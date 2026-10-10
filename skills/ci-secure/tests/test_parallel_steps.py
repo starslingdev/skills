@@ -10,9 +10,10 @@ poisoning and the rest, all unscanned, and the report reads clean.
 
 The oracle here is the existing fixture corpus itself: every fixture is
 scanned as written AND with each job's steps wrapped in a `- parallel:` group,
-and the two scans must report the same findings at the same (shifted) lines.
-No new workflow text is invented for the attack vectors; the shapes are the
-fixtures' own.
+and the two scans must report the same findings at the same (shifted) lines,
+except fixtures listed in `_RACE_ONLY_WHEN_WRAPPED`, whose steps really do
+race once they share a group. No new workflow text is invented for the attack
+vectors; the shapes are the fixtures' own.
 """
 
 from __future__ import annotations
@@ -119,8 +120,8 @@ def _signature(findings: list[dict], inserted_after: list[int] | None) -> list:
     )
 
 
-# One positive fixture per attack vector that has one (P14.11 is network-gated
-# and covered below through its pin collector; P14.18 is a document-level
+# Positive fixtures for each step-level vector (P14.11 is network-gated and
+# covered below through its pin collector; P14.18 is a document-level
 # permission fact with no step in it).
 _POSITIVE_FIXTURES = [
     ("p14_10_template_injection.yml.fixture", "P14.10"),
@@ -186,8 +187,7 @@ def test_whole_corpus_reports_identically_when_wrapped(
     for sig in want:
         assert sig in extra, f"{fixture}: {sig} lost inside a parallel: group"
         extra.remove(sig)
-    assert sorted(s[0] for s in extra) == \
-        _RACE_ONLY_WHEN_WRAPPED.get(fixture, []), extra
+    assert sorted(extra) == _RACE_ONLY_WHEN_WRAPPED.get(fixture, []), extra
     # Wrapping must not invent or lose a disclosure either: a gap the flat
     # scan records, or a suppressed match, must read the same inside a group.
     assert inside["dropped_matches"] == plain["dropped_matches"]
@@ -196,11 +196,49 @@ def test_whole_corpus_reports_identically_when_wrapped(
 
 # Fixtures whose steps, once they all start together, really do race: the
 # extra finding is the scanner reading concurrency, not a wrapping artifact.
+# Each extra is pinned by its full signature (pattern, line in the wrapped
+# file, jobs), so a different extra of the same pattern still fails.
 _RACE_ONLY_WHEN_WRAPPED = {
     # The clone is pinned to a full commit id in step 1 before step 2 runs it.
     # As siblings, `python3 tools/setup.py` may run before the pin lands.
-    "p14_24_negative_sha_pinned_fetch.yml.fixture": ["P14.24"],
+    "p14_24_negative_sha_pinned_fetch.yml.fixture": [
+        ("P14.24", 23, ("build",))],
 }
+
+
+# The corpus wrap never reaches P14.25's mitigation arm on its own: no fixture
+# repository pins pnpm >= 10. This variant writes that pin beside every
+# P14.25 fixture, plus the builds-disabled workflow below, so a race is caught
+# in both directions: a lost finding fails, and so does an unlisted new one.
+_RACE_ONLY_WHEN_WRAPPED_ON_PNPM10 = {
+    # Disable and install start together: the disable protects nothing.
+    "vite-builds-disabled": [("P14.25", 13, ("publish",))],
+}
+
+
+@pytest.mark.parametrize("fixture", sorted(
+    [p.name for p in _CLOAKED.glob("p14_25_*.yml.fixture")]
+    + ["vite-builds-disabled"]))
+def test_p14_25_corpus_reports_identically_when_wrapped_on_a_pnpm10_repo(
+    tmp_path: Path, fixture: str,
+) -> None:
+    text = (textwrap.dedent(_P14_25_VITE) if fixture == "vite-builds-disabled"
+            else (_CLOAKED / fixture).read_text(encoding="utf-8"))
+    wrapped, inserted_after = _wrap_steps_in_parallel(text)
+    if not inserted_after:
+        pytest.skip(f"{fixture} has no step list to wrap")
+    name = fixture.removesuffix(".fixture").removesuffix(".yml") + ".yml"
+    _write(_pnpm10(tmp_path / "plain"), name, text)
+    _write(_pnpm10(tmp_path / "wrapped"), name, wrapped)
+    plain = _scan_root(tmp_path / "plain")
+    inside = _scan_root(tmp_path / "wrapped")
+    want = _signature(plain["findings"], inserted_after)
+    extra = _signature(inside["findings"], None)
+    for sig in want:
+        assert sig in extra, f"{fixture}: {sig} lost inside a parallel: group"
+        extra.remove(sig)
+    assert sorted(extra) == \
+        _RACE_ONLY_WHEN_WRAPPED_ON_PNPM10.get(fixture, []), extra
 
 
 def test_wrapped_scan_discloses_the_parallel_steps_it_read(tmp_path: Path) -> None:
@@ -212,10 +250,12 @@ def test_wrapped_scan_discloses_the_parallel_steps_it_read(tmp_path: Path) -> No
     data = _scan_root(tmp_path)
     stats = data.get("parallel_steps")
     assert stats is not None, "findings JSON carries no parallel_steps record"
+    import yaml
     n_children = sum(
-        1 for ln in wrapped.splitlines()
-        if re.match(r"^\s*- (?!parallel:)", ln)
-    )
+        s.in_parallel_group
+        for job in yaml.safe_load(wrapped)["jobs"].values()
+        for s in scan._iter_job_steps(job))
+    assert n_children
     assert stats["steps_scanned"] == n_children
     assert stats["workflows"] == [".github/workflows/a.yml"]
 
@@ -374,8 +414,96 @@ def _lockstep_shapes() -> list:
         [{"uses": "x/y@v1", "parallel": "not-a-list"}, {"run": "after"}],
         [{"parallel": [[{"run": "in-a-list"}], "run: text", {"run": "ok"}]},
          {"run": "after"}],
+        _nested(scan._WALK_MAX_DEPTH),
+        _nested(scan._WALK_MAX_DEPTH + 1),
         deep,
     ]
+
+
+def _nested(groups: int) -> list:
+    """A leaf step inside `groups` nested `parallel:` groups."""
+    steps: list = [{"run": "leaf"}]
+    for _ in range(groups):
+        steps = [{"parallel": steps}]
+    return steps
+
+
+@pytest.mark.parametrize("groups,read", [(64, True), (65, False)])
+def test_the_depth_cap_boundary_is_the_same_for_both_walkers(
+    groups: int, read: bool,
+) -> None:
+    """The cap is `_WALK_MAX_DEPTH` groups: a leaf 64 groups down is read,
+    one 65 down is a too-deep note. (The lockstep test pins the node walker
+    to the same boundary.)"""
+    assert scan._WALK_MAX_DEPTH == 64
+    stats = scan._StepWalkStats()
+    leaves = [s.step["run"] for s in scan._iter_job_steps(
+        {"steps": _nested(groups)}, stats)]
+    assert leaves == (["leaf"] if read else [])
+    assert stats.malformed == (None if read else
+                               [("." .join(["1"] * groups),
+                                 scan._GROUP_TOO_DEEP)])
+
+
+def test_a_group_past_the_depth_cap_is_a_parallel_group_coverage_note(
+    tmp_path: Path,
+) -> None:
+    import yaml
+    _write(tmp_path, "deep.yml", yaml.safe_dump(
+        {"on": "push", "jobs": {"build": {"runs-on": "ubuntu-latest",
+                                          "steps": _nested(65)}}}))
+    data = _scan_root(tmp_path)
+    notes = data["coverage_notes"]
+    assert [e["scope"] for e in notes] == ["parallel-group"], notes
+    assert "more than 64 groups deep" in notes[0]["reason"], notes
+
+
+def test_a_coverage_note_names_a_child_as_step_group_dot_child(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "a.yml", textwrap.dedent("""\
+        on: push
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - run: make
+              - parallel:
+                  - run: echo one
+                  - - run: echo nested-list
+        """))
+    reasons = [e["reason"] for e in _scan_root(tmp_path)["coverage_notes"]]
+    assert len(reasons) == 1, reasons
+    assert reasons[0].startswith("jobs.build step 2.2 is an entry of a "
+                                 "`parallel:` group"), reasons
+
+
+def test_merge_keys_resolve_the_same_way_in_both_walkers() -> None:
+    """Own keys win over a merge, and in `<<: [*a, *b]` the earlier source
+    wins: both walkers must agree, or every later line shifts."""
+    import yaml
+    text = textwrap.dedent("""\
+        x-a: &a
+          parallel:
+            - run: from-a
+        x-b: &b
+          parallel:
+            - run: from-b
+        x-r: &r
+          run: merged
+        jobs:
+          j:
+            steps:
+              - <<: *r
+                run: own
+              - <<: [*a, *b]
+        """)
+    leaves = [s.step["run"] for s in scan._iter_job_steps(
+        yaml.safe_load(text)["jobs"]["j"])]
+    assert leaves == ["own", "from-a"]
+    steps_node = scan._node_keys(scan._job_nodes(text)["j"])["steps"]
+    assert [scan._node_keys(n)["run"].value
+            for n in scan._iter_step_nodes(steps_node)] == leaves
 
 
 @pytest.mark.parametrize("steps", _lockstep_shapes())
@@ -577,6 +705,39 @@ def test_p14_9_a_background_step_started_before_the_checkout_still_runs(
     assert len(_patterns(tmp_path, text, "P14.9")) == 1
 
 
+_P14_9_ARMS = """\
+    on: pull_request_target
+    jobs:
+      t:
+        runs-on: ubuntu-latest
+        steps:
+          - {executes}
+          - uses: actions/checkout@v4
+            with:
+              {key}: {value}
+"""
+
+
+@pytest.mark.parametrize("executes,key,value", [
+    ("uses: ./.github/actions/setup", "ref",
+     "${{ github.event.pull_request.head.sha }}"),
+    ("run: make", "repository",
+     "${{ github.event.pull_request.head.repo.full_name }}"),
+])
+def test_p14_9_concurrency_arms_a_local_action_and_a_repository_checkout(
+    tmp_path: Path, executes: str, key: str, value: str,
+) -> None:
+    """Both arms of the concurrent loop: a local `./` action as the
+    executing step, and a head checkout named by `repository:`. Each is
+    written ABOVE the checkout in one group."""
+    text = _P14_9_ARMS.format(executes=executes, key=key, value=value)
+    head, items, tail, ind = _split_steps(text)
+    assert _patterns(tmp_path / "flat", _joined(head, *items, tail),
+                     "P14.9") == []
+    grouped = _joined(head, _grouped(items, ind), tail)
+    assert len(_patterns(tmp_path / "grp", grouped, "P14.9")) == 1
+
+
 _P14_24_CLONE = (_CLOAKED / "p14_24_mutable_fetch_exec.yml.fixture").read_text()
 
 
@@ -624,8 +785,10 @@ def test_p14_24_mutable_fetch_arm_reads_children_of_a_group(
     tmp_path: Path, shape: str,
 ) -> None:
     """The mutable-fetch arm (`_checkout_fetches`, `_step_marks`) reads a
-    group's children like top-level steps: plain order, a child's own
-    `working-directory:`, and a single-line quoted `run:`."""
+    group's children like top-level steps: siblings in declaration order
+    (which, as siblings, also race), a child's own `working-directory:`, and
+    a single-line quoted `run:`. Strict order with no race is pinned by
+    `test_p14_24_a_group_then_a_top_level_execution_is_plain_order`."""
     if shape == "inline-quoted":
         head, (clone, execute), tail, ind = _split_steps(_P14_24_CLONE)
         one = (clone[0].strip().split("run: ", 1)[1] + " && "
@@ -640,6 +803,36 @@ def test_p14_24_mutable_fetch_arm_reads_children_of_a_group(
     assert len(_patterns(tmp_path / "flat", _joined(head, *items, tail),
                          "P14.24")) == 1
     grouped = _joined(head, _grouped(items, ind), tail)
+    assert len(_patterns(tmp_path / "grp", grouped, "P14.24")) == 1
+
+
+def test_p14_24_a_group_then_a_top_level_execution_is_plain_order(
+    tmp_path: Path,
+) -> None:
+    """The clone sits in a group and the execution after it: not siblings,
+    so only the declaration order (the group's implicit wait) can fire this,
+    at the same line as the flat workflow, one line down."""
+    head, (clone, execute), tail, ind = _split_steps(_P14_24_CLONE)
+    flat = _patterns(tmp_path / "flat", _joined(head, clone, execute, tail),
+                     "P14.24")
+    assert len(flat) == 1, flat
+    grouped = _patterns(tmp_path / "grp",
+                        _joined(head, _grouped([clone], ind), execute, tail),
+                        "P14.24")
+    assert [f["line"] for f in grouped] == [flat[0]["line"] + 1], grouped
+
+
+def test_p14_24_a_pin_racing_the_clone_pins_nothing(tmp_path: Path) -> None:
+    """The pin-racing arm: clone and pin are siblings, the execution comes
+    after the group. The pin may land before the clone, so it pins nothing."""
+    text = (_CLOAKED / "p14_24_negative_sha_pinned_fetch.yml.fixture"
+            ).read_text()
+    head, (fetch, execute), tail, ind = _split_steps(text)
+    clone = [" " * ind + "- run: " + fetch[1].strip() + "\n"]
+    pin = [" " * ind + "- run: " + fetch[2].strip() + "\n"]
+    assert _patterns(tmp_path / "flat", _joined(head, clone, pin, execute,
+                                                tail), "P14.24") == []
+    grouped = _joined(head, _grouped([clone, pin], ind), execute, tail)
     assert len(_patterns(tmp_path / "grp", grouped, "P14.24")) == 1
 
 
@@ -691,6 +884,36 @@ def test_p14_25_a_background_disable_protects_only_once_waited_for(
     for name, wait in (("id", "- wait: a\n"), ("all", "- wait-all:\n")):
         joined = _joined(head, bg, [" " * ind + wait], install, tail)
         assert _patterns(_pnpm10(tmp_path / name), joined, "P14.25") == [], wait
+
+
+def test_p14_25_a_re_enable_racing_the_install_exposes_it(
+    tmp_path: Path,
+) -> None:
+    """Builds are disabled at the top, then a re-enable and the install
+    start together: the re-enable may land first, so the install is
+    exposed (the racing RE-ENABLE arm of `_builds_disabled_at`)."""
+    head, (disable, install), tail, ind = _split_steps(_P14_25_VITE)
+    enable = [ln.replace("Disallow", "Allow").replace(
+        ".allowBuilds[]=false", ".allowBuilds[]=true") for ln in disable]
+    assert _patterns(_pnpm10(tmp_path / "flat"),
+                     _joined(head, disable, install, enable, tail),
+                     "P14.25") == []
+    grouped = _joined(head, disable, _grouped([enable, install], ind), tail)
+    assert len(_patterns(_pnpm10(tmp_path / "grp"), grouped, "P14.25")) == 1
+
+
+@pytest.mark.parametrize("wait,joins", [
+    ("- wait: other-id\n", False), ("- cancel: a\n", False),
+    ("- wait: [a]\n", True), ("- wait: [other-id, a]\n", True),
+])
+def test_p14_25_only_a_wait_naming_the_background_step_joins_it(
+    tmp_path: Path, wait: str, joins: bool,
+) -> None:
+    head, (disable, install), tail, ind = _split_steps(_P14_25_VITE)
+    bg = _backgrounded(disable, ind, step_id="a")
+    text = _joined(head, bg, [" " * ind + wait], install, tail)
+    assert len(_patterns(_pnpm10(tmp_path), text, "P14.25")) == \
+        (0 if joins else 1), wait
 
 
 def test_p14_25_a_group_finishes_before_the_step_after_it(tmp_path: Path) -> None:
@@ -1267,3 +1490,33 @@ def test_a_job_whose_spans_cannot_be_found_is_disclosed(
     _, gaps = scan._parallel_step_stats(wf)
     assert any("jobs.build" in g and "declaration order" in g
                for g in gaps), gaps
+
+
+def test_concurrency_within_one_top_level_entry_needs_two_grouped_steps() -> None:
+    T = scan._StepTiming
+    assert scan._steps_concurrent(T(2, True, None), T(2, True, None))
+    # A step carrying `parallel:` beside `run:` and its own child share a
+    # top-level entry, but the parent is not a group child: declared order.
+    assert not scan._steps_concurrent(T(2, False, None), T(2, True, None))
+
+
+def test_lines_in_different_jobs_are_never_concurrent() -> None:
+    T, S = scan._StepTiming, scan._StepSpan
+    both = T(0, True, None)
+    spans = [S("a", 1, 2, both), S("a", 3, 4, both), S("b", 5, 6, both)]
+    assert scan._lines_concurrent(spans, 1, 3)
+    assert not scan._lines_concurrent(spans, 1, 5)
+
+
+def test_a_repo_without_the_syntax_renders_no_parallel_steps_row(
+    tmp_path: Path,
+) -> None:
+    """The findings JSON always carries `parallel_steps` (all zeros here);
+    the rendered report shows no row for it."""
+    text = (_CLOAKED / "p14_10_template_injection.yml.fixture").read_text()
+    _write(tmp_path, "a.yml", text)
+    data = _scan_root(tmp_path)
+    assert data["parallel_steps"] == {"steps_scanned": 0, "control_steps": 0,
+                                      "background_steps": 0, "workflows": []}
+    md = load_script("ci_secure_report", "report.py").render(data)
+    assert "Parallel steps" not in md, md
