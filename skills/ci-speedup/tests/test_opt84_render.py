@@ -305,6 +305,16 @@ def test_held_back_row_prints_each_gates_phrase_and_the_verifier_agrees(tmp_path
     assert err, "dropping the step from the row must fail"
 
 
+def test_unmatched_pole_job_phrase_names_the_reusable_workflow_case():
+    # electron's lint pole is "lint / Lint", produced through a reusable-workflow
+    # call, so it is held back here; the reader is told that shape is the cause.
+    want = ("the pole's job could not be tied to one job in its workflow file (a "
+            "job produced through a reusable workflow call, for example), so the "
+            "step's command could not be read")
+    assert bp._OPT84_WITHHOLD_PHRASES["pole_job_not_matched_in_yaml"] == want
+    assert vr._VR_OPT84_WITHHOLD_PHRASES["pole_job_not_matched_in_yaml"] == want
+
+
 def test_held_back_entry_without_a_step_names_the_job():
     key = bp._OPT84_WITHHELD_DOC_KEY
     cands = [{"workflow_file": _WF, "job": "Lint", "gate": "workflow_yaml_unavailable"}]
