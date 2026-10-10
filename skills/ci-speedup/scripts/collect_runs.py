@@ -12818,10 +12818,19 @@ def _rl_walk(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, str]],
         seg = seg.strip()
         if not seg:
             continue
+        if relevant is None and _re.match(r"(?:cd|pushd|popd)(?:\s|$)", seg):
+            # The all-leaves read never trusts a directory change, even one it
+            # could follow: recorded as `cd` (never re-labelled by `in_runner`).
+            acc.unresolved.append({"kind": "cd", "reason": "changes directory inside "
+                                   "the command or a script it runs", "segment": seg,
+                                   "chain": list(chain), "tool": None, "wd": wd})
+            if not seg.startswith("cd"):
+                lost = lost if lost is not None else seg
+                continue
         if seg == "cd" or seg.startswith(("cd ", "cd\t")):
             new_wd = None if lost is not None else _opt82_cd(wd, seg[2:].strip())
             if new_wd is None:
-                if lost is None:
+                if lost is None and relevant is not None:
                     _note("cd", "changes to a directory this read cannot follow", seg)
                 lost = lost if lost is not None else seg[2:].strip()
             else:
@@ -16956,6 +16965,24 @@ def _opt84_gate_for_unresolved(u: dict[str, Any]) -> str:
     return "script_unresolvable"
 
 
+# Words in an action step's `uses:` or `name:` that say it may lint, format or
+# type-check (what it runs is inside the action, so it is held back). A LOCAL
+# action also qualifies when its label says check.
+_OPT84_ACTION_WORDS = ("eslint", "prettier", "oxlint", "oxfmt", "lint", "format",
+                       "tsc", "typecheck", "type-check")
+
+
+def _opt84_action_may_swap(step: dict[str, Any]) -> bool:
+    """Whether an action step plausibly runs a table tool: held back when it
+    does, the counted verdict `tool_not_in_table` when it cannot (CodeQL, an
+    upload, a local build action). Same spirit as OPT82's action-step rule."""
+    uses = str(step.get("uses") or "")
+    label = (uses + " " + str(step.get("name") or "")).lower()
+    if any(w in label for w in _OPT84_ACTION_WORDS):
+        return True
+    return uses.startswith(_LOCAL_USES_PREFIXES) and "check" in label
+
+
 def _opt84_leaf_tokens(tokens: list[str]) -> list[str]:
     """A leaf's tokens with a bare `pnpm` / `bun` in front of a binary dropped."""
     t = list(tokens)
@@ -17256,7 +17283,8 @@ def _detect_opt84_tool_swap(
                 continue
             st = walk.leaves[idx[0]].step
             if st.get("uses") or not isinstance(st.get("run"), str):
-                _no("candidate_is_an_action", wf, job, name)
+                _no("candidate_is_an_action" if _opt84_action_may_swap(st)
+                    else "tool_not_in_table", wf, job, name)
                 continue
             run = str(st["run"])
             raw_wd = st.get("working-directory",
@@ -17282,8 +17310,12 @@ def _detect_opt84_tool_swap(
             res = _resolve_run_leaves(run, wd, scripts_by_dir, scripts_unreadable,
                                       bin_names=_OPT84_BIN_NAMES)
             if res.unresolved:
-                _no(_opt84_gate_for_unresolved(res.unresolved[0]), wf, job, name,
-                    segment=res.unresolved[0].get("segment"))
+                # A directory change anywhere in the resolved command outranks
+                # the rest: it is why what follows could not be pinned down.
+                first = next((u for u in res.unresolved if u.get("kind") == "cd"),
+                             res.unresolved[0])
+                _no(_opt84_gate_for_unresolved(first), wf, job, name,
+                    segment=first.get("segment"))
                 continue
             found: list[tuple[str, dict[str, Any]]] = []
             targets: set[str] = set()
