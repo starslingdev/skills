@@ -292,7 +292,28 @@ def test_malformed_parallel_is_disclosed_not_skipped(tmp_path: Path) -> None:
     report = load_script("ci_secure_report", "report.py")
     md = report.render(data)
     assert "carry a value this scan cannot know" not in md, md
-    assert "1 `parallel:` group(s) in 1 workflow(s)" in md, md
+    assert "1 `parallel:` / background note(s) in 1 workflow(s)" in md, md
+
+
+def test_a_background_expression_note_is_not_headlined_as_a_rejected_shape(
+    tmp_path: Path,
+) -> None:
+    """A run-time `background:` value is valid syntax: the banner must not
+    say it is "not written in a shape GitHub accepts"."""
+    _write(tmp_path, "bg.yml", textwrap.dedent("""\
+        on: push
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - run: make
+                background: ${{ inputs.bg }}
+        """))
+    data = _scan_root(tmp_path)
+    assert [e["scope"] for e in data["coverage_notes"]] == ["parallel-group"]
+    md = load_script("ci_secure_report", "report.py").render(data)
+    assert "shape GitHub accepts" not in md, md
+    assert "1 `parallel:` / background note(s) in 1 workflow(s)" in md, md
 
 
 def _give_each_group_a_run(wrapped: str) -> str:
