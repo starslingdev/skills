@@ -1513,6 +1513,37 @@ def test_poles_complete_exempts_a_bare_push_floor_pole(tmp_path: Path):
     assert _tag_for(bare, _POLES, tmp_path, findings=case1_bare) == "FAIL"
 
 
+def test_poles_complete_exempts_a_pole_whose_every_step_was_dropped(tmp_path: Path):
+    """A pole stamped `no_step_measured_in_sample` has no step to break down: its body
+    says so ("No step could be measured: …") and its prompt carries the no-breakdown
+    line. That is an honest pole, not a stunted drill; the same body without its
+    stamp, or the stamp without the line, still FAILs."""
+    note = "No step could be measured: 2 skipped, 1 with no usable time."
+    body = (
+        "# demo - why is CI slow on a PR?\n\n"
+        "> **Bottom line.** A typical PR waits **51m 30s** for all checks to finish; trace below.\n\n"
+        '<a id="pole-1"></a>\n\n## Long pole 1: `ci.yml` ▸ test - 51m 30s\n\n'
+        f"```text\n{note}\n\n(captured this job's log but matched no known root-cause "
+        "pattern — no drill-down available; this is a coverage gap, not a clean job. The "
+        "detector set may need extending for this stack.)\n```\n\n"
+        "```text\nWHERE THE TIME GOES\n- No per-step breakdown was captured for this job; "
+        "profile its slowest step in the repo.\n```\n\n"
+        "#### 🤖 Prompt for your coding agent\n\n```text\ninvestigate it.\n```\n\n"
+        "## 🗄️ Data sources\n\n| Source | Coverage | Used for |\n| --- | --- | --- |\n"
+        "| ci-speedup static scan (skill commit `0000000`) | all | scan |\n")
+    def doc(**stamp) -> dict:
+        return {"pr_critical_path": {"poles": [dict(
+            {"check": "test", "workflow_file": ".github/workflows/ci.yml",
+             "p50_s": 3090.0}, **stamp)]},
+            "per_workflow_timing": {".github/workflows/ci.yml": {
+                "event_scope": "pull_request", "long_pole_job": "test"}}}
+    dropped = doc(step_decomposition_reason="no_step_measured_in_sample",
+                  skipped_steps=2, unmeasured_steps=1)
+    assert _tag_for(body, _POLES, tmp_path, findings=dropped) == "PASS"
+    assert _tag_for(body, _POLES, tmp_path, findings=doc()) == "FAIL"
+    assert _tag_for(body.replace(note, ""), _POLES, tmp_path, findings=dropped) == "FAIL"
+
+
 def test_poles_complete_fails_on_a_pole_with_a_prompt_but_no_drill(tmp_path: Path):
     # The bitmovin hole: a pole that HANDS OFF a prompt but whose body carries the renderer's
     # own "No per-step breakdown was captured" admission (no captured timeline AND no sampled
@@ -11434,3 +11465,498 @@ def test_parallel_steps_row_twin_matches_the_walker(tmp_path):
     for stamp in (_FULL_STAMP, many, _PARALLEL_STAMP,
                   {"groups": 0, "steps_in_groups": 0, "background_steps": 2}):
         assert vr._vr_parallel_steps_cell(stamp) == ws.parallel_steps_disclosure(stamp)
+
+
+# --------------------------------------------------------------------------- #
+# Step durations stay inside their job (curl/curl, run 38018162993): a skipped
+# step carries `started_at: 0001-01-01T00:00:00Z`, and reading it naively cited a
+# ~63.9-billion-second `test-linter` step in a HIGH OPT73 finding.
+# --------------------------------------------------------------------------- #
+
+_STEP_CITE = "no finding cites a step longer than its job's measured window"
+_STEP_STAMP = "no stamped step decomposition outlasts its job"
+_SENTINEL_S = 63927167070.0
+_LINUX = ".github/workflows/linux.yml"
+
+
+def _step_window_doc(*findings: dict, **extra) -> dict:
+    doc = {"pr_critical_path": {},
+           "per_workflow_timing": {_LINUX: {
+               "job_p50": {"CM clang-tidy": 277.0, "CM openssl torture 2": 277.0},
+               "job_max": {"CM clang-tidy": 290.0, "CM openssl torture 2": 290.0},
+               "job_bimodal": {}}},
+           "findings": list(findings)}
+    doc.update(extra)
+    return doc
+
+
+def _opt73(step_s: float, job_s: float | None = None, job: str = "CM clang-tidy",
+           table_step_s: float | None = None) -> dict:
+    job_s = job_s if job_s is not None else step_s + 200.0
+    tstep = table_step_s if table_step_s is not None else step_s
+    return {"id": "f148", "pattern": "OPT73", "workflow_file": _LINUX,
+            "affected_jobs": [job],
+            "measured_evidence": {
+                "summary": "...",
+                "table": {"headers": ["Cluster job", "Job p50", "`test-linter` p50",
+                                      "Share of job"],
+                          "rows": [[f"`{job}`", f"{job_s:.0f}s", f"{tstep:.0f}s", "33%"]]},
+                "waterfall": {"job": job, "job_p50_s": job_s, "shared_step": "test-linter",
+                              "steps": [{"step": "test-linter", "category": "test",
+                                         "p50_s": step_s, "shared": True},
+                                        {"step": "build", "category": "build",
+                                         "p50_s": 121.0, "shared": False}]}}}
+
+
+def test_step_cited_beyond_its_job_window_fails(tmp_path: Path):
+    rep = _good()
+    # FAIL: the curl shape, a year-1 sentinel step cited in the waterfall + table.
+    assert _tag_for(rep, _STEP_CITE, tmp_path,
+                    findings=_step_window_doc(_opt73(_SENTINEL_S))) == "FAIL"
+    # FAIL: an ordinary-looking step that still outlasts the job's longest sampled run.
+    assert _tag_for(rep, _STEP_CITE, tmp_path,
+                    findings=_step_window_doc(_opt73(400.0, job_s=500.0))) == "FAIL"
+    # FAIL: only the evidence table carries the bogus figure.
+    assert _tag_for(rep, _STEP_CITE, tmp_path, findings=_step_window_doc(
+        _opt73(60.0, job_s=250.0, table_step_s=_SENTINEL_S))) == "FAIL"
+    # FAIL: a job with no measured window still cannot cite a step longer than
+    # any GitHub job may run.
+    assert _tag_for(rep, _STEP_CITE, tmp_path, findings=_step_window_doc(
+        _opt73(_SENTINEL_S, job="unmeasured job"))) == "FAIL"
+    # PASS: in-window figures.
+    assert _tag_for(rep, _STEP_CITE, tmp_path,
+                    findings=_step_window_doc(_opt73(60.0, job_s=250.0))) == "PASS"
+    # PASS: a step longer than the job's 277s p50 but inside its 290s longest sampled
+    # run (a step that runs only on some runs has its p50 over those runs alone).
+    assert _tag_for(rep, _STEP_CITE, tmp_path, findings=_step_window_doc(
+        _opt73(285.0, job_s=300.0))) == "PASS"
+    # A structural decomposition's dominant figure: one step is bounded by the job's
+    # window, a `+ N more <cat> steps` category aggregate (a sum of step medians, as on
+    # pallets/flask `PyPy`) only by the absolute job limit.
+    def decomp(dom: str, p50: float) -> dict:
+        return {"id": "f7", "pattern": "OPT75", "workflow_file": _LINUX,
+                "affected_jobs": ["CM clang-tidy"],
+                "decomposition": {"dominant_step": dom, "dominant_p50_s": p50}}
+    assert _tag_for(rep, _STEP_CITE, tmp_path, findings=_step_window_doc(
+        decomp("run tests", 300.0))) == "FAIL"
+    assert _tag_for(rep, _STEP_CITE, tmp_path, findings=_step_window_doc(
+        decomp("run tests + 1 more test step", 300.0))) == "PASS"
+    assert _tag_for(rep, _STEP_CITE, tmp_path, findings=_step_window_doc(
+        decomp("run tests + 1 more test step", _SENTINEL_S))) == "FAIL"
+    # SKIP: no finding cites a step.
+    assert _tag_for(rep, _STEP_CITE, tmp_path, findings=_step_window_doc(
+        {"id": "f1", "pattern": "OPT12", "workflow_file": _LINUX})) == "SKIP"
+
+
+def test_stamped_decomposition_step_beyond_its_job_fails(tmp_path: Path):
+    rep = _good()
+
+    def pole(step_s: float) -> dict:
+        return {"poles": [{"check": "CM clang-tidy", "workflow_file": _LINUX,
+                           "job": "CM clang-tidy", "p50_s": 277.0,
+                           "steps": [{"step": "test-linter", "category": "test",
+                                      "p50_s": step_s},
+                                     {"step": "build", "category": "build",
+                                      "p50_s": 121.0}]}]}
+
+    assert _tag_for(rep, _STEP_STAMP, tmp_path, findings=_step_window_doc(
+        pr_critical_path=pole(_SENTINEL_S))) == "FAIL"
+    assert _tag_for(rep, _STEP_STAMP, tmp_path, findings=_step_window_doc(
+        pr_critical_path=pole(120.0))) == "PASS"
+
+    # The drilled run's per-step timeline (`data_bundle.logs[].steps_file`).
+    data = tmp_path / "findings.data"
+    data.mkdir()
+
+    def timeline(dur_s: float) -> dict:
+        (data / "t.steps.json").write_text(json.dumps({
+            "job": "CM clang-tidy", "job_dur_s": 209.0,
+            "steps": [{"name": "build", "number": 38, "start_s": 57.0, "dur_s": 121.0},
+                      {"name": "test-linter", "number": 44, "start_s": 0.0,
+                       "dur_s": dur_s}]}), encoding="utf-8")
+        return {"logs_dir": str(data),
+                "logs": [{"job": "CM clang-tidy", "check": "CM clang-tidy",
+                          "workflow_file": _LINUX, "steps_file": "t.steps.json"}]}
+
+    assert _tag_for(rep, _STEP_STAMP, tmp_path, findings=_step_window_doc(
+        data_bundle=timeline(_SENTINEL_S))) == "FAIL"
+    assert _tag_for(rep, _STEP_STAMP, tmp_path, findings=_step_window_doc(
+        data_bundle=timeline(30.0))) == "PASS"
+    assert _tag_for(rep, _STEP_STAMP, tmp_path,
+                    findings=_step_window_doc()) == "SKIP"
+
+
+def test_stamped_step_overrun_inside_the_absolute_bound_fails(tmp_path: Path):
+    """Overruns the 5-day absolute bound alone would let through: a pole step longer
+    than its job's longest sampled run, and a drilled-run timeline step that outlasts,
+    or ends after, that one run."""
+    def pole(step_s: float) -> dict:
+        return {"poles": [{"check": "CM clang-tidy", "workflow_file": _LINUX,
+                           "job": "CM clang-tidy", "p50_s": 277.0,
+                           "steps": [{"step": "test-linter", "category": "test",
+                                      "p50_s": step_s}]}]}
+
+    check = _run_stamp_check(tmp_path, _step_window_doc(pr_critical_path=pole(400.0)))
+    assert not check.ok and not check.skipped, check
+    assert "outlasts the job's longest sampled run (290s)" in check.detail, check
+    check = _run_stamp_check(tmp_path, _step_window_doc(pr_critical_path=pole(290.5)))
+    assert check.ok and not check.skipped, check
+
+    data = tmp_path / "findings.data"
+    data.mkdir()
+
+    def timeline(start_s: float, dur_s: float) -> dict:
+        (data / "t.steps.json").write_text(json.dumps({
+            "job": "CM clang-tidy", "job_dur_s": 209.0,
+            "steps": [{"name": "test-linter", "number": 44, "start_s": start_s,
+                       "dur_s": dur_s}]}), encoding="utf-8")
+        return {"logs_dir": str(data),
+                "logs": [{"job": "CM clang-tidy", "check": "CM clang-tidy",
+                          "workflow_file": _LINUX, "steps_file": "t.steps.json"}]}
+
+    # A step longer than its run.
+    check = _run_stamp_check(tmp_path, _step_window_doc(data_bundle=timeline(0.0, 250.0)))
+    assert not check.ok and not check.skipped, check
+    assert "outlasts the job's longest sampled run (209s)" in check.detail, check
+    # A step that fits inside its run's length but ends after the run did.
+    check = _run_stamp_check(tmp_path, _step_window_doc(data_bundle=timeline(200.0, 30.0)))
+    assert not check.ok and not check.skipped, check
+    assert "it ends at 230s, after the job's 209s run" in check.detail, check
+    check = _run_stamp_check(tmp_path, _step_window_doc(data_bundle=timeline(170.0, 30.0)))
+    assert check.ok and not check.skipped, check
+
+
+def test_step_citation_without_a_stamped_window_passes(tmp_path: Path):
+    """Findings written before `job_max` was stamped carry no per-job window. Their
+    in-range step figures PASS: a missing window is unknown, never a 0s bound."""
+    doc = _step_window_doc(_opt73(60.0, job_s=250.0))
+    del doc["per_workflow_timing"][_LINUX]["job_max"]
+    fp = tmp_path / "findings.json"
+    fp.write_text(json.dumps(doc), encoding="utf-8")
+    check = _load_verify_report().check_step_cited_within_job_window(fp)
+    assert check.ok and not check.skipped, check
+    # A pole step under a missing window is bounded by the absolute job limit only.
+    doc["pr_critical_path"] = {"poles": [{"check": "CM clang-tidy", "workflow_file": _LINUX,
+                                          "job": "CM clang-tidy", "p50_s": 277.0,
+                                          "steps": [{"step": "build", "category": "build",
+                                                     "p50_s": 400.0}]}]}
+    check = _run_stamp_check(tmp_path, doc)
+    assert check.ok and not check.skipped, check
+
+
+def _declared_timeline_doc(logs_dir: str) -> dict:
+    return _step_window_doc(
+        pr_critical_path={"poles": [{"check": "CM clang-tidy", "workflow_file": _LINUX,
+                                     "job": "CM clang-tidy", "p50_s": 277.0,
+                                     "steps": [{"step": "build", "category": "build",
+                                                "p50_s": 121.0}]}]},
+        data_bundle={"logs_dir": logs_dir,
+                     "logs": [{"job": "CM clang-tidy", "check": "CM clang-tidy",
+                               "workflow_file": _LINUX, "run_id": 38018162993,
+                               "steps_file": "t.steps.json"}]})
+
+
+def _run_stamp_check(tmp_path: Path, doc: dict):
+    fp = tmp_path / "findings.json"
+    fp.write_text(json.dumps(doc), encoding="utf-8")
+    return _load_verify_report().check_stamped_decomposition_within_job(fp)
+
+
+def _run_readable_check(tmp_path: Path, doc: dict):
+    fp = tmp_path / "findings.json"
+    fp.write_text(json.dumps(doc), encoding="utf-8")
+    return _load_verify_report().check_declared_timelines_readable(fp)
+
+
+def test_declared_timeline_missing_from_a_present_bundle_fails(tmp_path: Path):
+    """A declared `steps_file` the bundle should hold but does not is a FAIL naming the
+    pole and every path tried, never a silent pass over the poles alone. It is a FAIL
+    of its own check (a bundle-copy problem), not of the figure check."""
+    (tmp_path / "findings.data").mkdir()
+    doc = _declared_timeline_doc(str(tmp_path / "gone"))
+    check = _run_readable_check(tmp_path, doc)
+    assert not check.ok and not check.skipped, check
+    assert "CM clang-tidy" in check.detail and "38018162993" in check.detail
+    assert str(tmp_path / "findings.data" / "t.steps.json") in check.detail
+    assert str(tmp_path / "gone" / "t.steps.json") in check.detail
+    stamp = _run_stamp_check(tmp_path, doc)
+    assert stamp.ok and not stamp.skipped, stamp
+    assert "1 declared timeline(s) could not be read" in stamp.detail, stamp
+
+
+def test_declared_timeline_unreadable_or_wrong_shape_fails(tmp_path: Path):
+    data = tmp_path / "findings.data"
+    data.mkdir()
+    for body in ("{not json", "[1, 2]", '{"job": "x", "steps": 3}'):
+        (data / "t.steps.json").write_text(body, encoding="utf-8")
+        check = _run_readable_check(tmp_path, _declared_timeline_doc(str(data)))
+        assert not check.ok and not check.skipped, (body, check)
+        assert "t.steps.json" in check.detail, (body, check)
+        stamp = _run_stamp_check(tmp_path, _declared_timeline_doc(str(data)))
+        assert stamp.ok, (body, stamp)
+
+
+def test_declared_timelines_readable_passes_and_skips(tmp_path: Path):
+    check = _run_readable_check(tmp_path, _step_window_doc())
+    assert check.ok and check.skipped, check
+    check = _run_readable_check(tmp_path, _declared_timeline_doc("/nonexistent/x.data"))
+    assert check.ok and check.skipped, check
+    assert "bundle is not present" in check.detail, check
+    data = tmp_path / "findings.data"
+    data.mkdir()
+    (data / "t.steps.json").write_text(json.dumps(
+        {"job": "CM clang-tidy", "job_dur_s": 209.0, "steps": []}), encoding="utf-8")
+    check = _run_readable_check(tmp_path, _declared_timeline_doc(str(data)))
+    assert check.ok and not check.skipped, check
+    assert "1 declared timeline(s) read" in check.detail, check
+
+
+def test_declared_timeline_with_no_bundle_still_passes_on_the_pole_figures(tmp_path: Path):
+    """A findings-only artifact (a committed example: `logs_dir` is a temp path from
+    another machine, no `<findings>.data/` sibling) cannot check its timelines, but its
+    pole figures WERE checked: a PASS that says how many timelines went unchecked."""
+    check = _run_stamp_check(tmp_path, _declared_timeline_doc("/nonexistent/x.data"))
+    assert check.ok and not check.skipped, check
+    assert "1 declared timeline(s) not checked (bundle not present" in check.detail, check
+    assert "1 step figure(s) inside their job's longest run" in check.detail, check
+    # A pole that overruns its job still FAILs without the bundle.
+    doc = _declared_timeline_doc("/nonexistent/x.data")
+    doc["pr_critical_path"]["poles"][0]["steps"][0]["p50_s"] = _SENTINEL_S
+    check = _run_stamp_check(tmp_path, doc)
+    assert not check.ok and not check.skipped, check
+    # Nothing at all checked (no pole figures, timelines unreachable): a SKIP.
+    doc = _declared_timeline_doc("/nonexistent/x.data")
+    doc["pr_critical_path"]["poles"][0]["steps"] = []
+    check = _run_stamp_check(tmp_path, doc)
+    assert check.ok and check.skipped, check
+    assert "1 declared timeline(s) not checked" in check.detail, check
+
+
+def test_declared_timelines_read_but_all_empty_say_so(tmp_path: Path):
+    data = tmp_path / "findings.data"
+    data.mkdir()
+    (data / "t.steps.json").write_text(json.dumps(
+        {"job": "CM clang-tidy", "job_dur_s": 209.0, "steps": []}), encoding="utf-8")
+    doc = _declared_timeline_doc(str(data))
+    doc["pr_critical_path"]["poles"][0]["steps"] = []
+    check = _run_stamp_check(tmp_path, doc)
+    assert check.ok and check.skipped, check
+    assert "1 declared timeline(s) read, all empty" in check.detail, check
+
+
+def _timeline_bundle(tmp_path: Path, body: dict) -> dict:
+    data = tmp_path / "findings.data"
+    data.mkdir(exist_ok=True)
+    (data / "t.steps.json").write_text(json.dumps(body), encoding="utf-8")
+    return _declared_timeline_doc(str(data))
+
+
+def test_timeline_with_no_job_duration_fails_naming_it(tmp_path: Path):
+    """A drilled-run timeline with no `job_dur_s` cannot bound its steps by their run.
+    That is a FAIL naming the missing field, never a crash or a silent pass."""
+    for steps in ([{"name": "build", "start_s": 0.0, "dur_s": 121.0}],
+                  [{"name": "late", "start_s": _SENTINEL_S, "dur_s": 10.0}]):
+        doc = _timeline_bundle(tmp_path, {"job": "CM clang-tidy", "steps": steps})
+        check = _run_stamp_check(tmp_path, doc)
+        assert not check.ok and not check.skipped, check
+        assert "`job_dur_s`" in check.detail, check
+
+
+def test_timeline_step_with_a_malformed_duration_fails(tmp_path: Path):
+    for bad in ({"name": "build", "start_s": 0.0},
+                {"name": "build", "start_s": 0.0, "dur_s": "abc"}):
+        doc = _timeline_bundle(tmp_path, {"job": "CM clang-tidy", "job_dur_s": 209.0,
+                                          "steps": [bad]})
+        check = _run_stamp_check(tmp_path, doc)
+        assert not check.ok and not check.skipped, (bad, check)
+        assert "1 malformed timeline step(s)" in check.detail, (bad, check)
+
+
+def test_step_window_pass_details_separate_window_from_ceiling(tmp_path: Path):
+    """A PASS says how many figures were held to a stamped job window and how many only
+    to the 5-day ceiling; "all inside their job's measured window" over figures that had
+    no window was a claim the check never tested."""
+    vr = _load_verify_report()
+    fp = tmp_path / "findings.json"
+    doc = _step_window_doc(_opt73(60.0, job_s=250.0))
+    fp.write_text(json.dumps(doc), encoding="utf-8")
+    check = vr.check_step_cited_within_job_window(fp)
+    assert check.ok and not check.skipped, check
+    assert check.detail.startswith(
+        "3 step figure(s) inside their job's longest run; 0 held only to the 5-day "
+        "ceiling (no stamped job window)"), check.detail
+    del doc["per_workflow_timing"][_LINUX]["job_max"]
+    fp.write_text(json.dumps(doc), encoding="utf-8")
+    check = vr.check_step_cited_within_job_window(fp)
+    assert check.ok and not check.skipped, check
+    assert "0 step figure(s) inside their job's longest run; 3 held only to the 5-day " \
+           "ceiling (no stamped job window)" in check.detail, check.detail
+    assert "all inside" not in check.detail, check.detail
+    doc["pr_critical_path"] = {"poles": [{"check": "CM clang-tidy", "workflow_file": _LINUX,
+                                          "job": "CM clang-tidy", "p50_s": 277.0,
+                                          "steps": [{"step": "build", "category": "build",
+                                                     "p50_s": 121.0}]}]}
+    check = _run_stamp_check(tmp_path, doc)
+    assert check.ok and not check.skipped, check
+    assert "0 step figure(s) inside their job's longest run; 1 held only to the 5-day " \
+           "ceiling (no stamped job window)" in check.detail, check.detail
+
+
+# --- the omitted-steps line on a pole's step list ------------------------------
+
+_OMITTED = "a pole's step list says how many skipped or untimeable steps it leaves out"
+
+
+def _omitted_report(note: str | None) -> str:
+    body = ["## 🔴 Long pole 1: `ci.yml` ▸ `test` - 2m 00s", "", "```text",
+            "Where the job's ~2m 00s goes - every step, slowest first:", ""]
+    if note is not None:
+        body += ["", note]
+    return "\n".join(body + ["```", ""])
+
+
+def _omitted_doc(**counts) -> dict:
+    return {"pr_critical_path": {"poles": [dict(
+        {"check": "test", "job": "test", "workflow_file": ".github/workflows/ci.yml",
+         "p50_s": 120.0}, **counts)]}}
+
+
+def _run_omitted_check(tmp_path: Path, note: str | None, doc: dict):
+    fp = tmp_path / "findings.json"
+    fp.write_text(json.dumps(doc), encoding="utf-8")
+    return _load_verify_report().check_pole_omitted_steps_line(_omitted_report(note), fp)
+
+
+def test_pole_omitted_steps_line_must_match_its_stamp(tmp_path: Path):
+    good = ("(2 declared step(s) skipped on every sampled run and 1 with no usable time "
+            "are not timed here)")
+    doc = _omitted_doc(skipped_steps=2, unmeasured_steps=1)
+    check = _run_omitted_check(tmp_path, good, doc)
+    assert check.ok and not check.skipped, check
+    # Missing line, wrong numbers, a line with no stamp behind it: each FAILs.
+    assert not _run_omitted_check(tmp_path, None, doc).ok
+    assert not _run_omitted_check(tmp_path, good.replace("2 declared", "3 declared"), doc).ok
+    assert not _run_omitted_check(tmp_path, good, _omitted_doc()).ok
+    none = ("No step could be measured: 2 skipped, 1 with no usable time.")
+    doc = _omitted_doc(step_decomposition_reason="no_step_measured_in_sample",
+                       skipped_steps=2, unmeasured_steps=1)
+    assert _run_omitted_check(tmp_path, none, doc).ok
+    assert not _run_omitted_check(tmp_path, good, doc).ok
+    # No pole stamps a count and none renders a line: a SKIP.
+    check = _run_omitted_check(tmp_path, None, _omitted_doc())
+    assert check.ok and check.skipped, check
+
+
+def test_pole_omitted_steps_line_names_steps_timed_in_only_some_runs(tmp_path: Path):
+    """A stamp with `partially_measured_steps` needs its clause in the line; a report
+    that leaves it out FAILs."""
+    doc = _omitted_doc(skipped_steps=2, partially_measured_steps=1)
+    plain = "(2 declared step(s) skipped on every sampled run are not timed here)"
+    full = plain[:-1] + ("; 1 step(s) were timed in some sampled runs and skipped or "
+                         "untimeable in others)")
+    assert _run_omitted_check(tmp_path, full, doc).ok
+    assert not _run_omitted_check(tmp_path, plain, doc).ok
+    only = "(1 step(s) were timed in some sampled runs and skipped or untimeable in others)"
+    assert _run_omitted_check(tmp_path, only, _omitted_doc(partially_measured_steps=1)).ok
+    assert not _run_omitted_check(tmp_path, None, _omitted_doc(partially_measured_steps=1)).ok
+
+
+def test_pole_omitted_steps_line_says_how_many_sections_it_did_not_judge(tmp_path: Path):
+    """Two poles sharing one (workflow, check) key, or an aggregation-gate section,
+    are not judged; the detail says how many, never a silent pass."""
+    doc = _omitted_doc(skipped_steps=2)
+    doc["pr_critical_path"]["poles"].append(dict(doc["pr_critical_path"]["poles"][0]))
+    check = _run_omitted_check(tmp_path, None, doc)
+    assert check.ok and "1 section(s) not judged (shared key / aggregation gate)" \
+        in check.detail, check.detail
+
+
+def test_omitted_steps_line_twin_matches_the_renderer():
+    bp, vr = _load_blocking_path(), _load_verify_report()
+    import itertools
+    for sk, un, tr, pm, reason in itertools.product(
+            (0, 1, 3), (0, 2), (0, 1), (0, 1), (None, "no_step_measured_in_sample")):
+        pole = {"skipped_steps": sk, "unmeasured_steps": un, "trimmed_steps": tr,
+                "partially_measured_steps": pm}
+        if reason:
+            pole["step_decomposition_reason"] = reason
+        assert bp._omitted_steps_note(pole) == vr._vr_omitted_steps_note(pole), pole
+    for junk in ({"skipped_steps": True}, {"skipped_steps": "2"}, {"skipped_steps": -1}):
+        assert bp._omitted_steps_note(junk) == vr._vr_omitted_steps_note(junk), junk
+
+
+def _conditional_step_runs() -> list[list[dict]]:
+    """Ten sampled runs of one job: a 280s `run tests` step runs in two of them and is
+    `skipped` in the other eight, so the job's p50 is 16s while the step's own p50 (over
+    the runs it ran in) is 280s. Two slow runs in ten is below the bimodal split's floor,
+    so no slow-mode window rescues the step."""
+    base = datetime(2026, 10, 1, tzinfo=timezone.utc)
+
+    def ts(day: int, s: int) -> str:
+        return (base + timedelta(days=day, seconds=s)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def job(i: int, runs_tests: bool) -> dict:
+        steps = [{"name": "Set up job", "number": 1, "conclusion": "success",
+                  "started_at": ts(i, 0), "completed_at": ts(i, 2)},
+                 {"name": "Run actions/checkout@v4", "number": 2, "conclusion": "success",
+                  "started_at": ts(i, 2), "completed_at": ts(i, 5)},
+                 {"name": "detect changes", "number": 3, "conclusion": "success",
+                  "started_at": ts(i, 5), "completed_at": ts(i, 15)}]
+        end = 295 if runs_tests else 15
+        steps.append({"name": "run tests", "number": 4,
+                      "conclusion": "success" if runs_tests else "skipped",
+                      "started_at": ts(i, 15), "completed_at": ts(i, end)})
+        steps.append({"name": "Complete job", "number": 5, "conclusion": "success",
+                      "started_at": ts(i, end), "completed_at": ts(i, end + 1)})
+        return {"id": 100 + i, "name": "test", "conclusion": "success",
+                "status": "completed", "labels": ["ubuntu-latest"],
+                "started_at": ts(i, 0), "completed_at": ts(i, end + 1), "steps": steps}
+
+    return [[job(i, i in (3, 7))] for i in range(10)]
+
+
+def test_conditional_step_longer_than_the_job_median_is_not_a_failure(tmp_path: Path):
+    """A step that runs in 2 of 10 sampled runs is longer than the job's all-runs
+    median, and that is a correct report. The bound for one step is the job's LONGEST
+    sampled run (`per_workflow_timing[wf].job_max`), stamped by the same engine pass
+    that measured the step."""
+    cr, vr = _load_collect_runs(), _load_verify_report()
+    runs = _conditional_step_runs()
+    crit = cr._critical_path(runs)
+    decomp = cr._decompose_job_steps([r[0] for r in runs],
+                                     bimodal=crit["job_bimodal"].get("test"))
+    assert crit["job_p50"]["test"] == 16.0 and not crit["job_bimodal"]
+    # The bound the checks read: the job's longest sampled run (the two 296s runs
+    # that ran `run tests`), stamped for every job and never below its p50.
+    assert crit["job_max"]["test"] == 296.0, crit["job_max"]
+    assert set(crit["job_max"]) == set(crit["job_p50"]), crit["job_max"]
+    for job_name, p50 in crit["job_p50"].items():
+        assert crit["job_max"][job_name] >= p50, (job_name, crit["job_max"], p50)
+    assert ("run tests", "test", 280.0) in decomp["steps"]
+    steps = [{"step": n, "category": c, "p50_s": p} for n, c, p in decomp["steps"]]
+    doc = {"per_workflow_timing": {"ci.yml": crit},
+           "pr_critical_path": {"poles": [{"check": "test", "workflow_file": "ci.yml",
+                                           "job": "test", "p50_s": crit["job_p50"]["test"],
+                                           "steps": steps}]},
+           "findings": [{"id": "f1", "pattern": "OPT75", "workflow_file": "ci.yml",
+                         "affected_jobs": ["test"],
+                         "measured_evidence": {"waterfall": {"job": "test", "steps": steps}},
+                         "decomposition": {"dominant_step": "run tests",
+                                           "dominant_p50_s": 280.0}}]}
+    fp = tmp_path / "findings.json"
+    fp.write_text(json.dumps(doc), encoding="utf-8")
+    for check in (vr.check_stamped_decomposition_within_job(fp),
+                  vr.check_step_cited_within_job_window(fp)):
+        assert check.ok and not check.skipped, check
+
+
+def test_curl_skipped_step_sentinel_still_fails():
+    """The pre-fix curl/curl findings (finding f148, OPT73, a skipped `test-linter`
+    step's year-1 `started_at` read as a 63.9-billion-second step) still FAIL: a job
+    with no stamped longest run is bounded by the longest a GitHub Actions job may run."""
+    vr = _load_verify_report()
+    fp = _SKILL_DIR / "tests" / "fixtures" / "curl_skipped_step_sentinel_findings.json"
+    check = vr.check_step_cited_within_job_window(fp)
+    assert not check.ok and not check.skipped, check
+    assert "test-linter" in check.detail
+    assert "longer than any GitHub Actions job may run" in check.detail
