@@ -9123,7 +9123,7 @@ _VR_OPT84_PUBLISHED_RANGE = {
 _VR_OPT84_DOCS_URLS = {
     "prettier": "https://oxc.rs/docs/guide/usage/formatter.html",
     "eslint": "https://oxc.rs/docs/guide/usage/linter.html",
-    "tsc": "https://github.com/microsoft/typescript-go",
+    "tsc": "https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/",
 }
 _VR_OPT84_CARD_RE = re.compile(r'<a id="opt84-([^"]+)"></a>')
 _VR_OPT84_OWN_SECTION = "Tool swaps on other long poles"

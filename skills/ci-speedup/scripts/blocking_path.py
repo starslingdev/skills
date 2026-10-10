@@ -8652,7 +8652,7 @@ _OPT84_PUBLISHED_RANGE: dict[str, str] = {
 _OPT84_DOCS_URLS: dict[str, str] = {
     "prettier": "https://oxc.rs/docs/guide/usage/formatter.html",
     "eslint": "https://oxc.rs/docs/guide/usage/linter.html",
-    "tsc": "https://github.com/microsoft/typescript-go",
+    "tsc": "https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/",
 }
 _OPT84_SOURCE_NAME = {"prettier": "Prettier", "eslint": "ESLint", "tsc": "tsc"}
 _OPT84_TARGET_NAME = {"prettier": "oxfmt", "eslint": "oxlint",
