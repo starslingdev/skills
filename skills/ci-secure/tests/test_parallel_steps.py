@@ -283,7 +283,8 @@ def test_malformed_parallel_is_disclosed_not_skipped(tmp_path: Path) -> None:
     data = _scan_root(tmp_path)
     reasons = [e["reason"] for e in data["coverage_notes"]
                if e["workflow_file"].endswith("bad.yml")]
-    assert any("parallel:" in r and "NOT scanned" in r for r in reasons), reasons
+    assert any("parallel:" in r and "not read as steps" in r
+               for r in reasons), reasons
 
     # The banner headline must say what happened to this step: it was NOT
     # scanned. The headline written for steps that WERE read ("carry a value
@@ -350,6 +351,8 @@ def _lockstep_shapes() -> list:
     return [
         [{"run": "own", "parallel": [{"run": "child"}, {"uses": "x/y@v1"}]}],
         [{"uses": "x/y@v1", "parallel": "not-a-list"}, {"run": "after"}],
+        [{"parallel": [[{"run": "in-a-list"}], "run: text", {"run": "ok"}]},
+         {"run": "after"}],
         deep,
     ]
 
@@ -438,7 +441,7 @@ def test_a_group_past_the_depth_cap_is_not_called_a_non_list() -> None:
     """A valid list nested too deep is a coverage gap, but saying its value
     "is not a list of steps" would be false."""
     stats = scan._StepWalkStats()
-    job = {"steps": _lockstep_shapes()[2]}
+    job = {"steps": _lockstep_shapes()[-1]}
     assert list(scan._iter_job_steps(job, stats)) == []
     assert stats.malformed and stats.malformed[0][1] == scan._GROUP_TOO_DEEP
     sentence = scan._GROUP_GAP_SENTENCE[scan._GROUP_TOO_DEEP].format(
@@ -938,3 +941,159 @@ def test_p14_10_a_child_written_above_its_parents_run_is_not_dropped(
     lines, dropped = _p14_10_lines(tmp_path, text)
     assert lines == [7], lines
     assert dropped == [], dropped
+
+
+# ---------------------------------------------------------------------------
+# Nothing the walker passes over goes undisclosed.
+# ---------------------------------------------------------------------------
+
+def test_a_group_entry_that_is_not_a_step_is_disclosed() -> None:
+    """A nested list or a bare string inside a group is not a step. It used
+    to be skipped with no record; it is now a coverage note saying it was not
+    read as steps."""
+    stats = scan._StepWalkStats()
+    job = {"steps": [{"parallel": [[{"run": "a"}], "run: b", {"run": "c"}]}]}
+    assert [s.step["run"] for s in scan._iter_job_steps(job, stats)] == ["c"]
+    assert stats.malformed == [("1.1", scan._GROUP_CHILD_NOT_A_STEP),
+                               ("1.2", scan._GROUP_CHILD_NOT_A_STEP)]
+    sentence = scan._GROUP_GAP_SENTENCE[scan._GROUP_CHILD_NOT_A_STEP]
+    assert "not read as steps" in sentence and "review it manually" in sentence
+
+
+@pytest.mark.parametrize("children,depth", [("not-a-list", 0),
+                                            ([{"run": "child"}], None)])
+def test_a_step_beside_a_group_never_claims_unwalked_children_were_scanned(
+    children, depth,
+) -> None:
+    """`run:` beside `parallel:` whose children were NOT walked (not a list,
+    or past the depth cap) must not get the sentence saying its child steps
+    were scanned."""
+    step = {"run": "own", "parallel": children}
+    steps: list = [step]
+    if depth is None:                       # put the step past the depth cap
+        for _ in range(scan._WALK_MAX_DEPTH):
+            steps = [{"parallel": steps}]
+    stats = scan._StepWalkStats()
+    leaves = [s.step.get("run") for s in scan._iter_job_steps(
+        {"steps": steps}, stats)]
+    assert "child" not in leaves
+    assert stats.malformed, stats
+    for _, shape in stats.malformed:
+        sentence = scan._GROUP_GAP_SENTENCE[shape].format(
+            depth=scan._WALK_MAX_DEPTH)
+        assert "child steps were scanned" not in sentence, (shape, sentence)
+
+
+def test_a_group_whose_value_is_not_a_list_is_not_called_unscanned_by_all() -> None:
+    """Raw-text checks still read the text inside such a group, so "NOT
+    scanned by any detector" overclaims; the note says it was not read as
+    steps, and that some raw-text checks may still have matched."""
+    sentence = scan._GROUP_GAP_SENTENCE[scan._GROUP_NOT_A_LIST]
+    assert "by any detector" not in sentence
+    assert "not read as steps" in sentence
+    assert "raw-text checks may still have matched" in sentence
+
+
+def test_a_background_child_of_a_group_is_counted_once() -> None:
+    """scan-output.md: children of a group are counted in `steps_scanned`,
+    not in `background_steps`, even when written `background: true`."""
+    stats = scan._StepWalkStats()
+    job = {"steps": [{"parallel": [{"run": "a", "background": True},
+                                   {"run": "b"}]},
+                     {"run": "c", "background": True}]}
+    list(scan._iter_job_steps(job, stats))
+    assert (stats.in_parallel, stats.background) == (2, 1), stats
+
+
+# ---------------------------------------------------------------------------
+# Fail safe: a step that is not provably finished is still running.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("value,background", [
+    (True, True), ("true", True), ("${{ inputs.bg }}", True), (None, True),
+    (False, False), ("<absent>", False),
+])
+def test_any_background_value_but_false_is_treated_as_running(
+    value, background,
+) -> None:
+    step = {"run": "a"} if value == "<absent>" else {"run": "a",
+                                                      "background": value}
+    (leaf,) = scan._iter_job_steps({"steps": [step]})
+    assert leaf.background is background
+
+
+def test_a_background_value_chosen_at_run_time_is_disclosed() -> None:
+    stats = scan._StepWalkStats()
+    list(scan._iter_job_steps(
+        {"steps": [{"run": "a", "background": "${{ inputs.bg }}"}]}, stats))
+    assert stats.malformed == [("1", scan._STEP_BACKGROUND_EXPRESSION)]
+
+
+@pytest.mark.parametrize("bg_value", ["'true'", "${{ inputs.bg }}"])
+def test_p14_25_a_disable_backgrounded_by_a_non_literal_value_is_racing(
+    tmp_path: Path, bg_value: str,
+) -> None:
+    head, (disable, install), tail, ind = _split_steps(_P14_25_VITE)
+    bg = [ln.replace("background: true", f"background: {bg_value}")
+          for ln in _backgrounded(disable, ind)]
+    assert len(_patterns(_pnpm10(tmp_path), _joined(head, bg, install, tail),
+                         "P14.25")) == 1
+
+
+@pytest.mark.parametrize("wait", ["- wait-all: false\n",
+                                  "- wait-all: ${{ inputs.join }}\n"])
+def test_p14_25_a_wait_all_that_is_not_true_joins_nothing(
+    tmp_path: Path, wait: str,
+) -> None:
+    head, (disable, install), tail, ind = _split_steps(_P14_25_VITE)
+    bg = _backgrounded(disable, ind, step_id="a")
+    text = _joined(head, bg, [" " * ind + wait], install, tail)
+    assert len(_patterns(_pnpm10(tmp_path), text, "P14.25")) == 1, wait
+
+
+# Keys written on the group entry itself.
+
+def test_a_background_group_backgrounds_its_children(tmp_path: Path) -> None:
+    (leaf,) = scan._iter_job_steps({"steps": [
+        {"parallel": [{"run": "a"}], "background": True, "id": "g"}]})
+    assert leaf.background
+    head, (disable, install), tail, ind = _split_steps(_P14_25_VITE)
+    group = [" " * ind + "- background: true\n",
+             " " * ind + "  id: g\n",
+             " " * ind + "  parallel:\n",
+        *(("    " + ln) for ln in disable)]
+    assert len(_patterns(_pnpm10(tmp_path / "bg"),
+                         _joined(head, group, install, tail), "P14.25")) == 1
+    # Waited for by the group's id, the disable has finished first.
+    joined = _joined(head, group, [" " * ind + "- wait: g\n"], install, tail)
+    assert _patterns(_pnpm10(tmp_path / "joined"), joined, "P14.25") == []
+
+
+def test_group_level_continue_on_error_swallows_the_suite() -> None:
+    facts = load_script("ci_secure_config_facts", "config_facts.py")
+    doc = {
+        "on": "pull_request",
+        "jobs": {"test": {"runs-on": "ubuntu-latest", "steps": [
+            {"parallel": [{"run": "pytest -q"}], "continue-on-error": True},
+        ]}},
+    }
+    offences, saw_suite, _ = facts._suite_failure_swallowed(
+        ".github/workflows/ci.yml", doc)
+    assert saw_suite
+    assert len(offences) == 1, offences
+    assert "step 1.1" in offences[0] and "group-level" in offences[0], offences
+
+
+@pytest.mark.parametrize("key,noted", [
+    ("env", True), ("timeout-minutes", True), ("working-directory", True),
+    ("if", False), ("name", False), ("id", False),
+    ("continue-on-error", False), ("background", False),
+])
+def test_a_group_key_the_scan_does_not_model_is_disclosed(
+    key: str, noted: bool,
+) -> None:
+    stats = scan._StepWalkStats()
+    list(scan._iter_job_steps(
+        {"steps": [{"parallel": [{"run": "a"}], key: "x"}]}, stats))
+    want = [("1", scan._GROUP_UNKNOWN_KEY)] if noted else None
+    assert stats.malformed == want, stats

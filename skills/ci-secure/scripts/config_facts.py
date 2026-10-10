@@ -925,8 +925,11 @@ def _suite_failure_swallowed(rel: str,
             run = step.get("run")
             if not isinstance(run, str):
                 continue
+            # `continue-on-error: true` on a `parallel:` group holding the
+            # step swallows its failure as surely as its own would.
+            group_coe = job_step.group_continue_on_error
             if not _block_runs_verification_suite(run):
-                if _discards_a_status(run) or \
+                if _discards_a_status(run) or group_coe or \
                         _continue_on_error_is_literally_true(step):
                     unidentified.append(
                         f"{rel}: job `{job_name}` step {position}")
@@ -938,6 +941,10 @@ def _suite_failure_swallowed(rel: str,
                 where += f" (`{label.strip()}`)"
             if _continue_on_error_is_literally_true(step):
                 offences.append(f"{where} — `continue-on-error: true`")
+                continue
+            if group_coe:
+                offences.append(f"{where} — group-level "
+                                "`continue-on-error: true`")
                 continue
             reason = _swallow_reason(
                 run, exit_zero_live=_exit_zero_can_swallow(step, job, doc))

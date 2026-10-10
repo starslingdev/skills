@@ -1564,14 +1564,27 @@ class _JobStep:
     step: dict[str, Any]
     path: tuple[int, ...]               # 0-based index at each nesting level
     in_parallel_group: bool
+    # Possibly running in the background: the step, or a group holding it,
+    # carries any `background:` value but a literal `false` (fail safe).
     background: bool
     group: dict[str, Any] | None        # innermost enclosing `parallel:` entry
+    # Every enclosing `parallel:` entry, outermost first.
+    groups: tuple[dict[str, Any], ...] = ()
+    # The `id:` a top-level `wait:` names to join this background step: its
+    # own when it is itself background, else the innermost background group's.
+    background_id: Any = None
 
     @property
     def gated(self) -> bool:
-        """The step, or the parallel group holding it, has its own `if:`."""
-        return self.step.get("if") is not None or (
-            self.group is not None and self.group.get("if") is not None)
+        """The step, or a parallel group holding it, has its own `if:`."""
+        return self.step.get("if") is not None or any(
+            g.get("if") is not None for g in self.groups)
+
+    @property
+    def group_continue_on_error(self) -> bool:
+        """A group holding the step is written `continue-on-error: true`; a
+        failure of the step is then swallowed as surely as its own would be."""
+        return any(g.get("continue-on-error") is True for g in self.groups)
 
     @property
     def label(self) -> str:
@@ -1593,6 +1606,31 @@ class _StepWalkStats:
 _GROUP_NOT_A_LIST = "not-a-list"
 _GROUP_TOO_DEEP = "too-deep"
 _GROUP_ALSO_A_STEP = "also-a-step"
+_GROUP_ALSO_A_STEP_NOT_A_LIST = "also-a-step-not-a-list"
+_GROUP_ALSO_A_STEP_TOO_DEEP = "also-a-step-too-deep"
+_GROUP_CHILD_NOT_A_STEP = "child-not-a-step"
+_GROUP_UNKNOWN_KEY = "unknown-key"
+_STEP_BACKGROUND_EXPRESSION = "background-expression"
+
+# Keys on a `parallel:` entry this scan models. GitHub has not documented
+# which keys a group accepts; any other key is disclosed, not ignored.
+_GROUP_KNOWN_KEYS = frozenset({_PARALLEL_KEY, "if", "name", "id",
+                               "continue-on-error", "background"})
+
+
+def _may_run_in_background(entry: dict[str, Any]) -> bool:
+    """Fail safe: only an absent `background:` or a literal `false` proves the
+    entry finishes before the next step; `"true"`, `null` and an expression
+    all may leave it running."""
+    return "background" in entry and entry["background"] is not False
+
+
+def _note_background_expression(stats: _StepWalkStats | None,
+                                 path: tuple[int, ...],
+                                 entry: dict[str, Any]) -> None:
+    value = entry.get("background")
+    if isinstance(value, str) and "${{" in value:
+        _note_malformed(stats, path, _STEP_BACKGROUND_EXPRESSION)
 
 
 def _is_parallel_group(step: dict[str, Any]) -> bool:
@@ -1636,43 +1674,65 @@ def _iter_job_steps(
     """
     steps = job.get("steps") if isinstance(job, dict) else None
     if isinstance(steps, list):
-        yield from _iter_step_list(steps, (), None, stats, 0)
+        yield from _iter_step_list(steps, (), (), stats, 0)
 
 
 def _iter_step_list(
-    steps: list[Any], prefix: tuple[int, ...], group: dict[str, Any] | None,
-    stats: _StepWalkStats | None, depth: int,
+    steps: list[Any], prefix: tuple[int, ...],
+    groups: tuple[dict[str, Any], ...], stats: _StepWalkStats | None,
+    depth: int,
 ) -> Iterator[_JobStep]:
+    group = groups[-1] if groups else None
     for i, step in enumerate(steps):
-        if not isinstance(step, dict):
-            continue
         path = prefix + (i,)
+        if not isinstance(step, dict):
+            if group is not None:
+                # A nested list or a bare string inside a group is not a
+                # step; skipping it in silence read it as clean.
+                _note_malformed(stats, path, _GROUP_CHILD_NOT_A_STEP)
+            continue
         if _is_parallel_group(step):
+            if any(k not in _GROUP_KNOWN_KEYS for k in step):
+                _note_malformed(stats, path, _GROUP_UNKNOWN_KEY)
+            _note_background_expression(stats, path, step)
             children = step.get(_PARALLEL_KEY)
             if not isinstance(children, list):
                 _note_malformed(stats, path, _GROUP_NOT_A_LIST)
             elif depth >= _WALK_MAX_DEPTH:
                 _note_malformed(stats, path, _GROUP_TOO_DEEP)
             else:
-                yield from _iter_step_list(children, path, step, stats,
-                                           depth + 1)
+                yield from _iter_step_list(children, path, groups + (step,),
+                                           stats, depth + 1)
             continue
         if _is_control_step(step):
             if stats is not None:
                 stats.control += 1
             continue
-        background = step.get("background") is True
+        _note_background_expression(stats, path, step)
+        own_background = _may_run_in_background(step)
+        background_id = step.get("id") if own_background else next(
+            (g.get("id") for g in reversed(groups)
+             if _may_run_in_background(g)), None)
+        background = own_background or any(
+            _may_run_in_background(g) for g in groups)
         if stats is not None:
             stats.in_parallel += group is not None
-            stats.background += background
+            # A group's child is counted in `in_parallel` only, background
+            # or not (scan-output.md), so no step is counted twice.
+            stats.background += own_background and group is None
         yield _JobStep(step=step, path=path, in_parallel_group=group is not None,
-                       background=background, group=group)
+                       background=background, group=group, groups=groups,
+                       background_id=background_id)
         if _is_step_with_group(step):
-            _note_malformed(stats, path, _GROUP_ALSO_A_STEP)
             children = step.get(_PARALLEL_KEY)
-            if isinstance(children, list) and depth < _WALK_MAX_DEPTH:
-                yield from _iter_step_list(children, path, step, stats,
-                                           depth + 1)
+            if not isinstance(children, list):
+                _note_malformed(stats, path, _GROUP_ALSO_A_STEP_NOT_A_LIST)
+            elif depth >= _WALK_MAX_DEPTH:
+                _note_malformed(stats, path, _GROUP_ALSO_A_STEP_TOO_DEEP)
+            else:
+                _note_malformed(stats, path, _GROUP_ALSO_A_STEP)
+                yield from _iter_step_list(children, path, groups + (step,),
+                                           stats, depth + 1)
 
 
 def _job_steps(job: Any) -> list[dict[str, Any]]:
@@ -1683,19 +1743,31 @@ def _job_steps(job: Any) -> list[dict[str, Any]]:
 # Declaration order is not execution order once a job uses `parallel:` or
 # `background:`. Siblings in one group run at the same time (the group ends
 # with an implicit wait, so they are finished before the next top-level step),
-# and a `background: true` step keeps running past the steps declared after it
-# until a top-level `wait-all:` or a `wait:` naming its `id` (anything else,
-# `cancel:` included, is treated as still running: fail safe). The detectors
-# that reason about ORDER answer with this, and over-report rather than miss:
-# "did X run after the checkout/fetch?" counts a concurrent X as after, and
-# "did protection P finish before the install?" counts P only when it is
-# declared earlier AND not concurrent with the install. With neither syntax
-# present nothing is concurrent and every answer is the declaration order.
+# and a background step keeps running past the steps declared after it until
+# a top-level `wait-all:` (empty or literally `true`) or a `wait:` naming its
+# `id` (anything else — `cancel:`, `wait-all: false`, an expression — is
+# treated as still running: fail safe). A step is background when it, or a
+# group holding it, carries any `background:` value but a literal `false`. A
+# child that is itself background is treated as running past the group's end,
+# until a top-level wait (fail safe). The detectors that reason about ORDER
+# answer with this, and over-report rather than miss: "did X run after the
+# checkout/fetch?" counts a concurrent X as after, and "did protection P
+# finish before the install?" counts P only when it is declared earlier AND
+# not concurrent with the install. With neither syntax present nothing is
+# concurrent and every answer is the declaration order.
 @dataclass(frozen=True)
 class _StepTiming:
     top: int                    # index of the top-level `steps:` entry
     grouped: bool               # a child of a `parallel:` group
-    until: int | None           # background: top index of the joining wait
+    # background only: index of the top-level wait that joins it, or
+    # len(steps) when none does; None when not background.
+    until: int | None
+
+
+def _joins_all(control: dict[str, Any]) -> bool:
+    """`wait-all:` written empty or literally `true`; `false` or an
+    expression proves nothing has finished."""
+    return "wait-all" in control and control["wait-all"] in (None, True)
 
 
 def _step_timing(job_step: _JobStep, steps: list[Any]) -> _StepTiming:
@@ -1703,14 +1775,14 @@ def _step_timing(job_step: _JobStep, steps: list[Any]) -> _StepTiming:
     until: int | None = None
     if job_step.background:
         until = len(steps)
-        sid = job_step.step.get("id")
+        sid = job_step.background_id
         for j in range(top + 1, len(steps)):
             s = steps[j]
             if not (isinstance(s, dict) and _is_control_step(s)):
                 continue
             waits = s.get("wait")
             waits = waits if isinstance(waits, list) else [waits]
-            if "wait-all" in s or (
+            if _joins_all(s) or (
                     sid is not None and str(sid) in [str(w) for w in waits]):
                 until = j
                 break
@@ -1883,19 +1955,42 @@ def _job_nodes(text: str) -> dict[Any, Any]:
     return merged
 
 
+# Raw-text checks read a file's text whatever its step shape, so text the
+# walker could not read as steps may still have been matched by one of them;
+# no sentence here claims that NO detector saw it.
+_NOT_READ_AS_STEPS = ("was not read as steps; some raw-text checks may still "
+                      "have matched inside it — review it manually")
 _GROUP_GAP_SENTENCE = {
     _GROUP_NOT_A_LIST: (
-        "is a `parallel:` group whose value is not a list of steps, so the "
-        "steps it holds were NOT scanned by any detector — review them "
-        "manually"),
+        "is a `parallel:` group whose value is not a list of steps, so it "
+        + _NOT_READ_AS_STEPS),
     _GROUP_TOO_DEEP: (
         "is a `parallel:` group nested more than {depth} groups "
-        "deep, so the steps it holds were NOT scanned by any detector — "
-        "review them manually"),
+        "deep, so it " + _NOT_READ_AS_STEPS),
     _GROUP_ALSO_A_STEP: (
         "is a `parallel:` group that also carries `run:`/`uses:`, which "
         "GitHub does not accept; its own command and its child steps were "
         "scanned, but review it manually"),
+    _GROUP_ALSO_A_STEP_NOT_A_LIST: (
+        "is a step that also carries `parallel:`, which GitHub does not "
+        "accept; its own command was scanned, but its `parallel:` value is "
+        "not a list of steps, so that value " + _NOT_READ_AS_STEPS),
+    _GROUP_ALSO_A_STEP_TOO_DEEP: (
+        "is a step that also carries `parallel:`, which GitHub does not "
+        "accept; its own command was scanned, but it sits more than {depth} "
+        "groups deep, so its `parallel:` value " + _NOT_READ_AS_STEPS),
+    _GROUP_CHILD_NOT_A_STEP: (
+        "is an entry of a `parallel:` group that is not a step (a mapping), "
+        "so it " + _NOT_READ_AS_STEPS),
+    _GROUP_UNKNOWN_KEY: (
+        "is a `parallel:` group carrying a key other than `parallel:`, "
+        "`if:`, `name:`, `id:`, `continue-on-error:` or `background:`; its "
+        "child steps were scanned, but what that key does to them was not "
+        "modelled — review it manually"),
+    _STEP_BACKGROUND_EXPRESSION: (
+        "has a `background:` value chosen at run time; it was scanned, and "
+        "treated as running in the background until a top-level `wait:` "
+        "naming it or `wait-all:` — review it manually"),
 }
 
 
