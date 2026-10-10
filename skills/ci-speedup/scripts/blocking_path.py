@@ -8640,7 +8640,9 @@ _OPT84_TS6_ALIAS = (
     "it for those tools")
 _OPT84_SUMMARY = "uncredited, benchmark first"
 # The swap table's published speedup range per detected row: the catalog's
-# number, quoted as such, never this repo's.
+# number, quoted as such, never this repo's. The engine stamps it on each tool
+# (`published_range`); the card renders the stamp and falls back to this table
+# only when a tool carries none. A coupling test pins it to the engine's table.
 _OPT84_PUBLISHED_RANGE: dict[str, str] = {
     "prettier": "~4-30×",
     "eslint": "~8-20×",
@@ -8653,6 +8655,14 @@ _OPT84_DOCS_URLS: dict[str, str] = {
     "prettier": "https://oxc.rs/docs/guide/usage/formatter.html",
     "eslint": "https://oxc.rs/docs/guide/usage/linter.html",
     "tsc": "https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/",
+}
+# The target's migration guide, per row (None: the row has none). The engine
+# stamps `migration_docs_url` from the same `_OPT84_DOCS` table; when the stamp
+# is a string the card renders it beside the docs link.
+_OPT84_MIGRATION_DOCS_URLS: dict[str, "str | None"] = {
+    "prettier": "https://oxc.rs/docs/guide/usage/formatter/migrate-from-prettier.html",
+    "eslint": "https://oxc.rs/docs/guide/usage/linter/migrate-from-eslint.html",
+    "tsc": None,
 }
 _OPT84_SOURCE_NAME = {"prettier": "Prettier", "eslint": "ESLint", "tsc": "tsc"}
 _OPT84_TARGET_NAME = {"prettier": "oxfmt", "eslint": "oxlint",
@@ -8733,11 +8743,17 @@ def _opt84_card(f: dict[str, Any], catalog_url: str) -> list[str]:
         row = str(t.get("row") or "")
         src = _OPT84_SOURCE_NAME.get(row) or _flatten_cell(str(t.get("source_tool") or row))
         tgt = _OPT84_TARGET_NAME.get(row) or _flatten_cell(str(t.get("target") or ""))
+        rng = t.get("published_range")
+        rng = (_flatten_cell(rng) if isinstance(rng, str) and rng.strip()
+               else _OPT84_PUBLISHED_RANGE.get(row, ""))
+        mig = t.get("migration_docs_url")
         line = (f"- **{src} → {tgt}:** runs "
                 f"`{_flatten_cell(str(t.get('leaf_command') or ''))}`; {tgt} is a "
-                f"native drop-in (published range {_OPT84_PUBLISHED_RANGE.get(row, '')}, "
+                f"native drop-in (published range {rng}, "
                 f"the catalog's number, not this repo's); fit: {_opt84_fit_words(t)}; "
-                f"docs: {_flatten_cell(str(t.get('docs_url') or ''))}")
+                f"docs: {_flatten_cell(str(t.get('docs_url') or ''))}"
+                + (f"; migration guide: {_flatten_cell(mig)}"
+                   if isinstance(mig, str) and mig.strip() else ""))
         if row == "tsc" and t.get("typescript6_alias_needed"):
             line += f". {_OPT84_TS6_ALIAS}."
         out.append(line)

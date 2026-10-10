@@ -9125,6 +9125,11 @@ _VR_OPT84_DOCS_URLS = {
     "eslint": "https://oxc.rs/docs/guide/usage/linter.html",
     "tsc": "https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/",
 }
+_VR_OPT84_MIGRATION_DOCS_URLS = {
+    "prettier": "https://oxc.rs/docs/guide/usage/formatter/migrate-from-prettier.html",
+    "eslint": "https://oxc.rs/docs/guide/usage/linter/migrate-from-eslint.html",
+    "tsc": None,
+}
 _VR_OPT84_CARD_RE = re.compile(r'<a id="opt84-([^"]+)"></a>')
 _VR_OPT84_OWN_SECTION = "Tool swaps on other long poles"
 
@@ -9262,6 +9267,16 @@ def check_opt84_tool_swap(report: str, findings_path: Path | None) -> Check:
             if t.get("docs_url") != _VR_OPT84_DOCS_URLS.get(row):
                 bad.append(f"{fid}: tool {row!r} docs_url {t.get('docs_url')!r} is not "
                            "the known docs link for its row")
+            if row in _VR_OPT84_ROWS and (
+                    t.get("migration_docs_url") != _VR_OPT84_MIGRATION_DOCS_URLS.get(row)):
+                bad.append(f"{fid}: tool {row!r} migration_docs_url "
+                           f"{t.get('migration_docs_url')!r} is not the known migration "
+                           f"guide for its row ({_VR_OPT84_MIGRATION_DOCS_URLS.get(row)!r})")
+            if ("published_range" in t and row in _VR_OPT84_ROWS
+                    and t.get("published_range") != _VR_OPT84_PUBLISHED_RANGE.get(row)):
+                bad.append(f"{fid}: tool {row!r} published_range "
+                           f"{t.get('published_range')!r} is not the catalog's "
+                           f"{_VR_OPT84_PUBLISHED_RANGE.get(row)!r}")
             if fit == "deferred_to_opt82" and not any(
                     str(o.get("pattern") or "") == "OPT82"
                     and Path(str(o.get("workflow_file") or "")).name == wfb
@@ -9329,6 +9344,9 @@ def check_opt84_tool_swap(report: str, findings_path: Path | None) -> Check:
             url = _VR_OPT84_DOCS_URLS.get(row)
             if url and f"docs: {url}" not in flat:
                 bad.append(f"{fid}: card is missing the docs link for {row!r}")
+            mig = _VR_OPT84_MIGRATION_DOCS_URLS.get(row)
+            if mig and f"migration guide: {mig}" not in flat:
+                bad.append(f"{fid}: card is missing the migration guide for {row!r}")
             rng = _VR_OPT84_PUBLISHED_RANGE.get(row)
             if rng and f"published range {rng}" not in flat:
                 bad.append(f"{fid}: card is missing the published range for {row!r}")
@@ -9339,7 +9357,8 @@ def check_opt84_tool_swap(report: str, findings_path: Path | None) -> Check:
                    str(ts.get("command") or ""), str(f.get("title") or "")}
         literal |= {str(x) for x in _as_list(ts.get("resolved_leaves"))}
         for t in tools:
-            literal |= {str(t.get("leaf_command") or ""), str(t.get("docs_url") or "")}
+            literal |= {str(t.get("leaf_command") or ""), str(t.get("docs_url") or ""),
+                        str(t.get("migration_docs_url") or "")}
             literal |= {str(x) for x in _as_list(t.get("benchmark_commands"))}
             literal |= {str(x) for x in _as_list(t.get("fit_reasons"))}
         literal |= {_flatten_cell(x) for x in list(literal)}

@@ -54,7 +54,10 @@ def _tool(row, fit="drop-in", reasons=None):
     return {"row": row, "leaf_command": leaf, "source_tool": src, "target": tgt,
             "fit": fit, "fit_reasons": list(reasons or []),
             "source_version": "3.3.3", "typescript6_alias_needed": False,
-            "benchmark_commands": bench, "docs_url": bp._OPT84_DOCS_URLS[row]}
+            "benchmark_commands": bench, "docs_url": bp._OPT84_DOCS_URLS[row],
+            # Stamped by the engine on every tool, from its own tables.
+            "published_range": cr._OPT84_TABLE[row]["published_range"],
+            "migration_docs_url": cr._OPT84_DOCS[row]["migration_docs_url"]}
 
 
 def _tools_default():
@@ -154,6 +157,34 @@ def test_card_states_step_share_command_tools_ceiling_rail_and_benchmark():
     assert "Prompt for your coding agent" not in card
     assert not hasattr(bp, "_OPT84_MIGRATION_COST")
     assert not hasattr(bp, "_OPT84_TWO_COMMITS")
+
+
+def test_card_renders_each_tools_stamped_published_range():
+    t = _tool("prettier")
+    t["published_range"] = "~5-7×"
+    text = _flat(_card(_finding([t])))
+    assert "published range ~5-7×," in text, text
+    assert bp._OPT84_PUBLISHED_RANGE["prettier"] not in text
+
+
+def test_card_falls_back_to_the_table_range_when_none_is_stamped():
+    t = _tool("prettier")
+    del t["published_range"]
+    text = _flat(_card(_finding([t])))
+    assert f"published range {bp._OPT84_PUBLISHED_RANGE['prettier']}," in text, text
+
+
+def test_card_renders_the_migration_guide_beside_the_docs_when_stamped():
+    text = _flat(_card(_finding([_tool("eslint"), _tool("prettier"), _tool("tsc")])))
+    for row in ("eslint", "prettier"):
+        want = (f"docs: {bp._OPT84_DOCS_URLS[row]}; migration guide: "
+                f"{cr._OPT84_DOCS[row]['migration_docs_url']}")
+        assert want in text, (row, text)
+    # tsc has no migration guide: its docs line ends at the docs link.
+    tsc_line = next(ln for ln in _card(_finding([_tool("tsc")])).splitlines()
+                    if ln.startswith("- **tsc"))
+    assert "migration guide" not in tsc_line, tsc_line
+    assert tsc_line.endswith(f"docs: {bp._OPT84_DOCS_URLS['tsc']}"), tsc_line
 
 
 def test_one_tool_has_no_split_sentence():
@@ -290,6 +321,18 @@ def test_verifier_copies_equal_the_renderers():
     assert "check_opt84_tool_swap(report, findings_path)," in inspect.getsource(vr)
 
 
+def test_renderer_and_verifier_url_and_range_tables_equal_the_engines():
+    """Both docs keys and the published range: the renderer's tables, the
+    verifier's copies and the engine's `_OPT84_DOCS` / `_OPT84_TABLE` agree."""
+    engine_docs = {r: d["docs_url"] for r, d in cr._OPT84_DOCS.items()}
+    engine_mig = {r: d["migration_docs_url"] for r, d in cr._OPT84_DOCS.items()}
+    engine_rng = {r: t["published_range"] for r, t in cr._OPT84_TABLE.items()}
+    assert bp._OPT84_DOCS_URLS == vr._VR_OPT84_DOCS_URLS == engine_docs
+    assert bp._OPT84_MIGRATION_DOCS_URLS == vr._VR_OPT84_MIGRATION_DOCS_URLS == engine_mig
+    assert engine_mig["tsc"] is None
+    assert bp._OPT84_PUBLISHED_RANGE == vr._VR_OPT84_PUBLISHED_RANGE == engine_rng
+
+
 def test_engine_copies_equal_the_renderers_once_the_engine_lands():
     """Active once the engine half (`collect_runs._OPT84_*`) is on the branch."""
     if not hasattr(cr, "_OPT84_HELD_BACK_GATES"):
@@ -361,6 +404,13 @@ def test_verifier_is_quiet_without_opt84(tmp_path):
         "docs_url", "https://example.test/x"), "docs_url"),
     (lambda d: d["findings"][0]["tool_swap"]["tools"][0].__setitem__(
         "fit", "deferred_to_opt82"), "no OPT82 finding"),
+    (lambda d: d["findings"][0]["tool_swap"]["tools"][1].__setitem__(
+        "migration_docs_url", "https://example.test/m"),
+     "migration_docs_url 'https://example.test/m'"),
+    (lambda d: d["findings"][0]["tool_swap"]["tools"][1].__setitem__(
+        "migration_docs_url", None), "migration_docs_url None"),
+    (lambda d: d["findings"][0]["tool_swap"]["tools"][1].__setitem__(
+        "published_range", "~50-90×"), "published_range '~50-90×'"),
     (lambda d: d["findings"][0].__setitem__("wall_clock_p50_s", 52.0), "uncredited"),
     (lambda d: d["findings"][0].__setitem__("sizing_basis", "measured"), "sizing_basis"),
     (lambda d: d["pr_critical_path"].__setitem__("poles", []), "not a drilled long pole"),
@@ -399,6 +449,9 @@ def test_verifier_fails_a_tampered_finding(tmp_path, edit, needle):
     (lambda r: r.replace(bp._OPT84_SPLIT_UNKNOWN, ""), "split"),
     (lambda r: r.replace(bp._OPT84_DOCS_URLS["prettier"], "https://example.test/y"),
      "docs link"),
+    (lambda r: r.replace("; migration guide: "
+                         + cr._OPT84_DOCS["prettier"]["migration_docs_url"], ""),
+     "migration guide for 'prettier'"),
     (lambda r: re.sub(r'<a id="opt84-[^"]+"></a>', "", r), "no card"),
     (lambda r: r + '\n<a id="opt84-f99"></a>\n', "no OPT84 finding"),
     (lambda r: r.replace("## 🔴 Long pole 1:", "## 🧹 Also noticed\n\nx\n\n## 🔴 Long pole 1:")
@@ -425,6 +478,15 @@ def test_verifier_fails_a_card_after_opt81_on_its_pole(tmp_path):
     moved = report[:at] + '<a id="opt81-f81"></a>\n\nOPT81 card\n\n' + report[at:]
     c = _check(tmp_path, doc, moved)
     assert not c.ok and "after its pole's OPT81 card" in c.detail, c.detail
+
+
+def test_verifier_rejects_a_migration_guide_on_the_tsc_row(tmp_path):
+    t = _tool("tsc")
+    t["migration_docs_url"] = "https://example.test/ts7-migrate"
+    doc, report = _doc_and_report(_finding([t]))
+    c = _check(tmp_path, doc, report)
+    assert not c.ok and "migration_docs_url 'https://example.test/ts7-migrate'" in c.detail, (
+        c.detail)
 
 
 def test_verifier_accepts_names_and_commands_that_look_like_durations(tmp_path):
