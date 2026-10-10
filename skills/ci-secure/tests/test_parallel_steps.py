@@ -1169,3 +1169,72 @@ def test_a_pin_with_no_known_line_is_treated_as_racing() -> None:
     assert scan._pin_races(None, (10, 12), never, concurrency=True)
     assert not scan._pin_races(None, (10, 12), never, concurrency=False)
     assert not scan._pin_races(11, (10, 12), never, concurrency=True)
+
+
+# ---------------------------------------------------------------------------
+# Source spans (the concurrency model for the line-based detectors) resolve
+# keys the way the loader does.
+# ---------------------------------------------------------------------------
+
+_SPAN_SHAPES = {
+    "merge-key group": ("""\
+        on: push
+        x-grp: &grp
+          parallel:
+            - run: echo a
+            - run: echo b
+        jobs:
+          t:
+            runs-on: ubuntu-latest
+            steps:
+              - <<: *grp
+        """, "t"),
+    "merge-key job": ("""\
+        on: push
+        jobs:
+          base: &b
+            runs-on: ubuntu-latest
+            steps:
+              - parallel:
+                  - run: echo a
+                  - run: echo b
+          build:
+            <<: *b
+        """, "build"),
+    "yaml-1.1 bool job key": ("""\
+        on: push
+        jobs:
+          yes:
+            runs-on: ubuntu-latest
+            steps:
+              - parallel:
+                  - run: echo a
+                  - run: echo b
+        """, "True"),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_SPAN_SHAPES))
+def test_step_spans_resolve_keys_as_the_loader_does(shape: str) -> None:
+    text, job = _SPAN_SHAPES[shape]
+    spans = [s for s in scan._step_spans(textwrap.dedent(text))
+             if s.job == job]
+    assert len(spans) == 2, (shape, spans)
+    assert spans[0].start_line < spans[1].start_line
+
+
+def test_a_job_whose_spans_cannot_be_found_is_disclosed(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Concurrency silently falling back to declaration order is a coverage
+    gap, not a clean answer."""
+    text = textwrap.dedent(_SPAN_SHAPES["merge-key job"][0])
+    monkeypatch.setattr(scan, "_job_nodes", lambda _text: {})
+    unmatched: list[str] = []
+    assert scan._step_spans(text, unmatched) == []
+    assert unmatched == ["base", "build"]
+    wf = tmp_path / "a.yml"
+    wf.write_text(text)
+    _, gaps = scan._parallel_step_stats(wf)
+    assert any("jobs.build" in g and "declaration order" in g
+               for g in gaps), gaps

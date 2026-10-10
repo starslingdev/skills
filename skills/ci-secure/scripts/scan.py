@@ -1859,46 +1859,44 @@ class _StepSpan:
     timing: _StepTiming
 
 
-def _step_spans(text: str) -> list[_StepSpan]:
-    """Every leaf step that may run concurrently with another, by source line.
+def _step_spans(text: str,
+                unmatched: list[str] | None = None) -> list[_StepSpan]:
+    """Every leaf step's source span, for each job that holds at least one
+    grouped or background step.
 
-    Empty (and nothing is parsed) unless the text uses `parallel:` or
-    `background:` at all, so plain workflows keep their exact behaviour.
-    The parsed and the composed documents are walked by the same index path.
+    Empty (and nothing is parsed) unless the text contains the word
+    `parallel` or `background`, so plain workflows keep their exact
+    behaviour. Jobs are found by `_job_nodes` (keyed as the loader keys them)
+    and keys resolve through `_node_keys`, so `<<:` merges at the job or the
+    step level are followed; each leaf is paired by position with its node
+    from `_iter_step_nodes`, the lockstep twin of `_iter_job_steps`. A job
+    that holds concurrent steps but whose nodes cannot be paired is named in
+    ``unmatched`` — its concurrency would otherwise fall back to declaration
+    order in silence.
     """
     if "parallel" not in text and "background" not in text:
         return []
     try:
         doc = yaml.safe_load(text)
-        root = yaml.compose(text)
     except yaml.YAMLError:
         return []
-    if not (isinstance(doc, dict) and isinstance(doc.get("jobs"), dict)
-            and isinstance(root, yaml.MappingNode)):
+    if not (isinstance(doc, dict) and isinstance(doc.get("jobs"), dict)):
         return []
-
-    def _child(node: Any, key: str) -> Any:
-        if isinstance(node, yaml.MappingNode):
-            for k, v in node.value:
-                if getattr(k, "value", None) == key:
-                    return v
-        return None
-
-    jobs_node = _child(root, "jobs")
+    job_nodes = _job_nodes(text)
     out: list[_StepSpan] = []
     for name, job in doc["jobs"].items():
         timings = _job_step_timings(job)
         if not any(t.grouped or t.until is not None for _, t in timings):
             continue
-        for js, timing in timings:
-            node = _child(_child(jobs_node, str(name)), "steps")
-            try:
-                for depth, i in enumerate(js.path):
-                    if depth:
-                        node = _child(node, _PARALLEL_KEY)
-                    node = node.value[i]
-            except (AttributeError, IndexError, TypeError):
-                continue
+        job_node = job_nodes.get(name)
+        nodes = list(_iter_step_nodes(
+            _node_keys(job_node).get("steps")
+            if isinstance(job_node, yaml.MappingNode) else None))
+        if len(nodes) != len(timings):
+            if unmatched is not None:
+                unmatched.append(str(name))
+            continue
+        for (_, timing), node in zip(timings, nodes):
             out.append(_StepSpan(str(name), node.start_mark.line + 1,
                                  node.end_mark.line + 1, timing))
     return out
@@ -2080,6 +2078,15 @@ def _parallel_step_stats(
             gaps.append(f"jobs.{job_name} step {label} "
                         + _GROUP_GAP_SENTENCE[shape].format(
                             depth=_WALK_MAX_DEPTH))
+    unmatched: list[str] = []
+    if text:
+        _step_spans(text, unmatched)
+    for job_name in unmatched:
+        gaps.append(
+            f"jobs.{job_name} holds `parallel:` or background steps whose "
+            "source lines could not be found, so which of its steps may run "
+            "at the same time was not modelled and the order-dependent "
+            "checks fell back to declaration order — review it manually")
     return stats, gaps
 
 
