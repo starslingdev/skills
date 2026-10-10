@@ -152,7 +152,8 @@ def test_operand_position_rows_get_the_verdict_they_are_pinned_to(sides):
 
 def test_the_copied_patterns_are_character_identical(sides):
     speed, score = sides
-    for name in ("_GIT_HISTORY_RE", "_HISTORY_JOB_NAME_RE", "_LINE_CONTINUATION_RE"):
+    for name in ("_GIT_HISTORY_RE", "_HISTORY_JOB_NAME_RE", "_LINE_CONTINUATION_RE",
+                 "_NESTED_LOCAL_USES_RE"):
         a, b = getattr(speed, name), getattr(score, name)
         assert a.pattern == b.pattern, f"{name} pattern text diverged"
         assert a.flags == b.flags, f"{name} flags diverged"
@@ -397,3 +398,75 @@ def test_a_local_action_inside_a_parallel_group_is_indexed(sides, tmp_path: Path
     assert "./.github/actions/changed" in idx
     speed._GIT_HISTORY_LOCAL_ACTIONS = idx
     assert speed._job_needs_git_history(job, "a") is True
+
+
+def _composite(tmp_path: Path, name: str, *steps: str) -> None:
+    d = tmp_path / ".github" / "actions" / name
+    d.mkdir(parents=True)
+    d.joinpath("action.yml").write_text(
+        "runs:\n  using: composite\n  steps:\n" + "".join(steps))
+
+
+def _nested_tree(tmp_path: Path) -> None:
+    # outer → inner, and only inner runs the history command
+    _composite(tmp_path, "outer", "    - uses: ./.github/actions/inner\n")
+    _composite(tmp_path, "inner",
+               "    - run: git log --oneline\n      shell: bash\n")
+    # outer → a local action that does not exist (fail closed)
+    _composite(tmp_path, "dangling", "    - uses: ./.github/actions/missing\n")
+    # a two-action cycle with no history command anywhere
+    _composite(tmp_path, "ping", "    - uses: ./.github/actions/pong\n",
+               "    - run: npm ci\n      shell: bash\n")
+    _composite(tmp_path, "pong", "    - uses: $/.github/actions/ping\n")
+    # a `$/` outer whose `./` inner runs the history command
+    _composite(tmp_path, "self-outer", "    - uses: './.github/actions/inner'\n")
+
+
+# (outer ref a workflow step names, must the history index hold it?)
+_NESTED_ROWS = [
+    ("./.github/actions/outer", True),         # history op one reference deep
+    ("./.github/actions/dangling", True),      # unreadable nested ref: fail closed
+    ("./.github/actions/ping", False),         # history-free cycle terminates
+    ("$/.github/actions/self-outer", True),    # `$/` outer, `./` inner
+]
+
+
+@pytest.mark.parametrize("ref,expected", _NESTED_ROWS,
+                         ids=["nested-history", "nested-unreadable",
+                              "cycle-no-history", "self-prefix-outer"])
+def test_nested_local_references_are_followed(sides, tmp_path: Path, ref, expected):
+    """A composite action that delegates to ANOTHER local action: the history
+    op (or the unreadable file) can sit one reference deeper than the action
+    the workflow step names. Both engines must follow the chain, fail closed on
+    an unreadable link, and terminate on a cycle."""
+    speed, score = sides
+    _nested_tree(tmp_path)
+    job = {"steps": [{"uses": ref}]}
+    parsed = [(".github/workflows/ci.yml",
+               {"on": {"pull_request": None}, "jobs": {"j": job}}, "")]
+
+    speed_idx = speed._index_local_git_actions(tmp_path, parsed)
+    score_idx = score._index_local_git_actions(tmp_path, parsed)
+    assert (ref in speed_idx) is expected, f"ci-speedup: {ref} indexed={ref in speed_idx}"
+    assert (ref in score_idx) is expected, f"ci-score: {ref} indexed={ref in score_idx}"
+    assert speed_idx == score_idx, "the nested local-action index diverged"
+
+    speed._GIT_HISTORY_LOCAL_ACTIONS = speed_idx
+    assert speed._job_needs_git_history(job, "j") is expected
+    assert score._job_needs_git_history(job, "j", score_idx) is expected
+
+
+def test_a_chain_past_the_depth_cap_fails_closed(sides, tmp_path: Path):
+    """A history-free chain longer than the cap is unproven past the cap, so
+    both engines keep the outer ref in the index rather than call it clean."""
+    speed, score = sides
+    assert speed._MAX_LOCAL_ACTION_DEPTH == score._MAX_LOCAL_ACTION_DEPTH
+    n = speed._MAX_LOCAL_ACTION_DEPTH + 2
+    for i in range(n):
+        _composite(tmp_path, f"link{i}", f"    - uses: ./.github/actions/link{i + 1}\n"
+                   if i + 1 < n else "    - run: npm ci\n      shell: bash\n")
+    parsed = [(".github/workflows/ci.yml",
+               {"jobs": {"j": {"steps": [{"uses": "./.github/actions/link0"}]}}}, "")]
+    for engine in sides:
+        assert "./.github/actions/link0" in engine._index_local_git_actions(
+            tmp_path, parsed), engine.__name__

@@ -19,7 +19,10 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
   fix advice naming files that had nothing to pin; it now reads "111 of 111"
   and passes. The shallow-checkout check's git-history exemption also now
   opens a `$/`-referenced composite action (and fails closed when it cannot
-  be read), as it already did for `./`.
+  be read), as it already did for `./`, and follows nested references: a
+  git-history command inside a local action that the named action itself
+  calls (`./` or `$/`) exempts the full-history checkout too, and an
+  unreadable nested reference fails closed the same way.
 
 - **2026-10-09** — **Fixed** (#120): steps inside a GitHub Actions
   `parallel:` group (shipped by GitHub 2026-06-25 on github.com and GHEC; not

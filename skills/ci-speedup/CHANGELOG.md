@@ -995,7 +995,11 @@ unversioned and updates by reinstall from `main`.
   action named lint was not recognised as delegated lint, and a reusable
   workflow called as `$/.github/workflows/x.yml` was missing from the call
   graph. `$/x` now resolves to `<repo root>/x` everywhere `./x` does,
-  including references nested inside composite actions.
+  including references nested inside composite actions. The git-history
+  read behind the shallow-checkout pattern (OPT28) follows those nested
+  references too: a composite action that calls another local action
+  running `git diff origin/main...HEAD` no longer leaves `fetch-depth: 0`
+  looking removable, and an unreadable nested reference fails closed.
 
 - **2026-10-09** — **Steps written inside a GitHub Actions `parallel:` group are
   no longer invisible to the audit.** Since 2026-06-25 a step may be a

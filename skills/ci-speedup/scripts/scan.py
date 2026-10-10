@@ -414,10 +414,58 @@ def _has_git_history_op(text: str) -> bool:
     return bool(_GIT_HISTORY_RE.search(_LINE_CONTINUATION_RE.sub(" ", text)))
 
 
+# A local `uses:` reference written inside an action or reusable-workflow file
+# (`./…` or the self-repository `$/…`), quoted or bare.
+_NESTED_LOCAL_USES_RE = re.compile(r"uses:\s*['\"]?((?:\./|\$/)[^\s'\"#]+)")
+# How many local references deep the history read follows a chain before it
+# gives up. Past the cap the chain is unproven, so it fails CLOSED.
+_MAX_LOCAL_ACTION_DEPTH = 16
+
+
+def _read_local_history_file(root: Path, ref: str) -> "str | None":
+    """Text of the file a local ref names: `<root>/<ref[2:]>` itself when it is
+    a `.yml`/`.yaml` (a reusable workflow), else that directory's `action.yml`
+    or `action.yaml`. None when no candidate file is readable."""
+    base = root / ref[2:]  # strip leading "./" or "$/"
+    candidates = [base] if base.suffix in (".yml", ".yaml") else [
+        base / "action.yml", base / "action.yaml"]
+    for cand in candidates:
+        try:
+            return cand.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+    return None
+
+
+def _local_action_needs_history(root: Path, ref: str) -> bool:
+    """True when the local action `ref` names, or any local action or reusable
+    workflow it reaches through nested `uses:` references, runs a git-history
+    op. A composite action routinely delegates to another local action, and the
+    inner one can be the step that walks history. Any link that cannot be read
+    (or a chain deeper than `_MAX_LOCAL_ACTION_DEPTH`) fails CLOSED: it cannot
+    be PROVEN history-free. A cycle terminates on the visited set."""
+    seen: set[str] = set()
+    queue: list[tuple[str, int]] = [(ref, 0)]
+    while queue:
+        cur, depth = queue.pop()
+        if cur in seen:
+            continue
+        seen.add(cur)
+        if depth > _MAX_LOCAL_ACTION_DEPTH:
+            return True
+        text = _read_local_history_file(root, cur)
+        if text is None or _has_git_history_op(text):
+            return True
+        queue += [(m.split("@")[0].strip(), depth + 1)
+                  for m in _NESTED_LOCAL_USES_RE.findall(text)]
+    return False
+
+
 def _index_local_git_actions(root: Path, parsed: list[tuple[str, dict, str]]) -> set[str]:
     """Return the set of local `uses:` refs (e.g. `./.github/actions/turbo-changed`,
     or the self-repository `$/.github/actions/turbo-changed`) whose
-    composite-action file performs a git-history op."""
+    composite-action file performs a git-history op, directly or through a
+    nested local reference (`_local_action_needs_history`)."""
     refs: set[str] = set()
     for _rel, doc, _raw in parsed:
         for job in _jobs_from_doc(doc).values():
@@ -427,28 +475,9 @@ def _index_local_git_actions(root: Path, parsed: list[tuple[str, dict, str]]) ->
                 u = _uses(s).split("@")[0].strip()
                 if _is_local_uses(u):
                     refs.add(u)
-    out: set[str] = set()
-    for ref in refs:
-        rel = ref[2:]  # strip leading "./" or "$/"
-        base = root / rel
-        candidates = [base] if base.suffix in (".yml", ".yaml") else [
-            base / "action.yml", base / "action.yaml"]
-        for cand in candidates:
-            try:
-                text = cand.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                continue
-            if _has_git_history_op(text):
-                out.add(ref)
-            break
-        else:
-            # No candidate file was readable — we can't PROVE the action is
-            # history-free. Fail CLOSED: assume it may run a git-history op so
-            # OPT28 never recommends shallowing a job that invokes it (the same
-            # conservative stance as the changeset/release name fallback). The
-            # cost is at most a missed OPT28 finding, never a breaking fix.
-            out.add(ref)
-    return out
+    # Fail CLOSED on anything unproven (see `_local_action_needs_history`):
+    # the cost is at most a missed finding, never advice that breaks a job.
+    return {ref for ref in refs if _local_action_needs_history(root, ref)}
 
 
 def _job_needs_git_history(job: dict, job_name: str = "") -> bool:
