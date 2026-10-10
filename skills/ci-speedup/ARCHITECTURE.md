@@ -3093,7 +3093,9 @@ step carry `background: true`, and add control steps (`wait:`, `wait-all:`,
   lists `jobs_with_groups`, `jobs_with_background` and (in a file holding either)
   `sequential_jobs`, and `held_back`. Otherwise the key is absent and the scan
   output is byte-identical to before. The Data sources table renders a "Parallel
-  steps" row from it (`workflow_steps.parallel_steps_disclosure`).
+  steps" row from it (`workflow_steps.parallel_steps_disclosure` for the cell,
+  `workflow_steps.parallel_steps_used_for` for its "Used for" text, which names
+  groups, `background: true` steps or both, from the same counts).
 - **Run-data side — NOT changed.** `_decompose_job_steps` still sums per-step
   p50s into the job p50, and `_step_timeline` still lays steps out end to end.
   With overlapping steps both are wrong (the sum over-counts, the timeline

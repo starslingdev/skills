@@ -110,6 +110,19 @@ def test_a_job_with_only_background_steps_is_stamped_too():
     assert row is not None and "1 `background: true` step(s)" in row, row
 
 
+def test_a_parallel_only_job_stamps_no_background_steps():
+    """Children of a `parallel:` group run in the background, but they are
+    counted as steps in groups, not as `background: true` steps: the "Used
+    for" cell keys on `background_steps` and must keep the group sentence."""
+    docs = [("ci.yml", {"jobs": {"grouped": {"steps": [
+        {"parallel": [{"run": "a"}, {"run": "b"}]}, {"run": "c"}]}}})]
+    stats = ws.parallel_steps_stats(docs)
+    assert stats["groups"] == 1 and stats["steps_in_groups"] == 2, stats
+    assert stats["background_steps"] == 0, stats
+    assert stats["jobs_with_background"] == [], stats
+    assert ws.parallel_steps_used_for(stats) == ws._GROUPS_FEEDS
+
+
 def test_invalid_groups_are_recorded_per_job():
     docs = [("c.yml", {"jobs": {"j": {"steps": [{"run": "a", "parallel": [{"run": "b"}]}]}}})]
     stats = ws.parallel_steps_stats(docs)

@@ -698,6 +698,10 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # This directory first, so the sibling import below resolves even under
+    # PYTHONSAFEPATH / `python -P` (the script's directory is not on sys.path).
+    if str(Path(__file__).resolve().parent) not in sys.path:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
     from log_level import configure_logging  # STARSLING_LOG_LEVEL opt-in
     configure_logging()
     sys.exit(main())

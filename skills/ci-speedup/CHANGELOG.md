@@ -996,11 +996,20 @@ unversioned and updates by reinstall from `main`.
   but no script read it, so every debug line was unreachable and stderr stayed
   empty. Each program the skill runs (`run.py`, `scan.py`, `collect_runs.py`,
   `blocking_path.py`, `summary.py`, `record_timing.py`) now sets its log level
-  from the variable through one shared helper (`scripts/log_level.py`). Unset
-  means WARNING, as before; a name that is not a log level also means WARNING,
-  with one line per program saying the value was ignored (a `run.py` audit starts three programs, so three lines). What is logged is unchanged:
-  endpoints, sizes and pattern / workflow names, never gh response bodies.
-  Warnings that already printed now carry a `WARNING <module>:` prefix, except one emitted while the collector module is still loading, before logging is configured.
+  from the variable through one shared helper (`scripts/log_level.py`). Level
+  names are read in any case; `WARN` and `FATAL` are accepted as aliases and
+  `NOTSET` shows everything. Unset means WARNING, as before; a name that is not
+  a log level also means WARNING, with one line per program saying the value
+  was ignored (a `run.py` audit starts three programs, so three lines). What is
+  logged is unchanged: endpoints, sizes and pattern / workflow names, not gh
+  response bodies, except that a failed gh call's DEBUG line prints up to the
+  first 200 characters of gh's own error text and an unparsable workflow file's
+  DEBUG line prints the YAML parser's error, which can quote the file. Warnings
+  that already printed now carry a `WARNING <module>:` prefix (the collector's
+  read `WARNING collect_runs:`), except the `CI_SPEEDUP_FETCH_CONCURRENCY`
+  warning, which fires while the collector module is still loading, before
+  logging is configured, and prints bare as before. `summary.py` and
+  `record_timing.py` still start under `python -P` (PYTHONSAFEPATH).
 
 - **2026-10-10** — **A report is no longer refused because a modeled saving
   was checked against the wrong job.** On curl/curl the final check blocked
