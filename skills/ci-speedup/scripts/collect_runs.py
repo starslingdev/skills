@@ -17199,9 +17199,33 @@ def _detect_opt84_tool_swap(
             opt82_steps.add((str(f82.get("workflow_file") or ""),
                              str(tl.get("yaml_job") or ""), str(tl.get("lint_step") or "")))
 
+    # A repo with no JavaScript manifest at all (curl/curl): the scan walked the
+    # whole tree, read every manifest it found, and found none, nor any ESLint
+    # config. No tool in the table can run there, so every pole is the verdict
+    # `tool_not_in_table` before any pole -> YAML work (a matrix job whose name
+    # is an expression would otherwise be held back and listed for nothing).
+    # A manifest that exists but could not be read, an incomplete walk, or a
+    # missing block keeps the fail-closed path below.
+    no_js_manifest = (
+        isinstance(block, dict) and not tal.get("error")
+        and tal.get("truncated") is False
+        and not tal.get("package_scripts") and not tal.get("package_scripts_unreadable")
+        and not tal.get("tool_versions") and not tal.get("configs")
+        and not tal.get("unreadable"))
+
     out: list[dict[str, Any]] = []
     seen = set() if seen is None else seen
     for p in poles or []:
+        if no_js_manifest:
+            key = ((str(p.get("workflow_file") or ""),
+                    str(p.get("job") or p.get("check") or ""))
+                   if isinstance(p, dict) else None)
+            if key is not None and key in seen:
+                continue
+            if key is not None:
+                seen.add(key)
+            _no("tool_not_in_table", *(key or ()))
+            continue
         if not isinstance(p, dict):
             _no("pole_not_file_backed")
             continue
