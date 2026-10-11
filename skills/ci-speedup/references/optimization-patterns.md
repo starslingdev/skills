@@ -4911,7 +4911,7 @@ Its command is split on `&&`, `||`, `;`, `|` and newlines. A package-manager scr
 
 | Command | Row | Fit |
 |---|---|---|
-| `prettier --check`, `-c`, `--list-different` or `-l`; `pretty-quick --check` | Prettier → oxfmt | mostly drop-in |
+| `prettier --check`, `-c`, `--list-different` or `-l`; `pretty-quick --check` | Prettier → oxfmt | mostly drop-in; run both when a `package.json` from the step's directory up to the root declares a Prettier plugin (`prettier-plugin-*`), which oxfmt may not carry |
 | `eslint` | ESLint → oxlint | partial. Run both (the dual-run recipe) when any applicable config has: custom local rules; the `tailwindcss` plugin; a framework plugin; any other plugin oxlint does not carry natively (`convex`, for example); a `react-hooks/exhaustive-deps` rule; plugins and local rules the read could not see; or a shareable config or config import the read did not follow. Drop-in only when the config was read in full and none is present. Either way the risk is HIGH whenever the card reports this row. Deferred to OPT82 (no ESLint row on the card) when OPT82 reports type-aware rules on the same step |
 | `tsc` with `--noEmit` (also `-p ... --noEmit`) | `tsc --noEmit` → TypeScript 7 | yes for a type-check-only step; a `tsc` that emits is not in v1 |
 
@@ -4925,9 +4925,10 @@ These verdicts are counted only, never listed: no candidate step; none of the st
 |---|---|
 | step timings or step records unreadable; workflow file unreadable, or the check produced by more than one workflow; pole job (a job produced through a reusable workflow call, or a matrix job whose name is an expression, for example) or candidate step not matched to exactly one YAML step | the timings cannot be tied to the YAML (as in OPT83) |
 | a `${{ }}` in the candidate's command, `working-directory`, `env:` or `shell:`, or in a `defaults.run.working-directory`; or the command changes directory | the command is only known when the step runs |
-| a script the resolver cannot follow: missing, more than five levels deep, `package.json` unreadable, or a delegator (`turbo run`, `nx`, `lerna run`, `node ./script/x.js`) whose targets are not resolved (`make` is not one: see the verdicts above) | what runs is unknown |
+| a script the resolver cannot follow: missing, more than five levels deep, `package.json` unreadable, or a delegator (`turbo run`, `nx`, `lerna run`, `node ./script/x.js`) whose targets are not resolved (`make` is not one: see the verdicts above); a shell script or interpreter (`bash`, `sh`, `./x`, `*.sh`), `xargs`, or `npm test` / `npm start` whose script is missing (wrappers such as `time`, `env`, `timeout`, `nice` are stripped and what they run is read) | what runs is unknown |
+| a subshell (`(cd dir && ...)`) inside a script, or a package manager pointed at another directory (`-C`, `--dir`, `--prefix`) | which project's tools run is unknown |
 | the candidate is a `uses:` step whose `uses:` or `name:` says it may lint, format or type-check (it contains `eslint`, `prettier`, `oxlint`, `oxfmt`, `lint`, `format`, `tsc`, `typecheck` or `type-check`, or it is a local action whose label says `check`); any other action is the tool-not-in-table verdict | what it runs is inside the action |
-| ESLint found, but the applicable config is unreadable, truncated or missing | the fit (plain, dual-run or deferred) cannot be decided |
+| ESLint found, but the applicable config is unreadable, truncated, missing, or ambiguous between nested flat configs (read the way OPT82 reads it, including `ESLINT_USE_FLAT_CONFIG=false`) | the fit (plain, dual-run or deferred) cannot be decided |
 | `tsc --noEmit` found, but the `typescript` version is unreadable or not a plain semver range | whether the repo is already on 7 is unknown |
 | the step's working directory is outside the checkout | the manifest to read is unknown |
 

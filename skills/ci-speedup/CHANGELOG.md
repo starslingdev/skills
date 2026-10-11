@@ -28,14 +28,18 @@ unversioned and updates by reinstall from `main`.
   benchmark of both tools on the same runner first, after giving the drop-in
   the repo's migrated config (until then the drop-in runs on its defaults).
   Every rule, plugin, file set and check stays; when the drop-in may lack
-  something the repo relies on (ESLint custom rules, or any plugin oxlint does
-  not carry natively), the card says to run both tools. Any card that proposes
+  something the repo relies on (ESLint custom rules, any ESLint plugin oxlint
+  does not carry natively, including ones named only through a legacy
+  `plugin:` preset or a YAML config, or a Prettier plugin), the card says to
+  run both tools. Any card that proposes
   an ESLint swap itself (not left to OPT82) is marked high risk, drop-in or
   run-both alike. A
   repo already on the drop-in hears nothing about it, and ESLint with
   type-aware rules is left to OPT82. Anything the audit cannot read for certain
-  (a `${{ }}` expression in the command, a script it cannot follow, an action
-  step that may lint or format, a lint config it could not fully read) holds
+  (a `${{ }}` expression in the command, a script it cannot follow such as a
+  shell script or a subshell, a package manager pointed at another directory,
+  an action step that may lint or format, a lint config it could not fully
+  read) holds
   the step back, listed in the Data sources row as "tool swap: held back".
   Babel and Webpack stay in the catalog's swap table as recipes only. The
   catalog now has 82 patterns (73 hygiene, 9 structural). (#129)
