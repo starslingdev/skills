@@ -8619,7 +8619,9 @@ def _opt83_unrouted_block(findings: list[dict[str, Any]], catalog_url: str) -> l
 # `verify_report.check_opt84_tool_swap` re-derives the step, its share and the
 # ceiling from the pole, checks every tool row, fit and docs link, rejects any
 # other duration or percentage, and checks where the card sits.
-# STRING CONTRACTS with verify_report (a coupling test pins the copies equal):
+# STRING CONTRACTS with verify_report: each has a `_VR_OPT84_*` copy there, and
+# test_opt84_render.py's `test_verifier_copies_equal_the_renderers` pins them
+# equal (the docs and range tables are also pinned to the engine's):
 _OPT84_SIZING_LABEL = (
     "a CEILING, not a forecast: the step's own measured p50 is the most the swap "
     "can remove; the published speedup range is the catalog's, not this repo's "
@@ -8685,15 +8687,29 @@ def _opt84_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _opt84_for_pole(pole: dict[str, Any],
                     findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """The OPT84 findings whose job IS this pole: same workflow file and the
-    pole's own job (OPT84 is stamped from that pole, so the join is exact)."""
+    """The OPT84 findings stamped from this pole: same workflow file basename and
+    the pole's own job, and, when the finding carries the `pole_check` it was
+    stamped from, that check too (matrix legs can share one job; without it the
+    first pole with the job would take every leg's card)."""
     pole_wf = str(pole.get("workflow_file") or "")
     job = str(pole.get("job") or "")
     if not pole_wf or not job:
         return []
+    check = str(pole.get("check") or "")
     return [f for f in _opt84_findings(findings)
             if _wf_base(str(f.get("workflow_file") or "")) == _wf_base(pole_wf)
-            and str(f["tool_swap"].get("job") or "") == job]
+            and str(f["tool_swap"].get("job") or "") == job
+            and str(f["tool_swap"].get("pole_check") or "") in ("", check)]
+
+
+def _opt84_norm_cmd(cmd: str) -> str:
+    """A command in the engine's shlex-joined form, so a step that resolves to
+    itself (re-quoted or re-spaced) compares equal; unparsable quoting falls
+    back to whitespace-collapsed text."""
+    try:
+        return shlex.join(shlex.split(cmd))
+    except ValueError:
+        return " ".join(cmd.split())
 
 
 def _opt84_packages_note(t: dict[str, Any]) -> str:
@@ -8758,7 +8774,8 @@ def _opt84_card(f: dict[str, Any], catalog_url: str) -> list[str]:
     leaves = [_flatten_cell(str(x)) for x in ts.get("resolved_leaves") or [] if x]
     runs = f"It runs `{cmd}`" + (
         ", which resolves to " + " · ".join(f"`{x}`" for x in leaves) + "."
-        if leaves and leaves != [cmd] else ".")
+        if leaves and [_opt84_norm_cmd(x) for x in leaves] != [_opt84_norm_cmd(cmd)]
+        else ".")
     tools = [t for t in ts.get("tools") or [] if isinstance(t, dict)]
     out = [f'<a id="opt84-{fid}"></a>', "",
            f"**🧰 OPT84 · {title}** - risk **{_flatten_cell(str(f.get('risk') or 'MEDIUM'))}**"

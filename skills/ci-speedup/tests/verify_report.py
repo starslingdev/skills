@@ -9086,7 +9086,11 @@ def check_opt83_parallel_steps(report: str, findings_path: Path | None) -> Check
 
 # ---- OPT84: a slow step on the long pole runs a tool with a native drop-in ---
 # This verifier's OWN copies of the renderer's card strings and tables and of
-# the collector's gate sets and floors (coupling tests pin every copy equal).
+# the collector's gate sets and floors. Coupling tests in test_opt84_render.py
+# pin every copy equal: the card strings, names and docs/range tables to the
+# renderer's, the own-section heading to `_opt84_unrouted_block`'s, the fit
+# words to `_opt84_fit_words`, and the gates, floors, rows, fits and
+# categories to the engine's.
 _VR_OPT84_MIN_SHARE = 0.0
 _VR_OPT84_MIN_STEP_S = 20.0
 # The step categories a candidate may carry (collect_runs `_OPT84_CATEGORIES`).
@@ -9256,11 +9260,19 @@ def check_opt84_tool_swap(report: str, findings_path: Path | None) -> Check:
             continue
         wfb = Path(str(f.get("workflow_file") or "")).name
         job = str(ts.get("job") or "")
-        pole = next((p for p in poles if Path(str(p.get("workflow_file") or "")).name
-                     == wfb and str(p.get("job") or "") == job), None)
+        same_job = [p for p in poles if Path(str(p.get("workflow_file") or "")).name
+                    == wfb and str(p.get("job") or "") == job]
+        # Matrix legs can share one job; the engine stamps the pole it read
+        # (`pole_check`), so that pole is the one to re-derive from and to sit
+        # under. Without a stamp, the job's first pole (as the renderer joins).
+        pole_check = str(ts.get("pole_check") or "")
+        if pole_check:
+            same_job = [p for p in same_job if str(p.get("check") or "") == pole_check]
+        pole = same_job[0] if same_job else None
         if pole is None:
-            bad.append(f"{fid}: OPT84 on `{wfb}` ▸ `{job}`, which is not a drilled "
-                       "long pole")
+            bad.append(f"{fid}: OPT84 on `{wfb}` ▸ `{job}`"
+                       + (f" (pole `{pole_check}`)" if pole_check else "")
+                       + ", which is not a drilled long pole")
             continue
         job_p50 = _num(pole.get("job_p50_s")) or 0.0
         step = str(ts.get("step") or "")
@@ -9300,6 +9312,11 @@ def check_opt84_tool_swap(report: str, findings_path: Path | None) -> Check:
         rows = [str(t.get("row") or "") for t in tools]
         if len(set(rows)) != len(rows):
             bad.append(f"{fid}: tool row(s) named more than once: {rows}")
+        # Every row deferred is the engine's `eslint_reported_by_opt82` verdict,
+        # counted and never emitted as a finding.
+        if tools and all(str(t.get("fit") or "") == "deferred_to_opt82" for t in tools):
+            bad.append(f"{fid}: every tool is deferred to OPT82; the engine records "
+                       "that as its eslint_reported_by_opt82 verdict, not a finding")
         for t in tools:
             row, fit = str(t.get("row") or ""), str(t.get("fit") or "")
             if row not in _VR_OPT84_ROWS:
@@ -9308,6 +9325,15 @@ def check_opt84_tool_swap(report: str, findings_path: Path | None) -> Check:
             if fit not in _VR_OPT84_FITS:
                 bad.append(f"{fid}: tool {row!r} fit {fit!r} is not one of "
                            f"{sorted(_VR_OPT84_FITS)}")
+            # The engine defers only the ESLint row to OPT82 (its type-aware
+            # rules are OPT82's), and stamps a dual-run only with its reasons.
+            if fit == "deferred_to_opt82" and row != "eslint":
+                bad.append(f"{fid}: tool {row!r} fit 'deferred_to_opt82' on a row "
+                           "other than ESLint; the engine defers only ESLint")
+            if fit == "dual-run" and not [r for r in _as_list(t.get("fit_reasons"))
+                                          if str(r or "").strip()]:
+                bad.append(f"{fid}: tool {row!r} fit 'dual-run' with no fit_reasons; "
+                           "the engine stamps a dual-run only with its reasons")
             if t.get("docs_url") != _VR_OPT84_DOCS_URLS.get(row):
                 bad.append(f"{fid}: tool {row!r} docs_url {t.get('docs_url')!r} is not "
                            "the known docs link for its row")
@@ -9366,9 +9392,7 @@ def check_opt84_tool_swap(report: str, findings_path: Path | None) -> Check:
         h1 = min((h for h in heads if h > at), default=len(report))
         head = report[h0:report.find("\n", h0)] if h0 >= 0 else ""
         mine = {(Path(str(p.get("workflow_file") or "")).name,
-                 _strip_scope(str(p.get("check") or ""))) for p in poles
-                if Path(str(p.get("workflow_file") or "")).name == wfb
-                and str(p.get("job") or "") == job}
+                 _strip_scope(str(p.get("check") or ""))) for p in same_job}
         under = {(w, c) for w, c, _b in _pole_header_sections(head + "\n")}
         if mine & rendered:
             placed = bool(under & mine)
@@ -9427,6 +9451,16 @@ def check_opt84_tool_swap(report: str, findings_path: Path | None) -> Check:
                     if f"; fit: {want_fit}; docs: " not in tline:
                         bad.append(f"{fid}: card's {row!r} fit does not read "
                                    f"{want_fit!r}, the stamped fit")
+                    # The TS6 alias sentence rides on the tsc row exactly when
+                    # the engine stamped `typescript6_alias_needed`.
+                    if row == "tsc":
+                        has_alias = " ".join(_VR_OPT84_TS6_ALIAS.split()) in tline
+                        if has_alias != bool(t.get("typescript6_alias_needed")):
+                            bad.append(
+                                f"{fid}: card's tsc row's TypeScript 6 alias sentence "
+                                f"is {'present' if has_alias else 'absent'}, but "
+                                "typescript6_alias_needed is "
+                                f"{t.get('typescript6_alias_needed')!r}")
             url = _VR_OPT84_DOCS_URLS.get(row)
             if url and f"docs: {url}" not in flat:
                 bad.append(f"{fid}: card is missing the docs link for {row!r}")

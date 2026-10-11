@@ -648,7 +648,9 @@ def test_engine_raises_severity_and_risk_only_for_a_live_eslint_row(tools, want)
 
 @pytest.mark.parametrize("tools,want", _SEV_CASES)
 def test_verifier_rederives_the_engines_severity_rule(tmp_path, tools, want):
-    f = _finding([_tool(r, fit) for r, fit in tools])
+    # A dual-run carries its reasons, as the engine stamps it.
+    f = _finding([_tool(r, fit, ["a custom rule"] if fit == "dual-run" else None)
+                  for r, fit in tools])
     f["severity"] = f["risk"] = want
     extra = [_opt82()] if any(fit == "deferred_to_opt82" for _r, fit in tools) else []
     doc, report = _doc_and_report(f, extra=extra)
@@ -878,3 +880,140 @@ def test_verifier_passes_a_build_step(tmp_path):
     doc["pr_critical_path"]["poles"][0]["steps"][1]["category"] = "build"
     c = _check(tmp_path, doc, report)
     assert c.ok, c.detail
+
+
+# ---- the engine's fit contract: what it never emits, the verifier rejects ----
+
+@pytest.mark.parametrize("row", ["prettier", "tsc"])
+def test_verifier_rejects_a_deferred_fit_on_a_row_other_than_eslint(tmp_path, row):
+    # The engine defers only the ESLint row to OPT82; nothing else is OPT82's.
+    f = _finding([_tool("eslint"), _tool(row, "deferred_to_opt82")])
+    doc, report = _doc_and_report(f, extra=[_opt82()])
+    c = _check(tmp_path, doc, report)
+    assert not c.ok and f"tool {row!r} fit 'deferred_to_opt82' on a row other than ESLint" in (
+        c.detail), c.detail
+
+
+def test_verifier_rejects_a_finding_whose_every_tool_is_deferred(tmp_path):
+    # All rows deferred is the engine's `eslint_reported_by_opt82` verdict, never
+    # a finding.
+    f = _finding([_tool("eslint", "deferred_to_opt82")])
+    doc, report = _doc_and_report(f, extra=[_opt82()])
+    c = _check(tmp_path, doc, report)
+    assert not c.ok and "every tool is deferred to OPT82" in c.detail, c.detail
+
+
+def test_verifier_rejects_a_dual_run_with_no_stamped_reason(tmp_path):
+    f = _finding([_tool("eslint", "dual-run", [])])
+    doc, report = _doc_and_report(f)
+    c = _check(tmp_path, doc, report)
+    assert not c.ok and "fit 'dual-run' with no fit_reasons" in c.detail, c.detail
+
+
+# ---- the TS6 alias sentence follows the tsc row's stamp ----------------------
+
+def _alias_tsc(needed):
+    t = _tool("tsc")
+    t["typescript6_alias_needed"] = needed
+    return t
+
+
+def test_verifier_passes_a_tsc_row_with_its_alias_sentence(tmp_path):
+    doc, report = _doc_and_report(_finding([_alias_tsc(True)]))
+    assert vr._VR_OPT84_TS6_ALIAS in _flat(report)
+    c = _check(tmp_path, doc, report)
+    assert c.ok, c.detail
+
+
+def test_verifier_fails_a_tsc_row_missing_its_alias_sentence(tmp_path):
+    doc, report = _doc_and_report(_finding([_alias_tsc(True)]))
+    c = _check(tmp_path, doc, report.replace(f". {bp._OPT84_TS6_ALIAS}.", ""))
+    assert not c.ok and "tsc row's TypeScript 6 alias sentence" in c.detail, c.detail
+
+
+@pytest.mark.parametrize("needed", [False, None])
+def test_verifier_fails_an_alias_sentence_the_stamp_does_not_call_for(tmp_path, needed):
+    t = _alias_tsc(needed)
+    if needed is None:
+        del t["typescript6_alias_needed"]
+    doc, report = _doc_and_report(_finding([t]))
+    lines = report.splitlines()
+    i = next(n for n, ln in enumerate(lines) if ln.startswith("- **tsc → "))
+    lines[i] += f". {bp._OPT84_TS6_ALIAS}."
+    c = _check(tmp_path, doc, "\n".join(lines))
+    assert not c.ok and "tsc row's TypeScript 6 alias sentence" in c.detail, c.detail
+
+
+# ---- two matrix legs share a job: the stamped pole_check picks the pole -------
+
+def _leg(check, step_p50, job_p50):
+    p = _pole()
+    p["check"] = check
+    p["p50_s"] = p["job_p50_s"] = job_p50
+    p["steps"][1]["p50_s"] = step_p50
+    return p
+
+
+def _leg_finding():
+    # Stamped from the SECOND leg: 60s of a 180s job.
+    f = _finding([_tool("prettier")])
+    f["tool_swap"].update(pole_check="Lint (node 20)", job_p50_s=180.0,
+                          step_p50_s=60.0, ceiling_s=60.0,
+                          share=round(60.0 / 180.0, 3))
+    return f
+
+
+_LEGS = [_leg("Lint (node 18)", 52.0, 162.0), _leg("Lint (node 20)", 60.0, 180.0)]
+
+
+def test_verifier_rederives_from_the_stamped_pole_when_legs_share_a_job(tmp_path):
+    f = _leg_finding()
+    doc = {"findings": [f], "pr_critical_path": {"poles": copy.deepcopy(_LEGS)}}
+    report = ("## 🔴 Long pole 1: `lint.yml` ▸ `Lint (node 20)` — 3m 0s\n\n"
+              + _card(f) + "\n")
+    c = _check(tmp_path, doc, report)
+    assert c.ok, c.detail
+
+
+def test_verifier_fails_a_card_under_the_other_leg_sharing_its_job(tmp_path):
+    f = _leg_finding()
+    doc = {"findings": [f], "pr_critical_path": {"poles": copy.deepcopy(_LEGS)}}
+    report = ("## 🔴 Long pole 1: `lint.yml` ▸ `Lint (node 18)` — 2m 42s\n\n"
+              + _card(f) + "\n"
+              "## 🔴 Long pole 2: `lint.yml` ▸ `Lint (node 20)` — 3m 0s\n\n")
+    c = _check(tmp_path, doc, report)
+    assert not c.ok and "card renders outside its pole's section" in c.detail, c.detail
+
+
+def test_renderer_joins_a_finding_to_its_stamped_pole_only():
+    f = _leg_finding()
+    a, b = copy.deepcopy(_LEGS)
+    assert bp._opt84_for_pole(a, [f]) == []
+    assert bp._opt84_for_pole(b, [f]) == [f]
+    # Without a stamped pole_check the join stays the job's.
+    g = _finding([_tool("prettier")])
+    g["tool_swap"]["pole_check"] = ""
+    assert bp._opt84_for_pole(a, [g]) == [g]
+
+
+# ---- a command that resolves to itself names no "resolves to" clause ---------
+
+def test_card_omits_resolves_to_when_the_leaf_is_the_command_requoted():
+    f = _finding([_tool("eslint")])
+    f["tool_swap"]["command"] = "eslint '.'"
+    f["tool_swap"]["resolved_leaves"] = ["eslint ."]
+    text = _flat(_card(f))
+    assert "It runs `eslint '.'`." in text, text
+    assert "which resolves to" not in text, text
+
+
+def test_card_keeps_resolves_to_when_the_leaf_differs():
+    assert "which resolves to `eslint .`" in _flat(_card(_finding([_tool("eslint")])))
+
+
+# ---- coupling: the own-section heading the verifier looks for is the renderer's
+
+def test_verifier_own_section_heading_is_the_renderers():
+    lines = bp._opt84_unrouted_block([_finding()], "https://x/c.md")
+    heading = next(ln for ln in lines if ln.startswith("## "))
+    assert vr._VR_OPT84_OWN_SECTION in heading, heading
