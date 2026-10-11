@@ -496,6 +496,47 @@ def test_working_directory_is_read_for_the_manifest():
                for t in ts["tools"] for c in t["benchmark_commands"])
 
 
+def _verify(tmp_path, f):
+    """The rendered report and the verifier's verdict on `f` (the render test
+    module's helpers, read-only)."""
+    sys.path.insert(0, str(_SKILL_DIR / "tests"))
+    import test_opt84_render as tr
+    poles = [{**_pole(), "p50_s": 162.0}]
+    return tr._check(tmp_path, tr._doc([f], poles), tr._render([f], poles))
+
+
+def test_two_leaves_of_one_tool_in_one_step_are_one_row(tmp_path):
+    out, withheld, _c = _run(
+        {"run": "npx prettier --check src && npx prettier --check tests"})
+    assert len(out) == 1, withheld
+    f = out[0]
+    assert _rows(f) == ["prettier"]
+    t = _tool(f, "prettier")
+    assert t["leaf_command"] == "prettier --check src"
+    assert "src" in t["benchmark_commands"][0]
+    # One working directory: no workspace-packages claim.
+    assert "packages" not in t
+    assert not any("workspace package" in r for r in t["fit_reasons"])
+    assert f["tool_swap"]["split_unknown"] is False
+    c = _verify(tmp_path, f)
+    assert c.ok, c.detail
+
+
+def test_every_eslint_leaf_of_one_step_is_read_for_fit():
+    configs = [_config(), _config("web.eslint.config.js")]
+    facts = {"eslint.config.js": dict(_NO_FACTS),
+             "web.eslint.config.js": {"plugins": ["vue"], "local_rules": False,
+                                      "exhaustive_deps": False}}
+    block = _block(configs=configs, facts=facts)
+    out, withheld, _c = _run(
+        {"run": "npx eslint src && npx eslint -c web.eslint.config.js web"},
+        block=block)
+    assert len(out) == 1, withheld
+    assert _rows(out[0]) == ["eslint"]
+    t = _tool(out[0], "eslint")
+    assert t["fit"] == "dual-run" and any("vue" in r for r in t["fit_reasons"])
+
+
 # ---- held back -----------------------------------------------------------------
 
 @pytest.mark.parametrize("step,gate", [

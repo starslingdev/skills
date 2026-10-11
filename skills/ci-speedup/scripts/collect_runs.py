@@ -17351,18 +17351,17 @@ def _detect_opt84_tool_swap(
                     targets.add(str(row))
                 elif kind == "emits":
                     emits = True
-                elif kind == "row" and lf.get("task_runner"):
-                    # Every package a task runner reaches with this row's tool is
-                    # ONE tool entry (the verifier names each row once).
-                    grp = next((x for r, x in found
-                                if r == row and x.get("task_runner")), None)
+                elif kind == "row":
+                    # Every leaf of this row in the step (each package a task
+                    # runner reaches, or the same tool run twice) is ONE tool
+                    # entry: the verifier names each row once. The first leaf
+                    # is the entry's command and benchmark; fit reads them all.
+                    grp = next((x for r, x in found if r == row), None)
                     if grp is None:
                         found.append((str(row), {**lf, "group": [lf]}))
-                    else:
+                    elif not any(g["command"] == lf["command"] and g["wd"] == lf["wd"]
+                                 for g in grp["group"]):
                         grp["group"].append(lf)
-                elif kind == "row" and not any(r == row and x["command"] == lf["command"]
-                                               and x["wd"] == lf["wd"] for r, x in found):
-                    found.append((str(row), lf))
             silenced = [r for r, _lf in found if r in targets]
             found = [(r, lf) for r, lf in found if r not in targets]
             deferred = (wf, yaml_key, name) in opt82_steps
@@ -17414,7 +17413,10 @@ def _detect_opt84_tool_swap(
                             continue
                         reasons = _opt84_eslint_fit(tal, configs)
                         fit = "dual-run" if reasons else "drop-in"
-                if lf.get("task_runner") or len(group) > 1:
+                # The workspace-packages note is a task-runner expansion's: a
+                # tool run twice by hand in one directory reaches no packages.
+                expanded = any(g.get("task_runner") for g in group)
+                if expanded:
                     n = len(lwds)
                     reasons = [*reasons, f"across {n} workspace package"
                                f"{'' if n == 1 else 's'}; task-runner filters not "
@@ -17430,7 +17432,7 @@ def _detect_opt84_tool_swap(
                      "migration_docs_url": _OPT84_DOCS[row]["migration_docs_url"]}
                 if row == "tsc":
                     t["typescript6_alias_needed"] = alias_needed
-                if lf.get("task_runner") or len(group) > 1:
+                if expanded:
                     t["packages"] = len(lwds)
                 tools.append(t)
             if held:
