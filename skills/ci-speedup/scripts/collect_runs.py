@@ -5986,11 +5986,11 @@ _RM_DOOR_OVERRIDES: dict[str, tuple[str, str]] = {
               "saving is credited; the candidate steps' p50 sum minus the slowest is "
               "stamped as an upper bound and the prompt requires a benchmark first"),
     # NOT DERIVABLE — OPT84 credits nothing: the step's own measured p50 is
-    # stamped as a ceiling and a sandbox benchmark is required first.
+    # stamped as a ceiling and the card asks for a benchmark first.
     "OPT84": (_RM_DOOR_NOT_DERIVABLE,
               "uncredited tool-swap detector — no runner-minute or wall-clock saving "
               "is credited; the step's measured p50 is stamped as a ceiling and the "
-              "prompt requires a sandbox benchmark first"),
+              "card asks for a benchmark first on the same commit and runner class"),
     # NOT DERIVABLE — OPT80's basis is one STEP's tail excess (mean - p50 of the
     # checkout step), scaled by that job's own measured run frequency. It is
     # neither the per-job cost spine nor an eliminated-runs slice, so the generic
@@ -16838,12 +16838,14 @@ def _detect_opt83_parallel_steps(
 #
 # ROUTED FROM THE MEASURED CRITICAL PATH, like OPT83: only the poles `collect()`
 # drilled, from each pole's stamped per-step p50 decomposition. A step is a
-# candidate when it is `scan` or `build` (`_OPT84_CATEGORIES`), at least
-# `_OPT84_MIN_STEP_S` seconds, and a `run:` step. `_OPT84_MIN_SHARE` is 0.0 by
-# owner decision: unlike OPT83 there is no share-of-job floor, because a
-# swap's ceiling is the step's own time whatever share of the pole it is (a
-# 29s lint on a 318s gate still gets a card, which states the step's share). Unlike OPT83, a step inside a `parallel:` group still counts:
-# making a step faster does not depend on where it sits.
+# candidate when it is `scan` or `build` (`_OPT84_CATEGORIES`) and at least
+# `_OPT84_MIN_STEP_S` seconds; that it is a `run:` step is checked later, once
+# it is matched in the YAML (an action step is held back or a verdict there).
+# `_OPT84_MIN_SHARE` is 0.0 by owner decision: unlike OPT83 there is no
+# share-of-job floor, because a swap's ceiling is the step's own time whatever
+# share of the pole it is (a 29s lint on a 318s gate still gets a card, which
+# states the step's share). Unlike OPT83, a step inside a `parallel:` group
+# still counts: making a step faster does not depend on where it sits.
 #
 # What the step runs is read, never guessed: its `run:` is resolved through
 # package.json scripts by `_resolve_run_leaves` (OPT82's resolver, generalized)
@@ -16855,7 +16857,8 @@ def _detect_opt83_parallel_steps(
 # SIZING — uncredited by design. Published speedups are other repos' numbers.
 # The finding carries no wall-clock and no runner-minute saving and has no
 # `_SIZING` row; it stamps the step's own measured p50 as `ceiling_s` (the most
-# the swap can remove), and the prompt asks for a benchmark first.
+# the swap can remove), and the card asks for a benchmark first on the same
+# commit and runner class. OPT84 has no agent prompt of its own.
 _OPT84_TITLE = "A Slow Step on the Long Pole Runs a Tool That Has a Native Drop-in"
 _OPT84_FIX_STRATEGY = "slow-tool-on-pole-has-native-drop-in"
 _OPT84_MIN_SHARE = 0.0
@@ -16976,9 +16979,12 @@ _OPT84_PRETTIER_VALUE_FLAGS = frozenset({
 
 
 def _opt84_gate_for_unresolved(u: dict[str, Any]) -> str:
-    """The held-back gate for the first segment `_resolve_run_leaves` could not
-    follow. A local script run by node / tsx / ts-node is a script the read
-    cannot open; any other delegator (turbo, nx, lerna, make ...) is delegated."""
+    """The held-back gate for one segment `_resolve_run_leaves` could not
+    follow (the caller passes the first `cd` entry when there is one, else
+    the first entry). A local script run by node / tsx / ts-node is a script
+    the read cannot open; any other delegator (turbo, nx, lerna, a task the
+    task runner hands on ...) is delegated. `make` never reaches here: the
+    all-leaves read treats it as a plain leaf."""
     kind = str(u.get("kind") or "")
     if kind == "expression":
         return "command_has_expression"
@@ -17308,8 +17314,10 @@ def _opt84_paths(args: list[str], value_flags: "frozenset[str]") -> list[str]:
 
 def _opt84_benchmark_commands(row: str, tokens: list[str], runner: str,
                               wd: str) -> list[str]:
-    """[as CI runs it, with the target] — both timed, both cold (`--cache`
-    dropped), from the step's own working directory."""
+    """[as CI runs it, with the target] — both timed, from the leaf's own
+    directory `wd` (after any task-runner expansion, not the step's). For the
+    ESLint row both are cold (`--cache` and its cache flags dropped); the
+    Prettier and tsc rows keep the command's flags as CI runs them."""
     import shlex
     t = _opt84_leaf_tokens(tokens)
     args = t[1:]
@@ -17430,8 +17438,10 @@ def _detect_opt84_tool_swap(
 
     Every exit except a finding is counted into `withheld` (stamped as
     `opt84_withheld_by_gate`): one count per pole for a pole-level exit, one
-    per candidate step otherwise. A held-back exit (`_OPT84_HELD_BACK_GATES`)
-    is also listed in `withheld_candidates`, naming the job and the step.
+    per candidate step otherwise. A pole already seen (listed twice, or
+    shared through `seen` with an earlier call) is skipped without a count.
+    A held-back exit (`_OPT84_HELD_BACK_GATES`) is also listed in
+    `withheld_candidates`, naming the job and the step.
     `opt82_findings` are this run's OPT82 findings: an ESLint run OPT82 already
     reports on the same step is deferred to it."""
     def _no(gate: str, wf: str = "", job: str = "", step: "str | None" = None,
