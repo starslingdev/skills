@@ -9161,6 +9161,29 @@ def _vr_opt84_card_bodies(report: str) -> dict[str, str]:
     return out
 
 
+def _vr_opt84_fit_words(t: dict) -> str:
+    """The verifier's own copy of `blocking_path._opt84_fit_words` (a coupling
+    test pins them equal): the fit words a tool's row must show for its stamp."""
+    n = t.get("packages")
+    note = ("" if not isinstance(n, int) or isinstance(n, bool) or n < 1
+            else (f"across {n} workspace package{'' if n == 1 else 's'}; "
+                  "task-runner filters not applied"))
+    fit = str(t.get("fit") or "")
+    reasons = [_flatten_cell(str(r)) for r in t.get("fit_reasons") or [] if r]
+    if fit == "dual-run":
+        if note and note not in reasons:
+            reasons.append(note)
+        why = "; ".join(reasons)
+        return "run both" + (f": {why}" if why else "")
+    if fit == "drop-in":
+        words = "drop-in"
+    elif fit == "deferred_to_opt82":
+        words = "see OPT82 first: its type-aware rules are that finding's to settle"
+    else:
+        words = _flatten_cell(fit) or "unknown"
+    return words + (f"; {note}" if note else "")
+
+
 def check_opt84_tool_swap(report: str, findings_path: Path | None) -> Check:
     """Every OPT84 finding sits on a drilled long pole, re-derives its step, share
     and ceiling from that pole's stamped step p50s, names only table rows with
@@ -9391,9 +9414,16 @@ def check_opt84_tool_swap(report: str, findings_path: Path | None) -> Check:
                 tline = next((ln for ln in card_lines if ln.startswith(lead)), None)
                 if tline is None:
                     bad.append(f"{fid}: card has no row for {row!r}")
-                elif f"{tgt} {_VR_OPT84_REPLACEMENT} (published range" not in tline:
-                    bad.append(f"{fid}: card's {row!r} row does not name {tgt} "
-                               f"{_VR_OPT84_REPLACEMENT!r}")
+                else:
+                    if f"{tgt} {_VR_OPT84_REPLACEMENT} (published range" not in tline:
+                        bad.append(f"{fid}: card's {row!r} row does not name {tgt} "
+                                   f"{_VR_OPT84_REPLACEMENT!r}")
+                    # The fit the row SHOWS is the fit the engine STAMPED: a
+                    # dual-run shown as a drop-in is a coverage loss in waiting.
+                    want_fit = " ".join(_vr_opt84_fit_words(t).split())
+                    if f"; fit: {want_fit}; docs: " not in tline:
+                        bad.append(f"{fid}: card's {row!r} fit does not read "
+                                   f"{want_fit!r}, the stamped fit")
             url = _VR_OPT84_DOCS_URLS.get(row)
             if url and f"docs: {url}" not in flat:
                 bad.append(f"{fid}: card is missing the docs link for {row!r}")

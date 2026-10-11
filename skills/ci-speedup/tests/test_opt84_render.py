@@ -225,6 +225,40 @@ def test_verifier_fails_a_tool_row_that_calls_the_target_a_drop_in(tmp_path, edi
     assert not c.ok and needle in c.detail, c.detail
 
 
+@pytest.mark.parametrize("edit,needle", [
+    (lambda r: r.replace("fit: run both: this config has 2 custom rules oxlint cannot run;",
+                         "fit: drop-in;"),
+     "card's 'eslint' fit"),
+    (lambda r: r.replace("fit: drop-in;", "fit: run both;"), "card's 'prettier' fit"),
+], ids=["dual-run-shown-as-drop-in", "drop-in-shown-as-run-both"])
+def test_verifier_fails_a_card_whose_fit_disagrees_with_the_stamp(tmp_path, edit, needle):
+    doc, report = _doc_and_report()
+    tampered = edit(report)
+    assert tampered != report
+    c = _check(tmp_path, doc, tampered)
+    assert not c.ok and needle in c.detail, c.detail
+
+
+_FIT_WORD_CASES = [
+    {"fit": "drop-in"},
+    {"fit": "drop-in", "packages": 2},
+    {"fit": "dual-run", "fit_reasons": ["a", "b | c"]},
+    {"fit": "dual-run", "fit_reasons": [], "packages": 1},
+    {"fit": "dual-run", "fit_reasons": [
+        "x", "across 3 workspace packages; task-runner filters not applied"], "packages": 3},
+    {"fit": "deferred_to_opt82"},
+    {"fit": "deferred_to_opt82", "packages": 4},
+    {"fit": "something new"},
+    {"fit": None},
+    {"fit": "drop-in", "packages": True},
+]
+
+
+@pytest.mark.parametrize("t", _FIT_WORD_CASES)
+def test_verifier_fit_words_equal_the_renderers(t):
+    assert vr._vr_opt84_fit_words(t) == bp._opt84_fit_words(t)
+
+
 def test_one_tool_has_no_split_sentence():
     f = _finding([_tool("prettier")])
     assert bp._OPT84_SPLIT_UNKNOWN not in _flat(_card(f))
