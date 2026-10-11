@@ -91,7 +91,7 @@ def _finding(tools=None, fid="f84"):
             "resolved_leaves": [t["leaf_command"] for t in tools],
             "tools": tools, "ceiling_s": 52.0,
             "ceiling_basis": "the candidate step's own measured p50",
-            "split_unknown": len(tools) > 1, "min_share": 0.15, "min_step_s": 20.0,
+            "split_unknown": len(tools) > 1, "min_share": 0.0, "min_step_s": 20.0,
         },
     }
 
@@ -553,3 +553,42 @@ def test_verifier_accepts_names_and_commands_that_look_like_durations(tmp_path):
     doc, report = _doc_and_report(f)
     c = _check(tmp_path, doc, report)
     assert c.ok, c.detail
+
+
+# ---- task-runner expansion: the packages note renders for every fit -----------
+
+_PKG_NOTE = "across 3 workspace packages; task-runner filters not applied"
+
+
+def _pkg_tool(row, fit, reasons=()):
+    # The engine stamps `packages` and appends the note to `fit_reasons` on a
+    # task-runner expansion, whatever the fit.
+    t = _tool(row, fit, [*reasons, _PKG_NOTE])
+    t["packages"] = 3
+    return t
+
+
+@pytest.mark.parametrize("tool,extra", [
+    (lambda: _pkg_tool("prettier", "drop-in"), []),
+    (lambda: _pkg_tool("eslint", "dual-run",
+                       ["this config has 2 custom rules oxlint cannot run"]), []),
+    (lambda: _pkg_tool("eslint", "deferred_to_opt82"), [_opt82()]),
+], ids=["drop-in", "dual-run", "deferred_to_opt82"])
+def test_packages_note_renders_once_on_every_fit(tmp_path, tool, extra):
+    t = tool()
+    f = _finding([t, _tool("tsc")])
+    card = _flat(_card(f))
+    line = next(x for x in _card(f).splitlines() if x.startswith("- **")
+                and "→" in x and t["leaf_command"] in x)
+    assert _flat(line).count(_PKG_NOTE) == 1, line
+    assert card.count(_PKG_NOTE) == 1, card
+    doc, report = _doc_and_report(f, extra=extra)
+    c = _check(tmp_path, doc, report)
+    assert c.ok, c.detail
+
+
+def test_packages_note_is_rendered_from_the_count_when_reasons_lack_it():
+    t = _tool("prettier")
+    t["packages"] = 1
+    line = _flat(_card(_finding([t])))
+    assert "across 1 workspace package; task-runner filters not applied" in line

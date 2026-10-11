@@ -9087,7 +9087,7 @@ def check_opt83_parallel_steps(report: str, findings_path: Path | None) -> Check
 # ---- OPT84: a slow step on the long pole runs a tool with a native drop-in ---
 # This verifier's OWN copies of the renderer's card strings and tables and of
 # the collector's gate sets and floors (coupling tests pin every copy equal).
-_VR_OPT84_MIN_SHARE = 0.15
+_VR_OPT84_MIN_SHARE = 0.0
 _VR_OPT84_MIN_STEP_S = 20.0
 _VR_OPT84_ROWS = frozenset({"prettier", "eslint", "tsc"})
 _VR_OPT84_FITS = frozenset({"drop-in", "dual-run", "deferred_to_opt82"})

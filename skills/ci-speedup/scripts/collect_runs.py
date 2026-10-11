@@ -16834,9 +16834,10 @@ def _detect_opt83_parallel_steps(
 # ROUTED FROM THE MEASURED CRITICAL PATH, like OPT83: only the poles `collect()`
 # drilled, from each pole's stamped per-step p50 decomposition. A step is a
 # candidate when it is `scan` or `build` (`_OPT84_CATEGORIES`), at least
-# `_OPT84_MIN_STEP_S` seconds and at least `_OPT84_MIN_SHARE` of the pole's
-# decomposed p50 (OPT83's floors, so the two agree on what "heavy" means), and
-# a `run:` step. Unlike OPT83, a step inside a `parallel:` group still counts:
+# `_OPT84_MIN_STEP_S` seconds, and a `run:` step. `_OPT84_MIN_SHARE` is 0.0 by
+# owner decision: unlike OPT83 there is no share-of-job floor, because a
+# swap's ceiling is the step's own time whatever share of the pole it is (a
+# 29s lint on a 318s gate still gets a card, which states the step's share). Unlike OPT83, a step inside a `parallel:` group still counts:
 # making a step faster does not depend on where it sits.
 #
 # What the step runs is read, never guessed: its `run:` is resolved through
@@ -16852,7 +16853,7 @@ def _detect_opt83_parallel_steps(
 # the swap can remove), and the prompt asks for a benchmark first.
 _OPT84_TITLE = "A Slow Step on the Long Pole Runs a Tool That Has a Native Drop-in"
 _OPT84_FIX_STRATEGY = "slow-tool-on-pole-has-native-drop-in"
-_OPT84_MIN_SHARE = 0.15
+_OPT84_MIN_SHARE = 0.0
 _OPT84_MIN_STEP_S = 20.0
 _OPT84_CATEGORIES = frozenset({"scan", "build"})
 _OPT84_CEILING_BASIS = (

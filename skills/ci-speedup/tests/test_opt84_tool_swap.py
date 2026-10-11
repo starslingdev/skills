@@ -330,7 +330,7 @@ def test_contract_names():
                                "Native Drop-in")
     assert cr._OPT84_FIX_STRATEGY == "slow-tool-on-pole-has-native-drop-in"
     assert cr._OPT84_WITHHELD_DOC_KEY == "opt84_withheld_candidates"
-    assert cr._OPT84_MIN_STEP_S == 20.0 and cr._OPT84_MIN_SHARE == 0.15
+    assert cr._OPT84_MIN_STEP_S == 20.0 and cr._OPT84_MIN_SHARE == 0.0
 
 
 @pytest.mark.parametrize("run", ["npx prettier --check .", "prettier -c src",
@@ -541,15 +541,15 @@ def test_step_below_the_seconds_floor_is_no_candidate():
     assert out == [] and withheld == {"no_candidate_step": 1} and cands == []
 
 
-def test_step_below_the_share_floor_is_no_candidate():
-    # 25s is above the 20s floor and only 12.5% of a 200s pole.
-    out, withheld, cands = _run({"run": "npx eslint ."},
-                                pole=_pole(step_p50=25.0, job_p50=200.0))
-    assert out == [] and withheld == {"no_candidate_step": 1} and cands == []
+def test_a_small_share_step_above_the_seconds_floor_is_a_candidate():
+    # 25s is above the 20s floor and only 12.5% of a 200s pole: no share floor.
+    out, withheld, _c = _run({"run": "npx eslint ."},
+                             pole=_pole(step_p50=25.0, job_p50=200.0))
+    assert len(out) == 1 and withheld == {}, withheld
 
 
 @pytest.mark.parametrize("p50,job,fires", [(20.0, 100.0, True), (30.0, 200.0, True),
-                                           (29.9, 200.0, False)])
+                                           (20.0, 2000.0, True), (19.9, 200.0, False)])
 def test_the_floors_are_inclusive(p50, job, fires):
     out, _w, _c = _run({"run": "npx eslint ."}, pole=_pole(step_p50=p50, job_p50=job))
     assert bool(out) is fires
@@ -889,13 +889,17 @@ def test_a_directory_change_inside_a_resolved_script_is_command_changes_director
     assert _held(cands, "command_changes_directory")
 
 
-# ---- the share floor is one constant ---------------------------------------------
+# ---- no share floor: only the 20s absolute floor (owner decision 6) ----------
 
-def test_the_share_floor_is_decided_by_one_constant(monkeypatch):
-    # sveltejs: `lint` is 29s of a 318.5s job (9.1%): below today's 15% floor.
+def test_a_small_share_step_on_a_long_pole_still_gets_a_card():
+    # sveltejs: `lint` is 29s of a 318.5s job (9.1%). The 15% share floor was
+    # dropped (spec section 9, decision 6): the 20s absolute floor alone decides.
     pole = _pole(step_p50=29.0, job_p50=318.5)
     out, withheld, _c = _run({"run": "npx eslint ."}, pole=pole)
-    assert out == [] and withheld == {"no_candidate_step": 1}
-    monkeypatch.setattr(cr, "_OPT84_MIN_SHARE", 0.0)
+    assert len(out) == 1 and withheld == {}, withheld
+
+
+def test_the_absolute_floor_still_holds_without_a_share_floor():
+    pole = _pole(step_p50=19.9, job_p50=318.5)
     out, withheld, _c = _run({"run": "npx eslint ."}, pole=pole)
-    assert len(out) == 1, withheld
+    assert out == [] and withheld == {"no_candidate_step": 1}, withheld
