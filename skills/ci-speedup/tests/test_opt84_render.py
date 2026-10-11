@@ -104,9 +104,14 @@ def _pole(job="Lint", wf=_WF):
                       {"step": "Run tests", "category": "test", "p50_s": 100.0}]}
 
 
-def _opt82(job="Lint"):
+def _opt82(job="Lint", yaml_job="lint", lint_step=_STEP):
+    # The engine joins on OPT82's `type_aware_lint` block (workflow file, YAML
+    # job key, lint step), not on the display job: on a matrix lint job OPT82
+    # names one matrix run, which need not be the pole's.
     return {"id": "f82", "pattern": "OPT82", "workflow_file": _WF,
-            "affected_jobs": [job], "sizing_basis": "uncredited"}
+            "affected_jobs": [job], "sizing_basis": "uncredited",
+            "type_aware_lint": {"kind": "opt82_type_aware_lint", "job": job,
+                                "yaml_job": yaml_job, "lint_step": lint_step}}
 
 
 def _opt83():
@@ -594,3 +599,35 @@ def test_packages_note_is_rendered_from_the_count_when_reasons_lack_it():
     t["packages"] = 1
     line = _flat(_card(_finding([t])))
     assert "across 1 workspace package; task-runner filters not applied" in line
+
+
+# ---- deferral to OPT82: the engine's join, not the display job ----------------
+
+def test_verifier_passes_a_deferred_row_whose_opt82_names_another_matrix_run(tmp_path):
+    # A matrix lint job: OPT82 names the alphabetically first matrix run, the
+    # pole is another run of the same YAML job and step. The engine defers on
+    # (workflow file, yaml_job, lint_step), so an honest report must pass.
+    f = _finding([_tool("eslint", "deferred_to_opt82"), _tool("prettier")])
+    doc, report = _doc_and_report(f, extra=[_opt82(job="Lint (node 18)")])
+    c = _check(tmp_path, doc, report)
+    assert c.ok, c.detail
+
+
+def test_verifier_defers_on_the_whitespace_collapsed_step(tmp_path):
+    f = _finding([_tool("eslint", "deferred_to_opt82"), _tool("prettier")])
+    doc, report = _doc_and_report(f, extra=[_opt82(lint_step=" Run  lint and format checks ")])
+    c = _check(tmp_path, doc, report)
+    assert c.ok, c.detail
+
+
+@pytest.mark.parametrize("o82", [
+    lambda: _opt82(yaml_job="other"),
+    lambda: _opt82(lint_step="Run something else"),
+    lambda: {**_opt82(), "workflow_file": ".github/workflows/ci.yml"},
+    lambda: {k: v for k, v in _opt82().items() if k != "type_aware_lint"},
+], ids=["other-yaml-job", "other-step", "other-workflow", "no-block"])
+def test_verifier_fails_a_deferred_row_whose_opt82_is_on_another_step(tmp_path, o82):
+    f = _finding([_tool("eslint", "deferred_to_opt82"), _tool("prettier")])
+    doc, report = _doc_and_report(f, extra=[o82()])
+    c = _check(tmp_path, doc, report)
+    assert not c.ok and "no OPT82 finding" in c.detail, c.detail

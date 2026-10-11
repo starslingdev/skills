@@ -9282,14 +9282,22 @@ def check_opt84_tool_swap(report: str, findings_path: Path | None) -> Check:
                 bad.append(f"{fid}: tool {row!r} published_range "
                            f"{t.get('published_range')!r} is not the catalog's "
                            f"{_VR_OPT84_PUBLISHED_RANGE.get(row)!r}")
+            # The engine's join (collect_runs `opt82_steps`): an OPT82 finding on
+            # the same workflow file whose `type_aware_lint` block names the same
+            # YAML job key and lint step. Never the display job: on a matrix lint
+            # job OPT82 names one matrix run, which need not be the pole's.
             if fit == "deferred_to_opt82" and not any(
                     str(o.get("pattern") or "") == "OPT82"
                     and Path(str(o.get("workflow_file") or "")).name == wfb
-                    and (job in [str(j) for j in _as_list(o.get("affected_jobs"))]
-                         or str(o.get("job") or "") == job)
+                    and str(_as_dict(o.get("type_aware_lint")).get("yaml_job") or "")
+                    == str(ts.get("yaml_job") or "")
+                    and " ".join(str(_as_dict(o.get("type_aware_lint")).get(
+                        "lint_step") or "").split()) == " ".join(step.split())
+                    and step.strip()
                     for o in all_findings):
                 bad.append(f"{fid}: tool {row!r} is deferred to OPT82, but the run "
-                           f"has no OPT82 finding on `{wfb}` ▸ `{job}`")
+                           f"has no OPT82 finding on `{wfb}` ▸ YAML job "
+                           f"`{ts.get('yaml_job')}` ▸ step `{step}`")
         # Severity and risk, re-derived by the engine's rule: HIGH only when an
         # ESLint row is reported here (fit drop-in or dual-run: a rule silently
         # missing after the swap is a coverage loss nobody sees); a row deferred
