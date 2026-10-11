@@ -196,6 +196,35 @@ def test_card_renders_the_migration_guide_beside_the_docs_when_stamped():
     assert tsc_line.endswith(f"docs: {bp._OPT84_DOCS_URLS['tsc']}"), tsc_line
 
 
+@pytest.mark.parametrize("fit", ["dual-run", "deferred_to_opt82"])
+def test_a_row_that_is_not_a_drop_in_never_says_drop_in(fit):
+    t = _tool("eslint", fit, ["this config has 2 custom rules oxlint cannot run"]
+              if fit == "dual-run" else None)
+    line = next(ln for ln in _card(_finding([t])).splitlines()
+                if ln.startswith("- **ESLint → oxlint:**"))
+    assert "drop-in" not in line, line
+    assert "oxlint is the native replacement (published range" in line, line
+
+
+def test_a_drop_in_row_says_so_in_its_fit_only():
+    line = next(ln for ln in _card(_finding([_tool("prettier")])).splitlines()
+                if ln.startswith("- **Prettier → oxfmt:**"))
+    assert line.count("drop-in") == 1 and "fit: drop-in; docs:" in line, line
+
+
+@pytest.mark.parametrize("edit,needle", [
+    (lambda r: r.replace("oxlint is the native replacement", "oxlint is a native drop-in"),
+     "card's 'eslint' row does not name oxlint 'is the native replacement'"),
+    (lambda r: "\n".join(ln for ln in r.splitlines()
+                         if not ln.startswith("- **Prettier → oxfmt:**")),
+     "card has no row for 'prettier'"),
+], ids=["drop-in-wording", "row-missing"])
+def test_verifier_fails_a_tool_row_that_calls_the_target_a_drop_in(tmp_path, edit, needle):
+    doc, report = _doc_and_report()
+    c = _check(tmp_path, doc, edit(report))
+    assert not c.ok and needle in c.detail, c.detail
+
+
 def test_one_tool_has_no_split_sentence():
     f = _finding([_tool("prettier")])
     assert bp._OPT84_SPLIT_UNKNOWN not in _flat(_card(f))
@@ -340,7 +369,8 @@ def test_held_back_entry_without_a_step_names_the_job():
 
 def test_verifier_copies_equal_the_renderers():
     for name in ("SIZING_LABEL", "RAIL", "BENCHMARK", "SUMMARY", "SPLIT_UNKNOWN",
-                 "TS6_ALIAS", "DOCS_URLS", "PUBLISHED_RANGE", "WITHHOLD_PHRASES"):
+                 "TS6_ALIAS", "DOCS_URLS", "PUBLISHED_RANGE", "WITHHOLD_PHRASES",
+                 "REPLACEMENT", "SOURCE_NAME", "TARGET_NAME"):
         assert getattr(vr, f"_VR_OPT84_{name}") == getattr(bp, f"_OPT84_{name}"), name
     assert vr._VR_OPT84_HELD_BACK_GATES == frozenset(_HELD_BACK)
     assert vr._VR_OPT84_VERDICT_GATES == frozenset(_VERDICTS)

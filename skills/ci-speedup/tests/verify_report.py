@@ -9122,6 +9122,10 @@ _VR_OPT84_TS6_ALIAS = (
     "TypeScript 7.0 does not ship: keep the `@typescript/typescript6` alias beside "
     "it for those tools")
 _VR_OPT84_SUMMARY = "uncredited, benchmark first"
+_VR_OPT84_REPLACEMENT = "is the native replacement"
+_VR_OPT84_SOURCE_NAME = {"prettier": "Prettier", "eslint": "ESLint", "tsc": "tsc"}
+_VR_OPT84_TARGET_NAME = {"prettier": "oxfmt", "eslint": "oxlint",
+                         "tsc": "TypeScript 7 (`typescript@^7`)"}
 _VR_OPT84_PUBLISHED_RANGE = {
     "prettier": "~4-30×",
     "eslint": "~8-20×",
@@ -9375,8 +9379,21 @@ def check_opt84_tool_swap(report: str, findings_path: Path | None) -> Check:
                            (_VR_OPT84_SUMMARY, "its summary")):
             if need not in flat:
                 bad.append(f"{fid}: card is missing {what}")
+        card_lines = [" ".join(ln.split()) for ln in body.splitlines()]
         for t in tools:
             row = str(t.get("row") or "")
+            # The tool's own row: the target is named the native replacement,
+            # never "a drop-in" (that is a fit, stated by the row's `fit:`).
+            src = _VR_OPT84_SOURCE_NAME.get(row)
+            tgt = _VR_OPT84_TARGET_NAME.get(row)
+            if src and tgt:
+                lead = f"- **{src} → {tgt}:**"
+                tline = next((ln for ln in card_lines if ln.startswith(lead)), None)
+                if tline is None:
+                    bad.append(f"{fid}: card has no row for {row!r}")
+                elif f"{tgt} {_VR_OPT84_REPLACEMENT} (published range" not in tline:
+                    bad.append(f"{fid}: card's {row!r} row does not name {tgt} "
+                               f"{_VR_OPT84_REPLACEMENT!r}")
             url = _VR_OPT84_DOCS_URLS.get(row)
             if url and f"docs: {url}" not in flat:
                 bad.append(f"{fid}: card is missing the docs link for {row!r}")

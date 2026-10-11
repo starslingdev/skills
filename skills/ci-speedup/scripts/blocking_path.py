@@ -8641,6 +8641,10 @@ _OPT84_TS6_ALIAS = (
     "TypeScript 7.0 does not ship: keep the `@typescript/typescript6` alias beside "
     "it for those tools")
 _OPT84_SUMMARY = "uncredited, benchmark first"
+# What each tool row says the target is. Never "a drop-in": that is a fit, and
+# the row's own `fit:` says whether this repo's use of the tool is one (a
+# dual-run or an OPT82-first row is not).
+_OPT84_REPLACEMENT = "is the native replacement"
 # The swap table's published speedup range per detected row: the catalog's
 # number, quoted as such, never this repo's. The engine stamps it on each tool
 # (`published_range`); the card renders the stamp and falls back to this table
@@ -8732,7 +8736,7 @@ def _opt84_bench_pairs(tools: list[dict[str, Any]]) -> list[str]:
 
 def _opt84_card(f: dict[str, Any], catalog_url: str) -> list[str]:
     """One OPT84 finding as a short anchored card: the step and what it runs, each
-    tool's native drop-in with the catalog's published range and the target's
+    tool's native replacement and its fit, the catalog's published range and the target's
     docs, the labelled ceiling, one rail and one benchmark line. No prompt block:
     the reader's agent is pointed at the docs, not handed a migration script."""
     ts = f["tool_swap"]
@@ -8767,8 +8771,8 @@ def _opt84_card(f: dict[str, Any], catalog_url: str) -> list[str]:
                else _OPT84_PUBLISHED_RANGE.get(row, ""))
         mig = t.get("migration_docs_url")
         line = (f"- **{src} → {tgt}:** runs "
-                f"`{_flatten_cell(str(t.get('leaf_command') or ''))}`; {tgt} is a "
-                f"native drop-in (published range {rng}, "
+                f"`{_flatten_cell(str(t.get('leaf_command') or ''))}`; {tgt} "
+                f"{_OPT84_REPLACEMENT} (published range {rng}, "
                 f"the catalog's number, not this repo's); fit: {_opt84_fit_words(t)}; "
                 f"docs: {_flatten_cell(str(t.get('docs_url') or ''))}"
                 + (f"; migration guide: {_flatten_cell(mig)}"
