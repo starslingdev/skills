@@ -1052,3 +1052,16 @@ def test_an_unreadable_or_incomplete_manifest_walk_still_fails_closed(kw):
 def test_no_scan_block_is_not_read_as_no_manifest():
     _out, withheld, _c = _curl_case(None)
     assert withheld == {"pole_job_not_matched_in_yaml": 1}, withheld
+
+
+# ---- OPT81's last-resort advisory names OPT84 as a lever that renders first ------
+
+def test_opt81_a2_names_an_opt84_on_its_job_as_rendering_first():
+    # OPT84 is uncredited and structural: it does not hold the faster-runner
+    # advisory back, and the advisory's stamped levers say it is on the job.
+    sys.path.insert(0, str(_SKILL_DIR / "tests"))
+    import test_opt81_faster_runner as t81
+    out, withheld, _c = t81._a2([t81._f("OPT84", structural=True)])
+    assert len(out) == 1, withheld
+    whys = [c["why"] for c in out[0]["faster_runner"]["cheaper_levers_checked"]]
+    assert any("OPT84" in w and "renders first" in w for w in whys), whys

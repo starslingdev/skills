@@ -11654,8 +11654,8 @@ def _post_failure_waste_s(legs: list[dict[str, Any]]) -> tuple[float, str, list[
 # A2 (ADVISORY). The lever of LAST RESORT on a merge-gating long pole that runs on
 # a standard GitHub-hosted label, whose dominant step is compute, whose job did not
 # run on two or more labels (A1 data), and for which no cheaper lever exists: no
-# OPT70–OPT74 or OPT78 on the pole (the uncredited OPT75 and OPT83 render first
-# and do not hold it back); no credited non-advisory, non-pre-start finding
+# OPT70–OPT74 or OPT78 on the pole (the uncredited OPT75, OPT83 and OPT84 render
+# first and do not hold it back); no credited non-advisory, non-pre-start finding
 # (any pattern, OPT75 included) of at least half the job's p50; no sharding finding
 # (OPT24); no net-negative cache (OPT79) of 30s or more; and, at render time, no
 # log-level leaf on the pole's log. It carries no number at all: it names a class
@@ -11703,13 +11703,15 @@ _OPT81_CACHE_LEVER_MIN_S = 30.0
 # A2 (d): levers that are cheaper than hardware and suppress A2 by being present
 # on the pole: scope, de-trigger, warm build cache, shared step (OPT70-OPT73),
 # trust-boundary-forced cold work (OPT74) and per-file test isolation (OPT78).
-# Two uncredited levers are NOT in the set, and both render before A2:
+# Three uncredited levers are NOT in the set, and all three render before A2:
 #   - OPT75 ("decompose the dominant step") is what the router says when nothing
 #     more specific applies, so its presence alone does not suppress A2; an OPT75
 #     credit of half the pole's median or more still does, through the
 #     credited-lever rule above.
 #   - OPT83 (the pole's independent steps side by side) needs a benchmark before
 #     any saving is known, so the reader sees both (owner decision 2026-10-09).
+#   - OPT84 (a slow pole step's tool swapped for its native drop-in) is likewise
+#     uncredited until a benchmark measures it, so it does not suppress A2 either.
 _OPT81_CHEAPER_STRUCTURAL = frozenset({"OPT70", "OPT71", "OPT72", "OPT73", "OPT74",
                                        "OPT78"})
 
@@ -12297,6 +12299,7 @@ def _detect_opt81_runner_size_advisory(
 
     has_opt75 = any(str(f.get("pattern")) == "OPT75" for f in others)
     has_opt83 = any(str(f.get("pattern")) == "OPT83" for f in others)
+    has_opt84 = any(str(f.get("pattern")) == "OPT84" for f in others)
     checked = [
         {"lever": ("structural: scope, de-trigger, warm build cache, shared step, "
                    "trust-boundary cold work, per-file test isolation ("
@@ -12306,7 +12309,9 @@ def _detect_opt81_runner_size_advisory(
                  + ("; only the generic decompose lever (OPT75) applies, and it "
                     "renders first" if has_opt75 else "")
                  + ("; the uncredited independent-steps lever (OPT83) is on this "
-                    "job and renders first" if has_opt83 else ""))},
+                    "job and renders first" if has_opt83 else "")
+                 + ("; the uncredited tool-swap lever (OPT84) is on this job and "
+                    "renders first" if has_opt84 else ""))},
         {"lever": "a credited fix already on this job", "patterns": [],
          "applies": False,
          "why": "no finding credits wall-clock on this job at half its median or more"},
