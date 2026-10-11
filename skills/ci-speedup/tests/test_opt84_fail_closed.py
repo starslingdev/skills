@@ -186,3 +186,42 @@ def test_a_nested_flat_config_under_eslint_9_is_not_ambiguous():
     b["eslint_versions"] = {"": "^9.10.0"}
     out, withheld, _c = _run({"run": "npx eslint ."}, block=b)
     assert len(out) == 1, withheld
+
+
+# ---- 3. Prettier plugins make the swap a dual-run ------------------------------
+
+def test_a_prettier_plugin_at_the_root_is_a_dual_run_reason():
+    b = _block()
+    b["prettier_plugins"] = {"": ["prettier-plugin-tailwindcss"]}
+    out, withheld, _c = _run({"run": "npx prettier --check ."}, block=b)
+    assert len(out) == 1, withheld
+    t = _tool(out[0], "prettier")
+    assert t["fit"] == "dual-run"
+    assert t["fit_reasons"] == [
+        "Prettier plugin prettier-plugin-tailwindcss in `package.json`: oxfmt may "
+        "not carry it"]
+
+
+def test_a_prettier_plugin_in_the_package_and_at_the_root_are_both_named():
+    b = _block()
+    b["prettier_plugins"] = {"web": ["@ianvs/prettier-plugin-sort-imports"],
+                             "": ["prettier-plugin-svelte"], "other": ["x"]}
+    out, withheld, _c = _run({"run": "npx prettier --check .",
+                              "working-directory": "web"}, block=b)
+    assert len(out) == 1, withheld
+    reasons = _tool(out[0], "prettier")["fit_reasons"]
+    assert reasons == [
+        "Prettier plugin @ianvs/prettier-plugin-sort-imports in `web/package.json`: "
+        "oxfmt may not carry it",
+        "Prettier plugin prettier-plugin-svelte in `package.json`: oxfmt may not "
+        "carry it"]
+
+
+@pytest.mark.parametrize("plugins", [None, {}, {"": []}, {"other": ["x"]}])
+def test_no_prettier_plugin_on_the_walk_or_an_older_scan_stays_drop_in(plugins):
+    b = _block()
+    b.pop("prettier_plugins", None)
+    if plugins is not None:
+        b["prettier_plugins"] = plugins
+    out, withheld, _c = _run({"run": "npx prettier --check ."}, block=b)
+    assert len(out) == 1 and _tool(out[0], "prettier")["fit"] == "drop-in", withheld

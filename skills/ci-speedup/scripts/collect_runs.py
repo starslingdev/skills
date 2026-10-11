@@ -17374,6 +17374,34 @@ def _opt84_eslint_fit(block: dict[str, Any], configs: "list[dict[str, Any]]"
     return reasons
 
 
+def _opt84_prettier_fit(block: dict[str, Any], wds: list[str]) -> list[str]:
+    """Why an oxfmt swap of this Prettier run must be a dual-run (empty: plain
+    swap): every Prettier plugin a package.json at or above each run's
+    directory declares (the scan's `prettier_plugins`, {package dir: [plugin
+    package names]}), nearest first.
+
+    A scan that predates `prettier_plugins` (the key absent) reads as no
+    plugins, i.e. drop-in as before, rather than failing closed: failing
+    closed would turn every findings document written before the key existed
+    into a dual-run. A present key is read."""
+    plugins = block.get("prettier_plugins")
+    if not isinstance(plugins, dict):
+        return []
+    reasons: list[str] = []
+    for wd in wds:
+        d = wd
+        while True:
+            for name in plugins.get(d) or []:
+                where = f"{d}/package.json" if d else "package.json"
+                r = (f"Prettier plugin {name} in `{where}`: oxfmt may not carry it")
+                if r not in reasons:
+                    reasons.append(r)
+            if not d:
+                break
+            d = d.rsplit("/", 1)[0] if "/" in d else ""
+    return reasons
+
+
 def _detect_opt84_tool_swap(
     poles: list[dict[str, Any]],
     wf_docs: dict[str, Any],
@@ -17661,6 +17689,9 @@ def _detect_opt84_tool_swap(
                             continue
                         reasons = _opt84_eslint_fit(tal, configs)
                         fit = "dual-run" if reasons else "drop-in"
+                elif row == "prettier":
+                    reasons = _opt84_prettier_fit(tal, lwds)
+                    fit = "dual-run" if reasons else "drop-in"
                 # The workspace-packages note is a task-runner expansion's: a
                 # tool run twice by hand in one directory reaches no packages.
                 expanded = any(g.get("task_runner") for g in group)
