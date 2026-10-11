@@ -346,7 +346,9 @@ def test_never_in_also_noticed_tier2_or_totals():
     assert head.startswith("## ") and "Also noticed" in head, head
     also = body.split("\n## ", 1)[0]
     assert "f82" in also or "OPT82" in also, also[:1500]
-    assert "opt84" not in also and "OPT84" not in also
+    # No OPT84 card (OPT82's own prompt names OPT84's table, so the word alone
+    # is not the test; the card's anchor and header are).
+    assert '<a id="opt84-' not in also and "🧰 OPT84" not in also, also[:1500]
 
 
 # ---- held-back row -------------------------------------------------------------
@@ -740,6 +742,22 @@ def test_verifier_fails_a_deferred_row_whose_opt82_is_on_another_step(tmp_path, 
     doc, report = _doc_and_report(f, extra=[o82()])
     c = _check(tmp_path, doc, report)
     assert not c.ok and "no OPT82 finding" in c.detail, c.detail
+
+
+# ---- OPT82's prompt points its native-linter option at OPT84 -----------------
+
+def test_opt82_prompt_points_its_native_option_at_opt84_not_the_deleted_opt14_contract():
+    # The OPT14 migration-cost contract was removed with OPT84's arrival; the
+    # catalog's OPT82 entry now names OPT84's tool-swap table and its
+    # no-weakening rail, and the prompt must point where the catalog does.
+    m = {"pattern": "OPT82", "workflow_file": _WF, "affected_jobs": ["Lint"],
+         "type_aware_lint": {"rules": [{"rule": "@typescript-eslint/no-floating-promises"}],
+                             "configs": ["eslint.config.mjs"], "yaml_job": "lint",
+                             "lint_step": _STEP}}
+    text = _flat("\n".join(bp._opt82_prompt("t", [m], "u", "l")))
+    assert "OPT14 migration-cost" not in text and "migration-cost" not in text, text
+    opt_c = text.split("(c) ", 1)[1].split("Risk:", 1)[0]
+    assert "OPT84's tool-swap table and its no-weakening rail" in opt_c, opt_c
 
 
 # ---- the step's category: scan or build, and the pole's own -------------------

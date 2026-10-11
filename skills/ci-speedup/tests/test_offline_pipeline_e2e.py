@@ -1934,7 +1934,8 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     assert " ".join(bp._OPT84_SIZING_LABEL.split()) in _flat84
     assert " ".join(bp._OPT84_SPLIT_UNKNOWN.split()) in _flat84
     assert "fit: run both: framework plugin react" in _flat84, _s_pole[-2500:]
-    assert "OPT84" not in _also.split("## 🗄️", 1)[0], "OPT84 leaked into Also noticed"
+    # OPT82's prompt (in Also noticed) names OPT84's table; an OPT84 CARD must not be there.
+    assert '<a id="opt84-' not in _also.split("## 🗄️", 1)[0], "OPT84 leaked into Also noticed"
     assert "tool-swaps" not in report, "the style pole is rendered, so no own section"
     assert "tool-swap findings re-derive from the pole" in verify.stdout, verify.stdout[-2000:]
     # A tampered ceiling must redden the report's own self-check.
