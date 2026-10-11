@@ -494,6 +494,19 @@ def test_opt82_on_an_eslint_only_step_is_a_verdict():
     assert out == [] and withheld == {"eslint_reported_by_opt82": 1} and cands == []
 
 
+def test_opt82_defers_a_step_whose_yaml_name_has_inner_runs_of_spaces():
+    # OPT82 stamps the YAML `name:` only stripped; OPT84 matches the step by
+    # its whitespace-collapsed display name. Both sides compare collapsed.
+    yaml_name = "Run lint  and   format checks"
+    opt82 = [{"pattern": "OPT82", "workflow_file": _WF, "job": "Lint",
+              "type_aware_lint": {"yaml_job": "lint", "lint_step": yaml_name}}]
+    doc = _doc({"run": "npx eslint ."})
+    doc["jobs"]["lint"]["steps"][-1]["name"] = yaml_name
+    out, withheld, cands = _run(None, doc=doc, opt82=opt82)
+    assert out == [] and withheld == {"eslint_reported_by_opt82": 1}, withheld
+    assert cands == []
+
+
 def test_opt82_on_another_step_does_not_defer():
     opt82 = [{"pattern": "OPT82", "workflow_file": _WF, "job": "Lint",
               "type_aware_lint": {"yaml_job": "lint", "lint_step": "Other lint"}}]

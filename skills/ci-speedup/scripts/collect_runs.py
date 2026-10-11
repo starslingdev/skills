@@ -17216,12 +17216,15 @@ def _detect_opt84_tool_swap(
                                    (tal.get("package_scripts_unreadable") or []))
     alias_needed = any(isinstance(c, dict) and c.get("type_aware") == "on"
                        for c in (tal.get("configs") or []))
+    # OPT82 stamps its lint step's YAML `name:` stripped; OPT84's step name is
+    # the whitespace-collapsed display name. Both sides compare collapsed.
     opt82_steps = set()
     for f82 in opt82_findings or []:
         tl = f82.get("type_aware_lint") if isinstance(f82, dict) else None
         if isinstance(tl, dict):
             opt82_steps.add((str(f82.get("workflow_file") or ""),
-                             str(tl.get("yaml_job") or ""), str(tl.get("lint_step") or "")))
+                             str(tl.get("yaml_job") or ""),
+                             " ".join(str(tl.get("lint_step") or "").split())))
 
     # A repo with no JavaScript manifest at all (curl/curl): the scan walked the
     # whole tree, read every manifest it found, and found none, nor any ESLint
@@ -17388,7 +17391,7 @@ def _detect_opt84_tool_swap(
                         grp["group"].append(lf)
             silenced = [r for r, _lf in found if r in targets]
             found = [(r, lf) for r, lf in found if r not in targets]
-            deferred = (wf, yaml_key, name) in opt82_steps
+            deferred = (wf, yaml_key, " ".join(name.split())) in opt82_steps
             tools: list[dict[str, Any]] = []
             held: "str | None" = None
             for row, lf in found:
