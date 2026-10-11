@@ -354,10 +354,48 @@ def test_renderer_and_verifier_url_and_range_tables_equal_the_engines():
     assert bp._OPT84_PUBLISHED_RANGE == vr._VR_OPT84_PUBLISHED_RANGE == engine_rng
 
 
-def test_engine_copies_equal_the_renderers_once_the_engine_lands():
-    """Active once the engine half (`collect_runs._OPT84_*`) is on the branch."""
-    if not hasattr(cr, "_OPT84_HELD_BACK_GATES"):
-        pytest.skip("engine half of OPT84 not on this branch yet")
+def _engine_fit_vocabulary() -> set[str]:
+    """Every string the engine's detector ever assigns to `fit` (a plain
+    assignment, the `fit, reasons = ...` pair, or either branch of a ternary),
+    read from its source so a new fit word cannot slip past the verifier."""
+    import ast
+    import textwrap
+    tree = ast.parse(textwrap.dedent(inspect.getsource(cr._detect_opt84_tool_swap)))
+    out: set[str] = set()
+
+    def _strs(node):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            out.add(node.value)
+        elif isinstance(node, ast.IfExp):
+            _strs(node.body)
+            _strs(node.orelse)
+
+    for n in ast.walk(tree):
+        if not isinstance(n, ast.Assign):
+            continue
+        for tgt in n.targets:
+            if isinstance(tgt, ast.Name) and tgt.id == "fit":
+                _strs(n.value)
+            elif (isinstance(tgt, ast.Tuple) and tgt.elts
+                  and isinstance(tgt.elts[0], ast.Name) and tgt.elts[0].id == "fit"
+                  and isinstance(n.value, ast.Tuple) and n.value.elts):
+                _strs(n.value.elts[0])
+    return out
+
+
+def test_verifier_floors_rows_fits_and_categories_equal_the_engines():
+    assert vr._VR_OPT84_MIN_STEP_S == cr._OPT84_MIN_STEP_S
+    assert vr._VR_OPT84_MIN_SHARE == cr._OPT84_MIN_SHARE
+    assert vr._VR_OPT84_ROWS == set(cr._OPT84_TABLE)
+    assert vr._VR_OPT84_CATEGORIES == cr._OPT84_CATEGORIES
+    fits = _engine_fit_vocabulary()
+    assert fits == {"drop-in", "dual-run", "deferred_to_opt82"}, fits
+    assert vr._VR_OPT84_FITS == fits
+    assert vr._VR_OPT84_HIGH_FITS == fits - {"deferred_to_opt82"}
+
+
+def test_engine_copies_equal_the_renderers():
+    """A renamed engine constant goes red here (AttributeError), never skipped."""
     assert cr._OPT84_HELD_BACK_GATES == vr._VR_OPT84_HELD_BACK_GATES
     assert cr._OPT84_VERDICT_GATES == vr._VR_OPT84_VERDICT_GATES
     assert cr._OPT84_WITHHELD_DOC_KEY == bp._OPT84_WITHHELD_DOC_KEY
