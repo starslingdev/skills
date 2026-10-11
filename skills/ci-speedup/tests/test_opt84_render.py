@@ -287,6 +287,20 @@ def test_string_contracts_carry_the_owner_wording():
         assert w in bench, w
 
 
+def test_benchmark_line_compares_like_workloads():
+    # The target command times the target with its DEFAULT config (oxlint's
+    # default rules, oxfmt's defaults) until the repo's config is migrated, so
+    # timing it as-is compares unlike workloads and invites an inflated number.
+    b = bp._OPT84_BENCHMARK
+    assert b.startswith("Benchmark first")
+    assert "time both tools on the same commit and the same runner class" in b
+    assert "migrated config" in b and "migration guide" in b, b
+    assert "defaults" in b, b
+    assert "same files" in b and "equivalent rules" in b, b
+    assert vr._VR_OPT84_BENCHMARK == b
+    assert _flat(b) in _flat(_card())
+
+
 # ---- placement ----------------------------------------------------------------
 
 def _render(findings, poles=None, monkeypatch=None):

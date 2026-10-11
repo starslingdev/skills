@@ -8630,9 +8630,12 @@ _OPT84_RAIL = (
     "that only strips types; when the target lacks something the repo relies on, "
     "run both tools rather than dropping it")
 _OPT84_BENCHMARK = (
-    "Benchmark first: time both tools on the same commit and the same runner class "
-    "before claiming a number; if the swap reformats files, ship the recipe and the "
-    "bulk reformat as separate commits")
+    "Benchmark first: give the target the repo's migrated config (per its migration "
+    "guide where it has one; until then the target command below runs the tool's "
+    "defaults), then time "
+    "both tools on the same commit and the same runner class, checking the same files "
+    "with equivalent rules, before claiming a number; if the swap reformats files, "
+    "ship the recipe and the bulk reformat as separate commits")
 _OPT84_SPLIT_UNKNOWN = (
     "The tools share one step, so how the ceiling splits between them is unknown "
     "until measured")
