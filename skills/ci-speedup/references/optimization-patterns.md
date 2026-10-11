@@ -4919,13 +4919,13 @@ Its command is split on `&&`, `||`, `;`, `|` and newlines. A package-manager scr
 
 The Babel and Webpack rows are recipe only in v1: listed in the swap table, never detected.
 
-These verdicts are counted only, never listed: no candidate step; none of the step's tools is in the table; the target is already in use (for example `typescript` 7 or later in the manifest); a `tsc` that emits; the ESLint row on a step OPT82 already reports (other tools on that step still qualify).
+These verdicts are counted only, never listed: no candidate step; none of the step's tools is in the table (every pole of a repo with no JavaScript manifest at all reads this way, before its job is matched to the YAML; a manifest that exists but cannot be read is held back instead); the target is already in use (for example `typescript` 7 or later in the manifest); a `tsc` that emits; the ESLint row on a step OPT82 already reports (other tools on that step still qualify).
 
 **Held back (fails closed)**: counted, and listed in the Data sources row "tool swap: held back" with a plain-English reason; never reported.
 
 | Held back when | Why |
 |---|---|
-| step timings or step records unreadable; workflow file unreadable, or the check produced by more than one workflow; pole job (a job produced through a reusable workflow call, for example) or candidate step not matched to exactly one YAML step | the timings cannot be tied to the YAML (as in OPT83) |
+| step timings or step records unreadable; workflow file unreadable, or the check produced by more than one workflow; pole job (a job produced through a reusable workflow call, or a matrix job whose name is an expression, for example) or candidate step not matched to exactly one YAML step | the timings cannot be tied to the YAML (as in OPT83) |
 | a `${{ }}` in the candidate's command, `working-directory`, `env:` or `shell:`, or in a `defaults.run.working-directory`; or the command changes directory | the command is only known when the step runs |
 | a script the resolver cannot follow: missing, more than five levels deep, `package.json` unreadable, or a delegator (`turbo run`, `nx`, `lerna run`, `make`, `node ./script/x.js`) whose targets are not resolved | what runs is unknown |
 | the candidate is a `uses:` step | what it runs is inside the action |

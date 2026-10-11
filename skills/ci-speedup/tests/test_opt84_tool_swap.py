@@ -903,3 +903,71 @@ def test_the_absolute_floor_still_holds_without_a_share_floor():
     pole = _pole(step_p50=19.9, job_p50=318.5)
     out, withheld, _c = _run({"run": "npx eslint ."}, pole=pole)
     assert out == [] and withheld == {"no_candidate_step": 1}, withheld
+
+
+# ---- a repo with no JavaScript manifest at all: nothing can be a tool swap ----
+
+_CURL_WF = ".github/workflows/windows.yml"
+_CURL_JOB = "msvc, CM arm64-windows schannel U"
+
+
+def _curl_case(block):
+    # curl/curl windows.yml: the pole's job name is a rendered matrix expression,
+    # and a second job whose `name:` is all expressions (msys2) fits it too, so
+    # the pole -> YAML join fails; the repo has no package.json anywhere.
+    build = [{"uses": "actions/checkout@v4"},
+             {"name": "build", "run": "cmake --build bld"}]
+    doc = {"name": "windows", "on": "pull_request", "jobs": {
+        "msys2": {
+            "name": ("${{ matrix.sys == 'msys' && 'msys2' || 'mingw' }}, "
+                     "${{ matrix.build == 'cmake' && 'CM' || 'AM' }} ${{ matrix.env }}"
+                     " ${{ matrix.name }} ${{ matrix.test }}"),
+            "runs-on": "windows-2022", "steps": list(build)},
+        "msvc": {
+            "name": "msvc, CM ${{ matrix.arch }}-${{ matrix.plat }} ${{ matrix.name }}",
+            "runs-on": "windows-2022", "steps": list(build)}}}
+    pole = {"check": _CURL_JOB, "workflow_file": _CURL_WF, "job": _CURL_JOB,
+            "job_p50_s": 400.0,
+            "steps": [{"step": "build", "category": "build", "p50_s": 46.0},
+                      {"step": "Set up job", "category": "setup", "p50_s": 5.0}]}
+    withheld: dict[str, int] = {}
+    cands: list[dict] = []
+    out = cr._detect_opt84_tool_swap([pole], {_CURL_WF: doc}, block, [], 1,
+                                     withheld=withheld, withheld_candidates=cands)
+    return out, withheld, cands
+
+
+def _no_js_block(**kw):
+    return scan._tal_block(**{"configs": [], "unreadable": [], "truncated": False,
+                              "package_scripts": {}, "package_scripts_unreadable": [],
+                              "tool_versions": {}, "eslint_config_facts": {}, **kw})
+
+
+def test_a_repo_with_no_js_manifest_counts_every_pole_as_tool_not_in_table():
+    out, withheld, cands = _curl_case(_no_js_block())
+    assert out == [] and withheld == {"tool_not_in_table": 1}, withheld
+    assert cands == []
+
+
+def test_a_js_repo_with_a_matrix_job_name_is_still_held_back():
+    out, withheld, cands = _curl_case(_block())
+    assert out == [] and withheld == {"pole_job_not_matched_in_yaml": 1}, withheld
+    assert cands == [{"workflow_file": _CURL_WF, "job": _CURL_JOB,
+                      "gate": "pole_job_not_matched_in_yaml"}]
+
+
+@pytest.mark.parametrize("kw", [
+    {"package_scripts_unreadable": [""]},
+    {"truncated": True},
+    {"error": "walk failed"},
+    {"unreadable": [".eslintrc.yml"]},
+])
+def test_an_unreadable_or_incomplete_manifest_walk_still_fails_closed(kw):
+    out, withheld, cands = _curl_case(_no_js_block(**kw))
+    assert out == [] and withheld == {"pole_job_not_matched_in_yaml": 1}, withheld
+    assert len(cands) == 1
+
+
+def test_no_scan_block_is_not_read_as_no_manifest():
+    _out, withheld, _c = _curl_case(None)
+    assert withheld == {"pole_job_not_matched_in_yaml": 1}, withheld

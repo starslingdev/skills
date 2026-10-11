@@ -3272,6 +3272,10 @@ recipe only).
 Verdicts, counted only: no candidate, no table tool on the step, the target
 already in use, a `tsc` that emits, or an ESLint leaf on a step OPT82 already
 reports (OPT82 is the finding; other table tools on that step still qualify).
+A repo with no JavaScript manifest at all (the scan block's complete walk found
+no `package.json` scripts, no tool versions and no ESLint config, and nothing
+unreadable) makes every pole the `tool_not_in_table` verdict before any pole →
+YAML join, one count per pole; an unreadable manifest keeps the held-back path.
 Held back, failing closed: unreadable step timings or workflow file, a check
 produced by more than one workflow, a pole or step not matched to exactly one
 YAML job or step, a `${{ }}` in the command, working directory, `env:` or

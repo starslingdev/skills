@@ -1184,8 +1184,8 @@ _VR_OPT84_WITHHOLD_PHRASES = {
         "runs is unknown",
     "pole_job_not_matched_in_yaml":
         "the pole's job could not be tied to one job in its workflow file (a job "
-        "produced through a reusable workflow call, for example), so the step's "
-        "command could not be read",
+        "produced through a reusable workflow call, or a matrix job whose name is "
+        "an expression, for example), so the step's command could not be read",
     "measured_step_not_matched_in_yaml":
         "the slow step could not be matched to exactly one step in the workflow "
         "file, so what it runs is unknown",
