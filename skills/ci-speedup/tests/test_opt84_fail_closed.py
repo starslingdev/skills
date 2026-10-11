@@ -253,3 +253,18 @@ def test_an_unreadable_package_json_above_the_declaring_one_does_not_hold_tsc():
         block=_block(tool_versions={"packages/x": {"typescript": "^5.6.2"}},
                      unreadable_pkgs=["packages"]))
     assert len(out) == 1, withheld
+
+
+# ---- 5. the tsc package count is the packages below TypeScript 7 ---------------
+
+def test_tsc_package_count_excludes_packages_already_on_typescript_7():
+    scripts = {"": {}, "a": {"typecheck": "tsc --noEmit"},
+               "b": {"typecheck": "tsc --noEmit"}, "c": {"typecheck": "tsc --noEmit"}}
+    tv = {"": {"typescript": "^5.6.2"}, "c": {"typescript": "^7.0.0"}}
+    out, withheld, _c = _run({"run": "pnpm -r typecheck"},
+                             block=_block(scripts=scripts, tool_versions=tv))
+    assert len(out) == 1, withheld
+    t = _tool(out[0], "tsc")
+    assert t["packages"] == 2
+    assert "across 2 workspace packages; task-runner filters not applied" in t[
+        "fit_reasons"]

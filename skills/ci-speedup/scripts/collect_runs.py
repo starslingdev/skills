@@ -17662,6 +17662,9 @@ def _detect_opt84_tool_swap(
                         continue
                     lf = below[0]
                     lwd = str(lf["wd"] or "")
+                    # the packages the swap applies to: those already on 7+ are
+                    # not counted in `packages` or the workspace-packages note
+                    lwds = list(dict.fromkeys(str(g["wd"] or "") for g in below))
                     version = _opt84_version(tal, lwd, spec_row["package"])
                 elif row == "eslint":
                     if deferred:
