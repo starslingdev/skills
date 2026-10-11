@@ -225,3 +225,31 @@ def test_no_prettier_plugin_on_the_walk_or_an_older_scan_stays_drop_in(plugins):
         b["prettier_plugins"] = plugins
     out, withheld, _c = _run({"run": "npx prettier --check ."}, block=b)
     assert len(out) == 1 and _tool(out[0], "prettier")["fit"] == "drop-in", withheld
+
+
+# ---- 4. an unreadable package.json on the version walk holds the tsc row -------
+
+def test_an_unreadable_package_json_below_the_declaring_one_holds_tsc():
+    out, withheld, cands = _run(
+        {"run": "npx tsc --noEmit", "working-directory": "packages/x"},
+        block=_block(unreadable_pkgs=["packages/x"]))
+    assert out == []
+    _gate_only(withheld, cands, "typescript_version_unreadable")
+
+
+def test_an_unreadable_package_json_does_not_hold_eslint_or_prettier():
+    out, withheld, _c = _run(
+        {"run": "npx eslint . && npx prettier --check .",
+         "working-directory": "packages/x"},
+        block=_block(unreadable_pkgs=["packages/x"]))
+    assert len(out) == 1, withheld
+    for row in ("eslint", "prettier"):
+        assert _tool(out[0], row)["source_version"] is None
+
+
+def test_an_unreadable_package_json_above_the_declaring_one_does_not_hold_tsc():
+    out, withheld, _c = _run(
+        {"run": "npx tsc --noEmit", "working-directory": "packages/x"},
+        block=_block(tool_versions={"packages/x": {"typescript": "^5.6.2"}},
+                     unreadable_pkgs=["packages"]))
+    assert len(out) == 1, withheld

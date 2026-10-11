@@ -17237,12 +17237,22 @@ def _opt84_classify(tokens: list[str]) -> "tuple[str | None, str | None]":
     return None, None
 
 
-def _opt84_version(block: dict[str, Any], wd: str, package: str) -> "str | None":
+# What `_opt84_version` returns when a package.json on the upward walk (the
+# directory itself, or an ancestor nearer than the declaring one) could not be
+# read: the version that applies is unknown. `_opt84_major` reads it as None,
+# so the tsc row holds back; the ESLint and Prettier rows stamp None.
+_OPT84_VERSION_UNREADABLE: Any = object()
+
+
+def _opt84_version(block: dict[str, Any], wd: str, package: str) -> Any:
     """The `package` version spec the package.json nearest at or above `wd`
     declares, or None when none does. A pnpm catalog reference (`catalog:` =
     the default catalog, `catalog:<name>` = that named one) is resolved through
-    the scan's `pnpm_catalogs`; one that names no catalog entry is None."""
+    the scan's `pnpm_catalogs`; one that names no catalog entry is None.
+    `_OPT84_VERSION_UNREADABLE` when an unreadable package.json
+    (`package_scripts_unreadable`) sits on the walk before the declaring one."""
     versions = block.get("tool_versions") or {}
+    unreadable = {str(u) for u in (block.get("package_scripts_unreadable") or [])}
     d = wd
     while True:
         spec = (versions.get(d) or {}).get(package) if isinstance(
@@ -17255,6 +17265,8 @@ def _opt84_version(block: dict[str, Any], wd: str, package: str) -> "str | None"
                 got = cat.get(package) if isinstance(cat, dict) else None
                 return got if isinstance(got, str) else None
             return spec
+        if d in unreadable:
+            return _OPT84_VERSION_UNREADABLE
         if not d:
             return None
         d = d.rsplit("/", 1)[0] if "/" in d else ""
@@ -17635,6 +17647,8 @@ def _detect_opt84_tool_swap(
                 lwds = list(dict.fromkeys(str(g["wd"] or "") for g in group))
                 lwd = str(lf["wd"] or "")
                 version = _opt84_version(tal, lwd, spec_row["package"])
+                if version is _OPT84_VERSION_UNREADABLE:
+                    version = None              # informational here; tsc reads majors
                 fit, reasons = "drop-in", []
                 if row == "tsc":
                     majors = [(g, _opt84_major(_opt84_version(
