@@ -17627,6 +17627,18 @@ def _detect_opt84_tool_swap(
                         reasons = ["OPT82 reports this ESLint run's type-aware rules "
                                    "on the same step"]
                     else:
+                        # Read the configs exactly as OPT82 does: an
+                        # `ESLINT_USE_FLAT_CONFIG=false` in the step / job /
+                        # workflow env or inline in the step forces eslintrc
+                        # mode, and a nested flat config whose use depends on
+                        # the ESLint major is a config the read cannot settle.
+                        env_flag = next((str(e.get("ESLINT_USE_FLAT_CONFIG")) for e in (
+                            st.get("env"), spec.get("env"), doc.get("env"))
+                            if isinstance(e, dict) and "ESLINT_USE_FLAT_CONFIG" in e), "")
+                        eslintrc_forced = (env_flag.strip().lower() == "false"
+                                           or bool(_re.search(
+                                               r"\bESLINT_USE_FLAT_CONFIG=['\"]?false\b",
+                                               run)))
                         configs = []
                         unreadable_cfg = bool(tal.get("error"))
                         for g in group:
@@ -17634,11 +17646,13 @@ def _detect_opt84_tool_swap(
                                 break
                             gwd = str(g["wd"] or "")
                             eslint_cmd = shlex.join(g["tokens"])
+                            flag = _opt82_config_flag(eslint_cmd)
                             cfgs, bad = _opt82_applicable_configs(
-                                tal, gwd, _opt82_config_flag(eslint_cmd))
+                                tal, gwd, flag, eslintrc_forced)
                             if (bad or not cfgs
-                                    or (_opt82_walk_missed_dir(tal, gwd)
-                                        and not _opt82_config_flag(eslint_cmd))):
+                                    or (_opt82_walk_missed_dir(tal, gwd) and not flag)
+                                    or (not flag and _opt82_nested_flat_ambiguous(
+                                        tal, gwd, cfgs))):
                                 unreadable_cfg = True
                                 break
                             configs += [c for c in cfgs if c not in configs]

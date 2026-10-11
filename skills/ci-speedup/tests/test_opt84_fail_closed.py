@@ -135,3 +135,54 @@ def test_a_package_manager_pointed_at_another_directory_is_held_back(run):
     out, withheld, cands = _run({"run": run})
     assert out == []
     _gate_only(withheld, cands, "working_directory_unknown")
+
+
+# ---- 2. ESLint config reading matches OPT82 -----------------------------------
+
+_FLAT_AND_RC = dict(
+    configs=[_config("eslint.config.js"), _config(".eslintrc.json", format="eslintrc")],
+    facts={"eslint.config.js": dict(_NO_FACTS),
+           ".eslintrc.json": {**_NO_FACTS, "plugins": ["react"]}})
+
+
+@pytest.mark.parametrize("where", ["step", "job", "workflow", "inline"])
+def test_eslint_use_flat_config_false_reads_the_eslintrc(where):
+    step = {"run": "npx eslint ."}
+    if where == "step":
+        step["env"] = {"ESLINT_USE_FLAT_CONFIG": "false"}
+    if where == "inline":
+        step["run"] = "ESLINT_USE_FLAT_CONFIG=false npx eslint ."
+    doc = _doc(step)
+    if where == "job":
+        doc["jobs"]["lint"]["env"] = {"ESLINT_USE_FLAT_CONFIG": "false"}
+    if where == "workflow":
+        doc["env"] = {"ESLINT_USE_FLAT_CONFIG": "false"}
+    out, withheld, cands = _run(step, doc=doc, block=_block(**_FLAT_AND_RC))
+    assert len(out) == 1, (withheld, cands)
+    t = _tool(out[0], "eslint")
+    assert t["fit"] == "dual-run"
+    assert "framework plugin react in `.eslintrc.json`" in t["fit_reasons"]
+
+
+def test_without_the_flag_the_flat_config_is_read():
+    out, withheld, _c = _run({"run": "npx eslint ."}, block=_block(**_FLAT_AND_RC))
+    assert len(out) == 1 and _tool(out[0], "eslint")["fit"] == "drop-in", withheld
+
+
+_NESTED = dict(configs=[_config("eslint.config.js"),
+                        _config("packages/a/eslint.config.js")],
+               facts={"eslint.config.js": dict(_NO_FACTS),
+                      "packages/a/eslint.config.js": dict(_NO_FACTS)})
+
+
+def test_a_nested_flat_config_with_an_unknown_eslint_major_is_held_back():
+    out, withheld, cands = _run({"run": "npx eslint ."}, block=_block(**_NESTED))
+    assert out == []
+    _gate_only(withheld, cands, "eslint_config_unreadable")
+
+
+def test_a_nested_flat_config_under_eslint_9_is_not_ambiguous():
+    b = _block(**_NESTED)
+    b["eslint_versions"] = {"": "^9.10.0"}
+    out, withheld, _c = _run({"run": "npx eslint ."}, block=b)
+    assert len(out) == 1, withheld
