@@ -274,8 +274,15 @@ def test_never_in_also_noticed_tier2_or_totals():
     lines, n, _wc = bp._also_noticed_block([f], "https://x/c.md")
     assert (lines, n) == ([], 0)
     assert not bp._is_tier2_finding(f)
-    md = _render([f])
-    also = md.split("Also noticed", 1)[1] if "Also noticed" in md else ""
+    # An OPT82 finding on another job puts an Also noticed section in this
+    # render, so the check below reads a real section, never an empty string.
+    md = _render([f, _opt82(job="Other")])
+    assert '<a id="also-noticed"></a>' in md, md[:2000]
+    also = md.split('<a id="also-noticed"></a>', 1)[1]
+    head, _sep, body = also.lstrip("\n").partition("\n")
+    assert head.startswith("## ") and "Also noticed" in head, head
+    also = body.split("\n## ", 1)[0]
+    assert "f82" in also or "OPT82" in also, also[:1500]
     assert "opt84" not in also and "OPT84" not in also
 
 
@@ -685,6 +692,88 @@ def test_verifier_fails_a_step_category_the_engine_never_stamps(tmp_path, ts_cat
     doc["pr_critical_path"]["poles"][0]["steps"][1]["category"] = pole_cat
     c = _check(tmp_path, doc, report)
     assert not c.ok and needle in c.detail, c.detail
+
+
+# ---- negative self-tests: each verifier branch goes red on its own break -------
+
+def _rerendered(edit):
+    """A finding edited by `edit`, with its card rendered FROM the edited finding,
+    so only the verifier's re-derivation (never a stale card) can catch it."""
+    f = _finding()
+    edit(f)
+    return _doc_and_report(f)
+
+
+def test_verifier_fails_a_share_that_does_not_re_derive(tmp_path):
+    doc, report = _rerendered(lambda f: f["tool_swap"].__setitem__("share", 0.5))
+    assert "50% of this 162s job" in _flat(report)
+    c = _check(tmp_path, doc, report)
+    assert not c.ok and "share 0.5 != the re-derived 0.321" in c.detail, c.detail
+
+
+def test_verifier_fails_a_job_p50_other_than_the_poles(tmp_path):
+    doc, report = _rerendered(lambda f: f["tool_swap"].__setitem__("job_p50_s", 200.0))
+    c = _check(tmp_path, doc, report)
+    assert not c.ok and "job_p50_s 200.0 != the pole's 162.0" in c.detail, c.detail
+
+
+def test_verifier_fails_a_card_before_its_poles_opt83_card(tmp_path):
+    doc, report = _doc_and_report()
+    report += '\n<a id="opt83-f83"></a>\n\nOPT83 card\n'
+    c = _check(tmp_path, doc, report)
+    assert not c.ok and "card sits before its pole's OPT83 card" in c.detail, c.detail
+
+
+@pytest.mark.parametrize("edit", [
+    lambda r: r.replace(f"published range {bp._OPT84_PUBLISHED_RANGE['prettier']}",
+                        "published range ~40-90×"),
+    lambda r: r.replace(f"published range {bp._OPT84_PUBLISHED_RANGE['prettier']}, ", ""),
+], ids=["altered", "missing"])
+def test_verifier_fails_a_card_without_the_rows_published_range(tmp_path, edit):
+    doc, report = _doc_and_report()
+    c = _check(tmp_path, doc, edit(report))
+    assert not c.ok and "missing the published range for 'prettier'" in c.detail, c.detail
+
+
+def test_verifier_fails_a_finding_naming_one_row_twice(tmp_path):
+    f = _finding([_tool("prettier"), _tool("prettier")])
+    doc, report = _doc_and_report(f)
+    c = _check(tmp_path, doc, report)
+    assert not c.ok and "named more than once: ['prettier', 'prettier']" in c.detail, (
+        c.detail)
+
+
+def test_verifier_fails_a_ceiling_line_without_the_stamped_seconds(tmp_path):
+    doc, report = _doc_and_report()
+    c = _check(tmp_path, doc, report.replace("- **Ceiling:** 52s", "- **Ceiling:** 60s"))
+    assert not c.ok and "does not state the 52s ceiling" in c.detail, c.detail
+
+
+@pytest.mark.parametrize("edit,needle", [
+    (lambda d: d.__setitem__("opt84_withheld_by_gate", {"made_up_gate": 1}),
+     "counted gate 'made_up_gate' is not an OPT84 gate"),
+    (lambda d: d.__setitem__("opt84_withheld_candidates", [
+        {"workflow_file": _WF, "job": "Lint", "gate": "made_up_gate"}]),
+     "listed gate 'made_up_gate' is not an OPT84 held-back gate"),
+], ids=["counted", "listed"])
+def test_verifier_fails_a_gate_that_is_not_an_opt84_gate(tmp_path, edit, needle):
+    doc, report = _doc_and_report()
+    edit(doc)
+    c = _check(tmp_path, doc, report)
+    assert not c.ok and needle in c.detail, c.detail
+
+
+def test_verifier_fails_a_runner_minute_saving(tmp_path):
+    doc, report = _doc_and_report()
+    doc["findings"][0]["runner_min_saving"] = 12.0
+    c = _check(tmp_path, doc, report)
+    assert not c.ok and "carries runner_min_saving 12.0" in c.detail, c.detail
+
+
+def test_verifier_fails_a_card_when_the_run_has_no_opt84_finding(tmp_path):
+    _doc, report = _doc_and_report()
+    c = _check(tmp_path, {"findings": [], "pr_critical_path": {"poles": [_pole()]}}, report)
+    assert not c.ok and "the run recorded no OPT84 finding" in c.detail, c.detail
 
 
 def test_verifier_passes_a_build_step(tmp_path):
