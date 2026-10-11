@@ -21,16 +21,22 @@ unversioned and updates by reinstall from `main`.
   repo's `package.json` scripts) runs Prettier, ESLint or `tsc --noEmit`, the
   report adds a card at that job naming the step, its measured time, the tool,
   its drop-in (oxfmt, oxlint, TypeScript 7) and a link to the drop-in's own
-  migration docs. The card credits no saving: its only number is the step's
+  docs: the oxfmt and oxlint migration guides, and for TypeScript 7 its release
+  announcement, as it has no migration guide. Several uses of one tool in a
+  step are one row. The card credits no saving: its only number is the step's
   measured time, shown as the most the swap could remove, and it asks for a
-  benchmark of both tools on the same runner first. Every rule, plugin, file
-  set and check stays; when the drop-in lacks something the repo relies on
-  (ESLint custom rules or plugins), the card says to run both tools, and that
-  case is marked high risk. A repo already on the drop-in hears nothing about
-  it, and ESLint with type-aware rules is left to OPT82. Anything the audit
-  cannot read for certain (a `${{ }}` expression in the command, a script it
-  cannot follow, an action step, a lint config it could not fully read) holds
-  the job back, listed in the Data sources row as "tool swap: held back".
+  benchmark of both tools on the same runner first, after giving the drop-in
+  the repo's migrated config (until then the drop-in runs on its defaults).
+  Every rule, plugin, file set and check stays; when the drop-in may lack
+  something the repo relies on (ESLint custom rules, or any plugin oxlint does
+  not carry natively), the card says to run both tools. Any card that proposes
+  an ESLint swap itself (not left to OPT82) is marked high risk, drop-in or
+  run-both alike. A
+  repo already on the drop-in hears nothing about it, and ESLint with
+  type-aware rules is left to OPT82. Anything the audit cannot read for certain
+  (a `${{ }}` expression in the command, a script it cannot follow, an action
+  step that may lint or format, a lint config it could not fully read) holds
+  the step back, listed in the Data sources row as "tool swap: held back".
   Babel and Webpack stay in the catalog's swap table as recipes only. The
   catalog now has 82 patterns (73 hygiene, 9 structural). (#129)
 

@@ -10,9 +10,10 @@ closed: any fact the workflow file cannot prove, including a candidate step that
 sets `continue-on-error`, holds the pole back (the full list is in the OPT83
 catalog entry). OPT84 (a slow step on the pole runs a tool with a native drop-in)
 is the same shape: a finding dict rendered as its own uncredited card after any
-OPT83 card, its only number the step's p50 as a ceiling, its prompt pointing at
-the target's migration docs with a benchmark-first instruction and the
-no-weakening rail; its held-back list is in the OPT84 catalog entry. OPT78 is routed by a drill-log leaf rather than the
+OPT83 card, its only number the step's p50 as a ceiling. The card carries no
+prompt block: it links the target's docs (the oxfmt and oxlint migration
+guides; the TypeScript 7 row links the release announcement, as there is no
+migration guide) with a benchmark-first instruction and the no-weakening rail; its held-back list is in the OPT84 catalog entry. OPT78 is routed by a drill-log leaf rather than the
 critical-path router, so it emits no finding dict and the render boundary below
 never sees it:
 it gets no `Risk` row or banner. Its HIGH risk is stamped on the pole's drill-down

@@ -1135,7 +1135,9 @@ commonest reason). The per-gate tallies (`opt77_withheld_by_gate`,
 The held-back disclosure is ONE mechanism shared by OPT77, OPT79, OPT80, OPT81, OPT82, OPT83 and OPT84.
 `blocking_path._WITHHELD_ROWS` is a `WithheldRow` per pattern — findings-doc
 key, Data sources row label, counted noun, "Used for" cell, and `entry_shape`
-(`"job"` for OPT79 / OPT80 / OPT81 / OPT82 / OPT83 / OPT84, `"group"` for OPT77). The shape is registered
+(`"job"` for OPT79 / OPT80 / OPT81 / OPT82 / OPT83, `"group"` for OPT77, `"step"` for OPT84: a job
+entry that also names its one candidate step when the gate was decided on one, rendered
+`job (step)`). The shape is registered
 rather than inferred: both twins used to decide it by comparing the key against
 OPT77's, so a fourth group-shaped pattern would have rendered `(unnamed job)`
 for every candidate in the renderer AND been re-derived the same wrong way in
@@ -2270,7 +2272,7 @@ of a pull-request workflow, whose dominant step category is compute (`build` /
 after the shape gates; any other label, self-hosted included, is a verdict and
 never a held-back row), whose job did not run on two or more runner labels in the
 sample (A1 reports on those), and when no cheaper lever addresses the pole: no
-OPT70-74 or OPT78 on it (the uncredited OPT75 and OPT83 are the two
+OPT70-74 or OPT78 on it (the uncredited OPT75, OPT83 and OPT84 are the three
 exceptions: present, they render first and do not hold it back), no finding
 (OPT75 included) crediting at least half its p50 (A2's own rule, not the structural router's suppression), no OPT24, no OPT79
 of 30s or more (credited or uncredited).
@@ -3040,11 +3042,12 @@ profile; `_STRUCTURAL_META` is its structured form.
 not a structural finding (it carries no OPT70-75 id and joins no
 `_structural_for_pole`), but it is routed off the same measured pole and only
 after this track has run: OPT70-74 and OPT78 on the pole suppress it by being
-present. The two uncredited exceptions are OPT75 and OPT83: their presence does
-not suppress it (both render first, OPT83 because it needs a benchmark before
-any saving is known), though an OPT75 credit of half the pole's median or more
-does, like any credited finding. It renders after the pole's own prompt, its
-OPT75 block and any OPT83 card. See [§5.4](#54-opt81--a-runner-class-gap-measured-from-the-repos-own-runs-and-the-last-resort-runner-advisory).
+present. The three uncredited exceptions are OPT75, OPT83 and OPT84: their
+presence does not suppress it (all render first, OPT83 and OPT84 because each
+needs a benchmark before any saving is known; neither is in
+`_OPT81_CHEAPER_STRUCTURAL`), though an OPT75 credit of half the pole's median
+or more does, like any credited finding. It renders after the pole's own prompt,
+its OPT75 block, any OPT83 card and any OPT84 card. See [§5.4](#54-opt81--a-runner-class-gap-measured-from-the-repos-own-runs-and-the-last-resort-runner-advisory).
 
 ### Parallel steps: the YAML side is walked, the run-data side is not (yet)
 
@@ -3281,7 +3284,11 @@ produced by more than one workflow, a pole or step not matched to exactly one
 YAML job or step, a `${{ }}` in the command, working directory, `env:` or
 `shell:`, a directory change, a script the resolver cannot follow (missing,
 too deep, unreadable `package.json`, or an unresolved delegator such as
-`turbo run`, `nx` or `node ./script/x.js`), a `uses:` step, an ESLint config
+`turbo run`, `nx` or `node ./script/x.js`; `make` is not one, as this read
+treats it as a plain non-JavaScript leaf, `_RL_NON_JS_DELEGATORS`), a `uses:`
+step whose `uses:` or `name:` says it may lint, format or type-check
+(`_opt84_action_may_swap`; any other action is the `tool_not_in_table`
+verdict), an ESLint config
 that could not be fully read, an unreadable `typescript` version, or a working
 directory outside the checkout. Held-back poles are counted in
 `opt84_withheld_by_gate`, listed in `opt84_withheld_candidates`, and shown in
@@ -3294,15 +3301,30 @@ runner-minute door cannot derive it. Its only number is `ceiling_s`, the
 candidate step's measured p50: the most the swap can remove, not a forecast.
 The swap table's published speedup ranges are quoted as the catalog's, never as
 the repo's. When several table tools share one step there is one card and one
-ceiling, and the card says the split is unknown until measured. Risk is MEDIUM,
-HIGH on the ESLint row, whose recipe is dual-run whenever the config carries
-custom rules or plugins the target cannot replace. The card renders once in the
-pole's section, after any OPT83 card, and never in a total, Tier 2, the
-headline or Also noticed; it points at the target's own migration docs, carries
-the no-weakening rail, and tells the reader to benchmark both tools on the same
-runner class first. `verify_report.check_opt84_tool_swap` re-derives every card
-from the pole's stamped step p50 and the stamped command, scripts and config
-facts, and pins the held-back row like its siblings.
+ceiling, and the card says the split is unknown until measured; several
+leaves of one tool in a step are one tool row. Risk is MEDIUM, and HIGH
+whenever the card reports an ESLint row outright (drop-in or dual-run; a run
+deferred to OPT82 does not count). The ESLint fit is dual-run whenever a config
+carries custom local rules, the `tailwindcss` plugin, a framework plugin or any
+other plugin oxlint does not carry natively, a `react-hooks/exhaustive-deps`
+rule, facts the scan did not read, or a shareable config or config import it
+did not follow (fail closed). The card renders once in the pole's section,
+after any OPT83 card and before any OPT81 card, and never in a total, Tier 2,
+the headline or Also noticed. It carries no prompt block: each tool row says
+the target is the native replacement with its fit, and links the target's own
+docs (the oxfmt and oxlint migration guides; the TypeScript 7 announcement, as
+that row has no migration guide). It carries the no-weakening rail and a
+benchmark line that tells the reader to give the target the repo's migrated
+config first (until then the target runs on its defaults) and then time both
+tools on the same runner class. `verify_report.check_opt84_tool_swap`
+re-derives, from the drilled pole's stamped steps, each card's step p50,
+ceiling, job p50 and share, and checks the step qualifies; it checks the tool
+rows (each table row named once, a legal fit, the table's docs links and
+published range, an ESLint deferral only where OPT82 reports that step), the
+severity against the engine's rule, the split flag, that no saving is carried,
+and that exactly one card renders in the right place. It also pins the
+held-back counts against the listed entries, like its siblings. It does not
+re-resolve the command or re-read the scripts and config facts.
 
 ## 12. The blocking-path report (`blocking_path.py`)
 
