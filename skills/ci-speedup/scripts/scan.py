@@ -3954,6 +3954,16 @@ def _tal_block(**overrides: Any) -> dict[str, Any]:
         # `catalogs:<name>:` map is <name>. OPT84 resolves a `catalog:` /
         # `catalog:<name>` version through it; absent or unreadable = {}.
         "pnpm_catalogs": {},
+        # True when the root `pnpm-workspace.yaml` exists but could not be read
+        # or parsed (or a catalog in it is not a mapping): its `{}` above then
+        # means "unknown", not "no catalogs". Not added to `unreadable`, which
+        # lists ESLint configs only (OPT82 resolves configs through it).
+        "pnpm_catalogs_unreadable": False,
+        # {package dir: sorted Prettier plugin packages its package.json
+        # declares (dependencies + devDependencies): `prettier-plugin-*`,
+        # `@scope/prettier-plugin`, `@scope/prettier-plugin-*`}; a dir that
+        # declares none is absent.
+        "prettier_plugins": {},
     }
     block.update(overrides)
     return block
@@ -3962,18 +3972,30 @@ def _tal_block(**overrides: Any) -> dict[str, Any]:
 def _tal_pnpm_catalogs(root: Path) -> dict[str, dict[str, str]]:
     """The root `pnpm-workspace.yaml`'s catalogs; {} when there is none or it
     cannot be read (a catalog reference then stays unreadable downstream)."""
+    return _tal_pnpm_catalogs_read(root)[0]
+
+
+def _tal_pnpm_catalogs_read(root: Path) -> "tuple[dict[str, dict[str, str]], bool]":
+    """The catalogs and whether the file was UNREADABLE: present but not
+    readable as text, not YAML, not a mapping at the top, or holding a catalog
+    that is not a mapping. An absent file, or an empty one, is readable."""
+    path = root / "pnpm-workspace.yaml"
+    if not path.exists():
+        return {}, False
     try:
-        text = _read_config_text(root / "pnpm-workspace.yaml")
+        text = _read_config_text(path)
     except OSError:
-        return {}
+        return {}, True
     if text is None:
-        return {}
+        return {}, True
     try:
         data = yaml.safe_load(text)
     except yaml.YAMLError:
-        return {}
+        return {}, True
+    if data is None:
+        return {}, False
     if not isinstance(data, dict):
-        return {}
+        return {}, True
 
     def _specs(m: Any) -> "dict[str, str] | None":
         if not isinstance(m, dict):
@@ -3981,6 +4003,7 @@ def _tal_pnpm_catalogs(root: Path) -> dict[str, dict[str, str]]:
         return {str(k): str(v) for k, v in m.items()
                 if isinstance(v, (str, int, float)) and not isinstance(v, bool)}
 
+    bad = False
     out: dict[str, dict[str, str]] = {}
     named = data.get("catalogs")
     if isinstance(named, dict):
@@ -3988,16 +4011,24 @@ def _tal_pnpm_catalogs(root: Path) -> dict[str, dict[str, str]]:
             specs = _specs(m)
             if specs is not None:
                 out[str(n)] = specs
+            elif m is not None:
+                bad = True
+    elif named is not None:
+        bad = True
     default = _specs(data.get("catalog"))
     if default is not None:
         out["default"] = {**out.get("default", {}), **default}
-    return out
+    elif data.get("catalog") is not None:
+        bad = True
+    return out, bad
 
 
 # The packages whose declared versions OPT84 reads: the tools it can swap, the
 # targets that mean "already swapped", and the recipe-only rows' tools.
 _TAL_TOOL_PACKAGES = ("typescript", "prettier", "oxfmt", "oxlint", "eslint",
                       "@babel/core", "@swc/core", "webpack", "next")
+_TAL_PRETTIER_PLUGIN_RE = re.compile(
+    r"^(?:prettier-plugin-[\w.-]+|@[\w.-]+/prettier-plugin(?:-[\w.-]+)?)$")
 _TAL_CONFIG_FILE_RE = re.compile(
     r"^(\.prettierrc.*|prettier\.config\..+|babel\.config\..+|\.babelrc.*"
     r"|next\.config\..+)$")
@@ -4014,19 +4045,87 @@ _TAL_LOCAL_RULES_RE = re.compile(
     r"|\bcreate\s*\(\s*context\b")
 
 
-def _tal_fit_facts(text: str) -> dict[str, Any]:
-    """What an ESLint config's own text names, for OPT84's swap fit: the
-    plugins it loads, whether it defines rules locally, and whether it sets
-    `react-hooks/exhaustive-deps`. Read from text, never evaluated."""
+# A legacy `extends` entry that loads a plugin's preset: `plugin:<name>/<cfg>`.
+_TAL_PLUGIN_EXTENDS_RE = re.compile(r"""["'](plugin:[^"'\s]+)["']""")
+# The `react-hooks` presets that turn `react-hooks/exhaustive-deps` on
+# (`recommended`, `recommended-latest`, `recommended-legacy`).
+_TAL_HOOKS_PRESET_PREFIX = "plugin:react-hooks/recommended"
+
+
+def _tal_plugin_short(name: str) -> str:
+    """A plugin name in the shape the flat-config read records: the package
+    `eslint-plugin-x` is `x`, `@scope/eslint-plugin(-x)` is `@scope(/x)`, and a
+    short name (`react`, `@typescript-eslint`) stays as written."""
+    name = name.strip()
+    m = _TAL_PLUGIN_PKG_RE.fullmatch(name)
+    if m:
+        scope, short = m.group(1), m.group(2)
+        return (f"@{scope}" + (f"/{short}" if short else "")) if scope else (short or "")
+    return name
+
+
+def _tal_plugin_from_extends(spec: str) -> "str | None":
+    """The plugin a legacy `extends: plugin:...` entry loads, or None for any
+    other entry: `plugin:react/recommended` is `react`, `plugin:@scope/cfg` is
+    `@scope`, `plugin:@scope/name/cfg` is `@scope/name`."""
+    if not spec.startswith("plugin:"):
+        return None
+    parts = spec[len("plugin:"):].split("/")
+    if parts[0].startswith("@"):
+        name = "/".join(parts[:2]) if len(parts) >= 3 else parts[0]
+    else:
+        name = parts[0]
+    return _tal_plugin_short(name) or None
+
+
+def _tal_obj_plugin_specs(obj: Any) -> "tuple[list[str], list[str]]":
+    """A structured config's `plugins` and `extends` entries, top level and
+    every `overrides[]` entry, as parsed (a YAML block list, an unquoted flow
+    list and a JSON array read the same)."""
+    blocks = [obj] if isinstance(obj, dict) else []
+    if isinstance(obj, dict) and isinstance(obj.get("overrides"), list):
+        blocks += [o for o in obj["overrides"] if isinstance(o, dict)]
+    plugins: list[str] = []
+    extends: list[str] = []
+    for b in blocks:
+        pl = b.get("plugins")
+        pl = [pl] if isinstance(pl, str) else list(pl) if isinstance(pl, dict) else pl
+        if isinstance(pl, list):
+            plugins += [str(x) for x in pl if isinstance(x, str)]
+        ext = b.get("extends")
+        ext = [ext] if isinstance(ext, str) else ext
+        if isinstance(ext, list):
+            extends += [x for x in ext if isinstance(x, str)]
+    return plugins, extends
+
+
+def _tal_fit_facts(text: str, obj: Any = None) -> dict[str, Any]:
+    """What an ESLint config names, for OPT84's swap fit: the plugins it loads
+    (a `plugins` entry, an `eslint-plugin-*` package, or a `plugin:<name>/...`
+    preset in `extends`), whether it defines rules locally, and whether it sets
+    `react-hooks/exhaustive-deps` (named, or through a `react-hooks` preset).
+    Never evaluated. `obj` is the parsed object of a structured config
+    (`.eslintrc`, `.eslintrc.json/.yml/.yaml`, `package.json#eslintConfig`):
+    its `plugins` and `extends` are read from it; a JS config's from its text."""
     plugins: set[str] = set()
     for scope, name in _TAL_PLUGIN_PKG_RE.findall(text):
         plugins.add((f"@{scope}" + (f"/{name}" if name else "")) if scope else name)
-    for body in _TAL_PLUGINS_LIST_RE.findall(text):
-        plugins.update(_TAL_QUOTED_RE.findall(body))
+    if isinstance(obj, dict):
+        listed, extends = _tal_obj_plugin_specs(obj)
+        plugins.update(_tal_plugin_short(p) for p in listed)
+    else:
+        for body in _TAL_PLUGINS_LIST_RE.findall(text):
+            plugins.update(_TAL_QUOTED_RE.findall(body))
+        extends = _TAL_PLUGIN_EXTENDS_RE.findall(text)
+    for e in extends:
+        p = _tal_plugin_from_extends(e)
+        if p:
+            plugins.add(p)
     plugins.discard("")
     return {"plugins": sorted(plugins),
             "local_rules": bool(_TAL_LOCAL_RULES_RE.search(text)),
-            "exhaustive_deps": "react-hooks/exhaustive-deps" in text}
+            "exhaustive_deps": "react-hooks/exhaustive-deps" in text
+            or any(e.startswith(_TAL_HOOKS_PRESET_PREFIX) for e in extends)}
 
 
 def _read_type_aware_lint(root: Path) -> dict[str, Any]:
@@ -4064,6 +4163,7 @@ def _read_type_aware_lint_unguarded(root: Path) -> dict[str, Any]:
     tool_versions: dict[str, dict[str, str]] = {}
     config_files: dict[str, list[str]] = {}
     fit_facts: dict[str, dict[str, Any]] = {}
+    prettier_plugins: dict[str, list[str]] = {}
 
     def _finish(rel: str, fmt: str, read: dict[str, Any],
                 typed: "_TalCustomRules", imp_unresolved: list[str]) -> None:
@@ -4129,7 +4229,8 @@ def _read_type_aware_lint_unguarded(root: Path) -> dict[str, Any]:
             unreadable.append(rel)
             continue
         flat = path.name.startswith("eslint.config.")
-        fit_facts[rel] = _tal_fit_facts(text)
+        fit_facts[rel] = _tal_fit_facts(
+            text, _tal_parse_obj_text(text) if _tal_is_obj_config(path.name) else None)
         read = _tal_read_any(path, text, rel, flat)
         if read is None:
             unreadable.append(rel)
@@ -4157,6 +4258,9 @@ def _read_type_aware_lint_unguarded(root: Path) -> dict[str, Any]:
         tv = {k: deps[k] for k in _TAL_TOOL_PACKAGES if isinstance(deps.get(k), str)}
         if tv:
             tool_versions[_dir(rel)] = tv
+        pp = sorted(k for k in deps if _TAL_PRETTIER_PLUGIN_RE.match(str(k)))
+        if pp:
+            prettier_plugins[_dir(rel)] = pp
         try:
             present = sorted(n for n in os.listdir(path.parent)
                              if _TAL_CONFIG_FILE_RE.match(n))
@@ -4168,9 +4272,11 @@ def _read_type_aware_lint_unguarded(root: Path) -> dict[str, Any]:
         scripts[_dir(rel)] = ({str(k): str(v) for k, v in sc.items()
                                if isinstance(v, str)} if isinstance(sc, dict) else {})
         if isinstance(data.get("eslintConfig"), dict):
-            fit_facts[rel] = _tal_fit_facts(json.dumps(data["eslintConfig"]))
+            fit_facts[rel] = _tal_fit_facts(json.dumps(data["eslintConfig"]),
+                                            data["eslintConfig"])
             _finish(rel, "package.json", _tal_read_obj(data["eslintConfig"], rel),
                     _TalCustomRules(), [])
+    catalogs, catalogs_unreadable = _tal_pnpm_catalogs_read(root)
     return _tal_block(
         configs=sorted(configs, key=lambda c: c["path"]),
         unreadable=sorted(unreadable),
@@ -4181,7 +4287,9 @@ def _read_type_aware_lint_unguarded(root: Path) -> dict[str, Any]:
         tool_versions=tool_versions,
         config_files=config_files,
         eslint_config_facts=fit_facts,
-        pnpm_catalogs=_tal_pnpm_catalogs(root),
+        pnpm_catalogs=catalogs,
+        pnpm_catalogs_unreadable=catalogs_unreadable,
+        prettier_plugins=prettier_plugins,
     )
 
 
