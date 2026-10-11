@@ -9089,6 +9089,8 @@ def check_opt83_parallel_steps(report: str, findings_path: Path | None) -> Check
 # the collector's gate sets and floors (coupling tests pin every copy equal).
 _VR_OPT84_MIN_SHARE = 0.0
 _VR_OPT84_MIN_STEP_S = 20.0
+# The step categories a candidate may carry (collect_runs `_OPT84_CATEGORIES`).
+_VR_OPT84_CATEGORIES = frozenset({"scan", "build"})
 _VR_OPT84_ROWS = frozenset({"prettier", "eslint", "tsc"})
 _VR_OPT84_FITS = frozenset({"drop-in", "dual-run", "deferred_to_opt82"})
 # The ESLint fits that raise severity and risk to HIGH (collect_runs'
@@ -9239,6 +9241,13 @@ def check_opt84_tool_swap(report: str, findings_path: Path | None) -> Check:
             bad.append(f"{fid}: step `{step}` is not in the pole's measured steps")
             continue
         d = _num(ps.get("p50_s")) or 0.0
+        cat = ts.get("category")
+        if cat not in _VR_OPT84_CATEGORIES:
+            bad.append(f"{fid}: step category {cat!r} is not one of "
+                       f"{sorted(_VR_OPT84_CATEGORIES)}")
+        elif cat != str(ps.get("category") or ""):
+            bad.append(f"{fid}: step category {cat!r} != the pole step's "
+                       f"{ps.get('category')!r}")
         if _num(ts.get("step_p50_s")) != d:
             bad.append(f"{fid}: step `{step}` p50 {ts.get('step_p50_s')!r} != the "
                        f"pole's measured {d}")

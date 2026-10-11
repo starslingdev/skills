@@ -631,3 +631,27 @@ def test_verifier_fails_a_deferred_row_whose_opt82_is_on_another_step(tmp_path, 
     doc, report = _doc_and_report(f, extra=[o82()])
     c = _check(tmp_path, doc, report)
     assert not c.ok and "no OPT82 finding" in c.detail, c.detail
+
+
+# ---- the step's category: scan or build, and the pole's own -------------------
+
+@pytest.mark.parametrize("ts_cat,pole_cat,needle", [
+    ("test", "test", "category 'test' is not one of"),
+    ("build", "scan", "category 'build' != the pole step's 'scan'"),
+    (None, "scan", "category None is not one of"),
+], ids=["not-scan-or-build", "not-the-poles", "missing"])
+def test_verifier_fails_a_step_category_the_engine_never_stamps(tmp_path, ts_cat,
+                                                                 pole_cat, needle):
+    doc, report = _doc_and_report()
+    doc["findings"][0]["tool_swap"]["category"] = ts_cat
+    doc["pr_critical_path"]["poles"][0]["steps"][1]["category"] = pole_cat
+    c = _check(tmp_path, doc, report)
+    assert not c.ok and needle in c.detail, c.detail
+
+
+def test_verifier_passes_a_build_step(tmp_path):
+    doc, report = _doc_and_report()
+    doc["findings"][0]["tool_swap"]["category"] = "build"
+    doc["pr_critical_path"]["poles"][0]["steps"][1]["category"] = "build"
+    c = _check(tmp_path, doc, report)
+    assert c.ok, c.detail
