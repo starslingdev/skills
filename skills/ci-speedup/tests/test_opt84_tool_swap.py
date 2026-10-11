@@ -121,7 +121,7 @@ def test_opt82_resolver_results_are_byte_identical_to_the_pre_refactor_snapshot(
     # Recorded from every `_opt82_resolve_lint` call the OPT82 test module made on
     # main a7c2db4, before the resolver was generalized.
     snap = _snapshot()
-    assert len(snap["resolve"]) > 100
+    assert len(snap["resolve"]) == 128
     for e in snap["resolve"]:
         cmd, wd, sbd, chain, depth, unreadable, runner = e["args"]
         got = cr._opt82_resolve_lint(cmd, wd, sbd, chain, depth, frozenset(unreadable),
@@ -131,7 +131,7 @@ def test_opt82_resolver_results_are_byte_identical_to_the_pre_refactor_snapshot(
 
 def test_opt82_detector_results_are_byte_identical_to_the_pre_refactor_snapshot():
     snap = _snapshot()
-    assert len(snap["detect"]) > 50
+    assert len(snap["detect"]) == 92
     for e in snap["detect"]:
         wf, jpr, crit, doc, block, idx = e["args"]
         w = None if e["withheld_in"] is None else dict(e["withheld_in"])
@@ -703,7 +703,17 @@ def test_gate_sets_are_pinned():
 def test_every_gate_the_detector_can_count_is_in_a_set():
     src = inspect.getsource(cr._detect_opt84_tool_swap)
     import re
-    used = set(re.findall(r'_no\(\s*"([a-z0-9_]+)"', src)) | set(
+    # A gate is counted three ways: `_no("gate", ...)`, either branch of a
+    # conditional passed to `_no(...)`, and `held = held or "gate"` (counted
+    # later through `_no(held, ...)`).
+    direct = set(re.findall(r'_no\(\s*"([a-z0-9_]+)"', src))
+    branches = set(re.findall(
+        r'_no\(\s*"[a-z0-9_]+"\s+if\b[^()]*(?:\([^()]*\))?[^()]*?\belse\s+"([a-z0-9_]+)"',
+        src))
+    held = set(re.findall(r'held\s*=\s*held\s+or\s+"([a-z0-9_]+)"', src))
+    assert {"tool_not_in_table"} <= branches, branches
+    assert {"typescript_version_unreadable", "eslint_config_unreadable"} <= held, held
+    used = direct | branches | held | set(
         re.findall(r'"([a-z0-9_]+)"', inspect.getsource(cr._opt84_gate_for_unresolved)))
     allowed = cr._OPT84_VERDICT_GATES | cr._OPT84_HELD_BACK_GATES
     assert used and used - {"delegated", "script", "package_json", "expression", "cd",
