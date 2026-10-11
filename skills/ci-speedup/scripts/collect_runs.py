@@ -16938,6 +16938,27 @@ _OPT84_FRAMEWORK_PLUGINS = frozenset({
     "react", "react-hooks", "react-refresh", "react-native", "vue", "svelte",
     "angular", "@angular-eslint", "next", "@next/next", "astro", "solid", "qwik",
     "ember", "storybook"})
+# ESLint plugins oxlint implements natively (its built-in plugin table, checked
+# on https://oxc.rs/docs/guide/usage/linter/plugins.html on 2026-10-10), as the
+# scan names them: typescript-eslint, unicorn, import / import-x, jsdoc,
+# jsx-a11y, eslint-plugin-n, promise, jest and vitest. Any other plugin is a
+# dual-run reason: oxlint may not carry its rules, so it fails closed. The
+# framework plugins oxlint also lists (react, next, vue) stay dual-run above.
+_OPT84_OXLINT_NATIVE_PLUGINS = frozenset({
+    "@typescript-eslint", "typescript-eslint", "unicorn", "import", "import-x",
+    "jsdoc", "jsx-a11y", "n", "promise", "jest", "vitest", "@vitest"})
+
+
+def _opt84_plugin_name(p: str) -> str:
+    """A plugin as its short name: `eslint-plugin-x` is `x`, and
+    `@scope/eslint-plugin(-x)` is `@scope(/x)`."""
+    p = p.strip()
+    if p.startswith("eslint-plugin-"):
+        return p[len("eslint-plugin-"):]
+    if p.startswith("@") and "/eslint-plugin" in p:
+        scope, _sep, rest = p.partition("/eslint-plugin")
+        return scope + ("/" + rest.lstrip("-") if rest.lstrip("-") else "")
+    return p
 # ESLint flags that take a value (the value is not a lint path).
 _OPT84_ESLINT_VALUE_FLAGS = frozenset({
     "-c", "--config", "--ext", "-f", "--format", "--max-warnings", "-o",
@@ -17138,11 +17159,14 @@ def _opt84_eslint_fit(block: dict[str, Any], configs: "list[dict[str, Any]]"
         else:
             if facts.get("local_rules"):
                 _add(f"custom local rules in `{path}`")
-            for p in facts.get("plugins") or []:
-                if p == "tailwindcss" or str(p).endswith("/tailwindcss"):
+            for raw in facts.get("plugins") or []:
+                p = _opt84_plugin_name(str(raw))
+                if p == "tailwindcss" or p.endswith("/tailwindcss"):
                     _add(f"tailwindcss plugin in `{path}`")
                 elif p in _OPT84_FRAMEWORK_PLUGINS:
                     _add(f"framework plugin {p} in `{path}`")
+                elif p and p not in _OPT84_OXLINT_NATIVE_PLUGINS:
+                    _add(f"plugin {p} in `{path}`: oxlint may not carry its rules")
             if facts.get("exhaustive_deps"):
                 _add(f"react-hooks/exhaustive-deps rule in `{path}`")
         for s in c.get("shared_configs") or []:

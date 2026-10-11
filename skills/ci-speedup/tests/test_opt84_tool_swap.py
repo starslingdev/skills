@@ -431,6 +431,33 @@ def test_eslint_with_rules_oxlint_may_lack_is_dual_run(facts, config_kw, reason)
     assert out[0]["risk"] == "HIGH" and out[0]["severity"] == "HIGH"
 
 
+@pytest.mark.parametrize("plugins,named", [
+    (["acme"], "acme"),
+    (["@acme"], "@acme"),
+    (["convex"], "convex"),
+    (["unicorn", "@acme/internal"], "@acme/internal"),
+])
+def test_an_eslint_plugin_oxlint_does_not_carry_is_dual_run(plugins, named):
+    facts = {"eslint.config.js": {"plugins": plugins, "local_rules": False,
+                                  "exhaustive_deps": False}}
+    out, withheld, _c = _run({"run": "npx eslint ."}, block=_block(facts=facts))
+    assert len(out) == 1, withheld
+    t = _tool(out[0], "eslint")
+    assert t["fit"] == "dual-run", t["fit_reasons"]
+    assert any(f"plugin {named} in" in r for r in t["fit_reasons"]), t["fit_reasons"]
+
+
+def test_eslint_plugins_oxlint_implements_natively_stay_drop_in():
+    facts = {"eslint.config.js": {
+        "plugins": sorted(cr._OPT84_OXLINT_NATIVE_PLUGINS) + [
+            "eslint-plugin-unicorn", "@typescript-eslint/eslint-plugin"],
+        "local_rules": False, "exhaustive_deps": False}}
+    out, withheld, _c = _run({"run": "npx eslint ."}, block=_block(facts=facts))
+    assert len(out) == 1, withheld
+    t = _tool(out[0], "eslint")
+    assert t["fit"] == "drop-in" and t["fit_reasons"] == []
+
+
 def test_eslint_without_any_gate_is_drop_in():
     out, _w, _c = _run({"run": "npx eslint ."})
     t = _tool(out[0], "eslint")
