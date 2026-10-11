@@ -17498,6 +17498,11 @@ def _detect_opt84_tool_swap(
         job = str(p.get("job") or "")
         if not wf and p.get("ambiguous_workflows"):
             name = job or str(p.get("check") or "")
+            if not name:
+                # nothing to list it under: a held-back gate must be listed,
+                # so a nameless pole is the verdict instead
+                _no("pole_not_file_backed")
+                continue
             if ("", name) in seen:
                 continue
             seen.add(("", name))

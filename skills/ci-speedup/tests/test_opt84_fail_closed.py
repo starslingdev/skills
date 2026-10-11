@@ -268,3 +268,12 @@ def test_tsc_package_count_excludes_packages_already_on_typescript_7():
     assert t["packages"] == 2
     assert "across 2 workspace packages; task-runner filters not applied" in t[
         "fit_reasons"]
+
+
+# ---- 6. an ambiguous pole with no name is not file-backed ----------------------
+
+def test_an_ambiguous_pole_with_no_job_or_check_is_pole_not_file_backed():
+    out, withheld, cands = _run({"run": "npx eslint ."},
+                                poles=[{"ambiguous_workflows": ["a", "b"]}])
+    assert out == [] and withheld == {"pole_not_file_backed": 1}, withheld
+    assert cands == []
