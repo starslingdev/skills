@@ -16992,6 +16992,199 @@ def _opt84_gate_for_unresolved(u: dict[str, Any]) -> str:
     return "script_unresolvable"
 
 
+# A leaf the table has no row for is a VERDICT only when the read knows what it
+# runs. These leaves run something the read cannot see, so they hold the step
+# back instead (`_opt84_opaque_leaf`): a shell interpreter, a local executable
+# (`./x`, `../x`, `*.sh`), a wrapper around another command the read cannot
+# strip, a subshell, a package manager pointed at another directory, and a
+# package-manager builtin that runs a script it cannot follow.
+_OPT84_SHELLS = frozenset({"bash", "sh", "zsh", "dash"})
+# Local executables that are native build entry points by convention (autoconf's
+# `configure`, the Gradle and Maven wrappers): a leaf, like `make` (see
+# `_RL_NON_JS_DELEGATORS`), so a C or JVM build stays the verdict.
+_OPT84_NATIVE_LOCAL_EXECUTABLES = frozenset({"configure", "gradlew", "mvnw"})
+_OPT84_WRAPPERS = frozenset({"time", "env", "timeout", "xargs", "nice", "nohup",
+                             "exec"})
+# Package-manager builtins that run the package's own script of that name
+# (`t` / `tst` are npm's aliases of `test`).
+_OPT84_PM_SCRIPT_BUILTINS = {"test": "test", "t": "test", "tst": "test",
+                             "start": "start", "stop": "stop", "restart": "restart"}
+_OPT84_PM_DIR_FLAGS = frozenset({"-C", "--dir", "--prefix"})
+# Operators of the shell's `test` builtin: a `test` leaf carrying one is that
+# builtin, never `yarn test` (whose runner prefix the resolver strips).
+_OPT84_SHELL_TEST_OPS = frozenset({
+    "-a", "-b", "-c", "-d", "-e", "-f", "-g", "-h", "-k", "-n", "-o", "-p", "-r",
+    "-s", "-t", "-u", "-w", "-x", "-z", "-L", "-S", "-G", "-O", "-N", "-nt", "-ot",
+    "-ef", "-eq", "-ne", "-lt", "-le", "-gt", "-ge", "=", "==", "!=", "!", "<", ">"})
+
+
+def _opt84_unwrap(tokens: list[str]) -> "list[str] | None":
+    """The command a wrapper leaf (`_OPT84_WRAPPERS`) runs, its own flags and
+    values stripped; None when it cannot be read simply (`xargs` takes its
+    arguments from input; an unknown flag)."""
+    b = tokens[0].rsplit("/", 1)[-1]
+    t = list(tokens[1:])
+
+    def _flags(no_value: "frozenset[str]", with_value: "frozenset[str]",
+               long_eq: "frozenset[str]" = frozenset()) -> bool:
+        while t and t[0].startswith("-") and t[0] != "-":
+            f = t.pop(0)
+            if f == "--":
+                return True
+            if f in no_value or f.split("=", 1)[0] in long_eq:
+                continue
+            if f in with_value and t:
+                t.pop(0)
+                continue
+            return False
+        return True
+
+    if b == "xargs":
+        return None
+    if b == "nohup":
+        pass
+    elif b == "time":
+        if not _flags(frozenset({"-p", "-v", "--verbose", "--portability"}),
+                      frozenset()):
+            return None
+    elif b == "exec":
+        if not _flags(frozenset({"-c", "-l", "-cl", "-lc"}), frozenset({"-a"})):
+            return None
+    elif b == "nice":
+        if t and _re.fullmatch(r"-\d+", t[0]):
+            t.pop(0)
+        elif not _flags(frozenset(), frozenset({"-n", "--adjustment"}),
+                        frozenset({"--adjustment"})):
+            return None
+    elif b == "timeout":
+        if not _flags(frozenset({"--preserve-status", "--foreground", "-v",
+                                 "--verbose"}),
+                      frozenset({"-s", "--signal", "-k", "--kill-after"}),
+                      frozenset({"--signal", "--kill-after"})):
+            return None
+        if not t or not _re.fullmatch(r"\d+(?:\.\d+)?[smhd]?", t[0]):
+            return None
+        t.pop(0)
+    elif b == "env":
+        while t and (t[0] in ("-", "-i", "--ignore-environment")
+                     or t[0].startswith("--unset=") or t[0] in ("-u", "--unset")):
+            f = t.pop(0)
+            if f in ("-u", "--unset") and t:
+                t.pop(0)
+        if t and t[0].startswith("-"):
+            return None                       # `-S`, `-C`, ...: not read
+        while t and _re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", t[0]):
+            t.pop(0)
+    return t or None
+
+
+def _opt84_pm_script_call(lf: dict[str, Any]) -> "tuple[str, str, list[str]] | None":
+    """`(package manager, script name, args)` when a leaf is a package-manager
+    builtin that runs the package's own script (`npm test`, `pnpm start`,
+    `yarn test`). The resolver strips a leading `yarn` as a runner, so a yarn
+    one is a bare `test` / `start` leaf whose runner is yarn."""
+    t = list(lf.get("tokens") or [])
+    if t and t[0] in ("npm", "pnpm"):
+        i = 1
+        while i < len(t) and t[i].startswith("-") and t[i] != "--":
+            i += 1
+        if i < len(t) and t[i] in _OPT84_PM_SCRIPT_BUILTINS:
+            return t[0], _OPT84_PM_SCRIPT_BUILTINS[t[i]], t[i + 1:]
+        return None
+    if (t and lf.get("runner") == "yarn" and t[0] in _OPT84_PM_SCRIPT_BUILTINS
+            and not (t[0] == "test" and any(a in _OPT84_SHELL_TEST_OPS
+                                            for a in t[1:]))):
+        return "yarn", _OPT84_PM_SCRIPT_BUILTINS[t[0]], t[1:]
+    return None
+
+
+def _opt84_opaque_leaf(lf: dict[str, Any]) -> "tuple[str, str] | None":
+    """For a leaf no table row classifies: `("hold", gate)` when what it runs
+    cannot be read, `("expand", command)` when the command it stands for can
+    be resolved instead (a stripped wrapper, a package-manager script builtin),
+    None when it is a plain leaf (the verdict stands)."""
+    import shlex
+    t = list(lf.get("tokens") or [])
+    if not t:
+        return None
+    if t[0].startswith("("):
+        return "hold", "command_changes_directory"      # a subshell
+    if t[0] in ("npm", "pnpm", "yarn", "bun"):
+        head = t[:t.index("--")] if "--" in t else t
+        if any(a.split("=", 1)[0] in _OPT84_PM_DIR_FLAGS for a in head[1:]):
+            return "hold", "working_directory_unknown"
+    call = _opt84_pm_script_call(lf)
+    if call is not None:
+        pm, name, args = call
+        return "expand", shlex.join([pm, "run", name, *args])
+    b = t[0].rsplit("/", 1)[-1]
+    if b in _OPT84_WRAPPERS:
+        inner = _opt84_unwrap(t)
+        return (("expand", shlex.join(inner)) if inner
+                else ("hold", "script_unresolvable"))
+    if b in _OPT84_SHELLS:
+        return "hold", "script_unresolvable"
+    if ((t[0].endswith(".sh") or t[0].startswith(("./", "../")))
+            and b not in _OPT84_NATIVE_LOCAL_EXECUTABLES):
+        return "hold", "script_unresolvable"
+    return None
+
+
+_OPT84_MAX_LEAF_EXPANSIONS = 50
+
+
+def _opt84_expand_leaves(leaves: list[dict[str, Any]],
+                         scripts_by_dir: dict[str, dict[str, str]],
+                         scripts_unreadable: "frozenset[str]",
+                         ) -> "tuple[list[dict[str, Any]], str | None]":
+    """Every leaf of a resolved step with each opaque leaf (`_opt84_opaque_leaf`)
+    either expanded through `_resolve_run_leaves` (the same call path a
+    `pnpm run x` takes) or turned into a held-back gate. Returns (leaves, gate);
+    a gate means the step is held back. A directory change outranks any other
+    gate, as it does for the resolver's own unresolved segments."""
+    out: list[dict[str, Any]] = []
+    gates: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    budget = _OPT84_MAX_LEAF_EXPANSIONS
+    queue = [(lf, 0) for lf in leaves]
+    while queue:
+        lf, depth = queue.pop(0)
+        if _opt84_classify(lf["tokens"])[0] is not None:
+            out.append(lf)
+            continue
+        op = _opt84_opaque_leaf(lf)
+        if op is None:
+            out.append(lf)
+            continue
+        if op[0] == "hold":
+            gates.append(op[1])
+            continue
+        key = (str(lf.get("wd")), op[1])
+        if (lf.get("wd") is None or key in seen or budget <= 0
+                or depth >= _OPT82_MAX_SCRIPT_DEPTH):
+            gates.append("command_changes_directory" if lf.get("wd") is None
+                         else "script_unresolvable")
+            continue
+        seen.add(key)
+        budget -= 1
+        sub = _resolve_run_leaves(op[1], str(lf["wd"]), scripts_by_dir,
+                                  scripts_unreadable, bin_names=_OPT84_BIN_NAMES,
+                                  chain=list(lf.get("chain") or []),
+                                  runner=str(lf.get("runner") or "npx"))
+        if sub.unresolved:
+            first = next((u for u in sub.unresolved if u.get("kind") == "cd"),
+                         sub.unresolved[0])
+            gates.append(_opt84_gate_for_unresolved(first))
+            continue
+        tr = lf.get("task_runner")
+        queue[:0] = [({**c, "task_runner": tr} if tr and not c.get("task_runner")
+                      else c, depth + 1) for c in sub.leaves]
+    if gates:
+        return out, ("command_changes_directory"
+                     if "command_changes_directory" in gates else gates[0])
+    return out, None
+
+
 # Words in an action step's `uses:` or `name:` that say it may lint, format or
 # type-check (what it runs is inside the action, so it is held back). A LOCAL
 # action also qualifies when its label says check.
@@ -17374,10 +17567,19 @@ def _detect_opt84_tool_swap(
                 _no(_opt84_gate_for_unresolved(first), wf, job, name,
                     segment=first.get("segment"))
                 continue
+            # A leaf the table has no row for is the verdict only when the read
+            # knows what it runs: a shell script, a local executable, a wrapper
+            # it cannot strip, a subshell or a package manager sent elsewhere
+            # holds the step back; a stripped wrapper or `npm test` is followed.
+            leaves, opaque = _opt84_expand_leaves(res.leaves, scripts_by_dir,
+                                                  scripts_unreadable)
+            if opaque:
+                _no(opaque, wf, job, name)
+                continue
             found: list[tuple[str, dict[str, Any]]] = []
             targets: set[str] = set()
             emits = False
-            for lf in res.leaves:
+            for lf in leaves:
                 row, kind = _opt84_classify(lf["tokens"])
                 if kind == "target":
                     targets.add(str(row))
@@ -17482,7 +17684,7 @@ def _detect_opt84_tool_swap(
                 continue
             out.append(_opt84_finding(
                 p, wf, job, yaml_key, name, category, p50, job_p50, wd, run,
-                list(dict.fromkeys(lf["command"] for lf in res.leaves)), tools,
+                list(dict.fromkeys(lf["command"] for lf in leaves)), tools,
                 start_idx + len(out) + 1))
     return out
 
