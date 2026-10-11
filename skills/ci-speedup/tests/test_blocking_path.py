@@ -9027,10 +9027,10 @@ def test_no_collector_path_can_record_a_held_back_entry_with_no_job():
         elif (isinstance(n, ast.Assign)
               and any(_is_target(t) for t in n.targets)):
             writes.append(("=", n))
-    # 77, 79 pre-probe, 79 post-probe, 80, 81 A1, 81 A2, 82 and 83 (both guarded
-    # by `and job` in their `_no` helpers) — and every one of them an
-    # `append(<dict literal>)`, never an `extend`, an `insert` or a `+=`.
-    assert len(writes) == 8, [(k, ast.dump(n)[:60]) for k, n in writes]
+    # 77, 79 pre-probe, 79 post-probe, 80, 81 A1, 81 A2, 82, 83 and 84 (82, 83
+    # and 84 guarded by `and job` in their `_no` helpers) — and every one of them
+    # an `append(<dict literal>)`, never an `extend`, an `insert` or a `+=`.
+    assert len(writes) == 9, [(k, ast.dump(n)[:60]) for k, n in writes]
     for kind, n in writes:
         assert kind == "append", (kind, ast.dump(n)[:80])
         d = n.args[0]

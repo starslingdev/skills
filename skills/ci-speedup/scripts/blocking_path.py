@@ -8689,18 +8689,35 @@ def _opt84_for_pole(pole: dict[str, Any],
             and str(f["tool_swap"].get("job") or "") == job]
 
 
+def _opt84_packages_note(t: dict[str, Any]) -> str:
+    """The task-runner expansion note, from the stamped `packages` count; the
+    engine also appends it to `fit_reasons`, so dual-run must not repeat it."""
+    n = t.get("packages")
+    if not isinstance(n, int) or isinstance(n, bool) or n < 1:
+        return ""
+    return (f"across {n} workspace package{'' if n == 1 else 's'}; "
+            "task-runner filters not applied")
+
+
 def _opt84_fit_words(t: dict[str, Any]) -> str:
     """The fit in a few words: drop-in, run both (with the stamped reasons), or
-    OPT82 first."""
+    OPT82 first, plus the workspace-packages note on a task-runner expansion,
+    whatever the fit."""
     fit = str(t.get("fit") or "")
-    if fit == "drop-in":
-        return "drop-in"
+    note = _opt84_packages_note(t)
+    reasons = [_flatten_cell(str(r)) for r in t.get("fit_reasons") or [] if r]
     if fit == "dual-run":
-        why = "; ".join(_flatten_cell(str(r)) for r in t.get("fit_reasons") or [] if r)
+        if note and note not in reasons:
+            reasons.append(note)
+        why = "; ".join(reasons)
         return "run both" + (f": {why}" if why else "")
-    if fit == "deferred_to_opt82":
-        return "see OPT82 first: its type-aware rules are that finding's to settle"
-    return _flatten_cell(fit) or "unknown"
+    if fit == "drop-in":
+        words = "drop-in"
+    elif fit == "deferred_to_opt82":
+        words = "see OPT82 first: its type-aware rules are that finding's to settle"
+    else:
+        words = _flatten_cell(fit) or "unknown"
+    return words + (f"; {note}" if note else "")
 
 
 def _opt84_bench_pairs(tools: list[dict[str, Any]]) -> list[str]:

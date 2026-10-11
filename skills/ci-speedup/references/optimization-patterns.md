@@ -4901,11 +4901,11 @@ title_template: "A slow step on the long pole runs a tool that has a native drop
 
 **TL;DR**: A heavy step on the slowest job gating the merge runs a JavaScript dev tool (Prettier, ESLint or `tsc --noEmit`) that has a native, much faster drop-in (oxfmt, oxlint, TypeScript 7). The audit names the step, its measured time, the tool, the drop-in and the target's own migration docs. The step's measured time is a ceiling, not a saving: nothing is credited until a benchmark confirms it.
 
-**Anti-pattern**: A drilled long-pole job spends a large share of its time in a lint, format or type-check step whose command, directly or through a `package.json` script, runs a tool with a native replacement in the swap table below.
+**Anti-pattern**: A drilled long-pole job spends at least 20 seconds in a lint, format or type-check step whose command, directly or through a `package.json` script, runs a tool with a native replacement in the swap table below.
 
 **Detection heuristic** (routed from the measured critical path, once per drilled pole; no gh call of its own). A step is a candidate when:
 
-1. it measures at least 20s and at least 15% of the pole's decomposed p50 (the same floors as OPT83);
+1. it measures at least 20s (OPT83's absolute floor; there is deliberately no share-of-job floor, because the swap's ceiling is the step's own time whatever share of the pole it is, and the card states that share);
 2. its measured category is `scan` or `build`;
 3. it is a `run:` step.
 

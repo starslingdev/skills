@@ -3260,8 +3260,9 @@ call of its own. It reads the pole's stamped step decomposition (`steps`,
 `job_p50_s`), the workflow file, and the scan's `type_aware_lint` block, which
 carries the `package.json` scripts per directory, the tool versions found in
 each manifest, and the ESLint config facts. A step is a candidate when it
-measures at least 20s and at least 15% of the pole's decomposed p50 (OPT83's
-floors), its category is `scan` or `build`, and it is a `run:` step. Its
+measures at least 20s (OPT83's absolute floor; unlike OPT83 there is no
+share-of-job floor, `_OPT84_MIN_SHARE` = 0.0, so a 29s lint on a 318s gate
+still gets a card that states its share), its category is `scan` or `build`, and it is a `run:` step. Its
 command is split into leaf commands, following package-manager script calls
 through `package.json` up to five levels deep (OPT82's resolver, shared) and
 unwrapping runner calls; the leaves are matched against the v1 rows of the

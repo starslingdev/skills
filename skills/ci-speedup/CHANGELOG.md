@@ -17,7 +17,7 @@ unversioned and updates by reinstall from `main`.
   merge-gating job runs a tool that has a native, much faster drop-in.** New
   catalog pattern OPT84 looks at each slowest job the audit measured on the
   pull-request path. When a lint, format or type-check step takes at least 20
-  seconds and at least 15% of the job, and its command (directly or through the
+  seconds (whatever share of the job that is), and its command (directly or through the
   repo's `package.json` scripts) runs Prettier, ESLint or `tsc --noEmit`, the
   report adds a card at that job naming the step, its measured time, the tool,
   its drop-in (oxfmt, oxlint, TypeScript 7) and a link to the drop-in's own
