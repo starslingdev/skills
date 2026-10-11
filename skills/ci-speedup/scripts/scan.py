@@ -3949,9 +3949,49 @@ def _tal_block(**overrides: Any) -> dict[str, Any]:
         # what the config's own text names, never evaluated. OPT84 decides
         # whether an oxlint swap is a plain swap or a dual-run from these.
         "eslint_config_facts": {},
+        # {catalog name: {package: version spec}} from the root
+        # `pnpm-workspace.yaml`: its `catalog:` map is "default", each
+        # `catalogs:<name>:` map is <name>. OPT84 resolves a `catalog:` /
+        # `catalog:<name>` version through it; absent or unreadable = {}.
+        "pnpm_catalogs": {},
     }
     block.update(overrides)
     return block
+
+
+def _tal_pnpm_catalogs(root: Path) -> dict[str, dict[str, str]]:
+    """The root `pnpm-workspace.yaml`'s catalogs; {} when there is none or it
+    cannot be read (a catalog reference then stays unreadable downstream)."""
+    try:
+        text = _read_config_text(root / "pnpm-workspace.yaml")
+    except OSError:
+        return {}
+    if text is None:
+        return {}
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+
+    def _specs(m: Any) -> "dict[str, str] | None":
+        if not isinstance(m, dict):
+            return None
+        return {str(k): str(v) for k, v in m.items()
+                if isinstance(v, (str, int, float)) and not isinstance(v, bool)}
+
+    out: dict[str, dict[str, str]] = {}
+    named = data.get("catalogs")
+    if isinstance(named, dict):
+        for n, m in named.items():
+            specs = _specs(m)
+            if specs is not None:
+                out[str(n)] = specs
+    default = _specs(data.get("catalog"))
+    if default is not None:
+        out["default"] = {**out.get("default", {}), **default}
+    return out
 
 
 # The packages whose declared versions OPT84 reads: the tools it can swap, the
@@ -4141,6 +4181,7 @@ def _read_type_aware_lint_unguarded(root: Path) -> dict[str, Any]:
         tool_versions=tool_versions,
         config_files=config_files,
         eslint_config_facts=fit_facts,
+        pnpm_catalogs=_tal_pnpm_catalogs(root),
     )
 
 
