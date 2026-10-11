@@ -277,3 +277,40 @@ def test_an_ambiguous_pole_with_no_job_or_check_is_pole_not_file_backed():
                                 poles=[{"ambiguous_workflows": ["a", "b"]}])
     assert out == [] and withheld == {"pole_not_file_backed": 1}, withheld
     assert cands == []
+
+
+# ---- 8. task-runner forms through OPT84 -----------------------------------------
+
+@pytest.mark.parametrize("run", ["pnpm --dir web -r lint", "pnpm -C web -r lint"])
+def test_pnpm_recursive_in_another_directory_is_held_back(run):
+    out, withheld, cands = _run(
+        {"run": run}, block=_block(scripts={"": {}, "web/a": {"lint": "eslint ."}}))
+    assert out == []
+    _gate_only(withheld, cands, "delegated_script_unresolved")
+
+
+@pytest.mark.parametrize("run", ["npx nx affected --target=lint,typecheck",
+                                 "npx nx run-many -t lint,typecheck",
+                                 "npx nx run-many -t lint typecheck"])
+def test_nx_comma_and_multi_target_forms_expand_every_task(run):
+    scripts = {"": {}, "a": {"lint": "eslint .", "typecheck": "tsc --noEmit"},
+               "b": {"lint": "eslint src"}}
+    out, withheld, cands = _run({"run": run}, block=_block(scripts=scripts))
+    assert len(out) == 1, (withheld, cands)
+    assert sorted(_rows(out[0])) == ["eslint", "tsc"]
+    assert _tool(out[0], "eslint")["packages"] == 2
+
+
+def test_turbo_forwards_args_after_the_separator_into_each_package_leaf():
+    scripts = {"": {}, "apps/web": {"lint": "eslint ."},
+               "apps/docs": {"lint": "eslint src"}}
+    res = cr._resolve_run_leaves("npx turbo run lint -- --max-warnings 0", "",
+                                 scripts, bin_names=cr._OPT84_BIN_NAMES)
+    assert res.unresolved == [], res.unresolved
+    assert sorted((lf["wd"], lf["command"]) for lf in res.leaves) == [
+        ("apps/docs", "eslint src --max-warnings 0"),
+        ("apps/web", "eslint . --max-warnings 0")]
+    out, withheld, _c = _run({"run": "npx turbo run lint -- --max-warnings 0"},
+                             block=_block(scripts=scripts))
+    assert len(out) == 1, withheld
+    assert _tool(out[0], "eslint")["leaf_command"].endswith("--max-warnings 0")
