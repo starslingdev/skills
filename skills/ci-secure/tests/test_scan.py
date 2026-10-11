@@ -2134,3 +2134,131 @@ def test_evidence_gutter_check_tolerates_a_blank_source_line(
         assert re.match(r"\s*\d+:(?: |$)", line), (
             f"non-source line inside verbatim evidence: {line!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Coverage-gap dedupe (issue #36)
+# ---------------------------------------------------------------------------
+#
+# `scan()` fans `_DROPPED_MATCHES` out into three findings-JSON lists —
+# `dropped_matches`, `coverage_notes`, `suppressed_findings` — and collapses
+# exact repeats on the way (`if entry not in bucket`). Repeats are ordinary:
+# several detectors record the same (file, reason) pair once per match, so a
+# file with two matching steps queues the identical entry twice. Without the
+# collapse the report's incomplete-coverage blockquote prints that file's line
+# twice, which reads as two distinct gaps in one file.
+#
+# Nothing else in the suite exercises a repeated entry, so deleting the
+# membership test leaves every test green — the class of safety code that has
+# to be red-proved explicitly. These tests pin it at the scan seam, where the
+# dedupe actually lives (report.py renders the lists verbatim).
+
+
+class _NoClearList(list):
+    """A list whose ``clear()`` is inert.
+
+    ``scan()`` opens by clearing ``_DROPPED_MATCHES``, so entries seeded before
+    the call would be wiped before the bucketing loop that is under test ever
+    runs. Swapping the module global for this subclass lets a seeded queue
+    survive into that loop without reaching into scan()'s body.
+    """
+
+    def clear(self) -> None:  # noqa: D102 - deliberately does nothing
+        return
+
+
+def _bucket_gaps(tmp_path: Path, monkeypatch, queue: list[dict]) -> dict:
+    """Scan a benign repo with `queue` standing in for `_DROPPED_MATCHES`."""
+    _write_workflow(
+        tmp_path, "ok.yml",
+        "on: push\n"
+        "permissions: {}\n"
+        "jobs:\n"
+        "  build:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: echo hi\n",
+    )
+    monkeypatch.setattr(scan, "_DROPPED_MATCHES", _NoClearList(queue))
+    catalog = scan.load_catalog(
+        _SKILL_DIR / "references" / "security-patterns.md")
+    return scan.scan(catalog, tmp_path, gh_impostor=False)
+
+
+def _gap(file_path: Path, reason: str, kind: str) -> dict:
+    return {"file": str(file_path), "reason": reason, "kind": kind}
+
+
+def test_repeated_coverage_gap_entries_collapse_per_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same (file, reason) queued three times lists that file ONCE."""
+    wf = tmp_path / ".github" / "workflows" / "ok.yml"
+    reason = "P14.24: jobs.build could not be located in the raw file"
+    result = _bucket_gaps(tmp_path, monkeypatch, [
+        _gap(wf, reason, scan._KIND_UNANCHORED),
+        _gap(wf, reason, scan._KIND_UNANCHORED),
+        _gap(wf, reason, scan._KIND_UNANCHORED),
+    ])
+    assert result["dropped_matches"] == [
+        {"workflow_file": ".github/workflows/ok.yml", "reason": reason}
+    ], "a repeated coverage-gap entry was rendered more than once"
+
+
+def test_dedupe_keeps_distinct_reasons_for_the_same_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Teeth check: the collapse is on the whole entry, not on the filename.
+
+    One file CAN have two genuinely different gaps, and suppressing the second
+    would hide one. Order is the queue's, so the report reads in scan order.
+    """
+    wf = tmp_path / ".github" / "workflows" / "ok.yml"
+    first = "P14.24: jobs.build could not be located in the raw file"
+    second = "P14.25: jobs.build install line could not be located"
+    result = _bucket_gaps(tmp_path, monkeypatch, [
+        _gap(wf, first, scan._KIND_UNANCHORED),
+        _gap(wf, second, scan._KIND_UNANCHORED),
+        _gap(wf, first, scan._KIND_UNANCHORED),
+    ])
+    assert [e["reason"] for e in result["dropped_matches"]] == [first, second]
+
+
+def test_dedupe_applies_to_every_gap_bucket(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`coverage_notes` and `suppressed_findings` are separate lists fed by the
+    same loop; a dedupe that only covered `dropped_matches` would leave the
+    duplicate blockquote line the other two render."""
+    wf = tmp_path / ".github" / "workflows" / "ok.yml"
+    note = "P14.24: jobs.build: working-directory is computed"
+    supp = "P14.12: pin suppressed by a local action reference"
+    result = _bucket_gaps(tmp_path, monkeypatch, [
+        _gap(wf, note, scan._KIND_NOT_SCANNED),
+        _gap(wf, note, scan._KIND_NOT_SCANNED),
+        _gap(wf, supp, scan._KIND_SUPPRESSED),
+        _gap(wf, supp, scan._KIND_SUPPRESSED),
+    ])
+    assert [e["reason"] for e in result["coverage_notes"]] == [note]
+    assert [e["reason"] for e in result["suppressed_findings"]] == [supp]
+
+
+def test_dedupe_is_scoped_per_bucket_not_across_buckets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Teeth check: the same (file, reason) can legitimately land in TWO
+    buckets when it arrives under two different `kind`s — that is not a
+    duplicate, since `kind` is not part of the dedupe key `entry`. A dedupe
+    that (wrongly) checked membership across all three buckets combined,
+    instead of within each bucket, would drop the second occurrence here and
+    still pass every other test in this file, because none of them queue the
+    identical reason under two different kinds.
+    """
+    wf = tmp_path / ".github" / "workflows" / "ok.yml"
+    reason = "P14.24: jobs.build could not be located in the raw file"
+    result = _bucket_gaps(tmp_path, monkeypatch, [
+        _gap(wf, reason, scan._KIND_UNANCHORED),
+        _gap(wf, reason, scan._KIND_NOT_SCANNED),
+    ])
+    assert [e["reason"] for e in result["dropped_matches"]] == [reason]
+    assert [e["reason"] for e in result["coverage_notes"]] == [reason]
