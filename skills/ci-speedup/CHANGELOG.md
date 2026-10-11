@@ -32,7 +32,7 @@ unversioned and updates by reinstall from `main`.
   cannot follow, an action step, a lint config it could not fully read) holds
   the job back, listed in the Data sources row as "tool swap: held back".
   Babel and Webpack stay in the catalog's swap table as recipes only. The
-  catalog now has 82 patterns (73 hygiene, 9 structural). (#TBD)
+  catalog now has 82 patterns (73 hygiene, 9 structural). (#129)
 
 - **2026-10-09** — **The audit now spots a slow merge-gating job whose
   independent steps run one after another, and shows the most a `parallel:`
@@ -792,7 +792,7 @@ unversioned and updates by reinstall from `main`.
   title drops "(and Slow Tool Replacement)" and becomes "Repeated
   Checkout/Setup Without Artifact Handoff"; the tool-swap table that lived
   under it moved to OPT84, and OPT14 now links there. Its `fix_strategy` is
-  unchanged, so older findings files still match it. (#TBD)
+  unchanged, so older findings files still match it. (#129)
 
 - **2026-10-10** — **The "Parallel steps" Data sources row says what the repo
   actually uses.** Its "Used for" cell always described `parallel:` groups, so
