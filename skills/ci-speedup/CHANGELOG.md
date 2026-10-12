@@ -1080,7 +1080,7 @@ unversioned and updates by reinstall from `main`.
   is about 780 min/mo, and the report's check that no saving exceeds its jobs'
   measured compute refused the report. A failed sample now counts only when it
   ended within 15 minutes after the 360-minute kill; the report verifier
-  rejects a finding that credits a longer one. (PR #PRNUM)
+  rejects a finding that credits a longer one. (#131)
 - **2026-10-10** — **`STARSLING_LOG_LEVEL=DEBUG` now prints the debug trace.**
   The variable was documented as the opt-in for the scripts' diagnostic output,
   but no script read it, so every debug line was unreachable and stderr stayed
