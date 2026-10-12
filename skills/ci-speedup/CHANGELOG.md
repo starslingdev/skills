@@ -30,17 +30,27 @@ unversioned and updates by reinstall from `main`.
   Every rule, plugin, file set and check stays; when the drop-in may lack
   something the repo relies on (ESLint custom rules, any ESLint plugin oxlint
   does not carry natively, including ones named only through a legacy
-  `plugin:` preset or a YAML config, or a Prettier plugin), the card says to
-  run both tools. Any card that proposes
+  `plugin:` preset or a YAML config, ESLint type-aware rules, ESLint
+  command-line flags that add rules, plugins or parsers, a Prettier plugin, or
+  a Prettier config file the audit does not open such as `prettier.config.js`),
+  the card says to run both tools. ESLint with type-aware rules runs both
+  tools unless OPT82 already reports that step, in which case the card says to
+  see OPT82 first. Any card that proposes
   an ESLint swap itself (not left to OPT82) is marked high risk, drop-in or
-  run-both alike. A
-  repo already on the drop-in hears nothing about it, and ESLint with
-  type-aware rules is left to OPT82. Anything the audit cannot read for certain
+  run-both alike. The audit stays silent on a tool when the same step
+  already runs its drop-in, when oxlint or oxfmt (or `eslint-plugin-oxlint`)
+  is declared in a `package.json` on the step's path to the repo root, or,
+  for the type-check, when TypeScript 7 or later is declared. Anything the
+  audit cannot read for certain
   (a `${{ }}` expression in the command, a script it cannot follow such as a
   shell script or a subshell, a package manager pointed at another directory,
   an action step that may lint or format, a lint config it could not fully
-  read) holds
+  read, a repository scan that carries no lint config read, a `package.json`
+  or Prettier config it could not read, a TypeScript version it cannot pin
+  down, or, in a JavaScript repo, a general task runner such as `make` or
+  `just` and an action it does not recognise) holds
   the step back, listed in the Data sources row as "tool swap: held back".
+  The card links each drop-in's overview docs alongside its migration guide.
   A `pnpm <name>` / `yarn <name>` / `bun <name>` that names no script runs that
   binary and is read as it (a CLI the table has no row for is counted, not
   listed; a path or script file such as `bun build.ts`, a colon name, pnpm's
@@ -808,7 +818,17 @@ unversioned and updates by reinstall from `main`.
   title drops "(and Slow Tool Replacement)" and becomes "Repeated
   Checkout/Setup Without Artifact Handoff"; the tool-swap table that lived
   under it moved to OPT84, and OPT14 now links there. Its `fix_strategy` is
-  unchanged, so older findings files still match it. (#129)
+  unchanged, so older findings files still match it, and the catalog keeps
+  explicit alias anchors for the old heading's links (and for a few other
+  older-style links that committed findings files still carry), so links in
+  published example reports and on the website still land on the pattern; a
+  new test fails when a committed findings file links an anchor the catalog no
+  longer has. (#129)
+
+- **2026-10-10** — **OPT82's agent prompt now points to OPT84 for tool
+  swaps.** Its no-weakening step cited OPT14's swap table and the contract
+  under it, which moved; it now cites OPT84's tool-swap table and rail.
+  (#129)
 
 - **2026-10-10** — **The "Parallel steps" Data sources row says what the repo
   actually uses.** Its "Used for" cell always described `parallel:` groups, so

@@ -3272,25 +3272,41 @@ unwrapping runner calls; the leaves are matched against the v1 rows of the
 catalog's swap table (Prettier, ESLint, `tsc --noEmit`; Babel and Webpack are
 recipe only).
 
-Verdicts, counted only: no candidate, no table tool on the step, the target
-already in use, a `tsc` that emits, or an ESLint leaf on a step OPT82 already
-reports (OPT82 is the finding; other table tools on that step still qualify).
-A repo with no JavaScript manifest at all (the scan block's complete walk found
-no `package.json` scripts, no tool versions and no ESLint config, and nothing
-unreadable) makes every pole the `tool_not_in_table` verdict before any pole →
-YAML join, one count per pole; an unreadable manifest keeps the held-back path.
+Verdicts, counted only: a pole not backed by a workflow file
+(`pole_not_file_backed`), no candidate (checked first; a pole whose check maps
+to more than one workflow carries no measured steps today, so it reaches the
+held-back path), no table tool on the step, the target already in use (the
+same step runs `oxfmt` / `oxlint`, `eslint-plugin-oxlint` or a declared
+`oxlint` / `oxfmt` sits on the step's manifest walk, or `typescript` 7+ is
+declared), a `tsc` that emits, or a step whose only table tool is an ESLint run
+OPT82 already reports (OPT82 is the finding; other table tools on that step
+still qualify, and the card shows that ESLint row as "see OPT82 first").
+Generic runners (`make`, `just`, `pre-commit`, `concurrently`, `ng`, `gulp`,
+`docker`, …) and actions are a verdict only in a repo with no JavaScript
+manifest, where a direct leaf such as `npx prettier --check .` still fires; in
+a repo with one, a generic runner is held back, and so is any action outside
+the known allow-list (checkout, `setup-*`, cache, CodeQL, Docker and similar).
+An unreadable manifest keeps the held-back path.
 Held back, failing closed: unreadable step timings or workflow file, a check
 produced by more than one workflow, a pole or step not matched to exactly one
 YAML job or step, a `${{ }}` in the command, working directory, `env:` or
-`shell:`, a directory change, a script the resolver cannot follow (missing,
-too deep, unreadable `package.json`, or an unresolved delegator such as
-`turbo run`, `nx` or `node ./script/x.js`; `make` is not one, as this read
-treats it as a plain non-JavaScript leaf, `_RL_NON_JS_DELEGATORS`), a `uses:`
-step whose `uses:` or `name:` says it may lint, format or type-check
-(`_opt84_action_may_swap`; any other action is the `tool_not_in_table`
-verdict), an ESLint config
-that could not be fully read, an unreadable `typescript` version, or a working
-directory outside the checkout. Held-back poles are counted in
+`shell:`, a directory change, a script the resolver cannot follow (a missing
+or unfollowable `npm run` target, too deep, unreadable `package.json`, or an
+unresolved delegator such as `turbo run`, `nx` or `node ./script/x.js`; a
+task-runner expansion is trusted only when the manifest walk was complete), a
+generic runner or unknown action in a JavaScript repo (above), a `uses:` step
+whose `uses:` or `name:` says it may lint, format or type-check
+(`_opt84_action_may_swap`), an ESLint config that could not be fully read, a
+scan with no ESLint config read or whose config reader failed
+(`type_aware_lint_scan_missing`, `type_aware_config_reader_failed`, the two
+scan gates shared with OPT82), a `package.json` or Prettier config on the
+Prettier step's walk that could not be read (the Prettier fit fails closed;
+a Prettier config file the audit does not open, such as `.prettierrc.js` or
+`prettier.config.*`, makes the fit "run both" instead), a `typescript`
+version the audit cannot pin down (no `package.json` declares it, unreadable,
+a `>=` range, or a walk that was truncated, never reached the step's
+directory or hit an unreadable manifest), or a working directory outside the
+checkout. Held-back poles are counted in
 `opt84_withheld_by_gate`, listed in `opt84_withheld_candidates`, and shown in
 the "tool swap: held back" Data sources row from the shared `_WITHHELD_ROWS`
 registry, with plain reasons from `_OPT84_WITHHOLD_PHRASES`.
@@ -3307,13 +3323,19 @@ whenever the card reports an ESLint row outright (drop-in or dual-run; a run
 deferred to OPT82 does not count). The ESLint fit is dual-run whenever a config
 carries custom local rules, the `tailwindcss` plugin, a framework plugin or any
 other plugin oxlint does not carry natively, a `react-hooks/exhaustive-deps`
-rule, facts the scan did not read, or a shareable config or config import it
-did not follow (fail closed). The card renders once in the pole's section,
+rule, type-aware parsing that is on or unresolved (unless OPT82 already reports
+the step, which defers it), facts the scan did not read, or a shareable config
+or config import it did not follow (fail closed), and whenever the command
+passes `--rulesdir`, `--plugin`, `--rule`, `--parser` or `--ext`. The
+Prettier fit is dual-run when a `prettier-plugin-*` is declared on the walk, a
+Prettier config it reads lists `plugins`, or a Prettier config file it does
+not open applies. The card renders once in the pole's section,
 after any OPT83 card and before any OPT81 card, and never in a total, Tier 2,
 the headline or Also noticed. It carries no prompt block: each tool row says
-the target is the native replacement with its fit, and links the target's own
-docs (the oxfmt and oxlint migration guides; the TypeScript 7 announcement, as
-that row has no migration guide). It carries the no-weakening rail and a
+the target is the native replacement with its fit ("drop-in", "run both: …"
+or "see OPT82 first"), and links the target's own docs (the oxfmt and oxlint
+migration guides plus their overview pages, `_OPT84_DOCS`; the TypeScript 7
+announcement, as that row has no migration guide). It carries the no-weakening rail and a
 benchmark line that tells the reader to give the target the repo's migrated
 config first (until then the target runs on its defaults) and then time both
 tools on the same runner class. `verify_report.check_opt84_tool_swap`
@@ -3323,8 +3345,11 @@ rows (each table row named once, a legal fit, the table's docs links and
 published range, an ESLint deferral only where OPT82 reports that step), the
 severity against the engine's rule, the split flag, that no saving is carried,
 and that exactly one card renders in the right place. It also pins the
-held-back counts against the listed entries, like its siblings. It does not
-re-resolve the command or re-read the scripts and config facts.
+held-back counts against the listed entries, like its siblings. It also
+re-derives each tool row's fit from the config facts stamped on the finding
+(plugins, custom rules, type-aware state, unopened Prettier config files) and
+fails a fit those facts do not support. It does not re-resolve the command or
+re-read the scripts.
 
 ## 12. The blocking-path report (`blocking_path.py`)
 
