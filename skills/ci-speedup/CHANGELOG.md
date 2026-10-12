@@ -51,11 +51,17 @@ unversioned and updates by reinstall from `main`.
   `just` and an action it does not recognise) holds
   the step back, listed in the Data sources row as "tool swap: held back".
   The card links each drop-in's overview docs alongside its migration guide.
-  A nameless step GitHub names `Run <command>` whose command is a non-JavaScript
-  tool (cargo, cmake, go, gradle, dotnet, ...) is a silent verdict even when its
-  workflow step cannot be joined; Rust-ecosystem audit and cache actions are
-  known verdicts; a Prettier data config is read as JSON first, then YAML, so a
-  tab-indented `.prettierrc` names its plugins.
+  A nameless step GitHub names `Run <command>` whose command runs only
+  non-JavaScript tools (cargo, cmake, go, gradle, dotnet, ...) is a silent
+  verdict when its workflow job joins but the step itself cannot (an
+  expression in the command, or two steps sharing a name); a wrapper such as
+  `sudo`, `corepack`, `uv run`, `poetry run` or `bundle exec` is read through
+  to what it runs, and `lefthook`, `lint-staged`, `husky`, `bazel` and an
+  interpreter running a script file are held back like the other generic
+  runners. Rust-ecosystem audit and cache actions are known verdicts. Prettier
+  configs are read in every walked directory, not only beside a
+  `package.json`, as JSON first and then YAML, so a tab-indented `.prettierrc`
+  names its plugins; `--parser-options` on the ESLint command means run both.
   The report's own self-check re-derives every card from the findings file:
   the step and its time on its pole, the ceiling, the fit from the stamped
   lint-config facts (a "drop-in" over custom rules, a plugin oxlint does not
