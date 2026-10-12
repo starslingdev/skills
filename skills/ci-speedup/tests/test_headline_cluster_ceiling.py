@@ -364,10 +364,13 @@ def _presence_doc(*, wf: str, legs: list[str], step: str, cluster_wc: float,
     }
 
 
-def _crown_bottom_line(secs: float) -> str:
+def _crown_bottom_line(secs: float, wf: str = "tests_secondary.yml") -> str:
+    # Mirrors `blocking_path._cluster_headline_bottom_line`: the crown sentence names the cluster's
+    # workflow and points at its **OPT73** entry — the two facts the crown guards identify it by.
     return (f"> **Bottom line.** A typical PR waits **80m 00s** for all checks to finish. The biggest "
             f"single measured win is **~{bp._clock(secs)}** - the `Run test` step recurs across the "
-            "3 concurrent legs of `tests_secondary.yml`.")
+            f"3 concurrent legs of `{wf}`. See the **OPT73** entry under [Also noticed](#also-noticed) "
+            "for the measured step, evidence, and fix recipe.")
 
 
 def test_presence_guard_FAILS_when_a_minority_workflow_cluster_crowns(tmp_path):
@@ -496,7 +499,7 @@ def test_on_spine_guard_FAILS_when_an_off_spine_cluster_is_crowned(tmp_path):
                         step="Run pytest", cluster_wc=3000.0, wf_pole=0,
                         required=["Check hassfest"])
     doc["findings"][0]["off_spine"] = True
-    report = _crown_bottom_line(3000.0)
+    report = _crown_bottom_line(3000.0, wf="ci.yaml")
     c = vr.check_headline_cluster_lever_on_spine(report, _write_findings(tmp_path, doc))
     assert not c.ok and not c.skipped, c.detail
     assert "off_spine=True" in c.detail and "never crown" in c.detail
@@ -619,6 +622,37 @@ def test_on_spine_guard_FAILS_an_off_spine_crown_whose_fractional_ceiling_rounds
                         step="Run pytest", cluster_wc=3001.6, wf_pole=0,
                         required=["Check hassfest"])
     doc["findings"][0]["off_spine"] = True
-    report = _crown_bottom_line(3000.0)              # rendered 50m 00s, 1.6s under the ceiling
+    report = _crown_bottom_line(3000.0, wf="ci.yaml")  # rendered 50m 00s, 1.6s under the ceiling
     c = vr.check_headline_cluster_lever_on_spine(report, _write_findings(tmp_path, doc))
+    assert not c.ok and not c.skipped, c.detail
+
+
+# G. The crown is identified by what the Bottom line NAMES, not by its number alone. A number match
+# is a coincidence when the sentence leads with a different lever, and a crown sentence that names
+# the cluster is that cluster's crown even if its number is off.
+def test_off_spine_cluster_within_2s_of_a_chain_headline_is_not_crowned(tmp_path):
+    # A 35s off-spine cluster under the ~36s chain headroom: the renderer leads with the chain and
+    # never names the cluster, so the on-spine guard must not read the 1s-apart numbers as a crown.
+    vr = _vr()
+    d = _mastodon_shape()
+    d["findings"][0]["wall_clock_p50_s"] = 35.0
+    d["findings"][0]["off_spine"] = True
+    md = bp.render(d)
+    bl = _bottom_line(md)
+    assert "fixing the whole chain is worth up to" in bl and "**~36s**" in bl, bl
+    assert "OPT73" not in bl
+    c = vr.check_headline_cluster_lever_on_spine(md, _write_findings(tmp_path, d))
+    assert c.ok and c.skipped, c.detail
+    assert "does not lead" in c.detail
+
+
+def test_presence_guard_FAILS_a_named_minority_crown_whose_number_is_inflated(tmp_path):
+    # The Bottom line names the minority workflow's cluster as the crown but prints a number far
+    # above its stamped 20s ceiling. It is still that cluster's crown: FAIL, not an outranked skip.
+    vr = _vr()
+    doc = _presence_doc(wf=".github/workflows/tests_secondary.yml",
+                        legs=["Windows (firefox)", "Android"], step="Run test",
+                        cluster_wc=20.0, wf_pole=2)
+    c = vr.check_headline_lever_is_presence_eligible(_crown_bottom_line(3000.0),
+                                                     _write_findings(tmp_path, doc))
     assert not c.ok and not c.skipped, c.detail
