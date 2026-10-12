@@ -11984,6 +11984,23 @@ def check_cluster_lever_ceiling_escapes_sibling(report: str, findings_path: Path
 _HEADLINE_WIN_RE = re.compile(r"\*\*~\s*([0-9hms  ]+?)\*\*")
 
 
+def _cluster_leads_bottom_line(bl: str, rendered_s: float | None, f: dict, cluster_s: float) -> bool:
+    """True only when the Bottom line's crown sentence IS this cluster's: it names the cluster's
+    workflow (`` `<basename>` ``) and points at its **OPT73** entry, the two facts
+    `blocking_path._cluster_headline_bottom_line` always prints, and its first `~<clock>` win is not
+    smaller than the stamped ceiling by more than the 2s whole-second rendering tolerance (smaller is
+    a burial, the sibling burial guard's target). The number alone does not identify the crown:
+    reading `rendered >= ceiling` as "the cluster leads" credited a chain headroom to a small demoted
+    cluster (mastra-ai/mastra: a 58s off-spine `prebuild.yml` cluster under a ~15m 31s chain) and
+    FAILed a correct report, and an exact-number match is a coincidence when the sentence leads with
+    a different lever. A sentence that names the cluster is its crown even at an inflated number."""
+    if rendered_s is None:
+        return False
+    wf = _wf_base(str(f.get("workflow_file") or ""))
+    named = bool(wf) and "**OPT73**" in bl and f"`{wf}`" in bl
+    return named and rendered_s + 2.0 >= cluster_s
+
+
 def check_headline_consumes_stamped_cluster_ceiling(report: str, findings_path: Path | None) -> Check:
     """**Bottom line leads with the stamped cluster ceiling — no burial (#49, the burial invariant).**
     A credited cluster-floor lever (OPT73 with `cluster_floor_lever` stamped AND a positive
@@ -12114,10 +12131,11 @@ def check_headline_lever_is_presence_eligible(report: str, findings_path: Path |
     bl = next((ln for ln in report.splitlines() if "**Bottom line.**" in ln), "")
     m = _HEADLINE_WIN_RE.search(bl)
     rendered_s = _parse_clock_to_s(m.group(1)) if m else None
-    if rendered_s is None or rendered_s + 2.0 < best_s:
+    if not _cluster_leads_bottom_line(bl, rendered_s, best_f, best_s):
         return Check(name, True,
                      f"the credited cluster lever (OPT73 `{wf}`, ~{_fmt_clock(best_s)}) does not lead "
-                     "the Bottom line (buried or no `~<clock>` win) — the crown to presence-check is "
+                     "the Bottom line (buried, outranked by a different lever, or no `~<clock>` win) — the "
+                     "crown to presence-check is "
                      "not this lever. Coverage gap, not a clean pass.", skipped=True)
     # Re-derive the crowned lever's WORKFLOW gate frequency from the stamped per-check `pole_n`
     # (mirror of `blocking_path._toc_block`'s `wf_gate`): sum over every check in this workflow.
@@ -12198,13 +12216,15 @@ def check_headline_cluster_lever_on_spine(report: str, findings_path: Path | Non
     bl = next((ln for ln in report.splitlines() if "**Bottom line.**" in ln), "")
     m = _HEADLINE_WIN_RE.search(bl)
     rendered_s = _parse_clock_to_s(m.group(1)) if m else None
-    if rendered_s is None or rendered_s + 2.0 < best_s:
-        # The max credited cluster does not LEAD the Bottom line (buried / demoted / no tilde-win) —
-        # the fixed renderer's off-spine drop, or a genuine burial (the sibling guard's target). Not
-        # this guard's crown to judge → LOUD narrow skip (L8: never read clean on an unverifiable crown).
+    if not _cluster_leads_bottom_line(bl, rendered_s, best_f, best_s):
+        # The max credited cluster does not LEAD the Bottom line (buried / demoted / outranked by a
+        # chain or pole win the crown sentence names instead / no tilde-win) — the renderer's off-spine drop, or a genuine
+        # burial (the sibling guard's target). Not this guard's crown to judge → LOUD narrow skip
+        # (L8: never read clean on an unverifiable crown).
         return Check(name, True,
                      f"the max credited cluster lever (OPT73 `{wf}`, ~{_fmt_clock(best_s)}) does not "
-                     "lead the Bottom line (demoted/buried or no `~<clock>` win) — no off-spine crown "
+                     "lead the Bottom line (demoted/buried/outranked or no `~<clock>` win) — no "
+                     "off-spine crown "
                      "to catch. Coverage gap, not a clean pass.", skipped=True)
     if best_f.get("off_spine") is True:
         return Check(name, False,
