@@ -24,7 +24,7 @@ HOW IT RECORDS
   runs the OPT82 test module through `pytest.main`. Each call is kept in completion order and
   repeats are dropped (first occurrence wins): many cases share one fixture, so the module's
   ~650 resolver and ~140 detector calls reduce to 128 and 92 distinct ones.
-  The output is plain JSON: sorted keys, one-space indent, trailing newline — deterministic, so
+  The output is plain JSON: sorted keys, one recorded call per line, trailing newline — deterministic, so
   re-recording unchanged inputs reproduces the committed file byte for byte
   (`test_recording_reproduces_the_committed_snapshot_byte_for_byte` pins that).
 
@@ -64,8 +64,20 @@ def _norm(x):
 
 
 def dumps(snap: dict) -> str:
-    """The one serialization of a snapshot (the committed file is exactly this)."""
-    return json.dumps(snap, sort_keys=True, indent=1) + "\n"
+    """The one serialization of a snapshot (the committed file is exactly this): one
+    recorded call per line, keys sorted, so the file is ~220 lines and a re-recording
+    diffs call by call rather than value by value."""
+    lines = ["{"]
+    kinds = sorted(snap)
+    for i, kind in enumerate(kinds):
+        lines.append(f'{json.dumps(kind)}: [')
+        recs = snap[kind]
+        for j, rec in enumerate(recs):
+            lines.append(json.dumps(rec, sort_keys=True, separators=(",", ":"))
+                         + ("," if j + 1 < len(recs) else ""))
+        lines.append("]" + ("," if i + 1 < len(kinds) else ""))
+    lines.append("}")
+    return "\n".join(lines) + "\n"
 
 
 def _child(skill_dir: Path, out: Path) -> int:
