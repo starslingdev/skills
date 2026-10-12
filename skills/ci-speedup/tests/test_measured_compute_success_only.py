@@ -245,6 +245,19 @@ def test_spine_footnote_names_the_basis_and_the_excluded_runs(tmp_path):
     assert "footnote" in res.detail
 
 
+def test_contract_accepts_a_large_bucket_whose_mean_rounding_hides_the_total(tmp_path):
+    # 1500 successful runs totalling 15001 billable min: the row's mean rounds to
+    # 10.001, and 10.001 x 1500 = 15001.5, so the sampled total cannot be recovered
+    # from the mean. The split must re-derive from its own stamped whole minutes.
+    jobs = [[_job(600, "success", i % 60)] for i in range(1499)] + [[_job(660, "success", 0)]]
+    spine = cr._build_runner_minute_spine(
+        {_WF: {"pull_request": jobs}}, {}, {_WF: 3000}, "public", workflows_in_play={_WF})
+    doc = _doc(spine, [])
+    report = "# report\n\n" + "\n".join(bp._runner_minute_spine_block(doc)) + "\n"
+    res = vr.check_runner_minute_spine_contract(report, _write(tmp_path, doc))
+    assert res.ok, res.detail
+
+
 def test_footnote_mirror_matches_the_renderer():
     spine = _owner_case_spine()
     none = copy.deepcopy(spine)

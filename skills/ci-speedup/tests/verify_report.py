@@ -5225,28 +5225,34 @@ def _rendered_number_problem(label: str, got_cell: object, want: object, *,
 
 def _spine_row_success_split(row: dict, occurrence_n: float, workflow_n: float,
                              monthly: float, mean_billed: float) -> dict:
-    """Re-derive one cost-spine row's successful / excluded split from its own sample. The row's
-    sampled billable minutes are whole minutes per job run (`round(mean_billed * occurrences)`,
-    the same recovery the 1-minute floor check uses); the excluded failed / cancelled / timed-out
-    runs' minutes come off that total, and both halves extrapolate exactly like the row
-    (sampled minutes / sampled workflow runs x 30d volume). A success figure that still carries
-    the excluded minutes cannot re-derive."""
+    """Re-derive one cost-spine row's successful / excluded split from its own sample. Each half
+    stamps its whole sampled billable minutes; together they must match the row's sample
+    (mean x occurrences, within the mean's 3-decimal rounding), and each half extrapolates
+    exactly like the row (sampled minutes / sampled workflow runs x 30d volume). A success
+    figure that still carries the excluded minutes cannot re-derive."""
     problems: list[str] = []
     success_n = row.get("success_occurrence_count")
+    success_sampled = row.get("success_sampled_billable_min")
     excluded_n = row.get("excluded_non_success_occurrence_count")
     excluded_sampled = row.get("excluded_non_success_sampled_billable_min")
-    ints = (success_n, excluded_n, excluded_sampled)
+    ints = (success_n, success_sampled, excluded_n, excluded_sampled)
     if not all(isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in ints):
         return {"problems": ["successful / excluded job-run split missing or not whole counts"],
                 "success_month": 0.0, "excluded_runs": 0, "excluded_sampled": 0,
                 "excluded_month": 0.0}
-    sampled_total = round(mean_billed * occurrence_n)
     if success_n + excluded_n != occurrence_n:
         problems.append("success_occurrence_count + excluded_non_success_occurrence_count "
                         "does not equal sampled_job_occurrence_count")
-    if excluded_sampled > sampled_total or (excluded_n == 0 and excluded_sampled != 0):
-        problems.append("excluded_non_success_sampled_billable_min is outside the row's sample")
-    success_month = round(max(sampled_total - excluded_sampled, 0) / workflow_n * monthly, 3)
+    # The two halves' whole minutes must add up to the row's sample. The stamped mean is
+    # rounded to 3 decimals, so mean x occurrences sits within 0.0005 per occurrence of the
+    # true total (a large bucket cannot recover the integer total from the mean alone).
+    if abs(mean_billed * occurrence_n - (success_sampled + excluded_sampled)) > (
+            0.0005 * occurrence_n + 1e-6):
+        problems.append("success_sampled_billable_min + excluded_non_success_sampled_billable_min "
+                        "does not match the row's sampled billable minutes")
+    if (excluded_n == 0 and excluded_sampled != 0) or (success_n == 0 and success_sampled != 0):
+        problems.append("sampled billable minutes stamped on a half with no job runs")
+    success_month = round(success_sampled / workflow_n * monthly, 3)
     excluded_month = round(excluded_sampled / workflow_n * monthly, 3)
     if not _close(row.get("success_billable_equiv_min_per_month"), success_month):
         problems.append("success_billable_equiv_min_per_month does not rederive (measured "

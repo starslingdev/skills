@@ -6395,6 +6395,7 @@ def _append_runner_minute_spine_rows(
             # like the row (sampled billable minutes / sampled workflow runs x 30d
             # volume), so verify_report re-derives both from the row alone.
             "success_occurrence_count": bucket["success_occurrences"],
+            "success_sampled_billable_min": bucket["success_billable_min"],
             "success_billable_equiv_min_per_month": _round3(
                 bucket["success_billable_min"] / sampled_workflow_runs * workflow_volume),
             "excluded_non_success_occurrence_count": bucket["excluded_occurrences"],
