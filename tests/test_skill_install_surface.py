@@ -23,6 +23,7 @@ graded third-party calibration corpus) and ``test_ci_secure_install_surface.py``
 """
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -50,6 +51,9 @@ _MOVED_NAMES = {
     "test_loop_summary_infra.py",
     "dogfood-retry.test.mjs",
     "test_dogfood_retry_node.py",
+    "record_opt82_resolver_snapshot.py",
+    "test_opt82_resolver_snapshot.py",
+    "opt82_resolver_snapshot.json",
 }
 
 
@@ -121,6 +125,60 @@ def test_install_surface_has_no_runtime_capture_dirs():
     )
 
 
+# Compressed blobs never ship: an install cannot be read or reviewed as text, and the one
+# that landed here (#129, the OPT82 resolver replay snapshot) was maintainer-only test data.
+_COMPRESSED_SUFFIXES = (".gz", ".tgz", ".bz2", ".xz", ".zst", ".zip")
+
+
+def test_install_surface_has_no_compressed_files():
+    """No file under skills/ci-speedup/ may be a compressed archive (`.gz` and kin)."""
+    leaked = sorted(
+        p.relative_to(_REPO).as_posix()
+        for p in _SKILL.rglob("*")
+        if p.is_file() and p.name.lower().endswith(_COMPRESSED_SUFFIXES)
+        and "__pycache__" not in p.parts
+    )
+    assert not leaked, (
+        "compressed file(s) under the installable skill ship to every user unreadable — "
+        "keep test data as plain text, and maintainer-only data under maintainers/ci-speedup/: "
+        + ", ".join(leaked)
+    )
+
+
+def _is_recorded_call_snapshot(path: Path) -> bool:
+    """A recorded replay snapshot: named as one, or JSON shaped as one — a top-level object
+    whose values are lists of recorded calls, each an object carrying `args` and `out`."""
+    if "snapshot" in path.name.lower():
+        return True
+    if path.suffix != ".json":
+        return False
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(doc, dict) and any(
+        isinstance(v, list) and v
+        and all(isinstance(e, dict) and "args" in e and "out" in e for e in v)
+        for v in doc.values()
+    )
+
+
+def test_skill_fixtures_hold_no_recorded_replay_snapshot():
+    """A replay snapshot (every call a test module made, recorded with its output, replayed to
+    prove a refactor byte-identical) is maintainer-only regression data with a generator
+    beside it: it lives under maintainers/ci-speedup/tests/fixtures/, never in the install."""
+    fixtures = _SKILL / "tests" / "fixtures"
+    leaked = sorted(
+        p.relative_to(_REPO).as_posix()
+        for p in fixtures.rglob("*")
+        if p.is_file() and _is_recorded_call_snapshot(p)
+    )
+    assert not leaked, (
+        "recorded replay snapshot(s) under the installable skill's fixtures — move them to "
+        "maintainers/ci-speedup/tests/fixtures/ with their generator: " + ", ".join(leaked)
+    )
+
+
 def test_relocated_infra_actually_present():
     """The flip side — the infra must EXIST under maintainers/ci-speedup/, so the
     absence checks above can't pass vacuously if the files were deleted, not moved."""
@@ -138,6 +196,9 @@ def test_relocated_infra_actually_present():
         _MAINT / "tests" / "test_loop_summary_infra.py",
         _MAINT / "tests" / "dogfood-retry.test.mjs",
         _MAINT / "tests" / "test_dogfood_retry_node.py",
+        _MAINT / "scripts" / "record_opt82_resolver_snapshot.py",
+        _MAINT / "tests" / "test_opt82_resolver_snapshot.py",
+        _MAINT / "tests" / "fixtures" / "opt82_resolver_snapshot.json",
     ]
     missing = [p.relative_to(_REPO).as_posix() for p in required if not p.exists()]
     assert not missing, "relocated maintainer infra is missing: " + ", ".join(missing)

@@ -47,7 +47,7 @@ Checkout · 6. Conditional Execution · 7. Trigger and Scope · 8. Release Workf
 - **Category 11 — Stack-Specific**: turbo task outputs, unstable turbo env keys, type-aware ESLint on a slow lint job (`OPT82`).
 - **Category 12 — Build Caching (language-agnostic)**: uncached compiled-language builds.
 - **Category 13 — Hidden Failures and Dead Config**: dead env vars, misconfigured caches.
-- **Category 14 — Structural / Critical-Path Levers** (`OPT70`–`OPT75`, `OPT78`, `OPT83`): routed from the measured long pole (see ARCHITECTURE §11), not a flat grep. `OPT78` is routed by the drill-time leaf detector rather than the structural router; `OPT83` is routed by the structural pass over the drilled poles' step decomposition plus the workflow YAML, not by the log leaves.
+- **Category 14 — Structural / Critical-Path Levers** (`OPT70`–`OPT75`, `OPT78`, `OPT83`, `OPT84`): routed from the measured long pole (see ARCHITECTURE §11), not a flat grep. `OPT78` is routed by the drill-time leaf detector rather than the structural router; `OPT83` and `OPT84` are routed by structural passes over the drilled poles' step decomposition plus the workflow YAML, not by the log leaves (`OPT84` also follows the step's `package.json` scripts).
 
 (Catalog OPT-ids are the static scan; the `blocking_path.py` `_parse_log` **leaf
 detectors** — prisma / vitest / turbo / playwright — are a separate set run over
@@ -1054,7 +1054,11 @@ If ANY non-test source contains the above, the build is load-bearing at runtime 
 
 ---
 
-### OPT14 — Repeated Checkout/Setup Without Artifact Handoff (and Slow Tool Replacement)
+<!-- Alias anchors: this heading lost "(and Slow Tool Replacement)" when that half moved to OPT84; committed findings files, the example reports and the website still link both old slugs, so they stay. -->
+<a id="opt14--repeated-checkout-setup-without-artifact-handoff-and-slow-tool-replacement"></a>
+<a id="opt14--repeated-checkoutsetup-without-artifact-handoff-and-slow-tool-replacement"></a>
+
+### OPT14 — Repeated Checkout/Setup Without Artifact Handoff
 
 <!-- METADATA
 pattern: OPT14
@@ -1063,7 +1067,7 @@ class: static
 detector: yaml-job-correlated
 affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml"
 fix_strategy: repeated-checkout-setup-without-artifact-handoff-and-slow-to
-title_template: "Repeated Checkout/Setup Without Artifact Handoff (and Slow Tool Replacement)"
+title_template: "Repeated Checkout/Setup Without Artifact Handoff"
 -->
 
 **TL;DR**: Multiple jobs each re-install and re-build from scratch instead of building once and passing the result to the others.
@@ -1079,46 +1083,7 @@ title_template: "Repeated Checkout/Setup Without Artifact Handoff (and Slow Tool
 
 **GUARDRAIL — same as OPT12 above.** When the proposed fix is "share artifacts from a prior workflow / job", the artifact-existence check is mandatory. See [OPT12 GUARDRAIL](#opt12--duplicated-setup-across-jobs) for the full procedure and required `evidence` text. Findings whose producer doesn't upload an artifact are capped at HIGH severity, and the saving must be sized from measured install dedup + cold-tail recovery, not from "downstream rebuilds from scratch" assumptions.
 
----
-
-#### OPT14 (sub) — Slow Tool Replacement: Legacy → Rust-Native Swaps
-
-**Anti-pattern**: A CI step runs a JS-implemented dev tool (Prettier, ESLint, Babel, webpack, tsc, etc.) where a Rust-native (or otherwise compiled) drop-in replacement would do the same job in a fraction of the wall-clock time. The wall-time delta is real and measurable on every run, so it compounds quickly across PR volume.
-
-**Catalog of canonical swaps** (evaluate each when auditing a slow lint/format/build step — speedup multipliers below are honest ranges from real benchmarks, not vendor marketing):
-
-| Source             | Target                | Realistic speedup                                                                                | Drop-in?          | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| ------------------ | --------------------- | ------------------------------------------------------------------------------------------------ | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Prettier**       | **oxfmt**             | **~4–30×** (depends on tree size + tailwind sort)                                                | Mostly            | Drop-in for JS/TS/CSS/MD. Respects `.prettierignore` in scan mode (no positional args); does NOT respect it in explicit-path mode. `npx oxfmt --migrate prettier` produces a config from `.prettierrc`. Tailwind class sort uses oxfmt's own algorithm — order differs from `prettier-plugin-tailwindcss`. `embeddedLanguageFormatting` for JS/TS template literals (CSS-in-JS, `gql\`...\``) is not yet supported.                                                                                                                         |
-| **ESLint**         | **oxlint**            | **~8–20×** realistic (NOT the 50–100× advertised when type-aware rules and custom plugins exist) | Partial fit only  | Recommend a **dual-run scoped ESLint pattern** when ANY of the following are present: custom local rules, `tailwindcss` plugin, type-aware rules requiring `tsgolint`, framework plugins (`convex/*`, `next/*`, `@typescript-eslint/*` type-aware rules), or a `react-hooks/exhaustive-deps` configuration the team relies on. In dual-run, oxlint runs first across the tree; ESLint runs second with a config restricted to the rules oxlint can't replicate. Do NOT recommend a wholesale oxlint-only swap when these gates are present. When type-aware rules are on, OPT82's ledger is the prerequisite this row assumes: run it first ([OPT82](#opt82--lint-builds-the-whole-type-graph)). |
-| **Babel**          | **SWC**               | **~10×** compile                                                                                 | Yes for most      | Drop-in via `next/babel`, framework integration, or `@swc/jest`. Verify any custom Babel plugins have SWC equivalents before recommending.                                                                                                                                                                                                                                                                                                                                                                                                  |
-| **Webpack**        | **Turbopack**         | **~2–5×** build                                                                                  | Yes (Next.js 16+) | Default in Next.js 16+. Check for `webpack:` overrides in `next.config.js` that force fallback to webpack — those often need to be ported or removed before Turbopack is actually active.                                                                                                                                                                                                                                                                                                                                                   |
-| **`tsc --noEmit`** (TypeScript 5.x/6.x) | **TypeScript 7** (`typescript@^7`, the native port; the command is still `tsc`) | Vendor-stated "typically 8x to 12x on full builds" (TypeScript 7.0 announcement); measure per repo | Yes for type-check-only steps | Same checker, native and multithreaded: an upgrade of the real type-check, not a swap to a tool that skips it, and NOT the esbuild/swc anti-row below, which strips types. TypeScript 7.0 is stable (7.0.2 is `latest` on npm); the older `tsgo` / `@typescript/native-preview` preview is superseded, so do not recommend it. Caveats: 7.0 ships without a programmatic compiler API (expected in 7.1), so tools that call it (typescript-eslint type-aware rules, webpack/ts-loader style loaders) need the side-by-side `@typescript/typescript6` alias (`tsc6`); 7.0 changes defaults (`strict: true`, `types: []`, no `baseUrl`), so expect new errors on upgrade. On small CI runners, `--checkers` / `--singleThreaded` bound memory. Keep the old compiler for anything needing the API. |
-| **`tsc --noEmit`** | esbuild/swc typecheck | **DO NOT recommend**                                                                             | **Anti-pattern**  | esbuild and swc do not typecheck. They strip types. A real type-check needs the TypeScript compiler itself (`tsc`, or its TypeScript 7 native port above). Recommending this swap is a coverage regression masquerading as a speedup — the "speed without coverage is a regression" principle explicitly forbids it. Skip it.                                                                                                                                                                                                                                              |
-
-**Detection heuristic**:
-
-- Inspect lint/format/typecheck/build steps from the per-job `steps[]` array from `gh api repos/{owner}/{repo}/actions/runs/{run_id}/jobs`
-- Sort steps by P50 duration. For each slow step, check the command: `npx prettier`, `eslint`, `babel`, `webpack`, etc.
-- If a Rust-native target from the catalog above applies, run a sandbox benchmark before shipping a finding
-
-**Migration cost callout (REQUIRED for any tool-swap finding)** — every OPT14 tool-swap finding MUST surface, before being shipped, the concrete migration costs measured against a sandbox clone (not estimated):
-
-1. **Bulk reformat / rule-coverage gap**: how many files / what fraction of the source tree will diff after the swap? Run the new tool against a clean sandbox clone and `git status | wc -l`. Cite the absolute count and percentage (e.g. "27 files, ~1% of the source tree, net −21 LOC"). Estimating this without measurement is not acceptable.
-2. **Ignore-file behavior differences**: confirm the new tool respects `.prettierignore` / `.eslintignore` / `.gitignore` in the relevant invocation mode the workflow uses. Test empirically (e.g. for oxfmt: run `--check` with and without the ignore file present and diff the file counts — the delta should match the ignore-file entries).
-3. **Implicit-default parity gaps**: list every config option that is _unset_ in the source tool's config and therefore relies on the source tool's defaults (Prettier has ~15 such options: `arrowParens`, `bracketSpacing`, `endOfLine`, `htmlWhitespaceSensitivity`, `jsxSingleQuote`, `quoteProps`, `singleAttributePerLine`, `tabWidth`, `trailingComma`, `useTabs`, etc.). Confirm or test parity with the target tool for each. Don't assume defaults match.
-4. **Coverage caveats**: list features in the source tool that the target tool doesn't support (oxfmt's missing `embeddedLanguageFormatting`; oxlint's missing type-aware rules; Tailwind class-sort algorithm differences; etc.). Confirm whether the codebase relies on any of them — read the actual source files / configs, don't assume.
-
-**Two-commit shipping pattern (REQUIRED for tool-swap findings that require bulk reformat)**:
-
-When a tool swap requires reformatting source files (oxfmt finding 27 files, an ESLint→oxlint swap auto-fixing N files, etc.), structure the patch as **two commits**, never one:
-
-1. **Commit 1 — Recipe**: workflow change + new tool config file. This is the durable, reviewable change.
-2. **Commit 2 — Bulk reformat**: the result of running the new tool against the source tree.
-
-The recipe (commit 1) is what ships in the patch artifact. The bulk reformat (commit 2) is **regenerated against upstream HEAD at submission time** by the applying agent — bundling a stale reformat into the patch artifact creates drift the moment any other PR lands. The recipe is what ships; the bulk reformat is regenerated at apply-time against current upstream.
-
-**Real-world example (orgorgtheorg/orgorg, 2026-05)**: `Check Prettier formatting on /code` step ran `npx prettier --check` at 24s P50 over 257 runs. Swapped to `npx --yes oxfmt@0.47.0 --check` with a migrated `.oxfmtrc.json`. Benchmark: 24.3s avg → 5.7s avg = 4.27× speedup, ~80 min/mo saved. Migration cost: 27 files reformatted (~1% of tree, net −21 LOC), shipped as two commits (recipe + bulk reformat).
+A slow lint, format or type-check tool on the long pole is [OPT84](#opt84--a-slow-step-on-the-long-pole-runs-a-tool-that-has-a-native-drop-in).
 
 ---
 
@@ -2557,6 +2522,9 @@ title_template: "Conditional Step With Unconditional Setup"
 
 ---
 
+<!-- Alias anchor: findings files stamped before the GFM anchor fix link this older slug; keep it so those deep links still land. -->
+<a id="opt32--missing-paths-paths-ignore-on-expensive-workflows"></a>
+
 ### OPT32 — Missing `paths`/`paths-ignore` on Expensive Workflows
 
 <!-- METADATA
@@ -3262,6 +3230,9 @@ Keep the continuation lines at the **same indent** as `${{` (as above). YAML fol
 
 ---
 
+<!-- Alias anchor: findings files stamped before the GFM anchor fix link this older slug; keep it so those deep links still land. -->
+<a id="opt47--redundant-push-pull_request-double-trigger"></a>
+
 ### OPT47 — Redundant push + pull_request Double-Trigger
 
 <!-- METADATA
@@ -3304,6 +3275,9 @@ on:
 ---
 
 ---
+
+<!-- Alias anchor: findings files stamped before the GFM anchor fix link this older slug; keep it so those deep links still land. -->
+<a id="opt48--high-job-level-failure-rate--15--over-30d-"></a>
 
 ### OPT48 — High Job-Level Failure Rate (>15% over 30d)
 
@@ -3519,6 +3493,9 @@ Benchmark required either way: run the job on the candidate runner beside its cu
 
 ---
 
+<!-- Alias anchor: findings files stamped before the GFM anchor fix link this older slug; keep it so those deep links still land. -->
+<a id="opt52--turbo-tasks-missing-outputs-in-turbo-json"></a>
+
 ### OPT52 — Turbo Tasks Missing `outputs` in turbo.json
 
 <!-- METADATA
@@ -3704,6 +3681,9 @@ participate in Tier-2 de-overlap against whole-run eliminators.
 ---
 
 ---
+
+<!-- Alias anchor: findings files stamped before the GFM anchor fix link this older slug; keep it so those deep links still land. -->
+<a id="opt58--turbo-tasks-missing-inputs-in-turbo-json"></a>
 
 ### OPT58 — Turbo Tasks Missing `inputs` in turbo.json
 
@@ -4118,8 +4098,8 @@ somewhere.
     its types.
 - (c) **NATIVE.** Move the type-aware rules to a native type-aware linter
   (`tsgolint` through oxlint's type-aware mode) only when the remaining rule set
-  is one that tool supports, under the migration-cost contract in OPT14's
-  tool-swap table.
+  is one that tool supports, under OPT84's tool-swap table and its
+  no-weakening rail.
 
 **Guardrail**: The prompt requires a rule-by-rule ledger, one row per rule the
 current config enables (from `eslint --print-config`): the fast pass, the
@@ -4140,7 +4120,7 @@ only where the full type-aware pass still gates the merge on a merge queue.
 
 **Why not just oxlint**: oxlint covers most syntax-only rules at a fraction of the
 cost and is the right fast pass. It does not remove the type-aware rules; those
-still need a type-aware tool. See the ESLint → oxlint row in OPT14's tool-swap
+still need a type-aware tool. See the ESLint → oxlint row in OPT84's tool-swap
 table: OPT82's ledger is the prerequisite that row assumes.
 
 ---
@@ -4468,9 +4448,9 @@ stay catalog-keyed, but the catalog is no longer the only thing that can produce
 a finding.
 
 Most of them (OPT70–OPT75) are routed by the deterministic structural router in
-`collect_runs.py`. **OPT83** is routed by a structural pass over each drilled pole's
-per-step decomposition and its workflow YAML (not by the log leaves) and emits a
-finding with its own card. **OPT78** is routed instead by a drill-time leaf detector over
+`collect_runs.py`. **OPT83** and **OPT84** are each routed by a structural pass over each drilled pole's
+per-step decomposition and its workflow YAML (not by the log leaves) and emit a
+finding with its own card; OPT84 also reads the repo's `package.json` scripts and tool versions. **OPT78** is routed instead by a drill-time leaf detector over
 the long pole's captured log (ARCHITECTURE §12.3), corroborated against the repo's
 test-runner config. It emits no finding record, so the render boundary's `Risk`
 row and banner never see it: its HIGH risk is stamped on the pole's drill-down
@@ -4491,6 +4471,9 @@ rely on) < `HIGH` (can silently change what is built/tested/shipped —
 correctness exposure). The report's ranking demotes by risk so the rule is
 visible and a future edit can't quietly re-promote a HIGH-risk lever into the
 quick-wins list.
+
+<!-- Alias anchor: findings files stamped before the GFM anchor fix link this older slug; keep it so those deep links still land. -->
+<a id="opt70--scope-the-build-test-to-only-what-changed"></a>
 
 ### OPT70 — Scope the Build/Test to Only What Changed
 
@@ -4920,5 +4903,88 @@ Parallel steps (changelog 2026-06-25) run the group's children concurrently with
 **Sizing — deliberately uncredited**: no `_SIZING` model, no wall-clock or runner-minute saving. The only number is the upper bound (sum of the candidates' p50s minus the largest), which assumes each step keeps its solo speed on one runner; CPU, memory and disk contention can erase it. It is never summed into any total, the headline, Tier 2 or Also noticed. **Benchmark first**: rewrite only those steps as one `parallel:` group on a branch, compare the job's wall time over the next sampled runs, and keep it only if the measured gain holds.
 
 **Risk**: **MEDIUM** — a missed dependency can turn a green job into an order-dependent one.
+
+---
+
+### OPT84 — A Slow Step on the Long Pole Runs a Tool That Has a Native Drop-in
+
+<!-- METADATA
+pattern: OPT84
+impact: MEDIUM
+class: structural
+detector: critical-path
+risk: MEDIUM
+affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml,package.json"
+fix_strategy: slow-tool-on-pole-has-native-drop-in
+title_template: "A slow step on the long pole runs a tool that has a native drop-in"
+-->
+
+**TL;DR**: A heavy step on the slowest job gating the merge runs a JavaScript dev tool (Prettier, ESLint or `tsc --noEmit`) that has a native, much faster drop-in (oxfmt, oxlint, TypeScript 7). The audit names the step, its measured time, the tool, the drop-in and the target's own docs (its migration guide where one exists). The step's measured time is a ceiling, not a saving: nothing is credited until a benchmark confirms it.
+
+**Anti-pattern**: A drilled long-pole job spends at least 20 seconds in a lint, format or type-check step whose command, directly or through a `package.json` script, runs a tool with a native replacement in the swap table below.
+
+**Detection heuristic** (routed from the measured critical path, once per drilled pole; no gh call of its own). A step is a candidate when:
+
+1. it measures at least 20s (OPT83's absolute floor; there is deliberately no share-of-job floor, because the swap's ceiling is the step's own time whatever share of the pole it is, and the card states that share);
+2. its measured category is `scan` or `build`;
+3. it is a `run:` step.
+
+Its command is split on `&&`, `||`, `;`, `|` and newlines. A package-manager script call (`pnpm lint`, `npm run format:check`, `yarn typecheck`, `bun run ...`) is followed through the `package.json` scripts of the step's working directory, up to five levels deep, and runner calls (`npx`, `pnpm exec`, `bunx`, `yarn dlx`) are unwrapped. A `pnpm <name>`, `yarn <name>` or `bun <name>` that no script defines in the nearest `package.json` at or above the step's directory runs the binary of that name, as those package managers do, and is read as that command: `pnpm eslint .` is ESLint, and `pnpm vite build` is a CLI the table has no row for. A path or script file in that place (`bun build.ts`, `pnpm ./x.js`), a colon name (`yarn lint:ci`, which Yarn Berry runs from whichever workspace defines it) and pnpm's workspace-wide `recursive` are held back. The resulting commands are matched against the v1 rows of the swap table:
+
+| Command | Row | Fit |
+|---|---|---|
+| `prettier --check`, `-c`, `--list-different` or `-l`; `pretty-quick --check` | Prettier → oxfmt | drop-in, or run both when a `package.json` from the step's directory up to the root declares a Prettier plugin (`prettier-plugin-*`) or a Prettier config this audit reads lists `plugins` (oxfmt may not carry them), or when a Prettier config file this audit does not open (`.prettierrc.js`, `prettier.config.*`) applies, since its plugins and options are unknown. A `package.json` or Prettier config on that walk that cannot be read holds the step back (see below) |
+| `eslint` | ESLint → oxlint | run both (the dual-run recipe) when any applicable config has: custom local rules; the `tailwindcss` plugin; a framework plugin; any other plugin oxlint does not carry natively (`convex`, for example); a `react-hooks/exhaustive-deps` rule; type-aware parsing that is on or cannot be resolved; plugins and local rules the read could not see; or a shareable config or config import the read did not follow. Command-line flags that bring in rules or parsers the config does not show (`--rulesdir`, `--plugin`, `--rule`, `--parser`, `--ext`) also mean run both. Drop-in only when the config was read in full and none of these is present. Either way the risk is HIGH whenever the card reports this row. Deferred to OPT82 when OPT82 already reports that step: the ESLint row's fit reads "see OPT82 first" and it adds no high risk; a step whose only table tool is that ESLint run gets no card (a verdict, below) |
+| `tsc` with `--noEmit` (also `-p ... --noEmit`; the flag is matched in any letter case, as `tsc` accepts it) | `tsc --noEmit` → TypeScript 7 | drop-in for a type-check-only step; a `tsc` that emits is not in v1 |
+
+The Babel and Webpack rows are recipe only in v1: listed in the swap table, never detected. Several leaves of the same tool in one step (the same `eslint` run reached in several workspace packages, for example) are one tool row on the card, not one row per leaf.
+
+These verdicts are counted only, never listed: the pole is not backed by a workflow file (no workflow or job to tie it to; `pole_not_file_backed`); no candidate step (checked first, on the pole's measured steps, before any workflow or YAML gate; a pole whose check maps to more than one workflow carries no measured steps today, so in practice the candidate check cannot clear it and it is held back below); none of the step's tools is in the table; the target is already in use (the same step already runs `oxfmt` or `oxlint`, `eslint-plugin-oxlint` or a declared `oxlint` / `oxfmt` sits on the step's manifest walk, or `typescript` 7 or later is declared); a `tsc` that emits; a step whose only table tool is an ESLint run OPT82 already reports (other tools on that step still qualify, and the card then shows the ESLint row as "see OPT82 first").
+
+What "not in the table" covers depends on the repo. In a repo with no JavaScript manifest at all, a generic runner (`make`, `just`, `pre-commit`, `concurrently`, `ng`, `gulp`, `docker` and the like) and any `uses:` action are this verdict, while a direct leaf such as `npx prettier --check .` still fires. In a repo with a JavaScript manifest, a generic runner may run any of the table's tools behind its own configuration, so it is held back (below), and so is an action this audit does not know; only an action on the known allow-list (checkout, `setup-*`, cache, CodeQL, Docker and similar, none of which lints, formats or type-checks) is the verdict. A manifest that exists but cannot be read is held back, never this verdict. A nameless step GitHub names `Run <command>` whose command runs only non-JavaScript tools (`cargo clippy`, `go test`, `uv sync`; a wrapper such as `sudo`, `uv run` or `bundle exec` is read through to what it runs) is this verdict in any repo, even when the step itself cannot be matched in its job (an expression in the command, or two steps sharing that name), but never when the workflow file or the job cannot be matched; when the step is not matched only the first line of its `run:` is visible, so a later line that runs a table tool goes unseen.
+
+**Held back (fails closed)**: counted, and listed in the Data sources row "tool swap: held back" with a plain-English reason; never reported.
+
+| Held back when | Why |
+|---|---|
+| step timings or step records unreadable; workflow file unreadable, or the check produced by more than one workflow when the pole has a candidate step (or steps that cannot be read); pole job (a job produced through a reusable workflow call, or a matrix job whose name is an expression, for example) or candidate step not matched to exactly one YAML step | the timings cannot be tied to the YAML (as in OPT83) |
+| a `${{ }}` in the candidate's command, `working-directory`, `env:` or `shell:`, or in a `defaults.run.working-directory`; or the command changes directory | the command is only known when the step runs |
+| a script the resolver cannot follow (a missing or unfollowable `npm run` target, a script defined in an ancestor's `package.json` when the step's own directory has none, or no `package.json` read at or above the directory, or a nearer one the scan's manifest walk did not reach); more than five levels deep; `package.json` unreadable, or a delegator (`turbo run`, `nx`, `lerna run`, `node ./script/x.js`) whose targets are not resolved (a task-runner expansion is only trusted when the manifest walk was complete); in a repo with a JavaScript manifest, a generic runner (`make`, `just`, `pre-commit`, `concurrently`, `ng`, `gulp`, `docker`, …) whose own configuration this audit does not read; a shell script or interpreter (`bash`, `sh`, `./x`, `*.sh`), `xargs`, or `npm test` / `npm start` whose script is missing (wrappers such as `time`, `env`, `timeout`, `nice` are stripped and what they run is read) | what runs is unknown |
+| a subshell (`(cd dir && ...)`) inside a script, or a package manager pointed at another directory (`-C`, `--dir`, `--prefix`) | which project's tools run is unknown |
+| the candidate is a `uses:` step whose `uses:` or `name:` says it may lint, format or type-check (it contains `eslint`, `prettier`, `oxlint`, `oxfmt`, `lint`, `format`, `tsc`, `typecheck` or `type-check`, or it is a local action whose label says `check`); in a repo with a JavaScript manifest, any action not on the known allow-list (checkout, `setup-*`, cache, CodeQL, Docker and similar, which are the tool-not-in-table verdict) | what it runs is inside the action |
+| ESLint found, but the applicable config is unreadable, truncated, missing, or ambiguous between nested flat configs (read the way OPT82 reads it, including `ESLINT_USE_FLAT_CONFIG=false`) | the fit (plain, dual-run or deferred) cannot be decided |
+| ESLint found, but the repository scan behind the report carries no ESLint config read (`type_aware_lint_scan_missing`), or the scan's ESLint config reader failed (`type_aware_config_reader_failed`) | whether type-aware rules are on, and so the fit, is unknown |
+| Prettier found, but a `package.json` or a Prettier config on the step's walk cannot be read | whether a plugin makes the fit "run both" is unknown |
+| `tsc --noEmit` found, but no `package.json` declares `typescript`, the declared version is unreadable, a `>=` range (which TypeScript 7 already satisfies), or not a plain semver range, or the manifest walk was truncated, never reached the step's directory, or hit an unreadable manifest | whether the repo is already on 7 is unknown |
+| the step's working directory is outside the checkout | the manifest to read is unknown |
+
+**Ordering**: OPT82 runs first, and on a step it reports OPT84's ESLint row defers to it ("see OPT82 first"). OPT83 and OPT84 can both fire on one pole (one runs steps side by side, the other makes a step faster); each renders its own card, OPT83 first.
+
+**Swap table** (published ranges from real benchmarks, not this repo's numbers):
+
+| Source | Target | Realistic speedup | Drop-in? | Docs | Notes |
+| --- | --- | --- | --- | --- | --- |
+| **Prettier** | **oxfmt** | **~4–30×** (depends on tree size + tailwind sort) | Mostly | [Migrate from Prettier](https://oxc.rs/docs/guide/usage/formatter/migrate-from-prettier.html); [oxfmt overview](https://oxc.rs/docs/guide/usage/formatter.html) | Drop-in for JS/TS/CSS/MD. Respects `.prettierignore` globally: a file listed there is not formatted even when passed explicitly (oxfmt's ignore-files docs). `npx oxfmt --migrate prettier` produces a config from `.prettierrc`. Tailwind class sort uses oxfmt's own algorithm — order differs from `prettier-plugin-tailwindcss`. Embedded formatting (CSS-in-JS and GraphQL in template literals) is on by default (`embeddedLanguageFormatting: "auto"`), so expect diffs there too. |
+| **ESLint** | **oxlint** | **~8–20×** realistic (NOT the 50–100× advertised when type-aware rules and custom plugins exist) | Partial fit only | [Migrate from ESLint](https://oxc.rs/docs/guide/usage/linter/migrate-from-eslint.html); [oxlint overview](https://oxc.rs/docs/guide/usage/linter.html) | Recommend a **dual-run scoped ESLint pattern** when ANY of the following are present: custom local rules, `tailwindcss` plugin, type-aware rules requiring `tsgolint`, framework plugins or any other plugin oxlint does not carry natively (`convex/*`, `next/*`), `@typescript-eslint/*` type-aware rules, or a `react-hooks/exhaustive-deps` configuration the team relies on. In dual-run, oxlint runs first across the tree; ESLint runs second with a config restricted to the rules oxlint can't replicate. Do NOT recommend a wholesale oxlint-only swap when these gates are present. When type-aware rules are on (or cannot be resolved), the card says run both; when OPT82 already reports that step, OPT82's ledger is the prerequisite this row assumes: run it first ([OPT82](#opt82--lint-builds-the-whole-type-graph)). |
+| **Babel** (recipe only, not detected in v1) | **SWC** | **~10×** compile | Yes for most | [Migrating from Babel](https://swc.rs/docs/migrating-from-babel) | Drop-in via `next/babel`, framework integration, or `@swc/jest`. Verify any custom Babel plugins have SWC equivalents before recommending. |
+| **Webpack** (recipe only, not detected in v1) | **Turbopack** | **~2–5×** build | Yes (Next.js 16+) | [Turbopack](https://nextjs.org/docs/app/api-reference/turbopack) | Default in Next.js 16+. Check for `webpack:` overrides in `next.config.js` that force fallback to webpack — those often need to be ported or removed before Turbopack is actually active. |
+| **`tsc --noEmit`** (TypeScript 5.x/6.x) | **TypeScript 7** (`typescript@^7`, the native port; the command is still `tsc`) | Vendor-stated "typically 8x to 12x on full builds" (TypeScript 7.0 announcement); measure per repo | Yes for type-check-only steps | [Announcing TypeScript 7.0](https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/) | Same checker, native and multithreaded: an upgrade of the real type-check, not a swap to a tool that skips it, and NOT the esbuild/swc anti-row below, which strips types. TypeScript 7.0 is stable (7.0.2 is `latest` on npm); the older `tsgo` / `@typescript/native-preview` preview is superseded, so do not recommend it. Caveats: 7.0 ships without a programmatic compiler API (expected in 7.1), so tools that call it (typescript-eslint type-aware rules, webpack/ts-loader style loaders) need the side-by-side `@typescript/typescript6` alias (`tsc6`); 7.0 changes defaults (`strict: true`, `types: []`, no `baseUrl`), so expect new errors on upgrade. On small CI runners, `--checkers` / `--singleThreaded` bound memory. Keep the old compiler for anything needing the API. |
+| **`tsc --noEmit`** | esbuild/swc typecheck | **DO NOT recommend** | **Anti-pattern** | none (never a target) | esbuild and swc do not typecheck. They strip types. A real type-check needs the TypeScript compiler itself (`tsc`, or its TypeScript 7 native port above). Recommending this swap is a coverage regression masquerading as a speedup — the "speed without coverage is a regression" principle explicitly forbids it. Skip it. |
+
+**Fix recipe**: read the target's docs (linked in the table; the TypeScript 7 row links the release announcement, as there is no separate migration guide) and migrate the config. The card's tool row reads "<target> is the native replacement" and states the fit in its own words: "drop-in", "run both: …" with the reasons, or "see OPT82 first". Its benchmark line pairs the step's own command with the target's; the target run uses the tool's defaults until the repo's config is migrated to it, so migrate the config first and only then time both. Every rule, plugin, file set and check stays; when the target lacks one the repo relies on, run both tools (the target across the tree, the old tool scoped to what the target cannot do) rather than dropping it. Benchmark both tools on the same commit and the same runner class before claiming a number, and if the swap reformats files, ship the recipe and the bulk reformat as separate commits.
+
+**Real-world example** (its numbers, not a forecast for any other repo):
+
+- Linear, ["AI coding has made CI a bottleneck, so we reworked ours to keep up"](https://linear.app/now/ci-bottleneck-reworked) (2026-09-21): tsgo cut the weekly median type-check 73%; AST-only lint rules cut API lint 68% and full-repo lint 55%, and Oxlint came after.
+
+**Mandatory guardrail (this pattern is invalid without it)**: a benchmark of both tools on the same commit and runner class, and a diff of their output, before the old tool is removed; the dual-run shape whenever an ESLint gate in the detection table fires.
+
+**No-weakening rail**: never drop, narrow or disable a rule, a plugin, a file set or a check to make the swap fit; the esbuild/swc "type-check" is never a target (it strips types, it does not check them); when a target lacks a rule the repo relies on, the recipe is dual-run, not removal.
+
+**Conservative rollout (REQUIRED)**: one tool per PR; keep the old tool beside the new one until a sampled run shows matching results; compare the step's time over the next sampled runs.
+
+**Sizing: deliberately uncredited**. No `_SIZING` model, no wall-clock or runner-minute saving. The only number is the ceiling: the candidate step's measured p50, the most the swap can remove, not a forecast. The table's ranges are the catalog's published numbers, never this repo's. Nothing is summed into any total, the headline, Tier 2 or Also noticed. When several table tools share one step, there is one card and one ceiling, and how the time splits between them is unknown until measured. **Benchmark first.**
+
+**Risk**: **MEDIUM** for the Prettier and TypeScript 7 rows (a formatter diff or a stricter type-check default is visible and reversible); **HIGH** whenever the card reports an ESLint row outright, drop-in or run-both alike, because a rule the target silently lacks is a coverage loss nobody sees. An ESLint run deferred to OPT82 does not raise it.
 
 ---

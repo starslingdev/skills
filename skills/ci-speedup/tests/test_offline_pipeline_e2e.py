@@ -176,7 +176,16 @@ _JOB_ID = 9001
 #            no new check-runs page or PR fetch is made (the existing pages carry
 #            its check run). The OPT83 detector itself makes ZERO calls: it reads
 #            the pole's stamped step decomposition and the workflow YAML.)
-_GOLDEN_GH_QUERY_COUNT = 105
+#  111  now  (+6 for OPT84's corpus workflow `style.yml` (1009), a pull_request
+#            workflow whose `style` job is a required check: the same six calls
+#            `quality.yml` costs - one all-status run-list page, three
+#            `runs/{id}/jobs` pages (8501-8503), one `per_page=1` monthly-volume
+#            count and one `commits?path=<wf>&per_page=2` config-era lookup. Its
+#            runs reuse the corpus's three PR head shas, so no new check-runs page
+#            or PR fetch. The OPT84 detector itself makes ZERO calls: it reads the
+#            pole's stamped step decomposition, the workflow YAML and the scan's
+#            package.json / ESLint config facts from the checkout.)
+_GOLDEN_GH_QUERY_COUNT = 111
 # PR-H1: `push` is UNSCOPED (no `branches:`) so the same-head_sha push+PR run
 # pair in the corpus satisfies OPT47's structural precondition (a push scoped
 # only to the default branch is excluded by design).
@@ -684,6 +693,66 @@ _WF8_YAML_DEPENDENT = _WF8_YAML.replace(
     "        run: npx tsc --noEmit --maxNodeModuleJsDepth ${{ steps.lint.outputs.count }}\n")
 
 
+# OPT84 (a slow step on the long pole runs a tool that has a native drop-in),
+# wf id 1009, runs 8501-8503 (never colliding with OPT83's `quality.yml`, 1008 /
+# 8401-8403). Shaped like mastra's lint pole. OPT84 is routed from the DRILLED
+# POLES only, so, like `quality.yml`, this is a pull_request workflow whose one
+# job, `style`, is a REQUIRED check, run on the corpus's three PR head shas (one
+# more check run on each existing check-runs page, no new PR). At 92s it is the
+# shortest required check (under `quality`'s 96s), so the chain, the headline
+# and poles 1-4 are unchanged: it renders as pole 5 (the drill's cap). It must
+# stay at or above the 90s triage floor (`_TRIAGE_WALLCLOCK_FLOOR_S`): a 68s
+# version was triaged fast, its jobs never drilled, and it never became a pole.
+# Its steps: checkout 3s, `npm ci` 36s, then ONE heavy step, `Run lint and
+# format checks` (52s, 57% of the job), which runs `pnpm lint` in `apps/site`.
+# That package's own package.json resolves it to `eslint . && prettier --check .`
+# (two table tools on one step, so the split is unknown), declares `eslint` and
+# `prettier` and no `typescript`, and its flat config loads one framework plugin
+# (react), so the ESLint row is a dual-run. The config is not type-aware, so
+# OPT82 has nothing to report on this step and never defers it. OPT83 reads one
+# qualifying step (a verdict). OPT84 fires once, uncredited, ceiling 52s.
+# The workflow file is `style.yml`, not `lint.yml`: `lint.yml` is OPT82's
+# corpus workflow (1006).
+_WF9_ID = 1009
+_WF9_YAML = """name: Style
+on:
+  pull_request:
+
+jobs:
+  style:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - run: npm ci
+      - name: Run lint and format checks
+        working-directory: apps/site
+        run: pnpm lint
+"""
+_SITE_PACKAGE_JSON = """{
+  "name": "site",
+  "private": true,
+  "scripts": {
+    "lint": "eslint . && prettier --check ."
+  },
+  "devDependencies": {
+    "eslint": "^9.12.0",
+    "eslint-plugin-react": "^7.37.0",
+    "prettier": "^3.3.3"
+  }
+}
+"""
+_SITE_ESLINT_CONFIG = """import react from 'eslint-plugin-react';
+
+export default [
+  {
+    plugins: { react },
+    rules: { 'react/jsx-key': 'error' },
+  },
+];
+"""
+
 def _init_repo(root: Path, origin: str | None = _REPO,
                eslint_config: str = _ESLINT_CONFIG_TYPE_AWARE,
                quality_yaml: str = _WF8_YAML) -> None:
@@ -705,6 +774,11 @@ def _init_repo(root: Path, origin: str | None = _REPO,
     (root / ".github" / "workflows" / "lint.yml").write_text(_WF6_YAML, encoding="utf-8")
     (root / ".github" / "workflows" / "bench.yml").write_text(_WF7_YAML, encoding="utf-8")
     (root / ".github" / "workflows" / "quality.yml").write_text(quality_yaml, encoding="utf-8")
+    (root / ".github" / "workflows" / "style.yml").write_text(_WF9_YAML, encoding="utf-8")
+    (root / "apps" / "site").mkdir(parents=True)
+    (root / "apps" / "site" / "package.json").write_text(_SITE_PACKAGE_JSON, encoding="utf-8")
+    (root / "apps" / "site" / "eslint.config.mjs").write_text(
+        _SITE_ESLINT_CONFIG, encoding="utf-8")
     (root / "package.json").write_text(_PACKAGE_JSON, encoding="utf-8")
     (root / "eslint.config.mjs").write_text(eslint_config, encoding="utf-8")
     (root / "eslint-rules").mkdir()
@@ -731,7 +805,7 @@ def _init_repo(root: Path, origin: str | None = _REPO,
                         f"https://github.com/{origin}.git"],
                        cwd=root, check=True, env=env)
     subprocess.run(["git", "add", ".github", "package.json", "eslint.config.mjs",
-                    "eslint-rules", "packages"], cwd=root, check=True, env=env)
+                    "eslint-rules", "packages", "apps"], cwd=root, check=True, env=env)
     subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=root, check=True, env=env)
 
 
@@ -756,7 +830,7 @@ def _monthly_volume_endpoints_bracket() -> list[str]:
         since = ((now + _dt.timedelta(seconds=off)) - _dt.timedelta(days=30)
                  ).strftime("%Y-%m-%dT%H:%M:%SZ")
         for wf_id in (_WF_ID, _WF2_ID, _WF3_ID, _WF4_ID, _WF5_ID, _WF6_ID, _WF7_ID,
-                      _WF8_ID):
+                      _WF8_ID, _WF9_ID):
             out.append(f"repos/{_REPO}/actions/workflows/{wf_id}/runs"
                        f"?per_page=1&created=>={since}")
             out.append(f"repos/{_REPO}/actions/workflows/{wf_id}/runs"
@@ -1363,7 +1437,7 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     # Which YAML source fed the detectors is a fact ABOUT the report, so it is stamped.
     # `--root` is a real checkout of the synthetic repo here, so every workflow is read
     # off disk and none over the API.
-    assert ds.get("workflow_yaml_source") == {"checkout": 8, "api": 0}, (
+    assert ds.get("workflow_yaml_source") == {"checkout": 9, "api": 0}, (
         f"workflow YAML provenance not stamped as expected: {ds.get('workflow_yaml_source')!r}")
 
     render = subprocess.run(
@@ -1458,9 +1532,10 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     # leaks into the credited minutes (or the sample count) moves a number here.
     # 40 runs / 179 jobs / 7 workflows: main's 32 / 163 / 6 plus OPT81's push-only
     # `bench.yml` (1007: 8 sampled runs, two `bench` legs each = 16 jobs); now
-    # 43 / 182 / 8 with OPT83's `quality.yml` (1008: 3 sampled runs, one job each).
-    # The credited totals below do not move: OPT83 credits nothing.
-    assert "| **Runs analyzed** | 43 runs / 182 jobs across 8 workflows |" in report, (
+    # 43 / 182 / 8 with OPT83's `quality.yml` (1008: 3 sampled runs, one job each);
+    # now 46 / 185 / 9 with OPT84's `style.yml` (1009: 3 sampled runs, one job each).
+    # The credited totals below do not move: neither OPT83 nor OPT84 credits anything.
+    assert "| **Runs analyzed** | 46 runs / 185 jobs across 9 workflows |" in report, (
         _head)
     assert ("423 min/mo of wall-clock-neutral runner minutes is recoverable "
             "(8 neutral findings; none can slow a merge)") in _head, _head
@@ -1754,9 +1829,9 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     assert st83["ceiling_s"] == 50.0 and st83["job_p50_s"] == 96.0, st83
     assert all(st83["independence"].values()) and set(st83["independence"]) == set(cr._OPT83_INDEPENDENCE_KEYS)
     # Every other drilled pole is a measured verdict (one compute step at most),
-    # never a held-back candidate.
+    # never a held-back candidate: 4 with OPT84's one-heavy-step `style` pole.
     assert data.get("opt83_withheld_by_gate") == {
-        "fewer_than_two_qualifying_steps": 3}, data.get("opt83_withheld_by_gate")
+        "fewer_than_two_qualifying_steps": 4}, data.get("opt83_withheld_by_gate")
     assert data.get("opt83_withheld_candidates") == [], data.get(
         "opt83_withheld_candidates")
     _q_pole = next(sec for sec in report.split("\n## ")
@@ -1792,6 +1867,86 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
          "--report", str(report_path), "--findings", str(_bad_path)],
         capture_output=True, text=True, env=env, timeout=60)
     assert _v.returncode != 0 and "ceiling_s 80.0 != re-derived 50.0" in _v.stdout, _v.stdout
+
+    # ---- OPT84, end to end ----------------------------------------------------
+    # style.yml (wf 1009) is pole 5, shaped like mastra's lint pole: one step,
+    # `Run lint and format checks` (52s of the 92s job), runs `pnpm lint` in
+    # `apps/site`, whose package.json resolves it to `eslint . && prettier
+    # --check .`. Two table tools on one step: ESLint -> oxlint as a dual-run
+    # (the site's config loads the react plugin) and Prettier -> oxfmt drop-in.
+    # One uncredited finding whose ceiling is the step's own p50, its card once
+    # inside the `style` pole's section, nowhere else, and no total moves (the
+    # credited totals asserted above are unchanged by it).
+    o84 = [f for f in data["findings"] if f.get("pattern") == "OPT84"]
+    assert len(o84) == 1, (data.get("opt84_withheld_by_gate"),
+                           data.get("opt84_withheld_candidates"))
+    f84 = o84[0]
+    ts84 = f84["tool_swap"]
+    assert f84["workflow_file"] == ".github/workflows/style.yml", f84
+    assert f84["affected_jobs"] == ["style"], f84
+    assert f84["wall_clock_p50_s"] is None and f84["runner_min_saving"] is None, f84
+    assert f84["sizing_basis"] == "uncredited", f84
+    assert f84["severity"] == "HIGH" and f84["risk"] == "HIGH", f84
+    assert ts84["step"] == "Run lint and format checks", ts84
+    assert ts84["command"] == "pnpm lint" and ts84["working_directory"] == "apps/site", ts84
+    assert ts84["resolved_leaves"] == ["eslint .", "prettier --check ."], ts84
+    _o84_pole = next(p for p in poles if p.get("job") == "style")
+    _o84_step = next(s for s in _o84_pole["steps"]
+                     if s["step"] == "Run lint and format checks")
+    assert ts84["ceiling_s"] == _o84_step["p50_s"] == 52.0, (ts84, _o84_step)
+    assert ts84["job_p50_s"] == _o84_pole["job_p50_s"] == 92.0, _o84_pole
+    assert ts84["split_unknown"] is True, ts84
+    _t84 = {t["row"]: t for t in ts84["tools"]}
+    assert list(_t84) == ["eslint", "prettier"], ts84["tools"]
+    assert _t84["eslint"]["fit"] == "dual-run", _t84["eslint"]
+    assert _t84["eslint"]["fit_reasons"] == [
+        "framework plugin react in `apps/site/eslint.config.mjs`"], _t84["eslint"]
+    assert _t84["prettier"]["fit"] == "drop-in" and _t84["prettier"]["fit_reasons"] == []
+    assert _t84["eslint"]["source_version"] == "^9.12.0", _t84["eslint"]
+    assert _t84["prettier"]["source_version"] == "^3.3.3", _t84["prettier"]
+    # The other four drilled poles exit before a finding, each for its own
+    # reason: `prep`'s `npm run build` names a script the corpus package.json
+    # does not declare and `quality`'s `npx tsc --noEmit` sits in a package that
+    # declares no `typescript` (both HELD BACK, listed with job and step);
+    # `quality`'s Biome lint is not in the table, and `verify` / `test` have no
+    # heavy scan or build step (verdicts, counted only).
+    assert data.get("opt84_withheld_by_gate") == {
+        "script_unresolvable": 1, "typescript_version_unreadable": 1,
+        "tool_not_in_table": 1, "no_candidate_step": 2}, data.get("opt84_withheld_by_gate")
+    assert data.get("opt84_withheld_candidates") == [
+        {"workflow_file": ".github/workflows/chained.yml", "job": "prep",
+         "gate": "script_unresolvable", "step": "Build artifact"},
+        {"workflow_file": ".github/workflows/quality.yml", "job": "quality",
+         "gate": "typescript_version_unreadable", "step": "Typecheck"}], data.get(
+        "opt84_withheld_candidates")
+    _row84 = next(ln for ln in report.splitlines() if "tool swap: held back" in ln)
+    # The shared row names both held-back steps; with a tie it states one reason.
+    assert "held back (prep (Build artifact), quality (Typecheck))" in _row84, _row84
+    assert bp._OPT84_WITHHOLD_PHRASES["script_unresolvable"] in _row84, _row84
+    # One card, inside the style pole's section, after its OPT75 block if any.
+    _s_pole = next(sec for sec in report.split("\n## ")
+                   if "Long pole" in sec.splitlines()[0]
+                   and "style" in sec.splitlines()[0])
+    _card84 = f'<a id="opt84-{f84["id"]}"></a>'
+    assert report.count(_card84) == 1 and _card84 in _s_pole, _s_pole[-2500:]
+    _flat84 = " ".join(_s_pole.split())
+    assert "- **Ceiling:** 52s, this step's measured p50" in _flat84, _s_pole[-2500:]
+    assert " ".join(bp._OPT84_SIZING_LABEL.split()) in _flat84
+    assert " ".join(bp._OPT84_SPLIT_UNKNOWN.split()) in _flat84
+    assert "fit: run both: framework plugin react" in _flat84, _s_pole[-2500:]
+    # OPT82's prompt (in Also noticed) names OPT84's table; an OPT84 CARD must not be there.
+    assert '<a id="opt84-' not in _also.split("## 🗄️", 1)[0], "OPT84 leaked into Also noticed"
+    assert "tool-swaps" not in report, "the style pole is rendered, so no own section"
+    assert "tool-swap findings re-derive from the pole" in verify.stdout, verify.stdout[-2000:]
+    # A tampered ceiling must redden the report's own self-check.
+    _bad84 = json.loads(findings_path.read_text(encoding="utf-8"))
+    [f for f in _bad84["findings"] if f.get("pattern") == "OPT84"][0][
+        "tool_swap"]["ceiling_s"] = 60.0
+    _bad84_path = tmp_path / "findings_tampered_opt84.json"
+    _bad84_path.write_text(json.dumps(_bad84), encoding="utf-8")
+    _v84 = _verify(report_path, _bad84_path, env)
+    assert _v84.returncode != 0 and "ceiling_s 60.0 != the step's p50 52.0" in _v84.stdout, (
+        _v84.stdout)
 
     # ---- PR-H1 (G5): the promoted-path backstop — UNCONDITIONAL. -------------
     # Before this, the replay corpus promoted nothing, so the Tier-2 render
@@ -3008,10 +3163,14 @@ def test_opt82_type_aware_off_withholds_end_to_end(tmp_path):
     data = json.loads(findings_path.read_text(encoding="utf-8"))
     assert not [f for f in data["findings"] if f.get("pattern") == "OPT82"]
     gates = data.get("opt82_withheld_by_gate") or {}
-    assert gates.get("type_aware_parsing_off") == 1, gates
+    # Two verdicts: `lint.yml`'s `eslint` job (this test's syntax-only root
+    # config) and OPT84's `style.yml` lint, whose `apps/site` config is never
+    # type-aware.
+    assert gates.get("type_aware_parsing_off") == 2, gates
     assert [c["job"] for c in data.get("opt82_withheld_candidates")] == ["eslint-web"]
-    cfg = data["type_aware_lint"]["configs"][0]
-    assert cfg["path"] == "eslint.config.mjs" and cfg["type_aware"] == "off", cfg
+    cfg = next(c for c in data["type_aware_lint"]["configs"]
+               if c["path"] == "eslint.config.mjs")
+    assert cfg["type_aware"] == "off", cfg
     report = _render(_SCRIPTS, findings_path, report_path, env)
     assert "OPT82" not in report
     assert _verify(report_path, findings_path, env).returncode == 0
@@ -3296,3 +3455,55 @@ def test_opt83_two_findings_and_its_order_before_opt81_a2_through_collect(tmp_pa
     sec_end = report.find("\n## ", at83)
     assert "OPT81" in report[at83:sec_end if sec_end != -1 else len(report)], (
         report[at83:at83 + 4000])
+
+
+def test_opt84_detector_crash_skips_and_discloses_through_collect(tmp_path, monkeypatch):
+    """CRASH TRIPWIRE, driven through the real collector: a bug in the OPT84
+    detector must skip OPT84 for that pole's workflow, named in the report as a
+    detector that did not run, and never take the data pass down. The tripwire
+    also proves the corpus reaches the new branch: `style.yml`'s pole must be
+    offered to the detector. Remove the call-site guard and this test fails
+    with the RuntimeError itself."""
+    repo_root = tmp_path / "repo"
+    _init_repo(repo_root)
+    fixtures = _replay_dir(tmp_path)
+    env = _replay_env(fixtures)
+    findings_path = tmp_path / "findings.json"
+    report_path = tmp_path / "report.md"
+    scanned = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "scan.py"), "--root", str(repo_root),
+         "--repo", _REPO, "--skill-commit-sha", _run_py._git_short_sha(_SCRIPTS)],
+        capture_output=True, text=True, env=env, timeout=60)
+    assert scanned.returncode == 0, scanned.stderr
+    findings_path.write_text(scanned.stdout, encoding="utf-8")
+
+    calls: list[str] = []
+
+    def _boom(poles, *a, **k):
+        calls.append(str(poles[0].get("workflow_file") or ""))
+        raise RuntimeError("injected OPT84 detector failure")
+
+    monkeypatch.setenv("CI_SPEEDUP_GH_FIXTURES", str(fixtures))
+    monkeypatch.delenv("CI_SPEEDUP_GH_RECORD", raising=False)
+    monkeypatch.setattr(cr, "_detect_opt84_tool_swap", _boom)
+    rc = cr.main(["--in", str(findings_path), "--out", str(findings_path),
+                  "--root", str(repo_root), "--repo", _REPO])
+    assert rc == 0
+    assert ".github/workflows/style.yml" in calls, calls
+
+    data = json.loads(findings_path.read_text(encoding="utf-8"))
+    assert not [f for f in data["findings"] if f.get("pattern") == "OPT84"]
+    skipped = data["data_sources"].get("detectors_skipped") or []
+    entry = next(e for e in skipped if e["workflow"] == ".github/workflows/style.yml")
+    assert "OPT84" in entry["detectors"]
+    assert "tool-swap check failed on job `style` (RuntimeError)" in entry["reason"], entry
+    # The pass survived the crash: OPT83 (before) and OPT81's advisory (after) ran.
+    assert [f for f in data["findings"] if f.get("pattern") == "OPT83"]
+    assert [f for f in data["findings"] if f.get("pattern") == "OPT81"
+            and (f.get("faster_runner") or {}).get("half") == "A2"]
+
+    report = _render(_SCRIPTS, findings_path, report_path, env)
+    assert any("`style.yml`: OPT84 did not run." in ln for ln in report.splitlines())
+    assert "opt84-" not in report
+    ok = _verify(report_path, findings_path, env)
+    assert ok.returncode == 0, f"{ok.stdout}\n{ok.stderr}"

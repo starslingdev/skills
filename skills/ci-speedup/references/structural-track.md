@@ -1,14 +1,26 @@
 # Structural / critical-path track — risk model & intent interrogation
 
 Depth for the structural finding class (catalog category 14, OPT70–OPT75 plus
-OPT78 and OPT83) — the findings routed from the measured critical path rather than a YAML
+OPT78, OPT83 and OPT84) — the findings routed from the measured critical path rather than a YAML
 match. OPT83 is a finding dict (risk, guardrail and rollout on the record)
 rendered as its own card at the pole, uncredited: it does not rank in the
 findings table or get a `Risk` row, and its prompt carries an independence
 re-check rather than the history/intent interrogation below. Its gates fail
 closed: any fact the workflow file cannot prove, including a candidate step that
 sets `continue-on-error`, holds the pole back (the full list is in the OPT83
-catalog entry). OPT78 is routed by a drill-log leaf rather than the
+catalog entry). OPT84 (a slow step on the pole runs a tool with a native drop-in)
+is the same shape: a finding dict rendered as its own uncredited card after any
+OPT83 card, its only number the step's p50 as a ceiling. The card carries no
+prompt block: it links the target's docs (the oxfmt and oxlint migration
+guides and overview pages; the TypeScript 7 row links the release
+announcement, as there is no migration guide) with a benchmark-first
+instruction and the no-weakening rail. Its gates fail closed too: a scan with
+no ESLint config read or a failed config reader (the two scan gates it shares
+with OPT82), an unreadable `package.json` or Prettier config on the Prettier
+step's walk, and a TypeScript version it cannot pin down all hold the step
+back; the full held-back list is in the OPT84 catalog entry. The report
+verifier re-derives each tool row's fit from the config facts stamped on the
+finding. OPT78 is routed by a drill-log leaf rather than the
 critical-path router, so it emits no finding dict and the render boundary below
 never sees it:
 it gets no `Risk` row or banner. Its HIGH risk is stamped on the pole's drill-down

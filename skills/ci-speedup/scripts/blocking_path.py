@@ -32,7 +32,7 @@ import sys
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, NamedTuple
+from typing import Any, Callable, Literal, NamedTuple
 
 import claims  # same-skill module; typed claims layer (increment 1: headline family)
 import untrusted_wrap as uw  # same-skill module; BEGIN/END untrusted-log marking (#29)
@@ -5461,6 +5461,7 @@ _OPT80_WITHHELD_DOC_KEY = "opt80_withheld_candidates"
 _OPT81_WITHHELD_DOC_KEY = "opt81_withheld_candidates"
 _OPT82_WITHHELD_DOC_KEY = "opt82_withheld_candidates"
 _OPT83_WITHHELD_DOC_KEY = "opt83_withheld_candidates"
+_OPT84_WITHHELD_DOC_KEY = "opt84_withheld_candidates"
 _PARALLEL_STEPS_WITHHELD_DOC_KEY = "parallel_steps_withheld_candidates"
 class WithheldRow(NamedTuple):
     """One pattern's whole registration in the held-back disclosure.
@@ -5477,7 +5478,11 @@ class WithheldRow(NamedTuple):
     label: str      # the Data sources row's first cell
     noun: str       # what the count counts
     feeds: str      # the "Used for" cell
-    entry_shape: str  # "job" (OPT79 / OPT80) or "group" (OPT77)
+    # "job" (OPT79, OPT80, OPT81, OPT82, OPT83 and the parallel-steps row: an
+    # entry names one job, plus OPT83's named steps), "group" (OPT77: an entry
+    # names a whole group of jobs) or "step" (OPT84: a job entry that names its
+    # candidate step when its gate was decided on one).
+    entry_shape: Literal["job", "group", "step"]
 
 
 _WITHHELD_ROWS: tuple[WithheldRow, ...] = (
@@ -5508,6 +5513,11 @@ _WITHHELD_ROWS: tuple[WithheldRow, ...] = (
                 "Why a long pole whose compute steps run one after another produced "
                 "no parallel-steps finding",
                 "job"),
+    WithheldRow(_OPT84_WITHHELD_DOC_KEY, "tool swap: held back",
+                "candidate long pole step(s)",
+                "Why a slow step on a long pole that may run a tool with a native "
+                "drop-in produced no tool-swap finding",
+                "step"),
     # A credited lever (OPT24 sharding, the structural OPT70/72/75 route) whose
     # saving is priced from step medians on a job whose steps overlap.
     WithheldRow(_PARALLEL_STEPS_WITHHELD_DOC_KEY, "parallel steps: held back",
@@ -5716,6 +5726,63 @@ _OPT83_WITHHOLD_PHRASES: dict[str, str] = {
         "the job starts a container or a background server that the steps "
         "would all use at once",
 }
+# OPT84: a slow step on a long pole whose command could not be followed to the
+# tool it runs, or whose fit could not be decided. Every gate in
+# `collect_runs._OPT84_HELD_BACK_GATES`, and only those; a test pins them.
+_OPT84_WITHHOLD_PHRASES: dict[str, str] = {
+    "pole_workflow_ambiguous":
+        "the long pole's check is produced by more than one workflow file, so "
+        "which file's step ran is unknown",
+    "pole_step_entries_unreadable":
+        "the long pole's per-step records could not be read (a step with no "
+        "name or category, or one name twice), so which step is slow is unknown",
+    "pole_step_timings_unavailable":
+        "the long pole's per-step timings could not be read, so which step is "
+        "slow is unknown",
+    "workflow_yaml_unavailable":
+        "the long pole's workflow file could not be read, so what the slow step "
+        "runs is unknown",
+    "pole_job_not_matched_in_yaml":
+        "the pole's job could not be tied to one job in its workflow file (a job "
+        "produced through a reusable workflow call, or a matrix job whose name is "
+        "an expression, for example), so the step's command could not be read",
+    "measured_step_not_matched_in_yaml":
+        "the slow step could not be matched to exactly one step in the workflow "
+        "file, so what it runs is unknown",
+    "command_has_expression":
+        "the slow step's command, settings or working directory is only known "
+        "when the workflow runs",
+    "command_changes_directory":
+        "the slow step changes directory, so which project's tools it runs is "
+        "unknown",
+    "script_unresolvable":
+        "the slow step runs a script this audit could not follow to the tool it "
+        "calls",
+    "delegated_script_unresolved":
+        "the slow step hands off to a task runner whose target scripts this "
+        "audit could not resolve",
+    "package_json_unreadable":
+        "the package.json the slow step's scripts come from could not be read",
+    "candidate_is_an_action":
+        "the slow step is an action, and what it runs is inside the action",
+    "eslint_config_unreadable":
+        "the ESLint config the slow step uses could not be fully read, so "
+        "whether the faster linter covers its rules is unknown",
+    "typescript_version_unreadable":
+        "the TypeScript version could not be read, so whether the repo is "
+        "already on the native compiler is unknown",
+    "working_directory_unknown":
+        "the slow step's working directory could not be placed inside the "
+        "checkout, so which package.json applies is unknown",
+    # Pole-level: the findings file's own lint-tooling read is missing or failed,
+    # so no candidate step on the pole could be checked.
+    "type_aware_lint_scan_missing":
+        "the scan that wrote this findings file recorded no lint-tooling read, so "
+        "the step's tools could not be checked",
+    "type_aware_config_reader_failed":
+        "the scan's lint-tooling reader failed, so the step's tools could not be "
+        "checked",
+}
 # Every pattern's gate→phrase table, by doc key. OPT79's table is defined with
 # the rest of its code further down and registers itself there, so this one dict
 # is the single place the renderer looks a reason up.
@@ -5734,6 +5801,7 @@ _WITHHELD_PHRASES_BY_KEY: dict[str, dict[str, str]] = {
     _OPT81_WITHHELD_DOC_KEY: _OPT81_WITHHOLD_PHRASES,
     _OPT82_WITHHELD_DOC_KEY: _OPT82_WITHHOLD_PHRASES,
     _OPT83_WITHHELD_DOC_KEY: _OPT83_WITHHOLD_PHRASES,
+    _OPT84_WITHHELD_DOC_KEY: _OPT84_WITHHOLD_PHRASES,
 }
 # What the row says for a gate with no phrase. Never the code; `verify_report`
 # fails on the same gate, so this text cannot reach a verified report.
@@ -5840,6 +5908,11 @@ def _withheld_entries(rows: list[dict[str, Any]], key: str) -> list[str]:
         # An entry decided on named steps (OPT83's chosen run) names them, so
         # the reader can tell which steps were held back, not only the job.
         steps = r.get("steps")
+        # A "step"-shaped entry (OPT84) names its one candidate step, when the
+        # gate was decided on one.
+        if (_WITHHELD_SHAPE_BY_KEY.get(key) == "step" and isinstance(r.get("step"), str)
+                and r["step"].strip()):
+            steps = [r["step"]]
         if isinstance(steps, list) and steps:
             shown += " (" + " + ".join(_withheld_cell_text(x) for x in steps) + ")"
         out.add(shown)
@@ -8028,8 +8101,8 @@ def _opt82_prompt(title: str, members: list[dict[str, Any]], url: str,
         "      to exactly the type-aware rules left after (a), via a second config.",
         *_opt82_split_scope_lines(tal),
         "  (c) A native type-aware linter (tsgolint via oxlint's type-aware mode)",
-        "      only when the remaining rule set is one it supports, under the",
-        "      catalog OPT14 migration-cost contract.",
+        "      only when the remaining rule set is one it supports, under",
+        "      OPT84's tool-swap table and its no-weakening rail (catalog OPT84).",
         "Risk: MEDIUM - a rule that ends up in neither pass is a silent coverage",
         "loss, and a type-aware pass scoped to changed files can miss a type",
         "error a change causes in an unchanged file; only a full type-aware pass",
@@ -8544,6 +8617,219 @@ def _opt83_unrouted_block(findings: list[dict[str, Any]], catalog_url: str) -> l
     return out
 
 
+# =============================================================================
+# OPT84 — A Slow Step on the Long Pole Runs a Tool That Has a Native Drop-in
+# =============================================================================
+# Every OPT84 finding renders exactly ONCE, as a short anchored card
+# (`<a id="opt84-<id>"></a>`): inside its pole's section, after any OPT83 card
+# and before any OPT81 card, or, when its pole is not one of the rendered long
+# poles, in its own section below the poles. Never in Also noticed, never in
+# Tier 2, never in a total: it is uncredited, and its one number is a ceiling.
+# Owner steer 2026-10-10: the card points the reader's agent at the swap and the
+# target's own docs; it does not prescribe the migration.
+# `verify_report.check_opt84_tool_swap` re-derives the step, its share and the
+# ceiling from the pole, checks every tool row, fit and docs link, rejects any
+# other duration or percentage, and checks where the card sits.
+# STRING CONTRACTS with verify_report: each has a `_VR_OPT84_*` copy there, and
+# test_opt84_render.py's `test_verifier_copies_equal_the_renderers` pins them
+# equal (the docs and range tables are also pinned to the engine's):
+_OPT84_SIZING_LABEL = (
+    "a CEILING, not a forecast: the step's own measured p50 is the most the swap "
+    "can remove; the published speedup range is the catalog's, not this repo's "
+    "number. Not credited, and not in any total")
+_OPT84_RAIL = (
+    "Every rule, plugin, file set and check stays: never drop, narrow or disable "
+    "one to make the swap fit, and never replace a `tsc` type-check with a tool "
+    "that only strips types; when the target lacks something the repo relies on, "
+    "run both tools rather than dropping it")
+_OPT84_BENCHMARK = (
+    "Benchmark first: give the target the repo's migrated config (per its migration "
+    "guide where it has one; until then the target command below runs the tool's "
+    "defaults), then time "
+    "both tools on the same commit and the same runner class, checking the same files "
+    "with equivalent rules, before claiming a number; if the swap reformats files, "
+    "ship the recipe and the bulk reformat as separate commits")
+_OPT84_SPLIT_UNKNOWN = (
+    "The tools share one step, so how the ceiling splits between them is unknown "
+    "until measured")
+_OPT84_TS6_ALIAS = (
+    "A type-aware ESLint config in this repo calls the TypeScript compiler API, which "
+    "TypeScript 7.0 does not ship: keep the `@typescript/typescript6` alias beside "
+    "it for those tools")
+_OPT84_SUMMARY = "uncredited, benchmark first"
+# What each tool row says the target is. Never "a drop-in": that is a fit, and
+# the row's own `fit:` says whether this repo's use of the tool is one (a
+# dual-run or an OPT82-first row is not).
+_OPT84_REPLACEMENT = "is the native replacement"
+# The swap table's published speedup range is the catalog's number, quoted as
+# such, never this repo's. The engine stamps it on EVERY tool
+# (`published_range`, a required stamp); the card renders the stamp and keeps
+# no table of its own to fall back on, and the verifier fails a tool without one.
+# The target's own docs, per row. The engine stamps `docs_url` on each tool from
+# its `_OPT84_DOCS` table; the card renders the stamped link, and the verifier
+# accepts only these.
+_OPT84_DOCS_URLS: dict[str, str] = {
+    "prettier": "https://oxc.rs/docs/guide/usage/formatter.html",
+    "eslint": "https://oxc.rs/docs/guide/usage/linter.html",
+    "tsc": "https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/",
+}
+# The target's migration guide, per row (None: the row has none). The engine
+# stamps `migration_docs_url` from the same `_OPT84_DOCS` table; when the stamp
+# is a string the card renders it beside the docs link.
+_OPT84_MIGRATION_DOCS_URLS: dict[str, "str | None"] = {
+    "prettier": "https://oxc.rs/docs/guide/usage/formatter/migrate-from-prettier.html",
+    "eslint": "https://oxc.rs/docs/guide/usage/linter/migrate-from-eslint.html",
+    "tsc": None,
+}
+_OPT84_SOURCE_NAME = {"prettier": "Prettier", "eslint": "ESLint", "tsc": "tsc"}
+_OPT84_TARGET_NAME = {"prettier": "oxfmt", "eslint": "oxlint",
+                      "tsc": "TypeScript 7 (`typescript@^7`)"}
+
+
+def _opt84_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [f for f in findings if str(f.get("pattern", "")) == "OPT84"
+            and isinstance(f.get("tool_swap"), dict)]
+
+
+def _opt84_for_pole(pole: dict[str, Any],
+                    findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The OPT84 findings stamped from this pole: same workflow file basename and
+    the pole's own job, and, when the finding carries the `pole_check` it was
+    stamped from, that check too (matrix legs can share one job; without it the
+    first pole with the job would take every leg's card)."""
+    pole_wf = str(pole.get("workflow_file") or "")
+    job = str(pole.get("job") or "")
+    if not pole_wf or not job:
+        return []
+    check = str(pole.get("check") or "")
+    return [f for f in _opt84_findings(findings)
+            if _wf_base(str(f.get("workflow_file") or "")) == _wf_base(pole_wf)
+            and str(f["tool_swap"].get("job") or "") == job
+            and str(f["tool_swap"].get("pole_check") or "") in ("", check)]
+
+
+def _opt84_norm_cmd(cmd: str) -> str:
+    """A command in the engine's shlex-joined form, so a step that resolves to
+    itself (re-quoted or re-spaced) compares equal; unparsable quoting falls
+    back to whitespace-collapsed text."""
+    try:
+        return shlex.join(shlex.split(cmd))
+    except ValueError:
+        return " ".join(cmd.split())
+
+
+def _opt84_packages_note(t: dict[str, Any]) -> str:
+    """The task-runner expansion note, from the stamped `packages` count alone:
+    the engine never carries it in `fit_reasons` (non-empty only on a dual-run)."""
+    n = t.get("packages")
+    if not isinstance(n, int) or isinstance(n, bool) or n < 1:
+        return ""
+    return (f"across {n} workspace package{'' if n == 1 else 's'}; "
+            "task-runner filters not applied")
+
+
+def _opt84_fit_words(t: dict[str, Any]) -> str:
+    """The fit in a few words: drop-in, run both (with the stamped reasons), or
+    OPT82 first, plus the workspace-packages note on a task-runner expansion,
+    whatever the fit."""
+    fit = str(t.get("fit") or "")
+    note = _opt84_packages_note(t)
+    reasons = [_flatten_cell(str(r)) for r in t.get("fit_reasons") or [] if r]
+    if fit == "dual-run":
+        why = "; ".join(reasons)
+        words = "run both" + (f": {why}" if why else "")
+    elif fit == "drop-in":
+        words = "drop-in"
+    elif fit == "deferred_to_opt82":
+        words = "see OPT82 first: its type-aware rules are that finding's to settle"
+    else:
+        words = _flatten_cell(fit) or "unknown"
+    return words + (f"; {note}" if note else "")
+
+
+def _opt84_bench_pairs(tools: list[dict[str, Any]]) -> list[str]:
+    """Each tool's stamped `before` vs `after` benchmark command pair."""
+    out = []
+    for t in tools:
+        cmds = t.get("benchmark_commands")
+        if isinstance(cmds, list) and len(cmds) >= 2 and cmds[0] and cmds[1]:
+            out.append(f"`{_flatten_cell(str(cmds[0]))}` vs `{_flatten_cell(str(cmds[1]))}`")
+    return out
+
+
+def _opt84_card(f: dict[str, Any], catalog_url: str) -> list[str]:
+    """One OPT84 finding as a short anchored card: the step and what it runs, each
+    tool's native replacement and its fit, the catalog's published range and the target's
+    docs, the labelled ceiling, one rail and one benchmark line. No prompt block:
+    the reader's agent is pointed at the docs, not handed a migration script."""
+    ts = f["tool_swap"]
+    fid = re.sub(r"[^A-Za-z0-9_.:-]+", "_", str(f.get("id") or "x"))
+    title = _flatten_cell(str(f.get("title") or "OPT84"))
+    url = f"{catalog_url}#{f.get('fix_recipe_anchor')}" if f.get(
+        "fix_recipe_anchor") else catalog_url
+    wf = _wf_base(str(f.get("workflow_file") or ""))
+    job = _flatten_cell(str(ts.get("job") or ""))
+    step = _flatten_cell(str(ts.get("step") or ""))
+    p50 = _num(ts.get("step_p50_s")) or 0.0
+    job_p50 = _num(ts.get("job_p50_s")) or 0.0
+    share = _num(ts.get("share")) or 0.0
+    ceiling = _num(ts.get("ceiling_s")) or 0.0
+    cmd = _flatten_cell(str(ts.get("command") or ""))
+    leaves = [_flatten_cell(str(x)) for x in ts.get("resolved_leaves") or [] if x]
+    runs = f"It runs `{cmd}`" + (
+        ", which resolves to " + " · ".join(f"`{x}`" for x in leaves) + "."
+        if leaves and [_opt84_norm_cmd(x) for x in leaves] != [_opt84_norm_cmd(cmd)]
+        else ".")
+    tools = [t for t in ts.get("tools") or [] if isinstance(t, dict)]
+    out = [f'<a id="opt84-{fid}"></a>', "",
+           f"**🧰 OPT84 · {title}** - risk **{_flatten_cell(str(f.get('risk') or 'MEDIUM'))}**"
+           f" · {_OPT84_SUMMARY}", "",
+           f"- **Where:** `{wf}` ▸ `{job}` ▸ step `{step}`: {p50:.0f}s at the median, "
+           f"{share * 100:.0f}% of this {job_p50:.0f}s job. {runs}"]
+    for t in tools:
+        row = str(t.get("row") or "")
+        src = _OPT84_SOURCE_NAME.get(row) or _flatten_cell(str(t.get("source_tool") or row))
+        tgt = _OPT84_TARGET_NAME.get(row) or _flatten_cell(str(t.get("target") or ""))
+        rng = t.get("published_range")
+        rng = (_flatten_cell(rng) if isinstance(rng, str) and rng.strip()
+               else "not stamped")
+        mig = t.get("migration_docs_url")
+        line = (f"- **{src} → {tgt}:** runs "
+                f"`{_flatten_cell(str(t.get('leaf_command') or ''))}`; {tgt} "
+                f"{_OPT84_REPLACEMENT} (published range {rng}, "
+                f"the catalog's number, not this repo's); fit: {_opt84_fit_words(t)}; "
+                f"docs: {_flatten_cell(str(t.get('docs_url') or ''))}"
+                + (f"; migration guide: {_flatten_cell(mig)}"
+                   if isinstance(mig, str) and mig.strip() else ""))
+        if row == "tsc" and t.get("typescript6_alias_needed"):
+            line += f". {_OPT84_TS6_ALIAS}."
+        out.append(line)
+    ceil_line = (f"- **Ceiling:** {ceiling:.0f}s, this step's measured p50 - "
+                 f"{_OPT84_SIZING_LABEL}.")
+    if len(tools) > 1:
+        ceil_line += f" {_OPT84_SPLIT_UNKNOWN}."
+    bench = _opt84_bench_pairs(tools)
+    out += [ceil_line,
+            f"- **Rail:** {_OPT84_RAIL}.",
+            f"- **{_OPT84_BENCHMARK}.**" + (f" {'; '.join(bench)}." if bench else ""),
+            f"- **Catalog:** {url}", ""]
+    return out
+
+
+def _opt84_unrouted_block(findings: list[dict[str, Any]], catalog_url: str) -> list[str]:
+    """OPT84 findings whose pole is not one of the rendered long poles: their own
+    section, so a finding is never dropped and never dressed as hygiene."""
+    if not findings:
+        return []
+    out = ['<a id="tool-swaps"></a>', "",
+           "## 🧰 Tool swaps on other long poles", "",
+           "> OPT84 findings on a drilled long pole that is not rendered above. "
+           "Uncredited, benchmark first, and not part of any total.", ""]
+    for f in findings:
+        out += _opt84_card(f, catalog_url)
+    return out
+
+
 def _also_noticed_block(findings: list[dict[str, Any]],
                         catalog_url: str,
                         shallow_note: str = "",
@@ -8643,6 +8929,7 @@ def _also_noticed_block(findings: list[dict[str, Any]],
             and str(f.get("pattern", "")) not in _WAIT_PATTERNS  # → its own §
             and str(f.get("pattern", "")) != "OPT81"             # → its pole / own §
             and str(f.get("pattern", "")) != "OPT83"             # → its pole / own §
+            and str(f.get("pattern", "")) != "OPT84"             # → its pole / own §
             and not _on_pole_job(f)                               # valueless + all-pole-job → already AS a pole (#5)
             and not _is_opt79_pole_finding(f)]                    # OPT79 pole cache → its own block (at its pole, or `_opt79_off_pole_block`)
     if not elig:
@@ -9960,6 +10247,9 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     _o83_lines = _opt83_unrouted_block(_opt83_findings(all_findings), catalog_url)
     if _o83_lines:
         out += ["---", "", *_o83_lines]
+    _o84_lines = _opt84_unrouted_block(_opt84_findings(all_findings), catalog_url)
+    if _o84_lines:
+        out += ["---", "", *_o84_lines]
     if also_lines:
         out += ["---", "", *also_lines]
     # Measured net-negative caches that could not be PRICED (three cases: the
@@ -11174,6 +11464,7 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
 
     opt81_rendered: set[int] = set()
     opt83_rendered: set[int] = set()
+    opt84_rendered: set[int] = set()
     opt79_at_pole: set[str] = set()
     for i, p in enumerate(pole_wfs, 1):
         check = _clean_label(str(p.get("check", "")))
@@ -11614,6 +11905,11 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
                 if id(_o83) not in opt83_rendered:
                     opt83_rendered.add(id(_o83))
                     out += _opt83_card(_o83, catalog_url)
+            # And an OPT84 card, after OPT83's, for the same reason.
+            for _o84 in _opt84_for_pole(p, all_findings):
+                if id(_o84) not in opt84_rendered:
+                    opt84_rendered.add(id(_o84))
+                    out += _opt84_card(_o84, catalog_url)
             continue
         out += _floor_note(p, floor_pool)
         # OPT80's tail line sits beside the pole's merge-wait figure, as its own
@@ -11778,6 +12074,14 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
                 continue
             opt83_rendered.add(id(_o83))
             out += _opt83_card(_o83, catalog_url)
+        # OPT84 on THIS pole: a slow step runs a tool with a native drop-in.
+        # After OPT83 (a different lever: run side by side vs make each one
+        # faster) and before OPT81. Uncredited; one card per finding.
+        for _o84 in _opt84_for_pole(p, all_findings):
+            if id(_o84) in opt84_rendered:
+                continue
+            opt84_rendered.add(id(_o84))
+            out += _opt84_card(_o84, catalog_url)
         # OPT81 on THIS pole: the measured runner-class gap, or the runner-size
         # advisory as the LAST option — after the pole's own prompt and any OPT75
         # decomposition, never above a credited lever. A log-level leaf that
@@ -11868,6 +12172,12 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
         catalog_url)
     if _o83_lines:
         out += ["---", "", *_o83_lines]
+    # OPT84 findings whose pole is not rendered above get their own section.
+    _o84_lines = _opt84_unrouted_block(
+        [f for f in _opt84_findings(all_findings) if id(f) not in opt84_rendered],
+        catalog_url)
+    if _o84_lines:
+        out += ["---", "", *_o84_lines]
     if also_lines:
         out += ["---", "", *also_lines]
     if shallow_note and not queue_lines and not also_lines:

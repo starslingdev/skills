@@ -2967,7 +2967,9 @@ def _unfollowable_config_bases(text: str) -> list[str]:
     return out
 
 
-def _vitest_config_files(root: Path, is_config: "Any" = None
+def _vitest_config_files(root: Path, is_config: "Any" = None,
+                         also: "Any" = None, also_found: "list[Path] | None" = None,
+                         unlisted: "list[Path] | None" = None,
                          ) -> "tuple[list[Path], bool, list[Path]]":
     """Config candidates at the repo root plus a bounded walk beneath it, as
     ``(configs, truncated, manifests)`` — ``manifests`` being the `package.json`
@@ -2987,6 +2989,11 @@ def _vitest_config_files(root: Path, is_config: "Any" = None
     opt-out may sit in a config the walk never reached. "Walk exhausted" and "no
     config exists" therefore reach the SAME withheld outcome, for different
     reasons, so both are reported.
+
+    ``also`` / ``also_found``: a second file-name predicate, whose matches the
+    same walk appends to ``also_found`` (OPT84 collects Prettier configs this
+    way, so a config with no `package.json` beside it is still seen). They do
+    not count toward the config cap.
 
     The "plausibly" is load-bearing, and is why an unvisited directory is only
     counted when it is a package root (a `package.json` in it) or holds one
@@ -3023,7 +3030,11 @@ def _vitest_config_files(root: Path, is_config: "Any" = None
             entries = sorted(base.iterdir())
         except OSError:
             # An unreadable DIRECTORY is unvisited ground, not a clean miss.
+            # Recorded for callers that must name it (OPT84 marks it as a
+            # place whose Prettier configs could not be read).
             truncated = True
+            if unlisted is not None:
+                unlisted.append(base)
             continue
         for entry in entries:
             try:
@@ -3033,6 +3044,8 @@ def _vitest_config_files(root: Path, is_config: "Any" = None
                 # Listable but not stat-able (e.g. a `r--` directory): unvisited
                 # ground, never a crash of the whole scan.
                 truncated = True
+                if unlisted is not None:
+                    unlisted.append(entry)
                 continue
             if is_dir:
                 if entry.name in _VITEST_SKIP_DIRS or (
@@ -3056,6 +3069,8 @@ def _vitest_config_files(root: Path, is_config: "Any" = None
                     truncated = truncated or _may_hold_config(entry)
             elif entry.name == "package.json":
                 manifests.append(entry)
+            elif also is not None and also_found is not None and also(entry.name):
+                also_found.append(entry)
             elif (is_config or _is_vitest_config_name)(entry.name):
                 found.append(entry)
                 if len(found) >= _VITEST_CONFIG_MAX_FILES:
@@ -3937,20 +3952,306 @@ def _tal_block(**overrides: Any) -> dict[str, Any]:
         "eslint_versions": {},
         "rules_source": "references/type-aware-lint-rules.tsv",
         "error": None,
+        # OPT84 (tool swap) reads every key from here down (`tool_versions`,
+        # `config_files`, `eslint_config_facts`, `pnpm_catalogs`,
+        # `pnpm_catalogs_unreadable`, `prettier_plugins`,
+        # `prettier_plugin_files`, `prettier_config_unreadable`), plus
+        # `package_scripts` and `configs` above. {package dir: {package:
+        # version spec}} for the `_TAL_TOOL_PACKAGES` its package.json declares
+        # (dependencies + devDependencies, string specs only); a dir that
+        # declares none of them is absent.
+        "tool_versions": {},
+        # {package dir: sorted names of the formatter / compiler / framework
+        # config files beside its package.json (`_TAL_CONFIG_FILE_RE`)}.
+        "config_files": {},
+        # {ESLint config path: {"plugins", "local_rules", "exhaustive_deps"}}:
+        # what the config's own text names, never evaluated. OPT84 decides
+        # whether an oxlint swap is a plain swap or a dual-run from these.
+        "eslint_config_facts": {},
+        # {catalog name: {package: version spec}} from the root
+        # `pnpm-workspace.yaml`: its `catalog:` map is "default", each
+        # `catalogs:<name>:` map is <name>. OPT84 resolves a `catalog:` /
+        # `catalog:<name>` version through it; absent or unreadable = {}.
+        "pnpm_catalogs": {},
+        # True when the root `pnpm-workspace.yaml` exists but could not be read
+        # or parsed (or a catalog in it is not a mapping): its `{}` above then
+        # means "unknown", not "no catalogs". Not added to `unreadable`, which
+        # lists ESLint configs only (OPT82 resolves configs through it).
+        "pnpm_catalogs_unreadable": False,
+        # {package dir: sorted Prettier plugin packages its package.json
+        # declares (dependencies + devDependencies): `prettier-plugin-*`,
+        # `@scope/prettier-plugin`, `@scope/prettier-plugin-*`}; a dir that
+        # declares none is absent. The three `prettier_*` maps also key a
+        # directory holding a Prettier config and no package.json read (the
+        # walk collects the configs themselves), and `prettier_config_unreadable`
+        # names a package folder that could not be listed.
+        "prettier_plugins": {},
+        # {package dir: {plugin: the repo-relative file that names it}} for a
+        # plugin `prettier_plugins` lists ONLY because a Prettier config names
+        # it (`.prettierrc`, `.prettierrc.json|json5|yaml|yml`, or the
+        # `"prettier"` key of package.json); a dependency names package.json.
+        "prettier_plugin_files": {},
+        # {package dir: [repo-relative Prettier config files this read does not
+        # open]}: a JS / TS config (`.prettierrc.js|cjs|mjs|ts|...`,
+        # `prettier.config.*`), a TOML one, one that does not parse, or a
+        # package.json `"prettier"` key naming a shared config. Any of them may
+        # load plugins, so OPT84 reads the dir as "plugins unknown".
+        "prettier_config_unreadable": {},
     }
+    unknown = set(overrides) - set(block)
+    if unknown:
+        raise KeyError(f"_tal_block: not a type_aware_lint key: {sorted(unknown)}")
     block.update(overrides)
     return block
 
 
+def _tal_pnpm_catalogs(root: Path) -> dict[str, dict[str, str]]:
+    """The root `pnpm-workspace.yaml`'s catalogs; {} when there is none or it
+    cannot be read (a catalog reference then stays unreadable downstream)."""
+    return _tal_pnpm_catalogs_read(root)[0]
+
+
+def _tal_pnpm_catalogs_read(root: Path) -> "tuple[dict[str, dict[str, str]], bool]":
+    """The catalogs and whether the file was UNREADABLE: present but not
+    readable as text, not YAML, not a mapping at the top, or holding a catalog
+    that is not a mapping. An absent file, or an empty one, is readable."""
+    path = root / "pnpm-workspace.yaml"
+    if not path.exists():
+        return {}, False
+    try:
+        text = _read_config_text(path)
+    except OSError:
+        return {}, True
+    if text is None:
+        return {}, True
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return {}, True
+    if data is None:
+        return {}, False
+    if not isinstance(data, dict):
+        return {}, True
+
+    def _specs(m: Any) -> "dict[str, str] | None":
+        if not isinstance(m, dict):
+            return None
+        return {str(k): str(v) for k, v in m.items()
+                if isinstance(v, (str, int, float)) and not isinstance(v, bool)}
+
+    bad = False
+    out: dict[str, dict[str, str]] = {}
+    named = data.get("catalogs")
+    if isinstance(named, dict):
+        for n, m in named.items():
+            specs = _specs(m)
+            if specs is not None:
+                out[str(n)] = specs
+            elif m is not None:
+                bad = True
+    elif named is not None:
+        bad = True
+    default = _specs(data.get("catalog"))
+    if default is not None:
+        out["default"] = {**out.get("default", {}), **default}
+    elif data.get("catalog") is not None:
+        bad = True
+    return out, bad
+
+
+# The packages whose declared versions OPT84 reads: the tools it can swap, the
+# targets that mean "already swapped", and the recipe-only rows' tools.
+_TAL_TOOL_PACKAGES = ("typescript", "prettier", "oxfmt", "oxlint", "eslint",
+                      "@babel/core", "@swc/core", "webpack", "next")
+_TAL_PRETTIER_PLUGIN_RE = re.compile(
+    r"^(?:prettier-plugin-[\w.-]+|@[\w.-]+/prettier-plugin(?:-[\w.-]+)?)$")
+_TAL_CONFIG_FILE_RE = re.compile(
+    r"^(\.prettierrc.*|prettier\.config\..+|babel\.config\..+|\.babelrc.*"
+    r"|next\.config\..+)$")
+# An ESLint plugin named in a config's text: `eslint-plugin-x`,
+# `@scope/eslint-plugin(-x)`, or a string in a legacy `plugins: [...]` list.
+_TAL_PLUGIN_PKG_RE = re.compile(r"(?:@([\w.-]+)/)?eslint-plugin(?:-([\w.-]+))?")
+_TAL_PLUGINS_LIST_RE = re.compile(r"""["']?plugins["']?\s*:\s*\[([^\]]*)\]""")
+_TAL_QUOTED_RE = re.compile(r"""["']([^"']+)["']""")
+# A rule defined in the repo itself: a local-rules plugin, a rules directory, a
+# relative import of a rules / plugin module, or an inline rule (`create(context`).
+_TAL_LOCAL_RULES_RE = re.compile(
+    r"eslint-plugin-local|local-rules|rulesdir|rulesDirectory"
+    r"""|(?:from\s+|require\(\s*)["']\.{1,2}/[^"']*(?:rule|plugin)[^"']*["']"""
+    r"|\bcreate\s*\(\s*context\b")
+
+
+# A legacy `extends` entry that loads a plugin's preset: `plugin:<name>/<cfg>`.
+_TAL_PLUGIN_EXTENDS_RE = re.compile(r"""["'](plugin:[^"'\s]+)["']""")
+# The `react-hooks` presets that turn `react-hooks/exhaustive-deps` on
+# (`recommended`, `recommended-latest`, `recommended-legacy`).
+_TAL_HOOKS_PRESET_PREFIX = "plugin:react-hooks/recommended"
+
+
+def _tal_plugin_short(name: str) -> str:
+    """A plugin name in the shape the flat-config read records: the package
+    `eslint-plugin-x` is `x`, `@scope/eslint-plugin(-x)` is `@scope(/x)`, and a
+    short name (`react`, `@typescript-eslint`) stays as written."""
+    name = name.strip()
+    m = _TAL_PLUGIN_PKG_RE.fullmatch(name)
+    if m:
+        scope, short = m.group(1), m.group(2)
+        return (f"@{scope}" + (f"/{short}" if short else "")) if scope else (short or "")
+    return name
+
+
+def _tal_plugin_from_extends(spec: str) -> "str | None":
+    """The plugin a legacy `extends: plugin:...` entry loads, or None for any
+    other entry: `plugin:react/recommended` is `react`, `plugin:@scope/cfg` is
+    `@scope`, `plugin:@scope/name/cfg` is `@scope/name`."""
+    if not spec.startswith("plugin:"):
+        return None
+    parts = spec[len("plugin:"):].split("/")
+    if parts[0].startswith("@"):
+        name = "/".join(parts[:2]) if len(parts) >= 3 else parts[0]
+    else:
+        name = parts[0]
+    return _tal_plugin_short(name) or None
+
+
+def _tal_obj_plugin_specs(obj: Any) -> "tuple[list[str], list[str]]":
+    """A structured config's `plugins` and `extends` entries, top level and
+    every `overrides[]` entry, as parsed (a YAML block list, an unquoted flow
+    list and a JSON array read the same)."""
+    blocks = [obj] if isinstance(obj, dict) else []
+    if isinstance(obj, dict) and isinstance(obj.get("overrides"), list):
+        blocks += [o for o in obj["overrides"] if isinstance(o, dict)]
+    plugins: list[str] = []
+    extends: list[str] = []
+    for b in blocks:
+        pl = b.get("plugins")
+        pl = [pl] if isinstance(pl, str) else list(pl) if isinstance(pl, dict) else pl
+        if isinstance(pl, list):
+            plugins += [str(x) for x in pl if isinstance(x, str)]
+        ext = b.get("extends")
+        ext = [ext] if isinstance(ext, str) else ext
+        if isinstance(ext, list):
+            extends += [x for x in ext if isinstance(x, str)]
+    return plugins, extends
+
+
+def _tal_fit_facts(text: str, obj: Any = None) -> dict[str, Any]:
+    """What an ESLint config names, for OPT84's swap fit: the plugins it loads
+    (a `plugins` entry, an `eslint-plugin-*` package, or a `plugin:<name>/...`
+    preset in `extends`), whether it defines rules locally, and whether it sets
+    `react-hooks/exhaustive-deps` (named, or through a `react-hooks` preset).
+    Never evaluated. `obj` is the parsed object of a structured config
+    (`.eslintrc`, `.eslintrc.json/.yml/.yaml`, `package.json#eslintConfig`):
+    its `plugins` and `extends` are read from it; a JS config's from its text."""
+    plugins: set[str] = set()
+    for scope, name in _TAL_PLUGIN_PKG_RE.findall(text):
+        plugins.add((f"@{scope}" + (f"/{name}" if name else "")) if scope else name)
+    if isinstance(obj, dict):
+        listed, extends = _tal_obj_plugin_specs(obj)
+        plugins.update(_tal_plugin_short(p) for p in listed)
+    else:
+        for body in _TAL_PLUGINS_LIST_RE.findall(text):
+            plugins.update(_TAL_QUOTED_RE.findall(body))
+        extends = _TAL_PLUGIN_EXTENDS_RE.findall(text)
+    for e in extends:
+        p = _tal_plugin_from_extends(e)
+        if p:
+            plugins.add(p)
+    plugins.discard("")
+    return {"plugins": sorted(plugins),
+            "local_rules": bool(_TAL_LOCAL_RULES_RE.search(text)),
+            "exhaustive_deps": "react-hooks/exhaustive-deps" in text
+            or any(e.startswith(_TAL_HOOKS_PRESET_PREFIX) for e in extends)}
+
+
+# Prettier configs this read parses as data (JSON, then YAML; `.prettierrc` may
+# be either, and tab-indented JSON is not YAML). Any other `.prettierrc*` / `prettier.config.*`
+# (JS, TS, TOML) is recorded as not opened.
+_TAL_PRETTIER_DATA_CONFIGS = (".prettierrc", ".prettierrc.json", ".prettierrc.json5",
+                              ".prettierrc.yaml", ".prettierrc.yml")
+
+
+def _tal_is_prettier_config_name(name: str) -> bool:
+    """A Prettier config file name (`.prettierrc*`, `prettier.config.*`)."""
+    return name.startswith(".prettierrc") or name.startswith("prettier.config.")
+
+
+def _tal_unlisted_folder(rel_dir: str) -> str:
+    """The `prettier_config_unreadable` entry for a package folder that could
+    not be listed: any Prettier config in it is unknown."""
+    return f"{rel_dir or '.'}/ (folder could not be listed)"
+
+
+def _tal_prettier_config_plugins(folder: Path, rel_dir: str, present: list[str],
+                                 pkg: dict[str, Any],
+                                 ) -> "tuple[dict[str, str], list[str]]":
+    """({plugin: repo-relative file naming it}, [repo-relative Prettier configs
+    not opened]) for one package directory: the `plugins` of its data-shaped
+    Prettier configs and of its package.json `"prettier"` key. Never evaluated."""
+    def _rel(name: str) -> str:
+        return f"{rel_dir}/{name}" if rel_dir else name
+
+    found: dict[str, str] = {}
+    unread: list[str] = []
+
+    def _take(obj: Any, where: str) -> None:
+        if not isinstance(obj, dict):
+            unread.append(where)            # a shared-config string, or not a map
+            return
+        pl = obj.get("plugins")
+        pl = [pl] if isinstance(pl, str) else pl
+        if pl is None:
+            return
+        if not isinstance(pl, list):
+            unread.append(where)
+            return
+        for p in pl:
+            if isinstance(p, str) and p.strip():
+                found.setdefault(p.strip(), where)
+
+    if "prettier" in pkg:
+        _take(pkg["prettier"], _rel("package.json"))
+    for name in present:
+        if not _tal_is_prettier_config_name(name):
+            continue
+        if name not in _TAL_PRETTIER_DATA_CONFIGS:
+            unread.append(_rel(name))
+            continue
+        try:
+            text = _read_config_text(folder / name)
+        except OSError:
+            text = None
+        if text is None:
+            unread.append(_rel(name))
+            continue
+        # JSON first, then YAML: a JSON config indented with tabs (legal JSON)
+        # is refused by YAML, which forbids tab indentation. Only a file that
+        # parses as neither is unread.
+        try:
+            obj = json.loads(text)
+        except ValueError:
+            try:
+                obj = yaml.safe_load(text)
+            except yaml.YAMLError:
+                unread.append(_rel(name))
+                continue
+        if obj is None:
+            continue                        # an empty config sets nothing
+        _take(obj, _rel(name))
+    return found, sorted(set(unread))
+
+
 def _read_type_aware_lint(root: Path) -> dict[str, Any]:
-    """Read the repo's ESLint config(s) for OPT82. Never raises: a crashed
-    reader yields a block the consumer withholds on, and says so."""
+    """Read the repo's ESLint config(s) for OPT82, and the manifest and
+    formatter facts OPT84 reads. Never raises: a crashed reader yields a block
+    both consumers withhold on, and says so."""
     try:
         return _read_type_aware_lint_unguarded(root)
     except Exception as e:  # noqa: BLE001 — fail closed, never take the scan down
         print(f"ci-speedup: the ESLint config reader failed ({type(e).__name__}: "
-              f"{e}); the type-aware lint check (OPT82) will be WITHHELD for this "
-              "repo — this is a scanner failure, not a fact about the repo.",
+              f"{e}); the type-aware lint check (OPT82) and the tool-swap check "
+              "(OPT84) will be WITHHELD for this repo — this is a scanner "
+              "failure, not a fact about the repo.",
               file=sys.stderr)
         return _tal_block(error=type(e).__name__)
 
@@ -3958,7 +4259,15 @@ def _read_type_aware_lint(root: Path) -> dict[str, Any]:
 def _read_type_aware_lint_unguarded(root: Path) -> dict[str, Any]:
     root = root.resolve()
     rules_catalog = _load_type_aware_rules()
-    paths, truncated, manifests = _vitest_config_files(root, _is_eslint_config_name)
+    # Prettier configs are collected by the same walk (same depth, skip rules
+    # and `truncated`), keyed by their own directory: a `.prettierrc` with no
+    # package.json beside it (a root config over `web/package.json`, or a
+    # config-only `docs/`) applies all the same.
+    prettier_paths: list[Path] = []
+    unlisted_dirs: list[Path] = []
+    paths, truncated, manifests = _vitest_config_files(
+        root, _is_eslint_config_name, also=_tal_is_prettier_config_name,
+        also_found=prettier_paths, unlisted=unlisted_dirs)
 
     def _rel(path: Path) -> str:
         try:
@@ -3974,6 +4283,26 @@ def _read_type_aware_lint_unguarded(root: Path) -> dict[str, Any]:
     scripts: dict[str, dict[str, str]] = {}
     scripts_unreadable: list[str] = []
     eslint_versions: dict[str, str] = {}
+    tool_versions: dict[str, dict[str, str]] = {}
+    config_files: dict[str, list[str]] = {}
+    fit_facts: dict[str, dict[str, Any]] = {}
+    prettier_plugins: dict[str, list[str]] = {}
+    prettier_plugin_files: dict[str, dict[str, str]] = {}
+    prettier_config_unreadable: dict[str, list[str]] = {}
+    # A folder the walk could not list (or stat) is ground whose Prettier
+    # configs were never read: named, not silently absent, so the Prettier fit
+    # runs both tools rather than calling the swap a drop-in.
+    for _ud in unlisted_dirs:
+        try:
+            _urel = _ud.resolve().relative_to(root.resolve()).as_posix()
+        except ValueError:
+            _urel = _ud.name
+        _urel = "" if _urel == "." else _urel
+        prettier_config_unreadable.setdefault(_urel, [])
+        _mark = _tal_unlisted_folder(_urel)
+        if _mark not in prettier_config_unreadable[_urel]:
+            prettier_config_unreadable[_urel].append(_mark)
+    prettier_read_dirs: set[str] = set()
 
     def _finish(rel: str, fmt: str, read: dict[str, Any],
                 typed: "_TalCustomRules", imp_unresolved: list[str]) -> None:
@@ -4039,6 +4368,8 @@ def _read_type_aware_lint_unguarded(root: Path) -> dict[str, Any]:
             unreadable.append(rel)
             continue
         flat = path.name.startswith("eslint.config.")
+        fit_facts[rel] = _tal_fit_facts(
+            text, _tal_parse_obj_text(text) if _tal_is_obj_config(path.name) else None)
         read = _tal_read_any(path, text, rel, flat)
         if read is None:
             unreadable.append(rel)
@@ -4063,12 +4394,57 @@ def _read_type_aware_lint_unguarded(root: Path) -> dict[str, Any]:
                                                              dict) else {})}
         if isinstance(deps.get("eslint"), str):
             eslint_versions[_dir(rel)] = deps["eslint"]
+        tv = {k: deps[k] for k in _TAL_TOOL_PACKAGES if isinstance(deps.get(k), str)}
+        if tv:
+            tool_versions[_dir(rel)] = tv
+        pp = sorted(k for k in deps if _TAL_PRETTIER_PLUGIN_RE.match(str(k)))
+        prettier_read_dirs.add(_dir(rel))
+        try:
+            present = sorted(n for n in os.listdir(path.parent)
+                             if _TAL_CONFIG_FILE_RE.match(n))
+        except OSError:
+            # A folder that cannot be listed may hold a Prettier config: its
+            # plugins are unknown, never "none".
+            present = []
+            prettier_config_unreadable[_dir(rel)] = [_tal_unlisted_folder(_dir(rel))]
+        if present:
+            config_files[_dir(rel)] = present
+        cfg_plugins, cfg_unread = _tal_prettier_config_plugins(
+            path.parent, _dir(rel), present, data)
+        from_cfg = {n: f for n, f in cfg_plugins.items() if n not in pp}
+        if pp or from_cfg:
+            prettier_plugins[_dir(rel)] = sorted({*pp, *from_cfg})
+        if from_cfg:
+            prettier_plugin_files[_dir(rel)] = from_cfg
+        if cfg_unread:
+            prettier_config_unreadable[_dir(rel)] = sorted(
+                {*prettier_config_unreadable.get(_dir(rel), []), *cfg_unread})
         sc = data.get("scripts")
         scripts[_dir(rel)] = ({str(k): str(v) for k, v in sc.items()
                                if isinstance(v, str)} if isinstance(sc, dict) else {})
         if isinstance(data.get("eslintConfig"), dict):
+            fit_facts[rel] = _tal_fit_facts(json.dumps(data["eslintConfig"]),
+                                            data["eslintConfig"])
             _finish(rel, "package.json", _tal_read_obj(data["eslintConfig"], rel),
                     _TalCustomRules(), [])
+    # Prettier configs in a directory whose package.json was not read (none
+    # there, or one that could not be read): read the same way, keyed by the
+    # config's own directory, so the Prettier fit's upward and downward walks
+    # see them.
+    config_only: dict[str, list[str]] = {}
+    for path in prettier_paths:
+        d = _dir(_rel(path))
+        if d not in prettier_read_dirs:
+            config_only.setdefault(d, []).append(path.name)
+    for d, names in sorted(config_only.items()):
+        cfg_plugins, cfg_unread = _tal_prettier_config_plugins(
+            root / d if d else root, d, sorted(names), {})
+        if cfg_plugins:
+            prettier_plugins[d] = sorted(cfg_plugins)
+            prettier_plugin_files[d] = dict(cfg_plugins)
+        if cfg_unread:
+            prettier_config_unreadable[d] = cfg_unread
+    catalogs, catalogs_unreadable = _tal_pnpm_catalogs_read(root)
     return _tal_block(
         configs=sorted(configs, key=lambda c: c["path"]),
         unreadable=sorted(unreadable),
@@ -4076,6 +4452,14 @@ def _read_type_aware_lint_unguarded(root: Path) -> dict[str, Any]:
         package_scripts=scripts,
         package_scripts_unreadable=sorted(scripts_unreadable),
         eslint_versions=eslint_versions,
+        tool_versions=tool_versions,
+        config_files=config_files,
+        eslint_config_facts=fit_facts,
+        pnpm_catalogs=catalogs,
+        pnpm_catalogs_unreadable=catalogs_unreadable,
+        prettier_plugins=prettier_plugins,
+        prettier_plugin_files=prettier_plugin_files,
+        prettier_config_unreadable=prettier_config_unreadable,
     )
 
 
@@ -4676,8 +5060,11 @@ def scan(root: Path, catalog_path: Path) -> dict[str, Any]:
     # by a drill-time log leaf in blocking_path.py, gated on this scan's
     # `test_runner_isolation` block.
     # OPT83 (independent steps on a pole) is routed by collect_runs from each
-    # drilled pole's step decomposition plus the workflow YAML.
-    structural_detected = {"OPT70", "OPT71", "OPT72", "OPT73", "OPT75", "OPT83"}
+    # drilled pole's step decomposition plus the workflow YAML. OPT84 (a slow
+    # pole step runs a tool with a native drop-in) is routed the same way, from
+    # the pole's step decomposition plus the workflow YAML and package scripts.
+    structural_detected = {"OPT70", "OPT71", "OPT72", "OPT73", "OPT75", "OPT83",
+                           "OPT84"}
     structural_without_detector = sorted(
         c.pattern for c in catalog
         if c.finding_class == "structural" and c.pattern not in structural_detected)

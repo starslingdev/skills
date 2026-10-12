@@ -13,6 +13,69 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-10-10** — **The audit now points out when a slow step on the slowest
+  merge-gating job runs a tool that has a native, much faster drop-in.** New
+  catalog pattern OPT84 looks at each slowest job the audit measured on the
+  pull-request path. When a lint, format or type-check step takes at least 20
+  seconds (whatever share of the job that is), and its command (directly or through the
+  repo's `package.json` scripts) runs Prettier, ESLint or `tsc --noEmit`, the
+  report adds a card at that job naming the step, its measured time, the tool,
+  its drop-in (oxfmt, oxlint, TypeScript 7) and a link to the drop-in's own
+  docs: the oxfmt and oxlint migration guides, and for TypeScript 7 its release
+  announcement, as it has no migration guide. Several uses of one tool in a
+  step are one row. The card credits no saving: its only number is the step's
+  measured time, shown as the most the swap could remove, and it asks for a
+  benchmark of both tools on the same runner first, after giving the drop-in
+  the repo's migrated config (until then the drop-in runs on its defaults).
+  Every rule, plugin, file set and check stays; when the drop-in may lack
+  something the repo relies on (ESLint custom rules, any ESLint plugin oxlint
+  does not carry natively, including ones named only through a legacy
+  `plugin:` preset or a YAML config, ESLint type-aware rules, ESLint
+  command-line flags that add rules, plugins or parsers, a Prettier plugin, or
+  a Prettier config file the audit does not open such as `prettier.config.js`),
+  the card says to run both tools. ESLint with type-aware rules runs both
+  tools unless OPT82 already reports that step, in which case the card says to
+  see OPT82 first. Any card that proposes
+  an ESLint swap itself (not left to OPT82) is marked high risk, drop-in or
+  run-both alike. The audit stays silent on a tool when the same step
+  already runs its drop-in, when oxlint or oxfmt (or `eslint-plugin-oxlint`)
+  is declared in a `package.json` on the step's path to the repo root, or,
+  for the type-check, when TypeScript 7 or later is declared. Anything the
+  audit cannot read for certain
+  (a `${{ }}` expression in the command, a script it cannot follow such as a
+  shell script or a subshell, a package manager pointed at another directory,
+  an action step that may lint or format, a lint config it could not fully
+  read, a repository scan that carries no lint config read, a `package.json`
+  or Prettier config it could not read, a TypeScript version it cannot pin
+  down, or, in a JavaScript repo, a general task runner such as `make` or
+  `just` and an action it does not recognise) holds
+  the step back, listed in the Data sources row as "tool swap: held back".
+  The card links each drop-in's overview docs alongside its migration guide.
+  A nameless step GitHub names `Run <command>` whose command runs only
+  non-JavaScript tools (cargo, cmake, go, gradle, dotnet, ...) is a silent
+  verdict when its workflow job joins but the step itself cannot (an
+  expression in the command, or two steps sharing a name); a wrapper such as
+  `sudo`, `corepack`, `uv run`, `poetry run` or `bundle exec` is read through
+  to what it runs, and `lefthook`, `lint-staged`, `husky`, `bazel` and an
+  interpreter running a script file are held back like the other generic
+  runners. Rust-ecosystem audit and cache actions are known verdicts. Prettier
+  configs are read in every walked directory, not only beside a
+  `package.json`, as JSON first and then YAML, so a tab-indented `.prettierrc`
+  names its plugins; `--parser-options` on the ESLint command means run both.
+  The report's own self-check re-derives every card from the findings file:
+  the step and its time on its pole, the ceiling, the fit from the stamped
+  lint-config facts (a "drop-in" over custom rules, a plugin oxlint does not
+  carry, type-aware rules or unread facts fails it), the docs links, and that
+  no card exists when the scan's lint-tooling read is missing or failed.
+  A `pnpm <name>` / `yarn <name>` / `bun <name>` that names no script runs that
+  binary and is read as it (a CLI the table has no row for is counted, not
+  listed; a path or script file such as `bun build.ts`, a colon name, pnpm's
+  workspace-wide `recursive`, or a directory the scan's manifest walk did not
+  reach is held back), and a job with no scan or build step of 20 seconds or
+  more is skipped before any workflow file is read.
+  Babel and Webpack stay in the catalog's swap table as recipes only. The
+  catalog now has 82 patterns (73 hygiene, 9 structural). (#129)
+
 - **2026-10-09** — **The audit now spots a slow merge-gating job whose
   independent steps run one after another, and shows the most a `parallel:`
   group could take off its time.** New catalog pattern OPT83 looks at each
@@ -766,6 +829,22 @@ unversioned and updates by reinstall from `main`.
   re-rendered. (#72)
 
 ### Changed
+
+- **2026-10-10** — **OPT14 is now only about repeated checkout and setup.** Its
+  title drops "(and Slow Tool Replacement)" and becomes "Repeated
+  Checkout/Setup Without Artifact Handoff"; the tool-swap table that lived
+  under it moved to OPT84, and OPT14 now links there. Its `fix_strategy` is
+  unchanged, so older findings files still match it, and the catalog keeps
+  explicit alias anchors for the old heading's links (and for a few other
+  older-style links that committed findings files still carry), so links in
+  published example reports and on the website still land on the pattern; a
+  new test fails when a committed findings file links an anchor the catalog no
+  longer has. (#129)
+
+- **2026-10-10** — **OPT82's agent prompt now points to OPT84 for tool
+  swaps.** Its no-weakening step cited OPT14's swap table and the contract
+  under it, which moved; it now cites OPT84's tool-swap table and rail.
+  (#129)
 
 - **2026-10-10** — **The "Parallel steps" Data sources row says what the repo
   actually uses.** Its "Used for" cell always described `parallel:` groups, so
