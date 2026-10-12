@@ -422,6 +422,29 @@ def test_measured_saving_is_bounded_by_every_run_on_both_sides(tmp_path):
     assert res.ok and not res.skipped, res.detail
 
 
+def test_measured_saving_on_a_mixed_job_uses_every_run_not_the_fallback(tmp_path):
+    # The all-cancelled job above reaches the every-run bound through the all-excluded
+    # fallback too, so it cannot tell the measured-basis rule apart. Here the job has
+    # completed runs (10 x 10 min) AND cancelled ones (2 x 60 min): completed compute is
+    # 1000 min/mo, every run 2200. A measured 1500 sits between them, so it passes only
+    # because a measured saving is bounded by every run, on both sides.
+    runs = [[_named(_job(_JOB_S, "success", i), "mixed")] for i in range(10)]
+    runs += [[_named(_job(3600, "cancelled", 10 + i), "mixed")] for i in range(2)]
+    spine = _spine_for(runs)
+    row = spine["rows"][0]
+    assert round(row["completed_billable_equiv_min_per_month"]) == 1000
+    assert round(row["billable_equiv_min_per_month"]) == 2200
+    f = {"pattern": "OPT77", "workflow_file": _WF, "affected_jobs": ["mixed"],
+         "runner_min_saving": 1500.0, "sizing_basis": "measured"}
+    cr._reground_runner_minute_savings([f], spine)
+    assert f["runner_min_saving"] == 1500.0
+    res = _bound(_doc(spine, [f]), tmp_path)
+    assert res.ok and not res.skipped, res.detail
+    modeled = dict(f, sizing_basis="modeled", runner_min_saving=1500.0)
+    res = _bound(_doc(spine, [modeled]), tmp_path)
+    assert not res.ok, res.detail
+
+
 def test_modeled_failure_waste_finding_is_capped_at_every_run_compute():
     # OPT35 is a modeled failure-waste estimate: the door caps it, at every-run compute
     # (4800), never at completed compute (1200). This reaches the door's all-runs branch.
