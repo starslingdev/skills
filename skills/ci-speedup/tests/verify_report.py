@@ -5370,9 +5370,9 @@ def _measured_compute_footnote(spine: dict) -> str:
         text += " No timed-out, cancelled or killed job run was found in the sample."
     if failures > 0:
         text += (f" {failures} job download{'' if failures == 1 else 's'} failed, so the "
-                 "runs in them were not checked.")
+                 f"runs in {'it' if failures == 1 else 'them'} were not checked.")
     return text + (" Failed, neutral and other finished runs count. Modeled savings are "
-                   "capped at measured compute and savings derived from it are computed "
+                   "capped at measured compute and derived savings are computed "
                    "from it; measured savings and failure-waste findings are checked "
                    "against every sampled run instead.")
 

@@ -837,11 +837,11 @@ unversioned and updates by reinstall from `main`.
   a job's total several times over, so an overstated saving fitted under it.
   It now counts completed job runs (success or failure, plus neutral and other
   finished conclusions) and excludes conclusion `timed_out`, `cancelled`, and
-  any run inside the default-timeout kill window OPT57 uses. Each spine row
+  any failed run inside the default-timeout kill window OPT57 uses. Each spine row
   stamps its completed compute next to the excluded runs (count by reason,
   sampled minutes, min/mo); the footnote under the cost-spine table states the
   basis, names the excluded runs and failed job downloads, and says which
-  savings use which basis. The door and the report self-check now share one
+  savings use which basis. Savings sizing and the report self-check now share one
   basis rule: modeled savings are capped at completed compute; measured or
   Tier-2-certified savings and the failure-waste findings (OPT35, OPT46, OPT48,
   OPT57, OPT64) are checked against every sampled run. **Derived savings

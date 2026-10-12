@@ -176,7 +176,15 @@ def test_timed_out_and_cancelled_runs_are_excluded_with_their_reason():
 
 
 def test_kill_window_edges_match_opt57():
+    # OPT57's kill window holds only runs that FAILED there: GitHub kills a job at the
+    # default timeout with a failure. A run that SUCCEEDED (or ended neutral) inside the
+    # window finished on its own (an explicit timeout-minutes above 342, a long release
+    # job), so it counts as completed compute and is never reported as "killed".
     assert cr._spine_unfinished_reason({"conclusion": "success"},
+                                       cr._OPT57_NEAR_DEFAULT_TIMEOUT_S) is None
+    assert cr._spine_unfinished_reason({"conclusion": "neutral"},
+                                       cr._OPT57_NEAR_DEFAULT_TIMEOUT_S) is None
+    assert cr._spine_unfinished_reason({"conclusion": "failure"},
                                        cr._OPT57_NEAR_DEFAULT_TIMEOUT_S) == "kill_window"
     assert cr._spine_unfinished_reason({"conclusion": "failure"},
                                        cr._OPT57_DEFAULT_KILL_CEILING_S) == "kill_window"
@@ -331,7 +339,7 @@ def test_spine_footnote_names_the_basis_and_the_excluded_runs(tmp_path):
             "360 sampled min, 3600.000 min/mo) is excluded because no speed fix removes "
             "it; the cost-spine rows and Total still count its minutes.") in block
     assert ("Failed, neutral and other finished runs count. Modeled savings are capped at "
-            "measured compute and savings derived from it are computed from it; measured "
+            "measured compute and derived savings are computed from it; measured "
             "savings and failure-waste findings are checked against every sampled run "
             "instead.") in block
     report = "# report\n\n" + block.replace("runs: 1200.000", "runs: 4800.000") + "\n"
@@ -431,12 +439,33 @@ def test_every_finished_conclusion_counts_and_only_unfinished_ones_are_excluded(
     runs = [[_job(_JOB_S, c, i)] for i, c in enumerate(
         ("success", "success", "failure", "neutral", "action_required",
          "cancelled", "timed_out"))]
-    runs.append([_job(int(0.96 * 360 * 60), "success", 20)])     # kill window, any conclusion
+    runs.append([_job(int(0.96 * 360 * 60), "success", 20)])     # finished on its own: counts
+    runs.append([_job(int(0.96 * 360 * 60), "failure", 21)])     # killed in the window
     row = _spine_for(runs, volume=80)["rows"][0]
-    assert row["completed_occurrence_count"] == 5
+    assert row["completed_occurrence_count"] == 6
     assert row["excluded_unfinished_by_reason"] == {
         "timed_out": 1, "cancelled": 1, "kill_window": 1}
-    assert row["completed_sampled_billable_min"] == 50
+    assert row["completed_sampled_billable_min"] == 50 + 346
+
+
+def test_a_tiny_completed_figure_is_a_completed_bound_on_both_sides(tmp_path):
+    # 40 runs killed in the window plus one 1-minute success at 1 run/mo: completed compute
+    # is about 0.02 min/mo, real but rounding to 0.0. The door treated it as "every run
+    # excluded" (round(measured, 1) <= 0), kept a modeled 50 under the every-run cap with a
+    # false note, while the verifier bounded the same finding by 0.02 and refused the
+    # engine's own report. One unrounded test on both sides.
+    runs = [[_job(350 * 60, "failure", i % 59)] for i in range(40)]
+    runs.append([_job(60, "success", 59)])
+    spine = _spine_for(runs, volume=1)
+    row = spine["rows"][0]
+    assert 0 < row["completed_billable_equiv_min_per_month"] < 0.05
+    f = {"pattern": "OPT17", "workflow_file": _WF, "affected_jobs": ["build"],
+         "runner_min_saving": 50.0, "sizing_basis": "modeled"}
+    cr._reground_runner_minute_savings([f], spine)
+    assert f.get("runner_min_door_note") != cr._ALL_RUNS_EXCLUDED_NOTE
+    assert f["runner_min_saving"] == 0.0
+    res = _bound(_doc(spine, [f]), tmp_path)
+    assert res.ok, res.detail
 
 
 def test_derived_saving_uses_completed_compute():
@@ -635,4 +664,8 @@ def test_footnote_names_failed_job_downloads():
     note = bp._measured_compute_footnote(spine)
     assert "No timed-out, cancelled or killed job run was found in the sample." in note
     assert "2 job downloads failed, so the runs in them were not checked." in note
+    one = copy.deepcopy(spine)
+    one["workflow_coverage"]["job_fetch_failures"] = 1
+    for render in (bp._measured_compute_footnote, vr._measured_compute_footnote):
+        assert "1 job download failed, so the runs in it were not checked." in render(one)
     assert note == vr._measured_compute_footnote(spine)

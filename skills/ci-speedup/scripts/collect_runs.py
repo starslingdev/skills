@@ -6305,8 +6305,10 @@ def _cap_at_measured_compute(
     measured, matched, distinct = _own_workflow_billable(wf, jobs, by_wf_job, job_graph)
     figure = ("of every sampled run" if every_run else "of completed job runs")
     all_excluded = False
+    # UNROUNDED, exactly as the verifier's twin test: a completed figure that is tiny but
+    # positive (one short success among many killed runs) is a real completed bound.
     if (not every_run and all_index is not None and distinct and matched == distinct
-            and round(measured, 1) <= 0):
+            and measured <= 0):
         # Every sampled run of these jobs was timed out, cancelled or killed: there
         # is no completed basis, which is NOT "the jobs used no compute". The cap
         # (and the verifier's bound) fall back to every sampled run, and the note
@@ -6330,8 +6332,9 @@ def _cap_at_measured_compute(
     cap = (f"MEASURED monthly billable compute {figure} ({measured:g} min/mo from the "
            "cost spine) — a fix cannot save more minutes than the jobs consume"
            + ("; " + _ALL_RUNS_EXCLUDED_NOTE if all_excluded else "")) if measured > 0 else (
-           f"MEASURED monthly billable compute {figure}, which is 0 min/mo: the affected "
-           "jobs measured no billable compute in the sample, so there is no bill saving")
+           f"MEASURED monthly billable compute {figure}, which rounds to 0 min/mo: the "
+           "affected jobs measured no billable compute in the sample to that precision, so "
+           "there is no bill saving")
     f["size_note"] = (
         (str(f.get("size_note") or "") + "; " if f.get("size_note") else "")
         + f"estimate of {float(saving):g} min/mo capped at the affected jobs' " + cap)
@@ -6502,7 +6505,11 @@ def _spine_unfinished_reason(job: dict[str, Any], duration_s: float) -> str | No
     conclusion = str(job.get("conclusion") or "").lower()
     if conclusion in ("timed_out", "cancelled"):
         return conclusion
-    if _OPT57_NEAR_DEFAULT_TIMEOUT_S <= float(duration_s) <= _OPT57_DEFAULT_KILL_CEILING_S:
+    # Same window AND same conclusion test as OPT57: GitHub kills a job at the default
+    # timeout with a failure, so only a FAILED run in the window was killed. A run that
+    # succeeded there finished on its own and is completed compute.
+    if (conclusion == "failure"
+            and _OPT57_NEAR_DEFAULT_TIMEOUT_S <= float(duration_s) <= _OPT57_DEFAULT_KILL_CEILING_S):
         return "kill_window"
     return None
 
