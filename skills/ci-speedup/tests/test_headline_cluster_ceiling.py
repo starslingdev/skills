@@ -555,3 +555,44 @@ def test_volume_unknown_credited_cluster_is_appendix_owned_not_a_duplicate_pole(
     assert md.count("📐 Structural root-cause") == 0            # not a duplicate per-pole section
     bl = _bottom_line(md)
     assert "**~10m 27s**" in bl and "Also noticed" in bl
+
+
+# --------------------------------------------------------------------------- #
+# F. A SMALL off-spine cluster under a BIGGER chain headline is not "crowned" (the mastra-ai/mastra
+# shape). The renderer correctly leads with the chain headroom (~15m 31s on mastra) and demotes the
+# 58s off-spine `prebuild.yml` cluster, but the crown guards read "rendered win >= cluster ceiling" as
+# "the cluster leads" — so the chain's own number was attributed to the cluster and the on-spine
+# guard FAILed a correct report. A cluster leads only when the rendered win IS its ceiling.
+# --------------------------------------------------------------------------- #
+def _small_cluster_under_chain(off_spine: bool) -> dict:
+    # Mastodon chain (~36s headroom leads) with a 20s cluster that cannot out-rank it.
+    d = _mastodon_shape()
+    d["findings"][0]["wall_clock_p50_s"] = 20.0
+    if off_spine:
+        d["findings"][0]["off_spine"] = True
+    return d
+
+
+def test_small_off_spine_cluster_under_a_chain_headline_is_not_crowned(tmp_path):
+    vr = _vr()
+    d = _small_cluster_under_chain(off_spine=True)
+    md = bp.render(d)
+    bl = _bottom_line(md)
+    assert "fixing the whole chain is worth up to" in bl and "**~36s**" in bl, bl
+    assert "OPT73" not in bl                         # the renderer did NOT crown the cluster
+    c = vr.check_headline_cluster_lever_on_spine(md, _write_findings(tmp_path, d))
+    assert c.ok and c.skipped, c.detail              # no off-spine crown -> loud narrow skip
+    assert "does not lead" in c.detail and "Coverage gap, not a clean pass." in c.detail
+
+
+def test_presence_guard_does_not_judge_a_cluster_a_bigger_win_outranks(tmp_path):
+    # Same over-attribution in the presence guard: a minority-workflow cluster (2/20) whose 20s
+    # ceiling sits under a bigger rendered win is not the crown, so it must not FAIL as one.
+    vr = _vr()
+    doc = _presence_doc(wf=".github/workflows/tests_secondary.yml",
+                        legs=["Windows (firefox)", "Android"], step="Run test",
+                        cluster_wc=20.0, wf_pole=2)
+    report = _crown_bottom_line(3000.0)              # a different, bigger lever leads
+    c = vr.check_headline_lever_is_presence_eligible(report, _write_findings(tmp_path, doc))
+    assert c.ok and c.skipped, c.detail
+    assert "does not lead" in c.detail
