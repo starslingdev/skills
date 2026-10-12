@@ -1081,6 +1081,18 @@ unversioned and updates by reinstall from `main`.
   measured compute refused the report. A failed sample now counts only when it
   ended within 15 minutes after the 360-minute kill; the report verifier
   rejects a finding that credits a longer one. (#131)
+- **2026-10-12** — **The report's self-check no longer rejects a correct
+  headline when a smaller, demoted cluster fix sits beneath it** (#130). The
+  two Bottom-line crown checks counted any headline win at least as large as a
+  cluster lever's own saving as that cluster's crown. So a chain headroom that
+  correctly led (~15m 31s on mastra-ai/mastra) was blamed on a 58s cluster the
+  renderer had already kept out of the headline because its jobs are off the
+  merge-gating path, and the report failed verification. A cluster now counts
+  as leading only when the headline sentence names it (its workflow and its
+  OPT73 entry) and does not bury it, so a different lever whose number happens
+  to sit within 2s of the cluster's no longer reads as the cluster's crown. A
+  real off-path or minority-workflow crown still fails, including one whose
+  number is wrong. The renderer is unchanged.
 - **2026-10-10** — **`STARSLING_LOG_LEVEL=DEBUG` now prints the debug trace.**
   The variable was documented as the opt-in for the scripts' diagnostic output,
   but no script read it, so every debug line was unreachable and stderr stayed
