@@ -5359,7 +5359,7 @@ def _measured_compute_footnote(spine: dict) -> str:
         one = count == 1
         parts = [f"{int(_num(reasons.get(key)) or 0)} {label}" for key, label in (
             ("timed_out", "timed out"), ("cancelled", "cancelled"),
-            ("kill_window", "killed in the 6-hour default-timeout window"))
+            ("kill_window", "failed at or past the 6-hour default timeout"))
                  if int(_num(reasons.get(key)) or 0) > 0]
         text += (f" {count} timed-out, cancelled or killed job run{'' if one else 's'} "
                  f"({', '.join(parts)}; {sampled} sampled min, {monthly:.3f} min/mo) "

@@ -2157,7 +2157,7 @@ sizing path**. Two more invariants complete the class cut:
 PR #30; both it and the door pick each finding's basis through ONE rule,
 `_measured_compute_basis_for`, mirrored in the verifier and pinned by a coupling
 test: **completed job runs** (`completed_billable_equiv_min_per_month`; timed-out,
-cancelled and 6-hour-killed runs excluded, stamped per row by reason and summed in
+cancelled and failed-at-or-past-6-hour runs excluded, stamped per row by reason and summed in
 `excluded_unfinished`, named by the cost-spine footnote) for modeled and derived
 savings, every sampled run for `_FAILURE_WASTE_PATTERNS` (OPT35/46/48/57/64) and for
 measured or Tier-2-certified savings; a job whose every run was excluded falls back
@@ -3686,7 +3686,7 @@ through one policy. Whole-run-cancel patterns (OPT45 missing-concurrency, `_SIZI
 affected_jobs`) stay inside the bound BY DERIVATION rather than clamp:
 `_reground_whole_run_cancel_saving` re-derives the saving as `hit_rate × Σ(affected-job
 completed_billable_equiv_min_per_month from the spine)` (completed job runs: timed-out,
-cancelled and 6-hour-killed runs excluded, 2026-10-12) — the same measured rows bound (c) reads, joined the
+cancelled and failed-at-or-past-6-hour runs excluded, 2026-10-12) — the same measured rows bound (c) reads, joined the
 same way (matrix-stripped base, reusable-workflow fallback via the shared `_measured_billable_index`),
 and at least as strictly — so `hit_rate ≤ 1` puts it within bound by construction (superseding the
 provisional sizing-time figure, which grounds the no-spine case in the affected jobs' summed p50, never

@@ -190,8 +190,26 @@ def test_kill_window_edges_match_opt57():
                                        cr._OPT57_DEFAULT_KILL_CEILING_S) == "kill_window"
     assert cr._spine_unfinished_reason({"conclusion": "failure"},
                                        cr._OPT57_NEAR_DEFAULT_TIMEOUT_S - 1) is None
+    # Owner decision 2026-10-12: a failed run AT OR BEYOND the window's start is out, with
+    # no upper bound. Past the 375-min ceiling the span is not compute (a 30-day deployment
+    # approval wait reported as a failed job); OPT57 already ignores it.
     assert cr._spine_unfinished_reason({"conclusion": "failure"},
-                                       cr._OPT57_DEFAULT_KILL_CEILING_S + 1) is None
+                                       cr._OPT57_DEFAULT_KILL_CEILING_S + 1) == "kill_window"
+    assert cr._spine_unfinished_reason({"conclusion": "failure"}, 43200 * 60) == "kill_window"
+    # A successful run of any length still counts.
+    assert cr._spine_unfinished_reason({"conclusion": "success"}, 43200 * 60) is None
+
+
+def test_a_failed_approval_wait_is_excluded_and_a_long_success_still_counts():
+    runs = [[_job(_JOB_S, "success", i)] for i in range(10)]
+    runs.append([_job(600 * 60, "success", 10)])          # a 10-hour build that succeeded
+    runs.append([_job(43200 * 60, "failure", 11)])        # a 30-day approval wait, failed
+    row = _spine_for(runs, volume=120)["rows"][0]
+    assert row["completed_occurrence_count"] == 11
+    assert row["completed_sampled_billable_min"] == 10 * 10 + 600
+    assert row["excluded_unfinished_by_reason"] == {
+        "timed_out": 0, "cancelled": 0, "kill_window": 1}
+    assert row["excluded_unfinished_sampled_billable_min"] == 43200
 
 
 # --- the cap and the gate ----------------------------------------------------------
@@ -335,7 +353,7 @@ def test_spine_footnote_names_the_basis_and_the_excluded_runs(tmp_path):
     doc = _doc(spine, [])
     block = "\n".join(bp._runner_minute_spine_block(doc))
     assert ("Measured compute counts completed job runs: 1200.000 min/mo. 1 timed-out, "
-            "cancelled or killed job run (1 killed in the 6-hour default-timeout window; "
+            "cancelled or killed job run (1 failed at or past the 6-hour default timeout; "
             "360 sampled min, 3600.000 min/mo) is excluded because no speed fix removes "
             "it; the cost-spine rows and Total still count its minutes.") in block
     assert ("Failed, neutral and other finished runs count. Modeled savings are capped at "
@@ -363,8 +381,8 @@ def test_footnote_mirror_matches_the_renderer():
         assert bp._measured_compute_footnote(v) == vr._measured_compute_footnote(v)
     assert ("No timed-out, cancelled or killed job run was found in the sample."
             in bp._measured_compute_footnote(none))
-    assert ("2 timed-out, cancelled or killed job runs (1 killed in the 6-hour "
-            "default-timeout window; 360 sampled min, 3600.000 min/mo) are excluded because "
+    assert ("2 timed-out, cancelled or killed job runs (1 failed at or past the 6-hour "
+            "default timeout; 360 sampled min, 3600.000 min/mo) are excluded because "
             "no speed fix removes them; the cost-spine rows and Total still count their "
             "minutes.") in bp._measured_compute_footnote(two)
     assert bp._measured_compute_footnote(legacy) == ""

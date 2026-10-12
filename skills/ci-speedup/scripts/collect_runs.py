@@ -4835,7 +4835,7 @@ def _measured_compute_basis_for(f: dict[str, Any]) -> str:
 
 _ALL_RUNS_EXCLUDED_NOTE = (
     "every sampled run of the affected job(s) was excluded from measured compute "
-    "(timed out, cancelled, or killed in the 6-hour default-timeout window), so "
+    "(timed out, cancelled, or failed at or past the 6-hour default timeout), so "
     "there is no completed-run compute to measure this saving against")
 
 _SIZING: dict[str, dict[str, Any]] = {
@@ -6505,11 +6505,12 @@ def _spine_unfinished_reason(job: dict[str, Any], duration_s: float) -> str | No
     conclusion = str(job.get("conclusion") or "").lower()
     if conclusion in ("timed_out", "cancelled"):
         return conclusion
-    # Same window AND same conclusion test as OPT57: GitHub kills a job at the default
-    # timeout with a failure, so only a FAILED run in the window was killed. A run that
-    # succeeded there finished on its own and is completed compute.
-    if (conclusion == "failure"
-            and _OPT57_NEAR_DEFAULT_TIMEOUT_S <= float(duration_s) <= _OPT57_DEFAULT_KILL_CEILING_S):
+    # A FAILED run at or beyond the start of OPT57's kill window is out (owner decision
+    # 2026-10-12), with no upper bound: inside the window GitHub killed it at the default
+    # timeout; past the 375-min ceiling the span is not compute at all (a 30-day deployment
+    # approval wait reported as a failed job), which OPT57 already ignores. A run that
+    # SUCCEEDED, at any length, finished on its own and is completed compute.
+    if conclusion == "failure" and float(duration_s) >= _OPT57_NEAR_DEFAULT_TIMEOUT_S:
         return "kill_window"
     return None
 
