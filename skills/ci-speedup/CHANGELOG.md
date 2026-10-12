@@ -51,6 +51,11 @@ unversioned and updates by reinstall from `main`.
   `just` and an action it does not recognise) holds
   the step back, listed in the Data sources row as "tool swap: held back".
   The card links each drop-in's overview docs alongside its migration guide.
+  The report's own self-check re-derives every card from the findings file:
+  the step and its time on its pole, the ceiling, the fit from the stamped
+  lint-config facts (a "drop-in" over custom rules, a plugin oxlint does not
+  carry, type-aware rules or unread facts fails it), the docs links, and that
+  no card exists when the scan's lint-tooling read is missing or failed.
   A `pnpm <name>` / `yarn <name>` / `bun <name>` that names no script runs that
   binary and is read as it (a CLI the table has no row for is counted, not
   listed; a path or script file such as `bun build.ts`, a colon name, pnpm's
