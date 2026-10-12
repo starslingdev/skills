@@ -11170,9 +11170,17 @@ def test_withhold_phrase_tables_match_the_renderer_and_the_collector():
     # Every field of every row, including the "Used for" cell. Sliced to three,
     # that cell could be rewritten with the whole suite staying green.
     assert list(vr._VR_WITHHELD_ROWS) == list(bp._WITHHELD_ROWS)
+    # The shapes are a typed set on both registries (`Literal`), and every
+    # registered row's shape is one of them: a fourth spelling cannot be
+    # registered and dispatched on as some other shape.
+    import typing
+    shapes = set(typing.get_args(typing.get_type_hints(bp.WithheldRow)["entry_shape"]))
+    assert shapes == {"job", "group", "step"}, shapes
+    assert set(typing.get_args(
+        typing.get_type_hints(vr._VrWithheldRow)["entry_shape"])) == shapes
     for row in bp._WITHHELD_ROWS:
         assert row.feeds.strip(), f"{row.doc_key} registers an empty 'Used for' cell"
-        assert row.entry_shape in ("job", "group", "step"), row
+        assert row.entry_shape in shapes, row
     # the shape maps both twins dispatch on are derived from the registry, so a
     # pattern cannot be registered with one shape and rendered with another
     assert (bp._WITHHELD_SHAPE_BY_KEY == vr._VR_WITHHELD_SHAPE_BY_KEY

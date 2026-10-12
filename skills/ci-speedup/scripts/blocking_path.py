@@ -32,7 +32,7 @@ import sys
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, NamedTuple
+from typing import Any, Callable, Literal, NamedTuple
 
 import claims  # same-skill module; typed claims layer (increment 1: headline family)
 import untrusted_wrap as uw  # same-skill module; BEGIN/END untrusted-log marking (#29)
@@ -5478,8 +5478,11 @@ class WithheldRow(NamedTuple):
     label: str      # the Data sources row's first cell
     noun: str       # what the count counts
     feeds: str      # the "Used for" cell
-    entry_shape: str  # "job" (OPT79 / OPT80), "group" (OPT77) or "step" (OPT84:
-    #                   a job entry that names its candidate step when it has one)
+    # "job" (OPT79, OPT80, OPT81, OPT82, OPT83 and the parallel-steps row: an
+    # entry names one job, plus OPT83's named steps), "group" (OPT77: an entry
+    # names a whole group of jobs) or "step" (OPT84: a job entry that names its
+    # candidate step when its gate was decided on one).
+    entry_shape: Literal["job", "group", "step"]
 
 
 _WITHHELD_ROWS: tuple[WithheldRow, ...] = (
@@ -5771,6 +5774,14 @@ _OPT84_WITHHOLD_PHRASES: dict[str, str] = {
     "working_directory_unknown":
         "the slow step's working directory could not be placed inside the "
         "checkout, so which package.json applies is unknown",
+    # Pole-level: the findings file's own lint-tooling read is missing or failed,
+    # so no candidate step on the pole could be checked.
+    "type_aware_lint_scan_missing":
+        "the scan that wrote this findings file recorded no lint-tooling read, so "
+        "the step's tools could not be checked",
+    "type_aware_config_reader_failed":
+        "the scan's lint-tooling reader failed, so the step's tools could not be "
+        "checked",
 }
 # Every pattern's gate→phrase table, by doc key. OPT79's table is defined with
 # the rest of its code further down and registers itself there, so this one dict
@@ -8642,7 +8653,7 @@ _OPT84_SPLIT_UNKNOWN = (
     "The tools share one step, so how the ceiling splits between them is unknown "
     "until measured")
 _OPT84_TS6_ALIAS = (
-    "A type-aware ESLint config here calls the TypeScript compiler API, which "
+    "A type-aware ESLint config in this repo calls the TypeScript compiler API, which "
     "TypeScript 7.0 does not ship: keep the `@typescript/typescript6` alias beside "
     "it for those tools")
 _OPT84_SUMMARY = "uncredited, benchmark first"
@@ -8650,15 +8661,10 @@ _OPT84_SUMMARY = "uncredited, benchmark first"
 # the row's own `fit:` says whether this repo's use of the tool is one (a
 # dual-run or an OPT82-first row is not).
 _OPT84_REPLACEMENT = "is the native replacement"
-# The swap table's published speedup range per detected row: the catalog's
-# number, quoted as such, never this repo's. The engine stamps it on each tool
-# (`published_range`); the card renders the stamp and falls back to this table
-# only when a tool carries none. A coupling test pins it to the engine's table.
-_OPT84_PUBLISHED_RANGE: dict[str, str] = {
-    "prettier": "~4-30×",
-    "eslint": "~8-20×",
-    "tsc": "8-12× (vendor-stated)",
-}
+# The swap table's published speedup range is the catalog's number, quoted as
+# such, never this repo's. The engine stamps it on EVERY tool
+# (`published_range`, a required stamp); the card renders the stamp and keeps
+# no table of its own to fall back on, and the verifier fails a tool without one.
 # The target's own docs, per row. The engine stamps `docs_url` on each tool from
 # its `_OPT84_DOCS` table; the card renders the stamped link, and the verifier
 # accepts only these.
@@ -8713,8 +8719,8 @@ def _opt84_norm_cmd(cmd: str) -> str:
 
 
 def _opt84_packages_note(t: dict[str, Any]) -> str:
-    """The task-runner expansion note, from the stamped `packages` count; the
-    engine also appends it to `fit_reasons`, so dual-run must not repeat it."""
+    """The task-runner expansion note, from the stamped `packages` count alone:
+    the engine never carries it in `fit_reasons` (non-empty only on a dual-run)."""
     n = t.get("packages")
     if not isinstance(n, int) or isinstance(n, bool) or n < 1:
         return ""
@@ -8730,11 +8736,9 @@ def _opt84_fit_words(t: dict[str, Any]) -> str:
     note = _opt84_packages_note(t)
     reasons = [_flatten_cell(str(r)) for r in t.get("fit_reasons") or [] if r]
     if fit == "dual-run":
-        if note and note not in reasons:
-            reasons.append(note)
         why = "; ".join(reasons)
-        return "run both" + (f": {why}" if why else "")
-    if fit == "drop-in":
+        words = "run both" + (f": {why}" if why else "")
+    elif fit == "drop-in":
         words = "drop-in"
     elif fit == "deferred_to_opt82":
         words = "see OPT82 first: its type-aware rules are that finding's to settle"
@@ -8788,7 +8792,7 @@ def _opt84_card(f: dict[str, Any], catalog_url: str) -> list[str]:
         tgt = _OPT84_TARGET_NAME.get(row) or _flatten_cell(str(t.get("target") or ""))
         rng = t.get("published_range")
         rng = (_flatten_cell(rng) if isinstance(rng, str) and rng.strip()
-               else _OPT84_PUBLISHED_RANGE.get(row, ""))
+               else "not stamped")
         mig = t.get("migration_docs_url")
         line = (f"- **{src} → {tgt}:** runs "
                 f"`{_flatten_cell(str(t.get('leaf_command') or ''))}`; {tgt} "

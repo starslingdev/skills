@@ -34,6 +34,14 @@ _HELD_BACK = {
     "delegated_script_unresolved", "package_json_unreadable",
     "candidate_is_an_action", "eslint_config_unreadable",
     "typescript_version_unreadable", "working_directory_unknown",
+    "type_aware_lint_scan_missing", "type_aware_config_reader_failed",
+}
+# Decided before any candidate step is chosen: listed with the job, no step.
+_POLE_LEVEL = {
+    "pole_workflow_ambiguous", "pole_step_entries_unreadable",
+    "pole_step_timings_unavailable", "workflow_yaml_unavailable",
+    "pole_job_not_matched_in_yaml", "type_aware_lint_scan_missing",
+    "type_aware_config_reader_failed",
 }
 _VERDICTS = {
     "pole_not_file_backed", "no_candidate_step", "tool_not_in_table",
@@ -58,6 +66,22 @@ def _tool(row, fit="drop-in", reasons=None):
             # Stamped by the engine on every tool, from its own tables.
             "published_range": cr._OPT84_TABLE[row]["published_range"],
             "migration_docs_url": cr._OPT84_DOCS[row]["migration_docs_url"]}
+
+
+def _tal(**over):
+    """The scan's `type_aware_lint` block as a clean read: one flat ESLint config
+    at the root with no plugins or local rules, no Prettier plugins, a complete
+    walk."""
+    b = {"configs": [{"path": "eslint.config.js", "dir": "", "format": "flat",
+                      "type_aware": "off", "custom_rules": [], "shared_configs": [],
+                      "unresolved_imports": []}],
+         "unreadable": [], "truncated": False, "error": None,
+         "package_scripts_unreadable": [],
+         "eslint_config_facts": {"eslint.config.js": {
+             "plugins": [], "local_rules": False, "exhaustive_deps": False}},
+         "prettier_plugins": {}}
+    b.update(over)
+    return b
 
 
 def _tools_default():
@@ -127,6 +151,7 @@ def _opt83():
 
 def _doc(findings, poles=None):
     return {"repo": "o/r", "scanned_at": "2026-10-10T00:00:00Z",
+            "type_aware_lint": _tal(),
             "data_sources": {"runs_sampled": 100, "jobs_sampled": 300,
                              "workflows_analyzed": 5},
             "findings": findings,
@@ -154,7 +179,7 @@ def test_card_states_step_share_command_tools_ceiling_rail_and_benchmark():
     assert "`pnpm lint`" in text and "`eslint .`" in text and "`prettier --check .`" in text
     for row in ("eslint", "prettier"):
         assert bp._OPT84_DOCS_URLS[row] in text
-        assert bp._OPT84_PUBLISHED_RANGE[row] in text
+        assert cr._OPT84_TABLE[row]["published_range"] in text
     assert "run both" in text and "2 custom rules oxlint cannot run" in text
     assert "drop-in" in text
     assert bp._OPT84_SIZING_LABEL in text
@@ -173,14 +198,17 @@ def test_card_renders_each_tools_stamped_published_range():
     t["published_range"] = "~5-7×"
     text = _flat(_card(_finding([t])))
     assert "published range ~5-7×," in text, text
-    assert bp._OPT84_PUBLISHED_RANGE["prettier"] not in text
+    assert cr._OPT84_TABLE["prettier"]["published_range"] not in text
 
 
-def test_card_falls_back_to_the_table_range_when_none_is_stamped():
+def test_card_never_falls_back_to_a_table_range_when_none_is_stamped():
+    # `published_range` is a required stamp: the card renders what the engine
+    # stamped and nothing else, and the verifier fails a tool without one.
     t = _tool("prettier")
     del t["published_range"]
     text = _flat(_card(_finding([t])))
-    assert f"published range {bp._OPT84_PUBLISHED_RANGE['prettier']}," in text, text
+    assert cr._OPT84_TABLE["prettier"]["published_range"] not in text, text
+    assert not hasattr(bp, "_OPT84_PUBLISHED_RANGE")
 
 
 def test_card_renders_the_migration_guide_beside_the_docs_when_stamped():
@@ -243,9 +271,7 @@ _FIT_WORD_CASES = [
     {"fit": "drop-in"},
     {"fit": "drop-in", "packages": 2},
     {"fit": "dual-run", "fit_reasons": ["a", "b | c"]},
-    {"fit": "dual-run", "fit_reasons": [], "packages": 1},
-    {"fit": "dual-run", "fit_reasons": [
-        "x", "across 3 workspace packages; task-runner filters not applied"], "packages": 3},
+    {"fit": "dual-run", "fit_reasons": ["x"], "packages": 3},
     {"fit": "deferred_to_opt82"},
     {"fit": "deferred_to_opt82", "packages": 4},
     {"fit": "something new"},
@@ -382,9 +408,12 @@ def test_held_back_registry_row_and_phrases():
 def test_held_back_row_prints_each_gates_phrase_and_the_verifier_agrees(tmp_path, gate):
     key = bp._OPT84_WITHHELD_DOC_KEY
     row = next(r for r in bp._WITHHELD_ROWS if r.doc_key == key)
-    cands = [{"workflow_file": _WF, "job": "Lint", "gate": gate, "step": _STEP}]
+    on_step = gate not in _POLE_LEVEL
+    cand = {"workflow_file": _WF, "job": "Lint", "gate": gate}
+    cands = [{**cand, "step": _STEP}] if on_step else [cand]
     line = bp._withheld_candidates_line({key: cands}, key, row.noun)
-    assert line == (f"1 {row.noun} held back (Lint ({_STEP})): "
+    named = f"Lint ({_STEP})" if on_step else "Lint"
+    assert line == (f"1 {row.noun} held back ({named}): "
                     f"{bp._OPT84_WITHHOLD_PHRASES[gate]}."), line
     p = tmp_path / "findings.json"
     p.write_text(json.dumps({key: cands, "opt84_withheld_by_gate": {gate: 1}}),
@@ -392,8 +421,17 @@ def test_held_back_row_prints_each_gates_phrase_and_the_verifier_agrees(tmp_path
     report = f"| {row.label} | {line} | {row.feeds} |\n"
     err, _ = vr._withheld_disclosure_violation(report, p)
     assert err is None, err
-    err, _ = vr._withheld_disclosure_violation(report.replace(f" ({_STEP})", ""), p)
-    assert err, "dropping the step from the row must fail"
+    if on_step:
+        err, _ = vr._withheld_disclosure_violation(report.replace(f" ({_STEP})", ""), p)
+        assert err, "dropping the step from the row must fail"
+    # The entry carries `step` exactly when its gate is decided on a step.
+    wrong = [cand] if on_step else [{**cand, "step": _STEP}]
+    p.write_text(json.dumps({key: wrong, "opt84_withheld_by_gate": {gate: 1}}),
+                 encoding="utf-8")
+    line = bp._withheld_candidates_line({key: wrong}, key, row.noun)
+    err, _ = vr._withheld_disclosure_violation(
+        f"| {row.label} | {line} | {row.feeds} |\n", p)
+    assert err and "step" in err, (gate, err)
 
 
 def test_unmatched_pole_job_phrase_names_the_reusable_workflow_case():
@@ -419,7 +457,7 @@ def test_held_back_entry_without_a_step_names_the_job():
 
 def test_verifier_copies_equal_the_renderers():
     for name in ("SIZING_LABEL", "RAIL", "BENCHMARK", "SUMMARY", "SPLIT_UNKNOWN",
-                 "TS6_ALIAS", "DOCS_URLS", "PUBLISHED_RANGE", "WITHHOLD_PHRASES",
+                 "TS6_ALIAS", "DOCS_URLS", "WITHHOLD_PHRASES",
                  "REPLACEMENT", "SOURCE_NAME", "TARGET_NAME"):
         assert getattr(vr, f"_VR_OPT84_{name}") == getattr(bp, f"_OPT84_{name}"), name
     assert vr._VR_OPT84_HELD_BACK_GATES == frozenset(_HELD_BACK)
@@ -438,7 +476,7 @@ def test_renderer_and_verifier_url_and_range_tables_equal_the_engines():
     assert bp._OPT84_DOCS_URLS == vr._VR_OPT84_DOCS_URLS == engine_docs
     assert bp._OPT84_MIGRATION_DOCS_URLS == vr._VR_OPT84_MIGRATION_DOCS_URLS == engine_mig
     assert engine_mig["tsc"] is None
-    assert bp._OPT84_PUBLISHED_RANGE == vr._VR_OPT84_PUBLISHED_RANGE == engine_rng
+    assert vr._VR_OPT84_PUBLISHED_RANGE == engine_rng
 
 
 def _engine_fit_vocabulary() -> set[str]:
@@ -508,6 +546,12 @@ def _doc_and_report(f=None, extra=None):
 
 
 def _check(tmp_path, doc, report):
+    # Every doc a real run writes carries the scan's lint-tooling read; a test
+    # that is about its absence writes the doc itself (`_check_raw`).
+    return _check_raw(tmp_path, {"type_aware_lint": _tal(), **doc}, report)
+
+
+def _check_raw(tmp_path, doc, report):
     p = tmp_path / "findings.json"
     p.write_text(json.dumps(doc), encoding="utf-8")
     return vr.check_opt84_tool_swap(report, p)
@@ -695,9 +739,9 @@ _PKG_NOTE = "across 3 workspace packages; task-runner filters not applied"
 
 
 def _pkg_tool(row, fit, reasons=()):
-    # The engine stamps `packages` and appends the note to `fit_reasons` on a
-    # task-runner expansion, whatever the fit.
-    t = _tool(row, fit, [*reasons, _PKG_NOTE])
+    # The engine stamps `packages` on a task-runner expansion, whatever the fit;
+    # the note is rendered from that count, never carried in `fit_reasons`.
+    t = _tool(row, fit, list(reasons))
     t["packages"] = 3
     return t
 
@@ -823,9 +867,9 @@ def test_verifier_fails_a_card_before_its_poles_opt83_card(tmp_path):
 
 
 @pytest.mark.parametrize("edit", [
-    lambda r: r.replace(f"published range {bp._OPT84_PUBLISHED_RANGE['prettier']}",
+    lambda r: r.replace(f"published range {cr._OPT84_TABLE['prettier']['published_range']}",
                         "published range ~40-90×"),
-    lambda r: r.replace(f"published range {bp._OPT84_PUBLISHED_RANGE['prettier']}, ", ""),
+    lambda r: r.replace(f"published range {cr._OPT84_TABLE['prettier']['published_range']}, ", ""),
 ], ids=["altered", "missing"])
 def test_verifier_fails_a_card_without_the_rows_published_range(tmp_path, edit):
     doc, report = _doc_and_report()
@@ -1017,3 +1061,216 @@ def test_verifier_own_section_heading_is_the_renderers():
     lines = bp._opt84_unrouted_block([_finding()], "https://x/c.md")
     heading = next(ln for ln in lines if ln.startswith("## "))
     assert vr._VR_OPT84_OWN_SECTION in heading, heading
+
+
+# ---- the scan's lint-tooling read, required stamps, fit re-derivation ---------
+
+_SCAN_GATE_PHRASES = {
+    "type_aware_lint_scan_missing":
+        "the scan that wrote this findings file recorded no lint-tooling read, so "
+        "the step's tools could not be checked",
+    "type_aware_config_reader_failed":
+        "the scan's lint-tooling reader failed, so the step's tools could not be "
+        "checked",
+}
+
+
+def test_scan_gates_hold_back_in_plain_english_on_both_sides():
+    for g, want in _SCAN_GATE_PHRASES.items():
+        assert bp._OPT84_WITHHOLD_PHRASES[g] == want, g
+        assert vr._VR_OPT84_WITHHOLD_PHRASES[g] == want, g
+    assert len(bp._OPT84_WITHHOLD_PHRASES) == len(vr._VR_OPT84_HELD_BACK_GATES) == 17
+
+
+def test_step_gates_are_every_held_back_gate_but_the_pole_level_ones():
+    assert vr._VR_OPT84_STEP_GATES == frozenset(_HELD_BACK - _POLE_LEVEL)
+    assert vr._VR_OPT84_STEP_GATES < vr._VR_OPT84_HELD_BACK_GATES
+
+
+def test_ts6_alias_sentence_says_in_this_repo():
+    assert bp._OPT84_TS6_ALIAS.startswith(
+        "A type-aware ESLint config in this repo calls the TypeScript compiler API")
+    assert vr._VR_OPT84_TS6_ALIAS == bp._OPT84_TS6_ALIAS
+
+
+def test_packages_note_comes_from_the_count_alone_never_matched_against_reasons():
+    # The engine no longer carries the note in `fit_reasons`; the card renders it
+    # from `packages` on every fit and does not search the reasons for it.
+    t = {"fit": "dual-run", "fit_reasons": ["x", _PKG_NOTE], "packages": 3}
+    assert bp._opt84_fit_words(t).count(_PKG_NOTE) == 2
+    assert vr._vr_opt84_fit_words(t) == bp._opt84_fit_words(t)
+
+
+def test_verifier_oxlint_native_plugins_and_major_rule_equal_the_engines():
+    assert vr._VR_OPT84_OXLINT_NATIVE_PLUGINS == cr._OPT84_OXLINT_NATIVE_PLUGINS
+    for spec in ("^5.6.2", "~7.0", "5.6.2", ">=5", "v6", "6.0.0-beta.1",
+                 "npm:@typescript/typescript6@6.0.2", "npm:typescript", "catalog:",
+                 "workspace:*", "latest", "", None, "^7.0.2", "5.x"):
+        assert vr._vr_opt84_major(spec) == cr._opt84_major(spec), spec
+    for p in ("eslint-plugin-react", "@foo/eslint-plugin", "@foo/eslint-plugin-bar",
+              "react", " import "):
+        assert vr._vr_opt84_plugin_name(p) == cr._opt84_plugin_name(p), p
+
+
+def _with_tal(**over):
+    doc, report = _doc_and_report()
+    doc["type_aware_lint"] = _tal(**over)
+    return doc, report
+
+
+def _one(tool, **over):
+    """A one-tool finding and its card, with the scan block `_tal(**over)`."""
+    f = _finding([tool])
+    doc, report = _doc_and_report(f)
+    doc["type_aware_lint"] = _tal(**over)
+    return doc, report
+
+
+def test_verifier_fails_a_card_when_the_scan_recorded_no_lint_tooling_read(tmp_path):
+    doc, report = _doc_and_report()
+    doc.pop("type_aware_lint", None)
+    c = _check_raw(tmp_path, doc, report)
+    assert not c.ok and "no type_aware_lint block" in c.detail, c.detail
+
+
+def test_verifier_fails_a_card_stamped_from_a_failed_lint_tooling_read(tmp_path):
+    doc, report = _with_tal(error="OSError: boom")
+    c = _check_raw(tmp_path, doc, report)
+    assert not c.ok and "lint-tooling read that failed" in c.detail, c.detail
+
+
+@pytest.mark.parametrize("row", ["prettier", "tsc"])
+def test_verifier_fails_a_drop_in_stamped_from_a_truncated_walk(tmp_path, row):
+    doc, report = _one(_tool(row), truncated=True)
+    c = _check_raw(tmp_path, doc, report)
+    assert not c.ok and "truncated" in c.detail, c.detail
+
+
+def test_verifier_passes_a_clean_drop_in_of_each_row(tmp_path):
+    for row in ("prettier", "eslint", "tsc"):
+        doc, report = _one(_tool(row))
+        c = _check_raw(tmp_path, doc, report)
+        assert c.ok, (row, c.detail)
+
+
+def test_verifier_fails_a_tool_without_a_published_range(tmp_path):
+    doc, report = _doc_and_report()
+    del doc["findings"][0]["tool_swap"]["tools"][1]["published_range"]
+    c = _check(tmp_path, doc, report)
+    assert not c.ok and "carries no published_range" in c.detail, c.detail
+
+
+def test_verifier_fails_a_leaf_command_that_is_not_a_resolved_leaf(tmp_path):
+    doc, report = _doc_and_report()
+    doc["findings"][0]["tool_swap"]["resolved_leaves"] = ["eslint ."]
+    c = _check(tmp_path, doc, report)
+    assert not c.ok and "leaf_command 'prettier --check .' is not one of" in c.detail, (
+        c.detail)
+
+
+@pytest.mark.parametrize("fit,extra", [("drop-in", []), ("deferred_to_opt82", [_opt82()])])
+def test_verifier_fails_fit_reasons_on_a_fit_other_than_dual_run(tmp_path, fit, extra):
+    t = _tool("eslint", fit, ["a reason"])
+    f = _finding([t, _tool("prettier")])
+    doc, report = _doc_and_report(f, extra=extra)
+    c = _check(tmp_path, doc, report)
+    assert not c.ok and f"fit {fit!r} with fit_reasons" in c.detail, c.detail
+
+
+@pytest.mark.parametrize("version,ok", [
+    ("3.3.3", True), ("^5.6.2", True), ("~6.0", True),
+    ("npm:@typescript/typescript6@6.0.2", True),
+    ("^7.0.2", False), ("7.1.0", False), ("catalog:", False), ("workspace:*", False),
+    (None, False), ("latest", False),
+])
+def test_verifier_requires_a_readable_pre_7_typescript_version_on_a_tsc_row(
+        tmp_path, version, ok):
+    t = _tool("tsc")
+    t["source_version"] = version
+    doc, report = _one(t)
+    c = _check_raw(tmp_path, doc, report)
+    assert c.ok == ok, (version, c.detail)
+    if not ok:
+        assert "source_version" in c.detail, c.detail
+
+
+_CFG = "eslint.config.js"
+
+
+@pytest.mark.parametrize("over,needle", [
+    ({"configs": [{"path": _CFG, "dir": "", "format": "flat", "type_aware": "off",
+                   "custom_rules": [{"rule": "local/x", "source": "x.js"}]}]},
+     "custom local rules"),
+    ({"eslint_config_facts": {_CFG: {"plugins": [], "local_rules": True}}},
+     "custom local rules"),
+    ({"eslint_config_facts": {_CFG: {"plugins": ["eslint-plugin-react"]}}},
+     "plugin react"),
+    ({"eslint_config_facts": {_CFG: {"plugins": ["eslint-plugin-foo"]}}},
+     "plugin foo"),
+    ({"eslint_config_facts": {_CFG: {"plugins": [], "exhaustive_deps": True}}},
+     "react-hooks/exhaustive-deps"),
+    ({"eslint_config_facts": {}}, "were not read"),
+    ({"configs": [{"path": _CFG, "dir": "", "format": "flat", "type_aware": "on"}]},
+     "type-aware"),
+    ({"configs": [{"path": _CFG, "dir": "", "format": "flat",
+                   "type_aware": "unresolved"}]}, "type-aware"),
+    ({"configs": []}, "no ESLint config"),
+    ({"unreadable": [_CFG], "configs": []}, "could not be read"),
+], ids=["custom-rules", "local-rules", "framework-plugin", "unknown-plugin",
+        "hooks-rule", "facts-missing", "type-aware-on", "type-aware-unresolved",
+        "no-config", "config-unreadable"])
+def test_verifier_fails_an_eslint_drop_in_the_stamped_facts_contradict(
+        tmp_path, over, needle):
+    doc, report = _one(_tool("eslint"), **over)
+    c = _check_raw(tmp_path, doc, report)
+    assert not c.ok and "ESLint row stamped 'drop-in'" in c.detail \
+        and needle in c.detail, c.detail
+
+
+def test_verifier_passes_an_eslint_drop_in_with_only_native_plugins(tmp_path):
+    doc, report = _one(_tool("eslint"), eslint_config_facts={_CFG: {
+        "plugins": ["@typescript-eslint", "eslint-plugin-unicorn", "import"],
+        "local_rules": False, "exhaustive_deps": False}})
+    c = _check_raw(tmp_path, doc, report)
+    assert c.ok, c.detail
+
+
+def test_verifier_reads_the_nearest_flat_config_for_the_leafs_directory(tmp_path):
+    # The leaf runs in packages/a (its benchmark pair `cd`s there): the nearest
+    # flat config is packages/a's, so the root config's plugin does not apply.
+    t = _tool("eslint")
+    t["benchmark_commands"] = ["(cd packages/a && time npx eslint .)",
+                               "(cd packages/a && time npx --yes oxlint .)"]
+    cfgs = [{"path": _CFG, "dir": "", "format": "flat", "type_aware": "off"},
+            {"path": "packages/a/eslint.config.js", "dir": "packages/a",
+             "format": "flat", "type_aware": "off"}]
+    facts = {_CFG: {"plugins": ["eslint-plugin-react"]},
+             "packages/a/eslint.config.js": {"plugins": []}}
+    doc, report = _one(t, configs=cfgs, eslint_config_facts=facts)
+    c = _check_raw(tmp_path, doc, report)
+    assert c.ok, c.detail
+    facts["packages/a/eslint.config.js"] = {"plugins": ["eslint-plugin-vue"]}
+    doc, report = _one(t, configs=cfgs, eslint_config_facts=facts)
+    c = _check_raw(tmp_path, doc, report)
+    assert not c.ok and "plugin vue" in c.detail, c.detail
+
+
+@pytest.mark.parametrize("over,needle", [
+    ({"prettier_plugins": {"": ["prettier-plugin-tailwindcss"]}},
+     "prettier-plugin-tailwindcss"),
+    ({"prettier_plugins": None}, "were not read"),
+    ({"package_scripts_unreadable": [""]}, "were not read"),
+], ids=["plugin-at-root", "plugins-unread", "package-json-unreadable"])
+def test_verifier_fails_a_prettier_drop_in_the_stamped_plugins_contradict(
+        tmp_path, over, needle):
+    doc, report = _one(_tool("prettier"), **over)
+    c = _check_raw(tmp_path, doc, report)
+    assert not c.ok and "Prettier row stamped 'drop-in'" in c.detail \
+        and needle in c.detail, c.detail
+
+
+def test_verifier_passes_a_prettier_drop_in_whose_plugins_are_off_its_walk(tmp_path):
+    doc, report = _one(_tool("prettier"),
+                       prettier_plugins={"packages/b": ["prettier-plugin-svelte"]})
+    c = _check_raw(tmp_path, doc, report)
+    assert c.ok, c.detail
