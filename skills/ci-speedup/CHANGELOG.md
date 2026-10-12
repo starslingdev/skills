@@ -851,8 +851,9 @@ unversioned and updates by reinstall from `main`.
   had excluded runs (a job with one killed 6-hour attempt in 12 runs: OPT45
   0.2 × 4,800 = 960 → 0.2 × 1,200 = 240 min/mo); on nrwl/nx's and
   mastodon/mastodon's pinned windows no sampled run was excluded and no saving
-  moved. A job whose every run was excluded renders those savings unsized with
-  that reason. The self-check collects every refusal, refuses a
+  moved. On a job whose every sampled run was excluded, a modeled, derived or
+  clamped saving renders unsized with that reason (the self-check refuses a sized
+  one); the failure-waste findings keep their every-run basis. The self-check collects every refusal, refuses a
   completed-basis saving bounded by a pre-split row that may include excluded
   runs (all-status, or a job marked `continue-on-error`), and refuses split
   facts without their basis stamp. The committed `microsoft-playwright`

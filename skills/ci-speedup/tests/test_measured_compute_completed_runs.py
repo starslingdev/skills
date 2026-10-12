@@ -359,8 +359,9 @@ def test_spine_footnote_names_the_basis_and_the_excluded_runs(tmp_path):
     assert ("Failed, neutral and other finished runs count. Modeled savings are capped at "
             "measured compute and derived savings are computed from it; measured "
             "savings and failure-waste findings are checked against every sampled run "
-            "instead.") in block
-    report = "# report\n\n" + block.replace("runs: 1200.000", "runs: 4800.000") + "\n"
+            "instead. Savings on jobs whose every sampled run was excluded are shown "
+            "unsized.") in block
+    report ="# report\n\n" + block.replace("runs: 1200.000", "runs: 4800.000") + "\n"
     res = vr.check_runner_minute_spine_contract(report, _write(tmp_path, doc))
     assert not res.ok
     assert "footnote" in res.detail
@@ -530,23 +531,33 @@ def _all_killed_spine() -> dict:
                        for i in range(_SAMPLED_RUNS)])
 
 
-def test_every_run_excluded_caps_at_every_run_and_says_why(tmp_path):
-    # Every sampled run of `nightly` was killed: 0 completed min/mo, 43,200 across all
-    # runs. That is not "no compute": a modeled estimate keeps its own figure under the
-    # every-run bound, an overshoot is capped there, and the note says why.
+def test_every_run_excluded_leaves_a_modeled_saving_unsized(tmp_path):
+    # Owner decision 2026-10-12: every sampled run of `nightly` was killed, 0 completed
+    # min/mo. Those minutes are not removable by a speed fix, so a modeled estimate gets
+    # NO sized saving (it used to fall back to the 43,200 every-run total, crediting the
+    # killed minutes): unsized, not derivable, with the reason, exactly like a derived
+    # saving. The failure-waste findings keep their own every-run basis.
     spine = _all_killed_spine()
     small = {"pattern": "OPT17", "workflow_file": _WF, "affected_jobs": ["nightly"],
              "runner_min_saving": 50.0, "sizing_basis": "modeled"}
     big = dict(small, runner_min_saving=99999.0)
-    cr._reground_runner_minute_savings([small, big], spine)
-    assert small["runner_min_saving"] == 50.0
-    assert big["runner_min_saving"] == 43200.0
+    opt57 = {"pattern": "OPT57", "workflow_file": _WF, "affected_jobs": ["nightly"],
+             "runner_min_saving": 3000.0, "sizing_basis": "modeled"}
+    cr._reground_runner_minute_savings([small, big, opt57], spine)
     for f in (small, big):
-        assert "every sampled run of the affected job(s) was excluded" in (
-            f["runner_min_door_note"])
-    assert "no billable compute" not in big["size_note"]
-    res = _bound(_doc(spine, [small, big]), tmp_path)
-    assert res.ok and not res.skipped, res.detail
+        assert f["runner_min_saving"] is None
+        assert f["runner_min_basis"] == "not_spine_derivable"
+        assert "every sampled run of the affected job(s) was excluded" in f["size_note"]
+        assert "no billable compute" not in f["size_note"]
+    assert opt57["runner_min_saving"] == 3000.0
+    res = _bound(_doc(spine, [small, big, opt57]), tmp_path)
+    assert res.ok, res.detail
+    # The verifier agrees: a SIZED modeled saving on that job is refused.
+    sized = {"pattern": "OPT17", "workflow_file": _WF, "affected_jobs": ["nightly"],
+             "runner_min_saving": 50.0, "sizing_basis": "modeled"}
+    res = _bound(_doc(spine, [sized]), tmp_path)
+    assert not res.ok, res.detail
+    assert "every sampled run" in res.detail and "excluded" in res.detail
 
 
 def test_every_run_excluded_leaves_a_derived_saving_not_derivable():

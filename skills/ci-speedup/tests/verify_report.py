@@ -4615,8 +4615,8 @@ def check_saving_within_measured_compute(report: str, findings_path: Path | None
     modeled or derived saving; every sampled run (`billable_equiv_min_per_month`) for a
     failure-waste finding and for a measured or Tier-2-certified saving (re-derived exactly
     elsewhere; the door never caps it). When every sampled run of a finding's jobs was excluded
-    there is no completed basis, and the bound falls back to every sampled run, as the door's cap
-    does. The split is read only from a spine stamped `measured_compute_basis:
+    there is no completed basis: a completed-basis saving there must render unsized (the door's
+    `_mark_all_runs_excluded`), and a sized one FAILS. The split is read only from a spine stamped `measured_compute_basis:
     completed_job_runs_only`. A pre-split row counts its full figure when it was sampled from
     successful runs (a latest-attempt `status_filter: success` row, or one stamping no status) and
     its job is not marked `continue-on-error: true`; otherwise it MAY include excluded runs, and a
@@ -4776,7 +4776,17 @@ def check_saving_within_measured_compute(report: str, findings_path: Path | None
                 "stamps `completed_billable_equiv_min_per_month`")
             continue
         all_excluded = (not every_run) and matched > 0 and bound_c <= 0 < bound_a
-        bound = bound_a if (every_run or all_excluded) else bound_c
+        if all_excluded:
+            # Owner decision 2026-10-12, the engine's twin (`_mark_all_runs_excluded`): every
+            # sampled run of these jobs was excluded, so there is no completed basis and a
+            # completed-basis saving is never sized against the excluded minutes.
+            failures.append(
+                f"finding `{f.get('pattern', '?')}` credits {saving:g} min/mo of runner-time but "
+                f"every sampled run of its affected job(s) {jobs} was excluded from measured "
+                "compute (timed out, cancelled, or failed at or past the 6-hour default "
+                "timeout); a saving on those jobs must render unsized")
+            continue
+        bound = bound_a if every_run else bound_c
         if matched == 0:
             uncovered.append(f"{f.get('pattern', '?')}({', '.join(jobs[:2])})")
             continue
@@ -4788,9 +4798,7 @@ def check_saving_within_measured_compute(report: str, findings_path: Path | None
         # Directional upper bound + tolerance (L6): the spine's per-run mean is measured while the
         # finding's saving is a model over the same monthly volume, so allow small rounding slack.
         if saving > bound * 1.02 + 0.1:
-            what = ("billable compute across every sampled run (every sampled run of these jobs "
-                    "was excluded from measured compute)" if all_excluded
-                    else "billable compute across every sampled run" if every_run
+            what = ("billable compute across every sampled run" if every_run
                     else "billable compute from completed job runs")
             failures.append(
                 f"finding `{f.get('pattern', '?')}` credits {saving:g} min/mo of runner-time but its "
@@ -5374,7 +5382,8 @@ def _measured_compute_footnote(spine: dict) -> str:
     return text + (" Failed, neutral and other finished runs count. Modeled savings are "
                    "capped at measured compute and derived savings are computed "
                    "from it; measured savings and failure-waste findings are checked "
-                   "against every sampled run instead.")
+                   "against every sampled run instead. Savings on jobs whose every sampled "
+                   "run was excluded are shown unsized.")
 
 
 def _spine_carries_split_facts(spine: dict) -> bool:

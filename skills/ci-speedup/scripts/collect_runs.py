@@ -5790,9 +5790,10 @@ def _all_runs_excluded(wf: str, jobs: "list[str]", all_index: Any,
 
 
 def _mark_all_runs_excluded(f: dict[str, Any]) -> None:
-    """A saving DERIVED from completed-run compute (OPT45/OPT29) or clamped to it
-    (OPT73) cannot be derived when every sampled run of its jobs was excluded:
-    it renders unsized and not derivable, with the reason, never as a coverage gap."""
+    """A saving DERIVED from completed-run compute (OPT45/OPT29), clamped to it
+    (OPT73) or capped at it (a modeled estimate) has no basis when every sampled run
+    of its jobs was excluded: it renders unsized and not derivable, with the reason,
+    never as a coverage gap and never sized against the excluded minutes."""
     f["runner_min_saving"] = None
     f["runner_min_basis"] = "not_spine_derivable"
     f["runner_min_door_note"] = _ALL_RUNS_EXCLUDED_NOTE
@@ -6273,8 +6274,9 @@ def _cap_at_measured_compute(
     lowered — a fix cannot save more minutes than the jobs consume, whatever the
     model says. Stamps `measured_spine_clamped` and discloses the cap, naming which
     figure it used. The figure follows `_measured_compute_basis_for`: completed job
-    runs (`index`), or every sampled run (`all_index`) for a failure-waste finding
-    and for jobs whose every sampled run was excluded.
+    runs (`index`), or every sampled run (`all_index`) for a failure-waste finding.
+    A modeled saving on jobs whose every sampled run was excluded is left unsized
+    (`_mark_all_runs_excluded`), never sized against the excluded minutes.
 
     Two guards, because a cap LOWERS a credited figure:
       - EXEMPT: a figure the verifier re-derives from stamped evidence and requires
@@ -6304,20 +6306,21 @@ def _cap_at_measured_compute(
     by_wf_job, _by_job = use
     measured, matched, distinct = _own_workflow_billable(wf, jobs, by_wf_job, job_graph)
     figure = ("of every sampled run" if every_run else "of completed job runs")
-    all_excluded = False
     # UNROUNDED, exactly as the verifier's twin test: a completed figure that is tiny but
     # positive (one short success among many killed runs) is a real completed bound.
     if (not every_run and all_index is not None and distinct and matched == distinct
             and measured <= 0):
         # Every sampled run of these jobs was timed out, cancelled or killed: there
-        # is no completed basis, which is NOT "the jobs used no compute". The cap
-        # (and the verifier's bound) fall back to every sampled run, and the note
-        # says why.
+        # is no completed basis, which is NOT "the jobs used no compute" either. Owner
+        # decision 2026-10-12: those minutes are not removable by a speed fix, so a
+        # modeled saving is NOT sized against them; it renders unsized and not
+        # derivable with the reason, exactly as a derived saving does. (The verifier
+        # refuses a sized modeled saving on such a job.)
         every, a_matched, a_distinct = _own_workflow_billable(
             wf, jobs, all_index[0], job_graph)
         if a_matched == a_distinct and every > 0:
-            measured, figure, all_excluded = every, "of every sampled run", True
-            f["runner_min_door_note"] = _ALL_RUNS_EXCLUDED_NOTE
+            _mark_all_runs_excluded(f)
+            return
     # Every affected job joined its own rows, so a ZERO sum (or one that rounds to
     # 0) is a real bound, not a missing one: the jobs measured no billable compute
     # in the sample, and the saving clamps to 0.0. Leaving the estimate would fail
@@ -6331,7 +6334,7 @@ def _cap_at_measured_compute(
     f["runner_min_basis"] = "measured_spine_clamped"
     cap = (f"MEASURED monthly billable compute {figure} ({measured:g} min/mo from the "
            "cost spine) — a fix cannot save more minutes than the jobs consume"
-           + ("; " + _ALL_RUNS_EXCLUDED_NOTE if all_excluded else "")) if measured > 0 else (
+           ) if measured > 0 else (
            f"MEASURED monthly billable compute {figure}, which rounds to 0 min/mo: the "
            "affected jobs measured no billable compute in the sample to that precision, so "
            "there is no bill saving")

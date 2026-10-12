@@ -2160,9 +2160,9 @@ test: **completed job runs** (`completed_billable_equiv_min_per_month`; timed-ou
 cancelled and failed-at-or-past-6-hour runs excluded, stamped per row by reason and summed in
 `excluded_unfinished`, named by the cost-spine footnote) for modeled and derived
 savings, every sampled run for `_FAILURE_WASTE_PATTERNS` (OPT35/46/48/57/64) and for
-measured or Tier-2-certified savings; a job whose every run was excluded falls back
-to every sampled run on both sides, and a derived or clamped saving there renders
-unsized with that reason; a pre-split row that may include excluded runs (all-status,
+measured or Tier-2-certified savings; on a job whose every run was excluded a modeled,
+derived or clamped saving renders unsized with that reason, and the verifier refuses a
+sized one; a pre-split row that may include excluded runs (all-status,
 or a `continue-on-error` job) bounding a completed-basis saving FAILs, every refusal
 collected, 2026-10-12) and `check_cluster_lever_ceiling_escapes_sibling` (§5's cluster-floor lever
 must not be capped by its own matrix sibling — issue #44). The door SKIPs (like the

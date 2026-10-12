@@ -161,8 +161,9 @@ The Tier-2 section displays runner-minutes only:
   from it and OPT73 clamps to it; measured or Tier-2-certified savings and the
   failure-waste findings (OPT35, OPT46, OPT48, OPT57, OPT64) are checked against
   every sampled run. A job whose every sampled run was excluded has no completed
-  basis: its modeled saving falls back to every sampled run, and a derived or
-  clamped saving renders unsized with that reason.
+  basis: a modeled, derived or clamped saving on it renders unsized with that
+  reason, never sized against the excluded minutes (the failure-waste findings
+  keep their every-run basis).
 
 All figures are runner-minutes; multiply by your runner's per-minute rate to get
 dollars. The report leaves the per-minute rate to the reader. The calculation

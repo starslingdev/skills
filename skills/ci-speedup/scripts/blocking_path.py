@@ -7459,7 +7459,8 @@ def _measured_compute_footnote(spine: dict[str, Any]) -> str:
     return text + (" Failed, neutral and other finished runs count. Modeled savings are "
                    "capped at measured compute and derived savings are computed "
                    "from it; measured savings and failure-waste findings are checked "
-                   "against every sampled run instead.")
+                   "against every sampled run instead. Savings on jobs whose every sampled "
+                   "run was excluded are shown unsized.")
 
 
 def _tier2_source_job_name(value: object) -> str:
