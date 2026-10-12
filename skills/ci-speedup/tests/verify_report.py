@@ -3206,6 +3206,49 @@ def _on_path_appendix_jobs(report: str) -> tuple[set[str], list[str]]:
     return exact, fallback
 
 
+# The same `**Where:**` segment, capturing the workflow too: `\`wf[:line]\` (job)`.
+_WHERE_SITE_RE = re.compile(r"`([^`]+)`\s*\((.*?)\)(?=\s*,\s*(?:`|\+)|\s*$)")
+
+
+def _wf_base(wf: str) -> str:
+    """A workflow reference reduced to its file basename: `.github/workflows/ci.yml`, `ci.yml`
+    and a Where segment's `ci.yml:17` all compare as `ci.yml`."""
+    return re.sub(r":\d+$", "", str(wf).strip()).rsplit("/", 1)[-1]
+
+
+def _on_path_framed_sites(report: str) -> set[tuple[str, str]]:
+    """Every `(workflow basename, _cmp_name job/check)` the report frames ON the critical path
+    WITH a workflow attached: each Long-pole header's `\\`wf\\` ▸ CHECK` and each parsed segment
+    of an on-path appendix note's `**Where:**` line. The headline names no workflow, so it is not
+    here (the caller compares it by bare name)."""
+    sites = {(_wf_base(wf), _cmp_name(ck)) for wf, ck, _b in _pole_header_sections(report)}
+    for block in report.split("<details>"):
+        if _ON_PATH_SENTENCE not in block:
+            continue
+        m = re.search(r"^\*\*Where:\*\*\s*(.+)$", block, re.MULTILINE)
+        if m:
+            sites |= {(_wf_base(wf), _cmp_name(job))
+                      for wf, job in _WHERE_SITE_RE.findall(m.group(1))}
+    return {(w, j) for w, j in sites if j}
+
+
+def _check_owner_workflows(data: dict) -> dict[str, set[str]]:
+    """`_cmp_name` check name → the workflow basenames whose measured jobs produced a check-run
+    of that exact name (`per_workflow_timing[wf].job_p50` keys). This is the `(check, workflow)`
+    identity the spine's own off-spine stamp already uses (`collect_runs._stamp_off_spine_findings`
+    scopes by workflow_file): a dropped `test` run by `test-js.yml` is not the `test` matrix family
+    of `test-ruby.yml`, whose legs gate the merge (mastodon/mastodon). A name no workflow ran maps
+    to nothing, and the caller then compares it by bare name."""
+    owners: dict[str, set[str]] = {}
+    pwt = _as_dict(data.get("per_workflow_timing"))
+    for wf, row in pwt.items():
+        for job in _as_dict(_as_dict(row).get("job_p50")):
+            nm = _cmp_name(job)
+            if nm:
+                owners.setdefault(nm, set()).add(_wf_base(wf))
+    return owners
+
+
 def _vr_gate_counts(cp: dict) -> tuple[dict, int]:
     """Standalone mirror of `blocking_path._gate_counts`: from the per-PR `populations`
     ground truth, how often each check is PRESENT (ran with a positive p50) and the number of
@@ -3389,7 +3432,9 @@ def check_dropped_check_not_framed_on_path(report: str, findings_path: Path | No
     collides with a different check; the appendix/header names a JOB, so it only trips when the
     job name equals the excluded check name (the encord shape) — the same-token cross-scope
     residual `_stamp_off_spine_findings` documents (job `build` vs dropped CHECK `@a/pkg build`)
-    is out of exact-name scope by design."""
+    is out of exact-name scope by design. A hard-dropped name is further scoped to the
+    workflow(s) that ran it (`_check_owner_workflows`), so a same-named job in another workflow
+    (a gating matrix family whose legs are all on the spine) is not read as the dropped check."""
     name = "no spine-dropped check is also framed on the merge-gating critical path"
     if not findings_path or _is_static_only(report):
         return Check(name, True, "no findings / static-only — no spine to contradict",
@@ -3409,15 +3454,28 @@ def check_dropped_check_not_framed_on_path(report: str, findings_path: Path | No
                      skipped=True)
     # On-path framing: an exact-name context (headers ∪ headline ∪ parsed appendix jobs) OR —
     # only when an appendix Where line wouldn't parse — a substring of that raw line.
-    framed = _on_path_framed_check_names(report)
     appendix_jobs, appendix_fallback = _on_path_appendix_jobs(report)
-    framed_all = framed | appendix_jobs
-    # HARD-DROPPED: contradiction in ANY framing context. RARE-DEMOTED: contradiction ONLY in the
+    # HARD-DROPPED: contradiction in ANY framing context, scoped to the workflow that RAN the
+    # dropped check (`_check_owner_workflows`): a header / Where segment naming the same job in a
+    # DIFFERENT workflow is a homonym, not the excluded check (mastodon `test-js.yml` `test`
+    # dropped vs `test-ruby.yml`'s gating `test` matrix family). An owner-less name, and the
+    # workflow-less headline, compare by bare name. RARE-DEMOTED: contradiction ONLY in the
     # appendix on-path note (a demoted Long-pole header carries its own opt-in framing — not a
-    # contradiction). The substring fallback stays appendix-scoped for both.
+    # contradiction), kept NAME-level because the renderer demotes the name across workflows.
+    # The substring fallback stays appendix-scoped for both.
+    owners = _check_owner_workflows(_as_dict(data))
+    sites = _on_path_framed_sites(report)
+    _hl = _headline_slowest_label(report)
+    headline = _cmp_name(_hl) if _hl else ""
+
+    def _dropped_framed(d: str) -> bool:
+        own = owners.get(d)
+        return (d == headline
+                or any(j == d and (not own or w in own) for w, j in sites)
+                or any(d in w for w in appendix_fallback))
+
     contradictions = sorted(
-        {d for d in dropped
-         if d in framed_all or any(d in w for w in appendix_fallback)}
+        {d for d in dropped if _dropped_framed(d)}
         | {d for d in rare_demoted
            if d in appendix_jobs or any(d in w for w in appendix_fallback)})
     if contradictions:

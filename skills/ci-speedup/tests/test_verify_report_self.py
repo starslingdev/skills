@@ -2003,6 +2003,66 @@ def test_off_spine_check_passes_when_appendix_on_path_names_only_kept_checks(tmp
     assert _tag_for(_good() + build_note, _OFFSPINE, tmp_path, findings=mono) == "PASS"
 
 
+# --- mastodon/mastodon: a dropped check that shares its NAME with a gating matrix family -------
+# The dropped non-required `test` is `test-js.yml`'s single job; `test-ruby.yml`'s `test` job is a
+# matrix family whose legs (`test (3.4)` - the critical path - `test (3.3)`, `test (.ruby-version)`)
+# all sit ON the spine. An OPT24 on that family is correctly framed on-path. The name-only compare
+# read the family's bare `test` as the dropped `test-js.yml` check and FAILed a true report. The
+# dropped check's owning workflow is known from `per_workflow_timing` job names, so the comparison
+# is scoped to it: only a framing in the workflow that RAN the dropped check contradicts the spine.
+def _mastodon_dropped_test_findings() -> dict:
+    return {
+        "pr_critical_path": {"dropped_non_required_checks": ["test", "test (14-alpine)"]},
+        "per_workflow_timing": {
+            ".github/workflows/test-js.yml": {"job_p50": {"test": 180.0}},
+            ".github/workflows/test-migrations.yml": {"job_p50": {"test (14-alpine)": 300.0}},
+            ".github/workflows/test-ruby.yml": {"job_p50": {
+                "test (3.4)": 759.0, "test (3.3)": 738.0, "test (.ruby-version)": 668.0}},
+        },
+    }
+
+
+def _family_on_path_note(wf: str) -> str:
+    return _APPENDIX_ON_PATH.replace(
+        "`sdk-pr.yml` (Run integration tests), `test-sdk.yml` (Run integration tests)",
+        f"`{wf}` (test)")
+
+
+def test_off_spine_check_passes_when_on_path_family_only_shares_a_dropped_checks_name(
+        tmp_path: Path):
+    vr = _load_verify_report()
+    fp = tmp_path / "findings.json"
+    fp.write_text(json.dumps(_mastodon_dropped_test_findings()), encoding="utf-8")
+    c = vr.check_dropped_check_not_framed_on_path(
+        _good() + _family_on_path_note("test-ruby.yml"), fp)
+    assert c.ok and not c.skipped, (
+        "a gating `test-ruby.yml` matrix family framed on-path must not be confused with the "
+        f"dropped `test-js.yml` check of the same name; verifier said: {c.detail}")
+
+
+def test_off_spine_check_still_fails_when_the_dropped_checks_own_workflow_is_framed(
+        tmp_path: Path):
+    findings = _mastodon_dropped_test_findings()
+    assert _tag_for(_good() + _family_on_path_note("test-js.yml"), _OFFSPINE, tmp_path,
+                    findings=findings) == "FAIL"
+    # A `wf:line` Where segment resolves to the same workflow.
+    assert _tag_for(_good() + _family_on_path_note("test-js.yml:32"), _OFFSPINE, tmp_path,
+                    findings=findings) == "FAIL"
+    # A pole header in the owning workflow is still a contradiction too.
+    header = ('\n<a id="pole-2"></a>\n\n## Long pole 2: `test-js.yml` ▸ test - 3m 00s\n\n'
+              '```text\nWhere the job goes.\n```\n')
+    assert _tag_for(_good() + header, _OFFSPINE, tmp_path, findings=findings) == "FAIL"
+
+
+def test_off_spine_check_stays_name_strict_when_the_dropped_checks_workflow_is_unknown(
+        tmp_path: Path):
+    # No `per_workflow_timing` row ran the dropped `test`, so its owner can't be resolved and the
+    # comparison falls back to the bare name (a missed contradiction is the worse direction).
+    findings = {"pr_critical_path": {"dropped_non_required_checks": ["test"]}}
+    assert _tag_for(_good() + _family_on_path_note("test-ruby.yml"), _OFFSPINE, tmp_path,
+                    findings=findings) == "FAIL"
+
+
 # --- the SAME cross-seam property, extended to the typical/rare (presence-demotion) class ---
 # paradedb `Test pg_search`: a heavy job the spine DEMOTES as opt-in/rare (present on a MINORITY
 # of PRs) must not ALSO be framed "sits ON the merge-gating critical path" in the appendix. The
