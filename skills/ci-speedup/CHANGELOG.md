@@ -830,6 +830,36 @@ unversioned and updates by reinstall from `main`.
 
 ### Changed
 
+- **2026-10-12** — **Measured compute now leaves out runs no speed fix can
+  remove.** The cost spine's measured compute added up every sampled job run,
+  including attempts that timed out, were cancelled, or hung until GitHub's
+  6-hour default timeout killed them; one such hang among a dozen runs inflated
+  a job's total several times over, so an overstated saving fitted under it.
+  It now counts completed job runs (success or failure, plus neutral and other
+  finished conclusions) and excludes conclusion `timed_out`, `cancelled`, and
+  any failed run at or beyond the start of the default-timeout kill window OPT57
+  uses (342 min, no upper bound; a successful run of any length counts). Each spine row
+  stamps its completed compute next to the excluded runs (count by reason,
+  sampled minutes, min/mo); the footnote under the cost-spine table states the
+  basis, names the excluded runs and failed job downloads, and says which
+  savings use which basis. Savings sizing and the report self-check now share one
+  basis rule: modeled savings are capped at completed compute; measured or
+  Tier-2-certified savings and the failure-waste findings (OPT35, OPT46, OPT48,
+  OPT57, OPT64) are checked against every sampled run. **Derived savings
+  change:** OPT45 (missing concurrency) and OPT29 (merge-queue skip) derive
+  from completed compute, and OPT73 clamps to it, so they drop wherever a job
+  had excluded runs (a job with one killed 6-hour attempt in 12 runs: OPT45
+  0.2 × 4,800 = 960 → 0.2 × 1,200 = 240 min/mo); on nrwl/nx's and
+  mastodon/mastodon's pinned windows no sampled run was excluded and no saving
+  moved. On a job whose every sampled run was excluded, a modeled, derived or
+  clamped saving renders unsized with that reason (the self-check refuses a sized
+  one); the failure-waste findings keep their every-run basis. The self-check collects every refusal, refuses a
+  completed-basis saving bounded by a pre-split row that may include excluded
+  runs (all-status, or a job marked `continue-on-error`), and refuses split
+  facts without their basis stamp. The committed `microsoft-playwright`
+  example is a pre-split artifact; a carve-out pinned to its exact three
+  refusals tolerates it until it is regenerated. (#133)
+
 - **2026-10-10** — **OPT14 is now only about repeated checkout and setup.** Its
   title drops "(and Slow Tool Replacement)" and becomes "Repeated
   Checkout/Setup Without Artifact Handoff"; the tool-swap table that lived

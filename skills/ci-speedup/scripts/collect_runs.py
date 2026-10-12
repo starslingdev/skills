@@ -4801,6 +4801,43 @@ def _critical_path(jobs_per_run: list[list[dict[str, Any]]]) -> dict[str, Any]:
 # A pattern in the catalog that isn't here is sized as None/None and rendered
 # qualitatively. That's the honest path — the scanner never invents a number.
 
+# Findings that measure failure waste ON PURPOSE: post-failure sibling compute
+# (OPT35), superseded / cancelled runs (OPT46), the failure rate (OPT48), the
+# default-timeout kill (OPT57) and rerun attempts (OPT64). Their saving can BE
+# timed-out, cancelled or killed compute, the very runs measured compute leaves
+# out, so they keep their own basis: every sampled job run. MIRROR of
+# `verify_report._FAILURE_WASTE_PATTERNS`; a coupling test pins the two.
+_FAILURE_WASTE_PATTERNS: frozenset[str] = frozenset(
+    {"OPT35", "OPT46", "OPT48", "OPT57", "OPT64"})
+
+
+def _measured_compute_basis_for(f: dict[str, Any]) -> str:
+    """THE one basis rule, shared by the sizing door and its verifier twin
+    (`verify_report._measured_compute_basis_for`, pinned by a coupling test):
+      - "all_runs" (every sampled job run) for a failure-waste finding, and for a
+        figure the door never caps because the verifier re-derives it exactly from
+        stamped evidence (`sizing_basis: measured`, or a Tier-2 certificate): the
+        bound for those is the physical one, every minute the jobs ran;
+      - "completed" (completed job runs: timed-out, cancelled and killed runs
+        excluded) for everything else: modeled estimates are capped at it, and the
+        derived savings (OPT45 / OPT29) and the OPT73 clamp are computed from it.
+    A job whose sampled runs were ALL excluded has no completed basis; the door and
+    the verifier both handle that state explicitly (see `_all_runs_excluded`)."""
+    if str(f.get("pattern") or "") in _FAILURE_WASTE_PATTERNS:
+        return "all_runs"
+    if f.get("sizing_basis") == "measured":
+        return "all_runs"
+    cert = f.get("tier2_neutrality")
+    if isinstance(cert, dict) and cert:
+        return "all_runs"
+    return "completed"
+
+
+_ALL_RUNS_EXCLUDED_NOTE = (
+    "every sampled run of the affected job(s) was excluded from measured compute "
+    "(timed out, cancelled, or failed at or past the 6-hour default timeout), so "
+    "there is no completed-run compute to measure this saving against")
+
 _SIZING: dict[str, dict[str, Any]] = {
     # --- Static fast-path patterns (scan.py registers detectors for these) ---
     "OPT17": {"model": "direct", "default_s": 30.0},
@@ -5695,6 +5732,7 @@ def _reground_whole_run_cancel_saving(
     if index is None:
         return
     by_wf_job, by_job = index
+    all_index = _measured_billable_index(spine, all_runs=True)
 
     for f in findings:
         cfg = _SIZING.get(str(f.get("pattern") or "")) or {}
@@ -5708,6 +5746,10 @@ def _reground_whole_run_cancel_saving(
             continue
         wf = str(f.get("workflow_file") or "")
         measured, matched, distinct = _measured_billable_for_jobs(wf, jobs, by_wf_job, by_job)
+        if matched > 0 and measured <= 0 and _all_runs_excluded(
+                wf, jobs, all_index, measured):
+            _mark_all_runs_excluded(f)
+            continue
         if matched == 0 or measured <= 0:
             # A render-ready spine exists but NONE of this finding's affected jobs
             # resolved to a spine row WITH measured billable compute (either no join
@@ -5731,17 +5773,51 @@ def _reground_whole_run_cancel_saving(
         label = cfg.get("cost_basis_label", "the share reclaimed by cancelling superseded runs")
         f["size_note"] = (
             f"runner-minute (bill) only — at most ~{rate:.0%} of the affected jobs' "
-            f"MEASURED monthly billable compute ({round(measured, 1):g} min/mo from the "
-            f"cost spine){coverage}, {label}")
+            f"MEASURED monthly billable compute of completed job runs "
+            f"({round(measured, 1):g} min/mo from the cost spine){coverage}, {label}")
+
+
+def _all_runs_excluded(wf: str, jobs: "list[str]", all_index: Any,
+                       completed: float) -> bool:
+    """True when the affected jobs measure NO completed-run compute but DO have
+    compute across every sampled run: every sampled run of them was timed out,
+    cancelled or killed. A distinct state, never "no compute" or a coverage gap."""
+    if completed > 0 or all_index is None:
+        return False
+    a_wf_job, a_job = all_index
+    every, matched, _distinct = _measured_billable_for_jobs(wf, jobs, a_wf_job, a_job)
+    return matched > 0 and every > 0
+
+
+def _mark_all_runs_excluded(f: dict[str, Any]) -> None:
+    """A saving DERIVED from completed-run compute (OPT45/OPT29), clamped to it
+    (OPT73) or capped at it (a modeled estimate) has no basis when every sampled run
+    of its jobs was excluded: it renders unsized and not derivable, with the reason,
+    never as a coverage gap and never sized against the excluded minutes."""
+    f["runner_min_saving"] = None
+    f["runner_min_basis"] = "not_spine_derivable"
+    f["runner_min_door_note"] = _ALL_RUNS_EXCLUDED_NOTE
+    f["size_note"] = (
+        (str(f.get("size_note") or "") + "; " if f.get("size_note") else "")
+        + "runner-minutes not sized — " + _ALL_RUNS_EXCLUDED_NOTE)
 
 
 def _measured_billable_index(
-        spine: dict[str, Any] | None
+        spine: dict[str, Any] | None, *, all_runs: bool = False
 ) -> "tuple[dict[tuple[str, str], float], dict[str, list[float]]] | None":
     """Build the SHARED measured-billable join index from a render-ready cost
     spine, once, for the whole sizing door. Returns `(by_wf_job, by_job)` — the
     two-tier index every door-bound finding joins against — or None when there is
     no render-ready spine to bound against.
+
+    The measured compute is each row's `completed_billable_equiv_min_per_month`:
+    completed job runs, with timed-out, cancelled and killed runs left out (owner
+    decision 2026-10-12). `all_runs=True` sums the row's full
+    `billable_equiv_min_per_month` instead (the "all_runs" basis of
+    `_measured_compute_basis_for`). The split is read only from a spine stamped
+    `measured_compute_basis: completed_job_runs_only`; a pre-split artifact falls
+    back to each row's full figure, and the verifier refuses such a row when it
+    may include excluded runs.
 
     `by_wf_job[(workflow_file, base_job)]` sums the measured monthly billable
     compute across a job's matrix legs / event scopes / attempts;
@@ -5756,8 +5832,13 @@ def _measured_billable_index(
     if not isinstance(rows, list):
         return None
 
+    split = (not all_runs
+             and spine.get("measured_compute_basis") == "completed_job_runs_only")
+
     def _bill(row: dict[str, Any]) -> float:
-        v = row.get("billable_equiv_min_per_month")
+        v = row.get("completed_billable_equiv_min_per_month") if split else None
+        if v is None:
+            v = row.get("billable_equiv_min_per_month")
         return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else 0.0
 
     by_wf_job: dict[tuple[str, str], float] = {}
@@ -6082,6 +6163,7 @@ def _reground_runner_minute_savings(
     nothing. Under a render-ready spine they MUST resolve to a measured basis or
     unsize at the source; there is no keep-the-figure escape."""
     index = _measured_billable_index(spine)
+    all_index = _measured_billable_index(spine, all_runs=True)
     # OPT45 derives first (also stamps its own basis / unsizes on no join). Pass
     # the shared index so the spine is scanned once, not twice.
     _reground_whole_run_cancel_saving(findings, spine, index=index)
@@ -6114,7 +6196,7 @@ def _reground_runner_minute_savings(
         if policy == _RM_DOOR_NOT_DERIVABLE:
             f["runner_min_basis"] = "not_spine_derivable"
             f["runner_min_door_note"] = reason
-            _cap_at_measured_compute(f, saving, index, job_graph)
+            _cap_at_measured_compute(f, saving, index, job_graph, all_index=all_index)
             continue
         if policy == _RM_DOOR_UNCLASSIFIED:
             # Loud, on purpose: a rm-crediting pattern with no declared door policy
@@ -6144,6 +6226,10 @@ def _reground_runner_minute_savings(
         measured, matched, distinct = (_measured_billable_for_jobs(
             wf, jobs, by_wf_job, by_job, _templated_job_bases(job_graph, wf))
                                        if jobs else (0.0, 0, 0))
+        if matched > 0 and measured <= 0 and _all_runs_excluded(
+                wf, jobs, all_index, measured):
+            _mark_all_runs_excluded(f)
+            continue
         if matched == 0 or measured <= 0:
             _unsize_no_basis(f)
             continue
@@ -6170,8 +6256,9 @@ def _reground_runner_minute_savings(
             cov = "" if matched == distinct else f" ({matched}/{distinct} affected jobs measured)"
             f["size_note"] = (
                 (str(f.get("size_note") or "") + "; " if f.get("size_note") else "")
-                + f"clamped to the affected jobs' MEASURED monthly billable compute "
-                f"({measured:g} min/mo from the cost spine){cov} — a fix cannot save "
+                + f"clamped to the affected jobs' MEASURED monthly billable compute of "
+                f"completed job runs ({measured:g} min/mo from the cost spine){cov} — a "
+                f"fix cannot save "
                 f"more minutes than the jobs consume")
         else:
             # Already within the measured billable — confirmed, not clamped.
@@ -6181,11 +6268,15 @@ def _reground_runner_minute_savings(
 def _cap_at_measured_compute(
         f: dict[str, Any], saving: float,
         index: "tuple[dict[tuple[str, str], float], dict[str, list[float]]] | None",
-        job_graph: Any) -> None:
+        job_graph: Any, all_index: Any = None) -> None:
     """Cap a NOT-DERIVABLE modeled estimate at its affected jobs' measured billable
     compute. Below the cap the estimate keeps its own model; only an overshoot is
     lowered — a fix cannot save more minutes than the jobs consume, whatever the
-    model says. Stamps `measured_spine_clamped` and discloses the cap.
+    model says. Stamps `measured_spine_clamped` and discloses the cap, naming which
+    figure it used. The figure follows `_measured_compute_basis_for`: completed job
+    runs (`index`), or every sampled run (`all_index`) for a failure-waste finding.
+    A modeled saving on jobs whose every sampled run was excluded is left unsized
+    (`_mark_all_runs_excluded`), never sized against the excluded minutes.
 
     Two guards, because a cap LOWERS a credited figure:
       - EXEMPT: a figure the verifier re-derives from stamped evidence and requires
@@ -6210,8 +6301,26 @@ def _cap_at_measured_compute(
     jobs = [str(j) for j in (f.get("affected_jobs") or []) if str(j).strip()]
     if not jobs:
         return
-    by_wf_job, _by_job = index
+    every_run = _measured_compute_basis_for(f) == "all_runs"
+    use = all_index if (every_run and all_index is not None) else index
+    by_wf_job, _by_job = use
     measured, matched, distinct = _own_workflow_billable(wf, jobs, by_wf_job, job_graph)
+    figure = ("of every sampled run" if every_run else "of completed job runs")
+    # UNROUNDED, exactly as the verifier's twin test: a completed figure that is tiny but
+    # positive (one short success among many killed runs) is a real completed bound.
+    if (not every_run and all_index is not None and distinct and matched == distinct
+            and measured <= 0):
+        # Every sampled run of these jobs was timed out, cancelled or killed: there
+        # is no completed basis, which is NOT "the jobs used no compute" either. Owner
+        # decision 2026-10-12: those minutes are not removable by a speed fix, so a
+        # modeled saving is NOT sized against them; it renders unsized and not
+        # derivable with the reason, exactly as a derived saving does. (The verifier
+        # refuses a sized modeled saving on such a job.)
+        every, a_matched, a_distinct = _own_workflow_billable(
+            wf, jobs, all_index[0], job_graph)
+        if a_matched == a_distinct and every > 0:
+            _mark_all_runs_excluded(f)
+            return
     # Every affected job joined its own rows, so a ZERO sum (or one that rounds to
     # 0) is a real bound, not a missing one: the jobs measured no billable compute
     # in the sample, and the saving clamps to 0.0. Leaving the estimate would fail
@@ -6223,10 +6332,12 @@ def _cap_at_measured_compute(
         return
     f["runner_min_saving"] = measured
     f["runner_min_basis"] = "measured_spine_clamped"
-    cap = (f"MEASURED monthly billable compute ({measured:g} min/mo from the cost spine) "
-           "— a fix cannot save more minutes than the jobs consume") if measured > 0 else (
-           "MEASURED monthly billable compute, which is 0 min/mo: the affected jobs "
-           "measured no billable compute in the sample, so there is no bill saving")
+    cap = (f"MEASURED monthly billable compute {figure} ({measured:g} min/mo from the "
+           "cost spine) — a fix cannot save more minutes than the jobs consume"
+           ) if measured > 0 else (
+           f"MEASURED monthly billable compute {figure}, which rounds to 0 min/mo: the "
+           "affected jobs measured no billable compute in the sample to that precision, so "
+           "there is no bill saving")
     f["size_note"] = (
         (str(f.get("size_note") or "") + "; " if f.get("size_note") else "")
         + f"estimate of {float(saving):g} min/mo capped at the affected jobs' " + cap)
@@ -6300,9 +6411,29 @@ def _append_runner_minute_spine_rows(
                 "durations_s": [],
                 "billable_min": [],
                 "sample_window": [],
+                "completed_billable_min": 0,
+                "completed_occurrences": 0,
+                "excluded_billable_min": 0,
+                "excluded_occurrences": 0,
+                "excluded_by_reason": {r: 0 for r in _SPINE_UNFINISHED_REASONS},
             })
             bucket["durations_s"].append(float(duration_s))
             bucket["billable_min"].append(float(billed_min))
+            # MEASURED COMPUTE = completed job runs (owner decision 2026-10-12).
+            # Findings size savings over every run (a cache fix speeds a failing run
+            # too), so a failed run counts. Only a run no speed fix can remove is
+            # split out: timed out, cancelled, or killed by the 6-hour default
+            # timeout (one hang among a dozen runs would otherwise inflate the job's
+            # total several times over). It still bills, so it stays in the row's
+            # spend columns; the split is stamped, never dropped.
+            reason = _spine_unfinished_reason(job, duration_s)
+            if reason is None:
+                bucket["completed_billable_min"] += int(billed_min)
+                bucket["completed_occurrences"] += 1
+            else:
+                bucket["excluded_billable_min"] += int(billed_min)
+                bucket["excluded_occurrences"] += 1
+                bucket["excluded_by_reason"][reason] += 1
             created = str(job.get("_run_created_at") or "").strip()
             if created:
                 bucket["sample_window"].append(created)
@@ -6327,6 +6458,9 @@ def _append_runner_minute_spine_rows(
         window = sorted(bucket["sample_window"])
         if not window:
             continue
+        row_billable = _round3(billed_min_month)
+        completed_min, excluded_min = _spine_split_monthly(
+            row_billable, bucket["completed_billable_min"], bucket["excluded_billable_min"])
         rows.append({
             "workflow_file": wf_path,
             "job_name": job_name,
@@ -6346,8 +6480,55 @@ def _append_runner_minute_spine_rows(
             "mean_sampled_compute_seconds": mean_compute_s,
             "mean_sampled_billable_equiv_minutes": mean_billed,
             "raw_compute_runner_min_per_month": _round3(raw_min_month),
-            "billable_equiv_min_per_month": _round3(billed_min_month),
+            "billable_equiv_min_per_month": row_billable,
+            # The completed / excluded split of the same sample. Each half stamps its
+            # whole sampled billable minutes and takes that share of the row's own
+            # monthly figure (`_spine_split_monthly`), so a half never exceeds the
+            # row and verify_report re-derives both from the row alone.
+            "completed_occurrence_count": bucket["completed_occurrences"],
+            "completed_sampled_billable_min": bucket["completed_billable_min"],
+            "completed_billable_equiv_min_per_month": completed_min,
+            "excluded_unfinished_occurrence_count": bucket["excluded_occurrences"],
+            "excluded_unfinished_sampled_billable_min": bucket["excluded_billable_min"],
+            "excluded_unfinished_billable_equiv_min_per_month": excluded_min,
+            "excluded_unfinished_by_reason": dict(bucket["excluded_by_reason"]),
         })
+
+
+# Why a sampled job run is left out of MEASURED compute: it timed out, it was
+# cancelled, or its span sits in the default-timeout kill window OPT57 defines
+# ([95% x 360 min, 360 min + 15 min grace]: a job with no `timeout-minutes` killed by
+# GitHub at 6 h). No speed fix removes such a run. Every other conclusion (success,
+# failure, neutral, action_required, ...) is a completed run and counts. MIRROR of
+# `verify_report._SPINE_UNFINISHED_REASONS`.
+_SPINE_UNFINISHED_REASONS: tuple[str, ...] = ("timed_out", "cancelled", "kill_window")
+
+
+def _spine_unfinished_reason(job: dict[str, Any], duration_s: float) -> str | None:
+    conclusion = str(job.get("conclusion") or "").lower()
+    if conclusion in ("timed_out", "cancelled"):
+        return conclusion
+    # A FAILED run at or beyond the start of OPT57's kill window is out (owner decision
+    # 2026-10-12), with no upper bound: inside the window GitHub killed it at the default
+    # timeout; past the 375-min ceiling the span is not compute at all (a 30-day deployment
+    # approval wait reported as a failed job), which OPT57 already ignores. A run that
+    # SUCCEEDED, at any length, finished on its own and is completed compute.
+    if conclusion == "failure" and float(duration_s) >= _OPT57_NEAR_DEFAULT_TIMEOUT_S:
+        return "kill_window"
+    return None
+
+
+def _spine_split_monthly(row_billable: float, completed_sampled: int,
+                         excluded_sampled: int) -> tuple[float, float]:
+    """Each half's share of the row's monthly billable figure, by its whole sampled
+    minutes. ONE rounding shared with the row (the row's 3-decimal figure is split,
+    not re-extrapolated from exact minutes), so completed <= row always holds.
+    MIRROR of `verify_report._spine_split_monthly`."""
+    total = completed_sampled + excluded_sampled
+    if total <= 0:
+        return 0.0, 0.0
+    return (_round3(row_billable * completed_sampled / total),
+            _round3(row_billable * excluded_sampled / total))
 
 
 def _build_runner_minute_spine(
@@ -6407,6 +6588,17 @@ def _build_runner_minute_spine(
     prior_attempt_row_count = sum(1 for row in rows if row.get("attempt_filter") == "prior")
     total_raw = sum(float(r["raw_compute_runner_min_per_month"]) for r in rows)
     total_billed = sum(float(r["billable_equiv_min_per_month"]) for r in rows)
+    total_completed = sum(float(r["completed_billable_equiv_min_per_month"]) for r in rows)
+    excluded_unfinished = {
+        "job_run_count": sum(int(r["excluded_unfinished_occurrence_count"]) for r in rows),
+        "sampled_billable_min": sum(
+            int(r["excluded_unfinished_sampled_billable_min"]) for r in rows),
+        "billable_equiv_min_per_month": _round3(sum(
+            float(r["excluded_unfinished_billable_equiv_min_per_month"]) for r in rows)),
+        "by_reason": {reason: sum(int(r["excluded_unfinished_by_reason"][reason])
+                                  for r in rows)
+                      for reason in _SPINE_UNFINISHED_REASONS},
+    }
     for row in rows:
         denom = total_billed
         row["share_of_all_row_total"] = _round3(
@@ -6458,10 +6650,18 @@ def _build_runner_minute_spine(
             "job_fetch_failures": int(coverage_fetch_failures),
         },
         "rows": rows,
+        # The basis of every row's `completed_billable_equiv_min_per_month`: the
+        # measured compute a modeled saving is capped at (see
+        # `_measured_compute_basis_for` for which findings use it). The timed-out,
+        # cancelled and killed job runs it leaves out are summed here, by reason,
+        # so the report names them.
+        "measured_compute_basis": "completed_job_runs_only",
+        "excluded_unfinished": excluded_unfinished,
         "totals": {
             "row_count": len(rows),
             "raw_compute_runner_min_per_month": _round3(total_raw),
             "billable_equiv_min_per_month": _round3(total_billed),
+            "completed_billable_equiv_min_per_month": _round3(total_completed),
             "percentage_denominator": "all_rows_billable_equiv_min_per_month",
         },
     }

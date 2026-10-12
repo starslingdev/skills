@@ -1533,10 +1533,21 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     # 40 runs / 179 jobs / 7 workflows: main's 32 / 163 / 6 plus OPT81's push-only
     # `bench.yml` (1007: 8 sampled runs, two `bench` legs each = 16 jobs); now
     # 43 / 182 / 8 with OPT83's `quality.yml` (1008: 3 sampled runs, one job each);
-    # now 46 / 185 / 9 with OPT84's `style.yml` (1009: 3 sampled runs, one job each).
+    # now 46 / 185 / 9 with OPT84's `style.yml` (1009: 3 sampled runs, one job each);
+    # now 46 / 186 / 9 with a cancelled `style-preview` job in run 8501, the corpus's one
+    # job run measured compute excludes (see the cost-spine footnote assertions below).
     # The credited totals below do not move: neither OPT83 nor OPT84 credits anything.
-    assert "| **Runs analyzed** | 46 runs / 185 jobs across 9 workflows |" in report, (
+    assert "| **Runs analyzed** | 46 runs / 186 jobs across 9 workflows |" in report, (
         _head)
+    # The excluded run reaches the real pipeline end to end: the spine stamps it, the
+    # footnote names it, and verify_report (run above) re-derives both.
+    _spine = data["runner_minute_spine"]
+    assert _spine["measured_compute_basis"] == "completed_job_runs_only"
+    assert _spine["excluded_unfinished"]["job_run_count"] == 1, _spine["excluded_unfinished"]
+    assert _spine["excluded_unfinished"]["by_reason"] == {
+        "timed_out": 0, "cancelled": 1, "kill_window": 0}
+    assert "1 timed-out, cancelled or killed job run (1 cancelled; 3 sampled min, " in (
+        report), report.split("Measured compute counts", 1)[-1][:400]
     assert ("423 min/mo of wall-clock-neutral runner minutes is recoverable "
             "(8 neutral findings; none can slow a merge)") in _head, _head
     assert ("**423 min/mo credited after de-overlap** (naive sum 423 min/mo; "
