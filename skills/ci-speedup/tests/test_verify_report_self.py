@@ -7011,6 +7011,26 @@ def test_tier2_post_completion_opt57_rederives_timeout_recommendation(tmp_path: 
     assert "recommended_timeout_minutes" in chk.detail
 
 
+def test_tier2_post_completion_opt57_rejects_sample_beyond_default_timeout_kill(tmp_path: Path):
+    # A failed duration far past GitHub's 360 min default (nrwl/nx: a 30-day
+    # deployment-approval expiry) is not runner time a timeout could cut, so a
+    # finding that credits it must not re-derive as valid.
+    vr = _load_verify_report()
+    doc = _tier2_doc_for_verify()
+    f = _tier2_promoted_finding("f-opt57", 216000.0, proof="post_completion_waste_opt57")
+    burn = f["timeout_default_burn"]
+    burn["samples"][0]["duration_s"] = 2592001.0
+    burn["samples"][0]["waste_s"] = 2590201.0
+    burn["sampled_timeout_burn_min"] = 43170.0
+    burn["runner_min_saving"] = 215850.0
+    f["runner_min_saving"] = 215850.0
+    doc["findings"] = [f]
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert not chk.ok
+    assert "beyond the default-timeout kill" in chk.detail
+
+
 def test_tier2_post_completion_opt57_accepts_full_precision_p99_boundary(tmp_path: Path):
     vr = _load_verify_report()
     doc = _tier2_doc_for_verify()

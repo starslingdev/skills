@@ -8179,6 +8179,14 @@ _OPT35_SHARD_AXIS_RE = _re.compile(r"shard|partition|chunk|group[-_]?(index|num)
 _FAIL_FAST_FAILURE_CONCLUSIONS = frozenset({"failure", "timed_out"})
 _GHA_DEFAULT_JOB_TIMEOUT_S = 360.0 * 60.0
 _OPT57_NEAR_DEFAULT_TIMEOUT_S = 0.95 * _GHA_DEFAULT_JOB_TIMEOUT_S
+# Upper edge of the default-timeout kill band. Without `timeout-minutes` GitHub
+# stops a job at 360 min, so a failed span much longer than that was never runner
+# execution an explicit timeout could cut — it is time the job spent waiting
+# (e.g. a deployment-environment approval, which expires after 30 days: nrwl/nx's
+# `publish` sampled 2,592,001 s failures). The grace absorbs the cancellation /
+# teardown lag between the kill and `completed_at`.
+_OPT57_KILL_GRACE_S = 15.0 * 60.0
+_OPT57_DEFAULT_KILL_CEILING_S = _GHA_DEFAULT_JOB_TIMEOUT_S + _OPT57_KILL_GRACE_S
 _OPT57_TIMEOUT_BUFFER_S = 10.0 * 60.0
 _OPT57_TIMEOUT_MULTIPLIER = 1.5
 _OPT57_MIN_TIMEOUT_S = 15.0 * 60.0
@@ -13836,7 +13844,10 @@ def _detect_opt57_timeout_default_burn(
                 if conclusion not in _FAIL_FAST_FAILURE_CONCLUSIONS:
                     continue
                 dur = _job_compute_s(job)
-                if dur < _OPT57_NEAR_DEFAULT_TIMEOUT_S:
+                # Only a span inside the default-timeout kill band is runner burn a
+                # timeout could cut; a longer one is waiting time, not compute.
+                if not (_OPT57_NEAR_DEFAULT_TIMEOUT_S <= dur
+                        <= _OPT57_DEFAULT_KILL_CEILING_S):
                     continue
                 recommended_s = float(success["recommended_s"])
                 waste_s = max(0.0, dur - recommended_s)
@@ -13904,7 +13915,8 @@ def _detect_opt57_timeout_default_burn(
             summary=evidence,
             note=("Counts only jobs whose workflow YAML lacks `timeout-minutes`, whose "
                   "failed/timed-out sampled job duration reached at least 95% of "
-                  "GitHub's 360 minute default, and whose successful samples provide "
+                  "GitHub's 360 minute default (and no more than 15 minutes past it, "
+                  "the band a default-timeout kill lands in), and whose successful samples provide "
                   f"at least {_MIN_TIMED_RUNS} timed runs for a p99-backed timeout. "
                   "The recommendation is the next minute above max(p99+10m, p99*1.5, "
                   "15m), and is withheld if that approaches the 360 minute default."))
@@ -13937,6 +13949,7 @@ def _detect_opt57_timeout_default_burn(
             "job_template": str(bucket["spec"].get("template") or key),
             "default_timeout_minutes": int(_GHA_DEFAULT_JOB_TIMEOUT_S / 60.0),
             "near_default_threshold_s": round(_OPT57_NEAR_DEFAULT_TIMEOUT_S, 3),
+            "default_kill_ceiling_s": round(_OPT57_DEFAULT_KILL_CEILING_S, 3),
             "successful_duration_p99_s": p99_s,
             "successful_duration_samples": success_n,
             "recommended_timeout_minutes": recommended_min,

@@ -3655,7 +3655,10 @@ title_template: "Missing `timeout-minutes` on Known-Flaky Integration Jobs"
    precondition. Candidate workflows come from the scanned workflow graph, not
    from existing findings only.
 2. From all-status failed/timed-out workflow runs, find matching jobs whose
-   sampled duration reached at least 95% of GitHub's 360 minute default timeout.
+   sampled duration reached at least 95% of GitHub's 360 minute default timeout
+   and ended no more than 15 minutes after it. A longer failed span was not a
+   default-timeout kill (the job was waiting, e.g. on a deployment approval that
+   expires after 30 days), so an explicit timeout could not cut it.
 3. Require at least three successful timed samples for the same workflow job,
    compute p99, and recommend `timeout-minutes` above
    `max(p99 + 10m, p99 * 1.5, 15m)`, rounded up to minutes. Matrix jobs are

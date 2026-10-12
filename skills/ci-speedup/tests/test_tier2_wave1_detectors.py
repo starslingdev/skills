@@ -1965,6 +1965,41 @@ def test_opt57_requires_near_default_failed_duration():
     assert _opt57(timeout_runs=_timeout_failed_runs(seconds=below)) == []
 
 
+def test_opt57_ignores_failed_durations_far_beyond_the_default_timeout_kill():
+    # nrwl/nx `publish` shape: a ~10 min job whose sampled failures read 30 days
+    # (2,592,001 s — GitHub's deployment-approval expiry) and ~25.7 h. Neither is
+    # runner time a default-timeout kill could have produced: without
+    # `timeout-minutes` GitHub stops the job at 360 min, so a longer span is time
+    # the job spent NOT executing (waiting on an environment approval) and an
+    # explicit timeout cannot cut it. Crediting it claimed 64,142 runner-min/mo on
+    # a job whose measured compute is ~780 min/mo.
+    success = [[_span_job("Integration Tests", 600.0, "success", f"success-{i}")]
+               for i in range(10)]
+    phantom = [
+        [_span_job("Integration Tests", 2592001.0, "failure", "approval-expired")],
+        [_span_job("Integration Tests", 92473.0, "failure", "approval-wait")],
+    ]
+    out = _opt57(timeout_runs=phantom, success_runs=success, monthly=73, denominator=100)
+    credited = sum(float(f["runner_min_saving"]) for f in out)
+    measured_compute = 73 * 600.0 / 60.0  # the job's own monthly compute (730 min/mo)
+    assert credited <= measured_compute, (
+        f"OPT57 credits {credited} min/mo of runner-time but the job measures only "
+        f"{measured_compute} min/mo of compute")
+    assert out == []
+
+
+def test_opt57_counts_only_samples_inside_the_default_timeout_kill_band():
+    real_kill = [_span_job("Integration Tests", 21600.0, "timed_out", "timeout-1")]
+    phantom = [_span_job("Integration Tests", 2592001.0, "failure", "approval-expired")]
+    out = _opt57(timeout_runs=[real_kill, phantom])
+    assert len(out) == 1
+    burn = out[0]["timeout_default_burn"]
+    assert burn["run_ids"] == ["timeout-1"]
+    assert burn["sampled_timeout_occurrences"] == 1
+    assert burn["sampled_timeout_burn_min"] == 330.0
+    assert out[0]["runner_min_saving"] == 1650.0
+
+
 def test_opt57_withholds_recommendation_near_default_timeout():
     assert _opt57(success_runs=_timeout_success_runs(seconds=14000.0)) == []
 

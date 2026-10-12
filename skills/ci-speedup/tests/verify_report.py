@@ -5838,6 +5838,10 @@ def _rounding_waste_min(durations: list[float]) -> int:
 
 _VR_OPT57_DEFAULT_TIMEOUT_MIN = 360.0
 _VR_OPT57_NEAR_DEFAULT_TIMEOUT_S = 0.95 * _VR_OPT57_DEFAULT_TIMEOUT_MIN * 60.0
+# Keep in sync with collect_runs._OPT57_DEFAULT_KILL_CEILING_S: a failed span
+# longer than the 360 min default plus kill/teardown grace was not runner time a
+# default-timeout kill produced (e.g. a 30-day environment-approval expiry).
+_VR_OPT57_DEFAULT_KILL_CEILING_S = (_VR_OPT57_DEFAULT_TIMEOUT_MIN + 15.0) * 60.0
 _VR_OPT57_MIN_TIMEOUT_S = 15.0 * 60.0
 _VR_OPT57_TIMEOUT_BUFFER_S = 10.0 * 60.0
 _VR_OPT57_TIMEOUT_MULTIPLIER = 1.5
@@ -5908,6 +5912,12 @@ def _opt57_timeout_rederived(f: dict) -> list[str]:
         dur = _num(sample.get("duration_s"))
         if dur is None or dur < _VR_OPT57_NEAR_DEFAULT_TIMEOUT_S:
             problems.append(f"sample {i}: duration {dur!r} below near-default threshold")
+            continue
+        if dur > _VR_OPT57_DEFAULT_KILL_CEILING_S:
+            problems.append(
+                f"sample {i}: duration {dur!r} is beyond the default-timeout kill "
+                f"ceiling {_VR_OPT57_DEFAULT_KILL_CEILING_S:g}s — not runner time an "
+                "explicit timeout could cut")
             continue
         waste = max(0.0, dur - rec_s)
         got_waste = _num(sample.get("waste_s"))
