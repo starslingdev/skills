@@ -7011,6 +7011,44 @@ def test_tier2_post_completion_opt57_rederives_timeout_recommendation(tmp_path: 
     assert "recommended_timeout_minutes" in chk.detail
 
 
+@pytest.mark.parametrize("duration_s", [
+    2592001.0,   # nrwl/nx: a 30-day deployment-approval expiry
+    22501.0,     # one second past the 360 min default + 15 min grace ceiling
+])
+def test_tier2_post_completion_opt57_rejects_sample_beyond_default_timeout_kill(
+        tmp_path: Path, duration_s: float):
+    # A failed duration past the default-timeout kill band is not runner time a
+    # timeout could cut, so a finding that credits it must not re-derive as valid,
+    # even when every stamped number is internally consistent.
+    vr = _load_verify_report()
+    doc = _tier2_doc_for_verify()
+    f = _tier2_promoted_finding("f-opt57", 216000.0, proof="post_completion_waste_opt57")
+    burn = f["timeout_default_burn"]
+    waste_s = duration_s - 1800.0  # the fixture's recommended 30 min timeout
+    burn_min = round(waste_s / 60.0, 1)
+    burn["samples"][0]["duration_s"] = duration_s
+    burn["samples"][0]["waste_s"] = waste_s
+    burn["sampled_timeout_burn_min"] = burn_min
+    burn["runner_min_saving"] = burn_min * 5
+    f["runner_min_saving"] = burn_min * 5
+    doc["findings"] = [f]
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert not chk.ok
+    assert "beyond the default-timeout kill" in chk.detail
+
+
+def test_opt57_verifier_kill_band_stays_coupled_to_the_engine():
+    # The verifier re-derives OPT57 with its own copy of the band; a grace or floor
+    # retuned on one side only would make it reject valid reports or accept credit
+    # the engine no longer gives.
+    vr = _load_verify_report()
+    sys.path.insert(0, str(_SKILL_DIR / "scripts"))
+    import collect_runs as cr  # noqa: E402
+    assert vr._VR_OPT57_NEAR_DEFAULT_TIMEOUT_S == cr._OPT57_NEAR_DEFAULT_TIMEOUT_S == 20520.0
+    assert vr._VR_OPT57_DEFAULT_KILL_CEILING_S == cr._OPT57_DEFAULT_KILL_CEILING_S == 22500.0
+
+
 def test_tier2_post_completion_opt57_accepts_full_precision_p99_boundary(tmp_path: Path):
     vr = _load_verify_report()
     doc = _tier2_doc_for_verify()
