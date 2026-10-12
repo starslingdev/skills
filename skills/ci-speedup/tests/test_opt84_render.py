@@ -1269,6 +1269,70 @@ def test_verifier_fails_a_prettier_drop_in_the_stamped_plugins_contradict(
         and needle in c.detail, c.detail
 
 
+@pytest.mark.parametrize("row", ["prettier", "tsc"])
+def test_verifier_fails_a_drop_in_from_a_block_with_no_truncated_key(tmp_path, row):
+    doc, report = _one(_tool(row))
+    doc["type_aware_lint"].pop("truncated")
+    c = _check_raw(tmp_path, doc, report)
+    assert not c.ok and "truncated" in c.detail, c.detail
+
+
+def _in_dir(t, wd):
+    t["benchmark_commands"] = [f"(cd {wd} && {c})" for c in t["benchmark_commands"]]
+    return t
+
+
+@pytest.mark.parametrize("wd,unread", [
+    ("", {"": ["prettier.config.js"]}),
+    ("", {"docs": ["docs/.prettierrc.mjs"]}),
+    ("web", {"": [".prettierrc.toml"]}),
+    ("web", {"web": ["web/prettier.config.ts"]}),
+], ids=["root-at-root", "root-run-below", "nested-above", "nested-own"])
+def test_verifier_fails_a_prettier_drop_in_over_an_unopened_config(tmp_path, wd, unread):
+    t = _tool("prettier")
+    doc, report = _one(_in_dir(t, wd) if wd else t, prettier_config_unreadable=unread)
+    c = _check_raw(tmp_path, doc, report)
+    path = next(iter(unread.values()))[0]
+    assert not c.ok and "Prettier row stamped 'drop-in'" in c.detail \
+        and path in c.detail, c.detail
+
+
+def test_verifier_passes_a_nested_prettier_drop_in_beside_a_sibling_unopened_config(
+        tmp_path):
+    doc, report = _one(_in_dir(_tool("prettier"), "web"),
+                       prettier_config_unreadable={"docs": ["docs/.prettierrc.mjs"]})
+    c = _check_raw(tmp_path, doc, report)
+    assert c.ok, c.detail
+
+
+def _leaf(t, leaf):
+    t["leaf_command"] = leaf
+    return t
+
+
+def test_verifier_fails_a_prettier_drop_in_whose_command_loads_a_plugin(tmp_path):
+    t = _leaf(_tool("prettier"), "prettier --check --plugin=prettier-plugin-x .")
+    doc, report = _one(t)
+    c = _check_raw(tmp_path, doc, report)
+    assert not c.ok and "--plugin" in c.detail, c.detail
+
+
+@pytest.mark.parametrize("flag", ["--rulesdir rules", "--plugin acme", "--rule x:2",
+                                  "--parser babel", "--ext .ts",
+                                  "--parser-options=project:true"])
+def test_verifier_fails_an_eslint_drop_in_whose_command_loads_rules(tmp_path, flag):
+    t = _leaf(_tool("eslint"), f"eslint {flag} .")
+    doc, report = _one(t)
+    c = _check_raw(tmp_path, doc, report)
+    name = flag.split("=", 1)[0].split()[0]
+    assert not c.ok and "ESLint row stamped 'drop-in'" in c.detail \
+        and name in c.detail, c.detail
+
+
+def test_verifier_eslint_rule_flags_equal_the_engines():
+    assert vr._VR_OPT84_ESLINT_RULE_FLAGS == frozenset(cr._OPT84_ESLINT_RULE_FLAGS)
+
+
 def test_verifier_passes_a_prettier_drop_in_whose_plugins_are_off_its_walk(tmp_path):
     doc, report = _one(_tool("prettier"),
                        prettier_plugins={"packages/b": ["prettier-plugin-svelte"]})

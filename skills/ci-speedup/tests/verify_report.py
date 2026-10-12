@@ -9361,6 +9361,23 @@ def _vr_opt84_eslint_flag(cmd: str) -> "str | None":
     return None
 
 
+# ESLint CLI flags that load or change rules (or turn on type-aware parsing)
+# from outside the config: on the command, the swap is a dual-run (collect_runs
+# `_OPT84_ESLINT_RULE_FLAGS`, copied; a coupling test pins them equal).
+_VR_OPT84_ESLINT_RULE_FLAGS = frozenset({"--rulesdir", "--plugin", "--rule", "--parser",
+                                         "--ext", "--parser-options"})
+
+
+def _vr_opt84_leaf_flags(t: dict, flags: "frozenset[str]") -> list[str]:
+    """The `flags` the tool's stamped `leaf_command` carries (`--x` or `--x=v`)."""
+    try:
+        toks = shlex.split(str(t.get("leaf_command") or ""))
+    except ValueError:
+        toks = str(t.get("leaf_command") or "").split()
+    return list(dict.fromkeys(a.split("=", 1)[0] for a in toks[1:]
+                              if a.split("=", 1)[0] in flags))
+
+
 def _vr_opt84_eslint_dual_run_reasons(block: dict, t: dict) -> list[str]:
     """Why the scan's own facts make this ESLint row a dual-run, read from the
     configs its leaf's run reads: an unread or missing config, custom or local
@@ -9376,7 +9393,9 @@ def _vr_opt84_eslint_dual_run_reasons(block: dict, t: dict) -> list[str]:
         why.append(f"config(s) {sorted(unread)} could not be read")
     if not cfgs and not unread:
         why.append(f"no ESLint config the run in {wd or '.'!r} reads was recorded")
-    if block.get("truncated") is True:
+    for flag in _vr_opt84_leaf_flags(t, _VR_OPT84_ESLINT_RULE_FLAGS):
+        why.append(f"ESLint CLI flag `{flag}` on its command")
+    if block.get("truncated") is not False:
         dirs = [str(_as_dict(c).get("dir") or "") for c in _as_list(block.get("configs"))]
         dirs += [u.rsplit("/", 1)[0] if "/" in u else ""
                  for u in _as_list(block.get("unreadable")) if isinstance(u, str)]
@@ -9413,16 +9432,34 @@ def _vr_opt84_eslint_dual_run_reasons(block: dict, t: dict) -> list[str]:
 
 def _vr_opt84_prettier_dual_run_reasons(block: dict, t: dict) -> list[str]:
     """Why the scan's own facts make this Prettier row a dual-run: a Prettier
-    plugin declared by a package.json at or above its leaf's directory, or a
+    plugin declared by a package.json at or above its leaf's directory; a
     directory on that walk whose plugins were not read (no `prettier_plugins`
-    in the scan, or an unreadable package.json there)."""
+    in the scan, or an unreadable package.json there); a Prettier config the
+    scan did not open (`prettier_config_unreadable`) on that walk, or anywhere
+    below a run from the root; or a `--plugin` on the leaf's own command.
+
+    DOCUMENTED LIMITS (the engine's `_opt84_prettier_fit` reads these; this
+    backstop does not): a plugin or an unreadable package.json BELOW a run's
+    directory, and below a nested run its unopened configs; ground the scan
+    never walked (`_opt84_walk_up`'s "unknown"); no package.json read on the
+    walk at all; and a run whose leaf directory the benchmark pair does not
+    name (read as the root)."""
     plugins = block.get("prettier_plugins")
     if not isinstance(plugins, dict):
         return ["its Prettier plugins were not read (the scan recorded no "
                 "prettier_plugins)"]
     unreadable = {str(u) for u in _as_list(block.get("package_scripts_unreadable"))}
+    unopened = _as_dict(block.get("prettier_config_unreadable"))
     why: list[str] = []
-    for d in _vr_opt84_walk(_vr_opt84_leaf_wd(t)):
+    wd = _vr_opt84_leaf_wd(t)
+    walk = _vr_opt84_walk(wd)
+    for d in sorted(str(k) for k in unopened):
+        if d in walk or wd == "":
+            for path in _as_list(unopened.get(d)) or [d or "."]:
+                why.append(f"`{path}`: a Prettier config the scan did not open")
+    for flag in _vr_opt84_leaf_flags(t, frozenset({"--plugin"})):
+        why.append(f"Prettier CLI flag `{flag}` on its command")
+    for d in walk:
         where = f"{d}/package.json" if d else "package.json"
         got = plugins.get(d)
         if d in unreadable or (got is not None and not isinstance(got, list)):
@@ -9446,7 +9483,14 @@ def check_opt84_tool_swap(report: str, findings_path: Path | None) -> Check:
     required; `leaf_command` is one of the step's `resolved_leaves`;
     `fit_reasons` is non-empty exactly on a dual-run; a tsc row's version reads
     as a major under 7; and a "drop-in" is re-derived from the scan's ESLint
-    config facts / Prettier plugins (and refused from a truncated walk).
+    config facts / Prettier plugins and unopened Prettier configs, and from the
+    rule- or plugin-loading flags on the leaf's own command (and refused from a
+    walk not stamped complete: `truncated` missing counts as truncated).
+
+    Documented limits of that re-derivation (a backstop, not a second engine):
+    the Prettier ones listed on `_vr_opt84_prettier_dual_run_reasons`; for
+    ESLint, `ESLINT_USE_FLAT_CONFIG=false` and the nested-flat-config ambiguity
+    the engine holds back on are not re-read here.
 
     OPT84 is uncredited by design: the step's own p50 is the most a swap can
     remove, and the published range is the catalog's, so any other number on the
@@ -9622,7 +9666,8 @@ def check_opt84_tool_swap(report: str, findings_path: Path | None) -> Check:
             # A drop-in is re-derived from the scan facts the engine read: any
             # fact that makes the swap lossy contradicts it.
             if fit == "drop-in" and isinstance(tal, dict):
-                if block.get("truncated") is True and row in ("prettier", "tsc"):
+                # A block with no `truncated` key is a walk nobody vouched for.
+                if block.get("truncated") is not False and row in ("prettier", "tsc"):
                     bad.append(f"{fid}: {row} row stamped 'drop-in' from a truncated "
                                "lint-tooling walk, which never showed what it skipped")
                 if row == "eslint":

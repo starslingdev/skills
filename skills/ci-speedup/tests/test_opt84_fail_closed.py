@@ -759,8 +759,12 @@ def test_every_gate_the_leaf_helpers_return_is_in_a_set():
     import inspect
     import re
     src = (inspect.getsource(cr._opt84_opaque_leaf)
-           + inspect.getsource(cr._opt84_expand_leaves))
-    got = set(re.findall(r'"hold",\s*"([a-z0-9_]+)"', src))
+           + inspect.getsource(cr._opt84_expand_leaves)
+           + inspect.getsource(cr._opt84_wrapped)
+           + inspect.getsource(cr._opt84_strip_flags))
+    got = set(re.findall(r'"hold",\s*\(?"([a-z0-9_]+)"', src))
+    got |= set(re.findall(r'return None,\s*"([a-z0-9_]+)"', src))
+    got |= set(re.findall(r'gate or\s*"([a-z0-9_]+)"', src))
     got |= set(re.findall(r'gates\.append\(\s*"([a-z0-9_]+)"', src))
     got |= set(re.findall(r'"([a-z0-9_]+)"\s+if\b', src))
     got |= set(re.findall(r'\belse\s+"([a-z0-9_]+)"', src))
@@ -843,3 +847,154 @@ def test_an_unknown_eslint_action_is_still_held_back():
         {"uses": "some-org/eslint-action@v1", "name": "Do the thing"}, "Do the thing")
     assert out == [] and withheld == {"candidate_is_an_action": 1}, withheld
     assert [c["gate"] for c in cands] == ["candidate_is_an_action"]
+
+
+# ---- E1. wrappers and shims re-classify what they run --------------------------
+
+def test_corepack_runs_the_package_manager_and_its_script_is_followed():
+    out, withheld, cands = _run({"run": "corepack pnpm lint"},
+                                block=_block(scripts={"": {"lint": "eslint ."}}))
+    assert len(out) == 1 and _rows(out[0]) == ["eslint"], (withheld, cands)
+
+
+@pytest.mark.parametrize("run,gate", [
+    ("sudo make lint", "delegated_script_unresolved"),
+    ("sudo -E make lint", "delegated_script_unresolved"),
+    ("doas make lint", "delegated_script_unresolved"),
+    ("env CI=1 make lint", "delegated_script_unresolved"),
+    ("uv run pre-commit run --all-files", "delegated_script_unresolved"),
+    ("uv run --frozen pre-commit run --all-files", "delegated_script_unresolved"),
+    ("uvx pre-commit run --all-files", "delegated_script_unresolved"),
+    ("poetry run pre-commit run -a", "delegated_script_unresolved"),
+    ("pipx run pre-commit run", "delegated_script_unresolved"),
+    ("bundle exec pre-commit run", "delegated_script_unresolved"),
+    ("lefthook run pre-commit", "delegated_script_unresolved"),
+    ("npx lint-staged", "delegated_script_unresolved"),
+    ("npx husky", "delegated_script_unresolved"),
+    ("gmake lint", "delegated_script_unresolved"),
+    ("bazel test //...", "delegated_script_unresolved"),
+    ("bazelisk test //...", "delegated_script_unresolved"),
+    ("deno task lint", "delegated_script_unresolved"),
+    ("python scripts/lint.py", "script_unresolvable"),
+    ("python3 -u scripts/lint.py --fix", "script_unresolvable"),
+    ("uv run python scripts/lint.py", "script_unresolvable"),
+    ("deno run -A lint.ts", "script_unresolvable"),
+    ("cargo run --bin xtask -- lint", "script_unresolvable"),
+    ("uv run --directory web pre-commit run", "working_directory_unknown"),
+])
+def test_a_wrapper_or_shim_in_a_js_repo_holds_the_step_back(run, gate):
+    out, withheld, cands = _run({"run": run})
+    assert out == []
+    _gate_only(withheld, cands, gate)
+
+
+@pytest.mark.parametrize("run,row", [
+    ("sudo npx eslint .", "eslint"),
+    ("uv run npx prettier --check .", "prettier"),
+    ("bundle exec npx eslint .", "eslint"),
+    ("deno run -A npm:eslint .", "eslint"),
+])
+def test_a_wrapper_runs_a_table_tool_and_it_fires(run, row):
+    out, withheld, cands = _run({"run": run})
+    assert len(out) == 1 and _rows(out[0]) == [row], (withheld, cands)
+
+
+@pytest.mark.parametrize("run", ["uv sync --frozen", "poetry install", "bundle install",
+                                 "bundle exec rubocop", "python -m pytest",
+                                 "corepack enable", "deno fmt --check"])
+def test_a_wrapper_tool_that_runs_no_hidden_command_is_the_verdict(run):
+    out, withheld, cands = _run({"run": run})
+    assert out == [] and withheld == {"tool_not_in_table": 1}, withheld
+    assert cands == []
+
+
+@pytest.mark.parametrize("run", ["uv run pre-commit run --all-files",
+                                 "lefthook run pre-commit", "python scripts/lint.py",
+                                 "bazel test //..."])
+def test_a_wrapper_or_shim_in_a_repo_with_no_manifest_is_the_verdict(run):
+    out, withheld, cands = _no_js({"run": run})
+    assert out == [] and withheld == {"tool_not_in_table": 1}, withheld
+    assert cands == []
+
+
+@pytest.mark.parametrize("run", ["uv run pre-commit run --all-files",
+                                 "poetry run pre-commit run -a",
+                                 "sudo make lint", "bazel test //..."])
+def test_a_nameless_wrapped_runner_in_a_js_repo_is_held_not_a_verdict(run):
+    out, withheld, cands = _nameless(run, "Run " + run)
+    assert out == [] and set(withheld) <= cr._OPT84_HELD_BACK_GATES, withheld
+    assert len(cands) == 1, cands
+
+
+@pytest.mark.parametrize("cmd", ["uv run pre-commit run --all-files",
+                                 "poetry run pre-commit run -a",
+                                 "pipx run pre-commit run", "bundle exec make lint",
+                                 "cargo run --bin xtask", "sudo make lint",
+                                 "bazel test //...", "uv run python scripts/lint.py"])
+def test_the_nameless_non_js_read_reclassifies_a_wrapper(cmd):
+    assert cr._opt84_runs_only_non_js(cmd) is False
+
+
+@pytest.mark.parametrize("cmd", ["cargo clippy --all-targets", "uv sync --frozen",
+                                 "poetry install", "bundle install", "time cargo build",
+                                 "sudo cmake --build bld"])
+def test_the_nameless_non_js_read_still_reads_plain_non_js_tools(cmd):
+    assert cr._opt84_runs_only_non_js(cmd) is True
+
+
+# ---- E3. --parser-options turns on type-aware linting --------------------------
+
+@pytest.mark.parametrize("flag", ["--parser-options project:./tsconfig.json",
+                                  "--parser-options=project:./tsconfig.json"])
+def test_eslint_parser_options_on_the_command_is_run_both(flag):
+    t = _efit(f"npx eslint {flag} .")
+    assert t["fit"] == "dual-run", t
+    assert any("`--parser-options`" in r and "type-aware" in r
+               for r in t["fit_reasons"]), t["fit_reasons"]
+
+
+@pytest.mark.parametrize("flag", ["-f ./formatter.js", "--format=stylish"])
+def test_an_eslint_custom_formatter_is_not_a_reason(flag):
+    t = _efit(f"npx eslint {flag} .")
+    assert t["fit"] == "drop-in", t
+
+
+# ---- E4. the nameless fallback needs the YAML job to join ----------------------
+
+def test_a_nameless_rust_step_with_no_workflow_yaml_is_held_back():
+    withheld: dict[str, int] = {}
+    cands: list[dict] = []
+    out = cr._detect_opt84_tool_swap(
+        [_pole(step="Run cargo fmt --check")], {}, _block(), [], 40,
+        withheld=withheld, withheld_candidates=cands)
+    assert out == [] and withheld == {"workflow_yaml_unavailable": 1}, withheld
+    assert [c["gate"] for c in cands] == ["workflow_yaml_unavailable"]
+
+
+def test_a_nameless_rust_step_on_an_unmatched_job_is_held_back():
+    doc = _doc({"run": "cargo fmt --check"})
+    doc["jobs"] = {"other": {**doc["jobs"]["lint"], "name": "Other"}}
+    out, withheld, cands = _run(None, doc=doc, pole=_pole(step="Run cargo fmt --check"))
+    assert out == [] and withheld == {"pole_job_not_matched_in_yaml": 1}, withheld
+    assert [c["gate"] for c in cands] == ["pole_job_not_matched_in_yaml"]
+
+
+def test_a_nameless_rust_step_with_duplicate_display_names_is_the_verdict():
+    doc = _doc({})
+    doc["jobs"]["lint"]["steps"][2] = {"run": "cargo fmt --check"}
+    doc["jobs"]["lint"]["steps"].append({"run": "cargo fmt --check"})
+    out, withheld, cands = _run(None, doc=doc, pole=_pole(step="Run cargo fmt --check"))
+    assert out == [] and withheld == {"tool_not_in_table": 1}, withheld
+
+
+# ---- E6. `tsc --noEmit false` emits --------------------------------------------
+
+@pytest.mark.parametrize("run", ["npx tsc --noEmit false", "npx tsc -p . --noemit FALSE"])
+def test_tsc_noemit_false_emits(run):
+    out, withheld, cands = _run({"run": run})
+    assert out == [] and withheld == {"tsc_emits_not_in_v1": 1}, withheld
+
+
+def test_tsc_noemit_true_still_fires():
+    out, withheld, cands = _run({"run": "npx tsc --noEmit true"})
+    assert len(out) == 1 and _rows(out[0]) == ["tsc"], withheld

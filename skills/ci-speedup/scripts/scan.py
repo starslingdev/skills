@@ -2967,7 +2967,8 @@ def _unfollowable_config_bases(text: str) -> list[str]:
     return out
 
 
-def _vitest_config_files(root: Path, is_config: "Any" = None
+def _vitest_config_files(root: Path, is_config: "Any" = None,
+                         also: "Any" = None, also_found: "list[Path] | None" = None,
                          ) -> "tuple[list[Path], bool, list[Path]]":
     """Config candidates at the repo root plus a bounded walk beneath it, as
     ``(configs, truncated, manifests)`` — ``manifests`` being the `package.json`
@@ -2987,6 +2988,11 @@ def _vitest_config_files(root: Path, is_config: "Any" = None
     opt-out may sit in a config the walk never reached. "Walk exhausted" and "no
     config exists" therefore reach the SAME withheld outcome, for different
     reasons, so both are reported.
+
+    ``also`` / ``also_found``: a second file-name predicate, whose matches the
+    same walk appends to ``also_found`` (OPT84 collects Prettier configs this
+    way, so a config with no `package.json` beside it is still seen). They do
+    not count toward the config cap.
 
     The "plausibly" is load-bearing, and is why an unvisited directory is only
     counted when it is a package root (a `package.json` in it) or holds one
@@ -3056,6 +3062,8 @@ def _vitest_config_files(root: Path, is_config: "Any" = None
                     truncated = truncated or _may_hold_config(entry)
             elif entry.name == "package.json":
                 manifests.append(entry)
+            elif also is not None and also_found is not None and also(entry.name):
+                also_found.append(entry)
             elif (is_config or _is_vitest_config_name)(entry.name):
                 found.append(entry)
                 if len(found) >= _VITEST_CONFIG_MAX_FILES:
@@ -3966,7 +3974,10 @@ def _tal_block(**overrides: Any) -> dict[str, Any]:
         # {package dir: sorted Prettier plugin packages its package.json
         # declares (dependencies + devDependencies): `prettier-plugin-*`,
         # `@scope/prettier-plugin`, `@scope/prettier-plugin-*`}; a dir that
-        # declares none is absent.
+        # declares none is absent. The three `prettier_*` maps also key a
+        # directory holding a Prettier config and no package.json read (the
+        # walk collects the configs themselves), and `prettier_config_unreadable`
+        # names a package folder that could not be listed.
         "prettier_plugins": {},
         # {package dir: {plugin: the repo-relative file that names it}} for a
         # plugin `prettier_plugins` lists ONLY because a Prettier config names
@@ -4153,6 +4164,17 @@ _TAL_PRETTIER_DATA_CONFIGS = (".prettierrc", ".prettierrc.json", ".prettierrc.js
                               ".prettierrc.yaml", ".prettierrc.yml")
 
 
+def _tal_is_prettier_config_name(name: str) -> bool:
+    """A Prettier config file name (`.prettierrc*`, `prettier.config.*`)."""
+    return name.startswith(".prettierrc") or name.startswith("prettier.config.")
+
+
+def _tal_unlisted_folder(rel_dir: str) -> str:
+    """The `prettier_config_unreadable` entry for a package folder that could
+    not be listed: any Prettier config in it is unknown."""
+    return f"{rel_dir or '.'}/ (folder could not be listed)"
+
+
 def _tal_prettier_config_plugins(folder: Path, rel_dir: str, present: list[str],
                                  pkg: dict[str, Any],
                                  ) -> "tuple[dict[str, str], list[str]]":
@@ -4183,7 +4205,7 @@ def _tal_prettier_config_plugins(folder: Path, rel_dir: str, present: list[str],
     if "prettier" in pkg:
         _take(pkg["prettier"], _rel("package.json"))
     for name in present:
-        if not (name.startswith(".prettierrc") or name.startswith("prettier.config.")):
+        if not _tal_is_prettier_config_name(name):
             continue
         if name not in _TAL_PRETTIER_DATA_CONFIGS:
             unread.append(_rel(name))
@@ -4230,7 +4252,14 @@ def _read_type_aware_lint(root: Path) -> dict[str, Any]:
 def _read_type_aware_lint_unguarded(root: Path) -> dict[str, Any]:
     root = root.resolve()
     rules_catalog = _load_type_aware_rules()
-    paths, truncated, manifests = _vitest_config_files(root, _is_eslint_config_name)
+    # Prettier configs are collected by the same walk (same depth, skip rules
+    # and `truncated`), keyed by their own directory: a `.prettierrc` with no
+    # package.json beside it (a root config over `web/package.json`, or a
+    # config-only `docs/`) applies all the same.
+    prettier_paths: list[Path] = []
+    paths, truncated, manifests = _vitest_config_files(
+        root, _is_eslint_config_name, also=_tal_is_prettier_config_name,
+        also_found=prettier_paths)
 
     def _rel(path: Path) -> str:
         try:
@@ -4252,6 +4281,7 @@ def _read_type_aware_lint_unguarded(root: Path) -> dict[str, Any]:
     prettier_plugins: dict[str, list[str]] = {}
     prettier_plugin_files: dict[str, dict[str, str]] = {}
     prettier_config_unreadable: dict[str, list[str]] = {}
+    prettier_read_dirs: set[str] = set()
 
     def _finish(rel: str, fmt: str, read: dict[str, Any],
                 typed: "_TalCustomRules", imp_unresolved: list[str]) -> None:
@@ -4347,11 +4377,15 @@ def _read_type_aware_lint_unguarded(root: Path) -> dict[str, Any]:
         if tv:
             tool_versions[_dir(rel)] = tv
         pp = sorted(k for k in deps if _TAL_PRETTIER_PLUGIN_RE.match(str(k)))
+        prettier_read_dirs.add(_dir(rel))
         try:
             present = sorted(n for n in os.listdir(path.parent)
                              if _TAL_CONFIG_FILE_RE.match(n))
         except OSError:
+            # A folder that cannot be listed may hold a Prettier config: its
+            # plugins are unknown, never "none".
             present = []
+            prettier_config_unreadable[_dir(rel)] = [_tal_unlisted_folder(_dir(rel))]
         if present:
             config_files[_dir(rel)] = present
         cfg_plugins, cfg_unread = _tal_prettier_config_plugins(
@@ -4362,7 +4396,8 @@ def _read_type_aware_lint_unguarded(root: Path) -> dict[str, Any]:
         if from_cfg:
             prettier_plugin_files[_dir(rel)] = from_cfg
         if cfg_unread:
-            prettier_config_unreadable[_dir(rel)] = cfg_unread
+            prettier_config_unreadable[_dir(rel)] = sorted(
+                {*prettier_config_unreadable.get(_dir(rel), []), *cfg_unread})
         sc = data.get("scripts")
         scripts[_dir(rel)] = ({str(k): str(v) for k, v in sc.items()
                                if isinstance(v, str)} if isinstance(sc, dict) else {})
@@ -4371,6 +4406,23 @@ def _read_type_aware_lint_unguarded(root: Path) -> dict[str, Any]:
                                             data["eslintConfig"])
             _finish(rel, "package.json", _tal_read_obj(data["eslintConfig"], rel),
                     _TalCustomRules(), [])
+    # Prettier configs in a directory whose package.json was not read (none
+    # there, or one that could not be read): read the same way, keyed by the
+    # config's own directory, so the Prettier fit's upward and downward walks
+    # see them.
+    config_only: dict[str, list[str]] = {}
+    for path in prettier_paths:
+        d = _dir(_rel(path))
+        if d not in prettier_read_dirs:
+            config_only.setdefault(d, []).append(path.name)
+    for d, names in sorted(config_only.items()):
+        cfg_plugins, cfg_unread = _tal_prettier_config_plugins(
+            root / d if d else root, d, sorted(names), {})
+        if cfg_plugins:
+            prettier_plugins[d] = sorted(cfg_plugins)
+            prettier_plugin_files[d] = dict(cfg_plugins)
+        if cfg_unread:
+            prettier_config_unreadable[d] = cfg_unread
     catalogs, catalogs_unreadable = _tal_pnpm_catalogs_read(root)
     return _tal_block(
         configs=sorted(configs, key=lambda c: c["path"]),

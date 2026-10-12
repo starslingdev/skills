@@ -17103,8 +17103,11 @@ def _opt84_gate_for_unresolved(u: dict[str, Any]) -> str:
 # runs. These leaves run something the read cannot see, so they hold the step
 # back instead (`_opt84_opaque_leaf`): a shell interpreter, a local executable
 # (`./x`, `../x`, `*.sh`), a wrapper around another command the read cannot
-# strip, a subshell, a package manager pointed at another directory, and a
-# package-manager builtin that runs a script it cannot follow.
+# strip (`_opt84_wrapped`: `sudo`, `corepack`, `uv run`, `bundle exec` ... are
+# read through instead), an interpreter given a script file (`python x.py`,
+# `deno run x.ts`), `cargo run`, a subshell, a package manager pointed at
+# another directory, and a package-manager builtin that runs a script it
+# cannot follow.
 _OPT84_SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh", "fish", "pwsh",
                            "powershell"})
 # Runners whose own configuration decides what runs (a Makefile, a Justfile, a
@@ -17115,8 +17118,9 @@ _OPT84_SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh", "fish", "pwsh",
 # repo with no JS manifest `_detect_opt84_tool_swap` reads these as the verdict.
 _OPT84_OPAQUE_BINARIES: dict[str, str] = {
     b: "delegated_script_unresolved" for b in (
-        "make", "just", "task", "pre-commit", "concurrently", "ng", "nx", "gulp",
-        "grunt", "xo", "standard", "docker", "docker-compose")}
+        "make", "gmake", "just", "task", "pre-commit", "lefthook", "lint-staged",
+        "husky", "concurrently", "ng", "nx", "gulp", "grunt", "xo", "standard",
+        "docker", "docker-compose", "bazel", "bazelisk")}
 # Local executables that are native build entry points by convention (autoconf's
 # `configure`, the Gradle and Maven wrappers): a leaf, like `make` (see
 # `_RL_NON_JS_DELEGATORS`), so a C or JVM build stays the verdict.
@@ -17196,6 +17200,155 @@ def _opt84_unwrap(tokens: list[str]) -> "list[str] | None":
     return t or None
 
 
+# Package managers `corepack` runs as a shim (`corepack pnpm lint`).
+_OPT84_COREPACK_SHIMS = frozenset({"npm", "npx", "pnpm", "pnpx", "yarn", "yarnpkg"})
+# Python / Ruby package managers that also WRAP a command (`uv run x`,
+# `poetry run x`, `pipx run x`, `bundle exec x`): in that form what they run is
+# re-classified (`_opt84_wrapped`); any other subcommand (`uv sync`, `poetry
+# install`, `bundle install`) runs nothing hidden and is a non-JS tool.
+_OPT84_NON_JS_WRAPPER_HOSTS = frozenset({"uv", "poetry", "pipx", "bundle"})
+# Flags of the wrapping subcommands above: (no value, takes a value, moves to
+# another directory). Any other flag is not read, and the step is held back.
+_OPT84_UV_RUN_FLAGS = (
+    frozenset({"--frozen", "--locked", "--no-sync", "--all-extras", "--isolated",
+               "--no-project", "--active", "--no-dev", "--all-packages", "--exact",
+               "--no-editable", "--offline", "--no-cache", "--script", "-q",
+               "--quiet", "-v", "--verbose", "--all-groups", "--only-dev"}),
+    frozenset({"--with", "--with-requirements", "--with-editable", "--python",
+               "-p", "--package", "--extra", "--group", "--no-group", "--only-group",
+               "--env-file", "--from", "--index", "--default-index", "--index-url",
+               "--extra-index-url", "--cache-dir"}),
+    frozenset({"--directory", "--project"}))
+_OPT84_PIPX_RUN_FLAGS = (
+    frozenset({"--no-cache", "--verbose", "-v", "--quiet", "-q", "--system-site-packages"}),
+    frozenset({"--spec", "--python", "--pip-args", "--index-url", "-i"}),
+    frozenset())
+_OPT84_SUDO_FLAGS = (
+    frozenset({"-E", "-H", "-n", "-S", "-k", "-b", "-P", "--preserve-env",
+               "--non-interactive", "--stdin", "--set-home"}),
+    frozenset({"-u", "--user", "-g", "--group", "-p", "--prompt", "-h", "--host",
+               "-C", "--close-from", "-T", "--command-timeout"}),
+    frozenset({"-D", "--chdir"}))
+_OPT84_DOAS_FLAGS = (frozenset({"-n", "-s"}), frozenset({"-u", "-C"}), frozenset())
+# A file an interpreter runs (`python scripts/lint.py`, `deno run lint.ts`).
+_OPT84_INTERPRETERS = frozenset({"python", "python3", "python2", "pypy", "pypy3"})
+
+
+def _opt84_strip_flags(t: list[str], flags: "tuple[frozenset[str], ...]",
+                       ) -> "tuple[list[str] | None, str | None]":
+    """`t` with its leading flags (`flags` = (no value, takes a value, moves to
+    another directory)) stripped: (rest, None), or (None, gate) when a flag
+    is not one this read knows, or moves the command to another directory."""
+    no_value, with_value, chdir = flags
+    t = list(t)
+    while t and t[0].startswith("-") and t[0] != "-":
+        f = t.pop(0)
+        if f == "--":
+            break
+        name = f.split("=", 1)[0]
+        if name in chdir:
+            return None, "working_directory_unknown"
+        if f in no_value or (name in no_value | with_value and "=" in f):
+            continue
+        if f in with_value and t:
+            t.pop(0)
+            continue
+        return None, "script_unresolvable"
+    return t, None
+
+
+def _opt84_wrapped(tokens: list[str]) -> "tuple[str, Any] | None":
+    """What a wrapper or shim leaf runs: `("expand", inner tokens)` when the
+    command it wraps can be read and re-classified, `("hold", gate)` when it
+    runs something this read cannot see, None when the leaf wraps nothing
+    (the verdict stands on the leaf itself). One read for the step's leaves
+    (`_opt84_opaque_leaf`) and for the nameless `Run <command>` read
+    (`_opt84_runs_only_non_js`), so the two never disagree.
+
+    `time` / `env` / `timeout` / `nice` / `nohup` / `exec` (`_opt84_unwrap`),
+    `sudo` / `doas`, `corepack <package manager>`, `uv run` / `uvx` / `uv tool
+    run`, `poetry run`, `pipx run`, `bundle exec` re-classify the command
+    they wrap. `cargo run` runs a program built from the repo, a `deno run` /
+    `python` given a file runs that script, and `deno task` / `deno eval` run
+    code from config or a string: held back. `deno run npm:<pkg>` is that
+    package's binary (`deno run -A npm:eslint .` is ESLint)."""
+    t = list(tokens)
+    if not t:
+        return None
+    b = t[0].rsplit("/", 1)[-1]
+    sub = t[1] if len(t) > 1 else ""
+
+    def _inner(rest: "list[str] | None", gate: "str | None") -> "tuple[str, Any]":
+        if rest is None:
+            return "hold", gate or "script_unresolvable"
+        return ("expand", rest) if rest else ("hold", "script_unresolvable")
+
+    if b in _OPT84_WRAPPERS:
+        inner = _opt84_unwrap(t)
+        return ("expand", inner) if inner else ("hold", "script_unresolvable")
+    if b == "sudo":
+        return _inner(*_opt84_strip_flags(t[1:], _OPT84_SUDO_FLAGS))
+    if b == "doas":
+        return _inner(*_opt84_strip_flags(t[1:], _OPT84_DOAS_FLAGS))
+    if b == "corepack":
+        pm = sub.split("@", 1)[0]
+        return ("expand", [pm, *t[2:]]) if pm in _OPT84_COREPACK_SHIMS else None
+    if b == "uv":
+        if sub == "run":
+            return _inner(*_opt84_strip_flags(t[2:], _OPT84_UV_RUN_FLAGS))
+        if sub == "tool" and t[2:3] == ["run"]:
+            return _inner(*_opt84_strip_flags(t[3:], _OPT84_UV_RUN_FLAGS))
+        if sub.startswith("-"):
+            return "hold", ("working_directory_unknown"
+                            if sub.split("=", 1)[0] in _OPT84_UV_RUN_FLAGS[2]
+                            else "script_unresolvable")
+        return None
+    if b == "uvx":
+        return _inner(*_opt84_strip_flags(t[1:], _OPT84_UV_RUN_FLAGS))
+    if b == "poetry":
+        if sub == "run":
+            return _inner(*_opt84_strip_flags(t[2:], (frozenset(), frozenset(),
+                                                      frozenset())))
+        if "run" in t[2:] and sub.startswith("-"):
+            # `poetry -C web run x`: a global flag before the subcommand
+            return "hold", ("working_directory_unknown"
+                            if sub.split("=", 1)[0] in ("-C", "--directory", "-P",
+                                                        "--project")
+                            else "script_unresolvable")
+        return None
+    if b == "pipx":
+        return (_inner(*_opt84_strip_flags(t[2:], _OPT84_PIPX_RUN_FLAGS))
+                if sub == "run" else None)
+    if b == "bundle":
+        return (_inner(*_opt84_strip_flags(t[2:], (frozenset({"--keep-file-descriptors"}),
+                                                   frozenset({"--gemfile"}),
+                                                   frozenset())))
+                if sub == "exec" else None)
+    if b == "cargo":
+        i = 2 if sub.startswith("+") else 1      # `cargo +nightly run`
+        return ("hold", "script_unresolvable") if t[i:i + 1] == ["run"] else None
+    if b == "deno":
+        if sub in ("task", "eval"):
+            return "hold", ("delegated_script_unresolved" if sub == "task"
+                            else "script_unresolvable")
+        if sub == "run":
+            rest = [a for a in t[2:] if not a.startswith("-")]
+            if rest and rest[0].startswith("npm:"):
+                pkg = rest[0][len("npm:"):]
+                name = pkg.rsplit("@", 1)[0] if pkg.rfind("@") > 0 else pkg
+                return "expand", [name, *t[t.index(rest[0]) + 1:]]
+            return "hold", "script_unresolvable"
+        return None
+    if b in _OPT84_INTERPRETERS:
+        i = 1
+        while i < len(t) and t[i].startswith("-") and t[i] != "-":
+            if t[i] in ("-m", "-c"):
+                return None            # a module or inline code: a plain leaf
+            i += 2 if t[i] in ("-W", "-X") else 1
+        return ("hold", "script_unresolvable") if i < len(t) and t[i] != "-" else None
+    return None
+
+
 def _opt84_pm_script_call(lf: dict[str, Any]) -> "tuple[str, str, list[str]] | None":
     """`(package manager, script name, args)` when a leaf is a package-manager
     builtin that runs the package's own script (`npm test`, `pnpm start`,
@@ -17236,10 +17389,10 @@ def _opt84_opaque_leaf(lf: dict[str, Any]) -> "tuple[str, str] | None":
         pm, name, args = call
         return "expand", shlex.join([pm, "run", name, *args])
     b = t[0].rsplit("/", 1)[-1]
-    if b in _OPT84_WRAPPERS:
-        inner = _opt84_unwrap(t)
-        return (("expand", shlex.join(inner)) if inner
-                else ("hold", "script_unresolvable"))
+    wrapped = _opt84_wrapped(t)
+    if wrapped is not None:
+        return (("expand", shlex.join(wrapped[1])) if wrapped[0] == "expand"
+                else ("hold", str(wrapped[1])))
     if b in _OPT84_SHELLS:
         return "hold", "script_unresolvable"
     if b in _OPT84_OPAQUE_BINARIES:
@@ -17330,18 +17483,26 @@ _OPT84_KNOWN_ACTION_PREFIXES = (
 # (`_opt84_runs_only_non_js`), before the YAML join and the expression hold.
 # A runner whose own config decides what runs (`make`, `_OPT84_OPAQUE_BINARIES`)
 # is never in it: a Makefile can run ESLint, so in a JS repo it stays held back.
+# `uv`, `poetry`, `pipx` and `bundle` are not in it either: they wrap a command
+# (`uv run pre-commit ...`), which `_opt84_wrapped` re-classifies; only their
+# other subcommands (`uv sync`) count as non-JS (`_OPT84_NON_JS_WRAPPER_HOSTS`).
 _OPT84_NON_JS_TOOLS = frozenset({
     "cargo", "cross", "rustup", "rustc", "cmake", "ninja", "meson", "go",
     "mvn", "mvnw", "gradle", "gradlew", "configure", "dotnet", "msbuild", "swift",
-    "xcodebuild", "bundle", "rake", "pip", "pip3", "uv", "poetry", "bazel",
-    "bazelisk", "ctest", "flutter", "dart", "mix", "stack", "cabal", "zig",
+    "xcodebuild", "rake", "pip", "pip3", "ctest", "flutter", "dart", "mix",
+    "stack", "cabal", "zig",
 }) - frozenset(_OPT84_OPAQUE_BINARIES)
+_OPT84_MAX_UNWRAP = 8
 
 
 def _opt84_runs_only_non_js(cmd: str) -> bool:
     """Whether every segment of `cmd` starts with a non-JS tool or build
-    (`_OPT84_NON_JS_TOOLS`): a Rust lint, a C build, a Go test. An action ref
-    (`some-org/cargo@v1`, the first token carrying `@`) never qualifies."""
+    (`_OPT84_NON_JS_TOOLS`): a Rust lint, a C build, a Go test. A wrapper or
+    shim (`sudo`, `time`, `uv run`, `bundle exec`, ... : `_opt84_wrapped`) is
+    read through to the command it runs, the same read the step's leaves get;
+    one that runs something this read cannot see (`cargo run`, a Python script)
+    never qualifies. An action ref (`some-org/cargo@v1`, the first token
+    carrying `@`) never qualifies."""
     segs = [s.strip() for s in _OPT82_SEGMENT_SPLIT_RE.split(cmd or "") if s.strip()]
     if not segs:
         return False
@@ -17351,7 +17512,21 @@ def _opt84_runs_only_non_js(cmd: str) -> bool:
             toks = toks[1:]
         if not toks or "@" in toks[0]:
             return False
-        if toks[0].rsplit("/", 1)[-1] not in _OPT84_NON_JS_TOOLS:
+        for _ in range(_OPT84_MAX_UNWRAP):
+            w = _opt84_wrapped(toks)
+            if w is None:
+                break
+            if w[0] != "expand":
+                return False
+            toks = list(w[1])
+            while toks and _re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", toks[0]):
+                toks = toks[1:]
+            if not toks or "@" in toks[0]:
+                return False
+        else:
+            return False
+        b = toks[0].rsplit("/", 1)[-1]
+        if b not in _OPT84_NON_JS_TOOLS and b not in _OPT84_NON_JS_WRAPPER_HOSTS:
             return False
     return True
 
@@ -17394,10 +17569,15 @@ def _opt84_classify(tokens: list[str]) -> "tuple[str | None, str | None]":
         if b not in spec["binaries"]:
             continue
         if row == "tsc":
-            # tsc reads its options case-insensitively and with one dash or two
+            # tsc reads its options case-insensitively and with one dash or two;
+            # a boolean option takes an explicit `true` / `false` after it, so
+            # `--noEmit false` emits (the last one given wins).
             low = [a.lower() for a in args]
-            if ("--build" in low or "-b" in low or "-build" in low
-                    or not any(a in ("--noemit", "-noemit") for a in low)):
+            no_emit = False
+            for i, a in enumerate(low):
+                if a in ("--noemit", "-noemit"):
+                    no_emit = not (i + 1 < len(low) and low[i + 1] == "false")
+            if "--build" in low or "-b" in low or "-build" in low or not no_emit:
                 return row, "emits"
             return row, "row"
         need = spec["binaries"][b]
@@ -17570,8 +17750,12 @@ def _opt84_benchmark_commands(row: str, tokens: list[str], runner: str,
 
 
 # ESLint CLI flags that load or change rules from outside the config: oxlint
-# may not carry what they load, so the swap is a dual-run.
-_OPT84_ESLINT_RULE_FLAGS = ("--rulesdir", "--plugin", "--rule", "--parser", "--ext")
+# may not carry what they load, so the swap is a dual-run. `--parser-options`
+# can turn on type-aware linting (`project:...`) the config does not show. A
+# custom formatter (`-f` / `--format`) changes only the output: not a reason.
+# A STRING CONTRACT with the verifier's `_VR_OPT84_ESLINT_RULE_FLAGS`.
+_OPT84_ESLINT_RULE_FLAGS = ("--rulesdir", "--plugin", "--rule", "--parser", "--ext",
+                            "--parser-options")
 
 
 def _opt84_loads_oxlint_plugin(block: dict[str, Any],
@@ -17636,8 +17820,10 @@ def _opt84_eslint_fit(block: dict[str, Any], configs: "list[dict[str, Any]]",
         for a in _opt84_leaf_tokens(list(lf.get("tokens") or []))[1:]:
             flag = a.split("=", 1)[0]
             if flag in _OPT84_ESLINT_RULE_FLAGS:
-                _add(f"ESLint CLI flag `{flag}` in `{cmd}`: oxlint may not carry "
-                     "what it loads")
+                _add(f"ESLint CLI flag `{flag}` in `{cmd}`: " + (
+                    "it can turn on type-aware linting, which oxlint runs only "
+                    "through tsgolint" if flag == "--parser-options"
+                    else "oxlint may not carry what it loads"))
     return reasons
 
 
@@ -17907,17 +18093,25 @@ def _detect_opt84_tool_swap(
         doc = wf_docs.get(wf) if isinstance(wf_docs, dict) else None
         jobs = doc.get("jobs") if isinstance(doc, dict) else None
         # A step GitHub names `Run <command>` (a nameless `run:` step) whose
-        # command is only non-JS tools (`cargo clippy`, `make`, `go test`) is
-        # the verdict, before the YAML join and the expression hold: a matrix
+        # command is only non-JS tools (`cargo clippy`, `go test`; a wrapper
+        # such as `uv run` is read through, `_opt84_runs_only_non_js`) is the
+        # verdict, before the step join and the expression hold: a matrix
         # `${{ }}` in it fails the join, and a Rust lint is never a tool swap.
-        # When the YAML step joins, its whole command is read (the name holds
-        # only its first line); an action step never qualifies.
+        # When the YAML step joins, its whole command is read; an action step
+        # never qualifies. The display-name fallback (`c[0][4:]`) applies ONLY
+        # when the YAML job joined and the step could not (an expression in
+        # the command, or a display name two steps share): with no workflow
+        # YAML, or a job it cannot match, nothing shows the step is a nameless
+        # `run:` at all, so it stays held back below. RESIDUAL of the fallback:
+        # GitHub's name holds only the first line of a multi-line `run:`, so a
+        # nameless step whose first line is a non-JS tool and whose later line
+        # runs a table tool reads as the verdict when its join fails.
         hit0 = _opt83_match_yaml_job(jobs, job) if isinstance(jobs, dict) else None
         steps0 = ([lf.step for lf in job_walk(hit0[1]).leaves]
                   if hit0 is not None else [])
         kept = []
         for c in cands:
-            if c[0].startswith("Run "):
+            if c[0].startswith("Run ") and hit0 is not None:
                 same = [s for s in steps0 if _opt79_yaml_step_display(s) == c[0]]
                 st0 = same[0] if len(same) == 1 else None
                 cmd = (None if st0 is not None and (st0.get("uses") or st0.get("name")

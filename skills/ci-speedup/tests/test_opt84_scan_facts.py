@@ -260,3 +260,76 @@ def test_a_tab_indented_json_prettierrc_names_its_plugin(tmp_path):
     assert block["prettier_plugins"][""] == ["prettier-plugin-svelte"]
     assert block["prettier_plugin_files"][""]["prettier-plugin-svelte"] == ".prettierrc"
     assert block["prettier_config_unreadable"] == {}
+
+
+# ---- E2: a Prettier config with no package.json beside it ----------------------
+
+def _tree(tmp_path, files):
+    for name, text in files.items():
+        p = tmp_path / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+    return tmp_path
+
+
+def _prettier_run(block, run="npx prettier --check .", wd=None):
+    sys.path.insert(0, str(_SKILL_DIR / "tests"))
+    import test_opt84_tool_swap as t84
+    step = {"run": run, **({"working-directory": wd} if wd else {})}
+    out, withheld, cands = t84._run(step, block=block)
+    assert len(out) == 1, (withheld, cands)
+    return t84._tool(out[0], "prettier")
+
+
+def test_a_root_prettierrc_with_no_root_package_json_is_read(tmp_path):
+    root = _tree(tmp_path, {
+        ".prettierrc": json.dumps({"plugins": ["prettier-plugin-tailwindcss"]}),
+        "web/package.json": json.dumps({"devDependencies": {"prettier": "^3.3.0"}})})
+    block = scan._read_type_aware_lint(root)
+    assert block["prettier_plugins"].get("") == ["prettier-plugin-tailwindcss"], block
+    assert block["prettier_plugin_files"].get("") == {
+        "prettier-plugin-tailwindcss": ".prettierrc"}
+    t = _prettier_run(block, wd="web")
+    assert t["fit"] == "dual-run", t
+    assert any("`.prettierrc`" in r and "prettier-plugin-tailwindcss" in r
+               for r in t["fit_reasons"]), t["fit_reasons"]
+
+
+def test_a_config_only_subfolder_below_a_root_run_is_read(tmp_path):
+    root = _repo(tmp_path, {"devDependencies": {"prettier": "^3.3.0"}}, {
+        "docs/.prettierrc.json": json.dumps({"plugins": ["prettier-plugin-astro"]})})
+    block = scan._read_type_aware_lint(root)
+    assert block["prettier_plugin_files"].get("docs") == {
+        "prettier-plugin-astro": "docs/.prettierrc.json"}, block
+    t = _prettier_run(block)
+    assert t["fit"] == "dual-run", t
+    assert any("`docs/.prettierrc.json`" in r for r in t["fit_reasons"]), t["fit_reasons"]
+
+
+def test_a_config_only_folder_with_a_js_config_is_marked_unopened(tmp_path):
+    root = _repo(tmp_path, {}, {"docs/prettier.config.js": "module.exports = {};\n"})
+    block = scan._read_type_aware_lint(root)
+    assert block["prettier_config_unreadable"] == {"docs": ["docs/prettier.config.js"]}
+
+
+def test_a_config_only_folder_the_walk_skips_is_not_read(tmp_path):
+    root = _repo(tmp_path, {}, {
+        "node_modules/x/.prettierrc.json": json.dumps({"plugins": ["p"]})})
+    block = scan._read_type_aware_lint(root)
+    assert block["prettier_plugins"] == {} and block["prettier_config_unreadable"] == {}
+
+
+def test_a_package_folder_that_cannot_be_listed_is_marked_unreadable(tmp_path,
+                                                                     monkeypatch):
+    import os
+    root = _repo(tmp_path, {}, {"web/package.json": "{}"})
+    real = os.listdir
+
+    def _listdir(p="."):
+        if str(p).endswith("/web"):
+            raise PermissionError(13, "denied")
+        return real(p)
+    monkeypatch.setattr(scan.os, "listdir", _listdir)
+    block = scan._read_type_aware_lint(root)
+    assert list(block["prettier_config_unreadable"]) == ["web"], block
+    assert block["prettier_config_unreadable"]["web"], block
