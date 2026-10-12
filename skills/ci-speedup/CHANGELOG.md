@@ -1070,6 +1070,18 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-10-12** — **The report self-check no longer rejects a correct report
+  when a dropped check shares its name with a critical-path job in another
+  workflow** (#132). On mastodon/mastodon a non-required `test` job in one
+  workflow is left off the critical path, while a different workflow's `test`
+  matrix (whose legs include the slowest check on the critical path) is
+  correctly called out as on the critical path. The self-check compared bare
+  names and failed the report, so the audit withheld the "just save the
+  report" option from a correct report. It now excuses a same-named mention
+  only in a workflow whose measured runs show that name is a matrix of
+  differently named jobs; every other mention, including the headline and a
+  workflow the measurements don't cover, is still compared by name. The
+  report text itself is unchanged.
 - **2026-10-12** — **A missing-timeout finding (OPT57) no longer credits time a
   job spent waiting as runner minutes it could save.** Without
   `timeout-minutes`, GitHub stops a job at 360 minutes, so only a failed job
