@@ -3937,7 +3937,11 @@ def _tal_block(**overrides: Any) -> dict[str, Any]:
         "eslint_versions": {},
         "rules_source": "references/type-aware-lint-rules.tsv",
         "error": None,
-        # OPT84 (tool swap) reads the three below. {package dir: {package:
+        # OPT84 (tool swap) reads every key from here down (`tool_versions`,
+        # `config_files`, `eslint_config_facts`, `pnpm_catalogs`,
+        # `pnpm_catalogs_unreadable`, `prettier_plugins`,
+        # `prettier_plugin_files`, `prettier_config_unreadable`), plus
+        # `package_scripts` and `configs` above. {package dir: {package:
         # version spec}} for the `_TAL_TOOL_PACKAGES` its package.json declares
         # (dependencies + devDependencies, string specs only); a dir that
         # declares none of them is absent.
@@ -3964,7 +3968,21 @@ def _tal_block(**overrides: Any) -> dict[str, Any]:
         # `@scope/prettier-plugin`, `@scope/prettier-plugin-*`}; a dir that
         # declares none is absent.
         "prettier_plugins": {},
+        # {package dir: {plugin: the repo-relative file that names it}} for a
+        # plugin `prettier_plugins` lists ONLY because a Prettier config names
+        # it (`.prettierrc`, `.prettierrc.json|json5|yaml|yml`, or the
+        # `"prettier"` key of package.json); a dependency names package.json.
+        "prettier_plugin_files": {},
+        # {package dir: [repo-relative Prettier config files this read does not
+        # open]}: a JS / TS config (`.prettierrc.js|cjs|mjs|ts|...`,
+        # `prettier.config.*`), a TOML one, one that does not parse, or a
+        # package.json `"prettier"` key naming a shared config. Any of them may
+        # load plugins, so OPT84 reads the dir as "plugins unknown".
+        "prettier_config_unreadable": {},
     }
+    unknown = set(overrides) - set(block)
+    if unknown:
+        raise KeyError(f"_tal_block: not a type_aware_lint key: {sorted(unknown)}")
     block.update(overrides)
     return block
 
@@ -4128,15 +4146,78 @@ def _tal_fit_facts(text: str, obj: Any = None) -> dict[str, Any]:
             or any(e.startswith(_TAL_HOOKS_PRESET_PREFIX) for e in extends)}
 
 
+# Prettier configs this read parses as data (JSON or YAML; `.prettierrc` may be
+# either, and YAML reads JSON). Any other `.prettierrc*` / `prettier.config.*`
+# (JS, TS, TOML) is recorded as not opened.
+_TAL_PRETTIER_DATA_CONFIGS = (".prettierrc", ".prettierrc.json", ".prettierrc.json5",
+                              ".prettierrc.yaml", ".prettierrc.yml")
+
+
+def _tal_prettier_config_plugins(folder: Path, rel_dir: str, present: list[str],
+                                 pkg: dict[str, Any],
+                                 ) -> "tuple[dict[str, str], list[str]]":
+    """({plugin: repo-relative file naming it}, [repo-relative Prettier configs
+    not opened]) for one package directory: the `plugins` of its data-shaped
+    Prettier configs and of its package.json `"prettier"` key. Never evaluated."""
+    def _rel(name: str) -> str:
+        return f"{rel_dir}/{name}" if rel_dir else name
+
+    found: dict[str, str] = {}
+    unread: list[str] = []
+
+    def _take(obj: Any, where: str) -> None:
+        if not isinstance(obj, dict):
+            unread.append(where)            # a shared-config string, or not a map
+            return
+        pl = obj.get("plugins")
+        pl = [pl] if isinstance(pl, str) else pl
+        if pl is None:
+            return
+        if not isinstance(pl, list):
+            unread.append(where)
+            return
+        for p in pl:
+            if isinstance(p, str) and p.strip():
+                found.setdefault(p.strip(), where)
+
+    if "prettier" in pkg:
+        _take(pkg["prettier"], _rel("package.json"))
+    for name in present:
+        if not (name.startswith(".prettierrc") or name.startswith("prettier.config.")):
+            continue
+        if name not in _TAL_PRETTIER_DATA_CONFIGS:
+            unread.append(_rel(name))
+            continue
+        try:
+            text = _read_config_text(folder / name)
+        except OSError:
+            text = None
+        if text is None:
+            unread.append(_rel(name))
+            continue
+        try:
+            obj = (json.loads(text) if name.endswith((".json", ".json5"))
+                   else yaml.safe_load(text))
+        except (ValueError, yaml.YAMLError):
+            unread.append(_rel(name))
+            continue
+        if obj is None:
+            continue                        # an empty config sets nothing
+        _take(obj, _rel(name))
+    return found, sorted(set(unread))
+
+
 def _read_type_aware_lint(root: Path) -> dict[str, Any]:
-    """Read the repo's ESLint config(s) for OPT82. Never raises: a crashed
-    reader yields a block the consumer withholds on, and says so."""
+    """Read the repo's ESLint config(s) for OPT82, and the manifest and
+    formatter facts OPT84 reads. Never raises: a crashed reader yields a block
+    both consumers withhold on, and says so."""
     try:
         return _read_type_aware_lint_unguarded(root)
     except Exception as e:  # noqa: BLE001 — fail closed, never take the scan down
         print(f"ci-speedup: the ESLint config reader failed ({type(e).__name__}: "
-              f"{e}); the type-aware lint check (OPT82) will be WITHHELD for this "
-              "repo — this is a scanner failure, not a fact about the repo.",
+              f"{e}); the type-aware lint check (OPT82) and the tool-swap check "
+              "(OPT84) will be WITHHELD for this repo — this is a scanner "
+              "failure, not a fact about the repo.",
               file=sys.stderr)
         return _tal_block(error=type(e).__name__)
 
@@ -4164,6 +4245,8 @@ def _read_type_aware_lint_unguarded(root: Path) -> dict[str, Any]:
     config_files: dict[str, list[str]] = {}
     fit_facts: dict[str, dict[str, Any]] = {}
     prettier_plugins: dict[str, list[str]] = {}
+    prettier_plugin_files: dict[str, dict[str, str]] = {}
+    prettier_config_unreadable: dict[str, list[str]] = {}
 
     def _finish(rel: str, fmt: str, read: dict[str, Any],
                 typed: "_TalCustomRules", imp_unresolved: list[str]) -> None:
@@ -4259,8 +4342,6 @@ def _read_type_aware_lint_unguarded(root: Path) -> dict[str, Any]:
         if tv:
             tool_versions[_dir(rel)] = tv
         pp = sorted(k for k in deps if _TAL_PRETTIER_PLUGIN_RE.match(str(k)))
-        if pp:
-            prettier_plugins[_dir(rel)] = pp
         try:
             present = sorted(n for n in os.listdir(path.parent)
                              if _TAL_CONFIG_FILE_RE.match(n))
@@ -4268,6 +4349,15 @@ def _read_type_aware_lint_unguarded(root: Path) -> dict[str, Any]:
             present = []
         if present:
             config_files[_dir(rel)] = present
+        cfg_plugins, cfg_unread = _tal_prettier_config_plugins(
+            path.parent, _dir(rel), present, data)
+        from_cfg = {n: f for n, f in cfg_plugins.items() if n not in pp}
+        if pp or from_cfg:
+            prettier_plugins[_dir(rel)] = sorted({*pp, *from_cfg})
+        if from_cfg:
+            prettier_plugin_files[_dir(rel)] = from_cfg
+        if cfg_unread:
+            prettier_config_unreadable[_dir(rel)] = cfg_unread
         sc = data.get("scripts")
         scripts[_dir(rel)] = ({str(k): str(v) for k, v in sc.items()
                                if isinstance(v, str)} if isinstance(sc, dict) else {})
@@ -4290,6 +4380,8 @@ def _read_type_aware_lint_unguarded(root: Path) -> dict[str, Any]:
         pnpm_catalogs=catalogs,
         pnpm_catalogs_unreadable=catalogs_unreadable,
         prettier_plugins=prettier_plugins,
+        prettier_plugin_files=prettier_plugin_files,
+        prettier_config_unreadable=prettier_config_unreadable,
     )
 
 

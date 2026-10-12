@@ -134,6 +134,78 @@ def test_scan_block_defaults_carry_prettier_plugins():
     assert scan._tal_block()["prettier_plugins"] == {}
 
 
+# ---- 2b: Prettier plugins named in Prettier's own config files ----------------
+
+def test_scan_reads_prettier_plugins_from_every_data_config_shape(tmp_path):
+    root = _repo(tmp_path, {"prettier": {"plugins": ["prettier-plugin-pkgjson"]}}, {
+        ".prettierrc": "plugins:\n  - prettier-plugin-rc-yaml\n",
+        "a/package.json": "{}",
+        "a/.prettierrc.json": json.dumps({"plugins": ["prettier-plugin-astro"]}),
+        "b/package.json": "{}",
+        "b/.prettierrc.yml": "plugins: [prettier-plugin-svelte]\n",
+        "c/package.json": "{}",
+        "c/.prettierrc.json5": '{"plugins": ["./local-plugin.js"]}',
+        "d/package.json": "{}",
+        "d/.prettierrc.yaml": "semi: false\n"})
+    block = scan._read_type_aware_lint(root)
+    assert block["prettier_plugins"] == {
+        "": ["prettier-plugin-pkgjson", "prettier-plugin-rc-yaml"],
+        "a": ["prettier-plugin-astro"], "b": ["prettier-plugin-svelte"],
+        "c": ["./local-plugin.js"]}
+    assert block["prettier_plugin_files"] == {
+        "": {"prettier-plugin-pkgjson": "package.json",
+             "prettier-plugin-rc-yaml": ".prettierrc"},
+        "a": {"prettier-plugin-astro": "a/.prettierrc.json"},
+        "b": {"prettier-plugin-svelte": "b/.prettierrc.yml"},
+        "c": {"./local-plugin.js": "c/.prettierrc.json5"}}
+    assert block["prettier_config_unreadable"] == {}
+    # `config_files` stays the presence list it was
+    assert block["config_files"]["a"] == [".prettierrc.json"]
+
+
+def test_a_dependency_plugin_keeps_naming_the_package_json(tmp_path):
+    root = _repo(tmp_path, {"devDependencies": {"prettier-plugin-x": "1"}},
+                 {".prettierrc.json": json.dumps({"plugins": ["prettier-plugin-x"]})})
+    block = scan._read_type_aware_lint(root)
+    assert block["prettier_plugins"] == {"": ["prettier-plugin-x"]}
+    assert block["prettier_plugin_files"] == {}
+
+
+def test_scan_marks_prettier_configs_it_does_not_open(tmp_path):
+    root = _repo(tmp_path, {"prettier": "@acme/prettier-config"}, {
+        "a/package.json": "{}", "a/prettier.config.mjs": "export default {};\n",
+        "b/package.json": "{}", "b/.prettierrc.cjs": "module.exports = {};\n",
+        "c/package.json": "{}", "c/.prettierrc.json": "{not json",
+        "d/package.json": "{}", "d/.prettierrc.ts": "export default {};\n",
+        "e/package.json": "{}", "e/.prettierrc.toml": "semi = false\n"})
+    block = scan._read_type_aware_lint(root)
+    assert block["prettier_config_unreadable"] == {
+        "": ["package.json"], "a": ["a/prettier.config.mjs"],
+        "b": ["b/.prettierrc.cjs"], "c": ["c/.prettierrc.json"],
+        "d": ["d/.prettierrc.ts"], "e": ["e/.prettierrc.toml"]}
+
+
+def test_scan_block_defaults_carry_the_prettier_config_keys():
+    b = scan._tal_block()
+    assert b["prettier_plugin_files"] == {} and b["prettier_config_unreadable"] == {}
+
+
+def test_the_block_shape_refuses_an_unknown_key():
+    import pytest
+    with pytest.raises(KeyError):
+        scan._tal_block(prettier_plugin=["typo"])
+
+
+def test_the_reader_crash_message_names_both_patterns(tmp_path, monkeypatch, capsys):
+    def _boom(_root):
+        raise RuntimeError("x")
+    monkeypatch.setattr(scan, "_read_type_aware_lint_unguarded", _boom)
+    block = scan._read_type_aware_lint(tmp_path)
+    assert block["error"] == "RuntimeError"
+    err = capsys.readouterr().err
+    assert "OPT82" in err and "OPT84" in err, err
+
+
 # ---- 3: pnpm catalogs ----------------------------------------------------------
 
 def test_pnpm_workspace_malformed_is_marked_unreadable(tmp_path):

@@ -60,8 +60,9 @@ def test_an_opaque_leaf_holds_the_step_back(run, scripts):
 @pytest.mark.parametrize("run", ["./configure && make -j4", "./gradlew build",
                                  "time make -C bld"])
 def test_a_native_build_entry_point_stays_a_verdict(run):
+    # a C / JVM repo: no JS manifest anywhere (in a JS repo `make` is held back)
     out, withheld, cands = _run({"run": run}, pole=_pole(category="build"),
-                                block=_block(scripts={}))
+                                block=t84._no_js_block())
     assert out == [] and withheld == {"tool_not_in_table": 1}, withheld
     assert cands == []
 
@@ -217,14 +218,23 @@ def test_a_prettier_plugin_in_the_package_and_at_the_root_are_both_named():
         "carry it"]
 
 
-@pytest.mark.parametrize("plugins", [None, {}, {"": []}, {"other": ["x"]}])
-def test_no_prettier_plugin_on_the_walk_or_an_older_scan_stays_drop_in(plugins):
+@pytest.mark.parametrize("plugins", [{}, {"": []}, {"other": ["x"]}])
+def test_no_prettier_plugin_on_the_walk_stays_drop_in(plugins):
+    # `other` is a sibling of `web`, never below the folder the run formats
+    b = _block()
+    b["prettier_plugins"] = plugins
+    out, withheld, _c = _run({"run": "npx prettier --check .",
+                              "working-directory": "web"}, block=b)
+    assert len(out) == 1 and _tool(out[0], "prettier")["fit"] == "drop-in", withheld
+
+
+def test_a_block_with_no_prettier_plugins_map_is_run_both():
     b = _block()
     b.pop("prettier_plugins", None)
-    if plugins is not None:
-        b["prettier_plugins"] = plugins
     out, withheld, _c = _run({"run": "npx prettier --check ."}, block=b)
-    assert len(out) == 1 and _tool(out[0], "prettier")["fit"] == "drop-in", withheld
+    t = _tool(out[0], "prettier")
+    assert t["fit"] == "dual-run" and any("were not read" in r for r in t[
+        "fit_reasons"]), t
 
 
 # ---- 4. an unreadable package.json on the version walk holds the tsc row -------
@@ -265,9 +275,7 @@ def test_tsc_package_count_excludes_packages_already_on_typescript_7():
                              block=_block(scripts=scripts, tool_versions=tv))
     assert len(out) == 1, withheld
     t = _tool(out[0], "tsc")
-    assert t["packages"] == 2
-    assert "across 2 workspace packages; task-runner filters not applied" in t[
-        "fit_reasons"]
+    assert t["packages"] == 2 and t["fit_reasons"] == []
 
 
 # ---- 6. an ambiguous pole with no name is not file-backed ----------------------
@@ -314,3 +322,449 @@ def test_turbo_forwards_args_after_the_separator_into_each_package_leaf():
                              block=_block(scripts=scripts))
     assert len(out) == 1, withheld
     assert _tool(out[0], "eslint")["leaf_command"].endswith("--max-warnings 0")
+
+
+# =============================================================================
+# Review round A: the scan block, the stamp contract, and the reads that must
+# fail closed (Prettier fit, ESLint fit, the typescript version, generic
+# runners and actions, a truncated walk under a task runner)
+# =============================================================================
+
+def _raw(poles, block, docs=None, opt82=None):
+    w: dict[str, int] = {}
+    c: list[dict] = []
+    out = cr._detect_opt84_tool_swap(
+        poles, docs if docs is not None else {_WF: _doc({"run": "npx eslint ."})},
+        block, opt82 or [], 1, withheld=w, withheld_candidates=c)
+    return out, w, c
+
+
+# ---- A1. the scan block: missing or errored holds every pole back first -------
+
+def test_a_missing_scan_block_holds_each_pole_back_before_candidate_work():
+    other = _pole(category="test")                     # no candidate step at all
+    other["job"] = other["check"] = "Other"
+    out, w, c = _raw([_pole(), _pole(), other], None)  # Lint listed twice
+    assert out == [] and w == {"type_aware_lint_scan_missing": 2}, w
+    assert c == [{"workflow_file": _WF, "job": "Lint",
+                  "gate": "type_aware_lint_scan_missing"},
+                 {"workflow_file": _WF, "job": "Other",
+                  "gate": "type_aware_lint_scan_missing"}]
+
+
+def test_an_errored_scan_block_holds_back_and_never_takes_the_no_manifest_path():
+    blk = t84._no_js_block(error="RuntimeError")
+    out, w, c = _raw([_pole()], blk)
+    assert out == [] and w == {"type_aware_config_reader_failed": 1}, w
+    assert c == [{"workflow_file": _WF, "job": "Lint",
+                  "gate": "type_aware_config_reader_failed"}]
+    _out, w, _c = t84._curl_case(blk)
+    assert w == {"type_aware_config_reader_failed": 1}, w
+
+
+def test_the_two_scan_gates_are_held_back_gates():
+    assert {"type_aware_lint_scan_missing", "type_aware_config_reader_failed"} <= (
+        cr._OPT84_HELD_BACK_GATES)
+    assert len(cr._OPT84_HELD_BACK_GATES) == 17 and len(cr._OPT84_VERDICT_GATES) == 6
+
+
+def test_counting_an_unknown_gate_or_an_unlisted_hold_back_raises():
+    with pytest.raises(ValueError):
+        cr._opt84_count({}, [], "made_up_gate", _WF, "Lint")
+    with pytest.raises(ValueError):
+        cr._opt84_count({}, [], "script_unresolvable", _WF, "")
+    with pytest.raises(ValueError):                    # a step gate needs its step
+        cr._opt84_count({}, [], "script_unresolvable", _WF, "Lint")
+    with pytest.raises(ValueError):                    # a pole gate names no step
+        cr._opt84_count({}, [], "workflow_yaml_unavailable", _WF, "Lint", "s")
+    assert cr._OPT84_STEP_GATES < cr._OPT84_HELD_BACK_GATES
+    assert cr._OPT84_HELD_BACK_GATES - cr._OPT84_STEP_GATES == {
+        "pole_workflow_ambiguous", "pole_step_entries_unreadable",
+        "pole_step_timings_unavailable", "workflow_yaml_unavailable",
+        "pole_job_not_matched_in_yaml", "type_aware_lint_scan_missing",
+        "type_aware_config_reader_failed"}
+    w: dict[str, int] = {}
+    c: list[dict] = []
+    cr._opt84_count(w, c, "no_candidate_step", _WF, "")
+    cr._opt84_count(w, c, "script_unresolvable", _WF, "Lint", "s")
+    assert w == {"no_candidate_step": 1, "script_unresolvable": 1}
+    assert c == [{"workflow_file": _WF, "job": "Lint", "gate": "script_unresolvable",
+                  "step": "s"}]
+
+
+# ---- A0. the stamp contract ----------------------------------------------------
+
+_OPT82_ON_STEP = [{"pattern": "OPT82", "workflow_file": _WF, "job": "Lint",
+                   "type_aware_lint": {"yaml_job": "lint", "lint_step": _STEP}}]
+_INVARIANT_CASES = [
+    ({"run": "pnpm lint"}, dict(scripts=t84._MASTRA), None),
+    ({"run": "pnpm turbo run lint"}, dict(scripts=t84._TURBO_ESLINT), None),
+    ({"run": "pnpm -r typecheck"},
+     dict(scripts={"": {}, "a": {"typecheck": "tsc --noEmit"},
+                   "b": {"typecheck": "tsc --noEmit"}}), None),
+    ({"run": "pnpm lint"}, dict(scripts=t84._MASTRA), _OPT82_ON_STEP),
+    ({"run": "npx eslint . && npx prettier --check ."},
+     dict(facts={"eslint.config.js": {**_NO_FACTS, "plugins": ["vue"]}}), None),
+]
+
+
+@pytest.mark.parametrize("step,kw,opt82", _INVARIANT_CASES)
+def test_fit_reasons_are_non_empty_exactly_when_the_fit_is_dual_run(step, kw, opt82):
+    out, withheld, _c = _run(step, block=_block(**kw), opt82=opt82)
+    assert len(out) == 1, withheld
+    ts = out[0]["tool_swap"]
+    for t in ts["tools"]:
+        assert bool(t["fit_reasons"]) == (t["fit"] == "dual-run"), t
+        assert not any("workspace package" in r for r in t["fit_reasons"]), t
+        assert t["leaf_command"] in ts["resolved_leaves"], (t, ts["resolved_leaves"])
+        assert t["published_range"]
+
+
+def test_the_package_count_is_the_single_source_of_the_workspace_note():
+    out, _w, _c = _run({"run": "pnpm turbo run lint"},
+                       block=_block(scripts=t84._TURBO_ESLINT))
+    t = _tool(out[0], "eslint")
+    assert t["packages"] == 2 and t["fit"] == "drop-in" and t["fit_reasons"] == []
+
+
+# ---- A2. Prettier fit fails closed -------------------------------------------
+
+def _pfit(step, **block_kw):
+    extra = block_kw.pop("extra", {})
+    b = _block(**block_kw)
+    b.update(extra)
+    out, withheld, cands = _run(step, block=b)
+    assert len(out) == 1, (withheld, cands)
+    return _tool(out[0], "prettier")
+
+
+def test_an_unreadable_package_json_on_the_prettier_walk_is_run_both():
+    t = _pfit({"run": "npx prettier --check .", "working-directory": "packages/x"},
+              unreadable_pkgs=["packages/x"])
+    assert t["fit"] == "dual-run"
+    assert ("`packages/x/package.json` could not be read; its Prettier plugins are "
+            "unknown") in t["fit_reasons"], t["fit_reasons"]
+
+
+@pytest.mark.parametrize("wd,truncated", [("a/b", True), (".github/tools", False)])
+def test_a_prettier_walk_through_unread_ground_is_run_both(wd, truncated):
+    t = _pfit({"run": "npx prettier --check .", "working-directory": wd},
+              truncated=truncated)
+    assert t["fit"] == "dual-run"
+    assert (f"`{wd}/package.json` could not be read; its Prettier plugins are "
+            "unknown") in t["fit_reasons"], t["fit_reasons"]
+
+
+def test_a_truncated_walk_below_a_read_root_is_run_both():
+    t = _pfit({"run": "npx prettier --check ."}, truncated=True)
+    assert t["fit"] == "dual-run", t
+    assert any("stopped early" in r for r in t["fit_reasons"]), t["fit_reasons"]
+
+
+def test_prettier_with_no_package_json_read_on_the_walk_is_run_both():
+    t = _pfit({"run": "npx prettier --check ."}, scripts={})
+    assert t["fit"] == "dual-run"
+    assert t["fit_reasons"] == [
+        "no `package.json` was read at or above `.`; its Prettier plugins are unknown"]
+
+
+def test_a_prettier_plugin_from_a_config_file_names_that_file():
+    t = _pfit({"run": "npx prettier --check ."},
+              extra={"prettier_plugins": {"": ["prettier-plugin-astro"]},
+                     "prettier_plugin_files": {"": {"prettier-plugin-astro":
+                                                    ".prettierrc.json"}}})
+    assert t["fit_reasons"] == [
+        "Prettier plugin prettier-plugin-astro in `.prettierrc.json`: oxfmt may not "
+        "carry it"]
+
+
+def test_a_prettier_config_this_audit_does_not_open_is_run_both():
+    t = _pfit({"run": "npx prettier --check .", "working-directory": "web"},
+              scripts={"": {}, "web": {}},
+              extra={"prettier_config_unreadable": {"web": ["web/prettier.config.mjs"]}})
+    assert t["fit"] == "dual-run"
+    assert t["fit_reasons"] == [
+        "`web/prettier.config.mjs`: a Prettier config this audit does not open may "
+        "load plugins"]
+
+
+@pytest.mark.parametrize("run", ["npx prettier --check .", "npx prettier -c",
+                                 "npx prettier --check \"**/*.{ts,svelte}\"",
+                                 "npx pretty-quick --check"])
+def test_a_root_prettier_run_reads_every_subpackage_below_it(run):
+    t = _pfit({"run": run},
+              scripts={"": {}, "packages/web": {}},
+              extra={"prettier_plugins": {"packages/web": ["prettier-plugin-svelte"]}})
+    assert t["fit"] == "dual-run"
+    assert t["fit_reasons"] == [
+        "Prettier plugin prettier-plugin-svelte in `packages/web/package.json`: oxfmt "
+        "may not carry it"]
+
+
+def test_a_prettier_run_on_one_folder_does_not_read_a_sibling_package():
+    t = _pfit({"run": "npx prettier --check src"},
+              scripts={"": {}, "packages/web": {}},
+              extra={"prettier_plugins": {"packages/web": ["prettier-plugin-svelte"]}})
+    assert t["fit"] == "drop-in" and t["fit_reasons"] == []
+
+
+def test_a_prettier_plugin_flag_on_the_command_is_run_both():
+    t = _pfit({"run": "npx prettier --plugin prettier-plugin-x --check ."})
+    assert t["fit"] == "dual-run"
+    assert any("`--plugin`" in r for r in t["fit_reasons"]), t["fit_reasons"]
+
+
+# ---- A3. ESLint fit -------------------------------------------------------------
+
+def _efit(run="npx eslint .", **block_kw):
+    out, withheld, cands = _run({"run": run}, block=_block(**block_kw))
+    assert len(out) == 1, (withheld, cands)
+    return _tool(out[0], "eslint")
+
+
+def test_a_type_aware_config_is_run_both():
+    t = _efit(configs=[_config(type_aware="on")])
+    assert t["fit"] == "dual-run"
+    assert t["fit_reasons"] == [
+        "type-aware rules in `eslint.config.js`: oxlint runs them only through tsgolint"]
+
+
+def test_an_unresolved_type_aware_read_is_run_both():
+    t = _efit(configs=[_config(type_aware="unresolved")])
+    assert t["fit_reasons"] == [
+        "whether `eslint.config.js` is type-aware could not be resolved"]
+
+
+@pytest.mark.parametrize("flag", ["--rulesdir rules", "--plugin acme", "--rule 'x: 2'",
+                                  "--parser babel-eslint", "--ext .ts",
+                                  "--rulesdir=rules"])
+def test_eslint_cli_flags_that_load_rules_are_run_both(flag):
+    t = _efit(f"npx eslint {flag} .")
+    name = flag.split("=", 1)[0].split()[0]
+    assert t["fit"] == "dual-run"
+    assert any(f"ESLint CLI flag `{name}`" in r for r in t["fit_reasons"]), t
+
+
+def test_eslint_plugin_oxlint_in_the_config_means_the_step_already_runs_both():
+    facts = {"eslint.config.js": {**_NO_FACTS, "plugins": ["oxlint"]}}
+    out, withheld, cands = _run({"run": "npx eslint ."}, block=_block(facts=facts))
+    assert out == [] and withheld == {"target_already_in_use": 1} and cands == []
+
+
+@pytest.mark.parametrize("wd,tv", [
+    ("", {"": {"eslint": "^9", "oxlint": "^1.0.0"}}),
+    ("web", {"": {"oxlint": "^1.0.0"}, "web": {"eslint": "^9"}}),
+])
+def test_oxlint_declared_on_the_walk_means_the_eslint_row_is_already_swapped(wd, tv):
+    step = {"run": "npx eslint ."} | ({"working-directory": wd} if wd else {})
+    out, withheld, _c = _run(step, block=_block(tool_versions=tv,
+                                                scripts={"": {}, "web": {}}))
+    assert out == [] and withheld == {"target_already_in_use": 1}, withheld
+
+
+def test_oxfmt_declared_on_the_walk_means_the_prettier_row_is_already_swapped():
+    out, withheld, _c = _run({"run": "npx prettier --check ."},
+                             block=_block(tool_versions={"": {"oxfmt": "0.9.0"}}))
+    assert out == [] and withheld == {"target_already_in_use": 1}, withheld
+
+
+def test_oxlint_declared_in_a_sibling_package_does_not_silence_the_row():
+    out, withheld, _c = _run({"run": "npx eslint .", "working-directory": "web"},
+                             block=_block(tool_versions={"other": {"oxlint": "^1"}},
+                                          scripts={"": {}, "web": {}}))
+    assert len(out) == 1, withheld
+
+
+# ---- A4. the typescript version read -------------------------------------------
+
+@pytest.mark.parametrize("wd,truncated", [("a/b", True), (".github/tools", False),
+                                          ("dist/app", False)])
+def test_a_typescript_version_walk_through_unread_ground_holds_tsc(wd, truncated):
+    out, withheld, cands = _run(
+        {"run": "npx tsc --noEmit", "working-directory": wd},
+        block=_block(truncated=truncated))
+    assert out == []
+    _gate_only(withheld, cands, "typescript_version_unreadable")
+
+
+def test_a_read_step_directory_under_a_truncated_walk_reads_the_root_version():
+    out, withheld, _c = _run({"run": "npx tsc --noEmit", "working-directory": "a/b"},
+                             block=_block(truncated=True,
+                                          scripts={"": {}, "a/b": {}}))
+    assert len(out) == 1, withheld
+
+
+@pytest.mark.parametrize("spec", [">=5.0.0", ">4", "*", "latest", ">= 5"])
+def test_an_open_ended_typescript_range_is_unreadable(spec):
+    assert cr._opt84_major(spec) is None
+    out, withheld, _c = _run({"run": "npx tsc --noEmit"},
+                             block=_block(tool_versions={"": {"typescript": spec}}))
+    assert out == [] and withheld == {"typescript_version_unreadable": 1}, withheld
+
+
+@pytest.mark.parametrize("run", ["npx tsc --noemit", "npx tsc -noEmit",
+                                 "npx tsc -p . -NOEMIT"])
+def test_noemit_is_read_case_insensitively_and_with_one_dash(run):
+    out, withheld, _c = _run({"run": run})
+    assert len(out) == 1 and _rows(out[0]) == ["tsc"], withheld
+
+
+def test_a_catalog_ref_with_an_unreadable_workspace_file_holds_tsc_and_says_why():
+    b = _block(tool_versions={"": {"typescript": "catalog:", "eslint": "catalog:"}})
+    b["pnpm_catalogs"] = {}
+    b["pnpm_catalogs_unreadable"] = True
+    out, withheld, cands = _run({"run": "npx tsc --noEmit"}, block=b)
+    assert out == []
+    _gate_only(withheld, cands, "typescript_version_unreadable")
+    out, withheld, _c = _run({"run": "npx eslint ."}, block=b)
+    assert len(out) == 1, withheld
+    assert _tool(out[0], "eslint")["source_version"] == (
+        "catalog: (pnpm-workspace.yaml unreadable)")
+
+
+# ---- A5. generic runners, scripts and actions ---------------------------------
+
+@pytest.mark.parametrize("run,gate", [
+    ("make lint", "delegated_script_unresolved"),
+    ("just lint", "delegated_script_unresolved"),
+    ("task lint", "delegated_script_unresolved"),
+    ("pre-commit run --all-files", "delegated_script_unresolved"),
+    ("npx concurrently 'npm:lint:*'", "delegated_script_unresolved"),
+    ("npx ng lint", "delegated_script_unresolved"),
+    ("npx gulp lint", "delegated_script_unresolved"),
+    ("npx grunt lint", "delegated_script_unresolved"),
+    ("npx xo", "delegated_script_unresolved"),
+    ("npx standard", "delegated_script_unresolved"),
+    ("docker run --rm img lint", "delegated_script_unresolved"),
+    ("docker-compose run lint", "delegated_script_unresolved"),
+    ("pwsh ./lint.ps1", "script_unresolvable"),
+    ("fish lint.fish", "script_unresolvable"),
+    ("ksh lint.ksh", "script_unresolvable"),
+    ("bin/lint", "script_unresolvable"),
+    ("tools/ci/check --all", "script_unresolvable"),
+])
+def test_a_generic_runner_in_a_js_repo_holds_the_step_back(run, gate):
+    out, withheld, cands = _run({"run": run})
+    assert out == []
+    _gate_only(withheld, cands, gate)
+
+
+def _no_js(step, category="scan"):
+    return _run(step, pole=_pole(category=category), block=t84._no_js_block())
+
+
+def test_a_table_tool_named_directly_in_a_repo_with_no_manifest_still_fires():
+    out, withheld, cands = _no_js({"run": "npx --yes prettier@3 --check ."})
+    assert len(out) == 1, (withheld, cands)
+    t = _tool(out[0], "prettier")
+    assert t["source_version"] is None and t["fit"] == "dual-run"
+    assert t["fit_reasons"] == [
+        "no `package.json` was read at or above `.`; its Prettier plugins are unknown"]
+
+
+@pytest.mark.parametrize("run", ["make -C bld", "cmake --build bld", "bash ci/build.sh",
+                                 "./configure && make -j4", "bin/build"])
+def test_a_native_build_in_a_repo_with_no_manifest_is_the_verdict(run):
+    out, withheld, cands = _no_js({"run": run}, category="build")
+    assert out == [] and withheld == {"tool_not_in_table": 1}, withheld
+    assert cands == []
+
+
+@pytest.mark.parametrize("uses", [
+    "actions/setup-node@v4", "github/codeql-action/analyze@v3",
+    "docker/build-push-action@v6", "pnpm/action-setup@v4", "oven-sh/setup-bun@v2",
+    "Swatinem/rust-cache@v2", "dtolnay/rust-toolchain@stable",
+    "cygwin/cygwin-install-action@v4", "msys2/setup-msys2@v2",
+    "actions-rust-lang/setup-rust-toolchain@v1", "ruby/setup-ruby@v1",
+    "astral-sh/setup-uv@v5"])
+def test_an_allow_listed_action_is_the_verdict(uses):
+    doc = _doc({})
+    doc["jobs"]["lint"]["steps"][2] = {"uses": uses, "name": "Do the thing"}
+    out, withheld, cands = _run(None, doc=doc, pole=_pole(step="Do the thing"))
+    assert out == [] and withheld == {"tool_not_in_table": 1}, withheld
+    assert cands == []
+
+
+@pytest.mark.parametrize("uses", ["pre-commit/action@v3.0.1", "some/thing@v1",
+                                  "./.github/actions/build"])
+def test_an_unknown_or_lint_ish_action_is_held_back(uses):
+    doc = _doc({})
+    doc["jobs"]["lint"]["steps"][2] = {"uses": uses, "name": "Do the thing"}
+    out, withheld, cands = _run(None, doc=doc, pole=_pole(step="Do the thing"))
+    assert out == [] and withheld == {"candidate_is_an_action": 1}, withheld
+    assert [c["gate"] for c in cands] == ["candidate_is_an_action"]
+
+
+# ---- A6. task-runner expansion respects the walk ------------------------------
+
+def test_a_task_runner_under_a_truncated_walk_is_delegated():
+    out, withheld, cands = _run(
+        {"run": "pnpm turbo run lint"},
+        block=_block(scripts={"": {}, "a": {"lint": "eslint ."}}, truncated=True))
+    assert out == []
+    _gate_only(withheld, cands, "delegated_script_unresolved")
+
+
+# ---- A7. evidence wording ------------------------------------------------------
+
+def test_the_evidence_says_native_replacement():
+    out, _w, _c = _run({"run": "npx eslint ."})
+    ev = out[0]["evidence"]
+    assert "Each has a native replacement." in ev and "native drop-in" not in ev, ev
+
+
+# ---- A8. branches the test review named ---------------------------------------
+
+def test_a_config_found_with_no_facts_entry_is_run_both():
+    t = _efit(facts={})
+    assert t["fit_reasons"] == [
+        "`eslint.config.js`: its plugins and local rules were not read"]
+
+
+def test_an_unresolved_config_import_is_run_both():
+    t = _efit(configs=[_config(unresolved_imports=["./base.js"])])
+    assert t["fit_reasons"] == ["a config import in `eslint.config.js` was not followed"]
+
+
+@pytest.mark.parametrize("wd", ["/home/runner/work/x", "~/src"])
+def test_an_absolute_or_home_working_directory_is_held_back(wd):
+    out, withheld, cands = _run({"run": "npx eslint .", "working-directory": wd})
+    assert out == []
+    _gate_only(withheld, cands, "working_directory_unknown")
+
+
+def test_two_yaml_steps_with_one_display_name_are_not_matched():
+    doc = _doc({"run": "npx eslint ."})
+    doc["jobs"]["lint"]["steps"].append({"name": _STEP, "run": "npx prettier -c ."})
+    out, withheld, cands = _run(None, doc=doc)
+    assert out == []
+    _gate_only(withheld, cands, "measured_step_not_matched_in_yaml")
+
+
+def test_cache_location_and_strategy_are_dropped_from_the_eslint_baseline():
+    out, _w, _c = _run({"run": "npx eslint --cache --cache-location .cache/es "
+                        "--cache-strategy content --cache-location=.c2 src"})
+    base = _tool(out[0], "eslint")["benchmark_commands"][0]
+    assert "cache" not in base and base.endswith("eslint src)"), base
+
+
+def test_a_workflow_level_default_working_directory_expression_is_held_back():
+    doc = _doc({"run": "npx eslint ."}, wf_defaults={"working-directory": "${{ env.D }}"})
+    out, withheld, cands = _run(None, doc=doc)
+    assert out == []
+    _gate_only(withheld, cands, "command_has_expression")
+
+
+def test_every_gate_the_leaf_helpers_return_is_in_a_set():
+    import inspect
+    import re
+    src = (inspect.getsource(cr._opt84_opaque_leaf)
+           + inspect.getsource(cr._opt84_expand_leaves))
+    got = set(re.findall(r'"hold",\s*"([a-z0-9_]+)"', src))
+    got |= set(re.findall(r'gates\.append\(\s*"([a-z0-9_]+)"', src))
+    got |= set(re.findall(r'"([a-z0-9_]+)"\s+if\b', src))
+    got |= set(re.findall(r'\belse\s+"([a-z0-9_]+)"', src))
+    got |= {str(v) for v in cr._OPT84_OPAQUE_BINARIES.values()}
+    assert {"script_unresolvable", "command_changes_directory",
+            "working_directory_unknown", "delegated_script_unresolved"} <= got, got
+    assert got <= cr._OPT84_HELD_BACK_GATES, got - cr._OPT84_HELD_BACK_GATES

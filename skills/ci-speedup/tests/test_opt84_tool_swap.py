@@ -666,7 +666,8 @@ def test_gate_sets_are_pinned():
         "command_has_expression", "command_changes_directory", "script_unresolvable",
         "delegated_script_unresolved", "package_json_unreadable",
         "candidate_is_an_action", "eslint_config_unreadable",
-        "typescript_version_unreadable", "working_directory_unknown"})
+        "typescript_version_unreadable", "working_directory_unknown",
+        "type_aware_lint_scan_missing", "type_aware_config_reader_failed"})
     assert not cr._OPT84_VERDICT_GATES & cr._OPT84_HELD_BACK_GATES
 
 
@@ -715,8 +716,10 @@ _CURL_BUILD = ("if [ \"${MATRIX_BUILD}\" = 'cmake' ]; then\n  cmake --build bld\
     "for d in a b; do make -C $d; done", "case $X in a) cmake --build bld;; esac",
 ])
 def test_a_non_js_build_is_a_tool_not_in_the_table_never_held_back(run):
+    # a repo with no JS manifest (in a JS repo `make` is held back: its
+    # Makefile decides what runs)
     out, withheld, cands = _run({"run": run}, pole=_pole(category="build"),
-                                block=_block(scripts={}))
+                                block=_no_js_block())
     assert out == [] and withheld == {"tool_not_in_table": 1}, withheld
     assert cands == []
 
@@ -788,9 +791,8 @@ def test_turbo_eslint_across_packages_is_one_row_with_the_package_count(run):
     assert len(out) == 1, (withheld, cands)
     assert _rows(out[0]) == ["eslint"]
     t = _tool(out[0], "eslint")
-    assert t["packages"] == 2
-    assert "across 2 workspace packages; task-runner filters not applied" in t[
-        "fit_reasons"]
+    # the count is the one source of the renderer's workspace-packages note
+    assert t["packages"] == 2 and t["fit_reasons"] == []
     assert t["fit"] == "drop-in"
 
 
@@ -895,12 +897,13 @@ def test_mastodon_npm_alias_to_typescript6_fires_the_tsc_row():
     assert len(out) == 1 and _rows(out[0]) == ["tsc"], withheld
 
 
-# ---- action steps: held back only when the action plausibly lints / formats ------
+# ---- action steps: a verdict only for an allow-listed action ----------------------
+# (a local or unknown action, e.g. `./.github/actions/build`, is held back:
+# test_opt84_fail_closed's allow-list tests)
 
 @pytest.mark.parametrize("step", [
     {"uses": "github/codeql-action/analyze@v3", "name": "Perform CodeQL Analysis"},
     {"uses": "actions/upload-artifact@v4", "name": "Upload results"},
-    {"uses": "./.github/actions/build", "name": "Build"},
 ])
 def test_an_action_that_cannot_be_a_tool_swap_is_a_verdict_not_listed(step):
     doc = _doc({})
@@ -1019,7 +1022,6 @@ def test_a_js_repo_with_a_matrix_job_name_is_still_held_back():
 @pytest.mark.parametrize("kw", [
     {"package_scripts_unreadable": [""]},
     {"truncated": True},
-    {"error": "walk failed"},
     {"unreadable": [".eslintrc.yml"]},
 ])
 def test_an_unreadable_or_incomplete_manifest_walk_still_fails_closed(kw):
@@ -1029,8 +1031,11 @@ def test_an_unreadable_or_incomplete_manifest_walk_still_fails_closed(kw):
 
 
 def test_no_scan_block_is_not_read_as_no_manifest():
-    _out, withheld, _c = _curl_case(None)
-    assert withheld == {"pole_job_not_matched_in_yaml": 1}, withheld
+    # held back by the scan gate itself, before any pole -> YAML work (an
+    # errored block: test_opt84_fail_closed's scan-gate tests)
+    _out, withheld, cands = _curl_case(None)
+    assert withheld == {"type_aware_lint_scan_missing": 1}, withheld
+    assert [c["gate"] for c in cands] == ["type_aware_lint_scan_missing"]
 
 
 # ---- OPT81's last-resort advisory names OPT84 as a lever that renders first ------

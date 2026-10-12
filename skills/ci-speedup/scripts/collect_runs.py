@@ -12676,8 +12676,10 @@ def _resolve_run_leaves(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, s
                         walk_complete: bool = True) -> ResolvedLeaves:
     """Every leaf command `cmd` runs: split on `&&`, `||`, `;`, `|` and newlines,
     package-manager script calls followed into `scripts_by_dir[wd]` up to
-    `_OPT82_MAX_SCRIPT_DEPTH`, runner wrappers unwrapped, a literal `cd`
-    followed. Segments it cannot follow are recorded with a reason.
+    `_OPT82_MAX_SCRIPT_DEPTH`, runner wrappers unwrapped. A literal `cd` is
+    followed for OPT82's lint read; the all-leaves read (OPT84) records every
+    `cd` / `pushd` / `popd` as unresolved, so the step is held back. Segments
+    it cannot follow are recorded with a reason.
 
     `relevant` narrows which unfollowable segments count (OPT82 passes "is it
     lint-named"; None = every one, the OPT84 read, which also reads a
@@ -12845,13 +12847,19 @@ def _rl_walk(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, str]],
     resolver, verbatim, so its verdict is byte-identical (a snapshot test pins
     it); the leaves and unresolved records are collected beside it.
 
-    The all-leaves read (`relevant` None) adds three things OPT82 never sees:
-    `make` is a leaf, leading shell keywords are dropped, and a JS task runner
+    The all-leaves read (`relevant` None) adds five things OPT82 never sees:
+    (1) every `cd` / `pushd` / `popd` is recorded as an unresolved "cd", even
+    one it could follow; (2) leading shell keywords are dropped; (3) a
+    package-manager name no effective script defines is read as that binary
+    (`_opt82_script_ref(any_name=True)` over `_rl_effective_scripts`);
+    (4) `make` is a leaf (`_RL_NON_JS_DELEGATORS`); (5) a JS task runner
     (`_rl_task_runner`) is expanded over every package whose scripts define
-    its task (`in_runner` names it below that point, where any segment the read
-    cannot follow is recorded as delegated to it; `stack` holds the
-    `(dir, script)` pairs being followed, so the script that called the task
-    runner is never re-entered)."""
+    its task, unless a workspace package.json was unreadable or the scan's
+    manifest walk stopped early (`walk_complete` False), which records it as
+    unresolved (`in_runner` names the runner below that point, where any
+    segment the read cannot follow is recorded as delegated to it; `stack`
+    holds the `(dir, script)` pairs being followed, so the script that called
+    the task runner is never re-entered)."""
     import shlex
     chain = list(chain or [])
     unresolvable: "tuple[str, str, list[str]] | None" = None
@@ -12927,6 +12935,10 @@ def _rl_walk(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, str]],
             if scripts_unreadable:
                 _note("package_json", "a workspace package.json could not be read, so "
                       f"which packages define the `{tool}` task is unknown", seg, tool)
+                continue
+            if not acc.walk_complete:
+                _note("delegated", "the scan's manifest walk stopped early, so which "
+                      f"packages define the `{tool}` task is unknown", seg, tool)
                 continue
             if depth >= _OPT82_MAX_SCRIPT_DEPTH:
                 _note("delegated", "past the script depth cap", seg, tool)
@@ -16951,7 +16963,47 @@ _OPT84_HELD_BACK_GATES = frozenset({
     "eslint_config_unreadable",
     "typescript_version_unreadable",
     "working_directory_unknown",
+    # Pole-level, decided before any candidate work (as OPT82 does): the
+    # findings doc has no `type_aware_lint` block, or the scan's reader crashed
+    # (the block carries `error`). Nothing the read needs can be trusted.
+    "type_aware_lint_scan_missing",
+    "type_aware_config_reader_failed",
 })
+# The held-back gates decided on one STEP: their listing names the step. Every
+# other held-back gate is pole-level and is listed with the job only. A STRING
+# CONTRACT with the verifier's twin.
+_OPT84_STEP_GATES = frozenset({
+    "measured_step_not_matched_in_yaml", "command_has_expression",
+    "command_changes_directory", "script_unresolvable",
+    "delegated_script_unresolved", "package_json_unreadable",
+    "candidate_is_an_action", "eslint_config_unreadable",
+    "typescript_version_unreadable", "working_directory_unknown",
+})
+
+
+def _opt84_count(withheld: "dict[str, int] | None",
+                 withheld_candidates: "list[dict[str, Any]] | None",
+                 gate: str, wf: str = "", job: str = "",
+                 step: "str | None" = None) -> None:
+    """Count one OPT84 exit, and list it when it is held back. A gate outside
+    both sets, or a held-back gate with no job to list it under, is a bug in
+    the detector: it raises (the collector's guarded call then discloses the
+    skip) rather than counting something the report cannot explain."""
+    if gate not in _OPT84_VERDICT_GATES | _OPT84_HELD_BACK_GATES:
+        raise ValueError(f"OPT84 gate {gate!r} is in neither gate set")
+    if gate in _OPT84_HELD_BACK_GATES and not job:
+        raise ValueError(f"OPT84 held-back gate {gate!r} has no job to list it under")
+    if gate in _OPT84_HELD_BACK_GATES and bool(step) != (gate in _OPT84_STEP_GATES):
+        raise ValueError(f"OPT84 held-back gate {gate!r} "
+                         + ("needs the step it was decided on" if not step
+                            else "is pole-level and names no step"))
+    if withheld is not None:
+        withheld[gate] = withheld.get(gate, 0) + 1
+    if withheld_candidates is not None and gate in _OPT84_HELD_BACK_GATES:
+        withheld_candidates.append({"workflow_file": wf, "job": job, "gate": gate,
+                                    **({"step": step} if step else {})})
+
+
 # The target tools' own documentation (each URL checked to answer 200 on
 # 2026-10-10). One table, so the card and the catalog cite the same pages.
 _OPT84_DOCS: dict[str, dict[str, "str | None"]] = {
@@ -17053,7 +17105,18 @@ def _opt84_gate_for_unresolved(u: dict[str, Any]) -> str:
 # (`./x`, `../x`, `*.sh`), a wrapper around another command the read cannot
 # strip, a subshell, a package manager pointed at another directory, and a
 # package-manager builtin that runs a script it cannot follow.
-_OPT84_SHELLS = frozenset({"bash", "sh", "zsh", "dash"})
+_OPT84_SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh", "fish", "pwsh",
+                           "powershell"})
+# Runners whose own configuration decides what runs (a Makefile, a Justfile, a
+# Taskfile, the pre-commit config, a gulpfile, angular.json, a container ...),
+# and the JS linters outside the table that may wrap one: in a repo with a JS
+# manifest the step is held back, never the verdict. (`nx` here is the bare
+# binary; `_rl_task_runner` already reads `nx run-many` / `nx affected`.) In a
+# repo with no JS manifest `_detect_opt84_tool_swap` reads these as the verdict.
+_OPT84_OPAQUE_BINARIES: dict[str, str] = {
+    b: "delegated_script_unresolved" for b in (
+        "make", "just", "task", "pre-commit", "concurrently", "ng", "nx", "gulp",
+        "grunt", "xo", "standard", "docker", "docker-compose")}
 # Local executables that are native build entry points by convention (autoconf's
 # `configure`, the Gradle and Maven wrappers): a leaf, like `make` (see
 # `_RL_NON_JS_DELEGATORS`), so a C or JVM build stays the verdict.
@@ -17179,9 +17242,11 @@ def _opt84_opaque_leaf(lf: dict[str, Any]) -> "tuple[str, str] | None":
                 else ("hold", "script_unresolvable"))
     if b in _OPT84_SHELLS:
         return "hold", "script_unresolvable"
-    if ((t[0].endswith(".sh") or t[0].startswith(("./", "../")))
+    if b in _OPT84_OPAQUE_BINARIES:
+        return "hold", _OPT84_OPAQUE_BINARIES[b]
+    if ((t[0].endswith(".sh") or t[0].startswith(("./", "../")) or "/" in t[0])
             and b not in _OPT84_NATIVE_LOCAL_EXECUTABLES):
-        return "hold", "script_unresolvable"
+        return "hold", "script_unresolvable"     # a script or executable by path
     return None
 
 
@@ -17249,15 +17314,27 @@ _OPT84_ACTION_WORDS = ("eslint", "prettier", "oxlint", "oxfmt", "lint", "format"
                        "tsc", "typecheck", "type-check")
 
 
+# Actions known to set up a toolchain, cache, build an image or run an analysis
+# that is not a table tool (matched case-insensitively on `uses:` before the
+# `@ref`): such a step is the verdict `tool_not_in_table`. Every other action,
+# local or marketplace, runs something this read cannot see and is held back.
+_OPT84_KNOWN_ACTION_PREFIXES = (
+    "actions/", "github/codeql-action/", "docker/", "pnpm/action-setup",
+    "oven-sh/setup-bun", "swatinem/rust-cache", "dtolnay/", "cygwin/", "msys2/",
+    "actions-rust-lang/", "ruby/setup-ruby", "astral-sh/")
+
+
 def _opt84_action_may_swap(step: dict[str, Any]) -> bool:
-    """Whether an action step plausibly runs a table tool: held back when it
-    does, the counted verdict `tool_not_in_table` when it cannot (CodeQL, an
-    upload, a local build action). Same spirit as OPT82's action-step rule."""
+    """Whether an action step may run a table tool: held back when it may, the
+    counted verdict `tool_not_in_table` only for an allow-listed action
+    (`_OPT84_KNOWN_ACTION_PREFIXES`) whose label does not say lint / format /
+    type-check. An unknown action (a local one included) is held back: what it
+    runs is inside it."""
     uses = str(step.get("uses") or "")
     label = (uses + " " + str(step.get("name") or "")).lower()
     if any(w in label for w in _OPT84_ACTION_WORDS):
         return True
-    return uses.startswith(_LOCAL_USES_PREFIXES) and "check" in label
+    return not uses.split("@", 1)[0].lower().startswith(_OPT84_KNOWN_ACTION_PREFIXES)
 
 
 def _opt84_leaf_tokens(tokens: list[str]) -> list[str]:
@@ -17285,7 +17362,10 @@ def _opt84_classify(tokens: list[str]) -> "tuple[str | None, str | None]":
         if b not in spec["binaries"]:
             continue
         if row == "tsc":
-            if "--build" in args or "-b" in args or "--noEmit" not in args:
+            # tsc reads its options case-insensitively and with one dash or two
+            low = [a.lower() for a in args]
+            if ("--build" in low or "-b" in low or "-build" in low
+                    or not any(a in ("--noemit", "-noemit") for a in low)):
                 return row, "emits"
             return row, "row"
         need = spec["binaries"][b]
@@ -17294,24 +17374,74 @@ def _opt84_classify(tokens: list[str]) -> "tuple[str | None, str | None]":
     return None, None
 
 
+def _opt84_walk_up(block: dict[str, Any], wd: str) -> list[tuple[str, str]]:
+    """The directories from `wd` up to the repo root, nearest first, each with
+    what the scan's manifest walk knows of its package.json: "read", or
+    "unreadable" (one exists and could not be read), "unknown" (the walk may
+    never have looked there: a folder it skips without a trace, or, when it
+    stopped early (`truncated`), a directory below every read one, the same
+    ground `_rl_effective_scripts` refuses to walk), or "none" (looked; there
+    is none). The repo root is always looked at."""
+    scripts = block.get("package_scripts") or {}
+    unreadable = {str(u) for u in (block.get("package_scripts_unreadable") or [])}
+    complete = block.get("truncated") is False
+    out: list[tuple[str, str]] = []
+    d = wd or ""
+    read_below = False
+    while True:
+        if d in unreadable:
+            state = "unreadable"
+        elif isinstance(scripts.get(d), dict):
+            state = "read"
+        elif d and any(seg.startswith(".") or seg in _RL_UNWALKED_DIRS
+                       for seg in d.split("/")):
+            state = "unknown"
+        elif d and not complete and not read_below:
+            state = "unknown"
+        else:
+            state = "none"
+        out.append((d, state))
+        read_below = read_below or state == "read"
+        if not d:
+            return out
+        d = _posixpath.dirname(d)
+
+
+def _opt84_declared(block: dict[str, Any], wd: str, package: str) -> bool:
+    """Whether a package.json at or above `wd` declares `package` (any spec)."""
+    versions = block.get("tool_versions") or {}
+    return any(isinstance(versions.get(d), dict) and package in versions[d]
+               for d, _state in _opt84_walk_up(block, wd))
+
+
+def _opt84_any_row(leaves: list[dict[str, Any]]) -> bool:
+    """Whether any leaf runs a table tool this pattern would swap."""
+    return any(_opt84_classify(lf.get("tokens") or [])[1] == "row" for lf in leaves)
+
+
 # What `_opt84_version` returns when a package.json on the upward walk (the
 # directory itself, or an ancestor nearer than the declaring one) could not be
-# read: the version that applies is unknown. `_opt84_major` reads it as None,
-# so the tsc row holds back; the ESLint and Prettier rows stamp None.
+# read, or the walk passes ground the scan never looked at: the version that
+# applies is unknown. `_opt84_major` reads it as None, so the tsc row holds
+# back; the ESLint and Prettier rows stamp None.
 _OPT84_VERSION_UNREADABLE: Any = object()
+# The stamped version of a `catalog:` reference whose root `pnpm-workspace.yaml`
+# could not be read (`pnpm_catalogs_unreadable`): not a version, so the tsc row
+# holds back, and the stamp on the other rows says why.
+_OPT84_CATALOG_UNREADABLE = "catalog: (pnpm-workspace.yaml unreadable)"
 
 
 def _opt84_version(block: dict[str, Any], wd: str, package: str) -> Any:
     """The `package` version spec the package.json nearest at or above `wd`
     declares, or None when none does. A pnpm catalog reference (`catalog:` =
     the default catalog, `catalog:<name>` = that named one) is resolved through
-    the scan's `pnpm_catalogs`; one that names no catalog entry is None.
-    `_OPT84_VERSION_UNREADABLE` when an unreadable package.json
-    (`package_scripts_unreadable`) sits on the walk before the declaring one."""
+    the scan's `pnpm_catalogs`; one that names no catalog entry is None, or
+    `_OPT84_CATALOG_UNREADABLE` when the workspace file could not be read.
+    `_OPT84_VERSION_UNREADABLE` when, before the declaring one, the walk meets
+    an unreadable package.json or ground the scan never looked at
+    (`_opt84_walk_up`)."""
     versions = block.get("tool_versions") or {}
-    unreadable = {str(u) for u in (block.get("package_scripts_unreadable") or [])}
-    d = wd
-    while True:
+    for d, state in _opt84_walk_up(block, wd):
         spec = (versions.get(d) or {}).get(package) if isinstance(
             versions.get(d), dict) else None
         if isinstance(spec, str):
@@ -17320,20 +17450,22 @@ def _opt84_version(block: dict[str, Any], wd: str, package: str) -> Any:
                 cats = block.get("pnpm_catalogs")
                 cat = cats.get(name) if isinstance(cats, dict) else None
                 got = cat.get(package) if isinstance(cat, dict) else None
-                return got if isinstance(got, str) else None
+                if isinstance(got, str):
+                    return got
+                return (_OPT84_CATALOG_UNREADABLE
+                        if block.get("pnpm_catalogs_unreadable") else None)
             return spec
-        if d in unreadable:
+        if state in ("unreadable", "unknown"):
             return _OPT84_VERSION_UNREADABLE
-        if not d:
-            return None
-        d = d.rsplit("/", 1)[0] if "/" in d else ""
+    return None
 
 
 def _opt84_major(spec: "str | None") -> "int | None":
-    """The major of a plain semver spec (`^5.6.2`, `~7.0`, `5.6.2`, `>=5`), or None
-    for `workspace:*`, `catalog:`, a tag, a URL. An npm alias reads the aliased
-    version (`npm:@typescript/typescript6@6.0.2` is 6); one with no version is
-    None."""
+    """The major of a plain semver spec (`^5.6.2`, `~7.0`, `5.6.2`, `=5`), or None
+    for an open-ended range (`>=5`, `>4`: the installed major may be any above
+    it), `*`, a tag (`latest`), `workspace:*`, `catalog:`, a URL. An npm alias
+    reads the aliased version (`npm:@typescript/typescript6@6.0.2` is 6); one
+    with no version is None."""
     if not isinstance(spec, str):
         return None
     if spec.strip().startswith("npm:"):
@@ -17342,7 +17474,7 @@ def _opt84_major(spec: "str | None") -> "int | None":
         if at <= 0:
             return None
         spec = aliased[at + 1:]
-    m = _re.fullmatch(r"\s*(?:\^|~|>=|=|v)?\s*(\d+)(?:\.[\dx*]+){0,2}"
+    m = _re.fullmatch(r"\s*(?:\^|~|=|v)?\s*(\d+)(?:\.[\dx*]+){0,2}"
                       r"(?:-[\w.]+)?\s*", spec)
     return int(m.group(1)) if m else None
 
@@ -17405,11 +17537,31 @@ def _opt84_benchmark_commands(row: str, tokens: list[str], runner: str,
     return [f"({pre}time {base})", f"({pre}time {target})"]
 
 
-def _opt84_eslint_fit(block: dict[str, Any], configs: "list[dict[str, Any]]"
-                      ) -> list[str]:
+# ESLint CLI flags that load or change rules from outside the config: oxlint
+# may not carry what they load, so the swap is a dual-run.
+_OPT84_ESLINT_RULE_FLAGS = ("--rulesdir", "--plugin", "--rule", "--parser", "--ext")
+
+
+def _opt84_loads_oxlint_plugin(block: dict[str, Any],
+                               configs: "list[dict[str, Any]]") -> bool:
+    """Whether an applicable ESLint config loads `eslint-plugin-oxlint` (which
+    turns off the rules oxlint covers: the step already runs both tools)."""
+    facts_by_path = block.get("eslint_config_facts")
+    facts_by_path = facts_by_path if isinstance(facts_by_path, dict) else {}
+    for c in configs:
+        facts = facts_by_path.get(str(c.get("path") or ""))
+        if isinstance(facts, dict) and any(
+                _opt84_plugin_name(str(p)) == "oxlint" for p in facts.get("plugins") or []):
+            return True
+    return False
+
+
+def _opt84_eslint_fit(block: dict[str, Any], configs: "list[dict[str, Any]]",
+                      leaves: "list[dict[str, Any]] | None" = None) -> list[str]:
     """Why an oxlint swap of this ESLint run must be a dual-run (empty: plain
-    swap). Read from the scan's config facts; a config whose facts were not
-    read counts as a reason, so an unread config never reads as drop-in."""
+    swap). Read from the scan's config facts and the ESLint leaves' own flags;
+    a config whose facts were not read counts as a reason, so an unread config
+    never reads as drop-in."""
     facts_by_path = block.get("eslint_config_facts")
     facts_by_path = facts_by_path if isinstance(facts_by_path, dict) else {}
     reasons: list[str] = []
@@ -17420,6 +17572,11 @@ def _opt84_eslint_fit(block: dict[str, Any], configs: "list[dict[str, Any]]"
 
     for c in configs:
         path = str(c.get("path") or "")
+        if c.get("type_aware") == "on":
+            _add(f"type-aware rules in `{path}`: oxlint runs them only through "
+                 "tsgolint")
+        elif c.get("type_aware") == "unresolved":
+            _add(f"whether `{path}` is type-aware could not be resolved")
         if c.get("custom_rules"):
             _add(f"custom local rules in `{path}`")
         facts = facts_by_path.get(path)
@@ -17434,7 +17591,7 @@ def _opt84_eslint_fit(block: dict[str, Any], configs: "list[dict[str, Any]]"
                     _add(f"tailwindcss plugin in `{path}`")
                 elif p in _OPT84_FRAMEWORK_PLUGINS:
                     _add(f"framework plugin {p} in `{path}`")
-                elif p and p not in _OPT84_OXLINT_NATIVE_PLUGINS:
+                elif p and p != "oxlint" and p not in _OPT84_OXLINT_NATIVE_PLUGINS:
                     _add(f"plugin {p} in `{path}`: oxlint may not carry its rules")
             if facts.get("exhaustive_deps"):
                 _add(f"react-hooks/exhaustive-deps rule in `{path}`")
@@ -17442,34 +17599,119 @@ def _opt84_eslint_fit(block: dict[str, Any], configs: "list[dict[str, Any]]"
             _add(f"shareable config {s} not followed (`{path}`)")
         if c.get("unresolved_imports"):
             _add(f"a config import in `{path}` was not followed")
+    for lf in leaves or []:
+        cmd = str(lf.get("command") or "")
+        for a in _opt84_leaf_tokens(list(lf.get("tokens") or []))[1:]:
+            flag = a.split("=", 1)[0]
+            if flag in _OPT84_ESLINT_RULE_FLAGS:
+                _add(f"ESLint CLI flag `{flag}` in `{cmd}`: oxlint may not carry "
+                     "what it loads")
     return reasons
 
 
-def _opt84_prettier_fit(block: dict[str, Any], wds: list[str]) -> list[str]:
-    """Why an oxfmt swap of this Prettier run must be a dual-run (empty: plain
-    swap): every Prettier plugin a package.json at or above each run's
-    directory declares (the scan's `prettier_plugins`, {package dir: [plugin
-    package names]}), nearest first.
+def _opt84_prettier_bases(lf: dict[str, Any]) -> list[str]:
+    """The directories a Prettier leaf formats, repo-relative ("" = root): each
+    path argument's directory before any glob, joined to the leaf's own
+    directory; no path (or `pretty-quick`) is the leaf's directory. A path that
+    leaves the checkout reads as the root."""
+    t = _opt84_leaf_tokens(list(lf.get("tokens") or []))
+    wd = str(lf.get("wd") or "")
+    paths = (_opt84_paths(t[1:], _OPT84_PRETTIER_VALUE_FLAGS)
+             if _opt84_binary(t) == "prettier" else []) or ["."]
+    out: list[str] = []
+    for p in paths:
+        cut = min([i for i in (p.find(c) for c in "*?[{!") if i >= 0], default=-1)
+        if cut >= 0:
+            p = p[:cut].rsplit("/", 1)[0] if "/" in p[:cut] else "."
+        base = _posixpath.normpath(_posixpath.join(wd or ".", p or "."))
+        base = "" if base in (".", "") or base == ".." or base.startswith(
+            ("../", "/")) else base
+        if base not in out:
+            out.append(base)
+    return out
 
-    A scan that predates `prettier_plugins` (the key absent) reads as no
-    plugins, i.e. drop-in as before, rather than failing closed: failing
-    closed would turn every findings document written before the key existed
-    into a dual-run. A present key is read."""
+
+def _opt84_prettier_fit(block: dict[str, Any], leaves: "list[dict[str, Any]]",
+                        scripts_by_dir: "dict[str, dict[str, str]] | None" = None,
+                        scripts_unreadable: "frozenset[str]" = frozenset(),
+                        walk_complete: bool = True) -> list[str]:
+    """Why an oxfmt swap of this Prettier run must be a dual-run (empty: plain
+    swap). Fails closed on everything it cannot read:
+
+    - every Prettier plugin declared at or above each leaf's directory (the
+      scan's `prettier_plugins`: package.json dependencies and the `plugins` of
+      Prettier's own config files, `prettier_plugin_files` naming the file),
+      nearest first, then every one in a directory the run formats below it
+      (a root `prettier --check .` reaches each subpackage's config);
+    - a Prettier config the scan does not open (`prettier_config_unreadable`:
+      a JS / TS config, an unparsable one, a shared-config string);
+    - a package.json on the upward walk that could not be read, or ground the
+      scan never looked at (`_opt84_walk_up`), or no package.json read at all;
+    - a manifest walk that stopped early (`truncated`): a subpackage below may
+      declare a plugin;
+    - a `--plugin` flag on the command itself;
+    - a block with no `prettier_plugins` map at all (a findings document whose
+      scan never read them): unknown, so run both.
+
+    The verifier re-derives the drop-in verdict from the same block facts."""
+    reasons: list[str] = []
     plugins = block.get("prettier_plugins")
     if not isinstance(plugins, dict):
-        return []
-    reasons: list[str] = []
-    for wd in wds:
-        d = wd
-        while True:
-            for name in plugins.get(d) or []:
-                where = f"{d}/package.json" if d else "package.json"
-                r = (f"Prettier plugin {name} in `{where}`: oxfmt may not carry it")
-                if r not in reasons:
-                    reasons.append(r)
-            if not d:
-                break
-            d = d.rsplit("/", 1)[0] if "/" in d else ""
+        reasons.append("this scan's Prettier plugins were not read; whether oxfmt "
+                       "carries them is unknown")
+        plugins = {}
+    files = block.get("prettier_plugin_files")
+    files = files if isinstance(files, dict) else {}
+    configs = block.get("prettier_config_unreadable")
+    configs = configs if isinstance(configs, dict) else {}
+    pkg_unreadable = [str(u) for u in (block.get("package_scripts_unreadable") or [])]
+
+    def _add(r: str) -> None:
+        if r not in reasons:
+            reasons.append(r)
+
+    def _pkg(d: str) -> str:
+        return f"{d}/package.json" if d else "package.json"
+
+    def _dir_reasons(d: str) -> None:
+        for name in plugins.get(d) or []:
+            src = files.get(d) if isinstance(files.get(d), dict) else {}
+            where = str(src.get(name) or _pkg(d))
+            _add(f"Prettier plugin {name} in `{where}`: oxfmt may not carry it")
+        for path in configs.get(d) or []:
+            _add(f"`{path}`: a Prettier config this audit does not open may load "
+                 "plugins")
+
+    for lf in leaves:
+        wd = str(lf.get("wd") or "")
+        walk = _opt84_walk_up(block, wd)
+        unknown_named = False
+        for d, state in walk:
+            if state == "unreadable" or (state == "unknown" and not unknown_named):
+                unknown_named = unknown_named or state == "unknown"
+                _add(f"`{_pkg(d)}` could not be read; its Prettier plugins are unknown")
+            _dir_reasons(d)
+        if all(state == "none" for _d, state in walk):
+            _add(f"no `package.json` was read at or above `{wd or '.'}`; its "
+                 "Prettier plugins are unknown")
+        on_walk = {d for d, _s in walk}
+        for base in _opt84_prettier_bases(lf):
+            below = sorted({str(d) for d in (*plugins, *configs, *pkg_unreadable)
+                            if str(d) not in on_walk
+                            and (not base or str(d) == base
+                                 or str(d).startswith(base + "/"))})
+            for d in below:
+                if d in pkg_unreadable:
+                    _add(f"`{_pkg(d)}` could not be read; its Prettier plugins are "
+                         "unknown")
+                _dir_reasons(d)
+            if block.get("truncated") is not False:
+                _add("the scan's manifest walk stopped early, so Prettier plugins "
+                     f"below `{base or '.'}` are unknown")
+        t = _opt84_leaf_tokens(list(lf.get("tokens") or []))
+        if any(a.split("=", 1)[0] == "--plugin" for a in t[1:]):
+            _add(f"Prettier CLI flag `--plugin` in `{lf.get('command')}`: oxfmt may "
+                 "not carry the plugin it loads")
     return reasons
 
 
@@ -17497,12 +17739,14 @@ def _detect_opt84_tool_swap(
     reports on the same step is deferred to it."""
     def _no(gate: str, wf: str = "", job: str = "", step: "str | None" = None,
             **ctx: Any) -> None:
-        if withheld is not None:
-            withheld[gate] = withheld.get(gate, 0) + 1
-        if (withheld_candidates is not None and gate in _OPT84_HELD_BACK_GATES
-                and job):
-            withheld_candidates.append({"workflow_file": wf, "job": job, "gate": gate,
-                                        **({"step": step} if step else {})})
+        # A repo with no JavaScript manifest (curl): nothing the read could not
+        # follow can hide a table tool unless the command named one directly,
+        # so a held-back exit there is the verdict `tool_not_in_table`.
+        if (no_js_manifest and gate in _OPT84_HELD_BACK_GATES
+                and not ctx.pop("table_tool_seen", False)):
+            gate = "tool_not_in_table"
+        ctx.pop("table_tool_seen", None)
+        _opt84_count(withheld, withheld_candidates, gate, wf, job, step)
         logger.debug("OPT84 %s %s %s: withheld by %s%s", wf, job, step or "", gate,
                      (" " + " ".join(f"{k}={v!r}" for k, v in ctx.items())) if ctx else "")
 
@@ -17526,15 +17770,23 @@ def _detect_opt84_tool_swap(
                              str(tl.get("yaml_job") or ""),
                              " ".join(str(tl.get("lint_step") or "").split())))
 
+    # The scan's block is what every read below stands on. Missing (a findings
+    # doc written without it) or carrying `error` (the reader crashed): every
+    # pole is held back by that gate FIRST, before any candidate or YAML work,
+    # as OPT82 does, and the no-manifest read below never runs on it.
+    scan_gate = ("type_aware_lint_scan_missing" if not isinstance(block, dict)
+                 else "type_aware_config_reader_failed" if tal.get("error")
+                 else None)
     # A repo with no JavaScript manifest at all (curl/curl): the scan walked the
     # whole tree, read every manifest it found, and found none, nor any ESLint
-    # config. No tool in the table can run there, so every pole is the verdict
-    # `tool_not_in_table` before any pole -> YAML work (a matrix job whose name
-    # is an expression would otherwise be held back and listed for nothing).
-    # A manifest that exists but could not be read, an incomplete walk, or a
-    # missing block keeps the fail-closed path below.
+    # config. The read still runs, so a step that names a table tool directly
+    # (`npx --yes prettier@3 --check .`) is still reported; but anything it
+    # cannot follow (a matrix job name, a shell script, `make`) cannot hide a
+    # table tool there, so those exits are the verdict `tool_not_in_table`
+    # rather than a held-back listing (`_no`). A manifest that exists but could
+    # not be read, an incomplete walk, or a missing block is not this case.
     no_js_manifest = (
-        isinstance(block, dict) and not tal.get("error")
+        scan_gate is None
         and tal.get("truncated") is False
         and not tal.get("package_scripts") and not tal.get("package_scripts_unreadable")
         and not tal.get("tool_versions") and not tal.get("configs")
@@ -17543,18 +17795,19 @@ def _detect_opt84_tool_swap(
     out: list[dict[str, Any]] = []
     seen = set() if seen is None else seen
     for p in poles or []:
-        if no_js_manifest:
-            key = ((str(p.get("workflow_file") or ""),
-                    str(p.get("job") or p.get("check") or ""))
-                   if isinstance(p, dict) else None)
-            if key is not None and key in seen:
-                continue
-            if key is not None:
-                seen.add(key)
-            _no("tool_not_in_table", *(key or ()))
-            continue
         if not isinstance(p, dict):
             _no("pole_not_file_backed")
+            continue
+        if scan_gate is not None:
+            wf = str(p.get("workflow_file") or "")
+            job = str(p.get("job") or p.get("check") or "")
+            if not job:
+                _no("pole_not_file_backed")
+                continue
+            if (wf, job) in seen:
+                continue
+            seen.add((wf, job))
+            _no(scan_gate, wf, job)
             continue
         wf = str(p.get("workflow_file") or "")
         job = str(p.get("job") or "")
@@ -17562,7 +17815,9 @@ def _detect_opt84_tool_swap(
         # steps: the candidate check below runs on them FIRST, so a pole with no
         # candidate-shaped step is the verdict whatever its workflow. Only a
         # pole with a candidate (or steps that cannot be read) is held back as
-        # ambiguous.
+        # ambiguous. Today `collect()` stamps no `steps` on an ambiguous pole,
+        # so in a live run it always lands in `pole_workflow_ambiguous`; the
+        # order matters for a pole that does carry them.
         ambiguous = bool(not wf and p.get("ambiguous_workflows"))
         if ambiguous:
             job = job or str(p.get("check") or "")
@@ -17678,16 +17933,19 @@ def _detect_opt84_tool_swap(
                 first = next((u for u in res.unresolved if u.get("kind") == "cd"),
                              res.unresolved[0])
                 _no(_opt84_gate_for_unresolved(first), wf, job, name,
-                    segment=first.get("segment"))
+                    segment=first.get("segment"),
+                    table_tool_seen=_opt84_any_row(res.leaves))
                 continue
             # A leaf the table has no row for is the verdict only when the read
             # knows what it runs: a shell script, a local executable, a wrapper
-            # it cannot strip, a subshell or a package manager sent elsewhere
-            # holds the step back; a stripped wrapper or `npm test` is followed.
+            # it cannot strip, a subshell, a package manager sent elsewhere or
+            # a runner whose own config decides what runs (`make`, `just`,
+            # `pre-commit`, `docker` ...) holds the step back; a stripped
+            # wrapper or `npm test` is followed.
             leaves, opaque = _opt84_expand_leaves(res.leaves, scripts_by_dir,
                                                   scripts_unreadable, walk_complete)
             if opaque:
-                _no(opaque, wf, job, name)
+                _no(opaque, wf, job, name, table_tool_seen=_opt84_any_row(leaves))
                 continue
             found: list[tuple[str, dict[str, Any]]] = []
             targets: set[str] = set()
@@ -17741,9 +17999,10 @@ def _detect_opt84_tool_swap(
                     version = _opt84_version(tal, lwd, spec_row["package"])
                 elif row == "eslint":
                     if deferred:
+                        # OPT82's finding carries the why; a reason list here
+                        # would read as a dual-run (`fit_reasons` is non-empty
+                        # exactly when the fit is dual-run).
                         fit = "deferred_to_opt82"
-                        reasons = ["OPT82 reports this ESLint run's type-aware rules "
-                                   "on the same step"]
                     else:
                         # Read the configs exactly as OPT82 does: an
                         # `ESLINT_USE_FLAT_CONFIG=false` in the step / job /
@@ -17758,10 +18017,9 @@ def _detect_opt84_tool_swap(
                                                r"\bESLINT_USE_FLAT_CONFIG=['\"]?false\b",
                                                run)))
                         configs = []
-                        unreadable_cfg = bool(tal.get("error"))
+                        unreadable_cfg = False
+                        with_oxlint_plugin = 0
                         for g in group:
-                            if unreadable_cfg:
-                                break
                             gwd = str(g["wd"] or "")
                             eslint_cmd = shlex.join(g["tokens"])
                             flag = _opt82_config_flag(eslint_cmd)
@@ -17774,22 +18032,34 @@ def _detect_opt84_tool_swap(
                                 unreadable_cfg = True
                                 break
                             configs += [c for c in cfgs if c not in configs]
+                            if (_opt84_declared(tal, gwd, "oxlint")
+                                    or _opt84_loads_oxlint_plugin(tal, cfgs)):
+                                with_oxlint_plugin += 1
                         if unreadable_cfg:
                             held = held or "eslint_config_unreadable"
                             continue
-                        reasons = _opt84_eslint_fit(tal, configs)
+                        if with_oxlint_plugin == len(group):
+                            # oxlint declared on every leaf's walk, or
+                            # `eslint-plugin-oxlint` (which turns off the rules
+                            # oxlint covers) in its configs: this ESLint run is
+                            # already the dual-run.
+                            silenced.append(row)
+                            continue
+                        reasons = _opt84_eslint_fit(tal, configs, group)
                         fit = "dual-run" if reasons else "drop-in"
                 elif row == "prettier":
-                    reasons = _opt84_prettier_fit(tal, lwds)
+                    if all(_opt84_declared(tal, str(g["wd"] or ""), "oxfmt")
+                           for g in group):
+                        silenced.append(row)    # oxfmt is declared beside it
+                        continue
+                    reasons = _opt84_prettier_fit(tal, group, scripts_by_dir,
+                                                  scripts_unreadable, walk_complete)
                     fit = "dual-run" if reasons else "drop-in"
-                # The workspace-packages note is a task-runner expansion's: a
+                # A task-runner expansion stamps how many packages it reached as
+                # `packages`, the one source of the renderer's "across N
+                # workspace packages" note (never repeated in `fit_reasons`). A
                 # tool run twice by hand in one directory reaches no packages.
                 expanded = any(g.get("task_runner") for g in group)
-                if expanded:
-                    n = len(lwds)
-                    reasons = [*reasons, f"across {n} workspace package"
-                               f"{'' if n == 1 else 's'}; task-runner filters not "
-                               "applied"]
                 t = {"row": row, "leaf_command": lf["command"],
                      "source_tool": spec_row["source_tool"],
                      "target": spec_row["target"], "fit": fit,
@@ -17805,7 +18075,7 @@ def _detect_opt84_tool_swap(
                     t["packages"] = len(lwds)
                 tools.append(t)
             if held:
-                _no(held, wf, job, name)
+                _no(held, wf, job, name, table_tool_seen=True)
                 continue
             if not any(t["fit"] != "deferred_to_opt82" for t in tools):
                 if tools:
@@ -17843,7 +18113,8 @@ def _opt84_finding(p: dict[str, Any], wf: str, job: str, yaml_key: str, name: st
     evidence = (
         f"`{job}` is a measured long pole ({job_p50:.0f}s across its steps at p50). "
         f"Its step `{name}` measures {p50:.0f}s at p50 ({share * 100:.0f}% of the pole) "
-        f"and runs `{command}`, which resolves to: {swaps}. Each has a native drop-in. "
+        f"and runs `{command}`, which resolves to: {swaps}. Each has a native "
+        "replacement. "
         f"{ceiling:.0f}s, the step's own p50, is the CEILING on what the swap can "
         "remove, not a forecast"
         + ("; the tools share one step, so how it splits between them is unknown "
