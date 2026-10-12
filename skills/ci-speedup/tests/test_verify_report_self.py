@@ -2054,6 +2054,26 @@ def test_off_spine_check_still_fails_when_the_dropped_checks_own_workflow_is_fra
     assert _tag_for(_good() + header, _OFFSPINE, tmp_path, findings=findings) == "FAIL"
 
 
+def test_off_spine_check_still_fails_when_an_on_path_note_without_a_where_line_names_the_owner(
+        tmp_path: Path):
+    # An on-path note whose `**Where:**` label drifted away still carries its `wf` (job)
+    # segments; they are parsed from the whole block (as `_on_path_appendix_jobs` does), so the
+    # dropped check framed in its OWN workflow is still a contradiction, never a silent pass.
+    no_where = _family_on_path_note("test-js.yml").replace(
+        "**Where:** `test-js.yml` (test)", "Sites: `test-js.yml` (test), `ci.yml` (lint)")
+    assert "**Where:**" not in no_where
+    assert _tag_for(_good() + no_where, _OFFSPINE, tmp_path,
+                    findings=_mastodon_dropped_test_findings()) == "FAIL"
+
+
+def test_off_spine_check_headline_stays_name_level_when_the_dropped_checks_owner_is_known(
+        tmp_path: Path):
+    # The headline names no workflow, so a dropped `test` named the headline "slowest" is a
+    # contradiction even when the dropped check's owning workflow is known.
+    assert _tag_for(_good() + _headline("test"), _OFFSPINE, tmp_path,
+                    findings=_mastodon_dropped_test_findings()) == "FAIL"
+
+
 def test_off_spine_check_stays_name_strict_when_the_dropped_checks_workflow_is_unknown(
         tmp_path: Path):
     # No `per_workflow_timing` row ran the dropped `test`, so its owner can't be resolved and the

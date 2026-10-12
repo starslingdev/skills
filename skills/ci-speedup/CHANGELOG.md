@@ -1071,14 +1071,16 @@ unversioned and updates by reinstall from `main`.
 ### Fixed
 
 - **2026-10-12** — **The report self-check no longer rejects a correct report
-  when a dropped check shares its name with a merge-gating job in another
+  when a dropped check shares its name with a critical-path job in another
   workflow** (#132). On mastodon/mastodon a non-required `test` job in one
   workflow is left off the critical path, while a different workflow's `test`
-  matrix (whose legs include the slowest merge-gating check) is correctly
-  called out as on the critical path. The self-check compared bare names and
-  failed the report. It now ties each dropped check to the workflow that ran
-  it and flags only on-path framing in that workflow; a check whose workflow
-  is unknown is still compared by name. Rendered reports are unchanged.
+  matrix (whose legs include the slowest check on the critical path) is
+  correctly called out as on the critical path. The self-check compared bare
+  names and failed the report, so the audit withheld the "just save the
+  report" option from a correct report. It now ties each dropped check to the
+  workflow that ran it and flags only on-path framing in that workflow; a
+  check whose workflow is unknown, and the headline, are still compared by
+  name. The report text itself is unchanged.
 - **2026-10-10** — **`STARSLING_LOG_LEVEL=DEBUG` now prints the debug trace.**
   The variable was documented as the opt-in for the scripts' diagnostic output,
   but no script read it, so every debug line was unreachable and stderr stayed

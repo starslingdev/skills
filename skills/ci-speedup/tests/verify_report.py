@@ -3142,23 +3142,6 @@ def _strip_scope(s: str) -> str:
     return _fence_safe(re.sub(r"^@[^ /]+/", "", s)).replace("`", "'")
 
 
-def _on_path_framed_check_names(report: str) -> set[str]:
-    """The set of EXACT check NAMES the rendered report frames as ON the merge-gating critical
-    path in a single-name context — a Long-pole header (`## Long pole N: \\`wf\\` ▸ CHECK`, a
-    pole IS the critical path) and the headline "the slowest check a typical PR waits on" claim in
-    EITHER rendered form (name-first form 1 OR name-after form 2 — `_headline_slowest_label`). (The
-    appendix on-path note names jobs inside a CONCATENATED `**Where:**` line, so it can't join this
-    exact set cleanly — its job names are extracted by `_on_path_appendix_jobs`.) `_norm_check`-
-    normalized; the headline's `_clean_label`'d label is reconciled with the full stamp via
-    `_strip_scope` on the STAMP side, not here."""
-    names = {_cmp_name(check) for _wf, check, _body in _pole_header_sections(report)}
-    slowest = _headline_slowest_label(report)
-    if slowest:
-        names.add(_cmp_name(slowest))
-    names.discard("")
-    return names
-
-
 def _cmp_name(s: str) -> str:
     """The basis on which a dropped check and an on-path framing are compared for identity:
     scope-stripped (`_strip_scope`) THEN `_norm_check`. The `dropped_*` sets store the RAW
@@ -3170,8 +3153,11 @@ def _cmp_name(s: str) -> str:
     on a genuine monorepo where `@a/pkg build` is dropped while a DIFFERENT package's `@b/pkg build`
     is framed on-path (both → `pkg build`): for a CI regression net, erring toward CATCHING (a
     noisy block a human clears) over MISSING (a shipped contradiction) is the right bias; a precise
-    fix needs `(check, workflow_file)` identity from findings.json (future work — the gate is a
-    backstop to the scope-agnostic `off_spine` source fix, not the primary prevention)."""
+    fix needs `(check, workflow_file)` identity from findings.json, which
+    `check_dropped_check_not_framed_on_path` now applies to hard-dropped checks via
+    `_check_owner_workflows`; the headline and
+    rare-demoted comparisons stay name-level (the gate is a backstop to the scope-agnostic
+    `off_spine` source fix, not the primary prevention)."""
     return _norm_check(_strip_scope(str(s)))
 
 
@@ -3210,35 +3196,37 @@ def _on_path_appendix_jobs(report: str) -> tuple[set[str], list[str]]:
 _WHERE_SITE_RE = re.compile(r"`([^`]+)`\s*\((.*?)\)(?=\s*,\s*(?:`|\+)|\s*$)")
 
 
-def _wf_base(wf: str) -> str:
-    """A workflow reference reduced to its file basename: `.github/workflows/ci.yml`, `ci.yml`
-    and a Where segment's `ci.yml:17` all compare as `ci.yml`."""
-    return re.sub(r":\d+$", "", str(wf).strip()).rsplit("/", 1)[-1]
-
-
 def _on_path_framed_sites(report: str) -> set[tuple[str, str]]:
     """Every `(workflow basename, _cmp_name job/check)` the report frames ON the critical path
     WITH a workflow attached: each Long-pole header's `\\`wf\\` ▸ CHECK` and each parsed segment
     of an on-path appendix note's `**Where:**` line. The headline names no workflow, so it is not
-    here (the caller compares it by bare name)."""
+    here (the caller compares it by bare name). A block with no `**Where:**` line is scanned
+    whole, exactly as `_on_path_appendix_jobs` does, so the two never disagree on which segments
+    exist (a segment parsed there but not here would be a silent miss)."""
     sites = {(_wf_base(wf), _cmp_name(ck)) for wf, ck, _b in _pole_header_sections(report)}
     for block in report.split("<details>"):
         if _ON_PATH_SENTENCE not in block:
             continue
         m = re.search(r"^\*\*Where:\*\*\s*(.+)$", block, re.MULTILINE)
-        if m:
-            sites |= {(_wf_base(wf), _cmp_name(job))
-                      for wf, job in _WHERE_SITE_RE.findall(m.group(1))}
+        line = m.group(1) if m else block
+        sites |= {(_wf_base(_strip_line_suffix(wf.strip())), _cmp_name(job))
+                  for wf, job in _WHERE_SITE_RE.findall(line)}
     return {(w, j) for w, j in sites if j}
 
 
 def _check_owner_workflows(data: dict) -> dict[str, set[str]]:
     """`_cmp_name` check name → the workflow basenames whose measured jobs produced a check-run
-    of that exact name (`per_workflow_timing[wf].job_p50` keys). This is the `(check, workflow)`
-    identity the spine's own off-spine stamp already uses (`collect_runs._stamp_off_spine_findings`
-    scopes by workflow_file): a dropped `test` run by `test-js.yml` is not the `test` matrix family
-    of `test-ruby.yml`, whose legs gate the merge (mastodon/mastodon). A name no workflow ran maps
-    to nothing, and the caller then compares it by bare name."""
+    of that exact name (`per_workflow_timing[wf].job_p50` keys). It is the same `(check,
+    workflow)` scoping idea as the spine's off-spine stamp (`collect_runs._stamp_off_spine_findings`,
+    which resolves identity from the workflow definitions), derived here from MEASURED job names:
+    a dropped `test` run by `test-js.yml` is not the `test` matrix family of `test-ruby.yml`, whose
+    legs sit on the critical path (mastodon/mastodon). A name no workflow ran maps to nothing, and
+    the caller then compares it by bare name. Residual (a documented gap, not a silent design
+    choice): if the workflow that produced the dropped check has no measured row while ANOTHER
+    workflow measured a same-named job, the owner resolves to that other workflow alone and an
+    on-path framing in the unmeasured one is not flagged. It also relies on matrix legs being
+    measured under their LEG names (`test (3.4)`), never the bare base `test`; a bare-base key
+    would make that workflow an owner and bring the homonym back as a (loud) false positive."""
     owners: dict[str, set[str]] = {}
     pwt = _as_dict(data.get("per_workflow_timing"))
     for wf, row in pwt.items():
@@ -3411,9 +3399,10 @@ def check_dropped_check_not_framed_on_path(report: str, findings_path: Path | No
     PROPERTY over two sets read from the artifact + the rendered report (never a proxy of the
     renderer): the EXCLUDED set (the `dropped_*` footnote — present even in stampless bundles,
     which is why this keys on it and not `off_spine`) and the ON-PATH-FRAMED set built from EVERY
-    framing context — `_on_path_framed_check_names` (pole headers ∪ the headline "slowest" claim,
-    matched by EXACT name) ∪ `_on_path_appendix_jobs` (the appendix on-path notes' `**Where:**`
-    job names, matched EXACTLY, with a substring fallback only when a Where line won't parse). The
+    framing context — pole headers and the appendix on-path notes' `**Where:**` segments
+    (`_on_path_framed_sites`, each with its workflow), the headline "slowest" claim (by EXACT name),
+    and `_on_path_appendix_jobs` (Where job names, with a substring fallback only when a Where line
+    won't parse). The
     assertion is `EXCLUDED ∩ ON_PATH == ∅`. Because the on-path side is a SET assembled from every
     context, a contradiction shape not yet enumerated (a future on-path context) is caught by
     extending that set, not by adding a bespoke check — the class-wide guard, not a point-fix.
