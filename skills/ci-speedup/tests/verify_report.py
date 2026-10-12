@@ -42,11 +42,12 @@ import importlib.util
 import json
 import math
 import re
+import shlex
 import statistics
 import subprocess
 import sys
 from dataclasses import dataclass
-from typing import Callable, NamedTuple
+from typing import Callable, Literal, NamedTuple
 from pathlib import Path
 
 # Bounded exception to "this file never imports the renderer" (see the module
@@ -936,7 +937,8 @@ class _VrWithheldRow(NamedTuple):
     label: str
     noun: str
     feeds: str
-    entry_shape: str
+    # The renderer's typed set, copied: "job", "group" or "step" (OPT84).
+    entry_shape: Literal["job", "group", "step"]
 
 
 _VR_WITHHELD_ROWS = (
@@ -1214,7 +1216,26 @@ _VR_OPT84_WITHHOLD_PHRASES = {
     "working_directory_unknown":
         "the slow step's working directory could not be placed inside the "
         "checkout, so which package.json applies is unknown",
+    "type_aware_lint_scan_missing":
+        "the scan that wrote this findings file recorded no lint-tooling read, so "
+        "the step's tools could not be checked",
+    "type_aware_config_reader_failed":
+        "the scan's lint-tooling reader failed, so the step's tools could not be "
+        "checked",
 }
+# The OPT84 held-back gates decided on a candidate STEP: an entry under one of
+# these names its step (`step`), and an entry under any other (a pole-level
+# gate, decided before a step is chosen) names none. Every held-back gate but
+# the pole-level ones.
+_VR_OPT84_POLE_LEVEL_GATES = frozenset({
+    "pole_workflow_ambiguous", "pole_step_entries_unreadable",
+    "pole_step_timings_unavailable", "workflow_yaml_unavailable",
+    "pole_job_not_matched_in_yaml", "type_aware_lint_scan_missing",
+    "type_aware_config_reader_failed",
+})
+_VR_OPT84_STEP_GATES = frozenset(_VR_OPT84_WITHHOLD_PHRASES) - _VR_OPT84_POLE_LEVEL_GATES
+# "step"-shaped rows, by doc key: the gates whose entries carry `step`.
+_VR_STEP_GATES_BY_KEY = {_VR_OPT84_WITHHELD_DOC_KEY: _VR_OPT84_STEP_GATES}
 _VR_PARALLEL_STEPS_WITHHOLD_PHRASES = {
     "dominant_step_runs_inside_a_parallel_group":
         "the job's slowest steps run side by side with other steps (in a "
@@ -1356,6 +1377,18 @@ def _withheld_disclosure_violation(report: str, findings_path: Path | None
                 return (f"{key} records gate {r['gate']!r}, which has no plain-English "
                         "phrase in verify_report - the withheld row cannot be "
                         "re-derived, and a code is never a reason"), ""
+            # A "step"-shaped entry names its step exactly when its gate was
+            # decided on one: a pole-level gate naming a step claims a step the
+            # audit never chose, and a step gate without one hides which.
+            if shape == "step":
+                has_step = isinstance(r.get("step"), str) and bool(r["step"].strip())
+                want_step = r["gate"] in _VR_STEP_GATES_BY_KEY.get(key, frozenset())
+                if has_step != want_step:
+                    return (f"{key} entry for job {r.get('job')!r} under gate "
+                            f"{r['gate']!r} {'names' if has_step else 'names no'} "
+                            f"step, but that gate is decided "
+                            f"{'on a candidate step' if want_step else 'on the pole'}"
+                            ), ""
         # Both the Coverage cell AND the "Used for" cell. Held as a field
         # nothing read, the third column could be rewritten to anything — in
         # lockstep on both sides, since the renderer and this file are pinned
@@ -9125,7 +9158,7 @@ _VR_OPT84_SPLIT_UNKNOWN = (
     "The tools share one step, so how the ceiling splits between them is unknown "
     "until measured")
 _VR_OPT84_TS6_ALIAS = (
-    "A type-aware ESLint config here calls the TypeScript compiler API, which "
+    "A type-aware ESLint config in this repo calls the TypeScript compiler API, which "
     "TypeScript 7.0 does not ship: keep the `@typescript/typescript6` alias beside "
     "it for those tools")
 _VR_OPT84_SUMMARY = "uncredited, benchmark first"
@@ -9178,17 +9211,225 @@ def _vr_opt84_fit_words(t: dict) -> str:
     fit = str(t.get("fit") or "")
     reasons = [_flatten_cell(str(r)) for r in t.get("fit_reasons") or [] if r]
     if fit == "dual-run":
-        if note and note not in reasons:
-            reasons.append(note)
         why = "; ".join(reasons)
-        return "run both" + (f": {why}" if why else "")
-    if fit == "drop-in":
+        words = "run both" + (f": {why}" if why else "")
+    elif fit == "drop-in":
         words = "drop-in"
     elif fit == "deferred_to_opt82":
         words = "see OPT82 first: its type-aware rules are that finding's to settle"
     else:
         words = _flatten_cell(fit) or "unknown"
     return words + (f"; {note}" if note else "")
+
+
+# ESLint plugins oxlint implements natively (collect_runs
+# `_OPT84_OXLINT_NATIVE_PLUGINS`, copied; a coupling test pins them equal). Any
+# other plugin on a config the run reads makes an ESLint row a dual-run.
+_VR_OPT84_OXLINT_NATIVE_PLUGINS = frozenset({
+    "@typescript-eslint", "typescript-eslint", "unicorn", "import", "import-x",
+    "jsdoc", "jsx-a11y", "n", "promise", "jest", "vitest", "@vitest"})
+_VR_OPT84_TS_NATIVE_MAJOR = 7
+
+
+def _vr_opt84_plugin_name(p: str) -> str:
+    """collect_runs `_opt84_plugin_name`, copied: `eslint-plugin-x` is `x`, and
+    `@scope/eslint-plugin(-x)` is `@scope(/x)`."""
+    p = p.strip()
+    if p.startswith("eslint-plugin-"):
+        return p[len("eslint-plugin-"):]
+    if p.startswith("@") and "/eslint-plugin" in p:
+        scope, _sep, rest = p.partition("/eslint-plugin")
+        return scope + ("/" + rest.lstrip("-") if rest.lstrip("-") else "")
+    return p
+
+
+def _vr_opt84_major(spec: object) -> "int | None":
+    """collect_runs `_opt84_major`, copied: the major of a plain semver spec
+    (`^5.6.2`, `~7.0`, `5.6.2`, `>=5`), the aliased version's for an npm alias
+    (`npm:@typescript/typescript6@6.0.2` is 6), else None (`catalog:`,
+    `workspace:*`, a tag, a URL). A coupling test pins the two on samples."""
+    if not isinstance(spec, str):
+        return None
+    if spec.strip().startswith("npm:"):
+        aliased = spec.strip()[len("npm:"):]
+        at = aliased.rfind("@")
+        if at <= 0:
+            return None
+        spec = aliased[at + 1:]
+    m = re.fullmatch(r"\s*(?:\^|~|>=|=|v)?\s*(\d+)(?:\.[\dx*]+){0,2}"
+                     r"(?:-[\w.]+)?\s*", spec)
+    return int(m.group(1)) if m else None
+
+
+def _vr_opt84_leaf_wd(t: dict) -> str:
+    """The directory the tool's (first) leaf runs in, read from its stamped
+    benchmark pair, which `cd`s there whenever it is not the checkout root."""
+    cmds = _as_list(t.get("benchmark_commands"))
+    m = re.match(r"\(cd (.+?) && time ", str(cmds[0]) if cmds else "")
+    if not m:
+        return ""
+    try:
+        parts = shlex.split(m.group(1))
+    except ValueError:
+        parts = [m.group(1)]
+    wd = (parts[0] if parts else "").strip().strip("/")
+    return "" if wd in (".", "./") else wd.removeprefix("./")
+
+
+def _vr_opt84_walk(wd: str) -> list[str]:
+    """`wd` and every directory above it, nearest first, ending at the root ""."""
+    out, d = [wd], wd
+    while d:
+        d = d.rsplit("/", 1)[0] if "/" in d else ""
+        out.append(d)
+    return out
+
+
+def _vr_opt84_eslint_configs(block: dict, wd: str, explicit: "str | None"
+                             ) -> "tuple[list[dict], list[str]]":
+    """The ESLint configs a run in `wd` reads, and the unreadable config files
+    that could be among them - collect_runs `_opt82_applicable_configs`, in
+    this file's words: the `-c` config when one is passed; else the nearest
+    flat config at or above `wd`; else the legacy cascade (the nearest
+    `.eslintrc*` and its ancestors up to `root: true` or a literal type-aware
+    OFF, plus every `.eslintrc*` below `wd`). A step that forces eslintrc mode
+    with `ESLINT_USE_FLAT_CONFIG=false` is not modelled here (the env is not
+    stamped); it reads as flat mode."""
+    import posixpath
+    configs = [c for c in _as_list(block.get("configs")) if isinstance(c, dict)]
+    unreadable = [str(u) for u in _as_list(block.get("unreadable")) if isinstance(u, str)]
+
+    def _udir(u: str) -> str:
+        return u.rsplit("/", 1)[0] if "/" in u else ""
+
+    def _flat_name(u: str) -> bool:
+        return u.rsplit("/", 1)[-1].startswith("eslint.config.")
+
+    if explicit:
+        want = posixpath.normpath(posixpath.join(wd, explicit) if wd else explicit)
+        return ([c for c in configs if c.get("path") == want],
+                [u for u in unreadable if u == want])
+    walk = _vr_opt84_walk(wd)
+    flat_dirs = ({str(c.get("dir") or "") for c in configs if c.get("format") == "flat"}
+                 | {_udir(u) for u in unreadable if _flat_name(u)})
+    flat_near = next((d for d in walk if d in flat_dirs), None)
+    if flat_near is not None:
+        return ([c for c in configs if c.get("format") == "flat"
+                 and str(c.get("dir") or "") == flat_near],
+                [u for u in unreadable if _flat_name(u) and _udir(u) == flat_near])
+    rc = [c for c in configs if c.get("format") != "flat"]
+    rc_unread = [u for u in unreadable if not _flat_name(u)]
+    rc_dirs = {str(c.get("dir") or "") for c in rc} | {_udir(u) for u in rc_unread}
+    near = next((d for d in walk if d in rc_dirs), None)
+
+    def _below(x: str) -> bool:
+        return x != "" and (wd == "" or x.startswith(wd + "/"))
+
+    def _halts(cs: list) -> bool:
+        return any(c.get("root") for c in cs) or any(
+            c.get("sets_off") and c.get("type_aware") != "on" for c in cs)
+
+    picked = [c for c in rc if (near is not None and c.get("dir") == near)
+              or (_below(str(c.get("dir") or "")) and str(c.get("dir")) != near)]
+    cascade: set[str] = set()
+    at_near = [c for c in rc if near is not None and c.get("dir") == near]
+    if at_near:
+        stop, d = _halts(at_near), near or ""
+        while d and not stop:
+            d = d.rsplit("/", 1)[0] if "/" in d else ""
+            here = [c for c in rc if str(c.get("dir") or "") == d]
+            cascade.add(d)
+            picked += [c for c in here if c not in picked]
+            stop = _halts(here)
+    bad = [u for u in rc_unread
+           if _udir(u) == near or _below(_udir(u)) or _udir(u) in cascade]
+    return picked, bad
+
+
+def _vr_opt84_eslint_flag(cmd: str) -> "str | None":
+    """The `-c` / `--config` value on an ESLint leaf, if any."""
+    try:
+        toks = shlex.split(cmd)
+    except ValueError:
+        toks = cmd.split()
+    for i, tok in enumerate(toks):
+        if tok in ("-c", "--config") and i + 1 < len(toks):
+            return toks[i + 1]
+        if tok.startswith("--config="):
+            return tok.split("=", 1)[1]
+    return None
+
+
+def _vr_opt84_eslint_dual_run_reasons(block: dict, t: dict) -> list[str]:
+    """Why the scan's own facts make this ESLint row a dual-run, read from the
+    configs its leaf's run reads: an unread or missing config, custom or local
+    rules, a plugin oxlint does not carry natively, type-aware parsing on or
+    unresolved, the react-hooks/exhaustive-deps rule, a shareable config or an
+    import not followed, or a truncated walk that never reached the directory.
+    Empty: nothing the scan read contradicts a plain swap."""
+    wd = _vr_opt84_leaf_wd(t)
+    cfgs, unread = _vr_opt84_eslint_configs(
+        block, wd, _vr_opt84_eslint_flag(str(t.get("leaf_command") or "")))
+    why: list[str] = []
+    if unread:
+        why.append(f"config(s) {sorted(unread)} could not be read")
+    if not cfgs and not unread:
+        why.append(f"no ESLint config the run in {wd or '.'!r} reads was recorded")
+    if block.get("truncated") is True:
+        dirs = [str(_as_dict(c).get("dir") or "") for c in _as_list(block.get("configs"))]
+        dirs += [u.rsplit("/", 1)[0] if "/" in u else ""
+                 for u in _as_list(block.get("unreadable")) if isinstance(u, str)]
+        seen = (any(d == "" for d in dirs) if wd == "" else
+                any(d == wd or d.startswith(wd + "/") for d in dirs))
+        if not seen:
+            why.append(f"the config walk was truncated before reaching {wd or '.'!r}")
+    facts_by_path = _as_dict(block.get("eslint_config_facts"))
+    for c in cfgs:
+        path = str(c.get("path") or "")
+        if c.get("custom_rules"):
+            why.append(f"custom local rules in `{path}`")
+        ta = str(c.get("type_aware") or "")
+        if ta in ("on", "unresolved"):
+            why.append(f"type-aware parsing {ta} in `{path}`")
+        for sc in _as_list(c.get("shared_configs")):
+            why.append(f"shareable config {sc} not followed (`{path}`)")
+        if c.get("unresolved_imports"):
+            why.append(f"a config import in `{path}` was not followed")
+        facts = facts_by_path.get(path)
+        if not isinstance(facts, dict):
+            why.append(f"`{path}`: its plugins and local rules were not read")
+            continue
+        if facts.get("local_rules"):
+            why.append(f"custom local rules in `{path}`")
+        for raw in _as_list(facts.get("plugins")):
+            pn = _vr_opt84_plugin_name(str(raw))
+            if pn and pn not in _VR_OPT84_OXLINT_NATIVE_PLUGINS:
+                why.append(f"plugin {pn} in `{path}`")
+        if facts.get("exhaustive_deps"):
+            why.append(f"react-hooks/exhaustive-deps rule in `{path}`")
+    return list(dict.fromkeys(why))
+
+
+def _vr_opt84_prettier_dual_run_reasons(block: dict, t: dict) -> list[str]:
+    """Why the scan's own facts make this Prettier row a dual-run: a Prettier
+    plugin declared by a package.json at or above its leaf's directory, or a
+    directory on that walk whose plugins were not read (no `prettier_plugins`
+    in the scan, or an unreadable package.json there)."""
+    plugins = block.get("prettier_plugins")
+    if not isinstance(plugins, dict):
+        return ["its Prettier plugins were not read (the scan recorded no "
+                "prettier_plugins)"]
+    unreadable = {str(u) for u in _as_list(block.get("package_scripts_unreadable"))}
+    why: list[str] = []
+    for d in _vr_opt84_walk(_vr_opt84_leaf_wd(t)):
+        where = f"{d}/package.json" if d else "package.json"
+        got = plugins.get(d)
+        if d in unreadable or (got is not None and not isinstance(got, list)):
+            why.append(f"`{where}` could not be read, so its Prettier plugins were "
+                       "not read")
+        for name in got if isinstance(got, list) else []:
+            why.append(f"Prettier plugin {name} in `{where}`")
+    return why
 
 
 def check_opt84_tool_swap(report: str, findings_path: Path | None) -> Check:
@@ -9198,6 +9439,13 @@ def check_opt84_tool_swap(report: str, findings_path: Path | None) -> Check:
     card, in its pole's section (after any OPT83 card, before any OPT81 card) or
     in its own section, whose only duration and percentage claims are the step's
     p50, the job's p50 and the step's share of it.
+
+    Each tool row is also held to the facts it was stamped from: the scan's
+    lint-tooling read must exist and not have failed; `published_range` is
+    required; `leaf_command` is one of the step's `resolved_leaves`;
+    `fit_reasons` is non-empty exactly on a dual-run; a tsc row's version reads
+    as a major under 7; and a "drop-in" is re-derived from the scan's ESLint
+    config facts / Prettier plugins (and refused from a truncated walk).
 
     OPT84 is uncredited by design: the step's own p50 is the most a swap can
     remove, and the published range is the catalog's, so any other number on the
@@ -9236,6 +9484,19 @@ def check_opt84_tool_swap(report: str, findings_path: Path | None) -> Check:
             bad.append("the report renders an OPT84 card, but the run recorded no "
                        "OPT84 finding")
         return Check(name, not bad, "; ".join(bad) if bad else "no tool-swap findings")
+    # The scan's lint-tooling read every tool row's fit and version rest on
+    # (the engine holds a pole back as `type_aware_lint_scan_missing` /
+    # `type_aware_config_reader_failed` without it). A finding stamped while it
+    # is missing or failed rests on ground the scan never saw.
+    tal = doc.get("type_aware_lint")
+    block = tal if isinstance(tal, dict) else {}
+    if not isinstance(tal, dict):
+        bad.append(f"{len(found)} OPT84 finding(s), but the findings doc has no "
+                   "type_aware_lint block: the scan recorded no lint-tooling read, so "
+                   "no tool's fit or version could have been checked")
+    elif block.get("error"):
+        bad.append(f"{len(found)} OPT84 finding(s) stamped from a lint-tooling read "
+                   f"that failed ({block.get('error')})")
     poles = [p for p in _as_list(_as_dict(doc.get("pr_critical_path")).get("poles"))
              if isinstance(p, dict)]
     rendered = {(w, c) for w, c, _b in _pole_header_sections(report)}
@@ -9330,10 +9591,51 @@ def check_opt84_tool_swap(report: str, findings_path: Path | None) -> Check:
             if fit == "deferred_to_opt82" and row != "eslint":
                 bad.append(f"{fid}: tool {row!r} fit 'deferred_to_opt82' on a row "
                            "other than ESLint; the engine defers only ESLint")
-            if fit == "dual-run" and not [r for r in _as_list(t.get("fit_reasons"))
-                                          if str(r or "").strip()]:
+            stamped_reasons = [r for r in _as_list(t.get("fit_reasons"))
+                               if str(r or "").strip()]
+            if fit == "dual-run" and not stamped_reasons:
                 bad.append(f"{fid}: tool {row!r} fit 'dual-run' with no fit_reasons; "
                            "the engine stamps a dual-run only with its reasons")
+            # …and only a dual-run: `fit_reasons` non-empty <=> fit == dual-run
+            # (the workspace-packages note rides on `packages`, never here).
+            if fit != "dual-run" and stamped_reasons:
+                bad.append(f"{fid}: tool {row!r} fit {fit!r} with fit_reasons "
+                           f"{stamped_reasons}; only a dual-run carries reasons")
+            leaves = [str(x) for x in _as_list(ts.get("resolved_leaves"))]
+            if str(t.get("leaf_command") or "") not in leaves:
+                bad.append(f"{fid}: tool {row!r} leaf_command "
+                           f"{str(t.get('leaf_command') or '')!r} is not one of the "
+                           f"step's resolved_leaves {leaves}")
+            # The tsc row exists only below the native compiler's major: its
+            # version must read, by the engine's rule, as a major under 7.
+            if row == "tsc":
+                major = _vr_opt84_major(t.get("source_version"))
+                if major is None:
+                    bad.append(f"{fid}: tsc row source_version "
+                               f"{t.get('source_version')!r} is not a readable "
+                               "TypeScript version; the engine holds such a step back")
+                elif major >= _VR_OPT84_TS_NATIVE_MAJOR:
+                    bad.append(f"{fid}: tsc row source_version "
+                               f"{t.get('source_version')!r} is already TypeScript "
+                               f"{major}, the native compiler; nothing to swap")
+            # A drop-in is re-derived from the scan facts the engine read: any
+            # fact that makes the swap lossy contradicts it.
+            if fit == "drop-in" and isinstance(tal, dict):
+                if block.get("truncated") is True and row in ("prettier", "tsc"):
+                    bad.append(f"{fid}: {row} row stamped 'drop-in' from a truncated "
+                               "lint-tooling walk, which never showed what it skipped")
+                if row == "eslint":
+                    why = _vr_opt84_eslint_dual_run_reasons(block, t)
+                    if why:
+                        bad.append(f"{fid}: ESLint row stamped 'drop-in', but the "
+                                   "scan's facts call for a dual-run: "
+                                   + "; ".join(why))
+                elif row == "prettier":
+                    why = _vr_opt84_prettier_dual_run_reasons(block, t)
+                    if why:
+                        bad.append(f"{fid}: Prettier row stamped 'drop-in', but the "
+                                   "scan's facts call for a dual-run: "
+                                   + "; ".join(why))
             if t.get("docs_url") != _VR_OPT84_DOCS_URLS.get(row):
                 bad.append(f"{fid}: tool {row!r} docs_url {t.get('docs_url')!r} is not "
                            "the known docs link for its row")
@@ -9342,7 +9644,10 @@ def check_opt84_tool_swap(report: str, findings_path: Path | None) -> Check:
                 bad.append(f"{fid}: tool {row!r} migration_docs_url "
                            f"{t.get('migration_docs_url')!r} is not the known migration "
                            f"guide for its row ({_VR_OPT84_MIGRATION_DOCS_URLS.get(row)!r})")
-            if ("published_range" in t and row in _VR_OPT84_ROWS
+            if "published_range" not in t:
+                bad.append(f"{fid}: tool {row!r} carries no published_range, a "
+                           "required stamp")
+            elif (row in _VR_OPT84_ROWS
                     and t.get("published_range") != _VR_OPT84_PUBLISHED_RANGE.get(row)):
                 bad.append(f"{fid}: tool {row!r} published_range "
                            f"{t.get('published_range')!r} is not the catalog's "
