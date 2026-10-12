@@ -9245,9 +9245,10 @@ def _vr_opt84_plugin_name(p: str) -> str:
 
 def _vr_opt84_major(spec: object) -> "int | None":
     """collect_runs `_opt84_major`, copied: the major of a plain semver spec
-    (`^5.6.2`, `~7.0`, `5.6.2`, `>=5`), the aliased version's for an npm alias
-    (`npm:@typescript/typescript6@6.0.2` is 6), else None (`catalog:`,
-    `workspace:*`, a tag, a URL). A coupling test pins the two on samples."""
+    (`^5.6.2`, `~7.0`, `5.6.2`, `=5`), the aliased version's for an npm alias
+    (`npm:@typescript/typescript6@6.0.2` is 6), else None: an open-ended range
+    (`>=5`, `>4`: the installed major may be any above it), `*`, a tag,
+    `workspace:*`, `catalog:`, a URL. A coupling test pins the two on samples."""
     if not isinstance(spec, str):
         return None
     if spec.strip().startswith("npm:"):
@@ -9256,7 +9257,7 @@ def _vr_opt84_major(spec: object) -> "int | None":
         if at <= 0:
             return None
         spec = aliased[at + 1:]
-    m = re.fullmatch(r"\s*(?:\^|~|>=|=|v)?\s*(\d+)(?:\.[\dx*]+){0,2}"
+    m = re.fullmatch(r"\s*(?:\^|~|=|v)?\s*(\d+)(?:\.[\dx*]+){0,2}"
                      r"(?:-[\w.]+)?\s*", spec)
     return int(m.group(1)) if m else None
 
