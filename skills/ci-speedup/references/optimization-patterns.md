@@ -3658,7 +3658,11 @@ title_template: "Missing `timeout-minutes` on Known-Flaky Integration Jobs"
    sampled duration reached at least 95% of GitHub's 360 minute default timeout
    and ended no more than 15 minutes after it. A longer failed span was not a
    default-timeout kill (the job was waiting, e.g. on a deployment approval that
-   expires after 30 days), so an explicit timeout could not cut it.
+   expires after 30 days), so an explicit timeout could not cut it. Only the 360
+   minute default is GitHub's, and it applies on GitHub-hosted and self-hosted
+   runners alike (the 5-day self-hosted limit caps an explicit timeout, not the
+   default); the 95% floor and the 15-minute grace are this detector's own
+   tolerances.
 3. Require at least three successful timed samples for the same workflow job,
    compute p99, and recommend `timeout-minutes` above
    `max(p99 + 10m, p99 * 1.5, 15m)`, rounded up to minutes. Matrix jobs are

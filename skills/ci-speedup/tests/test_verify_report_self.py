@@ -7031,6 +7031,17 @@ def test_tier2_post_completion_opt57_rejects_sample_beyond_default_timeout_kill(
     assert "beyond the default-timeout kill" in chk.detail
 
 
+def test_opt57_verifier_kill_band_stays_coupled_to_the_engine():
+    # The verifier re-derives OPT57 with its own copy of the band; a grace or floor
+    # retuned on one side only would make it reject valid reports or accept credit
+    # the engine no longer gives.
+    vr = _load_verify_report()
+    sys.path.insert(0, str(_SKILL_DIR / "scripts"))
+    import collect_runs as cr  # noqa: E402
+    assert vr._VR_OPT57_NEAR_DEFAULT_TIMEOUT_S == cr._OPT57_NEAR_DEFAULT_TIMEOUT_S == 20520.0
+    assert vr._VR_OPT57_DEFAULT_KILL_CEILING_S == cr._OPT57_DEFAULT_KILL_CEILING_S == 22500.0
+
+
 def test_tier2_post_completion_opt57_accepts_full_precision_p99_boundary(tmp_path: Path):
     vr = _load_verify_report()
     doc = _tier2_doc_for_verify()

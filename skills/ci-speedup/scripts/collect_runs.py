@@ -8184,7 +8184,10 @@ _OPT57_NEAR_DEFAULT_TIMEOUT_S = 0.95 * _GHA_DEFAULT_JOB_TIMEOUT_S
 # execution an explicit timeout could cut — it is time the job spent waiting
 # (e.g. a deployment-environment approval, which expires after 30 days: nrwl/nx's
 # `publish` sampled 2,592,001 s failures). The grace absorbs the cancellation /
-# teardown lag between the kill and `completed_at`.
+# teardown lag between the kill and `completed_at`. Only the 360 min default is
+# GitHub's (it applies on hosted and self-hosted runners alike); the 95% floor
+# and the 15 min grace are this detector's own tolerances, not GitHub numbers.
+# tests/verify_report.py keeps a copy of both edges; a test pins them equal.
 _OPT57_KILL_GRACE_S = 15.0 * 60.0
 _OPT57_DEFAULT_KILL_CEILING_S = _GHA_DEFAULT_JOB_TIMEOUT_S + _OPT57_KILL_GRACE_S
 _OPT57_TIMEOUT_BUFFER_S = 10.0 * 60.0
