@@ -1751,7 +1751,8 @@ that found nothing.
 OPT57 now has a measured timeout-default-burn upgrade. A missing
 `timeout-minutes` key is only the structural gate: `collect_runs.py` emits a
 finding only when a failed/timed-out sampled job without an explicit timeout
-burned at least 95% of GitHub's 360 minute default, and the same workflow job has
+burned at least 95% of GitHub's 360 minute default and ended no more than 15
+minutes past it (a longer failed span was waiting, not runner time), and the same workflow job has
 at least three explicitly successful timed samples that support a recommended
 `timeout-minutes` above p99. Candidate workflows come from the scanned workflow
 graph, so this detector can run even when a workflow has no prior static finding.

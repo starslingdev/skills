@@ -1082,6 +1082,17 @@ unversioned and updates by reinstall from `main`.
   differently named jobs; every other mention, including the headline and a
   workflow the measurements don't cover, is still compared by name. The
   report text itself is unchanged.
+- **2026-10-12** — **A missing-timeout finding (OPT57) no longer credits time a
+  job spent waiting as runner minutes it could save.** Without
+  `timeout-minutes`, GitHub stops a job at 360 minutes, so only a failed job
+  that ran for about that long is burn an explicit timeout could cut. The
+  detector counted any failed job at least that long, including one that sat
+  for 30 days waiting on a deployment approval before expiring. On nrwl/nx this
+  credited about 64,000 runner-min/mo to a `publish` job whose measured compute
+  is about 780 min/mo, and the report's check that no saving exceeds its jobs'
+  measured compute refused the report. A failed sample now counts only when it
+  ended within 15 minutes after the 360-minute kill; the report verifier
+  rejects a finding that credits a longer one. (#131)
 - **2026-10-12** — **The report's self-check no longer rejects a correct
   headline when a smaller, demoted cluster fix sits beneath it** (#130). The
   two Bottom-line crown checks counted any headline win at least as large as a
