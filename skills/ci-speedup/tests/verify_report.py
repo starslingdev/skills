@@ -4562,6 +4562,14 @@ def _spine_job_identities(graph: dict, wf: str, job: str,
     return out
 
 
+# Findings that measure failure waste ON PURPOSE (post-failure sibling compute, superseded /
+# cancelled runs, the failure rate, the default-timeout kill, rerun attempts) keep their own
+# basis: they are bounded by every sampled job run, not by successful runs only. EMBEDDED copy of
+# `collect_runs._FAILURE_WASTE_PATTERNS` (verify_report imports no engine module); a coupling test
+# pins the two.
+_FAILURE_WASTE_PATTERNS = frozenset({"OPT35", "OPT46", "OPT48", "OPT57", "OPT64"})
+
+
 def check_saving_within_measured_compute(report: str, findings_path: Path | None) -> Check:
     """**Physical bound (c) — a runner-minute saving never exceeds the compute it cuts.** A finding's
     credited `runner_min_saving` (monthly billable minutes it claims to remove) can never exceed the
@@ -4628,14 +4636,32 @@ def check_saving_within_measured_compute(report: str, findings_path: Path | None
                 return True
         return False
 
+    # SUCCESSFUL JOB RUNS ONLY (owner decision 2026-10-12). The bound for every finding is its
+    # jobs' successful-run compute (`success_billable_equiv_min_per_month`); a failed, cancelled or
+    # timed-out attempt would otherwise inflate it (one six-hour hang among a dozen runs). Findings
+    # that measure failure waste on purpose (`_FAILURE_WASTE_PATTERNS`) keep their own basis and
+    # are bounded by every sampled run (`compute_all`). A pre-split row counts its full figure when
+    # it was sampled from successful runs only (a latest-attempt `status_filter: success` row, or a
+    # row stamping no status at all); a pre-split row that admits non-success runs (an all-status
+    # prior-attempt row) is UNSPLIT, and a success-basis saving bounded by one FAILS: its measured
+    # compute includes failed runs, so an old-style artifact cannot pass on that bound.
     compute: dict[tuple[str, str], float] = {}
+    compute_all: dict[tuple[str, str], float] = {}
+    unsplit: set[tuple[str, str]] = set()
     for r in rows:
         r = _as_dict(r)
         wf = str(r.get("workflow_file") or "")
         jb = _base(r.get("job_name") or "")
         bill = _num(r.get("billable_equiv_min_per_month")) or 0.0
+        success = _num(r.get("success_billable_equiv_min_per_month"))
+        if success is None:
+            status = str(r.get("status_filter") or "").strip()
+            if status and status != "success":
+                unsplit.add((wf, jb))
+            success = bill
         if wf and jb:
-            compute[(wf, jb)] = compute.get((wf, jb), 0.0) + bill
+            compute[(wf, jb)] = compute.get((wf, jb), 0.0) + success
+            compute_all[(wf, jb)] = compute_all.get((wf, jb), 0.0) + bill
 
     checked = 0
     uncovered: list[str] = []
@@ -4663,10 +4689,13 @@ def check_saving_within_measured_compute(report: str, findings_path: Path | None
         # `_whole_run_cancel_base_key` is at least as strict as this `_base` (it does no
         # scope-stripping), so the two gates tighten together and the door still bounds
         # to a subset of what this guard bounds.
+        failure_basis = str(f.get("pattern") or "") in _FAILURE_WASTE_PATTERNS
+        basis = compute_all if failure_basis else compute
         matched = 0
         distinct = 0
         bound = 0.0
         seen: set[str] = set()
+        mixed: list[str] = []
         for j in jobs:
             b = _base(j)
             if not b:
@@ -4684,7 +4713,9 @@ def check_saving_within_measured_compute(report: str, findings_path: Path | None
             distinct += 1
             if key:
                 matched += 1
-                bound += compute[key]
+                bound += basis[key]
+                if key in unsplit and not failure_basis:
+                    mixed.append(j)
             elif not _templated_in_wf(wf, b):
                 # Job base present under ANY workflow file (a reusable-workflow caller loses the wf).
                 # NOT for a job declared in `wf` under a `${{ }}`-templated `name:` (and not a
@@ -4695,10 +4726,20 @@ def check_saving_within_measured_compute(report: str, findings_path: Path | None
                 # LITERAL base only — graph aliases are same-workflow evidence and must not widen
                 # this cross-workflow match (see `_identities`); a job with no row in its own
                 # workflow stays an honest coverage gap rather than binding a foreign namesake.
-                alt = [v for (w, jb), v in compute.items() if jb == b]
+                alt = [(v, k) for k, v in basis.items() if k[1] == b]
                 if alt:
                     matched += 1
-                    bound += max(alt)
+                    best, best_key = max(alt)
+                    bound += best
+                    if best_key in unsplit and not failure_basis:
+                        mixed.append(j)
+        if mixed:
+            return Check(name, False,
+                         f"finding `{f.get('pattern', '?')}` is bounded by measured compute for "
+                         f"{mixed} that includes failed, cancelled or timed-out job runs (a cost-spine "
+                         "row sampled from all run conclusions with no successful-run split) — "
+                         "measured compute counts successful job runs only; re-run the collector so "
+                         "each row stamps `success_billable_equiv_min_per_month`")
         if matched == 0:
             uncovered.append(f"{f.get('pattern', '?')}({', '.join(jobs[:2])})")
             continue
@@ -4710,10 +4751,12 @@ def check_saving_within_measured_compute(report: str, findings_path: Path | None
         # Directional upper bound + tolerance (L6): the spine's per-run mean is measured while the
         # finding's saving is a model over the same monthly volume, so allow small rounding slack.
         if saving > bound * 1.02 + 0.1:
+            what = ("billable compute across every sampled run" if failure_basis
+                    else "billable compute from successful job runs")
             return Check(name, False,
                          f"finding `{f.get('pattern', '?')}` credits {saving:g} min/mo of runner-time "
                          f"but its affected job(s) {jobs} measure only {round(bound, 1):g} min/mo of "
-                         "billable compute in the cost spine — a fix cannot save more minutes than "
+                         f"{what} in the cost spine — a fix cannot save more minutes than "
                          "the jobs consume (the saving model overstates the job's measured cost)")
     detail = f"{checked} credited saving(s) within measured compute"
     if partial:
@@ -5180,6 +5223,61 @@ def _rendered_number_problem(label: str, got_cell: object, want: object, *,
     return None
 
 
+def _spine_row_success_split(row: dict, occurrence_n: float, workflow_n: float,
+                             monthly: float, mean_billed: float) -> dict:
+    """Re-derive one cost-spine row's successful / excluded split from its own sample. The row's
+    sampled billable minutes are whole minutes per job run (`round(mean_billed * occurrences)`,
+    the same recovery the 1-minute floor check uses); the excluded failed / cancelled / timed-out
+    runs' minutes come off that total, and both halves extrapolate exactly like the row
+    (sampled minutes / sampled workflow runs x 30d volume). A success figure that still carries
+    the excluded minutes cannot re-derive."""
+    problems: list[str] = []
+    success_n = row.get("success_occurrence_count")
+    excluded_n = row.get("excluded_non_success_occurrence_count")
+    excluded_sampled = row.get("excluded_non_success_sampled_billable_min")
+    ints = (success_n, excluded_n, excluded_sampled)
+    if not all(isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in ints):
+        return {"problems": ["successful / excluded job-run split missing or not whole counts"],
+                "success_month": 0.0, "excluded_runs": 0, "excluded_sampled": 0,
+                "excluded_month": 0.0}
+    sampled_total = round(mean_billed * occurrence_n)
+    if success_n + excluded_n != occurrence_n:
+        problems.append("success_occurrence_count + excluded_non_success_occurrence_count "
+                        "does not equal sampled_job_occurrence_count")
+    if excluded_sampled > sampled_total or (excluded_n == 0 and excluded_sampled != 0):
+        problems.append("excluded_non_success_sampled_billable_min is outside the row's sample")
+    success_month = round(max(sampled_total - excluded_sampled, 0) / workflow_n * monthly, 3)
+    excluded_month = round(excluded_sampled / workflow_n * monthly, 3)
+    if not _close(row.get("success_billable_equiv_min_per_month"), success_month):
+        problems.append("success_billable_equiv_min_per_month does not rederive (measured "
+                        "compute must count successful job runs only)")
+    if not _close(row.get("excluded_non_success_billable_equiv_min_per_month"), excluded_month):
+        problems.append("excluded_non_success_billable_equiv_min_per_month does not rederive")
+    return {"problems": problems, "success_month": success_month, "excluded_runs": excluded_n,
+            "excluded_sampled": excluded_sampled, "excluded_month": excluded_month}
+
+
+def _measured_compute_footnote(spine: dict) -> str:
+    """MIRROR of `blocking_path._measured_compute_footnote` (verify_report imports no engine
+    module): the cost-spine basis line rebuilt from stamped facts only."""
+    if str(spine.get("measured_compute_basis") or "") != "successful_job_runs_only":
+        return ""
+    totals = _as_dict(spine.get("totals"))
+    excluded = _as_dict(spine.get("excluded_non_success"))
+    success = _num(totals.get("success_billable_equiv_min_per_month")) or 0.0
+    count = int(_num(excluded.get("job_run_count")) or 0)
+    head = (f"Measured compute counts successful job runs only: {success:.3f} billable "
+            "min/mo. Every saving is capped and verified against it")
+    if count <= 0:
+        return head + "; no failed, cancelled or timed-out job run was sampled."
+    sampled = int(_num(excluded.get("sampled_billable_min")) or 0)
+    monthly = _num(excluded.get("billable_equiv_min_per_month")) or 0.0
+    plural = "" if count == 1 else "s"
+    return (head + f"; {count} failed, cancelled or timed-out job run{plural} "
+            f"({sampled} sampled billable min, {monthly:.3f} min/mo) excluded from it, "
+            "though the table above still counts their minutes.")
+
+
 def check_runner_minute_spine_contract(report: str, findings_path: Path | None) -> Check:
     name = "runner-minute cost spine source block is re-derivable"
     marker_count = len(_RUNNER_MINUTE_SPINE_MARKER_RE.findall(report or ""))
@@ -5275,6 +5373,16 @@ def check_runner_minute_spine_contract(report: str, findings_path: Path | None) 
     latest_attempt_row_count = 0
     prior_attempt_row_count = 0
     total_raw = total_billed = 0.0
+    # Measured compute = successful job runs only (owner decision 2026-10-12). A spine stamping
+    # that basis must carry the successful / excluded split on EVERY row, re-derivable from the
+    # row's own sample; a pre-split artifact (no basis stamp) is bounded by
+    # `check_saving_within_measured_compute`'s legacy rule instead.
+    basis_stamp = spine.get("measured_compute_basis")
+    split_basis = basis_stamp is not None
+    if split_basis and basis_stamp != "successful_job_runs_only":
+        problems.append(f"measured_compute_basis={basis_stamp!r}")
+    total_success = excluded_month = 0.0
+    excluded_runs = excluded_sampled = 0
     for idx, raw_row in enumerate(rows, 1):
         row = _as_dict(raw_row)
         key = _runner_spine_key_from_row(row)
@@ -5357,6 +5465,13 @@ def check_runner_minute_spine_contract(report: str, findings_path: Path | None) 
             problems.append(f"row {idx}: raw_compute_runner_min_per_month does not rederive")
         if not _close(row.get("billable_equiv_min_per_month"), round(billed_min, 3)):
             problems.append(f"row {idx}: billable_equiv_min_per_month does not rederive")
+        if split_basis:
+            split = _spine_row_success_split(row, occurrence_n, workflow_n, monthly, mean_billed)
+            problems.extend(f"row {idx}: {p}" for p in split["problems"])
+            total_success += split["success_month"]
+            excluded_runs += split["excluded_runs"]
+            excluded_sampled += split["excluded_sampled"]
+            excluded_month += split["excluded_month"]
         total_raw += round(raw_min, 3)
         total_billed += round(billed_min, 3)
     if not _close(totals.get("row_count"), float(len(rows)), 0.0):
@@ -5367,6 +5482,26 @@ def check_runner_minute_spine_contract(report: str, findings_path: Path | None) 
         problems.append("totals.billable_equiv_min_per_month does not rederive")
     if str(totals.get("percentage_denominator") or "") != "all_rows_billable_equiv_min_per_month":
         problems.append("totals.percentage_denominator is not all-row billable minutes")
+    if split_basis:
+        if not _close(totals.get("success_billable_equiv_min_per_month"), round(total_success, 3)):
+            problems.append("totals.success_billable_equiv_min_per_month does not rederive")
+        excluded = _as_dict(spine.get("excluded_non_success"))
+        if (excluded.get("job_run_count") != excluded_runs
+                or excluded.get("sampled_billable_min") != excluded_sampled
+                or not _close(excluded.get("billable_equiv_min_per_month"),
+                              round(excluded_month, 3))):
+            problems.append("excluded_non_success does not rederive from the rows' excluded "
+                            "job runs")
+        if rendered and render_ready is True:
+            footnote = _measured_compute_footnote(spine)
+            marker = _RUNNER_MINUTE_SPINE_MARKER_RE.search(report or "")
+            section = report[marker.end():] if marker else ""
+            nxt = re.search(r"^##\s+", section, re.MULTILINE)
+            section = section[:nxt.start()] if nxt else section
+            if footnote not in section:
+                problems.append(
+                    "cost-spine footnote does not state the stamped measured-compute basis "
+                    f"(expected: {footnote!r})")
     if spine.get("latest_attempt_row_count") != latest_attempt_row_count:
         problems.append("latest_attempt_row_count does not match rows")
     if spine.get("prior_attempt_row_count") != prior_attempt_row_count:

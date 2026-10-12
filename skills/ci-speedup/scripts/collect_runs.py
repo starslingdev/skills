@@ -4801,6 +4801,17 @@ def _critical_path(jobs_per_run: list[list[dict[str, Any]]]) -> dict[str, Any]:
 # A pattern in the catalog that isn't here is sized as None/None and rendered
 # qualitatively. That's the honest path — the scanner never invents a number.
 
+# Findings that measure failure waste ON PURPOSE: post-failure sibling compute
+# (OPT35), superseded / cancelled runs (OPT46), the failure rate (OPT48), the
+# default-timeout kill (OPT57) and rerun attempts (OPT64). Their saving IS
+# failed / cancelled / timed-out compute, so they keep their own basis: the
+# measured-compute cap and its verifier twin bound them by every sampled job
+# run, while every other finding is bounded by successful job runs only (owner
+# decision 2026-10-12). MIRROR of `verify_report._FAILURE_WASTE_PATTERNS`; a
+# coupling test pins the two.
+_FAILURE_WASTE_PATTERNS: frozenset[str] = frozenset(
+    {"OPT35", "OPT46", "OPT48", "OPT57", "OPT64"})
+
 _SIZING: dict[str, dict[str, Any]] = {
     # --- Static fast-path patterns (scan.py registers detectors for these) ---
     "OPT17": {"model": "direct", "default_s": 30.0},
@@ -5736,12 +5747,19 @@ def _reground_whole_run_cancel_saving(
 
 
 def _measured_billable_index(
-        spine: dict[str, Any] | None
+        spine: dict[str, Any] | None, *, all_runs: bool = False
 ) -> "tuple[dict[tuple[str, str], float], dict[str, list[float]]] | None":
     """Build the SHARED measured-billable join index from a render-ready cost
     spine, once, for the whole sizing door. Returns `(by_wf_job, by_job)` — the
     two-tier index every door-bound finding joins against — or None when there is
     no render-ready spine to bound against.
+
+    The measured compute is each row's `success_billable_equiv_min_per_month`:
+    successful job runs only (owner decision 2026-10-12). `all_runs=True` sums the
+    row's full `billable_equiv_min_per_month` instead, the basis kept by findings
+    that measure failure waste on purpose (`_FAILURE_WASTE_PATTERNS`). A row
+    without the split (a pre-split artifact) falls back to its full figure; the
+    verifier refuses such a row when it admits non-success runs.
 
     `by_wf_job[(workflow_file, base_job)]` sums the measured monthly billable
     compute across a job's matrix legs / event scopes / attempts;
@@ -5757,7 +5775,9 @@ def _measured_billable_index(
         return None
 
     def _bill(row: dict[str, Any]) -> float:
-        v = row.get("billable_equiv_min_per_month")
+        v = None if all_runs else row.get("success_billable_equiv_min_per_month")
+        if v is None:
+            v = row.get("billable_equiv_min_per_month")
         return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else 0.0
 
     by_wf_job: dict[tuple[str, str], float] = {}
@@ -6082,6 +6102,7 @@ def _reground_runner_minute_savings(
     nothing. Under a render-ready spine they MUST resolve to a measured basis or
     unsize at the source; there is no keep-the-figure escape."""
     index = _measured_billable_index(spine)
+    all_index: Any = _UNSET     # built on first use by a failure-waste finding
     # OPT45 derives first (also stamps its own basis / unsizes on no join). Pass
     # the shared index so the spine is scanned once, not twice.
     _reground_whole_run_cancel_saving(findings, spine, index=index)
@@ -6114,7 +6135,14 @@ def _reground_runner_minute_savings(
         if policy == _RM_DOOR_NOT_DERIVABLE:
             f["runner_min_basis"] = "not_spine_derivable"
             f["runner_min_door_note"] = reason
-            _cap_at_measured_compute(f, saving, index, job_graph)
+            # A failure-waste finding keeps its own basis (every sampled run);
+            # every other finding is capped at successful-run compute.
+            if pattern in _FAILURE_WASTE_PATTERNS:
+                if all_index is _UNSET:
+                    all_index = _measured_billable_index(spine, all_runs=True)
+                _cap_at_measured_compute(f, saving, all_index, job_graph)
+            else:
+                _cap_at_measured_compute(f, saving, index, job_graph)
             continue
         if policy == _RM_DOOR_UNCLASSIFIED:
             # Loud, on purpose: a rm-crediting pattern with no declared door policy
@@ -6300,9 +6328,25 @@ def _append_runner_minute_spine_rows(
                 "durations_s": [],
                 "billable_min": [],
                 "sample_window": [],
+                "success_billable_min": 0,
+                "success_occurrences": 0,
+                "excluded_billable_min": 0,
+                "excluded_occurrences": 0,
             })
             bucket["durations_s"].append(float(duration_s))
             bucket["billable_min"].append(float(billed_min))
+            # MEASURED COMPUTE = successful job runs only (owner decision
+            # 2026-10-12). A failed, cancelled or timed-out attempt still bills, so
+            # it stays in the row's spend columns, but it is split out of the
+            # measured compute savings are capped and verified against: one
+            # six-hour hang among a dozen runs would otherwise inflate the job's
+            # total several times over. The split is stamped, never dropped.
+            if (job.get("conclusion") or "").lower() == "success":
+                bucket["success_billable_min"] += int(billed_min)
+                bucket["success_occurrences"] += 1
+            else:
+                bucket["excluded_billable_min"] += int(billed_min)
+                bucket["excluded_occurrences"] += 1
             created = str(job.get("_run_created_at") or "").strip()
             if created:
                 bucket["sample_window"].append(created)
@@ -6347,6 +6391,16 @@ def _append_runner_minute_spine_rows(
             "mean_sampled_billable_equiv_minutes": mean_billed,
             "raw_compute_runner_min_per_month": _round3(raw_min_month),
             "billable_equiv_min_per_month": _round3(billed_min_month),
+            # The successful / excluded split of the same sample, each extrapolated
+            # like the row (sampled billable minutes / sampled workflow runs x 30d
+            # volume), so verify_report re-derives both from the row alone.
+            "success_occurrence_count": bucket["success_occurrences"],
+            "success_billable_equiv_min_per_month": _round3(
+                bucket["success_billable_min"] / sampled_workflow_runs * workflow_volume),
+            "excluded_non_success_occurrence_count": bucket["excluded_occurrences"],
+            "excluded_non_success_sampled_billable_min": bucket["excluded_billable_min"],
+            "excluded_non_success_billable_equiv_min_per_month": _round3(
+                bucket["excluded_billable_min"] / sampled_workflow_runs * workflow_volume),
         })
 
 
@@ -6407,6 +6461,14 @@ def _build_runner_minute_spine(
     prior_attempt_row_count = sum(1 for row in rows if row.get("attempt_filter") == "prior")
     total_raw = sum(float(r["raw_compute_runner_min_per_month"]) for r in rows)
     total_billed = sum(float(r["billable_equiv_min_per_month"]) for r in rows)
+    total_success = sum(float(r["success_billable_equiv_min_per_month"]) for r in rows)
+    excluded_non_success = {
+        "job_run_count": sum(int(r["excluded_non_success_occurrence_count"]) for r in rows),
+        "sampled_billable_min": sum(
+            int(r["excluded_non_success_sampled_billable_min"]) for r in rows),
+        "billable_equiv_min_per_month": _round3(sum(
+            float(r["excluded_non_success_billable_equiv_min_per_month"]) for r in rows)),
+    }
     for row in rows:
         denom = total_billed
         row["share_of_all_row_total"] = _round3(
@@ -6458,10 +6520,17 @@ def _build_runner_minute_spine(
             "job_fetch_failures": int(coverage_fetch_failures),
         },
         "rows": rows,
+        # The basis of every row's `success_billable_equiv_min_per_month`, the
+        # measured compute savings are capped and verified against. The failed,
+        # cancelled and timed-out job runs it leaves out are summed here so the
+        # report names them.
+        "measured_compute_basis": "successful_job_runs_only",
+        "excluded_non_success": excluded_non_success,
         "totals": {
             "row_count": len(rows),
             "raw_compute_runner_min_per_month": _round3(total_raw),
             "billable_equiv_min_per_month": _round3(total_billed),
+            "success_billable_equiv_min_per_month": _round3(total_success),
             "percentage_denominator": "all_rows_billable_equiv_min_per_month",
         },
     }

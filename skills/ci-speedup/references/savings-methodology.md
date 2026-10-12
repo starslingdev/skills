@@ -147,6 +147,13 @@ The Tier-2 section displays runner-minutes only:
 - **Billable-equivalent minutes** — the same saving under GitHub's per-job minute
   round-up (`ceil(job_seconds/60)`), the basis the cost-spine table and Tier-2
   rankings use.
+- **Measured compute** — the cap every runner-minute saving is held to and
+  verified against counts **successful job runs only**: each spine row stamps
+  its successful-run compute (`success_billable_equiv_min_per_month`) beside the
+  failed, cancelled and timed-out runs it excludes (count, sampled minutes,
+  min/mo), and the spine footnote names them; findings that measure failure
+  waste on purpose (OPT35, OPT46, OPT48, OPT57, OPT64) keep their own basis,
+  every sampled run.
 
 All figures are runner-minutes; multiply by your runner's per-minute rate to get
 dollars. The report leaves the per-minute rate to the reader. The calculation

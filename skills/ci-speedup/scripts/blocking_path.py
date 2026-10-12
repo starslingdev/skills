@@ -7414,8 +7414,35 @@ def _runner_minute_spine_block(doc: dict[str, Any]) -> list[str]:
     if hidden:
         plural = "s" if len(hidden) != 1 else ""
         lines.append(f"+{len(hidden)} more runner-minute row{plural} hidden")
+    footnote = _measured_compute_footnote(spine)
+    if footnote:
+        lines += ["", footnote]
     lines.append("")
     return lines
+
+
+def _measured_compute_footnote(spine: dict[str, Any]) -> str:
+    """The basis line under the cost-spine table: measured compute (what every
+    saving is capped and verified against) counts successful job runs only, and
+    the failed / cancelled / timed-out runs it leaves out are named with their
+    count and minutes. Built only from stamped facts; `verify_report` rebuilds the
+    same sentence from findings.json. A pre-split artifact renders no footnote."""
+    if str(spine.get("measured_compute_basis") or "") != "successful_job_runs_only":
+        return ""
+    totals = _as_dict(spine.get("totals"))
+    excluded = _as_dict(spine.get("excluded_non_success"))
+    success = _num(totals.get("success_billable_equiv_min_per_month")) or 0.0
+    count = int(_num(excluded.get("job_run_count")) or 0)
+    head = (f"Measured compute counts successful job runs only: {success:.3f} billable "
+            "min/mo. Every saving is capped and verified against it")
+    if count <= 0:
+        return head + "; no failed, cancelled or timed-out job run was sampled."
+    sampled = int(_num(excluded.get("sampled_billable_min")) or 0)
+    monthly = _num(excluded.get("billable_equiv_min_per_month")) or 0.0
+    plural = "" if count == 1 else "s"
+    return (head + f"; {count} failed, cancelled or timed-out job run{plural} "
+            f"({sampled} sampled billable min, {monthly:.3f} min/mo) excluded from it, "
+            "though the table above still counts their minutes.")
 
 
 def _tier2_source_job_name(value: object) -> str:

@@ -439,8 +439,8 @@ Reference docs (read on demand — each links one level deep from here; outside 
   the critical-path / long-pole / cluster-floor model (below-floor speedups
   save runner-minutes, zero wall-clock).
 - [references/savings-methodology.md](references/savings-methodology.md) —
-  two-axis sizing: Δ wall-clock ranks; measured runner-minute findings
-  promote; modeled residuals stay in "Also noticed".
+  two-axis sizing: Δ wall-clock ranks; measured runner-minute findings promote; modeled residuals stay in "Also noticed".
+  Savings are capped at measured compute, which counts successful job runs only (excluded runs named in the spine footnote).
 - [references/optimization-patterns.md](references/optimization-patterns.md) — the pattern catalog (every OPT-id).
 - [references/spine-scoping.md](references/spine-scoping.md) — which checks
   form the spine (required-scoping, PR-floor fallback, one-path demotion).

@@ -830,6 +830,23 @@ unversioned and updates by reinstall from `main`.
 
 ### Changed
 
+- **2026-10-12** — **Measured compute now counts successful job runs only.**
+  The cost spine's measured compute, the total every runner-minute saving is
+  capped at and the report self-check verifies against, used to add up every
+  sampled job run, including earlier attempts that failed, were cancelled or
+  timed out. One six-hour hang among a dozen runs inflated a job's total
+  several times over, so an overstated saving fitted under it. Each spine row
+  now stamps its successful-run compute next to the excluded runs' count and
+  minutes, the spine sums the excluded runs, and the footnote under the
+  cost-spine table states the basis and names them ("N failed, cancelled or
+  timed-out job runs (M sampled billable min, X min/mo) excluded"). The table
+  itself still lists those minutes where they ran. Findings that measure
+  failure waste on purpose (OPT35, OPT46, OPT48, OPT57, OPT64) keep their own
+  basis and stay bounded by every sampled run. The self-check refuses a saving
+  bounded by a pre-split row sampled from all run conclusions; the committed
+  `microsoft-playwright` example is such an artifact and is tolerated by a
+  self-expiring carve-out until it is regenerated.
+
 - **2026-10-10** — **OPT14 is now only about repeated checkout and setup.** Its
   title drops "(and Slow Tool Replacement)" and becomes "Repeated
   Checkout/Setup Without Artifact Handoff"; the tool-swap table that lived

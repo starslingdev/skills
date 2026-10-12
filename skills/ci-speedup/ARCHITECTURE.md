@@ -2153,7 +2153,12 @@ coverage gap instead). A rm-crediting pattern with NO declared policy stamps the
 (`verify_report`) FAILs on it — so **a new pattern cannot ship its own unmeasured
 sizing path**. Two more invariants complete the class cut:
 `check_saving_within_measured_compute` (a saving never exceeds the compute it cuts;
-PR #30) and `check_cluster_lever_ceiling_escapes_sibling` (§5's cluster-floor lever
+PR #30; that compute, like the door's cap, counts **successful job runs only**:
+each spine row stamps `success_billable_equiv_min_per_month` and its excluded
+failed / cancelled / timed-out runs, the spine sums them in `excluded_non_success`
+and the cost-spine footnote names them; `_FAILURE_WASTE_PATTERNS` (OPT35/46/48/57/64)
+keep their own basis, every sampled run; a pre-split all-status row bounding any
+other saving FAILs, 2026-10-12) and `check_cluster_lever_ceiling_escapes_sibling` (§5's cluster-floor lever
 must not be capped by its own matrix sibling — issue #44). The door SKIPs (like the
 compute guard) when no render-ready spine exists, so a legacy pre-door artifact
 never trips it.

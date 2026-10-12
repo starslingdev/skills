@@ -56,6 +56,21 @@ _ERA_AGE_RE = re.compile(
     r"changed (?:~\d+ (?:day|hour)s? ago|less than an hour ago|recently)")
 
 
+# Known verify failures on a committed example, tolerated PER-CHECK (never per-repo, so every
+# other check stays live there). Each entry is a self-expiring tripwire: the test asserts the
+# named check STILL fails, so regenerating the example makes the stale carve-out go red.
+# - microsoft-playwright, measured compute (2026-10-12): the example was collected before
+#   measured compute counted successful job runs only. Its cost spine has prior-attempt rows
+#   sampled from all run conclusions with no successful-run split, and its OPT73 savings are
+#   bounded by them, so the verifier now refuses that bound. A fresh collection needs live
+#   GitHub data; the example is regenerated in a follow-up PR (a regeneration inside the fix's
+#   own PR would stamp a commit the squash-merge erases).
+_KNOWN_DRIFT: dict[str, set[str]] = {
+    "microsoft-playwright": {
+        "each finding's runner-minute saving is within its jobs' measured compute"},
+}
+
+
 def _sans_provenance(report: str) -> str:
     """Blank the two spans that legitimately differ between a fresh render and the committed
     bytes without the report being stale: the provenance stamp (it records the renderer's own
@@ -178,12 +193,20 @@ def test_example_fresh_render_passes_verify_report_invariants(fresh_reports):
     failures: list[str] = []
     for repo, fj, md, report, _claims in fresh_reports:
         fired: set[str] = set()
+        known = _KNOWN_DRIFT.get(repo, set())
+        failed: set[str] = set()
         for c in vr.run_checks(report, md, fj, skill_repo=None):
             if c.skipped:
                 continue
             fired.add(c.name)
             if not c.ok:
-                failures.append(f"{repo}: {c.name} - {c.detail}")
+                failed.add(c.name)
+                if c.name not in known:
+                    failures.append(f"{repo}: {c.name} - {c.detail}")
+        for name in sorted(known - failed):
+            failures.append(
+                f"{repo}: known-drift carve-out for {name!r} is stale (the check now passes) "
+                "- remove it from _KNOWN_DRIFT")
         if len(fired) < _MIN_CHECKS_FIRED:
             failures.append(
                 f"{repo}: only {len(fired)} checks fired (< {_MIN_CHECKS_FIRED}) — "
