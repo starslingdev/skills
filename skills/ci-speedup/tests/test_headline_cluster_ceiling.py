@@ -564,18 +564,17 @@ def test_volume_unknown_credited_cluster_is_appendix_owned_not_a_duplicate_pole(
 # "the cluster leads" — so the chain's own number was attributed to the cluster and the on-spine
 # guard FAILed a correct report. A cluster leads only when the rendered win IS its ceiling.
 # --------------------------------------------------------------------------- #
-def _small_cluster_under_chain(off_spine: bool) -> dict:
-    # Mastodon chain (~36s headroom leads) with a 20s cluster that cannot out-rank it.
+def _small_off_spine_cluster_under_chain() -> dict:
+    # Mastodon chain (~36s headroom leads) with a 20s off-spine cluster that cannot out-rank it.
     d = _mastodon_shape()
     d["findings"][0]["wall_clock_p50_s"] = 20.0
-    if off_spine:
-        d["findings"][0]["off_spine"] = True
+    d["findings"][0]["off_spine"] = True
     return d
 
 
 def test_small_off_spine_cluster_under_a_chain_headline_is_not_crowned(tmp_path):
     vr = _vr()
-    d = _small_cluster_under_chain(off_spine=True)
+    d = _small_off_spine_cluster_under_chain()
     md = bp.render(d)
     bl = _bottom_line(md)
     assert "fixing the whole chain is worth up to" in bl and "**~36s**" in bl, bl
@@ -592,7 +591,34 @@ def test_presence_guard_does_not_judge_a_cluster_a_bigger_win_outranks(tmp_path)
     doc = _presence_doc(wf=".github/workflows/tests_secondary.yml",
                         legs=["Windows (firefox)", "Android"], step="Run test",
                         cluster_wc=20.0, wf_pole=2)
-    report = _crown_bottom_line(3000.0)              # a different, bigger lever leads
+    # A different, bigger lever leads: the chain headroom, not the cluster's own workflow.
+    report = ("> **Bottom line.** A typical PR waits **80m 00s** for all checks to finish; fixing "
+              "the whole chain is worth up to **~50m 00s**.")
     c = vr.check_headline_lever_is_presence_eligible(report, _write_findings(tmp_path, doc))
     assert c.ok and c.skipped, c.detail
     assert "does not lead" in c.detail
+
+
+# The crown match is "within 2s", not exact: a fractional stamped ceiling renders to whole seconds
+# (`_clock`), so a crowned cluster whose ceiling is 3000.4s shows as ~50m 00s. Both crown guards
+# must still treat that as the cluster's crown and FAIL; an exact-equality helper would SKIP it.
+def test_presence_guard_FAILS_a_crown_whose_fractional_ceiling_rounds_in_the_render(tmp_path):
+    vr = _vr()
+    doc = _presence_doc(wf=".github/workflows/tests_secondary.yml",
+                        legs=["Windows (firefox)", "Android"], step="Run test",
+                        cluster_wc=3000.4, wf_pole=2)
+    c = vr.check_headline_lever_is_presence_eligible(_crown_bottom_line(3000.4),
+                                                     _write_findings(tmp_path, doc))
+    assert not c.ok and not c.skipped, c.detail
+
+
+def test_on_spine_guard_FAILS_an_off_spine_crown_whose_fractional_ceiling_rounds(tmp_path):
+    vr = _vr()
+    doc = _presence_doc(wf=".github/workflows/ci.yaml",
+                        legs=["Run tests (1)", "Run tests (2)", "Run tests (3)"],
+                        step="Run pytest", cluster_wc=3001.6, wf_pole=0,
+                        required=["Check hassfest"])
+    doc["findings"][0]["off_spine"] = True
+    report = _crown_bottom_line(3000.0)              # rendered 50m 00s, 1.6s under the ceiling
+    c = vr.check_headline_cluster_lever_on_spine(report, _write_findings(tmp_path, doc))
+    assert not c.ok and not c.skipped, c.detail
