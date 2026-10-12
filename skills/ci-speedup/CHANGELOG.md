@@ -1077,10 +1077,11 @@ unversioned and updates by reinstall from `main`.
   matrix (whose legs include the slowest check on the critical path) is
   correctly called out as on the critical path. The self-check compared bare
   names and failed the report, so the audit withheld the "just save the
-  report" option from a correct report. It now ties each dropped check to the
-  workflow that ran it and flags only on-path framing in that workflow; a
-  check whose workflow is unknown, and the headline, are still compared by
-  name. The report text itself is unchanged.
+  report" option from a correct report. It now excuses a same-named mention
+  only in a workflow whose measured runs show that name is a matrix of
+  differently named jobs; every other mention, including the headline and a
+  workflow the measurements don't cover, is still compared by name. The
+  report text itself is unchanged.
 - **2026-10-10** — **`STARSLING_LOG_LEVEL=DEBUG` now prints the debug trace.**
   The variable was documented as the opt-in for the scripts' diagnostic output,
   but no script read it, so every debug line was unreachable and stderr stayed
