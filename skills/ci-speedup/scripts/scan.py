@@ -2969,6 +2969,7 @@ def _unfollowable_config_bases(text: str) -> list[str]:
 
 def _vitest_config_files(root: Path, is_config: "Any" = None,
                          also: "Any" = None, also_found: "list[Path] | None" = None,
+                         unlisted: "list[Path] | None" = None,
                          ) -> "tuple[list[Path], bool, list[Path]]":
     """Config candidates at the repo root plus a bounded walk beneath it, as
     ``(configs, truncated, manifests)`` — ``manifests`` being the `package.json`
@@ -3029,7 +3030,11 @@ def _vitest_config_files(root: Path, is_config: "Any" = None,
             entries = sorted(base.iterdir())
         except OSError:
             # An unreadable DIRECTORY is unvisited ground, not a clean miss.
+            # Recorded for callers that must name it (OPT84 marks it as a
+            # place whose Prettier configs could not be read).
             truncated = True
+            if unlisted is not None:
+                unlisted.append(base)
             continue
         for entry in entries:
             try:
@@ -3039,6 +3044,8 @@ def _vitest_config_files(root: Path, is_config: "Any" = None,
                 # Listable but not stat-able (e.g. a `r--` directory): unvisited
                 # ground, never a crash of the whole scan.
                 truncated = True
+                if unlisted is not None:
+                    unlisted.append(entry)
                 continue
             if is_dir:
                 if entry.name in _VITEST_SKIP_DIRS or (
@@ -4257,9 +4264,10 @@ def _read_type_aware_lint_unguarded(root: Path) -> dict[str, Any]:
     # package.json beside it (a root config over `web/package.json`, or a
     # config-only `docs/`) applies all the same.
     prettier_paths: list[Path] = []
+    unlisted_dirs: list[Path] = []
     paths, truncated, manifests = _vitest_config_files(
         root, _is_eslint_config_name, also=_tal_is_prettier_config_name,
-        also_found=prettier_paths)
+        also_found=prettier_paths, unlisted=unlisted_dirs)
 
     def _rel(path: Path) -> str:
         try:
@@ -4281,6 +4289,19 @@ def _read_type_aware_lint_unguarded(root: Path) -> dict[str, Any]:
     prettier_plugins: dict[str, list[str]] = {}
     prettier_plugin_files: dict[str, dict[str, str]] = {}
     prettier_config_unreadable: dict[str, list[str]] = {}
+    # A folder the walk could not list (or stat) is ground whose Prettier
+    # configs were never read: named, not silently absent, so the Prettier fit
+    # runs both tools rather than calling the swap a drop-in.
+    for _ud in unlisted_dirs:
+        try:
+            _urel = _ud.resolve().relative_to(root.resolve()).as_posix()
+        except ValueError:
+            _urel = _ud.name
+        _urel = "" if _urel == "." else _urel
+        prettier_config_unreadable.setdefault(_urel, [])
+        _mark = _tal_unlisted_folder(_urel)
+        if _mark not in prettier_config_unreadable[_urel]:
+            prettier_config_unreadable[_urel].append(_mark)
     prettier_read_dirs: set[str] = set()
 
     def _finish(rel: str, fmt: str, read: dict[str, Any],

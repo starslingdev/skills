@@ -333,3 +333,25 @@ def test_a_package_folder_that_cannot_be_listed_is_marked_unreadable(tmp_path,
     block = scan._read_type_aware_lint(root)
     assert list(block["prettier_config_unreadable"]) == ["web"], block
     assert block["prettier_config_unreadable"]["web"], block
+
+
+def test_a_folder_the_walk_itself_cannot_list_is_marked_unreadable(tmp_path, monkeypatch):
+    """Independent of how pathlib lists directories on this Python: the walk's own
+    listing of `web` fails, so `web` is named as a place whose Prettier configs
+    could not be read (Python 3.9's pathlib ignores a patched `os.listdir`; newer
+    versions honour it, which is why the sibling test was green here and red in
+    CI before the walk recorded the folder)."""
+    from pathlib import Path
+    root = _repo(tmp_path, {}, {"web/package.json": "{}"})
+    real = Path.iterdir
+
+    def _iterdir(self):
+        if self.name == "web":
+            raise PermissionError(13, "denied")
+        return real(self)
+    monkeypatch.setattr(Path, "iterdir", _iterdir)
+    block = scan._read_type_aware_lint(root)
+    assert list(block["prettier_config_unreadable"]) == ["web"], block
+    assert block["prettier_config_unreadable"]["web"] == [
+        scan._tal_unlisted_folder("web")], block
+    assert block["truncated"] is True
