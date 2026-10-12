@@ -305,7 +305,7 @@ def test_turbo_forwards_args_after_the_separator_into_each_package_leaf():
     scripts = {"": {}, "apps/web": {"lint": "eslint ."},
                "apps/docs": {"lint": "eslint src"}}
     res = cr._resolve_run_leaves("npx turbo run lint -- --max-warnings 0", "",
-                                 scripts, bin_names=cr._OPT84_BIN_NAMES)
+                                 scripts)
     assert res.unresolved == [], res.unresolved
     assert sorted((lf["wd"], lf["command"]) for lf in res.leaves) == [
         ("apps/docs", "eslint src --max-warnings 0"),

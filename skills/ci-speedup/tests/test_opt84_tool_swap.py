@@ -157,8 +157,7 @@ def test_resolver_returns_every_leaf_through_package_scripts():
 
 def test_resolver_splits_on_every_separator_and_unwraps_runners():
     res = cr._resolve_run_leaves("npx eslint . || true; pnpm exec prettier -c .\n"
-                                 "yarn tsc --noEmit | tee out", "", {"": {}},
-                                 bin_names=cr._OPT84_BIN_NAMES)
+                                 "yarn tsc --noEmit | tee out", "", {"": {}})
     assert [lf["command"] for lf in res.leaves] == [
         "eslint .", "true", "prettier -c .", "tsc --noEmit", "tee out"]
 
@@ -177,14 +176,17 @@ def test_resolver_records_what_it_cannot_follow(cmd, scripts, unreadable, kind):
     assert all(u.get("reason") for u in res.unresolved)
 
 
-def test_an_undeclared_package_manager_name_fails_closed_unless_it_is_a_table_binary():
-    res = cr._resolve_run_leaves("pnpm vitest run", "", {"": {}},
-                                 bin_names=cr._OPT84_BIN_NAMES)
+def test_an_undeclared_package_manager_name_runs_the_binary_when_the_scripts_were_read():
+    # pnpm / yarn / bun run the binary when no script of that name exists
+    for cmd in ("pnpm vitest run", "pnpm prettier --check ."):
+        res = cr._resolve_run_leaves(cmd, "", {"": {}})
+        assert [lf["command"] for lf in res.leaves] == [cmd] and res.unresolved == []
+    # no package.json read at or above the directory: what runs is unknown
+    res = cr._resolve_run_leaves("pnpm vitest run", "", {})
     assert [u["kind"] for u in res.unresolved] == ["script"] and res.leaves == []
-    res = cr._resolve_run_leaves("pnpm prettier --check .", "", {"": {}},
-                                 bin_names=cr._OPT84_BIN_NAMES)
-    assert [lf["command"] for lf in res.leaves] == ["pnpm prettier --check ."]
-    assert res.unresolved == []
+    # an ancestor package.json defines it: a script this read does not follow
+    res = cr._resolve_run_leaves("pnpm vitest run", "pkg", {"": {"vitest": "x"}})
+    assert [u["kind"] for u in res.unresolved] == ["script"] and res.leaves == []
 
 
 def test_resolver_stops_at_the_depth_cap():
@@ -795,8 +797,7 @@ def test_mastra_turbo_lint_resolves_and_both_rows_are_already_swapped():
 
 
 def test_resolver_expands_a_task_runner_over_every_package_defining_the_task():
-    res = cr._resolve_run_leaves("pnpm lint", "", _MASTRA_REAL,
-                                 bin_names=cr._OPT84_BIN_NAMES)
+    res = cr._resolve_run_leaves("pnpm lint", "", _MASTRA_REAL)
     assert res.unresolved == [], res.unresolved
     got = sorted((lf["wd"], lf["command"]) for lf in res.leaves)
     assert ("", "oxfmt --check . '!docs/**/*' '!examples/**/*'") in got
@@ -1075,3 +1076,122 @@ def test_opt81_a2_names_an_opt84_on_its_job_as_rendering_first():
     assert len(out) == 1, withheld
     whys = [c["why"] for c in out[0]["faster_runner"]["cheaper_levers_checked"]]
     assert any("OPT84" in w and "renders first" in w for w in whys), whys
+
+
+# ---- a bare package-manager binary call (no script of that name) -------------
+
+_APP = "examples/api"
+
+
+def _app_run(run, scripts, *, wd="./examples/api", unreadable_pkgs=()):
+    pole = _pole(step_p50=84.0, job_p50=562.0, category="build",
+                 step="build the APK")
+    return _run(None, pole=pole,
+                doc=_doc({"name": "build the APK", "working-directory": wd,
+                          "run": run}),
+                block=_block(scripts=scripts, unreadable_pkgs=unreadable_pkgs))
+
+
+@pytest.mark.parametrize("run", [
+    # a CLI's binary called through the package manager, no script of that name
+    "pnpm tauri android init --ci --skip-targets-install\n"
+    "pnpm tauri android build --debug --apk --target aarch64",
+    "yarn tauri ios build --debug --no-sign",
+    "bun tauri android build --debug",
+    # a name that is no script and no binary the table knows: nothing in the
+    # table runs, so it is the verdict, not a held-back read
+    "pnpm lint",
+])
+def test_a_package_manager_name_no_script_defines_runs_the_binary(run):
+    scripts = {"": {"build": "pnpm -r build"},
+               _APP: {"dev": "vite", "build": "vite build"}}
+    out, withheld, cands = _app_run(run, scripts)
+    assert out == [] and withheld == {"tool_not_in_table": 1}, (withheld, cands)
+    assert cands == []
+
+
+def test_a_bare_table_binary_with_no_script_is_its_row():
+    out, withheld, _c = _app_run("pnpm eslint .", {"": {}, _APP: {"build": "vite build"}})
+    assert len(out) == 1, withheld
+    assert _rows(out[0]) == ["eslint"]
+
+
+def test_the_binary_read_uses_the_nearest_package_json_above_the_directory():
+    # no package.json in the step's own directory: the root one is effective
+    out, withheld, _c = _app_run("pnpm tauri android build", {"": {"build": "x"}},
+                                 wd="./tools/mobile")
+    assert out == [] and withheld == {"tool_not_in_table": 1}, withheld
+    # ... and when the root defines it, what runs is that root script, which this
+    # read does not follow from another directory: held back
+    out, withheld, cands = _app_run("pnpm tauri android build",
+                                    {"": {"tauri": "node cli.js"}}, wd="./tools/mobile")
+    assert out == [] and withheld == {"script_unresolvable": 1}, withheld
+    assert [c["gate"] for c in cands] == ["script_unresolvable"]
+    # ... and when the nearest package.json could not be read, nothing is known
+    out, withheld, _c = _app_run("pnpm tauri android build", {"": {}},
+                                 unreadable_pkgs=(_APP,))
+    assert out == [] and withheld == {"package_json_unreadable": 1}, withheld
+
+
+def test_a_package_script_run_by_node_stays_held_back():
+    # tauri-apps' real `examples/api` declares
+    # `"tauri": "node ../../packages/cli/tauri.js"`: pnpm runs that script, and a
+    # node script is not read
+    scripts = {"": {}, _APP: {"tauri": "node ../../packages/cli/tauri.js"}}
+    out, withheld, cands = _app_run("pnpm tauri android build --debug --apk", scripts)
+    assert out == [] and withheld == {"script_unresolvable": 1}, withheld
+    assert cands == [{"workflow_file": _WF, "job": "Lint", "gate": "script_unresolvable",
+                      "step": "build the APK"}]
+
+
+# ---- gate order: the candidate check runs before any workflow / YAML gate ----
+
+def _ambiguous(steps):
+    p = {"check": "test (Windows, windows-latest)", "p50_s": 1544.0,
+         "ambiguous_workflows": [".github/workflows/a.yml", ".github/workflows/b.yml"]}
+    if steps is not None:
+        p["job_p50_s"] = 504.0
+        p["steps"] = steps
+    return p
+
+
+def _gate_only(pole):
+    w: dict[str, int] = {}
+    c: list[dict] = []
+    cr._detect_opt84_tool_swap([pole], {}, _block(), [], 1, withheld=w,
+                               withheld_candidates=c)
+    return w, c
+
+
+def test_an_ambiguous_pole_with_no_candidate_step_is_the_verdict():
+    w, c = _gate_only(_ambiguous([
+        {"step": "test tauri", "category": "test", "p50_s": 199.0},
+        {"step": "test tauri-utils", "category": "test", "p50_s": 185.0},
+        {"step": "install Rust", "category": "install", "p50_s": 12.0}]))
+    assert w == {"no_candidate_step": 1} and c == [], (w, c)
+
+
+def test_an_ambiguous_pole_with_a_candidate_step_is_still_held_back():
+    w, c = _gate_only(_ambiguous([
+        {"step": "test tauri", "category": "test", "p50_s": 199.0},
+        {"step": "Lint", "category": "scan", "p50_s": 30.0}]))
+    assert w == {"pole_workflow_ambiguous": 1}
+    assert c == [{"workflow_file": "", "job": "test (Windows, windows-latest)",
+                  "gate": "pole_workflow_ambiguous"}]
+
+
+@pytest.mark.parametrize("steps", [
+    None,                                                          # no decomposition
+    [{"step": "test tauri", "category": "test", "p50_s": "n/a"}],  # unreadable timing
+    [{"step": "a", "category": "test", "p50_s": 9.0},
+     {"step": "a", "category": "test", "p50_s": 9.0}],             # unreadable entries
+])
+def test_an_ambiguous_pole_whose_steps_cannot_be_read_stays_held_back(steps):
+    w, c = _gate_only(_ambiguous(steps))
+    assert w == {"pole_workflow_ambiguous": 1}
+    assert [x["gate"] for x in c] == ["pole_workflow_ambiguous"]
+
+
+def test_a_file_backed_pole_with_no_candidate_never_reaches_the_yaml_gates():
+    w, c = _gate_only(_pole(category="test"))          # no workflow YAML at all
+    assert w == {"no_candidate_step": 1} and c == []

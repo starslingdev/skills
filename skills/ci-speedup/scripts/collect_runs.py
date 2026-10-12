@@ -12577,14 +12577,18 @@ def _opt82_forwarded_args(toks: list[str], name: str) -> list[str]:
 
 def _opt82_script_ref(toks: list[str], scripts: "dict[str, str] | None",
                       any_name: bool = False,
-                      bin_names: "frozenset[str]" = frozenset(),
+                      effective: "dict[str, str] | None" = None,
                       ) -> "tuple[str, bool] | None":
     """`(script name, scoped elsewhere?)` when `toks` runs a package script.
 
-    `any_name` (the all-leaves read, OPT84) also treats an undeclared name as a
-    script reference, so it fails closed, unless it is one of `bin_names` and
-    the package's scripts were read (`pnpm prettier --check .` runs the
-    binary). OPT82 calls it with the defaults, unchanged."""
+    `any_name` (the all-leaves read, OPT84) reads an undeclared name the way
+    pnpm, yarn and bun do: `effective` is the scripts of the package.json the
+    package manager uses (the nearest one at or above the directory, read), and
+    a name none of them defines runs the binary of that name (`pnpm tauri
+    android build`, `pnpm prettier --check .`), so it is a leaf, not a script.
+    With no readable package.json there (`effective` None), or a name an
+    ancestor package.json defines, it stays a script reference and fails closed.
+    OPT82 calls it with the defaults, unchanged."""
     if not toks:
         return None
     pm, rest = toks[0], toks[1:]
@@ -12622,7 +12626,7 @@ def _opt82_script_ref(toks: list[str], scripts: "dict[str, str] | None",
     if scripts is not None and args[0] in scripts:
         return args[0], scoped
     if any_name:
-        if scripts is not None and not scoped and args[0] in bin_names:
+        if effective is not None and not scoped and args[0] not in effective:
             return None
         return args[0], scoped
     if "lint" in args[0].lower():
@@ -12652,7 +12656,6 @@ def _resolve_run_leaves(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, s
                         scripts_unreadable: "frozenset[str]" = frozenset(), *,
                         relevant: "Callable[[str], bool] | None" = None,
                         stop: "Callable[..., tuple | None] | None" = None,
-                        bin_names: "frozenset[str]" = frozenset(),
                         chain: "list[str] | None" = None, depth: int = 0,
                         runner: str = "npx") -> ResolvedLeaves:
     """Every leaf command `cmd` runs: split on `&&`, `||`, `;`, `|` and newlines,
@@ -12661,13 +12664,14 @@ def _resolve_run_leaves(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, s
     followed. Segments it cannot follow are recorded with a reason.
 
     `relevant` narrows which unfollowable segments count (OPT82 passes "is it
-    lint-named"; None = every one, the OPT84 read, which also treats any
-    undeclared package-manager name as a script unless it is in `bin_names`).
+    lint-named"; None = every one, the OPT84 read, which also reads a
+    package-manager name no effective script defines as that binary: see
+    `_opt82_script_ref`).
     `stop(rest, wd, runner, chain)` ends the walk at the first leaf it returns
     a tuple for (OPT82's ESLint leaf); the result is then `verdict`."""
     acc = ResolvedLeaves([], [])
     acc.verdict = _rl_walk(cmd, wd, scripts_by_dir, scripts_unreadable, relevant,
-                           stop, bin_names, chain, depth, runner, acc)
+                           stop, chain, depth, runner, acc)
     return acc
 
 
@@ -12782,11 +12786,29 @@ def _rl_task_runner(toks: list[str]
     return tool, pos, fwd
 
 
+def _rl_effective_scripts(wd: str, scripts_by_dir: dict[str, dict[str, str]],
+                          scripts_unreadable: "frozenset[str]",
+                          ) -> "dict[str, str] | None":
+    """The scripts of the package.json a package manager uses from `wd`: the
+    nearest one at or above it. None when that one could not be read, or when
+    no package.json is found up to the repo root."""
+    import posixpath
+    d = wd or ""
+    while True:
+        if d in scripts_unreadable:
+            return None
+        s = scripts_by_dir.get(d)
+        if isinstance(s, dict):
+            return s
+        if not d:
+            return None
+        d = posixpath.dirname(d)
+
+
 def _rl_walk(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, str]],
              scripts_unreadable: "frozenset[str]",
              relevant: "Callable[[str], bool] | None",
              stop: "Callable[..., tuple | None] | None",
-             bin_names: "frozenset[str]",
              chain: "list[str] | None", depth: int, runner: str,
              acc: ResolvedLeaves, in_runner: "str | None" = None,
              stack: "frozenset[tuple[str, str]]" = frozenset()) -> "tuple | None":
@@ -12854,7 +12876,7 @@ def _rl_walk(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, str]],
         rest, seg_runner, call = _opt82_exec_call(toks, runner)
         if call is not None:               # `npx -c '<command>'`
             sub = _rl_walk(call, wd, scripts_by_dir, scripts_unreadable, relevant,
-                           stop, bin_names, chain, depth + 1, seg_runner, acc,
+                           stop, chain, depth + 1, seg_runner, acc,
                            in_runner, stack)
             if sub is not None and sub[0] != "unresolvable":
                 return _found(sub)
@@ -12906,7 +12928,7 @@ def _rl_walk(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, str]],
             for d, task in targets:
                 body = scripts_by_dir[d][task]
                 _rl_walk(body + (" " + shlex.join(tr_fwd) if tr_fwd else ""), d,
-                         scripts_by_dir, scripts_unreadable, relevant, stop, bin_names,
+                         scripts_by_dir, scripts_unreadable, relevant, stop,
                          chain + [f"{tool} run {task} ({d or '.'})"], depth + 1,
                          pm_runner, acc, tool, stack | {(d, task)})
             continue
@@ -12919,8 +12941,10 @@ def _rl_walk(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, str]],
             unresolvable = unresolvable or ("unresolvable", "delegated", chain)
             continue
         scripts = scripts_by_dir.get(wd)
-        ref = _opt82_script_ref(toks, scripts, any_name=relevant is None,
-                                bin_names=bin_names)
+        ref = _opt82_script_ref(
+            toks, scripts, any_name=relevant is None,
+            effective=(_rl_effective_scripts(wd, scripts_by_dir, scripts_unreadable)
+                       if relevant is None and lost is None else None))
         if ref is None:
             if rest:
                 acc.leaves.append({"command": shlex.join(rest), "tokens": list(rest),
@@ -12948,7 +12972,7 @@ def _rl_walk(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, str]],
         fwd = _opt82_forwarded_args(toks, name)
         sub = _rl_walk(body + (" " + shlex.join(fwd) if fwd else ""),
                        wd, scripts_by_dir, scripts_unreadable, relevant, stop,
-                       bin_names, chain + [f"{toks[0]} run {name}"], depth + 1,
+                       chain + [f"{toks[0]} run {name}"], depth + 1,
                        _OPT82_RUNNER_BY_PM.get(toks[0], "npx"), acc, in_runner,
                        stack | {(wd, name)})
         if sub is not None and sub[0] != "unresolvable":
@@ -16935,11 +16959,6 @@ _OPT84_TABLE: dict[str, dict[str, Any]] = {
 }
 # `published_range` is the catalog's published range for the swap: OTHER repos'
 # numbers, rendered as such, never this repo's saving.
-# Binaries a bare `pnpm <name>` / `yarn <name>` may run when no script of that
-# name exists: the table's sources and targets. Any other undeclared name is
-# read as a script this read could not find, and fails closed.
-_OPT84_BIN_NAMES = frozenset({"prettier", "pretty-quick", "eslint", "tsc", "oxfmt",
-                              "oxlint"})
 # ESLint plugins whose rules oxlint may not carry one for one: any of these on
 # the config makes the recipe a dual-run (oxlint first, a scoped ESLint after).
 _OPT84_FRAMEWORK_PLUGINS = frozenset({
@@ -17174,7 +17193,7 @@ def _opt84_expand_leaves(leaves: list[dict[str, Any]],
         seen.add(key)
         budget -= 1
         sub = _resolve_run_leaves(op[1], str(lf["wd"]), scripts_by_dir,
-                                  scripts_unreadable, bin_names=_OPT84_BIN_NAMES,
+                                  scripts_unreadable,
                                   chain=list(lf.get("chain") or []),
                                   runner=str(lf.get("runner") or "npx"))
         if sub.unresolved:
@@ -17506,19 +17525,20 @@ def _detect_opt84_tool_swap(
             continue
         wf = str(p.get("workflow_file") or "")
         job = str(p.get("job") or "")
-        if not wf and p.get("ambiguous_workflows"):
-            name = job or str(p.get("check") or "")
-            if not name:
+        # A pole the drill could not tie to one workflow still has its measured
+        # steps: the candidate check below runs on them FIRST, so a pole with no
+        # candidate-shaped step is the verdict whatever its workflow. Only a
+        # pole with a candidate (or steps that cannot be read) is held back as
+        # ambiguous.
+        ambiguous = bool(not wf and p.get("ambiguous_workflows"))
+        if ambiguous:
+            job = job or str(p.get("check") or "")
+            if not job:
                 # nothing to list it under: a held-back gate must be listed,
                 # so a nameless pole is the verdict instead
                 _no("pole_not_file_backed")
                 continue
-            if ("", name) in seen:
-                continue
-            seen.add(("", name))
-            _no("pole_workflow_ambiguous", "", name)
-            continue
-        if not wf or not job:
+        elif not wf or not job:
             _no("pole_not_file_backed")
             continue
         if (wf, job) in seen:
@@ -17531,7 +17551,8 @@ def _detect_opt84_tool_swap(
         if steps and (len(steps) != len(raw_steps) or not all(_names)
                       or len(set(_names)) != len(_names)
                       or not all(str(s.get("category") or "").strip() for s in steps)):
-            _no("pole_step_entries_unreadable", wf, job)
+            _no("pole_workflow_ambiguous" if ambiguous
+                else "pole_step_entries_unreadable", wf, job)
             continue
 
         def _finite(v: Any) -> "float | None":
@@ -17551,13 +17572,17 @@ def _detect_opt84_tool_swap(
             measured.append((str(s.get("step") or "").strip(),
                              str(s.get("category") or ""), d))
         if not steps or job_p50 <= 0 or unreadable:
-            _no("pole_step_timings_unavailable", wf, job)
+            _no("pole_workflow_ambiguous" if ambiguous
+                else "pole_step_timings_unavailable", wf, job)
             continue
         cands = [(n, c, d) for n, c, d in measured
                  if c in _OPT84_CATEGORIES and d >= _OPT84_MIN_STEP_S
                  and d >= _OPT84_MIN_SHARE * job_p50]
         if not cands:
             _no("no_candidate_step", wf, job)
+            continue
+        if ambiguous:
+            _no("pole_workflow_ambiguous", wf, job)
             continue
         doc = wf_docs.get(wf) if isinstance(wf_docs, dict) else None
         jobs = doc.get("jobs") if isinstance(doc, dict) else None
@@ -17612,8 +17637,7 @@ def _detect_opt84_tool_swap(
                 _no("working_directory_unknown", wf, job, name)
                 continue
             wd = "" if wd == "." else wd
-            res = _resolve_run_leaves(run, wd, scripts_by_dir, scripts_unreadable,
-                                      bin_names=_OPT84_BIN_NAMES)
+            res = _resolve_run_leaves(run, wd, scripts_by_dir, scripts_unreadable)
             if res.unresolved:
                 # A directory change anywhere in the resolved command outranks
                 # the rest: it is why what follows could not be pinned down.
