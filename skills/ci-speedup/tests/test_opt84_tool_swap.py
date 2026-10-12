@@ -1083,13 +1083,15 @@ def test_opt81_a2_names_an_opt84_on_its_job_as_rendering_first():
 _APP = "examples/api"
 
 
-def _app_run(run, scripts, *, wd="./examples/api", unreadable_pkgs=()):
+def _app_run(run, scripts, *, wd="./examples/api", unreadable_pkgs=(),
+             truncated=False):
     pole = _pole(step_p50=84.0, job_p50=562.0, category="build",
                  step="build the APK")
     return _run(None, pole=pole,
                 doc=_doc({"name": "build the APK", "working-directory": wd,
                           "run": run}),
-                block=_block(scripts=scripts, unreadable_pkgs=unreadable_pkgs))
+                block=_block(scripts=scripts, unreadable_pkgs=unreadable_pkgs,
+                             truncated=truncated))
 
 
 @pytest.mark.parametrize("run", [
@@ -1195,3 +1197,49 @@ def test_an_ambiguous_pole_whose_steps_cannot_be_read_stays_held_back(steps):
 def test_a_file_backed_pole_with_no_candidate_never_reaches_the_yaml_gates():
     w, c = _gate_only(_pole(category="test"))          # no workflow YAML at all
     assert w == {"no_candidate_step": 1} and c == []
+
+
+@pytest.mark.parametrize("run", [
+    # bun (and a package manager handed a path) runs a FILE, as `node` would:
+    # what that file runs is unknown, so the step is held back, never read as
+    # a binary named after the file
+    "bun build.ts", "bun ./scripts/lint.ts", "bun scripts/check.js",
+    "bun tools/fmt.mjs", "pnpm ./scripts/x.cjs",
+])
+def test_a_package_manager_running_a_file_stays_held_back(run):
+    out, withheld, cands = _app_run(run, {"": {}, _APP: {"build": "vite build"}})
+    assert out == [] and withheld == {"script_unresolvable": 1}, (withheld, cands)
+    assert [c["gate"] for c in cands] == ["script_unresolvable"]
+
+
+@pytest.mark.parametrize("wd, truncated", [
+    ("./a/b/c/d/pkg", True),        # deeper than the scan's manifest walk reached
+    ("./.github/tools", False),     # a folder the walk skips without a trace
+    ("./dist/app", False),
+])
+def test_the_binary_read_never_walks_up_past_ground_the_scan_did_not_read(wd, truncated):
+    # a package.json the scan never read may define `lint`: what runs is unknown
+    out, withheld, cands = _app_run("pnpm lint", {"": {"build": "x"}}, wd=wd,
+                                    truncated=truncated)
+    assert out == [] and withheld == {"script_unresolvable": 1}, (withheld, cands)
+    # the step's own package.json was read: the walk's reach does not matter
+    out, withheld, _c = _app_run("pnpm tauri android build",
+                                 {"": {}, "a/b/c/d/pkg": {"build": "x"}},
+                                 wd="./a/b/c/d/pkg", truncated=True)
+    assert withheld == {"tool_not_in_table": 1}, withheld
+
+
+@pytest.mark.parametrize("run", [
+    "pnpm recursive run lint", "pnpm m run lint", "pnpm multi run lint",
+    # a colon-named script Yarn Berry runs from whichever workspace defines it
+    "yarn format:check",
+])
+def test_a_workspace_wide_or_colon_named_call_stays_held_back(run):
+    out, withheld, cands = _app_run(run, {"": {}, _APP: {"build": "vite build"}})
+    assert out == [] and withheld == {"script_unresolvable": 1}, (withheld, cands)
+
+
+def test_a_package_manager_pointed_at_another_directory_is_not_a_binary():
+    res = cr._resolve_run_leaves("pnpm -C apps/web prettier --check .", "",
+                                 {"": {}, "apps/web": {}})
+    assert res.leaves == [] and [u["kind"] for u in res.unresolved] == ["script"]

@@ -12586,8 +12586,9 @@ def _opt82_script_ref(toks: list[str], scripts: "dict[str, str] | None",
     package manager uses (the nearest one at or above the directory, read), and
     a name none of them defines runs the binary of that name (`pnpm tauri
     android build`, `pnpm prettier --check .`), so it is a leaf, not a script.
-    With no readable package.json there (`effective` None), or a name an
-    ancestor package.json defines, it stays a script reference and fails closed.
+    With no package.json read there (`effective` None), a name an ancestor
+    package.json defines when the directory has none, a path or script file,
+    or a colon name, it stays a script reference and fails closed.
     OPT82 calls it with the defaults, unchanged."""
     if not toks:
         return None
@@ -12626,7 +12627,18 @@ def _opt82_script_ref(toks: list[str], scripts: "dict[str, str] | None",
     if scripts is not None and args[0] in scripts:
         return args[0], scoped
     if any_name:
-        if effective is not None and not scoped and args[0] not in effective:
+        # A path or a script file (`bun build.ts`, `pnpm ./x.js`) is a file the
+        # package manager runs, as `node` would: never a binary, so it stays a
+        # reference this read does not follow and fails closed.
+        # pnpm's workspace-wide `recursive` / `m` / `multi` run a script in
+        # every package (scoped elsewhere); a colon name is a script Yarn
+        # Berry runs from whichever workspace defines it, never a binary.
+        if pm == "pnpm" and args[0] in ("recursive", "m", "multi"):
+            return args[0], True
+        is_file = "/" in args[0] or args[0].startswith(".") or ":" in args[0] or bool(
+            _re.search(r"\.(?:[cm]?[jt]sx?|sh)$", args[0]))
+        if (effective is not None and not scoped and not is_file
+                and args[0] not in effective):
             return None
         return args[0], scoped
     if "lint" in args[0].lower():
@@ -12650,6 +12662,9 @@ class ResolvedLeaves:
     leaves: list
     unresolved: list
     verdict: "tuple | None" = None
+    # False when the scan's manifest walk stopped early: the OPT84 binary read
+    # then trusts only a package.json read in the step's own directory.
+    walk_complete: bool = True
 
 
 def _resolve_run_leaves(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, str]],
@@ -12657,7 +12672,8 @@ def _resolve_run_leaves(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, s
                         relevant: "Callable[[str], bool] | None" = None,
                         stop: "Callable[..., tuple | None] | None" = None,
                         chain: "list[str] | None" = None, depth: int = 0,
-                        runner: str = "npx") -> ResolvedLeaves:
+                        runner: str = "npx",
+                        walk_complete: bool = True) -> ResolvedLeaves:
     """Every leaf command `cmd` runs: split on `&&`, `||`, `;`, `|` and newlines,
     package-manager script calls followed into `scripts_by_dir[wd]` up to
     `_OPT82_MAX_SCRIPT_DEPTH`, runner wrappers unwrapped, a literal `cd`
@@ -12669,7 +12685,7 @@ def _resolve_run_leaves(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, s
     `_opt82_script_ref`).
     `stop(rest, wd, runner, chain)` ends the walk at the first leaf it returns
     a tuple for (OPT82's ESLint leaf); the result is then `verdict`."""
-    acc = ResolvedLeaves([], [])
+    acc = ResolvedLeaves([], [], walk_complete=walk_complete)
     acc.verdict = _rl_walk(cmd, wd, scripts_by_dir, scripts_unreadable, relevant,
                            stop, chain, depth, runner, acc)
     return acc
@@ -12786,12 +12802,23 @@ def _rl_task_runner(toks: list[str]
     return tool, pos, fwd
 
 
+# Folders the scan's manifest walk prunes without marking itself truncated
+# (scan.py `_VITEST_SKIP_DIRS`, `_VITEST_PRUNE_MAYBE_WORKSPACE`; every dot
+# folder is treated as skipped): a package.json there is never read.
+_RL_UNWALKED_DIRS = frozenset({"node_modules", "dist", "coverage", "__pycache__",
+                               "build", "out", "vendor", "target"})
+
+
 def _rl_effective_scripts(wd: str, scripts_by_dir: dict[str, dict[str, str]],
                           scripts_unreadable: "frozenset[str]",
+                          walk_complete: bool = True,
                           ) -> "dict[str, str] | None":
     """The scripts of the package.json a package manager uses from `wd`: the
-    nearest one at or above it. None when that one could not be read, or when
-    no package.json is found up to the repo root."""
+    nearest one at or above it. None when that one could not be read, when no
+    package.json is found up to the repo root, or when the walk up would pass
+    ground the scan's manifest walk did not read (`walk_complete` False: it
+    stopped early; or a folder it skips without a trace), where a nearer
+    package.json may exist."""
     import posixpath
     d = wd or ""
     while True:
@@ -12800,7 +12827,9 @@ def _rl_effective_scripts(wd: str, scripts_by_dir: dict[str, dict[str, str]],
         s = scripts_by_dir.get(d)
         if isinstance(s, dict):
             return s
-        if not d:
+        if not d or not walk_complete or any(
+                seg.startswith(".") or seg in _RL_UNWALKED_DIRS
+                for seg in d.split("/")):
             return None
         d = posixpath.dirname(d)
 
@@ -12943,7 +12972,8 @@ def _rl_walk(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, str]],
         scripts = scripts_by_dir.get(wd)
         ref = _opt82_script_ref(
             toks, scripts, any_name=relevant is None,
-            effective=(_rl_effective_scripts(wd, scripts_by_dir, scripts_unreadable)
+            effective=(_rl_effective_scripts(wd, scripts_by_dir, scripts_unreadable,
+                                             acc.walk_complete)
                        if relevant is None and lost is None else None))
         if ref is None:
             if rest:
@@ -17161,6 +17191,7 @@ _OPT84_MAX_LEAF_EXPANSIONS = 50
 def _opt84_expand_leaves(leaves: list[dict[str, Any]],
                          scripts_by_dir: dict[str, dict[str, str]],
                          scripts_unreadable: "frozenset[str]",
+                         walk_complete: bool = True,
                          ) -> "tuple[list[dict[str, Any]], str | None]":
     """Every leaf of a resolved step with each opaque leaf (`_opt84_opaque_leaf`)
     either expanded through `_resolve_run_leaves` (the same call path a
@@ -17195,7 +17226,8 @@ def _opt84_expand_leaves(leaves: list[dict[str, Any]],
         sub = _resolve_run_leaves(op[1], str(lf["wd"]), scripts_by_dir,
                                   scripts_unreadable,
                                   chain=list(lf.get("chain") or []),
-                                  runner=str(lf.get("runner") or "npx"))
+                                  runner=str(lf.get("runner") or "npx"),
+                                  walk_complete=walk_complete)
         if sub.unresolved:
             first = next((u for u in sub.unresolved if u.get("kind") == "cd"),
                          sub.unresolved[0])
@@ -17481,7 +17513,8 @@ def _detect_opt84_tool_swap(
                       if isinstance(v, dict)}
     scripts_unreadable = frozenset(str(d) for d in
                                    (tal.get("package_scripts_unreadable") or []))
-    alias_needed = any(isinstance(c, dict) and c.get("type_aware") == "on"
+    walk_complete = tal.get("truncated") is False
+    alias_needed =any(isinstance(c, dict) and c.get("type_aware") == "on"
                        for c in (tal.get("configs") or []))
     # OPT82 stamps its lint step's YAML `name:` stripped; OPT84's step name is
     # the whitespace-collapsed display name. Both sides compare collapsed.
@@ -17637,7 +17670,8 @@ def _detect_opt84_tool_swap(
                 _no("working_directory_unknown", wf, job, name)
                 continue
             wd = "" if wd == "." else wd
-            res = _resolve_run_leaves(run, wd, scripts_by_dir, scripts_unreadable)
+            res = _resolve_run_leaves(run, wd, scripts_by_dir, scripts_unreadable,
+                                      walk_complete=walk_complete)
             if res.unresolved:
                 # A directory change anywhere in the resolved command outranks
                 # the rest: it is why what follows could not be pinned down.
@@ -17651,7 +17685,7 @@ def _detect_opt84_tool_swap(
             # it cannot strip, a subshell or a package manager sent elsewhere
             # holds the step back; a stripped wrapper or `npm test` is followed.
             leaves, opaque = _opt84_expand_leaves(res.leaves, scripts_by_dir,
-                                                  scripts_unreadable)
+                                                  scripts_unreadable, walk_complete)
             if opaque:
                 _no(opaque, wf, job, name)
                 continue

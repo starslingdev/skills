@@ -43,8 +43,10 @@ unversioned and updates by reinstall from `main`.
   the step back, listed in the Data sources row as "tool swap: held back".
   A `pnpm <name>` / `yarn <name>` / `bun <name>` that names no script runs that
   binary and is read as it (a CLI the table has no row for is counted, not
-  listed), and a job with no lint, format or type-check step of that size is
-  skipped first, even when the audit could not tie it to one workflow.
+  listed; a path or script file such as `bun build.ts`, a colon name, pnpm's
+  workspace-wide `recursive`, or a directory the scan's manifest walk did not
+  reach is held back), and a job with no scan or build step of 20 seconds or
+  more is skipped before any workflow file is read.
   Babel and Webpack stay in the catalog's swap table as recipes only. The
   catalog now has 82 patterns (73 hygiene, 9 structural). (#129)
 
