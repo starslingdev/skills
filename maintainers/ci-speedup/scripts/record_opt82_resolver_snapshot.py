@@ -16,8 +16,10 @@ WHAT IT RECORDS
 
 HOW IT RECORDS
   It exports the reference skill tree with `git archive <engine-ref> skills/ci-speedup` into a
-  temp dir, copies the CURRENT OPT82 test module over the archived one, and in a child Python
-  process imports the archived `collect_runs`, wraps the two functions in place (module-global
+  temp dir, copies the CURRENT OPT82 test module over the archived one (ONLY that file: the
+  archived tree supplies everything else the module uses — `references/*.tsv`, the shared test
+  helpers, `scripts/` — so an edit to those files on main is not seen by a re-recording until
+  `--engine-ref` moves), and in a child Python process imports the archived `collect_runs`, wraps the two functions in place (module-global
   rebinding, so the detector's internal and the resolver's recursive calls are caught too), and
   runs the OPT82 test module through `pytest.main`. Each call is kept in completion order and
   repeats are dropped (first occurrence wins): many cases share one fixture, so the module's
@@ -42,6 +44,7 @@ from __future__ import annotations
 import argparse
 import inspect
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -51,7 +54,7 @@ from pathlib import Path
 _REPO = Path(__file__).resolve().parents[3]
 _OPT82_TESTS = _REPO / "skills" / "ci-speedup" / "tests" / "test_opt82_type_aware_lint.py"
 DEFAULT_OUT = _REPO / "maintainers" / "ci-speedup" / "tests" / "fixtures" / "opt82_resolver_snapshot.json"
-DEFAULT_ENGINE_REF = "a7c2db4"
+DEFAULT_ENGINE_REF = "a7c2db4a1e281ba8656de2b18b01f72dcc9effa1"  # full SHA: never ambiguous
 
 
 def _norm(x):
@@ -123,15 +126,24 @@ def record(out: Path, engine_ref: str = DEFAULT_ENGINE_REF) -> None:
     with tempfile.TemporaryDirectory(prefix="opt82-snapshot-") as tmp:
         tree = Path(tmp) / "tree"
         tree.mkdir()
-        archive = subprocess.run(
-            ["git", "-C", str(_REPO), "archive", "--format=tar", engine_ref,
-             "skills/ci-speedup"], capture_output=True, check=True).stdout
+        try:
+            archive = subprocess.run(
+                ["git", "-C", str(_REPO), "archive", "--format=tar", engine_ref,
+                 "skills/ci-speedup"], capture_output=True, check=True).stdout
+        except subprocess.CalledProcessError as e:
+            raise SystemExit(
+                f"git archive {engine_ref} failed (exit {e.returncode}): this recorder needs a "
+                f"clone whose history contains {engine_ref} (no --depth clone, no source "
+                f"tarball). stderr: {e.stderr.decode(errors='replace').strip()}") from e
         subprocess.run(["tar", "-x", "-C", str(tree)], input=archive, check=True)
         skill_dir = tree / "skills" / "ci-speedup"
         shutil.copyfile(_OPT82_TESTS, skill_dir / "tests" / _OPT82_TESTS.name)
         tmp_out = Path(tmp) / "snapshot.json"
+        # Hermetic child: a PYTEST_ADDOPTS from the parent shell (-x, --lf, -k) would change
+        # which calls get recorded.
+        env = {k: v for k, v in os.environ.items() if k != "PYTEST_ADDOPTS"}
         subprocess.run([sys.executable, str(Path(__file__).resolve()), "--_child",
-                        str(skill_dir), str(tmp_out)], check=True, cwd=tmp)
+                        str(skill_dir), str(tmp_out)], check=True, cwd=tmp, env=env)
         out.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(tmp_out, out)
 
