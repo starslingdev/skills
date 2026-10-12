@@ -147,13 +147,20 @@ The Tier-2 section displays runner-minutes only:
 - **Billable-equivalent minutes** — the same saving under GitHub's per-job minute
   round-up (`ceil(job_seconds/60)`), the basis the cost-spine table and Tier-2
   rankings use.
-- **Measured compute** — the cap every runner-minute saving is held to and
-  verified against counts **successful job runs only**: each spine row stamps
-  its successful-run compute (`success_billable_equiv_min_per_month`) beside the
-  failed, cancelled and timed-out runs it excludes (count, sampled minutes,
-  min/mo), and the spine footnote names them; findings that measure failure
-  waste on purpose (OPT35, OPT46, OPT48, OPT57, OPT64) keep their own basis,
-  every sampled run.
+- **Measured compute** counts **completed job runs**, success or failure (a
+  speed fix helps a failing run too, and findings size savings over every run).
+  It excludes only runs no speed fix removes: conclusion `timed_out` or
+  `cancelled`, and any run whose span falls in the 6-hour default-timeout kill
+  window OPT57 defines (95% × 360 min to 360 + 15 min); `neutral`,
+  `action_required` and other finished conclusions count. Each spine row stamps
+  its completed compute (`completed_billable_equiv_min_per_month`) beside the
+  excluded runs (count by reason, sampled minutes, min/mo); the footnote names
+  them. Modeled savings are capped at measured compute; OPT45 / OPT29 derive
+  from it and OPT73 clamps to it; measured or Tier-2-certified savings and the
+  failure-waste findings (OPT35, OPT46, OPT48, OPT57, OPT64) are checked against
+  every sampled run. A job whose every sampled run was excluded has no completed
+  basis: its modeled saving falls back to every sampled run, and a derived or
+  clamped saving renders unsized with that reason.
 
 All figures are runner-minutes; multiply by your runner's per-minute rate to get
 dollars. The report leaves the per-minute rate to the reader. The calculation

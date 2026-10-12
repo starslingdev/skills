@@ -7422,27 +7422,44 @@ def _runner_minute_spine_block(doc: dict[str, Any]) -> list[str]:
 
 
 def _measured_compute_footnote(spine: dict[str, Any]) -> str:
-    """The basis line under the cost-spine table: measured compute (what every
-    saving is capped and verified against) counts successful job runs only, and
-    the failed / cancelled / timed-out runs it leaves out are named with their
-    count and minutes. Built only from stamped facts; `verify_report` rebuilds the
-    same sentence from findings.json. A pre-split artifact renders no footnote."""
-    if str(spine.get("measured_compute_basis") or "") != "successful_job_runs_only":
+    """The basis line under the cost-spine table: measured compute counts completed
+    job runs, names the timed-out, cancelled and killed runs it leaves out (count,
+    reasons, minutes), says when job downloads failed, and says which savings use
+    which basis. Built only from stamped facts; `verify_report` rebuilds the same
+    sentence from findings.json (`_measured_compute_footnote` there is a MIRROR). A
+    pre-split artifact renders no footnote."""
+    if str(spine.get("measured_compute_basis") or "") != "completed_job_runs_only":
         return ""
     totals = _as_dict(spine.get("totals"))
-    excluded = _as_dict(spine.get("excluded_non_success"))
-    success = _num(totals.get("success_billable_equiv_min_per_month")) or 0.0
+    excluded = _as_dict(spine.get("excluded_unfinished"))
+    reasons = _as_dict(excluded.get("by_reason"))
+    completed = _num(totals.get("completed_billable_equiv_min_per_month")) or 0.0
     count = int(_num(excluded.get("job_run_count")) or 0)
-    head = (f"Measured compute counts successful job runs only: {success:.3f} billable "
-            "min/mo. Every saving is capped and verified against it")
-    if count <= 0:
-        return head + "; no failed, cancelled or timed-out job run was sampled."
-    sampled = int(_num(excluded.get("sampled_billable_min")) or 0)
-    monthly = _num(excluded.get("billable_equiv_min_per_month")) or 0.0
-    plural = "" if count == 1 else "s"
-    return (head + f"; {count} failed, cancelled or timed-out job run{plural} "
-            f"({sampled} sampled billable min, {monthly:.3f} min/mo) excluded from it, "
-            "though the table above still counts their minutes.")
+    failures = int(_num(_as_dict(spine.get("workflow_coverage")).get("job_fetch_failures"))
+                   or 0)
+    text = f"Measured compute counts completed job runs: {completed:.3f} min/mo."
+    if count > 0:
+        sampled = int(_num(excluded.get("sampled_billable_min")) or 0)
+        monthly = _num(excluded.get("billable_equiv_min_per_month")) or 0.0
+        one = count == 1
+        parts = [f"{int(_num(reasons.get(key)) or 0)} {label}" for key, label in (
+            ("timed_out", "timed out"), ("cancelled", "cancelled"),
+            ("kill_window", "killed in the 6-hour default-timeout window"))
+                 if int(_num(reasons.get(key)) or 0) > 0]
+        text += (f" {count} timed-out, cancelled or killed job run{'' if one else 's'} "
+                 f"({', '.join(parts)}; {sampled} sampled min, {monthly:.3f} min/mo) "
+                 f"{'is' if one else 'are'} excluded because no speed fix removes "
+                 f"{'it' if one else 'them'}; the cost-spine rows and Total still count "
+                 f"{'its' if one else 'their'} minutes.")
+    else:
+        text += " No timed-out, cancelled or killed job run was found in the sample."
+    if failures > 0:
+        text += (f" {failures} job download{'' if failures == 1 else 's'} failed, so the "
+                 "runs in them were not checked.")
+    return text + (" Failed, neutral and other finished runs count. Modeled savings are "
+                   "capped at measured compute and savings derived from it are computed "
+                   "from it; measured savings and failure-waste findings are checked "
+                   "against every sampled run instead.")
 
 
 def _tier2_source_job_name(value: object) -> str:

@@ -2096,8 +2096,9 @@ where measured data exists — three instance-fixes in a week (OPT45 #33, OPT73 
 
 **The contract.** Every finding that credits a positive `runner_min_saving` flows
 through the door, which either DERIVES the saving from, or CLAMPS it to, the
-MEASURED cost-spine billable of its affected jobs (`billable_equiv_min_per_month`,
-summed via the shared `_measured_billable_index` / `_measured_billable_for_jobs`
+MEASURED cost-spine billable of its affected jobs (`completed_billable_equiv_min_per_month`,
+completed job runs only since 2026-10-12, or `billable_equiv_min_per_month` where
+`_measured_compute_basis_for` names every sampled run; summed via the shared `_measured_billable_index` / `_measured_billable_for_jobs`
 join — at least as strict as `verify_report`'s `_base` join, so a door-derived
 figure can only ever match a SUBSET of the rows the verifier bounds against). A
 finding whose affected jobs miss the join UNSIZES honestly (`runner_min_saving =
@@ -2153,12 +2154,17 @@ coverage gap instead). A rm-crediting pattern with NO declared policy stamps the
 (`verify_report`) FAILs on it — so **a new pattern cannot ship its own unmeasured
 sizing path**. Two more invariants complete the class cut:
 `check_saving_within_measured_compute` (a saving never exceeds the compute it cuts;
-PR #30; that compute, like the door's cap, counts **successful job runs only**:
-each spine row stamps `success_billable_equiv_min_per_month` and its excluded
-failed / cancelled / timed-out runs, the spine sums them in `excluded_non_success`
-and the cost-spine footnote names them; `_FAILURE_WASTE_PATTERNS` (OPT35/46/48/57/64)
-keep their own basis, every sampled run; a pre-split all-status row bounding any
-other saving FAILs, 2026-10-12) and `check_cluster_lever_ceiling_escapes_sibling` (§5's cluster-floor lever
+PR #30; both it and the door pick each finding's basis through ONE rule,
+`_measured_compute_basis_for`, mirrored in the verifier and pinned by a coupling
+test: **completed job runs** (`completed_billable_equiv_min_per_month`; timed-out,
+cancelled and 6-hour-killed runs excluded, stamped per row by reason and summed in
+`excluded_unfinished`, named by the cost-spine footnote) for modeled and derived
+savings, every sampled run for `_FAILURE_WASTE_PATTERNS` (OPT35/46/48/57/64) and for
+measured or Tier-2-certified savings; a job whose every run was excluded falls back
+to every sampled run on both sides, and a derived or clamped saving there renders
+unsized with that reason; a pre-split row that may include excluded runs (all-status,
+or a `continue-on-error` job) bounding a completed-basis saving FAILs, every refusal
+collected, 2026-10-12) and `check_cluster_lever_ceiling_escapes_sibling` (§5's cluster-floor lever
 must not be capped by its own matrix sibling — issue #44). The door SKIPs (like the
 compute guard) when no render-ready spine exists, so a legacy pre-door artifact
 never trips it.
@@ -3679,7 +3685,8 @@ at or below its affected jobs' measured monthly billable compute in the `runner_
 through one policy. Whole-run-cancel patterns (OPT45 missing-concurrency, `_SIZING` `cost_basis:
 affected_jobs`) stay inside the bound BY DERIVATION rather than clamp:
 `_reground_whole_run_cancel_saving` re-derives the saving as `hit_rate × Σ(affected-job
-billable_equiv_min_per_month from the spine)` — the same measured rows bound (c) reads, joined the
+completed_billable_equiv_min_per_month from the spine)` (completed job runs: timed-out,
+cancelled and 6-hour-killed runs excluded, 2026-10-12) — the same measured rows bound (c) reads, joined the
 same way (matrix-stripped base, reusable-workflow fallback via the shared `_measured_billable_index`),
 and at least as strictly — so `hit_rate ≤ 1` puts it within bound by construction (superseding the
 provisional sizing-time figure, which grounds the no-spine case in the affected jobs' summed p50, never
