@@ -19,13 +19,14 @@ HOW IT RECORDS
   temp dir, copies the CURRENT OPT82 test module over the archived one (ONLY that file: the
   archived tree supplies everything else the module uses — `references/*.tsv`, the shared test
   helpers, `scripts/` — so an edit to those files on main is not seen by a re-recording until
-  `--engine-ref` moves), and in a child Python process imports the archived `collect_runs`, wraps the two functions in place (module-global
-  rebinding, so the detector's internal and the resolver's recursive calls are caught too), and
-  runs the OPT82 test module through `pytest.main`. Each call is kept in completion order and
-  repeats are dropped (first occurrence wins): many cases share one fixture, so the module's
-  ~650 resolver and ~140 detector calls reduce to 128 and 92 distinct ones.
-  The output is plain JSON: sorted keys, one recorded call per line, trailing newline — deterministic, so
-  re-recording unchanged inputs reproduces the committed file byte for byte
+  `--engine-ref` moves), and in a child Python process imports the archived `collect_runs`,
+  wraps the two functions in place (module-global rebinding, so the detector's internal and
+  the resolver's recursive calls are caught too), and runs the OPT82 test module through
+  `pytest.main`. Each call is kept in completion order and repeats are dropped (first
+  occurrence wins): many cases share one fixture, so the module's ~650 resolver and ~140
+  detector calls reduce to 128 and 92 distinct ones.
+  The output is plain JSON: sorted keys, one recorded call per line, trailing newline —
+  deterministic, so re-recording unchanged inputs reproduces the committed file byte for byte
   (`test_recording_reproduces_the_committed_snapshot_byte_for_byte` pins that).
 
 HOW TO RUN (from the repo root; needs git history containing --engine-ref, pytest, PyYAML)
