@@ -768,3 +768,78 @@ def test_every_gate_the_leaf_helpers_return_is_in_a_set():
     assert {"script_unresolvable", "command_changes_directory",
             "working_directory_unknown", "delegated_script_unresolved"} <= got, got
     assert got <= cr._OPT84_HELD_BACK_GATES, got - cr._OPT84_HELD_BACK_GATES
+
+
+# ---- nameless `Run <command>` steps that run a non-JS tool ---------------------
+
+_CLIPPY_YAML = ("cargo clippy --target ${{ matrix.target }} --all-targets "
+                "--all-features -- -D warnings")
+_CLIPPY_MEASURED = ("Run cargo clippy --target aarch64-apple-darwin --all-targets "
+                    "--all-features -- -D warnings")
+
+
+def _nameless(run_or_step, measured):
+    doc = _doc({})
+    doc["jobs"]["lint"]["steps"][2] = (run_or_step if isinstance(run_or_step, dict)
+                                       else {"run": run_or_step})
+    return _run(None, doc=doc, pole=_pole(step=measured))
+
+
+def test_a_nameless_rust_step_whose_yaml_join_fails_is_the_verdict():
+    # The matrix expression makes the measured name differ from the YAML
+    # display, so the join fails; a Rust lint is never a tool swap (JS
+    # manifest present).
+    out, withheld, cands = _nameless(_CLIPPY_YAML, _CLIPPY_MEASURED)
+    assert out == [] and withheld == {"tool_not_in_table": 1}, withheld
+    assert cands == []
+
+
+def test_a_joined_rust_step_with_an_expression_is_the_verdict():
+    out, withheld, cands = _nameless(_CLIPPY_YAML, "Run " + _CLIPPY_YAML)
+    assert out == [] and withheld == {"tool_not_in_table": 1}, withheld
+    assert cands == []
+
+
+def test_a_nameless_js_step_with_an_expression_is_still_held_back():
+    run = "pnpm lint --filter ${{ matrix.pkg }}"
+    out, withheld, cands = _nameless(run, "Run " + run)
+    assert out == [] and withheld == {"command_has_expression": 1}, withheld
+    assert [c["gate"] for c in cands] == ["command_has_expression"]
+
+
+def test_a_joined_step_mixing_a_non_js_tool_and_a_table_tool_is_not_the_verdict():
+    # The YAML joins, so its whole command is read, not just the first line
+    # GitHub puts in the name: the `npx eslint` keeps the normal path.
+    out, withheld, cands = _nameless("cargo build\nnpx eslint .", "Run cargo build")
+    assert len(out) == 1, (withheld, cands)
+
+
+def test_a_nameless_make_step_in_a_js_repo_is_still_held_back():
+    # `make` runs whatever the Makefile says, ESLint included.
+    out, withheld, cands = _nameless("make lint", "Run make lint")
+    assert out == [] and withheld == {"delegated_script_unresolved": 1}, withheld
+
+
+def test_a_nameless_action_named_after_a_tool_is_not_read_as_that_tool():
+    # `Run actions-rs/cargo@v1` is an action ref, not a `cargo` command.
+    out, withheld, cands = _nameless({"uses": "some-org/make@v1"},
+                                     "Run some-org/make@v2")
+    assert withheld == {"measured_step_not_matched_in_yaml": 1}, withheld
+
+
+@pytest.mark.parametrize("uses", ["rustsec/audit-check@v2",
+                                  "EmbarkStudios/cargo-deny-action@v2",
+                                  "taiki-e/install-action@v2",
+                                  "obi1kenobi/cargo-semver-checks-action@v2"])
+def test_rust_ecosystem_actions_are_the_verdict(uses):
+    out, withheld, cands = _nameless({"uses": uses, "name": "rust audit"},
+                                     "rust audit")
+    assert out == [] and withheld == {"tool_not_in_table": 1}, withheld
+    assert cands == []
+
+
+def test_an_unknown_eslint_action_is_still_held_back():
+    out, withheld, cands = _nameless(
+        {"uses": "some-org/eslint-action@v1", "name": "Do the thing"}, "Do the thing")
+    assert out == [] and withheld == {"candidate_is_an_action": 1}, withheld
+    assert [c["gate"] for c in cands] == ["candidate_is_an_action"]

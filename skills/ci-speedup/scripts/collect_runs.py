@@ -17321,7 +17321,39 @@ _OPT84_ACTION_WORDS = ("eslint", "prettier", "oxlint", "oxfmt", "lint", "format"
 _OPT84_KNOWN_ACTION_PREFIXES = (
     "actions/", "github/codeql-action/", "docker/", "pnpm/action-setup",
     "oven-sh/setup-bun", "swatinem/rust-cache", "dtolnay/", "cygwin/", "msys2/",
-    "actions-rust-lang/", "ruby/setup-ruby", "astral-sh/")
+    "actions-rust-lang/", "ruby/setup-ruby", "astral-sh/", "rustsec/",
+    "embarkstudios/", "taiki-e/", "obi1kenobi/")
+
+
+# Non-JS tools and builds: a command made only of these is never a tool swap,
+# whatever manifests the repo holds. Read on a step GitHub names `Run <command>`
+# (`_opt84_runs_only_non_js`), before the YAML join and the expression hold.
+# A runner whose own config decides what runs (`make`, `_OPT84_OPAQUE_BINARIES`)
+# is never in it: a Makefile can run ESLint, so in a JS repo it stays held back.
+_OPT84_NON_JS_TOOLS = frozenset({
+    "cargo", "cross", "rustup", "rustc", "cmake", "ninja", "meson", "go",
+    "mvn", "mvnw", "gradle", "gradlew", "configure", "dotnet", "msbuild", "swift",
+    "xcodebuild", "bundle", "rake", "pip", "pip3", "uv", "poetry", "bazel",
+    "bazelisk", "ctest", "flutter", "dart", "mix", "stack", "cabal", "zig",
+}) - frozenset(_OPT84_OPAQUE_BINARIES)
+
+
+def _opt84_runs_only_non_js(cmd: str) -> bool:
+    """Whether every segment of `cmd` starts with a non-JS tool or build
+    (`_OPT84_NON_JS_TOOLS`): a Rust lint, a C build, a Go test. An action ref
+    (`some-org/cargo@v1`, the first token carrying `@`) never qualifies."""
+    segs = [s.strip() for s in _OPT82_SEGMENT_SPLIT_RE.split(cmd or "") if s.strip()]
+    if not segs:
+        return False
+    for seg in segs:
+        toks = _opt82_tokens(seg)
+        while toks and toks[0] in _RL_SHELL_KEYWORDS:
+            toks = toks[1:]
+        if not toks or "@" in toks[0]:
+            return False
+        if toks[0].rsplit("/", 1)[-1] not in _OPT84_NON_JS_TOOLS:
+            return False
+    return True
 
 
 def _opt84_action_may_swap(step: dict[str, Any]) -> bool:
@@ -17874,6 +17906,30 @@ def _detect_opt84_tool_swap(
             continue
         doc = wf_docs.get(wf) if isinstance(wf_docs, dict) else None
         jobs = doc.get("jobs") if isinstance(doc, dict) else None
+        # A step GitHub names `Run <command>` (a nameless `run:` step) whose
+        # command is only non-JS tools (`cargo clippy`, `make`, `go test`) is
+        # the verdict, before the YAML join and the expression hold: a matrix
+        # `${{ }}` in it fails the join, and a Rust lint is never a tool swap.
+        # When the YAML step joins, its whole command is read (the name holds
+        # only its first line); an action step never qualifies.
+        hit0 = _opt83_match_yaml_job(jobs, job) if isinstance(jobs, dict) else None
+        steps0 = ([lf.step for lf in job_walk(hit0[1]).leaves]
+                  if hit0 is not None else [])
+        kept = []
+        for c in cands:
+            if c[0].startswith("Run "):
+                same = [s for s in steps0 if _opt79_yaml_step_display(s) == c[0]]
+                st0 = same[0] if len(same) == 1 else None
+                cmd = (None if st0 is not None and (st0.get("uses") or st0.get("name")
+                                                    or not isinstance(st0.get("run"), str))
+                       else str(st0["run"]) if st0 is not None else c[0][4:])
+                if cmd is not None and _opt84_runs_only_non_js(cmd):
+                    _no("tool_not_in_table", wf, job, c[0])
+                    continue
+            kept.append(c)
+        cands = kept
+        if not cands:
+            continue
         if not isinstance(jobs, dict):
             _no("workflow_yaml_unavailable", wf, job)
             continue

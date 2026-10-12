@@ -248,3 +248,15 @@ def test_malformed_catalogs_default_lets_the_catalog_key_win(tmp_path):
           {"pnpm-workspace.yaml": ("catalogs:\n  default:\n    typescript: ^4.9.0\n"
                                    "catalog:\n  typescript: ^5.6.2\n")})
     assert cr._opt84_version(scan._read_type_aware_lint(two), "", "typescript") == "^5.6.2"
+
+
+def test_a_tab_indented_json_prettierrc_names_its_plugin(tmp_path):
+    # A `.prettierrc` written as JSON indented with tabs: YAML refuses tab
+    # indentation, so the read must try JSON first.
+    rc = ('{\n\t"useTabs": true,\n\t"singleQuote": true,\n\t"trailingComma": "none",\n'
+          '\t"printWidth": 100,\n\t"plugins": ["prettier-plugin-svelte"],\n'
+          '\t"overrides": [{ "files": "*.svelte", "options": { "parser": "svelte" } }]\n}\n')
+    block = scan._read_type_aware_lint(_repo(tmp_path, {}, {".prettierrc": rc}))
+    assert block["prettier_plugins"][""] == ["prettier-plugin-svelte"]
+    assert block["prettier_plugin_files"][""]["prettier-plugin-svelte"] == ".prettierrc"
+    assert block["prettier_config_unreadable"] == {}

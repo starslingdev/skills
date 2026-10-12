@@ -4146,8 +4146,8 @@ def _tal_fit_facts(text: str, obj: Any = None) -> dict[str, Any]:
             or any(e.startswith(_TAL_HOOKS_PRESET_PREFIX) for e in extends)}
 
 
-# Prettier configs this read parses as data (JSON or YAML; `.prettierrc` may be
-# either, and YAML reads JSON). Any other `.prettierrc*` / `prettier.config.*`
+# Prettier configs this read parses as data (JSON, then YAML; `.prettierrc` may
+# be either, and tab-indented JSON is not YAML). Any other `.prettierrc*` / `prettier.config.*`
 # (JS, TS, TOML) is recorded as not opened.
 _TAL_PRETTIER_DATA_CONFIGS = (".prettierrc", ".prettierrc.json", ".prettierrc.json5",
                               ".prettierrc.yaml", ".prettierrc.yml")
@@ -4195,12 +4195,17 @@ def _tal_prettier_config_plugins(folder: Path, rel_dir: str, present: list[str],
         if text is None:
             unread.append(_rel(name))
             continue
+        # JSON first, then YAML: a JSON config indented with tabs (legal JSON)
+        # is refused by YAML, which forbids tab indentation. Only a file that
+        # parses as neither is unread.
         try:
-            obj = (json.loads(text) if name.endswith((".json", ".json5"))
-                   else yaml.safe_load(text))
-        except (ValueError, yaml.YAMLError):
-            unread.append(_rel(name))
-            continue
+            obj = json.loads(text)
+        except ValueError:
+            try:
+                obj = yaml.safe_load(text)
+            except yaml.YAMLError:
+                unread.append(_rel(name))
+                continue
         if obj is None:
             continue                        # an empty config sets nothing
         _take(obj, _rel(name))
