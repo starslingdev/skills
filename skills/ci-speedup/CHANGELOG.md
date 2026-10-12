@@ -51,6 +51,11 @@ unversioned and updates by reinstall from `main`.
   `just` and an action it does not recognise) holds
   the step back, listed in the Data sources row as "tool swap: held back".
   The card links each drop-in's overview docs alongside its migration guide.
+  A nameless step GitHub names `Run <command>` whose command is a non-JavaScript
+  tool (cargo, cmake, go, gradle, dotnet, ...) is a silent verdict even when its
+  workflow step cannot be joined; Rust-ecosystem audit and cache actions are
+  known verdicts; a Prettier data config is read as JSON first, then YAML, so a
+  tab-indented `.prettierrc` names its plugins.
   The report's own self-check re-derives every card from the findings file:
   the step and its time on its pole, the ceiling, the fit from the stamped
   lint-config facts (a "drop-in" over custom rules, a plugin oxlint does not
