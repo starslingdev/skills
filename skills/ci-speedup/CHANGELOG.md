@@ -11,6 +11,14 @@ unversioned and updates by reinstall from `main`.
 
 ## [Unreleased]
 
+### Changed
+- **2026-10-17** — The description states the order between the two CI
+  skills: necessity before speed. When the ask is whether a check should run
+  at all on an event (a docs PR running the full suite, a guard fire drill on
+  every pull request), `ci-trim` runs first, with its one-line install named;
+  ci-speedup makes the checks that remain faster, and sharding a job never
+  answers whether it should run.
+
 ### Added
 
 - **2026-10-10** — **The audit now points out when a slow step on the slowest
