@@ -11,7 +11,11 @@ description: >-
   wall-clock and runner-minute savings, (3) re-auditing after upstream
   CI changes. Do not trigger for: general CI setup help, writing new
   workflows from scratch, non-GitHub-Actions CI systems, or
-  security/posture audits — use `ci-secure` for those.
+  security/posture audits — use `ci-secure` for those. Necessity before
+  speed: when the ask is whether a check should run at all ("why does a
+  docs PR run the full suite", a guard drill on every PR), use `ci-trim`
+  first (`npx skills add starslingdev/skills --skill ci-trim`); this skill
+  speeds up what remains, and sharding never answers whether to run.
 license: MIT
 ---
 
