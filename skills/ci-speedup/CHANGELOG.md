@@ -1100,6 +1100,18 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-10-18** - **OPT38 no longer calls a pull-request `edited` or `labeled`
+  trigger safe to remove just because the workflow has no `if:` guard on it.**
+  The entry rated removal "Risk: LOW" on the grounds that any real use of those
+  events would already be guarded. Two cases need the event with no guard: an
+  action or script that reads the PR title, description or labels internally (a
+  PR-title validator such as `amannn/action-semantic-pull-request`), where
+  dropping `edited` leaves a corrected title failing on a stale result; and a
+  base-branch change, which also fires `edited`, where dropping it leaves a
+  retargeted PR green against its old base. The detection steps now have the
+  agent inspect the workflow's `uses:` targets and scripts for those
+  dependencies first and keep every event they need, and the risk line says
+  removal is safe once that inspection finds none.
 - **2026-10-12** — **The report self-check no longer rejects a correct report
   when a dropped check shares its name with a critical-path job in another
   workflow** (#132). On mastodon/mastodon a non-required `test` job in one

@@ -2835,8 +2835,9 @@ For each hit:
 
 1. Confirm the `types:` array includes one of the non-content events.
 2. Cross-reference the workflow body for any `if: github.event.action == 'labeled'` (or similar) — if present, the trigger is intentional.
-3. If no such guard exists, the metadata events trigger a full no-op re-run.
-4. Cost = full workflow P50 × estimated frequency of metadata edits (typically 5-20% of PR activity).
+3. Inspect what the workflow reads before calling a re-run a no-op. List every `uses:` target and every script the jobs run, and look for a dependency on the PR title, description, labels, base branch, or other PR metadata, with or without an `if:` guard. A PR-title validator such as `amannn/action-semantic-pull-request`, a label-driven check, or a description linter reads that metadata internally, so its job needs the matching event type to run again. Keep every event type needed to rerun those checks.
+4. Only when that inspection finds no metadata dependency, the metadata events trigger a full no-op re-run.
+5. Cost = full workflow P50 × estimated frequency of metadata edits (typically 5-20% of PR activity).
 
 **Fix**: Restrict `types:` to content-change events:
 
@@ -2850,7 +2851,10 @@ Or simply omit `types:` to use the default (which already excludes `edited`).
 
 **Real-world example (blen-starter-kit deep-scan)**: `ci.yml` and several other workflows would re-run on PR title/body edits because of an inherited `types:` array including `edited`. Fix is a one-line YAML change.
 
-**Risk**: LOW. The change reduces noise; legitimate use cases (e.g., a workflow that posts comments based on label) need the trigger and would already have an `if:` guard.
+**Risk**: LOW once step 3 finds no metadata dependency; not LOW before it. An `if:` guard is not the only sign a workflow needs the event. Two cases need it with no guard at all:
+
+- An action or script that reads PR metadata internally (a PR-title validator, a label-driven check, a description linter). Dropping `edited` or `labeled` leaves a corrected title failing, or an invalid one passing, on a stale result.
+- `edited` also fires when the pull request's base branch changes. Dropping it means CI does not run again after a retarget, so a PR can show green against its old base.
 
 ---
 
