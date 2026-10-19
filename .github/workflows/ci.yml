@@ -51,7 +51,7 @@ jobs:
       # Third-party actions are pinned to a commit SHA (the tag comment is for humans only) so a
       # moved/compromised tag can't silently change what runs in CI.
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Full history so any provenance/ancestry guard can verify a recorded skill commit is an
           # ancestor of HEAD (a shallow depth-1 checkout wouldn't contain those commits).
@@ -90,7 +90,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Full history so any provenance/ancestry guard can verify a recorded skill commit is an
           # ancestor of HEAD (a shallow depth-1 checkout wouldn't contain those commits).
