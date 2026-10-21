@@ -1,0 +1,71 @@
+schema_version: "1.1"
+name: security-ask-routes-to-ci-secure
+description: >-
+  The should-not-trigger case (evals.json scenario 6). A supply-chain and OIDC
+  security audit is a posture review, not a speed or cost audit, and
+  ci-speedup's description scopes it out by name ("use `ci-secure` for those").
+  Both skills are installed, as they are for a user who has the StarSling set:
+  the security ask must be answered by ci-secure, ci-speedup must not be
+  loaded, and none of its pipeline may run. The sandbox holds a real checkout
+  with real workflows, so the routing decision is the only thing under test.
+tags: [ci-speedup, routing, should-not-trigger, negative]
+
+# ci-secure is mounted beside the skill under test so the routing question has
+# two real answers. With ci-speedup alone mounted, a first run of this case
+# answered the security ask correctly by hand and never named ci-secure,
+# because no ci-secure was installed to name; grading that prose would grade
+# the model's memory of a skill it could not see, not the routing contract.
+plugins: ["../..", "../../../ci-secure"]
+
+context:
+  scaffold_script: scaffold.sh
+
+execution:
+  prompt: |
+    Audit our CI for supply-chain and OIDC security risks — over-broad token
+    permissions, unpinned actions, dangerous triggers.
+  max_turns: 60
+  timeout_seconds: 900
+  allowed_tools: [Read, Glob, Grep, Skill, Agent, AskUserQuestion, TodoWrite, Bash]
+
+runs: 3
+
+graders:
+  - type: tool_used
+    name: ci-speedup-skill-not-loaded
+    tool: Skill
+    input_match: '"skill"\s*:\s*"(?:[\w-]+:)?ci-speedup"'
+    min: 0
+    max: 0
+    arm: both
+
+  - type: tool_used
+    name: ci-secure-skill-answers-the-ask
+    tool: Skill
+    input_match: '"skill"\s*:\s*"(?:[\w-]+:)?ci-secure"'
+    min: 1
+    arm: both
+
+  # ci-speedup's pipeline entry points. `collect_runs.py`, `blocking_path.py`
+  # and `verify_report.py` are ci-speedup's own names; `run.py` and `scan.py`
+  # are named with their directory because ci-secure ships scripts with the
+  # same basenames and is expected to run them here.
+  - type: tool_used
+    name: no-ci-speedup-pipeline-script-ran
+    tool: Bash
+    input_match: 'collect_runs\.py|blocking_path\.py|verify_report\.py|ci-speedup/scripts/(?:run|scan)\.py'
+    min: 0
+    max: 0
+
+  # No wall-clock optimization report was produced for this ask. This is the
+  # report's own title line, which only ci-speedup's renderer writes.
+  - type: regex
+    name: no-speed-report-in-the-transcript
+    target: trace
+    pattern: '# synthetic/repo - why is the merge slow\?'
+    match: not_contains
+
+expected_outcome: >-
+  ci-speedup does not run. The security-posture ask is answered by the
+  ci-secure skill, which ci-speedup's description names as the skill for it.
+  No ci-speedup script runs and no wall-clock report is produced.

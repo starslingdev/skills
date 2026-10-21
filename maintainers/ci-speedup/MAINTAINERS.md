@@ -435,6 +435,40 @@ only caught by re-running across repos).
   any counts (test totals, dropped-check counts, validation tables) at write time —
   don't carry a stale number forward.
 
+## Behavioural evals (real agent sessions)
+
+The pytest suite proves the engine; it never proves that an agent reading
+`SKILL.md` runs that engine, in order, and closes the way the contract says.
+`scripts/run_skill_evals.py` does: it scaffolds the synthetic repository the
+offline replay corpus was recorded against, drives one headless `claude -p`
+session per case with the skill mounted, and grades the recorded tool calls,
+the report the session rendered, and its closing message. The cases and what
+each pins are in `skills/ci-speedup/evals/README.md`.
+
+```bash
+# from the repo root (needs `claude` on PATH, PyYAML, and a gh login for the phase-1 gate)
+python3 maintainers/ci-speedup/scripts/run_skill_evals.py                        # both cases
+python3 maintainers/ci-speedup/scripts/run_skill_evals.py --case full-run-synthetic --keep
+```
+
+- **Exit codes.** 0 every grader passed; 1 a case ran and failed one; 2 the
+  harness could not run or could not collect the evidence (never a pass). A
+  failing or ungradable session lands in `skill-eval-logs/` at the repo root.
+- **Offline, honestly.** Every run-history read the skill's scripts make is
+  replayed (`CI_SPEEDUP_GH_FIXTURES`), and `scripts/eval_gh_shim.py` answers
+  the agent's own `gh repo view` / `gh api repos/synthetic/repo` from the same
+  corpus. `gh auth status` always reaches the real `gh`: no login, no pass.
+- **Cost.** One real session per case per run, under a dollar and about a
+  minute each when measured on 2026-10-21.
+- **When.** Before merging a change to `SKILL.md`, `references/`, `scripts/`,
+  `tests/verify_report.py`, the replay corpus or the cases. The `skill-evals`
+  workflow runs it on such a pull request (same-repo only) and reports
+  `ci-speedup skill evals`.
+- **Proving a grader can fail.** `--fixtures-override <dir>` replays from a
+  corpus you built instead. Removing `CI / test` from the corpus's required
+  checks makes `prep` the first long pole, and exactly one grader goes red;
+  that is how the full-run case's graders were shown to discriminate.
+
 ## NEVER (applies to all three loops)
 
 - Never commit `.ci-speedup-gaps/`, `.ci-speedup-loop/`, or `.ci-speedup-dogfood/`

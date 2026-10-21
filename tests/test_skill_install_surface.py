@@ -54,6 +54,9 @@ _MOVED_NAMES = {
     "record_opt82_resolver_snapshot.py",
     "test_opt82_resolver_snapshot.py",
     "opt82_resolver_snapshot.json",
+    # The behavioural eval harness spends real agent sessions; it never ships.
+    "run_skill_evals.py",
+    "test_ci_speedup_eval_harness.py",
 }
 
 
@@ -179,6 +182,23 @@ def test_skill_fixtures_hold_no_recorded_replay_snapshot():
     )
 
 
+def test_install_surface_holds_no_eval_session_output():
+    """The behavioural eval harness writes a failing session's verbatim transcript and the
+    files it rendered to `skill-eval-logs/`, and `claude plugin eval` defaults its results
+    to `<discovery root>/evals/results/`. Either one under the skill would ship a recorded
+    agent session to every user (gitignore does not protect the install surface). The
+    harness anchors its log dir on the repo root; this keeps it that way."""
+    leaked = sorted(
+        p.relative_to(_REPO).as_posix()
+        for p in _SKILL.rglob("*")
+        if p.is_dir() and (p.name == "skill-eval-logs"
+                           or p.relative_to(_SKILL).as_posix() == "evals/results")
+    )
+    assert not leaked, (
+        "eval session output under the installable skill ships to end users: "
+        + ", ".join(leaked))
+
+
 def test_relocated_infra_actually_present():
     """The flip side — the infra must EXIST under maintainers/ci-speedup/, so the
     absence checks above can't pass vacuously if the files were deleted, not moved."""
@@ -198,6 +218,8 @@ def test_relocated_infra_actually_present():
         _MAINT / "tests" / "test_dogfood_retry_node.py",
         _MAINT / "scripts" / "record_opt82_resolver_snapshot.py",
         _MAINT / "tests" / "test_opt82_resolver_snapshot.py",
+        _MAINT / "scripts" / "run_skill_evals.py",
+        _MAINT / "tests" / "test_ci_speedup_eval_harness.py",
         _MAINT / "tests" / "fixtures" / "opt82_resolver_snapshot.json",
     ]
     missing = [p.relative_to(_REPO).as_posix() for p in required if not p.exists()]

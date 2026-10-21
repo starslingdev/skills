@@ -31,6 +31,24 @@ unversioned and updates by reinstall from `main`.
   and stays vitest-only. The catalog count goes from 82 to 86 (75 hygiene
   plus 11 structural).
 
+- **2026-10-21** — **The skill's own instructions are now tested by running
+  them.** Two behavioural cases under `evals/` drive a real agent session
+  through the skill and grade what it did: a full audit, from the request to
+  the closing message, of a synthetic repository whose CI history is replayed
+  offline from the committed test corpus (so its numbers are fixed and can be
+  pinned), and a security audit request that must go to ci-secure instead of
+  this skill. The full audit is graded on the gh check running, the data pass,
+  the render and the report self-check all running in order, the self-check
+  passing, the report drilling the checks that gate the merge with an agent
+  prompt on each, the close quoting the merge wait exactly and naming no
+  internal catalog ids, and nothing being committed or pushed. They run on a
+  maintainer-only harness (never shipped with the skill) and in the skill-evals
+  workflow on pull requests that change the skill's instructions, references,
+  scripts or cases. The offline e2e test and the eval cases now build the
+  synthetic repository from one shared builder, `tests/fixtures/synthetic_corpus.py`,
+  so the two cannot drift. `evals.json`'s scenarios stay as the written
+  reference; its note now says which ones execute.
+
 - **2026-10-10** — **The audit now points out when a slow step on the slowest
   merge-gating job runs a tool that has a native, much faster drop-in.** New
   catalog pattern OPT84 looks at each slowest job the audit measured on the

@@ -1,0 +1,147 @@
+schema_version: "1.1"
+name: full-run-synthetic
+description: >-
+  A full audit, request to close, of the synthetic repository the offline
+  replay corpus was recorded against. The skill must pass its own gh gate,
+  run the data pass, render the report with the command the data pass printed,
+  run its self-check on that report and see it pass, and close on the measured
+  result without committing or pushing anything. Every run-history call is
+  answered from the committed replay corpus, so the report's numbers are fixed
+  and the graders can pin them. Runnable only on the maintainer harness, which
+  is what sets the replay variable (see evals/README.md).
+tags: [ci-speedup, full-run, offline-replay]
+
+plugins: ["../.."]
+
+context:
+  scaffold_script: scaffold.sh
+
+execution:
+  # The target is named, and named as the checkout in the working directory,
+  # because SKILL.md phase 1 re-confirms only an ambiguous target and resolves
+  # `owner/repo` with `gh repo view`, which cannot resolve a repository that
+  # exists only in the replay corpus. Naming it is what a user who already knows
+  # which repo they want does; it is not a bypass of the gate (`gh auth status`
+  # still runs and must pass).
+  prompt: |
+    Audit the CI of synthetic/repo for speed and cost. It's the git checkout in
+    the current directory, and that's the repo I want audited.
+  max_turns: 80
+  timeout_seconds: 1500
+  allowed_tools: [Read, Glob, Grep, Skill, Agent, AskUserQuestion, TodoWrite, Bash, Write]
+
+runs: 3
+
+graders:
+  - type: tool_used
+    name: ci-speedup-skill-fired
+    tool: Skill
+    input_match: '"skill"\s*:\s*"(?:[\w-]+:)?ci-speedup"'
+    min: 1
+    arm: both
+
+  # SKILL.md phase 1. The gate is real: the harness passes GitHub auth through,
+  # it does not stub `gh`.
+  - type: tool_used
+    name: gh-gate-checked
+    tool: Bash
+    input_match: 'gh auth status'
+    min: 1
+
+  # Phases 2-3: `run.py` orchestrates scan + data pass, with `--with-logs` so the
+  # drill bundle the render command binds is captured.
+  - type: tool_used
+    name: data-pass-ran-with-logs
+    tool: Bash
+    input_match: 'run\.py[^"]*--with-logs'
+    min: 1
+
+  - type: tool_used
+    name: report-rendered
+    tool: Bash
+    input_match: 'blocking_path\.py'
+    min: 1
+
+  - type: tool_used
+    name: self-check-ran
+    tool: Bash
+    input_match: 'verify_report\.py'
+    min: 1
+
+  # `verify_report.py` prints this on its own line only when every non-skipped
+  # check passed. The quoted phrase also sits in SKILL.md and in the script's
+  # own source, so the anchor is the line START: in both of those it follows a
+  # quote or `print("`, never a newline.
+  - type: regex
+    name: self-check-passed
+    target: trace
+    pattern: '\n✅ all checks passed'
+    match: contains
+
+  # The rendered report, read off disk. Long pole 1 is the `CI / test` check in
+  # ci.yml (197s at p50), the corpus's critical-path check
+  # (tests/test_offline_pipeline_e2e.py asserts `critical_path_check`), and pole
+  # 5 is `style.yml`'s `style`, the drill's last pole.
+  - type: regex
+    name: report-drills-ci-test-as-long-pole-1
+    target: files
+    pattern: '## 🟠 Long pole 1: `ci\.yml` ▸ `CI / test` - 3m 17s'
+    match: contains
+
+  - type: regex
+    name: report-drills-style-as-long-pole-5
+    target: files
+    pattern: 'Long pole 5: `style\.yml` ▸ `style` - 1m 32s'
+    match: contains
+
+  # The Bottom line is chain-aware: the `prep` -> `verify` needs: chain (220s)
+  # outlasts the 197s singleton, and the typical PR waits 3m 40s for it.
+  - type: regex
+    name: bottom-line-headlines-the-prep-verify-chain
+    target: files
+    pattern: 'waits \*\*3m 40s\*\* for the `prep` → `verify` chain'
+    match: contains
+
+  # Every long pole ends in a hand-off prompt. A pole heading followed by the
+  # next H2 with no prompt heading in between is a stunted pole.
+  - type: regex
+    name: no-long-pole-lacks-its-agent-prompt
+    target: files
+    pattern: '\n## [^\n]*Long pole \d+: [^\n]*\n(?:(?!\n## |#### 🤖 Prompt for your coding agent)[\s\S])*\n## '
+    match: not_contains
+
+  # Phase 6: the close quotes the report's merge-wait figure verbatim and keeps
+  # internal catalog ids out of the chat.
+  - type: regex
+    name: close-quotes-the-merge-wait-verbatim
+    target: last_message
+    pattern: '(?<![\d.])3m 40s'
+    match: contains
+
+  - type: regex
+    name: close-carries-no-catalog-id
+    target: last_message
+    pattern: '\bOPT\d+'
+    match: not_contains
+
+  - type: tool_used
+    name: nothing-was-committed
+    tool: Bash
+    input_match: 'git\s+(-\S+\s+\S+\s+)*commit'
+    min: 0
+    max: 0
+
+  - type: tool_used
+    name: nothing-was-pushed
+    tool: Bash
+    input_match: 'git\s+(-\S+\s+\S+\s+)*push'
+    min: 0
+    max: 0
+
+expected_outcome: >-
+  ci-speedup passes its gh gate, runs the data pass against the replayed
+  history, renders the report with the command the data pass printed, runs
+  verify_report.py on it and sees every check pass, then closes on the measured
+  result: the `prep` -> `verify` chain at 3m 40s and the `CI / test` check as
+  the slowest single gate, with no catalog ids in the chat and nothing
+  committed or pushed.
