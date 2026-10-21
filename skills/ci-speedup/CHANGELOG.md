@@ -13,6 +13,24 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-10-21** — **Four new catalog patterns for slow test jobs, OPT85 to
+  OPT88, each backed by measured changes OpenAI engineers made in their public
+  repos.** OPT85: tests that start a new process for every case, or link a
+  separate binary for every test file, run the same cases in one process per
+  worker or one binary instead. OPT86: an install step that compiles a
+  dependency from source when a prebuilt package exists for that interpreter
+  and platform pins a version that ships one and makes a source build an
+  error. OPT87: tests that wait on a slow external dependency they do not
+  verify stub it at its boundary, with a mandatory real-dependency run kept
+  elsewhere and a rule never to mock what the test exists to check. OPT88: a
+  test worker count nobody measured is timed at two or three settings on the
+  real runner, keeping the fastest. None has a detector yet, so the audit
+  never reports one on its own or claims to have checked it (the scan lists
+  OPT85 and OPT87 among the structural patterns it has no detector for), and
+  each credits no saving. OPT78 gains a pointer to OPT85
+  and stays vitest-only. The catalog count goes from 82 to 86 (75 hygiene
+  plus 11 structural).
+
 - **2026-10-10** — **The audit now points out when a slow step on the slowest
   merge-gating job runs a tool that has a native, much faster drop-in.** New
   catalog pattern OPT84 looks at each slowest job the audit measured on the

@@ -1,7 +1,7 @@
 # Structural / critical-path track — risk model & intent interrogation
 
 Depth for the structural finding class (catalog category 14, OPT70–OPT75 plus
-OPT78, OPT83 and OPT84) — the findings routed from the measured critical path rather than a YAML
+OPT78, OPT83, OPT84, OPT85 and OPT87) — the findings routed from the measured critical path rather than a YAML
 match. OPT83 is a finding dict (risk, guardrail and rollout on the record)
 rendered as its own card at the pole, uncredited: it does not rank in the
 findings table or get a `Risk` row, and its prompt carries an independence
