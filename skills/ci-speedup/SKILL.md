@@ -103,7 +103,7 @@ as intended that is simply the slowest thing gating the merge, with no catalog
 match. The **structural track** (category 14, OPT70–OPT75, OPT78, OPT83–OPT85, OPT87) attacks that: a second
 finding class **routed from the measured critical path** in `collect_runs.py` (the
 long-pole job decomposed to steps, required checks cross-referenced, shared cluster
-work detected; OPT78 via a config-gated vitest log leaf), not a YAML match — still
+work detected; OPT78 via a config-gated vitest log leaf; OPT74/85/87 have no router yet), not a YAML match — still
 catalog OPT-ids. Routing + risk model: `ARCHITECTURE.md` §11.
 
 ### Risk & intent are mandatory (baked into every structural prompt)
@@ -427,7 +427,7 @@ entry's METADATA block declares the pattern id, impact tier, finding class
 slug; structural entries add a `risk` rating + mandatory guardrail/rollout.
 
 Adding or cutting a pattern (catalog entry + detector registration, coverage
-bookkeeping, the intentionally-cut OPT49/50/51 / router-less OPT74 and OPT78 cases) is a
+bookkeeping, the intentionally-cut OPT49/50/51 / router-less OPT74, OPT78, OPT85 and OPT87 cases) is a
 contributor task — `maintainers/ci-speedup/MAINTAINERS.md` (source checkout
 only) § Adding a pattern to the catalog.
 
@@ -498,8 +498,8 @@ The scannable rule list; each is detailed in the section named in parentheses.
   "sampled 0/20 PRs", "found no drill logs", "the spine is empty", or "I couldn't X, so
   let me Y". A genuine coverage limit is stated once by the report's banners, not narrated.
 - **Emit a finding whose pattern id is not in the catalog** — both tracks emit only
-  catalog-declared OPT-ids (structural OPT70–75, OPT78, OPT83–85, OPT87 are *routed* from the
-  critical path but still catalog-declared).
+  catalog-declared OPT-ids (structural OPT70–73, OPT75, OPT78, OPT83, OPT84 are *routed* from the
+  critical path but still catalog-declared; router-less OPT74/85/87 are never emitted).
 - **Emit a generic "slow step" finding** — a step taking N seconds is an observation;
   every finding names a specific root cause ("admission gate").
 - **Present a structural change as a safe quick win** — each states its `risk`,

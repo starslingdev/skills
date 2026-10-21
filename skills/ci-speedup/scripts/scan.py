@@ -5269,7 +5269,7 @@ def scan(root: Path, catalog_path: Path) -> dict[str, Any]:
         "catalog_patterns_with_detector": len(static_entries) - len(unmatched_patterns),
         "catalog_patterns_without_detector": sorted(unmatched_patterns),
         # Structural catalog entries with no critical-path router (currently
-        # OPT74, and OPT78, which a drill-time log leaf routes instead). Reported so a catalogued-but-undetected structural pattern is
+        # OPT74, OPT85, OPT87, and OPT78, which a drill-time log leaf routes instead). Reported so a catalogued-but-undetected structural pattern is
         # honest about its coverage instead of silently never appearing.
         "catalog_structural_patterns_without_detector": structural_without_detector,
     }

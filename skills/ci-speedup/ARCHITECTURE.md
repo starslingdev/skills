@@ -2801,7 +2801,9 @@ cost, outside this catalog"). The **structural track** (catalog category 14, OPT
 it is routed from the measured critical path instead of matched against YAML.
 OPT70–OPT75 are routed by the deterministic router described below; **OPT78** is
 routed by the drill-time `vitest-isolate-pool` leaf detector (§12.3) and is
-reported by `scan.py` as having no critical-path router. **OPT83** is routed by
+reported by `scan.py` as having no critical-path router. **OPT74, OPT85 and
+OPT87** have no router at all: `scan.py` lists them the same way and nothing
+emits them. **OPT83** is routed by
 its own per-pole pass (`_detect_opt83_parallel_steps`) over each pole's step
 decomposition, then checked for independence against the workflow YAML.
 **OPT84** is routed by its own per-pole pass (`_detect_opt84_tool_swap`) over the

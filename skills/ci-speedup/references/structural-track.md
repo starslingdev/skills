@@ -2,7 +2,8 @@
 
 Depth for the structural finding class (catalog category 14, OPT70–OPT75 plus
 OPT78, OPT83, OPT84, OPT85 and OPT87) — the findings routed from the measured critical path rather than a YAML
-match. OPT83 is a finding dict (risk, guardrail and rollout on the record)
+match. OPT74, OPT85 and OPT87 have no router yet: they emit no finding,
+prompt or `Risk` row, and their catalog entries are applied by hand. OPT83 is a finding dict (risk, guardrail and rollout on the record)
 rendered as its own card at the pole, uncredited: it does not rank in the
 findings table or get a `Risk` row, and its prompt carries an independence
 re-check rather than the history/intent interrogation below. Its gates fail
