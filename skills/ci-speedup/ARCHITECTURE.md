@@ -26,9 +26,9 @@ developer's wait. It gets its own prominent section below.
 
 ## 1. Purpose & scope
 
-ci-speedup audits a repository's GitHub Actions workflows against an 82-pattern
-catalog — 73 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76, OPT77, OPT79, OPT80, OPT81 and OPT82) plus 9 **structural /
-critical-path** patterns (OPT70–OPT75, OPT78, OPT83 and OPT84, routed from the measured long pole; see
+ci-speedup audits a repository's GitHub Actions workflows against an 86-pattern
+catalog — 75 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86 and OPT88) plus 11 **structural /
+critical-path** patterns (OPT70–OPT75, OPT78, OPT83, OPT84, OPT85 and OPT87, routed from the measured long pole; see
 §11) — and produces a **root-cause-analysis** markdown report with **measured**
 impact on two axes: developer wall-clock wait (the ranking axis) and
 runner-minutes (the cloud bill). Detection, ranking, and every measured number
@@ -2791,17 +2791,19 @@ wired or removed rather than left to become archaeology.
 
 ## 11. The structural / critical-path track
 
-The hygiene/data-driven catalog (OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81, OPT82) is mostly **declarative** -
+The hygiene/data-driven catalog (OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88) is mostly **declarative** -
 static findings are locally-checkable YAML defects, while measured Tier-2 rows
 come from run history. Its blind spot: on real repos the merge is
 gated by a check that is *working as intended* and simply slow, with no
 catalog match. The old catalog-spine report used to dead-end there ("inherent
-cost, outside this catalog"). The **structural track** (catalog category 14, OPT70–OPT75 plus OPT78, OPT83 and OPT84,
+cost, outside this catalog"). The **structural track** (catalog category 14, OPT70–OPT75 plus OPT78, OPT83, OPT84, OPT85 and OPT87,
 `class: structural`) is a **second finding class that is not catalog-bound** —
 it is routed from the measured critical path instead of matched against YAML.
 OPT70–OPT75 are routed by the deterministic router described below; **OPT78** is
 routed by the drill-time `vitest-isolate-pool` leaf detector (§12.3) and is
-reported by `scan.py` as having no critical-path router. **OPT83** is routed by
+reported by `scan.py` as having no critical-path router. **OPT74, OPT85 and
+OPT87** have no router at all: `scan.py` lists them the same way and nothing
+emits them. **OPT83** is routed by
 its own per-pole pass (`_detect_opt83_parallel_steps`) over each pole's step
 decomposition, then checked for independence against the workflow YAML.
 **OPT84** is routed by its own per-pole pass (`_detect_opt84_tool_swap`) over the
@@ -4054,7 +4056,7 @@ order of preference:
 - [`SKILL.md`](SKILL.md) - the canonical contract (phases, admission gate,
   quality review).
 - [`references/optimization-patterns.md`](references/optimization-patterns.md) -
-  the 82-pattern catalog (METADATA + body per pattern); the source of truth for
+  the 86-pattern catalog (METADATA + body per pattern); the source of truth for
   detection and the report's TL;DR / pattern background.
 - [`references/wall-clock-methodology.md`](references/wall-clock-methodology.md)
   - critical-path / long-pole / cluster-floor model and the non-additive rule.

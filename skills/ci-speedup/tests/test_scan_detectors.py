@@ -2296,6 +2296,11 @@ def test_structural_pattern_without_router_is_reported_not_hidden(tmp_path: Path
     data = _scan(tmp_path)
     without = set(data["catalog_structural_patterns_without_detector"])
     assert "OPT74" in without, "OPT74 has no router and must be reported as uncovered"
+    # OPT85 / OPT87 are catalogued with no router; their catalog entries promise
+    # the scan lists them here, so registering either as detected without a
+    # router would silently claim coverage the audit does not have.
+    for pat in ("OPT85", "OPT87"):
+        assert pat in without, f"{pat} has no router and must be reported as uncovered"
     for pat in ("OPT70", "OPT71", "OPT72", "OPT73", "OPT75"):
         assert pat not in without, f"{pat} has a router and must not be listed"
 
@@ -3104,7 +3109,9 @@ def test_catalog_pattern_count_breakdown_sums_to_the_total():
     _sys.path.insert(0, str(_SKILL_DIR / "scripts"))
     import scan  # noqa: E402
 
-    count = len(scan.load_catalog(_CATALOG_PATH))
+    catalog = scan.load_catalog(_CATALOG_PATH)
+    count = len(catalog)
+    real_structural = sum(1 for e in catalog if e.finding_class == "structural")
     breakdown = re.compile(
         r"(\d+)[- ]pattern\s*\n?catalog\s*[—-]\s*(\d+)\s+\*\*hygiene/data-driven\*\*"
         r".*?plus\s+(\d+)\s+\*\*structural",
@@ -3119,6 +3126,11 @@ def test_catalog_pattern_count_breakdown_sums_to_the_total():
             f"{rel} breaks down its {total}-pattern catalog as {hygiene} hygiene + "
             f"{structural} structural = {hygiene + structural} — the breakdown must "
             f"sum to the total")
+        # A split that sums to the total can still be wrong (76 + 10 for a
+        # catalog with 11 structural entries); pin it to the real class count.
+        assert structural == real_structural, (
+            f"{rel} claims {structural} structural patterns but the catalog has "
+            f"{real_structural} `class: structural` entries")
 
 
 # =============================================================================

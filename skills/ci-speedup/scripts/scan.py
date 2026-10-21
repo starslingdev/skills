@@ -5063,6 +5063,8 @@ def scan(root: Path, catalog_path: Path) -> dict[str, Any]:
     # drilled pole's step decomposition plus the workflow YAML. OPT84 (a slow
     # pole step runs a tool with a native drop-in) is routed the same way, from
     # the pole's step decomposition plus the workflow YAML and package scripts.
+    # OPT85 (tests run in many processes) and OPT87 (tests wait on a slow
+    # dependency they do not verify) are catalogued with no router yet, like OPT74.
     structural_detected = {"OPT70", "OPT71", "OPT72", "OPT73", "OPT75", "OPT83",
                            "OPT84"}
     structural_without_detector = sorted(
@@ -5267,7 +5269,7 @@ def scan(root: Path, catalog_path: Path) -> dict[str, Any]:
         "catalog_patterns_with_detector": len(static_entries) - len(unmatched_patterns),
         "catalog_patterns_without_detector": sorted(unmatched_patterns),
         # Structural catalog entries with no critical-path router (currently
-        # OPT74, and OPT78, which a drill-time log leaf routes instead). Reported so a catalogued-but-undetected structural pattern is
+        # OPT74, OPT85, OPT87, and OPT78, which a drill-time log leaf routes instead). Reported so a catalogued-but-undetected structural pattern is
         # honest about its coverage instead of silently never appearing.
         "catalog_structural_patterns_without_detector": structural_without_detector,
     }

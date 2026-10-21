@@ -37,7 +37,7 @@ Checkout · 6. Conditional Execution · 7. Trigger and Scope · 8. Release Workf
 - **Category 1 — Caching** (`OPT1`–): tool installs, build/test caches, dynamic cache keys, and the one pattern pointed the other way — a cache measured to cost more than it saves (`OPT79`).
 - **Category 2 — Redundancy**: duplicate env, repeated setup sequences, redundant build steps, repeated fixed setup across independent small jobs (`OPT77`).
 - **Category 3 — Docker**: sleep-based readiness, over-broad `compose up`.
-- **Category 4 — Parallelization**: needless `needs:` serialization, unsharded long jobs.
+- **Category 4 — Parallelization**: needless `needs:` serialization, unsharded long jobs, a test worker count nobody measured (`OPT88`).
 - **Category 5 — Actions and Checkout**: stale action pins, repeated setup, full-history checkout, submodule / Git LFS checkout payload, checkout stalls on the tail (`OPT80`).
 - **Category 6 — Conditional Execution**: merge_group step-vs-job conditions, draft-PR gating.
 - **Category 7 — Trigger and Scope**: missing path filters, no `--filter` on PR turbo, cron frequency.
@@ -45,9 +45,9 @@ Checkout · 6. Conditional Execution · 7. Trigger and Scope · 8. Release Workf
 - **Category 9 — Queue Times and Concurrency**: missing/!coarse concurrency groups.
 - **Category 10 — Timing Anomalies**: failure-rate / bimodal duration signals (advisory), and the same job measured faster on another runner class (`OPT81`).
 - **Category 11 — Stack-Specific**: turbo task outputs, unstable turbo env keys, type-aware ESLint on a slow lint job (`OPT82`).
-- **Category 12 — Build Caching (language-agnostic)**: uncached compiled-language builds.
+- **Category 12 — Build Caching (language-agnostic)**: uncached compiled-language builds, a dependency compiled from source when a prebuilt package exists (`OPT86`).
 - **Category 13 — Hidden Failures and Dead Config**: dead env vars, misconfigured caches.
-- **Category 14 — Structural / Critical-Path Levers** (`OPT70`–`OPT75`, `OPT78`, `OPT83`, `OPT84`): routed from the measured long pole (see ARCHITECTURE §11), not a flat grep. `OPT78` is routed by the drill-time leaf detector rather than the structural router; `OPT83` and `OPT84` are routed by structural passes over the drilled poles' step decomposition plus the workflow YAML, not by the log leaves (`OPT84` also follows the step's `package.json` scripts).
+- **Category 14 — Structural / Critical-Path Levers** (`OPT70`–`OPT75`, `OPT78`, `OPT83`–`OPT85`, `OPT87`): routed from the measured long pole (see ARCHITECTURE §11), not a flat grep. `OPT85` (tests run in many processes instead of one) and `OPT87` (tests wait on a slow dependency they do not verify) have no router yet: like `OPT74`, they are catalogued for application from the drilled pole's log and are reported as without a detector. `OPT78` is routed by the drill-time leaf detector rather than the structural router; `OPT83` and `OPT84` are routed by structural passes over the drilled poles' step decomposition plus the workflow YAML, not by the log leaves (`OPT84` also follows the step's `package.json` scripts).
 
 (Catalog OPT-ids are the static scan; the `blocking_path.py` `_parse_log` **leaf
 detectors** — prisma / vitest / turbo / playwright — are a separate set run over
@@ -1844,6 +1844,53 @@ title_template: "Shard Imbalance"
 - **Required-checks caveat**: splitting a required leg into new matrix entries / parallel jobs adds new check names. If the original leg was a required status check, add the new jobs to branch protection as required checks (or the ruleset equivalent) — otherwise the split-out work silently stops gating merges (everything stays green) until that admin-only gating step is done. If the split routes the old check's work behind a `needs:` edge and an aggregator, see OPT75's [dependency-failure skip caveat](#opt75--long-pole-optimize-or-relocate-the-dominant-step) — a dependent skipped by a failed dependency reports skipped, not failed, so the aggregator must run with `always()` (or `!cancelled()`) and propagate every `needs.<job>.result`, and keeping the required check name on that aggregator re-gates the merge without an admin.
 
 This applies to any framework with sharding (pytest `--shard`, cargo-nextest `--partition`, Jest/Playwright `--shard`) for case 1, and to any package/backend matrix for case 2.
+
+---
+
+### OPT88 — Test Concurrency Is a Guess, Not a Measurement
+
+<!-- METADATA
+pattern: OPT88
+impact: MEDIUM
+class: data-driven
+detector: manual
+risk: MEDIUM
+affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml,pyproject.toml,pytest.ini,setup.cfg,.bazelrc,.config/nextest.toml,jest.config.*,vitest.config.*,package.json"
+fix_strategy: measure-test-concurrency
+title_template: "Test concurrency is set by guess, not measurement"
+-->
+
+**Not auto-detected yet.** Like other `detector: manual` entries (for example OPT25 and OPT43), no pass emits OPT88, so the audit never reports it on its own and never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading the slow test step's command and configuration against the heuristic below.
+
+**TL;DR**: The slowest test job runs with a worker count nobody measured: one worker on a runner with several cores, a fixed cap carried over from an older runner, or "as many as there are cores" where memory or a shared service is the real limit. Time two or three settings on the real runner class and keep the fastest. More workers is not always faster.
+
+**Anti-pattern**: The test step runs serially on a multi-core runner (pytest without a parallel plugin, `--test-threads=1`, `--runInBand`), or pins a worker count (`-n 4`, `--maxWorkers=2`, a build tool's local test-jobs cap) with no measurement behind it. Often a handful of tests that cannot share a database, a port or a file is what forced the whole suite serial.
+
+**Relation to other patterns**: [OPT23](#opt23--single-threaded-matrix-max-parallel-1) is `max-parallel: 1` across matrix jobs and [OPT24](#opt24--long-test-job-without-sharding) splits a suite across machines. OPT88 is the worker count inside one job on one machine, and it applies before sharding: a shard that wastes its own cores multiplies the waste.
+
+**Detection heuristic** (manual; read, never inferred):
+
+1. The slow step runs tests, and concurrency is set explicitly (serial, or a fixed number), or not at all on a runner whose test tool defaults to serial. Look everywhere it can be set: the test command, the workflow, and the test tool's own config files (for example `local_test_jobs` and a `test_env` thread count such as `RUST_TEST_THREADS` in `.bazelrc`, or pytest, jest and nextest config files).
+2. The setting does not match the runner: compare it with the core count of the job's runner label. If the label is custom and its core count is not documented, measure it first with a one-line probe step (`nproc`, or `[Environment]::ProcessorCount` on Windows).
+3. Look for what forced it: tests marked serial or skipped under parallel runs, shared fixed resources (one database name, a fixed port, a temp path), real-time waits (`sleep`, fixed-interval polling, see [OPT19](#opt19--test-source-sleep-dominance-includes-playwright-waitfortimeout)). If nothing forced it, say so: the tests did not force the setting, and only the measurement in fix step 3 justifies changing it.
+
+**Fix recipe**:
+
+1. Separate what cannot share: give each worker its own resource (a per-worker database name, an ephemeral port, a per-worker temp directory), and move tests that truly cannot run concurrently onto a serial lane that still runs in the same command (run the parallel set, then the serial set).
+2. Replace real-time waits with deterministic synchronization, so workers are not idle.
+3. Measure: on the same runner class and commit, with test-result caching off so the tests really run, time the current setting and two or three others (for example the core count and twice it), several runs each. Keep the fastest; stop at the first setting that regresses.
+4. Pin the measured value in configuration, per runner class, with a comment naming the measurement; re-measure when the runner changes.
+
+**Guardrail**: the same tests pass at every setting compared, and the flake rate does not rise. Watch memory: a setting that runs out of memory on some runs is not faster.
+
+**Sizing: uncredited**. No `_SIZING` model. The number comes only from the measurement in step 3.
+
+**Real-world example (OpenAI)**, their numbers, not a forecast for your repo:
+
+- openai/codex [#31352](https://github.com/openai/codex/pull/31352) (2026-07-07): "Controlled forced-test-execution measurements in #31339 found that 8 local jobs reduced Bazel elapsed time on every shard by 19–29%, including the slow shard from 835.5s to 609.3s, while 12 jobs regressed." The PR raised the Windows test shards' local test-jobs cap from 4 to 8, the measured best, not the highest value tried.
+- openai/openai-agents-python [#2563](https://github.com/openai/openai-agents-python/pull/2563) (2026-03-01): replaced "real-time waits in several slow tests with deterministic synchronization", moved shard-safe tests onto `pytest-xdist`, and isolated Redis/Dapr-sensitive files onto "a serial lane that still runs automatically". `make tests` "averaged 53.59 seconds before these changes and 14.34 seconds after them", measured "on the same machine" across three warm-cache runs: a local measurement, not a CI run.
+
+**Risk**: **MEDIUM**. More workers can expose tests that share state, which shows up as new flakes; the serial lane and the guardrail contain that.
 
 ---
 
@@ -4238,6 +4285,58 @@ Flag only when the job runs on `self-hosted` runners. On GitHub-hosted runners, 
 
 ---
 
+### OPT86 — CI Compiles a Dependency That Ships Prebuilt
+
+<!-- METADATA
+pattern: OPT86
+impact: HIGH
+class: data-driven
+detector: manual
+risk: LOW
+affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml,pyproject.toml,requirements*.txt,uv.lock,poetry.lock,requirements*.lock,package.json,Cargo.toml"
+fix_strategy: use-prebuilt-dependency-packages
+title_template: "CI compiles a dependency that ships prebuilt"
+-->
+
+**Not auto-detected yet.** Like other `detector: manual` entries (for example OPT25 and OPT43), no pass emits OPT86, so the audit never reports it on its own and never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading a slow install step's log against the heuristic below.
+
+**TL;DR**: An install step compiles a dependency from source (a C or C++ extension, a native add-on, a large machine-learning framework) when a prebuilt package exists for that interpreter and platform. Pin a version that ships prebuilt packages for every leg of the matrix, and make the install refuse to build from source, so the next lockfile bump cannot bring the compile back unnoticed.
+
+**Anti-pattern**: The usual causes:
+
+- the locked version has no prebuilt package (wheel) for one interpreter in the matrix, typically the newest Python before the library publishes for it, so the installer falls back to the source archive and compiles it on every cold run;
+- the install pulls a far larger build than the job uses, such as a GPU build of a machine-learning framework on a runner with no GPU, when the project publishes a CPU-only package index;
+- a dependency that publishes a prebuilt binary is built by the job's own toolchain because a feature flag, an environment variable or a missing platform match asks for source.
+
+**Detection heuristic** (manual; read from the step log, never inferred):
+
+1. The slow step is an install or build step, and its log shows a dependency being compiled: pip or uv `Building wheel for <pkg>` / `Building <pkg>==<version>`, `Running setup.py install`, `node-gyp rebuild` or `gyp info` during a JavaScript install, or a cargo build script compiling a bundled C or C++ library. The compile ends at the matching `Built <pkg>==<version>` line, so the span between the two is the compile time. A `Building <project> @ file://...` line is the project building itself, not a dependency compile. For the oversized-build cause there is no compile: the log instead shows the large build being downloaded and installed on a runner that cannot use it (for example the `nvidia-*` CUDA packages a default PyTorch install pulls on Linux, on a runner with no GPU).
+2. A prebuilt package exists for the job's interpreter, OS and architecture at a version the project accepts (check the package index), or the project publishes a prebuilt binary or a smaller build.
+3. Where a matrix exists, the leg that compiles (or downloads the oversized build) is the slow outlier.
+
+[OPT61](#opt61--missing-dependency-caching) and [OPT63](#opt63--dependency-install-with-cache-disabled) are the cache side of the same step (no cache, or one switched off). OPT86 is about what gets installed; both can apply at once, and a warm cache can hide a source build until its key changes.
+
+**Fix recipe**:
+
+1. Constrain the dependency to a version that ships prebuilt packages for every interpreter and platform in the matrix, with per-interpreter markers when one version cannot cover them all.
+2. Make a source build an error, so a future bump fails loudly instead of slowing down: `pip install --only-binary=<pkg>` for the package that compiled, or uv's `--no-build-package <pkg>`. Widen it to every dependency (`--only-binary=:all:`, or uv's `UV_NO_BUILD=1` / `--no-build`) only once every dependency, pure-Python ones included, ships a prebuilt package, since the wide form also refuses a pure-Python dependency published only as a source archive. Exempt only the project itself if it must be built.
+3. Install the smallest build the job needs: for example PyTorch from its CPU-only index on runners without a GPU, in its own install command (`pip install torch --index-url https://download.pytorch.org/whl/cpu`), because `--index-url` replaces PyPI for everything in the same command and any other dependency would then fail to resolve.
+4. Cache the result as well ([OPT61](#opt61--missing-dependency-caching)); prebuilt and cached are complementary.
+
+**Guardrail**: the prebuilt package must match what the project ships or tests against. A pinned version must satisfy the project's declared range; a CPU-only build is for jobs that do not test GPU code. A job that exists to test building from source (a packaging job, a source-build smoke test) keeps compiling.
+
+**Sizing: uncredited**. No `_SIZING` model. The ceiling is the measured span of the compile lines in the install step's log (for an oversized build, the measured download and install span); when a compiling leg is also slow for another reason, only the compile span counts toward OPT86's ceiling; the saving is what the next sampled runs show.
+
+**Real-world example (OpenAI)**, their numbers, not a forecast for your repo:
+
+- openai/openai-python [#3573](https://github.com/openai/openai-python/pull/3573) (2026-08-03): "the lockfiles pinned a NumPy version without Python 3.14 wheels, forcing slow source builds", and environment caching was disabled. The PR selected "prebuilt NumPy wheels for each supported interpreter", restored the cache, and stopped the HTTPX 2 job rerunning a suite the main matrix already covered. Together those took "HTTPX 2: **10m42s → 2m12s**" and "Python 3.14: **8m37s → 1m53s**". The PR does not split the saving between its changes, so none of it is a number for prebuilt wheels alone.
+- openai/whisper's test workflow installs `torch==<version>+cpu --index-url https://download.pytorch.org/whl/cpu` (no timing published).
+- openai/openai-python's CI sets `UV_NO_BUILD: '1'` at workflow level (added in [#3641](https://github.com/openai/openai-python/pull/3641) for supply-chain safety; no timing published), so a dependency without a prebuilt package fails the install instead of compiling.
+
+**Risk**: **LOW**. A version constraint and an install flag, both reversible; the hard error surfaces any gap at install time.
+
+---
+
 ### OPT64 — Repeated Workflow Attempts From Same Failing Job
 
 <!-- METADATA
@@ -4442,7 +4541,7 @@ title_template: "Dead Workflow Env Vars / Config"
 ## Category 14: Structural / Critical-Path Levers
 
 These patterns are a **different class** from everything above. The catalog
-patterns OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81 and OPT82 are *hygiene*: each is a named,
+patterns OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86 and OPT88 are *hygiene*: each is a named,
 locally-checkable defect with
 a mechanical, low-risk fix, detected by matching workflow YAML against the
 catalog. OPT81, like OPT79 and OPT80, is derived from run history rather than matched against YAML, and its A2 advisory is risk MEDIUM. On real repos almost every hygiene hit moves **~0 developer
@@ -4461,7 +4560,7 @@ a finding.
 Most of them (OPT70–OPT75) are routed by the deterministic structural router in
 `collect_runs.py`. **OPT83** and **OPT84** are each routed by a structural pass over each drilled pole's
 per-step decomposition and its workflow YAML (not by the log leaves) and emit a
-finding with its own card; OPT84 also reads the repo's `package.json` scripts and tool versions. **OPT78** is routed instead by a drill-time leaf detector over
+finding with its own card; OPT84 also reads the repo's `package.json` scripts and tool versions. **OPT85** and **OPT87** have no router yet: like OPT74 they are listed as structural patterns without a detector, and are applied by reading the drilled pole's log and test code. **OPT78** is routed instead by a drill-time leaf detector over
 the long pole's captured log (ARCHITECTURE §12.3), corroborated against the repo's
 test-runner config. It emits no finding record, so the render boundary's `Risk`
 row and banner never see it: its HIGH risk is stamped on the pole's drill-down
@@ -4788,7 +4887,7 @@ title_template: "Per-file test isolation rebuilds the shared module graph for ev
 
 **TL;DR**: Your slowest test job spends more time re-importing the app for each test file than running the tests — because the runner isolates every file and each one rebuilds the same expensive module graph from scratch.
 
-**Scope: vitest only.** The mechanism is vitest's `isolate` option, which defaults to `true` and gives every test file a fresh module registry. Other runners are deliberately out of scope here rather than guessed at: jest's per-file module registry is not configurable the same way (`--runInBand` and `maxWorkers` change *where* files run, not whether the registry is rebuilt), and the pytest equivalents (`pytest-forked`, `pytest-xdist --dist` modes) have different semantics again. A narrower, correct pattern beats a broad, wrong one; widen this entry only with verified config facts for the runner being added. The vm pools (`vmThreads`, `vmForks`) cannot turn isolation off at all, so a suite on one of them never gets this lever.
+**Scope: vitest only.** The mechanism is vitest's `isolate` option, which defaults to `true` and gives every test file a fresh module registry. Other runners are deliberately out of scope here rather than guessed at: jest's per-file module registry is not configurable the same way (`--runInBand` and `maxWorkers` change *where* files run, not whether the registry is rebuilt), and the pytest equivalents (`pytest-forked`, `pytest-xdist --dist` modes) have different semantics again. Startup paid per test case (a subprocess per case) or per test binary, on any runner, is a different mechanism and is [OPT85](#opt85--tests-run-in-many-processes-instead-of-one). A narrower, correct pattern beats a broad, wrong one; widen this entry only with verified config facts for the runner being added. The vm pools (`vmThreads`, `vmForks`) cannot turn isolation off at all, so a suite on one of them never gets this lever.
 
 **Anti-pattern**: A vitest suite on the measured critical path whose `import` phase exceeds its `tests` phase. Every test file re-resolves, re-transforms and re-executes the same shared graph — an ORM entity registry, a GraphQL schema build, decorator registration, a DI container — and with hundreds of files in a shard that setup is paid hundreds of times. The tests themselves are not the cost; re-reaching the starting line is.
 
@@ -4997,5 +5096,115 @@ What "not in the table" covers depends on the repo. In a repo with no JavaScript
 **Sizing: deliberately uncredited**. No `_SIZING` model, no wall-clock or runner-minute saving. The only number is the ceiling: the candidate step's measured p50, the most the swap can remove, not a forecast. The table's ranges are the catalog's published numbers, never this repo's. Nothing is summed into any total, the headline, Tier 2 or Also noticed. When several table tools share one step, there is one card and one ceiling, and how the time splits between them is unknown until measured. **Benchmark first.**
 
 **Risk**: **MEDIUM** for the Prettier and TypeScript 7 rows (a formatter diff or a stricter type-check default is visible and reversible); **HIGH** whenever the card reports an ESLint row outright, drop-in or run-both alike, because a rule the target silently lacks is a coverage loss nobody sees. An ESLint run deferred to OPT82 does not raise it.
+
+---
+
+### OPT85 — Tests Run in Many Processes Instead of One
+
+<!-- METADATA
+pattern: OPT85
+impact: HIGH
+class: structural
+detector: critical-path
+risk: MEDIUM
+affected_files: "pyproject.toml,pytest.ini,setup.cfg,tox.ini,conftest.py,Cargo.toml,.github/workflows/*.yml,.github/workflows/*.yaml"
+fix_strategy: run-tests-in-fewer-processes
+title_template: "Tests start a new process for every case or every test binary"
+-->
+
+**Not auto-detected yet.** No router emits OPT85 today, so `scan.py` lists it in `catalog_structural_patterns_without_detector` (as it does OPT74) and the audit never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading the drilled long pole's log and the test code against the heuristic below.
+
+**TL;DR**: The slowest test job spends most of its time starting processes rather than running tests: every test case launches a fresh interpreter or script, or every test file is linked into its own test binary. Running the same cases in one process per worker (or one binary) keeps every case and pays the startup once.
+
+**Anti-pattern**: Two shapes of the same cost.
+
+1. **A process per test case.** A parametrized suite whose every case shells out (`subprocess.run([sys.executable, "checker.py", ...])`, a CLI entry point, a helper script or a stub binary), so each case pays interpreter start, imports and compilation before any logic runs. With hundreds or thousands of cases, the startup is the suite.
+2. **A binary per test file (Rust).** Every file directly under a crate's `tests/` directory is its own integration-test target. Each one is linked against the crate and its dependencies, and `cargo test` runs the binaries one after another, so tests only run in parallel inside a binary.
+
+**Relation to OPT78**: same family (setup paid per unit instead of once), different mechanism. [OPT78](#opt78--per-file-test-isolation-rebuilding-shared-module-state) is vitest's per-file module registry, a setting inside one test process, emitted by its own log leaf; its scope note keeps it vitest-only, and this entry does not widen it. OPT85 is the operating-system process or the linked binary, whatever the runner.
+
+**Detection heuristic** (manual; read, never inferred):
+
+1. The drilled long pole's dominant step category is `test`. This is a gate only: it holds before and after a regression alike, so it cannot identify one by itself.
+2. Process per case: the test code starts a process inside a parametrized test, a per-case fixture, or a helper either one calls (`subprocess`, `os.system`, `pexpect`, a CLI runner), and the collected case count is large (hundreds or more; count cases from the collect-only listing, not from suite pass totals, which differ across commits). Corroborate with timing before reporting: the runner's slowest-tests report (`pytest --durations=N`) shows many cases of similar duration well above what their logic should cost, or a profile of one case shows most of its time in process creation. The slow run often has no slowest-tests report (the fix may be what adds one); then corroborate by comparing the job's test-step duration with a known-good run of the same job, and by timing one case with and without the process call.
+3. Binary per file: the crate has several `tests/*.rs` files, and the captured log shows one `Running tests/<name>.rs` line per file. Corroborate with timing: the link time per binary (`cargo test --no-run` timed, or `cargo build --timings`) and the gaps between binaries in the log.
+
+The shape alone is not a finding. The measured share of the step it accounts for is the claim.
+
+**Fix recipe**:
+
+- **Process per case**: load or compile the code under test once per worker (a session- or module-scoped fixture), and run each case in-process with fresh state: new globals or a fresh module namespace, the case's existing fixtures, and every piece of process state the case can touch (environment variables, working directory, `sys.argv`, patched modules, signal handlers) saved before and restored after it. Keep a small set of real subprocess cases for whatever depends on the process boundary: argument parsing, exit codes, stdout and stderr wiring, signal handling, and isolation itself.
+- **Binary per file**: move the integration tests into one test target, for example `tests/all/main.rs` declaring each former file as a module (`mod foo;`). Every test keeps its body and gains a module path. The crate is linked once, and the harness runs all tests in parallel.
+- Either way, turn on slow-test reporting (`pytest --durations=N` in the configuration, or the runner's timing report) so the next regression of this shape is visible in the log.
+
+**Mandatory guardrail (this pattern is invalid without it)**: the collected test list before and after must match (diff the collect-only listing; a Rust conversion adds a module path to every test name, so map each old name to its new one and check that none is lost or duplicated); each case must still execute the same code path; state a case can leak must be reset explicitly; and the converted suite must pass in random order where the runner can shuffle (for example with pytest-randomly). Stable Rust's test harness cannot shuffle, so run the converted binary both with `--test-threads=1` and with the default parallelism and require both green.
+
+**No-weakening rail**: never drop, merge or skip cases, and never skip setup a case needs, to make the suite fit in one process. Cases that test process behaviour stay real subprocesses.
+
+**Failure mode, plainly**: one process lets a case pass only because an earlier case left a global, an environment variable or a patched module behind. Separate processes made that impossible; the conversion makes it possible, so the reset and the order checks are what keep a green meaning something.
+
+**Conservative rollout (REQUIRED)**: convert one suite at a time; run the old and new paths side by side over real PR traffic and compare case lists and results; keep the subprocess path for the boundary cases permanently.
+
+**Sizing: deliberately uncredited**. No `_SIZING` model. The ceiling is measured, never assumed: per-case startup times the case count, or per-binary link time plus the gaps between binaries. **Benchmark first.**
+
+**Real-world example (OpenAI)**, their numbers, not a forecast for your repo:
+
+- openai/openai-python [#3830](https://github.com/openai/openai-python/pull/3830) (2026-09-09): a 1,760-case dependency-policy matrix had each case launch "a Python checker and up to four Python Git stubs". A harness comparison "measured median 180ms per subprocess case versus 0.9ms in-process". The fix compiles the checker "once per pytest worker" and runs each case "with fresh globals", keeping "real subprocess execution for CLI parity cases". The Python 3.14 test job went from 2m24s before the regression, to 7m00s with it, to 2m41s after the fix.
+- openai/codex [#2633](https://github.com/openai/codex/pull/2633) (2025-08-24): moving every file in the crate's `tests/` into "a single suite in order to have a single binary" took `cargo test -p codex-core` from "8:49.80 total" to "21.407 total". Both runs were measured "hot", on a second run "to exclude compile times"; it is a developer-machine `time` measurement, not a CI run.
+
+**Risk**: **MEDIUM**. Reversible, but in-process execution can let one case's leftovers decide another's result. Never list as a quick win.
+
+---
+
+### OPT87 — Tests Wait on a Slow Dependency They Do Not Verify
+
+<!-- METADATA
+pattern: OPT87
+impact: HIGH
+class: structural
+detector: critical-path
+risk: HIGH
+affected_files: "conftest.py,pyproject.toml,pytest.ini,.github/workflows/*.yml,.github/workflows/*.yaml"
+fix_strategy: stub-slow-external-dependency-in-tests
+title_template: "Tests wait on a slow external dependency they do not verify"
+-->
+
+**Not auto-detected yet.** No router emits OPT87 today, so `scan.py` lists it in `catalog_structural_patterns_without_detector` and the audit never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading the drilled long pole's log and the test code against the heuristic below.
+
+**TL;DR**: Tests on the slowest job call a real, slow dependency (a network API, a model endpoint, a package registry, a remote service) for behaviour the tests are not about, so they spend their time waiting on calls, timeouts and retries. Stub that dependency at its boundary in the pull-request suite, and keep a run against the real dependency elsewhere so the integration is still checked.
+
+**Anti-pattern**: A unit or component suite reaches the network because a mock is missing, a fixture does not cover a new code path, or the suite was written against the live service from the start. Each test then waits for a response, a connection timeout or a retry budget, and the suite's runtime tracks the dependency's latency instead of the code under test. An evaluation or smoke workflow that calls a paid model for every case is the same cost, paid in both time and money.
+
+**Relation to OPT19**: [OPT19](#opt19--test-source-sleep-dominance-includes-playwright-waitfortimeout) is a literal sleep in test source. OPT87 is waiting on an external call; the two often appear together (a retry loop with a sleep between attempts).
+
+**Detection heuristic** (manual; read, never inferred):
+
+1. The drilled long pole's dominant step category is `test`.
+2. Per-test durations (`pytest --durations=N`, or the runner's equivalent) show many tests clustered near one value that matches a timeout or retry budget, or a few tests far slower than the rest.
+3. The log or test code shows the external call: connection errors, DNS failures, retries or rate-limit responses that the test swallows; a real client constructed without a fixture override; or an API credential passed to the test step's environment.
+
+**Fix recipe**:
+
+1. Stub at the boundary the code already has (the client interface or adapter), with a fake that returns recorded or minimal realistic responses. Prefer one shared fixture over per-test patches, so a new test inherits the stub.
+2. Make an un-stubbed call fail fast in the pull-request lane (block outbound sockets in the test session, with an allow-list for local services), so the next missing mock is a red test instead of a slow green one.
+3. For model or evaluation calls, run pull-request CI against a dummy model that returns a fixed response, and spend the real model on a scheduled or post-merge run.
+4. Keep the real-dependency run: the same tests, or a contract test of the boundary, against the real dependency on a schedule, after merge or in the merge queue, with someone alerted when it fails.
+
+**Mandatory guardrail (this pattern is invalid without it)**: never mock away the thing the test exists to verify. A test whose subject is the integration itself (the client against the real API, the resolver against the real registry) moves to the real-dependency run; it is not stubbed. The real-dependency run must exist before the stub lands.
+
+**No-weakening rail**: the same tests and the same assertions run after the change. A stub returns data recorded from the real dependency, with credentials, tokens and auth headers scrubbed before the recording is committed, refreshed when the dependency changes, never whatever makes the assertion pass.
+
+**Failure mode, plainly**: the stub drifts from the real dependency, and the suite stays green while production breaks. The real-dependency run is what catches that drift; without it this pattern trades a slow suite for a blind one.
+
+**Conservative rollout (REQUIRED)**: introduce the stub behind a fixture; run both the stubbed and the real-dependency paths over a stretch of PR traffic and compare results; only then drop the real calls from the pull-request lane.
+
+**Sizing: deliberately uncredited**. No `_SIZING` model. The ceiling is the measured time of the affected tests, never a forecast. **Benchmark first.**
+
+**Real-world example (OpenAI)**, their numbers, not a forecast for your repo:
+
+- OpenAI's Core Experimentation team, ["Maintaining software with the GPT-6 family"](https://developers.openai.com/blog/maintaining-software-with-the-gpt-6-family): "adding a missing mock cut a 63-test resolver suite’s runtime from 592.6 seconds to 29.8 seconds—a 95% reduction, with all 63 tests retained." The post publishes the figure but does not name the repository or link CI runs.
+- openai/evals commit [feed6c75](https://github.com/openai/evals/commit/feed6c75d47bdfb9ec0c8eea3ce9932934d47324) (2023-03-18), "Change CI to use a dummy model call": the workflow that smoke-tests each new eval stopped passing an API key and ran every new eval against `dummy-chat` and `dummy-completion` models with `--max_samples 10`, instead of a live model. No timing was published, and the 2023 run history is no longer retrievable.
+
+**Risk**: **HIGH**. A stub can hide a real integration failure. Never list as a quick win.
 
 ---
