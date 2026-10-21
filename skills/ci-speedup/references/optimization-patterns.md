@@ -1870,9 +1870,9 @@ title_template: "Test concurrency is set by guess, not measurement"
 
 **Detection heuristic** (manual; read, never inferred):
 
-1. The slow step runs tests, and its command or the runner's configuration sets concurrency explicitly (serial, or a fixed number), or sets none on a runner whose test tool defaults to serial.
-2. The setting does not match the runner: compare it with the core count of the job's runner label.
-3. Look for what forced it: tests marked serial or skipped under parallel runs, shared fixed resources (one database name, a fixed port, a temp path), real-time waits (`sleep`, fixed-interval polling, see [OPT19](#opt19--test-source-sleep-dominance-includes-playwright-waitfortimeout)).
+1. The slow step runs tests, and concurrency is set explicitly (serial, or a fixed number), or not at all on a runner whose test tool defaults to serial. Look everywhere it can be set: the test command, the workflow, and the test tool's own config files (for example `local_test_jobs` and a `test_env` thread count such as `RUST_TEST_THREADS` in `.bazelrc`, or pytest, jest and nextest config files).
+2. The setting does not match the runner: compare it with the core count of the job's runner label. If the label is custom and its core count is not documented, measure it first with a one-line probe step (`nproc`, or `[Environment]::ProcessorCount` on Windows).
+3. Look for what forced it: tests marked serial or skipped under parallel runs, shared fixed resources (one database name, a fixed port, a temp path), real-time waits (`sleep`, fixed-interval polling, see [OPT19](#opt19--test-source-sleep-dominance-includes-playwright-waitfortimeout)). If nothing forced it, say so: the tests did not force the setting, and only the measurement in fix step 3 justifies changing it.
 
 **Fix recipe**:
 
@@ -4310,7 +4310,7 @@ title_template: "CI compiles a dependency that ships prebuilt"
 
 **Detection heuristic** (manual; read from the step log, never inferred):
 
-1. The slow step is an install or build step, and its log shows a dependency being compiled: pip or uv `Building wheel for <pkg>` / `Building <pkg>==<version>`, `Running setup.py install`, `node-gyp rebuild` or `gyp info` during a JavaScript install, or a cargo build script compiling a bundled C or C++ library. For the oversized-build cause there is no compile: the log instead shows the large build being downloaded and installed on a runner that cannot use it (for example the `nvidia-*` CUDA packages a default PyTorch install pulls on Linux, on a runner with no GPU).
+1. The slow step is an install or build step, and its log shows a dependency being compiled: pip or uv `Building wheel for <pkg>` / `Building <pkg>==<version>`, `Running setup.py install`, `node-gyp rebuild` or `gyp info` during a JavaScript install, or a cargo build script compiling a bundled C or C++ library. The compile ends at the matching `Built <pkg>==<version>` line, so the span between the two is the compile time. A `Building <project> @ file://...` line is the project building itself, not a dependency compile. For the oversized-build cause there is no compile: the log instead shows the large build being downloaded and installed on a runner that cannot use it (for example the `nvidia-*` CUDA packages a default PyTorch install pulls on Linux, on a runner with no GPU).
 2. A prebuilt package exists for the job's interpreter, OS and architecture at a version the project accepts (check the package index), or the project publishes a prebuilt binary or a smaller build.
 3. Where a matrix exists, the leg that compiles (or downloads the oversized build) is the slow outlier.
 
@@ -4325,7 +4325,7 @@ title_template: "CI compiles a dependency that ships prebuilt"
 
 **Guardrail**: the prebuilt package must match what the project ships or tests against. A pinned version must satisfy the project's declared range; a CPU-only build is for jobs that do not test GPU code. A job that exists to test building from source (a packaging job, a source-build smoke test) keeps compiling.
 
-**Sizing: uncredited**. No `_SIZING` model. The ceiling is the measured span of the compile lines in the install step's log (for an oversized build, the measured download and install span); the saving is what the next sampled runs show.
+**Sizing: uncredited**. No `_SIZING` model. The ceiling is the measured span of the compile lines in the install step's log (for an oversized build, the measured download and install span); when a compiling leg is also slow for another reason, only the compile span counts toward OPT86's ceiling; the saving is what the next sampled runs show.
 
 **Real-world example (OpenAI)**, their numbers, not a forecast for your repo:
 
@@ -5125,8 +5125,8 @@ title_template: "Tests start a new process for every case or every test binary"
 
 **Detection heuristic** (manual; read, never inferred):
 
-1. The drilled long pole's dominant step category is `test`.
-2. Process per case: the test code starts a process inside a parametrized test or a per-case fixture (`subprocess`, `os.system`, `pexpect`, a CLI runner), and the collected case count is large (hundreds or more). Corroborate with timing before reporting: the runner's slowest-tests report (`pytest --durations=N`) shows many cases of similar duration well above what their logic should cost, or a profile of one case shows most of its time in process creation.
+1. The drilled long pole's dominant step category is `test`. This is a gate only: it holds before and after a regression alike, so it cannot identify one by itself.
+2. Process per case: the test code starts a process inside a parametrized test, a per-case fixture, or a helper either one calls (`subprocess`, `os.system`, `pexpect`, a CLI runner), and the collected case count is large (hundreds or more; count cases from the collect-only listing, not from suite pass totals, which differ across commits). Corroborate with timing before reporting: the runner's slowest-tests report (`pytest --durations=N`) shows many cases of similar duration well above what their logic should cost, or a profile of one case shows most of its time in process creation. The slow run often has no slowest-tests report (the fix may be what adds one); then corroborate by comparing the job's test-step duration with a known-good run of the same job, and by timing one case with and without the process call.
 3. Binary per file: the crate has several `tests/*.rs` files, and the captured log shows one `Running tests/<name>.rs` line per file. Corroborate with timing: the link time per binary (`cargo test --no-run` timed, or `cargo build --timings`) and the gaps between binaries in the log.
 
 The shape alone is not a finding. The measured share of the step it accounts for is the claim.
@@ -5202,8 +5202,8 @@ title_template: "Tests wait on a slow external dependency they do not verify"
 
 **Real-world example (OpenAI)**, their numbers, not a forecast for your repo:
 
-- OpenAI's Core Experimentation team, ["Maintaining software with the GPT-6 family"](https://developers.openai.com/blog/maintaining-software-with-the-gpt-6-family): "adding a missing mock cut a 63-test resolver suite’s runtime from 592.6 seconds to 29.8 seconds—a 95% reduction, with all 63 tests retained."
-- openai/evals commit [feed6c75](https://github.com/openai/evals/commit/feed6c75d47bdfb9ec0c8eea3ce9932934d47324) (2023-03-18), "Change CI to use a dummy model call": the workflow that smoke-tests each new eval stopped passing an API key and ran every new eval against `dummy-chat` and `dummy-completion` models with `--max_samples 10`, instead of a live model. No timing was published.
+- OpenAI's Core Experimentation team, ["Maintaining software with the GPT-6 family"](https://developers.openai.com/blog/maintaining-software-with-the-gpt-6-family): "adding a missing mock cut a 63-test resolver suite’s runtime from 592.6 seconds to 29.8 seconds—a 95% reduction, with all 63 tests retained." The post publishes the figure but does not name the repository or link CI runs.
+- openai/evals commit [feed6c75](https://github.com/openai/evals/commit/feed6c75d47bdfb9ec0c8eea3ce9932934d47324) (2023-03-18), "Change CI to use a dummy model call": the workflow that smoke-tests each new eval stopped passing an API key and ran every new eval against `dummy-chat` and `dummy-completion` models with `--max_samples 10`, instead of a live model. No timing was published, and the 2023 run history is no longer retrievable.
 
 **Risk**: **HIGH**. A stub can hide a real integration failure. Never list as a quick win.
 
