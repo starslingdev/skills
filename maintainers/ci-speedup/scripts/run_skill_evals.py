@@ -32,7 +32,9 @@ Exit 0 when every selected case passes every mechanical grader, 1 when any run
 really ran and failed one, and otherwise 2 when the harness could not run: no
 `claude`, no PyYAML, a `gh` that fails `gh auth status` (checked once before
 any session), a scaffold failure, an agent that refused to start, a session
-that produced no events, a turn cap hit, a timeout, an error result, a report
+that produced no events, a stream cut off before its result event or holding
+an event that does not decode, a turn cap hit, a timeout, an error result, an
+unreadable case.yaml, any other unexpected harness error inside a run, a report
 the graders are anchored on that was never collected although every other
 grader passed, or a grader type / target / match mode this harness cannot
 evaluate. A session that never happened, graded, fails every positive grader
@@ -335,7 +337,12 @@ def _replay_fixtures(into: Path, span_s: int) -> Path:
 
 def _events(stream: str) -> list[dict]:
     """Every decodable JSON event in the stream, in order."""
-    out = []
+    return _decode(stream)[0]
+
+
+def _decode(stream: str) -> tuple[list[dict], int]:
+    """The decodable events, and how many event lines did not decode."""
+    out, bad = [], 0
     for line in stream.splitlines():
         line = line.strip()
         if not line.startswith("{"):
@@ -343,8 +350,8 @@ def _events(stream: str) -> list[dict]:
         try:
             out.append(json.loads(line))
         except json.JSONDecodeError:
-            continue
-    return out
+            bad += 1
+    return out, bad
 
 
 def _plugin_ignore(directory: str, names: list[str]) -> list[str]:
@@ -448,7 +455,7 @@ def _run_agent(prompt: str, sandbox: Path, plugin: Path | list[Path], max_turns:
 
     if r.returncode != 0:
         _no_session("claude exited non-zero — the session never ran.")
-    events = _events(r.stdout)
+    events, undecodable = _decode(r.stdout)
     if not any(e.get("type") == "system" and e.get("subtype") == "init"
                for e in events):
         _no_session("claude exited 0 but the stream carries no session.")
@@ -460,6 +467,12 @@ def _run_agent(prompt: str, sandbox: Path, plugin: Path | list[Path], max_turns:
                            "run is not a graded run", r.stdout)
         if e.get("is_error"):
             _no_session("the session ended in an error result.")
+    # A "never happened" grader (max: 0, not_contains) passes on whatever the
+    # stream lost, so a stream with a hole in it is not a graded run.
+    if undecodable:
+        _no_session(f"{undecodable} stream event(s) did not decode.")
+    if not any(e.get("type") == "result" for e in events):
+        _no_session("the stream ends without its result event; the session was cut off.")
     return r.stdout
 
 
@@ -791,7 +804,15 @@ def main(argv: list[str] | None = None) -> int:
     # could not run, else 0.
     failed = could_not_run = False
     for case in cases:
-        spec = yaml.safe_load((case / "case.yaml").read_text(encoding="utf-8"))
+        try:
+            spec = yaml.safe_load((case / "case.yaml").read_text(encoding="utf-8"))
+            if not isinstance(spec, dict):
+                raise ValueError("case.yaml is not a mapping")
+        except (OSError, ValueError, yaml.YAMLError) as exc:
+            print(f"harness: {case.name}: unreadable case.yaml: {exc}", file=sys.stderr)
+            print(f"\nDID NOT RUN  {case.name}  — unreadable case.yaml")
+            could_not_run = True
+            continue
         ex = spec.get("execution", {})
         prompt = ex.get("prompt")
         if not prompt:
@@ -852,9 +873,12 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"    report collected from: {p}")
                 if not ok or args.keep:
                     _record(case.name, run, stream, corpus)
-            except SystemExit as exc:
-                if exc.code != 2:
+            except (SystemExit, Exception) as exc:
+                if isinstance(exc, SystemExit) and exc.code != 2:
                     raise
+                if not isinstance(exc, SystemExit):
+                    print(f"harness: unhandled error: {type(exc).__name__}: {exc}",
+                          file=sys.stderr)
                 could_not_run = True
                 print(f"\nDID NOT RUN  {tag}  — the harness could not run or "
                       "grade this session (reason above); not a behaviour change")

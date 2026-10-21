@@ -82,8 +82,7 @@ touches those paths.
 ## What a pass here does and does not prove
 
 The harness is a port of ci-secure's, with the same gaps against
-`claude plugin eval` (the runner these case files are shaped for, which is in
-early access): it does not apply `execution.allowed_tools`, does not run the
+`claude plugin eval` (the runner these case files are shaped for): it does not apply `execution.allowed_tools`, does not run the
 no-plugin ablation arm, does not honour `execution.model` or `runs:`, and
 ignores regex `flags`. Each makes a pass weaker than the case asks for; none
 makes a failure wrong.

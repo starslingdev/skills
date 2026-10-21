@@ -110,6 +110,17 @@ def _is_404(r):
     ("api", "graphql", "-f", "query=query{repository(owner:\"synthetic\",name:\"repo\"){id}}"),
     ("api", "graphql", "-F", "owner={owner}", "-F", "name={repo}", "-f", "query=q"),
     ("search", "code", "foo", "--repo", "synthetic/repo"),
+    # gh accepts flags before the endpoint, and the endpoint in URL forms
+    ("api", "-F", "owner=synthetic", "-F", "name=repo", "-f", "query=q", "graphql"),
+    ("api", "/graphql", "-F", "owner=synthetic", "-F", "name=repo"),
+    ("api", "https://api.github.com/graphql", "-F", "owner=synthetic"),
+    # a query the shim cannot read (a file, stdin) could name the repository
+    ("api", "graphql", "--input", "q.json"),
+    ("api", "graphql", "-F", "query=@q.graphql"),
+    # the replayed owner's namespace, not only its one repository
+    ("api", "orgs/synthetic"),
+    ("api", "/users/Synthetic"),
+    ("api", "orgs/synthetic/repos?per_page=100"),
 ])
 def test_unserved_calls_on_the_replayed_repo_fail_closed(shim, args):
     r = shim.gh(*args)

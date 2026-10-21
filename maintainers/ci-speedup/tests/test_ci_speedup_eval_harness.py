@@ -46,6 +46,8 @@ _GOOD_STREAM = (
     '{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}}\n'
     '{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}\n'
 )
+# What `claude -p` actually prints: the session, then its closing result event.
+_SESSION = _GOOD_STREAM + '{"type":"result","subtype":"success","is_error":false}\n'
 
 
 # --- a session that never happened is exit 2 -------------------------------
@@ -77,8 +79,27 @@ def test_a_turn_cap_hit_is_not_a_graded_run(monkeypatch, tmp_path):
 
 def test_a_real_stream_is_returned_unchanged(monkeypatch, tmp_path):
     monkeypatch.setattr(harness.subprocess, "run",
+                        lambda *a, **k: _completed(stdout=_SESSION))
+    assert harness._run_agent("prompt", tmp_path, tmp_path, 60, 900) == _SESSION
+
+
+def test_a_stream_cut_off_before_its_result_is_not_graded(monkeypatch, tmp_path):
+    # A "never happened" grader (max: 0, not_contains) would pass on the events
+    # the stream lost, so a session with no closing result is not a graded run.
+    monkeypatch.setattr(harness.subprocess, "run",
                         lambda *a, **k: _completed(stdout=_GOOD_STREAM))
-    assert harness._run_agent("prompt", tmp_path, tmp_path, 60, 900) == _GOOD_STREAM
+    with pytest.raises(SystemExit) as exc:
+        harness._run_agent("prompt", tmp_path, tmp_path, 60, 900)
+    assert exc.value.code == 2
+
+
+def test_a_stream_with_an_undecodable_event_is_not_graded(monkeypatch, tmp_path):
+    stream = _SESSION.replace('{"type":"assistant","message":{"content":[{"type":"text"',
+                              '{"type":"assistant","message":{"content":[{"type":"te', 1)
+    monkeypatch.setattr(harness.subprocess, "run", lambda *a, **k: _completed(stdout=stream))
+    with pytest.raises(SystemExit) as exc:
+        harness._run_agent("prompt", tmp_path, tmp_path, 60, 900)
+    assert exc.value.code == 2
 
 
 def test_zero_runs_is_refused_rather_than_reported_as_a_pass():
@@ -91,10 +112,17 @@ def test_an_unexpected_harness_error_exits_2_not_1(monkeypatch, tmp_path):
     monkeypatch.setattr(harness.sys, "argv", ["run_skill_evals.py"])
     monkeypatch.setattr(harness.shutil, "which", lambda *a, **k: "/usr/bin/claude")
     monkeypatch.setattr(harness, "_gh_preflight", lambda: None, raising=False)
-    monkeypatch.setattr(harness, "_cases", lambda only: [tmp_path / "boom"])
+    def boom(only):
+        raise RuntimeError("boom")  # outside the per-case loop: cli()'s catch-all
+    monkeypatch.setattr(harness, "_cases", boom)
     with pytest.raises(SystemExit) as exc:
         harness.cli()
     assert exc.value.code == 2
+
+
+def test_an_unreadable_case_yaml_alone_exits_2(monkeypatch, tmp_path):
+    _wire_main(monkeypatch, tmp_path, [tmp_path / "missing"])
+    assert harness.main([]) == 2
 
 
 def test_a_grader_type_the_harness_cannot_score_is_not_a_pass():
@@ -120,7 +148,7 @@ def test_the_session_mounts_every_plugin_and_loads_no_user_settings(monkeypatch,
 
     def fake_run(cmd, **kw):
         seen["cmd"], seen["env"] = cmd, kw["env"]
-        return _completed(stdout=_GOOD_STREAM)
+        return _completed(stdout=_SESSION)
 
     monkeypatch.setattr(harness.subprocess, "run", fake_run)
     a, b = tmp_path / "a", tmp_path / "b"
@@ -587,7 +615,7 @@ def test_the_session_reads_scripts_from_the_plugin_copy(monkeypatch, tmp_path):
 
     def fake_run(cmd, **kw):
         seen["env"] = kw["env"]
-        return _completed(stdout=_GOOD_STREAM)
+        return _completed(stdout=_SESSION)
 
     monkeypatch.setattr(harness.subprocess, "run", fake_run)
     plugin = tmp_path / "ci-speedup"
@@ -654,6 +682,28 @@ def test_a_could_not_run_does_not_stop_later_cases(monkeypatch, tmp_path):
     _wire_main(monkeypatch, tmp_path, [a, b], run_agent)
     assert harness.main([]) == 2
     assert len(calls) == 2
+
+
+def test_a_real_failure_is_not_masked_by_a_later_unreadable_case(monkeypatch, tmp_path):
+    a, b = _fake_case(tmp_path, "a"), _fake_case(tmp_path, "b")
+    (b / "case.yaml").write_text("execution: [unclosed\n", encoding="utf-8")
+    _wire_main(monkeypatch, tmp_path, [a, b], lambda *a, **k: _NO_TOOL_STREAM)
+    assert harness.main([]) == 1
+
+
+def test_a_real_failure_is_not_masked_by_a_later_run_that_crashed(monkeypatch, tmp_path):
+    calls = []
+
+    def run_agent(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            return _NO_TOOL_STREAM
+        raise OSError("disk full")
+
+    a, b, c = (_fake_case(tmp_path, n) for n in "abc")
+    _wire_main(monkeypatch, tmp_path, [a, b, c], run_agent)
+    assert harness.main([]) == 1
+    assert len(calls) == 3
 
 
 def test_every_run_passing_is_exit_0(monkeypatch, tmp_path):

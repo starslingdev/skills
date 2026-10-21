@@ -161,8 +161,8 @@ jobs:
       (github.event_name == 'workflow_dispatch' ||
        github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: starsling-ubuntu-24.04
-    # Above the harness's own worst case at ONE run per case (the automatic default): five
-    # cases at the 900s per-run cap the case files declare is 75 minutes, so a lower budget
+    # Above the harness's own worst case at ONE run per case (the automatic default): the
+    # case files declare four at 900s and many-findings at 1500s, 85 minutes, so a lower budget
     # here would kill a slow-but-healthy suite and report it as a behaviour change. A manual
     # run with `runs` above 1 multiplies that and can exceed this budget. A hung session must
     # still not hold the pool: self-hosted jobs otherwise queue for hours with no signal.

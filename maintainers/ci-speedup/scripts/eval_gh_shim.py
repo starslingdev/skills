@@ -194,9 +194,21 @@ def _targets(argv: list[str], repo: str, remotes: list[str]) -> bool:
     args = [_expand(a, origin) for a in argv] if argv[:1] == ["api"] else argv
     if any(repo.lower() in a.lower() for a in args):
         return True
-    if argv[:2] == ["api", "graphql"]:  # owner and name may arrive as separate fields
-        owner = re.escape(repo.split("/", 1)[0])
-        return any(re.search(rf"(?i)\b{owner}\b", a) for a in args)
+    if argv[:1] == ["api"]:
+        owner = repo.split("/", 1)[0]
+        positional, flags = _split(argv[1:], _API_FLAGS)
+        endpoint = re.sub(r"^https?://api\.github\.com/", "",
+                          _expand(positional[0], origin) if positional else "").lstrip("/")
+        if re.match(rf"(?i)^(orgs|users)/{re.escape(owner)}(/|\?|$)", endpoint):
+            return True  # the owner's namespace is as unreserved as its repository
+        if endpoint.lower() == "graphql":
+            # Owner and name may arrive as separate fields, or inside a query
+            # the shim cannot read (a file, stdin): that one fails closed.
+            if _get(flags, "--input") is not None or any(
+                    k in ("-f", "-F") and v.split("=", 1)[-1].startswith("@")
+                    for k, v in flags):
+                return True
+            return any(re.search(rf"(?i)\b{re.escape(owner)}\b", a) for a in args)
     cmd = next((a for a in argv if not a.startswith("-")), None)
     if cmd not in _REPO_SCOPED:
         return False
