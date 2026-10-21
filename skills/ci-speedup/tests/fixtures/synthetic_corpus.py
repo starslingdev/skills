@@ -1,14 +1,16 @@
 """The synthetic repository the offline replay corpus (`gh_replay/`) was recorded against.
 
-Shared by two consumers so the corpus and the checkout it describes cannot drift
+Shared by every consumer so the corpus and the checkout it describes cannot drift
 between them:
 
   - `tests/test_offline_pipeline_e2e.py`, which drives scan -> collect -> render ->
-    verify against it as a subprocess pipeline, and
-  - the maintainer-only behavioural eval harness
-    (`maintainers/ci-speedup/scripts/run_skill_evals.py`) and the
-    `evals/full-run-synthetic/scaffold.sh` it runs, which hand the same checkout
-    and the same replay corpus to a real agent session.
+    verify against it as a subprocess pipeline;
+  - `evals/_scaffold_common.sh`, which every eval case's `scaffold.sh` sources to
+    materialise the checkout, and the maintainer-only behavioural eval harness
+    (`maintainers/ci-speedup/scripts/run_skill_evals.py`), which builds the replay
+    dir, so a real agent session gets the same checkout and the same corpus; and
+  - `tests/test_ci_speedup_evals_cases.py`, which renders the report offline from
+    both to check the eval cases' graders against it.
 
 It lives under `tests/fixtures/` so pytest never collects it, and so the eval
 harness's plugin copy (which withholds `tests/fixtures/`) never mounts it: it
@@ -19,7 +21,8 @@ Run as a script it materialises either half into a directory:
     python3 synthetic_corpus.py repo <empty-dir>
     python3 synthetic_corpus.py replay <dest-dir> [--span-seconds N]
 
-The text below this docstring was moved verbatim out of the e2e test; the
+The builder below this docstring was moved out of the e2e test verbatim with one
+addition, the optional `span_s` forward band on the monthly-volume bracket; the
 comments still speak from that file's point of view.
 """
 from __future__ import annotations
@@ -707,8 +710,9 @@ def _monthly_volume_endpoints_bracket(span_s: int = 31) -> list[str]:
 
 def _replay_dir(tmp_path: Path, span_s: int = 31) -> Path:
     """A ready-to-replay fixture dir: the committed corpus PLUS the one
-    time-dependent `_monthly_volume` fixture (bracketed over a small second band,
-    see `_monthly_volume_endpoints_bracket`), so the offline collection reports
+    time-dependent `_monthly_volume` fixture, bracketed over a forward band of
+    `span_s` seconds (~30 by default; the eval harness passes its session
+    budget, see `_monthly_volume_endpoints_bracket`), so the offline collection reports
     ZERO gh errors (no missed endpoint) and the clean-run assertion in the e2e
     can be an exact `== 0`."""
     dst = tmp_path / "gh_replay"

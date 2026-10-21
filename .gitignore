@@ -87,6 +87,8 @@ skills/ci-secure/evals/files/*/.github/
 # whatever sits there. Always pass `--output-dir` somewhere outside the skill;
 # `tests/test_ci_secure_install_surface.py` fails if results land here anyway.
 skills/ci-secure/evals/results/
+# The same default for ci-speedup's cases; the same caveat about the install surface.
+skills/ci-speedup/evals/results/
 
 # The ci-secure eval harness writes a failing session's full stream-json plus
 # the file corpus it collected to `./skill-eval-logs/` (relative to the working

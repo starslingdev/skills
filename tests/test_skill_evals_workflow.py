@@ -252,6 +252,9 @@ def _classify(tmp_path: Path, event: str, changed: list[str], skill: str = "") -
     (["skills/ci-secure/references/x.md"], "true", "false"),
     (["maintainers/ci-secure/scripts/run_skill_evals.py"], "true", "false"),
     (["skills/ci-secure/SKILL.md", "skills/ci-speedup/evals/README.md"], "true", "true"),
+    # ci-speedup's routing case mounts ci-secure and routes on ci-secure's
+    # SKILL.md description, so that file alone re-checks BOTH contracts.
+    (["skills/ci-secure/SKILL.md"], "true", "true"),
     ([".github/workflows/skill-evals.yml"], "true", "true"),
     # Not contract files: an oracle test or a doc never pays for a session.
     (["skills/ci-speedup/tests/test_blocking_path.py", "docs/methodology.md"], "false", "false"),
@@ -270,13 +273,141 @@ def test_a_manual_run_runs_the_suites_it_names(tmp_path, skill, secure, speedup)
     assert (got.get("secure"), got.get("speedup")) == (secure, speedup), got
 
 
-def test_every_triggering_path_is_classified_into_a_suite(tmp_path):
-    """The trigger's path filter and the classifier are two lists of the same
-    thing. A path that triggers the workflow but no suite starts a run that
-    verifies nothing; the day the lists drift, this says which entry."""
+def _trigger_paths() -> list[str]:
     doc = _doc()
     on = doc.get("on") or doc.get(True)
-    for pattern in on["pull_request"]["paths"]:
+    return list(on["pull_request"]["paths"])
+
+
+def _expected_suites(pattern: str) -> tuple[str, str]:
+    """(secure, speedup) a trigger path must set, derived from the path itself."""
+    if pattern in {".github/workflows/skill-evals.yml", "skills/ci-secure/SKILL.md"}:
+        return ("true", "true")
+    if pattern.startswith(("skills/ci-secure/", "maintainers/ci-secure/")):
+        return ("true", "false")
+    if pattern.startswith(("skills/ci-speedup/", "maintainers/ci-speedup/")):
+        return ("false", "true")
+    raise AssertionError(f"{pattern}: no expected suite; extend _expected_suites")
+
+
+def test_every_triggering_path_is_classified_into_its_own_suite(tmp_path):
+    """The trigger's path filter and the classifier are two lists of the same
+    thing. A path that triggers the workflow but no suite starts a run that
+    verifies nothing, and one classified into the WRONG suite pays for a
+    session that cannot see the change; the day the lists drift, this says
+    which entry."""
+    for pattern in _trigger_paths():
         sample = pattern.replace("**", "x/y.md")
         got = _classify(tmp_path, "pull_request", [sample])
-        assert "true" in got.values(), f"{pattern} triggers the workflow but runs no suite"
+        assert (got.get("secure"), got.get("speedup")) == _expected_suites(pattern), (
+            f"{pattern} classified as {got}")
+
+
+def _classifier_patterns() -> list[str]:
+    step = next(s for s in _job("changes")["steps"] if s.get("id") == "classify")
+    body = step["run"][step["run"].index('case "$f" in'):]
+    out: list[str] = []
+    for line in body.splitlines():
+        m = re.fullmatch(r"\s*([^\s()]+)\)\s*", line)
+        if m:
+            out.extend(m.group(1).split("|"))
+    return out
+
+
+def test_every_classifier_pattern_is_a_trigger_path():
+    """The reverse direction: a classifier pattern no trigger path covers is a
+    file the classifier would route to a suite on a run that never starts."""
+    patterns = _classifier_patterns()
+    assert len(patterns) >= 10, f"the classifier parse found only {patterns}"
+    paths = set(_trigger_paths())
+    missing = [p for p in patterns
+               if (p[:-1] + "**" if p.endswith("/*") else p) not in paths]
+    assert not missing, f"classifier patterns with no trigger path: {missing}"
+
+
+def _git_env(home: Path, repo: Path) -> dict:
+    """Pinned to the temp repository: inherited GIT_* variables (a hook or
+    worktree run exports an absolute GIT_DIR) can never reach the real one."""
+    return {"PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
+            "HOME": str(home), "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": str(home / ".gitconfig"),
+            "GIT_DIR": str(repo / ".git"), "GIT_WORK_TREE": str(repo),
+            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+
+
+def test_the_changed_file_list_is_fetched_deep_enough():
+    """`HEAD^1` exists only if the checkout fetched the merge commit's parent."""
+    checkout = next(s for s in _job("changes")["steps"] if s.get("name") == "Checkout")
+    assert checkout["with"]["fetch-depth"] == 2
+
+
+def test_a_file_moved_out_of_the_engine_still_triggers_its_suite(tmp_path):
+    """Executed, not read. With rename detection on, `git diff --name-only`
+    lists only a moved file's DESTINATION, so moving a script out of
+    `skills/ci-speedup/scripts/` read as a docs-only change and ran no suite;
+    a non-ASCII path came back C-quoted and matched no pattern."""
+    repo, home = tmp_path / "repo", tmp_path / "home"
+    repo.mkdir()
+    home.mkdir()
+    env = _git_env(home, repo)
+
+    def git(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=str(repo), env=env, check=True,
+                       capture_output=True, text=True)
+
+    git("init", "-q")
+    engine = repo / "skills" / "ci-speedup" / "scripts"
+    engine.mkdir(parents=True)
+    body = "".join(f"line {n}\n" for n in range(50))
+    (engine / "collect_runs.py").write_text(body, encoding="utf-8")
+    git("add", "skills")
+    git("commit", "-q", "-m", "base")
+    (repo / "docs").mkdir()
+    git("mv", "skills/ci-speedup/scripts/collect_runs.py", "docs/collect_runs.py")
+    git("commit", "-q", "-m", "move")
+
+    step = next(s for s in _job("changes")["steps"]
+                if s.get("name") == "List the changed files")
+    runner_temp = tmp_path / "runner"
+    runner_temp.mkdir()
+    proc = subprocess.run(["bash", "-c", step["run"]], cwd=str(repo),
+                          env={**env, "RUNNER_TEMP": str(runner_temp)},
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    changed = (runner_temp / "changed.txt").read_text(encoding="utf-8").splitlines()
+    assert "skills/ci-speedup/scripts/collect_runs.py" in changed, changed
+    got = _classify(tmp_path, "pull_request", changed)
+    assert got.get("speedup") == "true", (changed, got)
+
+
+def test_the_changed_file_list_never_quotes_a_path(tmp_path):
+    repo, home = tmp_path / "repo", tmp_path / "home"
+    repo.mkdir()
+    home.mkdir()
+    env = _git_env(home, repo)
+
+    def git(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=str(repo), env=env, check=True,
+                       capture_output=True, text=True)
+
+    git("init", "-q")
+    (repo / "a.txt").write_text("a\n", encoding="utf-8")
+    git("add", "a.txt")
+    git("commit", "-q", "-m", "base")
+    ref = repo / "skills" / "ci-speedup" / "references"
+    ref.mkdir(parents=True)
+    (ref / "café.md").write_text("x\n", encoding="utf-8")
+    git("add", "skills")
+    git("commit", "-q", "-m", "add")
+
+    step = next(s for s in _job("changes")["steps"]
+                if s.get("name") == "List the changed files")
+    runner_temp = tmp_path / "runner"
+    runner_temp.mkdir()
+    proc = subprocess.run(["bash", "-c", step["run"]], cwd=str(repo),
+                          env={**env, "RUNNER_TEMP": str(runner_temp)},
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    changed = (runner_temp / "changed.txt").read_text(encoding="utf-8").splitlines()
+    assert changed == ["skills/ci-speedup/references/café.md"], changed

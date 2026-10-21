@@ -458,9 +458,10 @@ def test_every_case_with_a_report_grader_anchors_on_engine_only_text(
 
 
 def test_the_full_run_targets_the_replayed_repo_by_name() -> None:
-    """SKILL.md phase 1 resolves `owner/repo` with `gh repo view`, which cannot
-    resolve a repository that exists only in the replay corpus. The prompt
-    names it, which the contract honours without a confirmation round-trip."""
+    """SKILL.md phase 1 re-confirms only an ambiguous target. The prompt names
+    the corpus repository and the checkout it lives in, so the contract proceeds
+    without a confirmation round-trip; the harness's gh shim answers
+    `gh repo view` for that repository from the replay corpus."""
     prompt = _load(_FULL_RUN)["execution"]["prompt"]
     assert "synthetic/repo" in prompt
     assert "current directory" in prompt
@@ -470,3 +471,89 @@ def test_evals_json_points_at_the_runnable_cases() -> None:
     note = json.loads((_EVALS / "evals.json").read_text(encoding="utf-8"))["note"]
     assert "run_skill_evals.py" in note, (
         "evals.json's note must say which scenarios now run, and where")
+
+
+# ---------------------------------------------------------------------------
+# `tool_used` graders against the input the harness actually matches.
+# ---------------------------------------------------------------------------
+#
+# The harness matches `input_match` against `json.dumps` of the tool input, so
+# a shell `"` reaches the regex as `\"` and a newline as `\n`. Each row below is
+# a Bash command a session could run, encoded exactly that way.
+
+_ROUTING = _EVALS / "security-ask-routes-to-ci-secure"
+
+
+def _grader(case_dir: Path, name: str) -> dict:
+    return next(g for g in _graders(_load(case_dir)) if g["name"] == name)
+
+
+def _bash_input(command: str) -> str:
+    return json.dumps({"command": command})
+
+
+@pytest.mark.parametrize("case_dir,name,command,hits", [
+    # SKILL.md phase 1's gate.
+    (_FULL_RUN, "gh-gate-checked", "gh auth status", True),
+    (_FULL_RUN, "gh-gate-checked", "gh auth status --hostname github.com 2>&1", True),
+    (_FULL_RUN, "gh-gate-checked", "gh repo view synthetic/repo", False),
+    # The data pass, however its arguments are quoted or wrapped.
+    (_FULL_RUN, "data-pass-ran-with-logs",
+     "python3 scripts/run.py --root . --out f.json --repo synthetic/repo --with-logs", True),
+    (_FULL_RUN, "data-pass-ran-with-logs",
+     'python3 /p/ci-speedup/scripts/run.py --root "$PWD" --repo synthetic/repo --with-logs',
+     True),
+    (_FULL_RUN, "data-pass-ran-with-logs",
+     'python3 scripts/run.py --out "/tmp/a b/findings.json" --with-logs', True),
+    (_FULL_RUN, "data-pass-ran-with-logs",
+     "python3 scripts/run.py --root . \\\n  --with-logs", True),
+    (_FULL_RUN, "data-pass-ran-with-logs", "python3 scripts/run.py --root .", False),
+    (_FULL_RUN, "data-pass-ran-with-logs",
+     "python3 scripts/run.py --root .\npython3 other.py --with-logs", False),
+    (_FULL_RUN, "data-pass-ran-with-logs",
+     "python3 scripts/run.py --root . && echo --with-logs", False),
+    # Nothing committed or pushed, whatever global options precede the verb.
+    (_FULL_RUN, "nothing-was-committed", "git commit -m x", True),
+    (_FULL_RUN, "nothing-was-committed", "git --no-pager commit -m x", True),
+    (_FULL_RUN, "nothing-was-committed", "git -C /r commit -am x", True),
+    (_FULL_RUN, "nothing-was-committed", 'git -C "/a b" commit -m x', True),
+    (_FULL_RUN, "nothing-was-committed", "git -c a=b commit -m x", True),
+    (_FULL_RUN, "nothing-was-committed", "git -c a=b --no-pager -C /r commit", True),
+    (_FULL_RUN, "nothing-was-committed", "/usr/bin/git commit -m x", True),
+    (_FULL_RUN, "nothing-was-committed", "git log --grep commit", False),
+    (_FULL_RUN, "nothing-was-committed", "git show HEAD:commit.txt", False),
+    (_FULL_RUN, "nothing-was-committed", "git status && echo commit", False),
+    (_FULL_RUN, "nothing-was-committed", "git commit-tree HEAD^{tree}", False),
+    (_FULL_RUN, "nothing-was-pushed", "git push origin HEAD", True),
+    (_FULL_RUN, "nothing-was-pushed", "git -C /r --no-pager push", True),
+    (_FULL_RUN, "nothing-was-pushed", "git --no-pager push --force", True),
+    (_FULL_RUN, "nothing-was-pushed", "git log --grep push", False),
+    (_FULL_RUN, "nothing-was-pushed", "git show HEAD:push.txt", False),
+    # The routing case: ci-speedup's pipeline, never ci-secure's same-named scripts.
+    (_ROUTING, "no-ci-speedup-pipeline-script-ran",
+     "python3 /p/ci-speedup/scripts/collect_runs.py --repo o/r", True),
+    (_ROUTING, "no-ci-speedup-pipeline-script-ran",
+     "python3 /p/ci-speedup/scripts/run.py --root .", True),
+    (_ROUTING, "no-ci-speedup-pipeline-script-ran",
+     "python3 /p/ci-speedup/tests/verify_report.py --report r.md", True),
+    (_ROUTING, "no-ci-speedup-pipeline-script-ran",
+     "python3 /p/ci-secure/tests/verify_report.py --report r.md", False),
+    (_ROUTING, "no-ci-speedup-pipeline-script-ran",
+     "python3 /p/ci-secure/scripts/run.py --root .", False),
+])
+def test_tool_used_graders_on_the_json_encoded_bash_input(case_dir, name, command, hits):
+    grader = _grader(case_dir, name)
+    assert grader["type"] == "tool_used" and grader["tool"] == "Bash"
+    encoded = _bash_input(command)
+    found = bool(re.search(grader["input_match"], encoded))
+    assert found == hits, f"{name}: {grader['input_match']!r} on {encoded!r} -> {found}"
+
+
+def test_the_routing_case_report_grader_fires_on_a_real_report(offline_render) -> None:
+    """`no-speed-report-in-the-transcript` holding on a session proves nothing
+    unless it FIRES on the report ci-speedup's renderer actually writes: a
+    renderer title change would otherwise make it vacuous without a sound."""
+    g = _grader(_ROUTING, "no-speed-report-in-the-transcript")
+    assert g["match"] == "not_contains"
+    assert re.search(g["pattern"], offline_render["files"]), (
+        f"{g['pattern']!r} no longer matches the rendered report's title")

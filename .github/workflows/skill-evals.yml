@@ -13,8 +13,10 @@
 # ONE WORKFLOW, ONE SUITE PER SKILL. A pull request pays only for the suite whose skill it
 # touched: the `changes` job classifies the diff, and each suite's job runs only when its
 # skill's contract changed. Each suite reports under its own check name, so a red can never be
-# attributed to the wrong skill, and a suite that did not apply reports no check at all rather
-# than a green one.
+# attributed to the wrong skill. A suite that did not apply still posts its checks, with the
+# conclusion "skipped": that is never verification. The suites are advisory today; if one is
+# ever made required, branch protection counts skipped as passing, so the `changes`
+# classifier becomes the gate and must be reviewed as one.
 #
 # WHY THIS IS NOT THE `test` GATE, and is not required:
 #
@@ -108,7 +110,10 @@ jobs:
 
       - name: List the changed files
         if: github.event_name == 'pull_request'
-        run: git diff --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed.txt"
+        # --no-renames: a file moved out of a contract path must list its SOURCE too, or moving
+        # a script out of skills/ci-speedup/scripts/ reads as a docs-only change. quotePath off:
+        # a non-ASCII path must come back raw, not C-quoted past every pattern below.
+        run: git -c core.quotePath=false diff --no-renames --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed.txt"
 
       - name: Classify
         id: classify
@@ -129,9 +134,11 @@ jobs:
           else
             while IFS= read -r f; do
               case "$f" in
-                .github/workflows/skill-evals.yml)
+                # ci-speedup's routing case mounts ci-secure and routes on ci-secure's SKILL.md
+                # description, so that one file re-checks both contracts.
+                .github/workflows/skill-evals.yml|skills/ci-secure/SKILL.md)
                   secure=true; speedup=true ;;
-                skills/ci-secure/SKILL.md|skills/ci-secure/references/*|skills/ci-secure/scripts/*|skills/ci-secure/evals/*|maintainers/ci-secure/scripts/run_skill_evals.py)
+                skills/ci-secure/references/*|skills/ci-secure/scripts/*|skills/ci-secure/evals/*|maintainers/ci-secure/scripts/run_skill_evals.py)
                   secure=true ;;
                 skills/ci-speedup/SKILL.md|skills/ci-speedup/references/*|skills/ci-speedup/scripts/*|skills/ci-speedup/evals/*|skills/ci-speedup/tests/verify_report.py|skills/ci-speedup/tests/fixtures/gh_replay/*|skills/ci-speedup/tests/fixtures/synthetic_corpus.py|maintainers/ci-speedup/scripts/run_skill_evals.py|maintainers/ci-speedup/scripts/eval_gh_shim.py)
                   speedup=true ;;
@@ -154,10 +161,11 @@ jobs:
       (github.event_name == 'workflow_dispatch' ||
        github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: starsling-ubuntu-24.04
-    # Above the harness's own worst case: five cases at the 900s per-run cap the case files
-    # declare is 75 minutes, so a lower budget here would kill a slow-but-healthy suite and
-    # report it as a behaviour change. A hung session must still not hold the pool: self-hosted
-    # jobs otherwise queue for hours with no signal.
+    # Above the harness's own worst case at ONE run per case (the automatic default): five
+    # cases at the 900s per-run cap the case files declare is 75 minutes, so a lower budget
+    # here would kill a slow-but-healthy suite and report it as a behaviour change. A manual
+    # run with `runs` above 1 multiplies that and can exceed this budget. A hung session must
+    # still not hold the pool: self-hosted jobs otherwise queue for hours with no signal.
     timeout-minutes: 90
     steps:
       - name: Checkout
@@ -231,9 +239,10 @@ jobs:
       (github.event_name == 'workflow_dispatch' ||
        github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: starsling-ubuntu-24.04
-    # Above the harness's own worst case: the cases' per-run caps summed (the full run's 1500s
-    # plus the routing case's 900s is 40 minutes), so a slow-but-healthy suite is never killed
-    # and reported as a behaviour change.
+    # Above the harness's own worst case at ONE run per case (the automatic default): the
+    # cases' per-run caps summed (the full run's 1500s plus the routing case's 900s is 40
+    # minutes), so a slow-but-healthy suite is never killed and reported as a behaviour change.
+    # A manual run with `runs` above 1 multiplies that and can exceed this budget.
     timeout-minutes: 50
     steps:
       - name: Checkout

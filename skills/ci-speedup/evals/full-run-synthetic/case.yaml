@@ -18,11 +18,12 @@ context:
 
 execution:
   # The target is named, and named as the checkout in the working directory,
-  # because SKILL.md phase 1 re-confirms only an ambiguous target and resolves
-  # `owner/repo` with `gh repo view`, which cannot resolve a repository that
-  # exists only in the replay corpus. Naming it is what a user who already knows
-  # which repo they want does; it is not a bypass of the gate (`gh auth status`
-  # still runs and must pass).
+  # because SKILL.md phase 1 re-confirms only an ambiguous target. The repository
+  # exists only in the replay corpus; the harness's gh shim answers
+  # `gh repo view` and `gh api repos/synthetic/repo` for it from that corpus.
+  # Naming it is what a user who already knows which repo they want does; it is
+  # not a bypass of the gate (`gh auth status` still reaches the real gh and
+  # must pass).
   prompt: |
     Audit the CI of synthetic/repo for speed and cost. It's the git checkout in
     the current directory, and that's the repo I want audited.
@@ -41,7 +42,13 @@ graders:
     arm: both
 
   # SKILL.md phase 1. The gate is real: the harness passes GitHub auth through,
-  # it does not stub `gh`.
+  # and its gh shim answers only the corpus repo's `repo view` and
+  # `api repos/synthetic/repo`; `gh auth status` goes to the real gh.
+  #
+  # Every `tool_used` pattern here is matched against the JSON-encoded tool
+  # input, so a shell `"` arrives as `\"` and a newline as `\n`.
+  # tests/test_ci_speedup_evals_cases.py pins each Bash grader on encoded
+  # commands, quoted arguments and global git options included.
   - type: tool_used
     name: gh-gate-checked
     tool: Bash
@@ -49,11 +56,13 @@ graders:
     min: 1
 
   # Phases 2-3: `run.py` orchestrates scan + data pass, with `--with-logs` so the
-  # drill bundle the render command binds is captured.
+  # drill bundle the render command binds is captured. The flag must sit in the
+  # same command: escaped quotes and `\`-continued lines are crossed, a bare
+  # newline, `;`, `|` or `&` is not.
   - type: tool_used
     name: data-pass-ran-with-logs
     tool: Bash
-    input_match: 'run\.py[^"]*--with-logs'
+    input_match: 'run\.py(?:[^"\\;|&]|\\\\\\n|\\[^n])*?--with-logs'
     min: 1
 
   - type: tool_used
@@ -124,17 +133,20 @@ graders:
     pattern: '\bOPT\d+'
     match: not_contains
 
+  # `git`, any global options (`-C <dir>`, `-c <k=v>`, `--git-dir <dir>`, and
+  # value-less ones such as `--no-pager`), then the verb itself. `git log --grep
+  # commit` and `git show HEAD:commit.txt` are not a commit.
   - type: tool_used
     name: nothing-was-committed
     tool: Bash
-    input_match: 'git\s+(-\S+\s+\S+\s+)*commit'
+    input_match: '(?<![\w.-])git(?:\s+(?:-[Cc]\s+(?:\\"[^"]*?\\"|[^\s"]+)|--(?:git-dir|work-tree|namespace)\s+(?:\\"[^"]*?\\"|[^\s"]+)|-[\w-]+(?:=[^\s"]+)?))*\s+commit(?![\w-])'
     min: 0
     max: 0
 
   - type: tool_used
     name: nothing-was-pushed
     tool: Bash
-    input_match: 'git\s+(-\S+\s+\S+\s+)*push'
+    input_match: '(?<![\w.-])git(?:\s+(?:-[Cc]\s+(?:\\"[^"]*?\\"|[^\s"]+)|--(?:git-dir|work-tree|namespace)\s+(?:\\"[^"]*?\\"|[^\s"]+)|-[\w-]+(?:=[^\s"]+)?))*\s+push(?![\w-])'
     min: 0
     max: 0
 

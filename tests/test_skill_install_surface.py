@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -57,6 +58,9 @@ _MOVED_NAMES = {
     # The behavioural eval harness spends real agent sessions; it never ships.
     "run_skill_evals.py",
     "test_ci_speedup_eval_harness.py",
+    # The harness's gh shim answers the replay corpus's repo lookups; same reason.
+    "eval_gh_shim.py",
+    "test_ci_speedup_eval_gh_shim.py",
 }
 
 
@@ -103,6 +107,30 @@ def test_no_loop_named_files_anywhere_under_skill():
         "file(s) under skills/ci-speedup/ are maintainer-only loop infra and belong "
         "under maintainers/ci-speedup/: " + ", ".join(leaked)
     )
+
+
+def test_the_name_catch_all_fires_on_a_leaked_eval_gh_shim(tmp_path, monkeypatch):
+    """The eval harness's gh shim is maintainer-only: copied into the skill's
+    scripts/, the catch-all above must name it."""
+    leak = tmp_path / "ci-speedup" / "scripts"
+    leak.mkdir(parents=True)
+    (leak / "eval_gh_shim.py").write_bytes(
+        (_MAINT / "scripts" / "eval_gh_shim.py").read_bytes())
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, "_SKILL", tmp_path / "ci-speedup")
+    monkeypatch.setattr(module, "_REPO", tmp_path)
+    with pytest.raises(AssertionError, match="eval_gh_shim.py"):
+        test_no_loop_named_files_anywhere_under_skill()
+
+
+def test_every_maintainer_eval_file_is_a_moved_name():
+    """Every eval-harness file under maintainers/ci-speedup/ is a name the
+    catch-all knows, so the next one added cannot leak into the skill unseen."""
+    found = sorted(p.name for sub in ("scripts", "tests")
+                   for p in (_MAINT / sub).glob("*eval*") if p.is_file())
+    assert "run_skill_evals.py" in found, found
+    missing = [n for n in found if n not in _MOVED_NAMES]
+    assert not missing, f"maintainer-only eval files missing from _MOVED_NAMES: {missing}"
 
 
 def test_install_surface_has_no_runtime_capture_dirs():
@@ -219,6 +247,7 @@ def test_relocated_infra_actually_present():
         _MAINT / "scripts" / "record_opt82_resolver_snapshot.py",
         _MAINT / "tests" / "test_opt82_resolver_snapshot.py",
         _MAINT / "scripts" / "run_skill_evals.py",
+        _MAINT / "scripts" / "eval_gh_shim.py",
         _MAINT / "tests" / "test_ci_speedup_eval_harness.py",
         _MAINT / "tests" / "fixtures" / "opt82_resolver_snapshot.json",
     ]

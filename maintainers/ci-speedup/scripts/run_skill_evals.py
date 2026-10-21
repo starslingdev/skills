@@ -28,14 +28,22 @@ reference files, or the scripts the contract tells the agent to invoke.
     python3 maintainers/ci-speedup/scripts/run_skill_evals.py --case full-run-synthetic
     python3 maintainers/ci-speedup/scripts/run_skill_evals.py --runs 3
 
-Exit 0 when every selected case passes every mechanical grader, 1 only when a
-case really ran and failed one, and 2 whenever the harness could not run: no
-`claude`, no PyYAML, a scaffold failure, an agent that refused to start, a
-session that produced no events, a turn cap hit, a report the graders are
-anchored on that was never collected, or a grader type this harness cannot
+Exit 0 when every selected case passes every mechanical grader, 1 when any run
+really ran and failed one, and otherwise 2 when the harness could not run: no
+`claude`, no PyYAML, a `gh` that fails `gh auth status` (checked once before
+any session), a scaffold failure, an agent that refused to start, a session
+that produced no events, a turn cap hit, a timeout, an error result, a report
+the graders are anchored on that was never collected although every other
+grader passed, or a grader type / target / match mode this harness cannot
 evaluate. A session that never happened, graded, fails every positive grader
 and passes every negative one; that is "the agent never ran", not "the agent
-behaved wrongly", and the two must never share an exit code.
+behaved wrongly", and the two must never share an exit code. A could-not-run
+inside one run does not stop the others: it is reported, its partial stream
+and files are kept under `skill-eval-logs/`, and the loop goes on, so a real
+FAIL elsewhere still exits 1. A session that ran and never rendered a report
+because it behaved wrongly (the skill never fired, it stopped at phase 1) is a
+FAIL, not a collection gap: its other graders say so, and its report graders
+are scored FAIL beside them.
 
 WHAT IS DIFFERENT FROM THE ci-secure HARNESS, and why:
 
@@ -52,18 +60,24 @@ WHAT IS DIFFERENT FROM THE ci-secure HARNESS, and why:
     passes. The harness does not fake that: it passes the caller's GitHub auth
     through (`GH_TOKEN` / `GITHUB_TOKEN` in CI, `HOME`'s gh config on a laptop).
     With replay on, the token is never used for a data call; it only lets the
-    gate pass honestly. No auth means the case fails its "pipeline ran" graders,
-    which is the skill doing exactly what its contract says.
+    gate pass honestly. Without auth the gate cannot pass, so the harness
+    checks `gh auth status` itself (with the same real `gh` and environment
+    the session gets) before any session and exits 2 if it fails: every case
+    would otherwise stop at phase 1 and fail its "pipeline ran" graders, a
+    verdict about the machine, not the skill.
   - The plugin copy keeps `tests/verify_report.py`. SKILL.md's phase 5 tells the
     agent to run it, so `tests/` cannot be withheld wholesale the way ci-secure
     withholds it. Everything else under `tests/` (the oracle tests and every
     fixture, the replay corpus included) is still withheld: those are the
     answer key.
   - The report is found by NAME. SKILL.md leaves the scratch path to the agent,
-    which usually lands it under TMPDIR (pointed at a directory this harness
-    owns) but may pick a literal `/tmp/...`. So beside the sandbox and TMPDIR,
-    the corpus also reads any `ci-speedup-findings-report.md` a Bash command of
-    THIS session named, provided the file was written after the session started.
+    and measured sessions do NOT honour TMPDIR (pointed at a directory this
+    harness owns): they pick a literal `/tmp/...` path (a CI log:
+    `report collected from: /tmp/ci-speedup-scratch/...`) or, on macOS, a
+    `mktemp -d` directory under the system temp dir, both outside the
+    harness's roots. So beside the sandbox and TMPDIR, the corpus also reads
+    any `ci-speedup-findings-report.md` a Bash command of THIS session named,
+    provided the file was written after the session started.
 
 WHAT THIS HARNESS DOES NOT YET DO, and `claude plugin eval` does: identical to
 the ci-secure harness. `execution.allowed_tools` is not applied, the no-plugin
@@ -145,12 +159,12 @@ _REPLAY_SLACK_S = 120
 
 
 def _env(tmpdir: Path | None = None, fixtures: Path | None = None,
-         shim_dir: Path | None = None) -> dict:
+         shim_dir: Path | None = None, plugin_scripts: Path | None = None) -> dict:
     """A deliberately small environment for the agent session.
 
     Same rationale as ci-secure's `_env`: no inherited `GIT_DIR` /
     `GIT_WORK_TREE`, no system git config, TMPDIR pointed at a directory the
-    harness owns. Two additions, both load-bearing:
+    harness owns. Three additions, all load-bearing:
 
     * GitHub auth (`GH_TOKEN`, `GITHUB_TOKEN`, `GH_HOST`, `GH_CONFIG_DIR`,
       `XDG_CONFIG_HOME`, `USER`). SKILL.md's phase-1 gate runs
@@ -162,6 +176,10 @@ def _env(tmpdir: Path | None = None, fixtures: Path | None = None,
     * `shim_dir`, prepended to PATH: the `gh` there answers the replayed
       repository from the same corpus and delegates everything else, the
       `gh auth status` gate included, to the real `gh` (`eval_gh_shim.py`).
+      `CI_SPEEDUP_EVAL_SCRIPTS` names `plugin_scripts`, the plugin COPY's
+      `scripts/`, never the repository's: the real skill directory is a
+      sibling of `evals/`, and an agent that reads the variable must not be
+      handed a path into the answer key.
     """
     keep = ("PATH", "HOME", "TMPDIR", "TERM", "LANG", "LC_ALL", "USER",
             "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "IS_SANDBOX",
@@ -178,13 +196,41 @@ def _env(tmpdir: Path | None = None, fixtures: Path | None = None,
     if shim_dir is not None:
         env["CI_SPEEDUP_EVAL_REAL_GH"] = shutil.which("gh", path=env["PATH"]) or ""
         env["CI_SPEEDUP_EVAL_REPLAYED_REPO"] = _REPLAYED_REPO
-        env["CI_SPEEDUP_EVAL_SCRIPTS"] = str(_SKILL / "scripts")
+        env["CI_SPEEDUP_EVAL_SCRIPTS"] = str(plugin_scripts) if plugin_scripts else ""
         env["PATH"] = f"{shim_dir}{os.pathsep}{env['PATH']}"
     return env
 
 
+def _gh_preflight() -> None:
+    """Exit 2 unless the session's real `gh` passes `gh auth status`.
+
+    SKILL.md's phase 1 stops the audit when that gate fails, so without auth
+    every case would run, spend tokens, and fail its pipeline graders: a
+    verdict about this machine, not about the skill. Checked here with the
+    same `gh` the session's shim delegates to (looked up on the session's
+    PATH before the shim is prepended) and the same environment.
+    """
+    env = _env()
+    real = shutil.which("gh", path=env["PATH"])
+    if not real:
+        _die("no `gh` on the session's PATH, so the gh gate cannot pass in this "
+             "environment; nothing was verified")
+    try:
+        r = subprocess.run([real, "auth", "status"], capture_output=True,
+                           text=True, timeout=60, env=env)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        _die(f"`gh auth status` could not run ({exc}); the gh gate cannot pass "
+             "in this environment; nothing was verified")
+    if r.returncode != 0:
+        _die("`gh auth status` failed, so the gh gate cannot pass in this "
+             "environment; nothing was verified:\n  "
+             + ((r.stderr or r.stdout).strip()[-800:] or "(no output)"))
+
+
 def _gh_shim(into: Path) -> Path:
-    """A directory holding one executable, `gh`, that runs `eval_gh_shim.py`.
+    """A directory holding one executable, `gh`, that runs a COPY of
+    `eval_gh_shim.py` placed beside it (never the in-repo file: its path sits
+    in the maintainers tree next to the case files).
 
     Why a shim at all, measured: of the first real full-run sessions, one ran
     the pipeline and passed, and the next ran `gh repo view` and
@@ -194,9 +240,11 @@ def _gh_shim(into: Path) -> Path:
     the agent calls directly was not. The shim closes that gap and nothing else.
     """
     into.mkdir(parents=True, exist_ok=True)
+    shim = into / _GH_SHIM.name
+    shutil.copyfile(_GH_SHIM, shim)
     gh = into / "gh"
     gh.write_text("#!/bin/sh\n"
-                  f'exec python3 "{_GH_SHIM}" "$@"\n', encoding="utf-8")
+                  f'exec python3 "{shim}" "$@"\n', encoding="utf-8")
     gh.chmod(0o755)
     return into
 
@@ -204,10 +252,11 @@ def _gh_shim(into: Path) -> Path:
 def _scaffold_env() -> dict:
     """The scaffold's environment: the minimal one, and no credentials at all.
 
-    `_scaffold_common.sh` (ci-secure) documents the sandbox it is written
-    against: PATH, HOME, TMPDIR, TERM, GIT_CONFIG_NOSYSTEM=1, no credentials.
-    The scaffold only writes files and runs `git init`; it has no use for a
-    token, so it never gets one.
+    `skills/ci-speedup/evals/_scaffold_common.sh` documents the sandbox it is
+    written against: PATH, HOME, TMPDIR, TERM, GIT_CONFIG_NOSYSTEM=1, no
+    credentials. The scaffold writes the synthetic repository through the
+    replay corpus builder, runs `git init` and commits it locally; it never
+    talks to GitHub and has no use for a token, so it never gets one.
     """
     keep = ("PATH", "HOME", "TMPDIR", "TERM", "LANG", "LC_ALL")
     env = {k: v for k, v in os.environ.items() if k in keep and v is not None}
@@ -219,6 +268,22 @@ def _scaffold_env() -> dict:
 def _die(msg: str, code: int = 2) -> None:
     print(f"harness: {msg}", file=sys.stderr)
     raise SystemExit(code)
+
+
+class _SessionNotGradable(SystemExit):
+    """Exit 2 for a session that started (or may have) but cannot be graded:
+    a turn cap, an error result, a timeout. Carries whatever stream the session
+    produced, so `main` can keep it and the files written so far for the
+    workflow's failure upload instead of losing them with the sandbox."""
+
+    def __init__(self, stream: str):
+        super().__init__(2)
+        self.stream = stream
+
+
+def _abort_session(msg: str, stream: str) -> None:
+    print(f"harness: {msg}", file=sys.stderr)
+    raise _SessionNotGradable(stream)
 
 
 def _cases(only: str | None) -> list[Path]:
@@ -345,6 +410,12 @@ def _run_agent(prompt: str, sandbox: Path, plugin: Path | list[Path], max_turns:
     Exits 2 rather than returning a stream no session produced (see the
     ci-secure harness: an auth failure, a root refusal or an unknown flag all
     yield an empty stdout that would grade as a full behavioural regression).
+    Every such exit carries the stream it saw (`_SessionNotGradable`), so the
+    caller can record a partial session.
+
+    A session that started and ended cleanly WITHOUT calling a tool is graded,
+    not refused: answering in prose without loading any skill is a behaviour
+    (the routing case's graders exist to catch exactly that).
     """
     plugins = plugin if isinstance(plugin, list) else [plugin]
     cmd = [
@@ -359,18 +430,21 @@ def _run_agent(prompt: str, sandbox: Path, plugin: Path | list[Path], max_turns:
     try:
         r = subprocess.run(
             cmd, cwd=sandbox, capture_output=True, text=True, timeout=timeout,
-            env=_env(tmpdir, fixtures, shim_dir),
+            env=_env(tmpdir, fixtures, shim_dir, Path(plugins[0]) / "scripts"),
         )
-    except subprocess.TimeoutExpired:
-        _die(f"agent run exceeded {timeout}s", 2)
+    except subprocess.TimeoutExpired as exc:
+        partial = exc.stdout or ""
+        if isinstance(partial, bytes):
+            partial = partial.decode("utf-8", errors="replace")
+        _abort_session(f"agent run exceeded {timeout}s", partial)
 
     def _no_session(reason: str) -> None:
-        _die("\n".join([
+        _abort_session("\n".join([
             reason,
             f"  claude exit code: {r.returncode}",
             f"  claude stderr: {r.stderr.strip()[-2000:] or '(empty)'}",
             f"  claude stdout: {r.stdout.strip()[-2000:] or '(empty)'}",
-        ]))
+        ]), r.stdout)
 
     if r.returncode != 0:
         _no_session("claude exited non-zero — the session never ran.")
@@ -378,14 +452,12 @@ def _run_agent(prompt: str, sandbox: Path, plugin: Path | list[Path], max_turns:
     if not any(e.get("type") == "system" and e.get("subtype") == "init"
                for e in events):
         _no_session("claude exited 0 but the stream carries no session.")
-    if not _tool_calls(r.stdout):
-        _no_session("the session completed without calling a single tool.")
     for e in events:
         if e.get("type") != "result":
             continue
         if e.get("subtype") == "error_max_turns":
-            _die(f"the session hit its {max_turns}-turn cap; a truncated run is "
-                 "not a graded run")
+            _abort_session(f"the session hit its {max_turns}-turn cap; a truncated "
+                           "run is not a graded run", r.stdout)
         if e.get("is_error"):
             _no_session("the session ended in an error result.")
     return r.stdout
@@ -434,19 +506,38 @@ def _transcript(stream: str) -> str:
 
 
 def _last_message(stream: str) -> str:
-    """The final assistant turn — what the session left on the reader's screen."""
-    texts = []
+    """What the session left on the reader's screen: every piece of assistant
+    text after the last tool call that is not `AskUserQuestion`, falling back
+    to the final text turn when no text follows that call.
+
+    Not simply the final text turn: under `claude -p` nobody can answer a
+    question, so a session that closes phase 6 and then asks the user
+    something (an `AskUserQuestion` that errors headless) followed by a short
+    "ok, stopping here" line would leave the graded "last message" holding
+    that one line while the close the graders are written against sits a turn
+    earlier. A question is not work, so it does not end the close; any other
+    tool call does.
+    """
+    after: list[str] = []
+    final_turn: list[str] = []
     for ev in _events(stream):
         if ev.get("type") != "assistant":
             continue
         content = (ev.get("message") or {}).get("content")
         if not isinstance(content, list):
             continue
-        turn = [str(c.get("text", "")) for c in content
-                if isinstance(c, dict) and c.get("type") == "text"]
+        turn = []
+        for c in content:
+            if not isinstance(c, dict):
+                continue
+            if c.get("type") == "text":
+                turn.append(str(c.get("text", "")))
+                after.append(str(c.get("text", "")))
+            elif c.get("type") == "tool_use" and c.get("name") != "AskUserQuestion":
+                after = []
         if turn:
-            texts = turn
-    return "\n".join(texts)
+            final_turn = turn
+    return "\n".join(after or final_turn)
 
 
 def _snapshot(roots: list[Path]) -> dict[str, str]:
@@ -560,17 +651,28 @@ def _files_corpus(roots: list[Path], before: dict[str, str],
 
 def _grade(graders: list[dict], stream: str, tools: list[tuple[str, str]],
            files: str = "", last_message: str = "") -> tuple[list, list]:
-    """(scored results, unscored llm graders). Identical semantics to the
-    ci-secure harness; only the report a `files` grader is anchored on differs."""
+    """(scored results, unscored llm graders). The ci-secure harness's
+    semantics, plus the rule for a `files` grader when no report was collected:
+
+    every other grader is scored first. If any of them failed, the session
+    behaved wrongly (the skill never fired, stopped at phase 1, never
+    rendered), and each `files` grader is scored FAIL ("no report collected")
+    so the verdict is a real exit-1 failure. Only when every other scored
+    grader passed is a missing report a collection failure (exit 2): the
+    session did the work and the harness could not find what it wrote.
+    """
     corpora = {"trace": stream, "files": files, "last_message": last_message}
+    have_report = bool(_REPORT_HEADER.search(files))
     scored, unscored = [], []
+    pending_files: list[int] = []  # indices in `scored` awaiting the rule above
     for g in graders:
         kind, name = g.get("type"), g.get("name", "?")
         if kind == "tool_used":
             pat = g.get("input_match")
             n = sum(
                 1 for t, i in tools
-                if t == g.get("tool") and (pat is None or re.search(pat, i))
+                if t == g.get("tool")
+                and (pat is None or re.search(pat, _without_description(i)))
             )
             lo, hi = g.get("min", 1), g.get("max")
             scored.append((name, n >= lo and (hi is None or n <= hi), f"count={n}"))
@@ -581,16 +683,28 @@ def _grade(graders: list[dict], stream: str, tools: list[tuple[str, str]],
                 _die(f"{name}: grader target {target!r} is not implemented — "
                      "this harness cannot score the case, so it must not "
                      "report one")
-            if target == "files" and not _REPORT_HEADER.search(files):
-                _die(f"{name}: targets `files`, but the session wrote no "
-                     f"{_REPORT_NAME} the harness could collect — the graders "
-                     "anchored on the report had no evidence to read, and that "
-                     "is not a behavioural failure")
+            want = None
+            if mode.startswith("count:"):
+                try:
+                    want = int(mode.split(":", 1)[1])
+                except ValueError:
+                    want = None
+                if want is None:
+                    _die(f"{name}: match mode {mode!r} has no integer count — "
+                         "this harness cannot score the case")
+            elif mode not in ("contains", "not_contains"):
+                _die(f"{name}: match mode {mode!r} is not implemented (contains, "
+                     "not_contains, count:N) — this harness cannot score the "
+                     "case, so it must not report one")
+            if target == "files" and not have_report:
+                pending_files.append(len(scored))
+                scored.append((name, False, f"no report collected: the session "
+                                            f"wrote no {_REPORT_NAME}"))
+                continue
             found = bool(re.search(pat, corpora[target]))
             if mode == "not_contains":
                 scored.append((name, not found, "absent" if not found else "PRESENT"))
-            elif mode.startswith("count:"):
-                want = int(mode.split(":", 1)[1])
+            elif want is not None:
                 n = len(re.findall(pat, corpora[target]))
                 scored.append((name, n == want, f"count={n}"))
             else:
@@ -602,7 +716,30 @@ def _grade(graders: list[dict], stream: str, tools: list[tuple[str, str]],
         else:
             _die(f"{name}: grader type {kind!r} is not implemented — this "
                  "harness cannot score the case, so it must not report one")
+    if pending_files:
+        others = [p for i, (_, p, _) in enumerate(scored) if i not in pending_files]
+        if all(others):
+            names = ", ".join(scored[i][0] for i in pending_files)
+            _die(f"{names}: target `files`, but the session wrote no "
+                 f"{_REPORT_NAME} the harness could collect while every other "
+                 "grader passed — the graders anchored on the report had no "
+                 "evidence to read, and that is not a behavioural failure")
     return scored, unscored
+
+
+def _without_description(raw: str) -> str:
+    """A tool input, JSON-encoded as `_tool_calls` gives it, minus the
+    `description` key. The model writes that field about the call; a
+    `tool_used` pattern asks what the call DID, so prose naming
+    `gh auth status` must not count as running it. Kept JSON-encoded because
+    the cases' patterns (`"skill"\\s*:\\s*"...`) are written against it."""
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+    if not isinstance(data, dict) or "description" not in data:
+        return raw
+    return json.dumps({k: v for k, v in data.items() if k != "description"})
 
 
 def _record(case: str, run: int, stream: str, corpus: str) -> None:
@@ -624,14 +761,19 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--keep", action="store_true", help="keep sandboxes and record every session, passing or not")
     ap.add_argument(
         "--fixtures-override", type=Path, default=None,
-        help="replay from THIS directory instead of the built corpus. A grader "
-             "check only: pointing it at an empty directory must turn the "
-             "full-run case red, which is how a maintainer proves the graders "
-             "discriminate. Never use it for a real verdict.")
+        help="replay from THIS corpus directory instead of the built one. A "
+             "grader check only: build a corpus that differs from the committed "
+             "one in one known fact (e.g. branch protection no longer requiring "
+             "`CI / test`, see maintainers/ci-speedup/MAINTAINERS.md) and the "
+             "grader pinned on that fact must go red with exit 1, which is how "
+             "a maintainer proves the graders discriminate. Never use it for a "
+             "real verdict.")
     args = ap.parse_args(argv)
 
     if args.runs < 1:
         _die(f"--runs {args.runs} would execute no session; that is not a pass")
+    # The session runs with cwd = its sandbox; a relative path would resolve there.
+    override = args.fixtures_override.resolve() if args.fixtures_override else None
 
     if shutil.which("claude") is None:
         _die("`claude` is not on PATH")
@@ -640,55 +782,65 @@ def main(argv: list[str] | None = None) -> int:
     except ImportError:
         _die("PyYAML is required")
 
-    failed = False
-    for case in _cases(args.case):
+    cases = _cases(args.case)
+    _gh_preflight()
+
+    # Per run: a could-not-run (exit 2 inside one run) is reported and the loop
+    # goes on, so an earlier real FAIL is never reported as exit 2 and later
+    # cases still execute. Exit 1 if any run failed a grader, else 2 if any
+    # could not run, else 0.
+    failed = could_not_run = False
+    for case in cases:
         spec = yaml.safe_load((case / "case.yaml").read_text(encoding="utf-8"))
         ex = spec.get("execution", {})
         prompt = ex.get("prompt")
         if not prompt:
-            _die(f"{case.name}: no execution.prompt")
+            print(f"harness: {case.name}: no execution.prompt", file=sys.stderr)
+            print(f"\nDID NOT RUN  {case.name}  — no execution.prompt")
+            could_not_run = True
+            continue
         timeout = ex.get("timeout_seconds", 900)
 
         for run in range(1, args.runs + 1):
+            tag = f"{case.name} (run {run}/{args.runs})"
+            stream: str | None = None
+            before: dict[str, str] = {}
+            started = time.time()
             sandbox = Path(tempfile.mkdtemp(prefix=f"skill-eval-{case.name}-"))
             plugin_root = Path(tempfile.mkdtemp(prefix=f"skill-eval-plugin-{case.name}-"))
             artifacts = Path(tempfile.mkdtemp(prefix=f"skill-eval-out-{case.name}-"))
             # Outside both graded roots: the replay corpus is input, and its job
             # logs name the jobs the graders assert on.
             replay_root = Path(tempfile.mkdtemp(prefix=f"skill-eval-replay-{case.name}-"))
+            roots = [sandbox, artifacts]
             try:
                 _scaffold(case, sandbox)
-                fixtures = (args.fixtures_override if args.fixtures_override
+                fixtures = (override if override
                             else _replay_fixtures(replay_root,
                                                   timeout + _REPLAY_SLACK_S))
-                before = _snapshot([sandbox, artifacts])
+                before = _snapshot(roots)
                 started = time.time()
-                stream = _run_agent(
-                    prompt, sandbox, _plugin_dirs(case, spec, plugin_root),
-                    ex.get("max_turns", 60), timeout, artifacts, fixtures,
-                    _gh_shim(replay_root / "bin"),
-                )
+                try:
+                    stream = _run_agent(
+                        prompt, sandbox, _plugin_dirs(case, spec, plugin_root),
+                        ex.get("max_turns", 60), timeout, artifacts, fixtures,
+                        _gh_shim(replay_root / "bin"),
+                    )
+                except _SessionNotGradable as exc:
+                    stream = exc.stream or None
+                    raise
                 tools = _tool_calls(stream)
-                roots = [sandbox, artifacts]
                 extra = _named_reports(tools, roots, started)
                 corpus = _files_corpus(roots, before, extra)
-                try:
-                    scored, unscored = _grade(
-                        spec.get("graders", []), _transcript(stream), tools,
-                        files=corpus, last_message=_last_message(stream))
-                except SystemExit:
-                    # A session that ran but could not be graded (its report was
-                    # never collected, say) is exactly the one somebody has to
-                    # read. Keep it before the exit-2 propagates.
-                    _record(case.name, run, stream, corpus)
-                    raise
+                scored, unscored = _grade(
+                    spec.get("graders", []), _transcript(stream), tools,
+                    files=corpus, last_message=_last_message(stream))
                 if not scored:
                     _die(f"{case.name}: no grader could be scored; a case with "
                          "nothing to check does not pass")
 
                 ok = all(p for _, p, _ in scored)
                 failed |= not ok
-                tag = f"{case.name} (run {run}/{args.runs})"
                 print(f"\n{'PASS' if ok else 'FAIL'}  {tag}  "
                       f"— {sum(p for _, p, _ in scored)}/{len(scored)} scored graders, "
                       f"{len(tools)} tool calls")
@@ -700,6 +852,19 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"    report collected from: {p}")
                 if not ok or args.keep:
                     _record(case.name, run, stream, corpus)
+            except SystemExit as exc:
+                if exc.code != 2:
+                    raise
+                could_not_run = True
+                print(f"\nDID NOT RUN  {tag}  — the harness could not run or "
+                      "grade this session (reason above); not a behaviour change")
+                if stream:
+                    # A session that started but could not be graded is exactly
+                    # the one somebody has to read: keep its stream and the
+                    # files it wrote before the sandbox is deleted below.
+                    extra = _named_reports(_tool_calls(stream), roots, started)
+                    _record(case.name, run, stream,
+                            _files_corpus(roots, before, extra))
             finally:
                 shutil.rmtree(plugin_root, ignore_errors=True)
                 shutil.rmtree(replay_root, ignore_errors=True)
@@ -710,7 +875,7 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"    sandbox kept: {sandbox}")
                     print(f"    session output kept: {artifacts}")
 
-    return 1 if failed else 0
+    return 1 if failed else 2 if could_not_run else 0
 
 
 def cli() -> int:

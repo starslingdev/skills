@@ -461,7 +461,9 @@ python3 maintainers/ci-speedup/scripts/run_skill_evals.py --case full-run-synthe
 - **Cost.** One real session per case per run, under a dollar and about a
   minute each when measured on 2026-10-21.
 - **When.** Before merging a change to `SKILL.md`, `references/`, `scripts/`,
-  `tests/verify_report.py`, the replay corpus or the cases. The `skill-evals`
+  `tests/verify_report.py`, the replay corpus or its builder
+  (`tests/fixtures/synthetic_corpus.py`), the cases, the harness or its gh shim,
+  or ci-secure's `SKILL.md` (the routing case routes on it). The `skill-evals`
   workflow runs it on such a pull request (same-repo only) and reports
   `ci-speedup skill evals`.
 - **Proving a grader can fail.** `--fixtures-override <dir>` replays from a
@@ -469,7 +471,10 @@ python3 maintainers/ci-speedup/scripts/run_skill_evals.py --case full-run-synthe
   checks makes `prep` the first long pole, and exactly one grader goes red;
   that is how the full-run case's graders were shown to discriminate.
 
-## NEVER (applies to all three loops)
+## NEVER (applies to the three self-improvement loops: gap → catalog, transcript, dogfood)
+
+The behavioural evals above are not one of these loops: they read only the
+committed synthetic corpus, hold no third-party data, and do run in CI.
 
 - Never commit `.ci-speedup-gaps/`, `.ci-speedup-loop/`, or `.ci-speedup-dogfood/`
   — third-party job logs / transcripts / screen data / run payloads, gitignored,

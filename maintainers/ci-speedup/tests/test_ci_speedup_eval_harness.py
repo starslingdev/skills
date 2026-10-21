@@ -67,17 +67,6 @@ def test_an_empty_stream_from_a_zero_exit_is_a_harness_failure(monkeypatch, caps
     assert "no session" in capsys.readouterr().err.lower()
 
 
-def test_a_session_that_called_no_tool_is_a_harness_failure(monkeypatch, capsys, tmp_path):
-    stream = ('{"type":"system","subtype":"init","session_id":"s"}\n'
-              '{"type":"result","subtype":"success","is_error":false}\n')
-    monkeypatch.setattr(harness.subprocess, "run", lambda *a, **k: _completed(
-        stdout=stream, stderr="Invalid API key"))
-    with pytest.raises(SystemExit) as exc:
-        harness._run_agent("prompt", tmp_path, tmp_path, 60, 900)
-    assert exc.value.code == 2
-    assert "Invalid API key" in capsys.readouterr().err
-
-
 def test_a_turn_cap_hit_is_not_a_graded_run(monkeypatch, tmp_path):
     stream = _GOOD_STREAM + '{"type":"result","subtype":"error_max_turns"}\n'
     monkeypatch.setattr(harness.subprocess, "run", lambda *a, **k: _completed(stdout=stream))
@@ -100,7 +89,8 @@ def test_zero_runs_is_refused_rather_than_reported_as_a_pass():
 
 def test_an_unexpected_harness_error_exits_2_not_1(monkeypatch, tmp_path):
     monkeypatch.setattr(harness.sys, "argv", ["run_skill_evals.py"])
-    monkeypatch.setattr(harness.shutil, "which", lambda _: "/usr/bin/claude")
+    monkeypatch.setattr(harness.shutil, "which", lambda *a, **k: "/usr/bin/claude")
+    monkeypatch.setattr(harness, "_gh_preflight", lambda: None, raising=False)
     monkeypatch.setattr(harness, "_cases", lambda only: [tmp_path / "boom"])
     with pytest.raises(SystemExit) as exc:
         harness.cli()
@@ -450,8 +440,9 @@ def test_the_shim_delegates_every_other_repository_and_command(shim_env, tmp_pat
     env, repo = shim_env
     assert _gh(env, repo, "repo", "view", "cli/cli").stdout.startswith("REAL repo view cli/cli")
     assert _gh(env, repo, "api", "repos/cli/cli").stdout.startswith("REAL api")
-    assert _gh(env, repo, "api", "-X", "POST",
-               "repos/synthetic/repo/issues").stdout.startswith("REAL api")
+    # A write to the replayed repository is a local 404, never delegated.
+    w = _gh(env, repo, "api", "-X", "POST", "repos/synthetic/repo/issues")
+    assert w.returncode == 1 and "REAL" not in w.stdout
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
     assert _gh(env, elsewhere, "repo", "view").stdout.startswith("REAL repo view")
@@ -461,3 +452,252 @@ def test_the_shim_is_inert_outside_an_eval(shim_env):
     env, repo = shim_env
     env = {k: v for k, v in env.items() if k != "CI_SPEEDUP_GH_FIXTURES"}
     assert _gh(env, repo, "api", "repos/synthetic/repo").stdout.startswith("REAL api")
+
+
+# --- a behaviour failure is exit 1, a could-not-run is exit 2 ----------------
+
+_FILES_GRADER = {"type": "regex", "name": "report-names-x", "target": "files",
+                 "pattern": "x"}
+
+
+def test_a_missing_report_after_a_failed_grader_is_a_behaviour_failure():
+    """A session that never fired the skill also never rendered a report. The
+    failed pipeline grader is the verdict; the missing report is not a reason
+    to throw it away."""
+    graders = [{"type": "tool_used", "name": "skill-fired", "tool": "Skill"},
+               _FILES_GRADER]
+    scored, _ = harness._grade(graders, "", [], files="")
+    assert [p for _, p, _ in scored] == [False, False]
+    assert "no report collected" in scored[1][2]
+
+
+def test_a_missing_report_when_everything_else_passed_is_a_collection_failure():
+    graders = [{"type": "tool_used", "name": "ran", "tool": "Bash"}, _FILES_GRADER]
+    with pytest.raises(SystemExit) as exc:
+        harness._grade(graders, "", [("Bash", "{}")], files="")
+    assert exc.value.code == 2
+
+
+def test_an_unknown_regex_match_mode_stops_the_harness():
+    with pytest.raises(SystemExit) as exc:
+        harness._grade([{"type": "regex", "name": "x", "pattern": "x",
+                         "match": "equals"}], "x", [])
+    assert exc.value.code == 2
+
+
+def test_tool_used_ignores_the_model_written_description():
+    """`description` is prose the model writes about a command; naming
+    `gh auth status` there is not running it."""
+    g = [{"type": "tool_used", "name": "gh-gate-checked", "tool": "Bash",
+          "input_match": "gh auth status"}]
+    fake = [("Bash", json.dumps({"command": "echo", "description": "gh auth status"}))]
+    assert harness._grade(g, "", fake)[0][0][1] is False
+    real = [("Bash", json.dumps({"command": "gh auth status", "description": "x"}))]
+    assert harness._grade(g, "", real)[0][0][1] is True
+
+
+def test_a_session_that_called_no_tool_is_graded(monkeypatch, tmp_path):
+    """The routing case can be answered in prose without loading any skill;
+    that is a behaviour to grade, not a session that never happened."""
+    stream = ('{"type":"system","subtype":"init","session_id":"s"}\n'
+              '{"type":"assistant","message":{"content":[{"type":"text","text":"prose"}]}}\n'
+              '{"type":"result","subtype":"success","is_error":false}\n')
+    monkeypatch.setattr(harness.subprocess, "run", lambda *a, **k: _completed(stdout=stream))
+    assert harness._run_agent("prompt", tmp_path, tmp_path, 60, 900) == stream
+
+
+def test_the_last_message_survives_a_trailing_unanswerable_question():
+    """Headless, the phase-6 close can be followed by an AskUserQuestion that
+    nobody answers and a short trailing line; the close is still the message
+    the reader was left with."""
+    stream = "\n".join(json.dumps(e) for e in [
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "early"}]}},
+        {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Bash",
+                                                       "input": {}}]}},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "THE CLOSE"}]}},
+        {"type": "assistant", "message": {"content": [{"type": "tool_use",
+                                                       "name": "AskUserQuestion",
+                                                       "input": {}}]}},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "ok."}]}},
+    ])
+    got = harness._last_message(stream)
+    assert "THE CLOSE" in got and "ok." in got and "early" not in got
+
+
+def test_the_last_message_falls_back_to_the_final_text_turn():
+    stream = "\n".join(json.dumps(e) for e in [
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "words"}]}},
+        {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Bash",
+                                                       "input": {}}]}},
+    ])
+    assert harness._last_message(stream) == "words"
+
+
+# --- the gh preflight ---------------------------------------------------------
+
+def test_the_gh_preflight_refuses_a_missing_gh(monkeypatch, capsys):
+    monkeypatch.setattr(harness.shutil, "which", lambda *a, **k: None)
+    with pytest.raises(SystemExit) as exc:
+        harness._gh_preflight()
+    assert exc.value.code == 2
+    assert "nothing was verified" in capsys.readouterr().err
+
+
+def test_the_gh_preflight_refuses_a_failing_auth_status(monkeypatch, capsys):
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        return _completed(returncode=1, stderr="You are not logged in")
+
+    monkeypatch.setattr(harness.shutil, "which", lambda *a, **k: "/real/gh")
+    monkeypatch.setattr(harness.subprocess, "run", fake_run)
+    with pytest.raises(SystemExit) as exc:
+        harness._gh_preflight()
+    assert exc.value.code == 2
+    assert seen["cmd"] == ["/real/gh", "auth", "status"]
+    assert "nothing was verified" in capsys.readouterr().err
+
+
+def test_main_runs_the_gh_preflight_before_any_session(monkeypatch, tmp_path):
+    case = _fake_case(tmp_path, "c1")
+    _wire_main(monkeypatch, tmp_path, [case], lambda *a, **k: pytest.fail("session ran"))
+    monkeypatch.setattr(harness, "_gh_preflight",
+                        lambda: harness._die("the gh gate cannot pass"))
+    with pytest.raises(SystemExit) as exc:
+        harness.main([])
+    assert exc.value.code == 2
+
+
+# --- the plugin copy is what the session and the shim read -----------------
+
+def test_the_shim_and_its_scripts_point_into_copies(tmp_path):
+    shim_dir = harness._gh_shim(tmp_path / "bin")
+    wrapper = (shim_dir / "gh").read_text(encoding="utf-8")
+    assert str(harness._GH_SHIM) not in wrapper
+    assert (shim_dir / "eval_gh_shim.py").is_file()
+    assert str(shim_dir / "eval_gh_shim.py") in wrapper
+    plugin = tmp_path / "plugin" / "ci-speedup"
+    env = harness._env(tmp_path, tmp_path / "fx", shim_dir, plugin / "scripts")
+    assert env["CI_SPEEDUP_EVAL_SCRIPTS"] == str(plugin / "scripts")
+
+
+def test_the_session_reads_scripts_from_the_plugin_copy(monkeypatch, tmp_path):
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["env"] = kw["env"]
+        return _completed(stdout=_GOOD_STREAM)
+
+    monkeypatch.setattr(harness.subprocess, "run", fake_run)
+    plugin = tmp_path / "ci-speedup"
+    harness._run_agent("p", tmp_path, [plugin], 60, 900, tmp_path, tmp_path / "fx",
+                       tmp_path / "bin")
+    assert seen["env"]["CI_SPEEDUP_EVAL_SCRIPTS"] == str(plugin / "scripts")
+
+
+# --- main: one run that could not run never hides another's verdict ---------
+
+def _fake_case(root: Path, name: str, graders=None) -> Path:
+    import yaml
+    d = root / "cases" / name
+    d.mkdir(parents=True)
+    (d / "case.yaml").write_text(yaml.safe_dump({
+        "execution": {"prompt": "p", "timeout_seconds": 10},
+        "graders": graders or [{"type": "tool_used", "name": "ran-bash", "tool": "Bash"}],
+    }), encoding="utf-8")
+    return d
+
+
+def _wire_main(monkeypatch, tmp_path, cases, run_agent=None):
+    monkeypatch.setattr(harness.shutil, "which", lambda *a, **k: "/usr/bin/claude")
+    monkeypatch.setattr(harness, "_gh_preflight", lambda: None, raising=False)
+    monkeypatch.setattr(harness, "_cases", lambda only: cases)
+    monkeypatch.setattr(harness, "_scaffold", lambda case, sandbox: None)
+    monkeypatch.setattr(harness, "_replay_fixtures", lambda into, span_s: into)
+    monkeypatch.setattr(harness, "_plugin_dirs",
+                        lambda case, spec, into: [into / "ci-speedup"])
+    if run_agent is not None:
+        monkeypatch.setattr(harness, "_run_agent", run_agent)
+    monkeypatch.setattr(harness, "_LOGS", tmp_path / "logs")
+
+
+_NO_TOOL_STREAM = ('{"type":"system","subtype":"init","session_id":"s"}\n'
+                   '{"type":"assistant","message":{"content":[{"type":"text","text":"x"}]}}\n')
+
+
+def test_a_real_failure_is_not_masked_by_a_later_run_that_could_not_run(monkeypatch, tmp_path):
+    calls = []
+
+    def run_agent(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            return _NO_TOOL_STREAM              # ran, called no Bash: a real FAIL
+        harness._die("agent run exceeded 10s")  # could not run
+
+    a, b = _fake_case(tmp_path, "a"), _fake_case(tmp_path, "b")
+    _wire_main(monkeypatch, tmp_path, [a, b], run_agent)
+    assert harness.main([]) == 1
+    assert len(calls) == 2
+
+
+def test_a_could_not_run_does_not_stop_later_cases(monkeypatch, tmp_path):
+    calls = []
+
+    def run_agent(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            harness._die("agent run exceeded 10s")
+        return _GOOD_STREAM
+
+    a, b = _fake_case(tmp_path, "a"), _fake_case(tmp_path, "b")
+    _wire_main(monkeypatch, tmp_path, [a, b], run_agent)
+    assert harness.main([]) == 2
+    assert len(calls) == 2
+
+
+def test_every_run_passing_is_exit_0(monkeypatch, tmp_path):
+    _wire_main(monkeypatch, tmp_path, [_fake_case(tmp_path, "a")],
+               lambda *a, **k: _GOOD_STREAM)
+    assert harness.main([]) == 0
+
+
+def test_the_fixtures_override_is_made_absolute(monkeypatch, tmp_path):
+    seen = {}
+
+    def run_agent(prompt, sandbox, plugin, max_turns, timeout, tmpdir=None,
+                  fixtures=None, shim_dir=None, *a, **k):
+        seen["fixtures"] = fixtures
+        return _GOOD_STREAM
+
+    _wire_main(monkeypatch, tmp_path, [_fake_case(tmp_path, "a")], run_agent)
+    monkeypatch.chdir(tmp_path)
+    assert harness.main(["--fixtures-override", "my-corpus"]) == 0
+    assert Path(seen["fixtures"]).is_absolute()
+    assert Path(seen["fixtures"]) == tmp_path / "my-corpus"
+
+
+# --- a session that started but cannot be graded still leaves evidence ------
+
+@pytest.mark.parametrize("ending", ["turn_cap", "error_result", "timeout"])
+def test_a_started_session_that_exits_2_is_saved_with_its_files(monkeypatch, tmp_path, ending):
+    partial = _GOOD_STREAM
+    if ending == "turn_cap":
+        partial += '{"type":"result","subtype":"error_max_turns"}\n'
+    elif ending == "error_result":
+        partial += '{"type":"result","subtype":"error_during_execution","is_error":true}\n'
+
+    def fake_run(cmd, **kw):
+        # the session wrote a file into its TMPDIR before it ended
+        (Path(kw["env"]["TMPDIR"]) / "findings.json").write_text("PARTIAL", encoding="utf-8")
+        if ending == "timeout":
+            raise subprocess.TimeoutExpired(cmd, 10, output=partial.encode())
+        return _completed(stdout=partial)
+
+    _wire_main(monkeypatch, tmp_path, [_fake_case(tmp_path, "c")])
+    monkeypatch.setattr(harness.subprocess, "run", fake_run)
+    assert harness.main([]) == 2
+    log = tmp_path / "logs" / "ci-speedup-c-run1.jsonl"
+    assert log.is_file() and '"init"' in log.read_text(encoding="utf-8")
+    files = tmp_path / "logs" / "ci-speedup-c-run1.files.txt"
+    assert files.is_file() and "PARTIAL" in files.read_text(encoding="utf-8")

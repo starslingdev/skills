@@ -46,19 +46,24 @@ graders:
     min: 1
     arm: both
 
-  # ci-speedup's pipeline entry points. `collect_runs.py`, `blocking_path.py`
-  # and `verify_report.py` are ci-speedup's own names; `run.py` and `scan.py`
-  # are named with their directory because ci-secure ships scripts with the
-  # same basenames and is expected to run them here.
+  # ci-speedup's pipeline entry points. `collect_runs.py` and `blocking_path.py`
+  # exist only in ci-speedup. `verify_report.py`, `run.py` and `scan.py` are
+  # named with their ci-speedup directory: ci-secure ships scripts with the
+  # same basenames and is expected to run them here, and its own
+  # tests/verify_report.py (withheld from the sibling copy this harness mounts,
+  # but present in a real install) must not count against this case.
   - type: tool_used
     name: no-ci-speedup-pipeline-script-ran
     tool: Bash
-    input_match: 'collect_runs\.py|blocking_path\.py|verify_report\.py|ci-speedup/scripts/(?:run|scan)\.py'
+    input_match: 'collect_runs\.py|blocking_path\.py|ci-speedup/tests/verify_report\.py|ci-speedup/scripts/(?:run|scan)\.py'
     min: 0
     max: 0
 
-  # No wall-clock optimization report was produced for this ask. This is the
-  # report's own title line, which only ci-speedup's renderer writes.
+  # No ci-speedup report title appears anywhere in the session transcript. The
+  # pattern is the title line ci-speedup's renderer writes for this repository;
+  # the renderer flattens an em dash in the title to a plain hyphen, which is
+  # why the pattern uses ` - `. tests/test_ci_speedup_evals_cases.py checks it
+  # still fires on a real offline render.
   - type: regex
     name: no-speed-report-in-the-transcript
     target: trace

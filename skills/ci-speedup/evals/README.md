@@ -68,9 +68,16 @@ next to the files it produced.
 written (2026-10-21): the full run took 35 to 60 seconds and about $0.45, the
 routing case about 30 seconds and $0.35.
 
-**When to run it.** Before merging a change to `SKILL.md`, `references/`,
-`scripts/` or these cases. `.github/workflows/skill-evals.yml` runs it
-automatically on a pull request that touches those paths.
+**When to run it.** Before merging a change to any file that can change what a
+session does or sees: `SKILL.md`, `references/`, `scripts/`, these cases,
+`tests/verify_report.py` (the self-check the contract runs),
+`tests/fixtures/gh_replay/` (the replay corpus), `tests/fixtures/synthetic_corpus.py`
+(the checkout and replay builder), the harness
+(`maintainers/ci-speedup/scripts/run_skill_evals.py`) or its gh shim
+(`maintainers/ci-speedup/scripts/eval_gh_shim.py`), and ci-secure's `SKILL.md`
+(the routing case mounts ci-secure and routes on its description).
+`.github/workflows/skill-evals.yml` runs it automatically on a pull request that
+touches those paths.
 
 ## What a pass here does and does not prove
 
