@@ -1144,7 +1144,10 @@ unversioned and updates by reinstall from `main`.
   recognised check or a short inline script, never a test or build run such
   as `mvn verify` or `make check`; a check that cannot fail (`|| true`), one
   that runs only under an `if:`, and a job with steps the scanner could not
-  read never make a gate. Each wait left unflagged is named in the DEBUG log
+  read never make a gate. Nor does a lint piped or chained into other work,
+  `--exit-zero`, a hyphenated script such as `scripts/lint-and-test.sh`, a
+  local composite action, a custom shell, or a gate that itself waits on
+  another job. Each wait left unflagged is named in the DEBUG log
   (`STARSLING_LOG_LEVEL=DEBUG`). On OpenAI's real workflows this removes 1 false finding
   in openai/whisper and 8 in openai/openai-python. The pattern's entry now
   explains when a `needs:` edge is the right call, and that a gate should stay

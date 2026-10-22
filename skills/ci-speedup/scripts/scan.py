@@ -1876,8 +1876,8 @@ def _detect_opt18(doc: dict, raw: str) -> list[Hit]:
 
 # Setup actions: checkout, any `setup-*` action, pnpm-style `action-setup`, cache.
 _OPT21_SETUP_USES_RE = re.compile(
-    r"^(?:actions/checkout|actions/cache(?:/restore)?|[\w.-]+/setup-[\w.-]+|"
-    r"[\w.-]+/action-setup)(?:@|$)", re.I)
+    r"^(?:actions/checkout|actions/cache(?:/restore)?|[\w-][\w.-]*/setup-[\w.-]+|"
+    r"[\w-][\w.-]*/action-setup)(?:@|$)", re.I)
 # Setup shell lines: dependency installs, fetches, step-output/env plumbing.
 _OPT21_SETUP_LINE_RE = re.compile(
     r"^(?:(?:python3?\s+-m\s+)?pip3?\s+install\b|npm\s+(?:ci|install)\b|"
@@ -1890,12 +1890,12 @@ _OPT21_SETUP_LINE_RE = re.compile(
 # lockfile checks. An optional runner prefix (`uv run`, `npx`, ...) is allowed.
 _OPT21_CHECK_LINE_RE = re.compile(
     r"^(?:(?:uv\s+run|poetry\s+run|pipx\s+run|npx|pnpm\s+exec|yarn\s+exec|"
-    r"bunx|python3?\s+-m)\s+(?:--?[\w-]+(?:[= ]\S+)?\s+)*)?"
+    r"bunx|python3?\s+-m)\s+(?:-{1,2}\w[\w-]*(?:=\S+|\s+[^-\s]\S*)?\s+)*)?"
     r"(?:pre-commit\s+run|prek\s+run|"
     r"uv\s+lock\s+--(?:check|locked)|poetry\s+(?:check|lock\s+--check)|"
     r"(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:lint|format[:-]check|fmt[:-]check|"
     r"check[:-]format|typecheck|type-check|check[:-]types|lint:\S+)(?![\w:.-])|"
-    r"\S*scripts/lint\b|"
+    r"\S*scripts/lint(?![\w-])|"
     r"make\s+(?:lint|check-format|format-check|fmt-check)(?![\w:.-])|"
     r"eslint|ruff\s+(?:check|format\s+--check)|flake8|pylint|black\s+--check|"
     r"isort\s+(?:--check|-c)|prettier\s+(?:--check|-c)|mypy|pyright|"
@@ -1914,7 +1914,7 @@ _OPT21_CHECK_NAME_RE = re.compile(
     r"^(?:check(?!\s*-?\s*out)|verify|validate|lint|ensure|require|assert|audit)\b",
     re.I)
 _OPT21_INLINE_SCRIPT_RE = re.compile(
-    r"^(?:(?:uv\s+run|poetry\s+run|pipx\s+run)\s+(?:--?[\w-]+(?:[= ]\S+)?\s+)*)?"
+    r"^(?:(?:uv\s+run|poetry\s+run|pipx\s+run)\s+(?:-{1,2}\w[\w-]*(?:=\S+|\s+[^-\s]\S*)?\s+)*)?"
     r"(?:python3?|node|ruby|perl)\s+(?:-\w+\s+)*-[ce]\s", re.I)
 _OPT21_SHELL_CHECK_RE = re.compile(
     r"^(?:\[\[?\s.*\]\]?|test\s.*|"
@@ -1964,7 +1964,10 @@ def _opt21_step_kind(step: dict) -> str:
         return "setup" if _OPT21_SETUP_USES_RE.match(uses) else "other"
     if not run or uses:
         return "other"
-    if _OPT21_NOT_A_GATE_RE.search(run) or _OPT21_CANNOT_FAIL_RE.search(run):
+    if "shell" in step:
+        return "other"
+    if (_OPT21_NOT_A_GATE_RE.search(run) or _OPT21_CANNOT_FAIL_RE.search(run)
+            or "--exit-zero" in run):
         return "other"
     if (_OPT21_CHECK_NAME_RE.match(str(step.get("name") or "").strip())
             and _opt21_is_scripted_check(run)):
@@ -1974,6 +1977,8 @@ def _opt21_step_kind(step: dict) -> str:
         return "other"
     kinds = []
     for ln in lines:
+        if "|" in ln:
+            return "other"
         if _OPT21_CHECK_LINE_RE.match(ln):
             kinds.append("check")
         elif _OPT21_SETUP_LINE_RE.match(ln):
@@ -2006,14 +2011,18 @@ def _opt21_is_check_only_gate(job: Any) -> bool:
     """True when `job` is a check-only gate (see the vocabulary above)."""
     if not isinstance(job, dict):
         return False
-    if any(k in job for k in ("outputs", "services", "container", "environment", "uses")):
+    # A gate that itself `needs:` another job passes that job's time on to its
+    # dependents, so it is not cheap; `defaults` can swap every step's shell.
+    if any(k in job for k in ("outputs", "services", "container", "environment",
+                              "uses", "needs", "defaults")):
         return False
     if job.get("continue-on-error") not in (None, False):
         return False
     # A step the walker could not read (a bare string, a malformed `parallel:`
     # group) may be anything: fail closed.
     raw = job.get("steps")
-    if not isinstance(raw, list) or any(not isinstance(s, dict) for s in raw):
+    if not isinstance(raw, list) or any(
+            not isinstance(s, dict) or "wait" in s or "cancel" in s for s in raw):
         return False
     if job_walk(job).malformed_groups:
         return False

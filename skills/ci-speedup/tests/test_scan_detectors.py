@@ -777,6 +777,110 @@ def test_opt21_gate_suppression_leaves_a_debug_trace(tmp_path: Path):
     assert re.search(r"OPT21 not flagged: job e2e\b", result.stderr)
 
 
+# More work dressed as a check: flags before the build verb, a check piped or
+# chained into other work, a hyphenated script name, a lint that cannot fail,
+# runners and scripts outside the check vocabulary, and job or step shapes
+# that change what runs (a local composite action, a custom shell).
+@pytest.mark.parametrize("step", [
+    pytest.param("- name: Lint and test\n        run: make -j4 test", id="make-flag-then-test"),
+    pytest.param("- name: Check\n        run: go -C sub test ./...", id="go-flag-then-test"),
+    pytest.param("- name: Check\n        run: npm --prefix web test", id="npm-flag-then-test"),
+    pytest.param("- name: Check\n        run: cargo +nightly build --release",
+                 id="cargo-toolchain-then-build"),
+    pytest.param("- name: Check it compiles\n        run: cmake -B build && cmake --build build -j",
+                 id="cmake-build"),
+    pytest.param("- name: Check\n        run: gradle --no-daemon check", id="gradle-check"),
+    pytest.param("- run: eslint . | ./heavy.sh", id="lint-piped-into-other-work"),
+    pytest.param("- run: pre-commit run --all-files || ./run-integration-tests.sh",
+                 id="lint-or-other-work"),
+    pytest.param("- run: ./scripts/lint-and-test.sh", id="lint-and-test-script"),
+    pytest.param("- run: make lint-and-test", id="make-lint-and-test"),
+    pytest.param("- run: flake8 --exit-zero .", id="lint-with-exit-zero"),
+    pytest.param("- name: Check everything\n        run: cargo nextest run", id="named-check-runs-nextest"),
+    pytest.param("- name: Verify\n        run: make", id="named-check-runs-bare-make"),
+    pytest.param("- name: Check build\n        run: make -j4", id="named-check-runs-make-j4"),
+    pytest.param("- name: Check\n        run: turbo run test", id="named-check-runs-turbo"),
+    pytest.param("- name: Ensure\n        run: ./scripts/e2e.sh", id="named-check-runs-e2e-script"),
+    pytest.param("- name: Check\n        run: bash ci/run_tests.sh", id="named-check-runs-test-script"),
+    pytest.param("- name: Check types\n        run: tsc -b", id="named-check-runs-tsc-build"),
+    pytest.param("- name: Validate\n        run: terraform plan", id="named-check-runs-terraform-plan"),
+    pytest.param("- uses: ./setup-and-test\n      - run: npm run lint", id="local-composite-action"),
+    pytest.param("- run: ruff check .\n        shell: bash -c 'pytest' {0}", id="custom-shell"),
+])
+def test_opt21_still_flags_a_wait_on_work_dressed_as_a_check(tmp_path: Path, step: str):
+    content = ("name: CI\non: pull_request\njobs:\n  dep:\n    runs-on: ubuntu-latest\n"
+               "    steps:\n      - uses: actions/checkout@v4\n      " + step + "\n" +
+               """  e2e:
+    needs: dep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm test
+""")
+    assert _opt21_jobs(tmp_path, content) == ["e2e"]
+
+
+@pytest.mark.parametrize("gate", [
+    pytest.param("    steps:\n      - wait: all\n      - run: ruff check .\n", id="control-step"),
+    pytest.param("    defaults:\n      run:\n        shell: bash -c 'pytest' {0}\n"
+                 "    steps:\n      - run: ruff check .\n", id="job-default-shell"),
+])
+def test_opt21_still_flags_a_wait_on_a_gate_whose_steps_are_not_plain(tmp_path: Path, gate: str):
+    content = ("name: CI\non: pull_request\njobs:\n  dep:\n    runs-on: ubuntu-latest\n" +
+               gate + """  e2e:
+    needs: dep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm test
+""")
+    assert _opt21_jobs(tmp_path, content) == ["e2e"]
+
+
+def test_opt21_still_flags_a_wait_through_a_gate_that_waits_on_a_build(tmp_path: Path):
+    # `e2e` really waits for `build` through the gate, so the gate is not cheap.
+    content = """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make build
+  lint:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ruff check .
+  e2e:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm test
+"""
+    assert _opt21_jobs(tmp_path, content) == ["e2e", "lint"]
+
+
+@pytest.mark.parametrize("prefix", ["      - run: ", "      - name: Verify\n        run: "])
+def test_opt21_gate_classification_stays_fast_on_a_long_flag_run(tmp_path: Path, prefix: str):
+    # A runner prefix followed by many flags and an unknown command must not
+    # send the check-line or inline-script regex into exponential backtracking.
+    import time
+    flags = " ".join(f"--flag{i}" for i in range(16))
+    content = ("name: CI\non: pull_request\njobs:\n  dep:\n    runs-on: ubuntu-latest\n"
+               "    steps:\n" + prefix + "uv run " + flags + " python zzz\n" + """  e2e:
+    needs: dep
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+""")
+    t0 = time.monotonic()
+    assert _opt21_jobs(tmp_path, content) == ["e2e"]
+    assert time.monotonic() - t0 < 5
+
+
 def test_opt21_still_flags_a_job_needing_a_gate_and_an_unused_build(tmp_path: Path):
     content = ("name: CI\non: pull_request\njobs:\n" + _OPT21_LINT_GATE +
                """  build:

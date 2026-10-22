@@ -1710,7 +1710,7 @@ title_template: "Unnecessary `needs:` Dependencies"
 
 **Fix**: Remove `needs:` unless the job genuinely requires outputs from the dependency, or the dependency is a gate (e.g., lint must pass before deploy).
 
-**When a `needs:` edge is the right call**: a cheap check job in front of expensive jobs (lint, pre-commit, a format or type check, a lockfile check) trades the check's own duration in wall clock for the runner minutes saved whenever it fails, because the expensive jobs never start. OPT21 does not flag a wait on a check-only gate: a job is left unflagged only when every job it needs is check-only (every step is setup such as checkout, `setup-*`, cache or a dependency install, or a recognised check command, or a step named as a check (Check…, Verify…, Lint…) whose body is a short inline check script; at least one check runs unconditionally and none can pass on failure (`|| true`); no outputs, artifacts, services, container, environment, reusable-workflow `uses:` or `continue-on-error`; nothing that builds, tests, deploys or publishes; every step readable), and the waiting job does not run regardless of the result (`always()`, `failure()`, `cancelled()`). Anything the detector cannot classify is still flagged. To make a gate cheaper, keep it short: it adds its full duration to every PR's wait.
+**When a `needs:` edge is the right call**: a cheap check job in front of expensive jobs (lint, pre-commit, a format or type check, a lockfile check) trades the check's own duration in wall clock for the runner minutes saved whenever it fails, because the expensive jobs never start. OPT21 does not flag a wait on a check-only gate: a job is left unflagged only when every job it needs is check-only (every step is setup such as checkout, `setup-*`, cache or a dependency install, or a recognised check command, or a step named as a check (Check…, Verify…, Lint…) whose body is a short inline check script; at least one check runs unconditionally and none can pass on failure (`|| true`, `--exit-zero`) or is piped into other work; no outputs, artifacts, services, container, environment, `defaults`, custom `shell`, reusable-workflow `uses:` or `continue-on-error`; the gate itself waits on no other job; nothing that builds, tests, deploys or publishes; every step readable), and the waiting job does not run regardless of the result (`always()`, `failure()`, `cancelled()`). Anything the detector cannot classify is still flagged. The gate is judged by what it runs, not by how long it takes, so a slow gate is not an OPT21 finding. To make a gate cheaper, keep it short: it adds its full duration to every PR's wait.
 
 ---
 
@@ -1909,7 +1909,7 @@ fix_strategy: build-once-test-natively
 title_template: "The slowest platform compiles its own tests"
 -->
 
-**Not auto-detected yet.** Like other `detector: manual` entries (for example OPT25 and OPT43), no pass emits OPT89, so the audit never reports it on its own and never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading the slowest platform leg's steps against the heuristic below.
+**Not auto-detected yet.** Like OPT86 and OPT88, no pass emits OPT89, so the audit never reports it on its own and never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading the slowest platform leg's steps against the heuristic below.
 
 **TL;DR**: A multi-platform test matrix makes every platform build its own test binaries, so the slowest or scarcest runner (Windows, an ARM machine, an emulated architecture) spends most of its time compiling instead of testing. Build the test binaries once on a fast runner (cross-compiling for the target), hand them over as an artifact, and run them natively on each platform.
 
@@ -1936,7 +1936,7 @@ title_template: "The slowest platform compiles its own tests"
 
 **Real-world example (OpenAI)**, their numbers, not a forecast for your repo:
 
-- openai/codex [#20585](https://github.com/openai/codex/pull/20585) (2026-05-01): Windows test builds moved to remote Linux build execution, and the change "keeps `TestRunner` actions local on the Windows runner". The PR reports a "Baseline native Windows Bazel test on `main`: success in about 28m12s" (the linked job is named "Local Bazel build on windows-latest", so build and test ran in it together) against a cross-compiled run's "Windows test 9m16s", both linked CI runs. The fully native Windows job stayed, on pushes to `main`, to keep the coverage the cross build lacked.
+- openai/codex [#20585](https://github.com/openai/codex/pull/20585) (2026-05-01): Windows test builds moved to remote Linux build execution, and the change "keeps `TestRunner` actions local on the Windows runner". The PR reports a "Baseline native Windows Bazel test on `main`: success in about 28m12s" (the linked job is named "Local Bazel build on windows-latest for x86_64-pc-windows-gnullvm", so build and test ran in it together) against a cross-compiled run's "Windows test 9m16s", both linked CI runs. The two are not like for like: the baseline was a push to `main`, and the cross-compiled PR leg leaves out the V8 and code-mode unit tests, so part of the gap is fewer tests. The fully native Windows job stayed, on pushes to `main`, to keep the coverage the cross build lacked.
 - openai/codex [#23358](https://github.com/openai/codex/pull/23358) (2026-05-20): the Windows ARM64 test archive is "cross-compiled on Windows x64 and replayed on native Windows ARM64 shards so the slow ARM64 machine is used for execution rather than compilation". Completed runs took "`34m30s`" and "`30m36s`" end to end, where "comparable pre-cross-compile sharded Windows ARM64 runs were `55m01s`, `50m21s`, and `46m42s`".
 - openai/tiktoken builds its ARM64 wheels on native `ubuntu-24.04-arm` runners instead of under QEMU emulation (commit 853da97, "Improve aarch64 and mac builds (#380)"; no timing published).
 
@@ -3090,7 +3090,7 @@ fix_strategy: fast-subset-on-prs-full-after-merge
 title_template: "Every pull request pays for coverage that could run after merge"
 -->
 
-**Not auto-detected yet.** Like other `detector: manual` entries (for example OPT25 and OPT43), no pass emits OPT90, so the audit never reports it on its own and never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading the pull-request workflows and their run history against the heuristic below.
+**Not auto-detected yet.** Like OPT86 and OPT88, no pass emits OPT90, so the audit never reports it on its own and never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading the pull-request workflows and their run history against the heuristic below.
 
 **TL;DR**: Every pull request waits for the full matrix (every OS, every runtime version, every heavyweight configuration) even though a small subset catches almost every failure. Run the subset that catches what matters before merge, and move the rest to a run after merge or on a schedule, where it still gates releases and pages someone when it fails.
 
@@ -3117,9 +3117,9 @@ title_template: "Every pull request pays for coverage that could run after merge
 
 **Real-world example (OpenAI)**, their numbers, not a forecast for your repo:
 
-- openai/codex [#16072](https://github.com/openai/codex/pull/16072) (2026-03-28) split the Rust checks into a PR-time workflow and "a full post-merge Cargo workflow", because the old one "made every PR pay for the full Cargo matrix even though most of that coverage is better treated as post-merge verification". The PR-time workflow kept no compile or test legs, because a separate workflow already ran build and test on every PR. No timing was published.
+- openai/codex [#16072](https://github.com/openai/codex/pull/16072) (2026-03-28) split the Rust checks into a PR-time workflow and "a full post-merge Cargo workflow", because the old one "made every PR pay for the full Cargo matrix even though most of that coverage is better treated as post-merge verification". The PR-time workflow kept no build or test legs for the main crates (only formatting, `cargo shear`, a custom lint, and that lint's own package tests when it changes), because a separate workflow already ran build and test on every PR. No timing was published.
 - openai/openai-python [#3537](https://github.com/openai/openai-python/pull/3537) (2026-07-24) adopted this shape when it added version coverage: "test the minimum/current runtimes on normal CI and the full supported matrix on a schedule". The full matrix was new, so this is the recommended shape rather than a measured saving; no timing was published.
-- openai/codex [#20585](https://github.com/openai/codex/pull/20585) (2026-05-01): "pull requests get the fast Windows cross-compiled Bazel test leg, while post-merge pushes to `main` run both that fast cross leg and a fully native Windows Bazel test leg". The PR reports a native Windows test "in about 28m12s" against the cross-compiled PR leg's "Windows test 9m16s". That gain comes from two changes the PR does not separate (cross-compiling, [OPT89](#opt89--the-slowest-platform-compiles-its-own-tests), and moving the native run after merge), so none of it is a number for this pattern alone.
+- openai/codex [#20585](https://github.com/openai/codex/pull/20585) (2026-05-01): "pull requests get the fast Windows cross-compiled Bazel test leg, while post-merge pushes to `main` run both that fast cross leg and a fully native Windows Bazel test leg". The PR reports a native Windows test "in about 28m12s" against the cross-compiled PR leg's "Windows test 9m16s". That gain comes from two changes the PR does not separate (cross-compiling, [OPT89](#opt89--the-slowest-platform-compiles-its-own-tests), and keeping the V8 and code-mode unit tests out of the PR leg), so none of it is a number for this pattern alone.
 
 **Risk**: **MEDIUM**. A regression can reach the default branch before the post-merge run catches it; the guardrail keeps that visible and short.
 
@@ -4448,7 +4448,7 @@ fix_strategy: profile-the-compile
 title_template: "The compile is the long pole and nobody profiled it"
 -->
 
-**Not auto-detected yet.** Like other `detector: manual` entries (for example OPT25 and OPT43), no pass emits OPT91, so the audit never reports it on its own and never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading the slow build step and the compiler's own timing reports against the heuristic below.
+**Not auto-detected yet.** Like OPT86 and OPT88, no pass emits OPT91, so the audit never reports it on its own and never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading the slow build step and the compiler's own timing reports against the heuristic below.
 
 **TL;DR**: The slowest job's time goes to compiling, the cache is already doing its job, and nobody has asked the compiler where the time goes. Profile the compile with the compiler's own timing reports, then fix the hotspot it names: a build-profile setting that costs far more build time than it returns at runtime, or one piece of code that is expensive to compile.
 
@@ -4475,8 +4475,8 @@ title_template: "The compile is the long pole and nobody profiled it"
 
 **Real-world example (OpenAI)**, their numbers, not a forecast for your repo:
 
-- openai/codex [#23710](https://github.com/openai/codex/pull/23710) (2026-06-04): "switching from fat LTO to ThinLTO (`3/thin/1`) reduced a clean `codex-cli` release build from 2073.893 seconds to 1243.172 seconds, a 40.06% improvement". In codex's release CI, only the Windows builds still used fat LTO at the time; the rest already used ThinLTO. The trade was measured too: "The resulting binary increased from 196.7 MiB to 211.8 MiB (+7.63%)", and "the worst image workload median was +0.86%". The PR does not say where the build was timed.
-- openai/codex [#16630](https://github.com/openai/codex/pull/16630) (2026-04-02): the hotspot was "a large compile-time tax from `#[async_trait]` on every concrete handler impl". Replacing it with native async functions took "a clean `codex-core` package rebuild" from "**187.15s to 68.98s**" in rustc's `total`, profiled with `cargo +nightly build -p codex-core --lib -Z unstable-options --timings=json` and `-Z time-passes`; the PR links no CI run for these numbers.
+- openai/codex [#23710](https://github.com/openai/codex/pull/23710) (2026-06-04): "switching from fat LTO to ThinLTO (`3/thin/1`) reduced a clean `codex-cli` release build from 2073.893 seconds to 1243.172 seconds, a 40.06% improvement". In codex's release CI, only the stable Windows builds still used fat LTO at the time; the rest already used ThinLTO. The trade was measured too: "The resulting binary increased from 196.7 MiB to 211.8 MiB (+7.63%)", and "the worst image workload median was +0.86%". The PR does not say where the build was timed.
+- openai/codex [#16630](https://github.com/openai/codex/pull/16630) (2026-04-02): the hotspot was "a large compile-time tax from `#[async_trait]` on every concrete handler impl". Replacing it with native `impl Future + Send` futures took "a clean `codex-core` package rebuild" from "**187.15s to 68.98s**" in rustc's `total`, profiled with `cargo +nightly build -p codex-core --lib -Z unstable-options --timings=json` and `-Z time-passes`; the PR links no CI run for these numbers.
 
 **Risk**: **MEDIUM**. A profile setting trades build time against runtime and size; the guardrail requires measuring both.
 
