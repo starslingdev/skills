@@ -1,16 +1,17 @@
 """Scanner-substrate guards for the behavioral eval fixtures added by the
 ci-secure self-improvement loop.
 
-The behavioral cases under ``evals/`` (``clean-repo``, ``pwn-request``,
-``many-findings``) are graded by ``claude plugin eval``, which runs an agent
-through the whole skill and which ``pytest`` does not execute. These tests pin
+The behavioral cases in ``evals/evals.json`` (``clean-repo``, ``pwn-request``,
+``many-findings``) are run by the shared eval runner
+(``maintainers/scripts/run_skill_evals.py``), which drives an agent through the
+whole skill and which ``pytest`` does not execute. These tests pin
 the *deterministic* scanner output each of those cases depends on, so a detector
 regression that would invalidate an eval is caught by ``pytest -v`` in CI — not
 silently discovered the next time the harness runs. The cases themselves are
-validated statically by ``test_evals_cases.py``.
+validated statically by ``test_ci_secure_evals.py``.
 
 Each test runs ``scripts/scan.py`` as a subprocess (mirroring real
-invocation) against the matching ``evals/files/<slug>/`` fixture.
+invocation) against the matching ``evals/fixtures/<slug>/`` fixture.
 
 Run from the skill root:
 
@@ -28,11 +29,11 @@ import pytest
 
 _SKILL_DIR = Path(__file__).resolve().parents[1]
 _SCAN_SCRIPT = _SKILL_DIR / "scripts" / "scan.py"
-_EVAL_FILES = _SKILL_DIR / "evals" / "files"
+_EVAL_FILES = _SKILL_DIR / "evals" / "fixtures"
 
 
 def _scan(slug: str) -> dict:
-    """Run scan.py against evals/files/<slug>/ and return the parsed JSON.
+    """Run scan.py against evals/fixtures/<slug>/ and return the parsed JSON.
 
     Skips if PyYAML is absent, matching test_scan.py's behavior on a runner
     without the scanner's one third-party dependency installed. (scan.py and

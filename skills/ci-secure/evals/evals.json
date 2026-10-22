@@ -1,0 +1,309 @@
+{
+  "skill_name": "ci-secure",
+  "note": "Every entry carries `checks` and runs as a real agent session against a scaffolded fixture via maintainers/scripts/run_skill_evals.py --skill ci-secure (see evals/README.md). Each `why` records why a check is anchored the way it is. Judge-only expectations, which used to be llm graders, live in `expected_output`; no harness scores them.",
+  "evals": [
+    {
+      "id": 1,
+      "name": "template-injection",
+      "fixture": "inject",
+      "prompt": "Run a CI security audit on the GitHub Actions workflows in this repository.\n\nFor each finding, quote the exact file and line it sits on, and explain in\nplain English what an attacker could actually do with it.",
+      "expected_output": "ci-secure runs its scanner (not a reading of the YAML) and reports a template-injection finding (P14.10) for the untrusted ${{ github.event.pull_request.title }} expression in a run: block at ci.yml:11, with a plain-English attacker scenario. Nothing is committed, pushed or opened as a pull request. Judge-only, not checked mechanically: the scenario names who the attacker is (anyone who can set a pull request, issue or comment text, no write access needed), the mechanism (the text is substituted into the shell command before the shell parses it) and the gain (commands with the workflow's privileges: secrets, the repository token, tampered builds), rather than a rule name, a severity or copied catalog boilerplate; the report carries the scope line (critical exploit-chain checks only, not a comprehensive audit).",
+      "max_turns": 60,
+      "timeout": 900,
+      "files_require": "ci-secure-report[^/\\n]*\\.md",
+      "checks": [
+        {
+          "name": "ci-secure-skill-fired",
+          "type": "tool_used",
+          "pattern": "^Skill .*\"skill\"\\s*:\\s*\"(?:[\\w-]+:)?ci-secure\"",
+          "min": 1
+        },
+        {
+          "name": "deterministic-engine-actually-ran",
+          "type": "tool_used",
+          "pattern": "^Bash .*(?:run\\.py|scan\\.py)",
+          "min": 1,
+          "why": "The verdict must come from the skill's own scanner, not from a model reading YAML. It sees the command, not its exit status, so every entry also carries an output anchor."
+        },
+        {
+          "name": "injection-reported-at-its-real-file-and-line",
+          "type": "files",
+          "pattern": "ci\\.yml[^\\n]{0,30}?\\b11\\b",
+          "why": "report.py renders the occurrence as <file>:<line> into the report file; the terminal summary carries the file without the line, so on the transcript this passed only when the agent happened to grep -n. One grep -n of the 11-line fixture prints the same thing, so it is never the completion anchor on its own."
+        },
+        {
+          "name": "engine-group-list-is-exactly-p14-10",
+          "type": "trace",
+          "pattern": "\\[\"P14\\.10\"\\]",
+          "why": "The completion anchor: run.py prints its group list as a JSON array of string-sorted ids. The closing bracket is load-bearing: SKILL.md's Phase 2 shows a two-group array as a worked example, so a pattern ending at the id would quote the skill. It cannot prove provenance (an agent could watch the scanner fail and type this); that residual is accepted."
+        },
+        {
+          "name": "banner-reports-one-of-ten-vectors-hit",
+          "type": "trace",
+          "pattern": "(?<![\\d.])1 of 10 vectors hit",
+          "why": "Corroboration, not proof: the banner format is documented in SKILL.md. (?<![\\d.]) stops a match inside 11 of 10."
+        },
+        {
+          "name": "nothing-was-committed",
+          "type": "tool_used",
+          "pattern": "^Bash .*git\\s+(-\\S+\\s+\\S+\\s+)*commit",
+          "min": 0,
+          "max": 0
+        },
+        {
+          "name": "nothing-was-pushed",
+          "type": "tool_used",
+          "pattern": "^Bash .*git\\s+(-\\S+\\s+\\S+\\s+)*push",
+          "min": 0,
+          "max": 0
+        },
+        {
+          "name": "no-pull-request-was-opened",
+          "type": "tool_used",
+          "pattern": "^Bash .*gh\\s+pr\\s+create",
+          "min": 0,
+          "max": 0
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "name": "clean-repo",
+      "fixture": "clean",
+      "prompt": "Run a CI security audit on the GitHub Actions workflows in this repository.",
+      "expected_output": "ci-secure scans and finds ZERO critical attack vectors and says so plainly and positively (zero findings is a first-class result, not an error), states the scope honestly (critical exploit chains only, not a comprehensive audit) and reports whether the network-gated impostor-SHA check ran or was skipped. Nothing is committed or pushed. Judge-only, not checked mechanically: no apology, hedge or suggestion the run failed; no invented 'lower-severity observations' or 'things worth noting' (the pass/fail config hygiene rows are expected and are not padding); no claim that the repository is secure overall rather than clean on the ten vectors checked.",
+      "max_turns": 60,
+      "timeout": 900,
+      "checks": [
+        {
+          "name": "ci-secure-skill-fired",
+          "type": "tool_used",
+          "pattern": "^Skill .*\"skill\"\\s*:\\s*\"(?:[\\w-]+:)?ci-secure\"",
+          "min": 1
+        },
+        {
+          "name": "deterministic-engine-actually-ran",
+          "type": "tool_used",
+          "pattern": "^Bash .*(?:run\\.py|scan\\.py)",
+          "min": 1,
+          "why": "The verdict must come from the skill's own scanner, not from a model reading YAML. It sees the command, not its exit status, so every entry also carries an output anchor."
+        },
+        {
+          "name": "banner-reports-zero-findings",
+          "type": "trace",
+          "pattern": "(?<![\\d.])0 critical findings",
+          "why": "report.py's pre-drawn banner, which SKILL.md has the agent grep out of the report and paste verbatim. The worked banner in references/terminal-summary.md says 3 and 2, so reading the skill cannot match it. (?<![\\d.]) stops a match inside 10 critical findings, the worst regression this entry exists to catch."
+        },
+        {
+          "name": "banner-reports-zero-of-ten-vectors-hit",
+          "type": "trace",
+          "pattern": "(?<![\\d.])0 of 10 vectors hit"
+        },
+        {
+          "name": "impostor-check-state-is-reported",
+          "type": "trace",
+          "pattern": "(?<![\\d.])0 of 10 vectors hit▕[ \\w]{0,40}· impostor check",
+          "why": "Asserts the impostor-SHA state is reported at all, never which way (it depends on the machine's gh). Anchored on the composition of two separate report.py f-strings: the bare phrase quotes references/terminal-summary.md and the raw status strings are literals in scripts/scan.py, both of which the agent can read."
+        },
+        {
+          "name": "nothing-was-committed",
+          "type": "tool_used",
+          "pattern": "^Bash .*git\\s+(-\\S+\\s+\\S+\\s+)*commit",
+          "min": 0,
+          "max": 0
+        },
+        {
+          "name": "nothing-was-pushed",
+          "type": "tool_used",
+          "pattern": "^Bash .*git\\s+(-\\S+\\s+\\S+\\s+)*push",
+          "min": 0,
+          "max": 0
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "name": "pwn-request",
+      "fixture": "pwn-request",
+      "prompt": "Check this repository for GitHub Actions security problems. Name the\nworkflow file each problem is in, and tell me what an attacker could do.",
+      "expected_output": "ci-secure reports P14.9 (fork code executed with privileges) on vulnerable.yml at line 8 (pull_request_target + checkout of the PR head + execution) and P14.25 on the same file at line 14 (two groups on one file is expected), and NOTHING on safe.yml, which runs the same build under plain pull_request: a real negative, not a coverage gap. The fix recipe recommends the pull_request trigger split. Nothing is committed or pushed. Judge-only, not checked mechanically: the scenario makes clear the attacker is any GitHub user opening a pull request from a fork, with no prior access, who gains execution holding the repository's token or secrets; the output shows safe.yml was scanned and cleared (a file count covering both, or an explicit statement), never skipped, unreadable or partial.",
+      "max_turns": 60,
+      "timeout": 900,
+      "files_require": "ci-secure-report[^/\\n]*\\.md",
+      "checks": [
+        {
+          "name": "ci-secure-skill-fired",
+          "type": "tool_used",
+          "pattern": "^Skill .*\"skill\"\\s*:\\s*\"(?:[\\w-]+:)?ci-secure\"",
+          "min": 1
+        },
+        {
+          "name": "deterministic-engine-actually-ran",
+          "type": "tool_used",
+          "pattern": "^Bash .*(?:run\\.py|scan\\.py)",
+          "min": 1,
+          "why": "The verdict must come from the skill's own scanner, not from a model reading YAML. It sees the command, not its exit status, so every entry also carries an output anchor."
+        },
+        {
+          "name": "engine-group-list-is-exactly-p14-25-then-p14-9",
+          "type": "trace",
+          "pattern": "P14\\.25.{2,10}P14\\.9",
+          "why": "run.py prints the ids sorted as strings, putting the two-digit suffix first, an order no person or model writing them by hand produces. It is contains: it does not assert that no third group was reported."
+        },
+        {
+          "name": "finding-lands-on-the-vulnerable-workflow",
+          "type": "files",
+          "pattern": "vulnerable\\.yml:(?:8|14)\\b[^\\n]{0,20}jobs",
+          "why": "A bare vulnerable.yml is free (any ls prints it); the occurrence lines are what only the engine knows. Read from the report file, where report.py renders the evidence bullet."
+        },
+        {
+          "name": "safe-workflow-produces-no-finding",
+          "type": "files",
+          "match": "not_contains",
+          "pattern": "safe\\.yml:\\d+[^\\n]{0,20}jobs",
+          "why": "The reason this entry exists. On the transcript, grep -n over the clean fixture prints its line-7 jobs key in exactly this shape and failed careful sessions; the files record carries only what the session wrote, so it asks only whether the renderer attributed a finding to safe.yml."
+        },
+        {
+          "name": "nothing-was-committed",
+          "type": "tool_used",
+          "pattern": "^Bash .*git\\s+(-\\S+\\s+\\S+\\s+)*commit",
+          "min": 0,
+          "max": 0
+        },
+        {
+          "name": "nothing-was-pushed",
+          "type": "tool_used",
+          "pattern": "^Bash .*git\\s+(-\\S+\\s+\\S+\\s+)*push",
+          "min": 0,
+          "max": 0
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "name": "many-findings",
+      "fixture": "many-findings",
+      "prompt": "Run a CI security audit on the GitHub Actions workflows in this repository\nand walk me through which findings to fix.",
+      "expected_output": "ci-secure reports nine finding groups, the nine statically-detectable vectors (P14.7, P14.9, P14.10, P14.14, P14.15, P14.18, P14.19, P14.24, P14.25; P14.11 is network-gated), and at the selection step prints a complete numbered free-text table of every group, built from report.py's render plan, before any capped question widget. Nothing is committed, pushed or opened as a pull request. Judge-only, not checked mechanically: a numbered row for every group (the banner counts findings and reads 10, one group holds two), nothing truncated, ranked-and-cut or summarized as 'and others'; each group carries its own attacker scenario rather than one reused paragraph. Not checked at all: one fix subagent per selected group, each editing only its finding's workflow_file (the session stops at the selection table).",
+      "max_turns": 90,
+      "timeout": 1500,
+      "checks": [
+        {
+          "name": "ci-secure-skill-fired",
+          "type": "tool_used",
+          "pattern": "^Skill .*\"skill\"\\s*:\\s*\"(?:[\\w-]+:)?ci-secure\"",
+          "min": 1
+        },
+        {
+          "name": "deterministic-engine-actually-ran",
+          "type": "tool_used",
+          "pattern": "^Bash .*(?:run\\.py|scan\\.py)",
+          "min": 1,
+          "why": "The verdict must come from the skill's own scanner, not from a model reading YAML. It sees the command, not its exit status, so every entry also carries an output anchor."
+        },
+        {
+          "name": "engine-found-all-nine-static-groups",
+          "type": "trace",
+          "pattern": "P14\\.10.{2,10}P14\\.14.{2,10}P14\\.15.{2,10}P14\\.18.{2,10}P14\\.19.{2,10}P14\\.24.{2,10}P14\\.25.{2,10}P14\\.7.{2,10}P14\\.9",
+          "why": "The engine's group list in run.py's string sort order (.24 and .25 before .7 and .9): only the scanner produces this sequence on this fixture, and no shorter subset matches."
+        },
+        {
+          "name": "banner-reports-nine-of-ten-vectors-hit",
+          "type": "trace",
+          "pattern": "(?<![\\d.])9 of 10 vectors hit"
+        },
+        {
+          "name": "selection-table-built-from-the-render-plan",
+          "type": "tool_used",
+          "pattern": "^Bash .*--render-plan",
+          "min": 1,
+          "why": "Keeps the table's numbering identical to the report's instead of an order the agent invents."
+        },
+        {
+          "name": "nothing-was-committed",
+          "type": "tool_used",
+          "pattern": "^Bash .*git\\s+(-\\S+\\s+\\S+\\s+)*commit",
+          "min": 0,
+          "max": 0
+        },
+        {
+          "name": "nothing-was-pushed",
+          "type": "tool_used",
+          "pattern": "^Bash .*git\\s+(-\\S+\\s+\\S+\\s+)*push",
+          "min": 0,
+          "max": 0
+        },
+        {
+          "name": "no-pull-request-was-opened",
+          "type": "tool_used",
+          "pattern": "^Bash .*gh\\s+pr\\s+create",
+          "min": 0,
+          "max": 0
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "name": "impostor-check-skipped",
+      "fixture": "inject",
+      "prompt": "Run a CI security audit on the GitHub Actions workflows in this repository.\nThere is no working `gh` here, so run the scan with the network-gated\nimpostor-SHA check disabled.",
+      "expected_output": "The scan runs fully (the nine static vectors need no network) and still finds the injection at ci.yml:11; the impostor-SHA check (P14.11) is SKIPPED and both the terminal summary and the report say so loudly. A skipped network-gated check is never presented as a pass. Nothing is committed or pushed. Judge-only, not checked mechanically: the skipped check is named, the output says it did not run, and nothing claims or implies the repository is clean on that check or that coverage was complete. The prompt asks for --gh-impostor off rather than removing gh, so the degraded state is the same on every machine; the scanner's own auto mode discovering gh is absent is not covered.",
+      "max_turns": 60,
+      "timeout": 900,
+      "files_require": "ci-secure-report[^/\\n]*\\.md",
+      "checks": [
+        {
+          "name": "ci-secure-skill-fired",
+          "type": "tool_used",
+          "pattern": "^Skill .*\"skill\"\\s*:\\s*\"(?:[\\w-]+:)?ci-secure\"",
+          "min": 1
+        },
+        {
+          "name": "scan-ran-with-the-network-gated-check-disabled",
+          "type": "tool_used",
+          "pattern": "^Bash .*--gh-impostor[ =]off",
+          "min": 1
+        },
+        {
+          "name": "static-scan-still-completed-and-found-the-injection",
+          "type": "files",
+          "pattern": "ci\\.yml[^\\n]{0,30}?\\b11\\b",
+          "why": "report.py renders the occurrence as <file>:<line> into the report file; the terminal summary carries the file without the line, so on the transcript this passed only when the agent happened to grep -n. One grep -n of the 11-line fixture prints the same thing, so it is never the completion anchor on its own."
+        },
+        {
+          "name": "banner-names-the-check-as-skipped",
+          "type": "trace",
+          "pattern": "(?<![\\d.])1 of 10 vectors hit▕[ \\w]{0,40}· impostor check SKIPPED",
+          "why": "The whole banner composition, this run's count plus the impostor state, adjacent only in a real render. The bridge is [ \\w], not [^\\n], so the pattern cannot match its own declaration."
+        },
+        {
+          "name": "skip-reason-is-recorded-and-surfaced",
+          "type": "trace",
+          "pattern": "gh-impostor=off \\(network-gated check did NOT run\\)",
+          "why": "scan.py's recorded reason, reached through the gh_checks lookup Phase 3 requires. SKILL.md writes the flag as --gh-impostor off; only the scanner writes the =off form."
+        },
+        {
+          "name": "disabled-check-was-not-quietly-re-run",
+          "type": "trace",
+          "match": "not_contains",
+          "pattern": "(?<![\\d.])1 of 10 vectors hit▕[ \\w]{0,40}· impostor check ran",
+          "why": "Fires if the scan is re-run without the flag and a completed state reaches the user. Anchored on the rendered banner: scan.py's raw ran: strings are literals the agent can grep, which would make this unpassable on a good run."
+        },
+        {
+          "name": "nothing-was-committed",
+          "type": "tool_used",
+          "pattern": "^Bash .*git\\s+(-\\S+\\s+\\S+\\s+)*commit",
+          "min": 0,
+          "max": 0
+        },
+        {
+          "name": "nothing-was-pushed",
+          "type": "tool_used",
+          "pattern": "^Bash .*git\\s+(-\\S+\\s+\\S+\\s+)*push",
+          "min": 0,
+          "max": 0
+        }
+      ]
+    }
+  ]
+}

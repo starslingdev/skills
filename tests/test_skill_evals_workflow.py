@@ -1,6 +1,6 @@
 """The skill-evals gate cannot go green over a session that did not happen.
 
-This workflow exists to run ci-secure's behavioural cases against a live agent.
+This workflow exists to run ci-secure's and ci-speedup's behavioural evals against a live agent.
 Its entire value is that a green `skill evals` check means five real sessions ran
 and behaved. Every way that decays is invisible in the check list: a fork PR that
 reports green having reached no API key, a verdict job that exits 0 on a skip, a
@@ -111,6 +111,14 @@ def test_the_verdict_waits_on_both_suites_and_they_share_the_fork_gate():
     assert _squash(_job("ci-speedup-evals")["if"]) == _squash(_job("evals")["if"])
 
 
+@pytest.mark.parametrize("job_id,skill", [("evals", "ci-secure"),
+                                          ("ci-speedup-evals", "ci-speedup")])
+def test_each_suite_runs_on_the_shared_runner(job_id, skill):
+    run = _job(job_id)["steps"]
+    step = next(s for s in run if s.get("name") == "Run the eval cases")
+    assert f"maintainers/scripts/run_skill_evals.py --skill {skill}" in _squash(step["run"])
+
+
 @pytest.mark.parametrize("job_id", ["evals", "ci-speedup-evals"])
 def test_each_suite_keeps_sandbox_exit2_and_pinned_cli(job_id):
     steps = {s.get("name"): s for s in _job(job_id)["steps"]}
@@ -151,14 +159,17 @@ def test_the_claude_cli_is_pinned():
 
 def test_the_job_budget_exceeds_the_harness_own_worst_case():
     """A slow-but-healthy suite killed by the job timeout is reported as a
-    behaviour change."""
-    worst_seconds = 0
-    for case in sorted(_EVALS.glob("*/case.yaml")):
-        spec = yaml.safe_load(case.read_text(encoding="utf-8"))
-        worst_seconds += (spec.get("execution") or {}).get("timeout_seconds", 900)
-    assert _job("evals")["timeout-minutes"] >= worst_seconds / 60, (
-        f"{worst_seconds / 60:.0f} minutes of per-run budget under a "
-        f"{_job('evals')['timeout-minutes']}-minute job timeout")
+    behaviour change. 1500 is the shared runner's default --timeout."""
+    import json
+    spec = json.loads((_EVALS / "evals.json").read_text(encoding="utf-8"))
+    worst_seconds = sum(e.get("timeout", 1500) for e in spec["evals"] if e.get("checks"))
+    assert worst_seconds > 0
+    # Setup (checkout, pip, the CLI install, five scaffolds) also spends the job
+    # budget, and a job killed at its timeout writes no results file to upload.
+    setup_minutes = 10
+    assert _job("evals")["timeout-minutes"] >= worst_seconds / 60 + setup_minutes, (
+        f"{worst_seconds / 60:.0f} minutes of per-run budget plus {setup_minutes} of "
+        f"setup under a {_job('evals')['timeout-minutes']}-minute job timeout")
 
 
 def test_every_third_party_action_is_pinned_to_a_sha():
@@ -189,3 +200,18 @@ def test_the_path_filter_covers_the_ci_speedup_eval_inputs(rel):
     doc = _doc()
     paths = (doc.get("on") or doc[True])["pull_request"]["paths"]
     assert any(fnmatch(rel, p) for p in paths), f"{rel} matches no filter path"
+
+
+@pytest.mark.parametrize("job_id", ["evals", "ci-speedup-evals"])
+@pytest.mark.parametrize("runs", ["2", "0", "x"])
+def test_a_runs_value_the_job_budget_cannot_hold_is_refused_before_any_session(job_id, runs,
+                                                                               tmp_path):
+    """The job timeout budgets one run per case; a dispatch with more would be
+    killed mid-suite and read as a failure. Executed, with no python on PATH, so
+    reaching the runner would also fail loudly."""
+    step = next(s for s in _job(job_id)["steps"] if s.get("name") == "Run the eval cases")
+    proc = subprocess.run(["bash", "-c", step["run"]],
+                          env={"RUNS": runs, "ID": "", "PATH": "/usr/bin:/bin"},
+                          capture_output=True, text=True, cwd=tmp_path)
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "::error" in proc.stdout and "runs" in proc.stdout

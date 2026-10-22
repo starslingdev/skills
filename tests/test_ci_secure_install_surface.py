@@ -8,12 +8,12 @@ no ``.skillignore`` / frontmatter allowlist / dotfile exclusion. So the ONLY way
 to keep maintainer-only files out of an end-user install is to keep them out of
 ``skills/ci-secure/`` entirely.
 
-ci-secure now HAS a maintainer-only tree — ``maintainers/ci-secure/`` holds
-``MAINTAINERS.md`` plus the behavioral-eval harness (``scripts/run_skill_evals.py``
-and its tests), which drives real ``claude -p`` sessions and is of no use to
-someone who installed the skill. So this guard is no longer purely
-forward-looking: it pins where that tree lives, and ``run_skill_evals.py`` is a
-forbidden basename under ``skills/ci-secure/`` for exactly that reason.
+ci-secure HAS a maintainer-only tree — ``maintainers/ci-secure/`` holds
+``MAINTAINERS.md`` — and its behavioral evals run on the shared runner
+(``maintainers/scripts/run_skill_evals.py`` plus ``eval_gh_shim.py``), which
+drives real ``claude -p`` sessions and is of no use to someone who installed the
+skill. So ``run_skill_evals.py`` and ``eval_gh_shim.py`` are forbidden basenames
+under ``skills/ci-secure/``, and the runner's output dirs may never land here.
 
 The leak shape still to expect is ci-speedup's: self-improvement loop infra
 (loop prompts, a summary schema, drafting scripts) plus the runtime capture
@@ -58,10 +58,11 @@ _FORBIDDEN_FILE_NAMES = {
     "loop-summary.schema.json",
     "draft_detector.py",
     "aggregate_lessons.py",
-    # The behavioral-eval harness. It drives a real, billed agent session per
-    # case, so it must never reach an end user's install and must never be
-    # collected by the ordinary `pytest` run.
+    # The shared behavioral-eval runner and its gh stand-in. The runner drives a
+    # real, billed agent session per entry, so neither may reach an end user's
+    # install or be collected by the ordinary `pytest` run.
     "run_skill_evals.py",
+    "eval_gh_shim.py",
 }
 
 # Directory names that mark the same thing.
@@ -126,8 +127,9 @@ def test_no_eval_results_under_skill():
     exactly like a tracked one. Those artifacts embed full prompts, transcript
     excerpts and grader evidence from whatever repository the maintainer ran
     against, which makes this a disclosure leak and not just clutter. The
-    remedy is `--output-dir` outside the skill; `evals/README.md` documents the
-    invocation.
+    remedy is `--output-dir` outside the skill on any manual `claude plugin
+    eval` run; the suite itself now runs on the shared runner, which writes to
+    the repository root instead.
     """
     results = _SKILL / "evals" / "results"
     assert not results.exists(), (
@@ -152,6 +154,14 @@ def test_no_tracked_eval_results():
         "eval run artifacts are tracked under the installable skill: "
         + ", ".join(leaked)
     )
+
+
+def test_no_eval_runner_output_under_skill():
+    """The shared runner writes per-run results and failing sessions (full
+    transcripts) at the repo root; under the skill they would ship."""
+    leaked = sorted(p.relative_to(_REPO).as_posix() for p in _SKILL.rglob("*")
+                    if p.name in ("skill-eval-results", "skill-eval-logs"))
+    assert not leaked, "eval runner output inside the installable skill: " + ", ".join(leaked)
 
 
 def test_no_maintainer_only_dirs_under_skill():
@@ -236,5 +246,6 @@ def test_detectors_actually_fire():
     assert not _is_capture_dotdir(".git")
     assert "MAINTAINERS.md" in _FORBIDDEN_FILE_NAMES
     assert "draft_detector.py" in _FORBIDDEN_FILE_NAMES
+    assert _is_forbidden_file("run_skill_evals.py") and _is_forbidden_file("eval_gh_shim.py")
     assert "loops" in _FORBIDDEN_DIR_NAMES
     assert "dogfood" in _FORBIDDEN_DIR_NAMES

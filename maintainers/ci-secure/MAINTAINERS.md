@@ -63,3 +63,11 @@ keeps meaning "cleared for publication".
 Adding a line to that allowlist **is** the decision, and it shows up in
 review. The guard does not judge whether publishing is acceptable — it forces
 somebody to say on the record that they thought about it.
+
+## Behavioral evals
+
+The five scenarios in `skills/ci-secure/evals/evals.json` run as real agent
+sessions on the shared runner, the same one ci-speedup uses:
+`python3 maintainers/scripts/run_skill_evals.py --skill ci-secure`. It spends
+real tokens and is never part of `pytest`; `skills/ci-secure/evals/README.md`
+covers what runs, the exit codes, and what the checks cannot judge.
