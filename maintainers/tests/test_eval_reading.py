@@ -356,3 +356,17 @@ def test_a_malformed_reading_check_is_a_harness_error(tmp_path, monkeypatch):
     with pytest.raises(runner.HarnessError, match="mx"):
         runner.apply_checks([{"name": "n", "type": "reading", "field": "reference_bytes", "mx": 0}],
                             {"reading": {"reference_bytes": 5}})
+
+
+def test_a_bash_read_whose_command_exits_non_zero_still_counts_its_output():
+    """Seen in a baseline run: `awk` printed the OPT81 entry, a later `cat` in the
+    same command failed, and the result came back flagged as an error with the
+    entry in it. The agent saw the entry; the `Exit code` line is not the file."""
+    out = "Exit code 1\n" + _ENTRY.replace("3585\t", "").replace("3586\t", "").replace("3587\t", "")
+    evs = [_call(1, "Bash", {"command": f"awk '/OPT81/,/OPT82/' {_ROOT}/references/optimization-patterns.md; "
+                                        "cat missing.yml"}),
+           {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1",
+                                                     "is_error": True, "content": out}]}}]
+    r = reading.summarize(evs, "ci-speedup", _NAMES, root=_ROOT)
+    assert r["reference_bytes"] == len(out.encode()) - len("Exit code 1\n")
+    assert r["catalog_entries_read"] == ["OPT81"]

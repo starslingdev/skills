@@ -32,7 +32,8 @@ in `unattributed_calls` instead of being dropped. Output, per session:
 `## <id> — ` or `### <id> — ` heading appears in a result attributed to the
 catalog with some of the entry's body under it (a heading listed alone, as an
 index grep prints it, is not a read): what an agent actually saw, not what it
-asked for. For a skill with no `optimization-patterns.md` catalog,
+asked for. A failed `Read` / `Grep` counts nothing; a `Bash` command that
+exits non-zero counts what it printed. For a skill with no `optimization-patterns.md` catalog,
 `catalog_opened` is None and the printed figure leaves the catalog out. Tested
 offline in `maintainers/tests/test_eval_reading.py`.
 """
@@ -302,7 +303,7 @@ def summarize(evs: list, skill: str, names: list[str] | None = None,
               wall_s: float | None = None, root: str | None = None) -> dict:
     """The reading figures for one session (see the module docstring), plus
     `session`: whole-session tokens and wall time (`session_totals`)."""
-    pending: dict[str, tuple[list[str], str | None]] = {}
+    pending: dict[str, tuple[list[str], str | None, bool]] = {}
     unattributed = 0
     for ev in evs:
         for c in _content(ev):
@@ -327,7 +328,7 @@ def summarize(evs: list, skill: str, names: list[str] | None = None,
             else:
                 continue
             if reads:
-                pending[str(c.get("id"))] = (paths, cd)
+                pending[str(c.get("id"))] = (paths, cd, name == "Bash")
     has_catalog = names is None or any(Path(n).name == CATALOG for n in names)
     files: dict[str, dict] = {}
     entries: list[str] = []
@@ -335,10 +336,20 @@ def summarize(evs: list, skill: str, names: list[str] | None = None,
         for c in _content(ev):
             got = pending.pop(str(c.get("tool_use_id")), None) if c.get(
                 "type") == "tool_result" else None
-            if not got or c.get("is_error"):  # a failed read put nothing of the file in context
+            if not got:
                 continue
-            paths, cd = got
+            paths, cd, shell = got
             body = _text(c.get("content"))
+            if c.get("is_error"):
+                # A failed Read / Grep put nothing of the file in context. A shell
+                # command that exits non-zero still returns what it printed (the
+                # read may have succeeded before a later part failed): count that,
+                # minus the `Exit code N` line, toward files that really exist.
+                if not shell:
+                    continue
+                body = re.sub(r"\AExit code \d+\n?", "", body)
+                if names is not None:
+                    paths = [p for p in paths if p in names]
             share = _owner_lines(body, paths) if paths else _prefixed_lines(body, names or [], root, cd)
             for p, (size, lines, text) in share.items():
                 if not size:
