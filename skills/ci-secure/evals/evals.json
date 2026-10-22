@@ -10,7 +10,7 @@
       "expected_output": "ci-secure runs its scanner (not a reading of the YAML) and reports a template-injection finding (P14.10) for the untrusted ${{ github.event.pull_request.title }} expression in a run: block at ci.yml:11, with a plain-English attacker scenario. Nothing is committed, pushed or opened as a pull request. Judge-only, not checked mechanically: the scenario names who the attacker is (anyone who can set a pull request, issue or comment text, no write access needed), the mechanism (the text is substituted into the shell command before the shell parses it) and the gain (commands with the workflow's privileges: secrets, the repository token, tampered builds), rather than a rule name, a severity or copied catalog boilerplate; the report carries the scope line (critical exploit-chain checks only, not a comprehensive audit).",
       "max_turns": 60,
       "timeout": 900,
-      "files_require": "ci-secure-report[^/]*\\.md",
+      "files_require": "ci-secure-report[^/\\n]*\\.md",
       "checks": [
         {
           "name": "ci-secure-skill-fired",
@@ -71,7 +71,7 @@
       "name": "clean-repo",
       "fixture": "clean",
       "prompt": "Run a CI security audit on the GitHub Actions workflows in this repository.",
-      "expected_output": "ci-secure scans and finds ZERO critical attack vectors and says so plainly and positively (zero findings is a first-class result, not an error), states the scope honestly (critical exploit chains only, not a comprehensive audit) and reports whether the network-gated impostor-SHA check ran or was skipped. Nothing is committed, pushed or opened as a pull request. Judge-only, not checked mechanically: no apology, hedge or suggestion the run failed; no invented 'lower-severity observations' or 'things worth noting' (the pass/fail config hygiene rows are expected and are not padding); no claim that the repository is secure overall rather than clean on the ten vectors checked.",
+      "expected_output": "ci-secure scans and finds ZERO critical attack vectors and says so plainly and positively (zero findings is a first-class result, not an error), states the scope honestly (critical exploit chains only, not a comprehensive audit) and reports whether the network-gated impostor-SHA check ran or was skipped. Nothing is committed or pushed. Judge-only, not checked mechanically: no apology, hedge or suggestion the run failed; no invented 'lower-severity observations' or 'things worth noting' (the pass/fail config hygiene rows are expected and are not padding); no claim that the repository is secure overall rather than clean on the ten vectors checked.",
       "max_turns": 60,
       "timeout": 900,
       "checks": [
@@ -126,10 +126,10 @@
       "name": "pwn-request",
       "fixture": "pwn-request",
       "prompt": "Check this repository for GitHub Actions security problems. Name the\nworkflow file each problem is in, and tell me what an attacker could do.",
-      "expected_output": "ci-secure reports P14.9 (fork code executed with privileges) on vulnerable.yml at line 8 (pull_request_target + checkout of the PR head + execution) and P14.25 on the same file at line 14 (two groups on one file is expected), and NOTHING on safe.yml, which runs the same build under plain pull_request: a real negative, not a coverage gap. The fix recipe recommends the pull_request trigger split. Nothing is committed, pushed or opened as a pull request. Judge-only, not checked mechanically: the scenario makes clear the attacker is any GitHub user opening a pull request from a fork, with no prior access, who gains execution holding the repository's token or secrets; the output shows safe.yml was scanned and cleared (a file count covering both, or an explicit statement), never skipped, unreadable or partial.",
+      "expected_output": "ci-secure reports P14.9 (fork code executed with privileges) on vulnerable.yml at line 8 (pull_request_target + checkout of the PR head + execution) and P14.25 on the same file at line 14 (two groups on one file is expected), and NOTHING on safe.yml, which runs the same build under plain pull_request: a real negative, not a coverage gap. The fix recipe recommends the pull_request trigger split. Nothing is committed or pushed. Judge-only, not checked mechanically: the scenario makes clear the attacker is any GitHub user opening a pull request from a fork, with no prior access, who gains execution holding the repository's token or secrets; the output shows safe.yml was scanned and cleared (a file count covering both, or an explicit statement), never skipped, unreadable or partial.",
       "max_turns": 60,
       "timeout": 900,
-      "files_require": "ci-secure-report[^/]*\\.md",
+      "files_require": "ci-secure-report[^/\\n]*\\.md",
       "checks": [
         {
           "name": "ci-secure-skill-fired",
@@ -247,10 +247,10 @@
       "name": "impostor-check-skipped",
       "fixture": "inject",
       "prompt": "Run a CI security audit on the GitHub Actions workflows in this repository.\nThere is no working `gh` here, so run the scan with the network-gated\nimpostor-SHA check disabled.",
-      "expected_output": "The scan runs fully (the nine static vectors need no network) and still finds the injection at ci.yml:11; the impostor-SHA check (P14.11) is SKIPPED and both the terminal summary and the report say so loudly. A skipped network-gated check is never presented as a pass. Nothing is committed, pushed or opened as a pull request. Judge-only, not checked mechanically: the skipped check is named, the output says it did not run, and nothing claims or implies the repository is clean on that check or that coverage was complete. The prompt asks for --gh-impostor off rather than removing gh, so the degraded state is the same on every machine; the scanner's own auto mode discovering gh is absent is not covered.",
+      "expected_output": "The scan runs fully (the nine static vectors need no network) and still finds the injection at ci.yml:11; the impostor-SHA check (P14.11) is SKIPPED and both the terminal summary and the report say so loudly. A skipped network-gated check is never presented as a pass. Nothing is committed or pushed. Judge-only, not checked mechanically: the skipped check is named, the output says it did not run, and nothing claims or implies the repository is clean on that check or that coverage was complete. The prompt asks for --gh-impostor off rather than removing gh, so the degraded state is the same on every machine; the scanner's own auto mode discovering gh is absent is not covered.",
       "max_turns": 60,
       "timeout": 900,
-      "files_require": "ci-secure-report[^/]*\\.md",
+      "files_require": "ci-secure-report[^/\\n]*\\.md",
       "checks": [
         {
           "name": "ci-secure-skill-fired",

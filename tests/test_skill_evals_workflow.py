@@ -164,9 +164,12 @@ def test_the_job_budget_exceeds_the_harness_own_worst_case():
     spec = json.loads((_EVALS / "evals.json").read_text(encoding="utf-8"))
     worst_seconds = sum(e.get("timeout", 1500) for e in spec["evals"] if e.get("checks"))
     assert worst_seconds > 0
-    assert _job("evals")["timeout-minutes"] >= worst_seconds / 60, (
-        f"{worst_seconds / 60:.0f} minutes of per-run budget under a "
-        f"{_job('evals')['timeout-minutes']}-minute job timeout")
+    # Setup (checkout, pip, the CLI install, five scaffolds) also spends the job
+    # budget, and a job killed at its timeout writes no results file to upload.
+    setup_minutes = 10
+    assert _job("evals")["timeout-minutes"] >= worst_seconds / 60 + setup_minutes, (
+        f"{worst_seconds / 60:.0f} minutes of per-run budget plus {setup_minutes} of "
+        f"setup under a {_job('evals')['timeout-minutes']}-minute job timeout")
 
 
 def test_every_third_party_action_is_pinned_to_a_sha():

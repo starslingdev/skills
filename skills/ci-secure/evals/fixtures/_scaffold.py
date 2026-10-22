@@ -48,7 +48,10 @@ def main(fixture_dir: Path, argv: list[str]) -> None:
                  ["-c", "user.email=evals@ci-secure.invalid", "-c", "user.name=ci-secure evals",
                   "-c", "commit.gpgsign=false", "-c", f"core.hooksPath={os.devnull}",
                   "commit", "-q", "-m", "workflows under audit"]):
-        subprocess.run(["git", "-C", str(sandbox), *args], check=True, env=env,
-                       capture_output=True, text=True)
+        done = subprocess.run(["git", "-C", str(sandbox), *args], env=env,
+                              capture_output=True, text=True)
+        if done.returncode != 0:  # git's own reason, not a bare traceback
+            sys.exit(f"scaffold: git {args[-1] if args[0] == '-c' else args[0]} failed "
+                     f"(exit {done.returncode}): {done.stderr.strip()}")
     print(f"scaffold: materialized {len(fixtures)} workflow(s) from {fixture_dir.name}",
           file=sys.stderr)

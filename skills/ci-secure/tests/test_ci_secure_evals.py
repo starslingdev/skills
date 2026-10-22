@@ -34,6 +34,19 @@ _CHECK_KEYS = {"name", "type", "pattern", "match", "min", "max", "why"}
 _ENTRY_KEYS = {"id", "name", "prompt", "expected_output", "fixture", "max_turns",
                "timeout", "files_require", "checks"}
 _BY_NAME = {e["name"]: e for e in _ENTRIES}
+# One entry per distinct fixture, so a reorder of evals.json cannot drop one
+# from the scaffold tests.
+_FIXTURE_ENTRIES = list({e["fixture"]: e for e in _ENTRIES}.values())
+_REPO = _SKILL.parents[1]
+
+
+def _load_runner():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "ci_secure_evals_shared_runner", _REPO / "maintainers" / "scripts" / "run_skill_evals.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 def _fixture_dir(entry: dict) -> Path:
@@ -190,7 +203,7 @@ def _scaffold(entry: dict, sandbox: Path) -> subprocess.CompletedProcess:
                           capture_output=True, text=True, timeout=120, env=env)
 
 
-@pytest.mark.parametrize("entry", _ENTRIES[:4], ids=lambda e: e["fixture"])
+@pytest.mark.parametrize("entry", _FIXTURE_ENTRIES, ids=lambda e: e["fixture"])
 def test_the_scaffold_materializes_and_commits_the_fixture_in_an_empty_sandbox(entry, tmp_path):
     sandbox = tmp_path / "repo"
     sandbox.mkdir()
@@ -279,3 +292,123 @@ def test_every_entry_anchors_on_output_only_a_completed_engine_run_produces(entr
             f"{c['name']} disagrees with the report the engine renders")
     if entry.get("files_require"):
         assert re.search(rf"(?m)^=== (?:{entry['files_require']}) ===$", files)
+
+
+def test_one_entry_per_fixture_covers_every_fixture_directory():
+    on_disk = sorted(p.name for p in (_EVALS_DIR / "fixtures").iterdir()
+                     if (p / "scaffold.py").is_file())
+    assert sorted(e["fixture"] for e in _FIXTURE_ENTRIES) == on_disk
+
+
+def _top_level_branch(pattern: str) -> bool:
+    """A `|` outside every group and character class. (sre_parse cannot
+    answer this: it inlines a bare `(?:...)` into its parent sequence.)"""
+    depth, in_class, i = 0, False, 0
+    while i < len(pattern):
+        ch = pattern[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if in_class:
+            in_class = ch != "]"
+        elif ch == "[":
+            in_class = True
+            if pattern[i + 1:i + 2] == "]":
+                i += 1
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == "|" and depth == 0:
+            return True
+        i += 1
+    return False
+
+
+def test_the_top_level_alternation_detector_itself():
+    assert _top_level_branch(r"^Bash .*run\.py|scan\.py")
+    assert not _top_level_branch(r"^Bash .*(?:run\.py|scan\.py)")
+    assert not _top_level_branch(r"^Bash .*[|]\s*bash")
+    assert not _top_level_branch(r"^Bash .*\|\s*bash")
+
+
+@pytest.mark.parametrize("entry", _ENTRIES, ids=lambda e: e["name"])
+def test_no_tool_used_pattern_escapes_its_tool_anchor(entry):
+    """`^Bash .*run\.py|scan\.py` passes the anchor check above, but its
+    second branch matches `scan.py` in ANY tool's input (a Read, a Grep), so
+    the count loosens silently. An alternation must sit inside a group."""
+    loose = [c["name"] for c in entry["checks"]
+             if c["type"] == "tool_used" and _top_level_branch(c["pattern"])]
+    assert not loose, f"wrap the alternation in (?:...): {loose}"
+
+
+@pytest.mark.parametrize("entry", [e for e in _ENTRIES if e.get("files_require")],
+                         ids=lambda e: e["name"])
+def test_files_require_matches_a_file_header_never_a_span_across_two(entry):
+    """The runner wraps `files_require` as `^=== (?:...) ===$` in multiline
+    mode. A `[^/]*` in it also crosses newlines, so a non-report file named
+    ci-secure-report-x.json followed by any .md satisfied the guard that
+    exists to prove the REPORT was collected."""
+    runner = _load_runner()
+    check = [{"name": "probe", "type": "files", "pattern": "x"}]
+    real = {"files": "=== ci-secure-report-abc.md ===\nx\n", "trace": "", "tool_used": "",
+            "last_message": ""}
+    runner.apply_checks(check, real, entry["files_require"])
+    straddle = dict(real, files="=== ci-secure-report-abc.json ===\n{}\n"
+                                "=== notes.md ===\nx\n")
+    with pytest.raises(runner.HarnessError):
+        runner.apply_checks(check, straddle, entry["files_require"])
+
+
+def _decoy_repo(path: Path) -> None:
+    path.mkdir()
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    for args in (["init", "-q"],
+                 ["-c", "user.email=d@d.invalid", "-c", "user.name=d", "-c",
+                  "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "decoy"]):
+        subprocess.run(["git", "-C", str(path), *args], check=True, env=env,
+                       capture_output=True)
+
+
+def test_the_scaffold_ignores_an_inherited_git_dir(tmp_path):
+    """A hook-exported GIT_DIR / GIT_WORK_TREE (a worktree pre-commit run)
+    must not send the scaffold's init + commit of vulnerable workflows at the
+    real repository."""
+    decoy = tmp_path / "decoy"
+    _decoy_repo(decoy)
+    sandbox = tmp_path / "repo"
+    sandbox.mkdir()
+    env = dict(os.environ, GIT_DIR=str(decoy / ".git"), GIT_WORK_TREE=str(decoy),
+               GIT_INDEX_FILE=str(decoy / ".git" / "index"))
+    done = subprocess.run([sys.executable, str(_fixture_dir(_ENTRIES[0]) / "scaffold.py"),
+                           str(sandbox), str(tmp_path)],
+                          capture_output=True, text=True, timeout=120, env=env)
+    assert done.returncode == 0, done.stderr
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+    def count(repo: Path) -> str:
+        return subprocess.run(["git", "-C", str(repo), "rev-list", "--count", "--all"],
+                              capture_output=True, text=True, check=True,
+                              env=clean).stdout.strip()
+
+    assert count(decoy) == "1", "the scaffold committed into the inherited GIT_DIR"
+    assert count(sandbox) == "1"
+
+
+def test_a_failed_scaffold_git_step_reports_gits_own_reason(tmp_path):
+    """The runner shows the scaffold's stderr on failure; a bare
+    CalledProcessError traceback hides why git refused."""
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    git = fake / "git"
+    git.write_text("#!/bin/sh\necho 'fatal: decoy reason from git' >&2\nexit 128\n",
+                   encoding="utf-8")
+    git.chmod(0o755)
+    sandbox = tmp_path / "repo"
+    sandbox.mkdir()
+    env = dict(os.environ, PATH=f"{fake}{os.pathsep}{os.environ['PATH']}")
+    done = subprocess.run([sys.executable, str(_fixture_dir(_ENTRIES[0]) / "scaffold.py"),
+                           str(sandbox), str(tmp_path)],
+                          capture_output=True, text=True, timeout=120, env=env)
+    assert done.returncode != 0
+    assert "decoy reason from git" in done.stderr, done.stderr[-800:]

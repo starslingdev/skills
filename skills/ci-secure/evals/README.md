@@ -12,7 +12,7 @@ the scripts that alters what the agent actually does.
 | 1 | `template-injection` | `inject` | the engine runs; P14.10 is reported at its real file and line |
 | 2 | `clean-repo` | `clean` | zero findings is reported, with the impostor-check state |
 | 3 | `pwn-request` | `pwn-request` | findings land on `vulnerable.yml`; `safe.yml` comes back clean |
-| 4 | `many-findings` | `many-findings` | all nine static groups are found; the table comes from the render plan |
+| 4 | `many-findings` | `many-findings` | all nine static groups are found and the render plan is requested (the table itself is judge-only) |
 | 5 | `impostor-check-skipped` | `inject` | the static scan completes with the network check off, and says it was skipped |
 
 Every entry also asserts nothing was committed or pushed. Each check carries
@@ -29,7 +29,9 @@ The fixtures stay cloaked because a registry scanner reads a tracked
     python3 maintainers/scripts/run_skill_evals.py --skill ci-secure [--id 3] [--runs 3] [--model M]
 
 Needs `claude` on `PATH` and PyYAML importable by `python3` (the scanner's one
-dependency). The skill is mounted as a copy without `evals/`, `CHANGELOG.md`
+dependency). The runner does not check for PyYAML: without it the scanner fails
+inside the session and the run exits 1, which reads as a behaviour change, so
+confirm `python3 -c "import yaml"` first. The skill is mounted as a copy without `evals/`, `CHANGELOG.md`
 and its oracle tests, so no answer key is on disk for the session. CI runs the
 same command in `.github/workflows/skill-evals.yml`.
 
@@ -48,11 +50,15 @@ failing sessions to `skill-eval-logs/`, both at the repo root.
 guard; a `trace` negative must not match `grep -n` output over the fixture;
 and each entry needs one positive `trace` check that only a completed engine
 run satisfies, with its `files` checks holding on the report the engine renders.
+A `tool_used` pattern keeps any alternation inside a group, so it stays bound
+to its tool. The vacuity rule covers the mounted skill only: the session runs
+with bypassed permissions, so it could still read committed sample reports
+elsewhere in the repository checkout; nothing in the prompts points it there.
 
 ## Dropped, and why
 
-These scenarios first ran on a ci-secure-only harness written for `claude
-plugin eval`. Moving to the shared runner dropped its seven `llm` graders: no
+These scenarios were first written as case files for `claude plugin eval`, and
+ran on a ci-secure-only stand-in harness while that command was early access. Moving to the shared runner dropped its seven `llm` graders: no
 regex can judge prose (attacker scenarios, a complete numbered table, honest
 scope and zero-findings wording), and nothing here runs a judge model. Their
 criteria are kept in each entry's `expected_output` so the intent is not lost.

@@ -114,7 +114,9 @@ entries are dated (UTC). Format loosely follows
   `case.yaml` files into `evals/evals.json`, the fixtures from `evals/files/`
   to `evals/fixtures/<slug>/` (still cloaked) with a Python `scaffold.py`, and
   the run command is now `maintainers/scripts/run_skill_evals.py --skill
-  ci-secure`. Every mechanical check keeps its exact regex. The seven `llm`
+  ci-secure`. Every mechanical check keeps its regex, target, match mode and
+  count bounds; the `tool_used` checks are re-anchored to the shared runner's
+  `<Tool> <json input>` record (`^Bash .*<old input match>`). The seven `llm`
   graders are dropped, since nothing here runs a judge model; their criteria
   live on in each entry's `expected_output`. The skill's own behaviour is
   unchanged.

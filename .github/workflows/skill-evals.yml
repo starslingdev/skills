@@ -59,7 +59,7 @@ on:
   workflow_dispatch:
     inputs:
       id:
-        description: "Single ci-secure evals.json entry id to run (blank = all five; ci-speedup always runs both entries)"
+        description: "Single ci-secure evals.json entry id to run, a number 1-5 (blank = all five; ci-speedup always runs both entries)"
         required: false
         type: string
       runs:
@@ -87,10 +87,11 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: starsling-ubuntu-24.04
     # Above the runner's own worst case: the five entries' per-session caps in evals.json sum
-    # to 85 minutes, so a lower budget here would kill a slow-but-healthy suite and
-    # report it as a behaviour change. A hung session must still not hold the pool: self-hosted
+    # to 85 minutes, plus about 10 for setup (checkout, pip, the CLI install, five scaffolds),
+    # so a lower budget here would kill a slow-but-healthy suite before it writes its results
+    # and report it as a behaviour change. A hung session must still not hold the pool: self-hosted
     # jobs otherwise queue for hours with no signal.
-    timeout-minutes: 90
+    timeout-minutes: 100
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
