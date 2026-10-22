@@ -17,10 +17,16 @@ entries are dated (UTC). Format loosely follows
   configured dependency update tool waits at least 3 days before proposing a
   fresh release (Dependabot `cooldown`, Renovate `minimumReleaseAge`), the
   prevention half of the install-script vector (P14.25). Not applicable when
-  neither tool is configured; a config this scan cannot parse (JSON5 syntax) is
-  unmeasured, never a pass or a fail. A Dependabot entry with no `cooldown` is
-  judged at Dependabot's own 3-day default and passes with that named.
-  Dependabot security updates are not delayed by a cooldown. (2026-10-22)
+  neither tool is configured; a config this scan cannot parse (a Renovate
+  config with comments or trailing commas, say) is unmeasured, never a pass or
+  a fail. A Dependabot entry with no `cooldown` is judged at Dependabot's own
+  3-day default (github.com; GHES from 3.23) and passes with that named.
+  Security updates are not delayed by either tool. **The config-fact aggregate
+  this skill hands ci-advisor gains a fact**: in a repository with Dependabot
+  or Renovate, `applicable_count` and `scored_count` each rise by one; with
+  neither, the fact is n/a and both are unchanged. A vendored CI gate run
+  without `--advisory` reds on a failing cooldown; the shipped workflow runs
+  with `--advisory`, which reports it without blocking. (2026-10-22)
 - ci-secure: `set +e; set -e; pytest -q` is recognised as a correctly wired
   suite. Reading the restore by physical line left an empty slice where all
   three share one line, failing a suite whose failure does end the job.

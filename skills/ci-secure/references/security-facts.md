@@ -40,9 +40,10 @@ Consumers bind to the ids, not to the sentences. ci-advisor blends from that
 block, and quantification belongs there, where the blend context carries the
 denominators.
 
-A fact that cannot be measured — an unscannable workflow file, or, for the two
-API-gated facts, no repository and no token — is **unmeasured, never a silent
-pass**: it scores nothing, stays in the applicable count as a
+A fact that cannot be measured — an unscannable workflow file; for the two
+API-gated facts, no repository and no token; or, for
+`sec.deps.update-cooldown`, an update config this scan cannot parse — is
+**unmeasured, never a silent pass**: it scores nothing, stays in the applicable count as a
 named coverage gap, and the block says so.
 
 A fact that **does not apply** is a different state and is treated differently.
@@ -329,10 +330,13 @@ two moved numbers.
     list): every entry is judged. An entry's `cooldown.default-days` must be
     3 or more, and so must every `semver-major-days` / `semver-minor-days` /
     `semver-patch-days` it sets — a long default beside a one-day patch window
-    still lets patch releases through in a day. An entry that sets only the
+    still lets patch releases through in a day. GitHub documents the semver
+    keys as applying only to package managers that support SemVer, and names
+    `docker`, `github-actions` and `terraform` as not; on those only
+    `default-days` is judged. An entry that sets only the
     semver keys passes when each one present is 3 or more, and the evidence
     says so (unlisted classes fall back to the default). An entry with **no**
-    `cooldown` is judged at Dependabot's own default: since July 14 2026
+    `cooldown` (or one that sets no day keys) is judged at Dependabot's own default: since July 14 2026
     Dependabot waits three days on github.com with no configuration (GitHub
     Enterprise Server from 3.23), which meets the threshold, so the entry
     passes and the evidence names it as relying on that default rather than
@@ -340,22 +344,26 @@ two moved numbers.
     judged.
   - **Renovate** (the first of `renovate.json`, `renovate.jsonc`,
     `renovate.json5`, the same three under `.github/`, `.renovaterc`,
-    `.renovaterc.json(c|5)`, or a `renovate` key in `package.json` — Renovate's
-    own search order): a top-level `minimumReleaseAge` of 3 days or more
-    (`"3 days"`, `"1 week"`, `"72 hours"`). A value set only inside
-    `packageRules` covers only the packages those rules match and does not
-    pass; neither does a preset in `extends` this scan cannot see into.
+    `.renovaterc.json`, `.renovaterc.jsonc`, `.renovaterc.json5`, or a
+    `renovate` key in `package.json` — Renovate's own search order): a
+    top-level `minimumReleaseAge` of 3 days or more (`"3 days"`, `"1 week"`,
+    `"72 hours"`, `"1 month"`; Renovate reads `M` as months and `m` as
+    minutes). A value set only inside `packageRules` covers only the packages
+    those rules match and does not pass; neither does a preset in `extends`
+    this scan cannot see into, and the fail says so when `extends` is set.
 
   Both tools configured: both must pass. Neither configured: **not
   applicable**, the same treatment `sec.gate.test-failure-fatal` gets — a
   repository with no update tool has nothing here to delay. A config this scan
-  cannot parse with the standard library and the YAML loader it already uses
-  (JSON5 comments, trailing commas, an age it cannot convert to days) is
-  **unmeasured**, never a pass and never a fail.
+  cannot read — a Dependabot file the YAML loader rejects, a Renovate config
+  that is not plain JSON (comments, trailing commas), or an age it cannot
+  convert to days — is **unmeasured**, never a pass and never a fail; the row
+  says to check the value by hand.
 
   **Security updates are not delayed.** GitHub documents that a Dependabot
-  cooldown applies to version updates only; a fix for a known vulnerability
-  still opens immediately. **To fix a fail**: `cooldown: { default-days: 7 }`
+  cooldown applies to version updates only, and Renovate documents that
+  security updates bypass `minimumReleaseAge`; a fix for a known
+  vulnerability still opens immediately. **To fix a fail**: `cooldown: { default-days: 7 }`
   on each Dependabot `updates` entry named, raising (or removing) any
   `semver-*-days` key under 3 on that entry and keeping its other `cooldown`
   keys, or `"minimumReleaseAge": "7 days"` at the top level of the Renovate

@@ -64,8 +64,8 @@ them to UNMEASURED — no pass, no fail, a stated reason, and they stay in the
 applicable count as a visible coverage gap (the same shape ci-speedup's
 speed_score uses). F3 and F10 read repo files and F8 a repository setting,
 not workflow YAML, and none of them is affected. F10 has its own unmeasured
-state: an update config this scan cannot parse (JSON5 syntax, say) is never a
-pass and never a fail.
+state: an update config this scan cannot parse (a Renovate config with
+comments, say) is never a pass and never a fail.
 
 THE REGISTERED SCORE — MACHINE-ONLY. This aggregate is NEVER rendered in the
 report (report.py prohibits it and tests/verify_report.py fails a report that
@@ -2191,6 +2191,10 @@ _DEPENDABOT_PLATFORM_DEFAULT_DAYS = 3
 _DEPENDABOT_FILES = (".github/dependabot.yml", ".github/dependabot.yaml")
 _COOLDOWN_DAY_KEYS = ("default-days", "semver-major-days",
                       "semver-minor-days", "semver-patch-days")
+# GitHub documents the `semver-*-days` keys as applying only to package
+# managers that support SemVer, and names these as not: they wait
+# `default-days`, so a semver key on them changes nothing.
+_NON_SEMVER_ECOSYSTEMS = frozenset({"docker", "github-actions", "terraform"})
 # Renovate's documented search order (it stops at the first match); the
 # `.gitlab/` copies are not read on GitHub. `package.json` is last.
 _RENOVATE_FILES = (
@@ -2202,6 +2206,10 @@ _AGE_RE = re.compile(
     r"^\s*(\d+(?:\.\d+)?)\s*(m|mins?|minutes?|h|hrs?|hours?|d|days?|w|weeks?|"
     r"y|yrs?|years?)\s*$", re.I)
 _AGE_UNIT_DAYS = {"m": 1 / 1440, "h": 1 / 24, "d": 1, "w": 7, "y": 365}
+# Renovate reads months itself before handing the rest to `ms`: a capital
+# `M` or `month(s)` is 30 days, while a lower-case `m` stays minutes.
+_AGE_MONTHS_RE = re.compile(
+    r"^\s*(\d+(?:\.\d+)?)\s*(?:M|[Mm][Oo][Nn][Tt][Hh][Ss]?)\s*$")
 
 
 def _renovate_age_days(value: object) -> float | None:
@@ -2209,6 +2217,9 @@ def _renovate_age_days(value: object) -> float | None:
     days, or None when this scan cannot read the value."""
     if not isinstance(value, str):
         return None
+    months = _AGE_MONTHS_RE.match(value)
+    if months:
+        return float(months.group(1)) * 30
     m = _AGE_RE.match(value)
     if not m:
         return None
@@ -2246,7 +2257,7 @@ def _dependabot_cooldown(root: Path) -> tuple[str, str] | None:
             where = ",".join(str(w) for w in where)
         label = f"{entry.get('package-ecosystem', '?')} {where}"
         cooldown = entry.get("cooldown")
-        if cooldown is None:
+        if cooldown is None or cooldown == {}:
             defaulted.append(label)
             if _DEPENDABOT_PLATFORM_DEFAULT_DAYS < _COOLDOWN_MIN_DAYS:
                 short.append(f"{label} (no cooldown)")
@@ -2254,7 +2265,13 @@ def _dependabot_cooldown(root: Path) -> tuple[str, str] | None:
         if not isinstance(cooldown, dict):
             unreadable.append(label)
             continue
-        days = {k: cooldown[k] for k in _COOLDOWN_DAY_KEYS if k in cooldown}
+        keys = (("default-days",)
+                if entry.get("package-ecosystem") in _NON_SEMVER_ECOSYSTEMS
+                else _COOLDOWN_DAY_KEYS)
+        days = {k: cooldown[k] for k in keys if k in cooldown}
+        if not days:
+            defaulted.append(label)
+            continue
         if any(isinstance(v, bool) or not isinstance(v, int)
                for v in days.values()):
             unreadable.append(label)
@@ -2279,9 +2296,10 @@ def _dependabot_cooldown(root: Path) -> tuple[str, str] | None:
                               f"cannot read ({_capped(unreadable, 3, ', ')})")
     notes = []
     if defaulted:
-        notes.append("relying on Dependabot's %d-day platform default (no "
-                     "`cooldown` set): %s" % (_DEPENDABOT_PLATFORM_DEFAULT_DAYS,
-                                              _capped(defaulted, 4, ", ")))
+        notes.append("relying on Dependabot's %d-day platform default "
+                     "(github.com, and GHES from 3.23; no cooldown days set): "
+                     "%s" % (_DEPENDABOT_PLATFORM_DEFAULT_DAYS,
+                             _capped(defaulted, 4, ", ")))
     if semver_only:
         notes.append("semver-specific keys only, unlisted classes on the "
                      "platform default: " + _capped(semver_only, 3, ", "))
@@ -2300,9 +2318,11 @@ def _renovate_cooldown(root: Path) -> tuple[str, str] | None:
             config = json.loads((root / found).read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, ValueError):
             return "unmeasured", (
-                f"unmeasured: {found} is not plain JSON (JSON5 comments, "
-                "trailing commas or unquoted keys are outside what this scan "
-                "parses), so its `minimumReleaseAge` cannot be read")
+                f"unmeasured: {found} is not plain JSON (comments, trailing "
+                "commas or unquoted keys are outside what this scan parses), "
+                "so its `minimumReleaseAge` cannot be read; check by hand "
+                "that it sets a top-level `minimumReleaseAge` of 3 days or "
+                "more")
     elif (root / "package.json").is_file():
         try:
             pkg = json.loads((root / "package.json").read_text(encoding="utf-8"))
@@ -2318,12 +2338,17 @@ def _renovate_cooldown(root: Path) -> tuple[str, str] | None:
     fix = (f"add `\"minimumReleaseAge\": \"7 days\"` at the top level of "
            f"{found}")
     if "minimumReleaseAge" not in config or config["minimumReleaseAge"] is None:
-        in_rules = any(isinstance(r, dict) and r.get("minimumReleaseAge")
-                       for r in config.get("packageRules") or [])
+        rules = config.get("packageRules")
+        in_rules = isinstance(rules, list) and any(
+            isinstance(r, dict) and r.get("minimumReleaseAge") for r in rules)
+        presets = config.get("extends")
         return "fail", (f"{found}: no top-level `minimumReleaseAge`"
                         + (" (set only inside `packageRules`, which covers "
                            "only the packages those rules match)"
-                           if in_rules else "") + f" — {fix}")
+                           if in_rules else "")
+                        + (" (presets in `extends` are not followed; if one "
+                           "sets it, set it here too to have it checked)"
+                           if presets else "") + f" — {fix}")
     value = config["minimumReleaseAge"]
     days = _renovate_age_days(value)
     if days is None:
@@ -2558,8 +2583,9 @@ def compute_config_facts(
         "dependency update tools wait at least %d days before proposing a "
         "fresh release (Dependabot `cooldown`, Renovate `minimumReleaseAge`), "
         "so a hijacked or typosquatted version is usually pulled before CI "
-        "installs it; Dependabot security updates are not delayed by a "
-        "cooldown" % _COOLDOWN_MIN_DAYS,
+        "installs it; security updates are not delayed (Dependabot's "
+        "cooldown and Renovate's `minimumReleaseAge` both let them through "
+        "at once)" % _COOLDOWN_MIN_DAYS,
         False, cd_outcome == "pass", cd_evidence, outcome=cd_outcome)
 
     return facts_to_score(facts)
