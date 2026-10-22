@@ -1,6 +1,6 @@
 # ci-speedup evals
 
-`evals.json` holds ten scenarios in Anthropic's skill-eval format. Most are
+`evals.json` holds thirteen scenarios in Anthropic's skill-eval format. Most are
 reference cases a maintainer runs by hand against public repositories. The
 entries that carry a `checks` list are also executed automatically, as real
 agent sessions, so a change to `SKILL.md` or `references/` that breaks the
@@ -12,8 +12,11 @@ audit turns a check red.
 |----|------|----------------|
 | 10 | `full-run-synthetic` | a full audit of the synthetic repository: the skill is invoked, `run.py` runs, the report names `ci.yml` / `CI / test` as long pole 1, `verify_report.py` passes, nothing is committed or pushed |
 | 6 | `security-ask-routes-to-ci-secure` | a security-posture request is answered by ci-secure (mounted beside ci-speedup), never by ci-speedup's pipeline |
+| 11 | `quality-review-opt81` | after the audit, the quality review checks the OPT81 runner-class card against its catalog entry and names the fork pull request caveat that exists only in that entry; the session must have read the `### OPT81` heading |
+| 12 | `gap-fill-coverage-lookup` | before a gap-fill, the agent looks up whether a dependency compiled from source on one matrix leg is already a catalog pattern and names OPT86 (a manual pattern no script names); reading is recorded |
+| 13 | `no-catalog-read-needed` | a question the measured report answers on its own (the typical wait, the slowest check); whether the catalog was opened is recorded, not asserted |
 
-Both use the `synthetic` fixture (`fixtures/synthetic/scaffold.py`), which
+All but 12 use the `synthetic` fixture (`fixtures/synthetic/scaffold.py`), which
 builds the repository and gh replay corpus of `tests/test_offline_pipeline_e2e.py`
 with that test's own helpers. Every run-history read is answered offline from
 the corpus, so the report's numbers are fixed. The agent's own `gh repo view` /
@@ -27,9 +30,58 @@ Optional entry fields: `fixture` (scaffold under `fixtures/`), `plugins`
 `{name, type, pattern, match?, min?, max?}`: `tool_used` counts tool calls
 whose `"<Tool> <json input>"` matches `pattern` (default `min` 1); `trace`,
 `files` and `last_message` search the transcript, the files the session
-wrote, or its final message (`match`: `contains` or `not_contains`). No
-`trace`/`files`/`last_message` pattern may match text the agent can read in
-the skill; `tests/test_ci_speedup_evals.py` enforces it.
+wrote, or its final message (`match`: `contains` or `not_contains`); `reading`
+counts one field of the session's reading record (below) as `{field,
+pattern?, min?, max?}`. No `trace`/`files`/`last_message` pattern may match
+text the agent can read in the skill; `tests/test_ci_speedup_evals.py`
+enforces it.
+
+## Reading accounting
+
+Every run also records how much of `references/` the session pulled into its
+context, because the catalog refactor's claim is "same report, less reading".
+`maintainers/scripts/eval_reading.py` pairs each `Read` call, each `Grep` call
+in `content` mode, and each `Bash` call with a command that prints file content
+(`cat`, `sed`, `head`, `tail`, `grep`, `egrep`, `fgrep`, `rg`, `less`, `more`,
+`awk`, `nl`, `jq`, `tac`, `cut`, `sort`, `uniq`, `strings`, `bat`, `diff`, an
+`xargs` or `find -exec` feeding one of these, and inline `perl` / `python` /
+`ruby` / `node` scripts) with its tool result and charges the result's bytes
+and lines to the reference file(s) the call names (including `$VAR/references/`,
+`cd .../references` then a bare file name, globs, and directory-wide greps,
+split per output line). A search from the skill root or above is charged per
+output line to the `references/<file>` its path prefix names. Each results row
+carries `reading: {reference_bytes, reference_lines, reference_files: [{path,
+bytes, lines, calls}], catalog_opened, catalog_entries_read,
+unattributed_calls}`, and the PASS / FAIL line carries a compact figure such as
+`refs 16.0 KB in 2 files, catalog opened; session 175k in, 23s wall`.
+A failed read counts nothing, a catalog entry counts as read only when its
+`##` or `###` heading comes with some of its body (an index grep reads none),
+and paths that reach another copy (a URL, `gh api`, `$HOME`, or a `cd` to
+another install) are not the copy under test. Name-only output reads nothing
+(`Grep` in its default `files_with_matches` mode, `grep -l` / `-c`, `ls`,
+`find`, `wc`). A `Bash` call that names a mounted reference file in a command
+the tracker cannot read (`cp`, a script) is counted in `unattributed_calls`
+and shown in the figure, never silently dropped. It measures what the agent
+saw, not what it asked for: a `sed -n` of one entry costs that entry, a full
+`Read` of the catalog costs the whole file. Reads by a subagent count only as
+far as the stream carries them.
+
+To prove a reading check is sensitive, run it with the entry it needs cut from
+the session's copy of the catalog (the repository is not touched). The wrapper
+also blocks the published copy on GitHub, which a session denied the local
+entry otherwise fetches (seen with both `curl` and `gh api`): web clients that
+honour the proxy variables reach only the model API, and `gh` refuses the
+publishing repository. It exits non-zero if no mounted copy was cut:
+
+    python3 maintainers/ci-speedup/scripts/eval_withhold_entry.py OPT81 --id 11 --model M
+
+## Baseline
+
+`maintainers/ci-speedup/evals/baseline/2026-10-22/` holds the committed
+baseline on the unsplit catalog: five runs of every runnable entry with a
+pinned model, the per-run results JSON, and `summary.md` (per case: median and
+range of reference bytes, files read, input tokens, wall time, and pass counts
+per check). Re-running it: `maintainers/ci-speedup/MAINTAINERS.md`.
 
 ## How to run
 
@@ -50,8 +102,10 @@ A 2 is a coverage gap, never a behaviour change.
 
 ## Cost
 
-About $0.40 to $0.65 and 30 to 95 seconds per run (measured on claude 2.1.307
-locally and the pinned 2.1.235 in CI).
+In the 2026-10-22 baseline (claude 2.1.308, locally): $0.23 to
+$0.39 and 17 to 69 seconds for entries 6, 10, 12 and 13; $0.41 to $1.18 and
+47 to 153 seconds for entry 11, which may start two review subagents. One run
+of all five entries is about $2.10.
 Tokens, duration and cost per run are printed and written to
 `skill-eval-results/` at the repo root (gitignored); failing sessions are kept
 in `skill-eval-logs/`.

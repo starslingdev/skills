@@ -37,7 +37,7 @@ on:
       - "skills/ci-secure/references/**"
       - "skills/ci-secure/scripts/**"
       - "skills/ci-secure/evals/**"
-      # ci-speedup's two runnable evals.json entries. One workflow-level filter for both
+      # ci-speedup's five runnable evals.json entries. One workflow-level filter for both
       # suites, so a change to either skill runs both (no classifier job by design).
       - "skills/ci-speedup/SKILL.md"
       - "skills/ci-speedup/references/**"
@@ -50,6 +50,7 @@ on:
       - "skills/ci-speedup/tests/fixtures/gh_replay/**"
       - "maintainers/scripts/run_skill_evals.py"
       - "maintainers/scripts/eval_gh_shim.py"
+      - "maintainers/scripts/eval_reading.py"
       - ".github/workflows/skill-evals.yml"
 
   # Manual: run it against any branch on demand, from the Actions tab or
@@ -59,7 +60,7 @@ on:
   workflow_dispatch:
     inputs:
       id:
-        description: "Single ci-secure evals.json entry id to run, a number 1-5 (blank = all five; ci-speedup always runs both entries)"
+        description: "Single ci-secure evals.json entry id to run, a number 1-5 (blank = all five; ci-speedup always runs all five entries)"
         required: false
         type: string
       runs:
@@ -167,17 +168,17 @@ jobs:
           if-no-files-found: ignore
 
 
-  # ci-speedup's runnable evals.json entries (a full audit of the synthetic repo against its
-  # offline replay corpus, and the security ask that must route to ci-secure), run by the
-  # shared runner. Same trust model as `evals` above.
+  # ci-speedup's five runnable evals.json entries (a full audit of the synthetic repo against
+  # its offline replay corpus, the security ask that must route to ci-secure, and three
+  # reading-sensitive cases), run by the shared runner. Same trust model as `evals` above.
   ci-speedup-evals:
     name: ci-speedup skill evals
     if: >-
       github.event_name == 'workflow_dispatch' ||
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: starsling-ubuntu-24.04
-    # Two entries at the runner's 1500s per-session cap, plus the scaffold.
-    timeout-minutes: 60
+    # Five entries at the runner's 1500s per-session cap, plus the scaffold.
+    timeout-minutes: 135
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0

@@ -59,7 +59,22 @@ _MOVED_NAMES = {
     "eval_gh_shim.py",
     "test_shared_skill_eval_runner.py",
     "test_eval_gh_shim.py",
+    # Reading accounting, the eval baseline tools, and their tests.
+    "eval_reading.py",
+    "test_eval_reading.py",
+    "eval_withhold_entry.py",
+    "eval_baseline_summary.py",
+    "test_eval_baseline_tools.py",
 }
+
+
+def test_eval_baseline_lives_under_maintainers_never_in_the_install():
+    """The committed eval baseline (per-run results + summary) is maintainer data:
+    it must exist under maintainers/ci-speedup/evals/baseline/ and nowhere under skills/."""
+    baselines = _MAINT / "evals" / "baseline"
+    assert list(baselines.glob("*/summary.md")), "no committed eval baseline summary"
+    assert not [p for p in (_REPO / "skills").rglob("*")
+                if p.is_dir() and p.name == "baseline"]
 
 
 def test_no_skill_eval_results_dir_under_skills():

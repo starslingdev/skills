@@ -190,6 +190,7 @@ def test_the_workflow_asks_for_no_more_than_read_access():
     "skills/ci-speedup/tests/test_offline_pipeline_e2e.py",
     "skills/ci-speedup/tests/fixtures/gh_replay/"
     "repos_synthetic_repo_branches_main_protection_required_status_checks.json",
+    "maintainers/scripts/eval_reading.py",  # the runner imports it; a break is exit 2
 ])
 def test_the_path_filter_covers_the_ci_speedup_eval_inputs(rel):
     """The session runs verify_report.py, and the synthetic fixture is built by
@@ -200,6 +201,15 @@ def test_the_path_filter_covers_the_ci_speedup_eval_inputs(rel):
     doc = _doc()
     paths = (doc.get("on") or doc[True])["pull_request"]["paths"]
     assert any(fnmatch(rel, p) for p in paths), f"{rel} matches no filter path"
+
+
+def test_the_ci_speedup_job_budget_covers_every_entry_at_the_session_cap():
+    """The job runs every runnable entry at the runner's default 1500s cap; a
+    job timeout below that kills a slow-but-healthy run and reads as a failure."""
+    import json
+    evals = json.loads((_REPO / "skills" / "ci-speedup" / "evals" / "evals.json").read_text(encoding="utf-8"))
+    worst_minutes = sum(1 for e in evals["evals"] if e.get("checks")) * 1500 / 60
+    assert _job("ci-speedup-evals")["timeout-minutes"] >= worst_minutes, worst_minutes
 
 
 @pytest.mark.parametrize("job_id", ["evals", "ci-speedup-evals"])

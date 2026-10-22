@@ -17,7 +17,9 @@ import pytest
 _SKILL = Path(__file__).resolve().parents[1]
 _EVALS = json.loads((_SKILL / "evals" / "evals.json").read_text(encoding="utf-8"))
 _RUNNABLE = [e for e in _EVALS["evals"] if e.get("checks")]
-_TYPES = {"tool_used", "trace", "files", "last_message"}
+_TYPES = {"tool_used", "trace", "files", "last_message", "reading"}
+_READING_FIELDS = {"reference_bytes", "reference_lines", "reference_files",
+                   "catalog_opened", "catalog_entries_read"}
 
 
 def _agent_readable() -> list[Path]:
@@ -35,11 +37,12 @@ def _agent_readable() -> list[Path]:
     return out
 
 
-def test_two_entries_are_runnable_and_ids_are_unique():
+def test_five_entries_are_runnable_and_ids_are_unique():
     ids = [e["id"] for e in _EVALS["evals"]]
     assert len(ids) == len(set(ids))
     assert {e["name"] for e in _RUNNABLE} == {
-        "full-run-synthetic", "security-ask-routes-to-ci-secure"}
+        "full-run-synthetic", "security-ask-routes-to-ci-secure", "quality-review-opt81",
+        "gap-fill-coverage-lookup", "no-catalog-read-needed"}
 
 
 @pytest.mark.parametrize("entry", _RUNNABLE, ids=lambda e: e["name"])
@@ -48,7 +51,10 @@ def test_every_check_is_well_formed(entry):
     for c in entry["checks"]:
         assert c["type"] in _TYPES, c
         assert c.get("match", "contains") in ("contains", "not_contains"), c
-        re.compile(c["pattern"])
+        if c["type"] == "reading":
+            assert c["field"] in _READING_FIELDS, c
+            assert set(c) <= {"name", "type", "field", "pattern", "min", "max"}, c
+        re.compile(c.get("pattern", ""))
     for name in entry.get("plugins", []):
         assert (_SKILL.parent / name / "SKILL.md").is_file(), name
 
@@ -67,7 +73,7 @@ def test_no_text_check_matches_anything_the_agent_can_read():
     hits = []
     for entry in _RUNNABLE:
         for c in entry["checks"]:
-            if c["type"] == "tool_used":
+            if c["type"] in ("tool_used", "reading"):
                 continue
             pat = re.compile(c["pattern"])
             hits += [(c["name"], p.relative_to(_SKILL).as_posix()) for p in files
@@ -91,3 +97,38 @@ def test_nothing_committed_check_sees_multiline_bash(command, expected):
                if c["name"] == "nothing-committed-or-pushed")
     call = "Bash " + json.dumps({"command": command})
     assert len(re.findall(pat, call)) == expected, call
+
+
+@pytest.mark.parametrize("answer,ok", [
+    ("MISSING-FROM-CARD: non-standard runner labels are often unavailable to fork pull requests", True),
+    ("MISSING-FROM-CARD: The faster runner label isn't available to fork PRs.", True),
+    ("MISSING-FROM-CARD: larger runners aren't offered to PRs from forks", True),
+    ("MISSING-FROM-CARD: none, the card already says a fork pull request can select the slower label", False),
+    ("MISSING-FROM-CARD: fork PRs get no repo secrets and can't reach upstream branch caches", False),
+])
+def test_the_fork_caveat_check_takes_the_caveat_and_only_the_caveat(answer, ok):
+    """The card itself mentions forks, so `fork` plus any negation is not the caveat:
+    it must say a runner/label is not available to fork PRs, and `none` never passes."""
+    entry = next(e for e in _RUNNABLE if e["name"] == "quality-review-opt81")
+    check = next(c for c in entry["checks"] if c["name"] == "names-the-catalog-only-fork-caveat")
+    assert bool(re.search(check["pattern"], "Review done.\n" + answer)) is ok
+
+
+def test_reading_check_patterns_name_real_catalog_entries_and_reference_files():
+    """A typo'd id or file name in a reading pattern would make a `max` check
+    pass and a `min` check fail for the wrong reason."""
+    catalog = (_SKILL / "references" / "optimization-patterns.md").read_text(encoding="utf-8")
+    names = {p.relative_to(_SKILL / "references").as_posix()
+             for p in (_SKILL / "references").rglob("*") if p.is_file()}
+    for entry in _RUNNABLE:
+        for c in entry["checks"]:
+            if c["type"] != "reading" or "pattern" not in c:
+                continue
+            pat = c["pattern"].replace("\\.", ".")
+            ids = re.findall(r"OPT\d+", pat)
+            if c["field"] == "catalog_entries_read":
+                assert ids, c
+            for i in ids:
+                assert re.search(rf"(?m)^#{{2,3}} {i} — ", catalog), (c["name"], i)
+            for f in re.findall(r"[\w-]+\.(?:md|tsv|json)", pat):
+                assert f in names, (c["name"], f)
