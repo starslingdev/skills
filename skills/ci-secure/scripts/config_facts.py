@@ -1739,8 +1739,12 @@ def _is_admin_only_403(message: str) -> bool:
 # the status AND the reason — which the comment used to claim while the regex
 # was a bare `\b404\b`, so a branch renamed between the two calls, a
 # plan-gated endpoint, even a 502 quoting 404 in its body, all read as
-# "nothing required here": a measured PASS over a source never read.
-_NOT_PROTECTED_404_RE = re.compile(r"\b404\b.*branch not protected", re.I | re.S)
+# "nothing required here": a measured PASS over a source never read. Either
+# order: `gh_utils` raises with gh's stderr alone, which puts the reason first
+# (`gh: Branch not protected (HTTP 404)`).
+_NOT_PROTECTED_404_RE = re.compile(
+    r"\b404\b.*branch not protected|branch not protected.*\b404\b",
+    re.I | re.S)
 
 
 def _is_not_protected_404(exc: Exception) -> bool:
@@ -2268,7 +2272,10 @@ def _code_owner_review_via_gh(repo: str) -> tuple[bool | None, str]:
         if _is_not_protected_404(exc):
             classic_require = False
         else:
-            classic_error = f"classic branch protection: {str(exc).strip()}"
+            classic_error = (
+                f"classic branch protection: {str(exc).strip()} (only "
+                "repository admins can read it; an admin's re-run, or the "
+                "branch's settings page, settles it)")
             # The classic endpoint is admin-only, so auditing someone else's
             # repository lands here (403, or a bare 404 GitHub also answers
             # to non-admins). The public branch endpoint's `protected` flag
@@ -2337,14 +2344,16 @@ def _codeowners_enforced(
     if required:
         return "pass", (
             f"{evidence}, and {detail} requires review from Code Owners, so a "
-            "workflow change cannot merge without an owner's approval")
+            "workflow change cannot merge without an owner's approval, except "
+            "by an actor the rule lets bypass it")
     return "fail", (
         f"{evidence}, but on {detail} neither a ruleset nor classic branch "
         "protection requires review from Code Owners: CODEOWNERS requests an "
         "owner's review, and the merge rules do not require it, so any "
         "approver can merge a workflow change. Turn on \"Require review from "
-        "Code Owners\" in the branch's ruleset (its pull request rule) or in "
-        "its branch protection")
+        "Code Owners\" in the pull request rule of a ruleset that targets the "
+        "branch, or in its branch protection — creating one that requires a "
+        "pull request first if the branch has neither")
 
 
 # --- the fact table -----------------------------------------------------------

@@ -18,10 +18,12 @@ vector detectors are lexical rather than confirmed exploit proofs, and a public
 number must not grade a stranger's repo down on an unconfirmed match.
 
 **The denominator is token-dependent, so the aggregate is not comparable
-across scans run under different auth.** Two of the nine facts read the GitHub
-API. In a repository where every fact applies, a scan with no repository or no
-token measures seven of nine and scores `100 × passed / 7`; the same repository
-scanned with a token scores over nine. A fact that does not apply to the
+across scans run under different auth.** Up to three of the nine facts read
+the GitHub API (the CODEOWNERS fact only once a CODEOWNERS rule covers the
+workflows). In a repository where every fact applies and that rule exists, a
+scan with no repository or no token measures six of nine and scores
+`100 × passed / 6`; the same repository scanned with a token that can read
+every source scores over nine. A fact that does not apply to the
 repository at all leaves the denominator on top of that (see below), so both
 numbers drop by one in a repository whose workflows run no suite.
 The unmeasured ids are named in the block's `unmeasured` list and the caveat, so

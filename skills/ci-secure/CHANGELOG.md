@@ -175,7 +175,14 @@ entries are dated (UTC). Format loosely follows
   on a branch the public branch endpoint reports as protected). A reader
   without admin access still gets a measured fail when that endpoint reports
   the branch unprotected, since then no classic protection exists. The
-  fact's label now says the rule must be enforced.
+  fact's label now says the rule must be enforced. A covering CODEOWNERS
+  that used to pass now reads as unmeasured in every scan without a
+  repository and token, the vendored CI gate included, so the scored count
+  there drops by one; that is a coverage gap stated out loud, not a
+  regression. Two fixes ride along: gh's real "Branch not protected" 404
+  (reason before status) is now recognised as an answer, which also lets
+  `sec.required-checks.skippable` measure ruleset-only branches read by an
+  admin, and the branch name is escaped in every API path.
 - **2026-10-10** — **A self-repository action (`uses: $/path`, GitHub
   2026-07-30) run after a checkout of the fork's head now counts as fork code
   executed with privileges, exactly like a `./` action or a `run:` step.** A

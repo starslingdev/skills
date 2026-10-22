@@ -190,7 +190,7 @@ Contract lines, all mandatory:
   contradiction, because a grade and a scan measure different things. Compose
   no `Security score:` line, no ratio, no percentage, no `N/100`. Read the
   report's `## 🧰 Config hygiene checks — pass/fail` table and NAME what
-  failed: `One hygiene gap: no reviewer rule covers your workflow files.` Two
+  failed: `One hygiene gap: no enforced reviewer rule covers your workflows.` Two
   or more: name each, one short clause apiece. All passing: `All config
   hygiene checks pass.` Unmeasured is a coverage gap, n/a did not apply to
   this repo: say each as itself, never as a pass and never as nothing.

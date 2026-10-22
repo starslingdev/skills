@@ -238,8 +238,12 @@ rules applies to an install PR as much as to a fix PR.
    it runs.** On `pull_request` GitHub checks out the PR's tree, so both
    `.github/workflows/ci-secure.yml` and the vendored `ci-secure/` are
    the PR's versions. Tell them to require review on **both** paths
-   before making `ci-secure` a required check. A CODEOWNERS entry for
-   `.github/` is one of the facts this gate checks; `/ci-secure/` is not
+   before making `ci-secure` a required check: a CODEOWNERS entry for
+   each path AND "Require review from Code Owners" turned on for the
+   branch, since without that setting CODEOWNERS only requests the
+   owner's review. The gate fails only on a MISSING CODEOWNERS entry
+   for `.github/workflows/` (whether the branch enforces it is
+   unmeasured here, item 5); `/ci-secure/` is not checked at all
    — nothing checks it for them, and `.github/` alone leaves the gate,
    the engine, `config.py` (which defines which outcomes block) and the
    manifest editable by an ordinary approval. Hashing does not help

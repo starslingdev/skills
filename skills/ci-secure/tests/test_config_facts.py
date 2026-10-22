@@ -674,15 +674,19 @@ def _owner_review_fact(tmp_path, rules, classic, *, repo="owner/repo",
 
 
 def test_codeowners_enforced_by_a_ruleset_passes(tmp_path):
-    f, _ = _owner_review_fact(tmp_path, _PR_RULE_OWNER_REVIEW, _ADMIN_403)
+    f, calls = _owner_review_fact(tmp_path, _PR_RULE_OWNER_REVIEW, _ADMIN_403)
     assert f["outcome"] == "pass", f
-    assert "require" in f["evidence"].lower(), f
+    assert "a ruleset on branch `main`" in f["evidence"], f
+    # A ruleset's yes settles it: the admin-only classic endpoint is not asked.
+    assert calls == ["repos/owner/repo",
+                     "repos/owner/repo/rules/branches/main"], calls
 
 
 def test_codeowners_enforced_by_classic_protection_only_passes(tmp_path):
     f, _ = _owner_review_fact(tmp_path, _PR_RULE_NO_OWNER_REVIEW,
                               _CLASSIC_OWNER_REVIEW)
     assert f["outcome"] == "pass", f
+    assert "classic branch protection on `main`" in f["evidence"], f
 
 
 def test_codeowners_not_enforced_by_either_readable_source_fails(tmp_path):
@@ -706,6 +710,29 @@ def test_codeowners_with_no_rules_and_no_classic_protection_fails(tmp_path):
     assert f["outcome"] == "fail", f
 
 
+# What `gh_utils.run_gh_api` actually raises for an admin reading classic
+# protection on a branch that has none: `API call failed: ` plus gh's stderr
+# only, the reason BEFORE the status (checked against a live repository).
+_REAL_GH_NOT_PROTECTED_404 = RuntimeError(
+    "API call failed: gh: Branch not protected (HTTP 404)\n")
+
+
+def test_the_real_gh_not_protected_404_is_an_answer():
+    assert cf._is_not_protected_404(_REAL_GH_NOT_PROTECTED_404)
+    assert not cf._is_not_protected_404(
+        RuntimeError("API call failed: gh: Not Found (HTTP 404)\n"))
+
+
+def test_a_ruleset_only_branch_read_by_an_admin_fails(tmp_path):
+    """The common ruleset-only repository, read with admin access: the
+    rulesets do not require owner review, and classic protection answers
+    gh's real "Branch not protected" 404. Both sources were read, so this is
+    a measured fail, not a coverage gap."""
+    f, _ = _owner_review_fact(tmp_path, _PR_RULE_NO_OWNER_REVIEW,
+                              _REAL_GH_NOT_PROTECTED_404)
+    assert f["outcome"] == "fail", f
+
+
 def test_codeowners_covered_without_a_repo_is_unmeasured(tmp_path):
     f, calls = _owner_review_fact(tmp_path, _PR_RULE_OWNER_REVIEW,
                                   _CLASSIC_OWNER_REVIEW, repo=None)
@@ -721,7 +748,10 @@ def test_codeowners_ruleset_says_no_and_classic_403_is_unmeasured(tmp_path):
     neither a pass nor a fail."""
     f, _ = _owner_review_fact(tmp_path, _PR_RULE_NO_OWNER_REVIEW, _ADMIN_403)
     assert f["outcome"] == "unmeasured", f
-    assert "unmeasured" in f["evidence"], f
+    ev = f["evidence"]
+    assert "its rulesets do not require it" in ev, ev
+    assert "classic branch protection: " in ev, ev
+    assert "only repository admins can read" in ev, ev
 
 
 _BARE_404 = RuntimeError(
@@ -767,16 +797,61 @@ def test_an_unreadable_branch_endpoint_stays_unmeasured(tmp_path):
 def test_an_unprotected_branch_does_not_rescue_unreadable_rulesets(tmp_path):
     """The branch fallback stands in for CLASSIC protection only. With the
     rulesets themselves unread there is still no answer."""
-    f, _ = _owner_review_fact(
+    f, calls = _owner_review_fact(
         tmp_path, RuntimeError("HTTP 500"), _ADMIN_403,
         branch={"name": "main", "protected": False})
     assert f["outcome"] == "unmeasured", f
+    assert "repos/owner/repo/branches/main" not in calls, calls
 
 
 def test_codeowners_ruleset_unreadable_is_unmeasured_not_a_fail(tmp_path):
     f, _ = _owner_review_fact(tmp_path, RuntimeError("HTTP 500"),
                               _CLASSIC_NO_OWNER_REVIEW)
     assert f["outcome"] == "unmeasured", f
+    ev = f["evidence"]
+    assert "classic branch protection does not require it" in ev, ev
+    assert "rulesets: " in ev, ev
+
+
+def test_a_branch_body_without_the_protected_key_settles_nothing(tmp_path):
+    """Only an explicit `protected: false` is a readable "no protection"; an
+    absent key is not an answer."""
+    f, _ = _owner_review_fact(tmp_path, _PR_RULE_NO_OWNER_REVIEW, _ADMIN_403,
+                              branch={"name": "main"})
+    assert f["outcome"] == "unmeasured", f
+
+
+def test_no_authenticated_gh_is_unmeasured_and_says_so():
+    class _NoGh:
+        @staticmethod
+        def check_prereqs():
+            return False
+
+        @staticmethod
+        def run_gh_api(path, **kw):
+            raise AssertionError(f"no call expected, got {path}")
+
+    with mock.patch.object(cf, "_gh_utils", lambda: _NoGh):
+        required, detail = cf._code_owner_review_via_gh("owner/repo")
+    assert required is None, detail
+    assert "gh auth login" in detail, detail
+
+
+def test_a_fetcher_that_raises_is_unmeasured_not_a_crash(tmp_path):
+    root, files = _repo(tmp_path, {"ci.yml": _SAFE_WF},
+                        codeowners="/.github/workflows/ @sec-team\n")
+
+    def boom(repo):
+        raise RuntimeError("socket closed")
+
+    out = cf.compute_config_facts(
+        root, files, [], repo="owner/repo",
+        required_contexts_fetcher=lambda r: ([], "branch `main`"),
+        fork_approval_fetcher=lambda r: ("first_time_contributors", "x"),
+        codeowner_review_fetcher=boom)
+    f = _outcome(out, _CO_FACT)
+    assert f["outcome"] == "unmeasured", f
+    assert "socket closed" in f["evidence"], f
 
 
 @pytest.mark.parametrize("branch,segment", [
@@ -1403,7 +1478,7 @@ def test_a_scan_gap_forces_the_fact_unmeasured(tmp_path):
     assert _outcome(out, _FACT)["outcome"] == "unmeasured"
 
 
-def test_the_fact_table_carries_both_api_gated_facts(tmp_path):
+def test_the_fact_table_carries_every_api_gated_fact(tmp_path):
     out = _facts_with(tmp_path, {"ci.yml": _VERDICT_PATTERN}, ["test"])
     assert out["applicable_count"] == 9
     assert out["scored_count"] == 9
