@@ -24,7 +24,8 @@ unversioned and updates by reinstall from `main`.
   Five runs of each runnable eval on today's single-file catalog are committed
   as the baseline the upcoming catalog split is measured against. Name-only
   listings (`grep -l`, `ls`) count as no reading, a search from the skill root
-  counts the reference lines it printed, and a command the accounting cannot
+  counts the reference lines it printed, a shell command that exits non-zero
+  still counts what it printed, and a command the accounting cannot
   read is reported as unattributed rather than dropped. The skill's
   instructions and catalog are unchanged; only its eval definitions and
   maintainer tooling change.
