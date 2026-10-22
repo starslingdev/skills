@@ -439,7 +439,10 @@ only caught by re-running across repos).
 
 `skills/ci-speedup/evals/evals.json` entries that carry `checks` run as real
 headless agent sessions: `python3 maintainers/scripts/run_skill_evals.py --skill ci-speedup`
-(add `--id 10` for one entry, `--runs 3` to gauge flakiness). The `synthetic`
+(add `--id 10` for one entry, `--runs 3` to gauge flakiness). That runs the
+`gate` tier, up to five sessions at once; entry 11 (`quality-review-opt81`) is
+tier `measure` and needs `--tier measure` or `--all` (it exists for the catalog
+before/after and the baseline, not as a per-PR check). The `synthetic`
 fixture builds the offline e2e test's repository and replays its gh corpus, and
 `maintainers/scripts/eval_gh_shim.py` answers the agent's own `gh` calls about
 that repository from the same corpus. Each run costs about $0.40 to $0.65 and
@@ -456,8 +459,10 @@ change is judged against is committed under
 runs of every runnable entry, plus `summary.md`. To re-run it, on a clean
 branch of the commit you want to measure: run each entry five times with the
 same pinned model the existing baseline names (`--model`, recorded in its
-`summary.md`), one entry per invocation and at most two invocations at once
-(the full-run entries share the agent's `/tmp` scratch, so run 10, 11 and 13
+`summary.md`), one entry per invocation with `--all` so entry 11 is included,
+and at most two invocations at once (the full-run entries 10, 11 and 13 write
+fixed `/tmp` scratch paths; within one invocation the runner's `serial` flag
+makes them take turns, but across invocations nothing does, so run those three
 one after another), copy the `skill-eval-results/ci-speedup-*.json` files into
 a new dated directory, regenerate the table with
 `python3 maintainers/ci-speedup/scripts/eval_baseline_summary.py <dir>`, grep

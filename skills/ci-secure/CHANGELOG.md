@@ -109,6 +109,13 @@ entries are dated (UTC). Format loosely follows
 
 ### Changed
 
+- **2026-10-22** — **The five eval scenarios now run at the same time.** The
+  shared eval runner starts every session at once (at most five; `--jobs N` or
+  `SKILL_EVALS_JOBS` to change it), each in its own sandbox, skill copy and
+  temp dir, and prints each verdict as its session finishes. The suite takes
+  about as long as its slowest case instead of the sum of all five, and the CI
+  job's timeout drops from 100 to 45 minutes to match. All five stay in the
+  per-PR `gate` tier; the checks and the skill's behaviour are unchanged.
 - **2026-10-22** — **The five eval scenarios run on the shared eval runner,
   and ci-secure's own harness is retired.** The cases moved from five
   `case.yaml` files into `evals/evals.json`, the fixtures from `evals/files/`

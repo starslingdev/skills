@@ -157,19 +157,89 @@ def test_the_claude_cli_is_pinned():
         f"pin the CLI version; got {step['run'].strip()!r}")
 
 
-def test_the_job_budget_exceeds_the_harness_own_worst_case():
+def _runner_module():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "runner_for_budget", _REPO / "maintainers" / "scripts" / "run_skill_evals.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.mark.parametrize("job_id,skill", [("evals", "ci-secure"),
+                                          ("ci-speedup-evals", "ci-speedup")])
+def test_the_job_budget_exceeds_the_harness_own_parallel_worst_case(job_id, skill,
+                                                                    monkeypatch):
     """A slow-but-healthy suite killed by the job timeout is reported as a
-    behaviour change. 1500 is the shared runner's default --timeout."""
+    behaviour change. Sessions run in parallel, so the worst case is the
+    number of rounds the default parallelism needs times the longest session
+    cap (1500s is the runner's default --timeout), or the `serial` entries'
+    caps end to end if that is longer. Every tier counts: the `all` dispatch
+    runs the measure entries too."""
     import json
-    spec = json.loads((_EVALS / "evals.json").read_text(encoding="utf-8"))
-    worst_seconds = sum(e.get("timeout", 1500) for e in spec["evals"] if e.get("checks"))
-    assert worst_seconds > 0
-    # Setup (checkout, pip, the CLI install, five scaffolds) also spends the job
+    import math
+    monkeypatch.delenv("SKILL_EVALS_JOBS", raising=False)
+    runner = _runner_module()
+    spec = json.loads((_REPO / "skills" / skill / "evals" / "evals.json").read_text(encoding="utf-8"))
+    runnable = [e for e in spec["evals"] if e.get("checks")]
+    caps = [e.get("timeout", 1500) for e in runnable]
+    rounds = math.ceil(len(caps) / runner.default_jobs(len(caps)))
+    serial = sum(e.get("timeout", 1500) for e in runnable if e.get("serial"))
+    worst_minutes = max(rounds * max(caps), serial) / 60
+    # Setup (checkout, pip, the CLI install, the scaffolds) also spends the job
     # budget, and a job killed at its timeout writes no results file to upload.
     setup_minutes = 10
-    assert _job("evals")["timeout-minutes"] >= worst_seconds / 60 + setup_minutes, (
-        f"{worst_seconds / 60:.0f} minutes of per-run budget plus {setup_minutes} of "
-        f"setup under a {_job('evals')['timeout-minutes']}-minute job timeout")
+    budget = _job(job_id)["timeout-minutes"]
+    assert budget >= worst_minutes + setup_minutes, (
+        f"{worst_minutes:.0f} minutes of session budget plus {setup_minutes} of "
+        f"setup under a {budget}-minute job timeout")
+    # A hung session must not hold the self-hosted pool for the old serial sum.
+    assert budget <= worst_minutes + setup_minutes + 15, budget
+
+
+def test_the_dispatch_offers_the_three_tiers_and_defaults_to_the_gate():
+    doc = _doc()
+    tier = (doc.get("on") or doc[True])["workflow_dispatch"]["inputs"]["tier"]
+    assert tier["type"] == "choice" and tier["options"] == ["gate", "measure", "all"]
+    assert tier.get("default") == "gate"
+
+
+@pytest.mark.parametrize("job_id", ["evals", "ci-speedup-evals"])
+@pytest.mark.parametrize("tier,want,unwanted", [
+    ("", [], ["--all", "--tier"]),          # pull_request: no inputs at all
+    ("gate", [], ["--all", "--tier"]),
+    ("measure", ["--tier measure"], ["--all"]),
+    ("all", ["--all"], ["--tier"]),
+])
+def test_the_tier_input_reaches_the_runner_and_the_default_passes_no_all(job_id, tier, want,
+                                                                         unwanted, tmp_path):
+    """Executed with a stand-in `python3` that prints its arguments."""
+    step = next(s for s in _job(job_id)["steps"] if s.get("name") == "Run the eval cases")
+    assert "${{ inputs.tier }}" in step["env"].get("TIER", "")
+    fake = tmp_path / "python3"
+    fake.write_text('#!/bin/sh\necho "ARGS: $*"\n')
+    fake.chmod(0o755)
+    proc = subprocess.run(["bash", "-c", step["run"]],
+                          env={"RUNS": "1", "ID": "", "TIER": tier,
+                               "PATH": f"{tmp_path}:/usr/bin:/bin"},
+                          capture_output=True, text=True, cwd=tmp_path)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    [args] = [l for l in proc.stdout.splitlines() if l.startswith("ARGS:")]
+    assert all(w in args for w in want) and not any(u in args for u in unwanted), args
+
+
+@pytest.mark.parametrize("job_id", ["evals", "ci-speedup-evals"])
+def test_an_unknown_tier_is_refused_before_any_session(job_id, tmp_path):
+    step = next(s for s in _job(job_id)["steps"] if s.get("name") == "Run the eval cases")
+    fake = tmp_path / "python3"  # exits 0: reaching the runner would read as a pass
+    fake.write_text('#!/bin/sh\necho "ARGS: $*"\n')
+    fake.chmod(0o755)
+    proc = subprocess.run(["bash", "-c", step["run"]],
+                          env={"RUNS": "1", "ID": "", "TIER": "everything",
+                               "PATH": f"{tmp_path}:/usr/bin:/bin"},
+                          capture_output=True, text=True, cwd=tmp_path)
+    assert proc.returncode == 2 and "::error" in proc.stdout, proc.stdout + proc.stderr
+    assert "ARGS:" not in proc.stdout
 
 
 def test_every_third_party_action_is_pinned_to_a_sha():
@@ -201,15 +271,6 @@ def test_the_path_filter_covers_the_ci_speedup_eval_inputs(rel):
     doc = _doc()
     paths = (doc.get("on") or doc[True])["pull_request"]["paths"]
     assert any(fnmatch(rel, p) for p in paths), f"{rel} matches no filter path"
-
-
-def test_the_ci_speedup_job_budget_covers_every_entry_at_the_session_cap():
-    """The job runs every runnable entry at the runner's default 1500s cap; a
-    job timeout below that kills a slow-but-healthy run and reads as a failure."""
-    import json
-    evals = json.loads((_REPO / "skills" / "ci-speedup" / "evals" / "evals.json").read_text(encoding="utf-8"))
-    worst_minutes = sum(1 for e in evals["evals"] if e.get("checks")) * 1500 / 60
-    assert _job("ci-speedup-evals")["timeout-minutes"] >= worst_minutes, worst_minutes
 
 
 @pytest.mark.parametrize("job_id", ["evals", "ci-speedup-evals"])

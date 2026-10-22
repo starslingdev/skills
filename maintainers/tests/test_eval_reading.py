@@ -344,7 +344,7 @@ def test_the_runner_fails_entry_11_when_the_session_never_reads_the_catalog(tmp_
             "MISSING-FROM-CARD: fork pull requests can't use the faster runner label"}]}},
            {"type": "result", "subtype": "success", "duration_ms": 1000, "usage": {}}]
     runner = _runner(tmp_path, monkeypatch, evs)
-    assert runner.main(["--skill", "ci-speedup", "--id", "11"]) == 1
+    assert runner.main(["--skill", "ci-speedup", "--all", "--id", "11"]) == 1
     [res] = json.loads(next((tmp_path / "results").iterdir()).read_text())
     checks = {c["name"]: c["passed"] for c in res["checks"]}
     assert res["passed"] is False and checks["read-the-opt81-catalog-entry"] is False

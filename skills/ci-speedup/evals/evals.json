@@ -157,6 +157,7 @@
     {
       "id": 10,
       "name": "full-run-synthetic",
+      "serial": true,
       "prompt": "Audit the CI of synthetic/repo for speed and cost. It's the git checkout in the current directory, and that's the repo I want audited.",
       "expected_output": "ci-speedup passes its gh gate, runs the data pass (run.py) against the replayed history of the synthetic repo, renders the report, runs verify_report.py on it and sees every check pass, and closes on the measured result. The report drills `ci.yml` / `CI / test` as long pole 1. Nothing is committed or pushed.",
       "fixture": "synthetic",
@@ -202,6 +203,8 @@
     {
       "id": 11,
       "name": "quality-review-opt81",
+      "tier": "measure",
+      "serial": true,
       "prompt": "Audit the CI of synthetic/repo for speed and cost. It's the git checkout in the current directory. Then, before I trust the report, run the skill's quality review on one finding only: the OPT81 runner-class comparison for `bench`. Check that card against its catalog entry, including the entry's fix recipe, and tell me any caveat the entry's fix recipe gives that the card's agent prompt leaves out. End your reply with one line `MISSING-FROM-CARD: <the caveat, or none>`.",
       "expected_output": "The audit runs and renders the report, which carries an OPT81 A1 card for `bench` (ubuntu-latest vs ubuntu-latest-8-cores). The review reads the OPT81 catalog entry and names the caveat its A1 fix recipe carries and the card's prompt does not: runner labels other than the standard ones are often unavailable to fork pull requests, so moving the job to the faster label can leave fork PRs without a runner.",
       "fixture": "synthetic",
@@ -278,6 +281,7 @@
     {
       "id": 13,
       "name": "no-catalog-read-needed",
+      "serial": true,
       "prompt": "Run a CI speed audit of synthetic/repo (the git checkout in the current directory) and tell me just two things: how long a typical pull request waits for its CI checks, and which check's job is the slowest. Just the numbers, I don't need fixes.",
       "expected_output": "ci-speedup runs its data pass on the replayed history, renders and verifies the report, and answers with the measured headline: a typical PR waits 3m 40s, and `CI / test` is the slowest single job at a 3m 17s median. Nothing in the question needs the pattern catalog.",
       "fixture": "synthetic",

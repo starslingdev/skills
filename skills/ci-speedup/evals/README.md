@@ -12,7 +12,7 @@ audit turns a check red.
 |----|------|----------------|
 | 10 | `full-run-synthetic` | a full audit of the synthetic repository: the skill is invoked, `run.py` runs, the report names `ci.yml` / `CI / test` as long pole 1, `verify_report.py` passes, nothing is committed or pushed |
 | 6 | `security-ask-routes-to-ci-secure` | a security-posture request is answered by ci-secure (mounted beside ci-speedup), never by ci-speedup's pipeline |
-| 11 | `quality-review-opt81` | after the audit, the quality review checks the OPT81 runner-class card against its catalog entry and names the fork pull request caveat that exists only in that entry; the session must have read the `### OPT81` heading |
+| 11 | `quality-review-opt81` | **tier `measure`**: after the audit, the quality review checks the OPT81 runner-class card against its catalog entry and names the fork pull request caveat that exists only in that entry; the session must have read the `### OPT81` heading |
 | 12 | `gap-fill-coverage-lookup` | before a gap-fill, the agent looks up whether a dependency compiled from source on one matrix leg is already a catalog pattern and names OPT86 (a manual pattern no script names); reading is recorded |
 | 13 | `no-catalog-read-needed` | a question the measured report answers on its own (the typical wait, the slowest check); whether the catalog was opened is recorded, not asserted |
 
@@ -25,8 +25,22 @@ stand-in from the same corpus. `gh auth status` and read-only `gh api` calls
 about other repositories (GETs with no field or input flags) go to the real
 `gh`; any other call fails closed with a local 404.
 
+**Tiers.** An entry's `tier` is `gate` (the default) or `measure`. Gate
+entries are the per-pull-request regression check and run by default; a
+`measure` entry exists for a measurement (entry 11: the catalog before/after
+and the baseline, where its review subagents cost about seven minutes and
+$3.77 a run in CI) and runs only with `--tier measure` or `--all`. A skipped
+entry still prints a `SKIPPED (tier)` line and a `skipped` row in the results.
+
+**Parallel sessions.** Runs go up to five at a time (`--jobs N`, or env
+`SKILL_EVALS_JOBS`), each with its own sandbox, skill copy and `TMPDIR`. The
+full-audit entries 10, 11 and 13 are marked `serial: true` and take turns:
+their sessions write their findings and report to a `/tmp/...` path they pick
+themselves (seen: `/tmp/cisp-audit/`), not under `TMPDIR`, so two at once
+would overwrite each other's files. Entries 6 and 12 run beside them.
+
 Optional entry fields: `fixture` (scaffold under `fixtures/`), `plugins`
-(other skills to mount), `max_turns`, and `checks`. A check is
+(other skills to mount), `max_turns`, `tier`, `serial`, and `checks`. A check is
 `{name, type, pattern, match?, min?, max?}`: `tool_used` counts tool calls
 whose `"<Tool> <json input>"` matches `pattern` (default `min` 1); `trace`,
 `files` and `last_message` search the transcript, the files the session
@@ -73,7 +87,7 @@ entry otherwise fetches (seen with both `curl` and `gh api`): web clients that
 honour the proxy variables reach only the model API, and `gh` refuses the
 publishing repository. It exits non-zero if no mounted copy was cut:
 
-    python3 maintainers/ci-speedup/scripts/eval_withhold_entry.py OPT81 --id 11 --model M
+    python3 maintainers/ci-speedup/scripts/eval_withhold_entry.py OPT81 --all --id 11 --model M
 
 ## Baseline
 
@@ -86,12 +100,14 @@ per check). Re-running it: `maintainers/ci-speedup/MAINTAINERS.md`.
 ## How to run
 
     python3 maintainers/scripts/run_skill_evals.py --skill ci-speedup [--id 10] [--runs 3] [--model M]
+    python3 maintainers/scripts/run_skill_evals.py --skill ci-speedup --all --id 11   # the measure tier
 
 Needs `claude` and an authenticated `gh` (the skill's phase 1 checks it).
 The skill is mounted as a copy without `evals/`, `CHANGELOG.md`,
 `tests/test_*.py`, `tests/conftest.py` or `tests/fixtures/` (the answer key); `tests/verify_report.py`
-stays because the skill runs it. CI runs the same command in the
-`ci-speedup skill evals` job of `.github/workflows/skill-evals.yml`.
+stays because the skill runs it. CI runs the same command (gate tier) in the
+`ci-speedup skill evals` job of `.github/workflows/skill-evals.yml`; its
+manual dispatch takes `tier: gate | measure | all`.
 
 Exit codes: **0** every run passed; **1** at least one session ran and failed
 a check (even when other runs could not run); **2** otherwise, when any run
@@ -104,8 +120,10 @@ A 2 is a coverage gap, never a behaviour change.
 
 In the 2026-10-22 baseline (claude 2.1.308, locally): $0.23 to
 $0.39 and 17 to 69 seconds for entries 6, 10, 12 and 13; $0.41 to $1.18 and
-47 to 153 seconds for entry 11, which may start two review subagents. One run
-of all five entries is about $2.10.
+47 to 153 seconds for entry 11, which may start two review subagents (in CI
+on 2026-10-22: 424 seconds and $3.77). One run of all five entries is about
+$2.10 locally. In that CI run the gate tier (6, 10, 12, 13) cost $1.76 of
+the five entries' $5.53.
 Tokens, duration and cost per run are printed and written to
 `skill-eval-results/` at the repo root (gitignored); failing sessions are kept
 in `skill-eval-logs/`.

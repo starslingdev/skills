@@ -3,8 +3,17 @@
 
     python3 maintainers/scripts/run_skill_evals.py --skill ci-speedup
     python3 maintainers/scripts/run_skill_evals.py --skill ci-speedup --id 10 --runs 3
+    python3 maintainers/scripts/run_skill_evals.py --skill ci-speedup --all --id 11
 
-An entry is runnable when it carries `checks`. For each run:
+An entry is runnable when it carries `checks`. Its optional `tier` is `gate`
+(the default: the per-PR regression check) or `measure` (kept for a
+before/after measurement or the baseline); only `gate` entries run unless
+`--tier measure` or `--all` is passed, and every entry left out prints a
+SKIPPED (tier) line. Runs go `--jobs` at a time (default: every run, at most
+five; env SKILL_EVALS_JOBS), each in its own temp dir, sandbox, skill copy and
+TMPDIR; runs of entries marked `serial` (their sessions write fixed `/tmp`
+paths) take turns. A PASS / FAIL / NOT RUN block prints as each run finishes.
+For each run:
 
   1. scaffold - `evals/fixtures/<fixture>/scaffold.py` builds the target in an
                 empty temp dir and prints KEY=VALUE lines for the session env;
@@ -18,18 +27,21 @@ An entry is runnable when it carries `checks`. For each run:
 Exit 0 every run passed, 1 a run happened and failed a check, 2 the harness
 could not run (nothing selected, no claude, scaffold failed, no real `gh` for
 the shim, no session or no result event, turn cap, timeout, a `files` check
-with nothing collected or an empty report, or an unexpected crash). If any run
+with nothing collected or an empty report, or an unexpected crash). A crash is
+that run's NOT RUN; the other runs still finish and grade. If any run
 failed a check the exit is 1 even when other runs could not run, a crash
 included: a session that happened and failed is the stronger signal. A session
 that never happened must not read as a behaviour change. Tokens and duration
-per run go to `skill-eval-results/`, rewritten after every run so a crash or a
-killed job keeps what already ran. Each entry's `expected_output` is judge-only:
-no check reads it, so it is printed and recorded as UNSCORED.
+per run go to `skill-eval-results/`, rewritten (atomically, by the one main
+thread) after every run so a crash or a killed job keeps what already ran.
+Each entry's `expected_output` is judge-only: no check reads it, so it is
+printed and recorded as UNSCORED.
 Maintainer-only: it spends real tokens and is never part of pytest.
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -38,7 +50,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -50,6 +64,11 @@ _LOGS = _REPO / "skill-eval-logs"
 _SHIM = Path(__file__).resolve().parent / "eval_gh_shim.py"
 _CHECK_TYPES = ("tool_used", "trace", "files", "last_message", "reading")
 _MAX_FILE = 4 * 1024 * 1024
+_MAX_JOBS = 5  # sessions at once by default; each is one `claude -p` process
+# `gate` entries run by default (the per-PR regression check); `measure`
+# entries exist to measure (a before/after, the baseline) and run on request.
+_TIERS = ("gate", "measure")
+_SERIAL = threading.Lock()  # held by a `serial` entry's run for its whole session
 # The session loads no user-level settings, so a laptop with the skill installed
 # globally cannot answer from that copy instead of the one under test.
 _ISOLATION = ("--setting-sources", "project,local")
@@ -272,8 +291,11 @@ def run_session(prompt: str, cwd: Path, plugins: list[Path], env: dict,
     elif result.get("is_error") and not why:
         why = "the session ended in an error result"
     if why:
-        _LOGS.mkdir(exist_ok=True)
-        (_LOGS / f"harness-error-{int(time.time())}.jsonl").write_text(r.stdout)
+        _LOGS.mkdir(exist_ok=True)  # mkstemp: two runs failing in one second keep both
+        fd, _ = tempfile.mkstemp(prefix=f"harness-error-{int(time.time())}-",
+                                 suffix=".jsonl", dir=_LOGS)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(r.stdout)
         raise HarnessError(f"{why}; stderr: {r.stderr.strip()[-1500:] or '(empty)'}")
     return r.stdout, evs
 
@@ -340,9 +362,29 @@ def run_entry(skill_dir: Path, entry: dict, run: int, args) -> dict:
         return out
     finally:
         if args.keep:
-            print(f"    kept: {tmp}")
+            print(f"    [#{entry.get('id')}] kept: {tmp}")
         else:
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+def default_jobs(n_runs: int) -> int:
+    """Sessions at once: `SKILL_EVALS_JOBS` if set, else every run, capped."""
+    env = os.environ.get("SKILL_EVALS_JOBS", "").strip()
+    return int(env) if env else max(1, min(n_runs, _MAX_JOBS))
+
+
+def _attempt(skill_dir: Path, entry: dict, run: int, args) -> tuple[str, object]:
+    """One run on a worker thread. Any Exception becomes that run's NOT RUN, so
+    a crash in one session never takes the others down with it. A `serial`
+    entry's sessions write fixed `/tmp/...` paths (the agent picks them, not
+    $TMPDIR), so those runs take turns while the others run beside them."""
+    try:
+        with _SERIAL if entry.get("serial") else contextlib.nullcontext():
+            return "ok", run_entry(skill_dir, entry, run, args)
+    except HarnessError as exc:
+        return "not_run", str(exc)
+    except Exception as exc:  # a harness bug in this run only: the others still grade
+        return "not_run", f"unhandled {type(exc).__name__}: {exc}"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -354,11 +396,25 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--max-turns", type=int, default=80)
     ap.add_argument("--timeout", type=int, default=1500, help="seconds per session")
     ap.add_argument("--keep", action="store_true", help="keep the temp dirs")
+    ap.add_argument("--jobs", type=int, help="sessions at once (default: every run, at most "
+                    f"{_MAX_JOBS}; env SKILL_EVALS_JOBS)")
+    ap.add_argument("--tier", choices=_TIERS, default="gate",
+                    help="run only entries of this tier (default gate)")
+    ap.add_argument("--all", action="store_true", help="run every tier")
     args = ap.parse_args(argv)
     skill_dir = _REPO / "skills" / args.skill
     spec = json.loads((skill_dir / "evals" / "evals.json").read_text(encoding="utf-8"))
-    entries = [e for e in spec["evals"] if e.get("checks")
-               and (args.id is None or e.get("id") == args.id)]
+    selected = [e for e in spec["evals"] if e.get("checks")
+                and (args.id is None or e.get("id") == args.id)]
+    bad = [e.get("id") for e in selected if e.get("tier", "gate") not in _TIERS]
+    if bad:
+        print(f"harness: unknown `tier` on entries {bad}; use one of {_TIERS}", file=sys.stderr)
+        return 2
+    entries = [e for e in selected if args.all or e.get("tier", "gate") == args.tier]
+    skipped = [e for e in selected if e not in entries]
+    for e in skipped:  # never silently absent: the line says how to run it
+        print(f"SKIPPED (tier)  {args.skill} #{e.get('id')} {e.get('name', '')}  tier "
+              f"{e.get('tier', 'gate')}; run with --tier {e.get('tier', 'gate')} or --all")
     if not entries or args.runs < 1:
         print("harness: nothing to run (no entry with `checks` selected)", file=sys.stderr)
         return 2
@@ -367,45 +423,53 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     _RESULTS.mkdir(exist_ok=True)
     out = _RESULTS / f"{args.skill}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}.json"
-    results, harness_errors, crashed = [], 0, False
+    results = [{"id": e.get("id"), "skipped": f"tier {e.get('tier', 'gate')}"} for e in skipped]
+    harness_errors = 0
 
+    def record(item: dict) -> None:  # main thread only; on disk after every run, atomically
+        results.append(item)
+        part = out.with_name(f".{out.name}.part")
+        part.write_text(json.dumps(results, indent=2))
+        os.replace(part, out)
+
+    tasks = [(e, run) for e in entries for run in range(1, args.runs + 1)]
+    jobs = args.jobs if args.jobs is not None else default_jobs(len(tasks))
+    if jobs < 1:
+        print("harness: --jobs / SKILL_EVALS_JOBS must be at least 1", file=sys.stderr)
+        return 2
     for entry in entries:
-        if crashed:
-            break
-        unscored = {"unscored": "expected_output"} if entry.get("expected_output") else {}
-        if unscored:
+        if entry.get("expected_output"):
             print(f"\nUNSCORED  {args.skill} #{entry.get('id')} {entry.get('name', '')}  "
                   "expected_output is judge-only; no check reads it")
-
-        def record(item: dict) -> None:  # on disk after every run: a killed job keeps it
-            results.append({**item, **unscored})
-            out.write_text(json.dumps(results, indent=2))
-        for run in range(1, args.runs + 1):
-            tag = f"{args.skill} #{entry.get('id')} {entry.get('name', '')} (run {run}/{args.runs})"
-            try:
-                r = run_entry(skill_dir, entry, run, args)
-            except HarnessError as exc:
+    print(f"\nrunning {len(tasks)} session(s), {min(jobs, len(tasks))} at a time", flush=True)
+    started = time.monotonic()
+    pool = ThreadPoolExecutor(max_workers=jobs)
+    try:
+        futures = {pool.submit(_attempt, skill_dir, e, run, args): (e, run) for e, run in tasks}
+        for fut in as_completed(futures):  # lines print as runs finish, one block per run
+            entry, run = futures[fut]
+            eid = entry.get("id")
+            unscored = {"unscored": "expected_output"} if entry.get("expected_output") else {}
+            tag = f"{args.skill} #{eid} {entry.get('name', '')} (run {run}/{args.runs})"
+            kind, r = fut.result()
+            if kind == "not_run":
                 harness_errors += 1
-                print(f"\nNOT RUN  {tag}\n    harness: {exc}")
-                record({"id": entry.get("id"), "run": run, "harness_error": str(exc)})
+                print(f"\nNOT RUN  {tag}\n    [#{eid}] harness: {r}", flush=True)
+                record({"id": eid, "run": run, "harness_error": r, **unscored})
                 continue
-            except Exception as exc:  # a harness bug: stop spending tokens, keep the verdicts
-                harness_errors, crashed = harness_errors + 1, True
-                print(f"\nNOT RUN  {tag}\n    harness: unhandled {type(exc).__name__}: {exc}"
-                      "\n    stopping: the remaining runs were not attempted")
-                record({"id": entry.get("id"), "run": run,
-                        "harness_error": f"unhandled {type(exc).__name__}: {exc}"})
-                break
-            record(r)
+            record({**r, **unscored})
             secs = (r["duration_ms"] or 0) / 1000
-            print(f"\n{'PASS' if r['passed'] else 'FAIL'}  {tag}  {r['tool_calls']} tool calls, "
-                  f"{r['input_tokens']} in / {r['output_tokens']} out tokens, {secs:.0f}s, "
-                  f"${r['cost_usd'] or 0:.2f}, {eval_reading.figure(r['reading'])}")
-            for c in r["checks"]:
-                print(f"    {'ok  ' if c['passed'] else 'FAIL'} {c['name']}  ({c['detail']})")
+            lines = [f"\n{'PASS' if r['passed'] else 'FAIL'}  {tag}  {r['tool_calls']} tool "
+                     f"calls, {r['input_tokens']} in / {r['output_tokens']} out tokens, "
+                     f"{secs:.0f}s, ${r['cost_usd'] or 0:.2f}, {eval_reading.figure(r['reading'])}"]
+            lines += [f"    [#{eid}] {'ok  ' if c['passed'] else 'FAIL'} {c['name']}  "
+                      f"({c['detail']})" for c in r["checks"]]
             if r.get("session_log"):
-                print(f"    session recorded: {r['session_log']}")
-    print(f"\nresults: {out}")
+                lines.append(f"    [#{eid}] session recorded: {r['session_log']}")
+            print("\n".join(lines), flush=True)
+    finally:  # a killed job (KeyboardInterrupt) starts nothing new; the file holds what ran
+        pool.shutdown(wait=False, cancel_futures=True)
+    print(f"\nresults: {out}\ntotal wall: {time.monotonic() - started:.0f}s")
     # Precedence: a run that happened and failed (1) outranks runs that could
     # not run or a crash (2), which outrank a clean pass (0).
     if any(r.get("passed") is False for r in results):
