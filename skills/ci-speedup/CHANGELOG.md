@@ -13,6 +13,21 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-10-21** — **Three more catalog patterns for slow builds and slow
+  pull-request checks, OPT89 to OPT91, each backed by changes OpenAI engineers
+  made in their public repos.** OPT89: when the slowest platform in a matrix
+  compiles its own tests, build them once on a fast runner (cross-compiling)
+  and run them natively on that platform, keeping a fully native run after
+  merge. OPT90: when every pull request waits for coverage a small subset would
+  catch, run the subset on pull requests and the rest after merge or on a
+  schedule, with failures that reach an owner and block releases. OPT91: when
+  the compile itself is the slowest step and the cache is not the problem,
+  profile it with the compiler's own timing reports and fix the setting or the
+  code it names, measuring runtime and size before changing a release setting.
+  None has a detector yet, so the audit never reports one on its own or claims
+  to have checked it, and none credits a saving. The catalog count goes from 86
+  to 89 (78 hygiene plus 11 structural).
+
 - **2026-10-21** — **Four new catalog patterns for slow test jobs, OPT85 to
   OPT88, each backed by measured changes OpenAI engineers made in their public
   repos.** OPT85: tests that start a new process for every case, or link a
