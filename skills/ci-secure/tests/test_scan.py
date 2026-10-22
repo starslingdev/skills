@@ -1420,11 +1420,11 @@ def test_p147_silent_when_setup_node_has_no_cache_input(tmp_path: Path) -> None:
 
 
 # -----------------------------------------------------------------------------
-# Eval substrate: the evals/ fixtures must actually produce what the case files
-# under evals/*/case.yaml grade on, or every eval scores against a fiction.
+# Eval substrate: the evals/ fixtures must actually produce what the checks in
+# evals/evals.json grade on, or every eval scores against a fiction.
 # -----------------------------------------------------------------------------
 
-_EVALS = _SKILL_DIR / "evals" / "files"
+_EVALS = _SKILL_DIR / "evals" / "fixtures"
 
 
 def test_eval_inject_fixture_fires_p1410() -> None:

@@ -33,7 +33,7 @@ def _materialize_cloaked_fixtures():
 
     # (cloaked source dir, materialized destination dir)
     jobs = [(tests / "fixtures/dot-github", tests / "fixtures/.github")]
-    ev = skill / "evals/files"
+    ev = skill / "evals/fixtures"
     if ev.is_dir():
         for d in sorted(ev.iterdir()):
             if (d / "dot-github").is_dir():
