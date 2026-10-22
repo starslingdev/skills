@@ -435,6 +435,20 @@ only caught by re-running across repos).
   any counts (test totals, dropped-check counts, validation tables) at write time —
   don't carry a stale number forward.
 
+## Behavioural evals
+
+`skills/ci-speedup/evals/evals.json` entries that carry `checks` run as real
+headless agent sessions: `python3 maintainers/scripts/run_skill_evals.py --skill ci-speedup`
+(add `--id 10` for one entry, `--runs 3` to gauge flakiness). The `synthetic`
+fixture builds the offline e2e test's repository and replays its gh corpus, and
+`maintainers/scripts/eval_gh_shim.py` answers the agent's own `gh` calls about
+that repository from the same corpus. Each run costs about $0.40 to $0.65 and
+under two minutes; results (tokens, time, cost, per-check verdicts) land in the gitignored
+`skill-eval-results/`, failing sessions in `skill-eval-logs/`. CI runs the same
+command in the `ci-speedup skill evals` job. Run it before merging a SKILL.md or
+references change that CI did not cover (fork PRs). Details:
+`skills/ci-speedup/evals/README.md`.
+
 ## NEVER (applies to all three loops)
 
 - Never commit `.ci-speedup-gaps/`, `.ci-speedup-loop/`, or `.ci-speedup-dogfood/`

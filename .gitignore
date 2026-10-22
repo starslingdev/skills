@@ -94,3 +94,8 @@ skills/ci-secure/evals/results/
 # transcript of an agent session — prompts, tool output, the rendered report.
 # Never tracked; see maintainers/ci-secure/scripts/run_skill_evals.py.
 skill-eval-logs/
+
+# The shared skill-eval runner (maintainers/scripts/run_skill_evals.py) writes
+# per-run token, time and check results here, at the repo root, never under
+# skills/. Local run output only; never tracked.
+skill-eval-results/

@@ -1,6 +1,6 @@
 {
   "skill_name": "ci-speedup",
-  "note": "ci-speedup is a live-data skill: the measured findings come from sampling a repo's real GitHub Actions run timings via `gh`, so these end-to-end evals require gh auth + network and target public repos. The committed worked examples under reports/ (better-auth, mastra, langfuse) are the recorded expected outputs, and tests/verify_report.py is their invariant gate. The pytest suite under tests/ (test_scan_detectors.py, test_blocking_path.py, test_structural_findings.py, test_collect_runs_sizing.py, test_committed_reports.py, ...) is the primary offline regression eval; these scenarios cover the user-visible end-to-end behaviour. These scenarios are manual/agent-run reference cases - no automated runner executes them; the pytest suite is the executable regression gate, and the no-skill baseline in `baseline` remains unrecorded.",
+  "note": "ci-speedup is a live-data skill: the measured findings come from sampling a repo's real GitHub Actions run timings via `gh`, so these end-to-end evals require gh auth + network and target public repos. The committed worked examples under reports/ (better-auth, mastra, langfuse) are the recorded expected outputs, and tests/verify_report.py is their invariant gate. The pytest suite under tests/ (test_scan_detectors.py, test_blocking_path.py, test_structural_findings.py, test_collect_runs_sizing.py, test_committed_reports.py, ...) is the primary offline regression eval; these scenarios cover the user-visible end-to-end behaviour. Entries carrying `checks` (6 and 10) run as real agent sessions against an offline replay of the synthetic repo via maintainers/scripts/run_skill_evals.py (see evals/README.md); the rest are manual reference cases, and the no-skill baseline in `baseline` remains unrecorded.",
   "baseline": "Model-progress (deprecation) signal — these evals should periodically be run WITHOUT the skill loaded to check whether the base model has caught up (a no-skill baseline that now passes means the skill may be redundant). For ci-speedup this risk is low: the value is capability uplift the model cannot reproduce unaided — deterministic gh run-history sampling, the measured wall-clock critical-path/cluster-floor model, and the 89-pattern detector catalog. Baseline status: NOT yet recorded against a no-skill run; re-check when adopting a new base model.",
   "evals": [
     {
@@ -83,6 +83,34 @@
         "ci-speedup does not run its scan/collect/render pipeline for a security-posture request.",
         "The agent recognizes this as out of scope and points the user to the ci-secure skill.",
         "No wall-clock optimization report is produced for this prompt."
+      ],
+      "name": "security-ask-routes-to-ci-secure",
+      "fixture": "synthetic",
+      "plugins": [
+        "ci-secure"
+      ],
+      "max_turns": 60,
+      "checks": [
+        {
+          "name": "ci-secure-skill-invoked",
+          "type": "tool_used",
+          "pattern": "^Skill .*\"skill\": \"(?:[\\w-]+:)?ci-secure\"",
+          "min": 1
+        },
+        {
+          "name": "ci-speedup-skill-not-invoked",
+          "type": "tool_used",
+          "pattern": "^Skill .*\"skill\": \"(?:[\\w-]+:)?ci-speedup\"",
+          "min": 0,
+          "max": 0
+        },
+        {
+          "name": "ci-speedup-pipeline-not-run",
+          "type": "tool_used",
+          "pattern": "^Bash .*(?:collect_runs\\.py|ci-speedup/scripts/run\\.py|blocking_path\\.py)",
+          "min": 0,
+          "max": 0
+        }
       ]
     },
     {
@@ -124,6 +152,51 @@
         "The card links each target's own migration docs, says to benchmark both tools on the same commit and runner class before claiming a number, and carries the no-weakening rail (no rule, plugin, file set or check is dropped; dual-run when the target lacks one).",
         "No OPT84 number is summed into the headline, Tier 2, Also noticed or any total.",
         "On a repo whose format step already runs `oxfmt --check`, no OPT84 card mentions Prettier."
+      ]
+    },
+    {
+      "id": 10,
+      "name": "full-run-synthetic",
+      "prompt": "Audit the CI of synthetic/repo for speed and cost. It's the git checkout in the current directory, and that's the repo I want audited.",
+      "expected_output": "ci-speedup passes its gh gate, runs the data pass (run.py) against the replayed history of the synthetic repo, renders the report, runs verify_report.py on it and sees every check pass, and closes on the measured result. The report drills `ci.yml` / `CI / test` as long pole 1. Nothing is committed or pushed.",
+      "fixture": "synthetic",
+      "note": "Runnable on the maintainer harness only: the `synthetic` fixture builds the offline e2e test's repository and replays its committed gh corpus, so the report's numbers are fixed.",
+      "expectations": [
+        "The ci-speedup skill is invoked and runs its data pass.",
+        "The report names `ci.yml` / `CI / test` as long pole 1.",
+        "verify_report.py passes on the rendered report.",
+        "The skill did not commit or push."
+      ],
+      "checks": [
+        {
+          "name": "ci-speedup-skill-invoked",
+          "type": "tool_used",
+          "pattern": "^Skill .*\"skill\": \"(?:[\\w-]+:)?ci-speedup\"",
+          "min": 1
+        },
+        {
+          "name": "data-pass-ran",
+          "type": "tool_used",
+          "pattern": "^Bash .*scripts/run\\.py",
+          "min": 1
+        },
+        {
+          "name": "report-drills-ci-test-as-long-pole-1",
+          "type": "files",
+          "pattern": "Long pole 1: `ci\\.yml` ▸ `CI / test`"
+        },
+        {
+          "name": "self-check-passed",
+          "type": "trace",
+          "pattern": "(?m)^✅ all checks passed"
+        },
+        {
+          "name": "nothing-committed-or-pushed",
+          "type": "tool_used",
+          "pattern": "^Bash .*(?:(?<![\\w.-])|(?<=\\\\[nt]))git(?:\\s+-\\S+(?:\\s+[^\\s-]\\S*)?)*\\s+(?:commit|push)(?![\\w-])",
+          "min": 0,
+          "max": 0
+        }
       ]
     }
   ]
