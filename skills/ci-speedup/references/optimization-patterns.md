@@ -1862,7 +1862,7 @@ fix_strategy: measure-test-concurrency
 title_template: "Test concurrency is set by guess, not measurement"
 -->
 
-**Not auto-detected yet.** Like other `detector: manual` entries (for example OPT25 and OPT43), no pass emits OPT88, so the audit never reports it on its own and never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading the slow test step's command and configuration against the heuristic below.
+**Not auto-detected yet.** Like OPT86, no pass emits OPT88, so the audit never reports it on its own and never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading the slow test step's command and configuration against the heuristic below.
 
 **TL;DR**: The slowest test job runs with a worker count nobody measured: one worker on a runner with several cores, a fixed cap carried over from an older runner, or "as many as there are cores" where memory or a shared service is the real limit. Time two or three settings on the real runner class and keep the fastest. More workers is not always faster.
 
@@ -4396,7 +4396,7 @@ fix_strategy: use-prebuilt-dependency-packages
 title_template: "CI compiles a dependency that ships prebuilt"
 -->
 
-**Not auto-detected yet.** Like other `detector: manual` entries (for example OPT25 and OPT43), no pass emits OPT86, so the audit never reports it on its own and never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading a slow install step's log against the heuristic below.
+**Not auto-detected yet.** Like OPT88, no pass emits OPT86, so the audit never reports it on its own and never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading a slow install step's log against the heuristic below.
 
 **TL;DR**: An install step compiles a dependency from source (a C or C++ extension, a native add-on, a large machine-learning framework) when a prebuilt package exists for that interpreter and platform. Pin a version that ships prebuilt packages for every leg of the matrix, and make the install refuse to build from source, so the next lockfile bump cannot bring the compile back unnoticed.
 

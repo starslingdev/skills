@@ -26,7 +26,8 @@ unversioned and updates by reinstall from `main`.
   code it names, measuring runtime and size before changing a release setting.
   None has a detector yet, so the audit never reports one on its own or claims
   to have checked it, and none credits a saving. The catalog count goes from 86
-  to 89 (78 hygiene plus 11 structural).
+  to 89 (78 hygiene plus 11 structural). The OPT86 and OPT88 entries no
+  longer name OPT25 and OPT43 as patterns nothing detects; both are detected.
 
 - **2026-10-21** — **Four new catalog patterns for slow test jobs, OPT85 to
   OPT88, each backed by measured changes OpenAI engineers made in their public
