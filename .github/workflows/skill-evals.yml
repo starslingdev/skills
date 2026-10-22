@@ -37,6 +37,14 @@ on:
       - "skills/ci-secure/scripts/**"
       - "skills/ci-secure/evals/**"
       - "maintainers/ci-secure/scripts/run_skill_evals.py"
+      # ci-speedup's two runnable evals.json entries. One workflow-level filter for both
+      # suites, so a change to either skill runs both (no classifier job by design).
+      - "skills/ci-speedup/SKILL.md"
+      - "skills/ci-speedup/references/**"
+      - "skills/ci-speedup/scripts/**"
+      - "skills/ci-speedup/evals/**"
+      - "maintainers/scripts/run_skill_evals.py"
+      - "maintainers/scripts/eval_gh_shim.py"
       - ".github/workflows/skill-evals.yml"
 
   # Manual: run it against any branch on demand, from the Actions tab or
@@ -46,7 +54,7 @@ on:
   workflow_dispatch:
     inputs:
       case:
-        description: "Single case to run (blank = all five)"
+        description: "Single ci-secure case to run (blank = all five; ci-speedup always runs both entries)"
         required: false
         type: string
       runs:
@@ -142,13 +150,75 @@ jobs:
           if-no-files-found: ignore
 
 
+  # ci-speedup's runnable evals.json entries (a full audit of the synthetic repo against its
+  # offline replay corpus, and the security ask that must route to ci-secure), run by the
+  # shared runner. Same trust model as `evals` above.
+  ci-speedup-evals:
+    name: ci-speedup skill evals
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: starsling-ubuntu-24.04
+    # Two entries at the runner's 1500s per-session cap, plus the scaffold.
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.12"
+
+      # The scaffold builds the synthetic repo with the offline e2e test's own helpers,
+      # and that module imports pytest.
+      - name: Install harness dependencies
+        run: pip install pytest pyyaml
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code@2.1.235
+
+      - name: Run the eval cases
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # SKILL.md's phase 1 runs `gh auth status` and stops without it. Every run-history
+          # read is answered from the replay corpus, so the read-only token is never used for
+          # a data call about the synthetic repo (the gh shim fails those closed).
+          GH_TOKEN: ${{ github.token }}
+          RUNS: ${{ inputs.runs }}
+          IS_SANDBOX: "1"
+        run: |
+          set -uo pipefail
+          status=0
+          python3 maintainers/scripts/run_skill_evals.py --skill ci-speedup \
+            --runs "${RUNS:-1}" || status=$?
+          if [ "$status" -eq 2 ]; then
+            echo "::error title=SKILL EVALS DID NOT RUN::The harness could not run (exit 2). Nothing was verified — this is a coverage gap, not a behaviour change. The reason is on the NOT RUN line above."
+          elif [ "$status" -ne 0 ]; then
+            echo "::error title=SKILL EVALS FAILED::A ci-speedup eval ran and failed a check (exit ${status})."
+          fi
+          exit "$status"
+
+      - name: Keep the sessions that failed and the per-run results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-speedup-skill-eval-sessions
+          path: |
+            skill-eval-logs/
+            skill-eval-results/
+          retention-days: 14
+          if-no-files-found: ignore
+
   # ONE check name, always reported, mirroring `test`'s verdict job in ci.yml. The evals job is
   # conditional, and GitHub counts a skipped check as a pass — so a skip must be turned into a
   # visible statement here instead. `always()` rather than `!cancelled()` for the same reason it
   # is used there: a cancelled run reports skipped, and skipped reads as green.
   verdict:
     name: skill evals
-    needs: [evals]
+    needs: [evals, ci-speedup-evals]
     # `always()` so a skipped or cancelled evals job still gets a verdict — but NOT on a fork
     # PR, where the check would be green over a session that could not happen. The fork job
     # below carries that case under a name that says so. The two conditions are exact
@@ -163,15 +233,21 @@ jobs:
       - name: Report
         env:
           RESULT: ${{ needs.evals.result }}
+          SPEEDUP_RESULT: ${{ needs.ci-speedup-evals.result }}
         run: |
           set -euo pipefail
-          echo "evals job: ${RESULT}"
-          case "${RESULT}" in
-            success)   echo "Skill evals passed."; exit 0 ;;
-            failure)   echo "::error::Skill evals FAILED. Read the job log: the harness prints whether a case ran and failed a grader, or whether it could not run at all."; exit 1 ;;
-            cancelled) echo "::warning::Skill evals were cancelled; nothing was verified."; exit 1 ;;
-            *)         echo "::error::Skill evals did not run (${RESULT}); that is not a pass."; exit 1 ;;
-          esac
+          status=0
+          for pair in "ci-secure:${RESULT:-}" "ci-speedup:${SPEEDUP_RESULT:-}"; do
+            suite="${pair%%:*}"; result="${pair#*:}"
+            echo "${suite} evals job: ${result}"
+            case "${result}" in
+              success)   echo "${suite} skill evals passed." ;;
+              failure)   echo "::error::${suite} skill evals FAILED. Read the job log: the harness prints whether a case ran and failed, or whether it could not run at all."; status=1 ;;
+              cancelled) echo "::warning::${suite} skill evals were cancelled; nothing was verified."; status=1 ;;
+              *)         echo "::error::${suite} skill evals did not run (${result}); that is not a pass."; status=1 ;;
+            esac
+          done
+          exit "$status"
 
   # The name is the message: this check being green must not read as "the contract was
   # verified". Failing an external contributor's PR for a secret they have no way to reach

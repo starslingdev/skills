@@ -54,7 +54,16 @@ _MOVED_NAMES = {
     "record_opt82_resolver_snapshot.py",
     "test_opt82_resolver_snapshot.py",
     "opt82_resolver_snapshot.json",
+    # The shared skill-eval runner, its gh stand-in, and their test.
+    "run_skill_evals.py",
+    "eval_gh_shim.py",
+    "test_shared_skill_eval_runner.py",
 }
+
+
+def test_no_skill_eval_results_dir_under_skills():
+    """The eval runner writes per-run token/time results; they never ship."""
+    assert not list((_REPO / "skills").rglob("skill-eval-results"))
 
 
 def test_skill_dir_has_no_maintainer_only_files():

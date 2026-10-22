@@ -28,6 +28,14 @@ unversioned and updates by reinstall from `main`.
   to have checked it, and none credits a saving. The catalog count goes from 86
   to 89 (78 hygiene plus 11 structural). The OPT86 and OPT88 entries no
   longer name OPT25 and OPT43 as patterns nothing detects; both are detected.
+- **2026-10-21** — **Two eval scenarios now run as real agent sessions on every
+  change to the skill.** `evals/evals.json` entries may carry `fixture` and
+  `checks`; the ones that do (a full audit of the synthetic repository against
+  its offline replay corpus, and the security ask that must route to
+  ci-secure) are executed by the maintainers' shared runner and by the
+  `ci-speedup skill evals` CI job, so an instruction change that breaks the
+  audit goes red. The skill's own behaviour is unchanged. See
+  `evals/README.md`.
 
 - **2026-10-21** — **Four new catalog patterns for slow test jobs, OPT85 to
   OPT88, each backed by measured changes OpenAI engineers made in their public

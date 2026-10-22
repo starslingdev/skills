@@ -81,24 +81,43 @@ def test_only_the_verdict_job_carries_the_check_name_skill_evals():
         f"exactly one job may report the check name 'skill evals'; got {named}")
 
 
-@pytest.mark.parametrize("result,expected", [
-    ("success", 0),
-    ("failure", 1),
-    ("cancelled", 1),
-    ("skipped", 1),
-    ("", 1),
-    ("neutral", 1),
+@pytest.mark.parametrize("result,speedup,expected", [
+    ("success", "success", 0),
+    ("failure", "success", 1),
+    ("cancelled", "success", 1),
+    ("skipped", "success", 1),
+    ("", "success", 1),
+    ("neutral", "success", 1),
+    ("success", "failure", 1),
+    ("success", "skipped", 1),
+    ("success", "", 1),
 ])
-def test_the_verdict_script_passes_only_on_a_real_success(result, expected):
+def test_the_verdict_script_passes_only_on_a_real_success(result, speedup, expected):
     """Executed, not read. `skipped` reads as green to branch protection, so the
-    verdict must turn every non-success into a non-zero exit itself."""
+    verdict must turn every non-success of EITHER suite into a non-zero exit."""
     script = _job("verdict")["steps"][0]["run"]
     proc = subprocess.run(
-        ["bash", "-c", script], env={"RESULT": result, "PATH": "/usr/bin:/bin"},
+        ["bash", "-c", script],
+        env={"RESULT": result, "SPEEDUP_RESULT": speedup, "PATH": "/usr/bin:/bin"},
         capture_output=True, text=True)
     assert proc.returncode == expected, (
         f"RESULT={result!r} exited {proc.returncode}, expected {expected}: "
         f"{proc.stdout}{proc.stderr}")
+
+
+def test_the_verdict_waits_on_both_suites_and_they_share_the_fork_gate():
+    """A suite the verdict does not `needs:` can be skipped or red unseen."""
+    assert set(_job("verdict")["needs"]) == {"evals", "ci-speedup-evals"}
+    assert _squash(_job("ci-speedup-evals")["if"]) == _squash(_job("evals")["if"])
+
+
+@pytest.mark.parametrize("job_id", ["evals", "ci-speedup-evals"])
+def test_each_suite_keeps_sandbox_exit2_and_pinned_cli(job_id):
+    steps = {s.get("name"): s for s in _job(job_id)["steps"]}
+    assert steps["Run the eval cases"]["env"].get("IS_SANDBOX") == "1"
+    assert "-eq 2" in steps["Run the eval cases"]["run"]
+    assert re.search(r"@anthropic-ai/claude-code@\d+\.\d+\.\d+",
+                     steps["Install Claude Code"]["run"])
 
 
 def test_the_agent_step_declares_the_sandbox_the_cli_requires_under_root():
