@@ -28,12 +28,18 @@ in `unattributed_calls` instead of being dropped. Output, per session:
     {reference_bytes, reference_lines, catalog_opened, catalog_entries_read,
      unattributed_calls, reference_files: [{path, bytes, lines, calls}]}
 
+The catalog is `optimization-patterns.md` or, split, any file under
+`references/patterns/` (`opt<N>-*.md`, `INDEX.md`); each file keeps its own
+row, so a session shows which pattern files it read. A named sub-directory
+(`grep -rn x references/patterns/`) stands for the files in it that the
+command names, or all of them.
+
 `catalog_entries_read` lists the catalog entry ids (`OPT81`, ...) whose
-`## <id> — ` or `### <id> — ` heading appears in a result attributed to the
+`# <id> — `, `## <id> — ` or `### <id> — ` heading appears in a result attributed to the
 catalog with some of the entry's body under it (a heading listed alone, as an
 index grep prints it, is not a read): what an agent actually saw, not what it
 asked for. A failed `Read` / `Grep` counts nothing; a `Bash` command that
-exits non-zero counts what it printed, minus the shell's own error lines. For a skill with no `optimization-patterns.md` catalog,
+exits non-zero counts what it printed, minus the shell's own error lines. For a skill with no catalog in either shape,
 `catalog_opened` is None and the printed figure leaves the catalog out. Tested
 offline in `maintainers/tests/test_eval_reading.py`.
 """
@@ -46,6 +52,7 @@ import re
 from pathlib import Path
 
 CATALOG = "optimization-patterns.md"
+PATTERNS_DIR = "patterns/"  # a split catalog: references/patterns/{opt<N>-*.md,INDEX.md}
 _READERS = {"cat", "sed", "head", "tail", "grep", "egrep", "fgrep", "rg", "less", "more", "awk",
             "nl", "jq", "tac", "cut", "sort", "uniq", "strings", "bat", "diff"}
 _SEARCHERS = {"grep", "egrep", "fgrep", "rg"}
@@ -63,7 +70,7 @@ _DIAG = re.compile(r"^(?:\(eval\):\d+:|(?:ba|z|da)?sh:|(?:%s|xargs|find|timeout)
                    r"|command not found|No such file or directory|Permission denied"
                    r"|^Command timed out" % "|".join(sorted(_READERS | _SCRIPTED)))
 _REF = re.compile(r"(?<![\w.${-])(?:([\w.-]+)/)?references(?:/([^\s'\"`;|&<>(){}]*))?")
-_HEADING = re.compile(r"^\s*(?:\S*?[:-])?\d*[:\t-]?\s*#{2,3} (OPT\d+) — ")
+_HEADING = re.compile(r"^\s*(?:\S*?[:-])?\d*[:\t-]?\s*#{1,3} (OPT\d+) — ")
 _NUMBER = re.compile(r"^\s*(?:\S*?[:-])?\d*[:\t-]?")
 _VAR = re.compile(r"(?:^|[\s;&|(])(?:export\s+)?([A-Za-z_]\w*)=(['\"]?)([^\s'\";&|]+)\2")
 _CHECK_KEYS = {"type", "name", "field", "min", "max", "pattern"}
@@ -133,6 +140,15 @@ def referenced(text: str, skill: str, names: list[str] | None = None,
         if not rest:  # the directory itself, when it reads as a path (not prose)
             bare_dir |= bool(owner) or m.group(0).endswith("/") or bool(
                 re.search(r"cd\s+$", text[:m.start()]))
+            continue
+        sub = rest.rstrip("/")
+        under = [n for n in names or [] if n.startswith(sub + "/")]
+        if under and not any(ch in rest for ch in "*?["):  # a sub-directory (`references/patterns/`)
+            tail = text[m.end():]
+            named = [n for n in under if n not in out and (re.search(
+                rf"(?<![\w.-]){re.escape(n.rsplit('/', 1)[1])}(?![\w-])", tail) or any(
+                fnmatch.fnmatch(n.rsplit("/", 1)[1], g) for g in re.findall(r"[\w.-]*[*?][\w.*?-]*", tail)))]
+            out += named or [n for n in under if n not in out]
             continue
         hits = [n for n in names or [] if fnmatch.fnmatch(n, rest)] if any(
             ch in rest for ch in "*?[") else [rest]
@@ -351,7 +367,7 @@ def summarize(evs: list, skill: str, names: list[str] | None = None,
                 continue
             if reads:
                 pending[str(c.get("id"))] = (paths, cd, name == "Bash")
-    has_catalog = names is None or any(Path(n).name == CATALOG for n in names)
+    has_catalog = names is None or any(is_catalog(n) for n in names)
     files: dict[str, dict] = {}
     entries: list[str] = []
     for ev in evs:
@@ -379,17 +395,23 @@ def summarize(evs: list, skill: str, names: list[str] | None = None,
                     continue
                 f = files.setdefault(p, {"path": p, "bytes": 0, "lines": 0, "calls": 0})
                 f["bytes"], f["lines"], f["calls"] = f["bytes"] + size, f["lines"] + lines, f["calls"] + 1
-                if has_catalog and Path(p).name == CATALOG:
+                if has_catalog and is_catalog(p):
                     entries += [i for i in _entries(text) if i not in entries]
     rows = sorted(files.values(), key=lambda f: -f["bytes"])
     return {"reference_bytes": sum(f["bytes"] for f in rows),
             "reference_lines": sum(f["lines"] for f in rows),
-            "catalog_opened": any(Path(f["path"]).name == CATALOG for f in rows)
+            "catalog_opened": any(is_catalog(f["path"]) for f in rows)
             if has_catalog else None,
             "catalog_entries_read": entries,
             "unattributed_calls": unattributed,
             "reference_files": rows,
             "session": session_totals(evs, wall_s)}
+
+
+def is_catalog(path: str) -> bool:
+    """The catalog in either shape: the single `optimization-patterns.md`, or
+    a file of the split catalog under `references/patterns/`."""
+    return Path(path).name == CATALOG or path.startswith(PATTERNS_DIR)
 
 
 def reference_names(skill_dir: Path) -> list[str]:

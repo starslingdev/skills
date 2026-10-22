@@ -498,12 +498,28 @@ runner-rates file to refresh and no freshness check to run.
 
 ## Adding a pattern to the catalog (manual)
 
-Adding a new pattern is a two-part edit: author the catalog entry (METADATA +
-body) in `skills/ci-speedup/references/optimization-patterns.md`, then register its detector in
+Adding a new pattern is a three-part edit:
+
+1. **Author the pattern file** `skills/ci-speedup/references/patterns/opt<N>-<slug>.md`
+   (slug = the pattern's `fix_strategy`): YAML frontmatter with the same keys as
+   the old METADATA block, in the same order, plus `category: N`; then the body
+   with the title as the H1 (`# OPT<N> — Title`).
+2. **Add its line to `references/patterns/INDEX.md`** under its category, at the
+   position it should appear in the compiled file (INDEX order is the build
+   order).
+3. **Build and commit.** Run `python3 maintainers/ci-speedup/scripts/build_catalog.py`
+   and commit the new file, `INDEX.md` and the regenerated
+   `references/optimization-patterns.md` together. Never hand-edit the compiled
+   file: it is generated, and `build_catalog.py --check` in CI turns red on drift.
+
+Then register its detector in
 `skills/ci-speedup/scripts/scan.py` (a per-file / cross-workflow / repo-file handler or, for
-single-condition patterns, just `match:` / `yaml_path:` METADATA params) or
+single-condition patterns, just `match:` / `yaml_path:` frontmatter params) or
 `skills/ci-speedup/scripts/collect_runs.py` (for a `data-driven` pattern, or a `structural`
 pattern routed from the measured critical path).
+
+A cut pattern keeps its file with `status: cut`. A retitled pattern keeps its
+file name and gets an `aliases:` entry (plus `alias_note:`) for the old anchor.
 
 Coverage bookkeeping: a `static` catalog entry with no detector is reported in
 `catalog_patterns_without_detector`; `data-driven` entries are detected in

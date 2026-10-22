@@ -43,6 +43,7 @@ _MOVED_NAMES = {
     "loop-analysis-prompt.md",
     "loop-summary.schema.json",
     "draft_detector.py",
+    "build_catalog.py",
     "aggregate_lessons.py",
     "ci-speedup-dogfood.js",
     "ci-speedup-dogfood.command.md",

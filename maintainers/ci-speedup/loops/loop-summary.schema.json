@@ -129,6 +129,7 @@
               "SKILL.md",
               "evals/evals.json",
               "references/optimization-patterns.md",
+              "references/patterns/",
               "references/wall-clock-methodology.md",
               "references/savings-methodology.md",
               "references/adversarial-review-rubric.md",

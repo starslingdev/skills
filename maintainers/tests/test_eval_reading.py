@@ -413,3 +413,60 @@ def test_a_failing_shell_command_counts_what_it_printed_but_not_its_error_line()
     r = reading.summarize(evs, "ci-speedup", _NAMES, root=_ROOT)
     assert [(f["path"], f["bytes"]) for f in r["reference_files"]] == [
         ("optimization-patterns.md", len(_ENTRY.encode()))]
+
+
+# --- the split catalog: references/patterns/opt<N>-*.md + INDEX.md ---------------
+
+_SPLIT = ["gap-fill.md", "optimization-patterns.md", "patterns/INDEX.md",
+          "patterns/opt8-cache-key-granularity-mismatch.md",
+          "patterns/opt81-same-job-faster-on-another-runner.md",
+          "patterns/opt86-use-prebuilt-dependency-packages.md"]
+_OPT81_FILE = "     1\t---\n     2\tpattern: OPT81\n     3\t---\n     4\t\n     5\t# OPT81 — The Same Job\n     6\t\n     7\tbody"
+
+
+def test_a_read_of_one_pattern_file_is_the_catalog_and_names_its_entry():
+    evs = [_call(1, "Read", {"file_path": f"{_ROOT}/references/patterns/opt81-same-job-faster-on-another-runner.md"}),
+           _result(1, _OPT81_FILE)]
+    r = reading.summarize(evs, "ci-speedup", _SPLIT, root=_ROOT)
+    assert r["catalog_opened"] and r["catalog_entries_read"] == ["OPT81"]
+    assert [f["path"] for f in r["reference_files"]] == ["patterns/opt81-same-job-faster-on-another-runner.md"]
+
+
+def test_the_index_alone_opens_the_catalog_but_reads_no_entry():
+    body = "- [OPT86 — CI Compiles a Dependency](opt86-use-prebuilt-dependency-packages.md) · HIGH · data-driven · x"
+    evs = [_call(1, "Bash", {"command": f"cat {_ROOT}/references/patterns/INDEX.md"}), _result(1, body)]
+    r = reading.summarize(evs, "ci-speedup", _SPLIT, root=_ROOT)
+    assert r["catalog_opened"] and r["catalog_entries_read"] == []
+    assert [f["path"] for f in r["reference_files"]] == ["patterns/INDEX.md"]
+
+
+def test_a_recursive_grep_over_the_patterns_dir_is_charged_per_file():
+    body = (f"{_ROOT}/references/patterns/opt86-use-prebuilt-dependency-packages.md:5:# OPT86 — CI Compiles\n"
+            f"{_ROOT}/references/patterns/opt86-use-prebuilt-dependency-packages.md:7:wheel body\n"
+            f"{_ROOT}/references/patterns/INDEX.md:40:- [OPT86 — x](y) wheel\n")
+    evs = [_call(1, "Bash", {"command": f"grep -rn wheel {_ROOT}/references/patterns/"}), _result(1, body)]
+    r = reading.summarize(evs, "ci-speedup", _SPLIT, root=_ROOT)
+    paths = sorted(f["path"] for f in r["reference_files"])
+    assert paths == ["patterns/INDEX.md", "patterns/opt86-use-prebuilt-dependency-packages.md"]
+    assert r["catalog_entries_read"] == ["OPT86"]
+
+
+def test_a_glob_after_cd_into_the_patterns_dir_names_only_that_file():
+    evs = [_call(1, "Bash", {"command": f"cd {_ROOT}/references/patterns && cat opt81-*.md"}),
+           _result(1, _OPT81_FILE)]
+    r = reading.summarize(evs, "ci-speedup", _SPLIT, root=_ROOT)
+    assert [f["path"] for f in r["reference_files"]] == ["patterns/opt81-same-job-faster-on-another-runner.md"]
+    assert r["catalog_entries_read"] == ["OPT81"]
+
+
+def test_a_path_glob_matches_one_pattern_and_not_its_numeric_neighbour():
+    evs = [_call(1, "Bash", {"command": f"cat {_ROOT}/references/patterns/opt8-*.md"}),
+           _result(1, "# OPT8 — Cache Key Granularity Mismatch\n\nbody")]
+    r = reading.summarize(evs, "ci-speedup", _SPLIT, root=_ROOT)
+    assert [f["path"] for f in r["reference_files"]] == ["patterns/opt8-cache-key-granularity-mismatch.md"]
+
+
+def test_a_non_catalog_reference_file_still_does_not_open_the_catalog():
+    evs = [_call(1, "Read", {"file_path": f"{_ROOT}/references/gap-fill.md"}), _result(1, "x" * 40)]
+    r = reading.summarize(evs, "ci-speedup", _SPLIT, root=_ROOT)
+    assert r["catalog_opened"] is False

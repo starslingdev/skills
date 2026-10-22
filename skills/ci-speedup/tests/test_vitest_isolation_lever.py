@@ -462,10 +462,8 @@ def test_prompt_keeps_the_no_weakening_rail():
 # --- the catalog entry -------------------------------------------------------
 
 def _catalog_section(pat: str) -> str:
-    catalog = (_SKILL_DIR / "references" / "optimization-patterns.md").read_text()
-    start = catalog.index(f"### {pat} —")
-    nxt = catalog.find("\n### ", start + 1)
-    return catalog[start:] if nxt < 0 else catalog[start:nxt]
+    path = next((_SKILL_DIR / "references" / "patterns").glob(f"{pat.lower()}-*.md"))
+    return path.read_text(encoding="utf-8")
 
 
 def test_opt78_is_catalogued_as_a_high_risk_structural_lever():

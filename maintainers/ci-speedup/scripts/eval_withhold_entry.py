@@ -7,7 +7,9 @@ The discrimination proof for a reading-sensitive eval: the shared runner
 (`maintainers/scripts/run_skill_evals.py`) mounts a copy of the skill; this
 wrapper deletes the `### <id> — ...` section from that copy's
 `references/optimization-patterns.md` (up to the next `##`/`###` heading)
-before the session starts, and exits non-zero if no mounted copy was cut. It
+and, for the split catalog, deletes `references/patterns/<id>-*.md` and its
+`INDEX.md` line, before the session starts, and exits non-zero if no mounted
+copy was cut. It
 also stops the session fetching the published copy instead:
 
   - every HTTP(S) client that honours the proxy variables (`curl`, `git`,
@@ -37,6 +39,7 @@ from pathlib import Path
 
 _RUNNER = Path(__file__).resolve().parents[2] / "scripts" / "run_skill_evals.py"
 _CATALOG = Path("references") / "optimization-patterns.md"
+_PATTERNS = Path("references") / "patterns"
 _SKILL = "ci-speedup"
 _DEAD = "http://127.0.0.1:9"
 _SPARED = "anthropic.com,.anthropic.com,claude.ai,.claude.ai"
@@ -51,6 +54,23 @@ def withhold(text: str, pattern_id: str) -> str:
         raise SystemExit(f"withhold: no `### {pattern_id} —` heading in the catalog")
     end = re.compile(r"(?m)^#{2,3} ").search(text, m.end())
     return text[:m.start()] + (text[end.start():] if end else "")
+
+
+def withhold_split(patterns: Path, pattern_id: str) -> None:
+    """Delete `pattern_id`'s file and INDEX.md line from a split catalog
+    (`references/patterns/`); nothing when the copy has no split catalog."""
+    if not patterns.is_dir():
+        return
+    files = list(patterns.glob(f"{pattern_id.lower()}-*.md"))
+    if not files:
+        raise SystemExit(f"withhold: no {pattern_id.lower()}-*.md in {patterns}")
+    for f in files:
+        f.unlink()
+    index = patterns / "INDEX.md"
+    if index.is_file():
+        keep = [l for l in index.read_text(encoding="utf-8").splitlines(keepends=True)
+                if not l.startswith(f"- [{pattern_id} — ")]
+        index.write_text("".join(keep), encoding="utf-8")
 
 
 def _guard_gh(real: str | None) -> Path:
@@ -94,6 +114,7 @@ def install(runner, pattern_id: str) -> list[str]:
         if not cat.is_file():
             raise SystemExit(f"withhold: the mounted copy has no {_CATALOG}: {out}")
         cat.write_text(withhold(cat.read_text(encoding="utf-8"), pattern_id), encoding="utf-8")
+        withhold_split(Path(out) / _PATTERNS, pattern_id)
         cut.append(str(cat))
         print(f"    withheld {pattern_id} from the mounted catalog: {cat}")
         return out

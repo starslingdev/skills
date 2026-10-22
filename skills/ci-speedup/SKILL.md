@@ -77,7 +77,7 @@ detector, the agent writes a **log-grounded, clearly-labelled** root-cause readi
 (verbatim log lines, framed as a lead to verify) — a breakdown + fix prompt instead
 of a dead-end, never touching detection, ranking, or measured magnitudes.
 
-`scripts/scan.py` parses `references/optimization-patterns.md` and runs its
+`scripts/scan.py` parses `references/patterns/*.md` and runs its
 registered detectors against the repo — five deterministic flavors (per-file
 bespoke, declarative `match:`/`yaml_path:`, cross-workflow, repo-file,
 source-grep; `ARCHITECTURE.md`). `scripts/collect_runs.py` then adds the
@@ -388,7 +388,7 @@ dropped (never reframed into a softer finding):
    **OPT49/slow-setup and OPT51/install-ratio were CUT** — a duration/ratio never
    proves a cold cache (criterion 2); the verified slow-setup signal lives with
    OPT3/5/8/9 and OPT73. Rationale: the ⚠️ CUT notes in
-   [references/optimization-patterns.md](references/optimization-patterns.md).)
+   [references/patterns/](references/patterns/INDEX.md).)
 2. **Positive instance evidence** — proof the defect actually costs time on
    *this* repo: the cacheable step ran uncached with measurable cost, the
    long leg measurably gates the matrix, etc. The *absence* of a signal
@@ -417,14 +417,14 @@ agreement. A finding only one pass would defend is cut or escalated, not kept.
 
 ## Pattern catalog
 
-`references/optimization-patterns.md` declares all 89 patterns across 14
-categories (Caching, Redundancy, Docker, Parallelization, Actions and
-Checkout, Conditional Execution, Trigger and Scope, Release Workflow, Queue
-Times and Concurrency, Timing Anomalies, Stack-Specific, Build Caching,
-Hidden Failures and Dead Config, **Structural / Critical-Path Levers**). Each
-entry's METADATA block declares the pattern id, impact tier, finding class
-(`static` / `data-driven` / `structural`), detector type, and fix strategy
-slug; structural entries add a `risk` rating + mandatory guardrail/rollout.
+Patterns live one per file in `references/patterns/opt<N>-*.md` (89 patterns
+in 14 categories, from Caching to **Structural / Critical-Path Levers**). Each
+file's frontmatter declares the id, impact tier, finding class (`static` /
+`data-driven` / `structural`), detector and fix strategy slug; structural
+entries add a `risk` rating + mandatory guardrail/rollout. When a finding,
+prompt or review names `OPT<N>`, read that one file in full; read
+`references/patterns/INDEX.md` only to find which pattern covers a stack.
+Never open `references/optimization-patterns.md`: it is the generated public copy.
 
 Adding or cutting a pattern (catalog entry + detector registration, coverage
 bookkeeping, the intentionally-cut OPT49/50/51 / router-less OPT74, OPT78, OPT85 and OPT87 cases) is a
@@ -441,7 +441,7 @@ Reference docs (read on demand — each links one level deep from here; outside 
 - [references/savings-methodology.md](references/savings-methodology.md) —
   two-axis sizing: Δ wall-clock ranks; measured runner-minute findings promote; modeled residuals stay in "Also noticed".
   Measured compute counts completed job runs (timed-out, cancelled, and failed runs at or past the 6-hour timeout excluded, named in the spine footnote): modeled savings are capped at it; measured and failure-waste savings are checked against every sampled run.
-- [references/optimization-patterns.md](references/optimization-patterns.md) — the pattern catalog (every OPT-id).
+- [references/patterns/INDEX.md](references/patterns/INDEX.md) — the pattern index (every OPT-id; one file per pattern).
 - [references/spine-scoping.md](references/spine-scoping.md) — which checks
   form the spine (required-scoping, PR-floor fallback, one-path demotion).
 - [references/structural-track.md](references/structural-track.md) — the

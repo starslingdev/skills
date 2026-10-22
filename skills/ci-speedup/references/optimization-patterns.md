@@ -1,3 +1,6 @@
+<!-- GENERATED FILE, do not edit: maintainers/ci-speedup/scripts/build_catalog.py builds it from
+references/patterns/ (one file per pattern, ordered by patterns/INDEX.md). Agents: do not read this file;
+find a pattern in references/patterns/INDEX.md and read references/patterns/opt<N>-*.md. -->
 # ci-speedup Pattern Catalog
 
 This catalog defines every CI optimization pattern the `ci-speedup` skill can

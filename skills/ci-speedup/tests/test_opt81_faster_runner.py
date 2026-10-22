@@ -32,7 +32,7 @@ sys.path.insert(0, str(_SKILL_DIR / "scripts"))
 import blocking_path as bp  # noqa: E402
 import collect_runs as cr  # noqa: E402
 
-_CATALOG = _SKILL_DIR / "references" / "optimization-patterns.md"
+_OPT81_FILE = next((_SKILL_DIR / "references" / "patterns").glob("opt81-*.md"))
 _WF = ".github/workflows/bench.yml"
 _STEPS = ["Set up job", "Run actions/checkout@v4", "Run benchmarks",
           "Post Run actions/checkout@v4", "Complete job"]
@@ -224,7 +224,7 @@ def test_opt81_larger_runner_option_does_not_deny_the_naming_the_taxonomy_reads(
     sentence = ("A runner name the organisation chooses cannot be classified by size "
                 "by this audit unless it follows GitHub's `<image>-<N>core(s)` naming.")
     assert bp._OPT81_A2_OPTION_LARGER.endswith(sentence), bp._OPT81_A2_OPTION_LARGER
-    assert sentence in _CATALOG.read_text(encoding="utf-8")
+    assert sentence in _OPT81_FILE.read_text(encoding="utf-8")
 
 
 # =============================================================================
@@ -744,9 +744,9 @@ def _foreign_domains(text: str) -> list[str]:
 
 
 def _opt81_catalog_entry() -> str:
-    text = _CATALOG.read_text(encoding="utf-8")
-    m = re.search(r"### OPT81 — .*?(?=\n### OPT|\n## Category|\Z)", text, re.S)
-    assert m, "the catalog has no ### OPT81 entry"
+    text = _OPT81_FILE.read_text(encoding="utf-8")
+    m = re.search(r"^# OPT81 — .*", text, re.S | re.M)
+    assert m, "the OPT81 pattern file has no `# OPT81 —` title"
     return m.group(0)
 
 

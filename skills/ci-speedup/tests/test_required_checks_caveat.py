@@ -39,7 +39,18 @@ _SPLIT_INTO_NEW_JOBS_FIX_KEYS = [
     "benchmark-serial-reruns", # the "parallelise across runners" alternative
 ]
 
-_CATALOG = (Path(__file__).resolve().parents[1] / "references" / "optimization-patterns.md").read_text()
+_PATTERN_FILES = sorted((Path(__file__).resolve().parents[1] / "references" / "patterns").glob("opt*.md"))
+
+
+def _pattern_file_text(anchor: str) -> str | None:
+    """Text of the one-file-per-pattern entry whose `# OPTn — Title` heading line
+    contains `anchor` (None when no pattern carries it)."""
+    for p in _PATTERN_FILES:
+        text = p.read_text(encoding="utf-8")
+        heading = next((ln for ln in text.splitlines() if ln.startswith("# ")), "")
+        if anchor in heading:
+            return text
+    return None
 
 
 def _has_required_checks_caveat(text: str) -> bool:
@@ -70,15 +81,12 @@ def test_catalog_sharding_patterns_carry_the_caveat():
     for anchor in ("Long Test Job Without Sharding", "Shard Imbalance",
                    "Sequential Workflows via `workflow_run`",
                    "Repeated Fixed Setup Across Independent Small Jobs"):
-        assert anchor in _CATALOG, (
+        # Each pattern is its own file, so the section is exactly that pattern's prose and
+        # cannot bleed into a neighbour's caveat.
+        section = _pattern_file_text(anchor)
+        assert section is not None, (
             f"catalog anchor {anchor!r} not found — was the pattern title renamed?"
         )
-        start = _CATALOG.index(anchor)
-        # Bound the window at the NEXT pattern's `### ` header so each pattern's pin bites on
-        # its OWN caveat — a fixed char window could bleed into the next pattern's caveat and
-        # false-pass if this pattern's were dropped.
-        nxt = _CATALOG.find("\n### ", start + 1)
-        section = _CATALOG[start:nxt] if nxt != -1 else _CATALOG[start:]
         assert "Required-checks caveat" in section and _has_required_checks_caveat(section), (
             f"the catalog pattern near {anchor!r} lost its required-checks caveat"
         )
@@ -246,14 +254,9 @@ def test_rendered_opt75_handoff_warns_about_a_skipped_dependent():
 def _opt75_catalog_section() -> str:
     """OPT75's own catalog window, so every catalog pin bites on OPT75's prose alone."""
     anchor = "OPT75 — Long Pole: Optimize or Relocate the Dominant Step"
-    assert anchor in _CATALOG, "OPT75 heading not found — was the pattern renamed?"
-    start = _CATALOG.index(anchor)
-    # OPT75 is currently the LAST `### ` pattern in the file, so bounding only on the
-    # next `### ` leaves the window running to EOF and silently annexing whatever gets
-    # appended later. Bound on the next heading of either level.
-    bounds = [i for i in (_CATALOG.find("\n### ", start + 1),
-                          _CATALOG.find("\n## ", start + 1)) if i != -1]
-    return _CATALOG[start:min(bounds)] if bounds else _CATALOG[start:]
+    text = _pattern_file_text(anchor)
+    assert text is not None, "OPT75 heading not found — was the pattern renamed?"
+    return text
 
 
 def test_catalog_opt75_carries_both_relocation_explanations():
