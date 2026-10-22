@@ -83,3 +83,12 @@ def test_a_hand_edit_to_the_compiled_file_is_drift(tmp_path, monkeypatch):
     monkeypatch.setattr(bc, "COMPILED", copy)
     monkeypatch.setattr(bc, "_REPO", tmp_path)
     assert bc.main(["--check"]) == 1
+
+
+def test_a_yaml_syntax_error_is_a_source_error_not_drift(tree, monkeypatch, capsys):
+    p = next(tree.glob("opt33-*.md"))
+    p.write_text(p.read_text().replace("\ncategory: 7\n", "\ncategory: 7\nyaml_path: jobs: build\n", 1))
+    real_build = bc.build
+    monkeypatch.setattr(bc, "build", lambda: real_build(tree))
+    assert bc.main(["--check"]) == 2
+    assert "build_catalog:" in capsys.readouterr().err

@@ -48,6 +48,7 @@ _MOVED_NAMES = {
     "ci-speedup-dogfood.js",
     "ci-speedup-dogfood.command.md",
     "test_draft_detector.py",
+    "test_build_catalog.py",
     "test_aggregate_lessons.py",
     "test_loop_summary_infra.py",
     "dogfood-retry.test.mjs",

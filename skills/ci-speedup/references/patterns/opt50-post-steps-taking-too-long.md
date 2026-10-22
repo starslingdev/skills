@@ -7,6 +7,7 @@ affected_files: '.github/workflows/*.yml,.github/workflows/*.yaml'
 fix_strategy: post-steps-taking-too-long
 title_template: 'Post Steps Taking Too Long'
 category: 10
+status: cut
 ---
 
 # OPT50 — Post Steps Taking Too Long

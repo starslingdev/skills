@@ -138,13 +138,14 @@ def parse_pattern_file(path: Path) -> tuple[dict, str, str, str]:
 
 def pattern_files(directory: Path) -> list[Path]:
     """The pattern files of `directory` in catalog order: INDEX.md's order, then
-    any file INDEX.md does not list, by number (never dropped; the build's
-    check fails on it)."""
+    any `opt<N>-*.md` file INDEX.md does not list, by number (never dropped;
+    the build's check fails on it). Other names are not patterns."""
     index = directory / "INDEX.md"
     ids = _INDEX_LINE_RE.findall(index.read_text(encoding="utf-8")) if index.is_file() else []
     listed = [p for i in ids for p in sorted(directory.glob(f"{i.lower()}-*.md"))[:1]]
     listed = list(dict.fromkeys(listed))
-    rest = sorted((p for p in directory.glob("opt*.md") if p not in listed),
+    rest = sorted((p for p in directory.glob("opt*.md")
+                   if p not in listed and re.match(r"opt\d+-", p.name)),
                   key=lambda p: int(re.match(r"opt(\d+)", p.name).group(1)))
     return listed + rest
 

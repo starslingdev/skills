@@ -203,7 +203,7 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     try:
         text = build()
-    except (BuildError, ValueError) as exc:
+    except (BuildError, ValueError, scan.yaml.YAMLError) as exc:
         print(f"build_catalog: {exc}", file=sys.stderr)
         return 2
     current = COMPILED.read_text(encoding="utf-8") if COMPILED.is_file() else ""

@@ -5,6 +5,7 @@ fixes the scanner's catalog order), and retired ids keep their stub file."""
 from __future__ import annotations
 
 import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -42,4 +43,14 @@ def test_index_lists_every_pattern_file_exactly_once_in_scanner_order():
 
 def test_retired_ids_keep_their_stub_files():
     status = {scan.parse_pattern_file(p)[1]: scan.parse_pattern_file(p)[0].get("status") for p in _FILES}
-    assert status["OPT49"] == status["OPT51"] == "cut" and status["OPT66"] == "removed"
+    assert status["OPT49"] == status["OPT50"] == status["OPT51"] == "cut" and status["OPT66"] == "removed"
+    index = (_PATTERNS / "INDEX.md").read_text(encoding="utf-8")
+    for oid in ("OPT49", "OPT50", "OPT51"):
+        assert re.search(rf"^- {oid} — .+ — cut; id retired$", index, re.M), oid
+
+
+def test_a_stray_opt_named_file_that_is_not_a_pattern_does_not_crash_the_scanner(tmp_path):
+    d = tmp_path / "patterns"
+    shutil.copytree(_PATTERNS, d)
+    (d / "optional.md").write_text("notes, not a pattern\n", encoding="utf-8")
+    assert [e.pattern for e in scan.load_catalog(d)] == [e.pattern for e in scan.load_catalog(_PATTERNS)]

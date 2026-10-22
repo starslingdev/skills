@@ -70,7 +70,7 @@ This order is also the compiled file's order; contributors see `README.md`.
 - OPT48 — High Job-Level Failure Rate (>15% over 30d) (MEDIUM, data-driven) — job fails over 15% of runs
 ## Category 10 — Timing Anomalies
 - OPT49 — Slow Setup Step (MEDIUM, data-driven) — cut; id retired
-- OPT50 — Post Steps Taking Too Long (MEDIUM, data-driven) — slow Post steps (cache save)
+- OPT50 — Post Steps Taking Too Long (MEDIUM, data-driven) — cut; id retired
 - OPT51 — Install-to-Test Ratio >50% (MEDIUM, data-driven) — cut; id retired
 - OPT81 — The Same Job Is Measurably Faster on Another Runner (MEDIUM, data-driven) — job faster on another runner class
 ## Category 11 — Stack-Specific
