@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -164,3 +166,66 @@ def test_scaffold_with_no_workflow_ids_exits_non_zero(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as exc:
         mod.main(tmp_path, tmp_path)
     assert isinstance(exc.value.code, str) and "_WF" in exc.value.code  # str: stderr, exit 1
+
+
+# Ported from ci-secure's retired harness: behaviour its entries rely on.
+
+def _rec(files: str) -> dict:
+    return {"files": files, "trace": "", "last_message": "", "tool_used": []}
+
+
+def test_files_require_turns_a_missing_report_into_a_harness_error():
+    """Scratch notes keep the `files` record non-empty while the report is
+    missing; checks anchored on the report must not then read as a red."""
+    check = [{"name": "x", "type": "files", "pattern": "jobs", "match": "not_contains"}]
+    req = r"ci-secure-report[^/]*\.md"
+    with pytest.raises(runner.HarnessError):
+        runner.apply_checks(check, _rec("=== notes.txt ===\nthinking"), req)
+    [(_, ok, _)] = runner.apply_checks(check, _rec("=== ci-secure-report-a.md ===\nok"), req)
+    assert ok
+
+
+def test_an_entry_timeout_and_turn_cap_override_the_defaults(monkeypatch, tmp_path):
+    seen = {}
+
+    def fake(prompt, cwd, plugins, env, max_turns, timeout, model):
+        seen.update(max_turns=max_turns, timeout=timeout)
+        return _stream("ci-secure"), runner.events(_stream("ci-secure"))
+    monkeypatch.setattr(runner, "run_session", fake)
+    monkeypatch.setattr(runner, "_LOGS", tmp_path / "logs")
+    args = runner.argparse.Namespace(max_turns=80, timeout=1500, model=None, keep=False)
+    entry = {"id": 1, "prompt": "p", "timeout": 900, "max_turns": 60,
+             "checks": [{"name": "s", "type": "tool_used", "pattern": "^Skill "}]}
+    assert runner.run_entry(_REPO / "skills" / "ci-secure", entry, 1, args)["passed"]
+    assert seen == {"max_turns": 60, "timeout": 900}
+
+
+def test_sessions_and_scaffolds_do_not_inherit_git_repository_selection(monkeypatch):
+    """An exported GIT_DIR would send a scaffold's commit of vulnerable
+    workflow YAML at a real repository."""
+    monkeypatch.setenv("GIT_DIR", "/real/.git")
+    monkeypatch.setenv("GIT_WORK_TREE", "/real")
+    env = runner._env()
+    assert "GIT_DIR" not in env and "GIT_WORK_TREE" not in env
+
+
+def test_text_checks_read_decoded_lines_without_the_prompt():
+    """`[^\\n]` must mean one line: on raw stream-json a newline is two
+    characters, and a same-line check would match across lines."""
+    evs = [{"type": "user", "message": {"content": [{"type": "text", "text": "PROMPT"}]}},
+           {"type": "assistant", "message": {"content": [
+               {"type": "text", "text": "ci.yml (clean)\nline 11 elsewhere"}]}},
+           {"type": "user", "message": {"content": [{"type": "tool_result", "content": [
+               {"type": "text", "text": "0 of 10 vectors hit"}]}]}}]
+    got = runner.transcript(evs)
+    assert not re.search(r"ci\.yml[^\n]{0,30}?\b11\b", got)
+    assert "PROMPT" not in got and "0 of 10 vectors hit" in got
+
+
+@pytest.mark.parametrize("argv", [["--skill", "no-such-skill"],
+                                  ["--skill", "ci-secure", "--runs", "0"]])
+def test_a_crash_or_an_empty_selection_exits_2(argv):
+    script = _REPO / "maintainers" / "scripts" / "run_skill_evals.py"
+    r = subprocess.run([sys.executable, str(script), *argv],
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 2, r.stderr

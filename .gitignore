@@ -77,7 +77,7 @@ uv.lock
 # tracked, so registry/marketplace scanners never see workflow-shaped attack
 # strings in the repo tree.
 skills/ci-secure/tests/fixtures/.github/
-skills/ci-secure/evals/files/*/.github/
+skills/ci-secure/evals/fixtures/*/.github/
 
 # `claude plugin eval` writes its run artifacts (aggregate-result.json,
 # report.html, kept sandboxes) to `<discovery root>/evals/results/` by default —
@@ -88,11 +88,10 @@ skills/ci-secure/evals/files/*/.github/
 # `tests/test_ci_secure_install_surface.py` fails if results land here anyway.
 skills/ci-secure/evals/results/
 
-# The ci-secure eval harness writes a failing session's full stream-json plus
-# the file corpus it collected to `./skill-eval-logs/` (relative to the working
-# directory, so the repo root on a local run). Those hold the verbatim
-# transcript of an agent session — prompts, tool output, the rendered report.
-# Never tracked; see maintainers/ci-secure/scripts/run_skill_evals.py.
+# The shared skill-eval runner writes a failing session's full stream-json plus
+# the files it collected to `skill-eval-logs/` at the repo root. Those hold the
+# verbatim transcript of an agent session — prompts, tool output, the rendered
+# report. Never tracked; see maintainers/scripts/run_skill_evals.py.
 skill-eval-logs/
 
 # The shared skill-eval runner (maintainers/scripts/run_skill_evals.py) writes

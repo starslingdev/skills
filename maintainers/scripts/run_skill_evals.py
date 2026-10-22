@@ -179,8 +179,12 @@ def files_written(roots: list[Path], before: dict, calls: list[str], since: floa
     return "\n".join(out)
 
 
-def apply_checks(checks: list[dict], rec: dict) -> list[tuple[str, bool, str]]:
-    """(name, passed, detail) per check. `rec` holds the four records."""
+def apply_checks(checks: list[dict], rec: dict,
+                 files_require: str | None = None) -> list[tuple[str, bool, str]]:
+    """(name, passed, detail) per check. `rec` holds the four records.
+    `files_require` (an entry field) names, as a regex, the file a `files`
+    check reads: when no collected file is called that, a `files` check is a
+    harness error, so scratch files cannot stand in for a missing report."""
     results = []
     for c in checks:
         kind, name, pat = c.get("type"), c.get("name", "?"), c.get("pattern", "")
@@ -194,6 +198,10 @@ def apply_checks(checks: list[dict], rec: dict) -> list[tuple[str, bool, str]]:
         if kind == "files" and not rec["files"]:
             raise HarnessError(f"check {name!r} reads `files`, but the session wrote "
                                "nothing the harness could collect")
+        if kind == "files" and files_require and not re.search(
+                rf"(?m)^=== (?:{files_require}) ===$", rec["files"]):
+            raise HarnessError(f"check {name!r} reads `files`, but no collected file "
+                               f"matches {files_require!r}")
         found = re.search(pat, rec[kind]) is not None
         if c.get("match", "contains") == "not_contains":
             results.append((name, not found, "absent" if not found else "PRESENT"))
@@ -260,7 +268,8 @@ def run_entry(skill_dir: Path, entry: dict, run: int, args) -> dict:
                          PATH=f"{shim_dir}{os.pathsep}{_env()['PATH']}")
         before, since = snapshot([sandbox, tmpdir]), time.time() - 1
         stream, evs = run_session(entry["prompt"], sandbox, plugins, _env(extra),
-                                  entry.get("max_turns", args.max_turns), args.timeout,
+                                  entry.get("max_turns", args.max_turns),
+                                  entry.get("timeout", args.timeout),
                                   args.model)
         (tmp / "session.jsonl").write_text(stream)  # read with --keep
         calls = tool_calls(evs)
@@ -274,7 +283,7 @@ def run_entry(skill_dir: Path, entry: dict, run: int, args) -> dict:
             Path(f"{stem}.jsonl").write_text(stream)
             Path(f"{stem}.files.txt").write_text(rec["files"])
         try:
-            checks = apply_checks(entry["checks"], rec)
+            checks = apply_checks(entry["checks"], rec, entry.get("files_require"))
         except HarnessError:
             keep_session()  # nothing collected: the transcript says why
             raise

@@ -109,6 +109,15 @@ entries are dated (UTC). Format loosely follows
 
 ### Changed
 
+- **2026-10-22** — **The five eval scenarios run on the shared eval runner,
+  and ci-secure's own harness is retired.** The cases moved from five
+  `case.yaml` files into `evals/evals.json`, the fixtures from `evals/files/`
+  to `evals/fixtures/<slug>/` (still cloaked) with a Python `scaffold.py`, and
+  the run command is now `maintainers/scripts/run_skill_evals.py --skill
+  ci-secure`. Every mechanical check keeps its exact regex. The seven `llm`
+  graders are dropped, since nothing here runs a judge model; their criteria
+  live on in each entry's `expected_output`. The skill's own behaviour is
+  unchanged.
 - **2026-08-25** — **The rejection record now accounts for every pattern id
   the old catalog carried, and states the catalog's size correctly.**
   `references/why-these-ten.md` is the one document that explains why each

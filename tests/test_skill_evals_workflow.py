@@ -1,6 +1,6 @@
 """The skill-evals gate cannot go green over a session that did not happen.
 
-This workflow exists to run ci-secure's behavioural cases against a live agent.
+This workflow exists to run ci-secure's and ci-speedup's behavioural evals against a live agent.
 Its entire value is that a green `skill evals` check means five real sessions ran
 and behaved. Every way that decays is invisible in the check list: a fork PR that
 reports green having reached no API key, a verdict job that exits 0 on a skip, a
@@ -111,6 +111,14 @@ def test_the_verdict_waits_on_both_suites_and_they_share_the_fork_gate():
     assert _squash(_job("ci-speedup-evals")["if"]) == _squash(_job("evals")["if"])
 
 
+@pytest.mark.parametrize("job_id,skill", [("evals", "ci-secure"),
+                                          ("ci-speedup-evals", "ci-speedup")])
+def test_each_suite_runs_on_the_shared_runner(job_id, skill):
+    run = _job(job_id)["steps"]
+    step = next(s for s in run if s.get("name") == "Run the eval cases")
+    assert f"maintainers/scripts/run_skill_evals.py --skill {skill}" in _squash(step["run"])
+
+
 @pytest.mark.parametrize("job_id", ["evals", "ci-speedup-evals"])
 def test_each_suite_keeps_sandbox_exit2_and_pinned_cli(job_id):
     steps = {s.get("name"): s for s in _job(job_id)["steps"]}
@@ -151,11 +159,11 @@ def test_the_claude_cli_is_pinned():
 
 def test_the_job_budget_exceeds_the_harness_own_worst_case():
     """A slow-but-healthy suite killed by the job timeout is reported as a
-    behaviour change."""
-    worst_seconds = 0
-    for case in sorted(_EVALS.glob("*/case.yaml")):
-        spec = yaml.safe_load(case.read_text(encoding="utf-8"))
-        worst_seconds += (spec.get("execution") or {}).get("timeout_seconds", 900)
+    behaviour change. 1500 is the shared runner's default --timeout."""
+    import json
+    spec = json.loads((_EVALS / "evals.json").read_text(encoding="utf-8"))
+    worst_seconds = sum(e.get("timeout", 1500) for e in spec["evals"] if e.get("checks"))
+    assert worst_seconds > 0
     assert _job("evals")["timeout-minutes"] >= worst_seconds / 60, (
         f"{worst_seconds / 60:.0f} minutes of per-run budget under a "
         f"{_job('evals')['timeout-minutes']}-minute job timeout")
