@@ -3111,7 +3111,7 @@ title_template: "Every pull request pays for coverage that could run after merge
 3. Keep one required status check on the PR path so branch protection stays simple, and do not leave a moved job listed as required, or PRs will wait on a check that never runs.
 4. Make a red post-merge run impossible to miss: it notifies an owner, and it blocks a release.
 
-**Guardrail**: moving coverage after merge means a regression can land on the default branch before it is caught. Keep that window short and owned: the post-merge run must start on every merge, its failures must reach someone, and a failure must block the release path. Never move a leg whose failures are often unique to it.
+**Guardrail**: moving coverage after merge means a regression can land on the default branch before it is caught. Keep that window short and owned: every merged commit must be covered (a post-merge or merge-queue run starts on every merge; a scheduled run tests the latest merged tree, so it must run often enough to keep the window short), its failures must reach someone, and a release must not ship a commit the full matrix has not passed. Never move a leg whose failures are often unique to it.
 
 **Sizing: uncredited**. No `_SIZING` model. The ceiling is the measured share of the PR's wait spent on the legs that move; what remains is the subset's time.
 
@@ -4464,7 +4464,7 @@ title_template: "The compile is the long pole and nobody profiled it"
 
 **Fix recipe**:
 
-1. Profile a clean build of the slow target on the same runner class, and keep the report.
+1. Profile the slow target on the same runner class with the same cache state as the slow job (dependencies restored, or a clean build when the job builds clean by design), and keep the report. A clean build profiled separately is a comparison, not the measurement.
 2. If a build-profile setting dominates (for example fat link-time optimization in a release profile), measure the alternatives (ThinLTO, more codegen units) on build time AND on what the setting is for: runtime of the real workloads, binary size.
 3. If one crate, module or construct dominates, change that code (for example a macro that generates heavy wrappers for every implementation, or deeply nested generics), keeping its public shape where possible.
 4. Re-profile, and record the before and after with the commands used, so a later regression can be measured the same way.
