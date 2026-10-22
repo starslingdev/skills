@@ -46,7 +46,8 @@ never a behaviour change.
 
 ## Cost
 
-About $0.40 and 30 to 60 seconds per run (measured on claude 2.1.307).
+About $0.40 to $0.65 and 30 to 95 seconds per run (measured on claude 2.1.307
+locally and the pinned 2.1.235 in CI).
 Tokens, duration and cost per run are printed and written to
 `skill-eval-results/` at the repo root (gitignored); failing sessions are kept
 in `skill-eval-logs/`.

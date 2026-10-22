@@ -442,8 +442,8 @@ headless agent sessions: `python3 maintainers/scripts/run_skill_evals.py --skill
 (add `--id 10` for one entry, `--runs 3` to gauge flakiness). The `synthetic`
 fixture builds the offline e2e test's repository and replays its gh corpus, and
 `maintainers/scripts/eval_gh_shim.py` answers the agent's own `gh` calls about
-that repository from the same corpus. Each run costs about $0.40 and under a
-minute; results (tokens, time, cost, per-check verdicts) land in the gitignored
+that repository from the same corpus. Each run costs about $0.40 to $0.65 and
+under two minutes; results (tokens, time, cost, per-check verdicts) land in the gitignored
 `skill-eval-results/`, failing sessions in `skill-eval-logs/`. CI runs the same
 command in the `ci-speedup skill evals` job. Run it before merging a SKILL.md or
 references change that CI did not cover (fork PRs). Details:
