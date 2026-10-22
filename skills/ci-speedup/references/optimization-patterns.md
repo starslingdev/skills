@@ -1918,7 +1918,7 @@ title_template: "The slowest platform compiles its own tests"
 **Detection heuristic** (manual; read, never inferred):
 
 1. A matrix runs the same build-and-test on several platforms or architectures, and one platform leg is the slow outlier.
-2. On that leg, the build or compile step (or an emulation setup step such as QEMU) takes most of the job, and the test step is a minority of it.
+2. On that leg, the build or compile work (or an emulation setup step such as QEMU) takes most of the job, and running the tests is a minority of it. When compile and test share one step (`bazel test`, or a test command that compiles first), step timings cannot split them: read the run log, a build-timing artifact (Bazel's profile, cargo's `--timings` report), or a test-only run of the same tests on another runner before concluding.
 3. The toolchain can build for that target elsewhere: cross-compilation is supported (for example Rust targets, Go `GOOS`/`GOARCH`, a C or C++ cross toolchain), or the test runner can package built tests as an archive to replay elsewhere (for example `cargo nextest archive`).
 
 **Fix recipe**:
@@ -1934,7 +1934,7 @@ title_template: "The slowest platform compiles its own tests"
 
 **Real-world example (OpenAI)**, their numbers, not a forecast for your repo:
 
-- openai/codex [#20585](https://github.com/openai/codex/pull/20585) (2026-05-01): Windows test builds moved to remote Linux build execution, and the change "keeps `TestRunner` actions local on the Windows runner". The PR reports a "Baseline native Windows Bazel test on `main`: success in about 28m12s" against a cross-compiled run's "Windows test 9m16s", both linked CI runs. The fully native Windows job stayed, on pushes to `main`, to keep the coverage the cross build lacked.
+- openai/codex [#20585](https://github.com/openai/codex/pull/20585) (2026-05-01): Windows test builds moved to remote Linux build execution, and the change "keeps `TestRunner` actions local on the Windows runner". The PR reports a "Baseline native Windows Bazel test on `main`: success in about 28m12s" (the linked job is named "Local Bazel build on windows-latest", so build and test ran in it together) against a cross-compiled run's "Windows test 9m16s", both linked CI runs. The fully native Windows job stayed, on pushes to `main`, to keep the coverage the cross build lacked.
 - openai/codex [#23358](https://github.com/openai/codex/pull/23358) (2026-05-20): the Windows ARM64 test archive is "cross-compiled on Windows x64 and replayed on native Windows ARM64 shards so the slow ARM64 machine is used for execution rather than compilation". Completed runs took "`34m30s`" and "`30m36s`" end to end, where "comparable pre-cross-compile sharded Windows ARM64 runs were `55m01s`, `50m21s`, and `46m42s`".
 - openai/tiktoken builds its ARM64 wheels on native `ubuntu-24.04-arm` runners instead of under QEMU emulation (commit 853da97, "Improve aarch64 and mac builds (#380)"; no timing published).
 
