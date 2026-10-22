@@ -2699,7 +2699,7 @@ def test_p1424_workflow_level_default_working_directory_separates_them(tmp_path)
 
 
 # ---------------------------------------------------------------------------
-# The `repo` plumbing: scan(..., repo=...) -> the two API-gated config facts.
+# The `repo` plumbing: scan(..., repo=...) -> the API-gated config facts.
 #
 # Nothing exercised this. Deleting `repo=repo` from the call `scan()` makes
 # into `compute_config_facts` left the whole suite green — both facts would
@@ -2708,8 +2708,12 @@ def test_p1424_workflow_level_default_working_directory_separates_them(tmp_path)
 # ---------------------------------------------------------------------------
 
 def test_scan_passes_the_repo_through_to_the_api_gated_facts(tmp_path):
-    """End to end at the scan boundary, with the two fetchers stubbed at module
-    level — the seam a production run actually goes through."""
+    """End to end at the scan boundary, with the three fetchers stubbed at
+    module level — the seam a production run actually goes through. The
+    CODEOWNERS fact reaches its fetcher only once a rule covers workflows, so
+    the fixture carries one."""
+    (tmp_path / ".github").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".github" / "CODEOWNERS").write_text(".github/ @sec-team\n")
     _wf(tmp_path, "ci.yml", """\
         name: ci
         on: pull_request
@@ -2738,15 +2742,21 @@ def test_scan_passes_the_repo_through_to_the_api_gated_facts(tmp_path):
         seen.append(repo)
         return "first_time_contributors", "the repository's Actions settings"
 
+    def _owner_review(repo):
+        seen.append(repo)
+        return False, "branch `main`"
+
     with mock.patch.object(cf, "_required_contexts_via_gh", _contexts), \
-         mock.patch.object(cf, "_fork_approval_via_gh", _approval):
+         mock.patch.object(cf, "_fork_approval_via_gh", _approval), \
+         mock.patch.object(cf, "_code_owner_review_via_gh", _owner_review):
         result = scan.scan(catalog, tmp_path, repo="owner/name")
 
-    # The repository reached BOTH fetchers — the plumbing under test.
-    assert seen == ["owner/name", "owner/name"], seen
+    # The repository reached EVERY fetcher — the plumbing under test.
+    assert seen == ["owner/name"] * 3, seen
     facts = {f["fact_id"]: f for f in result["security_score"]["facts"]}
     assert facts["sec.required-checks.skippable"]["outcome"] == "fail"
     assert facts["sec.fork-approval.effective"]["outcome"] == "pass"
+    assert facts["sec.codeowners.workflows"]["outcome"] == "fail"
     assert result["security_score"]["unmeasured"] == []
 
 

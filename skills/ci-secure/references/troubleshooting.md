@@ -8,7 +8,7 @@ rules) — this file is the lookup table, not the contract.
 |-------|----------|
 | "no .github/workflows directory" | Run from a repo root that contains GitHub Actions workflows |
 | PyYAML missing | `pip install pyyaml` (the scanner's only third-party dep) |
-| gh not installed / not logged in | The scan still runs; three checks go unmeasured and are reported as such — the impostor-SHA vector, and the two API-gated config facts (required-checks-skippable, fork-PR approval). `gh auth login` to enable them |
+| gh not installed / not logged in | The scan still runs; up to four checks go unmeasured and are reported as such — the impostor-SHA vector, and the API-gated config facts (required-checks-skippable, fork-PR approval, and — when a CODEOWNERS rule covers workflows — whether the branch enforces it). `gh auth login` to enable them |
 | Scanner emits zero findings | Most likely the workflows are actually clean — that's the headline, not a bug. Otherwise check for a detector regression via `tests/` |
 | Scanner exits non-zero or writes unparseable output | Coverage failure, not a clean repo — surface exit code + stderr and stop (SKILL.md NEVER rules) |
 | Subagent stops with a question | Surface it to the user; the finding's heading stays unmarked until the subagent completes |

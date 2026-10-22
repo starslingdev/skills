@@ -36,11 +36,11 @@ subagent per finding group. It never commits, pushes, or opens a PR
 only — this is not a comprehensive audit.*
 
 **Prereqs:** PyYAML (`pip install pyyaml` — the scanner's only third-party
-dep). `gh` is optional, used for four things: the network-gated impostor-SHA
+dep). `gh` is optional, used for five things: the network-gated impostor-SHA
 check (P14.11 — the one vector that cannot be answered from YAML alone), the
-dormancy note on findings, and the two config facts read over the API
-(required-checks-skippable, fork-PR approval). Everything else runs locally in
-seconds. Troubleshooting: [references/troubleshooting.md](references/troubleshooting.md).
+dormancy note on findings, and three config facts read over the API
+(required checks skippable, fork-PR approval, CODEOWNERS enforced). Everything
+else runs locally in seconds. Troubleshooting: [references/troubleshooting.md](references/troubleshooting.md).
 
 **`<ci-secure>` in the commands below is this skill's own install directory** —
 the absolute path to the directory holding this `SKILL.md` (e.g.
@@ -58,13 +58,13 @@ By default the skill operates on the current working directory.
    user the repo has no GitHub Actions workflows to scan.
 3. If `gh auth status` succeeds AND the repo has a GitHub remote, derive
    `owner/repo` from `git remote get-url origin` into **`REPO`** — the shell
-   variable Phase 2 expands, and what the four gh-gated checks above need.
+   variable Phase 2 expands, and what the gh-gated checks above need.
    The URL comes in two shapes; the command handling both is in
    [references/troubleshooting.md](references/troubleshooting.md). Confirm
    it is exactly `owner/repo` (one `/`, no scheme, no `.git` suffix) before
    passing it; on any other shape leave `REPO` empty rather than passing it
    on. If gh is unavailable, proceed: the scan runs without it and the report
-   says so — impostor-SHA reported as skipped, the two API-gated config facts
+   says so — impostor-SHA reported as skipped, the API-gated config facts
    as UNMEASURED coverage gaps, never as passes.
 
 ## Phase 2: Scan (one driver call)

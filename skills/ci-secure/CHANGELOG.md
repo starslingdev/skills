@@ -159,6 +159,20 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-10-22** — **`sec.codeowners.workflows` no longer passes on a
+  CODEOWNERS rule the branch does not enforce.** CODEOWNERS only requests an
+  owner's review; it binds only when the default branch requires review from
+  Code Owners. A covering file passed on its own, so a repository whose rules
+  required one approval from anyone read as needing an owner's sign-off on
+  workflow changes. A missing or non-covering CODEOWNERS still fails from the
+  files alone. A covering one now also reads the merge rules over the API,
+  under the same contract as the other API-gated facts: pass when a ruleset
+  (organisation rulesets included) or classic branch protection requires
+  review from Code Owners; fail when both are readable and neither does,
+  naming the setting to turn on; unmeasured, with the reason, when there is no
+  repository or token or the answer cannot be completed (a ruleset that does
+  not require it plus admin-only classic protection the reader cannot see).
+  The fact's label now says the rule must be enforced.
 - **2026-10-10** — **A self-repository action (`uses: $/path`, GitHub
   2026-07-30) run after a checkout of the fork's head now counts as fork code
   executed with privileges, exactly like a `./` action or a `run:` step.** A
