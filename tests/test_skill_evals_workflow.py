@@ -200,3 +200,18 @@ def test_the_path_filter_covers_the_ci_speedup_eval_inputs(rel):
     doc = _doc()
     paths = (doc.get("on") or doc[True])["pull_request"]["paths"]
     assert any(fnmatch(rel, p) for p in paths), f"{rel} matches no filter path"
+
+
+@pytest.mark.parametrize("job_id", ["evals", "ci-speedup-evals"])
+@pytest.mark.parametrize("runs", ["2", "0", "x"])
+def test_a_runs_value_the_job_budget_cannot_hold_is_refused_before_any_session(job_id, runs,
+                                                                               tmp_path):
+    """The job timeout budgets one run per case; a dispatch with more would be
+    killed mid-suite and read as a failure. Executed, with no python on PATH, so
+    reaching the runner would also fail loudly."""
+    step = next(s for s in _job(job_id)["steps"] if s.get("name") == "Run the eval cases")
+    proc = subprocess.run(["bash", "-c", step["run"]],
+                          env={"RUNS": runs, "ID": "", "PATH": "/usr/bin:/bin"},
+                          capture_output=True, text=True, cwd=tmp_path)
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "::error" in proc.stdout and "runs" in proc.stdout

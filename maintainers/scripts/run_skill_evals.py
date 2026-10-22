@@ -18,9 +18,13 @@ An entry is runnable when it carries `checks`. For each run:
 Exit 0 every run passed, 1 a run happened and failed a check, 2 the harness
 could not run (nothing selected, no claude, scaffold failed, no real `gh` for
 the shim, no session or no result event, turn cap, timeout, a `files` check
-with nothing collected, or an unexpected crash). If any run failed a check the
-exit is 1 even when other runs could not run. A session that never happened
-must not read as a behaviour change. Tokens and duration per run go to `skill-eval-results/`.
+with nothing collected or an empty report, or an unexpected crash). If any run
+failed a check the exit is 1 even when other runs could not run, a crash
+included: a session that happened and failed is the stronger signal. A session
+that never happened must not read as a behaviour change. Tokens and duration
+per run go to `skill-eval-results/`, rewritten after every run so a crash or a
+killed job keeps what already ran. Each entry's `expected_output` is judge-only:
+no check reads it, so it is printed and recorded as UNSCORED.
 Maintainer-only: it spends real tokens and is never part of pytest.
 """
 from __future__ import annotations
@@ -90,8 +94,13 @@ def scaffold(skill_dir: Path, fixture: str | None, sandbox: Path, aux: Path) -> 
     script = skill_dir / "evals" / "fixtures" / fixture / "scaffold.py"
     if not script.is_file():
         raise HarnessError(f"no scaffold for fixture {fixture!r}: {script}")
-    r = subprocess.run([sys.executable, str(script), str(sandbox), str(aux)],
-                       capture_output=True, text=True, timeout=300, env=_env())
+    try:
+        r = subprocess.run([sys.executable, str(script), str(sandbox), str(aux)],
+                           capture_output=True, text=True, timeout=300, env=_env())
+    except subprocess.TimeoutExpired:
+        raise HarnessError(f"scaffold {fixture!r} exceeded 300s")
+    except OSError as exc:
+        raise HarnessError(f"scaffold {fixture!r} could not start: {exc}")
     if r.returncode != 0:
         raise HarnessError(f"scaffold {fixture!r} failed: {r.stderr.strip()[-800:]}")
     return dict(l.split("=", 1) for l in r.stdout.splitlines() if "=" in l)
@@ -179,12 +188,22 @@ def files_written(roots: list[Path], before: dict, calls: list[str], since: floa
     return "\n".join(out)
 
 
+def required_files(files: str, files_require: str) -> list[tuple[str, str]]:
+    """(header, body) of each collected file whose name `files_require` matches
+    in full; every other file (scratch notes, the findings JSON) is left out."""
+    parts = re.split(r"(?m)^=== (.+) ===$\n?", files)
+    return [(f"=== {n} ===", b) for n, b in zip(parts[1::2], parts[2::2])
+            if re.fullmatch(f"(?:{files_require})", n)]
+
+
 def apply_checks(checks: list[dict], rec: dict,
                  files_require: str | None = None) -> list[tuple[str, bool, str]]:
     """(name, passed, detail) per check. `rec` holds the four records.
     `files_require` (an entry field) names, as a regex, the file a `files`
-    check reads: when no collected file is called that, a `files` check is a
-    harness error, so scratch files cannot stand in for a missing report."""
+    check reads, and the check then reads only that file: when none is
+    collected, or one is empty, a `files` check is a harness error, so scratch
+    files can neither stand in for a missing report nor satisfy a check the
+    report fails, and an empty report cannot pass a `not_contains`."""
     results = []
     for c in checks:
         kind, name, pat = c.get("type"), c.get("name", "?"), c.get("pattern", "")
@@ -198,11 +217,17 @@ def apply_checks(checks: list[dict], rec: dict,
         if kind == "files" and not rec["files"]:
             raise HarnessError(f"check {name!r} reads `files`, but the session wrote "
                                "nothing the harness could collect")
-        if kind == "files" and files_require and not re.search(
-                rf"(?m)^=== (?:{files_require}) ===$", rec["files"]):
-            raise HarnessError(f"check {name!r} reads `files`, but no collected file "
-                               f"matches {files_require!r}")
-        found = re.search(pat, rec[kind]) is not None
+        text = rec[kind]
+        if kind == "files" and files_require:
+            wanted = required_files(rec["files"], files_require)
+            if not wanted:
+                raise HarnessError(f"check {name!r} reads `files`, but no collected file "
+                                   f"matches {files_require!r}")
+            if any(not body.strip() for _, body in wanted):
+                raise HarnessError(f"check {name!r} reads `files`, but the collected "
+                                   f"{files_require!r} file is empty")
+            text = "\n".join(f"{h}\n{b}" for h, b in wanted)
+        found = re.search(pat, text) is not None
         if c.get("match", "contains") == "not_contains":
             results.append((name, not found, "absent" if not found else "PRESENT"))
         else:
@@ -328,8 +353,21 @@ def main(argv: list[str] | None = None) -> int:
     if shutil.which("claude") is None:
         print("harness: `claude` is not on PATH", file=sys.stderr)
         return 2
-    results, harness_errors = [], 0
+    _RESULTS.mkdir(exist_ok=True)
+    out = _RESULTS / f"{args.skill}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}.json"
+    results, harness_errors, crashed = [], 0, False
+
     for entry in entries:
+        if crashed:
+            break
+        unscored = {"unscored": "expected_output"} if entry.get("expected_output") else {}
+        if unscored:
+            print(f"\nUNSCORED  {args.skill} #{entry.get('id')} {entry.get('name', '')}  "
+                  "expected_output is judge-only; no check reads it")
+
+        def record(item: dict) -> None:  # on disk after every run: a killed job keeps it
+            results.append({**item, **unscored})
+            out.write_text(json.dumps(results, indent=2))
         for run in range(1, args.runs + 1):
             tag = f"{args.skill} #{entry.get('id')} {entry.get('name', '')} (run {run}/{args.runs})"
             try:
@@ -337,9 +375,16 @@ def main(argv: list[str] | None = None) -> int:
             except HarnessError as exc:
                 harness_errors += 1
                 print(f"\nNOT RUN  {tag}\n    harness: {exc}")
-                results.append({"id": entry.get("id"), "run": run, "harness_error": str(exc)})
+                record({"id": entry.get("id"), "run": run, "harness_error": str(exc)})
                 continue
-            results.append(r)
+            except Exception as exc:  # a harness bug: stop spending tokens, keep the verdicts
+                harness_errors, crashed = harness_errors + 1, True
+                print(f"\nNOT RUN  {tag}\n    harness: unhandled {type(exc).__name__}: {exc}"
+                      "\n    stopping: the remaining runs were not attempted")
+                record({"id": entry.get("id"), "run": run,
+                        "harness_error": f"unhandled {type(exc).__name__}: {exc}"})
+                break
+            record(r)
             secs = (r["duration_ms"] or 0) / 1000
             print(f"\n{'PASS' if r['passed'] else 'FAIL'}  {tag}  {r['tool_calls']} tool calls, "
                   f"{r['input_tokens']} in / {r['output_tokens']} out tokens, {secs:.0f}s, "
@@ -348,10 +393,9 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"    {'ok  ' if c['passed'] else 'FAIL'} {c['name']}  ({c['detail']})")
             if r.get("session_log"):
                 print(f"    session recorded: {r['session_log']}")
-    _RESULTS.mkdir(exist_ok=True)
-    out = _RESULTS / f"{args.skill}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}.json"
-    out.write_text(json.dumps(results, indent=2))
     print(f"\nresults: {out}")
+    # Precedence: a run that happened and failed (1) outranks runs that could
+    # not run or a crash (2), which outrank a clean pass (0).
     if any(r.get("passed") is False for r in results):
         return 1
     return 2 if harness_errors else 0

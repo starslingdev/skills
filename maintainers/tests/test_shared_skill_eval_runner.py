@@ -220,6 +220,7 @@ def test_text_checks_read_decoded_lines_without_the_prompt():
     got = runner.transcript(evs)
     assert not re.search(r"ci\.yml[^\n]{0,30}?\b11\b", got)
     assert "PROMPT" not in got and "0 of 10 vectors hit" in got
+    assert "ci.yml (clean)" in got  # the agent's own prose is part of the transcript
 
 
 @pytest.mark.parametrize("argv", [["--skill", "no-such-skill"],
@@ -229,3 +230,123 @@ def test_a_crash_or_an_empty_selection_exits_2(argv):
     r = subprocess.run([sys.executable, str(script), *argv],
                        capture_output=True, text=True, timeout=60)
     assert r.returncode == 2, r.stderr
+
+
+# The `files` record, crash survival and the judge-only expectation.
+
+_REPORT = r"ci-secure-report[^/\n]*\.md"
+
+
+def test_files_checks_read_only_the_required_report_never_scratch_files():
+    """`files_require` proves the report exists; the check must then read THAT
+    file, or a scratch note carrying the needle passes for a report without it."""
+    rec = _rec("=== ci-secure-report-a.md ===\nno finding here\n"
+               "=== notes.txt ===\nP14.10 at ci.yml:11")
+    [(_, ok, _)] = runner.apply_checks(
+        [{"name": "x", "type": "files", "pattern": r"P14\.10"}], rec, _REPORT)
+    assert not ok
+
+
+def test_an_empty_required_report_is_a_harness_error_not_a_vacuous_pass():
+    rec = _rec("=== ci-secure-report-a.md ===\n\n=== notes.txt ===\nthinking")
+    with pytest.raises(runner.HarnessError):
+        runner.apply_checks([{"name": "x", "type": "files", "pattern": "jobs",
+                              "match": "not_contains"}], rec, _REPORT)
+
+
+def test_files_and_trace_checks_never_read_each_other():
+    rec = {"files": "=== r.md ===\nFILEONLY", "trace": "TRACEONLY",
+           "last_message": "", "tool_used": []}
+    got = runner.apply_checks([
+        {"name": "a", "type": "trace", "pattern": "FILEONLY"},
+        {"name": "b", "type": "files", "pattern": "TRACEONLY"},
+        {"name": "c", "type": "trace", "pattern": "TRACEONLY"},
+        {"name": "d", "type": "files", "pattern": "FILEONLY"}], rec)
+    assert [ok for _, ok, _ in got] == [False, False, True, True]
+
+
+def test_an_unknown_check_type_is_a_harness_error():
+    with pytest.raises(runner.HarnessError):
+        runner.apply_checks([{"name": "x", "type": "reading_typo", "pattern": "y"}],
+                            _rec("=== r.md ===\nx"))
+
+
+@pytest.mark.parametrize("exc", [subprocess.TimeoutExpired(["x"], 300), OSError("no exec")])
+def test_a_scaffold_that_hangs_or_cannot_start_is_a_harness_error(tmp_path, monkeypatch, exc):
+    def boom(*a, **k):
+        raise exc
+    monkeypatch.setattr(runner.subprocess, "run", boom)
+    sandbox = tmp_path / "repo"
+    sandbox.mkdir()
+    with pytest.raises(runner.HarnessError):
+        runner.scaffold(_REPO / "skills" / "ci-secure", "inject", sandbox, tmp_path)
+
+
+def _sequenced(monkeypatch, *outcomes):
+    """subprocess.run returning (or raising) each outcome in turn."""
+    seq = list(outcomes)
+
+    def fake(*a, **k):
+        o = seq.pop(0)
+        if isinstance(o, BaseException):
+            raise o
+        return subprocess.CompletedProcess([], 0, stdout=o, stderr="")
+    monkeypatch.setattr(runner.subprocess, "run", fake)
+
+
+def _results(tmp_path) -> list[dict]:
+    return json.loads(next((tmp_path / "results").iterdir()).read_text())
+
+
+def test_a_crash_after_a_failed_run_keeps_the_failure_and_exits_1(offline, tmp_path, monkeypatch):
+    """A run that happened and failed is a behaviour change; a later crash must
+    neither discard it nor turn the verdict into 'did not run'."""
+    _sequenced(monkeypatch, _stream("ci-speedup:ci-speedup"), RuntimeError("harness bug"))
+    assert runner.main(["--skill", "ci-speedup", "--id", "6", "--runs", "2"]) == 1
+    runs = _results(tmp_path)
+    assert runs[0]["passed"] is False and "RuntimeError" in runs[1]["harness_error"]
+
+
+def test_a_crash_after_a_passing_run_exits_2_and_keeps_the_pass(offline, tmp_path, monkeypatch):
+    _sequenced(monkeypatch, _stream("ci-secure:ci-secure"), RuntimeError("harness bug"))
+    assert runner.main(["--skill", "ci-speedup", "--id", "6", "--runs", "2"]) == 2
+    assert _results(tmp_path)[0]["passed"] is True
+
+
+def test_results_are_on_disk_after_every_run_even_if_the_job_is_killed(offline, tmp_path,
+                                                                       monkeypatch):
+    _sequenced(monkeypatch, _stream("ci-secure:ci-secure"), KeyboardInterrupt())
+    with pytest.raises(KeyboardInterrupt):
+        runner.main(["--skill", "ci-speedup", "--id", "6", "--runs", "2"])
+    assert _results(tmp_path)[0]["passed"] is True
+
+
+def test_the_judge_only_expected_output_is_printed_and_recorded_as_unscored(offline, tmp_path,
+                                                                            capsys):
+    assert offline(_stream("ci-secure:ci-secure")) == 0
+    assert "UNSCORED" in capsys.readouterr().out
+    [res] = _results(tmp_path)
+    assert res["passed"] and res["unscored"] == "expected_output"
+
+
+def test_claude_stderr_reaches_the_not_run_line(offline, monkeypatch, capsys):
+    fake = subprocess.CompletedProcess([], 1, stdout="", stderr="decoy-claude-refusal")
+    monkeypatch.setattr(runner.subprocess, "run", lambda *a, **k: fake)
+    assert runner.main(["--skill", "ci-speedup", "--id", "6"]) == 2
+    out = capsys.readouterr().out
+    assert "NOT RUN" in out and "decoy-claude-refusal" in out
+
+
+def test_the_session_tmpdir_is_the_collected_tmp_dir(monkeypatch, tmp_path):
+    """SKILL.md writes the report under $TMPDIR; the harness only collects the
+    report if TMPDIR is the directory it snapshots."""
+    def fake(prompt, cwd, plugins, env, max_turns, timeout, model):
+        assert Path(env["TMPDIR"]) == cwd.parent / "tmp"
+        (Path(env["TMPDIR"]) / "ci-secure-report-x.md").write_text("RENDERED")
+        return _stream("ci-secure"), runner.events(_stream("ci-secure"))
+    monkeypatch.setattr(runner, "run_session", fake)
+    monkeypatch.setattr(runner, "_LOGS", tmp_path / "logs")
+    args = runner.argparse.Namespace(max_turns=80, timeout=1500, model=None, keep=False)
+    entry = {"id": 1, "prompt": "p", "files_require": _REPORT,
+             "checks": [{"name": "r", "type": "files", "pattern": "RENDERED"}]}
+    assert runner.run_entry(_REPO / "skills" / "ci-secure", entry, 1, args)["passed"]

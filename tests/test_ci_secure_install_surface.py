@@ -127,8 +127,9 @@ def test_no_eval_results_under_skill():
     exactly like a tracked one. Those artifacts embed full prompts, transcript
     excerpts and grader evidence from whatever repository the maintainer ran
     against, which makes this a disclosure leak and not just clutter. The
-    remedy is `--output-dir` outside the skill; `evals/README.md` documents the
-    invocation.
+    remedy is `--output-dir` outside the skill on any manual `claude plugin
+    eval` run; the suite itself now runs on the shared runner, which writes to
+    the repository root instead.
     """
     results = _SKILL / "evals" / "results"
     assert not results.exists(), (

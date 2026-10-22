@@ -16,11 +16,14 @@ that keep a check honest:
 """
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -57,19 +60,16 @@ def _cloaked(entry: dict) -> list[Path]:
     return sorted((_fixture_dir(entry) / "dot-github" / "workflows").glob("*.yml.fixture"))
 
 
-def _agent_readable() -> list[Path]:
-    """What the runner's plugin copy mounts: the skill minus evals/,
-    CHANGELOG.md, tests/test_*.py, tests/conftest.py and tests/fixtures/."""
-    out = []
-    for p in sorted(_SKILL.rglob("*")):
-        rel = p.relative_to(_SKILL).parts
-        if not p.is_file() or "__pycache__" in rel or rel[0] in ("evals", "CHANGELOG.md"):
-            continue
-        if rel[0] == "tests" and (rel[1] == "fixtures" or rel[-1].startswith("test_")
-                                  or rel[-1] == "conftest.py"):
-            continue
-        out.append(p)
-    return out
+@functools.lru_cache(maxsize=1)
+def _agent_readable() -> tuple[Path, ...]:
+    """What the runner's plugin copy mounts, built by the runner's own copy
+    (`shutil.copytree(..., ignore=plugin_ignore)`) so a change to what it
+    withholds reaches these rules. Returned as the source paths."""
+    ignore = _load_runner().plugin_ignore
+    with tempfile.TemporaryDirectory() as tmp:
+        copy = Path(shutil.copytree(_SKILL, Path(tmp) / _SKILL.name, ignore=ignore))
+        return tuple(_SKILL / p.relative_to(copy) for p in sorted(copy.rglob("*"))
+                     if p.is_file())
 
 
 def _agent_readable_text() -> str:

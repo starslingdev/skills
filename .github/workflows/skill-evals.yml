@@ -6,7 +6,7 @@
 # this repository would notice.
 #
 # Each case scaffolds fixture workflows into a throwaway directory, drives one headless
-# `claude -p` session against it, and applies the case's own graders to the recorded tool calls
+# `claude -p` session against it, and applies the entry's checks to the recorded tool calls
 # and output. See skills/ci-secure/evals/README.md and skills/ci-speedup/evals/README.md for
 # the cases, and maintainers/scripts/run_skill_evals.py for the shared runner both suites use.
 #
@@ -63,7 +63,7 @@ on:
         required: false
         type: string
       runs:
-        description: "Runs per case"
+        description: "Runs per case. Only 1 fits the job timeout; any other value is refused before a session starts"
         required: false
         default: "1"
         type: string
@@ -112,8 +112,9 @@ jobs:
       - name: Install Claude Code
         run: npm install -g @anthropic-ai/claude-code@2.1.235
 
-      # One run per case. Bump --runs only if the suite proves flaky in practice: every extra
-      # run is another full agent session.
+      # One run per case: every extra run is another full agent session, and the job timeout
+      # below holds exactly one. The runner writes its results file after every run, so a
+      # job killed at the timeout still uploads the verdicts it reached.
       - name: Run the eval cases
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -129,10 +130,19 @@ jobs:
           IS_SANDBOX: "1"
         # The harness separates "a case ran and failed" (1) from "the harness could not run at
         # all" (2), so preserve the distinction here rather than collapsing both into a red
-        # check that asserts a cause the workflow cannot know.
+        # check that asserts a cause the workflow cannot know. When both happen in one suite
+        # (a case failed, a later one could not run or the harness crashed) the exit is 1: a
+        # session that ran and failed is the stronger signal; the NOT RUN lines still print.
         run: |
           set -uo pipefail
           status=0
+          # The job timeout budgets ONE run per case (GitHub expressions cannot scale it by
+          # `runs`), so a dispatch asking for more would be killed mid-suite. Refuse it before
+          # any session starts; dispatch the workflow again for another sample.
+          if [ "${RUNS:-1}" != "1" ]; then
+            echo "::error title=SKILL EVALS DID NOT RUN::runs=${RUNS} is not supported: the job timeout budgets one run per case. Nothing was verified; dispatch again for another run."
+            exit 2
+          fi
           python3 maintainers/scripts/run_skill_evals.py --skill ci-secure \
             --runs "${RUNS:-1}" ${ID:+--id "$ID"} || status=$?
           if [ "$status" -eq 2 ]; then
@@ -199,6 +209,13 @@ jobs:
         run: |
           set -uo pipefail
           status=0
+          # The job timeout budgets ONE run per case (GitHub expressions cannot scale it by
+          # `runs`), so a dispatch asking for more would be killed mid-suite. Refuse it before
+          # any session starts; dispatch the workflow again for another sample.
+          if [ "${RUNS:-1}" != "1" ]; then
+            echo "::error title=SKILL EVALS DID NOT RUN::runs=${RUNS} is not supported: the job timeout budgets one run per case. Nothing was verified; dispatch again for another run."
+            exit 2
+          fi
           python3 maintainers/scripts/run_skill_evals.py --skill ci-speedup \
             --runs "${RUNS:-1}" || status=$?
           if [ "$status" -eq 2 ]; then
