@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Run ci-speedup evals with one catalog entry cut from the session's skill copy.
 
-    python3 maintainers/ci-speedup/scripts/eval_withhold_entry.py OPT81 --id 11 --model M
+    python3 maintainers/ci-speedup/scripts/eval_withhold_entry.py OPT81 --all --id 11 --model M
+
+(Entry 11 is in the `measure` tier, so `--all` or `--tier measure` is needed.)
 
 The discrimination proof for a reading-sensitive eval: the shared runner
 (`maintainers/scripts/run_skill_evals.py`) mounts a copy of the skill; this

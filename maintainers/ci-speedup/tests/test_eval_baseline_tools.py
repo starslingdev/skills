@@ -82,6 +82,16 @@ def test_split_catalog_reads_get_their_own_table_and_count_as_catalog():
     assert "Split catalog" not in summary.summarize([run([("optimization-patterns.md", 5)])])
 
 
+def test_an_entry_the_tier_skipped_is_neither_a_run_nor_a_not_run():
+    """A default (gate) run records `{"id": 11, "skipped": "tier measure"}`:
+    the entry was not selected, which is not a session that failed to start."""
+    ran = {"id": 11, "name": "q", "passed": True, "checks": [{"name": "c", "passed": True}]}
+    out = summary.summarize([ran, {"id": 11, "skipped": "tier measure"},
+                             {"id": 12, "skipped": "tier measure"}])
+    assert "| 11 | `q` | 1 | 1 | 0 |" in out, out
+    assert "| 12 |" not in out, out
+
+
 @pytest.mark.parametrize("d", _BASELINES, ids=lambda p: p.name if p.name not in ("before", "after")
                          else f"{p.parent.name}/{p.name}")
 def test_every_committed_summary_matches_its_results(d):

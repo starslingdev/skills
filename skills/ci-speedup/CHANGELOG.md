@@ -897,6 +897,19 @@ unversioned and updates by reinstall from `main`.
   short index. The single catalog file stays at the same path, generated from
   the per-pattern files, so every report link and anchor still works.
   Scanner output is unchanged.
+- **2026-10-22** — **Eval sessions run at the same time, and the
+  quality-review measurement leaves the per-PR check.** The shared eval runner
+  starts every session at once (at most five; `--jobs N` or `SKILL_EVALS_JOBS`)
+  and prints each verdict as its session finishes. The three full-audit
+  entries (10, 11, 13) are marked `serial` and take turns, because their
+  sessions pick fixed `/tmp/...` scratch paths (observed:
+  `/tmp/cisp-audit/findings.json`) and two at once would overwrite each
+  other's findings and report. Entry 11 (`quality-review-opt81`) is marked
+  `tier: measure`: it exists for the catalog before/after measurement and the
+  baseline, so pull requests no longer pay for it (about seven minutes and
+  $3.77 on a CI run on 2026-10-22); it runs with `--tier measure` or `--all`, from the
+  workflow's manual dispatch, and stays in the committed baseline. The checks
+  and the skill's behaviour are unchanged.
 
 - **2026-10-12** — **Measured compute now leaves out runs no speed fix can
   remove.** The cost spine's measured compute added up every sampled job run,
