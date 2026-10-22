@@ -35,6 +35,13 @@ confirm `python3 -c "import yaml"` first. The skill is mounted as a copy without
 and its oracle tests, so no answer key is on disk for the session. CI runs the
 same command in `.github/workflows/skill-evals.yml`.
 
+The five sessions run at once (`--jobs N` or env `SKILL_EVALS_JOBS` to change
+it; default every run, at most five), each with its own sandbox, skill copy
+and `TMPDIR`, which is where `SKILL.md` writes the findings and report
+(`${TMPDIR:-/tmp}`), so two sessions never share a scratch path. All five are in the default
+`gate` tier, the per-PR check; an entry may set `tier: measure` to run only
+with `--tier measure` or `--all` (ci-secure has none).
+
 Exit codes: **0** every run passed; **1** a session ran and failed a check;
 **2** nothing worth checking happened (no `claude`, scaffold failed, no
 session, turn cap, timeout, or a `files` check with no `ci-secure-report*.md`

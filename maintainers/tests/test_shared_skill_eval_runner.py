@@ -302,14 +302,14 @@ def test_a_crash_after_a_failed_run_keeps_the_failure_and_exits_1(offline, tmp_p
     """A run that happened and failed is a behaviour change; a later crash must
     neither discard it nor turn the verdict into 'did not run'."""
     _sequenced(monkeypatch, _stream("ci-speedup:ci-speedup"), RuntimeError("harness bug"))
-    assert runner.main(["--skill", "ci-speedup", "--id", "6", "--runs", "2"]) == 1
+    assert runner.main(["--skill", "ci-speedup", "--id", "6", "--runs", "2", "--jobs", "1"]) == 1
     runs = _results(tmp_path)
     assert runs[0]["passed"] is False and "RuntimeError" in runs[1]["harness_error"]
 
 
 def test_a_crash_after_a_passing_run_exits_2_and_keeps_the_pass(offline, tmp_path, monkeypatch):
     _sequenced(monkeypatch, _stream("ci-secure:ci-secure"), RuntimeError("harness bug"))
-    assert runner.main(["--skill", "ci-speedup", "--id", "6", "--runs", "2"]) == 2
+    assert runner.main(["--skill", "ci-speedup", "--id", "6", "--runs", "2", "--jobs", "1"]) == 2
     assert _results(tmp_path)[0]["passed"] is True
 
 
@@ -317,7 +317,7 @@ def test_results_are_on_disk_after_every_run_even_if_the_job_is_killed(offline, 
                                                                        monkeypatch):
     _sequenced(monkeypatch, _stream("ci-secure:ci-secure"), KeyboardInterrupt())
     with pytest.raises(KeyboardInterrupt):
-        runner.main(["--skill", "ci-speedup", "--id", "6", "--runs", "2"])
+        runner.main(["--skill", "ci-speedup", "--id", "6", "--runs", "2", "--jobs", "1"])
     assert _results(tmp_path)[0]["passed"] is True
 
 
@@ -350,3 +350,196 @@ def test_the_session_tmpdir_is_the_collected_tmp_dir(monkeypatch, tmp_path):
     entry = {"id": 1, "prompt": "p", "files_require": _REPORT,
              "checks": [{"name": "r", "type": "files", "pattern": "RENDERED"}]}
     assert runner.run_entry(_REPO / "skills" / "ci-secure", entry, 1, args)["passed"]
+
+
+# Parallel sessions and entry tiers.
+
+def _fake_entry(monkeypatch, sleep: float = 0.0, crash_ids=(), fail_ids=()):
+    """run_entry replaced: sleeps, then passes, fails or crashes by entry id."""
+    import time as _time
+    seen = []
+
+    def fake(skill_dir, entry, run, args):
+        seen.append((entry["id"], run))
+        _time.sleep(sleep)
+        if entry["id"] in crash_ids:
+            raise RuntimeError(f"harness bug in #{entry['id']}")
+        ok = entry["id"] not in fail_ids
+        return {"id": entry["id"], "name": entry.get("name"), "run": run, "passed": ok,
+                "tool_calls": 1, "input_tokens": 1, "output_tokens": 1,
+                "duration_ms": int(sleep * 1000), "cost_usd": 0.0, "reading": {},
+                "checks": [{"name": "c", "passed": ok, "detail": "x"}]}
+    monkeypatch.setattr(runner, "run_entry", fake)
+    monkeypatch.setattr(runner.eval_reading, "figure", lambda r: "refs -")
+    return seen
+
+
+@pytest.fixture
+def parallel(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "_RESULTS", tmp_path / "results")
+    monkeypatch.setattr(runner, "_LOGS", tmp_path / "logs")
+    monkeypatch.setattr(runner.shutil, "which", lambda *a, **k: "/usr/bin/true")
+    monkeypatch.delenv("SKILL_EVALS_JOBS", raising=False)
+
+
+def test_parallel_runs_take_about_the_longest_run_not_the_sum(parallel, tmp_path, monkeypatch):
+    import time as _time
+    _fake_entry(monkeypatch, sleep=0.5)
+    t0 = _time.monotonic()
+    assert runner.main(["--skill", "ci-secure", "--jobs", "5"]) == 0
+    took = _time.monotonic() - t0
+    assert took < 1.5, f"5 runs of 0.5s took {took:.1f}s: they ran one after another"
+    assert sorted(r["id"] for r in _results(tmp_path)) == [1, 2, 3, 4, 5]
+
+
+def test_entries_whose_sessions_share_fixed_tmp_paths_never_overlap(parallel, monkeypatch):
+    """Observed: a full-audit session writes `/tmp/cisp-audit/findings.json`
+    (a literal path, not $TMPDIR). Two such sessions at once would overwrite
+    each other's findings and collect each other's report, so `serial`
+    entries take turns while the rest run beside them."""
+    import time as _time
+    spans = {}
+
+    def fake(skill_dir, entry, run, args):
+        t0 = _time.monotonic()
+        _time.sleep(0.3)
+        spans[entry["id"]] = (t0, _time.monotonic())
+        return {"id": entry["id"], "run": run, "passed": True, "tool_calls": 1,
+                "input_tokens": 1, "output_tokens": 1, "duration_ms": 1, "cost_usd": 0,
+                "reading": {}, "checks": []}
+    monkeypatch.setattr(runner, "run_entry", fake)
+    monkeypatch.setattr(runner.eval_reading, "figure", lambda r: "")
+    assert runner.main(["--skill", "ci-speedup", "--all"]) == 0
+    serial = sorted(spans[i] for i in (10, 11, 13))
+    assert all(a[1] <= b[0] for a, b in zip(serial, serial[1:])), serial
+    assert spans[6][0] < serial[0][1] and spans[12][0] < serial[0][1]  # the others did not wait
+
+
+def test_a_stopped_job_starts_no_serial_session_that_was_waiting_its_turn(parallel,
+                                                                         monkeypatch):
+    """Ctrl-C (or a cancelled CI job) while one `serial` session runs: the
+    serial runs queued behind its lock are already on worker threads, so
+    cancelling futures cannot stop them. None may start a paid session once
+    the one holding the lock finishes."""
+    import threading as _threading
+    holding, release, started = _threading.Event(), _threading.Event(), []
+
+    def fake(skill_dir, entry, run, args):
+        started.append(entry["id"])
+        holding.set()
+        release.wait(5)
+        return {"id": entry["id"], "run": run, "passed": True, "tool_calls": 1,
+                "input_tokens": 1, "output_tokens": 1, "duration_ms": 1, "cost_usd": 0,
+                "reading": {}, "checks": []}
+    pools = []
+
+    class Pool(runner.ThreadPoolExecutor):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            pools.append(self)
+
+    def interrupted(futures):  # the operator presses Ctrl-C mid-session
+        assert holding.wait(5)
+        raise KeyboardInterrupt
+    monkeypatch.setattr(runner, "run_entry", fake)
+    monkeypatch.setattr(runner, "ThreadPoolExecutor", Pool)
+    monkeypatch.setattr(runner, "as_completed", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        runner.main(["--skill", "ci-speedup", "--id", "10", "--runs", "3", "--jobs", "3"])
+    release.set()
+    pools[0].shutdown(wait=True)
+    assert started == [10], f"sessions started after the stop: {started[1:]}"
+
+
+def test_the_default_parallelism_is_the_run_count_capped_at_5_and_the_env_wins(monkeypatch):
+    monkeypatch.delenv("SKILL_EVALS_JOBS", raising=False)
+    assert (runner.default_jobs(3), runner.default_jobs(12)) == (3, 5)
+    monkeypatch.setenv("SKILL_EVALS_JOBS", "2")
+    assert runner.default_jobs(12) == 2
+
+
+def test_a_crash_in_one_run_leaves_the_others_graded(parallel, tmp_path, monkeypatch, capsys):
+    _fake_entry(monkeypatch, sleep=0.1, crash_ids=(10,))
+    assert runner.main(["--skill", "ci-speedup"]) == 2
+    res = {r["id"]: r for r in _results(tmp_path) if "skipped" not in r}
+    assert set(res) == {6, 10, 12, 13}
+    assert "RuntimeError" in res[10]["harness_error"]
+    assert all(res[i]["passed"] for i in (6, 12, 13))
+    assert "NOT RUN  ci-speedup #10" in capsys.readouterr().out
+
+
+def test_a_failure_among_parallel_runs_still_exits_1_and_names_its_entry(parallel, monkeypatch,
+                                                                          capsys):
+    _fake_entry(monkeypatch, sleep=0.05, crash_ids=(6,), fail_ids=(12,))
+    assert runner.main(["--skill", "ci-speedup"]) == 1
+    out = capsys.readouterr().out
+    assert re.search(r"(?m)^FAIL  ci-speedup #12 ", out)
+    assert re.search(r"(?m)^    \[#12\] FAIL c ", out)
+
+
+def test_two_could_not_run_sessions_keep_two_distinct_logs(offline, tmp_path, monkeypatch):
+    fake = subprocess.CompletedProcess([], 1, stdout="", stderr="")
+    monkeypatch.setattr(runner.subprocess, "run", lambda *a, **k: fake)
+    assert runner.main(["--skill", "ci-speedup", "--id", "6", "--runs", "2"]) == 2
+    logs = [p for p in (tmp_path / "logs").iterdir() if p.name.startswith("harness-error")]
+    assert len(logs) == 2
+
+
+def test_a_measure_entry_is_skipped_by_default_and_listed_as_skipped(parallel, tmp_path,
+                                                                     monkeypatch, capsys):
+    seen = _fake_entry(monkeypatch)
+    assert runner.main(["--skill", "ci-speedup"]) == 0
+    assert 11 not in [i for i, _ in seen]
+    out = capsys.readouterr().out
+    assert re.search(r"(?m)^SKIPPED \(tier\)  ci-speedup #11 quality-review-opt81", out)
+    assert {"id": 11, "skipped": "tier measure"} in _results(tmp_path)
+
+
+@pytest.mark.parametrize("argv,ids", [(["--all"], [6, 10, 11, 12, 13]),
+                                      (["--tier", "measure"], [11]),
+                                      (["--all", "--id", "11"], [11])])
+def test_all_or_the_measure_tier_runs_the_measurement_entry(parallel, monkeypatch, argv, ids):
+    seen = _fake_entry(monkeypatch)
+    assert runner.main(["--skill", "ci-speedup", *argv]) == 0
+    assert sorted(i for i, _ in seen) == ids
+
+
+def test_selecting_only_a_skipped_entry_runs_nothing_and_exits_2(parallel, monkeypatch, capsys):
+    seen = _fake_entry(monkeypatch)
+    assert runner.main(["--skill", "ci-speedup", "--id", "11"]) == 2
+    assert not seen and "SKIPPED (tier)" in capsys.readouterr().out
+
+
+def test_a_tier_that_selects_nothing_says_the_tier_left_every_entry_out(parallel, monkeypatch,
+                                                                        capsys):
+    """ci-secure has no `measure` entry: a `tier: measure` dispatch exits 2, and
+    the reason must name the tier, not claim no entry has checks."""
+    seen = _fake_entry(monkeypatch)
+    assert runner.main(["--skill", "ci-secure", "--tier", "measure"]) == 2
+    err = capsys.readouterr().err
+    assert not seen and "every selected entry is outside tier measure" in err, err
+
+
+def test_every_tier_is_known_and_only_the_review_measurement_leaves_the_gate():
+    tiers = {}
+    for skill in ("ci-speedup", "ci-secure"):
+        spec = json.loads((_REPO / "skills" / skill / "evals" / "evals.json").read_text())
+        for e in spec["evals"]:
+            if e.get("checks"):
+                assert e.get("tier", "gate") in runner._TIERS, e["id"]
+                tiers[(skill, e["id"])] = e.get("tier", "gate")
+    assert [k for k, t in tiers.items() if t == "measure"] == [("ci-speedup", 11)]
+
+
+def test_an_unknown_tier_is_a_harness_error(parallel, monkeypatch):
+    real = json.loads
+
+    def with_typo(text, *a, **k):
+        spec = real(text, *a, **k)
+        if isinstance(spec, dict) and "evals" in spec:
+            spec["evals"][-1]["tier"] = "measurement"
+        return spec
+    monkeypatch.setattr(runner.json, "loads", with_typo)
+    seen = _fake_entry(monkeypatch)
+    assert runner.main(["--skill", "ci-speedup"]) == 2
+    assert not seen

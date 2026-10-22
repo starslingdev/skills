@@ -55,6 +55,16 @@ def test_the_summary_reports_medians_ranges_and_not_run_sessions():
     assert "| 11 | `c` | 3/4 |" in out and "| 11 | `d` | 1/1 |" in out
 
 
+def test_an_entry_the_tier_skipped_is_neither_a_run_nor_a_not_run():
+    """A default (gate) run records `{"id": 11, "skipped": "tier measure"}`:
+    the entry was not selected, which is not a session that failed to start."""
+    ran = {"id": 11, "name": "q", "passed": True, "checks": [{"name": "c", "passed": True}]}
+    out = summary.summarize([ran, {"id": 11, "skipped": "tier measure"},
+                             {"id": 12, "skipped": "tier measure"}])
+    assert "| 11 | `q` | 1 | 1 | 0 |" in out, out
+    assert "| 12 |" not in out, out
+
+
 @pytest.mark.parametrize("d", _BASELINES, ids=lambda p: p.name)
 def test_every_committed_summary_matches_its_results(d):
     """summary.md quotes the tool's output; a hand edit or a stale table fails here."""

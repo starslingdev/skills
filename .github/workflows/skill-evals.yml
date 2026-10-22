@@ -37,7 +37,7 @@ on:
       - "skills/ci-secure/references/**"
       - "skills/ci-secure/scripts/**"
       - "skills/ci-secure/evals/**"
-      # ci-speedup's five runnable evals.json entries. One workflow-level filter for both
+      # ci-speedup's runnable evals.json entries. One workflow-level filter for both
       # suites, so a change to either skill runs both (no classifier job by design).
       - "skills/ci-speedup/SKILL.md"
       - "skills/ci-speedup/references/**"
@@ -60,7 +60,7 @@ on:
   workflow_dispatch:
     inputs:
       id:
-        description: "Single ci-secure evals.json entry id to run, a number 1-5 (blank = all five; ci-speedup always runs all five entries)"
+        description: "Single ci-secure evals.json entry id to run, a number 1-5 (blank = all five; ci-speedup always runs every entry of the chosen tier)"
         required: false
         type: string
       runs:
@@ -68,6 +68,12 @@ on:
         required: false
         default: "1"
         type: string
+      tier:
+        description: "gate = the per-PR regression entries (what pull requests run); measure = only the measurement entries (ci-speedup's quality-review-opt81; ci-secure has none and reports NOT RUN); all = both"
+        required: false
+        default: gate
+        type: choice
+        options: [gate, measure, all]
 
 # A superseded run is wasted tokens, not just wasted minutes.
 concurrency:
@@ -87,12 +93,12 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: starsling-ubuntu-24.04
-    # Above the runner's own worst case: the five entries' per-session caps in evals.json sum
-    # to 85 minutes, plus about 10 for setup (checkout, pip, the CLI install, five scaffolds),
-    # so a lower budget here would kill a slow-but-healthy suite before it writes its results
-    # and report it as a behaviour change. A hung session must still not hold the pool: self-hosted
-    # jobs otherwise queue for hours with no signal.
-    timeout-minutes: 100
+    # Above the runner's own worst case: the five entries run in parallel (one round), so the
+    # longest per-session cap in evals.json (25 minutes) plus about 10 for setup (checkout, pip,
+    # the CLI install, five scaffolds). A lower budget would kill a slow-but-healthy suite before
+    # it writes its results and report it as a behaviour change. A hung session must still not
+    # hold the pool: self-hosted jobs otherwise queue for hours with no signal.
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -121,6 +127,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ID: ${{ inputs.id }}
           RUNS: ${{ inputs.runs }}
+          TIER: ${{ inputs.tier }}
           # The runner executes as root, and `claude` refuses `--permission-mode
           # bypassPermissions` under uid 0 unless a deliberate sandbox is declared: it prints
           # "cannot be used with root/sudo privileges" and exits before the first turn. That is
@@ -144,10 +151,17 @@ jobs:
             echo "::error title=SKILL EVALS DID NOT RUN::runs=${RUNS} is not supported: the job timeout budgets one run per case. Nothing was verified; dispatch again for another run."
             exit 2
           fi
+          # Pull requests have no inputs: the gate tier, with no --all.
+          case "${TIER:-gate}" in
+            gate) tier_args="" ;;
+            measure) tier_args="--tier measure" ;;
+            all) tier_args="--all" ;;
+            *) echo "::error title=SKILL EVALS DID NOT RUN::tier=${TIER} is not gate, measure or all. Nothing was verified."; exit 2 ;;
+          esac
           python3 maintainers/scripts/run_skill_evals.py --skill ci-secure \
-            --runs "${RUNS:-1}" ${ID:+--id "$ID"} || status=$?
+            --runs "${RUNS:-1}" ${ID:+--id "$ID"} $tier_args || status=$?
           if [ "$status" -eq 2 ]; then
-            echo "::error title=SKILL EVALS DID NOT RUN::The harness could not run (exit 2). Nothing was verified — this is a coverage gap, not a behaviour change. The reason is on the NOT RUN line above."
+            echo "::error title=SKILL EVALS DID NOT RUN::The harness could not run (exit 2). Nothing was verified — this is a coverage gap, not a behaviour change. The reason is on the NOT RUN or harness: line above."
           elif [ "$status" -ne 0 ]; then
             echo "::error title=SKILL EVALS FAILED::A ci-secure eval ran and failed a check (exit ${status})."
           fi
@@ -168,17 +182,21 @@ jobs:
           if-no-files-found: ignore
 
 
-  # ci-speedup's five runnable evals.json entries (a full audit of the synthetic repo against
-  # its offline replay corpus, the security ask that must route to ci-secure, and three
-  # reading-sensitive cases), run by the shared runner. Same trust model as `evals` above.
+  # ci-speedup's runnable evals.json entries (a full audit of the synthetic repo against its
+  # offline replay corpus, the security ask that must route to ci-secure, and reading-sensitive
+  # cases), run by the shared runner. Same trust model as `evals` above. Pull requests run the
+  # four gate entries; quality-review-opt81 is a measurement (tier measure), run by dispatch.
   ci-speedup-evals:
     name: ci-speedup skill evals
     if: >-
       github.event_name == 'workflow_dispatch' ||
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: starsling-ubuntu-24.04
-    # Five entries at the runner's 1500s per-session cap, plus the scaffold.
-    timeout-minutes: 135
+    # Entries run in parallel, except the three `serial` full audits (10, 11, 13), which write
+    # fixed /tmp paths and so take turns: worst case (tier all) is those three end to end at the
+    # runner's 1500s per-session cap, plus about 10 minutes of setup and scaffolds. Healthy runs
+    # take a few minutes; this only bounds a hung session.
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -206,6 +224,7 @@ jobs:
           # a data call about the synthetic repo (the gh shim fails those closed).
           GH_TOKEN: ${{ github.token }}
           RUNS: ${{ inputs.runs }}
+          TIER: ${{ inputs.tier }}
           IS_SANDBOX: "1"
         run: |
           set -uo pipefail
@@ -217,10 +236,17 @@ jobs:
             echo "::error title=SKILL EVALS DID NOT RUN::runs=${RUNS} is not supported: the job timeout budgets one run per case. Nothing was verified; dispatch again for another run."
             exit 2
           fi
+          # Pull requests have no inputs: the gate tier, with no --all.
+          case "${TIER:-gate}" in
+            gate) tier_args="" ;;
+            measure) tier_args="--tier measure" ;;
+            all) tier_args="--all" ;;
+            *) echo "::error title=SKILL EVALS DID NOT RUN::tier=${TIER} is not gate, measure or all. Nothing was verified."; exit 2 ;;
+          esac
           python3 maintainers/scripts/run_skill_evals.py --skill ci-speedup \
-            --runs "${RUNS:-1}" || status=$?
+            --runs "${RUNS:-1}" $tier_args || status=$?
           if [ "$status" -eq 2 ]; then
-            echo "::error title=SKILL EVALS DID NOT RUN::The harness could not run (exit 2). Nothing was verified — this is a coverage gap, not a behaviour change. The reason is on the NOT RUN line above."
+            echo "::error title=SKILL EVALS DID NOT RUN::The harness could not run (exit 2). Nothing was verified — this is a coverage gap, not a behaviour change. The reason is on the NOT RUN or harness: line above."
           elif [ "$status" -ne 0 ]; then
             echo "::error title=SKILL EVALS FAILED::A ci-speedup eval ran and failed a check (exit ${status})."
           fi

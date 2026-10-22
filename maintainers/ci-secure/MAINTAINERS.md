@@ -68,6 +68,7 @@ somebody to say on the record that they thought about it.
 
 The five scenarios in `skills/ci-secure/evals/evals.json` run as real agent
 sessions on the shared runner, the same one ci-speedup uses:
-`python3 maintainers/scripts/run_skill_evals.py --skill ci-secure`. It spends
+`python3 maintainers/scripts/run_skill_evals.py --skill ci-secure` (all five
+are `gate` tier and run at once, up to `--jobs`, default five). It spends
 real tokens and is never part of `pytest`; `skills/ci-secure/evals/README.md`
 covers what runs, the exit codes, and what the checks cannot judge.
