@@ -37,7 +37,9 @@ entry still prints a `SKIPPED (tier)` line and a `skipped` row in the results.
 full-audit entries 10, 11 and 13 are marked `serial: true` and take turns:
 their sessions write their findings and report to a `/tmp/...` path they pick
 themselves (seen: `/tmp/cisp-audit/`), not under `TMPDIR`, so two at once
-would overwrite each other's files. Entries 6 and 12 run beside them.
+would overwrite each other's files. Entries 6 and 12 run beside them. The
+turn-taking is within one runner process: two runner invocations at once on
+one machine (or a real ci-speedup audit beside one) can still collide there.
 
 Optional entry fields: `fixture` (scaffold under `fixtures/`), `plugins`
 (other skills to mount), `max_turns`, `tier`, `serial`, and `checks`. A check is

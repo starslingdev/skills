@@ -161,7 +161,7 @@ jobs:
           python3 maintainers/scripts/run_skill_evals.py --skill ci-secure \
             --runs "${RUNS:-1}" ${ID:+--id "$ID"} $tier_args || status=$?
           if [ "$status" -eq 2 ]; then
-            echo "::error title=SKILL EVALS DID NOT RUN::The harness could not run (exit 2). Nothing was verified — this is a coverage gap, not a behaviour change. The reason is on the NOT RUN line above."
+            echo "::error title=SKILL EVALS DID NOT RUN::The harness could not run (exit 2). Nothing was verified — this is a coverage gap, not a behaviour change. The reason is on the NOT RUN or harness: line above."
           elif [ "$status" -ne 0 ]; then
             echo "::error title=SKILL EVALS FAILED::A ci-secure eval ran and failed a check (exit ${status})."
           fi
@@ -246,7 +246,7 @@ jobs:
           python3 maintainers/scripts/run_skill_evals.py --skill ci-speedup \
             --runs "${RUNS:-1}" $tier_args || status=$?
           if [ "$status" -eq 2 ]; then
-            echo "::error title=SKILL EVALS DID NOT RUN::The harness could not run (exit 2). Nothing was verified — this is a coverage gap, not a behaviour change. The reason is on the NOT RUN line above."
+            echo "::error title=SKILL EVALS DID NOT RUN::The harness could not run (exit 2). Nothing was verified — this is a coverage gap, not a behaviour change. The reason is on the NOT RUN or harness: line above."
           elif [ "$status" -ne 0 ]; then
             echo "::error title=SKILL EVALS FAILED::A ci-speedup eval ran and failed a check (exit ${status})."
           fi

@@ -415,6 +415,42 @@ def test_entries_whose_sessions_share_fixed_tmp_paths_never_overlap(parallel, mo
     assert spans[6][0] < serial[0][1] and spans[12][0] < serial[0][1]  # the others did not wait
 
 
+def test_a_stopped_job_starts_no_serial_session_that_was_waiting_its_turn(parallel,
+                                                                         monkeypatch):
+    """Ctrl-C (or a cancelled CI job) while one `serial` session runs: the
+    serial runs queued behind its lock are already on worker threads, so
+    cancelling futures cannot stop them. None may start a paid session once
+    the one holding the lock finishes."""
+    import threading as _threading
+    holding, release, started = _threading.Event(), _threading.Event(), []
+
+    def fake(skill_dir, entry, run, args):
+        started.append(entry["id"])
+        holding.set()
+        release.wait(5)
+        return {"id": entry["id"], "run": run, "passed": True, "tool_calls": 1,
+                "input_tokens": 1, "output_tokens": 1, "duration_ms": 1, "cost_usd": 0,
+                "reading": {}, "checks": []}
+    pools = []
+
+    class Pool(runner.ThreadPoolExecutor):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            pools.append(self)
+
+    def interrupted(futures):  # the operator presses Ctrl-C mid-session
+        assert holding.wait(5)
+        raise KeyboardInterrupt
+    monkeypatch.setattr(runner, "run_entry", fake)
+    monkeypatch.setattr(runner, "ThreadPoolExecutor", Pool)
+    monkeypatch.setattr(runner, "as_completed", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        runner.main(["--skill", "ci-speedup", "--id", "10", "--runs", "3", "--jobs", "3"])
+    release.set()
+    pools[0].shutdown(wait=True)
+    assert started == [10], f"sessions started after the stop: {started[1:]}"
+
+
 def test_the_default_parallelism_is_the_run_count_capped_at_5_and_the_env_wins(monkeypatch):
     monkeypatch.delenv("SKILL_EVALS_JOBS", raising=False)
     assert (runner.default_jobs(3), runner.default_jobs(12)) == (3, 5)
@@ -472,6 +508,16 @@ def test_selecting_only_a_skipped_entry_runs_nothing_and_exits_2(parallel, monke
     seen = _fake_entry(monkeypatch)
     assert runner.main(["--skill", "ci-speedup", "--id", "11"]) == 2
     assert not seen and "SKIPPED (tier)" in capsys.readouterr().out
+
+
+def test_a_tier_that_selects_nothing_says_the_tier_left_every_entry_out(parallel, monkeypatch,
+                                                                        capsys):
+    """ci-secure has no `measure` entry: a `tier: measure` dispatch exits 2, and
+    the reason must name the tier, not claim no entry has checks."""
+    seen = _fake_entry(monkeypatch)
+    assert runner.main(["--skill", "ci-secure", "--tier", "measure"]) == 2
+    err = capsys.readouterr().err
+    assert not seen and "every selected entry is outside tier measure" in err, err
 
 
 def test_every_tier_is_known_and_only_the_review_measurement_leaves_the_gate():

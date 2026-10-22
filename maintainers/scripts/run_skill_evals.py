@@ -373,13 +373,17 @@ def default_jobs(n_runs: int) -> int:
     return int(env) if env else max(1, min(n_runs, _MAX_JOBS))
 
 
-def _attempt(skill_dir: Path, entry: dict, run: int, args) -> tuple[str, object]:
+def _attempt(skill_dir: Path, entry: dict, run: int, args,
+             stop: threading.Event) -> tuple[str, object]:
     """One run on a worker thread. Any Exception becomes that run's NOT RUN, so
     a crash in one session never takes the others down with it. A `serial`
     entry's sessions write fixed `/tmp/...` paths (the agent picks them, not
-    $TMPDIR), so those runs take turns while the others run beside them."""
+    $TMPDIR), so those runs take turns while the others run beside them. A run
+    already waiting its turn when the job is stopped starts no session."""
     try:
         with _SERIAL if entry.get("serial") else contextlib.nullcontext():
+            if stop.is_set():
+                return "not_run", "the job was stopped before this session started"
             return "ok", run_entry(skill_dir, entry, run, args)
     except HarnessError as exc:
         return "not_run", str(exc)
@@ -416,7 +420,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"SKIPPED (tier)  {args.skill} #{e.get('id')} {e.get('name', '')}  tier "
               f"{e.get('tier', 'gate')}; run with --tier {e.get('tier', 'gate')} or --all")
     if not entries or args.runs < 1:
-        print("harness: nothing to run (no entry with `checks` selected)", file=sys.stderr)
+        why = (f"every selected entry is outside tier {args.tier}" if skipped
+               else "no entry with `checks` selected")
+        print(f"harness: nothing to run ({why})", file=sys.stderr)
         return 2
     if shutil.which("claude") is None:
         print("harness: `claude` is not on PATH", file=sys.stderr)
@@ -443,9 +449,10 @@ def main(argv: list[str] | None = None) -> int:
                   "expected_output is judge-only; no check reads it")
     print(f"\nrunning {len(tasks)} session(s), {min(jobs, len(tasks))} at a time", flush=True)
     started = time.monotonic()
-    pool = ThreadPoolExecutor(max_workers=jobs)
+    pool, stop = ThreadPoolExecutor(max_workers=jobs), threading.Event()
     try:
-        futures = {pool.submit(_attempt, skill_dir, e, run, args): (e, run) for e, run in tasks}
+        futures = {pool.submit(_attempt, skill_dir, e, run, args, stop): (e, run)
+                   for e, run in tasks}
         for fut in as_completed(futures):  # lines print as runs finish, one block per run
             entry, run = futures[fut]
             eid = entry.get("id")
@@ -468,6 +475,7 @@ def main(argv: list[str] | None = None) -> int:
                 lines.append(f"    [#{eid}] session recorded: {r['session_log']}")
             print("\n".join(lines), flush=True)
     finally:  # a killed job (KeyboardInterrupt) starts nothing new; the file holds what ran
+        stop.set()  # runs already queued on the serial lock see it once they get the lock
         pool.shutdown(wait=False, cancel_futures=True)
     print(f"\nresults: {out}\ntotal wall: {time.monotonic() - started:.0f}s")
     # Precedence: a run that happened and failed (1) outranks runs that could

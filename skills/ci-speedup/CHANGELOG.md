@@ -901,7 +901,7 @@ unversioned and updates by reinstall from `main`.
   other's findings and report. Entry 11 (`quality-review-opt81`) is marked
   `tier: measure`: it exists for the catalog before/after measurement and the
   baseline, so pull requests no longer pay for it (about seven minutes and
-  $3.77 on its last CI run); it runs with `--tier measure` or `--all`, from the
+  $3.77 on a CI run on 2026-10-22); it runs with `--tier measure` or `--all`, from the
   workflow's manual dispatch, and stays in the committed baseline. The checks
   and the skill's behaviour are unchanged.
 

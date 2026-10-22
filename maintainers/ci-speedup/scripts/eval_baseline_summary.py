@@ -27,11 +27,13 @@ def _span(vals: list[float], fmt=lambda v: f"{v:,.0f}") -> str:
 
 def summarize(rows: list[dict]) -> str:
     """The baseline tables. A row is a session that ran when it carries
-    `passed`; a `harness_error` row is not run. Reading figures come from the
-    rows that recorded `reading`, each check counts over the rows that carry
-    it, and a missing wall time is left out of the medians (never a zero)."""
+    `passed`; a `harness_error` row is not run; a `skipped` row (an entry its
+    tier left out) was never selected, so it is no row at all. Reading figures
+    come from the rows that recorded `reading`, each check counts over the rows
+    that carry it, and a missing wall time is left out of the medians (never a
+    zero)."""
     cases: dict[int, list[dict]] = {}
-    for r in rows:
+    for r in (r for r in rows if "skipped" not in r):
         cases.setdefault(r.get("id"), []).append(r)
     head = ("| id | case | runs | passed | not run | reference bytes | of which catalog | "
             "reference files | catalog opened | input tokens | wall time (s) |\n"
