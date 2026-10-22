@@ -54,6 +54,7 @@ _EXPECTED_FACTS = frozenset({
     "sec.required-checks.skippable",
     "sec.fork-approval.effective",
     "sec.gate.test-failure-fatal",
+    "sec.deps.update-cooldown",
 })
 
 

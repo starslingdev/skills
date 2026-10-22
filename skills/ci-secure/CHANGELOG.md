@@ -13,6 +13,14 @@ entries are dated (UTC). Format loosely follows
 
 ### Added
 
+- ci-secure: new config hygiene check `sec.deps.update-cooldown` — every
+  configured dependency update tool waits at least 3 days before proposing a
+  fresh release (Dependabot `cooldown`, Renovate `minimumReleaseAge`), the
+  prevention half of the install-script vector (P14.25). Not applicable when
+  neither tool is configured; a config this scan cannot parse (JSON5 syntax) is
+  unmeasured, never a pass or a fail. A Dependabot entry with no `cooldown` is
+  judged at Dependabot's own 3-day default and passes with that named.
+  Dependabot security updates are not delayed by a cooldown. (2026-10-22)
 - ci-secure: `set +e; set -e; pytest -q` is recognised as a correctly wired
   suite. Reading the restore by physical line left an empty slice where all
   three share one line, failing a suite whose failure does end the job.

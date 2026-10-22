@@ -38,6 +38,9 @@ THE FACTS
   F9 sec.gate.test-failure-fatal          no job that runs the test/lint suite
                                           swallows its own exit code (n/a when
                                           no workflow runs one)
+  F10 sec.deps.update-cooldown            Dependabot / Renovate wait >= 3 days
+                                          before proposing a fresh release
+                                          (n/a when neither is configured)
 
 F7 and F8 read the GitHub API, not workflow YAML, so they are TOKEN-GATED: no
 repo or no token means UNMEASURED with the reason stated — the same contract
@@ -59,8 +62,10 @@ over
 every workflow file, so ANY unscannable workflow (`scan_incomplete`) forces
 them to UNMEASURED — no pass, no fail, a stated reason, and they stay in the
 applicable count as a visible coverage gap (the same shape ci-speedup's
-speed_score uses). F3 reads repo files and F8 a repository setting, not
-workflow YAML, and neither is affected.
+speed_score uses). F3 and F10 read repo files and F8 a repository setting,
+not workflow YAML, and none of them is affected. F10 has its own unmeasured
+state: an update config this scan cannot parse (JSON5 syntax, say) is never a
+pass and never a fail.
 
 THE REGISTERED SCORE — MACHINE-ONLY. This aggregate is NEVER rendered in the
 report (report.py prohibits it and tests/verify_report.py fails a report that
@@ -2170,6 +2175,184 @@ def _fork_approval_effective(repo: str | None, fetcher) -> tuple[str, str]:
         "it gates anyone is not something this scan can say")
 
 
+# --- dependency update cooldown (F10) ----------------------------------------
+# The prevention half of P14.25: a hijacked or typosquatted release is usually
+# reported and pulled within days, so an update tool that waits before
+# proposing a fresh version rarely hands it to CI at all.
+
+# Long enough that most malicious releases are pulled first, short enough to be uncontroversial.
+_COOLDOWN_MIN_DAYS = 3
+
+# What Dependabot waits when an `updates` entry sets no `cooldown` (github.com
+# since 2026-07-14; GHES from 3.23). An entry with no `cooldown` is judged at
+# this value, so it passes while it meets `_COOLDOWN_MIN_DAYS`.
+_DEPENDABOT_PLATFORM_DEFAULT_DAYS = 3
+
+_DEPENDABOT_FILES = (".github/dependabot.yml", ".github/dependabot.yaml")
+_COOLDOWN_DAY_KEYS = ("default-days", "semver-major-days",
+                      "semver-minor-days", "semver-patch-days")
+# Renovate's documented search order (it stops at the first match); the
+# `.gitlab/` copies are not read on GitHub. `package.json` is last.
+_RENOVATE_FILES = (
+    "renovate.json", "renovate.jsonc", "renovate.json5",
+    ".github/renovate.json", ".github/renovate.jsonc", ".github/renovate.json5",
+    ".renovaterc", ".renovaterc.json", ".renovaterc.jsonc", ".renovaterc.json5",
+)
+_AGE_RE = re.compile(
+    r"^\s*(\d+(?:\.\d+)?)\s*(m|mins?|minutes?|h|hrs?|hours?|d|days?|w|weeks?|"
+    r"y|yrs?|years?)\s*$", re.I)
+_AGE_UNIT_DAYS = {"m": 1 / 1440, "h": 1 / 24, "d": 1, "w": 7, "y": 365}
+
+
+def _renovate_age_days(value: object) -> float | None:
+    """Renovate's `minimumReleaseAge` ("3 days", "1 week", "72 hours") in
+    days, or None when this scan cannot read the value."""
+    if not isinstance(value, str):
+        return None
+    m = _AGE_RE.match(value)
+    if not m:
+        return None
+    return float(m.group(1)) * _AGE_UNIT_DAYS[m.group(2)[0].lower()]
+
+
+def _dependabot_cooldown(root: Path) -> tuple[str, str] | None:
+    """(outcome, evidence) for Dependabot version updates; None when the repo
+    configures none."""
+    found = next((rel for rel in _DEPENDABOT_FILES
+                  if (root / rel).is_file()), None)
+    if found is None:
+        return None
+    import yaml  # the loader the scan already parses workflows with
+    try:
+        doc = yaml.safe_load((root / found).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+        return "unmeasured", (f"unmeasured: {found} could not be read as YAML "
+                              f"({type(exc).__name__})")
+    updates = doc.get("updates") if isinstance(doc, dict) else None
+    if not updates:
+        return None
+    if not isinstance(updates, list):
+        return "unmeasured", f"unmeasured: `updates` in {found} is not a list"
+    short: list[str] = []
+    defaulted: list[str] = []
+    semver_only: list[str] = []
+    unreadable: list[str] = []
+    for entry in updates:
+        if not isinstance(entry, dict):
+            unreadable.append("an entry that is not a mapping")
+            continue
+        where = entry.get("directory") or entry.get("directories") or "?"
+        if isinstance(where, list):
+            where = ",".join(str(w) for w in where)
+        label = f"{entry.get('package-ecosystem', '?')} {where}"
+        cooldown = entry.get("cooldown")
+        if cooldown is None:
+            defaulted.append(label)
+            if _DEPENDABOT_PLATFORM_DEFAULT_DAYS < _COOLDOWN_MIN_DAYS:
+                short.append(f"{label} (no cooldown)")
+            continue
+        if not isinstance(cooldown, dict):
+            unreadable.append(label)
+            continue
+        days = {k: cooldown[k] for k in _COOLDOWN_DAY_KEYS if k in cooldown}
+        if any(isinstance(v, bool) or not isinstance(v, int)
+               for v in days.values()):
+            unreadable.append(label)
+            continue
+        if "default-days" not in days:
+            # Unlisted semver classes fall back to the platform default.
+            days.setdefault("default-days", _DEPENDABOT_PLATFORM_DEFAULT_DAYS)
+            if len(days) > 1:
+                semver_only.append(label)
+        low = [f"{k}: {v}" for k, v in days.items() if v < _COOLDOWN_MIN_DAYS]
+        if low:
+            short.append(f"{label} ({', '.join(low)})")
+    if short:
+        return "fail", (
+            f"{found}: {_capped(short, 4)} — wait under {_COOLDOWN_MIN_DAYS} "
+            "days before proposing a fresh release; add "
+            "`cooldown: { default-days: 7 }` to each entry")
+    if unreadable:
+        return "unmeasured", (f"unmeasured: {found} has a `cooldown` this scan "
+                              f"cannot read ({_capped(unreadable, 3, ', ')})")
+    notes = []
+    if defaulted:
+        notes.append("relying on Dependabot's %d-day platform default (no "
+                     "`cooldown` set): %s" % (_DEPENDABOT_PLATFORM_DEFAULT_DAYS,
+                                              _capped(defaulted, 4, ", ")))
+    if semver_only:
+        notes.append("semver-specific keys only, unlisted classes on the "
+                     "platform default: " + _capped(semver_only, 3, ", "))
+    return "pass", (f"{found}: every `updates` entry waits at least "
+                    f"{_COOLDOWN_MIN_DAYS} days"
+                    + ("; " + "; ".join(notes) if notes else ""))
+
+
+def _renovate_cooldown(root: Path) -> tuple[str, str] | None:
+    """(outcome, evidence) for Renovate; None when the repo configures none."""
+    config: Any = None
+    found = next((rel for rel in _RENOVATE_FILES if (root / rel).is_file()),
+                 None)
+    if found is not None:
+        try:
+            config = json.loads((root / found).read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError):
+            return "unmeasured", (
+                f"unmeasured: {found} is not plain JSON (JSON5 comments, "
+                "trailing commas or unquoted keys are outside what this scan "
+                "parses), so its `minimumReleaseAge` cannot be read")
+    elif (root / "package.json").is_file():
+        try:
+            pkg = json.loads((root / "package.json").read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError):
+            return None
+        if not isinstance(pkg, dict) or "renovate" not in pkg:
+            return None
+        found, config = "package.json `renovate`", pkg["renovate"]
+    else:
+        return None
+    if not isinstance(config, dict):
+        return "unmeasured", f"unmeasured: {found} is not a JSON object"
+    fix = (f"add `\"minimumReleaseAge\": \"7 days\"` at the top level of "
+           f"{found}")
+    if "minimumReleaseAge" not in config or config["minimumReleaseAge"] is None:
+        in_rules = any(isinstance(r, dict) and r.get("minimumReleaseAge")
+                       for r in config.get("packageRules") or [])
+        return "fail", (f"{found}: no top-level `minimumReleaseAge`"
+                        + (" (set only inside `packageRules`, which covers "
+                           "only the packages those rules match)"
+                           if in_rules else "") + f" — {fix}")
+    value = config["minimumReleaseAge"]
+    days = _renovate_age_days(value)
+    if days is None:
+        return "unmeasured", (f"unmeasured: {found} sets `minimumReleaseAge: "
+                              f"{value!r}`, a value this scan cannot convert "
+                              "to days")
+    if days < _COOLDOWN_MIN_DAYS:
+        return "fail", (f"{found}: `minimumReleaseAge: {value}` is under "
+                        f"{_COOLDOWN_MIN_DAYS} days — {fix}")
+    return "pass", f"{found}: `minimumReleaseAge: {value}`"
+
+
+def _update_cooldown(root: Path) -> tuple[str, str]:
+    """(outcome, evidence) for `sec.deps.update-cooldown`. Every configured
+    tool must pass; any fail fails; otherwise any unreadable config leaves it
+    unmeasured, never passed."""
+    try:
+        results = [r for r in (_dependabot_cooldown(root),
+                               _renovate_cooldown(root)) if r is not None]
+    except OSError as exc:
+        return "unmeasured", f"unmeasured: could not read update configs ({exc})"
+    if not results:
+        return "not_applicable", (
+            "not applicable: no Dependabot version updates and no Renovate "
+            "config, so no update tool here proposes fresh releases")
+    outcomes = {o for o, _ in results}
+    outcome = ("fail" if "fail" in outcomes else
+               "unmeasured" if "unmeasured" in outcomes else "pass")
+    return outcome, "; ".join(e for _, e in results)
+
+
 # --- the fact table -----------------------------------------------------------
 
 def compute_config_facts(
@@ -2367,6 +2550,15 @@ def compute_config_facts(
         True, not persist,
         "no untrusted-trigger checkout persists credentials"
         if not persist else _capped(persist, 4))
+
+    cd_outcome, cd_evidence = _update_cooldown(root)
+    add("sec.deps.update-cooldown",
+        "dependency update tools wait at least %d days before proposing a "
+        "fresh release (Dependabot `cooldown`, Renovate `minimumReleaseAge`), "
+        "so a hijacked or typosquatted version is usually pulled before CI "
+        "installs it; Dependabot security updates are not delayed by a "
+        "cooldown" % _COOLDOWN_MIN_DAYS,
+        False, cd_outcome == "pass", cd_evidence, outcome=cd_outcome)
 
     return facts_to_score(facts)
 
