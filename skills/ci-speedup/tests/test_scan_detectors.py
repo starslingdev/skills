@@ -598,6 +598,185 @@ def test_opt21_still_flags_a_wait_on_a_non_gate(tmp_path: Path, dep_job: str):
     assert _opt21_jobs(tmp_path, content) == ["e2e"]
 
 
+# A check-style step NAME must not turn a full test or build run into a gate:
+# flags before the subcommand, and test runners outside the npm/cargo/go set.
+@pytest.mark.parametrize("name,run", [
+    ("Verify", "mvn -B verify"),
+    ("Check", "make check"),
+    ("Validate", "pnpm -r test"),
+    ("Check flake", "nix flake check"),
+    ("Verify", "bundle exec rspec"),
+    ("Check", "ctest --output-on-failure"),
+    ("Check", "python -m unittest discover"),
+    ("Verify", "./ci/run_all_tests.sh"),
+])
+def test_opt21_still_flags_a_test_run_under_a_check_name(tmp_path: Path, name: str, run: str):
+    content = f"""name: CI
+on: pull_request
+jobs:
+  dep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: {name}
+        run: {run}
+  e2e:
+    needs: dep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm test
+"""
+    assert _opt21_jobs(tmp_path, content) == ["e2e"]
+
+
+# A gate that cannot fail, whose only check is conditional, or whose steps
+# could not all be read gates nothing the detector can vouch for.
+@pytest.mark.parametrize("gate_steps", [
+    pytest.param("""      - uses: actions/checkout@v4
+      - run: ruff check . || true
+""", id="check-that-cannot-fail"),
+    pytest.param("""      - uses: actions/checkout@v4
+      - name: Lint
+        run: eslint . || exit 0
+""", id="check-named-step-that-cannot-fail"),
+    pytest.param("""      - uses: actions/checkout@v4
+      - run: npm run lint
+        if: github.event_name == 'push'
+""", id="only-check-is-conditional"),
+    pytest.param("""      - uses: actions/checkout@v4
+      - npm run deploy
+      - run: npm run lint
+""", id="unreadable-step"),
+    pytest.param("""      - uses: actions/checkout@v4
+      - parallel: npm run deploy
+      - run: npm run lint
+""", id="unreadable-parallel-group"),
+    pytest.param("""      - uses: actions/checkout@v4
+      - run: npm run lint-and-build
+""", id="script-name-only-starting-with-lint"),
+    pytest.param("""      - uses: actions/checkout@v4
+      - run: npm run lint
+      - run: ./scripts/do-something
+""", id="check-beside-an-unclassifiable-step"),
+    pytest.param("""      - uses: actions/checkout@v4
+      - uses: someorg/deploy-action@v1
+      - run: npm run lint
+""", id="check-beside-a-non-setup-action"),
+    pytest.param("""      - uses: actions/checkout@v4
+      - run: npm run lint
+        continue-on-error: true
+""", id="check-step-that-cannot-fail"),
+    pytest.param("""      - uses: actions/checkout@v4
+      - run: npm ci
+""", id="setup-only-no-check"),
+    pytest.param("""      - uses: actions/checkout@v4
+      - name: Verify build
+        run: npm run build
+""", id="check-named-build"),
+])
+def test_opt21_still_flags_a_wait_on_a_gate_it_cannot_vouch_for(tmp_path: Path, gate_steps: str):
+    content = ("name: CI\non: pull_request\njobs:\n  dep:\n    runs-on: ubuntu-latest\n"
+               "    steps:\n" + gate_steps + """  e2e:
+    needs: dep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm test
+""")
+    assert _opt21_jobs(tmp_path, content) == ["e2e"]
+
+
+@pytest.mark.parametrize("extra", [
+    "    services:\n      pg:\n        image: postgres\n",
+    "    container: node:20\n",
+    "    environment: production\n",
+])
+def test_opt21_still_flags_a_wait_on_a_lint_job_with_job_level_extras(tmp_path: Path, extra: str):
+    gate = _OPT21_LINT_GATE.replace("    runs-on: ubuntu-latest\n",
+                                    "    runs-on: ubuntu-latest\n" + extra, 1)
+    content = ("name: CI\non: pull_request\njobs:\n" + gate + """  e2e:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm test
+""")
+    assert _opt21_jobs(tmp_path, content) == ["e2e"]
+
+
+@pytest.mark.parametrize("cond", ["failure()", "cancelled()", "${{ !cancelled() }}"])
+def test_opt21_still_flags_a_gate_wait_under_a_result_condition(tmp_path: Path, cond: str):
+    content = ("name: CI\non: pull_request\njobs:\n" + _OPT21_LINT_GATE +
+               f"""  e2e:
+    needs: lint
+    if: {cond}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm test
+""")
+    assert _opt21_jobs(tmp_path, content) == ["e2e"]
+
+
+@pytest.mark.parametrize("needs", ["[lint, typecheck]", "[typecheck, lint]"])
+def test_opt21_not_flagged_on_two_gates(tmp_path: Path, needs: str):
+    content = ("name: CI\non: pull_request\njobs:\n" + _OPT21_LINT_GATE +
+               f"""  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npx tsc --noEmit
+  e2e:
+    needs: {needs}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm test
+""")
+    assert _opt21_jobs(tmp_path, content) == []
+
+
+def test_opt21_still_flags_a_wait_on_a_missing_or_empty_job(tmp_path: Path):
+    content = """name: CI
+on: pull_request
+jobs:
+  empty:
+    runs-on: ubuntu-latest
+    steps: []
+  a:
+    needs: ghost
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+  b:
+    needs: empty
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+"""
+    assert sorted(_opt21_jobs(tmp_path, content)) == ["a", "b"]
+
+
+def test_opt21_gate_suppression_leaves_a_debug_trace(tmp_path: Path):
+    import os
+    _write_workflow(tmp_path, "ci.yml", "name: CI\non: pull_request\njobs:\n" +
+                    _OPT21_LINT_GATE + """  e2e:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm test
+""")
+    result = subprocess.run(
+        [sys.executable, str(_SCAN_SCRIPT), "--root", str(tmp_path)],
+        capture_output=True, text=True, check=True,
+        env={**os.environ, "STARSLING_LOG_LEVEL": "DEBUG"},
+    )
+    assert "OPT21" not in _patterns(json.loads(result.stdout))
+    assert re.search(r"OPT21 not flagged: job e2e\b", result.stderr)
+
+
 def test_opt21_still_flags_a_job_needing_a_gate_and_an_unused_build(tmp_path: Path):
     content = ("name: CI\non: pull_request\njobs:\n" + _OPT21_LINT_GATE +
                """  build:

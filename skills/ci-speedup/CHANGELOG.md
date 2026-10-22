@@ -18,7 +18,7 @@ unversioned and updates by reinstall from `main`.
   made in their public repos.** OPT89: when the slowest platform in a matrix
   compiles its own tests, build them once on a fast runner (cross-compiling)
   and run them natively on that platform, keeping a fully native run after
-  merge. OPT90: when every pull request waits for coverage a small subset would
+  merge or on a schedule. OPT90: when every pull request waits for coverage a small subset would
   catch, run the subset on pull requests and the rest after merge or on a
   schedule, with failures that reach an owner and block releases. OPT91: when
   the compile itself is the slowest step and the cache is not the problem,
@@ -1138,8 +1138,14 @@ unversioned and updates by reinstall from `main`.
   that waits on a cheap check job (lint, pre-commit, a format or type check, a
   lockfile check) is waiting on purpose: the gate stops expensive jobs from
   starting when the check fails. OPT21 now stays silent when every job a job
-  waits on is such a check-only gate; anything it cannot classify is still
-  flagged as before. On OpenAI's real workflows this removes 1 false finding
+  waits on is such a check-only gate, unless the waiting job runs whatever the
+  gate's result; anything it cannot classify is still flagged as before. A
+  step named like a check ("Verify", "Check") counts only when its body is a
+  recognised check or a short inline script, never a test or build run such
+  as `mvn verify` or `make check`; a check that cannot fail (`|| true`), one
+  that runs only under an `if:`, and a job with steps the scanner could not
+  read never make a gate. Each wait left unflagged is named in the DEBUG log
+  (`STARSLING_LOG_LEVEL=DEBUG`). On OpenAI's real workflows this removes 1 false finding
   in openai/whisper and 8 in openai/openai-python. The pattern's entry now
   explains when a `needs:` edge is the right call, and that a gate should stay
   short because it adds its full duration to every pull request's wait.
