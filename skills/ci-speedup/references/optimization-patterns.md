@@ -37,15 +37,15 @@ Checkout · 6. Conditional Execution · 7. Trigger and Scope · 8. Release Workf
 - **Category 1 — Caching** (`OPT1`–): tool installs, build/test caches, dynamic cache keys, and the one pattern pointed the other way — a cache measured to cost more than it saves (`OPT79`).
 - **Category 2 — Redundancy**: duplicate env, repeated setup sequences, redundant build steps, repeated fixed setup across independent small jobs (`OPT77`).
 - **Category 3 — Docker**: sleep-based readiness, over-broad `compose up`.
-- **Category 4 — Parallelization**: needless `needs:` serialization, unsharded long jobs, a test worker count nobody measured (`OPT88`).
+- **Category 4 — Parallelization**: needless `needs:` serialization, unsharded long jobs, a test worker count nobody measured (`OPT88`), the slowest platform compiling its own tests (`OPT89`).
 - **Category 5 — Actions and Checkout**: stale action pins, repeated setup, full-history checkout, submodule / Git LFS checkout payload, checkout stalls on the tail (`OPT80`).
 - **Category 6 — Conditional Execution**: merge_group step-vs-job conditions, draft-PR gating.
-- **Category 7 — Trigger and Scope**: missing path filters, no `--filter` on PR turbo, cron frequency.
+- **Category 7 — Trigger and Scope**: missing path filters, no `--filter` on PR turbo, cron frequency, every PR paying for coverage that could run after merge (`OPT90`).
 - **Category 8 — Release Workflow**: release-path caching + redundancy.
 - **Category 9 — Queue Times and Concurrency**: missing/!coarse concurrency groups.
 - **Category 10 — Timing Anomalies**: failure-rate / bimodal duration signals (advisory), and the same job measured faster on another runner class (`OPT81`).
 - **Category 11 — Stack-Specific**: turbo task outputs, unstable turbo env keys, type-aware ESLint on a slow lint job (`OPT82`).
-- **Category 12 — Build Caching (language-agnostic)**: uncached compiled-language builds, a dependency compiled from source when a prebuilt package exists (`OPT86`).
+- **Category 12 — Build Caching (language-agnostic)**: uncached compiled-language builds, a dependency compiled from source when a prebuilt package exists (`OPT86`), a compile nobody profiled (`OPT91`).
 - **Category 13 — Hidden Failures and Dead Config**: dead env vars, misconfigured caches.
 - **Category 14 — Structural / Critical-Path Levers** (`OPT70`–`OPT75`, `OPT78`, `OPT83`–`OPT85`, `OPT87`): routed from the measured long pole (see ARCHITECTURE §11), not a flat grep. `OPT85` (tests run in many processes instead of one) and `OPT87` (tests wait on a slow dependency they do not verify) have no router yet: like `OPT74`, they are catalogued for application from the drilled pole's log and are reported as without a detector. `OPT78` is routed by the drill-time leaf detector rather than the structural router; `OPT83` and `OPT84` are routed by structural passes over the drilled poles' step decomposition plus the workflow YAML, not by the log leaves (`OPT84` also follows the step's `package.json` scripts).
 
@@ -1710,6 +1710,13 @@ title_template: "Unnecessary `needs:` Dependencies"
 
 **Fix**: Remove `needs:` unless the job genuinely requires outputs from the dependency, or the dependency is a gate (e.g., lint must pass before deploy).
 
+**When a `needs:` edge is the right call**: a cheap check job in front of expensive jobs (lint, pre-commit, a format or type check, a lockfile check) trades the check's own duration in wall clock for the runner minutes saved whenever it fails, because the expensive jobs never start. OPT21 does not flag a wait on such a check-only gate:
+
+- **What counts as a check-only gate.** Every step is setup (checkout, `setup-*`, cache or a dependency install) or a recognised check command, and at least one check runs unconditionally. A step named as a check (Check…, Verify…, Lint…) also counts when its body is a short inline check script; the name never makes anything that builds, tests, deploys or publishes a check.
+- **What disqualifies a gate.** A check that can pass on failure (`|| true`, `--exit-zero`) or is piped into other work; a job with outputs, artifacts, services, a container, an environment, `defaults`, a custom `shell`, a reusable-workflow `uses:` or `continue-on-error`; a gate that itself waits on another job; any step the detector cannot read. A check that only runs under an `if:` does not count as the gate's check.
+- **When the wait is still flagged.** Any job the waiting job needs is not a check-only gate, or the waiting job runs whatever the gate's result (`always()`, `failure()`, `cancelled()` in its `if:`). Anything the detector cannot classify is still flagged.
+- **"Cheap" is judged by what the gate runs, not by how long it takes**, so a slow gate is not an OPT21 finding. To make a gate cheaper, keep it short: it adds its full duration to every PR's wait.
+
 ---
 
 ---
@@ -1860,7 +1867,7 @@ fix_strategy: measure-test-concurrency
 title_template: "Test concurrency is set by guess, not measurement"
 -->
 
-**Not auto-detected yet.** Like other `detector: manual` entries (for example OPT25 and OPT43), no pass emits OPT88, so the audit never reports it on its own and never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading the slow test step's command and configuration against the heuristic below.
+**Not auto-detected yet.** Like OPT86, no pass emits OPT88, so the audit never reports it on its own and never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading the slow test step's command and configuration against the heuristic below.
 
 **TL;DR**: The slowest test job runs with a worker count nobody measured: one worker on a runner with several cores, a fixed cap carried over from an older runner, or "as many as there are cores" where memory or a shared service is the real limit. Time two or three settings on the real runner class and keep the fastest. More workers is not always faster.
 
@@ -1891,6 +1898,54 @@ title_template: "Test concurrency is set by guess, not measurement"
 - openai/openai-agents-python [#2563](https://github.com/openai/openai-agents-python/pull/2563) (2026-03-01): replaced "real-time waits in several slow tests with deterministic synchronization", moved shard-safe tests onto `pytest-xdist`, and isolated Redis/Dapr-sensitive files onto "a serial lane that still runs automatically". `make tests` "averaged 53.59 seconds before these changes and 14.34 seconds after them", measured "on the same machine" across three warm-cache runs: a local measurement, not a CI run.
 
 **Risk**: **MEDIUM**. More workers can expose tests that share state, which shows up as new flakes; the serial lane and the guardrail contain that.
+
+---
+
+### OPT89 — The Slowest Platform Compiles Its Own Tests
+
+<!-- METADATA
+pattern: OPT89
+impact: HIGH
+class: data-driven
+detector: manual
+risk: MEDIUM
+affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml,.bazelrc,Cargo.toml,.cargo/config.toml,.config/nextest.toml"
+fix_strategy: build-once-test-natively
+title_template: "The slowest platform compiles its own tests"
+-->
+
+**Not auto-detected yet.** Like OPT86 and OPT88, no pass emits OPT89, so the audit never reports it on its own and never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading the slowest platform leg's steps against the heuristic below.
+
+**TL;DR**: A multi-platform test matrix makes every platform build its own test binaries, so the slowest or scarcest runner (Windows, an ARM machine, an emulated architecture) spends most of its time compiling instead of testing. Build the test binaries once on a fast runner (cross-compiling for the target), hand them over as an artifact, and run them natively on each platform.
+
+**Anti-pattern**: The platform legs of a matrix each run the full build-and-test, and one leg is the long pole because its runner is slow at compiling, or because the architecture is emulated (for example an ARM build under QEMU on an x86 runner). The compile is the same work on every leg; only running the tests needs the target platform.
+
+**Relation to other patterns**: [OPT81](#opt81--the-same-job-is-measurably-faster-on-another-runner) moves a whole job to a faster runner class. OPT89 moves only the build, and keeps the tests on the platform they must run on. [OPT14](#opt14--repeated-checkoutsetup-without-artifact-handoff) is the same artifact-handoff idea for setup work inside one platform.
+
+**Detection heuristic** (manual; read, never inferred):
+
+1. A matrix runs the same build-and-test on several platforms or architectures, and one platform leg is the slow outlier.
+2. On that leg, the build or compile work (or an emulation setup step such as QEMU) takes most of the job, and running the tests is a minority of it. When compile and test share one step (`bazel test`, or a test command that compiles first), step timings cannot split them: read the run log, a build-timing artifact (Bazel's profile, cargo's `--timings` report), or a test-only run of the same tests on another runner before concluding.
+3. The toolchain can build for that target elsewhere: cross-compilation is supported (for example Rust targets, Go `GOOS`/`GOARCH`, a C or C++ cross toolchain), or the test runner can package built tests as an archive to replay elsewhere (for example `cargo nextest archive`).
+
+**Fix recipe**:
+
+1. Build the test binaries for the slow target on a fast runner, cross-compiling, and upload them as an artifact (a test archive where the runner supports one).
+2. Download and run them on a native runner of the target platform; shard the run across several native runners when the test phase is still long.
+3. Where a native runner exists, prefer it to emulation: an emulated architecture is slower at both building and testing.
+4. Keep a fully native build-and-test of that platform somewhere, after merge or on a schedule, for anything the cross-built binary cannot cover.
+
+**Guardrail**: a cross-compiled binary is not always the binary a native build produces (different linker, toolchain or bundled native libraries). List what the cross-built tests do not exercise, keep a native run that covers it, and do not drop a test from the native platform because it does not build cross.
+
+**Sizing: uncredited**. No `_SIZING` model. The ceiling is the measured build share of the slow leg; the saving is what the next sampled runs show.
+
+**Real-world example (OpenAI)**, their numbers, not a forecast for your repo:
+
+- openai/codex [#20585](https://github.com/openai/codex/pull/20585) (2026-05-01): Windows test builds moved to remote Linux build execution, and the change "keeps `TestRunner` actions local on the Windows runner". The PR reports a "Baseline native Windows Bazel test on `main`: success in about 28m12s" (the linked job is named "Local Bazel build on windows-latest for x86_64-pc-windows-gnullvm", so build and test ran in it together) against a cross-compiled run's "Windows test 9m16s", both linked CI runs. The two are not like for like: the baseline was a push to `main`, and the cross-compiled PR leg leaves out the V8 and code-mode unit tests, so part of the gap is fewer tests. The fully native Windows job stayed, on pushes to `main`, to keep the coverage the cross build lacked.
+- openai/codex [#23358](https://github.com/openai/codex/pull/23358) (2026-05-20): the Windows ARM64 test archive is "cross-compiled on Windows x64 and replayed on native Windows ARM64 shards so the slow ARM64 machine is used for execution rather than compilation". Completed runs took "`34m30s`" and "`30m36s`" end to end, where "comparable pre-cross-compile sharded Windows ARM64 runs were `55m01s`, `50m21s`, and `46m42s`".
+- openai/tiktoken builds its ARM64 wheels on native `ubuntu-24.04-arm` runners instead of under QEMU emulation (commit 853da97, "Improve aarch64 and mac builds (#380)"; no timing published).
+
+**Risk**: **MEDIUM**. Reversible, but a cross-built binary can hide a platform-specific build or link problem; the native run in step 4 is what catches it.
 
 ---
 
@@ -3024,6 +3079,54 @@ Required-status-check caveat from OPT39 applies here too.
 **Real-world example (blen-starter-kit deep-scan)**: `ci.yml` `web-quality` runs `bunx playwright install --with-deps chromium` + smoke e2e on every PR, even API-only or mobile-only PRs. Adding the `changes:` job + `if: needs.changes.outputs.web == 'true'` skips the entire job for ~50-70% of PRs.
 
 **Risk**: MEDIUM. Cross-app changes (e.g., a shared `packages/ui` change that affects both `apps/web` and `apps/mobile`) need to be in the `paths-filter` rules for BOTH apps. List shared packages explicitly in each app's filter to avoid false-skip.
+
+---
+
+### OPT90 — Every Pull Request Pays for Coverage That Could Run After Merge
+
+<!-- METADATA
+pattern: OPT90
+impact: HIGH
+class: data-driven
+detector: manual
+risk: MEDIUM
+affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml"
+fix_strategy: fast-subset-on-prs-full-after-merge
+title_template: "Every pull request pays for coverage that could run after merge"
+-->
+
+**Not auto-detected yet.** Like OPT86 and OPT88, no pass emits OPT90, so the audit never reports it on its own and never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading the pull-request workflows and their run history against the heuristic below.
+
+**TL;DR**: Every pull request waits for the full matrix (every OS, every runtime version, every heavyweight configuration) even though a small subset catches almost every failure. Run the subset that catches what matters before merge, and move the rest to a run after merge or on a schedule, where it still gates releases and pages someone when it fails.
+
+**Anti-pattern**: A `pull_request` workflow on the long pole runs a wide matrix or a heavyweight suite on every push to every PR. Most legs only fail when another, cheaper leg fails too, so they add wait and runner minutes to every PR without changing the merge decision.
+
+**Relation to other patterns**: [OPT32](#opt32--missing-pathspaths-ignore-on-expensive-workflows), [OPT39](#opt39--multi-language-matrix-without-path-filter) and [OPT70](#opt70--scope-the-buildtest-to-only-what-changed) skip work a PR's changes cannot affect. OPT90 keeps all the work and changes *when* part of it runs. [OPT35](#opt35--missing-fail-fast-on-non-diagnostic-matrix-dimensions) stops a failing matrix early; OPT90 shrinks the matrix a PR waits on.
+
+**Detection heuristic** (manual; read, never inferred):
+
+1. A `pull_request`-triggered workflow on the merge path runs a matrix of several OS, runtime or configuration legs, or a heavyweight suite, and it is on the long pole or a large share of the PR's runner minutes. A PR path that already runs a small subset while the wide matrix runs after merge or on a schedule is the recommended shape, not an instance.
+2. In run history, count each leg's leg-unique failures: runs where that leg failed and every other leg passed, ignoring skipped legs and the aggregator job that only reports the others' results. Use a window long enough to cover normal PR traffic, not the last few hours. A leg with no leg-unique failures is a candidate to move. A leg that does fail alone is catching something no other leg catches (a subset on one OS cannot stand in for another OS); moving it means finding those failures after merge instead, which is the team's call to make with the count in hand.
+3. The repo can host the rest after merge: a `push` trigger on the default branch, a merge queue, or a `schedule`.
+
+**Fix recipe**:
+
+1. Choose the PR subset from the data in step 2: typically the oldest and newest supported runtime on the main OS, plus any leg the team keeps because it fails alone. The subset can be empty for a class of check another required workflow already covers on PRs.
+2. Move the remaining legs to a workflow that runs on `push` to the default branch (and `workflow_dispatch`), on a merge queue, or on a `schedule`, so they run against the merged tree.
+3. Keep one required status check on the PR path so branch protection stays simple, and do not leave a moved job listed as required, or PRs will wait on a check that never runs.
+4. Make a red post-merge run impossible to miss: it notifies an owner, and it blocks a release.
+
+**Guardrail**: moving coverage after merge means a regression can land on the default branch before it is caught. Keep that window short and owned: every merged commit must be covered (a post-merge or merge-queue run starts on every merge; a scheduled run tests the latest merged tree, so it must run often enough to keep the window short), its failures must reach someone, and a release must not ship a commit the full matrix has not passed. Never move a leg whose failures are often unique to it.
+
+**Sizing: uncredited**. No `_SIZING` model. The ceiling is the measured share of the PR's wait spent on the legs that move; what remains is the subset's time.
+
+**Real-world example (OpenAI)**, their numbers, not a forecast for your repo:
+
+- openai/codex [#16072](https://github.com/openai/codex/pull/16072) (2026-03-28) split the Rust checks into a PR-time workflow and "a full post-merge Cargo workflow", because the old one "made every PR pay for the full Cargo matrix even though most of that coverage is better treated as post-merge verification". The PR-time workflow kept no build or test legs for the main crates (only formatting, `cargo shear`, a custom lint, and that lint's own package tests when it changes), because a separate workflow already ran build and test on every PR. No timing was published.
+- openai/openai-python [#3537](https://github.com/openai/openai-python/pull/3537) (2026-07-24) adopted this shape when it added version coverage: "test the minimum/current runtimes on normal CI and the full supported matrix on a schedule". The full matrix was new, so this is the recommended shape rather than a measured saving; no timing was published.
+- openai/codex [#20585](https://github.com/openai/codex/pull/20585) (2026-05-01): "pull requests get the fast Windows cross-compiled Bazel test leg, while post-merge pushes to `main` run both that fast cross leg and a fully native Windows Bazel test leg". The PR reports a native Windows test "in about 28m12s" against the cross-compiled PR leg's "Windows test 9m16s". That gain comes from two changes the PR does not separate (cross-compiling, [OPT89](#opt89--the-slowest-platform-compiles-its-own-tests), and keeping the V8 and code-mode unit tests out of the PR leg), so none of it is a number for this pattern alone.
+
+**Risk**: **MEDIUM**. A regression can reach the default branch before the post-merge run catches it; the guardrail keeps that visible and short.
 
 ---
 
@@ -4298,7 +4401,7 @@ fix_strategy: use-prebuilt-dependency-packages
 title_template: "CI compiles a dependency that ships prebuilt"
 -->
 
-**Not auto-detected yet.** Like other `detector: manual` entries (for example OPT25 and OPT43), no pass emits OPT86, so the audit never reports it on its own and never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading a slow install step's log against the heuristic below.
+**Not auto-detected yet.** Like OPT88, no pass emits OPT86, so the audit never reports it on its own and never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading a slow install step's log against the heuristic below.
 
 **TL;DR**: An install step compiles a dependency from source (a C or C++ extension, a native add-on, a large machine-learning framework) when a prebuilt package exists for that interpreter and platform. Pin a version that ships prebuilt packages for every leg of the matrix, and make the install refuse to build from source, so the next lockfile bump cannot bring the compile back unnoticed.
 
@@ -4334,6 +4437,53 @@ title_template: "CI compiles a dependency that ships prebuilt"
 - openai/openai-python's CI sets `UV_NO_BUILD: '1'` at workflow level (added in [#3641](https://github.com/openai/openai-python/pull/3641) for supply-chain safety; no timing published), so a dependency without a prebuilt package fails the install instead of compiling.
 
 **Risk**: **LOW**. A version constraint and an install flag, both reversible; the hard error surfaces any gap at install time.
+
+---
+
+### OPT91 — The Compile Is the Long Pole and Nobody Profiled It
+
+<!-- METADATA
+pattern: OPT91
+impact: HIGH
+class: data-driven
+detector: manual
+risk: MEDIUM
+affected_files: "Cargo.toml,.cargo/config.toml,tsconfig*.json,CMakeLists.txt,.github/workflows/*.yml,.github/workflows/*.yaml"
+fix_strategy: profile-the-compile
+title_template: "The compile is the long pole and nobody profiled it"
+-->
+
+**Not auto-detected yet.** Like OPT86 and OPT88, no pass emits OPT91, so the audit never reports it on its own and never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading the slow build step and the compiler's own timing reports against the heuristic below.
+
+**TL;DR**: The slowest job's time goes to compiling, the cache is already doing its job, and nobody has asked the compiler where the time goes. Profile the compile with the compiler's own timing reports, then fix the hotspot it names: a build-profile setting that costs far more build time than it returns at runtime, or one piece of code that is expensive to compile.
+
+**Anti-pattern**: A compile-heavy job (a release build, a crate or package rebuilt on every run) is the long pole, and the response so far has been a bigger runner or more cache. Neither touches the cause when one setting or one hotspot dominates: a link-time optimization mode that serializes the final link, or macro- or generic-heavy code that multiplies the compiler's work.
+
+**Relation to other patterns**: rule out the cache first. [OPT61](#opt61--missing-dependency-caching) and [OPT62](#opt62--build-artifacts-destroyed-before-every-run) cover work that should not be repeated at all; OPT91 is the compile that genuinely has to run, made cheaper. [OPT81](#opt81--the-same-job-is-measurably-faster-on-another-runner) is the bigger-runner option, which this pattern tries first not to need.
+
+**Detection heuristic** (manual; read, never inferred):
+
+1. The long pole's dominant step is a compile or build step.
+2. The cache is not the explanation: dependencies are restored, or the job builds clean by design (a release build), and the slow part is compiling the project's own code or the final optimized link.
+3. Nobody has read the compiler's timing report for this job (a report CI already produces but nobody examines counts as unread; check the workflow for it and whether its artifact survives), or the report names one dominant item: for Rust, `cargo build --timings` (per crate) and `-Z time-passes` (per compiler pass, nightly); for TypeScript, `tsc --extendedDiagnostics` or `--generateTrace`; for C and C++, Clang's `-ftime-trace`.
+
+**Fix recipe**:
+
+1. Profile the slow target on the same runner class with the same cache state as the slow job (dependencies restored, or a clean build when the job builds clean by design), and keep the report. A clean build profiled separately is a comparison, not the measurement.
+2. If a build-profile setting dominates (for example fat link-time optimization in a release profile), measure the alternatives (ThinLTO, more codegen units) on build time AND on what the setting is for: runtime of the real workloads, binary size.
+3. If one crate, module or construct dominates, change that code (for example a macro that generates heavy wrappers for every implementation, or deeply nested generics), keeping its public shape where possible.
+4. Re-profile, and record the before and after with the commands used, so a later regression can be measured the same way.
+
+**Guardrail**: a release-profile setting changes the product, not just the build. Measure the runtime and size of what ships before changing it, and keep the shipped artifact on the settings that were measured. A profile setting used only to speed up CI must not silently become the release setting.
+
+**Sizing: uncredited**. No `_SIZING` model. The ceiling is the measured compile share of the step; the saving is what the next profile and the next sampled runs show.
+
+**Real-world example (OpenAI)**, their numbers, not a forecast for your repo:
+
+- openai/codex [#23710](https://github.com/openai/codex/pull/23710) (2026-06-04): "switching from fat LTO to ThinLTO (`3/thin/1`) reduced a clean `codex-cli` release build from 2073.893 seconds to 1243.172 seconds, a 40.06% improvement". In codex's release CI, only the stable Windows builds still used fat LTO at the time; the rest already used ThinLTO. The trade was measured too: "The resulting binary increased from 196.7 MiB to 211.8 MiB (+7.63%)", and "the worst image workload median was +0.86%". The PR does not say where the build was timed.
+- openai/codex [#16630](https://github.com/openai/codex/pull/16630) (2026-04-02): the hotspot was "a large compile-time tax from `#[async_trait]` on every concrete handler impl". Replacing it with native `impl Future + Send` futures took "a clean `codex-core` package rebuild" from "**187.15s to 68.98s**" in rustc's `total`, profiled with `cargo +nightly build -p codex-core --lib -Z unstable-options --timings=json` and `-Z time-passes`; the PR links no CI run for these numbers.
+
+**Risk**: **MEDIUM**. A profile setting trades build time against runtime and size; the guardrail requires measuring both.
 
 ---
 
@@ -4541,7 +4691,7 @@ title_template: "Dead Workflow Env Vars / Config"
 ## Category 14: Structural / Critical-Path Levers
 
 These patterns are a **different class** from everything above. The catalog
-patterns OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86 and OPT88 are *hygiene*: each is a named,
+patterns OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86 and OPT88–OPT91 are *hygiene*: each is a named,
 locally-checkable defect with
 a mechanical, low-risk fix, detected by matching workflow YAML against the
 catalog. OPT81, like OPT79 and OPT80, is derived from run history rather than matched against YAML, and its A2 advisory is risk MEDIUM. On real repos almost every hygiene hit moves **~0 developer

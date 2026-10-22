@@ -13,6 +13,22 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-10-21** — **Three more catalog patterns for slow builds and slow
+  pull-request checks, OPT89 to OPT91, each backed by changes OpenAI engineers
+  made in their public repos.** OPT89: when the slowest platform in a matrix
+  compiles its own tests, build them once on a fast runner (cross-compiling)
+  and run them natively on that platform, keeping a fully native run after
+  merge or on a schedule. OPT90: when every pull request waits for coverage a small subset would
+  catch, run the subset on pull requests and the rest after merge or on a
+  schedule, with failures that reach an owner and block releases. OPT91: when
+  the compile itself is the slowest step and the cache is not the problem,
+  profile it with the compiler's own timing reports and fix the setting or the
+  code it names, measuring runtime and size before changing a release setting.
+  None has a detector yet, so the audit never reports one on its own or claims
+  to have checked it, and none credits a saving. The catalog count goes from 86
+  to 89 (78 hygiene plus 11 structural). The OPT86 and OPT88 entries no
+  longer name OPT25 and OPT43 as patterns nothing detects; both are detected.
+
 - **2026-10-21** — **Four new catalog patterns for slow test jobs, OPT85 to
   OPT88, each backed by measured changes OpenAI engineers made in their public
   repos.** OPT85: tests that start a new process for every case, or link a
@@ -1117,6 +1133,26 @@ unversioned and updates by reinstall from `main`.
   run improvised).
 
 ### Fixed
+
+- **2026-10-21** — **The "unnecessary `needs:`" finding (OPT21) no longer
+  tells a team to remove a deliberate gate, or credits a saving for it.** A job
+  that waits on a cheap check job (lint, pre-commit, a format or type check, a
+  lockfile check) is waiting on purpose: the gate stops expensive jobs from
+  starting when the check fails. OPT21 now stays silent when every job a job
+  waits on is such a check-only gate, unless the waiting job runs whatever the
+  gate's result; anything it cannot classify is still flagged as before. A
+  step named like a check ("Verify", "Check") counts only when its body is a
+  recognised check or a short inline script, never a test or build run such
+  as `mvn verify` or `make check`; a check that cannot fail (`|| true`), one
+  that runs only under an `if:`, and a job with steps the scanner could not
+  read never make a gate. Nor does a lint piped or chained into other work,
+  `--exit-zero`, a hyphenated script such as `scripts/lint-and-test.sh`, a
+  local composite action, a custom shell, or a gate that itself waits on
+  another job. Each wait left unflagged is named in the DEBUG log
+  (`STARSLING_LOG_LEVEL=DEBUG`). On OpenAI's real workflows this removes 1 false finding
+  in openai/whisper and 8 in openai/openai-python. The pattern's entry now
+  explains when a `needs:` edge is the right call, and that a gate should stay
+  short because it adds its full duration to every pull request's wait.
 
 - **2026-10-18** - **OPT38 no longer calls a pull-request `edited` or `labeled`
   trigger safe to remove just because the workflow has no `if:` guard on it.**
