@@ -93,3 +93,74 @@ def test_the_plugin_copy_withholds_the_answer_key_but_keeps_verify_report(tmp_pa
 def test_results_and_logs_land_outside_the_installable_skills():
     for d in (runner._RESULTS, runner._LOGS):
         assert d.parent == _REPO and "skills" not in d.relative_to(_REPO).parts
+
+
+def test_a_stream_with_no_result_event_is_a_harness_error_even_on_exit_0(offline):
+    """A truncated stream must not grade: its `max: 0` checks would pass vacuously."""
+    assert offline("\n".join(_stream("ci-secure:ci-secure").splitlines()[:-1]), 0) == 2
+
+
+def _max0(eid: int, name: str) -> str:
+    spec = json.loads((_REPO / "skills" / "ci-speedup" / "evals" / "evals.json").read_text())
+    [e] = [e for e in spec["evals"] if e["id"] == eid]
+    return next(c["pattern"] for c in e["checks"] if c["name"] == name)
+
+
+@pytest.mark.parametrize("eid,name,bad", [
+    (6, "ci-speedup-pipeline-not-run", "python3 /x/ci-speedup/scripts/run.py"),
+    (10, "nothing-committed-or-pushed", "git commit -m x"),
+])
+def test_max_0_patterns_match_real_bash_tool_calls(eid, name, bad):
+    def count(cmd):
+        ev = {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "Bash", "input": {"command": cmd}}]}}
+        [r] = runner.apply_checks([{"name": name, "type": "tool_used", "pattern": _max0(eid, name),
+                                    "min": 0, "max": 0}], {"tool_used": runner.tool_calls([ev])})
+        return int(r[2].split("=")[1])
+    assert (count(bad), count("git status")) == (1, 0)
+
+
+def _write_call(tool: str, path: Path) -> str:
+    return f"{tool} {json.dumps({'file_path': str(path), 'content': 'x'})}"
+
+
+@pytest.mark.parametrize("tool", ["Write", "Edit", "MultiEdit"])
+def test_files_written_collects_an_outside_md_a_write_tool_named(tmp_path, tool):
+    root, out = tmp_path / "root", tmp_path / "out" / "report.md"
+    root.mkdir(); out.parent.mkdir(); out.write_text("REPORT")
+    got = runner.files_written([root], {}, [_write_call(tool, out)], out.stat().st_mtime - 1)
+    assert got.count("REPORT") == 1
+
+
+def test_files_written_skips_unchanged_symlinked_and_stale_files(tmp_path):
+    import os
+    root, outside = tmp_path / "root", tmp_path / "old.md"
+    root.mkdir()
+    (root / "same.txt").write_text("SAME")
+    (root / "real.md").write_text("REAL")
+    (root / "link.md").symlink_to(root / "real.md")
+    outside.write_text("STALE")
+    os.utime(outside, (1000, 1000))
+    before = runner.snapshot([root])
+    (root / "new.txt").write_text("NEW")
+    calls = [f"Bash {json.dumps({'command': f'cat {outside} {root}/link.md'})}",
+             _write_call("Write", outside)]
+    got = runner.files_written([root], before, calls, since=2000)
+    assert "NEW" in got and "SAME" not in got and "STALE" not in got
+    assert "=== link.md ===" not in got
+
+
+def test_scaffold_with_no_workflow_ids_exits_non_zero(tmp_path, monkeypatch):
+    path = _REPO / "skills" / "ci-speedup" / "evals" / "fixtures" / "synthetic" / "scaffold.py"
+    spec = importlib.util.spec_from_file_location("synthetic_scaffold", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    class Stub:
+        _REPO = "o/r"
+        _init_repo = staticmethod(lambda d: None)
+        _replay_dir = staticmethod(lambda d: d)
+    monkeypatch.setattr(mod, "e2e", Stub)
+    with pytest.raises(SystemExit) as exc:
+        mod.main(tmp_path, tmp_path)
+    assert isinstance(exc.value.code, str) and "_WF" in exc.value.code  # str: stderr, exit 1

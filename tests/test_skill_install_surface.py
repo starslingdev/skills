@@ -58,6 +58,7 @@ _MOVED_NAMES = {
     "run_skill_evals.py",
     "eval_gh_shim.py",
     "test_shared_skill_eval_runner.py",
+    "test_eval_gh_shim.py",
 }
 
 

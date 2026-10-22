@@ -22,7 +22,7 @@ _TYPES = {"tool_used", "trace", "files", "last_message"}
 
 def _agent_readable() -> list[Path]:
     """What the runner's plugin copy mounts: the skill minus evals/,
-    CHANGELOG.md, tests/test_*.py and tests/fixtures/."""
+    CHANGELOG.md, tests/test_*.py, tests/conftest.py and tests/fixtures/."""
     out = []
     for p in _SKILL.rglob("*"):
         rel = p.relative_to(_SKILL).parts

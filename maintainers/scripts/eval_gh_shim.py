@@ -3,17 +3,19 @@
 
 `run_skill_evals.py` puts this first on the session's PATH when a fixture asks
 for it. The skill's own scripts already replay through `CI_SPEEDUP_GH_FIXTURES`,
-but phase 1 has the agent run `gh repo view` / `gh api repos/<repo>` itself, and
+but phase 1 has the agent run `gh auth status` and `gh repo view` itself, and
 the replayed repository exists only in the corpus, so real GitHub answers 404
 and the session stops to ask about access. This makes the CLI see what the
 scripts see, and nothing more:
 
-  - `gh auth status`, `--version`/`version`/`help`, and `gh api` calls that do
-    not name the replayed repository or its owner go to the real `gh`;
-  - a GET `gh api` under `repos/<replayed repo>` and `gh repo view` are served
-    from the corpus;
-  - everything else fails closed with a local 404. The replayed slug is a
-    namespace nobody here owns on GitHub, so no call about it may reach GitHub.
+  - every `gh auth` subcommand, `--version`/`version`/`help`, and read-only
+    (GET, no field or input flags) `gh api` calls that do not name the replayed
+    repository or its owner go to the real `gh`;
+  - a GET `gh api` under `repos/<replayed repo>` and `gh repo view` of it are
+    served from the corpus;
+  - everything else, including any `gh api` write and `graphql`, fails closed
+    with a local 404. The replayed slug is a namespace nobody here owns on
+    GitHub, and an eval session never needs to write, so neither reaches GitHub.
 
 Environment (set by the runner): EVAL_GH_SHIM_REPO, CI_SPEEDUP_GH_FIXTURES,
 EVAL_GH_REAL (the real gh), EVAL_GH_SCRIPTS (the skill copy's scripts/ dir).
@@ -85,11 +87,13 @@ def main(argv: list[str]) -> int:
     if args[:1] == ["api"] and pos:
         endpoint = re.sub(r"^(https://api\.github\.com)?/+", "", pos[0])
         mentions = re.search(rf"(?i)\b{re.escape(owner)}\b", " ".join(args[1:]))
-        if not mentions and endpoint != "graphql":
-            return _real(argv)
         method = (flags.get("-X") or flags.get("--method") or ["GET"])[-1].upper()
         writes = any(k in flags for k in ("-f", "-F", "--raw-field", "--field", "--input"))
-        if method != "GET" or writes or not endpoint.lower().startswith(f"repos/{repo}".lower()):
+        if method != "GET" or writes:
+            return _not_found()
+        if not mentions and endpoint != "graphql":
+            return _real(argv)
+        if not endpoint.lower().startswith(f"repos/{repo}".lower()):
             return _not_found()
         path = _fixture(endpoint)
         if path is None:
@@ -100,7 +104,9 @@ def main(argv: list[str]) -> int:
         return _emit(json.loads(path.read_text(encoding="utf-8")), flags)
     if args[:2] == ["repo", "view"] and (len(pos) < 2 or pos[1].lower() == repo.lower()):
         path = _fixture(f"repos/{repo}")
-        doc = json.loads(path.read_text(encoding="utf-8")) if path else {}
+        if path is None:
+            return _not_found()
+        doc = json.loads(path.read_text(encoding="utf-8"))
         view = {"nameWithOwner": repo, "name": name, "owner": {"login": owner},
                 "defaultBranchRef": {"name": doc.get("default_branch", "main")},
                 "isPrivate": bool(doc.get("private")), "url": f"https://github.com/{repo}",

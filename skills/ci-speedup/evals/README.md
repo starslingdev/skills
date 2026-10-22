@@ -18,7 +18,9 @@ builds the repository and gh replay corpus of `tests/test_offline_pipeline_e2e.p
 with that test's own helpers. Every run-history read is answered offline from
 the corpus, so the report's numbers are fixed. The agent's own `gh repo view` /
 `gh api` calls about the synthetic repository are answered by a maintainer-side
-stand-in from the same corpus; `gh auth status` still goes to the real `gh`.
+stand-in from the same corpus. `gh auth status` and read-only `gh api` calls
+about other repositories (GETs with no field or input flags) go to the real
+`gh`; any other call fails closed with a local 404.
 
 Optional entry fields: `fixture` (scaffold under `fixtures/`), `plugins`
 (other skills to mount), `max_turns`, and `checks`. A check is
@@ -39,10 +41,12 @@ The skill is mounted as a copy without `evals/`, `CHANGELOG.md`,
 stays because the skill runs it. CI runs the same command in the
 `ci-speedup skill evals` job of `.github/workflows/skill-evals.yml`.
 
-Exit codes: **0** every run passed; **1** a session ran and failed a check;
-**2** the harness could not run (no `claude`, scaffold failed, no session, turn
-cap hit, or a `files` check with nothing collected). A 2 is a coverage gap,
-never a behaviour change.
+Exit codes: **0** every run passed; **1** at least one session ran and failed
+a check (even when other runs could not run); **2** otherwise, when any run
+could not run or nothing ran: no `claude`, no real `gh` for the shim, nothing
+selected or `--runs` below 1, scaffold failed, no session, session timeout,
+turn cap hit, a `files` check with nothing collected, or an unexpected crash.
+A 2 is a coverage gap, never a behaviour change.
 
 ## Cost
 

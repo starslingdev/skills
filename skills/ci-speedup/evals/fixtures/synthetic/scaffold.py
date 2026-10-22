@@ -29,6 +29,8 @@ def main(sandbox: Path, aux: Path) -> None:
     e2e._init_repo(sandbox)
     replay = e2e._replay_dir(aux)
     wf_ids = [getattr(e2e, n) for n in dir(e2e) if re.fullmatch(r"_WF\d*_ID", n)]
+    if not wf_ids:  # an empty band would leave the data pass with no volume fixture
+        sys.exit("scaffold: no _WF*_ID constants in the e2e test; the replay corpus would be empty")
     now = dt.datetime.now(dt.timezone.utc)
     body = json.dumps({"total_count": 42})
     for off in range(-1, _BAND_S):

@@ -28,8 +28,10 @@ unversioned and updates by reinstall from `main`.
   to have checked it, and none credits a saving. The catalog count goes from 86
   to 89 (78 hygiene plus 11 structural). The OPT86 and OPT88 entries no
   longer name OPT25 and OPT43 as patterns nothing detects; both are detected.
-- **2026-10-21** — **Two eval scenarios now run as real agent sessions on every
-  change to the skill.** `evals/evals.json` entries may carry `fixture` and
+- **2026-10-21** — **Two eval scenarios now run as real agent sessions on
+  same-repo pull requests that change the skill's `SKILL.md`, references,
+  scripts or evals, or the eval's test inputs** (fork pull requests do not run
+  them). `evals/evals.json` entries may carry `fixture` and
   `checks`; the ones that do (a full audit of the synthetic repository against
   its offline replay corpus, and the security ask that must route to
   ci-secure) are executed by the maintainers' shared runner and by the

@@ -12,13 +12,15 @@ An entry is runnable when it carries `checks`. For each run:
                 of the skill (minus its answer key) mounted by `--plugin-dir`;
   3. collect  - tool calls, transcript, last message, and the files the
                 session wrote (in the sandbox, its TMPDIR, or at an absolute
-                `.md` path one of its Bash commands named);
+                `.md` path a Bash command named or a Write/Edit targeted);
   4. check    - each check's regex against the record it names.
 
 Exit 0 every run passed, 1 a run happened and failed a check, 2 the harness
-could not run (no claude, scaffold failed, no session, turn cap, or a `files`
-check with nothing collected). A session that never happened must not read as
-a behaviour change. Tokens and duration per run go to `skill-eval-results/`.
+could not run (nothing selected, no claude, scaffold failed, no real `gh` for
+the shim, no session or no result event, turn cap, timeout, a `files` check
+with nothing collected, or an unexpected crash). If any run failed a check the
+exit is 1 even when other runs could not run. A session that never happened
+must not read as a behaviour change. Tokens and duration per run go to `skill-eval-results/`.
 Maintainer-only: it spends real tokens and is never part of pytest.
 """
 from __future__ import annotations
@@ -152,19 +154,24 @@ def snapshot(roots: list[Path]) -> dict[str, str]:
 
 def files_written(roots: list[Path], before: dict, calls: list[str], since: float) -> str:
     """Every file the session created or changed under `roots`, plus any `.md`
-    an absolute path in one of its Bash commands names that was written after
-    `since` (the skill leaves its scratch dir to the agent, which may pick
-    `/tmp/...` or a `mktemp -d` that ignores TMPDIR)."""
+    at an absolute path one of its Bash commands names, or a Write / Edit /
+    MultiEdit call targets, that was written after `since` (the skill leaves
+    its scratch dir to the agent, which may pick `/tmp/...` or a `mktemp -d`
+    that ignores TMPDIR)."""
     paths = [p for p in _files(roots)
              if before.get(str(p)) != hashlib.sha256(p.read_bytes()).hexdigest()]
+    named = []
     for call in calls:
-        if not call.startswith("Bash "):
-            continue
-        cmd = str(json.loads(call[5:]).get("command", ""))
-        for m in re.finditer(r"(/[^\s'\"`;|&<>()]+\.md)\b", cmd):
-            p = Path(m.group(1))
-            if p not in paths and p.is_file() and not p.is_symlink() and p.stat().st_mtime >= since:
-                paths.append(p)
+        tool, _, raw = call.partition(" ")
+        if tool == "Bash":
+            cmd = str(json.loads(raw).get("command", ""))
+            named += [m.group(1) for m in re.finditer(r"(/[^\s'\"`;|&<>()]+\.md)\b", cmd)]
+        elif tool in ("Write", "Edit", "MultiEdit"):
+            fp = str(json.loads(raw).get("file_path", ""))
+            named += [fp] if fp.startswith("/") and fp.endswith(".md") else []
+    for p in map(Path, named):
+        if p not in paths and p.is_file() and not p.is_symlink() and p.stat().st_mtime >= since:
+            paths.append(p)
     out = []
     for p in paths:
         raw = p.read_bytes()[:_MAX_FILE]
@@ -209,12 +216,14 @@ def run_session(prompt: str, cwd: Path, plugins: list[Path], env: dict,
         raise HarnessError(f"session exceeded {timeout}s")
     evs = events(r.stdout)
     why = None
-    if r.returncode != 0 and not any(e.get("type") == "result" for e in evs):
-        why = f"claude exited {r.returncode}"
-    elif not any(e.get("type") == "system" and e.get("subtype") == "init" for e in evs):
+    if not any(e.get("type") == "system" and e.get("subtype") == "init" for e in evs):
         why = "the stream carries no session"
     elif not tool_calls(evs):
         why = "the session called no tool"
+    elif not any(e.get("type") == "result" for e in evs):  # truncated: max-0 checks pass vacuously
+        why = "the stream has no result event"
+    if why and r.returncode != 0:
+        why = f"claude exited {r.returncode}: {why}"
     result = next((e for e in reversed(evs) if e.get("type") == "result"), {})
     if result.get("subtype") == "error_max_turns":
         why = f"the session hit its {max_turns}-turn cap"

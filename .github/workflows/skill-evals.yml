@@ -7,13 +7,15 @@
 #
 # Each case scaffolds fixture workflows into a throwaway directory, drives one headless
 # `claude -p` session against it, and applies the case's own graders to the recorded tool calls
-# and output. See skills/ci-secure/evals/README.md for the cases and
-# maintainers/ci-secure/scripts/run_skill_evals.py for the harness.
+# and output. See skills/ci-secure/evals/README.md and skills/ci-speedup/evals/README.md for
+# the cases, and maintainers/ci-secure/scripts/run_skill_evals.py and
+# maintainers/scripts/run_skill_evals.py for the harnesses.
 #
 # WHY THIS IS NOT THE `test` GATE, and is not required:
 #
 #   - It spends real tokens. One session per case, so it is path-filtered to the files that can
-#     actually change agent behaviour. A README or example PR never pays for it.
+#     actually change agent behaviour. An example or top-level docs PR never pays for it;
+#     an edit to an evals/ README does, because evals/** is in the filter.
 #   - It is non-deterministic. An agent can reach a correct outcome by a different route, so a
 #     required check here would be flaky, and a flaky gate gets disabled or ignored.
 #   - It cannot run on fork PRs at all: `pull_request` from a fork has no access to
