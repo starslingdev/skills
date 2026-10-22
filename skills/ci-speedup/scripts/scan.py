@@ -114,7 +114,7 @@ def _slug_anchor(opt_id: str, title: str) -> str:
 # (maintainers/ci-speedup/scripts/build_catalog.py) and still parses here.
 _PATTERN_H1_RE = re.compile(r"^# (OPT\d+) — (.+?)$", re.M)
 _FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.S)
-_INDEX_LINK_RE = re.compile(r"^- \[(OPT\d+) — .*?\]\((opt\d+-[^)\s]+\.md)\)", re.M)
+_INDEX_LINE_RE = re.compile(r"^- (OPT\d+) — ", re.M)
 # Frontmatter keys that describe the source file, not the pattern's METADATA.
 PATTERN_FILE_KEYS = ("category", "status", "aliases", "alias_note")
 
@@ -141,9 +141,9 @@ def pattern_files(directory: Path) -> list[Path]:
     any file INDEX.md does not list, by number (never dropped; the build's
     check fails on it)."""
     index = directory / "INDEX.md"
-    listed = [directory / name for _, name in _INDEX_LINK_RE.findall(
-        index.read_text(encoding="utf-8"))] if index.is_file() else []
-    listed = [p for p in dict.fromkeys(listed) if p.is_file()]
+    ids = _INDEX_LINE_RE.findall(index.read_text(encoding="utf-8")) if index.is_file() else []
+    listed = [p for i in ids for p in sorted(directory.glob(f"{i.lower()}-*.md"))[:1]]
+    listed = list(dict.fromkeys(listed))
     rest = sorted((p for p in directory.glob("opt*.md") if p not in listed),
                   key=lambda p: int(re.match(r"opt(\d+)", p.name).group(1)))
     return listed + rest

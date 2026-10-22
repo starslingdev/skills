@@ -69,7 +69,7 @@ def withhold_split(patterns: Path, pattern_id: str) -> None:
     index = patterns / "INDEX.md"
     if index.is_file():
         keep = [l for l in index.read_text(encoding="utf-8").splitlines(keepends=True)
-                if not l.startswith(f"- [{pattern_id} — ")]
+                if not l.startswith((f"- {pattern_id} — ", f"- [{pattern_id} — "))]
         index.write_text("".join(keep), encoding="utf-8")
 
 

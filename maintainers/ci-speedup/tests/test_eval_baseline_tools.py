@@ -30,10 +30,10 @@ def test_withholding_from_a_split_catalog_deletes_the_file_and_its_index_line(tm
     pats.mkdir()
     for n in ("opt8-a.md", "opt81-b.md", "opt86-c.md"):
         (pats / n).write_text("x\n")
-    (pats / "INDEX.md").write_text("# i\n- [OPT8 — A](opt8-a.md) · x\n- [OPT81 — B](opt81-b.md) · x\n")
+    (pats / "INDEX.md").write_text("# i\n- OPT8 — A (LOW, static) — x\n- OPT81 — B (LOW, static) — x\n")
     wrapper.withhold_split(pats, "OPT81")
     assert sorted(p.name for p in pats.iterdir()) == ["INDEX.md", "opt8-a.md", "opt86-c.md"]
-    assert (pats / "INDEX.md").read_text() == "# i\n- [OPT8 — A](opt8-a.md) · x\n"
+    assert (pats / "INDEX.md").read_text() == "# i\n- OPT8 — A (LOW, static) — x\n"
     with pytest.raises(SystemExit):
         wrapper.withhold_split(pats, "OPT81")
 

@@ -34,10 +34,10 @@ def test_every_file_is_named_for_its_pattern_and_carries_the_required_keys():
 
 def test_index_lists_every_pattern_file_exactly_once_in_scanner_order():
     index = (_PATTERNS / "INDEX.md").read_text(encoding="utf-8")
-    listed = re.findall(r"^- \[OPT\d+ — .*?\]\((opt\d+-[^)\s]+\.md)\)", index, re.M)
-    assert sorted(listed) == [p.name for p in _FILES] and len(listed) == len(set(listed))
-    assert [p.name for p in scan.pattern_files(_PATTERNS)] == listed
-    assert [e.pattern.lower() for e in scan.load_catalog(_PATTERNS)] == [n.split("-")[0] for n in listed]
+    ids = re.findall(r"^- (OPT\d+) — .+ \((?:HIGH|MEDIUM|LOW), [a-z-]+\) — \S", index, re.M)
+    assert sorted(ids) == sorted(scan.parse_pattern_file(p)[1] for p in _FILES) and len(ids) == len(set(ids))
+    assert [scan.parse_pattern_file(p)[1] for p in scan.pattern_files(_PATTERNS)] == ids
+    assert [e.pattern for e in scan.load_catalog(_PATTERNS)] == ids
 
 
 def test_retired_ids_keep_their_stub_files():

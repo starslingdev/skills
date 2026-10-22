@@ -60,8 +60,8 @@ def test_a_file_whose_name_and_pattern_disagree_fails(tree):
 
 def test_an_index_line_whose_impact_disagrees_with_the_file_fails(tree):
     idx = tree / "INDEX.md"
-    line = next(l for l in idx.read_text().splitlines() if l.startswith("- [OPT33 — "))
-    idx.write_text(idx.read_text().replace(line, line.replace(" · MEDIUM · ", " · HIGH · ")))
+    line = next(l for l in idx.read_text().splitlines() if l.startswith("- OPT33 — "))
+    idx.write_text(idx.read_text().replace(line, line.replace("(MEDIUM, static)", "(HIGH, static)")))
     _breaks(tree, "INDEX.md line says")
 
 
@@ -69,6 +69,12 @@ def test_a_missing_required_key_fails(tree):
     p = next(tree.glob("opt33-*.md"))
     p.write_text(p.read_text().replace("\ncategory: 7\n", "\n", 1))
     _breaks(tree, "missing")
+
+
+def test_an_index_line_with_no_pattern_file_fails(tree):
+    idx = tree / "INDEX.md"
+    idx.write_text(idx.read_text() + "- OPT999 — Nothing (LOW, static) — no file\n")
+    _breaks(tree, "no single opt<n>")
 
 
 def test_a_hand_edit_to_the_compiled_file_is_drift(tmp_path, monkeypatch):

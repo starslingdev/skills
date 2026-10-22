@@ -1,7 +1,7 @@
-<!-- Non-pattern text of the compiled ../optimization-patterns.md: the preamble before the
-Contents bullets (generated from INDEX.md), the text after them, and each `## Category N:`
-heading block, placed before the first pattern of that category. Each section runs from its
-marker line to the next marker. Edit here, then run build_catalog.py. -->
+<!-- Non-pattern text of the compiled ../optimization-patterns.md: the preamble (with the
+Contents section and its category blurbs) and each `## Category N:` heading block, placed
+before the first pattern of that category. Each section runs from its marker line to the
+next marker. Edit here, then run build_catalog.py. -->
 <!-- frame: preamble -->
 # ci-speedup Pattern Catalog
 
@@ -39,7 +39,20 @@ Checkout · 6. Conditional Execution · 7. Trigger and Scope · 8. Release Workf
 12. Build Caching (Language-Agnostic) · 13. Hidden Failures and Dead Config ·
 14. Structural / Critical-Path Levers
 
-<!-- frame: after-contents -->
+- **Category 1 — Caching** (`OPT1`–): tool installs, build/test caches, dynamic cache keys, and the one pattern pointed the other way — a cache measured to cost more than it saves (`OPT79`).
+- **Category 2 — Redundancy**: duplicate env, repeated setup sequences, redundant build steps, repeated fixed setup across independent small jobs (`OPT77`).
+- **Category 3 — Docker**: sleep-based readiness, over-broad `compose up`.
+- **Category 4 — Parallelization**: needless `needs:` serialization, unsharded long jobs, a test worker count nobody measured (`OPT88`), the slowest platform compiling its own tests (`OPT89`).
+- **Category 5 — Actions and Checkout**: stale action pins, repeated setup, full-history checkout, submodule / Git LFS checkout payload, checkout stalls on the tail (`OPT80`).
+- **Category 6 — Conditional Execution**: merge_group step-vs-job conditions, draft-PR gating.
+- **Category 7 — Trigger and Scope**: missing path filters, no `--filter` on PR turbo, cron frequency, every PR paying for coverage that could run after merge (`OPT90`).
+- **Category 8 — Release Workflow**: release-path caching + redundancy.
+- **Category 9 — Queue Times and Concurrency**: missing/!coarse concurrency groups.
+- **Category 10 — Timing Anomalies**: failure-rate / bimodal duration signals (advisory), and the same job measured faster on another runner class (`OPT81`).
+- **Category 11 — Stack-Specific**: turbo task outputs, unstable turbo env keys, type-aware ESLint on a slow lint job (`OPT82`).
+- **Category 12 — Build Caching (language-agnostic)**: uncached compiled-language builds, a dependency compiled from source when a prebuilt package exists (`OPT86`), a compile nobody profiled (`OPT91`).
+- **Category 13 — Hidden Failures and Dead Config**: dead env vars, misconfigured caches.
+- **Category 14 — Structural / Critical-Path Levers** (`OPT70`–`OPT75`, `OPT78`, `OPT83`–`OPT85`, `OPT87`): routed from the measured long pole (see ARCHITECTURE §11), not a flat grep. `OPT85` (tests run in many processes instead of one) and `OPT87` (tests wait on a slow dependency they do not verify) have no router yet: like `OPT74`, they are catalogued for application from the drilled pole's log and are reported as without a detector. `OPT78` is routed by the drill-time leaf detector rather than the structural router; `OPT83` and `OPT84` are routed by structural passes over the drilled poles' step decomposition plus the workflow YAML, not by the log leaves (`OPT84` also follows the step's `package.json` scripts).
 
 (Catalog OPT-ids are the static scan; the `blocking_path.py` `_parse_log` **leaf
 detectors** — prisma / vitest / turbo / playwright — are a separate set run over

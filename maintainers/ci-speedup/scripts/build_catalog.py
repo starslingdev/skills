@@ -9,12 +9,11 @@ Sources, all under `skills/ci-speedup/references/patterns/`:
   opt<N>-<slug>.md  one pattern: YAML frontmatter (the METADATA keys in their
                     order, then `category`, optional `status`, `aliases`,
                     `alias_note`), then `# OPT<N> — Title` and the body.
-  INDEX.md          one `## Category N — Name` section per category (its
-                    Contents bullet is rebuilt from the heading and the blurb
-                    under it) and one line per pattern; the line order is the
-                    compiled order.
-  _frame.md         the compiled file's other text: the preamble, the text
-                    after the Contents bullets, and each `## Category N:` block.
+  INDEX.md          a `## Category N — Name` line per category and one line
+                    per pattern, `- OPT<N> — Title (IMPACT, class) — clause`;
+                    the line order is the compiled order.
+  _frame.md         the compiled file's other text: the preamble (with the
+                    Contents section) and each `## Category N:` block.
 
 Output: `skills/ci-speedup/references/optimization-patterns.md`, a generated
 file kept at its published path so every report link and `#optN--` anchor
@@ -54,9 +53,8 @@ BANNER = (
 REQUIRED = ("pattern", "impact", "class", "detector", "affected_files", "title_template", "category")
 # METADATA values written in double quotes (every other key is bare).
 _QUOTED = {"affected_files", "title_template", "match", "wf_name_filter", "wf_name_exclude"}
-_INDEX_LINE = re.compile(
-    r"^- \[(OPT\d+) — (.+)\]\((opt\d+-[a-z0-9_-]+\.md)\) · (HIGH|MEDIUM|LOW) · ([a-z-]+) · \S.*$")
-_INDEX_CAT = re.compile(r"^## (Category (\d+) — .+?)(?: (\(`OPT.*\)))?$")
+_INDEX_LINE = re.compile(r"^- (OPT\d+) — (.+) \((HIGH|MEDIUM|LOW), ([a-z-]+)\) — \S.*$")
+_INDEX_CAT = re.compile(r"^## Category (\d+) — \S.*$")
 _FRAME_MARK = re.compile(r"^<!-- frame: (.+) -->\n", re.M)
 _ALIAS = re.compile(r"^[a-z0-9_-]+$")
 
@@ -65,28 +63,27 @@ class BuildError(Exception):
     pass
 
 
-def _read_index(path: Path) -> tuple[list[tuple[int, str, str, str]], list[tuple[str, str, str, str, str, int]]]:
-    """(categories [(n, name, paren, blurb)], patterns [(id, title, file, impact, class, category)])."""
-    cats, pats = [], []
-    lines = path.read_text(encoding="utf-8").splitlines()
+def _read_index(path: Path) -> list[tuple[str, str, str, str, str, int]]:
+    """Patterns in INDEX order: (id, title, file, impact, class, category). The
+    file is the one `opt<n>-*.md` beside INDEX.md ("" when there is none or
+    more than one; the caller reports it)."""
+    pats = []
     cur = None
-    for i, line in enumerate(lines):
+    for i, line in enumerate(path.read_text(encoding="utf-8").splitlines()):
         m = _INDEX_CAT.match(line)
         if m:
-            blurb = next((l for l in lines[i + 1:] if l.strip()), "")
-            if blurb.startswith(("- [", "## ")):
-                raise BuildError(f"INDEX.md: {m.group(1)} has no blurb line under its heading")
-            cur = int(m.group(2))
-            cats.append((cur, m.group(1), m.group(3) or "", blurb))
+            cur = int(m.group(1))
             continue
-        if line.startswith("- ["):
+        if line.startswith("- "):
             p = _INDEX_LINE.match(line)
             if not p:
-                raise BuildError(f"INDEX.md line {i + 1} is not `- [OPT<n> — Title](file) · IMPACT · class · sentence`")
+                raise BuildError(f"INDEX.md line {i + 1} is not `- OPT<n> — Title (IMPACT, class) — clause`")
             if cur is None:
                 raise BuildError(f"INDEX.md line {i + 1}: pattern listed before any category heading")
-            pats.append((*p.groups(), cur))
-    return cats, pats
+            oid, title, impact, klass = p.groups()
+            hits = sorted(path.parent.glob(f"{oid.lower()}-*.md"))
+            pats.append((oid, title, hits[0].name if len(hits) == 1 else "", impact, klass, cur))
+    return pats
 
 
 def _frame(path: Path) -> dict[str, str]:
@@ -110,9 +107,12 @@ def _demote(body: str) -> str:
 
 def build(patterns: Path = PATTERNS) -> str:
     """The compiled catalog text, after every source check."""
-    cats, listed = _read_index(patterns / "INDEX.md")
+    listed = _read_index(patterns / "INDEX.md")
     frame = _frame(patterns / "_frame.md")
     files = sorted(p.name for p in patterns.glob("opt*.md"))
+    unresolved = [i for i, _, f, *_ in listed if not f]
+    if unresolved:
+        raise BuildError(f"INDEX.md lists {unresolved} with no single opt<n>-*.md file each")
     names = [f for _, _, f, _, _, _ in listed]
     dup = sorted({n for n in names if names.count(n) > 1})
     if dup:
@@ -123,15 +123,12 @@ def build(patterns: Path = PATTERNS) -> str:
     ids = [i for i, *_ in listed]
     if len(set(ids)) != len(ids):
         raise BuildError("INDEX.md lists an OPT id twice")
-    for key in ("preamble", "after-contents"):
+    for key in ("preamble",):
         if key not in frame:
             raise BuildError(f"_frame.md has no `<!-- frame: {key} -->` section")
     cat_blocks = {int(k.split()[1]): v for k, v in frame.items() if k.startswith("category ")}
 
     out = [BANNER, frame["preamble"]]
-    for n, name, paren, blurb in cats:
-        out.append(f"- **{name}**{' ' + paren if paren else ''}: {blurb}\n")
-    out.append(frame["after-contents"])
     seen_cats: list[int] = []
     for k, (oid, title, fname, impact, klass, cat) in enumerate(listed):
         meta, fid, ftitle, body = scan.parse_pattern_file(patterns / fname)

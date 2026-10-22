@@ -22,11 +22,11 @@ One file per ci-speedup catalog pattern. Agents: find the pattern in
 
 1. Write or edit the file. A new pattern takes the next unused id.
 2. Add its line to `INDEX.md` under its category, where it should sit in the
-   compiled catalog: `- [OPT<N> — Title](file) · IMPACT · class · one sentence.`
+   compiled catalog: `- OPT<N> — Title (IMPACT, class) — short clause`.
 3. Run `python3 maintainers/ci-speedup/scripts/build_catalog.py` and commit
    the file, `INDEX.md` and the regenerated `../optimization-patterns.md`.
 
 `../optimization-patterns.md` is generated (it keeps every published report
 link and anchor working); never edit it by hand. `_frame.md` holds its
-preamble and category headings. The build checks the contract above and CI
+preamble, Contents blurbs and category headings. The build checks the contract above and CI
 runs it with `--check`. Registering a detector: `maintainers/ci-speedup/MAINTAINERS.md`.
