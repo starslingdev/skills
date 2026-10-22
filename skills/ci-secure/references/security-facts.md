@@ -107,8 +107,10 @@ two moved numbers.
   repository or no token, or when the answer cannot be completed (classic
   protection is admin-only, so a ruleset that does not require it plus an
   unreadable classic endpoint establishes nothing), the fact is unmeasured and
-  says why. A 404 "Branch not protected" is an answer — no classic protection
-  exists — not a failure to read.
+  says why. Two answers settle classic protection without admin access: a 404
+  "Branch not protected" from its endpoint, and `protected: false` on the
+  public branch endpoint (that flag is set by rulesets as well as classic
+  protection, so `false` means neither exists; `true` settles nothing).
 - **`sec.trigger.fork-code-uncleared`** — no workflow with an untrusted-event
   trigger (`pull_request_target`, `workflow_run`, `issue_comment`, …) checks
   out the attacker's head ref. Bare untrusted triggers pass.

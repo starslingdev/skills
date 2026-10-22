@@ -2193,7 +2193,23 @@ def _fork_approval_effective(repo: str | None, fetcher) -> tuple[str, str]:
 # answers to a non-admin) there, and a ruleset that does not require owner
 # review says nothing about classic protection that might. The one 404 that IS
 # an answer is "Branch not protected" — no classic protection exists — and
-# F7's `_is_not_protected_404` recognises exactly that one.
+# F7's `_is_not_protected_404` recognises exactly that one. When classic is
+# unreadable, the public branch endpoint's `protected: false` is the other
+# readable "no classic protection" (see `_branch_protected_flag`).
+
+def _branch_protected_flag(gh: Any, repo: str, branch: str) -> bool | None:
+    """The public branch endpoint's `protected` flag, or None.
+
+    None covers a failed call, an unexpected shape and a missing or non-bool
+    key alike: the caller treats only `False` as an answer.
+    """
+    try:
+        body = json.loads(gh.run_gh_api(f"repos/{repo}/branches/{branch}"))
+    except Exception:                                          # noqa: BLE001
+        return None
+    flag = body.get("protected") if isinstance(body, dict) else None
+    return flag if isinstance(flag, bool) else None
+
 
 def _code_owner_review_via_gh(repo: str) -> tuple[bool | None, str]:
     """(required, detail) from the API, or (None, reason)."""
@@ -2240,7 +2256,31 @@ def _code_owner_review_via_gh(repo: str) -> tuple[bool | None, str]:
         if _is_not_protected_404(exc):
             classic_require = False
         else:
-            errors.append(f"classic branch protection: {exc}")
+            classic_error = f"classic branch protection: {str(exc).strip()}"
+            # The classic endpoint is admin-only, so auditing someone else's
+            # repository lands here (403, or a bare 404 GitHub also answers
+            # to non-admins). The public branch endpoint's `protected` flag
+            # can still settle it — but only in one direction. Verified
+            # against live repositories: a branch covered by a ruleset and NO
+            # classic protection (classic answers "Branch not protected")
+            # reports `protected: true`, so the flag reflects rulesets as well
+            # as classic protection. `false` therefore means neither exists:
+            # no classic protection, a readable "no". `true` cannot say which
+            # source set it, and a failed read says nothing — both leave the
+            # classic source unknown. Only asked once the rulesets were read
+            # and said no; it stands in for classic protection, never for them.
+            flag = (_branch_protected_flag(gh, repo, branch)
+                    if rules_require is False else None)
+            if flag is False:
+                classic_require = False
+            elif rules_require is False:
+                errors.append(classic_error + (
+                    "; the branch reports `protected: true`, which a ruleset "
+                    "alone also sets, so that does not settle it"
+                    if flag else
+                    "; the branch's `protected` flag could not be read either"))
+            else:
+                errors.append(classic_error)
     if classic_require:
         return True, f"classic branch protection on `{branch}`"
     if rules_require is False and classic_require is False:

@@ -171,8 +171,11 @@ entries are dated (UTC). Format loosely follows
   review from Code Owners; fail when both are readable and neither does,
   naming the setting to turn on; unmeasured, with the reason, when there is no
   repository or token or the answer cannot be completed (a ruleset that does
-  not require it plus admin-only classic protection the reader cannot see).
-  The fact's label now says the rule must be enforced.
+  not require it plus admin-only classic protection the reader cannot see,
+  on a branch the public branch endpoint reports as protected). A reader
+  without admin access still gets a measured fail when that endpoint reports
+  the branch unprotected, since then no classic protection exists. The
+  fact's label now says the rule must be enforced.
 - **2026-10-10** — **A self-repository action (`uses: $/path`, GitHub
   2026-07-30) run after a checkout of the fork's head now counts as fork code
   executed with privileges, exactly like a `./` action or a `run:` step.** A

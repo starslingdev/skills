@@ -618,8 +618,12 @@ _NOT_PROTECTED_404 = RuntimeError(
     "gh: Branch not protected (HTTP 404)")
 
 
-def _owner_review_gh(rules, classic, calls):
-    """A stubbed `gh` whose two merge-rule sources answer independently.
+def _owner_review_gh(rules, classic, calls, branch=None):
+    """A stubbed `gh` whose merge-rule sources answer independently.
+
+    `branch` is the public branch endpoint's answer (`protected` is readable by
+    anyone with read access); it defaults to `protected: true`, which settles
+    nothing, so only the tests about it change the outcome through it.
 
     Drives the REAL fetcher through `_gh_utils`, the same seam the F7 tests
     use, so the shipped parsing is what gets exercised. Every path asked for is
@@ -639,6 +643,9 @@ def _owner_review_gh(rules, classic, calls):
                 answer = rules
             elif path == "repos/owner/repo/branches/main/protection":
                 answer = classic
+            elif path == "repos/owner/repo/branches/main":
+                answer = {"name": "main", "protected": True} \
+                    if branch is None else branch
             else:
                 raise AssertionError(f"unexpected endpoint {path}")
             if isinstance(answer, Exception):
@@ -648,7 +655,8 @@ def _owner_review_gh(rules, classic, calls):
 
 
 def _owner_review_fact(tmp_path, rules, classic, *, repo="owner/repo",
-                       codeowners="/.github/workflows/ @sec-team\n"):
+                       codeowners="/.github/workflows/ @sec-team\n",
+                       branch=None):
     """The CODEOWNERS row and every gh path requested, for one repository.
 
     The two other API-gated facts get recorded answers, so the ONLY gh traffic
@@ -656,7 +664,8 @@ def _owner_review_fact(tmp_path, rules, classic, *, repo="owner/repo",
     root, files = _repo(tmp_path, {"ci.yml": _SAFE_WF}, codeowners=codeowners)
     calls: list[str] = []
     with mock.patch.object(cf, "_gh_utils",
-                           lambda: _owner_review_gh(rules, classic, calls)):
+                           lambda: _owner_review_gh(rules, classic, calls,
+                                                    branch)):
         out = cf.compute_config_facts(
             root, files, [], repo=repo,
             required_contexts_fetcher=lambda r: ([], "branch `main`"),
@@ -713,6 +722,55 @@ def test_codeowners_ruleset_says_no_and_classic_403_is_unmeasured(tmp_path):
     f, _ = _owner_review_fact(tmp_path, _PR_RULE_NO_OWNER_REVIEW, _ADMIN_403)
     assert f["outcome"] == "unmeasured", f
     assert "unmeasured" in f["evidence"], f
+
+
+_BARE_404 = RuntimeError(
+    'API call failed: {"message":"Not Found","status":"404"}'
+    "gh: Not Found (HTTP 404)")
+
+
+@pytest.mark.parametrize("classic", [_ADMIN_403, _BARE_404],
+                         ids=["classic-403", "classic-bare-404"])
+def test_an_unprotected_branch_settles_the_unreadable_classic_source(
+        tmp_path, classic):
+    """The common audit is of someone else's repository, where classic
+    protection answers 403 or a bare 404. The branch endpoint is public, and
+    `protected: false` means NO protection of either kind on the branch, so
+    a ruleset that does not require owner review is then the whole answer: a
+    measured fail, not a coverage gap."""
+    f, calls = _owner_review_fact(
+        tmp_path, _PR_RULE_NO_OWNER_REVIEW, classic,
+        branch={"name": "main", "protected": False})
+    assert f["outcome"] == "fail", f
+    assert "Require review from Code Owners" in f["evidence"], f
+    assert "repos/owner/repo/branches/main" in calls, calls
+
+
+def test_a_protected_branch_leaves_the_unreadable_classic_source_open(
+        tmp_path):
+    """`protected: true` is set by a ruleset as well as by classic protection,
+    so it cannot say which — the classic source stays unknown."""
+    f, _ = _owner_review_fact(
+        tmp_path, _PR_RULE_NO_OWNER_REVIEW, _BARE_404,
+        branch={"name": "main", "protected": True})
+    assert f["outcome"] == "unmeasured", f
+    assert "`protected: true`" in f["evidence"], f
+
+
+def test_an_unreadable_branch_endpoint_stays_unmeasured(tmp_path):
+    f, _ = _owner_review_fact(
+        tmp_path, _PR_RULE_NO_OWNER_REVIEW, _ADMIN_403,
+        branch=RuntimeError("HTTP 502"))
+    assert f["outcome"] == "unmeasured", f
+
+
+def test_an_unprotected_branch_does_not_rescue_unreadable_rulesets(tmp_path):
+    """The branch fallback stands in for CLASSIC protection only. With the
+    rulesets themselves unread there is still no answer."""
+    f, _ = _owner_review_fact(
+        tmp_path, RuntimeError("HTTP 500"), _ADMIN_403,
+        branch={"name": "main", "protected": False})
+    assert f["outcome"] == "unmeasured", f
 
 
 def test_codeowners_ruleset_unreadable_is_unmeasured_not_a_fail(tmp_path):
