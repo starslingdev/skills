@@ -18,7 +18,8 @@ catalog and `SKILL.md` routes to it.
   arms' 10/11/13 chains never overlapped; entry 12 ran beside them from its
   own export.
 - **Files:** one results JSON per invocation, exactly as the runner wrote
-  it (no hand edits). The table is the output of
+  it, with one redaction: entry 11 run 4's `session_log` is cut to its file
+  name (the runner recorded an absolute local path). The table is the output of
   `python3 maintainers/ci-speedup/scripts/eval_baseline_summary.py maintainers/ci-speedup/evals/baseline/2026-10-22-split/before`.
 - **One invocation lost and re-run:** the first entry-12 batch started in
   the same second as the entry-10 batch from the same export, both wrote

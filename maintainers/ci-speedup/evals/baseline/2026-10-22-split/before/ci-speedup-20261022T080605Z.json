@@ -253,7 +253,7 @@
         "detail": "catalog_entries_read=0"
       }
     ],
-    "session_log": "/private/tmp/claude-501/-Users-yonasb5-Development-skills/2f28335e-8660-4786-8540-296cf87f0b5c/scratchpad/before-tree/skill-eval-logs/ci-speedup-11-run4.jsonl",
+    "session_log": "ci-speedup-11-run4.jsonl",
     "unscored": "expected_output"
   },
   {
