@@ -1133,6 +1133,17 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-10-21** — **The "unnecessary `needs:`" finding (OPT21) no longer
+  tells a team to remove a deliberate gate, or credits a saving for it.** A job
+  that waits on a cheap check job (lint, pre-commit, a format or type check, a
+  lockfile check) is waiting on purpose: the gate stops expensive jobs from
+  starting when the check fails. OPT21 now stays silent when every job a job
+  waits on is such a check-only gate; anything it cannot classify is still
+  flagged as before. On OpenAI's real workflows this removes 1 false finding
+  in openai/whisper and 8 in openai/openai-python. The pattern's entry now
+  explains when a `needs:` edge is the right call, and that a gate should stay
+  short because it adds its full duration to every pull request's wait.
+
 - **2026-10-18** - **OPT38 no longer calls a pull-request `edited` or `labeled`
   trigger safe to remove just because the workflow has no `if:` guard on it.**
   The entry rated removal "Risk: LOW" on the grounds that any real use of those
