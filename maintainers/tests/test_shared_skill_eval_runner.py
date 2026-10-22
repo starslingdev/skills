@@ -39,11 +39,11 @@ def offline(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "scaffold", lambda *a: {})
     monkeypatch.setattr(runner.shutil, "which", lambda *a, **k: "/usr/bin/true")
 
-    def run_with(stdout: str, returncode: int = 0) -> int:
+    def run_with(stdout: str, returncode: int = 0, eid: str = "6") -> int:
         fake = subprocess.CompletedProcess([], returncode, stdout=stdout, stderr="")
         monkeypatch.setattr(runner.subprocess, "run", lambda *a, **k: fake)
         # Entry 6: ci-secure must be invoked, ci-speedup must not.
-        return runner.main(["--skill", "ci-speedup", "--id", "6"])
+        return runner.main(["--skill", "ci-speedup", "--id", eid])
     return run_with
 
 
@@ -73,6 +73,12 @@ def test_a_files_check_with_nothing_collected_is_a_harness_error():
     with pytest.raises(runner.HarnessError):
         runner.apply_checks([{"name": "x", "type": "files", "pattern": "y"}],
                             {"files": "", "trace": "", "last_message": "", "tool_used": []})
+
+
+def test_a_report_that_was_not_collected_exits_2_and_keeps_the_session(offline, tmp_path):
+    """The case that most needs a transcript: the session ran, but no report was found."""
+    assert offline(_stream("ci-speedup:ci-speedup"), eid="10") == 2
+    assert any(p.suffix == ".jsonl" for p in (tmp_path / "logs").iterdir())
 
 
 def test_the_plugin_copy_withholds_the_answer_key_but_keeps_verify_report(tmp_path):

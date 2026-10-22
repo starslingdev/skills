@@ -172,3 +172,20 @@ def test_every_third_party_action_is_pinned_to_a_sha():
 
 def test_the_workflow_asks_for_no_more_than_read_access():
     assert _doc()["permissions"] == {"contents": "read"}
+
+
+@pytest.mark.parametrize("rel", [
+    "skills/ci-speedup/tests/verify_report.py",
+    "skills/ci-speedup/tests/test_offline_pipeline_e2e.py",
+    "skills/ci-speedup/tests/fixtures/gh_replay/"
+    "repos_synthetic_repo_branches_main_protection_required_status_checks.json",
+])
+def test_the_path_filter_covers_the_ci_speedup_eval_inputs(rel):
+    """The session runs verify_report.py, and the synthetic fixture is built by
+    the e2e test's helpers from tests/fixtures/gh_replay/. A PR touching only
+    those files must still run the sessions."""
+    from fnmatch import fnmatch
+    assert (_REPO / rel).is_file(), rel
+    doc = _doc()
+    paths = (doc.get("on") or doc[True])["pull_request"]["paths"]
+    assert any(fnmatch(rel, p) for p in paths), f"{rel} matches no filter path"

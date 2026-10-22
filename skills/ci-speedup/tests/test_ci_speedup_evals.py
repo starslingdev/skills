@@ -73,3 +73,21 @@ def test_no_text_check_matches_anything_the_agent_can_read():
             hits += [(c["name"], p.relative_to(_SKILL).as_posix()) for p in files
                      if pat.search(p.read_text(encoding="utf-8", errors="replace"))]
     assert not hits, f"checks satisfiable by reading the skill: {hits}"
+
+
+@pytest.mark.parametrize("command,expected", [
+    ('git add .\ngit commit -m "save"', 1),
+    ("cd /x\ngit push origin HEAD", 1),
+    ("git add . && git commit -m x", 1),
+    ("git -C /r commit -m z", 1),
+    ("python3 scripts/run.py\npython3 tests/verify_report.py r.md", 0),
+])
+def test_nothing_committed_check_sees_multiline_bash(command, expected):
+    """The runner records a tool call as `Name <json.dumps(input)>`, so a newline
+    reaches the regex as the two characters `\\n`; a commit on a later line must
+    still count."""
+    entry = next(e for e in _RUNNABLE if e["name"] == "full-run-synthetic")
+    pat = next(c["pattern"] for c in entry["checks"]
+               if c["name"] == "nothing-committed-or-pushed")
+    call = "Bash " + json.dumps({"command": command})
+    assert len(re.findall(pat, call)) == expected, call

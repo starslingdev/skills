@@ -193,7 +193,7 @@
         {
           "name": "nothing-committed-or-pushed",
           "type": "tool_used",
-          "pattern": "^Bash .*(?<![\\w.-])git(?:\\s+-\\S+(?:\\s+[^\\s-]\\S*)?)*\\s+(?:commit|push)(?![\\w-])",
+          "pattern": "^Bash .*(?:(?<![\\w.-])|(?<=\\\\[nt]))git(?:\\s+-\\S+(?:\\s+[^\\s-]\\S*)?)*\\s+(?:commit|push)(?![\\w-])",
           "min": 0,
           "max": 0
         }

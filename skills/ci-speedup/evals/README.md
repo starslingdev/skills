@@ -35,7 +35,7 @@ the skill; `tests/test_ci_speedup_evals.py` enforces it.
 
 Needs `claude` and an authenticated `gh` (the skill's phase 1 checks it).
 The skill is mounted as a copy without `evals/`, `CHANGELOG.md`,
-`tests/test_*.py` or `tests/fixtures/` (the answer key); `tests/verify_report.py`
+`tests/test_*.py`, `tests/conftest.py` or `tests/fixtures/` (the answer key); `tests/verify_report.py`
 stays because the skill runs it. CI runs the same command in the
 `ci-speedup skill evals` job of `.github/workflows/skill-evals.yml`.
 

@@ -258,8 +258,18 @@ def run_entry(skill_dir: Path, entry: dict, run: int, args) -> dict:
         rec = {"tool_used": calls, "trace": transcript(evs),
                "last_message": last_message(evs),
                "files": files_written([sandbox, tmpdir], before, calls, since)}
-        checks = apply_checks(entry["checks"], rec)
-        result = next((e for e in reversed(evs) if e.get("type") == "result"), {})
+        stem = _LOGS / f"{skill_dir.name}-{entry.get('id')}-run{run}"
+
+        def keep_session() -> None:
+            _LOGS.mkdir(exist_ok=True)
+            Path(f"{stem}.jsonl").write_text(stream)
+            Path(f"{stem}.files.txt").write_text(rec["files"])
+        try:
+            checks = apply_checks(entry["checks"], rec)
+        except HarnessError:
+            keep_session()  # nothing collected: the transcript says why
+            raise
+        result =next((e for e in reversed(evs) if e.get("type") == "result"), {})
         usage = result.get("usage") or {}
         out = {"id": entry.get("id"), "name": entry.get("name"), "run": run,
                "passed": all(ok for _, ok, _ in checks), "tool_calls": len(calls),
@@ -270,10 +280,7 @@ def run_entry(skill_dir: Path, entry: dict, run: int, args) -> dict:
                "cost_usd": result.get("total_cost_usd"),
                "checks": [{"name": n, "passed": ok, "detail": d} for n, ok, d in checks]}
         if not out["passed"]:
-            _LOGS.mkdir(exist_ok=True)
-            stem = _LOGS / f"{skill_dir.name}-{entry.get('id')}-run{run}"
-            Path(f"{stem}.jsonl").write_text(stream)
-            Path(f"{stem}.files.txt").write_text(rec["files"])
+            keep_session()
             out["session_log"] = f"{stem}.jsonl"
         return out
     finally:

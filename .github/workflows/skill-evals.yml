@@ -1,4 +1,4 @@
-# Behavioral eval suite for the ci-secure skill.
+# Behavioral eval suites for the ci-secure and ci-speedup skills.
 #
 # The rest of CI tests the scanner: deterministic Python, every push, every PR. This tests the
 # CONTRACT — the instructions in SKILL.md that a live agent reads and executes. A refactor can
@@ -43,6 +43,11 @@ on:
       - "skills/ci-speedup/references/**"
       - "skills/ci-speedup/scripts/**"
       - "skills/ci-speedup/evals/**"
+      # The session runs verify_report.py; the scaffold builds the fixture with the
+      # e2e test's helpers from its replay corpus.
+      - "skills/ci-speedup/tests/verify_report.py"
+      - "skills/ci-speedup/tests/test_offline_pipeline_e2e.py"
+      - "skills/ci-speedup/tests/fixtures/gh_replay/**"
       - "maintainers/scripts/run_skill_evals.py"
       - "maintainers/scripts/eval_gh_shim.py"
       - ".github/workflows/skill-evals.yml"
@@ -270,7 +275,7 @@ jobs:
           echo ""
           echo "  This pull request comes from a fork. Fork runs cannot reach"
           echo "  ANTHROPIC_API_KEY, so no headless session could be started and"
-          echo "  none of the five behavioural cases was executed."
+          echo "  none of the ci-secure or ci-speedup behavioural cases was executed."
           echo ""
           echo "  This is a coverage gap, NOT a pass. Before merging a fork"
           echo "  change to SKILL.md, references/, scripts/ or evals/, push the"
