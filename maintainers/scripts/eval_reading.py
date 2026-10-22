@@ -33,7 +33,7 @@ in `unattributed_calls` instead of being dropped. Output, per session:
 catalog with some of the entry's body under it (a heading listed alone, as an
 index grep prints it, is not a read): what an agent actually saw, not what it
 asked for. A failed `Read` / `Grep` counts nothing; a `Bash` command that
-exits non-zero counts what it printed. For a skill with no `optimization-patterns.md` catalog,
+exits non-zero counts what it printed, minus the shell's own error lines. For a skill with no `optimization-patterns.md` catalog,
 `catalog_opened` is None and the printed figure leaves the catalog out. Tested
 offline in `maintainers/tests/test_eval_reading.py`.
 """
@@ -54,7 +54,14 @@ _LISTERS = {"ls", "find", "wc", "stat", "file", "du", "tree", "test", "[", "real
             "dirname", "basename", "md5sum", "shasum", "sha256sum", "echo", "touch", "mkdir"}
 _LIST_FLAGS = {"--files-with-matches", "--files-without-match", "--count", "--count-matches",
                "--files", "--quiet"}
-_PREFIX = ("export", "sudo", "time", "command", "env", "nohup", "exec")
+_PREFIX = ("export", "sudo", "time", "command", "env", "nohup", "exec",
+           "if", "then", "else", "elif", "while", "until", "do", "!", "{")
+_WRAPPERS = ("timeout", "nice", "stdbuf")  # run the next word, after their own options
+_XARGS_VALUED = ("-n", "-P", "-L", "-s", "-d", "-E", "-I")
+# A failed shell command's own complaints, never file content.
+_DIAG = re.compile(r"^(?:\(eval\):\d+:|(?:ba|z|da)?sh:|(?:%s|xargs|find|timeout):\s)"
+                   r"|command not found|No such file or directory|Permission denied"
+                   r"|^Command timed out" % "|".join(sorted(_READERS | _SCRIPTED)))
 _REF = re.compile(r"(?<![\w.${-])(?:([\w.-]+)/)?references(?:/([^\s'\"`;|&<>(){}]*))?")
 _HEADING = re.compile(r"^\s*(?:\S*?[:-])?\d*[:\t-]?\s*#{2,3} (OPT\d+) — ")
 _NUMBER = re.compile(r"^\s*(?:\S*?[:-])?\d*[:\t-]?")
@@ -149,6 +156,9 @@ def _split_shell(cmd: str) -> list[str]:
         elif ch in "'\"":
             quote = ch
             cur.append(ch)
+        elif ch == "\\":  # an escaped character (`\|` in a grep pattern) never splits
+            cur.append(cmd[i:i + 2])
+            i += 1
         elif ch in "|;&\n()`":
             segs.append("".join(cur))
             cur = []
@@ -163,6 +173,8 @@ def _kind(word: str, args: list[str]) -> str:
     """`reader`, `xargs` (a reader fed file names on stdin), `lister`, `cd` or `other`."""
     if word == "cd":
         return "cd"
+    if word == "for":  # `for f in <files>; do cat $f`: the list names what the body reads
+        return "loop"
     if word in _SEARCHERS and any(a in _LIST_FLAGS or a in ("-l", "-L", "-c", "-q") or re.fullmatch(
             r"-[A-Za-z]*[lLcq][A-Za-z]*", a) for a in args):
         return "lister"
@@ -171,7 +183,8 @@ def _kind(word: str, args: list[str]) -> str:
     if word in _SCRIPTED:
         return "reader" if any(re.fullmatch(r"-\w*[ce]\w*", a) for a in args) else "other"
     if word == "xargs":
-        inner = [a for a in args if not a.startswith("-") and a != "{}"]
+        inner = [a for i, a in enumerate(args) if not a.startswith("-") and a != "{}"
+                 and not (i and args[i - 1] in _XARGS_VALUED)]
         return "xargs" if inner and _kind(inner[0], inner[1:]) == "reader" else "lister"
     if word == "find":
         if any(a in ("-exec", "-execdir") for a in args):
@@ -188,8 +201,15 @@ def _segments(cmd: str) -> list[tuple[str, str]]:
     out = []
     for seg in _split_shell(cmd):
         toks = seg.split()
-        while toks and (re.match(r"^[A-Za-z_]\w*=", toks[0]) or toks[0] in _PREFIX):
-            toks = toks[1:]
+        while toks:
+            if re.match(r"^[A-Za-z_]\w*=", toks[0]) or toks[0] in _PREFIX:
+                toks = toks[1:]
+            elif toks[0] in _WRAPPERS:
+                toks = toks[1:]
+                while toks and (toks[0].startswith("-") or re.fullmatch(r"[\d.]+[smhd]?", toks[0])):
+                    toks = toks[1:]
+            else:
+                break
         if toks:
             out.append((_kind(Path(toks[0].strip("'\"")).name, [t.strip("'\"") for t in toks[1:]]), seg))
     return out
@@ -199,7 +219,9 @@ def _bash_paths(command: str, skill: str, names, root) -> tuple[bool, list[str],
     """(reads, paths, unattributed) for one `Bash` command."""
     segs = _segments(_expand(command))
     reads = any(k in ("reader", "xargs") for k, _ in segs)
-    keep = {"cd", "reader", "xargs"} | ({"lister"} if any(k == "xargs" for k, _ in segs) else set())
+    # A lister feeding a reader (`ls | xargs cat`, `cat $(ls ...)`) names what it reads.
+    fed = any(k == "xargs" or (k == "reader" and s.endswith("$")) for k, s in segs)
+    keep = {"cd", "reader", "xargs", "loop"} | ({"lister"} if fed else set())
     paths = referenced("; ".join(s for k, s in segs if k in keep), skill, names, root) if reads else []
     other = referenced("; ".join(s for k, s in segs if k == "other"), skill, names, root)
     return reads, paths, bool(other) and not paths
@@ -348,6 +370,7 @@ def summarize(evs: list, skill: str, names: list[str] | None = None,
                 if not shell:
                     continue
                 body = re.sub(r"\AExit code \d+\n?", "", body)
+                body = "\n".join(ln for ln in body.splitlines() if not _DIAG.search(ln))
                 if names is not None:
                     paths = [p for p in paths if p in names]
             share = _owner_lines(body, paths) if paths else _prefixed_lines(body, names or [], root, cd)

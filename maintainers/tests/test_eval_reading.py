@@ -370,3 +370,46 @@ def test_a_bash_read_whose_command_exits_non_zero_still_counts_its_output():
     r = reading.summarize(evs, "ci-speedup", _NAMES, root=_ROOT)
     assert r["reference_bytes"] == len(out.encode()) - len("Exit code 1\n")
     assert r["catalog_entries_read"] == ["OPT81"]
+
+
+@pytest.mark.parametrize("command", [
+    "cat $(ls {root}/references/gap-fill.md)",
+    "ls {root}/references/gap-fill.md | xargs -n 1 cat",
+    "for f in {root}/references/gap-fill.md; do cat $f; done",
+    "{{ cat {root}/references/gap-fill.md; }}",
+    "timeout 5 cat {root}/references/gap-fill.md",
+    "if [ -f {root}/references/gap-fill.md ]; then cat {root}/references/gap-fill.md; fi",
+    r"grep -n OPT81\|OPT82 {root}/references/gap-fill.md",
+])
+def test_a_reader_wrapped_in_shell_syntax_still_counts(command):
+    """Each shape counted before simple-command splitting and must still count."""
+    evs = [_call(1, "Bash", {"command": command.format(root=_ROOT)}), _result(1, "g" * 50)]
+    r = reading.summarize(evs, "ci-speedup", _NAMES, root=_ROOT)
+    assert [(f["path"], f["bytes"]) for f in r["reference_files"]] == [("gap-fill.md", 50)]
+
+
+def _errored(i: int, body: str) -> dict:
+    return {"type": "user", "message": {"content": [
+        {"type": "tool_result", "tool_use_id": f"t{i}", "is_error": True, "content": body}]}}
+
+
+@pytest.mark.parametrize("command,body", [
+    ("rg -n OPT81 {cat}", "Exit code 127\n(eval):1: command not found: rg"),
+    ("sed -n '3585,3643p' {cat} | hed -5", "Exit code 127\n(eval):1: command not found: hed"),
+    ("sed -n '3585,3643' {cat}", "Exit code 1\nsed: 1: \"3585,3643\": command expected"),
+    ("cat {cat}", "Command timed out after 2m 0.0s"),
+])
+def test_a_shell_read_that_failed_before_printing_counts_nothing(command, body):
+    cat = f"{_ROOT}/references/optimization-patterns.md"
+    evs = [_call(1, "Bash", {"command": command.format(cat=cat)}), _errored(1, body)]
+    r = reading.summarize(evs, "ci-speedup", _NAMES, root=_ROOT)
+    assert (r["reference_bytes"], r["catalog_opened"]) == (0, False)
+
+
+def test_a_failing_shell_command_counts_what_it_printed_but_not_its_error_line():
+    cat = f"{_ROOT}/references/optimization-patterns.md"
+    evs = [_call(1, "Bash", {"command": f"awk 'NR>=3585' {cat}; cat {_ROOT}/references/nope.md"}),
+           _errored(1, f"Exit code 1\n{_ENTRY}\ncat: {_ROOT}/references/nope.md: No such file or directory")]
+    r = reading.summarize(evs, "ci-speedup", _NAMES, root=_ROOT)
+    assert [(f["path"], f["bytes"]) for f in r["reference_files"]] == [
+        ("optimization-patterns.md", len(_ENTRY.encode()))]
