@@ -17,7 +17,9 @@ import pytest
 _SKILL = Path(__file__).resolve().parents[1]
 _EVALS = json.loads((_SKILL / "evals" / "evals.json").read_text(encoding="utf-8"))
 _RUNNABLE = [e for e in _EVALS["evals"] if e.get("checks")]
-_TYPES = {"tool_used", "trace", "files", "last_message"}
+_TYPES = {"tool_used", "trace", "files", "last_message", "reading"}
+_READING_FIELDS = {"reference_bytes", "reference_lines", "reference_files",
+                   "catalog_opened", "catalog_entries_read"}
 
 
 def _agent_readable() -> list[Path]:
@@ -35,11 +37,12 @@ def _agent_readable() -> list[Path]:
     return out
 
 
-def test_two_entries_are_runnable_and_ids_are_unique():
+def test_five_entries_are_runnable_and_ids_are_unique():
     ids = [e["id"] for e in _EVALS["evals"]]
     assert len(ids) == len(set(ids))
     assert {e["name"] for e in _RUNNABLE} == {
-        "full-run-synthetic", "security-ask-routes-to-ci-secure"}
+        "full-run-synthetic", "security-ask-routes-to-ci-secure", "quality-review-opt81",
+        "gap-fill-coverage-lookup", "no-catalog-read-needed"}
 
 
 @pytest.mark.parametrize("entry", _RUNNABLE, ids=lambda e: e["name"])
@@ -48,7 +51,9 @@ def test_every_check_is_well_formed(entry):
     for c in entry["checks"]:
         assert c["type"] in _TYPES, c
         assert c.get("match", "contains") in ("contains", "not_contains"), c
-        re.compile(c["pattern"])
+        if c["type"] == "reading":
+            assert c["field"] in _READING_FIELDS, c
+        re.compile(c.get("pattern", ""))
     for name in entry.get("plugins", []):
         assert (_SKILL.parent / name / "SKILL.md").is_file(), name
 
@@ -67,7 +72,7 @@ def test_no_text_check_matches_anything_the_agent_can_read():
     hits = []
     for entry in _RUNNABLE:
         for c in entry["checks"]:
-            if c["type"] == "tool_used":
+            if c["type"] in ("tool_used", "reading"):
                 continue
             pat = re.compile(c["pattern"])
             hits += [(c["name"], p.relative_to(_SKILL).as_posix()) for p in files

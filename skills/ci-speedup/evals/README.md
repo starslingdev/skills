@@ -1,6 +1,6 @@
 # ci-speedup evals
 
-`evals.json` holds ten scenarios in Anthropic's skill-eval format. Most are
+`evals.json` holds thirteen scenarios in Anthropic's skill-eval format. Most are
 reference cases a maintainer runs by hand against public repositories. The
 entries that carry a `checks` list are also executed automatically, as real
 agent sessions, so a change to `SKILL.md` or `references/` that breaks the
@@ -12,8 +12,11 @@ audit turns a check red.
 |----|------|----------------|
 | 10 | `full-run-synthetic` | a full audit of the synthetic repository: the skill is invoked, `run.py` runs, the report names `ci.yml` / `CI / test` as long pole 1, `verify_report.py` passes, nothing is committed or pushed |
 | 6 | `security-ask-routes-to-ci-secure` | a security-posture request is answered by ci-secure (mounted beside ci-speedup), never by ci-speedup's pipeline |
+| 11 | `quality-review-opt81` | after the audit, the quality review checks the OPT81 runner-class card against its catalog entry and names the fork pull request caveat that exists only in that entry; the session must have read the `### OPT81` heading |
+| 12 | `gap-fill-coverage-lookup` | before a gap-fill, the agent looks up whether a dependency compiled from source on one matrix leg is already a catalog pattern and names OPT86 (a manual pattern no script names); reading is recorded |
+| 13 | `no-catalog-read-needed` | a question the measured report answers on its own (the typical wait, the slowest check); whether the catalog was opened is recorded, not asserted |
 
-Both use the `synthetic` fixture (`fixtures/synthetic/scaffold.py`), which
+All but 12 use the `synthetic` fixture (`fixtures/synthetic/scaffold.py`), which
 builds the repository and gh replay corpus of `tests/test_offline_pipeline_e2e.py`
 with that test's own helpers. Every run-history read is answered offline from
 the corpus, so the report's numbers are fixed. The agent's own `gh repo view` /
@@ -27,9 +30,43 @@ Optional entry fields: `fixture` (scaffold under `fixtures/`), `plugins`
 `{name, type, pattern, match?, min?, max?}`: `tool_used` counts tool calls
 whose `"<Tool> <json input>"` matches `pattern` (default `min` 1); `trace`,
 `files` and `last_message` search the transcript, the files the session
-wrote, or its final message (`match`: `contains` or `not_contains`). No
-`trace`/`files`/`last_message` pattern may match text the agent can read in
-the skill; `tests/test_ci_speedup_evals.py` enforces it.
+wrote, or its final message (`match`: `contains` or `not_contains`); `reading`
+counts one field of the session's reading record (below) as `{field,
+pattern?, min?, max?}`. No `trace`/`files`/`last_message` pattern may match
+text the agent can read in the skill; `tests/test_ci_speedup_evals.py`
+enforces it.
+
+## Reading accounting
+
+Every run also records how much of `references/` the session pulled into its
+context, because the catalog refactor's claim is "same report, less reading".
+`maintainers/scripts/eval_reading.py` pairs each `Read` / `Grep` call, and each
+`Bash` call that reads a file (`cat`, `sed`, `head`, `tail`, `grep`, `rg`,
+`less`, `awk`), with its tool result and charges the result's bytes and lines
+to the reference file(s) the call names (including `cd .../references` then a
+bare file name, globs, and directory-wide greps, split per output line). Each
+results row carries `reading: {reference_bytes, reference_lines,
+reference_files: [{path, bytes, lines, calls}], catalog_opened,
+catalog_entries_read}`, and the PASS / FAIL line ends with a compact figure
+such as `refs 16.0 KB in 2 files, catalog opened`. It measures what the agent
+saw, not what it asked for: a `sed -n` of one entry costs that entry, a full
+`Read` of the catalog costs the whole file. Reads by a subagent count only as
+far as the stream carries them.
+
+To prove a reading check is sensitive, run it with the entry it needs cut from
+the session's copy of the catalog (the repository is not touched). The wrapper
+also blocks the published copy on GitHub, which a session denied the local
+entry otherwise fetches (seen with both `curl` and `gh api`):
+
+    python3 maintainers/ci-speedup/scripts/eval_withhold_entry.py OPT81 --id 11 --model M
+
+## Baseline
+
+`maintainers/ci-speedup/evals/baseline/2026-10-22/` holds the committed
+baseline on the unsplit catalog: five runs of every runnable entry with a
+pinned model, the per-run results JSON, and `summary.md` (per case: median and
+range of reference bytes, files read, input tokens, wall time, and pass counts
+per check). Re-running it: `maintainers/ci-speedup/MAINTAINERS.md`.
 
 ## How to run
 

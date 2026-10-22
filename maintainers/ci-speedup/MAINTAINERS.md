@@ -449,6 +449,23 @@ command in the `ci-speedup skill evals` job. Run it before merging a SKILL.md or
 references change that CI did not cover (fork PRs). Details:
 `skills/ci-speedup/evals/README.md`.
 
+**Reading baseline.** Every run also records how much of `references/` the
+session read (`maintainers/scripts/eval_reading.py`). The baseline a catalog
+change is judged against is committed under
+`maintainers/ci-speedup/evals/baseline/<date>/`: per-run results JSON for five
+runs of every runnable entry, plus `summary.md`. To re-run it, on a clean
+branch of the commit you want to measure: run each entry five times with the
+same pinned model the existing baseline names (`--model`, recorded in its
+`summary.md`), one entry per invocation and at most two invocations at once
+(the full-run entries share the agent's `/tmp` scratch, so run 10, 11 and 13
+one after another), copy the `skill-eval-results/ci-speedup-*.json` files into
+a new dated directory, regenerate the table with
+`python3 maintainers/ci-speedup/scripts/eval_baseline_summary.py <dir>`, grep
+the results for tokens before committing, and prove the discriminating case
+still discriminates with `maintainers/ci-speedup/scripts/eval_withhold_entry.py`.
+Compare a candidate against the committed baseline, never against a re-run of
+it taken on a different model.
+
 ## NEVER (applies to all three loops)
 
 - Never commit `.ci-speedup-gaps/`, `.ci-speedup-loop/`, or `.ci-speedup-dogfood/`

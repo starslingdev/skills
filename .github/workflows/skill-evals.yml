@@ -39,7 +39,7 @@ on:
       - "skills/ci-secure/scripts/**"
       - "skills/ci-secure/evals/**"
       - "maintainers/ci-secure/scripts/run_skill_evals.py"
-      # ci-speedup's two runnable evals.json entries. One workflow-level filter for both
+      # ci-speedup's five runnable evals.json entries. One workflow-level filter for both
       # suites, so a change to either skill runs both (no classifier job by design).
       - "skills/ci-speedup/SKILL.md"
       - "skills/ci-speedup/references/**"
@@ -52,6 +52,7 @@ on:
       - "skills/ci-speedup/tests/fixtures/gh_replay/**"
       - "maintainers/scripts/run_skill_evals.py"
       - "maintainers/scripts/eval_gh_shim.py"
+      - "maintainers/scripts/eval_reading.py"
       - ".github/workflows/skill-evals.yml"
 
   # Manual: run it against any branch on demand, from the Actions tab or
@@ -61,7 +62,7 @@ on:
   workflow_dispatch:
     inputs:
       case:
-        description: "Single ci-secure case to run (blank = all five; ci-speedup always runs both entries)"
+        description: "Single ci-secure case to run (blank = all five; ci-speedup always runs all five entries)"
         required: false
         type: string
       runs:

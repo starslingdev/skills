@@ -37,11 +37,14 @@ import tempfile
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import eval_reading  # noqa: E402  (reading accounting lives in its own module)
+
 _REPO = Path(__file__).resolve().parents[2]
 _RESULTS = _REPO / "skill-eval-results"
 _LOGS = _REPO / "skill-eval-logs"
 _SHIM = Path(__file__).resolve().parent / "eval_gh_shim.py"
-_CHECK_TYPES = ("tool_used", "trace", "files", "last_message")
+_CHECK_TYPES = ("tool_used", "trace", "files", "last_message", "reading")
 _MAX_FILE = 4 * 1024 * 1024
 # The session loads no user-level settings, so a laptop with the skill installed
 # globally cannot answer from that copy instead of the one under test.
@@ -191,6 +194,9 @@ def apply_checks(checks: list[dict], rec: dict) -> list[tuple[str, bool, str]]:
             lo, hi = c.get("min", 1), c.get("max")
             results.append((name, n >= lo and (hi is None or n <= hi), f"count={n}"))
             continue
+        if kind == "reading":
+            results.append((name, *eval_reading.check(c, rec["reading"])))
+            continue
         if kind == "files" and not rec["files"]:
             raise HarnessError(f"check {name!r} reads `files`, but the session wrote "
                                "nothing the harness could collect")
@@ -266,7 +272,10 @@ def run_entry(skill_dir: Path, entry: dict, run: int, args) -> dict:
         calls = tool_calls(evs)
         rec = {"tool_used": calls, "trace": transcript(evs),
                "last_message": last_message(evs),
-               "files": files_written([sandbox, tmpdir], before, calls, since)}
+               "files": files_written([sandbox, tmpdir], before, calls, since),
+               "reading": eval_reading.summarize(evs, skill_dir.name,
+                                                 eval_reading.reference_names(skill_dir),
+                                                 time.time() - since - 1, str(plugins[0]))}
         stem = _LOGS / f"{skill_dir.name}-{entry.get('id')}-run{run}"
 
         def keep_session() -> None:
@@ -286,7 +295,7 @@ def run_entry(skill_dir: Path, entry: dict, run: int, args) -> dict:
                    "input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")),
                "output_tokens": usage.get("output_tokens") or 0,
                "duration_ms": result.get("duration_ms"),
-               "cost_usd": result.get("total_cost_usd"),
+               "cost_usd": result.get("total_cost_usd"), "reading": rec["reading"],
                "checks": [{"name": n, "passed": ok, "detail": d} for n, ok, d in checks]}
         if not out["passed"]:
             keep_session()
@@ -334,7 +343,7 @@ def main(argv: list[str] | None = None) -> int:
             secs = (r["duration_ms"] or 0) / 1000
             print(f"\n{'PASS' if r['passed'] else 'FAIL'}  {tag}  {r['tool_calls']} tool calls, "
                   f"{r['input_tokens']} in / {r['output_tokens']} out tokens, {secs:.0f}s, "
-                  f"${r['cost_usd'] or 0:.2f}")
+                  f"${r['cost_usd'] or 0:.2f}, {eval_reading.figure(r['reading'])}")
             for c in r["checks"]:
                 print(f"    {'ok  ' if c['passed'] else 'FAIL'} {c['name']}  ({c['detail']})")
             if r.get("session_log"):

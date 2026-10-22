@@ -179,6 +179,7 @@ def test_the_workflow_asks_for_no_more_than_read_access():
     "skills/ci-speedup/tests/test_offline_pipeline_e2e.py",
     "skills/ci-speedup/tests/fixtures/gh_replay/"
     "repos_synthetic_repo_branches_main_protection_required_status_checks.json",
+    "maintainers/scripts/eval_reading.py",  # the runner imports it; a break is exit 2
 ])
 def test_the_path_filter_covers_the_ci_speedup_eval_inputs(rel):
     """The session runs verify_report.py, and the synthetic fixture is built by

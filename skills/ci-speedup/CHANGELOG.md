@@ -13,6 +13,18 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-10-22** — **Eval sessions now record how much of the reference
+  material the agent read, with a committed baseline.** Every eval run records
+  the bytes and lines the agent pulled from `references/` (per file), whether
+  it opened the pattern catalog and which catalog entries it saw, and the
+  session's whole input tokens and wall time. Three new runnable evals exercise
+  the catalog: a quality review that must find a caveat that exists only in
+  the OPT81 entry, a coverage lookup that must name OPT86 for a dependency
+  compiled from source, and a control question the report answers on its own.
+  Five runs of each runnable eval on today's single-file catalog are committed
+  as the baseline the upcoming catalog split is measured against. Maintainer
+  tooling only: the shipped skill is unchanged.
+
 - **2026-10-21** — **Three more catalog patterns for slow builds and slow
   pull-request checks, OPT89 to OPT91, each backed by changes OpenAI engineers
   made in their public repos.** OPT89: when the slowest platform in a matrix
