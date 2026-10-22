@@ -26,6 +26,10 @@ def _span(vals: list[float], fmt=lambda v: f"{v:,.0f}") -> str:
 
 
 def summarize(rows: list[dict]) -> str:
+    """The baseline tables. A row is a session that ran when it carries
+    `passed`; a `harness_error` row is not run. Reading figures come from the
+    rows that recorded `reading`, each check counts over the rows that carry
+    it, and a missing wall time is left out of the medians (never a zero)."""
     cases: dict[int, list[dict]] = {}
     for r in rows:
         cases.setdefault(r.get("id"), []).append(r)
@@ -35,21 +39,23 @@ def summarize(rows: list[dict]) -> str:
     lines, checks = [head], []
     for cid in sorted(cases, key=lambda i: (i is None, i)):
         rs = cases[cid]
-        ran = [r for r in rs if "reading" in r]
+        ran = [r for r in rs if "passed" in r and "harness_error" not in r]
         name = next((r.get("name") for r in ran if r.get("name")), "?")
-        rd = [r["reading"] for r in ran]
+        rd = [r["reading"] for r in ran if isinstance(r.get("reading"), dict)]
+        sess = [x.get("session") or {} for x in rd]
         lines.append("| {} | `{}` | {} | {} | {} | {} | {} | {} | {}/{} | {} | {} |".format(
             cid, name, len(rs), sum(1 for r in ran if r.get("passed")), len(rs) - len(ran),
             _span([x["reference_bytes"] for x in rd]),
-            _span([sum(f["bytes"] for f in x["reference_files"]
+            _span([sum(f.get("bytes", 0) for f in x["reference_files"]
                        if f.get("path", "").endswith(CATALOG)) for x in rd]),
             _span([len(x["reference_files"]) for x in rd]),
-            sum(1 for x in rd if x["catalog_opened"]), len(rd),
-            _span([x["session"]["input_tokens"] for x in rd]),
-            _span([x["session"]["wall_s"] or 0 for x in rd])))
-        names = [c["name"] for c in (ran[0]["checks"] if ran else [])]
-        checks += [f"| {cid} | `{n}` | {sum(1 for r in ran for c in r['checks'] if c['name'] == n and c['passed'])}/{len(ran)} |"
-                   for n in names]
+            sum(1 for x in rd if x.get("catalog_opened")), len(rd),
+            _span([s["input_tokens"] for s in sess if s.get("input_tokens") is not None]),
+            _span([s["wall_s"] for s in sess if s.get("wall_s") is not None])))
+        names = list(dict.fromkeys(c["name"] for r in ran for c in r.get("checks", [])))
+        for n in names:
+            got = [c["passed"] for r in ran for c in r.get("checks", []) if c["name"] == n]
+            checks.append(f"| {cid} | `{n}` | {sum(1 for v in got if v)}/{len(got)} |")
     return ("\n".join(lines) + "\n\nPass count per check:\n\n| id | check | passed |\n|---|---|---|\n"
             + "\n".join(checks) + "\n")
 
