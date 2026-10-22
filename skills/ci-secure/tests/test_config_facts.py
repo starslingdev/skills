@@ -779,6 +779,47 @@ def test_codeowners_ruleset_unreadable_is_unmeasured_not_a_fail(tmp_path):
     assert f["outcome"] == "unmeasured", f
 
 
+@pytest.mark.parametrize("branch,segment", [
+    ("release#2026", "release%232026"),
+    ("v1?beta", "v1%3Fbeta"),
+    ("release/2.x", "release/2.x"),
+], ids=["hash", "question-mark", "slash-kept"])
+def test_the_default_branch_is_escaped_in_every_endpoint_path(branch, segment):
+    """A branch name is a path value: `#` or `?` left raw ends the path, so
+    the request would address a different branch (or none) and the fact
+    would read the wrong rules. Every endpoint this fact calls must carry the
+    escaped name; `/` stays as is, as GitHub's branch paths expect."""
+    calls: list[str] = []
+
+    class _Gh:
+        @staticmethod
+        def check_prereqs():
+            return True
+
+        @staticmethod
+        def run_gh_api(path, **kw):
+            calls.append(path)
+            if path == "repos/owner/repo":
+                return json.dumps({"default_branch": branch})
+            if path == f"repos/owner/repo/rules/branches/{segment}":
+                return json.dumps(_PR_RULE_NO_OWNER_REVIEW)
+            if path == f"repos/owner/repo/branches/{segment}/protection":
+                raise _ADMIN_403
+            if path == f"repos/owner/repo/branches/{segment}":
+                return json.dumps({"name": branch, "protected": False})
+            raise AssertionError(f"unexpected endpoint {path}")
+
+    with mock.patch.object(cf, "_gh_utils", lambda: _Gh):
+        required, detail = cf._code_owner_review_via_gh("owner/repo")
+    assert required is False, (required, detail)
+    assert f"`{branch}`" in detail, detail
+    assert calls[1:] == [
+        f"repos/owner/repo/rules/branches/{segment}",
+        f"repos/owner/repo/branches/{segment}/protection",
+        f"repos/owner/repo/branches/{segment}",
+    ], calls
+
+
 def test_no_codeowners_fails_without_any_api_call(tmp_path):
     """No CODEOWNERS file is decided by the files alone, exactly as before:
     a fail, and not one API round-trip spent on it."""

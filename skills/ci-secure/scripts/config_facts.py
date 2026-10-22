@@ -87,6 +87,7 @@ from functools import lru_cache
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Iterator
+from urllib.parse import quote
 
 REGISTERED = "2026-08-03"
 
@@ -2197,6 +2198,13 @@ def _fork_approval_effective(repo: str | None, fetcher) -> tuple[str, str]:
 # unreadable, the public branch endpoint's `protected: false` is the other
 # readable "no classic protection" (see `_branch_protected_flag`).
 
+def _branch_segment(branch: str) -> str:
+    """`branch` escaped for an API path. A raw `#` or `?` would end the path
+    and address another branch (or none); `/` stays, as GitHub's branch paths
+    take it as is."""
+    return quote(branch, safe="/")
+
+
 def _branch_protected_flag(gh: Any, repo: str, branch: str) -> bool | None:
     """The public branch endpoint's `protected` flag, or None.
 
@@ -2204,7 +2212,8 @@ def _branch_protected_flag(gh: Any, repo: str, branch: str) -> bool | None:
     key alike: the caller treats only `False` as an answer.
     """
     try:
-        body = json.loads(gh.run_gh_api(f"repos/{repo}/branches/{branch}"))
+        body = json.loads(gh.run_gh_api(
+            f"repos/{repo}/branches/{_branch_segment(branch)}"))
     except Exception:                                          # noqa: BLE001
         return None
     flag = body.get("protected") if isinstance(body, dict) else None
@@ -2225,8 +2234,10 @@ def _code_owner_review_via_gh(repo: str) -> tuple[bool | None, str]:
 
     errors: list[str] = []
     rules_require: bool | None = None
+    segment = _branch_segment(branch)
     try:
-        rules = json.loads(gh.run_gh_api(f"repos/{repo}/rules/branches/{branch}"))
+        rules = json.loads(gh.run_gh_api(
+            f"repos/{repo}/rules/branches/{segment}"))
         if not isinstance(rules, list):
             raise ValueError(
                 f"the rulesets endpoint returned {type(rules).__name__}, not "
@@ -2244,7 +2255,8 @@ def _code_owner_review_via_gh(repo: str) -> tuple[bool | None, str]:
     classic_require: bool | None = None
     try:
         classic = json.loads(gh.run_gh_api(
-            f"repos/{repo}/branches/{branch}/protection", quiet_not_found=True))
+            f"repos/{repo}/branches/{segment}/protection",
+            quiet_not_found=True))
         if not isinstance(classic, dict):
             raise ValueError(
                 f"the branch protection endpoint returned "
