@@ -5118,6 +5118,17 @@ def test_a_short_semver_key_fails_even_beside_a_long_default(tmp_path):
     assert f["outcome"] == "fail", f["evidence"]
 
 
+def test_the_fix_for_a_short_semver_key_names_that_key(tmp_path):
+    """`cooldown: { default-days: 7 }` alone leaves a short semver key in
+    place, which still fails; the fix must tell the user to raise it too."""
+    f, _ = _cooldown(tmp_path, _dependabot(_entry(
+        "npm", cooldown="    cooldown:\n      default-days: 7\n"
+                        "      semver-patch-days: 1\n")))
+    assert f["outcome"] == "fail", f["evidence"]
+    fix = f["evidence"].split(" — ", 1)[1]
+    assert "semver-" in fix, fix
+
+
 def test_renovate_one_week_passes(tmp_path):
     f, _ = _cooldown(tmp_path, {"renovate.json":
                                 '{"minimumReleaseAge": "1 week"}'})

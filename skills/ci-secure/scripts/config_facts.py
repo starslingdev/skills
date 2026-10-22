@@ -2270,8 +2270,10 @@ def _dependabot_cooldown(root: Path) -> tuple[str, str] | None:
     if short:
         return "fail", (
             f"{found}: {_capped(short, 4)} — wait under {_COOLDOWN_MIN_DAYS} "
-            "days before proposing a fresh release; add "
-            "`cooldown: { default-days: 7 }` to each entry")
+            "days before proposing a fresh release; set "
+            "`cooldown: { default-days: 7 }` on each entry named and raise "
+            "(or remove) any `semver-*-days` key under 3 there, keeping its "
+            "other `cooldown` keys")
     if unreadable:
         return "unmeasured", (f"unmeasured: {found} has a `cooldown` this scan "
                               f"cannot read ({_capped(unreadable, 3, ', ')})")

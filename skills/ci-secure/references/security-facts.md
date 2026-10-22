@@ -356,5 +356,7 @@ two moved numbers.
   **Security updates are not delayed.** GitHub documents that a Dependabot
   cooldown applies to version updates only; a fix for a known vulnerability
   still opens immediately. **To fix a fail**: `cooldown: { default-days: 7 }`
-  on each Dependabot `updates` entry named, or `"minimumReleaseAge": "7 days"`
-  at the top level of the Renovate config.
+  on each Dependabot `updates` entry named, raising (or removing) any
+  `semver-*-days` key under 3 on that entry and keeping its other `cooldown`
+  keys, or `"minimumReleaseAge": "7 days"` at the top level of the Renovate
+  config.
