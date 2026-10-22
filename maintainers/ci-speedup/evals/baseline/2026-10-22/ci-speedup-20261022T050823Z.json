@@ -332,7 +332,7 @@
       {
         "name": "read-the-opt81-catalog-entry",
         "passed": true,
-        "detail": "catalog_entries_read=2"
+        "detail": "catalog_entries_read=1"
       }
     ]
   }

@@ -227,7 +227,7 @@
         {
           "name": "names-the-catalog-only-fork-caveat",
           "type": "last_message",
-          "pattern": "(?i)MISSING-FROM-CARD:(?=[^\\n]*fork)(?=[^\\n]*(?:unavailable|not available|cannot|can't|can ?not|unable|no access|n't (?:use|run|get|pick)))"
+          "pattern": "(?i)MISSING-FROM-CARD:(?!\\s*none\\b)(?=[^\\n]*fork)(?=[^\\n]*(?:label|runner))(?=[^\\n]*(?:unavailable|not (?:be )?(?:available|offered)|n't (?:be )?(?:available|offered)|(?:n't|can ?not|unable to) (?:use|run|get|pick|select)|no access))"
         },
         {
           "name": "read-some-reference-material",
@@ -281,7 +281,7 @@
       "prompt": "Run a CI speed audit of synthetic/repo (the git checkout in the current directory) and tell me just two things: how long a typical pull request waits for its CI checks, and which check's job is the slowest. Just the numbers, I don't need fixes.",
       "expected_output": "ci-speedup runs its data pass on the replayed history, renders and verifies the report, and answers with the measured headline: a typical PR waits 3m 40s, and `CI / test` is the slowest single job at a 3m 17s median. Nothing in the question needs the pattern catalog.",
       "fixture": "synthetic",
-      "note": "Reading-sensitive control: whether the catalog is opened is recorded per run and deliberately NOT asserted in the baseline; the split refactor is expected to drive it to zero. Graded on the answer, not the report file: the runner only collects a report at a literal absolute path, and agents often write it under a shell variable.",
+      "note": "Reading-sensitive control: whether the catalog is opened is recorded per run and deliberately NOT asserted; it was zero in every baseline run, so a non-zero value after the split is a regression to look at. Graded on the answer, not the report file: the runner only collects a report at a literal absolute path, and agents often write it under a shell variable.",
       "expectations": [
         "The audit runs its data pass.",
         "The answer states the 3m 40s typical wait and names `CI / test` as the slowest job."

@@ -47,8 +47,12 @@ to the reference file(s) the call names (including `cd .../references` then a
 bare file name, globs, and directory-wide greps, split per output line). Each
 results row carries `reading: {reference_bytes, reference_lines,
 reference_files: [{path, bytes, lines, calls}], catalog_opened,
-catalog_entries_read}`, and the PASS / FAIL line ends with a compact figure
-such as `refs 16.0 KB in 2 files, catalog opened`. It measures what the agent
+catalog_entries_read}`, and the PASS / FAIL line carries a compact figure
+such as `refs 16.0 KB in 2 files, catalog opened; session 175k in, 23s wall`.
+A failed read counts nothing, a catalog entry counts as read only when its
+heading comes with some of its body (an index grep reads none), and paths that
+reach another copy (a URL, `gh api`, or a `cd` to another install) are not the
+copy under test. It measures what the agent
 saw, not what it asked for: a `sed -n` of one entry costs that entry, a full
 `Read` of the catalog costs the whole file. Reads by a subagent count only as
 far as the stream carries them.
@@ -87,8 +91,7 @@ A 2 is a coverage gap, never a behaviour change.
 
 ## Cost
 
-About $0.40 to $0.65 and 30 to 95 seconds per run (measured on claude 2.1.307
-locally and the pinned 2.1.235 in CI). In the 2026-10-22 baseline: $0.28 to
+In the 2026-10-22 baseline (claude 2.1.307, locally): $0.28 to
 $0.48 and 20 to 55 seconds for entries 6, 10, 12 and 13; $0.43 to $1.25 and
 42 to 142 seconds for entry 11, which may start two review subagents. One run
 of all five entries is about $2.30.

@@ -158,17 +158,17 @@ jobs:
           if-no-files-found: ignore
 
 
-  # ci-speedup's runnable evals.json entries (a full audit of the synthetic repo against its
-  # offline replay corpus, and the security ask that must route to ci-secure), run by the
-  # shared runner. Same trust model as `evals` above.
+  # ci-speedup's five runnable evals.json entries (a full audit of the synthetic repo against
+  # its offline replay corpus, the security ask that must route to ci-secure, and three
+  # reading-sensitive cases), run by the shared runner. Same trust model as `evals` above.
   ci-speedup-evals:
     name: ci-speedup skill evals
     if: >-
       github.event_name == 'workflow_dispatch' ||
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: starsling-ubuntu-24.04
-    # Two entries at the runner's 1500s per-session cap, plus the scaffold.
-    timeout-minutes: 60
+    # Five entries at the runner's 1500s per-session cap, plus the scaffold.
+    timeout-minutes: 135
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0

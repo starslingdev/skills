@@ -70,7 +70,7 @@ _NAMES = ["adversarial-review-rubric.md", "gap-fill.md", "optimization-patterns.
 
 def test_a_cd_into_references_then_a_bare_file_name_is_counted():
     evs = [_call(1, "Bash", {"command": f"cd {_ROOT}/references; grep -n -i wheel optimization-patterns.md"}),
-           _result(1, "4391:### OPT86 — CI Compiles a Dependency That Ships Prebuilt")]
+           _result(1, "4391:### OPT86 — CI Compiles a Dependency That Ships Prebuilt\n4392-\n4393-Wheel built")]
     r = reading.summarize(evs, "ci-speedup", _NAMES)
     assert [f["path"] for f in r["reference_files"]] == ["optimization-patterns.md"]
     assert r["catalog_entries_read"] == ["OPT86"]
@@ -96,10 +96,44 @@ def test_another_install_of_the_same_skill_is_not_the_one_under_test():
     assert [(f["path"], f["bytes"]) for f in r["reference_files"]] == [("gap-fill.md", 7)]
 
 
-def test_a_heading_seen_twice_in_one_result_is_one_entry():
-    evs = [_call(1, "Bash", {"command": f"grep -n -A2 'OPT81 —' {_ROOT}/references/optimization-patterns.md"}),
-           _result(1, _ENTRY + "\n" + _ENTRY)]
-    assert reading.summarize(evs, "ci-speedup")["catalog_entries_read"] == ["OPT81"]
+def test_a_heading_without_its_body_is_not_an_entry_read():
+    """A heading index (`grep '^### OPT'`) or a bare heading grep lists entries; it reads none."""
+    index = "3585:### OPT81 — Faster Runner\n3643:### OPT82 — Other"
+    evs = [_call(1, "Bash", {"command": f"grep -n '^### OPT' {_ROOT}/references/optimization-patterns.md"}),
+           _result(1, index)]
+    assert reading.summarize(evs, "ci-speedup")["catalog_entries_read"] == []
+
+
+@pytest.mark.parametrize("command", [
+    "cd {root} && cat ./references/gap-fill.md",                      # greptile: `./` read as an owner
+    "D={root}; sed -n 1,9p $D/references/gap-fill.md",                # shell variable
+    'D={root}; cat "${{D}}"/references/gap-fill.md',
+    "cd {root} && grep -rn cache references/",                        # relative bare directory
+])
+def test_relative_and_variable_paths_into_the_mount_are_counted(command):
+    evs = [_call(1, "Bash", {"command": command.format(root=_ROOT)}), _result(1, "gap-fill.md:1:" + "g" * 50)]
+    r = reading.summarize(evs, "ci-speedup", _NAMES, root=_ROOT)
+    assert [f["path"] for f in r["reference_files"]] == ["gap-fill.md"]
+
+
+@pytest.mark.parametrize("command", [
+    "cd ~/.claude/skills/ci-speedup && sed -n 1,9p references/optimization-patterns.md",
+    "curl -s https://raw.githubusercontent.com/o/r/main/skills/ci-speedup/references/optimization-patterns.md | head",
+    "gh api repos/o/r/contents/skills/ci-speedup/references/optimization-patterns.md | head",
+])
+def test_another_copy_reached_by_cd_or_over_the_network_is_not_the_mount(command):
+    evs = [_call(1, "Bash", {"command": command}), _result(1, _ENTRY)]
+    r = reading.summarize(evs, "ci-speedup", _NAMES, root=_ROOT)
+    assert (r["reference_bytes"], r["catalog_opened"]) == (0, False)
+
+
+def test_a_failed_or_empty_read_is_not_a_read():
+    evs = [_call(1, "Read", {"file_path": f"{_ROOT}/references/optimization-patterns.md"}),
+           {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1",
+                                                     "is_error": True, "content": "File too large"}]}},
+           _call(2, "Bash", {"command": f"grep -n nomatch {_ROOT}/references/gap-fill.md"}), _result(2, "")]
+    r = reading.summarize(evs, "ci-speedup", _NAMES, root=_ROOT)
+    assert (r["reference_bytes"], r["reference_files"], r["catalog_opened"]) == (0, [], False)
 
 
 def test_the_word_references_in_prose_is_not_a_read():
@@ -128,6 +162,11 @@ def test_reading_checks(check, ok):
     evs = [_call(1, "Read", {"file_path": f"{_ROOT}/references/optimization-patterns.md"}),
            _result(1, _ENTRY)]
     assert reading.check(check, reading.summarize(evs, "ci-speedup"))[0] is ok
+
+
+def test_a_reading_check_on_an_unknown_field_is_a_harness_error_not_a_pass():
+    with pytest.raises(ValueError, match="reference_byte"):
+        reading.check({"type": "reading", "field": "reference_byte", "min": 0}, {"reference_bytes": 5})
 
 
 def test_the_runner_records_reading_and_prints_the_figure(tmp_path, monkeypatch, capsys):

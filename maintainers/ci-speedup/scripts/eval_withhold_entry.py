@@ -62,7 +62,7 @@ def main(argv: list[str]) -> int:
     def env_without_the_published_copy(extra=None):
         extra = dict(extra or {})
         if extra.get("EVAL_GH_REAL"):
-            guard.write_text("#!/bin/sh\ncase \"$*\" in *starslingdev*) echo 'HTTP 404: Not Found'"
+            guard.write_text("#!/bin/sh\ncase \"$(echo \"$*\" | tr A-Z a-z)\" in *starslingdev*) echo 'HTTP 404: Not Found'"
                              f" >&2; exit 1;; esac\nexec \"{extra['EVAL_GH_REAL']}\" \"$@\"\n")
             guard.chmod(0o755)
             extra["EVAL_GH_REAL"] = str(guard)

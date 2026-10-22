@@ -30,7 +30,9 @@ from pathlib import Path
 CATALOG = "optimization-patterns.md"
 _READERS = re.compile(r"(?<![\w-])(?:cat|sed|head|tail|grep|egrep|rg|less|awk)(?![\w-])")
 _REF = re.compile(r"(?<![\w.-])(?:([\w.-]+)/)?references(?:/([^\s'\"`;|&<>(){}]*))?")
-_HEADING = re.compile(r"#{2,3} (OPT\d+) — ")
+_HEADING = re.compile(r"^\s*(?:\S*?[:-])?\d*[:\t-]?\s*#{2,3} (OPT\d+) — ")
+_NUMBER = re.compile(r"^\s*(?:\S*?[:-])?\d*[:\t-]?")
+_VAR = re.compile(r"(?:^|[\s;&|(])(?:export\s+)?([A-Za-z_]\w*)=(['\"]?)([^\s'\";&|]+)\2")
 
 
 def _text(body) -> str:
@@ -45,18 +47,30 @@ def _content(ev: dict) -> list:
     return [x for x in c if isinstance(x, dict)] if isinstance(c, list) else []
 
 
+def _expand(cmd: str) -> str:
+    """`cmd` with `$V` / `${V}` / `"$V"` replaced by `V=value` set in it."""
+    vals = {k: v for k, _, v in _VAR.findall(cmd)}
+    return re.sub(r"\"?\$\{?([A-Za-z_]\w*)\}?\"?", lambda m: vals.get(m.group(1), m.group(0)), cmd)
+
+
 def _elsewhere(text: str, m: re.Match, root: str | None) -> bool:
-    """The path `m` sits in is absolute (or `~/`) and outside the mounted copy
-    `root`: another install of the skill, not the one under test."""
+    """The path `m` sits in is not the mounted copy `root`: a URL or a `gh api`
+    path (the published copy), or an absolute (or `~/`) path outside `root`, or
+    a relative one after a `cd` to such a path (another install of the skill)."""
+    path = re.split(r"[\s'\"`;|&<>(){}=]", text[:m.start()])[-1] + m.group(0)
+    if "://" in path or re.match(r"/?repos/", path):
+        return True
     if not root:
         return False
-    path = re.split(r"[\s'\"`;|&<>(){}=]", text[:m.start()])[-1] + m.group(0)
     if not path.startswith(("/", "~")):
-        return False
+        cds = re.findall(r"(?:^|[\s;&|(])cd\s+['\"]?([^\s'\";&|]+)", text[:m.start()])
+        if not cds or not cds[-1].startswith(("/", "~")):
+            return False
+        path = cds[-1]
 
     def norm(p: str) -> str:
         return p[len("/private"):] if p.startswith("/private/") else p
-    return not norm(path).startswith(norm(str(root).rstrip("/")) + "/")
+    return not (norm(path) + "/").startswith(norm(str(root).rstrip("/")) + "/")
 
 
 def referenced(text: str, skill: str, names: list[str] | None = None,
@@ -68,12 +82,13 @@ def referenced(text: str, skill: str, names: list[str] | None = None,
     and bare-directory mentions resolve against `names` (the real listing)."""
     out: list[str] = []
     bare_dir = False
+    text = _expand(text)
     for m in _REF.finditer(text):
         owner, rest = m.group(1), (m.group(2) or "").rstrip(".,:")
-        if (owner and owner != skill) or _elsewhere(text, m, root):
+        if (owner and owner not in (skill, ".", "..")) or _elsewhere(text, m, root):
             continue
         if not rest:  # the directory itself, when it reads as a path (not prose)
-            bare_dir |= bool(owner) or text[m.end():m.end() + 1] == "/" or bool(
+            bare_dir |= bool(owner) or m.group(0).endswith("/") or bool(
                 re.search(r"cd\s+$", text[:m.start()]))
             continue
         hits = [n for n in names or [] if fnmatch.fnmatch(n, rest)] if any(
@@ -104,6 +119,23 @@ def _split(body: str, paths: list[str]) -> dict[str, tuple[int, int]]:
         got[p][0] += loose[0] // len(takers)
         got[p][1] += loose[1] // len(takers)
     return {p: (b, n) for p, (b, n) in got.items() if p in takers}
+
+
+def _entries(body: str) -> list[str]:
+    """Catalog ids whose heading appears in `body` with some of the entry's
+    text under it: a heading listed alone (an index grep) is not a read."""
+    lines, out = body.splitlines(), []
+    for i, line in enumerate(lines):
+        h = _HEADING.match(line)
+        if not h or h.group(1) in out:
+            continue
+        for nxt in lines[i + 1:]:
+            if _HEADING.match(nxt):
+                break
+            if _NUMBER.sub("", nxt, count=1).strip():
+                out.append(h.group(1))
+                break
+    return out
 
 
 def session_totals(evs: list[dict], wall_s: float | None = None) -> dict:
@@ -148,14 +180,16 @@ def summarize(evs: list[dict], skill: str, names: list[str] | None = None,
         for c in _content(ev):
             paths = pending.pop(str(c.get("tool_use_id")), None) if c.get(
                 "type") == "tool_result" else None
-            if not paths:
+            if not paths or c.get("is_error"):  # a failed read put nothing of the file in context
                 continue
             body = _text(c.get("content"))
             for p, (size, lines) in _split(body, paths).items():
+                if not size:
+                    continue
                 f = files.setdefault(p, {"path": p, "bytes": 0, "lines": 0, "calls": 0})
                 f["bytes"], f["lines"], f["calls"] = f["bytes"] + size, f["lines"] + lines, f["calls"] + 1
                 if Path(p).name == CATALOG:
-                    entries += [i for i in dict.fromkeys(_HEADING.findall(body)) if i not in entries]
+                    entries += [i for i in _entries(body) if i not in entries]
     rows = sorted(files.values(), key=lambda f: -f["bytes"])
     return {"reference_bytes": sum(f["bytes"] for f in rows),
             "reference_lines": sum(f["lines"] for f in rows),
@@ -175,7 +209,9 @@ def check(c: dict, reading: dict) -> tuple[bool, str]:
     """A `reading` check: `{"type": "reading", "field": F, "min"?, "max"?,
     "pattern"?}`. A list field counts its items matching `pattern` (default:
     all); a bool counts as 0/1; the count must sit in [min (default 1), max]."""
-    v = reading.get(c.get("field"))
+    if c.get("field") not in reading:
+        raise ValueError(f"reading check names unknown field {c.get('field')!r}")
+    v = reading[c["field"]]
     if isinstance(v, list):
         n = sum(1 for x in v if re.search(c.get("pattern", ""), json.dumps(x)
                                           if isinstance(x, dict) else str(x)))

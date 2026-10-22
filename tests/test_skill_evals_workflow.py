@@ -190,3 +190,12 @@ def test_the_path_filter_covers_the_ci_speedup_eval_inputs(rel):
     doc = _doc()
     paths = (doc.get("on") or doc[True])["pull_request"]["paths"]
     assert any(fnmatch(rel, p) for p in paths), f"{rel} matches no filter path"
+
+
+def test_the_ci_speedup_job_budget_covers_every_entry_at_the_session_cap():
+    """The job runs every runnable entry at the runner's default 1500s cap; a
+    job timeout below that kills a slow-but-healthy run and reads as a failure."""
+    import json
+    evals = json.loads((_REPO / "skills" / "ci-speedup" / "evals" / "evals.json").read_text(encoding="utf-8"))
+    worst_minutes = sum(1 for e in evals["evals"] if e.get("checks")) * 1500 / 60
+    assert _job("ci-speedup-evals")["timeout-minutes"] >= worst_minutes, worst_minutes

@@ -96,3 +96,18 @@ def test_nothing_committed_check_sees_multiline_bash(command, expected):
                if c["name"] == "nothing-committed-or-pushed")
     call = "Bash " + json.dumps({"command": command})
     assert len(re.findall(pat, call)) == expected, call
+
+
+@pytest.mark.parametrize("answer,ok", [
+    ("MISSING-FROM-CARD: non-standard runner labels are often unavailable to fork pull requests", True),
+    ("MISSING-FROM-CARD: The faster runner label isn't available to fork PRs.", True),
+    ("MISSING-FROM-CARD: larger runners aren't offered to PRs from forks", True),
+    ("MISSING-FROM-CARD: none, the card already says a fork pull request can select the slower label", False),
+    ("MISSING-FROM-CARD: fork PRs get no repo secrets and can't reach upstream branch caches", False),
+])
+def test_the_fork_caveat_check_takes_the_caveat_and_only_the_caveat(answer, ok):
+    """The card itself mentions forks, so `fork` plus any negation is not the caveat:
+    it must say a runner/label is not available to fork PRs, and `none` never passes."""
+    entry = next(e for e in _RUNNABLE if e["name"] == "quality-review-opt81")
+    check = next(c for c in entry["checks"] if c["name"] == "names-the-catalog-only-fork-caveat")
+    assert bool(re.search(check["pattern"], "Review done.\n" + answer)) is ok

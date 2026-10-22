@@ -15,8 +15,24 @@ single-file catalog (`references/optimization-patterns.md`, 5,360 lines,
   Entries 10, 11 and 13 ran one after another (their sessions pick scratch
   paths under `/tmp` and could collide); 6 and 12 ran beside them.
 - **Files:** one results JSON per invocation, as the runner wrote it, with one
-  correction: in entry 11 run 5, `catalog_entries_read` listed `OPT81` twice
-  (a counting bug fixed in the same change, with a test); it was deduplicated.
+  hand correction: in entry 11 run 5, `catalog_entries_read` listed `OPT81`
+  twice (a counting bug fixed in the same change, with a test); the list was
+  deduplicated and that run's check detail changed from `=2` to `=1`.
+- **Measured with** `maintainers/scripts/eval_reading.py` as of commit
+  `b976489`. Review then fixed several attribution gaps, so the figures here
+  carry these known biases: reads through a shell variable (`$D/references/x`),
+  `./references/x`, or a relative `references/` directory grep counted zero
+  (undercount); a `sed` slice or grep that showed an entry's body without its
+  heading recorded no entry (entry 12 run 3 has none), while a heading-only
+  grep recorded one; a remote copy (`curl`, `gh api`) piped into a reader
+  counted as the local file. Still true after the fixes: a compound command
+  charges all of its output to the reference files it names, unprefixed output
+  over several files splits evenly, and the catalog is the file
+  `optimization-patterns.md`, so a split catalog must map its per-pattern
+  files to "catalog" before the two are compared.
+- **Check change after the baseline:** entry 11's answer check now also needs
+  a runner or label word, accepts `isn't available` / `aren't offered`, and
+  rejects `none`; its five baseline passes were graded on the older pattern.
 - **Discarded:** a first five-run pass of entry 12. Its prompt did not name
   the skill, and in one run the agent skipped the Skill tool and read an older,
   globally installed copy of ci-speedup in the maintainer's home directory
@@ -76,8 +92,8 @@ Pass count per check:
   more than 47 KB of the 393 KB catalog. Runs that verified in the main
   session (2, 4) read 13 to 15 KB of it (`sed -n` / `awk` over the OPT81
   range). Runs that delegated to two review subagents (1, 3, 5) read 42 to
-  46 KB, because each subagent locates and reads the entry again, and they
-  read the review rubric too. The spread comes from delegation, not from the
+  46 KB, because each subagent locates and reads the entry again (runs 1, 3,
+  4 and 5 also read the review rubric). The spread comes from delegation, not from the
   catalog's shape.
 - **gap-fill-coverage-lookup** finds OPT86 in three or four tool calls: a
   keyword grep over the catalog and `gap-fill.md`, then a `sed -n` of the
