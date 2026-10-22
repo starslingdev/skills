@@ -5,35 +5,36 @@
     "run": 1,
     "passed": true,
     "tool_calls": 3,
-    "input_tokens": 134358,
-    "output_tokens": 1503,
-    "duration_ms": 22489,
-    "cost_usd": 0.2823898,
+    "input_tokens": 142137,
+    "output_tokens": 1431,
+    "duration_ms": 15850,
+    "cost_usd": 0.2391976,
     "reading": {
-      "reference_bytes": 6549,
-      "reference_lines": 33,
+      "reference_bytes": 20695,
+      "reference_lines": 97,
       "catalog_opened": true,
       "catalog_entries_read": [
         "OPT86"
       ],
+      "unattributed_calls": 0,
       "reference_files": [
         {
           "path": "optimization-patterns.md",
-          "bytes": 3668,
-          "lines": 24,
+          "bytes": 13457,
+          "lines": 73,
           "calls": 2
         },
         {
           "path": "gap-fill.md",
-          "bytes": 2881,
-          "lines": 9,
+          "bytes": 7238,
+          "lines": 24,
           "calls": 1
         }
       ],
       "session": {
-        "wall_s": 23.1,
-        "input_tokens": 134358,
-        "output_tokens": 1503,
+        "wall_s": 16.8,
+        "input_tokens": 142137,
+        "output_tokens": 1431,
         "result_events": 1,
         "subagents": 0
       }
@@ -52,7 +53,7 @@
       {
         "name": "read-some-reference-material",
         "passed": true,
-        "detail": "reference_bytes=6549"
+        "detail": "reference_bytes=20695"
       }
     ]
   },
@@ -61,36 +62,37 @@
     "name": "gap-fill-coverage-lookup",
     "run": 2,
     "passed": true,
-    "tool_calls": 3,
-    "input_tokens": 143723,
-    "output_tokens": 1614,
-    "duration_ms": 19658,
-    "cost_usd": 0.3285092,
+    "tool_calls": 4,
+    "input_tokens": 178192,
+    "output_tokens": 1786,
+    "duration_ms": 26417,
+    "cost_usd": 0.24097559999999998,
     "reading": {
-      "reference_bytes": 20705,
-      "reference_lines": 89,
+      "reference_bytes": 12397,
+      "reference_lines": 86,
       "catalog_opened": true,
       "catalog_entries_read": [
         "OPT86"
       ],
+      "unattributed_calls": 0,
       "reference_files": [
         {
           "path": "optimization-patterns.md",
-          "bytes": 13462,
-          "lines": 69,
-          "calls": 2
+          "bytes": 9316,
+          "lines": 66,
+          "calls": 3
         },
         {
           "path": "gap-fill.md",
-          "bytes": 7243,
+          "bytes": 3081,
           "lines": 20,
-          "calls": 1
+          "calls": 2
         }
       ],
       "session": {
-        "wall_s": 20.3,
-        "input_tokens": 143723,
-        "output_tokens": 1614,
+        "wall_s": 27.2,
+        "input_tokens": 178192,
+        "output_tokens": 1786,
         "result_events": 1,
         "subagents": 0
       }
@@ -109,7 +111,7 @@
       {
         "name": "read-some-reference-material",
         "passed": true,
-        "detail": "reference_bytes=20705"
+        "detail": "reference_bytes=12397"
       }
     ]
   },
@@ -119,33 +121,38 @@
     "run": 3,
     "passed": true,
     "tool_calls": 3,
-    "input_tokens": 137654,
-    "output_tokens": 1899,
-    "duration_ms": 21441,
-    "cost_usd": 0.3110384,
+    "input_tokens": 144890,
+    "output_tokens": 2194,
+    "duration_ms": 22837,
+    "cost_usd": 0.257707,
     "reading": {
-      "reference_bytes": 13811,
-      "reference_lines": 72,
+      "reference_bytes": 19666,
+      "reference_lines": 94,
       "catalog_opened": true,
-      "catalog_entries_read": [],
+      "catalog_entries_read": [
+        "OPT89",
+        "OPT86",
+        "OPT91"
+      ],
+      "unattributed_calls": 0,
       "reference_files": [
         {
-          "path": "optimization-patterns.md",
-          "bytes": 10023,
-          "lines": 59,
+          "path": "gap-fill.md",
+          "bytes": 9833,
+          "lines": 47,
           "calls": 2
         },
         {
-          "path": "gap-fill.md",
-          "bytes": 3788,
-          "lines": 13,
-          "calls": 1
+          "path": "optimization-patterns.md",
+          "bytes": 9833,
+          "lines": 47,
+          "calls": 2
         }
       ],
       "session": {
-        "wall_s": 22.1,
-        "input_tokens": 137654,
-        "output_tokens": 1899,
+        "wall_s": 23.9,
+        "input_tokens": 144890,
+        "output_tokens": 2194,
         "result_events": 1,
         "subagents": 0
       }
@@ -164,7 +171,7 @@
       {
         "name": "read-some-reference-material",
         "passed": true,
-        "detail": "reference_bytes=13811"
+        "detail": "reference_bytes=19666"
       }
     ]
   },
@@ -174,35 +181,38 @@
     "run": 4,
     "passed": true,
     "tool_calls": 3,
-    "input_tokens": 137422,
-    "output_tokens": 1737,
-    "duration_ms": 23730,
-    "cost_usd": 0.30782220000000005,
+    "input_tokens": 148266,
+    "output_tokens": 1526,
+    "duration_ms": 17611,
+    "cost_usd": 0.26010920000000004,
     "reading": {
-      "reference_bytes": 14227,
-      "reference_lines": 72,
+      "reference_bytes": 20820,
+      "reference_lines": 112,
       "catalog_opened": true,
       "catalog_entries_read": [
-        "OPT86"
+        "OPT89",
+        "OPT86",
+        "OPT91"
       ],
+      "unattributed_calls": 0,
       "reference_files": [
         {
           "path": "optimization-patterns.md",
-          "bytes": 11065,
-          "lines": 47,
+          "bytes": 13572,
+          "lines": 81,
           "calls": 2
         },
         {
           "path": "gap-fill.md",
-          "bytes": 3162,
-          "lines": 25,
+          "bytes": 7248,
+          "lines": 31,
           "calls": 1
         }
       ],
       "session": {
-        "wall_s": 24.4,
-        "input_tokens": 137422,
-        "output_tokens": 1737,
+        "wall_s": 22.9,
+        "input_tokens": 148266,
+        "output_tokens": 1526,
         "result_events": 1,
         "subagents": 0
       }
@@ -221,7 +231,7 @@
       {
         "name": "read-some-reference-material",
         "passed": true,
-        "detail": "reference_bytes=14227"
+        "detail": "reference_bytes=20820"
       }
     ]
   },
@@ -230,36 +240,31 @@
     "name": "gap-fill-coverage-lookup",
     "run": 5,
     "passed": true,
-    "tool_calls": 4,
-    "input_tokens": 178684,
-    "output_tokens": 1611,
-    "duration_ms": 31357,
-    "cost_usd": 0.3100678,
+    "tool_calls": 3,
+    "input_tokens": 145747,
+    "output_tokens": 1618,
+    "duration_ms": 27330,
+    "cost_usd": 0.2555234,
     "reading": {
-      "reference_bytes": 11027,
-      "reference_lines": 62,
+      "reference_bytes": 17978,
+      "reference_lines": 76,
       "catalog_opened": true,
       "catalog_entries_read": [
         "OPT86"
       ],
+      "unattributed_calls": 0,
       "reference_files": [
         {
           "path": "optimization-patterns.md",
-          "bytes": 7761,
-          "lines": 36,
-          "calls": 2
-        },
-        {
-          "path": "gap-fill.md",
-          "bytes": 3266,
-          "lines": 26,
+          "bytes": 17978,
+          "lines": 76,
           "calls": 2
         }
       ],
       "session": {
-        "wall_s": 32.1,
-        "input_tokens": 178684,
-        "output_tokens": 1611,
+        "wall_s": 31.0,
+        "input_tokens": 145747,
+        "output_tokens": 1618,
         "result_events": 1,
         "subagents": 0
       }
@@ -278,7 +283,7 @@
       {
         "name": "read-some-reference-material",
         "passed": true,
-        "detail": "reference_bytes=11027"
+        "detail": "reference_bytes=17978"
       }
     ]
   }

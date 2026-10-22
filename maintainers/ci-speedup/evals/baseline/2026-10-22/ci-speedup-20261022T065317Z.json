@@ -4,38 +4,47 @@
     "name": "quality-review-opt81",
     "run": 1,
     "passed": true,
-    "tool_calls": 23,
-    "input_tokens": 61978,
-    "output_tokens": 1145,
-    "duration_ms": 12268,
-    "cost_usd": 1.2549232000000001,
+    "tool_calls": 24,
+    "input_tokens": 557750,
+    "output_tokens": 5351,
+    "duration_ms": 151078,
+    "cost_usd": 1.1782556000000002,
     "reading": {
-      "reference_bytes": 92283,
-      "reference_lines": 859,
+      "reference_bytes": 112567,
+      "reference_lines": 1419,
       "catalog_opened": true,
       "catalog_entries_read": [
         "OPT81",
-        "OPT52"
+        "OPT52",
+        "OPT53",
+        "OPT54",
+        "OPT55",
+        "OPT56",
+        "OPT57",
+        "OPT58",
+        "OPT59",
+        "OPT60"
       ],
+      "unattributed_calls": 0,
       "reference_files": [
         {
           "path": "optimization-patterns.md",
-          "bytes": 46487,
-          "lines": 345,
-          "calls": 5
+          "bytes": 69536,
+          "lines": 908,
+          "calls": 6
         },
         {
           "path": "adversarial-review-rubric.md",
-          "bytes": 45796,
-          "lines": 514,
-          "calls": 5
+          "bytes": 43031,
+          "lines": 511,
+          "calls": 4
         }
       ],
       "session": {
-        "wall_s": 113.4,
-        "input_tokens": 916876,
-        "output_tokens": 15400,
-        "result_events": 3,
+        "wall_s": 153.0,
+        "input_tokens": 946720,
+        "output_tokens": 17308,
+        "result_events": 1,
         "subagents": 2
       }
     },
@@ -58,7 +67,7 @@
       {
         "name": "read-some-reference-material",
         "passed": true,
-        "detail": "reference_bytes=92283"
+        "detail": "reference_bytes=112567"
       },
       {
         "name": "read-the-opt81-catalog-entry",
@@ -72,32 +81,40 @@
     "name": "quality-review-opt81",
     "run": 2,
     "passed": true,
-    "tool_calls": 7,
-    "input_tokens": 314676,
-    "output_tokens": 3013,
-    "duration_ms": 41004,
-    "cost_usd": 0.4288834,
+    "tool_calls": 22,
+    "input_tokens": 518827,
+    "output_tokens": 6189,
+    "duration_ms": 116656,
+    "cost_usd": 0.9425980000000003,
     "reading": {
-      "reference_bytes": 15240,
-      "reference_lines": 122,
+      "reference_bytes": 86201,
+      "reference_lines": 714,
       "catalog_opened": true,
       "catalog_entries_read": [
-        "OPT81"
+        "OPT81",
+        "OPT52"
       ],
+      "unattributed_calls": 0,
       "reference_files": [
         {
           "path": "optimization-patterns.md",
-          "bytes": 15240,
-          "lines": 122,
-          "calls": 1
+          "bytes": 75945,
+          "lines": 560,
+          "calls": 7
+        },
+        {
+          "path": "adversarial-review-rubric.md",
+          "bytes": 10256,
+          "lines": 154,
+          "calls": 4
         }
       ],
       "session": {
-        "wall_s": 41.6,
-        "input_tokens": 314676,
-        "output_tokens": 3013,
+        "wall_s": 117.5,
+        "input_tokens": 809986,
+        "output_tokens": 13052,
         "result_events": 1,
-        "subagents": 0
+        "subagents": 2
       }
     },
     "checks": [
@@ -119,7 +136,7 @@
       {
         "name": "read-some-reference-material",
         "passed": true,
-        "detail": "reference_bytes=15240"
+        "detail": "reference_bytes=86201"
       },
       {
         "name": "read-the-opt81-catalog-entry",
@@ -133,38 +150,37 @@
     "name": "quality-review-opt81",
     "run": 3,
     "passed": true,
-    "tool_calls": 19,
-    "input_tokens": 60112,
-    "output_tokens": 1215,
-    "duration_ms": 13742,
-    "cost_usd": 1.1744770000000002,
+    "tool_calls": 23,
+    "input_tokens": 65358,
+    "output_tokens": 1543,
+    "duration_ms": 15910,
+    "cost_usd": 1.1844248000000002,
     "reading": {
-      "reference_bytes": 74176,
-      "reference_lines": 1012,
+      "reference_bytes": 74628,
+      "reference_lines": 887,
       "catalog_opened": true,
       "catalog_entries_read": [
-        "OPT81",
-        "OPT52",
-        "OPT82"
+        "OPT81"
       ],
+      "unattributed_calls": 0,
       "reference_files": [
         {
           "path": "optimization-patterns.md",
-          "bytes": 42398,
-          "lines": 647,
-          "calls": 7
+          "bytes": 42540,
+          "lines": 383,
+          "calls": 6
         },
         {
           "path": "adversarial-review-rubric.md",
-          "bytes": 31778,
-          "lines": 365,
-          "calls": 6
+          "bytes": 32088,
+          "lines": 504,
+          "calls": 3
         }
       ],
       "session": {
-        "wall_s": 141.6,
-        "input_tokens": 848381,
-        "output_tokens": 15096,
+        "wall_s": 149.1,
+        "input_tokens": 915151,
+        "output_tokens": 18419,
         "result_events": 3,
         "subagents": 2
       }
@@ -188,7 +204,7 @@
       {
         "name": "read-some-reference-material",
         "passed": true,
-        "detail": "reference_bytes=74176"
+        "detail": "reference_bytes=74628"
       },
       {
         "name": "read-the-opt81-catalog-entry",
@@ -203,35 +219,39 @@
     "run": 4,
     "passed": true,
     "tool_calls": 9,
-    "input_tokens": 423082,
-    "output_tokens": 3794,
-    "duration_ms": 53980,
-    "cost_usd": 0.506518,
+    "input_tokens": 428362,
+    "output_tokens": 3671,
+    "duration_ms": 46283,
+    "cost_usd": 0.4102546,
     "reading": {
-      "reference_bytes": 22716,
-      "reference_lines": 220,
+      "reference_bytes": 30540,
+      "reference_lines": 519,
       "catalog_opened": true,
       "catalog_entries_read": [
-        "OPT81"
+        "OPT81",
+        "OPT52",
+        "OPT53",
+        "OPT54",
+        "OPT55",
+        "OPT56",
+        "OPT57",
+        "OPT58",
+        "OPT59",
+        "OPT60"
       ],
+      "unattributed_calls": 0,
       "reference_files": [
         {
           "path": "optimization-patterns.md",
-          "bytes": 13303,
-          "lines": 110,
-          "calls": 2
-        },
-        {
-          "path": "adversarial-review-rubric.md",
-          "bytes": 9413,
-          "lines": 110,
-          "calls": 2
+          "bytes": 30540,
+          "lines": 519,
+          "calls": 3
         }
       ],
       "session": {
-        "wall_s": 54.7,
-        "input_tokens": 423082,
-        "output_tokens": 3794,
+        "wall_s": 47.0,
+        "input_tokens": 428362,
+        "output_tokens": 3671,
         "result_events": 1,
         "subagents": 0
       }
@@ -255,7 +275,7 @@
       {
         "name": "read-some-reference-material",
         "passed": true,
-        "detail": "reference_bytes=22716"
+        "detail": "reference_bytes=30540"
       },
       {
         "name": "read-the-opt81-catalog-entry",
@@ -269,42 +289,39 @@
     "name": "quality-review-opt81",
     "run": 5,
     "passed": true,
-    "tool_calls": 21,
-    "input_tokens": 67027,
-    "output_tokens": 1314,
-    "duration_ms": 13042,
-    "cost_usd": 1.1528695999999998,
+    "tool_calls": 22,
+    "input_tokens": 424277,
+    "output_tokens": 5830,
+    "duration_ms": 130892,
+    "cost_usd": 1.0194294,
     "reading": {
-      "reference_bytes": 53015,
-      "reference_lines": 813,
+      "reference_bytes": 70043,
+      "reference_lines": 765,
       "catalog_opened": true,
       "catalog_entries_read": [
         "OPT81",
-        "OPT52",
-        "OPT53",
-        "OPT54",
-        "OPT55",
-        "OPT56"
+        "OPT60"
       ],
+      "unattributed_calls": 0,
       "reference_files": [
         {
-          "path": "optimization-patterns.md",
-          "bytes": 41800,
-          "lines": 634,
-          "calls": 3
+          "path": "adversarial-review-rubric.md",
+          "bytes": 41439,
+          "lines": 550,
+          "calls": 6
         },
         {
-          "path": "adversarial-review-rubric.md",
-          "bytes": 11215,
-          "lines": 179,
-          "calls": 3
+          "path": "optimization-patterns.md",
+          "bytes": 28604,
+          "lines": 215,
+          "calls": 5
         }
       ],
       "session": {
-        "wall_s": 111.0,
-        "input_tokens": 935507,
-        "output_tokens": 14065,
-        "result_events": 3,
+        "wall_s": 131.6,
+        "input_tokens": 803601,
+        "output_tokens": 15866,
+        "result_events": 1,
         "subagents": 2
       }
     },
@@ -327,7 +344,7 @@
       {
         "name": "read-some-reference-material",
         "passed": true,
-        "detail": "reference_bytes=53015"
+        "detail": "reference_bytes=70043"
       },
       {
         "name": "read-the-opt81-catalog-entry",
