@@ -3100,13 +3100,13 @@ title_template: "Every pull request pays for coverage that could run after merge
 
 **Detection heuristic** (manual; read, never inferred):
 
-1. A `pull_request`-triggered workflow on the merge path runs a matrix of several OS, runtime or configuration legs, or a heavyweight suite, and it is on the long pole or a large share of the PR's runner minutes.
-2. In run history, a leg rarely fails on its own: when it fails, a cheaper leg (the newest and oldest supported runtime, the main OS) usually fails on the same run. A leg that often fails alone is catching something the subset would miss, and stays on the PR path.
+1. A `pull_request`-triggered workflow on the merge path runs a matrix of several OS, runtime or configuration legs, or a heavyweight suite, and it is on the long pole or a large share of the PR's runner minutes. A PR path that already runs a small subset while the wide matrix runs after merge or on a schedule is the recommended shape, not an instance.
+2. In run history, count each leg's leg-unique failures: runs where that leg failed and every other leg passed, ignoring skipped legs and the aggregator job that only reports the others' results. Use a window long enough to cover normal PR traffic, not the last few hours. A leg with no leg-unique failures is a candidate to move. A leg that does fail alone is catching something no other leg catches (a subset on one OS cannot stand in for another OS); moving it means finding those failures after merge instead, which is the team's call to make with the count in hand.
 3. The repo can host the rest after merge: a `push` trigger on the default branch, a merge queue, or a `schedule`.
 
 **Fix recipe**:
 
-1. Choose the PR subset from the data in step 2: typically the oldest and newest supported runtime on the main OS, plus any leg that fails alone.
+1. Choose the PR subset from the data in step 2: typically the oldest and newest supported runtime on the main OS, plus any leg the team keeps because it fails alone. The subset can be empty for a class of check another required workflow already covers on PRs.
 2. Move the remaining legs to a workflow that runs on `push` to the default branch (and `workflow_dispatch`), on a merge queue, or on a `schedule`, so they run against the merged tree.
 3. Keep one required status check on the PR path so branch protection stays simple, and do not leave a moved job listed as required, or PRs will wait on a check that never runs.
 4. Make a red post-merge run impossible to miss: it notifies an owner, and it blocks a release.
@@ -3117,8 +3117,8 @@ title_template: "Every pull request pays for coverage that could run after merge
 
 **Real-world example (OpenAI)**, their numbers, not a forecast for your repo:
 
-- openai/codex [#16072](https://github.com/openai/codex/pull/16072) (2026-03-28) split the Rust checks into a PR-time workflow and "a full post-merge Cargo workflow", because the old one "made every PR pay for the full Cargo matrix even though most of that coverage is better treated as post-merge verification". No timing was published.
-- openai/openai-python [#3537](https://github.com/openai/openai-python/pull/3537) (2026-07-24): "test the minimum/current runtimes on normal CI and the full supported matrix on a schedule". No timing was published.
+- openai/codex [#16072](https://github.com/openai/codex/pull/16072) (2026-03-28) split the Rust checks into a PR-time workflow and "a full post-merge Cargo workflow", because the old one "made every PR pay for the full Cargo matrix even though most of that coverage is better treated as post-merge verification". The PR-time workflow kept no compile or test legs, because a separate workflow already ran build and test on every PR. No timing was published.
+- openai/openai-python [#3537](https://github.com/openai/openai-python/pull/3537) (2026-07-24) adopted this shape when it added version coverage: "test the minimum/current runtimes on normal CI and the full supported matrix on a schedule". The full matrix was new, so this is the recommended shape rather than a measured saving; no timing was published.
 - openai/codex [#20585](https://github.com/openai/codex/pull/20585) (2026-05-01): "pull requests get the fast Windows cross-compiled Bazel test leg, while post-merge pushes to `main` run both that fast cross leg and a fully native Windows Bazel test leg". The PR reports a native Windows test "in about 28m12s" against the cross-compiled PR leg's "Windows test 9m16s". That gain comes from two changes the PR does not separate (cross-compiling, [OPT89](#opt89--the-slowest-platform-compiles-its-own-tests), and moving the native run after merge), so none of it is a number for this pattern alone.
 
 **Risk**: **MEDIUM**. A regression can reach the default branch before the post-merge run catches it; the guardrail keeps that visible and short.
@@ -4459,8 +4459,8 @@ title_template: "The compile is the long pole and nobody profiled it"
 **Detection heuristic** (manual; read, never inferred):
 
 1. The long pole's dominant step is a compile or build step.
-2. The cache is not the problem: dependencies are restored, and the slow part is compiling the project's own code or the final optimized link.
-3. The compiler's timing report has not been run on it, or it names one dominant item: for Rust, `cargo build --timings` (per crate) and `-Z time-passes` (per compiler pass, nightly); for TypeScript, `tsc --extendedDiagnostics` or `--generateTrace`; for C and C++, Clang's `-ftime-trace`.
+2. The cache is not the explanation: dependencies are restored, or the job builds clean by design (a release build), and the slow part is compiling the project's own code or the final optimized link.
+3. Nobody has read the compiler's timing report for this job (a report CI already produces but nobody examines counts as unread; check the workflow for it and whether its artifact survives), or the report names one dominant item: for Rust, `cargo build --timings` (per crate) and `-Z time-passes` (per compiler pass, nightly); for TypeScript, `tsc --extendedDiagnostics` or `--generateTrace`; for C and C++, Clang's `-ftime-trace`.
 
 **Fix recipe**:
 
@@ -4475,7 +4475,7 @@ title_template: "The compile is the long pole and nobody profiled it"
 
 **Real-world example (OpenAI)**, their numbers, not a forecast for your repo:
 
-- openai/codex [#23710](https://github.com/openai/codex/pull/23710) (2026-06-04): "switching from fat LTO to ThinLTO (`3/thin/1`) reduced a clean `codex-cli` release build from 2073.893 seconds to 1243.172 seconds, a 40.06% improvement". The trade was measured too: "The resulting binary increased from 196.7 MiB to 211.8 MiB (+7.63%)", and "the worst image workload median was +0.86%". The PR does not say where the build was timed.
+- openai/codex [#23710](https://github.com/openai/codex/pull/23710) (2026-06-04): "switching from fat LTO to ThinLTO (`3/thin/1`) reduced a clean `codex-cli` release build from 2073.893 seconds to 1243.172 seconds, a 40.06% improvement". In codex's release CI, only the Windows builds still used fat LTO at the time; the rest already used ThinLTO. The trade was measured too: "The resulting binary increased from 196.7 MiB to 211.8 MiB (+7.63%)", and "the worst image workload median was +0.86%". The PR does not say where the build was timed.
 - openai/codex [#16630](https://github.com/openai/codex/pull/16630) (2026-04-02): the hotspot was "a large compile-time tax from `#[async_trait]` on every concrete handler impl". Replacing it with native async functions took "a clean `codex-core` package rebuild" from "**187.15s to 68.98s**" in rustc's `total`, profiled with `cargo +nightly build -p codex-core --lib -Z unstable-options --timings=json` and `-Z time-passes`; the PR links no CI run for these numbers.
 
 **Risk**: **MEDIUM**. A profile setting trades build time against runtime and size; the guardrail requires measuring both.
