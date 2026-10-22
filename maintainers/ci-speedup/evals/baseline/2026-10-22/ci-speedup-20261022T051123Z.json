@@ -1,0 +1,237 @@
+[
+  {
+    "id": 13,
+    "name": "no-catalog-read-needed",
+    "run": 1,
+    "passed": true,
+    "tool_calls": 4,
+    "input_tokens": 170911,
+    "output_tokens": 1689,
+    "duration_ms": 29841,
+    "cost_usd": 0.29987080000000005,
+    "reading": {
+      "reference_bytes": 0,
+      "reference_lines": 0,
+      "catalog_opened": false,
+      "catalog_entries_read": [],
+      "reference_files": [],
+      "session": {
+        "wall_s": 30.5,
+        "input_tokens": 170911,
+        "output_tokens": 1689,
+        "result_events": 1,
+        "subagents": 0
+      }
+    },
+    "checks": [
+      {
+        "name": "ci-speedup-skill-invoked",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "data-pass-ran",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "states-the-measured-wait",
+        "passed": true,
+        "detail": "found"
+      },
+      {
+        "name": "names-the-slowest-job",
+        "passed": true,
+        "detail": "found"
+      }
+    ]
+  },
+  {
+    "id": 13,
+    "name": "no-catalog-read-needed",
+    "run": 2,
+    "passed": true,
+    "tool_calls": 4,
+    "input_tokens": 171067,
+    "output_tokens": 1542,
+    "duration_ms": 28854,
+    "cost_usd": 0.2972194,
+    "reading": {
+      "reference_bytes": 0,
+      "reference_lines": 0,
+      "catalog_opened": false,
+      "catalog_entries_read": [],
+      "reference_files": [],
+      "session": {
+        "wall_s": 29.5,
+        "input_tokens": 171067,
+        "output_tokens": 1542,
+        "result_events": 1,
+        "subagents": 0
+      }
+    },
+    "checks": [
+      {
+        "name": "ci-speedup-skill-invoked",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "data-pass-ran",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "states-the-measured-wait",
+        "passed": true,
+        "detail": "found"
+      },
+      {
+        "name": "names-the-slowest-job",
+        "passed": true,
+        "detail": "found"
+      }
+    ]
+  },
+  {
+    "id": 13,
+    "name": "no-catalog-read-needed",
+    "run": 3,
+    "passed": true,
+    "tool_calls": 4,
+    "input_tokens": 176450,
+    "output_tokens": 1558,
+    "duration_ms": 18894,
+    "cost_usd": 0.2990138,
+    "reading": {
+      "reference_bytes": 0,
+      "reference_lines": 0,
+      "catalog_opened": false,
+      "catalog_entries_read": [],
+      "reference_files": [],
+      "session": {
+        "wall_s": 20.6,
+        "input_tokens": 176450,
+        "output_tokens": 1558,
+        "result_events": 1,
+        "subagents": 0
+      }
+    },
+    "checks": [
+      {
+        "name": "ci-speedup-skill-invoked",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "data-pass-ran",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "states-the-measured-wait",
+        "passed": true,
+        "detail": "found"
+      },
+      {
+        "name": "names-the-slowest-job",
+        "passed": true,
+        "detail": "found"
+      }
+    ]
+  },
+  {
+    "id": 13,
+    "name": "no-catalog-read-needed",
+    "run": 4,
+    "passed": true,
+    "tool_calls": 4,
+    "input_tokens": 170618,
+    "output_tokens": 1655,
+    "duration_ms": 30681,
+    "cost_usd": 0.2980402,
+    "reading": {
+      "reference_bytes": 0,
+      "reference_lines": 0,
+      "catalog_opened": false,
+      "catalog_entries_read": [],
+      "reference_files": [],
+      "session": {
+        "wall_s": 31.4,
+        "input_tokens": 170618,
+        "output_tokens": 1655,
+        "result_events": 1,
+        "subagents": 0
+      }
+    },
+    "checks": [
+      {
+        "name": "ci-speedup-skill-invoked",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "data-pass-ran",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "states-the-measured-wait",
+        "passed": true,
+        "detail": "found"
+      },
+      {
+        "name": "names-the-slowest-job",
+        "passed": true,
+        "detail": "found"
+      }
+    ]
+  },
+  {
+    "id": 13,
+    "name": "no-catalog-read-needed",
+    "run": 5,
+    "passed": true,
+    "tool_calls": 5,
+    "input_tokens": 213292,
+    "output_tokens": 2015,
+    "duration_ms": 42348,
+    "cost_usd": 0.3282906,
+    "reading": {
+      "reference_bytes": 0,
+      "reference_lines": 0,
+      "catalog_opened": false,
+      "catalog_entries_read": [],
+      "reference_files": [],
+      "session": {
+        "wall_s": 43.0,
+        "input_tokens": 213292,
+        "output_tokens": 2015,
+        "result_events": 1,
+        "subagents": 0
+      }
+    },
+    "checks": [
+      {
+        "name": "ci-speedup-skill-invoked",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "data-pass-ran",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "states-the-measured-wait",
+        "passed": true,
+        "detail": "found"
+      },
+      {
+        "name": "names-the-slowest-job",
+        "passed": true,
+        "detail": "found"
+      }
+    ]
+  }
+]

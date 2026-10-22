@@ -155,7 +155,7 @@ def summarize(evs: list[dict], skill: str, names: list[str] | None = None,
                 f = files.setdefault(p, {"path": p, "bytes": 0, "lines": 0, "calls": 0})
                 f["bytes"], f["lines"], f["calls"] = f["bytes"] + size, f["lines"] + lines, f["calls"] + 1
                 if Path(p).name == CATALOG:
-                    entries += [i for i in _HEADING.findall(body) if i not in entries]
+                    entries += [i for i in dict.fromkeys(_HEADING.findall(body)) if i not in entries]
     rows = sorted(files.values(), key=lambda f: -f["bytes"])
     return {"reference_bytes": sum(f["bytes"] for f in rows),
             "reference_lines": sum(f["lines"] for f in rows),

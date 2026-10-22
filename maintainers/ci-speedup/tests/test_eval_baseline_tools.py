@@ -44,5 +44,5 @@ def test_the_summary_reports_medians_ranges_and_not_run_sessions():
                             "session": {"input_tokens": 1000 + b, "wall_s": 60.0}}}
     out = summary.summarize([run(0, False), run(200, True), run(400, True),
                              {"id": 11, "run": 4, "harness_error": "x"}])
-    assert "| 11 | `q` | 4 | 2 | 1 | 200 (0 to 400) | 2 (0 to 4) | 2/3 | 1,200 (1,000 to 1,400) |" in out
+    assert "| 11 | `q` | 4 | 2 | 1 | 200 (0 to 400) | 0 (0 to 0) | 2 (0 to 4) | 2/3 | 1,200 (1,000 to 1,400) |" in out
     assert "| 11 | `c` | 2/3 |" in out

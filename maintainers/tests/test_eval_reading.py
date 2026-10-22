@@ -96,6 +96,12 @@ def test_another_install_of_the_same_skill_is_not_the_one_under_test():
     assert [(f["path"], f["bytes"]) for f in r["reference_files"]] == [("gap-fill.md", 7)]
 
 
+def test_a_heading_seen_twice_in_one_result_is_one_entry():
+    evs = [_call(1, "Bash", {"command": f"grep -n -A2 'OPT81 —' {_ROOT}/references/optimization-patterns.md"}),
+           _result(1, _ENTRY + "\n" + _ENTRY)]
+    assert reading.summarize(evs, "ci-speedup")["catalog_entries_read"] == ["OPT81"]
+
+
 def test_the_word_references_in_prose_is_not_a_read():
     evs = [_call(1, "Bash", {"command": f"grep -n 'references' {_ROOT}/SKILL.md"}), _result(1, "x" * 400)]
     assert reading.summarize(evs, "ci-speedup", _NAMES)["reference_bytes"] == 0

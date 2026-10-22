@@ -88,7 +88,10 @@ A 2 is a coverage gap, never a behaviour change.
 ## Cost
 
 About $0.40 to $0.65 and 30 to 95 seconds per run (measured on claude 2.1.307
-locally and the pinned 2.1.235 in CI).
+locally and the pinned 2.1.235 in CI). In the 2026-10-22 baseline: $0.28 to
+$0.48 and 20 to 55 seconds for entries 6, 10, 12 and 13; $0.43 to $1.25 and
+42 to 142 seconds for entry 11, which may start two review subagents. One run
+of all five entries is about $2.30.
 Tokens, duration and cost per run are printed and written to
 `skill-eval-results/` at the repo root (gitignored); failing sessions are kept
 in `skill-eval-logs/`.

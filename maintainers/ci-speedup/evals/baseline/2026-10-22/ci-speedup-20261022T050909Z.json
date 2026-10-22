@@ -1,0 +1,285 @@
+[
+  {
+    "id": 12,
+    "name": "gap-fill-coverage-lookup",
+    "run": 1,
+    "passed": true,
+    "tool_calls": 3,
+    "input_tokens": 134358,
+    "output_tokens": 1503,
+    "duration_ms": 22489,
+    "cost_usd": 0.2823898,
+    "reading": {
+      "reference_bytes": 6549,
+      "reference_lines": 33,
+      "catalog_opened": true,
+      "catalog_entries_read": [
+        "OPT86"
+      ],
+      "reference_files": [
+        {
+          "path": "optimization-patterns.md",
+          "bytes": 3668,
+          "lines": 24,
+          "calls": 2
+        },
+        {
+          "path": "gap-fill.md",
+          "bytes": 2881,
+          "lines": 9,
+          "calls": 1
+        }
+      ],
+      "session": {
+        "wall_s": 23.1,
+        "input_tokens": 134358,
+        "output_tokens": 1503,
+        "result_events": 1,
+        "subagents": 0
+      }
+    },
+    "checks": [
+      {
+        "name": "ci-speedup-skill-invoked",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "names-opt86",
+        "passed": true,
+        "detail": "found"
+      },
+      {
+        "name": "read-some-reference-material",
+        "passed": true,
+        "detail": "reference_bytes=6549"
+      }
+    ]
+  },
+  {
+    "id": 12,
+    "name": "gap-fill-coverage-lookup",
+    "run": 2,
+    "passed": true,
+    "tool_calls": 3,
+    "input_tokens": 143723,
+    "output_tokens": 1614,
+    "duration_ms": 19658,
+    "cost_usd": 0.3285092,
+    "reading": {
+      "reference_bytes": 20705,
+      "reference_lines": 89,
+      "catalog_opened": true,
+      "catalog_entries_read": [
+        "OPT86"
+      ],
+      "reference_files": [
+        {
+          "path": "optimization-patterns.md",
+          "bytes": 13462,
+          "lines": 69,
+          "calls": 2
+        },
+        {
+          "path": "gap-fill.md",
+          "bytes": 7243,
+          "lines": 20,
+          "calls": 1
+        }
+      ],
+      "session": {
+        "wall_s": 20.3,
+        "input_tokens": 143723,
+        "output_tokens": 1614,
+        "result_events": 1,
+        "subagents": 0
+      }
+    },
+    "checks": [
+      {
+        "name": "ci-speedup-skill-invoked",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "names-opt86",
+        "passed": true,
+        "detail": "found"
+      },
+      {
+        "name": "read-some-reference-material",
+        "passed": true,
+        "detail": "reference_bytes=20705"
+      }
+    ]
+  },
+  {
+    "id": 12,
+    "name": "gap-fill-coverage-lookup",
+    "run": 3,
+    "passed": true,
+    "tool_calls": 3,
+    "input_tokens": 137654,
+    "output_tokens": 1899,
+    "duration_ms": 21441,
+    "cost_usd": 0.3110384,
+    "reading": {
+      "reference_bytes": 13811,
+      "reference_lines": 72,
+      "catalog_opened": true,
+      "catalog_entries_read": [],
+      "reference_files": [
+        {
+          "path": "optimization-patterns.md",
+          "bytes": 10023,
+          "lines": 59,
+          "calls": 2
+        },
+        {
+          "path": "gap-fill.md",
+          "bytes": 3788,
+          "lines": 13,
+          "calls": 1
+        }
+      ],
+      "session": {
+        "wall_s": 22.1,
+        "input_tokens": 137654,
+        "output_tokens": 1899,
+        "result_events": 1,
+        "subagents": 0
+      }
+    },
+    "checks": [
+      {
+        "name": "ci-speedup-skill-invoked",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "names-opt86",
+        "passed": true,
+        "detail": "found"
+      },
+      {
+        "name": "read-some-reference-material",
+        "passed": true,
+        "detail": "reference_bytes=13811"
+      }
+    ]
+  },
+  {
+    "id": 12,
+    "name": "gap-fill-coverage-lookup",
+    "run": 4,
+    "passed": true,
+    "tool_calls": 3,
+    "input_tokens": 137422,
+    "output_tokens": 1737,
+    "duration_ms": 23730,
+    "cost_usd": 0.30782220000000005,
+    "reading": {
+      "reference_bytes": 14227,
+      "reference_lines": 72,
+      "catalog_opened": true,
+      "catalog_entries_read": [
+        "OPT86"
+      ],
+      "reference_files": [
+        {
+          "path": "optimization-patterns.md",
+          "bytes": 11065,
+          "lines": 47,
+          "calls": 2
+        },
+        {
+          "path": "gap-fill.md",
+          "bytes": 3162,
+          "lines": 25,
+          "calls": 1
+        }
+      ],
+      "session": {
+        "wall_s": 24.4,
+        "input_tokens": 137422,
+        "output_tokens": 1737,
+        "result_events": 1,
+        "subagents": 0
+      }
+    },
+    "checks": [
+      {
+        "name": "ci-speedup-skill-invoked",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "names-opt86",
+        "passed": true,
+        "detail": "found"
+      },
+      {
+        "name": "read-some-reference-material",
+        "passed": true,
+        "detail": "reference_bytes=14227"
+      }
+    ]
+  },
+  {
+    "id": 12,
+    "name": "gap-fill-coverage-lookup",
+    "run": 5,
+    "passed": true,
+    "tool_calls": 4,
+    "input_tokens": 178684,
+    "output_tokens": 1611,
+    "duration_ms": 31357,
+    "cost_usd": 0.3100678,
+    "reading": {
+      "reference_bytes": 11027,
+      "reference_lines": 62,
+      "catalog_opened": true,
+      "catalog_entries_read": [
+        "OPT86"
+      ],
+      "reference_files": [
+        {
+          "path": "optimization-patterns.md",
+          "bytes": 7761,
+          "lines": 36,
+          "calls": 2
+        },
+        {
+          "path": "gap-fill.md",
+          "bytes": 3266,
+          "lines": 26,
+          "calls": 2
+        }
+      ],
+      "session": {
+        "wall_s": 32.1,
+        "input_tokens": 178684,
+        "output_tokens": 1611,
+        "result_events": 1,
+        "subagents": 0
+      }
+    },
+    "checks": [
+      {
+        "name": "ci-speedup-skill-invoked",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "names-opt86",
+        "passed": true,
+        "detail": "found"
+      },
+      {
+        "name": "read-some-reference-material",
+        "passed": true,
+        "detail": "reference_bytes=11027"
+      }
+    ]
+  }
+]

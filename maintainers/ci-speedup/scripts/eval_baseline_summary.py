@@ -16,6 +16,8 @@ import statistics
 import sys
 from pathlib import Path
 
+CATALOG = "optimization-patterns.md"
+
 
 def _span(vals: list[float], fmt=lambda v: f"{v:,.0f}") -> str:
     if not vals:
@@ -27,17 +29,20 @@ def summarize(rows: list[dict]) -> str:
     cases: dict[int, list[dict]] = {}
     for r in rows:
         cases.setdefault(r.get("id"), []).append(r)
-    head = ("| id | case | runs | passed | not run | reference bytes | reference files | "
-            "catalog opened | input tokens | wall time (s) |\n|---|---|---|---|---|---|---|---|---|---|")
+    head = ("| id | case | runs | passed | not run | reference bytes | of which catalog | "
+            "reference files | catalog opened | input tokens | wall time (s) |\n"
+            "|---|---|---|---|---|---|---|---|---|---|---|")
     lines, checks = [head], []
     for cid in sorted(cases, key=lambda i: (i is None, i)):
         rs = cases[cid]
         ran = [r for r in rs if "reading" in r]
         name = next((r.get("name") for r in ran if r.get("name")), "?")
         rd = [r["reading"] for r in ran]
-        lines.append("| {} | `{}` | {} | {} | {} | {} | {} | {}/{} | {} | {} |".format(
+        lines.append("| {} | `{}` | {} | {} | {} | {} | {} | {} | {}/{} | {} | {} |".format(
             cid, name, len(rs), sum(1 for r in ran if r.get("passed")), len(rs) - len(ran),
             _span([x["reference_bytes"] for x in rd]),
+            _span([sum(f["bytes"] for f in x["reference_files"]
+                       if f.get("path", "").endswith(CATALOG)) for x in rd]),
             _span([len(x["reference_files"]) for x in rd]),
             sum(1 for x in rd if x["catalog_opened"]), len(rd),
             _span([x["session"]["input_tokens"] for x in rd]),
