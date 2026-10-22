@@ -1710,6 +1710,8 @@ title_template: "Unnecessary `needs:` Dependencies"
 
 **Fix**: Remove `needs:` unless the job genuinely requires outputs from the dependency, or the dependency is a gate (e.g., lint must pass before deploy).
 
+**When a `needs:` edge is the right call**: a cheap check job in front of expensive jobs (lint, pre-commit, a format or type check, a lockfile check) trades the check's own duration in wall clock for the runner minutes saved whenever it fails, because the expensive jobs never start. OPT21 does not flag a wait on a check-only gate: a job is skipped only when every job it needs is check-only (every step is setup such as checkout, `setup-*`, cache or a dependency install, or a recognised check command; no outputs, artifacts, services, container, environment or `continue-on-error`; nothing that builds, tests, deploys or publishes), and the waiting job does not run regardless of the result (`always()`, `failure()`, `cancelled()`). Anything the detector cannot classify is still flagged. To make a gate cheaper, keep it short: it adds its full duration to every PR's wait.
+
 ---
 
 ---

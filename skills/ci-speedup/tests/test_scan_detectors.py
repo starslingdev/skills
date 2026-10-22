@@ -436,6 +436,213 @@ jobs:
     assert "OPT21" not in _scan_one(tmp_path, neg)
 
 
+# --- OPT21 cheap-gate carve-out ---------------------------------------------
+# A job that `needs:` a check-only job (lint / pre-commit / format / lockfile
+# check) is a deliberate cheap gate: the expensive job never starts when the
+# cheap check fails. OPT21 must not flag (and so must not credit) that wait.
+# Every needed job has to be a check-only gate; anything the vocabulary cannot
+# classify keeps the finding (fail closed).
+
+def _opt21_jobs(tmp_path: Path, content: str) -> list[str]:
+    _write_workflow(tmp_path, "ci.yml", content)
+    return sorted(j for f in _scan(tmp_path)["findings"]
+                  if f["pattern"] == "OPT21" for j in f["affected_jobs"])
+
+
+def test_opt21_not_flagged_on_a_pre_commit_gate(tmp_path: Path):
+    # openai/whisper test.yml shape: the matrix test job waits on a job that
+    # only runs `pre-commit run --all-files`.
+    content = """name: test
+on: [push, pull_request]
+jobs:
+  pre-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch base branch
+        run: git fetch origin ${{ github.base_ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - name: Get pip cache dir
+        id: pip-cache
+        run: |
+          echo "dir=$(pip cache dir)" >> $GITHUB_OUTPUT
+      - name: pip/pre-commit cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ hashFiles('**/.pre-commit-config.yaml') }}
+      - name: pre-commit
+        run: |
+          pip install --upgrade pre-commit
+          pre-commit install --install-hooks
+          pre-commit run --all-files
+  whisper-test:
+    needs: pre-commit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip3 install .["dev"]
+      - run: pytest -vv
+"""
+    assert _opt21_jobs(tmp_path, content) == []
+
+
+def test_opt21_not_flagged_on_a_lockfile_check_gate(tmp_path: Path):
+    # openai/openai-python ci.yml shape: lint, build and test all wait on a
+    # short `dependency-locks` job that only verifies the lockfile.
+    content = """name: CI
+on: [push, pull_request]
+jobs:
+  dependency-locks:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify dependency source provenance before installing tools
+        run: |
+          python -I -c 'import tomllib, pathlib; assert tomllib.loads(pathlib.Path("uv.lock").read_text())'
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+      - name: Verify dependency groups and committed lock
+        run: |
+          uv run --no-project python -c 'import tomllib'
+          uv lock --check
+  lint:
+    needs: dependency-locks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: uv sync --locked
+      - run: ./scripts/lint
+  build:
+    needs: dependency-locks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/build
+  test:
+    needs: dependency-locks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/test
+"""
+    assert _opt21_jobs(tmp_path, content) == []
+
+
+_OPT21_LINT_GATE = """  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+      - run: npm ci
+      - run: npm run lint
+"""
+
+
+@pytest.mark.parametrize("dep_job", [
+    pytest.param("""  dep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - run: npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist
+""", id="build-job-uploading-an-unused-artifact"),
+    pytest.param("""  dep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install -e .
+      - run: pytest
+""", id="test-job"),
+    pytest.param("""  dep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/do-something
+""", id="unclassifiable-step"),
+    pytest.param("""  dep:
+    runs-on: ubuntu-latest
+    outputs:
+      ok: ${{ steps.l.outputs.ok }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: l
+        run: npm run lint
+""", id="gate-declaring-outputs"),
+    pytest.param("""  dep:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm run lint
+""", id="gate-that-cannot-fail"),
+])
+def test_opt21_still_flags_a_wait_on_a_non_gate(tmp_path: Path, dep_job: str):
+    content = ("name: CI\non: pull_request\njobs:\n" + dep_job +
+               """  e2e:
+    needs: dep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm test
+""")
+    assert _opt21_jobs(tmp_path, content) == ["e2e"]
+
+
+def test_opt21_still_flags_a_job_needing_a_gate_and_an_unused_build(tmp_path: Path):
+    content = ("name: CI\non: pull_request\njobs:\n" + _OPT21_LINT_GATE +
+               """  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - run: npm run build
+  e2e:
+    needs: [lint, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm test
+""")
+    assert _opt21_jobs(tmp_path, content) == ["e2e"]
+
+
+def test_opt21_still_flags_a_gate_wait_the_job_runs_through(tmp_path: Path):
+    # `if: always()` runs the job whether the gate passed or failed, so the
+    # edge gates nothing: it is pure ordering, still an OPT21 candidate.
+    content = ("name: CI\non: pull_request\njobs:\n" + _OPT21_LINT_GATE +
+               """  e2e:
+    needs: lint
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm test
+""")
+    assert _opt21_jobs(tmp_path, content) == ["e2e"]
+
+
+def test_opt21_not_flagged_on_a_lint_gate(tmp_path: Path):
+    content = ("name: CI\non: pull_request\njobs:\n" + _OPT21_LINT_GATE +
+               """  e2e:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm test
+""")
+    assert _opt21_jobs(tmp_path, content) == []
+
+
 def test_opt27_duplicate_setup_node(tmp_path: Path):
     pos = """name: CI
 on: push

@@ -1861,12 +1861,129 @@ def _detect_opt18(doc: dict, raw: str) -> list[Hit]:
 
 # ---- OPT21 — Unnecessary `needs:` Dependencies -------------------------------
 
+# Check-only gate vocabulary. A job that `needs:` ONLY check-only gates (a lint /
+# pre-commit / format / type-check / lockfile-check job) is a deliberate cheap
+# gate: the expensive job never starts when the cheap check fails, so OPT21 does
+# not flag it. The test is static and fails closed: a needed job is a gate only
+# when every step is recognised setup or a recognised check, at least one step
+# is a check, nothing builds / tests / deploys / publishes, and the job has no
+# outputs, services, container, environment, reusable `uses:` or
+# continue-on-error. Anything unrecognised keeps the finding.
+
+# Setup actions: checkout, any `setup-*` action, pnpm-style `action-setup`, cache.
+_OPT21_SETUP_USES_RE = re.compile(
+    r"^(?:actions/checkout|actions/cache(?:/restore)?|[\w.-]+/setup-[\w.-]+|"
+    r"[\w.-]+/action-setup)(?:@|$)", re.I)
+# Setup shell lines: dependency installs, fetches, step-output/env plumbing.
+_OPT21_SETUP_LINE_RE = re.compile(
+    r"^(?:(?:python3?\s+-m\s+)?pip3?\s+install\b|npm\s+(?:ci|install)\b|"
+    r"pnpm\s+install\b|yarn(?:\s+install)?\b(?!\s+\w)|bun\s+install\b|"
+    r"uv\s+(?:sync|pip\s+install)\b|poetry\s+install\b|bundle\s+install\b|"
+    r"go\s+mod\s+download\b|git\s+fetch\b|corepack\s+enable\b|"
+    r"pre-commit\s+install\b|"
+    r"echo\s.*>>\s*\"?\$\{?GITHUB_(?:OUTPUT|ENV|PATH)\b)", re.I)
+# Check shell lines: linters, formatters in check mode, type checkers,
+# lockfile checks. An optional runner prefix (`uv run`, `npx`, ...) is allowed.
+_OPT21_CHECK_LINE_RE = re.compile(
+    r"^(?:(?:uv\s+run|poetry\s+run|pipx\s+run|npx|pnpm\s+exec|yarn\s+exec|"
+    r"bunx|python3?\s+-m)\s+(?:--?[\w-]+(?:[= ]\S+)?\s+)*)?"
+    r"(?:pre-commit\s+run|prek\s+run|"
+    r"uv\s+lock\s+--(?:check|locked)|poetry\s+(?:check|lock\s+--check)|"
+    r"(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:lint|format[:-]check|fmt[:-]check|"
+    r"check[:-]format|typecheck|type-check|check[:-]types|lint:\S+)\b|"
+    r"\S*scripts/lint\b|make\s+(?:lint|check-format|format-check|fmt-check)\b|"
+    r"eslint|ruff\s+(?:check|format\s+--check)|flake8|pylint|black\s+--check|"
+    r"isort\s+(?:--check|-c)|prettier\s+(?:--check|-c)|mypy|pyright|"
+    r"tsc\s+--noEmit|actionlint|shellcheck|yamllint|markdownlint\S*|"
+    r"golangci-lint|gofmt\s+-l|cargo\s+fmt\b.*--check|cargo\s+clippy|"
+    r"stylelint|biome\s+(?:check|lint|ci)|codespell|typos|"
+    r"git\s+diff\s+--exit-code)\b", re.I)
+# A step NAMED as a check ("Verify ...", "Check ...", "Lint ...") counts as a
+# check even when its shell body is bespoke (openai-python's provenance check).
+_OPT21_CHECK_NAME_RE = re.compile(
+    r"^(?:check(?!\s*-?\s*out)|verify|validate|lint|ensure|require|assert|audit)\b",
+    re.I)
+# Anything that builds, tests, deploys or publishes disqualifies the job as a
+# gate, even inside a step whose name says "check".
+_OPT21_NOT_A_GATE_RE = re.compile(
+    r"\b(?:pytest|jest|vitest|mocha|playwright|cypress|tox|nox|"
+    r"(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:test|build|e2e|deploy|publish|release)|"
+    r"(?:cargo|go|dotnet|mvn|gradle|bazel|make)\s+(?:test|build|install|publish|"
+    r"deploy|run|package)|gradlew|mvnw|python3?\s+-m\s+build|"
+    r"docker\s+(?:build|push|compose)|buildx|twine|gh\s+release|kubectl|helm|"
+    r"terraform\s+apply|serverless|vercel|netlify|wrangler|deploy|publish|"
+    r"scripts/(?:build|test|deploy|release|publish))\b", re.I)
+# A dependent that runs whatever the gate's result (`always()`, `failure()`,
+# `cancelled()` in its `if:`) is not gated by it: the edge is pure ordering.
+_OPT21_RUNS_REGARDLESS_RE = re.compile(r"\b(?:always|failure|cancelled)\s*\(", re.I)
+
+
+def _opt21_run_lines(run: str) -> list[str]:
+    """The command lines of a `run:` body, comments, blanks and `set` dropped,
+    `&&`-chains split."""
+    out: list[str] = []
+    for ln in run.splitlines():
+        for part in re.split(r"&&|;", ln):
+            part = part.strip()
+            if part and not part.startswith("#") and not re.match(r"set\s+[-+]", part):
+                out.append(part)
+    return out
+
+
+def _opt21_step_kind(step: dict) -> str:
+    """'setup', 'check', or 'other' (unclassifiable: fail closed)."""
+    if step.get("continue-on-error") not in (None, False):
+        return "other"
+    uses = _uses(step)
+    run = _run(step)
+    if uses and not run:
+        return "setup" if _OPT21_SETUP_USES_RE.match(uses) else "other"
+    if not run or uses:
+        return "other"
+    if _OPT21_NOT_A_GATE_RE.search(run):
+        return "other"
+    if _OPT21_CHECK_NAME_RE.match(str(step.get("name") or "").strip()):
+        return "check"
+    lines = _opt21_run_lines(run)
+    if not lines:
+        return "other"
+    kinds = []
+    for ln in lines:
+        if _OPT21_CHECK_LINE_RE.match(ln):
+            kinds.append("check")
+        elif _OPT21_SETUP_LINE_RE.match(ln):
+            kinds.append("setup")
+        else:
+            return "other"
+    return "check" if "check" in kinds else "setup"
+
+
+def _opt21_is_check_only_gate(job: Any) -> bool:
+    """True when `job` is a check-only gate (see the vocabulary above)."""
+    if not isinstance(job, dict):
+        return False
+    if any(k in job for k in ("outputs", "services", "container", "environment", "uses")):
+        return False
+    if job.get("continue-on-error") not in (None, False):
+        return False
+    steps = _steps(job)
+    if not steps:
+        return False
+    kinds = [_opt21_step_kind(s) for s in steps]
+    return "other" not in kinds and "check" in kinds
+
+
 def _detect_opt21(doc: dict, raw: str) -> list[Hit]:
     """A job declares `needs:` but references no `needs.*.outputs` and downloads
     no artifact from the dependency (catalog OPT21 heuristic). Caveat in the
-    evidence: a pure-ordering gate (e.g. lint-before-deploy) is legitimate."""
+    evidence: a pure-ordering gate (e.g. lint-before-deploy) is legitimate.
+    A job whose every dependency is a check-only gate (lint, pre-commit,
+    format, type or lockfile check) is not flagged: that wait is a deliberate
+    cheap gate. Not flagged means not credited either; there is no held-back
+    record, since this is a verdict about the workflow, not a gap in reading it."""
     hits: list[Hit] = []
-    for job_name, job in _jobs_from_doc(doc).items():
+    jobs = _jobs_from_doc(doc)
+    for job_name, job in jobs.items():
         if not isinstance(job, dict):
             continue
         needs = job.get("needs")
@@ -1893,7 +2010,10 @@ def _detect_opt21(doc: dict, raw: str) -> list[Hit]:
             r"needs\.[\w-]+|needs\[\s*['\"][\w.-]+['\"]\s*\]|"
             r"(?:to|from)JSON\(\s*needs\s*\)|alls-green", job_text))
         downloads = any("download-artifact" in _uses(s) for s in _steps(job))
-        if not uses_outputs and not downloads:
+        cheap_gate = (
+            not _OPT21_RUNS_REGARDLESS_RE.search(str(job.get("if") or ""))
+            and all(_opt21_is_check_only_gate(jobs.get(str(n))) for n in needs))
+        if not uses_outputs and not downloads and not cheap_gate:
             hits.append(Hit(
                 # Anchor on THIS job's own `needs:`, not the file-global first
                 # match — a multi-job workflow has many `needs:` lines and the
