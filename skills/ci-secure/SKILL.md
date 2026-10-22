@@ -56,16 +56,10 @@ By default the skill operates on the current working directory.
    If it's not, ask the user for a path and `cd` there before continuing.
 2. Verify `.github/workflows/` exists. If it doesn't, stop and tell the
    user the repo has no GitHub Actions workflows to scan.
-3. If `gh auth status` succeeds AND the repo has a GitHub remote, derive
-   `owner/repo` from `git remote get-url origin` into **`REPO`** — the shell
-   variable Phase 2 expands, and what the four gh-gated checks above need.
-   The URL comes in two shapes; the command handling both is in
-   [references/troubleshooting.md](references/troubleshooting.md). Confirm
-   it is exactly `owner/repo` (one `/`, no scheme, no `.git` suffix) before
-   passing it; on any other shape leave `REPO` empty rather than passing it
-   on. If gh is unavailable, proceed: the scan runs without it and the report
-   says so — impostor-SHA reported as skipped, the two API-gated config facts
-   as UNMEASURED coverage gaps, never as passes.
+3. The gh-gated checks above need `owner/repo`. Do NOT carry it over in a
+   variable: Phase 2's block derives it itself, in its own shell. If gh is
+   unavailable, proceed: the report says so — impostor-SHA reported as
+   skipped, the two API-gated config facts as UNMEASURED, never as passes.
 
 ## Phase 2: Scan (one driver call)
 
@@ -77,10 +71,14 @@ By default the skill operates on the current working directory.
 ROOT="$(git rev-parse --show-toplevel)"
 SLUG="$(printf '%s' "$ROOT" | shasum | cut -c1-12)"
 FINDINGS="${TMPDIR:-/tmp}/ci-secure-findings-${SLUG}.json"
-# Phase 1 step 3's `owner/repo`, bound here because each phase runs in its own
-# shell; EMPTY skips the gh-gated checks rather than passing them. TWO tokens
-# on purpose — the one-token form is a zsh trap (references/troubleshooting.md).
-REPO="${REPO-}"
+# `owner/repo` for the gh-gated checks, derived HERE (each phase runs in its own
+# shell). An already-exported REPO wins; else origin, only if gh is authed and
+# it is GitHub-shaped (references/troubleshooting.md). EMPTY skips those checks,
+# never passes them. TWO tokens below on purpose: one token is a zsh trap.
+if [ -z "${REPO-}" ] && gh auth status >/dev/null 2>&1; then
+  REPO="$(git remote get-url origin 2>/dev/null | sed -E 's#^(https://([^@/]+@)?github\.com/|(ssh://)?git@github\.com[:/])##; s#/$##; s#\.git$##')"
+  printf '%s\n' "$REPO" | grep -Eqx '[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+' || REPO=""
+fi
 <ci-secure>/scripts/run.py --root "$ROOT" ${REPO:+--repo} ${REPO:+"$REPO"} --out "$FINDINGS"
 ```
 

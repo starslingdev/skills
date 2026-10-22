@@ -159,6 +159,17 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-10-22** — **The scan step now works out `owner/repo` itself, so the
+  two API-gated config facts (required-checks-skippable, fork-PR approval) and
+  the dormancy lookup actually run in a real session.** The repo was derived
+  while following one step and read back in the next, but each step runs in
+  its own shell, so it arrived empty: the scanner got no `--repo` and those
+  checks reported UNMEASURED on every run even with `gh` signed in. The scan
+  block now derives it in its own shell — only when `gh auth status`
+  succeeds, from a `github.com` origin in either the https or ssh shape, and
+  only when the result is exactly `owner/repo`; an explicitly exported `REPO`
+  still wins. The impostor-SHA check was not affected: it runs whenever `gh`
+  is signed in.
 - **2026-10-10** — **A self-repository action (`uses: $/path`, GitHub
   2026-07-30) run after a checkout of the fork's head now counts as fork code
   executed with privileges, exactly like a `./` action or a `run:` step.** A

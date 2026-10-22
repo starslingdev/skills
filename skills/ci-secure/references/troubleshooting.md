@@ -16,17 +16,22 @@ rules) — this file is the lookup table, not the contract.
 
 ## Deriving `owner/repo` from the remote
 
-Phase 1 passes `--repo owner/repo` when gh is authenticated. The remote URL
-comes in two shapes; this handles both:
+The Phase 2 block passes `--repo owner/repo` when gh is authenticated, and
+derives it in the SAME shell that runs the scan: shell variables do not
+survive between an agent's separate commands, so a `REPO` set while
+following Phase 1 would be empty by Phase 2 and every gh-gated check would
+silently go unmeasured. Precedence: an explicitly exported `REPO` wins (to
+point the lookups at another repo); otherwise it comes from the origin
+remote, which arrives in two shapes:
 
 ```bash
-url=$(git remote get-url origin)
 # https://github.com/owner/repo[.git]  or  git@github.com:owner/repo.git
-REPO=$(printf '%s' "$url" \
-  | sed -E 's#^(https?://[^/]+/|git@[^:]+:)##; s#\.git$##')
+git remote get-url origin \
+  | sed -E 's#^(https://([^@/]+@)?github\.com/|(ssh://)?git@github\.com[:/])##; s#/$##; s#\.git$##'
 ```
 
-Confirm the result is exactly `owner/repo` — one `/`, no scheme, no `.git`
-suffix — before passing it. If it does not match that shape, skip the lookup
-rather than passing it on: the scan still runs, and the checks it feeds are
-reported as skipped or unmeasured, never as passes.
+The result is passed only if it is exactly `owner/repo` — one `/`, no
+scheme, no `.git` suffix. A non-GitHub remote keeps its scheme or host, fails
+that check, and leaves `REPO` empty rather than passing it on: the scan still
+runs, and the checks it feeds are reported as skipped or unmeasured, never as
+passes.
