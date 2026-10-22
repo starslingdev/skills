@@ -22,8 +22,12 @@ unversioned and updates by reinstall from `main`.
   the OPT81 entry, a coverage lookup that must name OPT86 for a dependency
   compiled from source, and a control question the report answers on its own.
   Five runs of each runnable eval on today's single-file catalog are committed
-  as the baseline the upcoming catalog split is measured against. Maintainer
-  tooling only: the shipped skill is unchanged.
+  as the baseline the upcoming catalog split is measured against. Name-only
+  listings (`grep -l`, `ls`) count as no reading, a search from the skill root
+  counts the reference lines it printed, and a command the accounting cannot
+  read is reported as unattributed rather than dropped. The skill's
+  instructions and catalog are unchanged; only its eval definitions and
+  maintainer tooling change.
 
 - **2026-10-21** — **Three more catalog patterns for slow builds and slow
   pull-request checks, OPT89 to OPT91, each backed by changes OpenAI engineers

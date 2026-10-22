@@ -40,19 +40,28 @@ enforces it.
 
 Every run also records how much of `references/` the session pulled into its
 context, because the catalog refactor's claim is "same report, less reading".
-`maintainers/scripts/eval_reading.py` pairs each `Read` / `Grep` call, and each
-`Bash` call that reads a file (`cat`, `sed`, `head`, `tail`, `grep`, `rg`,
-`less`, `awk`), with its tool result and charges the result's bytes and lines
-to the reference file(s) the call names (including `cd .../references` then a
-bare file name, globs, and directory-wide greps, split per output line). Each
-results row carries `reading: {reference_bytes, reference_lines,
-reference_files: [{path, bytes, lines, calls}], catalog_opened,
-catalog_entries_read}`, and the PASS / FAIL line carries a compact figure
-such as `refs 16.0 KB in 2 files, catalog opened; session 175k in, 23s wall`.
+`maintainers/scripts/eval_reading.py` pairs each `Read` call, each `Grep` call
+in `content` mode, and each `Bash` call with a command that prints file content
+(`cat`, `sed`, `head`, `tail`, `grep`, `egrep`, `fgrep`, `rg`, `less`, `more`,
+`awk`, `nl`, `jq`, `tac`, `cut`, `sort`, `uniq`, `strings`, `bat`, `diff`, an
+`xargs` or `find -exec` feeding one of these, and inline `perl` / `python` /
+`ruby` / `node` scripts) with its tool result and charges the result's bytes
+and lines to the reference file(s) the call names (including `$VAR/references/`,
+`cd .../references` then a bare file name, globs, and directory-wide greps,
+split per output line). A search from the skill root or above is charged per
+output line to the `references/<file>` its path prefix names. Each results row
+carries `reading: {reference_bytes, reference_lines, reference_files: [{path,
+bytes, lines, calls}], catalog_opened, catalog_entries_read,
+unattributed_calls}`, and the PASS / FAIL line carries a compact figure such as
+`refs 16.0 KB in 2 files, catalog opened; session 175k in, 23s wall`.
 A failed read counts nothing, a catalog entry counts as read only when its
-heading comes with some of its body (an index grep reads none), and paths that
-reach another copy (a URL, `gh api`, or a `cd` to another install) are not the
-copy under test. It measures what the agent
+`##` or `###` heading comes with some of its body (an index grep reads none),
+and paths that reach another copy (a URL, `gh api`, `$HOME`, or a `cd` to
+another install) are not the copy under test. Name-only output reads nothing
+(`Grep` in its default `files_with_matches` mode, `grep -l` / `-c`, `ls`,
+`find`, `wc`). A `Bash` call that names a mounted reference file in a command
+the tracker cannot read (`cp`, a script) is counted in `unattributed_calls`
+and shown in the figure, never silently dropped. It measures what the agent
 saw, not what it asked for: a `sed -n` of one entry costs that entry, a full
 `Read` of the catalog costs the whole file. Reads by a subagent count only as
 far as the stream carries them.
@@ -60,7 +69,9 @@ far as the stream carries them.
 To prove a reading check is sensitive, run it with the entry it needs cut from
 the session's copy of the catalog (the repository is not touched). The wrapper
 also blocks the published copy on GitHub, which a session denied the local
-entry otherwise fetches (seen with both `curl` and `gh api`):
+entry otherwise fetches (seen with both `curl` and `gh api`): web clients that
+honour the proxy variables reach only the model API, and `gh` refuses the
+publishing repository. It exits non-zero if no mounted copy was cut:
 
     python3 maintainers/ci-speedup/scripts/eval_withhold_entry.py OPT81 --id 11 --model M
 
