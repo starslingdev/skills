@@ -53,6 +53,7 @@ def test_every_check_is_well_formed(entry):
         assert c.get("match", "contains") in ("contains", "not_contains"), c
         if c["type"] == "reading":
             assert c["field"] in _READING_FIELDS, c
+            assert set(c) <= {"name", "type", "field", "pattern", "min", "max"}, c
         re.compile(c.get("pattern", ""))
     for name in entry.get("plugins", []):
         assert (_SKILL.parent / name / "SKILL.md").is_file(), name
@@ -111,3 +112,23 @@ def test_the_fork_caveat_check_takes_the_caveat_and_only_the_caveat(answer, ok):
     entry = next(e for e in _RUNNABLE if e["name"] == "quality-review-opt81")
     check = next(c for c in entry["checks"] if c["name"] == "names-the-catalog-only-fork-caveat")
     assert bool(re.search(check["pattern"], "Review done.\n" + answer)) is ok
+
+
+def test_reading_check_patterns_name_real_catalog_entries_and_reference_files():
+    """A typo'd id or file name in a reading pattern would make a `max` check
+    pass and a `min` check fail for the wrong reason."""
+    catalog = (_SKILL / "references" / "optimization-patterns.md").read_text(encoding="utf-8")
+    names = {p.relative_to(_SKILL / "references").as_posix()
+             for p in (_SKILL / "references").rglob("*") if p.is_file()}
+    for entry in _RUNNABLE:
+        for c in entry["checks"]:
+            if c["type"] != "reading" or "pattern" not in c:
+                continue
+            pat = c["pattern"].replace("\\.", ".")
+            ids = re.findall(r"OPT\d+", pat)
+            if c["field"] == "catalog_entries_read":
+                assert ids, c
+            for i in ids:
+                assert re.search(rf"(?m)^#{{2,3}} {i} — ", catalog), (c["name"], i)
+            for f in re.findall(r"[\w-]+\.(?:md|tsv|json)", pat):
+                assert f in names, (c["name"], f)

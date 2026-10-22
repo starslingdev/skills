@@ -201,3 +201,158 @@ def test_session_tokens_come_from_the_cumulative_model_usage_across_resumed_turn
     assert reading.session_totals(evs, 12.34) == {
         "wall_s": 12.3, "input_tokens": 1000, "output_tokens": 40,
         "result_events": 2, "subagents": 2}
+
+
+_CAT_LINES = (f"{_ROOT}/references/optimization-patterns.md:3585:### OPT81 — Faster Runner\n"
+              f"{_ROOT}/references/optimization-patterns.md-3586-unavailable to fork pull requests\n")
+
+
+@pytest.mark.parametrize("name,inp", [
+    ("Bash", {"command": f"grep -rn -A1 OPT81 {_ROOT}"}),
+    ("Bash", {"command": f"cd {_ROOT} && grep -rn -A1 OPT81 ."}),
+    ("Grep", {"pattern": "OPT81", "path": _ROOT, "output_mode": "content", "-A": 1}),
+])
+def test_a_search_from_the_skill_root_is_charged_by_each_output_lines_file(name, inp):
+    body = _CAT_LINES
+    if inp.get("command", "").startswith("cd "):
+        body = body.replace(f"{_ROOT}/", "./")
+    evs = [_call(1, name, inp), _result(1, body + f"{_ROOT}/SKILL.md:9:OPT81 is listed\n")]
+    r = reading.summarize(evs, "ci-speedup", _NAMES, root=_ROOT)
+    assert [f["path"] for f in r["reference_files"]] == ["optimization-patterns.md"]
+    assert r["reference_bytes"] == len(body.encode()) and r["catalog_entries_read"] == ["OPT81"]
+
+
+@pytest.mark.parametrize("name,inp,out", [
+    ("Grep", {"pattern": "OPT81", "path": f"{_ROOT}/references"},
+     f"Found 1 file\n{_ROOT}/references/optimization-patterns.md"),
+    ("Grep", {"pattern": "OPT81", "path": _ROOT, "output_mode": "count"},
+     f"{_ROOT}/references/optimization-patterns.md:4"),
+    ("Bash", {"command": f"grep -rl OPT81 {_ROOT}/references/"}, f"{_ROOT}/references/optimization-patterns.md"),
+    ("Bash", {"command": f"grep -c OPT {_ROOT}/references/optimization-patterns.md"}, "91"),
+    ("Bash", {"command": f"ls {_ROOT}/references/ | head"}, "gap-fill.md\noptimization-patterns.md"),
+    ("Bash", {"command": f"find {_ROOT}/references -name '*.md'"},
+     f"{_ROOT}/references/gap-fill.md\n{_ROOT}/references/optimization-patterns.md"),
+    ("Bash", {"command": f"wc -c {_ROOT}/references/gap-fill.md"}, f"4000 {_ROOT}/references/gap-fill.md"),
+])
+def test_a_listing_of_file_names_reads_nothing(name, inp, out):
+    evs = [_call(1, name, inp), _result(1, out)]
+    r = reading.summarize(evs, "ci-speedup", _NAMES, root=_ROOT)
+    assert (r["reference_bytes"], r["catalog_opened"]) == (0, False)
+    assert r.get("unattributed_calls") == 0
+
+
+@pytest.mark.parametrize("command", [
+    'cat "${{CLAUDE_PLUGIN_ROOT}}/references/gap-fill.md"',
+    "sed -n '1,50p' \"$D/references/gap-fill.md\"",
+    "nl -ba {root}/references/gap-fill.md",
+    "perl -ne 'print if 1..9' {root}/references/gap-fill.md",
+    "python3 -c \"print(open('{root}/references/gap-fill.md').read())\"",
+    "ls {root}/references/gap-fill.md | xargs cat",
+    "find {root}/references -name gap-fill.md -exec cat {{}} \;",
+])
+def test_variables_and_other_readers_reach_the_mount(command):
+    evs = [_call(1, "Bash", {"command": command.format(root=_ROOT)}), _result(1, "g" * 50)]
+    r = reading.summarize(evs, "ci-speedup", _NAMES, root=_ROOT)
+    assert [(f["path"], f["bytes"]) for f in r["reference_files"]] == [("gap-fill.md", 50)]
+
+
+def test_home_is_another_install_not_the_mount():
+    evs = [_call(1, "Bash", {"command": "cat $HOME/.agents/skills/ci-speedup/references/gap-fill.md"}),
+           _result(1, "g" * 50)]
+    assert reading.summarize(evs, "ci-speedup", _NAMES, root=_ROOT)["reference_bytes"] == 0
+
+
+def test_a_command_the_tracker_cannot_read_is_surfaced_not_dropped():
+    evs = [_call(1, "Bash", {"command": f"cp {_ROOT}/references/gap-fill.md /tmp/g && bat /tmp/g"}),
+           _result(1, "g" * 50)]
+    r = reading.summarize(evs, "ci-speedup", _NAMES, root=_ROOT)
+    assert (r["reference_bytes"], r.get("unattributed_calls")) == (0, 1)
+    assert "1 unattributed" in reading.figure(r)
+
+
+def test_a_grep_tool_content_search_of_one_reference_file_is_counted():
+    evs = [_call(1, "Grep", {"pattern": "wheel", "path": f"{_ROOT}/references/gap-fill.md",
+                             "output_mode": "content"}), _result(1, "12:" + "w" * 20)]
+    r = reading.summarize(evs, "ci-speedup", _NAMES, root=_ROOT)
+    assert [(f["path"], f["bytes"]) for f in r["reference_files"]] == [("gap-fill.md", 23)]
+
+
+def test_a_heading_repeated_in_one_result_counts_once():
+    body = _ENTRY + "\n" + _ENTRY
+    evs = [_call(1, "Read", {"file_path": f"{_ROOT}/references/optimization-patterns.md"}), _result(1, body)]
+    assert reading.summarize(evs, "ci-speedup")["catalog_entries_read"] == ["OPT81"]
+
+
+def test_a_heading_followed_only_by_line_numbers_is_not_an_entry_read():
+    body = "3585:### OPT81 — Faster Runner\n3586:\n3587-\n"
+    evs = [_call(1, "Bash", {"command": f"grep -n -A2 OPT81 {_ROOT}/references/optimization-patterns.md"}),
+           _result(1, body)]
+    assert reading.summarize(evs, "ci-speedup")["catalog_entries_read"] == []
+
+
+def test_unprefixed_lines_of_a_directory_grep_go_only_to_files_it_printed():
+    body = "gap-fill.md:3:" + "b" * 10 + "\n--\n" + "c" * 20
+    evs = [_call(1, "Bash", {"command": f"grep -rn x {_ROOT}/references/"}), _result(1, body)]
+    by = {f["path"]: f["bytes"] for f in reading.summarize(evs, "ci-speedup", _NAMES)["reference_files"]}
+    assert by == {"gap-fill.md": len(body.encode()) + 1}
+
+
+@pytest.mark.parametrize("ev", [
+    {"type": "system", "message": "a string"},
+    {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "9", "name": "Read", "input": "x"}]}},
+    {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "9", "content": 7}]}},
+    {"type": "result", "modelUsage": {"m": None}, "subagent_stats": "n/a"},
+    "not an event",
+])
+def test_malformed_events_never_stop_the_run(ev):
+    r = reading.summarize([_call(9, "Read", {"file_path": f"{_ROOT}/references/gap-fill.md"}), ev],
+                          "ci-speedup", _NAMES, root=_ROOT)
+    assert r["reference_bytes"] == 0
+
+
+def test_a_reading_check_with_an_unknown_key_is_a_harness_error_not_a_pass():
+    with pytest.raises(ValueError, match="mx"):
+        reading.check({"type": "reading", "name": "n", "field": "reference_bytes", "mx": 0},
+                      {"reference_bytes": 5})
+
+
+def test_a_skill_without_the_catalog_prints_no_catalog_figure():
+    evs = [_call(1, "Read", {"file_path": f"{_ROOT}/references/gap-fill.md"}), _result(1, "g" * 10)]
+    r = reading.summarize(evs, "ci-secure", ["gap-fill.md"], root=_ROOT.replace("ci-speedup", "ci-secure"))
+    assert r["catalog_opened"] is None and "catalog" not in reading.figure(r)
+
+
+def _runner(tmp_path, monkeypatch, evs):
+    spec = importlib.util.spec_from_file_location("runner_r2", _SCRIPTS / "run_skill_evals.py")
+    runner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runner)
+    monkeypatch.setattr(runner, "_RESULTS", tmp_path / "results")
+    monkeypatch.setattr(runner, "_LOGS", tmp_path / "logs")
+    monkeypatch.setattr(runner, "scaffold", lambda *a: {})
+    monkeypatch.setattr(runner.shutil, "which", lambda *a, **k: "/usr/bin/true")
+    fake = subprocess.CompletedProcess([], 0, stdout="\n".join(map(json.dumps, evs)), stderr="")
+    monkeypatch.setattr(runner.subprocess, "run", lambda *a, **k: fake)
+    return runner
+
+
+def test_the_runner_fails_entry_11_when_the_session_never_reads_the_catalog(tmp_path, monkeypatch):
+    evs = [{"type": "system", "subtype": "init"},
+           _call(1, "Skill", {"skill": "ci-speedup"}), _result(1, "ok"),
+           _call(2, "Bash", {"command": "python3 ci-speedup/scripts/run.py --repo o/r"}), _result(2, "done"),
+           _call(3, "Bash", {"command": "cat ci-speedup/references/gap-fill.md"}), _result(3, "g" * 64),
+           {"type": "assistant", "message": {"content": [{"type": "text", "text":
+            "MISSING-FROM-CARD: fork pull requests can't use the faster runner label"}]}},
+           {"type": "result", "subtype": "success", "duration_ms": 1000, "usage": {}}]
+    runner = _runner(tmp_path, monkeypatch, evs)
+    assert runner.main(["--skill", "ci-speedup", "--id", "11"]) == 1
+    [res] = json.loads(next((tmp_path / "results").iterdir()).read_text())
+    checks = {c["name"]: c["passed"] for c in res["checks"]}
+    assert res["passed"] is False and checks["read-the-opt81-catalog-entry"] is False
+    assert checks["read-some-reference-material"] and checks["names-the-catalog-only-fork-caveat"]
+
+
+def test_a_malformed_reading_check_is_a_harness_error(tmp_path, monkeypatch):
+    runner = _runner(tmp_path, monkeypatch, [])
+    with pytest.raises(runner.HarnessError, match="mx"):
+        runner.apply_checks([{"name": "n", "type": "reading", "field": "reference_bytes", "mx": 0}],
+                            {"reading": {"reference_bytes": 5}})

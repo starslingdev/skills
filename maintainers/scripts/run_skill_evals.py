@@ -195,7 +195,10 @@ def apply_checks(checks: list[dict], rec: dict) -> list[tuple[str, bool, str]]:
             results.append((name, n >= lo and (hi is None or n <= hi), f"count={n}"))
             continue
         if kind == "reading":
-            results.append((name, *eval_reading.check(c, rec["reading"])))
+            try:
+                results.append((name, *eval_reading.check(c, rec["reading"])))
+            except ValueError as exc:  # a malformed check never passes silently
+                raise HarnessError(str(exc)) from exc
             continue
         if kind == "files" and not rec["files"]:
             raise HarnessError(f"check {name!r} reads `files`, but the session wrote "
