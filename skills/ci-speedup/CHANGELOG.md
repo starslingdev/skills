@@ -891,6 +891,12 @@ unversioned and updates by reinstall from `main`.
 
 ### Changed
 
+- **2026-10-22** — **The pattern catalog is now one file per pattern plus an
+  index.** An agent reviewing a finding reads that one pattern's file instead
+  of searching a 393 KB catalog, and finds which pattern covers a stack from a
+  short index. The single catalog file stays at the same path, generated from
+  the per-pattern files, so every report link and anchor still works.
+  Scanner output is unchanged.
 - **2026-10-22** — **Eval sessions run at the same time, and the
   quality-review measurement leaves the per-PR check.** The shared eval runner
   starts every session at once (at most five; `--jobs N` or `SKILL_EVALS_JOBS`)

@@ -2796,12 +2796,10 @@ def test_structural_pattern_without_router_is_reported_not_hidden(tmp_path: Path
 
 
 def _catalog_section(pat: str) -> str:
-    """The catalog body of one `### <PAT> — ...` section, up to the next `###`
-    heading (or EOF — the last section in the file must not blow up the lint)."""
-    catalog = (_SKILL_DIR / "references" / "optimization-patterns.md").read_text()
-    start = catalog.index(f"### {pat} —")
-    nxt = catalog.find("\n### ", start + 1)
-    return catalog[start:] if nxt < 0 else catalog[start:nxt]
+    """The catalog body of one pattern: its own file under references/patterns/
+    (frontmatter, `# <PAT> — ...` title, then the verbatim body)."""
+    path = next((_SKILL_DIR / "references" / "patterns").glob(f"{pat.lower()}-*.md"))
+    return path.read_text(encoding="utf-8")
 
 
 def _yaml_blocks(body: str) -> list[str]:
@@ -3545,7 +3543,7 @@ jobs:
 # the shipped "N-pattern" doc claims stay reconciled with the real count.
 # =============================================================================
 
-_CATALOG_PATH = _SKILL_DIR / "references" / "optimization-patterns.md"
+_CATALOG_PATH = _SKILL_DIR / "references" / "patterns"
 
 
 def test_opt66_stays_retired_not_silently_deleted():
@@ -3559,12 +3557,15 @@ def test_opt66_stays_retired_not_silently_deleted():
     _sys.path.insert(0, str(_SKILL_DIR / "scripts"))
     import scan  # noqa: E402
 
-    text = _CATALOG_PATH.read_text(encoding="utf-8")
-    assert "### OPT66" in text, (
-        "OPT66 must keep a retired-id stub in the catalog, not be silently deleted")
-    stub = re.search(r"### OPT66.*?(?=\n### OPT|\Z)", text, re.S)
-    assert stub and "REMOVED" in stub.group(0), (
-        "the OPT66 stub must carry a REMOVED/CUT marker naming the pricing excision")
+    files = list(_CATALOG_PATH.glob("opt66-*.md"))
+    assert len(files) == 1, (
+        "OPT66 must keep a retired-id stub file in the catalog, not be silently deleted")
+    text = files[0].read_text(encoding="utf-8")
+    front = re.match(r"---\n(.*?)\n---\n", text, re.S)
+    assert front and re.search(r"^status: removed$", front.group(1), re.M), (
+        "the OPT66 stub must carry `status: removed` in its frontmatter")
+    assert "REMOVED" in text, (
+        "the OPT66 stub body must carry a REMOVED marker naming the pricing excision")
     ents = {e.pattern: e for e in scan.load_catalog(_CATALOG_PATH)}
     assert "OPT66" in ents, "OPT66 must parse as a catalog entry (keeps the id in the count)"
     assert ents["OPT66"].detector == "manual", (
@@ -3587,7 +3588,7 @@ def test_catalog_pattern_count_matches_doc_claims():
         for claimed in re.findall(r"(\d+)[- ]pattern", text):
             assert int(claimed) == count, (
                 f"{rel} claims a {claimed}-pattern catalog but the real count is "
-                f"{count} — reconcile the doc with optimization-patterns.md")
+                f"{count} — reconcile the doc with references/patterns/")
 
 
 def test_catalog_pattern_count_breakdown_sums_to_the_total():

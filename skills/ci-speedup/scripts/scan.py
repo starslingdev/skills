@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """ci-speedup static scanner.
 
-Parses the catalog at `references/optimization-patterns.md`, applies each
+Parses the catalog at `references/patterns/` (one file per pattern), applies each
 declared static detector against every workflow YAML in the target repo's
 `.github/workflows/`, and emits a JSON document describing the matches. The
 data-driven patterns (METADATA `class: data-driven`, `detector: manual`)
@@ -107,7 +107,79 @@ def _slug_anchor(opt_id: str, title: str) -> str:
     return re.sub(r"\s", "-", raw)
 
 
+# The catalog's source form: one file per pattern under `references/patterns/`
+# (`opt<N>-<slug>.md`: YAML frontmatter, then `# OPT<N> — Title` and the body),
+# listed in `INDEX.md`, whose order is the catalog order. The single file
+# `references/optimization-patterns.md` is compiled from them
+# (maintainers/ci-speedup/scripts/build_catalog.py) and still parses here.
+_PATTERN_H1_RE = re.compile(r"^# (OPT\d+) — (.+?)$", re.M)
+_FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.S)
+_INDEX_LINE_RE = re.compile(r"^- (OPT\d+) — ", re.M)
+# Frontmatter keys that describe the source file, not the pattern's METADATA.
+PATTERN_FILE_KEYS = ("category", "status", "aliases", "alias_note")
+
+
+def parse_pattern_file(path: Path) -> tuple[dict, str, str, str]:
+    """(frontmatter, opt_id, title, body after the H1 line) of one pattern file.
+    Raises ValueError on a file without frontmatter or an `# OPT<n> — ` title."""
+    text = path.read_text(encoding="utf-8")
+    fm = _FRONTMATTER_RE.match(text)
+    if not fm:
+        raise ValueError(f"{path}: no YAML frontmatter")
+    meta = yaml.safe_load(fm.group(1))
+    if not isinstance(meta, dict):
+        raise ValueError(f"{path}: frontmatter is not a mapping")
+    rest = text[fm.end():]
+    h1 = _PATTERN_H1_RE.search(rest)
+    if not h1 or rest[:h1.start()].strip():
+        raise ValueError(f"{path}: the first line after the frontmatter is not `# OPT<n> — Title`")
+    return meta, h1.group(1), h1.group(2).strip(), rest[h1.end():]
+
+
+def pattern_files(directory: Path) -> list[Path]:
+    """The pattern files of `directory` in catalog order: INDEX.md's order, then
+    any `opt<N>-*.md` file INDEX.md does not list, by number (never dropped;
+    the build's check fails on it). Other names are not patterns."""
+    index = directory / "INDEX.md"
+    ids = _INDEX_LINE_RE.findall(index.read_text(encoding="utf-8")) if index.is_file() else []
+    listed = [p for i in ids for p in sorted(directory.glob(f"{i.lower()}-*.md"))[:1]]
+    listed = list(dict.fromkeys(listed))
+    rest = sorted((p for p in directory.glob("opt*.md")
+                   if p not in listed and re.match(r"opt\d+-", p.name)),
+                  key=lambda p: int(re.match(r"opt(\d+)", p.name).group(1)))
+    return listed + rest
+
+
+def _entry(opt_id: str, title: str, meta: dict) -> CatalogEntry:
+    return CatalogEntry(
+        pattern=meta.get("pattern", opt_id),
+        impact=meta.get("impact", "MEDIUM").upper(),
+        finding_class=meta.get("class", "static"),
+        detector=meta.get("detector", "manual"),
+        affected_files=meta.get("affected_files", ""),
+        fix_strategy=meta.get("fix_strategy", ""),
+        title_template=meta.get("title_template", title),
+        anchor=_slug_anchor(opt_id, title),
+        match=meta.get("match", ""),
+        yaml_path=meta.get("yaml_path", ""),
+        yaml_value=meta.get("yaml_value", ""),
+        wf_name_filter=meta.get("wf_name_filter", ""),
+        wf_name_exclude=meta.get("wf_name_exclude", ""),
+    )
+
+
 def load_catalog(path: Path) -> list[CatalogEntry]:
+    """The catalog entries, from `references/patterns/` (a directory) or from
+    the compiled single file (the original parser, kept for `--catalog` callers
+    and the build's equality check). Both yield the same entries."""
+    if path.is_dir():
+        entries = []
+        for p in pattern_files(path):
+            fm, opt_id, title, _ = parse_pattern_file(p)
+            meta = {k: str(v) for k, v in fm.items()
+                    if k not in PATTERN_FILE_KEYS and v is not None}
+            entries.append(_entry(opt_id, title, meta))
+        return entries
     text = path.read_text(encoding="utf-8")
     entries: list[CatalogEntry] = []
     heads = list(_HEADING_RE.finditer(text))
@@ -125,21 +197,7 @@ def load_catalog(path: Path) -> list[CatalogEntry]:
                 for line in m.group(1).splitlines() if ":" in line
             )
         )
-        entries.append(CatalogEntry(
-            pattern=meta.get("pattern", opt_id),
-            impact=meta.get("impact", "MEDIUM").upper(),
-            finding_class=meta.get("class", "static"),
-            detector=meta.get("detector", "manual"),
-            affected_files=meta.get("affected_files", ""),
-            fix_strategy=meta.get("fix_strategy", ""),
-            title_template=meta.get("title_template", title),
-            anchor=_slug_anchor(opt_id, title),
-            match=meta.get("match", ""),
-            yaml_path=meta.get("yaml_path", ""),
-            yaml_value=meta.get("yaml_value", ""),
-            wf_name_filter=meta.get("wf_name_filter", ""),
-            wf_name_exclude=meta.get("wf_name_exclude", ""),
-        ))
+        entries.append(_entry(opt_id, title, meta))
     return entries
 
 
@@ -197,7 +255,8 @@ def _block_lines(raw: str, start_line: int, max_lines: int = 12) -> str:
 # Hits. Detectors return [] when the pattern does not fire on this file.
 #
 # Adding a new pattern is a two-step move:
-#   1. Author the catalog entry in references/optimization-patterns.md.
+#   1. Author references/patterns/opt<N>-<slug>.md + its INDEX.md line, then run
+#      maintainers/ci-speedup/scripts/build_catalog.py.
 #   2. Add a handler keyed by OPT-id below.
 #
 # A pattern declared in the catalog but missing a handler is logged once and
@@ -5473,14 +5532,15 @@ def main(argv: list[str] | None = None) -> int:
                    help="Path to the target repo's root (contains .github/workflows/).")
     p.add_argument("--out", type=Path, default=None)
     p.add_argument("--catalog", type=Path, default=None,
-                   help="Path to optimization-patterns.md (default: bundled).")
+                   help="Catalog: the references/patterns/ directory or the compiled "
+                        "optimization-patterns.md (default: bundled references/patterns/).")
     p.add_argument("--skill-commit-sha", default=None)
     p.add_argument("--commit-sha", default=None)
     p.add_argument("--repo", default=None)
     args = p.parse_args(argv)
 
     catalog = args.catalog or (Path(__file__).resolve().parents[1]
-                               / "references" / "optimization-patterns.md")
+                               / "references" / "patterns")
     t0 = time.time()
     try:
         result = scan(args.root, catalog)

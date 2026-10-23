@@ -9939,7 +9939,7 @@ def _detect_opt77_repeated_setup_across_small_jobs(
 # `_VR_OPT80_*` twin in `tests/verify_report.py`, which re-derives on ITS copy
 # and compares the stamped value to it; `test_opt80_verifier_constants_stay_
 # coupled_to_the_engine` fails if the two drift. Each is also WRITTEN OUT in
-# `references/optimization-patterns.md` under "### OPT80" — detection heuristic
+# `references/patterns/opt80-*.md` (compiled into the catalog) — heuristic
 # clauses 2, 3 and 5, and the probe cap named in clause 5 — so moving one here
 # means moving it in the verifier AND in that catalog entry, or the report
 # describes bounds it did not use.
@@ -12606,8 +12606,8 @@ def _detect_opt81_runner_size_advisory(
 # separately measured; `ceiling_basis` says which), and its prompt asks for
 # the benchmark first. There is deliberately no `_SIZING` row for OPT82.
 #
-# Every catalog fact this mirrors lives in `references/optimization-patterns.md`
-# under "### OPT82"; the verifier's check is
+# Every catalog fact this mirrors lives in `references/patterns/opt82-*.md`
+# (compiled into the catalog); the verifier's check is
 # `verify_report.check_opt82_type_aware_lint_uncredited`.
 _OPT82_MIN_LINT_P50_S = 60.0
 # The findings-doc key the collector writes OPT82's WITHHELD candidates under

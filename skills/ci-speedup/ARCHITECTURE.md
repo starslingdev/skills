@@ -4055,9 +4055,12 @@ order of preference:
 
 - [`SKILL.md`](SKILL.md) - the canonical contract (phases, admission gate,
   quality review).
-- [`references/optimization-patterns.md`](references/optimization-patterns.md) -
-  the 89-pattern catalog (METADATA + body per pattern); the source of truth for
-  detection and the report's TL;DR / pattern background.
+- [`references/patterns/INDEX.md`](references/patterns/INDEX.md) -
+  the 89-pattern catalog, one file per pattern (frontmatter + body); the source
+  of truth for detection and the report's TL;DR / pattern background. The
+  single-file [`references/optimization-patterns.md`](references/optimization-patterns.md)
+  is compiled from `references/patterns/` by
+  `maintainers/ci-speedup/scripts/build_catalog.py`.
 - [`references/wall-clock-methodology.md`](references/wall-clock-methodology.md)
   - critical-path / long-pole / cluster-floor model and the non-additive rule.
 - [`references/savings-methodology.md`](references/savings-methodology.md) -

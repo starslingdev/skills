@@ -117,7 +117,8 @@ def test_the_fork_caveat_check_takes_the_caveat_and_only_the_caveat(answer, ok):
 def test_reading_check_patterns_name_real_catalog_entries_and_reference_files():
     """A typo'd id or file name in a reading pattern would make a `max` check
     pass and a `min` check fail for the wrong reason."""
-    catalog = (_SKILL / "references" / "optimization-patterns.md").read_text(encoding="utf-8")
+    catalog = "\n".join(p.read_text(encoding="utf-8") for p in
+                        sorted((_SKILL / "references" / "patterns").glob("opt*.md")))
     names = {p.relative_to(_SKILL / "references").as_posix()
              for p in (_SKILL / "references").rglob("*") if p.is_file()}
     for entry in _RUNNABLE:
@@ -129,6 +130,6 @@ def test_reading_check_patterns_name_real_catalog_entries_and_reference_files():
             if c["field"] == "catalog_entries_read":
                 assert ids, c
             for i in ids:
-                assert re.search(rf"(?m)^#{{2,3}} {i} — ", catalog), (c["name"], i)
+                assert re.search(rf"(?m)^#{{1,3}} {i} —", catalog), (c["name"], i)
             for f in re.findall(r"[\w-]+\.(?:md|tsv|json)", pat):
                 assert f in names, (c["name"], f)

@@ -1,0 +1,247 @@
+[
+  {
+    "id": 13,
+    "name": "no-catalog-read-needed",
+    "run": 1,
+    "passed": true,
+    "tool_calls": 4,
+    "input_tokens": 171639,
+    "output_tokens": 1663,
+    "duration_ms": 18669,
+    "cost_usd": 0.2332552,
+    "reading": {
+      "reference_bytes": 0,
+      "reference_lines": 0,
+      "catalog_opened": false,
+      "catalog_entries_read": [],
+      "unattributed_calls": 0,
+      "reference_files": [],
+      "session": {
+        "wall_s": 19.6,
+        "input_tokens": 171639,
+        "output_tokens": 1663,
+        "result_events": 1,
+        "subagents": 0
+      }
+    },
+    "checks": [
+      {
+        "name": "ci-speedup-skill-invoked",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "data-pass-ran",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "states-the-measured-wait",
+        "passed": true,
+        "detail": "found"
+      },
+      {
+        "name": "names-the-slowest-job",
+        "passed": true,
+        "detail": "found"
+      }
+    ],
+    "unscored": "expected_output"
+  },
+  {
+    "id": 13,
+    "name": "no-catalog-read-needed",
+    "run": 2,
+    "passed": true,
+    "tool_calls": 4,
+    "input_tokens": 171911,
+    "output_tokens": 1770,
+    "duration_ms": 21809,
+    "cost_usd": 0.2358744,
+    "reading": {
+      "reference_bytes": 0,
+      "reference_lines": 0,
+      "catalog_opened": false,
+      "catalog_entries_read": [],
+      "unattributed_calls": 0,
+      "reference_files": [],
+      "session": {
+        "wall_s": 22.5,
+        "input_tokens": 171911,
+        "output_tokens": 1770,
+        "result_events": 1,
+        "subagents": 0
+      }
+    },
+    "checks": [
+      {
+        "name": "ci-speedup-skill-invoked",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "data-pass-ran",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "states-the-measured-wait",
+        "passed": true,
+        "detail": "found"
+      },
+      {
+        "name": "names-the-slowest-job",
+        "passed": true,
+        "detail": "found"
+      }
+    ],
+    "unscored": "expected_output"
+  },
+  {
+    "id": 13,
+    "name": "no-catalog-read-needed",
+    "run": 3,
+    "passed": true,
+    "tool_calls": 4,
+    "input_tokens": 176381,
+    "output_tokens": 1561,
+    "duration_ms": 26563,
+    "cost_usd": 0.24496400000000002,
+    "reading": {
+      "reference_bytes": 0,
+      "reference_lines": 0,
+      "catalog_opened": false,
+      "catalog_entries_read": [],
+      "unattributed_calls": 0,
+      "reference_files": [],
+      "session": {
+        "wall_s": 28.7,
+        "input_tokens": 176381,
+        "output_tokens": 1561,
+        "result_events": 1,
+        "subagents": 0
+      }
+    },
+    "checks": [
+      {
+        "name": "ci-speedup-skill-invoked",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "data-pass-ran",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "states-the-measured-wait",
+        "passed": true,
+        "detail": "found"
+      },
+      {
+        "name": "names-the-slowest-job",
+        "passed": true,
+        "detail": "found"
+      }
+    ],
+    "unscored": "expected_output"
+  },
+  {
+    "id": 13,
+    "name": "no-catalog-read-needed",
+    "run": 4,
+    "passed": true,
+    "tool_calls": 4,
+    "input_tokens": 171754,
+    "output_tokens": 1608,
+    "duration_ms": 37224,
+    "cost_usd": 0.2324338,
+    "reading": {
+      "reference_bytes": 0,
+      "reference_lines": 0,
+      "catalog_opened": false,
+      "catalog_entries_read": [],
+      "unattributed_calls": 0,
+      "reference_files": [],
+      "session": {
+        "wall_s": 37.9,
+        "input_tokens": 171754,
+        "output_tokens": 1608,
+        "result_events": 1,
+        "subagents": 0
+      }
+    },
+    "checks": [
+      {
+        "name": "ci-speedup-skill-invoked",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "data-pass-ran",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "states-the-measured-wait",
+        "passed": true,
+        "detail": "found"
+      },
+      {
+        "name": "names-the-slowest-job",
+        "passed": true,
+        "detail": "found"
+      }
+    ],
+    "unscored": "expected_output"
+  },
+  {
+    "id": 13,
+    "name": "no-catalog-read-needed",
+    "run": 5,
+    "passed": true,
+    "tool_calls": 4,
+    "input_tokens": 174254,
+    "output_tokens": 2082,
+    "duration_ms": 28648,
+    "cost_usd": 0.24727859999999996,
+    "reading": {
+      "reference_bytes": 0,
+      "reference_lines": 0,
+      "catalog_opened": false,
+      "catalog_entries_read": [],
+      "unattributed_calls": 0,
+      "reference_files": [],
+      "session": {
+        "wall_s": 29.5,
+        "input_tokens": 174254,
+        "output_tokens": 2082,
+        "result_events": 1,
+        "subagents": 0
+      }
+    },
+    "checks": [
+      {
+        "name": "ci-speedup-skill-invoked",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "data-pass-ran",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "states-the-measured-wait",
+        "passed": true,
+        "detail": "found"
+      },
+      {
+        "name": "names-the-slowest-job",
+        "passed": true,
+        "detail": "found"
+      }
+    ],
+    "unscored": "expected_output"
+  }
+]
