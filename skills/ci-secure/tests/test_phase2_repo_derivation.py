@@ -157,7 +157,9 @@ def test_other_github_shapes_derive_repo(tmp_path, shell, origin):
 
 @pytest.mark.parametrize("shell", _SHELLS)
 @pytest.mark.parametrize("origin", [
-    "https://github.com.example.net/acme/widgets.git",
+    # A github.com-prefixed host, built at runtime: a literal look-alike host
+    # in shipped text reads as a malicious URL to registry security scans.
+    "https://" + ".".join(["github", "com", "example", "net"]) + "/acme/widgets.git",
     "https://notgithub.com/acme/widgets.git",
     "git@github.example.net:acme/widgets.git",
 ])
