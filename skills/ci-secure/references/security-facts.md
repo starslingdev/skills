@@ -7,7 +7,7 @@
 
 ---
 
-ci-secure computes nine deterministic, pass/fail configuration facts as
+ci-secure computes ten deterministic, pass/fail configuration facts as
 MACHINE-ONLY inputs for a future blended score (the ci-advisor door, not yet
 public). They are aggregated `100 × passed / scored` with no weights and no
 partial credit (registered 2026-08-03) — but **that aggregate is never a number
@@ -18,14 +18,15 @@ vector detectors are lexical rather than confirmed exploit proofs, and a public
 number must not grade a stranger's repo down on an unconfirmed match.
 
 **The denominator is token-dependent, so the aggregate is not comparable
-across scans run under different auth.** Up to three of the nine facts read
+across scans run under different auth.** Up to three of the ten facts read
 the GitHub API (the CODEOWNERS fact only once a CODEOWNERS rule covers the
 workflows). In a repository where every fact applies and that rule exists, a
-scan with no repository or no token measures six of nine and scores
-`100 × passed / 6`; the same repository scanned with a token that can read
-every source scores over nine. A fact that does not apply to the
+scan with no repository or no token measures seven of ten and scores
+`100 × passed / 7`; the same repository scanned with a token that can read
+every source scores over ten. A fact that does not apply to the
 repository at all leaves the denominator on top of that (see below), so both
-numbers drop by one in a repository whose workflows run no suite.
+numbers drop by one for each such fact — in a repository whose workflows run
+no suite, and in one that configures no dependency update tool.
 The unmeasured ids are named in the block's `unmeasured` list and the caveat, so
 a consumer — ci-advisor above all — can tell the two apart, but only if it
 checks: comparing the raw numbers across differently-authenticated scans
@@ -33,7 +34,7 @@ compares different measurements.
 
 **The aggregate is machine-only.** ci-secure's own report and close render
 these facts as a pass/fail table and **no number** by design: a hygiene
-aggregate labelled "Security score" overclaims what nine config observations
+aggregate labelled "Security score" overclaims what ten config observations
 can say, and printed beside a ten-vector scan it read as a contradiction. The
 `security_score` block in the findings JSON keeps its shape — same keys, same `fact_id`s, same outcomes, same aggregate; only prose the
 report prints was reworded so it stops naming a score the reader never sees.
@@ -41,9 +42,10 @@ Consumers bind to the ids, not to the sentences. ci-advisor blends from that
 block, and quantification belongs there, where the blend context carries the
 denominators.
 
-A fact that cannot be measured — an unscannable workflow file, or, for the
-three API-gated facts, no repository and no token — is **unmeasured, never a silent
-pass**: it scores nothing, stays in the applicable count as a
+A fact that cannot be measured — an unscannable workflow file; for the three
+API-gated facts, no repository and no token; or, for
+`sec.deps.update-cooldown`, an update config this scan cannot parse — is
+**unmeasured, never a silent pass**: it scores nothing, stays in the applicable count as a
 named coverage gap, and the block says so.
 
 A fact that **does not apply** is a different state and is treated differently.
@@ -53,9 +55,11 @@ not-applicable fact scores nothing and leaves the applicable count entirely —
 the same treatment ci-score gives a check it rules not applicable — while its
 row still renders, because a row that quietly vanishes reads as a pass. Its id
 is listed in the block's `not_applicable` list, separate from `unmeasured`, so
-a consumer never has to guess which of the two it is looking at. Only
-`sec.gate.test-failure-fatal` can reach that state today, and only in a
-repository whose workflows run no test or lint suite at all.
+a consumer never has to guess which of the two it is looking at. Two facts
+can reach that state today: `sec.gate.test-failure-fatal`, only in a
+repository whose workflows run no test or lint suite at all, and
+`sec.deps.update-cooldown`, only in a repository that configures neither
+Dependabot version updates nor Renovate.
 
 ## The disjointness census
 
@@ -77,6 +81,7 @@ instead of shipping.
 | `sec.fork-approval.effective` | — none | A repository Actions setting, not workflow YAML at all; no ci-score check reads it, and no YAML edit can move it. |
 | `sec.gate.test-failure-fatal` | `ci.parallel.test-sharding` | Both look at the jobs that run the suite, and neither edit moves the other: sharding is a `strategy.matrix` on the job, this fact is the `run:` line's exit code and the step's `continue-on-error`. A sharded suite can still swallow every shard's failure, and an unsharded one can be perfectly fatal. Also bounded against the OTHER engine: `continue-on-error` on an upload, report, or notification step is a speed and reliability question that ci-speedup owns, and it does not reach this fact, because only a step whose own `run:` command the allowlist recognises as a suite is in scope — a `uses:` upload action has no `run:` line at all. Residual, disclosed: a reporting step whose command *does* match the allowlist is in scope here too, as is a suite step carrying `continue-on-error: true` that has been red for every run (ci-speedup's OPT68); the bound is on the command, not on the step's stated purpose. |
 | `sec.checkout.credentials-scoped` | `ci.checkout.shallow-clone` | Both read checkout steps, but different keys: `fetch-depth` there, `persist-credentials` here — two `with:` entries, two edits. This fact also applies only on untrusted-trigger workflows (excluding the payload-less `fork`/`watch` notification events); shallow-clone applies on PR-gating ones. |
+| `sec.deps.update-cooldown` | — none | Dependabot and Renovate config files are not workflow YAML, and no ci-score check reads `dependabot.yml`, a Renovate config, `cooldown`, or `minimumReleaseAge` (ci-score's registry and methodology were searched for all four). The nearest neighbour, `ci.security.pinned-action-shas`, reads `uses:` refs in workflow files; adding a cooldown cannot move it, and pinning an action cannot move this. |
 
 **Residual correlation, disclosed:** a repo with careless
 workflow hygiene will tend to fail checks in both tools — that is the
@@ -329,3 +334,61 @@ two moved numbers.
   job — and if the intent was to see the failure without blocking, keep the
   reporting and re-raise the status (`… || { echo "suite failed"; exit 1; }`,
   or capture `$?` under `set +e` and `exit` it at the end).
+- **`sec.deps.update-cooldown`** — every configured dependency update tool
+  waits at least **3 days** after a release is published before proposing it.
+  This is the prevention half of P14.25: a hijacked maintainer account or a
+  typosquat usually ships a malicious version that is reported and pulled
+  within days, so a tool that waits rarely hands that version to the CI
+  install that runs its lifecycle scripts. Three days is the threshold — long
+  enough that most malicious releases are gone first, short enough to be
+  uncontroversial — and it lives in one named constant.
+
+  - **Dependabot** (`.github/dependabot.yml` or `.yaml` with an `updates:`
+    list): every entry is judged. An entry's `cooldown.default-days` must be
+    3 or more, and so must every `semver-major-days` / `semver-minor-days` /
+    `semver-patch-days` it sets — a long default beside a one-day patch window
+    still lets patch releases through in a day. GitHub documents the semver
+    keys as applying only to package managers that support SemVer, and names
+    `docker`, `github-actions` and `terraform` as not; on those only
+    `default-days` is judged. An entry that sets only the
+    semver keys passes when each one present is 3 or more, and the evidence
+    says so (unlisted classes fall back to the default). An entry with **no**
+    `cooldown` (or one that sets no day keys) is judged at Dependabot's own default: since July 14 2026
+    Dependabot waits three days on github.com with no configuration (GitHub
+    Enterprise Server from 3.23), which meets the threshold, so the entry
+    passes and the evidence names it as relying on that default rather than
+    claiming the repository set one. An entry whose `cooldown.exclude`
+    lists `*` lets every package skip the wait and **fails**; a narrower
+    `exclude` passes and the evidence names the exempted packages. `include`
+    lists are not judged.
+  - **Renovate** (the first of `renovate.json`, `renovate.jsonc`,
+    `renovate.json5`, the same three under `.github/`, `.renovaterc`,
+    `.renovaterc.json`, `.renovaterc.jsonc`, `.renovaterc.json5`, or a
+    `renovate` key in `package.json` — Renovate's own search order): a
+    top-level `minimumReleaseAge` of 3 days or more (`"3 days"`, `"1 week"`,
+    `"72 hours"`, `"1 month"`; Renovate reads `M` as months and `m` as
+    minutes). A value set only inside `packageRules` covers only the packages
+    those rules match and does not pass; neither does a preset in `extends`
+    this scan cannot see into, and the fail says so when `extends` is set.
+    A `packageRules` entry that lowers `minimumReleaseAge` below 3 days (or
+    sets it to `null`) for **every** package — no `match*` / `exclude*`
+    filter, or only match-all ones such as `"*"` or `"/.*/"` — undoes the
+    top-level wait and **fails**. A rule that lowers it for a filtered set of
+    packages (your own scope, say) passes, and the evidence names it.
+
+  Both tools configured: both must pass. Neither configured: **not
+  applicable**, the same treatment `sec.gate.test-failure-fatal` gets — a
+  repository with no update tool has nothing here to delay. A config this scan
+  cannot read — a Dependabot file the YAML loader rejects, a Renovate config
+  that is not plain JSON (comments, trailing commas), or an age it cannot
+  convert to days — is **unmeasured**, never a pass and never a fail; the row
+  says to check the value by hand.
+
+  **Security updates are not delayed.** GitHub documents that a Dependabot
+  cooldown applies to version updates only, and Renovate documents that
+  security updates bypass `minimumReleaseAge`; a fix for a known
+  vulnerability still opens immediately. **To fix a fail**: `cooldown: { default-days: 7 }`
+  on each Dependabot `updates` entry named, raising (or removing) any
+  `semver-*-days` key under 3 on that entry and keeping its other `cooldown`
+  keys, or `"minimumReleaseAge": "7 days"` at the top level of the Renovate
+  config.

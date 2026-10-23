@@ -127,6 +127,10 @@ def _co_facts(root, files):
 
 def test_a_well_configured_repo_passes_every_fact(tmp_path):
     root, files = _repo(tmp_path, {"ci.yml": _SAFE_WF})
+    (root / ".github" / "dependabot.yml").write_text(
+        "version: 2\nupdates:\n  - package-ecosystem: npm\n"
+        "    directory: /\n    schedule: {interval: weekly}\n"
+        "    cooldown: {default-days: 7}\n")
     # `sec.required-checks.skippable` reads branch protection, so the repo and
     # a recorded API response are supplied here; without them it is UNMEASURED
     # (asserted separately below), never a pass.
@@ -136,7 +140,7 @@ def test_a_well_configured_repo_passes_every_fact(tmp_path):
         required_contexts_fetcher=lambda repo: ([], "branch `main`"),
         fork_approval_fetcher=lambda repo: ("all_external_contributors", "x"))
     assert out["score"] == 100.0
-    assert out["passed"] == out["scored_count"] == 9
+    assert out["passed"] == out["scored_count"] == 10
     for f in out["facts"]:
         assert f["outcome"] == "pass", f"{f['fact_id']} failed: {f['evidence']}"
 
@@ -1021,6 +1025,9 @@ def test_unscannable_workflow_forces_workflow_facts_to_unmeasured(tmp_path):
             # its recorded answer is unreadable.
             assert f["outcome"] == "unmeasured"
             assert "broken.yml" not in f["evidence"]
+        elif f["fact_id"] == "sec.deps.update-cooldown":
+            # Reads update-tool configs, not workflow YAML; this repo has none.
+            assert f["outcome"] == "not_applicable"
         else:
             assert f["outcome"] == "unmeasured", (
                 f"{f['fact_id']} resolved despite an unscanned workflow — "
@@ -5297,9 +5304,10 @@ def test_not_applicable_leaves_the_applicable_count(tmp_path):
     in as a named coverage gap."""
     root, files = _repo(tmp_path, {"ci.yml": _wf("      - run: echo hello\n")})
     out = cf.compute_config_facts(root, files, [])
-    # Eight other facts: five measurable offline, three API-gated and
+    # Nine other facts: five measurable offline, three API-gated and
     # unmeasured (the covering CODEOWNERS fixture cannot be confirmed enforced
-    # without a repository).
+    # without a repository), and the update-cooldown fact, also n/a here (no
+    # update tool).
     assert out["applicable_count"] == 8
     assert out["scored_count"] == 5
 
@@ -5366,3 +5374,368 @@ def test_a_swallow_inside_a_loop_body_is_still_a_swallow(tmp_path):
     f = _fatal(tmp_path, {"ci.yml": _wf(
         "      - run: for m in a b; do pytest -q; done || true\n")})
     assert f["outcome"] == "fail", f["evidence"]
+
+
+# --- F10: dependency update cooldown ----------------------------------------
+
+_COOLDOWN = "sec.deps.update-cooldown"
+
+
+def _cooldown(tmp_path, files: dict[str, str]):
+    """Run the fact table over a repo with one clean workflow plus ``files``
+    (repo-relative path -> body); return the cooldown fact and the block."""
+    root, wfs = _repo(tmp_path, {"ci.yml": _SAFE_WF})
+    for rel, body in files.items():
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(body)
+    out = cf.compute_config_facts(root, wfs, [])
+    return _outcome(out, _COOLDOWN), out
+
+
+def _dependabot(*entries: str) -> dict[str, str]:
+    return {".github/dependabot.yml": "version: 2\nupdates:\n" + "".join(entries)}
+
+
+def _entry(eco: str, directory: str = "/", cooldown: str = "") -> str:
+    return (f"  - package-ecosystem: {eco}\n"
+            f"    directory: \"{directory}\"\n"
+            "    schedule:\n      interval: weekly\n" + cooldown)
+
+
+def test_cooldown_is_not_applicable_without_an_update_tool(tmp_path):
+    f, out = _cooldown(tmp_path, {})
+    assert f["outcome"] == "not_applicable", f["evidence"]
+    assert _COOLDOWN in out["not_applicable"]
+    assert _COOLDOWN not in out["unmeasured"]
+
+
+def test_a_dependabot_file_with_no_updates_is_not_a_version_update_config(tmp_path):
+    f, _ = _cooldown(tmp_path, {".github/dependabot.yml": "version: 2\n"})
+    assert f["outcome"] == "not_applicable", f["evidence"]
+
+
+def test_cooldown_passes_when_every_dependabot_entry_waits_three_days(tmp_path):
+    f, _ = _cooldown(tmp_path, _dependabot(
+        _entry("npm", cooldown="    cooldown:\n      default-days: 7\n"),
+        _entry("github-actions",
+               cooldown="    cooldown:\n      default-days: 3\n")))
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_a_dependabot_entry_without_cooldown_is_judged_at_the_platform_default(
+        tmp_path):
+    """Since 2026-07-14 Dependabot waits three days on github.com when an entry
+    sets no `cooldown`. That meets the threshold, so the entry passes — but the
+    evidence names it as relying on the platform default rather than claiming
+    the repository configured one."""
+    f, _ = _cooldown(tmp_path, _dependabot(
+        _entry("npm", cooldown="    cooldown:\n      default-days: 7\n"),
+        _entry("pip", "/docs")))
+    assert f["outcome"] == "pass", f["evidence"]
+    assert "pip /docs" in f["evidence"]
+    assert "platform default" in f["evidence"]
+
+
+def test_a_one_day_dependabot_cooldown_fails_naming_the_entry(tmp_path):
+    f, _ = _cooldown(tmp_path, _dependabot(
+        _entry("npm", cooldown="    cooldown:\n      default-days: 7\n"),
+        _entry("pip", "/docs", "    cooldown:\n      default-days: 1\n")))
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "pip /docs" in f["evidence"]
+    assert "npm /" not in f["evidence"]
+    assert "cooldown: { default-days: 7 }" in f["evidence"]
+
+
+def test_a_zero_day_cooldown_opts_out_and_fails(tmp_path):
+    f, _ = _cooldown(tmp_path, _dependabot(
+        _entry("npm", cooldown="    cooldown:\n      default-days: 0\n")))
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_semver_only_cooldown_keys_each_need_three_days(tmp_path):
+    ok, _ = _cooldown(tmp_path / "a", _dependabot(_entry(
+        "npm", cooldown="    cooldown:\n      semver-major-days: 30\n"
+                        "      semver-minor-days: 7\n"
+                        "      semver-patch-days: 3\n")))
+    assert ok["outcome"] == "pass", ok["evidence"]
+    assert "semver" in ok["evidence"]
+    bad, _ = _cooldown(tmp_path / "b", _dependabot(_entry(
+        "npm", cooldown="    cooldown:\n      semver-major-days: 30\n"
+                        "      semver-patch-days: 1\n")))
+    assert bad["outcome"] == "fail", bad["evidence"]
+    assert "semver-patch-days" in bad["evidence"]
+
+
+def test_a_short_semver_key_fails_even_beside_a_long_default(tmp_path):
+    f, _ = _cooldown(tmp_path, _dependabot(_entry(
+        "npm", cooldown="    cooldown:\n      default-days: 7\n"
+                        "      semver-patch-days: 1\n")))
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_the_fix_for_a_short_semver_key_names_that_key(tmp_path):
+    """`cooldown: { default-days: 7 }` alone leaves a short semver key in
+    place, which still fails; the fix must tell the user to raise it too."""
+    f, _ = _cooldown(tmp_path, _dependabot(_entry(
+        "npm", cooldown="    cooldown:\n      default-days: 7\n"
+                        "      semver-patch-days: 1\n")))
+    assert f["outcome"] == "fail", f["evidence"]
+    fix = f["evidence"].split(" — ", 1)[1]
+    assert "semver-" in fix, fix
+
+
+def test_renovate_one_week_passes(tmp_path):
+    f, _ = _cooldown(tmp_path, {"renovate.json":
+                                '{"minimumReleaseAge": "1 week"}'})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_renovate_hours_are_converted(tmp_path):
+    f, _ = _cooldown(tmp_path, {".github/renovate.json":
+                                '{"minimumReleaseAge": "72 hours"}'})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_renovate_one_day_fails(tmp_path):
+    f, _ = _cooldown(tmp_path, {"renovate.json":
+                                '{"minimumReleaseAge": "1 day"}'})
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "renovate.json" in f["evidence"]
+
+
+def test_renovate_without_minimum_release_age_fails(tmp_path):
+    f, _ = _cooldown(tmp_path, {"renovate.json":
+                                '{"extends": ["config:recommended"]}'})
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "minimumReleaseAge" in f["evidence"]
+
+
+def test_an_unreadable_renovate_age_is_unmeasured(tmp_path):
+    f, _ = _cooldown(tmp_path, {"renovate.json":
+                                '{"minimumReleaseAge": "a fortnight"}'})
+    assert f["outcome"] == "unmeasured", f["evidence"]
+
+
+def test_renovate_in_package_json_is_read(tmp_path):
+    f, _ = _cooldown(tmp_path, {"package.json": json.dumps(
+        {"name": "x", "renovate": {"minimumReleaseAge": "3 days"}})})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_package_json_without_renovate_key_is_not_a_renovate_config(tmp_path):
+    f, _ = _cooldown(tmp_path, {"package.json": '{"name": "x"}'})
+    assert f["outcome"] == "not_applicable", f["evidence"]
+
+
+def test_both_tools_one_failing_fails(tmp_path):
+    files = _dependabot(_entry(
+        "npm", cooldown="    cooldown:\n      default-days: 7\n"))
+    files["renovate.json"] = '{"minimumReleaseAge": "1 day"}'
+    f, _ = _cooldown(tmp_path, files)
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "renovate.json" in f["evidence"]
+
+
+def test_an_unparsable_json5_renovate_config_is_unmeasured(tmp_path):
+    f, out = _cooldown(tmp_path, {"renovate.json5":
+                                  "{\n  // a comment\n"
+                                  "  minimumReleaseAge: '7 days',\n}\n"})
+    assert f["outcome"] == "unmeasured", f["evidence"]
+    assert "renovate.json5" in f["evidence"]
+    assert _COOLDOWN in out["unmeasured"]
+
+
+def test_an_unparsable_dependabot_file_is_unmeasured(tmp_path):
+    f, _ = _cooldown(tmp_path, {".github/dependabot.yml":
+                                "updates: [\n  - bad: : :\n"})
+    assert f["outcome"] == "unmeasured", f["evidence"]
+
+
+def test_the_cooldown_fact_says_security_updates_are_not_delayed(tmp_path):
+    f, _ = _cooldown(tmp_path, {})
+    assert "security updates" in f["fact"]
+    assert "not delayed" in f["fact"]
+
+
+def test_the_cooldown_threshold_is_one_named_constant():
+    assert cf._COOLDOWN_MIN_DAYS == 3
+
+
+# --- F10 review fixes: each of these was red on the first version ------------
+
+def test_a_non_list_package_rules_does_not_crash_the_fact_table(tmp_path):
+    """A malformed `packageRules` must cost this one fact, not raise out of
+    the fact table and blank every hygiene row."""
+    f, out = _cooldown(tmp_path, {"renovate.json": '{"packageRules": 5}'})
+    assert f["outcome"] == "fail", f["evidence"]
+    assert len(out["facts"]) == 10
+
+
+def test_semver_keys_are_ignored_where_dependabot_ignores_them(tmp_path):
+    """GitHub documents the semver-*-days keys as applying only to package
+    managers that support SemVer; github-actions, docker and terraform use
+    `default-days`, so a short semver key there delays nothing less."""
+    f, _ = _cooldown(tmp_path, _dependabot(_entry(
+        "github-actions", cooldown="    cooldown:\n      default-days: 7\n"
+                                   "      semver-patch-days: 1\n")))
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_an_empty_cooldown_is_named_as_relying_on_the_platform_default(
+        tmp_path):
+    f, _ = _cooldown(tmp_path, _dependabot(_entry(
+        "npm", cooldown="    cooldown: {}\n")))
+    assert f["outcome"] == "pass", f["evidence"]
+    assert "platform default" in f["evidence"]
+
+
+def test_the_platform_default_evidence_names_where_it_applies(tmp_path):
+    f, _ = _cooldown(tmp_path, _dependabot(_entry("npm")))
+    assert "GHES" in f["evidence"], f["evidence"]
+
+
+@pytest.mark.parametrize("age", ["1M", "1 month", "2 months"])
+def test_renovate_months_are_read_as_months(tmp_path, age):
+    """Renovate reads `M` and `month(s)` as 30 days; `m` is minutes."""
+    f, _ = _cooldown(tmp_path, {"renovate.json":
+                                json.dumps({"minimumReleaseAge": age})})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_renovate_lower_case_m_is_still_minutes(tmp_path):
+    f, _ = _cooldown(tmp_path, {"renovate.json":
+                                '{"minimumReleaseAge": "4320m"}'})
+    assert f["outcome"] == "pass", f["evidence"]
+    f, _ = _cooldown(tmp_path / "b", {"renovate.json":
+                                      '{"minimumReleaseAge": "60m"}'})
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_a_missing_age_with_presets_says_presets_are_not_followed(tmp_path):
+    f, _ = _cooldown(tmp_path, {"renovate.json":
+                                '{"extends": ["config:best-practices"]}'})
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "extends" in f["evidence"], f["evidence"]
+
+
+def test_an_unparsable_renovate_config_says_what_to_do(tmp_path):
+    f, _ = _cooldown(tmp_path, {"renovate.json5":
+                                "{\n  // a comment\n"
+                                "  minimumReleaseAge: '7 days',\n}\n"})
+    assert "by hand" in f["evidence"], f["evidence"]
+
+
+def test_the_fact_says_renovate_security_updates_are_not_delayed(tmp_path):
+    f, _ = _cooldown(tmp_path, {})
+    tail = f["fact"].split("security updates", 1)[1]
+    assert "Renovate" in tail, f["fact"]
+
+
+# --- F10 edges the first version left untested (coverage, not fixes) --------
+
+@pytest.mark.parametrize("age", ["71 hours", "2 days", "2.9 days"])
+def test_renovate_just_under_three_days_fails(tmp_path, age):
+    f, _ = _cooldown(tmp_path, {"renovate.json":
+                                json.dumps({"minimumReleaseAge": age})})
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_a_two_day_dependabot_cooldown_fails(tmp_path):
+    f, _ = _cooldown(tmp_path, _dependabot(_entry(
+        "npm", cooldown="    cooldown:\n      default-days: 2\n")))
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_renovate_reads_the_first_config_in_its_search_order(tmp_path):
+    f, _ = _cooldown(tmp_path / "a", {
+        "renovate.json": '{"minimumReleaseAge": "1 day"}',
+        ".github/renovate.json": '{"minimumReleaseAge": "7 days"}'})
+    assert f["outcome"] == "fail", f["evidence"]
+    f, _ = _cooldown(tmp_path / "b", {
+        ".github/renovate.json": '{"minimumReleaseAge": "7 days"}',
+        "package.json": json.dumps({"renovate": {"minimumReleaseAge": "1 day"}})})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_dependabot_yaml_extension_is_read(tmp_path):
+    f, _ = _cooldown(tmp_path, {".github/dependabot.yaml":
+                                "version: 2\nupdates:\n" + _entry(
+                                    "npm", cooldown="    cooldown:\n"
+                                                    "      default-days: 1\n")})
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_an_age_set_only_in_package_rules_does_not_pass(tmp_path):
+    f, _ = _cooldown(tmp_path, {"renovate.json": json.dumps(
+        {"packageRules": [{"matchPackageNames": ["*"],
+                           "minimumReleaseAge": "7 days"}]})})
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "packageRules" in f["evidence"]
+
+
+def test_a_short_entry_outranks_an_unreadable_one(tmp_path):
+    f, _ = _cooldown(tmp_path, _dependabot(
+        _entry("npm", cooldown="    cooldown:\n      default-days: 1\n"),
+        _entry("pip", cooldown="    cooldown:\n      default-days: '7'\n")))
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_a_boolean_cooldown_value_is_unreadable_not_one_day(tmp_path):
+    f, _ = _cooldown(tmp_path, _dependabot(_entry(
+        "npm", cooldown="    cooldown:\n      default-days: true\n")))
+    assert f["outcome"] == "unmeasured", f["evidence"]
+
+
+# --- F10 exemptions: a total bypass fails, a partial one is named ------------
+
+def test_a_dependabot_exclude_of_everything_fails(tmp_path):
+    f, _ = _cooldown(tmp_path, _dependabot(_entry(
+        "npm", cooldown="    cooldown:\n      default-days: 7\n"
+                        "      exclude: ['*']\n")))
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "exclude" in f["evidence"]
+
+
+def test_a_dependabot_exclude_of_everything_with_no_days_still_fails(tmp_path):
+    f, _ = _cooldown(tmp_path, _dependabot(_entry(
+        "npm", cooldown="    cooldown:\n      exclude: ['*']\n")))
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_a_narrow_dependabot_exclude_passes_and_is_named(tmp_path):
+    f, _ = _cooldown(tmp_path, _dependabot(_entry(
+        "npm", cooldown="    cooldown:\n      default-days: 7\n"
+                        "      exclude: ['@acme/*']\n")))
+    assert f["outcome"] == "pass", f["evidence"]
+    assert "@acme/*" in f["evidence"]
+
+
+@pytest.mark.parametrize("rule", [
+    {"minimumReleaseAge": "0 days"},
+    {"matchPackageNames": ["*"], "minimumReleaseAge": "1 day"},
+    {"matchPackageNames": ["/.*/"], "minimumReleaseAge": "2 days"},
+])
+def test_a_renovate_rule_lowering_every_package_fails(tmp_path, rule):
+    f, _ = _cooldown(tmp_path, {"renovate.json": json.dumps(
+        {"minimumReleaseAge": "7 days", "packageRules": [rule]})})
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "packageRules" in f["evidence"]
+
+
+def test_a_narrow_renovate_rule_lowering_some_packages_passes_and_is_named(
+        tmp_path):
+    f, _ = _cooldown(tmp_path, {"renovate.json": json.dumps(
+        {"minimumReleaseAge": "7 days",
+         "packageRules": [{"matchPackageNames": ["@acme/**"],
+                           "minimumReleaseAge": "0 days"}]})})
+    assert f["outcome"] == "pass", f["evidence"]
+    assert "@acme/**" in f["evidence"]
+
+
+def test_a_renovate_rule_keeping_three_days_is_not_an_exemption(tmp_path):
+    f, _ = _cooldown(tmp_path, {"renovate.json": json.dumps(
+        {"minimumReleaseAge": "7 days",
+         "packageRules": [{"minimumReleaseAge": "3 days"}]})})
+    assert f["outcome"] == "pass", f["evidence"]
+    assert "exempt" not in f["evidence"]
