@@ -56,10 +56,10 @@ By default the skill operates on the current working directory.
    If it's not, ask the user for a path and `cd` there before continuing.
 2. Verify `.github/workflows/` exists. If it doesn't, stop and tell the
    user the repo has no GitHub Actions workflows to scan.
-3. The gh-gated checks above need `owner/repo`. Do NOT carry it over in a
-   variable: Phase 2's block derives it itself, in its own shell. If gh is
-   unavailable, proceed: the report says so — impostor-SHA reported as
-   skipped, the two API-gated config facts as UNMEASURED, never as passes.
+3. Dormancy and the two API-gated facts need `owner/repo`; Phase 2's block
+   derives it in its own shell (never carry it in a variable). If gh is
+   unavailable or no repo derives, proceed: the report says so (impostor-SHA
+   skipped without gh; those facts UNMEASURED, never passes). Name the cause.
 
 ## Phase 2: Scan (one driver call)
 
@@ -71,14 +71,14 @@ By default the skill operates on the current working directory.
 ROOT="$(git rev-parse --show-toplevel)"
 SLUG="$(printf '%s' "$ROOT" | shasum | cut -c1-12)"
 FINDINGS="${TMPDIR:-/tmp}/ci-secure-findings-${SLUG}.json"
-# `owner/repo` for the gh-gated checks, derived HERE (each phase runs in its own
-# shell). An already-exported REPO wins; else origin, only if gh is authed and
-# it is GitHub-shaped (references/troubleshooting.md). EMPTY skips those checks,
-# never passes them. TWO tokens below on purpose: one token is a zsh trap.
-if [ -z "${REPO-}" ] && gh auth status >/dev/null 2>&1; then
+# `owner/repo` for the API facts + dormancy, derived HERE (each phase runs in its
+# own shell): the user's CI_SECURE_REPO if set, else a github.com origin when gh
+# is authed; a generic REPO is ignored (references/troubleshooting.md). Not
+# owner/repo = EMPTY = unmeasured, never passed. TWO tokens below: zsh trap.
+REPO="${CI_SECURE_REPO-}"; if [ -z "$REPO" ] && gh auth status >/dev/null 2>&1; then
   REPO="$(git remote get-url origin 2>/dev/null | sed -nE 's#/$##; s#\.git$##; s#^(https://([^@/]+@)?github\.com/|(ssh://)?git@github\.com[:/])##p')"
-  printf '%s\n' "$REPO" | grep -Eqx '[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+' || REPO=""
 fi
+printf '%s\n' "$REPO" | grep -Eqx '[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+' || REPO=""
 <ci-secure>/scripts/run.py --root "$ROOT" ${REPO:+--repo} ${REPO:+"$REPO"} --out "$FINDINGS"
 ```
 

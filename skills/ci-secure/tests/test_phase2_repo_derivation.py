@@ -40,7 +40,7 @@ def _write_exe(path: Path, body: str) -> None:
 
 
 def _run_block(tmp_path: Path, shell: str, origin: str | None, gh_ok: bool,
-               exported_repo: str | None = None) -> list[str]:
+               extra_env: dict[str, str] | None = None) -> list[str]:
     home = tmp_path / "home"
     home.mkdir()
     bin_dir = tmp_path / "bin"
@@ -60,8 +60,7 @@ def _run_block(tmp_path: Path, shell: str, origin: str | None, gh_ok: bool,
         "GIT_CONFIG_GLOBAL": os.devnull,
         "LC_ALL": "C",
     }
-    if exported_repo is not None:
-        env["REPO"] = exported_repo
+    env.update(extra_env or {})
 
     git = ["git", "-C", str(repo_dir)]
     subprocess.run([*git, "init", "-q"], check=True, env=env)
@@ -115,10 +114,56 @@ def test_non_github_or_malformed_origin_passes_no_repo(tmp_path, shell, origin):
 
 
 @pytest.mark.parametrize("shell", _SHELLS)
-def test_exported_repo_wins_over_origin(tmp_path, shell):
+def test_ci_secure_repo_override_wins_over_origin(tmp_path, shell):
     argv = _run_block(tmp_path, shell, "https://github.com/acme/widgets.git",
-                      gh_ok=True, exported_repo="other/place")
+                      gh_ok=True, extra_env={"CI_SECURE_REPO": "other/place"})
     assert _repo_arg(argv) == "other/place", f"run.py argv: {argv}"
+
+
+@pytest.mark.parametrize("shell", _SHELLS)
+@pytest.mark.parametrize("stray", ["other-org/other-repo", "/path/to/dir", "acme"])
+def test_generic_repo_env_var_is_ignored(tmp_path, shell, stray):
+    """`REPO` is a generic name a user's profile may set for another tool. A
+    valid-looking one would read ANOTHER repo's settings and run history and
+    score them as this repo's (a false pass); a path-shaped one makes scan.py
+    exit 2 and stops the whole audit. The block must ignore it entirely."""
+    argv = _run_block(tmp_path, shell, "https://github.com/acme/widgets.git",
+                      gh_ok=True, extra_env={"REPO": stray})
+    assert _repo_arg(argv) == "acme/widgets", f"run.py argv: {argv}"
+
+
+@pytest.mark.parametrize("shell", _SHELLS)
+@pytest.mark.parametrize("override", ["/path/to/dir", "https://github.com/acme/widgets", "acme"])
+def test_override_not_owner_repo_is_dropped(tmp_path, shell, override):
+    """A malformed override leaves the checks unmeasured; it never reaches
+    run.py, where scan.py would reject it with exit 2 and stop the audit."""
+    argv = _run_block(tmp_path, shell, "https://github.com/acme/widgets.git",
+                      gh_ok=True, extra_env={"CI_SECURE_REPO": override})
+    assert "--repo" not in argv, f"run.py argv: {argv}"
+
+
+@pytest.mark.parametrize("shell", _SHELLS)
+@pytest.mark.parametrize("origin", [
+    "https://x-access-token:s3cr3tTOKEN@github.com/acme/widgets.git",
+    "https://someone@github.com/acme/widgets.git",
+    "ssh://git@github.com/acme/widgets.git",
+    "https://github.com/acme/widgets/",
+])
+def test_other_github_shapes_derive_repo(tmp_path, shell, origin):
+    argv = _run_block(tmp_path, shell, origin, gh_ok=True)
+    assert _repo_arg(argv) == "acme/widgets", f"run.py argv: {argv}"
+    assert not any("s3cr3tTOKEN" in a for a in argv), f"token leaked: {argv}"
+
+
+@pytest.mark.parametrize("shell", _SHELLS)
+@pytest.mark.parametrize("origin", [
+    "https://github.com.example.net/acme/widgets.git",
+    "https://notgithub.com/acme/widgets.git",
+    "git@github.example.net:acme/widgets.git",
+])
+def test_lookalike_host_passes_no_repo(tmp_path, shell, origin):
+    argv = _run_block(tmp_path, shell, origin, gh_ok=True)
+    assert "--repo" not in argv, f"run.py argv: {argv}"
 
 
 @pytest.mark.parametrize("shell", _SHELLS)
