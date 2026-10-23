@@ -340,8 +340,10 @@ two moved numbers.
     Dependabot waits three days on github.com with no configuration (GitHub
     Enterprise Server from 3.23), which meets the threshold, so the entry
     passes and the evidence names it as relying on that default rather than
-    claiming the repository set one. `include` / `exclude` lists are not
-    judged.
+    claiming the repository set one. An entry whose `cooldown.exclude`
+    lists `*` lets every package skip the wait and **fails**; a narrower
+    `exclude` passes and the evidence names the exempted packages. `include`
+    lists are not judged.
   - **Renovate** (the first of `renovate.json`, `renovate.jsonc`,
     `renovate.json5`, the same three under `.github/`, `.renovaterc`,
     `.renovaterc.json`, `.renovaterc.jsonc`, `.renovaterc.json5`, or a
@@ -351,6 +353,11 @@ two moved numbers.
     minutes). A value set only inside `packageRules` covers only the packages
     those rules match and does not pass; neither does a preset in `extends`
     this scan cannot see into, and the fail says so when `extends` is set.
+    A `packageRules` entry that lowers `minimumReleaseAge` below 3 days (or
+    sets it to `null`) for **every** package — no `match*` / `exclude*`
+    filter, or only match-all ones such as `"*"` or `"/.*/"` — undoes the
+    top-level wait and **fails**. A rule that lowers it for a filtered set of
+    packages (your own scope, say) passes, and the evidence names it.
 
   Both tools configured: both must pass. Neither configured: **not
   applicable**, the same treatment `sec.gate.test-failure-fatal` gets — a

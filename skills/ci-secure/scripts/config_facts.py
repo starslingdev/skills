@@ -2202,6 +2202,31 @@ _RENOVATE_FILES = (
     ".github/renovate.json", ".github/renovate.jsonc", ".github/renovate.json5",
     ".renovaterc", ".renovaterc.json", ".renovaterc.jsonc", ".renovaterc.json5",
 )
+# A filter value that matches every package: Dependabot's `exclude: ["*"]`,
+# or a Renovate matcher whose every value is a match-all glob or regex.
+_MATCH_ALL = frozenset({"*", "**", "/.*/", ".*", "/.+/", ".+"})
+
+
+def _as_list(value: object) -> list:
+    return value if isinstance(value, list) else [value]
+
+
+def _matches_everything(value: object) -> bool:
+    items = _as_list(value)
+    return bool(items) and all(isinstance(v, str) and v.strip() in _MATCH_ALL
+                               for v in items)
+
+
+def _renovate_rule_filters(rule: dict) -> list[str]:
+    """The narrowing filters of one `packageRules` entry: every `match*` /
+    `exclude*` key (Renovate's matchers, current and deprecated), minus any
+    whose value matches every package. Empty means the rule covers all."""
+    return [f"{k}: {_capped([str(v) for v in _as_list(val)], 2, ', ')}"
+            for k, val in rule.items()
+            if (k.startswith("match") or k.startswith("exclude"))
+            and not _matches_everything(val)]
+
+
 _AGE_RE = re.compile(
     r"^\s*(\d+(?:\.\d+)?)\s*(m|mins?|minutes?|h|hrs?|hours?|d|days?|w|weeks?|"
     r"y|yrs?|years?)\s*$", re.I)
@@ -2248,6 +2273,7 @@ def _dependabot_cooldown(root: Path) -> tuple[str, str] | None:
     defaulted: list[str] = []
     semver_only: list[str] = []
     unreadable: list[str] = []
+    exempted: list[str] = []
     for entry in updates:
         if not isinstance(entry, dict):
             unreadable.append("an entry that is not a mapping")
@@ -2265,6 +2291,14 @@ def _dependabot_cooldown(root: Path) -> tuple[str, str] | None:
         if not isinstance(cooldown, dict):
             unreadable.append(label)
             continue
+        exclude = cooldown.get("exclude")
+        if exclude:
+            excluded = [str(x) for x in _as_list(exclude)]
+            if any(x.strip() in _MATCH_ALL for x in excluded):
+                short.append(f"{label} (cooldown.exclude: * — every package "
+                             "skips the wait)")
+                continue
+            exempted.append(f"{label} excludes " + _capped(excluded, 3, ", "))
         keys = (("default-days",)
                 if entry.get("package-ecosystem") in _NON_SEMVER_ECOSYSTEMS
                 else _COOLDOWN_DAY_KEYS)
@@ -2303,6 +2337,9 @@ def _dependabot_cooldown(root: Path) -> tuple[str, str] | None:
     if semver_only:
         notes.append("semver-specific keys only, unlisted classes on the "
                      "platform default: " + _capped(semver_only, 3, ", "))
+    if exempted:
+        notes.append("packages exempted from the wait: "
+                     + _capped(exempted, 3, "; "))
     return "pass", (f"{found}: every `updates` entry waits at least "
                     f"{_COOLDOWN_MIN_DAYS} days"
                     + ("; " + "; ".join(notes) if notes else ""))
@@ -2350,6 +2387,28 @@ def _renovate_cooldown(root: Path) -> tuple[str, str] | None:
                            "sets it, set it here too to have it checked)"
                            if presets else "") + f" — {fix}")
     value = config["minimumReleaseAge"]
+    rules = config.get("packageRules")
+    bypass: list[str] = []
+    exempted: list[str] = []
+    for i, rule in enumerate(rules if isinstance(rules, list) else []):
+        if not isinstance(rule, dict) or "minimumReleaseAge" not in rule:
+            continue
+        age = rule["minimumReleaseAge"]
+        # An explicit null in a rule clears the wait for what it matches.
+        rule_days = 0.0 if age is None else _renovate_age_days(age)
+        if rule_days is None or rule_days >= _COOLDOWN_MIN_DAYS:
+            continue
+        filters = _renovate_rule_filters(rule)
+        if filters:
+            exempted.append(f"rule {i + 1} ({'; '.join(filters)}): {age}")
+        else:
+            bypass.append(f"rule {i + 1}: {age}")
+    if bypass:
+        return "fail", (f"{found}: `packageRules` "
+                        f"{_capped(bypass, 3, ', ')} lowers "
+                        f"`minimumReleaseAge` below {_COOLDOWN_MIN_DAYS} days "
+                        "for every package — raise it, or narrow the rule to "
+                        "the packages that may skip the wait")
     days = _renovate_age_days(value)
     if days is None:
         return "unmeasured", (f"unmeasured: {found} sets `minimumReleaseAge: "
@@ -2358,7 +2417,9 @@ def _renovate_cooldown(root: Path) -> tuple[str, str] | None:
     if days < _COOLDOWN_MIN_DAYS:
         return "fail", (f"{found}: `minimumReleaseAge: {value}` is under "
                         f"{_COOLDOWN_MIN_DAYS} days — {fix}")
-    return "pass", f"{found}: `minimumReleaseAge: {value}`"
+    return "pass", (f"{found}: `minimumReleaseAge: {value}`"
+                    + ("; packages exempted from the wait by `packageRules`: "
+                       + _capped(exempted, 3, "; ") if exempted else ""))
 
 
 def _update_cooldown(root: Path) -> tuple[str, str]:

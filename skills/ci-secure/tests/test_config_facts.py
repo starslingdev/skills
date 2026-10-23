@@ -5330,3 +5330,57 @@ def test_a_boolean_cooldown_value_is_unreadable_not_one_day(tmp_path):
     f, _ = _cooldown(tmp_path, _dependabot(_entry(
         "npm", cooldown="    cooldown:\n      default-days: true\n")))
     assert f["outcome"] == "unmeasured", f["evidence"]
+
+
+# --- F10 exemptions: a total bypass fails, a partial one is named ------------
+
+def test_a_dependabot_exclude_of_everything_fails(tmp_path):
+    f, _ = _cooldown(tmp_path, _dependabot(_entry(
+        "npm", cooldown="    cooldown:\n      default-days: 7\n"
+                        "      exclude: ['*']\n")))
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "exclude" in f["evidence"]
+
+
+def test_a_dependabot_exclude_of_everything_with_no_days_still_fails(tmp_path):
+    f, _ = _cooldown(tmp_path, _dependabot(_entry(
+        "npm", cooldown="    cooldown:\n      exclude: ['*']\n")))
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_a_narrow_dependabot_exclude_passes_and_is_named(tmp_path):
+    f, _ = _cooldown(tmp_path, _dependabot(_entry(
+        "npm", cooldown="    cooldown:\n      default-days: 7\n"
+                        "      exclude: ['@acme/*']\n")))
+    assert f["outcome"] == "pass", f["evidence"]
+    assert "@acme/*" in f["evidence"]
+
+
+@pytest.mark.parametrize("rule", [
+    {"minimumReleaseAge": "0 days"},
+    {"matchPackageNames": ["*"], "minimumReleaseAge": "1 day"},
+    {"matchPackageNames": ["/.*/"], "minimumReleaseAge": "2 days"},
+])
+def test_a_renovate_rule_lowering_every_package_fails(tmp_path, rule):
+    f, _ = _cooldown(tmp_path, {"renovate.json": json.dumps(
+        {"minimumReleaseAge": "7 days", "packageRules": [rule]})})
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "packageRules" in f["evidence"]
+
+
+def test_a_narrow_renovate_rule_lowering_some_packages_passes_and_is_named(
+        tmp_path):
+    f, _ = _cooldown(tmp_path, {"renovate.json": json.dumps(
+        {"minimumReleaseAge": "7 days",
+         "packageRules": [{"matchPackageNames": ["@acme/**"],
+                           "minimumReleaseAge": "0 days"}]})})
+    assert f["outcome"] == "pass", f["evidence"]
+    assert "@acme/**" in f["evidence"]
+
+
+def test_a_renovate_rule_keeping_three_days_is_not_an_exemption(tmp_path):
+    f, _ = _cooldown(tmp_path, {"renovate.json": json.dumps(
+        {"minimumReleaseAge": "7 days",
+         "packageRules": [{"minimumReleaseAge": "3 days"}]})})
+    assert f["outcome"] == "pass", f["evidence"]
+    assert "exempt" not in f["evidence"]

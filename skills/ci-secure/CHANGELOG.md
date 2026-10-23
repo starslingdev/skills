@@ -20,7 +20,11 @@ entries are dated (UTC). Format loosely follows
   neither tool is configured; a config this scan cannot parse (a Renovate
   config with comments or trailing commas, say) is unmeasured, never a pass or
   a fail. A Dependabot entry with no `cooldown` is judged at Dependabot's own
-  3-day default (github.com; GHES from 3.23) and passes with that named.
+  3-day default (github.com; GHES from 3.23) and passes with that named. An
+  exemption that covers every package fails (a Dependabot `cooldown.exclude`
+  of `*`, or a Renovate `packageRules` entry with no narrowing filter that
+  lowers `minimumReleaseAge` below 3 days); a partial exemption passes and the
+  row names it.
   Security updates are not delayed by either tool. **The config-fact aggregate
   this skill hands ci-advisor gains a fact**: in a repository with Dependabot
   or Renovate, `applicable_count` and `scored_count` each rise by one; with
