@@ -103,6 +103,10 @@ def test_gh_not_authenticated_passes_no_repo(tmp_path, shell):
     "https://gitlab.com/acme/widgets.git",
     "git@gitlab.com:acme/widgets.git",
     "https://github.com/acme/widgets/extra.git",
+    # A relative-path origin has no GitHub prefix; it must not be read as
+    # owner/repo (that would point the API lookups at an unrelated repo).
+    "acme/widgets.git",
+    "acme/widgets",
     None,
 ])
 def test_non_github_or_malformed_origin_passes_no_repo(tmp_path, shell, origin):

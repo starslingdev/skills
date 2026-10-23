@@ -27,11 +27,13 @@ remote, which arrives in two shapes:
 ```bash
 # https://github.com/owner/repo[.git]  or  git@github.com:owner/repo.git
 git remote get-url origin \
-  | sed -E 's#^(https://([^@/]+@)?github\.com/|(ssh://)?git@github\.com[:/])##; s#/$##; s#\.git$##'
+  | sed -nE 's#/$##; s#\.git$##; s#^(https://([^@/]+@)?github\.com/|(ssh://)?git@github\.com[:/])##p'
 ```
 
-The result is passed only if it is exactly `owner/repo` — one `/`, no
-scheme, no `.git` suffix. A non-GitHub remote keeps its scheme or host, fails
-that check, and leaves `REPO` empty rather than passing it on: the scan still
+`sed -n` with the `p` flag prints only when the `github.com` prefix actually
+matched, so a remote without one (another host, or a relative path such as
+`owner/repo.git`) yields nothing. The result is passed only if it is exactly
+`owner/repo` — one `/`, no scheme, no `.git` suffix — and anything else
+leaves `REPO` empty rather than passing it on: the scan still
 runs, and the checks it feeds are reported as skipped or unmeasured, never as
 passes.

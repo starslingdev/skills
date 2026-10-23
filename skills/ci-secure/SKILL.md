@@ -76,7 +76,7 @@ FINDINGS="${TMPDIR:-/tmp}/ci-secure-findings-${SLUG}.json"
 # it is GitHub-shaped (references/troubleshooting.md). EMPTY skips those checks,
 # never passes them. TWO tokens below on purpose: one token is a zsh trap.
 if [ -z "${REPO-}" ] && gh auth status >/dev/null 2>&1; then
-  REPO="$(git remote get-url origin 2>/dev/null | sed -E 's#^(https://([^@/]+@)?github\.com/|(ssh://)?git@github\.com[:/])##; s#/$##; s#\.git$##')"
+  REPO="$(git remote get-url origin 2>/dev/null | sed -nE 's#/$##; s#\.git$##; s#^(https://([^@/]+@)?github\.com/|(ssh://)?git@github\.com[:/])##p')"
   printf '%s\n' "$REPO" | grep -Eqx '[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+' || REPO=""
 fi
 <ci-secure>/scripts/run.py --root "$ROOT" ${REPO:+--repo} ${REPO:+"$REPO"} --out "$FINDINGS"
