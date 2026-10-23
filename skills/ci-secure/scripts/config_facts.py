@@ -22,7 +22,9 @@ THE FACTS
                                           other than `id-token` (writes belong
                                           on jobs; `write-all` fails)
   F3 sec.codeowners.workflows             a CODEOWNERS entry covers
-                                          `.github/workflows/`
+                                          `.github/workflows/` and the default
+                                          branch requires review from Code
+                                          Owners (API-gated once covered)
   F4 sec.trigger.fork-code-uncleared      no untrusted-trigger workflow checks
                                           out the attacker's head ref
   F5 sec.secrets.no-blanket-inherit       no reusable-workflow call passes
@@ -42,7 +44,11 @@ THE FACTS
 F7 and F8 read the GitHub API, not workflow YAML, so they are TOKEN-GATED: no
 repo or no token means UNMEASURED with the reason stated — the same contract
 the impostor-SHA vector keeps. They are never a pass for being unreadable and
-never a fail for it either.
+never a fail for it either. F3 joins them once a CODEOWNERS rule covers
+workflows: CODEOWNERS only REQUESTS an owner's review, and whether the default
+branch REQUIRES it (a ruleset or classic branch protection) is an API fact
+under the same contract. A missing or non-covering CODEOWNERS still fails from
+the files alone, with no API call.
 
 F4 replaces "has a dangerous trigger", which is true of 84% of the repos
 measured during development and so discriminates nobody. The tiering is deliberate and keeps the
@@ -81,6 +87,7 @@ from functools import lru_cache
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Iterator
+from urllib.parse import quote
 
 REGISTERED = "2026-08-03"
 
@@ -1732,8 +1739,12 @@ def _is_admin_only_403(message: str) -> bool:
 # the status AND the reason — which the comment used to claim while the regex
 # was a bare `\b404\b`, so a branch renamed between the two calls, a
 # plan-gated endpoint, even a 502 quoting 404 in its body, all read as
-# "nothing required here": a measured PASS over a source never read.
-_NOT_PROTECTED_404_RE = re.compile(r"\b404\b.*branch not protected", re.I | re.S)
+# "nothing required here": a measured PASS over a source never read. Either
+# order: `gh_utils` raises with gh's stderr alone, which puts the reason first
+# (`gh: Branch not protected (HTTP 404)`).
+_NOT_PROTECTED_404_RE = re.compile(
+    r"\b404\b.*branch not protected|branch not protected.*\b404\b",
+    re.I | re.S)
 
 
 def _is_not_protected_404(exc: Exception) -> bool:
@@ -2170,6 +2181,181 @@ def _fork_approval_effective(repo: str | None, fetcher) -> tuple[str, str]:
         "it gates anyone is not something this scan can say")
 
 
+# --- F3, second half: is the CODEOWNERS rule ENFORCED? -----------------------
+#
+# A CODEOWNERS rule only REQUESTS a review from its owners. It is binding only
+# when the default branch requires review from Code Owners — a `pull_request`
+# rule with `require_code_owner_review` in a ruleset (the rules endpoint folds
+# in organisation rulesets too), or `require_code_owner_reviews` in classic
+# branch protection. With neither, any approver merges a workflow change, and a
+# pass here told the reader the opposite. So a covering file is only half the
+# fact, and the other half is an API read with F7's contract: no repository or
+# no token is UNMEASURED, and so is any answer the scan cannot complete.
+#
+# Either source saying YES is enough on its own — it is a positive statement
+# about what GitHub enforces. NO needs BOTH sources read: the classic endpoint
+# is admin-only, so most readers get a 403 (or a bare 404, which GitHub also
+# answers to a non-admin) there, and a ruleset that does not require owner
+# review says nothing about classic protection that might. The one 404 that IS
+# an answer is "Branch not protected" — no classic protection exists — and
+# F7's `_is_not_protected_404` recognises exactly that one. When classic is
+# unreadable, the public branch endpoint's `protected: false` is the other
+# readable "no classic protection" (see `_branch_protected_flag`).
+
+def _branch_segment(branch: str) -> str:
+    """`branch` escaped for an API path. A raw `#` or `?` would end the path
+    and address another branch (or none); `/` stays, as GitHub's branch paths
+    take it as is."""
+    return quote(branch, safe="/")
+
+
+def _branch_protected_flag(gh: Any, repo: str, branch: str) -> bool | None:
+    """The public branch endpoint's `protected` flag, or None.
+
+    None covers a failed call, an unexpected shape and a missing or non-bool
+    key alike: the caller treats only `False` as an answer.
+    """
+    try:
+        body = json.loads(gh.run_gh_api(
+            f"repos/{repo}/branches/{_branch_segment(branch)}"))
+    except Exception:                                          # noqa: BLE001
+        return None
+    flag = body.get("protected") if isinstance(body, dict) else None
+    return flag if isinstance(flag, bool) else None
+
+
+def _code_owner_review_via_gh(repo: str) -> tuple[bool | None, str]:
+    """(required, detail) from the API, or (None, reason)."""
+    gh = _gh_utils()
+    if not gh.check_prereqs():
+        return None, "gh is unavailable or not authenticated (run gh auth login)"
+    try:
+        branch = json.loads(gh.run_gh_api(f"repos/{repo}")).get("default_branch")
+    except Exception as exc:                                   # noqa: BLE001
+        return None, f"the repository's default branch could not be read ({exc})"
+    if not branch:
+        return None, "the repository reported no default branch"
+
+    errors: list[str] = []
+    rules_require: bool | None = None
+    segment = _branch_segment(branch)
+    try:
+        rules = json.loads(gh.run_gh_api(
+            f"repos/{repo}/rules/branches/{segment}"))
+        if not isinstance(rules, list):
+            raise ValueError(
+                f"the rulesets endpoint returned {type(rules).__name__}, not "
+                f"the documented array of rules")
+        rules_require = any(
+            isinstance(rule, dict) and rule.get("type") == "pull_request"
+            and isinstance(rule.get("parameters"), dict)
+            and rule["parameters"].get("require_code_owner_review") is True
+            for rule in rules)
+    except Exception as exc:                                   # noqa: BLE001
+        errors.append(f"rulesets: {exc}")
+    if rules_require:
+        return True, f"a ruleset on branch `{branch}`"
+
+    classic_require: bool | None = None
+    try:
+        classic = json.loads(gh.run_gh_api(
+            f"repos/{repo}/branches/{segment}/protection",
+            quiet_not_found=True))
+        if not isinstance(classic, dict):
+            raise ValueError(
+                f"the branch protection endpoint returned "
+                f"{type(classic).__name__}, not an object")
+        reviews = classic.get("required_pull_request_reviews")
+        classic_require = (isinstance(reviews, dict)
+                           and reviews.get("require_code_owner_reviews") is True)
+    except Exception as exc:                                   # noqa: BLE001
+        if _is_not_protected_404(exc):
+            classic_require = False
+        else:
+            classic_error = (
+                f"classic branch protection: {str(exc).strip()} (only "
+                "repository admins can read it; an admin's re-run, or the "
+                "branch's settings page, settles it)")
+            # The classic endpoint is admin-only, so auditing someone else's
+            # repository lands here (403, or a bare 404 GitHub also answers
+            # to non-admins). The public branch endpoint's `protected` flag
+            # can still settle it — but only in one direction. Verified
+            # against live repositories: a branch covered by a ruleset and NO
+            # classic protection (classic answers "Branch not protected")
+            # reports `protected: true`, so the flag reflects rulesets as well
+            # as classic protection. `false` therefore means neither exists:
+            # no classic protection, a readable "no". `true` cannot say which
+            # source set it, and a failed read says nothing — both leave the
+            # classic source unknown. Only asked once the rulesets were read
+            # and said no; it stands in for classic protection, never for them.
+            flag = (_branch_protected_flag(gh, repo, branch)
+                    if rules_require is False else None)
+            if flag is False:
+                classic_require = False
+            elif rules_require is False:
+                errors.append(classic_error + (
+                    "; the branch reports `protected: true`, which a ruleset "
+                    "alone also sets, so that does not settle it"
+                    if flag else
+                    "; the branch's `protected` flag could not be read either"))
+            else:
+                errors.append(classic_error)
+    if classic_require:
+        return True, f"classic branch protection on `{branch}`"
+    if rules_require is False and classic_require is False:
+        return False, f"branch `{branch}`"
+    said = ("its rulesets do not require it, but "
+            if rules_require is False else
+            "classic branch protection does not require it, but "
+            if classic_require is False else "")
+    return None, (f"whether branch `{branch}` requires review from Code "
+                  f"Owners could not be established — {said}"
+                  f"{'; '.join(errors)}")
+
+
+def _codeowners_enforced(
+    root: Path, repo: str | None, fetcher,
+) -> tuple[str, str]:
+    """(outcome, evidence) for `sec.codeowners.workflows`.
+
+    The file decides every outcome it can: no CODEOWNERS, no covering rule, or
+    an unreadable file comes back exactly as `_codeowners_covers_workflows`
+    says, with no API call. Only a COVERING file goes on to ask whether the
+    default branch enforces it.
+    """
+    outcome, evidence = _codeowners_covers_workflows(root)
+    if outcome != "pass":
+        return outcome, evidence
+    if not repo:
+        return "unmeasured", (
+            f"unmeasured: {evidence}, but CODEOWNERS only requests an owner's "
+            "review — whether the default branch REQUIRES it is an API fact, "
+            "and this scan had no repository to read it from — that needs "
+            "`gh` authenticated (`gh auth login`) and a GitHub remote to "
+            "derive `owner/name` from")
+    try:
+        required, detail = fetcher(repo)
+    except Exception as exc:                                   # noqa: BLE001
+        return "unmeasured", (
+            f"unmeasured: {evidence}, but whether the default branch requires "
+            f"review from Code Owners could not be read ({exc})")
+    if required is None:
+        return "unmeasured", f"unmeasured: {evidence}, but {detail}"
+    if required:
+        return "pass", (
+            f"{evidence}, and {detail} requires review from Code Owners, so a "
+            "workflow change cannot merge without an owner's approval, except "
+            "by an actor the rule lets bypass it")
+    return "fail", (
+        f"{evidence}, but on {detail} neither a ruleset nor classic branch "
+        "protection requires review from Code Owners: CODEOWNERS requests an "
+        "owner's review, and the merge rules do not require it, so any "
+        "approver can merge a workflow change. Turn on \"Require review from "
+        "Code Owners\" in the pull request rule of a ruleset that targets the "
+        "branch, or in its branch protection — creating one that requires a "
+        "pull request first if the branch has neither")
+
+
 # --- the fact table -----------------------------------------------------------
 
 def compute_config_facts(
@@ -2179,19 +2365,23 @@ def compute_config_facts(
     repo: str | None = None,
     required_contexts_fetcher: Any = None,
     fork_approval_fetcher: Any = None,
+    codeowner_review_fetcher: Any = None,
 ) -> dict[str, Any]:
     """Every fact, every time — pass/fail/unmeasured, never silently absent.
 
-    ``repo`` (``owner/name``) enables the TWO facts that need the API —
-    ``sec.required-checks.skippable`` (branch protection) and
-    ``sec.fork-approval.effective`` (the repository's fork-PR approval setting).
-    It is optional, and its absence is disclosed as UNMEASURED rather than
-    skipped — a fact that quietly vanishes from the table is a silent pass.
+    ``repo`` (``owner/name``) enables the THREE facts that need the API —
+    ``sec.required-checks.skippable`` (branch protection),
+    ``sec.fork-approval.effective`` (the repository's fork-PR approval setting)
+    and, once a CODEOWNERS rule covers workflows, ``sec.codeowners.workflows``
+    (whether the default branch requires review from Code Owners). It is
+    optional, and its absence is disclosed as UNMEASURED rather than skipped —
+    a fact that quietly vanishes from the table is a silent pass.
 
-    ``required_contexts_fetcher`` and ``fork_approval_fetcher`` are the seams
-    the tests inject a recorded response through, one per API-gated fact,
-    defaulting to ``_required_contexts_via_gh`` and ``_fork_approval_via_gh``;
-    nothing in the suite touches the network.
+    ``required_contexts_fetcher``, ``fork_approval_fetcher`` and
+    ``codeowner_review_fetcher`` are the seams the tests inject a recorded
+    response through, one per API-gated fact, defaulting to
+    ``_required_contexts_via_gh``, ``_fork_approval_via_gh`` and
+    ``_code_owner_review_via_gh``; nothing in the suite touches the network.
     """
     scan = _scan()
 
@@ -2254,9 +2444,11 @@ def compute_config_facts(
         # rendering it through the scope formatter produced "write-all: write".
         else _capped([f"{rel}: {_write_grant_phrase(s)}" for rel, s in wide], 4))
 
-    co_outcome, co_evidence = _codeowners_covers_workflows(root)
+    co_outcome, co_evidence = _codeowners_enforced(
+        root, repo, codeowner_review_fetcher or _code_owner_review_via_gh)
     add("sec.codeowners.workflows",
-        "a CODEOWNERS entry covers `.github/workflows/`",
+        "a CODEOWNERS entry covers `.github/workflows/` and the default "
+        "branch enforces it (requires review from Code Owners)",
         False, co_outcome == "pass", co_evidence, outcome=co_outcome)
 
     uncleared = []

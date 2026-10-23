@@ -18,10 +18,12 @@ vector detectors are lexical rather than confirmed exploit proofs, and a public
 number must not grade a stranger's repo down on an unconfirmed match.
 
 **The denominator is token-dependent, so the aggregate is not comparable
-across scans run under different auth.** Two of the nine facts read the GitHub
-API. In a repository where every fact applies, a scan with no repository or no
-token measures seven of nine and scores `100 × passed / 7`; the same repository
-scanned with a token scores over nine. A fact that does not apply to the
+across scans run under different auth.** Up to three of the nine facts read
+the GitHub API (the CODEOWNERS fact only once a CODEOWNERS rule covers the
+workflows). In a repository where every fact applies and that rule exists, a
+scan with no repository or no token measures six of nine and scores
+`100 × passed / 6`; the same repository scanned with a token that can read
+every source scores over nine. A fact that does not apply to the
 repository at all leaves the denominator on top of that (see below), so both
 numbers drop by one in a repository whose workflows run no suite.
 The unmeasured ids are named in the block's `unmeasured` list and the caveat, so
@@ -39,8 +41,8 @@ Consumers bind to the ids, not to the sentences. ci-advisor blends from that
 block, and quantification belongs there, where the blend context carries the
 denominators.
 
-A fact that cannot be measured — an unscannable workflow file, or, for the two
-API-gated facts, no repository and no token — is **unmeasured, never a silent
+A fact that cannot be measured — an unscannable workflow file, or, for the
+three API-gated facts, no repository and no token — is **unmeasured, never a silent
 pass**: it scores nothing, stays in the applicable count as a
 named coverage gap, and the block says so.
 
@@ -68,7 +70,7 @@ instead of shipping.
 | --- | --- | --- |
 | `sec.permissions.workflow-declares` | `ci.security.scoped-id-token` | Adding a `permissions:` block is a different edit from relocating an `id-token: write` grant. A workflow can declare permissions and still fail scoped-id-token, and vice versa. |
 | `sec.permissions.write-scoped` | `ci.security.scoped-id-token` | **Disjoint by construction:** `id-token` is excluded from this fact's scope set, so the one edit scoped-id-token asks for (move `id-token: write` to a job) cannot change this fact. `write-all` fails here on its own; unwinding it into per-job grants is not the id-token relocation. |
-| `sec.codeowners.workflows` | — none | CODEOWNERS is not workflow YAML; no ci-score check reads it. |
+| `sec.codeowners.workflows` | — none | CODEOWNERS is not workflow YAML, and the branch rule that enforces it (require review from Code Owners) is read over the API, not from YAML; no ci-score check reads either. API-gated once a rule covers workflows. |
 | `sec.trigger.fork-code-uncleared` | `ci.trigger.*` (concurrency, cancel, path-filter) | Those checks read `concurrency:` and `paths:` blocks; this fact reads the trigger list plus checkout `ref:`/`repository:` values. No shared YAML key. Also tiered against ci-secure's own P14.9 finding: a bare untrusted trigger passes (the true-of-84% defect, deliberately removed), trigger + attacker-head checkout fails this FACT, and only the full trigger + checkout + execution chain is the P14.9 finding — so the fact and the finding cannot fire on the same edit either. |
 | `sec.secrets.no-blanket-inherit` | — none | No ci-score check reads `secrets:` on reusable-workflow calls. |
 | `sec.required-checks.skippable` | — none | Branch protection is not workflow YAML; no ci-score check reads the API. The workflow-side edit this fact asks for (add an always-running verdict job that `needs:` the conditional ones) touches no key any ci-score check reads. |
@@ -94,8 +96,23 @@ two moved numbers.
   the jobs that need them; `permissions: write-all` fails.
 - **`sec.codeowners.workflows`** — a CODEOWNERS entry covers
   `.github/workflows/` (`.github/workflows/`, `.github/**`, or a bare `*`
-  global owner; an extension rule like `*.go` does not cover it). Without one,
-  workflow changes merge with the same approvals as any other change.
+  global owner; an extension rule like `*.go` does not cover it) AND the
+  default branch enforces it. Without a covering entry, workflow changes merge
+  with the same approvals as any other change — a fail decided from the files
+  alone, with no API call. With one, CODEOWNERS only REQUESTS an owner's
+  review: it binds only when the branch requires review from Code Owners, in a
+  ruleset's pull request rule (organisation rulesets included) or in classic
+  branch protection. Either source requiring it passes; both readable and
+  neither requiring it fails, because any approver can then merge a workflow
+  change. **To fix that fail**: turn on "Require review from Code Owners" in
+  the branch's ruleset or branch protection. API-gated once covered: with no
+  repository or no token, or when the answer cannot be completed (classic
+  protection is admin-only, so a ruleset that does not require it plus an
+  unreadable classic endpoint establishes nothing), the fact is unmeasured and
+  says why. Two answers settle classic protection without admin access: a 404
+  "Branch not protected" from its endpoint, and `protected: false` on the
+  public branch endpoint (that flag is set by rulesets as well as classic
+  protection, so `false` means neither exists; `true` settles nothing).
 - **`sec.trigger.fork-code-uncleared`** — no workflow with an untrusted-event
   trigger (`pull_request_target`, `workflow_run`, `issue_comment`, …) checks
   out the attacker's head ref. Bare untrusted triggers pass.

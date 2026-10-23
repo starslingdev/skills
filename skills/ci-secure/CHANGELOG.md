@@ -159,6 +159,30 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-10-22** — **`sec.codeowners.workflows` no longer passes on a
+  CODEOWNERS rule the branch does not enforce.** CODEOWNERS only requests an
+  owner's review; it binds only when the default branch requires review from
+  Code Owners. A covering file passed on its own, so a repository whose rules
+  required one approval from anyone read as needing an owner's sign-off on
+  workflow changes. A missing or non-covering CODEOWNERS still fails from the
+  files alone. A covering one now also reads the merge rules over the API,
+  under the same contract as the other API-gated facts: pass when a ruleset
+  (organisation rulesets included) or classic branch protection requires
+  review from Code Owners; fail when both are readable and neither does,
+  naming the setting to turn on; unmeasured, with the reason, when there is no
+  repository or token or the answer cannot be completed (a ruleset that does
+  not require it plus admin-only classic protection the reader cannot see,
+  on a branch the public branch endpoint reports as protected). A reader
+  without admin access still gets a measured fail when that endpoint reports
+  the branch unprotected, since then no classic protection exists. The
+  fact's label now says the rule must be enforced. A covering CODEOWNERS
+  that used to pass now reads as unmeasured in every scan without a
+  repository and token, the vendored CI gate included, so the scored count
+  there drops by one; that is a coverage gap stated out loud, not a
+  regression. Two fixes ride along: gh's real "Branch not protected" 404
+  (reason before status) is now recognised as an answer, which also lets
+  `sec.required-checks.skippable` measure ruleset-only branches read by an
+  admin, and the branch name is escaped in every API path.
 - **2026-10-22** — **The scan step now works out `owner/repo` itself, so the
   two API-gated config facts (required-checks-skippable, fork-PR approval) and
   the dormancy lookup actually run in a real session.** The repo was derived
