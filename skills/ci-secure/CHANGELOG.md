@@ -174,6 +174,11 @@ entries are dated (UTC). Format loosely follows
   different repository's settings and run history and scored them as this
   one's (two passes and a dormant finding that were not true). The
   impostor-SHA check was not affected: it runs whenever `gh` is signed in.
+  Same bug class, later phases: the report render built its path from a slug
+  only the scan step's shell had set, so every repository rendered to the
+  same `ci-secure-report-.md` (two audits at once read each other's report),
+  and the summary and selection steps read paths nothing in their own shell
+  set. Every later block now re-derives its paths on its first line.
 - **2026-10-10** — **A self-repository action (`uses: $/path`, GitHub
   2026-07-30) run after a checkout of the fork's head now counts as fork code
   executed with privileges, exactly like a `./` action or a `run:` step.** A

@@ -285,7 +285,8 @@ def test_the_self_proof_runbook_still_explains_every_outcome_skill_md_branches_o
 # case, and Phase 2 then derives the value itself, so it is not a silent gap.
 _AMBIENT_SHELL_VARS = {"TMPDIR", "HOME", "PATH", "PWD", "USER", "SHELL", "CI_SECURE_REPO"}
 _VAR_EXPANSION = re.compile(r"\$\{?([A-Z][A-Z0-9_]*)")
-_VAR_ASSIGNMENT = re.compile(r"^\s*(?:export\s+)?([A-Z][A-Z0-9_]*)=", re.MULTILINE)
+# An assignment starts a line or follows `;` (one-line path preludes).
+_VAR_ASSIGNMENT = re.compile(r"(?:^|;)\s*(?:export\s+)?([A-Z][A-Z0-9_]*)=", re.MULTILINE)
 
 
 def _bash_blocks(text: str) -> list[str]:

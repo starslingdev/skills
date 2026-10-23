@@ -29,7 +29,7 @@ fix ever being tested. `on` makes `run.py` exit 2 in that situation instead
 of skipping, so a fix that cannot be verified fails loudly.
 
 The re-scan the oracle runs writes ONE file, `ci-secure-recheck-<slug>.json`
-in tmp, scoped by the same per-repo slug SKILL.md Phase 1 derives. That is
+in tmp, scoped by the same per-repo slug SKILL.md's Phase 2 block derives. That is
 the documented exception to SKILL.md's two-file budget (it cannot overwrite
 `$FINDINGS`, which the orchestrator still needs), and it is per-repo for the
 same reason the findings path is: a fixed `/tmp/ci-secure-recheck.json` is a
