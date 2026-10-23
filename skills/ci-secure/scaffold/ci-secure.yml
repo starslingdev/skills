@@ -12,8 +12,10 @@
 # from the pull request, so a pull request can edit THIS FILE — point the gate
 # at a different engine, or weaken the step — and the check it reports is the
 # edited one. That is true of every in-repo check, and the edit is visible in
-# the diff. Requiring review on BOTH `.github/` (a CODEOWNERS entry, which this
-# gate also checks for) and `/ci-secure/` is what actually closes it. `.github/`
+# the diff. Requiring review on BOTH `.github/` and `/ci-secure/` is what
+# actually closes it: a CODEOWNERS entry for each, AND "Require review from
+# Code Owners" turned on for the branch — without that setting CODEOWNERS only
+# requests the owner's review and any approver can merge. `.github/`
 # alone is half the trust path: the gate, the engine, `config.py` — which
 # defines which outcomes block — and the manifest all live under `/ci-secure/`,
 # are checked out from the pull request too, and none of them are under
@@ -223,8 +225,10 @@ jobs:
 # advisory mode too. Advisory is a ramp for findings, never a mute button for a
 # broken scan.
 #
-# Two facts will likely stay UNMEASURED whatever you do: whether your required
-# checks can be skipped, and your fork-PR approval policy. Both are repository
-# settings behind admin-scoped API endpoints that a CI job's token cannot read.
+# Up to three facts will stay UNMEASURED whatever you do: whether your required
+# checks can be skipped, your fork-PR approval policy, and — when a CODEOWNERS
+# entry covers your workflows — whether the branch requires review from Code
+# Owners. All three are repository settings read through the GitHub API, which
+# this gate does not call (the first two are admin-scoped besides).
 # They are reported as unmeasured and are excluded from the score rather than
 # counted as passes — a coverage gap stated out loud, not a clean result.

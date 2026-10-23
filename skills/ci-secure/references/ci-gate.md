@@ -228,16 +228,22 @@ rules applies to an install PR as much as to a fix PR.
    the gate gone entirely, the order matters: delete the workflow FIRST,
    then `ci-secure/`. The other way round reds every run in between, on
    the drift check, before the gate is even reached.
-5. **Two facts stay UNMEASURED** on any CI token: whether required
-   checks are skippable, and the fork-PR approval policy. Both are
-   admin-scoped API reads. They are disclosed and dropped from the
-   score, never counted as passes.
+5. **Up to three facts stay UNMEASURED** on any CI token: whether required
+   checks are skippable, the fork-PR approval policy, and — once a
+   CODEOWNERS rule covers workflows — whether the branch enforces it
+   (requires review from Code Owners). All three are API reads the gate
+   does not make. They are disclosed and dropped from the score, never
+   counted as passes; a MISSING CODEOWNERS entry still fails.
 6. **A pull request can edit the workflow that judges it — and the gate
    it runs.** On `pull_request` GitHub checks out the PR's tree, so both
    `.github/workflows/ci-secure.yml` and the vendored `ci-secure/` are
    the PR's versions. Tell them to require review on **both** paths
-   before making `ci-secure` a required check. A CODEOWNERS entry for
-   `.github/` is one of the facts this gate checks; `/ci-secure/` is not
+   before making `ci-secure` a required check: a CODEOWNERS entry for
+   each path AND "Require review from Code Owners" turned on for the
+   branch, since without that setting CODEOWNERS only requests the
+   owner's review. The gate fails only on a MISSING CODEOWNERS entry
+   for `.github/workflows/` (whether the branch enforces it is
+   unmeasured here, item 5); `/ci-secure/` is not checked at all
    — nothing checks it for them, and `.github/` alone leaves the gate,
    the engine, `config.py` (which defines which outcomes block) and the
    manifest editable by an ordinary approval. Hashing does not help

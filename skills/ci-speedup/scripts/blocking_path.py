@@ -2552,7 +2552,7 @@ _FIX_META: dict[str, dict[str, Any]] = {
                    "provider fits; apply the change to the vitest config / scripts, "
                    "verify the coverage consumer still works, and re-measure the step.",
     },
-    # OPT78 - see references/optimization-patterns.md. HIGH risk: this lever buys
+    # OPT78 - see references/patterns/opt78-*.md. HIGH risk: this lever buys
     # speed by letting test files SHARE a module registry, which can leak state
     # between them. The guardrail/rollout below are not advice, they are the
     # condition on which the lever is sane at all, so they ride in the prompt.

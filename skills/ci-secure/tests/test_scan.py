@@ -1254,13 +1254,15 @@ def test_a_dropped_match_does_not_unmeasure_the_config_facts(
     assert data["dropped_matches"], "expected the folded scalar to drop"
     score = data["security_score"]
     outcomes = {f["fact_id"]: f["outcome"] for f in score["facts"]}
-    # The two API-gated facts (branch protection, fork-PR approval policy) are
-    # unmeasured in this offline scan by contract — that is disclosure, not the
-    # regression this test guards. Everything that reads workflow YAML must
-    # still resolve: a dropped match is one expression the scanner could not
-    # anchor, not an unreadable file, and treating it as a scan gap would take
-    # every universal fact down with it.
-    api_gated = {"sec.required-checks.skippable", "sec.fork-approval.effective"}
+    # The API-gated facts (branch protection, fork-PR approval policy, and
+    # whether a covering CODEOWNERS rule is enforced) are unmeasured in this
+    # offline scan by contract — that is disclosure, not the regression this
+    # test guards. Everything that reads workflow YAML must still resolve: a
+    # dropped match is one expression the scanner could not anchor, not an
+    # unreadable file, and treating it as a scan gap would take every
+    # universal fact down with it.
+    api_gated = {"sec.required-checks.skippable", "sec.fork-approval.effective",
+                 "sec.codeowners.workflows"}
     assert {fid for fid, out in outcomes.items()
             if out == "unmeasured"} <= api_gated, (
         f"a dropped match unmeasured the config facts: {outcomes}"

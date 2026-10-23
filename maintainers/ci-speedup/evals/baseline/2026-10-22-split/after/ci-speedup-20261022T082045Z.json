@@ -1,0 +1,881 @@
+[
+  {
+    "id": 11,
+    "name": "quality-review-opt81",
+    "run": 1,
+    "passed": true,
+    "tool_calls": 9,
+    "input_tokens": 406378,
+    "output_tokens": 4203,
+    "duration_ms": 49001,
+    "cost_usd": 0.38742540000000003,
+    "reading": {
+      "reference_bytes": 22302,
+      "reference_lines": 224,
+      "catalog_opened": true,
+      "catalog_entries_read": [
+        "OPT81"
+      ],
+      "unattributed_calls": 0,
+      "reference_files": [
+        {
+          "path": "patterns/opt81-same-job-faster-on-another-runner.md",
+          "bytes": 14766,
+          "lines": 155,
+          "calls": 2
+        },
+        {
+          "path": "adversarial-review-rubric.md",
+          "bytes": 7536,
+          "lines": 69,
+          "calls": 1
+        }
+      ],
+      "session": {
+        "wall_s": 49.6,
+        "input_tokens": 406378,
+        "output_tokens": 4203,
+        "result_events": 1,
+        "subagents": 0
+      }
+    },
+    "checks": [
+      {
+        "name": "ci-speedup-skill-invoked",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "data-pass-ran",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "names-the-catalog-only-fork-caveat",
+        "passed": true,
+        "detail": "found"
+      },
+      {
+        "name": "read-some-reference-material",
+        "passed": true,
+        "detail": "reference_bytes=22302"
+      },
+      {
+        "name": "read-the-opt81-catalog-entry",
+        "passed": true,
+        "detail": "catalog_entries_read=1"
+      }
+    ],
+    "unscored": "expected_output"
+  },
+  {
+    "id": 11,
+    "name": "quality-review-opt81",
+    "run": 2,
+    "passed": true,
+    "tool_calls": 8,
+    "input_tokens": 348675,
+    "output_tokens": 3667,
+    "duration_ms": 52831,
+    "cost_usd": 0.3443468,
+    "reading": {
+      "reference_bytes": 10497,
+      "reference_lines": 56,
+      "catalog_opened": true,
+      "catalog_entries_read": [
+        "OPT81"
+      ],
+      "unattributed_calls": 0,
+      "reference_files": [
+        {
+          "path": "patterns/opt81-same-job-faster-on-another-runner.md",
+          "bytes": 10497,
+          "lines": 56,
+          "calls": 1
+        }
+      ],
+      "session": {
+        "wall_s": 53.6,
+        "input_tokens": 348675,
+        "output_tokens": 3667,
+        "result_events": 1,
+        "subagents": 0
+      }
+    },
+    "checks": [
+      {
+        "name": "ci-speedup-skill-invoked",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "data-pass-ran",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "names-the-catalog-only-fork-caveat",
+        "passed": true,
+        "detail": "found"
+      },
+      {
+        "name": "read-some-reference-material",
+        "passed": true,
+        "detail": "reference_bytes=10497"
+      },
+      {
+        "name": "read-the-opt81-catalog-entry",
+        "passed": true,
+        "detail": "catalog_entries_read=1"
+      }
+    ],
+    "unscored": "expected_output"
+  },
+  {
+    "id": 11,
+    "name": "quality-review-opt81",
+    "run": 3,
+    "passed": true,
+    "tool_calls": 17,
+    "input_tokens": 61696,
+    "output_tokens": 1394,
+    "duration_ms": 15479,
+    "cost_usd": 1.0756054000000002,
+    "reading": {
+      "reference_bytes": 96821,
+      "reference_lines": 941,
+      "catalog_opened": true,
+      "catalog_entries_read": [
+        "OPT81"
+      ],
+      "unattributed_calls": 0,
+      "reference_files": [
+        {
+          "path": "patterns/opt81-same-job-faster-on-another-runner.md",
+          "bytes": 51149,
+          "lines": 429,
+          "calls": 5
+        },
+        {
+          "path": "adversarial-review-rubric.md",
+          "bytes": 44580,
+          "lines": 512,
+          "calls": 3
+        },
+        {
+          "path": "patterns/INDEX.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/README.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/_frame.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt1-unnecessary-tool-install.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt11-redundant-environment-variables.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt12-duplicated-setup-across-jobs.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt13-build-step-in-jobs-that-dont-need-it.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt14-repeated-checkout-setup-without-artifact-handoff-and-slow-to.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt15-cross-workflow-build-redundancy.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt16-within-job-duplicate-commands.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt17-sleep-based-container-readiness.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt18-all-containers-started-for-single-service-tests.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt19-test-source-sleep-dominance-includes-playwright-waitfortimeo.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt2-uncached-large-downloads.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt20-unpinned-docker-image-tags.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt21-unnecessary-needs-dependencies.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt22-sequential-workflows-via-workflow-run.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt23-single-threaded-matrix-max-parallel-1.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt24-long-test-job-without-sharding.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt25-shard-imbalance.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt26-outdated-action-major-versions.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt27-duplicate-setup-node-calls-in-same-job.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt28-full-git-history-checkout.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt29-merge-queue-skip-at-step-level-only.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt3-turbo-cache-misconfiguration.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt30-matrix-jobs-without-job-level-conditional.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt31-conditional-step-with-unconditional-setup.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt32-missing-paths-paths-ignore-on-expensive-workflows.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt33-no-draft-pr-gating-on-expensive-jobs.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt34-no-changed-package-filtering.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt35-missing-fail-fast-on-non-diagnostic-matrix-dimensions.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt36-cron-schedule-too-frequent.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt37-workflow-trigger-dependency-gap-cache-race.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt38-non-content-trigger-event-types-pr-edited-etc.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt39-multi-language-matrix-without-path-filter.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt4-docker-layer-cache-missing.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt40-monorepo-job-runs-regardless-of-affected-app.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt41-turbo-force-true-disabling-all-caching.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt42-turbo-cache-remote-rw-in-release.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt43-excessive-queue-time.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt44-concurrency-group-too-restrictive.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt45-missing-concurrency-groups.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt46-superseded-runs-not-cancelled-missing-concurrency-or-cancel-.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt47-redundant-push-pull_request-double-trigger.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt48-high-job-level-failure-rate-15-over-30d.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt49-step-duration-outlier.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt5-pnpm-store-not-cached-or-wrong-setup-order.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt50-post-steps-taking-too-long.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt51-install-to-test-ratio-50.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt52-turbo-tasks-missing-outputs-in-turbo-json.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt53-unstable-env-vars-invalidating-turbo-cache.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt54-full-repo-pnpm-r-where-package-filters-are-possible.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt55-vitest-running-in-watch-dev-mode-in-ci.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt56-playwright-traces-videos-uploaded-unconditionally.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt57-missing-timeout-minutes-on-known-flaky-integration-jobs.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt58-turbo-tasks-missing-inputs-in-turbo-json.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt59-runtime-only-env-vars-in-turbo-globalenv.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt6-cache-key-entropy-too-high-or-unstable.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt60-turbo-ci-configuration-missing.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt61-missing-dependency-caching.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt62-build-artifacts-destroyed-before-every-run.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt63-dependency-install-with-cache-disabled.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt64-repeated-workflow-attempts-from-same-failing-job.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt65-billing-rounding-waste-from-tiny-matrix-legs.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt66-sku-arbitrage-ceiling.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt68-broken-step-masked-by-continue-on-error.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt69-dead-workflow-env-vars-config.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt7-pnpm-version-drift-across-workflows.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt70-scope-build-test-to-changed.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt71-expensive-non-required-check.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt72-redundant-work-ratio.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt73-shared-substep-floor.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt74-trust-boundary-cache-split.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt75-decompose-inherent-cost-pole.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt76-submodule-lfs-checkout-payload.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt77-repeated-fixed-setup-across-independent-small-jobs.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt78-test-isolation-shared-module-registry.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt79-cache-costs-more-than-it-saves.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt8-cache-key-granularity-mismatch.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt80-checkout-stalls-on-the-tail.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt82-lint-builds-the-whole-type-graph.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt83-run-independent-pole-steps-in-parallel.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt84-slow-tool-on-pole-has-native-drop-in.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt85-run-tests-in-fewer-processes.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt86-use-prebuilt-dependency-packages.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt87-stub-slow-external-dependency-in-tests.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt88-measure-test-concurrency.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt89-build-once-test-natively.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt9-tool-specific-cache-flag-not-enabled.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt90-fast-subset-on-prs-full-after-merge.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt91-profile-the-compile.md",
+          "bytes": 12,
+          "lines": 0,
+          "calls": 1
+        }
+      ],
+      "session": {
+        "wall_s": 126.4,
+        "input_tokens": 797361,
+        "output_tokens": 16012,
+        "result_events": 3,
+        "subagents": 2
+      }
+    },
+    "checks": [
+      {
+        "name": "ci-speedup-skill-invoked",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "data-pass-ran",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "names-the-catalog-only-fork-caveat",
+        "passed": true,
+        "detail": "found"
+      },
+      {
+        "name": "read-some-reference-material",
+        "passed": true,
+        "detail": "reference_bytes=96821"
+      },
+      {
+        "name": "read-the-opt81-catalog-entry",
+        "passed": true,
+        "detail": "catalog_entries_read=1"
+      }
+    ],
+    "unscored": "expected_output"
+  },
+  {
+    "id": 11,
+    "name": "quality-review-opt81",
+    "run": 4,
+    "passed": true,
+    "tool_calls": 8,
+    "input_tokens": 350375,
+    "output_tokens": 3362,
+    "duration_ms": 57409,
+    "cost_usd": 0.3399116,
+    "reading": {
+      "reference_bytes": 17866,
+      "reference_lines": 147,
+      "catalog_opened": true,
+      "catalog_entries_read": [
+        "OPT81"
+      ],
+      "unattributed_calls": 0,
+      "reference_files": [
+        {
+          "path": "patterns/opt81-same-job-faster-on-another-runner.md",
+          "bytes": 17866,
+          "lines": 147,
+          "calls": 2
+        }
+      ],
+      "session": {
+        "wall_s": 58.0,
+        "input_tokens": 350375,
+        "output_tokens": 3362,
+        "result_events": 1,
+        "subagents": 0
+      }
+    },
+    "checks": [
+      {
+        "name": "ci-speedup-skill-invoked",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "data-pass-ran",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "names-the-catalog-only-fork-caveat",
+        "passed": true,
+        "detail": "found"
+      },
+      {
+        "name": "read-some-reference-material",
+        "passed": true,
+        "detail": "reference_bytes=17866"
+      },
+      {
+        "name": "read-the-opt81-catalog-entry",
+        "passed": true,
+        "detail": "catalog_entries_read=1"
+      }
+    ],
+    "unscored": "expected_output"
+  },
+  {
+    "id": 11,
+    "name": "quality-review-opt81",
+    "run": 5,
+    "passed": true,
+    "tool_calls": 10,
+    "input_tokens": 465562,
+    "output_tokens": 5116,
+    "duration_ms": 58762,
+    "cost_usd": 0.42766080000000006,
+    "reading": {
+      "reference_bytes": 22290,
+      "reference_lines": 222,
+      "catalog_opened": true,
+      "catalog_entries_read": [
+        "OPT81"
+      ],
+      "unattributed_calls": 0,
+      "reference_files": [
+        {
+          "path": "patterns/opt81-same-job-faster-on-another-runner.md",
+          "bytes": 14760,
+          "lines": 154,
+          "calls": 2
+        },
+        {
+          "path": "adversarial-review-rubric.md",
+          "bytes": 7530,
+          "lines": 68,
+          "calls": 1
+        }
+      ],
+      "session": {
+        "wall_s": 59.5,
+        "input_tokens": 465562,
+        "output_tokens": 5116,
+        "result_events": 1,
+        "subagents": 0
+      }
+    },
+    "checks": [
+      {
+        "name": "ci-speedup-skill-invoked",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "data-pass-ran",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "names-the-catalog-only-fork-caveat",
+        "passed": true,
+        "detail": "found"
+      },
+      {
+        "name": "read-some-reference-material",
+        "passed": true,
+        "detail": "reference_bytes=22290"
+      },
+      {
+        "name": "read-the-opt81-catalog-entry",
+        "passed": true,
+        "detail": "catalog_entries_read=1"
+      }
+    ],
+    "unscored": "expected_output"
+  }
+]

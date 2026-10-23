@@ -177,6 +177,50 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-10-22** — **`sec.codeowners.workflows` no longer passes on a
+  CODEOWNERS rule the branch does not enforce.** CODEOWNERS only requests an
+  owner's review; it binds only when the default branch requires review from
+  Code Owners. A covering file passed on its own, so a repository whose rules
+  required one approval from anyone read as needing an owner's sign-off on
+  workflow changes. A missing or non-covering CODEOWNERS still fails from the
+  files alone. A covering one now also reads the merge rules over the API,
+  under the same contract as the other API-gated facts: pass when a ruleset
+  (organisation rulesets included) or classic branch protection requires
+  review from Code Owners; fail when both are readable and neither does,
+  naming the setting to turn on; unmeasured, with the reason, when there is no
+  repository or token or the answer cannot be completed (a ruleset that does
+  not require it plus admin-only classic protection the reader cannot see,
+  on a branch the public branch endpoint reports as protected). A reader
+  without admin access still gets a measured fail when that endpoint reports
+  the branch unprotected, since then no classic protection exists. The
+  fact's label now says the rule must be enforced. A covering CODEOWNERS
+  that used to pass now reads as unmeasured in every scan without a
+  repository and token, the vendored CI gate included, so the scored count
+  there drops by one; that is a coverage gap stated out loud, not a
+  regression. Two fixes ride along: gh's real "Branch not protected" 404
+  (reason before status) is now recognised as an answer, which also lets
+  `sec.required-checks.skippable` measure ruleset-only branches read by an
+  admin, and the branch name is escaped in every API path.
+- **2026-10-22** — **The scan step now works out `owner/repo` itself, so the
+  two API-gated config facts (required-checks-skippable, fork-PR approval) and
+  the dormancy lookup actually run in a real session.** The repo was derived
+  while following one step and read back in the next, but each step runs in
+  its own shell, so it arrived empty: the scanner got no `--repo` and those
+  checks reported UNMEASURED on every run even with `gh` signed in. The scan
+  block now derives it in its own shell — only when `gh auth status`
+  succeeds, from a `github.com` origin in either the https or ssh shape (a
+  remote with no `github.com` prefix, such as a relative path, yields
+  nothing), and only when the result is exactly `owner/repo`. The override is
+  now `CI_SECURE_REPO`, shape-checked the same way; a generic `REPO` in the
+  environment is ignored, because a stale one set by another tool read a
+  different repository's settings and run history and scored them as this
+  one's (two passes and a dormant finding that were not true). The
+  impostor-SHA check was not affected: it runs whenever `gh` is signed in.
+  Same bug class, later phases: the report render built its path from a slug
+  only the scan step's shell had set, so every repository rendered to the
+  same `ci-secure-report-.md` (two audits at once read each other's report),
+  and the summary and selection steps read paths nothing in their own shell
+  set. Every later block now re-derives its paths on its first line.
 - **2026-10-10** — **A self-repository action (`uses: $/path`, GitHub
   2026-07-30) run after a checkout of the fork's head now counts as fork code
   executed with privileges, exactly like a `./` action or a `run:` step.** A
