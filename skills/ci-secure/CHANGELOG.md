@@ -13,6 +13,53 @@ entries are dated (UTC). Format loosely follows
 
 ### Added
 
+- ci-secure: "If a push credential leaks" — three new config hygiene checks,
+  read over the GitHub API the way the required-checks and fork-approval
+  checks already are. A credential that can push workflow files (GitHub's
+  docs name the `workflow` scope for classic tokens and OAuth apps, and the
+  "Workflows" permission for GitHub Apps and fine-grained tokens; the report
+  links them) can create a throwaway branch, add a workflow that reads
+  secrets, run it and delete the branch; none of it reaches the scanned
+  checkout, and protecting workflow files on the default branch does not
+  stop it.
+  `sec.environments.branch-restricted` passes when every deployment
+  environment accepts only branches and tags a non-admin push credential can
+  neither create nor move, or requires a reviewer (an admin or owner
+  credential is not covered, and the report says so). A pull request rule
+  holds a branch only when it needs at least one approval, and a
+  pull-request-mode bypass actor can still move it. Patterns are matched the
+  way GitHub documents (only `**/` crosses `/`). Every environment counts,
+  secrets or not, because a cloud role trusts an environment name over OIDC;
+  the GitHub-managed `github-pages` and `copilot` count only when they hold a
+  secret, and one whose secrets cannot be read and that would not pass
+  leaves the check unmeasured. "Protected branches only" is decided by classic branch protection
+  rules alone (rulesets do not count there), and with no classic rule at all
+  GitHub lets every branch and tag deploy, which fails. A repository with no
+  environments is not applicable here. `sec.environments.approval-holds`
+  passes when every environment with reviewers blocks self-review.
+  `sec.secrets.environment-scoped` passes when no repository or
+  organisation secret is readable from any branch (no secrets at all
+  included) and fails when one is, naming each (NAMES, never values; likely
+  high-value ones first) and saying what must be done: an environment that
+  passes the branch check, the value re-entered there (GitHub never shows a
+  stored value), the old copy deleted, or for an organisation secret its
+  repository access narrowed. It never reads "0 secrets" over a list that
+  could not be read. The report shows all of it under a new sub-heading,
+  with one line naming what is not checked yet: a credential that cannot
+  push workflow files but can change code the repository's own workflows
+  run. No repository, no token, or an unreadable source is unmeasured with
+  the reason, never a pass; classic protection rules and ruleset bypass
+  lists are readable only by an admin, so verdicts that depend on them are
+  unmeasured on any other token, while an environment that fails on its
+  settings alone still fails. **The config-fact aggregate this skill hands
+  ci-advisor gains three facts, so the security score shifts for anyone
+  running with a token**: `applicable_count` rises by up to three, and a
+  repo whose environments accept any branch, or that keeps secrets outside
+  every environment, now scores lower than before. Without a token all
+  three are unmeasured and stay in the applicable count as a disclosed gap;
+  on a reader's token the secrets check stays unmeasured (secret lists need
+  admin rights or the secrets permission). The CI gate does not read them
+  (they stay unmeasured there). (2026-10-26)
 - ci-secure: new config hygiene check `sec.deps.update-cooldown` — every
   configured dependency update tool waits at least 3 days before proposing a
   fresh release (Dependabot `cooldown`, Renovate `minimumReleaseAge`), the

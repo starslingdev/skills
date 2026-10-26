@@ -98,7 +98,33 @@ The one non-scripted field. Written once per pattern group and merged onto
 - `security_score` — present in the JSON and **never rendered**. Phase 3
   forbids a score, ratio or `N/100` anywhere the user sees. It is listed here
   so it is recognized as out of bounds rather than mistaken for a summary
-  worth surfacing.
+  worth surfacing. Its `facts` rows ARE rendered (the hygiene table), and
+  so is one unscored key inside it, `security_score.push_access`, which the
+  report shows under "If a push credential leaks":
+  - `status` — `measured` / `unmeasured` (the environment list could not
+    be read) / `not_checked` (no repository or no token), with `reason`.
+  - `environments` — one object per environment: `name`, `managed`
+    (GitHub-managed `github-pages` / `copilot`), `branch_check` and
+    `branch_check_why` (`pass` / `fail` / `unmeasured`, or `info` for a
+    managed environment that is not judged), `approval_check` and
+    `approval_check_why` (`pass` / `fail` / `not_applicable` / `info`),
+    `reviewers` (count), `has_rules` (a branch
+    policy or required reviewers exist) and `admins_can_bypass`
+    (information only, never part of a verdict; the report notes it only
+    where `has_rules` is true, on an environment that is not GitHub-managed).
+  - `inventory` — the secret list behind the
+    `sec.secrets.environment-scoped` row: `status` (`measured` /
+    `partial` / `unmeasured` / `not_checked`), `repo_secrets` and
+    `org_secrets` (lists of secret NAMES, or `null` when that list could
+    not be read — `null` is never "none"), `high_value` (a sort hint, not
+    a severity) and `reason`.
+  - `tier1_gap` and `credential_note` — the two sentences every run
+    states: what is not checked yet, and the OIDC exposure.
+  - `token_note` — one sentence linking GitHub's docs on which
+    credentials can add or change workflow files.
+  The three facts themselves are `sec.environments.branch-restricted`,
+  `sec.environments.approval-holds` and `sec.secrets.environment-scoped`
+  in `facts`, like any other.
 - `timings` — script-owned spans. As `run.py --out` writes them at Phase 2:
   `run_start_epoch`, `activity_enrich_s`, `scan_total_s`, `scripted_end_epoch`,
   `scripted_total_s`. **`total_run_s` is NOT there yet** — `report.py` computes

@@ -36,10 +36,10 @@ subagent per finding group. It never commits, pushes, or opens a PR
 only — this is not a comprehensive audit.*
 
 **Prereqs:** PyYAML (`pip install pyyaml` — the scanner's only third-party
-dep). `gh` is optional, used for five things: the network-gated impostor-SHA
-check (P14.11 — the one vector that cannot be answered from YAML alone), the
-dormancy note on findings, and three config facts read over the API
-(required checks skippable, fork-PR approval, CODEOWNERS enforced). Everything
+dep). `gh` is optional, used for the network-gated impostor-SHA check (P14.11
+— the one vector that cannot be answered from YAML alone), the dormancy note,
+and six config facts read over the API (required checks skippable, fork-PR
+approval, CODEOWNERS enforced, two environment checks, secrets). Everything
 else runs locally in seconds. Troubleshooting: [references/troubleshooting.md](references/troubleshooting.md).
 
 **`<ci-secure>` in the commands below is this skill's own install directory** —
@@ -56,7 +56,7 @@ By default the skill operates on the current working directory.
    If it's not, ask the user for a path and `cd` there before continuing.
 2. Verify `.github/workflows/` exists. If it doesn't, stop and tell the
    user the repo has no GitHub Actions workflows to scan.
-3. Dormancy and the three API-gated facts need `owner/repo`; Phase 2's block
+3. Dormancy and the six API-gated facts need `owner/repo`; Phase 2's block
    derives it in its own shell (never carry it in a variable). If gh is
    unavailable or no repo derives, proceed: the report says so (impostor-SHA
    skipped without gh; those facts UNMEASURED, never passes). Name the cause.

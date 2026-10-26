@@ -240,6 +240,7 @@ def run_gh_api(
     paginate: bool = False,
     timeout: int = SUBPROCESS_TIMEOUT,
     quiet_not_found: bool = False,
+    quiet_forbidden: bool = False,
 ) -> str:
     """Run a gh api command with proper error handling.
 
@@ -252,6 +253,9 @@ def run_gh_api(
         timeout: Timeout in seconds.
         quiet_not_found: If True, 404 errors are logged at DEBUG level instead
             of ERROR. Useful for existence checks where 404 is expected.
+        quiet_forbidden: If True, a 403 is logged at INFO instead of ERROR,
+            with the endpoint only. For reads a caller expects to be refused
+            to readers without access (secret lists); the caller reports it.
 
     Returns:
         The stdout content on success.
@@ -321,6 +325,9 @@ def run_gh_api(
         is_not_found = "HTTP 404" in stderr or "Not Found" in stderr
         if quiet_not_found and is_not_found:
             logger.debug(f"API call to {endpoint} returned 404: {stderr}")
+        elif quiet_forbidden and "HTTP 403" in stderr:
+            logger.info(f"API call to {endpoint} returned 403 (expected "
+                        "without access; reported as unmeasured)")
         else:
             logger.error(f"API call to {endpoint} failed: {stderr}")
         raise GitHubAPIError(f"API call failed: {stderr}")

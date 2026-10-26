@@ -1814,17 +1814,125 @@ def _security_score_block(security_score: dict[str, Any] | None) -> str:
             + ". What is shown below is what could be read from it; treat "
             "the rest as missing, not as empty.",
         ]
-    if facts:
+    rows = [f for f in facts if isinstance(f, dict)]
+    push_rows = [f for f in rows
+                 if str(f.get("fact_id", "")).startswith(_PUSH_ACCESS_PREFIX)
+                 or f.get("fact_id") in _PUSH_ACCESS_IDS]
+    main_rows = [f for f in rows if f not in push_rows]
+    if main_rows:
         out += ["", "| | Check | Evidence |", "|---|---|---|"]
-        for f in facts:
-            if not isinstance(f, dict):
-                continue
-            mark = _OUTCOME_MARKS.get(str(f.get("outcome")),
-                                      str(f.get("outcome")))
+        out += [_fact_row(f) for f in main_rows]
+    push_access = security_score.get("push_access")
+    if push_rows or isinstance(push_access, dict):
+        out += ["", _push_access_block(push_rows, push_access)]
+    return "\n".join(out)
+
+
+# The environment facts render under their own sub-heading: they answer a
+# different question from the rows above (what a leaked push credential
+# reaches), and the unscored lists that explain them sit with them.
+_PUSH_ACCESS_PREFIX = "sec.environments."
+_PUSH_ACCESS_IDS = frozenset({"sec.secrets.environment-scoped"})
+
+
+def _fact_row(f: dict[str, Any]) -> str:
+    mark = _OUTCOME_MARKS.get(str(f.get("outcome")), str(f.get("outcome")))
+    return f"| {mark} | {_cell(f.get('fact'))} | {_cell(f.get('evidence'))} |"
+
+
+_ENV_MARKS = {"pass": "✅", "fail": "❌", "unmeasured": "⚠️ unmeasured",
+              "not_applicable": "➖ n/a", "info": "ℹ️ not judged"}
+
+
+def _names(names: list[Any]) -> str:
+    return ", ".join(f"`{_flatten_scanned(n)}`" for n in names)
+
+
+def _push_access_block(push_rows: list[dict[str, Any]], block: Any) -> str:
+    """``### If a push credential leaks`` — the two environment facts and the
+    environment-scoped secrets fact, the per-environment verdicts, the
+    secret-name list behind the secrets fact, and the one-line statement of
+    what is not checked. The list never reads "0 secrets" over a list that
+    could not be read. Failing rows say what must be done, in the report
+    itself; there is no prompt to hand to an agent."""
+    block = block if isinstance(block, dict) else {}
+    out = [
+        "### If a push credential leaks",
+        "",
+        "A credential that can push workflow files can create a throwaway "
+        "branch, add a workflow that reads secrets, run it and delete the "
+        "branch; nothing of it reaches the checkout scanned above. These "
+        "rows ask whether the repository's deployment environments stop "
+        "that, and whether any secret sits outside every environment. The "
+        "tables and lists under them explain the rows and are not scored "
+        "on their own. An admin or owner credential can change or skip "
+        "these settings; these rows do not cover one.",
+    ]
+    if block.get("token_note"):
+        out += ["", str(block["token_note"]).replace("\n", " ")]
+    if push_rows:
+        out += ["", "| | Check | Evidence |", "|---|---|---|"]
+        out += [_fact_row(f) for f in push_rows]
+    envs = [e for e in block.get("environments") or [] if isinstance(e, dict)]
+    if envs:
+        out += ["", f"**Environments ({len(envs)}):**", "",
+                "| Environment | Branches or reviewer | Self-approval "
+                "blocked | Why | Note |", "|---|---|---|---|---|"]
+        for e in envs:
+            note = ("admins can skip these rules (not scored: only an admin "
+                    "credential can use it)"
+                    # Only where there is a rule to skip: on an environment
+                    # with no policy and no reviewers the line is noise, and
+                    # a GitHub-managed row is not judged at all.
+                    if e.get("admins_can_bypass") and e.get("has_rules")
+                    and not e.get("managed") else "")
+            why = "; ".join(w for w in (e.get("branch_check_why"), e.get("approval_check_why"))
+                            if w)
             out.append(
-                f"| {mark} | {_cell(f.get('fact'))} | "
-                f"{_cell(f.get('evidence'))} |"
-            )
+                f"| `{_flatten_scanned(e.get('name'))}` | "
+                f"{_ENV_MARKS.get(str(e.get('branch_check')), _cell(e.get('branch_check')))} | "
+                f"{_ENV_MARKS.get(str(e.get('approval_check')), _cell(e.get('approval_check')))} | "
+                f"{_cell(why)} | {note} |")
+    raw_inv = block.get("inventory")
+    inv = raw_inv if isinstance(raw_inv, dict) else {}
+    status = inv.get("status")
+    head = ("**Secrets readable from any branch** (the list behind the "
+            "environment-scoped secrets row):")
+    if status in ("measured", "partial"):
+        parts = []
+        for label, key in (("repository", "repo_secrets"),
+                           ("organisation", "org_secrets")):
+            names = inv.get(key)
+            if names is None:
+                parts.append(f"the {label} list could not be read")
+            else:
+                parts.append(f"{len(names)} {label} secret(s)"
+                             + (f": {_names(names)}" if names else ""))
+        line = f"{head} " + "; ".join(parts) + "."
+        if status == "partial":
+            line += (f" Partial — {_cell(inv.get('reason'))}; a secret in "
+                     "the unread list is not shown, so this is not a full "
+                     "count.")
+        out += ["", line]
+        if inv.get("high_value"):
+            out += ["", "Likely high-value, worth moving into an environment "
+                    "that passes the branch check above: "
+                    + _names(inv["high_value"]) + "."]
+        if inv.get("repo_secrets") or inv.get("org_secrets"):
+            out += ["", "Each of these is readable from any branch such a "
+                    "credential creates; only moving it into a closed "
+                    "environment protects it."]
+    elif status == "unmeasured":
+        out += ["", f"{head} ⚠️ unmeasured — the secret lists could not be "
+                f"read ({_cell(inv.get('reason'))}). That is a coverage gap, "
+                "not \"no secrets\"."]
+    else:
+        reason = (inv.get("reason") or block.get("reason")
+                  or "the inventory was not produced on this run")
+        out += ["", f"{head} not checked here — {_cell(reason)}."]
+    for key in ("credential_note", "tier1_gap"):
+        if block.get(key):
+            out += ["", _cell(block[key])]
     return "\n".join(out)
 
 

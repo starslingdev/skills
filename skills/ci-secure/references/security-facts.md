@@ -7,7 +7,7 @@
 
 ---
 
-ci-secure computes ten deterministic, pass/fail configuration facts as
+ci-secure computes thirteen deterministic, pass/fail configuration facts as
 MACHINE-ONLY inputs for a future blended score (the ci-advisor door, not yet
 public). They are aggregated `100 × passed / scored` with no weights and no
 partial credit (registered 2026-08-03) — but **that aggregate is never a number
@@ -18,12 +18,17 @@ vector detectors are lexical rather than confirmed exploit proofs, and a public
 number must not grade a stranger's repo down on an unconfirmed match.
 
 **The denominator is token-dependent, so the aggregate is not comparable
-across scans run under different auth.** Up to three of the ten facts read
+across scans run under different auth.** Up to six of the thirteen facts read
 the GitHub API (the CODEOWNERS fact only once a CODEOWNERS rule covers the
 workflows). In a repository where every fact applies and that rule exists, a
-scan with no repository or no token measures seven of ten and scores
+scan with no repository or no token measures seven of thirteen and scores
 `100 × passed / 7`; the same repository scanned with a token that can read
-every source scores over ten. A fact that does not apply to the
+every source scores over thirteen. Between the two sits the ordinary
+reader's token: the two environment facts are measured from environment
+settings, but any verdict that rests on classic branch protection rules or a
+ruleset's bypass list (both admin-only) stays unmeasured, and so does the
+environment-scoped secrets fact (secret lists need admin rights or the
+secrets permission). A fact that does not apply to the
 repository at all leaves the denominator on top of that (see below), so both
 numbers drop by one for each such fact — in a repository whose workflows run
 no suite, and in one that configures no dependency update tool.
@@ -34,7 +39,7 @@ compares different measurements.
 
 **The aggregate is machine-only.** ci-secure's own report and close render
 these facts as a pass/fail table and **no number** by design: a hygiene
-aggregate labelled "Security score" overclaims what ten config observations
+aggregate labelled "Security score" overclaims what thirteen config observations
 can say, and printed beside a ten-vector scan it read as a contradiction. The
 `security_score` block in the findings JSON keeps its shape — same keys, same `fact_id`s, same outcomes, same aggregate; only prose the
 report prints was reworded so it stops naming a score the reader never sees.
@@ -42,7 +47,7 @@ Consumers bind to the ids, not to the sentences. ci-advisor blends from that
 block, and quantification belongs there, where the blend context carries the
 denominators.
 
-A fact that cannot be measured — an unscannable workflow file; for the three
+A fact that cannot be measured — an unscannable workflow file; for the six
 API-gated facts, no repository and no token; or, for
 `sec.deps.update-cooldown`, an update config this scan cannot parse — is
 **unmeasured, never a silent pass**: it scores nothing, stays in the applicable count as a
@@ -55,11 +60,13 @@ not-applicable fact scores nothing and leaves the applicable count entirely —
 the same treatment ci-score gives a check it rules not applicable — while its
 row still renders, because a row that quietly vanishes reads as a pass. Its id
 is listed in the block's `not_applicable` list, separate from `unmeasured`, so
-a consumer never has to guess which of the two it is looking at. Two facts
+a consumer never has to guess which of the two it is looking at. Four facts
 can reach that state today: `sec.gate.test-failure-fatal`, only in a
-repository whose workflows run no test or lint suite at all, and
+repository whose workflows run no test or lint suite at all;
 `sec.deps.update-cooldown`, only in a repository that configures neither
-Dependabot version updates nor Renovate.
+Dependabot version updates nor Renovate; `sec.environments.branch-restricted`,
+only in a repository with no environments; and `sec.environments.approval-holds`, only when no
+environment requires a reviewer.
 
 ## The disjointness census
 
@@ -81,6 +88,9 @@ instead of shipping.
 | `sec.fork-approval.effective` | — none | A repository Actions setting, not workflow YAML at all; no ci-score check reads it, and no YAML edit can move it. |
 | `sec.gate.test-failure-fatal` | `ci.parallel.test-sharding` | Both look at the jobs that run the suite, and neither edit moves the other: sharding is a `strategy.matrix` on the job, this fact is the `run:` line's exit code and the step's `continue-on-error`. A sharded suite can still swallow every shard's failure, and an unsharded one can be perfectly fatal. Also bounded against the OTHER engine: `continue-on-error` on an upload, report, or notification step is a speed and reliability question that ci-speedup owns, and it does not reach this fact, because only a step whose own `run:` command the allowlist recognises as a suite is in scope — a `uses:` upload action has no `run:` line at all. Residual, disclosed: a reporting step whose command *does* match the allowlist is in scope here too, as is a suite step carrying `continue-on-error: true` that has been red for every run (ci-speedup's OPT68); the bound is on the command, not on the step's stated purpose. |
 | `sec.checkout.credentials-scoped` | `ci.checkout.shallow-clone` | Both read checkout steps, but different keys: `fetch-depth` there, `persist-credentials` here — two `with:` entries, two edits. This fact also applies only on untrusted-trigger workflows (excluding the payload-less `fork`/`watch` notification events); shallow-clone applies on PR-gating ones. |
+| `sec.environments.branch-restricted` | — none | Deployment environment settings, rulesets and classic branch protection are read over the API, not from workflow YAML; ci-score reads no environment, ruleset or secret API, and no YAML edit moves this fact (an `environment:` key in a workflow is not what it reads). |
+| `sec.environments.approval-holds` | — none | An environment's required-reviewer setting, read over the API; no ci-score check reads it and no YAML edit can move it. |
+| `sec.secrets.environment-scoped` | — none | The repository and organisation secret lists are read over the API; ci-score reads no secret API, and no workflow YAML edit moves this fact (moving a secret into an environment is a settings change). |
 | `sec.deps.update-cooldown` | — none | Dependabot and Renovate config files are not workflow YAML, and no ci-score check reads `dependabot.yml`, a Renovate config, `cooldown`, or `minimumReleaseAge` (ci-score's registry and methodology were searched for all four). The nearest neighbour, `ci.security.pinned-action-shas`, reads `uses:` refs in workflow files; adding a cooldown cannot move it, and pinning an action cannot move this. |
 
 **Residual correlation, disclosed:** a repo with careless
@@ -392,3 +402,94 @@ two moved numbers.
   `semver-*-days` key under 3 on that entry and keeping its other `cooldown`
   keys, or `"minimumReleaseAge": "7 days"` at the top level of the Renovate
   config.
+- **`sec.environments.branch-restricted`** — every deployment environment
+  either accepts only refs a leaked non-admin push credential can neither
+  create nor move ("closed"), or requires at least one reviewer. A credential that can
+  push workflow files can otherwise create a throwaway branch, add a
+  workflow that binds to the environment, read its secrets and delete the
+  branch; nothing of it reaches the scanned checkout, and protecting
+  workflow files on the default branch does not stop it. **Every
+  environment is in scope**, secrets or not: a cloud role that trusts the
+  environment's name over OIDC makes the name itself the credential. The
+  GitHub-managed `github-pages` and `copilot` are in scope only when they
+  hold a secret, and are listed as "can't tell" (never passed or failed)
+  when their secrets cannot be read.
+
+  A pattern is **closed** when every ref it can match is covered by an
+  active ruleset (organisation rulesets included; `evaluate` and
+  `disabled` count for nothing) or a classic rule that blocks creating it
+  AND blocks pushing to it, with nobody short of an admin on the bypass
+  list. An exact name that already exists needs pushes blocked plus
+  deletion or creation blocked (otherwise it can be deleted and pushed
+  again); one that does not exist yet needs creation blocked. A branch
+  matching an accepted wildcard that already exists with no protection
+  proves the pattern open on its own. Tag patterns need a closed tag
+  ruleset. **"Protected branches only" is decided by classic branch
+  protection rules alone** (measured 2026-10-24: a ruleset-protected branch
+  is not admitted). With no classic rule in the repository at all, GitHub
+  lets every branch and tag deploy to such an environment, which fails like
+  no restriction; with at least one, each classic pattern must block
+  creation and pushes.
+
+  A repository with **no environments** is not applicable here, whatever
+  its secrets are. Readable repository and organisation secrets are
+  `sec.secrets.environment-scoped`'s question, and failing both checks on
+  one setup would bill one gap twice. (Until 2026-10-24 this case failed
+  when a secret was readable; that rule was retired when the secrets fact
+  was scored.)
+
+  API-gated, with F7's contract: no repository or no token is unmeasured;
+  an unreadable source makes only the verdicts that depend on it
+  unmeasured, while an environment that accepts any branch still fails; no
+  retries. Classic branch protection rules and ruleset bypass lists are
+  readable only by an admin (anyone else is answered with an empty classic
+  list, which is never read as "none"), so on a reader's token a
+  "protected branches only" environment, or one closed only by a ruleset,
+  is unmeasured. **To fix a fail**: set the environment to "Selected
+  branches and tags" naming exact protected branches whose rules block
+  creating and pushing, or "Protected branches only" with a classic rule
+  that blocks creation on every protected pattern, or add a required
+  reviewer.
+- **`sec.environments.approval-holds`** — every environment that has
+  required reviewers also has "Prevent self-review" on. Otherwise a leaked
+  reviewer's credential starts a run and approves it itself. One bad
+  setting costs one check: reviewers satisfy the branch fact above, and
+  only this fact fails on self-review. "Admins can bypass" is shown as an
+  information line, never part of either verdict, because only an admin
+  credential can use it. Not applicable when no environment has reviewers.
+  **To fix a fail**: turn on "Prevent self-review" in each named
+  environment's required-reviewers rule.
+- **`sec.secrets.environment-scoped`** — no repository- or
+  organisation-level Actions secret is readable by this repository: every
+  secret it uses lives in an environment. Any secret outside one is
+  readable from any branch a push credential creates, however well the
+  environments are locked. **Passes** when neither list holds a secret,
+  including a repository with no secrets at all. **Fails** when either
+  does; the evidence names each one, repository and organisation
+  separately, with a short deterministic hint (`PRIVATE_KEY`, `APP_ID`,
+  `PYPI`, `NPM_TOKEN`, …) putting the likely high-value ones first — a
+  sort order, not a severity. **Unmeasured** when a list cannot be read
+  (both need admin rights or the secrets permission), never a pass; when
+  one list is unreadable and the other already holds a secret, the fail
+  stands, because nothing in the unread list can undo it, and the
+  evidence says the list may be incomplete. Scored by owner decision
+  (2026-10-24), knowing it fails many repositories: it is the one setting
+  that decides whether locking environments protects anything. **To fix a
+  fail**: pick or create an environment that passes
+  `sec.environments.branch-restricted`, re-enter each named secret's value
+  there (GitHub never shows a stored value, so this step is the user's),
+  point the jobs that use it at that environment, then delete the
+  repository or organisation copy. For an organisation secret, narrowing
+  its repository access to the repositories that need it is the
+  alternative. The names (never values) also render under the row as the
+  secret list. The report states, every run, that a pushed workflow can
+  ask for its own write-scoped token and an OIDC login token, and that a
+  credential which cannot push workflow files, but can change code the
+  repository's own workflows run, is not checked yet. Which credentials
+  can push workflow files is cited from GitHub's docs: the `workflow`
+  scope for classic tokens and OAuth apps
+  (https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps),
+  the "Workflows" permission for GitHub Apps
+  (https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/choosing-permissions-for-a-github-app)
+  and for fine-grained tokens
+  (https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens).
