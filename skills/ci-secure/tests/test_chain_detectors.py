@@ -2746,17 +2746,42 @@ def test_scan_passes_the_repo_through_to_the_api_gated_facts(tmp_path):
         seen.append(repo)
         return False, "branch `main`"
 
+    class _EnvGh:
+        """One environment that requires a reviewer and blocks self-review;
+        no readable secret."""
+
+        @staticmethod
+        def run_gh_api(path, **kw):
+            if path.endswith("/environments?per_page=100"):
+                return json.dumps({"environments": [{
+                    "name": "prod", "deployment_branch_policy": None,
+                    "can_admins_bypass": False, "protection_rules": [{
+                        "type": "required_reviewers",
+                        "prevent_self_review": True,
+                        "reviewers": [{"type": "Team"}]}]}]})
+            if path.endswith("secrets?per_page=100"):
+                return json.dumps({"secrets": []})
+            raise AssertionError(f"unexpected endpoint {path}")
+
+    def _push_access(repo):
+        seen.append(repo)
+        return cf._GhPushAccess(_EnvGh, repo), "recorded"
+
     with mock.patch.object(cf, "_required_contexts_via_gh", _contexts), \
          mock.patch.object(cf, "_fork_approval_via_gh", _approval), \
-         mock.patch.object(cf, "_code_owner_review_via_gh", _owner_review):
+         mock.patch.object(cf, "_code_owner_review_via_gh", _owner_review), \
+         mock.patch.object(cf, "_push_access_via_gh", _push_access):
         result = scan.scan(catalog, tmp_path, repo="owner/name")
 
     # The repository reached EVERY fetcher — the plumbing under test.
-    assert seen == ["owner/name"] * 3, seen
+    assert seen == ["owner/name"] * 4, seen
     facts = {f["fact_id"]: f for f in result["security_score"]["facts"]}
     assert facts["sec.required-checks.skippable"]["outcome"] == "fail"
     assert facts["sec.fork-approval.effective"]["outcome"] == "pass"
     assert facts["sec.codeowners.workflows"]["outcome"] == "fail"
+    assert facts["sec.environments.branch-restricted"]["outcome"] == "pass"
+    assert facts["sec.environments.approval-holds"]["outcome"] == "pass"
+    assert facts["sec.secrets.environment-scoped"]["outcome"] == "pass"
     assert result["security_score"]["unmeasured"] == []
 
 
@@ -2779,8 +2804,11 @@ def test_scan_without_a_repo_leaves_both_api_facts_unmeasured(tmp_path):
     result = scan.scan(catalog, tmp_path)
     score = result["security_score"]
     assert set(score["unmeasured"]) == {
-        "sec.required-checks.skippable", "sec.fork-approval.effective"}
-    assert score["scored_count"] == score["applicable_count"] - 2
+        "sec.required-checks.skippable", "sec.fork-approval.effective",
+        "sec.environments.branch-restricted",
+        "sec.environments.approval-holds",
+        "sec.secrets.environment-scoped"}
+    assert score["scored_count"] == score["applicable_count"] - 5
 
 
 # ---------------------------------------------------------------------------
