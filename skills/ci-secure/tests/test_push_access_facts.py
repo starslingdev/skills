@@ -1837,3 +1837,42 @@ def test_an_unexpected_403_is_logged_with_its_reason_class(caplog):
     assert msgs and not any("expected" in m for m in msgs), msgs
     assert any("SAML" in m for m in msgs), msgs
     assert not any("Personal Access token" in m for m in msgs), msgs
+
+
+# --- a bracket class never matches `/` in a protection pattern ----------------
+
+_FEATURE_X_ABSENT = {f"{R}/branches/feature%2Fx": _BRANCH_NOT_FOUND,
+                     f"{R}/branches/feature/x": _BRANCH_NOT_FOUND}
+
+
+def test_a_classic_negated_bracket_does_not_cross_slash(tmp_path):
+    """Under FNM_PATHNAME `feature[!_]*` does not match `feature/x`, so the
+    closed rule protects nothing there and the branch is open."""
+    rule = dict(_CLOSED_CLASSIC, pattern="feature[!_]*")
+    env = _custom_classic(tmp_path, ["feature/x"], [rule],
+                          extra=_FEATURE_X_ABSENT)
+    assert env["branch_check"] == "fail", env
+
+
+def test_a_ruleset_negated_bracket_does_not_cross_slash(tmp_path):
+    rs = _ruleset(1, ["refs/heads/feature[!_]*"], ["creation", "update"])
+    out, _ = _custom_case(tmp_path, [("feature/x", "branch")], [rs],
+                          extra=_FEATURE_X_ABSENT)
+    assert _envs(out)["prod"]["branch_check"] == "fail", _envs(out)
+
+
+@pytest.mark.parametrize("pattern", ["feature[!_]x", "feature[/x]x"])
+def test_a_bracket_never_matches_slash_with_pathname(pattern):
+    assert not cf._glob_matches(pattern, "feature/x", pathname=True)
+    assert cf._glob_matches(pattern, "featureyx" if "!" in pattern
+                            else "featurexx", pathname=True)
+
+
+def test_a_bracket_in_the_accepted_pattern_keeps_folder_depth_rivals(
+        tmp_path):
+    """Read widely, `rel[!_]*` may accept `rel/x`, which the open `rel*/*`
+    rule covers, so the closed `rel*` rule cannot settle it alone."""
+    env = _custom_classic(tmp_path, ["rel[!_]*"], [
+        dict(_CLOSED_CLASSIC, pattern="rel*"),
+        dict(_OPEN_CLASSIC, pattern="rel*/*")])
+    assert env["branch_check"] != "pass", env

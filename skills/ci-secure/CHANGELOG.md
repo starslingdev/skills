@@ -31,7 +31,8 @@ entries are dated (UTC). Format loosely follows
   actor can still move it. Only one classic rule applies to a branch (an
   exact name outranks every wildcard), so an open exact-name rule inside a
   closed wildcard opens it. Patterns are matched the
-  way GitHub documents (only `**/` crosses `/`). Every environment counts,
+  way GitHub documents (only `**/` crosses `/`; no `*`, `?` or bracket
+  class matches it). Every environment counts,
   secrets or not, because a cloud role trusts an environment name over OIDC;
   the GitHub-managed `github-pages` and `copilot` count only when they hold a
   secret, and one whose secrets cannot be read and that would not pass

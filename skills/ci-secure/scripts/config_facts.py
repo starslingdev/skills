@@ -3065,7 +3065,9 @@ def _glob_regex(pattern: str, pathname: bool = False) -> re.Pattern:
                 body = pattern[i + 1:end].replace("\\", "\\\\")
                 if body.startswith("!"):
                     body = "^" + body[1:]
-                out.append(f"[{body}]")
+                # FNM_PATHNAME matches one segment at a time, so no class,
+                # negated or naming `/` itself, ever matches `/`.
+                out.append(("(?!/)" if pathname else "") + f"[{body}]")
                 i = end
         else:
             out.append(re.escape(c))
@@ -3309,6 +3311,11 @@ def _rules_may_meet(rule_pattern: str, pattern: str) -> bool:
     if not (a.startswith(b) or b.startswith(a)):
         return False
     if "**" not in rule_pattern and "**" not in pattern:
+        # A bracket class muddies the count (a `/` inside one is no
+        # separator, and the wide reading of an accepted pattern lets a class
+        # match `/`), so with one the answer stays "may".
+        if "[" in rule_pattern + pattern:
+            return True
         return rule_pattern.count("/") == pattern.count("/")
     return True
 
@@ -3415,8 +3422,12 @@ def _pattern_state(src: Any, kind: str, pattern: str, rulesets: Any,
                     "files can push one to it")
     if missing:
         what = "a branch" if kind == "branch" else "a tag"
-        lead = ("does not exist yet, and " if exists is False else "")
-        return "open", (f"{label} {lead}nothing blocks "
+        if exists is True:
+            return "open", (f"{label} exists, and nothing blocks "
+                            f"{'; nor '.join(missing)} — any push credential "
+                            "can push a workflow to it")
+        lead = (" does not exist yet, and" if exists is False else ":")
+        return "open", (f"{label}{lead} nothing blocks "
                         f"{'; nor '.join(missing)} — any push credential "
                         f"can make {what} it accepts")
     return "unknown", (f"{label}: whether it is closed could not be "
