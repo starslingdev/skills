@@ -1,0 +1,17 @@
+{
+ "_note": "Probe P6 (2026-10-24): the status and message GitHub answered on each endpoint in a known state, recorded against a private sandbox repository (admin token) and against a public repository (an authenticated non-collaborator, and no token). Only the status and message are kept; gh prints them as `gh: <message> (HTTP <status>)`.",
+ "cases": {
+  "branch-does-not-exist": {"endpoint": "branches/{b}", "token": "admin", "status": 404, "message": "Branch not found", "means": "answer: the branch does not exist"},
+  "dbp-policy-null": {"endpoint": "environments/{e}/deployment-branch-policies", "token": "admin", "status": 404, "message": "Not Found", "means": "same as protected-branches and missing environment; never asked except for a custom policy"},
+  "dbp-protected-branches": {"endpoint": "environments/{e}/deployment-branch-policies", "token": "admin", "status": 404, "message": "Not Found", "means": "identical to the two other 404s"},
+  "dbp-environment-missing": {"endpoint": "environments/{e}/deployment-branch-policies", "token": "admin", "status": 404, "message": "Not Found", "means": "identical to the two other 404s"},
+  "environments-wrong-repo": {"endpoint": "environments", "token": "admin", "status": 404, "message": "Not Found", "means": "unmeasured: zero environments is a 200 with an empty list"},
+  "environments-none": {"endpoint": "environments", "token": "admin", "status": 200, "body": {"total_count": 0, "environments": []}, "means": "answer: no environments"},
+  "rulesets-wrong-repo": {"endpoint": "rulesets", "token": "admin", "status": 404, "message": "Not Found", "means": "unmeasured"},
+  "secrets-wrong-repo": {"endpoint": "actions/secrets", "token": "admin", "status": 404, "message": "Not Found", "means": "unmeasured"},
+  "secrets-none": {"endpoint": "actions/secrets", "token": "admin", "status": 200, "body": {"total_count": 0, "secrets": []}, "means": "answer: no secrets"},
+  "environment-secrets-missing-env": {"endpoint": "environments/{e}/secrets", "token": "admin", "status": 404, "message": "Not Found", "means": "unmeasured"},
+  "secrets-non-collaborator": {"endpoint": "actions/secrets", "token": "non-collaborator", "status": 403, "message": "You must have repository read permissions or have the repository secrets fine-grained permission.", "means": "unmeasured"},
+  "secrets-anonymous": {"endpoint": "actions/secrets", "token": "none", "status": 401, "message": "Requires authentication", "means": "unmeasured"}
+ }
+}

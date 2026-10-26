@@ -228,12 +228,25 @@ rules applies to an install PR as much as to a fix PR.
    the gate gone entirely, the order matters: delete the workflow FIRST,
    then `ci-secure/`. The other way round reds every run in between, on
    the drift check, before the gate is even reached.
-5. **Up to three facts stay UNMEASURED** on any CI token: whether required
-   checks are skippable, the fork-PR approval policy, and — once a
-   CODEOWNERS rule covers workflows — whether the branch enforces it
-   (requires review from Code Owners). All three are API reads the gate
-   does not make. They are disclosed and dropped from the score, never
-   counted as passes; a MISSING CODEOWNERS entry still fails.
+5. **Up to six facts stay UNMEASURED** in the gate: whether required
+   checks are skippable, the fork-PR approval policy — once a CODEOWNERS
+   rule covers workflows — whether the branch enforces it (requires review
+   from Code Owners), the two environment checks (branches restricted,
+   self-approval blocked) and whether every secret lives in an
+   environment. All six are API reads the gate does not make;
+   it runs the engine with no repository. They are disclosed and never
+   counted as passes; a MISSING CODEOWNERS entry still fails. The three
+   push-credential checks would not be fully measurable on a CI token anyway
+   (recorded 2026-10-24): the default Actions token cannot read
+   environments at all; with `actions: read` it can read them and their
+   branch policies, so the reviewer and self-approval verdicts become
+   measurable, and so do custom-policy environments that accept an
+   existing unprotected branch or a tag pattern no ruleset closes, but
+   classic branch
+   protection rules, ruleset bypass lists and every secret list stay
+   unreadable, so "protected branches only" verdicts, verdicts that rest
+   on a ruleset's bypass list, and the environment-scoped secrets check
+   would stay unmeasured. Run the skill itself with an admin's `gh` login for those.
 6. **A pull request can edit the workflow that judges it — and the gate
    it runs.** On `pull_request` GitHub checks out the PR's tree, so both
    `.github/workflows/ci-secure.yml` and the vendored `ci-secure/` are

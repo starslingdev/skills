@@ -109,6 +109,50 @@ def _outcome(result, fact_id):
 _CO_ENFORCED = lambda repo: (True, "a ruleset on branch `main`")  # noqa: E731
 
 
+class _ClosedEnvironmentsGh:
+    """A recorded `gh` for the two environment facts: one environment that
+    requires a reviewer and blocks self-review, and no readable secret.
+
+    Every test in this file that names a repository reaches the environment
+    facts' default fetcher, so it is answered here instead of by the real
+    `gh` — nothing in the suite touches the network. Those facts' own
+    behaviour is tested in `test_push_access_facts.py`; here they pass, so a
+    count below is "the other facts plus two passes"."""
+
+    @staticmethod
+    def check_prereqs():
+        return True
+
+    @staticmethod
+    def run_gh_api(path, **kw):
+        base = path.split("/environments")[0].split("/actions")[0]
+        if path.endswith("/environments?per_page=100"):
+            return json.dumps({"total_count": 1, "environments": [{
+                "name": "prod", "can_admins_bypass": False,
+                "deployment_branch_policy": None,
+                "protection_rules": [{
+                    "type": "required_reviewers",
+                    "prevent_self_review": True,
+                    "reviewers": [{"type": "Team",
+                                   "reviewer": {"slug": "release"}}]}]}]})
+        if path.endswith("secrets?per_page=100"):
+            return json.dumps({"total_count": 0, "secrets": []})
+        if path == base:
+            return json.dumps({"default_branch": "main"})
+        raise AssertionError(f"unexpected endpoint {path}")
+
+
+@pytest.fixture(autouse=True)
+def _recorded_environments(monkeypatch):
+    # `raising=False`: the attribute is the fact's default fetcher; binding it
+    # by name keeps every other test's `gh` traffic exactly what it was.
+    monkeypatch.setattr(
+        cf, "_push_access_via_gh",
+        lambda repo: (cf._GhPushAccess(_ClosedEnvironmentsGh, repo),
+                      "recorded environment settings"),
+        raising=False)
+
+
 def _co_facts(root, files):
     """The fact table for a test about how the CODEOWNERS FILE is parsed.
 
@@ -140,13 +184,13 @@ def test_a_well_configured_repo_passes_every_fact(tmp_path):
         required_contexts_fetcher=lambda repo: ([], "branch `main`"),
         fork_approval_fetcher=lambda repo: ("all_external_contributors", "x"))
     assert out["score"] == 100.0
-    assert out["passed"] == out["scored_count"] == 10
+    assert out["passed"] == out["scored_count"] == 13
     for f in out["facts"]:
         assert f["outcome"] == "pass", f"{f['fact_id']} failed: {f['evidence']}"
 
 
 def test_the_api_gated_facts_are_the_only_unmeasured_ones_offline(tmp_path):
-    """Offline, the YAML facts still resolve and the three API-gated ones
+    """Offline, the YAML facts still resolve and the six API-gated ones
     disclose that they did not — a scan with no token is a smaller
     measurement, not a cleaner repo. The CODEOWNERS fact is API-gated only
     once a rule covers workflows (this fixture's does): whether the branch
@@ -154,9 +198,12 @@ def test_the_api_gated_facts_are_the_only_unmeasured_ones_offline(tmp_path):
     root, files = _repo(tmp_path, {"ci.yml": _SAFE_WF})
     out = cf.compute_config_facts(root, files, [])
     assert sorted(out["unmeasured"]) == ["sec.codeowners.workflows",
+                                         "sec.environments.approval-holds",
+                                         "sec.environments.branch-restricted",
                                          "sec.fork-approval.effective",
-                                         "sec.required-checks.skippable"]
-    assert out["scored_count"] == 6 and out["applicable_count"] == 9
+                                         "sec.required-checks.skippable",
+                                         "sec.secrets.environment-scoped"]
+    assert out["scored_count"] == 6 and out["applicable_count"] == 12
     assert "COVERAGE GAP" in out["caveat"]
 
 
@@ -561,9 +608,9 @@ def test_codeowners_undecodable_file_is_unmeasured_not_a_fail(tmp_path):
     assert "unmeasured" in f["evidence"], f
     assert "sec.codeowners.workflows" in out["unmeasured"]
     # ...and it is a coverage gap, not a silent pass. `applicable_count` stays
-    # 9 — every fact is still applicable — while only 6 score: this one plus
-    # the two other API-gated facts, which are unmeasured offline too.
-    assert out["scored_count"] == 6 and out["applicable_count"] == 9
+    # 12 — every fact is still applicable — while only 6 score: this one
+    # plus the five other API-gated facts, which are unmeasured offline too.
+    assert out["scored_count"] == 6 and out["applicable_count"] == 12
     assert "COVERAGE GAP" in out["caveat"]
 
 
@@ -1028,19 +1075,24 @@ def test_unscannable_workflow_forces_workflow_facts_to_unmeasured(tmp_path):
         elif f["fact_id"] == "sec.deps.update-cooldown":
             # Reads update-tool configs, not workflow YAML; this repo has none.
             assert f["outcome"] == "not_applicable"
+        elif f["fact_id"].startswith("sec.environments.") or \
+                f["fact_id"] == "sec.secrets.environment-scoped":
+            # Read from environment settings over the API, not workflow
+            # YAML; the recorded environment passes both.
+            assert f["outcome"] == "pass", f
         else:
             assert f["outcome"] == "unmeasured", (
                 f"{f['fact_id']} resolved despite an unscanned workflow — "
                 "that is a silent pass over a coverage hole"
             )
             assert "broken.yml" in f["evidence"]
-    assert out["scored_count"] == 1
-    assert out["applicable_count"] == 9
+    assert out["scored_count"] == 4
+    assert out["applicable_count"] == 12
     assert "COVERAGE GAP" in out["caveat"]
     # The ratio must be over RESOLVED facts only. If unmeasured facts leaked
     # into the numerator, 5 unmeasured + 1 pass over scored=1 would read 600 —
     # so pin the value, not just the counts.
-    assert out["passed"] == 1
+    assert out["passed"] == 4
     assert out["score"] == pytest.approx(100.0)
 
 
@@ -1067,9 +1119,9 @@ def test_score_is_the_registered_ratio_with_no_weights(tmp_path):
         codeowner_review_fetcher=_CO_ENFORCED,
         required_contexts_fetcher=lambda repo: ([], "branch `main`"),
         fork_approval_fetcher=lambda repo: ("first_time_contributors", "x"))
-    # bad.yml fails exactly one fact (permissions-declares); 8/9 pass.
-    assert out["passed"] == 8 and out["scored_count"] == 9
-    assert out["score"] == pytest.approx(round(100 * 8 / 9, 1))
+    # bad.yml fails exactly one fact (permissions-declares); 11/12 pass.
+    assert out["passed"] == 11 and out["scored_count"] == 12
+    assert out["score"] == pytest.approx(round(100 * 11 / 12, 1))
     assert out["registered"]
     assert "no weights" in out["constants"]["rule"]
 
@@ -1487,8 +1539,8 @@ def test_a_scan_gap_forces_the_fact_unmeasured(tmp_path):
 
 def test_the_fact_table_carries_every_api_gated_fact(tmp_path):
     out = _facts_with(tmp_path, {"ci.yml": _VERDICT_PATTERN}, ["test"])
-    assert out["applicable_count"] == 9
-    assert out["scored_count"] == 9
+    assert out["applicable_count"] == 12
+    assert out["scored_count"] == 12
 
 
 # --- F8: sec.fork-approval.effective -----------------------------------------
@@ -1573,10 +1625,12 @@ def test_a_scan_gap_does_not_unmeasure_the_fork_approval_fact(tmp_path):
     assert _outcome(out, _FORK_FACT)["outcome"] == "pass"
 
 
-def test_the_fact_table_carries_nine_facts(tmp_path):
+def test_the_fact_table_carries_twelve_applicable_facts(tmp_path):
+    # Thirteen facts; the update-cooldown fact does not apply (no update
+    # tool).
     out = _fork_facts(tmp_path, "all_external_contributors")
-    assert out["applicable_count"] == 9
-    assert out["scored_count"] == 9
+    assert out["applicable_count"] == 12
+    assert out["scored_count"] == 12
 
 
 # ---------------------------------------------------------------------------
@@ -2381,7 +2435,7 @@ def test_a_branch_protection_fetcher_that_raises_becomes_one_unmeasured_row(
     assert "gh subprocess died" in f["evidence"], f["evidence"]
     assert _FACT in out["unmeasured"]
     # The rest of the table still resolved — the failure is contained.
-    assert out["scored_count"] == 8 and out["applicable_count"] == 9
+    assert out["scored_count"] == 11 and out["applicable_count"] == 12
 
 
 def test_a_fork_approval_fetcher_that_raises_becomes_one_unmeasured_row(
@@ -2400,7 +2454,7 @@ def test_a_fork_approval_fetcher_that_raises_becomes_one_unmeasured_row(
     assert f["outcome"] == "unmeasured", f
     assert "gh subprocess died" in f["evidence"], f["evidence"]
     assert _FORK_FACT in out["unmeasured"]
-    assert out["scored_count"] == 8 and out["applicable_count"] == 9
+    assert out["scored_count"] == 11 and out["applicable_count"] == 12
 
 
 # ---------------------------------------------------------------------------
@@ -4530,7 +4584,7 @@ def test_a_path_filtered_push_cannot_certify_even_over_every_branch(tmp_path):
     "    branches: ['**']\n    paths-ignore: ['docs/**']\n",
 ])
 def test_a_path_filtered_push_still_counts_against_the_check(tmp_path, filters):
-    """The other half of UNKNOWN, and the F13 trap: unable-to-certify must not
+    """The other half of UNKNOWN, and review finding 13's trap: unable-to-certify must not
     become unable-to-run. A SKIPPABLE job in such a workflow still counts
     against the required check, so its bypass is still found."""
     body = f"""\
@@ -4575,7 +4629,7 @@ jobs:
 
 
 def test_a_path_filtered_push_alone_is_not_a_false_red(tmp_path):
-    """And the F13 direction: an ALWAYS-running job in a path-filtered push,
+    """And review finding 13's direction: an ALWAYS-running job in a path-filtered push,
     as the only producer, is not evidence of a bypass — it is simply not
     knowable whether it reports. Not judged, not failed."""
     f = _outcome(_facts_with(tmp_path, {"build.yml": _PATHS_PUSH_PRODUCER},
@@ -5304,11 +5358,11 @@ def test_not_applicable_leaves_the_applicable_count(tmp_path):
     in as a named coverage gap."""
     root, files = _repo(tmp_path, {"ci.yml": _wf("      - run: echo hello\n")})
     out = cf.compute_config_facts(root, files, [])
-    # Nine other facts: five measurable offline, three API-gated and
+    # Twelve other facts: five measurable offline, six API-gated and
     # unmeasured (the covering CODEOWNERS fixture cannot be confirmed enforced
     # without a repository), and the update-cooldown fact, also n/a here (no
     # update tool).
-    assert out["applicable_count"] == 8
+    assert out["applicable_count"] == 11
     assert out["scored_count"] == 5
 
 
@@ -5569,7 +5623,7 @@ def test_a_non_list_package_rules_does_not_crash_the_fact_table(tmp_path):
     the fact table and blank every hygiene row."""
     f, out = _cooldown(tmp_path, {"renovate.json": '{"packageRules": 5}'})
     assert f["outcome"] == "fail", f["evidence"]
-    assert len(out["facts"]) == 10
+    assert len(out["facts"]) == 13
 
 
 def test_semver_keys_are_ignored_where_dependabot_ignores_them(tmp_path):

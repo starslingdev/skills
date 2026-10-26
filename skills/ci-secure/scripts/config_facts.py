@@ -43,8 +43,19 @@ THE FACTS
   F10 sec.deps.update-cooldown            Dependabot / Renovate wait >= 3 days
                                           before proposing a fresh release
                                           (n/a when neither is configured)
+  F11 sec.environments.branch-restricted  every deployment environment accepts
+                                          only refs a non-admin push
+                                          credential can neither create nor
+                                          move, or requires a reviewer
+                                          (API-gated)
+  F12 sec.environments.approval-holds     every environment with reviewers
+                                          blocks self-review (API-gated)
+  F13 sec.secrets.environment-scoped      no repository or organisation
+                                          secret is readable from any branch
+                                          (API-gated)
 
-F7 and F8 read the GitHub API, not workflow YAML, so they are TOKEN-GATED: no
+F7, F8, F11, F12 and F13 read the GitHub API, not workflow YAML, so they are
+TOKEN-GATED: no
 repo or no token means UNMEASURED with the reason stated — the same contract
 the impostor-SHA vector keeps. They are never a pass for being unreadable and
 never a fail for it either. F3 joins them once a CODEOWNERS rule covers
@@ -86,6 +97,7 @@ from __future__ import annotations
 import importlib.util
 import itertools
 import json
+import logging
 import re
 import sys
 from functools import lru_cache
@@ -95,6 +107,10 @@ from typing import Any, Iterator
 from urllib.parse import quote
 
 REGISTERED = "2026-08-03"
+
+# Debug lines carry endpoints and counts only, never a response body or a
+# secret name (`gh_utils.run_gh_api` logs each endpoint and its size).
+_log = logging.getLogger(__name__)
 
 
 def _load_sibling(name: str, path: Path) -> ModuleType:
@@ -256,7 +272,7 @@ def _codeowners_covers_workflows(root: Path) -> tuple[str, str]:
     try:
         # `is_file()` re-raises EACCES on an unreadable parent directory, so
         # the probe belongs INSIDE the guard: one unreadable dir used to
-        # escape to scan.py's broad backstop and take all twelve facts down.
+        # escape to scan.py's broad backstop and take all thirteen facts down.
         for candidate in _CODEOWNERS_CANDIDATES:
             if (root / candidate).is_file():
                 found = root / candidate
@@ -2627,6 +2643,1220 @@ def _update_cooldown(root: Path) -> tuple[str, str]:
     return outcome, "; ".join(e for _, e in results)
 
 
+# --- if a push credential leaks: environments (F11, F12), secrets (F13) ------
+#
+# A credential that can push workflow files (GitHub documents, among others,
+# the `workflow` scope for classic tokens and OAuth apps, and the "Workflows"
+# permission for fine-grained tokens and GitHub Apps; see _TOKEN_DOCS) can
+# create a throwaway branch, add a workflow that reads secrets, let it run
+# and delete the branch. Nothing of it ever reaches the checkout this scan
+# reads, and protecting workflow files on the default branch does not stop it.
+# What does is GitHub's environment settings: an environment that accepts only
+# branches a non-admin credential can neither create nor move, or one that
+# needs a reviewer, keeps its secrets and its cloud logins (cloud roles trust
+# an environment NAME over OIDC, so an environment with no secrets counts too).
+# One exception: GitHub creates `github-pages` and `copilot` itself, so one of
+# those that holds no secret is left out of the verdict; one whose secrets
+# cannot be read is judged on its settings and, if it would not pass, keeps
+# either environment check unmeasured. An admin or owner credential can change these
+# settings, so no verdict here covers one.
+#
+#   F11 sec.environments.branch-restricted  every environment is restricted to
+#       "closed" refs, or requires a reviewer
+#   F12 sec.environments.approval-holds     every environment with reviewers
+#       stops the requester approving their own run
+#   F13 sec.secrets.environment-scoped      no repo- or org-level secret is
+#       readable from any branch (every secret lives in an environment); the
+#       secret-name inventory is its list
+#
+# A ref is CLOSED when every ref its pattern can match is covered by an active
+# ruleset (or classic protection) that blocks creating it AND blocks direct
+# updates, with nobody short of an admin able to bypass either. For classic
+# protection only the one rule GitHub applies to a branch counts (a rule
+# naming it exactly beats every wildcard); a pull request rule blocks updates
+# only when it needs at least one approval that a new push dismisses or
+# re-asks. An existing
+# exact name needs updates blocked and deletion or creation blocked (otherwise
+# it can be deleted and pushed again). `evaluate` and `disabled` rulesets count
+# for nothing; organisation rulesets count.
+#
+# The contract is F7's: no repository or no token is UNMEASURED with the reason;
+# a source that cannot be read leaves every verdict that depends on it
+# unmeasured, never passed and never dropped; no retries.
+
+# PROBE P1 (a private sandbox repository, settings toggled by hand): does a
+# branch protected ONLY by a ruleset count as "protected" for an environment
+# whose policy is "Protected branches only"? ANSWERED NO (2026-10-24, toggled
+# three times): only CLASSIC branch protection rules decide what that policy
+# admits. With zero classic rules in the repository it admits every branch and
+# every tag; one classic rule, even one matching nothing, makes it restrictive
+# and then it admits no tag. So under False the protected set is the classic
+# patterns alone, and only classic settings can close them. True restores the
+# pre-probe reading (ruleset patterns join the set, rulesets can close).
+P1_RULESET_ONLY_BRANCH_COUNTS_AS_PROTECTED = False
+
+# PROBE P6: on which endpoints a 404 is an ANSWER ("nothing configured") rather
+# than a failure (wrong repository, wrong path, no access). Only a recording
+# moves an endpoint to an answer; every other 404 is unmeasured.
+#   * `branch`: recorded 2026-10-24 — a missing branch answers 404 "Branch not
+#     found", so that 404 (and only with that reason) means "does not exist".
+#   * The deployment-branch-policies endpoint is deliberately NOT an answer:
+#     it was recorded answering 404 when the policy is null or
+#     protected-branches, but this engine asks it only for custom-policy
+#     environments, where a 404 can only mean the read failed. It therefore
+#     has no entry here, and `branch_policies()` passes no `kind`.
+P6_NOT_FOUND_ANSWERS = {
+    "branch": re.compile(r"branch not found", re.I),
+}
+
+_MANAGED_ENVIRONMENTS = frozenset({"github-pages", "copilot"})
+_BRANCH_FACT = "sec.environments.branch-restricted"
+_APPROVAL_FACT = "sec.environments.approval-holds"
+_PER_PAGE = "per_page=100"
+_GLOB_CHARS = "*?["
+
+# A short, deterministic sort hint for the inventory. It orders the list; it is
+# not a severity, and getting it wrong costs only ordering.
+_HIGH_VALUE_SECRET = re.compile(
+    r"PRIVATE_KEY|APP_ID|PYPI|NPM_TOKEN|PUBLISH|RELEASE|DEPLOY|"
+    r"(?:^|_)PAT(?:_|$)|GH_TOKEN|GITHUB_TOKEN")
+
+_SECRETS_FACT = "sec.secrets.environment-scoped"
+
+# Some of the credentials that can add or change workflow files, as GitHub
+# documents them. Cited instead of asserted, and not a complete list: the
+# report links these rather than listing credential types this skill has not
+# tested.
+_TOKEN_DOCS = (
+    ("the `workflow` scope (classic tokens, OAuth apps)",
+     "https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/"
+     "scopes-for-oauth-apps"),
+    ("the \"Workflows\" permission (GitHub Apps)",
+     "https://docs.github.com/en/apps/creating-github-apps/"
+     "registering-a-github-app/choosing-permissions-for-a-github-app"),
+    ("the \"Workflows\" permission (fine-grained tokens)",
+     "https://docs.github.com/en/rest/authentication/"
+     "permissions-required-for-fine-grained-personal-access-tokens"),
+)
+_TOKEN_NOTE = (
+    "GitHub documents, among others, these credentials that can add or "
+    "change workflow files: "
+    + "; ".join(f"[{label}]({url})" for label, url in _TOKEN_DOCS) + ".")
+
+_TIER1_GAP = (
+    "Not checked here: a leaked credential that can push code but cannot "
+    "push workflow files can still change what this repository's own "
+    "workflows run on its branches (build scripts, tests, local actions).")
+_CREDENTIAL_NOTE = (
+    "A workflow pushed with such a credential can also ask for its own "
+    "write-scoped Actions token and an OIDC login token, so any cloud role "
+    "that trusts this repository without pinning a branch or an "
+    "environment that passes the branch check is exposed too; cloud trust "
+    "policies cannot be read from here.")
+
+
+class _Unread(Exception):
+    """A source this scan asked for and could not read; the message is why."""
+
+
+def _not_found_is_an_answer(kind: str, exc: Exception) -> bool:
+    reason = P6_NOT_FOUND_ANSWERS.get(kind)
+    text = str(exc)
+    return bool(reason and re.search(r"\b404\b", text) and reason.search(text))
+
+
+def _json_pages(text: str) -> list:
+    """Every JSON document `gh api --paginate` printed, in order: one per page
+    for an endpoint that answers an object, one merged array for an array."""
+    dec = json.JSONDecoder()
+    out: list = []
+    i, n = 0, len(text)
+    while True:
+        while i < n and text[i].isspace():
+            i += 1
+        if i >= n:
+            break
+        doc, i = dec.raw_decode(text, i)
+        out.append(doc)
+    if not out:
+        raise ValueError("the response was empty")
+    return out
+
+
+def _paged(text: str, key: str | None) -> list:
+    items: list = []
+    for page in _json_pages(text):
+        got = page if key is None else (
+            page.get(key) if isinstance(page, dict) else None)
+        if not isinstance(got, list):
+            raise ValueError(
+                f"a page was {type(page).__name__}, not the documented "
+                + ("array" if key is None else f"object with a `{key}` list"))
+        items += got
+    return items
+
+
+def _env_segment(name: str) -> str:
+    return quote(name, safe="")
+
+
+_CLASSIC_QUERY = (
+    "query($owner: String!, $name: String!) { repository(owner: $owner, "
+    "name: $name) { viewerPermission branchProtectionRules(first: 100) { "
+    "totalCount nodes { pattern blocksCreations restrictsPushes "
+    "requiresApprovingReviews requiredApprovingReviewCount allowsDeletions "
+    "dismissesStaleReviews requireLastPushApproval "
+    "pushAllowances(first: 1) { "
+    "totalCount } bypassPullRequestAllowances(first: 1) { totalCount } } } } }")
+
+
+class _GhPushAccess:
+    """The repository's environment, ruleset and secret settings, read lazily
+    over `gh` and memoised, so a run asks only for what a verdict needs.
+
+    Every reader returns the answer or raises `_Unread` with the reason; a
+    failure is remembered, so a second verdict over the same source does not
+    ask again (there are no retries)."""
+
+    def __init__(self, gh: Any, repo: str):
+        self.gh, self.repo = gh, repo
+        self._memo: dict[str, tuple[bool, Any]] = {}
+
+    def _once(self, key: str, fn) -> Any:
+        if key not in self._memo:
+            try:
+                self._memo[key] = (True, fn())
+            except _Unread as exc:
+                self._memo[key] = (False, str(exc))
+            except Exception as exc:                           # noqa: BLE001
+                # Unmeasured either way, but an engine bug must stay
+                # distinguishable from a coverage gap in a debug trace.
+                _log.debug("push access reader %s failed", key, exc_info=True)
+                self._memo[key] = (False, f"{key}: {str(exc).strip()}")
+        ok, value = self._memo[key]
+        if not ok:
+            raise _Unread(value)
+        return value
+
+    def _get(self, path: str, *, paginate: bool = False, kind: str = "",
+             key: str | None = None, what: str = "",
+             forbidden_expected: bool = False) -> Any:
+        try:
+            kw = {"quiet_forbidden": True} if forbidden_expected else {}
+            text = self.gh.run_gh_api(path, paginate=paginate,
+                                      quiet_not_found=True, **kw)
+        except Exception as exc:                               # noqa: BLE001
+            if kind and _not_found_is_an_answer(kind, exc):
+                return None
+            raise _Unread(f"{what or path} could not be read "
+                          f"({str(exc).strip()})")
+        try:
+            return _paged(text, key) if paginate else json.loads(text)
+        except ValueError as exc:
+            raise _Unread(f"{what or path} returned an unexpected body ({exc})")
+
+    def _repository(self) -> dict:
+        def read():
+            body = self._get(f"repos/{self.repo}", what="the repository")
+            if not isinstance(body, dict):
+                raise _Unread("the repository endpoint returned no object")
+            return body
+        return self._once("repository", read)
+
+    def is_admin(self) -> bool:
+        """The caller's admin right, from the repository's own
+        `permissions.admin`. Only an explicit True counts."""
+        perms = self._repository().get("permissions")
+        return isinstance(perms, dict) and perms.get("admin") is True
+
+    def default_branch(self) -> str:
+        def read():
+            body = self._repository()
+            branch = body.get("default_branch")
+            if not branch:
+                raise _Unread("the repository reported no default branch")
+            return str(branch)
+        return self._once("default_branch", read)
+
+    def environments(self) -> list[dict]:
+        def read():
+            envs = self._get(f"repos/{self.repo}/environments?{_PER_PAGE}",
+                             paginate=True, key="environments",
+                             what="the environment list")
+            _log.debug("push access: %d environment(s)", len(envs))
+            if any(not isinstance(e, dict) or not e.get("name")
+                   for e in envs):
+                raise _Unread("the environment list held an entry with no "
+                              "name")
+            return envs
+        return self._once("environments", read)
+
+    def branch_policies(self, env: str) -> list[dict]:
+        return self._once(f"policies:{env}", lambda: self._get(
+            f"repos/{self.repo}/environments/{_env_segment(env)}"
+            f"/deployment-branch-policies?{_PER_PAGE}", paginate=True,
+            key="branch_policies",
+            what=f"the deployment branch policies of `{env}`"))
+
+    def rulesets(self) -> list[dict]:
+        def read():
+            listed = self._get(
+                f"repos/{self.repo}/rulesets?includes_parents=true&{_PER_PAGE}",
+                paginate=True, key=None, what="the rulesets")
+            details = []
+            for item in listed:
+                rid = item.get("id") if isinstance(item, dict) else None
+                if rid is None:
+                    raise _Unread("the rulesets list held an entry with no id")
+                body = self._get(
+                    f"repos/{self.repo}/rulesets/{rid}?includes_parents=true",
+                    what=f"ruleset {rid}")
+                if not isinstance(body, dict):
+                    raise _Unread(f"ruleset {rid} was not an object")
+                details.append(body)
+            _log.debug("push access: %d ruleset(s)", len(details))
+            return details
+        return self._once("rulesets", read)
+
+    def classic_rules(self) -> list[dict]:
+        """Classic branch protection RULES (patterns). Only GraphQL lists
+        them, and it answers a non-admin with an empty list rather than an
+        error, so anything short of an admin's answer is unread, never
+        "none"."""
+        def read():
+            # Recorded: a non-admin is answered with a silent zero, the
+            # Actions token with FORBIDDEN. Admin rights are
+            # established explicitly first, so a reader never spends the call
+            # and a zero is never mistaken for "no rules".
+            if not self.is_admin():
+                raise _Unread(
+                    "classic branch protection rules are readable only by a "
+                    "repository admin (GitHub answers anyone else with an "
+                    "empty list, which is not the same as none)")
+            owner, _, name = self.repo.partition("/")
+            try:
+                text = self.gh.run_gh_api(
+                    "graphql", method="POST",
+                    fields={"query": _CLASSIC_QUERY, "owner": owner,
+                            "name": name})
+                body = json.loads(text)
+                repo = body["data"]["repository"]
+                rules = repo["branchProtectionRules"]
+            except Exception as exc:                           # noqa: BLE001
+                raise _Unread(f"classic branch protection rules could not be "
+                              f"read ({str(exc).strip()})")
+            if repo.get("viewerPermission") != "ADMIN":
+                raise _Unread(
+                    "classic branch protection rules are readable only by a "
+                    "repository admin (GitHub answers anyone else with an "
+                    "empty list, which is not the same as none)")
+            # A rule the answer cannot show is a rule whose pattern goes
+            # unchecked, so an odd shape is unread, never "these are all".
+            nodes = rules.get("nodes") if isinstance(rules, dict) else None
+            total = rules.get("totalCount") if isinstance(rules, dict) else None
+            if (not isinstance(nodes, list) or not isinstance(total, int)
+                    or isinstance(total, bool)
+                    or any(not isinstance(n, dict) for n in nodes)):
+                raise _Unread("classic branch protection rules returned an "
+                              "unexpected shape")
+            if total > len(nodes):
+                raise _Unread("more than 100 classic branch protection rules")
+            return nodes
+        return self._once("classic", read)
+
+    def protected_branches(self) -> set[str]:
+        return self._once("protected", lambda: {
+            str(b.get("name")) for b in self._get(
+                f"repos/{self.repo}/branches?protected=true&{_PER_PAGE}",
+                paginate=True, key=None, what="the protected branch list")
+            if isinstance(b, dict)})
+
+    def branch(self, name: str) -> dict | None:
+        """The branch, or None when it does not exist (P6: `branch`)."""
+        return self._once(f"branch:{name}", lambda: self._get(
+            f"repos/{self.repo}/branches/{_branch_segment(name)}",
+            kind="branch", what=f"branch `{name}`"))
+
+    def matching_refs(self, prefix: str) -> list[str]:
+        def read():
+            what = f"the branches starting `{prefix}`"
+            refs = self._get(
+                f"repos/{self.repo}/git/matching-refs/heads/"
+                f"{_branch_segment(prefix)}", paginate=True, key=None,
+                what=what)
+            # A dropped entry could be the branch that proves a pattern open.
+            if any(not isinstance(r, dict) or not str(
+                    r.get("ref") or "").startswith("refs/heads/")
+                    for r in refs):
+                raise _Unread(f"{what} returned an unexpected shape")
+            return [str(r["ref"])[len("refs/heads/"):] for r in refs]
+        return self._once(f"refs:{prefix}", read)
+
+    def _secret_names(self, key: str, path: str, what: str) -> list[str]:
+        def read():
+            listed = self._get(path, paginate=True, key="secrets", what=what,
+                               forbidden_expected=True)
+            # An entry with no name is not "no secret": the list is unread.
+            if any(not isinstance(s, dict) or not s.get("name")
+                   for s in listed):
+                raise _Unread(f"{what} held an entry with no name")
+            names = sorted(str(s["name"]) for s in listed)
+            _log.debug("push access: %d %s", len(names), key)
+            return names
+        return self._once(key, read)
+
+    def repo_secrets(self) -> list[str]:
+        return self._secret_names(
+            "repo secrets", f"repos/{self.repo}/actions/secrets?{_PER_PAGE}",
+            "the repository secret list")
+
+    def org_secrets(self) -> list[str]:
+        return self._secret_names(
+            "org secrets",
+            f"repos/{self.repo}/actions/organization-secrets?{_PER_PAGE}",
+            "the organisation secret list")
+
+    def environment_secrets(self, env: str) -> list[str]:
+        return self._secret_names(
+            f"environment secrets:{env}",
+            f"repos/{self.repo}/environments/{_env_segment(env)}"
+            f"/secrets?{_PER_PAGE}", f"the secrets of `{env}`")
+
+
+def _push_access_via_gh(repo: str) -> tuple[Any, str]:
+    """(source, detail), or (None, reason) when `gh` cannot be used."""
+    gh = _gh_utils()
+    if not gh.check_prereqs():
+        return None, "gh is unavailable or not authenticated (run gh auth login)"
+    return _GhPushAccess(gh, repo), "the repository's settings"
+
+
+# --- ref patterns -------------------------------------------------------------
+
+def _is_glob(pattern: str) -> bool:
+    return any(c in pattern for c in _GLOB_CHARS)
+
+
+def _glob_regex(pattern: str, pathname: bool = False) -> re.Pattern:
+    """A ref pattern as a regex. `*`, `?` and `[...]` never match `/`.
+
+    `pathname=True` is how GitHub matches branch protection and ruleset
+    patterns: Ruby's File.fnmatch with File::FNM_PATHNAME, where only `**/`
+    at the start of a path segment matches any number of folders and a bare
+    `**` behaves like `*` (`qa/**/*` matches `qa/a/b`; `release/**` does
+    not). Docs: "Because GitHub uses the File::FNM_PATHNAME flag for the
+    File.fnmatch syntax, the wildcard does not match directory separators"
+    (docs.github.com, "Creating rulesets for a repository" and "Managing a
+    branch protection rule"). A dot-led segment, which FNM_PATHNAME treats
+    apart, cannot occur: git forbids ref components starting with `.`.
+
+    `pathname=False` lets a bare `**` cross `/`. It is used where a wider
+    reading is the safe one: the refs an ENVIRONMENT pattern may accept, and
+    what a ruleset EXCLUDE may take away."""
+    out, i = [], 0
+    while i < len(pattern):
+        c = pattern[i]
+        if pattern.startswith("**", i):
+            at_segment = i == 0 or pattern[i - 1] == "/"
+            if pathname and at_segment and pattern.startswith("**/", i):
+                out.append("(?:[^/]*/)*")
+                i += 3
+            else:
+                out.append("[^/]*" if pathname else ".*")
+                i += 2
+            continue
+        if c == "*":
+            out.append("[^/]*")
+        elif c == "?":
+            out.append("[^/]")
+        elif c == "[":
+            end = pattern.find("]", i + 1)
+            if end == -1:
+                out.append(re.escape(c))
+            else:
+                body = pattern[i + 1:end].replace("\\", "\\\\")
+                if body.startswith("!"):
+                    body = "^" + body[1:]
+                # FNM_PATHNAME matches one segment at a time, so no class,
+                # negated or naming `/` itself, ever matches `/`.
+                out.append(("(?!/)" if pathname else "") + f"[{body}]")
+                i = end
+        else:
+            out.append(re.escape(c))
+        i += 1
+    return re.compile("".join(out) + r"\Z")
+
+
+_RULESET_ALL = "~ALL"     # a ruleset's own "every ref" condition
+
+
+def _glob_matches(pattern: str, name: str, pathname: bool = False) -> bool:
+    if pattern == _RULESET_ALL:
+        return True
+    return bool(_glob_regex(pattern, pathname).match(name))
+
+
+def _glob_prefix(pattern: str) -> str:
+    cut = min((pattern.index(c) for c in _GLOB_CHARS if c in pattern),
+              default=len(pattern))
+    return pattern[:cut]
+
+
+def _covers(cover: str, pattern: str) -> bool:
+    """Does the protection pattern `cover` (read with FNM_PATHNAME, see
+    `_glob_regex`) match EVERY ref the accepted `pattern` can match? Exact
+    for a literal `pattern`; for a wildcard only the provable shapes (equal,
+    match-all, a `**/*` or a trailing `*` over a literal prefix) — anything
+    else is "not shown to cover", which can over-fail and never
+    under-fail."""
+    if cover == _RULESET_ALL:
+        return True
+    if not _is_glob(pattern):
+        return _glob_matches(cover, pattern, pathname=True)
+    if cover == pattern:
+        return True
+    if cover.endswith("**/*"):
+        head = cover[:-4]
+        if not _is_glob(head) and (not head or head.endswith("/")):
+            return pattern.startswith(head) and len(pattern) > len(head)
+    head = cover.rstrip("*")
+    if len(cover) - len(head) in (1, 2) and not _is_glob(head):
+        # `H*` or a bare `H**` (which is `H*`): one segment after `H`. An
+        # accepted `**` might cross `/`, so it is not shown to be covered.
+        rest = pattern[len(head):]
+        return pattern.startswith(head) and "/" not in rest and "**" not in rest
+    return False
+
+
+def _may_overlap(exclude: str, pattern: str) -> bool:
+    if not _is_glob(pattern):
+        return _glob_matches(exclude, pattern)
+    if not _is_glob(exclude):
+        return _glob_matches(pattern, exclude)
+    return True
+
+
+def _ruleset_patterns(rs: dict, prefix: str, default_branch: str
+                      ) -> tuple[list[str], list[str]]:
+    cond = (rs.get("conditions") or {}).get("ref_name") or {}
+
+    def norm(p: str) -> str | None:
+        if p == "~ALL":
+            return _RULESET_ALL
+        if p == "~DEFAULT_BRANCH":
+            return default_branch if prefix == "refs/heads/" else None
+        return p[len(prefix):] if p.startswith(prefix) else None
+    inc = [q for p in cond.get("include") or [] if (q := norm(str(p)))]
+    exc = [q for p in cond.get("exclude") or [] if (q := norm(str(p)))]
+    return inc, exc
+
+
+_ADMIN_ACTORS = {("RepositoryRole", 5), ("OrganizationAdmin", None),
+                 ("OrganizationAdmin", 1), ("EnterpriseOwner", None)}
+
+
+def _bypass_state(rs: dict, block: str) -> str:
+    """'clean' (nobody short of an admin), 'open' or 'unknown' (the list is
+    not served to readers without admin rights) for one block."""
+    if "bypass_actors" not in rs or not isinstance(rs["bypass_actors"], list):
+        return "unknown"
+    for actor in rs["bypass_actors"]:
+        if not isinstance(actor, dict):
+            return "unknown"
+        if actor.get("bypass_mode") == "pull_request" and block != "update":
+            # GitHub lets this actor merge a pull request that does not meet
+            # the rules. A merge can neither create nor delete a ref, but it
+            # does move one, so the actor counts against `update` only.
+            continue
+        if (actor.get("actor_type"), actor.get("actor_id")) in _ADMIN_ACTORS:
+            continue
+        return "open"
+    return "clean"
+
+
+_BLOCKS = {"creation": {"creation"}, "update": {"update", "pull_request"},
+           "deletion": {"deletion"}}
+
+
+def _fresh_approval(dismiss: Any, last_push: Any) -> str | None:
+    """'held', 'unknown' or None: does an approval stop counting once new
+    commits land? Without that, a credential pushes a workflow onto a pull
+    request someone already approved and merges it on the old approval."""
+    if dismiss is True or last_push is True:
+        return "held"
+    if dismiss is False and last_push is False:
+        return None
+    return "unknown"
+
+
+def _rule_holds(rule: dict) -> str | None:
+    """'held', 'unknown' or None for one ruleset rule already of a wanted
+    type. A pull_request rule holds updates only when it needs at least one
+    approval (with none, a credential merges its own pull request) and that
+    approval is dismissed or re-asked after a new push."""
+    if rule.get("type") != "pull_request":
+        return "held"
+    params = rule.get("parameters")
+    if not isinstance(params, dict):
+        return "unknown"
+    count = params.get("required_approving_review_count")
+    if not isinstance(count, int) or isinstance(count, bool):
+        return "unknown"
+    if count < 1:
+        return None
+    return _fresh_approval(params.get("dismiss_stale_reviews_on_push"),
+                           params.get("require_last_push_approval"))
+
+
+def _requirements(kind: str, pattern: str, exists: bool | None) -> list:
+    """Each entry is a set of blocks of which ONE must hold."""
+    if kind == "branch" and not _is_glob(pattern) and exists:
+        return [{"update"}, {"deletion", "creation"}]
+    return [{"creation"}, {"update"}]
+
+
+def _block_state(block: str, kind: str, pattern: str, rulesets: Any,
+                 classic: Any, default_branch: str) -> tuple[str, str]:
+    """('held' | 'unknown' | 'absent', why) for one block on one pattern."""
+    prefix = "refs/heads/" if kind == "branch" else "refs/tags/"
+    target = "branch" if kind == "branch" else "tag"
+    unknown: list[str] = []
+    if isinstance(rulesets, _Unread):
+        unknown.append(f"the rulesets: {rulesets}")
+    else:
+        for rs in rulesets:
+            if rs.get("enforcement") != "active" or rs.get("target") != target:
+                continue
+            inc, exc = _ruleset_patterns(rs, prefix, default_branch)
+            if not any(_covers(q, pattern) for q in inc):
+                continue
+            if any(_may_overlap(e, pattern) for e in exc):
+                continue
+            wanted = _BLOCKS[block] - ({"pull_request"} if kind == "tag"
+                                       else set())
+            holds = {_rule_holds(r) for r in rs.get("rules") or []
+                     if isinstance(r, dict) and r.get("type") in wanted}
+            if "held" not in holds and "unknown" not in holds:
+                continue
+            state = _bypass_state(rs, block)
+            if state == "open":
+                continue
+            if state == "unknown":
+                unknown.append(
+                    f"ruleset `{rs.get('name')}`'s bypass list is not "
+                    "readable without the right to edit rulesets (in "
+                    "practice, admin)")
+            elif "held" in holds:
+                return "held", f"ruleset `{rs.get('name')}`"
+            else:
+                unknown.append(
+                    f"ruleset `{rs.get('name')}`'s pull request rule does not "
+                    "say how many approvals it needs, or whether they survive "
+                    "a new push")
+    if kind == "branch":
+        if isinstance(classic, _Unread):
+            unknown.append(str(classic))
+        else:
+            state, why = _classic_state(block, pattern, classic)
+            if state == "held":
+                return "held", why
+            if state == "unknown":
+                unknown.append(why)
+    if unknown:
+        return "unknown", "; ".join(dict.fromkeys(unknown))
+    return "absent", ""
+
+
+def _nobody_allowed(rule: dict, key: str) -> bool | None:
+    """Does the allowance list `key` name nobody? None when it is unreadable
+    (a missing list is unknown, never "nobody")."""
+    allowed = rule.get(key)
+    count = allowed.get("totalCount") if isinstance(allowed, dict) else None
+    if not isinstance(count, int) or isinstance(count, bool):
+        return None
+    return count == 0
+
+
+def _classic_holds(rule: dict, block: str) -> str | None:
+    """'held', 'unknown' or None: does this one classic rule hold `block`?"""
+    if block == "deletion":
+        return "held" if rule.get("allowsDeletions") is False else None
+    pushes_closed = (_nobody_allowed(rule, "pushAllowances")
+                     if rule.get("restrictsPushes") is True else False)
+    if block == "creation":
+        if rule.get("blocksCreations") is not True:
+            return None
+        return {True: "held", None: "unknown"}.get(pushes_closed)
+    if pushes_closed:
+        return "held"
+    held = _classic_reviews_hold(rule)
+    return "unknown" if held is None and pushes_closed is None else held
+
+
+def _classic_reviews_hold(rule: dict) -> str | None:
+    if rule.get("requiresApprovingReviews") is not True:
+        return None
+    reviews = _nobody_allowed(rule, "bypassPullRequestAllowances")
+    if reviews is None:
+        return "unknown"
+    if not reviews:
+        return None
+    count = rule.get("requiredApprovingReviewCount")
+    if not isinstance(count, int) or isinstance(count, bool):
+        return "unknown"
+    if count < 1:
+        # With no approval required, a credential merges its own pull request.
+        return None
+    return _fresh_approval(rule.get("dismissesStaleReviews"),
+                           rule.get("requireLastPushApproval"))
+
+
+def _rules_may_meet(rule_pattern: str, pattern: str) -> bool:
+    """Can the classic rule `rule_pattern` match a ref the accepted `pattern`
+    accepts? Two wildcards meet unless their literal prefixes or (with no
+    `**`) their folder depths rule it out; anything else is "may"."""
+    if not _is_glob(pattern):
+        return _glob_matches(rule_pattern, pattern, pathname=True)
+    if not _is_glob(rule_pattern):
+        return _glob_matches(pattern, rule_pattern)
+    a, b = _glob_prefix(rule_pattern), _glob_prefix(pattern)
+    if not (a.startswith(b) or b.startswith(a)):
+        return False
+    if "**" not in rule_pattern and "**" not in pattern:
+        # A bracket class muddies the count (a `/` inside one is no
+        # separator, and the wide reading of an accepted pattern lets a class
+        # match `/`), so with one the answer stays "may".
+        if "[" in rule_pattern + pattern:
+            return True
+        return rule_pattern.count("/") == pattern.count("/")
+    return True
+
+
+def _classic_state(block: str, pattern: str, classic: list[dict]
+                   ) -> tuple[str, str]:
+    """('held' | 'unknown' | 'absent', why) from classic protection alone.
+
+    GitHub applies ONE classic rule to a branch, never a combination: a rule
+    naming the branch exactly outranks every wildcard rule, and among
+    wildcard rules the oldest wins (docs.github.com, "About protected
+    branches"). The rules' order is not read, so where wildcard rules that
+    disagree may both apply, the answer is unknown, never held."""
+    meeting = [(p, r) for r in classic
+               if (p := str(r.get("pattern") or ""))
+               and _rules_may_meet(p, pattern)]
+    if not _is_glob(pattern):
+        exact = [(p, r) for p, r in meeting if not _is_glob(p)]
+        applying = exact[:1] or meeting
+        covering = applying
+    else:
+        applying = meeting
+        covering = [(p, r) for p, r in meeting if _covers(p, pattern)]
+    states = {p: _classic_holds(r, block) for p, r in applying}
+    held = [p for p, _ in covering if states[p] == "held"]
+    if not held:
+        unsure = [p for p, _ in covering if states[p] == "unknown"]
+        if unsure:
+            return "unknown", (
+                f"classic rule `{unsure[0]}` does not say how many approvals "
+                "it needs, or whether they survive a new push")
+        return "absent", ""
+    rivals = [p for p, _ in applying if states[p] != "held"]
+    if not rivals:
+        return "held", f"classic rule `{held[0]}`"
+    if any(not _is_glob(p) and states[p] is None for p in rivals):
+        # A rule naming one accepted branch exactly governs it, and it leaves
+        # that branch open.
+        return "absent", ""
+    return "unknown", (
+        f"classic rules `{held[0]}` and `{rivals[0]}` both may match; GitHub "
+        "applies only one rule to a branch (an exact name first, else the "
+        "oldest), and their order is not read here")
+
+
+_BLOCK_WORDS = {"creation": "creating it", "update": "pushing to it",
+                "deletion": "deleting it"}
+
+
+def _pattern_state(src: Any, kind: str, pattern: str, rulesets: Any,
+                   classic: Any, default_branch: str,
+                   accepts_unprotected: bool) -> tuple[str, str]:
+    """('closed' | 'open' | 'unknown', why) for one accepted ref pattern.
+
+    `accepts_unprotected` is False under "protected branches only", where an
+    existing unprotected branch is not an accepted ref at all."""
+    label = f"`{pattern}`" + (" (tag)" if kind == "tag" else "")
+    exists: bool | None = None
+    if kind == "branch" and not _is_glob(pattern):
+        try:
+            body = src.branch(pattern)
+        except _Unread as exc:
+            return "unknown", f"{label}: {exc}"
+        exists = body is not None
+        if exists and accepts_unprotected and \
+                isinstance(body, dict) and body.get("protected") is False:
+            return "open", (f"{label} exists and nothing protects it, so any "
+                            "push credential can push a workflow to it")
+    missing: list[str] = []
+    unknown: list[str] = []
+    for options in _requirements(kind, pattern, exists):
+        states = [(b, *_block_state(b, kind, pattern, rulesets, classic,
+                                    default_branch)) for b in sorted(options)]
+        if any(s == "held" for _, s, _ in states):
+            continue
+        unk = [why for _, s, why in states if s == "unknown"]
+        if unk:
+            unknown += unk
+        else:
+            missing.append(" or ".join(_BLOCK_WORDS[b] for b, _, _ in states))
+    if not missing and not unknown:
+        return "closed", f"{label} is closed"
+    # Rules alone left it undecided (an unreadable source, an unreadable
+    # bypass list). One more answer settles it as OPEN without those sources:
+    # a branch matching the pattern that already exists with no protection.
+    if not missing and kind == "branch" and _is_glob(pattern) \
+            and accepts_unprotected:
+        prefix = _glob_prefix(pattern)
+        if prefix:
+            try:
+                refs = src.matching_refs(prefix)
+                protected = src.protected_branches() if refs else set()
+            except _Unread as exc:
+                refs, protected = [], set()
+                unknown.append(str(exc))
+            # Proof of OPEN, so the narrower reading of the accepted pattern.
+            hit = next((r for r in refs
+                        if _glob_matches(pattern, r, pathname=True)
+                        and r not in protected), None)
+            if hit:
+                return "open", (
+                    f"{label} matches `{hit}`, which exists and nothing "
+                    "protects, so any credential that can push workflow "
+                    "files can push one to it")
+    if missing:
+        what = "a branch" if kind == "branch" else "a tag"
+        if exists is True:
+            return "open", (f"{label} exists, and nothing blocks "
+                            f"{'; nor '.join(missing)} — any push credential "
+                            "can push a workflow to it")
+        lead = (" does not exist yet, and" if exists is False else ":")
+        return "open", (f"{label}{lead} nothing blocks "
+                        f"{'; nor '.join(missing)} — any push credential "
+                        f"can make {what} it accepts")
+    return "unknown", (f"{label}: whether it is closed could not be "
+                       f"established — {'; '.join(dict.fromkeys(unknown))}")
+
+
+def _source(fn) -> Any:
+    try:
+        return fn()
+    except _Unread as exc:
+        return exc
+
+
+def _environment_branch_verdict(src: Any, env: dict) -> tuple[str, str]:
+    """(pass | fail | unmeasured, why) for one in-scope environment."""
+    name = env["name"]
+    reviewers = _reviewer_count(env)
+    if reviewers:
+        return "pass", f"`{name}` requires a reviewer"
+    policy = env.get("deployment_branch_policy")
+    if policy is None:
+        return "fail", (f"`{name}` accepts any branch and needs no reviewer")
+    if not isinstance(policy, dict):
+        return "unmeasured", f"`{name}`'s branch policy is not readable"
+    try:
+        default_branch = src.default_branch()
+    except _Unread as exc:
+        return "unmeasured", f"`{name}`: {exc}"
+    classic = _source(src.classic_rules)
+    if policy.get("protected_branches") is True and \
+            not P1_RULESET_ONLY_BRANCH_COUNTS_AS_PROTECTED:
+        # Probe P1: only classic rules decide, so only classic settings can
+        # close a pattern; rulesets are not consulted at all.
+        if isinstance(classic, _Unread):
+            return "unmeasured", (
+                f"`{name}` accepts \"protected branches\", which only classic "
+                f"branch protection rules decide — {classic}")
+        patterns = list(dict.fromkeys(
+            str(r.get("pattern")) for r in classic if r.get("pattern")))
+        if not patterns:
+            return "fail", (
+                f"`{name}` accepts \"protected branches\", and the repository "
+                "has no classic branch protection rule, in which case GitHub "
+                "lets every branch and tag deploy to it; it needs no reviewer")
+        states = [_pattern_state(src, "branch", p, [], classic,
+                                 default_branch, accepts_unprotected=False)
+                  for p in patterns]
+        opened = [why for s, why in states if s == "open"]
+        if opened:
+            return "fail", (f"`{name}` accepts protected branches, and "
+                            f"{_capped(opened, 2)}")
+        unsettled = [why for s, why in states if s == "unknown"]
+        if unsettled:
+            return "unmeasured", f"`{name}`: {_capped(unsettled, 2)}"
+        return "pass", (f"`{name}` accepts only branches matching a classic "
+                        "protection rule, and every such rule blocks "
+                        "creating and pushing")
+    rulesets = _source(src.rulesets)
+    if policy.get("protected_branches") is True:
+        patterns: list[tuple[str, str]] = []
+        unread: list[str] = []
+        if P1_RULESET_ONLY_BRANCH_COUNTS_AS_PROTECTED:
+            if isinstance(rulesets, _Unread):
+                unread.append(str(rulesets))
+            else:
+                for rs in rulesets:
+                    if rs.get("enforcement") == "active" and \
+                            rs.get("target") == "branch":
+                        inc, _ = _ruleset_patterns(rs, "refs/heads/",
+                                                   default_branch)
+                        patterns += [("branch", "**" if p == _RULESET_ALL
+                                      else p) for p in inc]
+        if isinstance(classic, _Unread):
+            unread.append(str(classic))
+        else:
+            patterns += [("branch", str(r.get("pattern")))
+                         for r in classic if r.get("pattern")]
+        states = [_pattern_state(src, k, p, rulesets, classic, default_branch,
+                                 accepts_unprotected=False)
+                  for k, p in dict.fromkeys(patterns)]
+        opened = [why for s, why in states if s == "open"]
+        if opened:
+            return "fail", (f"`{name}` accepts protected branches, and "
+                            f"{_capped(opened, 2)}")
+        if unread:
+            return "unmeasured", (
+                f"`{name}` accepts protected branches, and which branches "
+                f"those are could not be read in full — "
+                f"{'; '.join(unread)}")
+        unsettled = [why for s, why in states if s == "unknown"]
+        if unsettled:
+            return "unmeasured", f"`{name}`: {_capped(unsettled, 2)}"
+        if not states:
+            return "fail", (f"`{name}` accepts \"protected branches\", and "
+                            "with none protected GitHub lets every branch "
+                            "and tag deploy")
+        return "pass", (f"`{name}` accepts only protected branches, and every "
+                        "protected pattern is closed")
+    if policy.get("custom_branch_policies") is True:
+        try:
+            entries = src.branch_policies(name)
+        except _Unread as exc:
+            return "unmeasured", f"`{name}`: {exc}"
+        states = []
+        for entry in entries:
+            if not isinstance(entry, dict) or not entry.get("name"):
+                return "unmeasured", (f"`{name}`: a deployment branch policy "
+                                      "entry had no name")
+            # No type is GitHub's default, a branch; any other is unknown.
+            kind = entry.get("type") or "branch"
+            if kind not in ("branch", "tag"):
+                return "unmeasured", (f"`{name}`: a deployment branch policy "
+                                      f"entry has the unknown type `{kind}`")
+            states.append(_pattern_state(
+                src, kind, str(entry["name"]), rulesets, classic,
+                default_branch, accepts_unprotected=True))
+        opened = [why for s, why in states if s == "open"]
+        if opened:
+            return "fail", f"`{name}`: {_capped(opened, 2)}"
+        unsettled = [why for s, why in states if s == "unknown"]
+        if unsettled:
+            return "unmeasured", f"`{name}`: {_capped(unsettled, 2)}"
+        return "pass", (f"`{name}` accepts only branches and tags a "
+                        "non-admin push credential can neither create nor "
+                        "move")
+    return "unmeasured", (f"`{name}` has a branch policy this check does not "
+                          "recognise")
+
+
+def _reviewer_rules(env: dict) -> list[dict]:
+    """The environment's required-reviewer rules. A rule list or reviewer
+    list of an unexpected shape raises `_Unread`: it is not zero reviewers."""
+    rules = env.get("protection_rules")
+    if not isinstance(rules, list) or any(
+            not isinstance(r, dict) for r in rules):
+        raise _Unread(f"`{env['name']}`'s protection rules have an "
+                      "unexpected shape")
+    found = [r for r in rules if r.get("type") == "required_reviewers"]
+    if any(not isinstance(r.get("reviewers"), list) for r in found):
+        raise _Unread(f"`{env['name']}`'s required reviewer list has an "
+                      "unexpected shape")
+    return found
+
+
+def _reviewer_count(env: dict) -> int:
+    return sum(len(r["reviewers"]) for r in _reviewer_rules(env))
+
+
+def _self_review_allowed(env: dict) -> bool:
+    return not any(r.get("prevent_self_review") is True
+                   for r in _reviewer_rules(env))
+
+
+def _inventory(src: Any) -> dict[str, Any]:
+    repo_s, org_s = _source(src.repo_secrets), _source(src.org_secrets)
+    reasons = [str(x) for x in (repo_s, org_s) if isinstance(x, _Unread)]
+    repo_names = None if isinstance(repo_s, _Unread) else repo_s
+    org_names = None if isinstance(org_s, _Unread) else org_s
+    status = ("measured" if not reasons else
+              "unmeasured" if len(reasons) == 2 else "partial")
+    names = (repo_names or []) + (org_names or [])
+    return {"status": status, "repo_secrets": repo_names,
+            "org_secrets": org_names,
+            "high_value": sorted(n for n in set(names)
+                                 if _HIGH_VALUE_SECRET.search(n.upper())),
+            "reason": "; ".join(reasons)}
+
+
+def _not_checked_block(reason: str) -> dict[str, Any]:
+    return {"status": "not_checked", "reason": reason, "environments": [],
+            "inventory": {"status": "not_checked", "repo_secrets": None,
+                          "org_secrets": None, "high_value": [],
+                          "reason": reason},
+            "tier1_gap": _TIER1_GAP, "credential_note": _CREDENTIAL_NOTE}
+
+
+def _push_access(repo: str | None, fetcher) -> tuple[
+        tuple[str, str], tuple[str, str], dict[str, Any]]:
+    """((F11 outcome, evidence), (F12 outcome, evidence), push_access block)."""
+    if not repo:
+        reason = ("environment and secret settings are read over the API, and "
+                  "this scan had no repository to read them from — that needs "
+                  "`gh` authenticated (`gh auth login`) and a GitHub remote "
+                  "to derive `owner/name` from")
+        both = ("unmeasured", f"unmeasured: {reason}")
+        return both, both, _not_checked_block(reason)
+    try:
+        src, detail = fetcher(repo)
+    except Exception as exc:                                   # noqa: BLE001
+        src, detail = None, f"the settings could not be read ({exc})"
+    if src is None:
+        both = ("unmeasured", f"unmeasured: {detail}")
+        return both, both, _not_checked_block(detail)
+
+    inventory = _inventory(src)
+    try:
+        envs = src.environments()
+    except _Unread as exc:
+        both = ("unmeasured", f"unmeasured: {exc}")
+        return both, both, {
+            "status": "unmeasured", "reason": str(exc), "environments": [],
+            "inventory": inventory, "tier1_gap": _TIER1_GAP,
+            "credential_note": _CREDENTIAL_NOTE}
+
+    rows: list[dict[str, Any]] = []
+    # GitHub-managed environments whose secrets cannot be read, and which
+    # would not pass on their settings: each may hold secrets, so each keeps
+    # the check from passing (an unread source never yields a pass).
+    could_fail: list[str] = []
+    approval_could_fail: list[str] = []
+    for env in envs:
+        name = str(env["name"])
+        try:
+            _reviewer_rules(env)
+        except _Unread as exc:
+            rows.append({"name": name,
+                         "managed": name in _MANAGED_ENVIRONMENTS,
+                         "admins_can_bypass":
+                             env.get("can_admins_bypass") is True,
+                         "reviewers": None, "has_rules": True,
+                         "branch_check": "unmeasured",
+                         "branch_check_why": str(exc),
+                         "approval_check": "unmeasured",
+                         "approval_check_why": ""})
+            continue
+        row = {"name": name, "managed": name in _MANAGED_ENVIRONMENTS,
+               "admins_can_bypass": env.get("can_admins_bypass") is True,
+               "reviewers": _reviewer_count(env),
+               # Whether there is anything for an admin to skip: a branch
+               # policy or required reviewers.
+               "has_rules": (env.get("deployment_branch_policy") is not None
+                             or _reviewer_count(env) > 0)}
+        if row["managed"]:
+            try:
+                held = src.environment_secrets(name)
+            except _Unread as exc:
+                # The real reason (a 403, a 502, a rate limit) is kept: not
+                # every unread list is a permission gap.
+                held, unread = None, str(exc)
+            if held is None:
+                verdict, why = _environment_branch_verdict(src, env)
+                if verdict != "pass":
+                    could_fail.append(
+                        f"`{name}` is GitHub-managed, its secrets could not "
+                        f"be read ({unread}), and {why}")
+                if row["reviewers"] and _self_review_allowed(env):
+                    approval_could_fail.append(
+                        f"`{name}` is GitHub-managed, its secrets could not "
+                        f"be read ({unread}), and it lets whoever started a "
+                        "run approve it")
+            if not held:
+                row.update(branch_check="info", approval_check="info", branch_check_why=(
+                    f"`{name}` is GitHub-managed; can't tell whether it holds "
+                    f"secrets ({unread})" if held is None else
+                    f"`{name}` is GitHub-managed and holds no secret"),
+                    approval_check_why="")
+                rows.append(row)
+                continue
+        verdict, why = _environment_branch_verdict(src, env)
+        row.update(branch_check=verdict, branch_check_why=why)
+        if row["reviewers"]:
+            allowed = _self_review_allowed(env)
+            row.update(approval_check="fail" if allowed else "pass", approval_check_why=(
+                f"`{name}` lets whoever started a run approve it" if allowed
+                else f"`{name}` blocks self-review"))
+        else:
+            row.update(approval_check="not_applicable", approval_check_why="")
+        rows.append(row)
+    block = {"status": "measured", "reason": "", "environments": rows,
+             "inventory": inventory, "tier1_gap": _TIER1_GAP,
+             "credential_note": _CREDENTIAL_NOTE}
+
+    judged = [r for r in rows if r["branch_check"] != "info"]
+    cant_tell = [r["branch_check_why"] for r in rows
+                 if r["branch_check"] == "info"
+                 and "can't tell" in r["branch_check_why"]]
+    if not judged:
+        branch = _zero_environments(cant_tell, bool(rows))
+    else:
+        failed = [r["branch_check_why"] for r in judged if r["branch_check"] == "fail"]
+        unsettled = [r["branch_check_why"] for r in judged if r["branch_check"] == "unmeasured"]
+        if failed:
+            branch = ("fail", (
+                f"{len(failed)} of {len(judged)} environment(s) can be "
+                "reached from a branch any push credential can make, and "
+                "need no reviewer: " + _capped(failed, 6) + ". Restrict each "
+                "to \"Selected branches and tags\" naming protected branches "
+                "whose rules block creating and pushing, or to \"Protected "
+                "branches only\" with a classic branch protection rule on "
+                "every protected pattern that turns on \"Restrict who can "
+                "push to matching branches\" (nobody listed) and \"Restrict "
+                "pushes that create matching branches\" (rulesets do not "
+                "count for that option) — or add a required reviewer"))
+        elif unsettled or could_fail:
+            branch = ("unmeasured", "unmeasured: "
+                   + _capped(unsettled + could_fail, 4))
+        else:
+            branch = ("pass", (
+                f"every one of {len(judged)} environment(s) is limited to "
+                "branches and tags a non-admin push credential can neither "
+                "create nor move, or requires a reviewer"))
+    reviewed = [r for r in rows
+                if r.get("approval_check") in ("pass", "fail")]
+    approval_could_fail += [r["branch_check_why"] for r in rows
+                            if r["approval_check"] == "unmeasured"]
+    if approval_could_fail and not any(
+            r["approval_check"] == "fail" for r in reviewed):
+        approval = ("unmeasured", "unmeasured: "
+                    + _capped(approval_could_fail, 4))
+    elif not reviewed:
+        approval = ("not_applicable", (
+            "not applicable: no environment requires a reviewer (whether "
+            "environments need one is the branch-restriction check's "
+            "question)"))
+    else:
+        selfish = [r["name"] for r in reviewed if r["approval_check"] == "fail"]
+        approval = ("fail", (
+            f"{len(selfish)} of {len(reviewed)} environment(s) with required "
+            "reviewers let whoever started a run approve it: "
+            + _capped([f"`{n}`" for n in selfish], 6, ", ")
+            + ". A leaked reviewer's credential approves its own run; turn "
+            "on \"Prevent self-review\" for each")) if selfish else (
+            "pass", (f"every one of {len(reviewed)} environment(s) with "
+                     "required reviewers blocks self-review"))
+    return branch, approval, block
+
+
+def _zero_environments(cant_tell: list[str], any_env: bool
+                       ) -> tuple[str, str]:
+    """No environment to judge: NOT APPLICABLE, whatever the secrets are.
+
+    Readable repository and organisation secrets are
+    `sec.secrets.environment-scoped`'s question; failing here too would make
+    one setup cost two checks. A GitHub-managed environment whose secrets cannot be read might be in
+    scope, so that one case stays unmeasured."""
+    if cant_tell:
+        return "unmeasured", (
+            "unmeasured: the only environments are GitHub-managed ones, "
+            "and whether they hold secrets could not be read: "
+            + _capped(cant_tell, 2))
+    where = ("no environments" if not any_env else
+             "no environments other than GitHub-managed ones holding nothing")
+    return "not_applicable", (
+        f"not applicable: {where}, so there is no environment to restrict "
+        "(whether secrets sit outside one is the environment-scoped secrets "
+        "check's question)")
+
+
+def _secret_names_in_order(names: list[str]) -> list[str]:
+    """Likely high-value names first (a sort order, not a severity)."""
+    return sorted(names, key=lambda n: (
+        not _HIGH_VALUE_SECRET.search(n.upper()), n))
+
+
+_SCOPED_FIX = (
+    "To fix each one: pick or create an environment that passes the "
+    "branch-restriction check above, re-enter the secret's value there "
+    "(GitHub never shows a stored value, so only you can do this step), "
+    "point the jobs that use it at that environment, then delete the "
+    "repository or organisation copy. What this can break: a job on a pull "
+    "request or on a branch the environment does not accept can no longer "
+    "read the secret; give that job an environment with a required "
+    "reviewer, or stop it needing the secret")
+_SCOPED_ORG_FIX = (
+    "; for an organisation secret, narrowing its repository access to the "
+    "repositories that need it is the alternative")
+
+
+def _secrets_scoped(inventory: dict[str, Any]) -> tuple[str, str]:
+    """(outcome, evidence) for `sec.secrets.environment-scoped`.
+
+    Pass: no repository- or organisation-level secret is readable here (no
+    secrets at all included). Fail: at least one is, from any branch a push
+    credential creates. Unmeasured when a list cannot be read — unless the
+    list that WAS read already proves the fail, which no unread list can
+    undo."""
+    repo_names = inventory.get("repo_secrets")
+    org_names = inventory.get("org_secrets")
+    reason = inventory.get("reason") or "the secret lists were not read"
+    if inventory.get("status") == "not_checked":
+        return "unmeasured", f"unmeasured: {reason}"
+    parts = []
+    if repo_names:
+        parts.append(f"{len(repo_names)} repository secret(s): " + ", ".join(
+            f"`{n}`" for n in _secret_names_in_order(repo_names)))
+    if org_names:
+        parts.append(f"{len(org_names)} organisation secret(s): " + ", ".join(
+            f"`{n}`" for n in _secret_names_in_order(org_names)))
+    if parts:
+        unread = ("" if inventory.get("status") == "measured" else
+                  f" (the other list could not be read: {reason}, so this "
+                  "may not be all of them)")
+        return "fail", (
+            "readable from any branch a push credential creates, outside "
+            "every environment — " + "; ".join(parts) + unread + ". "
+            + _SCOPED_FIX + (_SCOPED_ORG_FIX if org_names else ""))
+    if inventory.get("status") == "measured":
+        return "pass", ("no repository or organisation secret is readable "
+                        "here; every secret this repository uses lives in an "
+                        "environment, or there are none")
+    return "unmeasured", (
+        f"unmeasured: the secret lists could not be read in full ({reason})"
+        + _secrets_hint(reason))
+
+
+def _secrets_hint(reason: str) -> str:
+    """What to change so the secret lists can be read, from the 403 itself:
+    a token not authorised for single sign-on needs that, not more rights.
+    Otherwise GitHub's own answer, quoted in the reason, says what it wants."""
+    if "SAML" in reason:
+        return ("; authorise the token for the organisation's SAML single "
+                "sign-on")
+    if "IP allow list" in reason:
+        return "; run from an address the organisation's IP allow list permits"
+    return ""
+
+
 # --- the fact table -----------------------------------------------------------
 
 def compute_config_facts(
@@ -2637,22 +3867,29 @@ def compute_config_facts(
     required_contexts_fetcher: Any = None,
     fork_approval_fetcher: Any = None,
     codeowner_review_fetcher: Any = None,
+    push_access_fetcher: Any = None,
 ) -> dict[str, Any]:
     """Every fact, every time — pass/fail/unmeasured, never silently absent.
 
-    ``repo`` (``owner/name``) enables the THREE facts that need the API —
+    ``repo`` (``owner/name``) enables the SIX facts that need the API —
     ``sec.required-checks.skippable`` (branch protection),
-    ``sec.fork-approval.effective`` (the repository's fork-PR approval setting)
-    and, once a CODEOWNERS rule covers workflows, ``sec.codeowners.workflows``
-    (whether the default branch requires review from Code Owners). It is
-    optional, and its absence is disclosed as UNMEASURED rather than skipped —
-    a fact that quietly vanishes from the table is a silent pass.
+    ``sec.fork-approval.effective`` (the repository's fork-PR approval
+    setting), once a CODEOWNERS rule covers workflows
+    ``sec.codeowners.workflows`` (whether the default branch requires review
+    from Code Owners), the two environment facts
+    ``sec.environments.branch-restricted`` and
+    ``sec.environments.approval-holds``, and
+    ``sec.secrets.environment-scoped`` (with the per-environment verdicts and
+    the secret-name list in the block's ``push_access`` key). It is optional, and
+    its absence is disclosed as UNMEASURED rather than skipped — a fact that
+    quietly vanishes from the table is a silent pass.
 
-    ``required_contexts_fetcher``, ``fork_approval_fetcher`` and
-    ``codeowner_review_fetcher`` are the seams the tests inject a recorded
-    response through, one per API-gated fact, defaulting to
-    ``_required_contexts_via_gh``, ``_fork_approval_via_gh`` and
-    ``_code_owner_review_via_gh``; nothing in the suite touches the network.
+    ``required_contexts_fetcher``, ``fork_approval_fetcher``,
+    ``codeowner_review_fetcher`` and ``push_access_fetcher`` are the seams the
+    tests inject a recorded response through, defaulting to
+    ``_required_contexts_via_gh``, ``_fork_approval_via_gh``,
+    ``_code_owner_review_via_gh`` and ``_push_access_via_gh``; nothing in the
+    suite touches the network.
     """
     scan = _scan()
 
@@ -2841,7 +4078,47 @@ def compute_config_facts(
         "at once)" % _COOLDOWN_MIN_DAYS,
         False, cd_outcome == "pass", cd_evidence, outcome=cd_outcome)
 
-    return facts_to_score(facts)
+    # Environment settings, not workflow YAML: a scan gap says nothing about
+    # them. The default fetcher is looked up at call time so a test can
+    # replace it by name.
+    try:
+        (env_outcome, env_evidence), (ap_outcome, ap_evidence), push_block = \
+            _push_access(repo, push_access_fetcher or _push_access_via_gh)
+    except Exception as exc:                                   # noqa: BLE001
+        # A field the verdict code cannot handle costs these three checks,
+        # with the reason, never the whole fact table.
+        _log.warning("push access verdicts failed (%s); reported as "
+                     "unmeasured", type(exc).__name__)
+        _log.debug("push access verdicts failed", exc_info=True)
+        reason = ("the environment and secret settings could not be judged "
+                  f"({exc!r})")
+        env_outcome = ap_outcome = "unmeasured"
+        env_evidence = ap_evidence = f"unmeasured: {reason}"
+        push_block = _not_checked_block(reason)
+    add(_BRANCH_FACT,
+        "every deployment environment either accepts only branches and tags "
+        "a non-admin push credential can neither create nor move, or "
+        "requires a reviewer (an environment's name is also what cloud "
+        "logins trust, so one holding no secrets counts too)",
+        False, env_outcome == "pass", env_evidence, outcome=env_outcome)
+    add(_APPROVAL_FACT,
+        "every deployment environment with required reviewers stops whoever "
+        "started a run from approving it themselves",
+        False, ap_outcome == "pass", ap_evidence, outcome=ap_outcome)
+    sc_outcome, sc_evidence = _secrets_scoped(push_block["inventory"])
+    add(_SECRETS_FACT,
+        "no repository or organisation secret is readable from any branch: "
+        "every secret this repository uses lives in an environment (a "
+        "pushed branch can read any secret that is not)",
+        False, sc_outcome == "pass", sc_evidence, outcome=sc_outcome)
+    push_block["token_note"] = _TOKEN_NOTE
+
+    out = facts_to_score(facts)
+    # Unscored: the per-environment verdicts, the secret-name inventory, and
+    # the two sentences every run states. Rendered under the report's "If a
+    # push credential leaks" sub-heading; never part of the aggregate.
+    out["push_access"] = push_block
+    return out
 
 
 def facts_to_score(facts: list[dict[str, Any]]) -> dict[str, Any]:
