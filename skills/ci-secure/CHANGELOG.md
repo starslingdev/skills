@@ -26,8 +26,11 @@ entries are dated (UTC). Format loosely follows
   environment accepts only branches and tags a non-admin push credential can
   neither create nor move, or requires a reviewer (an admin or owner
   credential is not covered, and the report says so). A pull request rule
-  holds a branch only when it needs at least one approval, and a
-  pull-request-mode bypass actor can still move it. Patterns are matched the
+  holds a branch only when it needs at least one approval that is
+  dismissed or re-asked after a new push, and a pull-request-mode bypass
+  actor can still move it. Only one classic rule applies to a branch (an
+  exact name outranks every wildcard), so an open exact-name rule inside a
+  closed wildcard opens it. Patterns are matched the
   way GitHub documents (only `**/` crosses `/`). Every environment counts,
   secrets or not, because a cloud role trusts an environment name over OIDC;
   the GitHub-managed `github-pages` and `copilot` count only when they hold a
@@ -36,14 +39,17 @@ entries are dated (UTC). Format loosely follows
   rules alone (rulesets do not count there), and with no classic rule at all
   GitHub lets every branch and tag deploy, which fails. A repository with no
   environments is not applicable here. `sec.environments.approval-holds`
-  passes when every environment with reviewers blocks self-review.
+  passes when every environment with reviewers blocks self-review (a
+  GitHub-managed one whose secrets cannot be read and that allows
+  self-review leaves it unmeasured).
   `sec.secrets.environment-scoped` passes when no repository or
   organisation secret is readable from any branch (no secrets at all
   included) and fails when one is, naming each (NAMES, never values; likely
   high-value ones first) and saying what must be done: an environment that
   passes the branch check, the value re-entered there (GitHub never shows a
   stored value), the old copy deleted, or for an organisation secret its
-  repository access narrowed. It never reads "0 secrets" over a list that
+  repository access narrowed, with what that can break (jobs on pull
+  requests or other branches lose the secret). It never reads "0 secrets" over a list that
   could not be read. The report shows all of it under a new sub-heading,
   with one line naming what is not checked yet: a credential that cannot
   push workflow files but can change code the repository's own workflows
@@ -55,11 +61,14 @@ entries are dated (UTC). Format loosely follows
   ci-advisor gains three facts, so the security score shifts for anyone
   running with a token**: `applicable_count` rises by up to three, and a
   repo whose environments accept any branch, or that keeps secrets outside
-  every environment, now scores lower than before. Without a token all
+  every environment, now scores lower than before. Most repositories
+  scanned with a token that can read secret lists will fail
+  `sec.secrets.environment-scoped` at first; that is the exposure, not a
+  false positive. Without a token all
   three are unmeasured and stay in the applicable count as a disclosed gap;
-  on a reader's token the secrets check stays unmeasured (secret lists need
-  admin rights or the secrets permission). The CI gate does not read them
-  (they stay unmeasured there). (2026-10-26)
+  on a reader's token the secrets check stays unmeasured (secret lists
+  answer a non-admin 403). The CI gate does not read them (they stay
+  unmeasured there, each a non-blocking warning line). (2026-10-26)
 - ci-secure: new config hygiene check `sec.deps.update-cooldown` — every
   configured dependency update tool waits at least 3 days before proposing a
   fresh release (Dependabot `cooldown`, Renovate `minimumReleaseAge`), the

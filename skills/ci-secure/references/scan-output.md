@@ -119,7 +119,8 @@ The one non-scripted field. Written once per pattern group and merged onto
     not be read — `null` is never "none"), `high_value` (a sort hint, not
     a severity) and `reason`.
   - `tier1_gap` and `credential_note` — the two sentences every run
-    states: what is not checked yet, and the OIDC exposure.
+    states when this layer completes (empty when it crashed): what is not
+    checked yet, and the OIDC exposure.
   - `token_note` — one sentence linking GitHub's docs on which
     credentials can add or change workflow files.
   The three facts themselves are `sec.environments.branch-restricted`,

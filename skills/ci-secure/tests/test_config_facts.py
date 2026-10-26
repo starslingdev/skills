@@ -190,7 +190,7 @@ def test_a_well_configured_repo_passes_every_fact(tmp_path):
 
 
 def test_the_api_gated_facts_are_the_only_unmeasured_ones_offline(tmp_path):
-    """Offline, the YAML facts still resolve and the three API-gated ones
+    """Offline, the YAML facts still resolve and the six API-gated ones
     disclose that they did not — a scan with no token is a smaller
     measurement, not a cleaner repo. The CODEOWNERS fact is API-gated only
     once a rule covers workflows (this fixture's does): whether the branch

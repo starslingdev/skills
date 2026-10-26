@@ -31,7 +31,8 @@ environment-scoped secrets fact (secret lists need admin rights or the
 secrets permission). A fact that does not apply to the
 repository at all leaves the denominator on top of that (see below), so both
 numbers drop by one for each such fact — in a repository whose workflows run
-no suite, and in one that configures no dependency update tool.
+no suite, in one that configures no dependency update tool, and, for the two
+environment facts, in one with no environments or no required reviewers.
 The unmeasured ids are named in the block's `unmeasured` list and the caveat, so
 a consumer — ci-advisor above all — can tell the two apart, but only if it
 checks: comparing the raw numbers across differently-authenticated scans
@@ -419,7 +420,15 @@ two moved numbers.
   active ruleset (organisation rulesets included; `evaluate` and
   `disabled` count for nothing) or a classic rule that blocks creating it
   AND blocks pushing to it, with nobody short of an admin on the bypass
-  list. An exact name that already exists needs pushes blocked plus
+  list. A pull request rule blocks pushing only when it needs at least one
+  approval AND that approval is dismissed or re-asked after a new push
+  (otherwise a credential pushes a workflow onto an already-approved pull
+  request and merges it); one that does not say is unmeasured. GitHub
+  applies one classic rule to a branch, never a combination: a rule naming
+  it exactly outranks every wildcard, and among wildcards the oldest wins.
+  So an exact-name rule that leaves an accepted branch open opens the
+  pattern, and two wildcard rules that disagree over it leave it
+  unmeasured (their order is not read). An exact name that already exists needs pushes blocked plus
   deletion or creation blocked (otherwise it can be deleted and pushed
   again); one that does not exist yet needs creation blocked. A branch
   matching an accepted wildcard that already exists with no protection
@@ -457,6 +466,9 @@ two moved numbers.
   only this fact fails on self-review. "Admins can bypass" is shown as an
   information line, never part of either verdict, because only an admin
   credential can use it. Not applicable when no environment has reviewers.
+  A GitHub-managed environment whose secrets cannot be read and that allows
+  self-review keeps this fact from passing (unmeasured), as it does the
+  branch fact.
   **To fix a fail**: turn on "Prevent self-review" in each named
   environment's required-reviewers rule.
 - **`sec.secrets.environment-scoped`** — no repository- or
@@ -469,7 +481,9 @@ two moved numbers.
   separately, with a short deterministic hint (`PRIVATE_KEY`, `APP_ID`,
   `PYPI`, `NPM_TOKEN`, …) putting the likely high-value ones first — a
   sort order, not a severity. **Unmeasured** when a list cannot be read
-  (both need admin rights or the secrets permission), never a pass; when
+  (recorded: both answer a non-admin reader 403, although GitHub's docs
+  say collaborator access; an entry with no name counts as unread too),
+  never a pass; when
   one list is unreadable and the other already holds a secret, the fail
   stands, because nothing in the unread list can undo it, and the
   evidence says the list may be incomplete. Scored by owner decision
@@ -479,10 +493,14 @@ two moved numbers.
   `sec.environments.branch-restricted`, re-enter each named secret's value
   there (GitHub never shows a stored value, so this step is the user's),
   point the jobs that use it at that environment, then delete the
-  repository or organisation copy. For an organisation secret, narrowing
+  repository or organisation copy. What that can break: a job on a pull
+  request, or on a branch the environment does not accept, can no longer
+  read the secret; give it an environment with a required reviewer or stop
+  it needing the secret. For an organisation secret, narrowing
   its repository access to the repositories that need it is the
   alternative. The names (never values) also render under the row as the
-  secret list. The report states, every run, that a pushed workflow can
+  secret list. The report states, every run in which this layer completes,
+  that a pushed workflow can
   ask for its own write-scoped token and an OIDC login token, and that a
   credential which cannot push workflow files, but can change code the
   repository's own workflows run, is not checked yet. Which credentials

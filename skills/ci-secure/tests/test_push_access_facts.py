@@ -479,7 +479,8 @@ def test_an_exact_name_that_does_not_exist_yet_with_creation_block_passes(
 
 def test_an_existing_exact_name_needs_updates_blocked(tmp_path):
     rs = _ruleset(1, ["~DEFAULT_BRANCH"], ["pull_request", "deletion"])
-    rs["rules"][0]["parameters"] = {"required_approving_review_count": 1}
+    rs["rules"][0]["parameters"] = {"required_approving_review_count": 1,
+                                    "dismiss_stale_reviews_on_push": True}
     out, _ = _custom_case(tmp_path, [("main", "branch")], [rs], extra={
         f"{R}/branches/main": {"name": "main", "protected": True}})
     assert _envs(out)["prod"]["branch_check"] == "pass", _envs(out)
@@ -1272,6 +1273,7 @@ def _classic_release(tmp_path, **rule):
     base = {"pattern": "release", "blocksCreations": False,
             "restrictsPushes": False, "requiresApprovingReviews": True,
             "requiredApprovingReviewCount": 1,
+            "dismissesStaleReviews": True, "requireLastPushApproval": False,
             "allowsDeletions": False, "pushAllowances": {"totalCount": 0},
             "bypassPullRequestAllowances": {"totalCount": 0}}
     base.update(rule)
@@ -1389,7 +1391,8 @@ def test_probe_p1_on_a_closed_ruleset_pattern_passes(tmp_path, monkeypatch):
                         True)
     rs = _ruleset(1, ["refs/heads/stable/**"],
                   ["creation", "deletion", "pull_request"])
-    rs["rules"][2]["parameters"] = {"required_approving_review_count": 1}
+    rs["rules"][2]["parameters"] = {"required_approving_review_count": 1,
+                                    "require_last_push_approval": True}
     out, _ = _run(_responses(
         [_env("release", _PROTECTED)], rulesets=[rs],
         classic=_graphql("ADMIN", [dict(_CLOSED_CLASSIC,
@@ -1456,3 +1459,134 @@ def test_the_report_says_admin_credentials_are_not_covered(tmp_path):
                                 "security_score": out})
     sub = md.split("### If a push credential leaks", 1)[1]
     assert "admin or owner credential" in sub, sub[:600]
+
+
+# --- review-loop regressions: one classic rule, stale approvals, managed
+# environments' approval check, malformed secret entries -----------------------
+
+_OPEN_CLASSIC = {
+    "blocksCreations": False, "restrictsPushes": False,
+    "requiresApprovingReviews": False, "requiredApprovingReviewCount": 0,
+    "allowsDeletions": True, "pushAllowances": {"totalCount": 0},
+    "bypassPullRequestAllowances": {"totalCount": 0}}
+
+
+def _custom_classic(tmp_path, patterns, rules, extra=None):
+    extra = dict(extra or {})
+    extra[_dbp("prod")] = {"total_count": len(patterns), "branch_policies": [
+        {"name": n, "type": "branch"} for n in patterns]}
+    out, _ = _run(_responses([_env("prod", _CUSTOM)],
+                             classic=_graphql("ADMIN", list(rules)),
+                             extra=extra), tmp_path=tmp_path)
+    return _envs(out)["prod"]
+
+
+def test_an_exact_classic_rule_outranks_a_closed_wildcard_rule(tmp_path):
+    """GitHub applies ONE classic rule to a branch, and a rule naming it
+    exactly outranks every wildcard rule. `release`'s own rule lets anyone
+    push, so the closed `*` rule protects nothing there."""
+    env = _custom_classic(
+        tmp_path, ["release"],
+        [dict(_CLOSED_CLASSIC, pattern="*"),
+         dict(_OPEN_CLASSIC, pattern="release")],
+        extra={f"{R}/branches/release": {"name": "release",
+                                         "protected": True}})
+    assert env["branch_check"] == "fail", env
+
+
+def test_an_exact_classic_rule_inside_a_closed_wildcard_opens_it(tmp_path):
+    """`release/hotfix` is accepted by `release/*` and governed by its own,
+    open rule: a push credential moves it."""
+    env = _custom_classic(
+        tmp_path, ["release/*"],
+        [_CLOSED_CLASSIC, dict(_OPEN_CLASSIC, pattern="release/hotfix")],
+        extra={f"{R}/git/matching-refs/heads/release/": []})
+    assert env["branch_check"] == "fail", env
+
+
+def test_two_overlapping_classic_wildcards_that_disagree_are_unmeasured(
+        tmp_path):
+    """Between wildcard rules the OLDER one applies, and the query does not
+    read their order: closed is not proven, open is not either."""
+    env = _custom_classic(
+        tmp_path, ["release/*"],
+        [_CLOSED_CLASSIC, dict(_OPEN_CLASSIC, pattern="*/*")],
+        extra={f"{R}/git/matching-refs/heads/release/": []})
+    assert env["branch_check"] == "unmeasured", env
+
+
+def test_a_disjoint_open_classic_wildcard_does_not_matter(tmp_path):
+    env = _custom_classic(
+        tmp_path, ["release/*"],
+        [_CLOSED_CLASSIC, dict(_OPEN_CLASSIC, pattern="feature/*")],
+        extra={f"{R}/git/matching-refs/heads/release/": []})
+    assert env["branch_check"] == "pass", env
+
+
+def test_an_approval_that_survives_new_pushes_does_not_hold_updates(
+        tmp_path):
+    """Approvals stay after a push and the last push needs no approval: the
+    credential pushes a workflow onto an already-approved pull request and
+    merges it."""
+    rs = _closed_main({"required_approving_review_count": 1,
+                       "dismiss_stale_reviews_on_push": False,
+                       "require_last_push_approval": False})
+    out, _ = _custom_case(tmp_path, [("main", "branch")], [rs],
+                          extra=_main_exists())
+    assert _envs(out)["prod"]["branch_check"] == "fail", _envs(out)
+
+
+@pytest.mark.parametrize("flag", ["dismiss_stale_reviews_on_push",
+                                  "require_last_push_approval"])
+def test_either_fresh_approval_setting_holds_updates(tmp_path, flag):
+    params = {"required_approving_review_count": 1,
+              "dismiss_stale_reviews_on_push": False,
+              "require_last_push_approval": False}
+    params[flag] = True
+    out, _ = _custom_case(tmp_path, [("main", "branch")],
+                          [_closed_main(params)], extra=_main_exists())
+    assert _envs(out)["prod"]["branch_check"] == "pass", _envs(out)
+
+
+def test_a_pull_request_rule_silent_on_stale_approvals_is_unmeasured(
+        tmp_path):
+    rs = _closed_main({"required_approving_review_count": 1})
+    out, _ = _custom_case(tmp_path, [("main", "branch")], [rs],
+                          extra=_main_exists())
+    assert _envs(out)["prod"]["branch_check"] == "unmeasured", _envs(out)
+
+
+def test_a_classic_approval_that_survives_new_pushes_does_not_hold(tmp_path):
+    env = _classic_release(tmp_path, dismissesStaleReviews=False,
+                           requireLastPushApproval=False)
+    assert env["branch_check"] == "fail", env
+
+
+def test_the_classic_query_asks_for_the_fresh_approval_settings():
+    assert "dismissesStaleReviews" in cf._CLASSIC_QUERY
+    assert "requireLastPushApproval" in cf._CLASSIC_QUERY
+
+
+@pytest.mark.parametrize("managed", ["github-pages", "copilot"])
+def test_a_managed_environment_allowing_self_review_blocks_the_approval_pass(
+        tmp_path, managed):
+    """Its secrets cannot be read, so it may hold some; it lets whoever
+    started a run approve it, so the approval check cannot pass."""
+    out, _ = _run(_responses(
+        [_env(managed, _ANY, reviewers=1, prevent_self_review=False),
+         _env("prod", _ANY, reviewers=1, prevent_self_review=True)],
+        extra={f"{R}/environments/{managed}/secrets?per_page=100":
+               _ADMIN_403}), tmp_path=tmp_path)
+    f = _fact(out, APPROVAL)
+    assert f["outcome"] == "unmeasured", f
+    assert managed in f["evidence"], f
+
+
+@pytest.mark.parametrize("entry", [{}, {"name": ""}, "TOKEN", None])
+def test_a_secret_entry_of_an_unexpected_shape_is_unmeasured(tmp_path, entry):
+    """A list entry with no name is not "no secret": the list is unread."""
+    out, _ = _run(_responses([_CLOSED_ENV], extra={
+        f"{R}/actions/secrets?per_page=100": {"total_count": 1,
+                                              "secrets": [entry]}}),
+        tmp_path=tmp_path)
+    assert _fact(out, SCOPED)["outcome"] == "unmeasured", _fact(out, SCOPED)

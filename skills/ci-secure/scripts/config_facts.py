@@ -272,7 +272,7 @@ def _codeowners_covers_workflows(root: Path) -> tuple[str, str]:
     try:
         # `is_file()` re-raises EACCES on an unreadable parent directory, so
         # the probe belongs INSIDE the guard: one unreadable dir used to
-        # escape to scan.py's broad backstop and take all twelve facts down.
+        # escape to scan.py's broad backstop and take all thirteen facts down.
         for candidate in _CODEOWNERS_CANDIDATES:
             if (root / candidate).is_file():
                 found = root / candidate
@@ -2799,6 +2799,7 @@ _CLASSIC_QUERY = (
     "name: $name) { viewerPermission branchProtectionRules(first: 100) { "
     "totalCount nodes { pattern blocksCreations restrictsPushes "
     "requiresApprovingReviews requiredApprovingReviewCount allowsDeletions "
+    "dismissesStaleReviews requireLastPushApproval "
     "pushAllowances(first: 1) { "
     "totalCount } bypassPullRequestAllowances(first: 1) { totalCount } } } } }")
 
@@ -2969,10 +2970,13 @@ class _GhPushAccess:
 
     def _secret_names(self, key: str, path: str, what: str) -> list[str]:
         def read():
-            names = sorted(str(s.get("name")) for s in self._get(
-                path, paginate=True, key="secrets", what=what,
-                forbidden_expected=True)
-                if isinstance(s, dict) and s.get("name"))
+            listed = self._get(path, paginate=True, key="secrets", what=what,
+                               forbidden_expected=True)
+            # An entry with no name is not "no secret": the list is unread.
+            if any(not isinstance(s, dict) or not s.get("name")
+                   for s in listed):
+                raise _Unread(f"{what} held an entry with no name")
+            names = sorted(str(s["name"]) for s in listed)
             _log.debug("push access: %d %s", len(names), key)
             return names
         return self._once(key, read)
@@ -3148,18 +3152,34 @@ _BLOCKS = {"creation": {"creation"}, "update": {"update", "pull_request"},
            "deletion": {"deletion"}}
 
 
+def _fresh_approval(dismiss: Any, last_push: Any) -> str | None:
+    """'held', 'unknown' or None: does an approval stop counting once new
+    commits land? Without that, a credential pushes a workflow onto a pull
+    request someone already approved and merges it on the old approval."""
+    if dismiss is True or last_push is True:
+        return "held"
+    if dismiss is False and last_push is False:
+        return None
+    return "unknown"
+
+
 def _rule_holds(rule: dict) -> str | None:
     """'held', 'unknown' or None for one ruleset rule already of a wanted
     type. A pull_request rule holds updates only when it needs at least one
-    approval; with none, a credential merges its own pull request."""
+    approval (with none, a credential merges its own pull request) and that
+    approval is dismissed or re-asked after a new push."""
     if rule.get("type") != "pull_request":
         return "held"
     params = rule.get("parameters")
-    count = (params.get("required_approving_review_count")
-             if isinstance(params, dict) else None)
+    if not isinstance(params, dict):
+        return "unknown"
+    count = params.get("required_approving_review_count")
     if not isinstance(count, int) or isinstance(count, bool):
         return "unknown"
-    return "held" if count >= 1 else None
+    if count < 1:
+        return None
+    return _fresh_approval(params.get("dismiss_stale_reviews_on_push"),
+                           params.get("require_last_push_approval"))
 
 
 def _requirements(kind: str, pattern: str, exists: bool | None) -> list:
@@ -3198,46 +3218,110 @@ def _block_state(block: str, kind: str, pattern: str, rulesets: Any,
             if state == "unknown":
                 unknown.append(
                     f"ruleset `{rs.get('name')}`'s bypass list is not "
-                    "readable without admin rights")
+                    "readable without the right to edit rulesets (in "
+                    "practice, admin)")
             elif "held" in holds:
                 return "held", f"ruleset `{rs.get('name')}`"
             else:
                 unknown.append(
                     f"ruleset `{rs.get('name')}`'s pull request rule does not "
-                    "say how many approvals it needs")
+                    "say how many approvals it needs, or whether they survive "
+                    "a new push")
     if kind == "branch":
         if isinstance(classic, _Unread):
             unknown.append(str(classic))
         else:
-            for rule in classic:
-                if not _covers(str(rule.get("pattern") or ""), pattern):
-                    continue
-                pushes_closed = (rule.get("restrictsPushes") is True and
-                                 not (rule.get("pushAllowances") or {})
-                                 .get("totalCount"))
-                count = rule.get("requiredApprovingReviewCount")
-                reviews = (rule.get("requiresApprovingReviews") is True and
-                           not (rule.get("bypassPullRequestAllowances") or {})
-                           .get("totalCount"))
-                held = {"creation": pushes_closed
-                        and rule.get("blocksCreations") is True,
-                        # With no approval required, a credential merges its
-                        # own pull request.
-                        "update": pushes_closed or (
-                            reviews and isinstance(count, int)
-                            and not isinstance(count, bool) and count >= 1),
-                        "deletion": rule.get("allowsDeletions") is False
-                        }[block]
-                if held:
-                    return "held", f"classic rule `{rule.get('pattern')}`"
-                if block == "update" and reviews and not isinstance(
-                        count, int):
-                    unknown.append(
-                        f"classic rule `{rule.get('pattern')}` does not say "
-                        "how many approvals it needs")
+            state, why = _classic_state(block, pattern, classic)
+            if state == "held":
+                return "held", why
+            if state == "unknown":
+                unknown.append(why)
     if unknown:
         return "unknown", "; ".join(dict.fromkeys(unknown))
     return "absent", ""
+
+
+def _classic_holds(rule: dict, block: str) -> str | None:
+    """'held', 'unknown' or None: does this one classic rule hold `block`?"""
+    pushes_closed = (rule.get("restrictsPushes") is True and
+                     not (rule.get("pushAllowances") or {}).get("totalCount"))
+    if block == "creation":
+        return ("held" if pushes_closed and rule.get("blocksCreations") is True
+                else None)
+    if block == "deletion":
+        return "held" if rule.get("allowsDeletions") is False else None
+    if pushes_closed:
+        return "held"
+    reviews = (rule.get("requiresApprovingReviews") is True and
+               not (rule.get("bypassPullRequestAllowances") or {})
+               .get("totalCount"))
+    if not reviews:
+        return None
+    count = rule.get("requiredApprovingReviewCount")
+    if not isinstance(count, int) or isinstance(count, bool):
+        return "unknown"
+    if count < 1:
+        # With no approval required, a credential merges its own pull request.
+        return None
+    return _fresh_approval(rule.get("dismissesStaleReviews"),
+                           rule.get("requireLastPushApproval"))
+
+
+def _rules_may_meet(rule_pattern: str, pattern: str) -> bool:
+    """Can the classic rule `rule_pattern` match a ref the accepted `pattern`
+    accepts? Two wildcards meet unless their literal prefixes or (with no
+    `**`) their folder depths rule it out; anything else is "may"."""
+    if not _is_glob(pattern):
+        return _glob_matches(rule_pattern, pattern, pathname=True)
+    if not _is_glob(rule_pattern):
+        return _glob_matches(pattern, rule_pattern)
+    a, b = _glob_prefix(rule_pattern), _glob_prefix(pattern)
+    if not (a.startswith(b) or b.startswith(a)):
+        return False
+    if "**" not in rule_pattern and "**" not in pattern:
+        return rule_pattern.count("/") == pattern.count("/")
+    return True
+
+
+def _classic_state(block: str, pattern: str, classic: list[dict]
+                   ) -> tuple[str, str]:
+    """('held' | 'unknown' | 'absent', why) from classic protection alone.
+
+    GitHub applies ONE classic rule to a branch, never a combination: a rule
+    naming the branch exactly outranks every wildcard rule, and among
+    wildcard rules the oldest wins (docs.github.com, "About protected
+    branches"). The rules' order is not read, so where wildcard rules that
+    disagree may both apply, the answer is unknown, never held."""
+    meeting = [(p, r) for r in classic
+               if (p := str(r.get("pattern") or ""))
+               and _rules_may_meet(p, pattern)]
+    if not _is_glob(pattern):
+        exact = [(p, r) for p, r in meeting if not _is_glob(p)]
+        applying = exact[:1] or meeting
+        covering = applying
+    else:
+        applying = meeting
+        covering = [(p, r) for p, r in meeting if _covers(p, pattern)]
+    states = {p: _classic_holds(r, block) for p, r in applying}
+    held = [p for p, _ in covering if states[p] == "held"]
+    if not held:
+        unsure = [p for p, _ in covering if states[p] == "unknown"]
+        if unsure:
+            return "unknown", (
+                f"classic rule `{unsure[0]}` does not say how many approvals "
+                "it needs, or whether they survive a new push")
+        return "absent", ""
+    rivals = [p for p, _ in applying if states[p] != "held"]
+    if not rivals:
+        return "held", f"classic rule `{held[0]}`"
+    if any(not _is_glob(p) and states[p] is None for p in rivals):
+        # A rule naming one accepted branch exactly governs it, and it leaves
+        # that branch open.
+        return "absent", ""
+    return "unknown", (
+        f"classic rules `{held[0]}` and `{rivals[0]}` both may match; GitHub "
+        "applies only one rule to a branch (an exact name first, else the "
+        "oldest), and their order is not read here")
 
 
 _BLOCK_WORDS = {"creation": "creating it", "update": "pushing to it",
@@ -3297,8 +3381,8 @@ def _pattern_state(src: Any, kind: str, pattern: str, rulesets: Any,
             if hit:
                 return "open", (
                     f"{label} matches `{hit}`, which exists and nothing "
-                    "protects, so any push credential can push a workflow "
-                    "to it")
+                    "protects, so any credential that can push workflow "
+                    "files can push one to it")
     if missing:
         what = "a branch" if kind == "branch" else "a tag"
         lead = ("does not exist yet, and " if exists is False else "")
@@ -3496,6 +3580,7 @@ def _push_access(repo: str | None, fetcher) -> tuple[
     # would not pass on their settings: each may hold secrets, so each keeps
     # the check from passing (an unread source never yields a pass).
     could_fail: list[str] = []
+    approval_could_fail: list[str] = []
     for env in envs:
         name = str(env["name"])
         row = {"name": name, "managed": name in _MANAGED_ENVIRONMENTS,
@@ -3516,6 +3601,11 @@ def _push_access(repo: str | None, fetcher) -> tuple[
                     could_fail.append(
                         f"`{name}` is GitHub-managed, its secrets need admin "
                         f"rights to read, and {why}")
+                if row["reviewers"] and _self_review_allowed(env):
+                    approval_could_fail.append(
+                        f"`{name}` is GitHub-managed, its secrets need admin "
+                        "rights to read, and it lets whoever started a run "
+                        "approve it")
             if not held:
                 row.update(branch_check="info", approval_check="info", branch_check_why=(
                     f"`{name}` is GitHub-managed; can't tell whether it holds "
@@ -3565,7 +3655,11 @@ def _push_access(repo: str | None, fetcher) -> tuple[
                 "create nor move, or requires a reviewer"))
     reviewed = [r for r in rows
                 if r.get("approval_check") in ("pass", "fail")]
-    if not reviewed:
+    if approval_could_fail and not any(
+            r["approval_check"] == "fail" for r in reviewed):
+        approval = ("unmeasured", "unmeasured: "
+                    + _capped(approval_could_fail, 4))
+    elif not reviewed:
         approval = ("not_applicable", (
             "not applicable: no environment requires a reviewer (whether "
             "environments need one is the branch-restriction check's "
@@ -3616,7 +3710,10 @@ _SCOPED_FIX = (
     "branch-restriction check above, re-enter the secret's value there "
     "(GitHub never shows a stored value, so only you can do this step), "
     "point the jobs that use it at that environment, then delete the "
-    "repository or organisation copy")
+    "repository or organisation copy. What this can break: a job on a pull "
+    "request or on a branch the environment does not accept can no longer "
+    "read the secret; give that job an environment with a required "
+    "reviewer, or stop it needing the secret")
 _SCOPED_ORG_FIX = (
     "; for an organisation secret, narrowing its repository access to the "
     "repositories that need it is the alternative")
