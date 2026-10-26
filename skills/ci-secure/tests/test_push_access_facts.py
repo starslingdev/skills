@@ -1101,7 +1101,9 @@ def test_report_renders_the_push_credential_sub_heading(tmp_path):
     assert "deployment environment" in sub
     for name in ("mobile-beta", "artifact-signing", "github-pages"):
         assert name in sub, name
-    assert "not checked here" in sub or "unmeasured" in sub
+    # The example's secret lists are unreadable: said as a gap, never a count.
+    assert 'coverage gap, not "no secrets"' in sub, sub
+    assert "secret(s)" not in sub, sub
     # The tier-1 gap, stated in one line.
     assert "cannot push workflow files" in sub
     # The secret check is the third row under the sub-heading, and the
@@ -1590,3 +1592,110 @@ def test_a_secret_entry_of_an_unexpected_shape_is_unmeasured(tmp_path, entry):
                                               "secrets": [entry]}}),
         tmp_path=tmp_path)
     assert _fact(out, SCOPED)["outcome"] == "unmeasured", _fact(out, SCOPED)
+
+
+# --- review-loop: lines no test pinned, each of which a one-line mutant
+# turned into a false pass ------------------------------------------------------
+
+def test_a_creation_only_ruleset_leaves_pushes_open(tmp_path):
+    """"Restrict creations" alone: nobody makes a new `release/x`, but every
+    existing one takes direct pushes."""
+    rs = _ruleset(1, ["refs/heads/release/*"], ["creation"])
+    out, _ = _custom_case(tmp_path, [("release/*", "branch")], [rs], extra={
+        f"{R}/git/matching-refs/heads/release/": [
+            {"ref": "refs/heads/release/1"}],
+        f"{R}/branches?protected=true&per_page=100": [
+            {"name": "release/1", "protected": True}]})
+    assert _envs(out)["prod"]["branch_check"] == "fail", _envs(out)
+
+
+def test_protected_branches_with_an_unreadable_branch_is_unmeasured(
+        tmp_path):
+    rule = dict(_CLOSED_CLASSIC, pattern="release")
+    out, _ = _run(_responses([_env("ship", _PROTECTED)],
+                             classic=_graphql("ADMIN", [rule]),
+                             extra={f"{R}/branches/release": _HTTP_502}),
+                  tmp_path=tmp_path)
+    assert _envs(out)["ship"]["branch_check"] == "unmeasured", _envs(out)
+    assert _fact(out, BRANCH)["outcome"] == "unmeasured"
+
+
+@pytest.mark.parametrize("body", ['{"message": "weird"}', "", "[1, 2]"])
+def test_a_secret_list_of_an_unexpected_shape_is_unmeasured(tmp_path, body):
+    out, _ = _run(_responses([_CLOSED_ENV], extra={
+        f"{R}/actions/secrets?per_page=100": body}), tmp_path=tmp_path)
+    assert _fact(out, SCOPED)["outcome"] == "unmeasured", _fact(out, SCOPED)
+
+
+def test_an_unrecognised_branch_policy_is_unmeasured(tmp_path):
+    policy = {"protected_branches": False, "custom_branch_policies": False}
+    out, _ = _run(_responses([_env("prod", policy)]), tmp_path=tmp_path)
+    assert _envs(out)["prod"]["branch_check"] == "unmeasured", _envs(out)
+    assert _fact(out, BRANCH)["outcome"] == "unmeasured"
+
+
+def test_a_reviewer_rule_silent_on_self_review_allows_it(tmp_path):
+    env = _env("prod", _ANY, reviewers=1)
+    del env["protection_rules"][0]["prevent_self_review"]
+    out, _ = _run(_responses([env]), tmp_path=tmp_path)
+    assert _fact(out, APPROVAL)["outcome"] == "fail", _fact(out, APPROVAL)
+
+
+def test_a_crashed_facts_layer_never_reads_as_no_secrets(tmp_path,
+                                                         monkeypatch):
+    """scan.py's crash block renders as "not checked", never as a count."""
+    scan = cf._scan()
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("facts layer exploded")
+
+    monkeypatch.setattr(cf, "compute_config_facts", _boom)
+    monkeypatch.setitem(sys.modules, "config_facts", cf)
+    degraded = scan._compute_security_score(tmp_path, [], [])
+    md = _load_report().render({"findings": [], "repo": "owner/repo",
+                                "scanned_workflows": 1,
+                                "security_score": degraded})
+    sub = md.split("### If a push credential leaks", 1)[1]
+    assert "not checked here" in sub, sub
+    assert "secret(s)" not in sub, sub
+
+
+def _block(inventory, envs=()):
+    return {"status": "measured", "reason": "", "environments": list(envs),
+            "inventory": inventory, "tier1_gap": "", "credential_note": ""}
+
+
+def test_the_report_marks_each_environment_verdict():
+    md = _load_report()._push_access_block([], _block(
+        {"status": "measured", "repo_secrets": [], "org_secrets": []},
+        [{"name": "open", "branch_check": "fail", "approval_check": "pass",
+          "branch_check_why": "w", "approval_check_why": ""}]))
+    row = next(line for line in md.splitlines() if line.startswith("| `open`"))
+    cells = [c.strip() for c in row.split("|")]
+    assert cells[2] == "❌" and cells[3] == "✅", row
+
+
+def test_the_report_lists_names_and_high_value_ones():
+    md = _load_report()._push_access_block([], _block(
+        {"status": "measured", "repo_secrets": ["A_TOKEN", "NPM_TOKEN"],
+         "org_secrets": [], "high_value": ["NPM_TOKEN"]}))
+    assert "2 repository secret(s): `A_TOKEN`, `NPM_TOKEN`" in md, md
+    assert "0 organisation secret(s)" in md, md
+    assert "Likely high-value" in md and "`NPM_TOKEN`." in md, md
+
+
+def test_the_report_never_counts_an_unread_list():
+    md = _load_report()._push_access_block([], _block(
+        {"status": "partial", "repo_secrets": ["A"], "org_secrets": None,
+         "reason": "the organisation list could not be read"}))
+    assert "the organisation list could not be read" in md, md
+    assert "organisation secret(s)" not in md, md
+    assert "Partial" in md and "not a full count" in md, md
+
+
+def test_the_report_says_an_unmeasured_inventory_is_a_gap():
+    md = _load_report()._push_access_block([], _block(
+        {"status": "unmeasured", "repo_secrets": None, "org_secrets": None,
+         "reason": "403"}))
+    assert "unmeasured" in md and 'not "no secrets"' in md, md
+    assert "secret(s)" not in md, md
