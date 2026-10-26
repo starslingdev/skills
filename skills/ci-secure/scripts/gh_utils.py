@@ -7,6 +7,7 @@ including authentication checks, GraphQL execution, and error handling.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from functools import lru_cache
 from typing import Any
@@ -326,13 +327,29 @@ def run_gh_api(
         if quiet_not_found and is_not_found:
             logger.debug(f"API call to {endpoint} returned 404: {stderr}")
         elif quiet_forbidden and "HTTP 403" in stderr:
-            logger.info(f"API call to {endpoint} returned 403 (expected "
-                        "without access; reported as unmeasured)")
+            why = _forbidden_class(stderr)
+            if why == "permission":
+                logger.info(f"API call to {endpoint} returned 403 (expected "
+                            "without access; reported as unmeasured)")
+            else:
+                logger.warning(f"API call to {endpoint} returned 403 ({why}); "
+                               "reported as unmeasured")
         else:
             logger.error(f"API call to {endpoint} failed: {stderr}")
         raise GitHubAPIError(f"API call failed: {stderr}")
 
     return result.stdout
+
+
+def _forbidden_class(stderr: str) -> str:
+    """A short reason class for a 403, never the response body itself."""
+    if "SAML" in stderr:
+        return "SAML SSO enforcement"
+    if "IP allow list" in stderr:
+        return "IP allow list"
+    if re.search(r"admin rights|permission|not accessible", stderr):
+        return "permission"
+    return "unrecognised 403"
 
 
 def run_gh_raw(

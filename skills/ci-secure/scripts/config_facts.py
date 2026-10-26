@@ -2823,6 +2823,9 @@ class _GhPushAccess:
             except _Unread as exc:
                 self._memo[key] = (False, str(exc))
             except Exception as exc:                           # noqa: BLE001
+                # Unmeasured either way, but an engine bug must stay
+                # distinguishable from a coverage gap in a debug trace.
+                _log.debug("push access reader %s failed", key, exc_info=True)
                 self._memo[key] = (False, f"{key}: {str(exc).strip()}")
         ok, value = self._memo[key]
         if not ok:
@@ -2941,9 +2944,18 @@ class _GhPushAccess:
                     "classic branch protection rules are readable only by a "
                     "repository admin (GitHub answers anyone else with an "
                     "empty list, which is not the same as none)")
-            if (rules.get("totalCount") or 0) > len(rules.get("nodes") or []):
+            # A rule the answer cannot show is a rule whose pattern goes
+            # unchecked, so an odd shape is unread, never "these are all".
+            nodes = rules.get("nodes") if isinstance(rules, dict) else None
+            total = rules.get("totalCount") if isinstance(rules, dict) else None
+            if (not isinstance(nodes, list) or not isinstance(total, int)
+                    or isinstance(total, bool)
+                    or any(not isinstance(n, dict) for n in nodes)):
+                raise _Unread("classic branch protection rules returned an "
+                              "unexpected shape")
+            if total > len(nodes):
                 raise _Unread("more than 100 classic branch protection rules")
-            return [n for n in rules.get("nodes") or [] if isinstance(n, dict)]
+            return nodes
         return self._once("classic", read)
 
     def protected_branches(self) -> set[str]:
@@ -3241,20 +3253,38 @@ def _block_state(block: str, kind: str, pattern: str, rulesets: Any,
     return "absent", ""
 
 
+def _nobody_allowed(rule: dict, key: str) -> bool | None:
+    """Does the allowance list `key` name nobody? None when it is unreadable
+    (a missing list is unknown, never "nobody")."""
+    allowed = rule.get(key)
+    count = allowed.get("totalCount") if isinstance(allowed, dict) else None
+    if not isinstance(count, int) or isinstance(count, bool):
+        return None
+    return count == 0
+
+
 def _classic_holds(rule: dict, block: str) -> str | None:
     """'held', 'unknown' or None: does this one classic rule hold `block`?"""
-    pushes_closed = (rule.get("restrictsPushes") is True and
-                     not (rule.get("pushAllowances") or {}).get("totalCount"))
-    if block == "creation":
-        return ("held" if pushes_closed and rule.get("blocksCreations") is True
-                else None)
     if block == "deletion":
         return "held" if rule.get("allowsDeletions") is False else None
+    pushes_closed = (_nobody_allowed(rule, "pushAllowances")
+                     if rule.get("restrictsPushes") is True else False)
+    if block == "creation":
+        if rule.get("blocksCreations") is not True:
+            return None
+        return {True: "held", None: "unknown"}.get(pushes_closed)
     if pushes_closed:
         return "held"
-    reviews = (rule.get("requiresApprovingReviews") is True and
-               not (rule.get("bypassPullRequestAllowances") or {})
-               .get("totalCount"))
+    held = _classic_reviews_hold(rule)
+    return "unknown" if held is None and pushes_closed is None else held
+
+
+def _classic_reviews_hold(rule: dict) -> str | None:
+    if rule.get("requiresApprovingReviews") is not True:
+        return None
+    reviews = _nobody_allowed(rule, "bypassPullRequestAllowances")
+    if reviews is None:
+        return "unknown"
     if not reviews:
         return None
     count = rule.get("requiredApprovingReviewCount")
@@ -3511,17 +3541,28 @@ def _environment_branch_verdict(src: Any, env: dict) -> tuple[str, str]:
                           "recognise")
 
 
+def _reviewer_rules(env: dict) -> list[dict]:
+    """The environment's required-reviewer rules. A rule list or reviewer
+    list of an unexpected shape raises `_Unread`: it is not zero reviewers."""
+    rules = env.get("protection_rules")
+    if not isinstance(rules, list) or any(
+            not isinstance(r, dict) for r in rules):
+        raise _Unread(f"`{env['name']}`'s protection rules have an "
+                      "unexpected shape")
+    found = [r for r in rules if r.get("type") == "required_reviewers"]
+    if any(not isinstance(r.get("reviewers"), list) for r in found):
+        raise _Unread(f"`{env['name']}`'s required reviewer list has an "
+                      "unexpected shape")
+    return found
+
+
 def _reviewer_count(env: dict) -> int:
-    return sum(len(r.get("reviewers") or [])
-               for r in env.get("protection_rules") or []
-               if isinstance(r, dict) and r.get("type") == "required_reviewers")
+    return sum(len(r["reviewers"]) for r in _reviewer_rules(env))
 
 
 def _self_review_allowed(env: dict) -> bool:
     return not any(r.get("prevent_self_review") is True
-                   for r in env.get("protection_rules") or []
-                   if isinstance(r, dict)
-                   and r.get("type") == "required_reviewers")
+                   for r in _reviewer_rules(env))
 
 
 def _inventory(src: Any) -> dict[str, Any]:
@@ -3583,6 +3624,19 @@ def _push_access(repo: str | None, fetcher) -> tuple[
     approval_could_fail: list[str] = []
     for env in envs:
         name = str(env["name"])
+        try:
+            _reviewer_rules(env)
+        except _Unread as exc:
+            rows.append({"name": name,
+                         "managed": name in _MANAGED_ENVIRONMENTS,
+                         "admins_can_bypass":
+                             env.get("can_admins_bypass") is True,
+                         "reviewers": None, "has_rules": True,
+                         "branch_check": "unmeasured",
+                         "branch_check_why": str(exc),
+                         "approval_check": "unmeasured",
+                         "approval_check_why": ""})
+            continue
         row = {"name": name, "managed": name in _MANAGED_ENVIRONMENTS,
                "admins_can_bypass": env.get("can_admins_bypass") is True,
                "reviewers": _reviewer_count(env),
@@ -3593,23 +3647,25 @@ def _push_access(repo: str | None, fetcher) -> tuple[
         if row["managed"]:
             try:
                 held = src.environment_secrets(name)
-            except _Unread:
-                held = None
+            except _Unread as exc:
+                # The real reason (a 403, a 502, a rate limit) is kept: not
+                # every unread list is a permission gap.
+                held, unread = None, str(exc)
             if held is None:
                 verdict, why = _environment_branch_verdict(src, env)
                 if verdict != "pass":
                     could_fail.append(
-                        f"`{name}` is GitHub-managed, its secrets need admin "
-                        f"rights to read, and {why}")
+                        f"`{name}` is GitHub-managed, its secrets could not "
+                        f"be read ({unread}), and {why}")
                 if row["reviewers"] and _self_review_allowed(env):
                     approval_could_fail.append(
-                        f"`{name}` is GitHub-managed, its secrets need admin "
-                        "rights to read, and it lets whoever started a run "
-                        "approve it")
+                        f"`{name}` is GitHub-managed, its secrets could not "
+                        f"be read ({unread}), and it lets whoever started a "
+                        "run approve it")
             if not held:
                 row.update(branch_check="info", approval_check="info", branch_check_why=(
                     f"`{name}` is GitHub-managed; can't tell whether it holds "
-                    "secrets (that needs admin rights)" if held is None else
+                    f"secrets ({unread})" if held is None else
                     f"`{name}` is GitHub-managed and holds no secret"),
                     approval_check_why="")
                 rows.append(row)
@@ -3629,7 +3685,8 @@ def _push_access(repo: str | None, fetcher) -> tuple[
              "credential_note": _CREDENTIAL_NOTE}
 
     judged = [r for r in rows if r["branch_check"] != "info"]
-    cant_tell = [r["name"] for r in rows if r["branch_check"] == "info"
+    cant_tell = [r["branch_check_why"] for r in rows
+                 if r["branch_check"] == "info"
                  and "can't tell" in r["branch_check_why"]]
     if not judged:
         branch = _zero_environments(cant_tell, bool(rows))
@@ -3655,6 +3712,8 @@ def _push_access(repo: str | None, fetcher) -> tuple[
                 "create nor move, or requires a reviewer"))
     reviewed = [r for r in rows
                 if r.get("approval_check") in ("pass", "fail")]
+    approval_could_fail += [r["branch_check_why"] for r in rows
+                            if r["approval_check"] == "unmeasured"]
     if approval_could_fail and not any(
             r["approval_check"] == "fail" for r in reviewed):
         approval = ("unmeasured", "unmeasured: "
@@ -3688,9 +3747,9 @@ def _zero_environments(cant_tell: list[str], any_env: bool
     scope, so that one case stays unmeasured."""
     if cant_tell:
         return "unmeasured", (
-            "unmeasured: the only environments are GitHub-managed ones "
-            f"({_capped([f'`{n}`' for n in cant_tell], 2, ', ')}) whose "
-            "secrets need admin rights to read")
+            "unmeasured: the only environments are GitHub-managed ones, "
+            "and whether they hold secrets could not be read: "
+            + _capped(cant_tell, 2))
     where = ("no environments" if not any_env else
              "no environments other than GitHub-managed ones holding nothing")
     return "not_applicable", (
@@ -3753,7 +3812,18 @@ def _secrets_scoped(inventory: dict[str, Any]) -> tuple[str, str]:
                         "environment, or there are none")
     return "unmeasured", (
         f"unmeasured: the secret lists could not be read in full ({reason}); "
-        "secret lists need admin rights or the secrets permission")
+        + _secrets_hint(reason))
+
+
+def _secrets_hint(reason: str) -> str:
+    """What to change so the secret lists can be read, from the 403 itself:
+    a token not authorised for single sign-on needs that, not more rights."""
+    if "SAML" in reason:
+        return ("authorise the token for the organisation's SAML single "
+                "sign-on")
+    if "IP allow list" in reason:
+        return "run from an address the organisation's IP allow list permits"
+    return "secret lists need admin rights or the secrets permission"
 
 
 # --- the fact table -----------------------------------------------------------
@@ -3980,8 +4050,20 @@ def compute_config_facts(
     # Environment settings, not workflow YAML: a scan gap says nothing about
     # them. The default fetcher is looked up at call time so a test can
     # replace it by name.
-    (env_outcome, env_evidence), (ap_outcome, ap_evidence), push_block = \
-        _push_access(repo, push_access_fetcher or _push_access_via_gh)
+    try:
+        (env_outcome, env_evidence), (ap_outcome, ap_evidence), push_block = \
+            _push_access(repo, push_access_fetcher or _push_access_via_gh)
+    except Exception as exc:                                   # noqa: BLE001
+        # A field the verdict code cannot handle costs these three checks,
+        # with the reason, never the whole fact table.
+        _log.warning("push access verdicts failed (%s); reported as "
+                     "unmeasured", type(exc).__name__)
+        _log.debug("push access verdicts failed", exc_info=True)
+        reason = ("the environment and secret settings could not be judged "
+                  f"({exc!r})")
+        env_outcome = ap_outcome = "unmeasured"
+        env_evidence = ap_evidence = f"unmeasured: {reason}"
+        push_block = _not_checked_block(reason)
     add(_BRANCH_FACT,
         "every deployment environment either accepts only branches and tags "
         "a non-admin push credential can neither create nor move, or "

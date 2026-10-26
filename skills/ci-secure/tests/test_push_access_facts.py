@@ -1699,3 +1699,141 @@ def test_the_report_says_an_unmeasured_inventory_is_a_gap():
          "reason": "403"}))
     assert "unmeasured" in md and 'not "no secrets"' in md, md
     assert "secret(s)" not in md, md
+
+
+# --- silent-failure review: an odd shape is unmeasured, never a verdict --------
+
+_MAIN_CLOSED = dict(_CLOSED_CLASSIC, pattern="main")
+_MAIN_PROTECTED = {f"{R}/branches/main": {"name": "main", "protected": True}}
+
+
+@pytest.mark.parametrize("rules", [
+    {"totalCount": 2, "nodes": [_MAIN_CLOSED, None]},
+    {"nodes": [_MAIN_CLOSED]},
+    {"totalCount": 1},
+], ids=["null-node", "no-total-count", "no-nodes"])
+def test_a_classic_rule_list_of_an_unexpected_shape_is_unmeasured(
+        tmp_path, rules):
+    """A rule the list cannot show is a rule whose pattern goes unchecked,
+    so the list is unread, never complete."""
+    classic = {"data": {"repository": {"viewerPermission": "ADMIN",
+                                       "branchProtectionRules": rules}}}
+    out, _ = _run(_responses([_env("prod", _PROTECTED)], classic=classic,
+                             extra=_MAIN_PROTECTED), tmp_path=tmp_path)
+    f = _fact(out, BRANCH)
+    assert f["outcome"] == "unmeasured", f
+    assert "unexpected shape" in f["evidence"], f
+
+
+@pytest.mark.parametrize("key", ["pushAllowances",
+                                 "bypassPullRequestAllowances"])
+@pytest.mark.parametrize("value", ["missing", None, {}])
+def test_a_classic_allowance_of_an_unexpected_shape_is_unknown(
+        tmp_path, key, value):
+    """An allowance list that is not there is unknown, not "nobody"."""
+    rule = dict(_MAIN_CLOSED)
+    if key == "bypassPullRequestAllowances":
+        rule["restrictsPushes"] = False
+        rule.update(requiredApprovingReviewCount=1, dismissesStaleReviews=True)
+    if value == "missing":
+        del rule[key]
+    else:
+        rule[key] = value
+    out, _ = _run(_responses([_env("prod", _PROTECTED)],
+                             classic=_graphql(rules=[rule]),
+                             extra=_MAIN_PROTECTED), tmp_path=tmp_path)
+    assert _fact(out, BRANCH)["outcome"] == "unmeasured", _fact(out, BRANCH)
+
+
+def _reviewers_missing(env):
+    del env["protection_rules"][0]["reviewers"]
+
+
+def _reviewers_null(env):
+    env["protection_rules"][0]["reviewers"] = None
+
+
+def _reviewers_a_number(env):
+    env["protection_rules"][0]["reviewers"] = 3
+
+
+def _rules_not_a_list(env):
+    env["protection_rules"] = {"required_reviewers": env["protection_rules"]}
+
+
+@pytest.mark.parametrize("damage", [_reviewers_missing, _reviewers_null,
+                                    _reviewers_a_number, _rules_not_a_list])
+def test_a_reviewer_rule_of_an_unexpected_shape_is_unmeasured(
+        tmp_path, damage):
+    """The environment does require a reviewer; an unreadable reviewer list
+    is not zero reviewers, so neither check may claim either way."""
+    env = _env("prod", _ANY, reviewers=1)
+    damage(env)
+    out, _ = _run(_responses([env]), tmp_path=tmp_path)
+    for fact_id in (BRANCH, APPROVAL):
+        f = _fact(out, fact_id)
+        assert f["outcome"] == "unmeasured", f
+        assert "`prod`" in f["evidence"], f
+    assert "needs no reviewer" not in _fact(out, BRANCH)["evidence"]
+
+
+def test_a_field_the_verdict_cannot_handle_leaves_the_other_facts(tmp_path):
+    """One odd field costs the push-credential checks, with the reason, and
+    never the whole fact table."""
+    rs = _ruleset(1, ["~ALL"], ["creation", "update"])
+    rs["conditions"] = 3
+    out, _ = _run(_responses([_env("prod", _CUSTOM)], rulesets=[rs], extra={
+        _dbp("prod"): _Pages({"total_count": 1, "branch_policies": [
+            {"name": "release", "type": "branch"}]}),
+        f"{R}/branches/release": None}), tmp_path=tmp_path)
+    for fact_id in (BRANCH, APPROVAL, SCOPED):
+        f = _fact(out, fact_id)
+        assert f["outcome"] == "unmeasured", f
+        assert "AttributeError" in f["evidence"], f
+    assert _fact(out, "sec.checkout.credentials-scoped")["outcome"] == "pass"
+    assert out["push_access"]["status"] == "not_checked", out["push_access"]
+
+
+def test_a_managed_environment_keeps_the_real_reason_its_secrets_are_unread(
+        tmp_path):
+    """A 502 is not a permission gap; the evidence names it and does not
+    send the reader off to get admin rights."""
+    out, _ = _run(_responses([_env("github-pages", _ANY)], extra={
+        f"{R}/environments/github-pages/secrets?per_page=100": _HTTP_502}),
+        tmp_path=tmp_path)
+    f = _fact(out, BRANCH)
+    assert f["outcome"] == "unmeasured", f
+    assert "502" in f["evidence"] and "admin rights" not in f["evidence"], f
+    why = _envs(out)["github-pages"]["branch_check_why"]
+    assert "502" in why and "admin rights" not in why, why
+
+
+_SSO_403 = _api_error(
+    "gh: Resource protected by organization SAML enforcement. You must grant "
+    "your Personal Access token access to this organization. (HTTP 403)")
+
+
+def test_an_sso_403_on_the_secret_lists_does_not_prescribe_admin_rights(
+        tmp_path):
+    out, _ = _run(_responses([], extra={
+        f"{R}/actions/secrets?per_page=100": _SSO_403,
+        f"{R}/actions/organization-secrets?per_page=100": _SSO_403}),
+        tmp_path=tmp_path)
+    f = _fact(out, SCOPED)
+    assert f["outcome"] == "unmeasured", f
+    assert "admin rights" not in f["evidence"], f
+    assert "single sign-on" in f["evidence"], f
+
+
+def test_an_unexpected_403_is_logged_with_its_reason_class(caplog):
+    gh = cf._gh_utils()
+    done = mock.Mock(returncode=1, stdout="", stderr=_SSO_403.args[0][
+        len("API call failed: "):])
+    with mock.patch.object(gh.subprocess, "run", return_value=done), \
+            caplog.at_level("DEBUG"):
+        with pytest.raises(gh.GitHubAPIError):
+            gh.run_gh_api("repos/o/r/actions/secrets", quiet_forbidden=True)
+    msgs = [r.getMessage() for r in caplog.records if "403" in r.getMessage()]
+    assert msgs and not any("expected" in m for m in msgs), msgs
+    assert any("SAML" in m for m in msgs), msgs
+    assert not any("Personal Access token" in m for m in msgs), msgs

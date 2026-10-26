@@ -57,7 +57,7 @@ entries are dated (UTC). Format loosely follows
   the reason, never a pass; classic protection rules and ruleset bypass
   lists are readable only by an admin, so verdicts that depend on them are
   unmeasured on any other token, while an environment that fails on its
-  settings alone still fails. **The config-fact aggregate this skill hands
+  settings alone still fails. An answer of an unexpected shape (a null classic rule, a missing allowance or reviewer list) is unmeasured too, the unmeasured reason is the real one (a 502 or a SAML single sign-on 403 is not sent off to get admin rights), and a field the verdict code cannot handle costs only these three checks, never the rest of the fact table. **The config-fact aggregate this skill hands
   ci-advisor gains three facts, so the security score shifts for anyone
   running with a token**: `applicable_count` rises by up to three, and a
   repo whose environments accept any branch, or that keeps secrets outside
