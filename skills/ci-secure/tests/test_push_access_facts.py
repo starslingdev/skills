@@ -1406,8 +1406,9 @@ def test_probe_p1_on_a_closed_ruleset_pattern_passes(tmp_path, monkeypatch):
 # --- output contract and log hygiene ------------------------------------------
 
 def test_environment_rows_name_their_checks_not_fact_numbers(tmp_path):
-    """The per-environment verdict keys say which check they hold; `branch` /
-    `approval` collided with the fact numbering (BRANCH is another fact)."""
+    """The per-environment verdict keys say which check they hold; the old
+    `f10` / `f11` keys collided with the fact numbering (the environment
+    facts are F11 and F12)."""
     out, _ = _run(_responses([_env("prod", _ANY, reviewers=1)]),
                   tmp_path=tmp_path)
     row = _envs(out)["prod"]

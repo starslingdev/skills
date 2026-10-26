@@ -27,12 +27,13 @@ every source scores over thirteen. Between the two sits the ordinary
 reader's token: the two environment facts are measured from environment
 settings, but any verdict that rests on classic branch protection rules or a
 ruleset's bypass list (both admin-only) stays unmeasured, and so does the
-environment-scoped secrets fact (secret lists need admin rights or the
-secrets permission). A fact that does not apply to the
-repository at all leaves the denominator on top of that (see below), so both
-numbers drop by one for each such fact — in a repository whose workflows run
-no suite, in one that configures no dependency update tool, and, for the two
-environment facts, in one with no environments or no required reviewers.
+environment-scoped secrets fact whenever the secret lists answer 403. A
+fact that does not apply to the repository at all leaves the denominator on
+top of that (see below), so the number drops by one for each such fact — in
+a repository whose workflows run no suite or that configures no dependency
+update tool (both scans), and, for the two environment facts, in one with no
+environments or no required reviewers (the token scan only: without a token
+those two are unmeasured, never not applicable).
 The unmeasured ids are named in the block's `unmeasured` list and the caveat, so
 a consumer — ci-advisor above all — can tell the two apart, but only if it
 checks: comparing the raw numbers across differently-authenticated scans
@@ -443,9 +444,7 @@ two moved numbers.
   A repository with **no environments** is not applicable here, whatever
   its secrets are. Readable repository and organisation secrets are
   `sec.secrets.environment-scoped`'s question, and failing both checks on
-  one setup would bill one gap twice. (Until 2026-10-24 this case failed
-  when a secret was readable; that rule was retired when the secrets fact
-  was scored.)
+  one setup would bill one gap twice.
 
   API-gated, with F7's contract: no repository or no token is unmeasured;
   an unreadable source makes only the verdicts that depend on it
@@ -456,9 +455,11 @@ two moved numbers.
   "protected branches only" environment, or one closed only by a ruleset,
   is unmeasured. **To fix a fail**: set the environment to "Selected
   branches and tags" naming exact protected branches whose rules block
-  creating and pushing, or "Protected branches only" with a classic rule
-  that blocks creation on every protected pattern, or add a required
-  reviewer.
+  creating and pushing, or "Protected branches only" with a classic
+  branch protection rule on every protected pattern that turns on
+  "Restrict who can push to matching branches" (nobody listed) and
+  "Restrict pushes that create matching branches" (rulesets do not count
+  for that option), or add a required reviewer.
 - **`sec.environments.approval-holds`** — every environment that has
   required reviewers also has "Prevent self-review" on. Otherwise a leaked
   reviewer's credential starts a run and approves it itself. One bad
@@ -481,13 +482,14 @@ two moved numbers.
   separately, with a short deterministic hint (`PRIVATE_KEY`, `APP_ID`,
   `PYPI`, `NPM_TOKEN`, …) putting the likely high-value ones first — a
   sort order, not a severity. **Unmeasured** when a list cannot be read
-  (recorded: both answer a non-admin reader 403, although GitHub's docs
-  say collaborator access; an entry with no name counts as unread too),
+  (recorded: both answer a non-collaborator 403, and GitHub's message asks
+  for repository read access or the secrets fine-grained permission; an
+  entry with no name counts as unread too),
   never a pass; when
   one list is unreadable and the other already holds a secret, the fail
   stands, because nothing in the unread list can undo it, and the
-  evidence says the list may be incomplete. Scored by owner decision
-  (2026-10-24), knowing it fails many repositories: it is the one setting
+  evidence says the list may be incomplete. Scored knowing it fails many
+  repositories: it is the one setting
   that decides whether locking environments protects anything. **To fix a
   fail**: pick or create an environment that passes
   `sec.environments.branch-restricted`, re-enter each named secret's value
@@ -503,8 +505,8 @@ two moved numbers.
   that a pushed workflow can
   ask for its own write-scoped token and an OIDC login token, and that a
   credential which cannot push workflow files, but can change code the
-  repository's own workflows run, is not checked yet. Which credentials
-  can push workflow files is cited from GitHub's docs: the `workflow`
+  repository's own workflows run, is not checked yet. Credentials that
+  can push workflow files are cited from GitHub's docs, among others: the `workflow`
   scope for classic tokens and OAuth apps
   (https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps),
   the "Workflows" permission for GitHub Apps

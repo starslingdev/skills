@@ -2645,8 +2645,8 @@ def _update_cooldown(root: Path) -> tuple[str, str]:
 
 # --- if a push credential leaks: environments (F11, F12), secrets (F13) ------
 #
-# A credential that can push workflow files (GitHub documents this as the
-# `workflow` scope for classic tokens and OAuth apps, and the "Workflows"
+# A credential that can push workflow files (GitHub documents, among others,
+# the `workflow` scope for classic tokens and OAuth apps, and the "Workflows"
 # permission for fine-grained tokens and GitHub Apps; see _TOKEN_DOCS) can
 # create a throwaway branch, add a workflow that reads secrets, let it run
 # and delete the branch. Nothing of it ever reaches the checkout this scan
@@ -2658,7 +2658,7 @@ def _update_cooldown(root: Path) -> tuple[str, str]:
 # One exception: GitHub creates `github-pages` and `copilot` itself, so one of
 # those that holds no secret is left out of the verdict; one whose secrets
 # cannot be read is judged on its settings and, if it would not pass, keeps
-# the check unmeasured. An admin or owner credential can change these
+# either environment check unmeasured. An admin or owner credential can change these
 # settings, so no verdict here covers one.
 #
 #   F11 sec.environments.branch-restricted  every environment is restricted to
@@ -2671,7 +2671,11 @@ def _update_cooldown(root: Path) -> tuple[str, str]:
 #
 # A ref is CLOSED when every ref its pattern can match is covered by an active
 # ruleset (or classic protection) that blocks creating it AND blocks direct
-# updates, with nobody short of an admin able to bypass either. An existing
+# updates, with nobody short of an admin able to bypass either. For classic
+# protection only the one rule GitHub applies to a branch counts (a rule
+# naming it exactly beats every wildcard); a pull request rule blocks updates
+# only when it needs at least one approval that a new push dismisses or
+# re-asks. An existing
 # exact name needs updates blocked and deletion or creation blocked (otherwise
 # it can be deleted and pushed again). `evaluate` and `disabled` rulesets count
 # for nothing; organisation rulesets count.
@@ -2680,7 +2684,7 @@ def _update_cooldown(root: Path) -> tuple[str, str]:
 # a source that cannot be read leaves every verdict that depends on it
 # unmeasured, never passed and never dropped; no retries.
 
-# PROBE P1 (spec 2026-10-24 §7 step 0, private sandbox repository): does a
+# PROBE P1 (a private sandbox repository, settings toggled by hand): does a
 # branch protected ONLY by a ruleset count as "protected" for an environment
 # whose policy is "Protected branches only"? ANSWERED NO (2026-10-24, toggled
 # three times): only CLASSIC branch protection rules decide what that policy
@@ -2719,9 +2723,10 @@ _HIGH_VALUE_SECRET = re.compile(
 
 _SECRETS_FACT = "sec.secrets.environment-scoped"
 
-# Which credentials can add or change workflow files, as GitHub documents it.
-# Cited instead of asserted: the report links these rather than listing
-# credential types this skill has not tested.
+# Some of the credentials that can add or change workflow files, as GitHub
+# documents them. Cited instead of asserted, and not a complete list: the
+# report links these rather than listing credential types this skill has not
+# tested.
 _TOKEN_DOCS = (
     ("the `workflow` scope (classic tokens, OAuth apps)",
      "https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/"
@@ -2734,7 +2739,8 @@ _TOKEN_DOCS = (
      "permissions-required-for-fine-grained-personal-access-tokens"),
 )
 _TOKEN_NOTE = (
-    "GitHub documents which credentials can add or change workflow files: "
+    "GitHub documents, among others, these credentials that can add or "
+    "change workflow files: "
     + "; ".join(f"[{label}]({url})" for label, url in _TOKEN_DOCS) + ".")
 
 _TIER1_GAP = (
@@ -2744,9 +2750,9 @@ _TIER1_GAP = (
 _CREDENTIAL_NOTE = (
     "A workflow pushed with such a credential can also ask for its own "
     "write-scoped Actions token and an OIDC login token, so any cloud role "
-    "that trusts this repository without pinning a branch or a closed "
-    "environment is exposed too; cloud trust policies cannot be read from "
-    "here.")
+    "that trusts this repository without pinning a branch or an "
+    "environment that passes the branch check is exposed too; cloud trust "
+    "policies cannot be read from here.")
 
 
 class _Unread(Exception):
@@ -2918,8 +2924,8 @@ class _GhPushAccess:
         error, so anything short of an admin's answer is unread, never
         "none"."""
         def read():
-            # Recorded (probe P5/P6): a non-admin is answered with a silent
-            # zero, the Actions token with FORBIDDEN. Admin rights are
+            # Recorded: a non-admin is answered with a silent zero, the
+            # Actions token with FORBIDDEN. Admin rights are
             # established explicitly first, so a reader never spends the call
             # and a zero is never mistaken for "no rules".
             if not self.is_admin():
@@ -3527,8 +3533,9 @@ def _environment_branch_verdict(src: Any, env: dict) -> tuple[str, str]:
         if unsettled:
             return "unmeasured", f"`{name}`: {_capped(unsettled, 2)}"
         if not states:
-            return "pass", (f"`{name}` accepts only protected branches, and "
-                            "no branch is protected, so no branch can deploy")
+            return "fail", (f"`{name}` accepts \"protected branches\", and "
+                            "with none protected GitHub lets every branch "
+                            "and tag deploy")
         return "pass", (f"`{name}` accepts only protected branches, and every "
                         "protected pattern is closed")
     if policy.get("custom_branch_policies") is True:
@@ -3721,8 +3728,11 @@ def _push_access(repo: str | None, fetcher) -> tuple[
                 "need no reviewer: " + _capped(failed, 6) + ". Restrict each "
                 "to \"Selected branches and tags\" naming protected branches "
                 "whose rules block creating and pushing, or to \"Protected "
-                "branches only\" with a creation-blocking rule on every "
-                "protected pattern — or add a required reviewer"))
+                "branches only\" with a classic branch protection rule on "
+                "every protected pattern that turns on \"Restrict who can "
+                "push to matching branches\" (nobody listed) and \"Restrict "
+                "pushes that create matching branches\" (rulesets do not "
+                "count for that option) — or add a required reviewer"))
         elif unsettled or could_fail:
             branch = ("unmeasured", "unmeasured: "
                    + _capped(unsettled + could_fail, 4))
@@ -3761,10 +3771,9 @@ def _zero_environments(cant_tell: list[str], any_env: bool
                        ) -> tuple[str, str]:
     """No environment to judge: NOT APPLICABLE, whatever the secrets are.
 
-    D4 used to fail this check when a repo/org secret was readable. With
-    `sec.secrets.environment-scoped` scoring exactly that, failing here too
-    would make one setup cost two checks (owner decision 2026-10-24). A
-    GitHub-managed environment whose secrets cannot be read might be in
+    Readable repository and organisation secrets are
+    `sec.secrets.environment-scoped`'s question; failing here too would make
+    one setup cost two checks. A GitHub-managed environment whose secrets cannot be read might be in
     scope, so that one case stays unmeasured."""
     if cant_tell:
         return "unmeasured", (
@@ -3832,19 +3841,20 @@ def _secrets_scoped(inventory: dict[str, Any]) -> tuple[str, str]:
                         "here; every secret this repository uses lives in an "
                         "environment, or there are none")
     return "unmeasured", (
-        f"unmeasured: the secret lists could not be read in full ({reason}); "
+        f"unmeasured: the secret lists could not be read in full ({reason})"
         + _secrets_hint(reason))
 
 
 def _secrets_hint(reason: str) -> str:
     """What to change so the secret lists can be read, from the 403 itself:
-    a token not authorised for single sign-on needs that, not more rights."""
+    a token not authorised for single sign-on needs that, not more rights.
+    Otherwise GitHub's own answer, quoted in the reason, says what it wants."""
     if "SAML" in reason:
-        return ("authorise the token for the organisation's SAML single "
+        return ("; authorise the token for the organisation's SAML single "
                 "sign-on")
     if "IP allow list" in reason:
-        return "run from an address the organisation's IP allow list permits"
-    return "secret lists need admin rights or the secrets permission"
+        return "; run from an address the organisation's IP allow list permits"
+    return ""
 
 
 # --- the fact table -----------------------------------------------------------

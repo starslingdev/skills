@@ -102,7 +102,9 @@ The one non-scripted field. Written once per pattern group and merged onto
   so is one unscored key inside it, `security_score.push_access`, which the
   report shows under "If a push credential leaks":
   - `status` — `measured` / `unmeasured` (the environment list could not
-    be read) / `not_checked` (no repository or no token), with `reason`.
+    be read) / `not_checked` (no repository, no token, or the settings or
+    verdicts could not be computed at all), with `reason`; in the shape a
+    crashed facts layer leaves, `token_note` is absent.
   - `environments` — one object per environment: `name`, `managed`
     (GitHub-managed `github-pages` / `copilot`), `branch_check` and
     `branch_check_why` (`pass` / `fail` / `unmeasured`, or `info` for a

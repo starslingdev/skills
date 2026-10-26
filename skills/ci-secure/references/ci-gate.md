@@ -229,7 +229,7 @@ rules applies to an install PR as much as to a fix PR.
    then `ci-secure/`. The other way round reds every run in between, on
    the drift check, before the gate is even reached.
 5. **Up to six facts stay UNMEASURED** in the gate: whether required
-   checks are skippable, the fork-PR approval policy, — once a CODEOWNERS
+   checks are skippable, the fork-PR approval policy — once a CODEOWNERS
    rule covers workflows — whether the branch enforces it (requires review
    from Code Owners), the two environment checks (branches restricted,
    self-approval blocked) and whether every secret lives in an
@@ -239,8 +239,10 @@ rules applies to an install PR as much as to a fix PR.
    push-credential checks would not be fully measurable on a CI token anyway
    (recorded 2026-10-24): the default Actions token cannot read
    environments at all; with `actions: read` it can read them and their
-   branch policies, so the reviewer and self-approval verdicts and the
-   custom-policy failures become measurable, but classic branch
+   branch policies, so the reviewer and self-approval verdicts become
+   measurable, and so do custom-policy environments that accept an
+   existing unprotected branch or a tag pattern no ruleset closes, but
+   classic branch
    protection rules, ruleset bypass lists and every secret list stay
    unreadable, so "protected branches only" verdicts, verdicts that rest
    on a ruleset's bypass list, and the environment-scoped secrets check

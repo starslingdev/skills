@@ -1920,8 +1920,10 @@ def _push_access_block(push_rows: list[dict[str, Any]], block: Any) -> str:
                     + _names(inv["high_value"]) + "."]
         if inv.get("repo_secrets") or inv.get("org_secrets"):
             out += ["", "Each of these is readable from any branch such a "
-                    "credential creates; only moving it into a closed "
-                    "environment protects it."]
+                    "credential creates; moving it into an environment that "
+                    "passes the branch check above protects it (for an "
+                    "organisation secret, narrowing its repository access "
+                    "also does)."]
     elif status == "unmeasured":
         out += ["", f"{head} ⚠️ unmeasured — the secret lists could not be "
                 f"read ({_cell(inv.get('reason'))}). That is a coverage gap, "

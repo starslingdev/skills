@@ -16,7 +16,7 @@ entries are dated (UTC). Format loosely follows
 - ci-secure: "If a push credential leaks" — three new config hygiene checks,
   read over the GitHub API the way the required-checks and fork-approval
   checks already are. A credential that can push workflow files (GitHub's
-  docs name the `workflow` scope for classic tokens and OAuth apps, and the
+  docs name, among others, the `workflow` scope for classic tokens and OAuth apps, and the
   "Workflows" permission for GitHub Apps and fine-grained tokens; the report
   links them) can create a throwaway branch, add a workflow that reads
   secrets, run it and delete the branch; none of it reaches the scanned
@@ -67,8 +67,8 @@ entries are dated (UTC). Format loosely follows
   `sec.secrets.environment-scoped` at first; that is the exposure, not a
   false positive. Without a token all
   three are unmeasured and stay in the applicable count as a disclosed gap;
-  on a reader's token the secrets check stays unmeasured (secret lists
-  answer a non-admin 403). The CI gate does not read them (they stay
+  where the secret lists answer 403 (recorded for a non-collaborator) the
+  secrets check stays unmeasured. The CI gate does not read them (they stay
   unmeasured there, each a non-blocking warning line). (2026-10-26)
 - ci-secure: new config hygiene check `sec.deps.update-cooldown` — every
   configured dependency update tool waits at least 3 days before proposing a

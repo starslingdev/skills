@@ -4584,7 +4584,7 @@ def test_a_path_filtered_push_cannot_certify_even_over_every_branch(tmp_path):
     "    branches: ['**']\n    paths-ignore: ['docs/**']\n",
 ])
 def test_a_path_filtered_push_still_counts_against_the_check(tmp_path, filters):
-    """The other half of UNKNOWN, and the F13 trap: unable-to-certify must not
+    """The other half of UNKNOWN, and review finding 13's trap: unable-to-certify must not
     become unable-to-run. A SKIPPABLE job in such a workflow still counts
     against the required check, so its bypass is still found."""
     body = f"""\
@@ -4629,7 +4629,7 @@ jobs:
 
 
 def test_a_path_filtered_push_alone_is_not_a_false_red(tmp_path):
-    """And the F13 direction: an ALWAYS-running job in a path-filtered push,
+    """And review finding 13's direction: an ALWAYS-running job in a path-filtered push,
     as the only producer, is not evidence of a bypass — it is simply not
     knowable whether it reports. Not judged, not failed."""
     f = _outcome(_facts_with(tmp_path, {"build.yml": _PATHS_PUSH_PRODUCER},

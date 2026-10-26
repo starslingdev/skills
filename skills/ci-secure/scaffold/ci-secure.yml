@@ -226,7 +226,7 @@ jobs:
 # broken scan.
 #
 # Up to six facts will stay UNMEASURED whatever you do: whether your required
-# checks can be skipped, your fork-PR approval policy, — when a CODEOWNERS
+# checks can be skipped, your fork-PR approval policy — when a CODEOWNERS
 # entry covers your workflows — whether the branch requires review from Code
 # Owners, the two deployment-environment checks (branches restricted,
 # self-approval blocked) and whether every secret lives in an environment. All
