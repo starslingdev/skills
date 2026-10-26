@@ -2972,13 +2972,19 @@ class _GhPushAccess:
             kind="branch", what=f"branch `{name}`"))
 
     def matching_refs(self, prefix: str) -> list[str]:
-        return self._once(f"refs:{prefix}", lambda: [
-            str(r["ref"])[len("refs/heads/"):] for r in self._get(
+        def read():
+            what = f"the branches starting `{prefix}`"
+            refs = self._get(
                 f"repos/{self.repo}/git/matching-refs/heads/"
                 f"{_branch_segment(prefix)}", paginate=True, key=None,
-                what=f"the branches starting `{prefix}`")
-            if isinstance(r, dict) and str(r.get("ref", "")).startswith(
-                "refs/heads/")])
+                what=what)
+            # A dropped entry could be the branch that proves a pattern open.
+            if any(not isinstance(r, dict) or not str(
+                    r.get("ref") or "").startswith("refs/heads/")
+                    for r in refs):
+                raise _Unread(f"{what} returned an unexpected shape")
+            return [str(r["ref"])[len("refs/heads/"):] for r in refs]
+        return self._once(f"refs:{prefix}", read)
 
     def _secret_names(self, key: str, path: str, what: str) -> list[str]:
         def read():
@@ -3535,7 +3541,11 @@ def _environment_branch_verdict(src: Any, env: dict) -> tuple[str, str]:
             if not isinstance(entry, dict) or not entry.get("name"):
                 return "unmeasured", (f"`{name}`: a deployment branch policy "
                                       "entry had no name")
-            kind = "tag" if entry.get("type") == "tag" else "branch"
+            # No type is GitHub's default, a branch; any other is unknown.
+            kind = entry.get("type") or "branch"
+            if kind not in ("branch", "tag"):
+                return "unmeasured", (f"`{name}`: a deployment branch policy "
+                                      f"entry has the unknown type `{kind}`")
             states.append(_pattern_state(
                 src, kind, str(entry["name"]), rulesets, classic,
                 default_branch, accepts_unprotected=True))

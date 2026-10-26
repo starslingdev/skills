@@ -1876,3 +1876,77 @@ def test_a_bracket_in_the_accepted_pattern_keeps_folder_depth_rivals(
         dict(_CLOSED_CLASSIC, pattern="rel*"),
         dict(_OPEN_CLASSIC, pattern="rel*/*")])
     assert env["branch_check"] != "pass", env
+
+
+# --- test review: lines that decide a pass, and two shape contracts ------------
+
+def test_a_managed_environment_left_unmeasured_blocks_a_pass(tmp_path):
+    """Non-admin reader: github-pages' secrets are 403 and its "protected
+    branches only" policy cannot be judged without the classic rules. It may
+    hold secrets and may be open, so the check cannot pass on `prod` alone."""
+    out, _ = _run(_responses(
+        [_env("github-pages", _PROTECTED),
+         _env("prod", _ANY, reviewers=1, prevent_self_review=True)],
+        classic=_graphql("READ"),
+        extra={f"{R}/environments/github-pages/secrets?per_page=100":
+               _ADMIN_403}), tmp_path=tmp_path)
+    f = _fact(out, BRANCH)
+    assert f["outcome"] == "unmeasured", f
+    assert "github-pages" in f["evidence"], f
+
+
+def test_a_closed_classic_wildcard_with_an_open_double_star_rival_is_unmeasured(
+        tmp_path):
+    """GitHub applies the older of the two rules, and their order is not
+    read, so the closed `release/*` cannot settle it."""
+    env = _custom_classic(
+        tmp_path, ["release/*"],
+        [_CLOSED_CLASSIC, dict(_OPEN_CLASSIC, pattern="**/*")],
+        extra={f"{R}/git/matching-refs/heads/release/": []})
+    assert env["branch_check"] == "unmeasured", env
+
+
+def test_a_classic_review_rule_silent_on_its_approval_count_is_unmeasured(
+        tmp_path):
+    env = _classic_release(tmp_path, requiredApprovingReviewCount=None)
+    assert env["branch_check"] == "unmeasured", env
+
+
+def test_a_pull_request_rule_silent_on_its_approval_count_is_unmeasured(
+        tmp_path):
+    rs = _closed_main({"dismiss_stale_reviews_on_push": True,
+                       "require_last_push_approval": True})
+    out, _ = _custom_case(tmp_path, [("main", "branch")], [rs],
+                          extra=_main_exists())
+    assert _envs(out)["prod"]["branch_check"] == "unmeasured", _envs(out)
+
+
+@pytest.mark.parametrize("entry", [42, {"node_id": "x"},
+                                   {"ref": "refs/tags/release/v1"}])
+def test_a_matching_ref_of_an_unexpected_shape_is_unmeasured(tmp_path, entry):
+    """A dropped entry could be the existing unprotected branch that proves
+    the pattern open, so the list is unread, not shorter."""
+    out, _ = _custom_case(tmp_path, [("release/*", "branch")], extra={
+        f"{R}/git/matching-refs/heads/release/": [entry],
+        "graphql": _graphql("READ")})
+    env = _envs(out)["prod"]
+    assert env["branch_check"] == "unmeasured", env
+    assert "unexpected shape" in env["branch_check_why"], env
+
+
+def test_a_branch_policy_entry_of_an_unknown_type_is_unmeasured(tmp_path):
+    """Neither a branch nor a tag: which rules hold it is unknown."""
+    rs = _ruleset(1, ["~ALL"], ["creation", "update"])
+    out, _ = _custom_case(tmp_path, [("v*", "commit")], [rs])
+    env = _envs(out)["prod"]
+    assert env["branch_check"] == "unmeasured", env
+    assert "`commit`" in env["branch_check_why"], env
+
+
+def test_a_branch_policy_entry_without_a_type_is_a_branch(tmp_path):
+    """GitHub's default type is `branch`."""
+    rs = _ruleset(1, ["~ALL"], ["creation", "update"])
+    out, _ = _run(_responses([_env("prod", _CUSTOM)], rulesets=[rs], extra={
+        _dbp("prod"): {"total_count": 1, "branch_policies": [{"name": "v*"}]}}),
+        tmp_path=tmp_path)
+    assert _envs(out)["prod"]["branch_check"] == "pass", _envs(out)
