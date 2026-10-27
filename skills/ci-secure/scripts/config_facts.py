@@ -2060,9 +2060,16 @@ def _required_checks_skippable(
             reason = _skip_path(jobs, key)
             if reason is None:
                 if _needs_of(_job) and not any(
-                    _block_runs_verification_suite(str(step.step.get("run", "")))
-                    and len(_code_lines(str(step.step.get("run", "")))) == 1
-                    and not re.search(r"[;&|\n$]", _code_lines(str(step.step.get("run", "")))[0])
+                    len(_code_lines(str(step.step.get("run", "")))) == 1
+                    # A command-name mention is not proof of executed tests:
+                    # help/version/collection modes, wrappers and negation hold.
+                    and re.fullmatch(r"(?:python3? -m )?pytest(?: (?:-[qv]|--quiet|--verbose))*",
+                                     _code_lines(str(step.step.get("run", "")))[0])
+                    and not any((doc.get("env"), _job.get("env"), step.step.get("env")))
+                    and step.step.get("shell", _job.get("defaults", {}).get("run", {}).get("shell",
+                        doc.get("defaults", {}).get("run", {}).get("shell"))) in (None, "bash", "sh", "pwsh", "powershell")
+                    and _job.get("continue-on-error") in (None, False)
+                    and step.step.get("continue-on-error") in (None, False)
                     and not step.gated and not step.background and not step.in_parallel_group
                     for step in _scan()._iter_job_steps(_job)
                 ):

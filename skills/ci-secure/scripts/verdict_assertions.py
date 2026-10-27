@@ -431,6 +431,15 @@ def analyze(jobs, key, workflow=None):
         for name in order:
             for source in strings(jobs[name]):
                 domain.update(re.findall(r"'([^']*)'", source))
+                domain.update(re.findall(r'"([^"\n]*)"', source))
+            # Shell guards can compare against env scalars, and literal job
+            # outputs are reachable even when no assertion quotes their value.
+            for mapping in [jobs[name].get("outputs"), jobs[name].get("env"),
+                            *(step.get("env") for step in jobs[name].get("steps", [])
+                              if isinstance(step, dict))]:
+                if isinstance(mapping, dict):
+                    domain.update(str(value) for value in mapping.values()
+                                  if isinstance(value, (str, int, bool)) and "${{" not in str(value))
         for parent, _ in refs:
             if parent not in jobs or jobs[parent].get("strategy", {}).get("matrix"):
                 raise Unknown("unresolved detector output producer")

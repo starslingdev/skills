@@ -13,6 +13,8 @@ entries are dated (UTC). Format loosely follows
 
 ### Added
 
+- **2026-10-27** — Required-check assertion analysis now includes literal output and shell/environment comparison values in its bounded domain. Ordinary-suite exemptions require a supported test invocation with fatal results; help, version, collection and negated commands cannot certify verification.
+
 - ci-secure: "If a push credential leaks" — three new config hygiene checks,
   read over the GitHub API the way the required-checks and fork-approval
   checks already are. A credential that can push workflow files (GitHub's

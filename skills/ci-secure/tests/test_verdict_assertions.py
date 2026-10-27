@@ -110,6 +110,44 @@ class VerdictTests(unittest.TestCase):
         jobs["changes"]["outputs"]["changed"] = "invalid"
         self.assertEqual(self.outcome(jobs), "fail")
 
+    def test_shell_literals_and_env_values_expand_output_domain(self):
+        for indirect in (False, True):
+            jobs = graph('if [[ "$CHANGED" != "escape" ]]; then\n  exit 1\nfi\n', True)
+            jobs["changes"]["outputs"]["changed"] = "escape"
+            jobs["verdict"]["env"] = {"CHANGED": "${{ needs.changes.outputs.changed }}"}
+            if indirect:
+                jobs["verdict"]["env"]["EXPECTED"] = "escape"
+                jobs["verdict"]["steps"][0]["run"] = jobs["verdict"]["steps"][0]["run"].replace('"escape"', '"$EXPECTED"')
+            with self.subTest(indirect=indirect):
+                self.assertEqual(self.outcome(jobs), "fail")
+
+    def test_nonexecuting_or_tolerated_suite_is_not_an_exemption(self):
+        for source, tolerated in [("pytest --version", False), ("pytest --help", False),
+                                   ("pytest --collect-only", False), ("! pytest -q", False),
+                                   ("pytest -q", True), ("pytest -q", "${{ true }}")]:
+            jobs = graph(source)
+            jobs["verdict"]["steps"][0]["continue-on-error"] = tolerated
+            docs = [("ci.yml", {"on": ["pull_request"], "jobs": jobs})]
+            with self.subTest(source=source, tolerated=tolerated):
+                result = cf._required_checks_skippable(docs, "owner/repo", lambda _: (["verdict"], "test"))
+                self.assertNotEqual(result[0], "pass")
+
+    def test_suite_environment_and_shell_overrides_cannot_exempt(self):
+        for scope in ("workflow", "job", "step"):
+            for setting in ("env", "shell"):
+                jobs = graph("pytest -q")
+                doc = {"on": ["pull_request"], "jobs": jobs}
+                target = doc if scope == "workflow" else jobs["verdict"] if scope == "job" else jobs["verdict"]["steps"][0]
+                if setting == "env":
+                    target["env"] = {"PYTEST_ADDOPTS": "--collect-only"}
+                elif scope == "step":
+                    target["shell"] = "bash -c 'exit 0' {0}"
+                else:
+                    target["defaults"] = {"run": {"shell": "bash -c 'exit 0' {0}"}}
+                with self.subTest(scope=scope, setting=setting):
+                    self.assertNotEqual(cf._required_checks_skippable(
+                        [("ci.yml", doc)], "owner/repo", lambda _: (["verdict"], "test"))[0], "pass")
+
     def test_echo_is_not_assertion(self):
         self.assertEqual(self.outcome(graph('echo "${{ needs.suite.result }}"')), "fail")
 

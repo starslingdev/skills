@@ -9844,6 +9844,19 @@ def check_opt92_linux_benchmark(report: str, findings_path: Path | None) -> Chec
                 errors.append(fid + ": price or saving on uncredited card")
         if any(f.get(k) is not None for k in ("wall_clock_p50_s", "runner_min_saving")) or f.get("realization") != "none" or f.get("sizing_basis") != "uncredited":
             errors.append(fid + ": uncredited contract changed")
+        expected_where = (f"- **Where:** `{_flatten_cell(str(f.get('workflow_file', '')))}` ▸ "
+                          f"`{_flatten_cell(str(proof.get('job', '')))}` on "
+                          f"`{_flatten_cell(str(proof.get('runner', '')))}` "
+                          f"({_flatten_cell(str(proof.get('architecture', '')))}).")
+        if [line for line in body.splitlines() if line.startswith("- **Where:**")] != [expected_where]:
+            errors.append(fid + ": visible job, workflow or runner does not match evidence")
+        checks = proof.get("checks")
+        if not isinstance(checks, list) or not checks or any(not isinstance(x, str) or not x.strip() for x in checks):
+            errors.append(fid + ": completed checks must be nonempty strings")
+        else:
+            expected_checks = "- **Checks completed:** " + "; ".join(_flatten_cell(x) for x in checks) + "."
+            if [line for line in body.splitlines() if line.startswith("- **Checks completed:**")] != [expected_checks]:
+                errors.append(fid + ": visible completed checks do not match evidence")
         observations = [o for o in _as_list(proof.get("observations")) if isinstance(o, dict)]
         for reason, count in _as_dict(proof.get("sample_exclusions")).items():
             phrases = {"budget": "the evidence request budget was exhausted",

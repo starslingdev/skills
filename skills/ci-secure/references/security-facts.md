@@ -551,8 +551,13 @@ contract was checked against that revision's
 [input and exit handling](https://github.com/re-actors/alls-green/blob/b5b5b37504aa4183270bd3d855c52a67f212be35/src/normalize_needed_jobs_status.py),
 and [result rules](https://github.com/re-actors/alls-green/blob/b5b5b37504aa4183270bd3d855c52a67f212be35/src/job_outcome.py).
 
-Ordinary producers executing their own recognized verification suite retain
-the existing producer-execution check; F9 owns swallowed suite failures.
+Ordinary producers with a supported, unconditional test invocation retain the
+producer-execution check. The exemption supports direct `pytest` and
+`python`/`python3 -m pytest`, optionally with quiet/verbose flags, and requires
+fatal job and step results, a stock shell, and no environment overrides.
+Help, version, collection modes, negation and
+unresolved wrappers do not establish that tests execute. F9 still independently
+checks swallowed suite failures.
 Assertions must execute and propagate failure. Echoing a status is not an
 assertion; a disabled assertion cannot gate the verdict.
 

@@ -189,10 +189,18 @@ def _admit(doc, key, source_files, source_contents):
     if any(native_command(step.get("run", "")) for step in job.get("steps", []) if isinstance(step, dict) and "if" not in step):
         return "skip", "native_work", {}
     on = doc.get("on", doc.get(True, {}))
-    on_text = str(on).lower()
-    if any(
-        x in on_text for x in ("tags", "release", "workflow_call")
-    ) or job.get("environment"):
+    if isinstance(on, str):
+        events = {on: None}
+    elif isinstance(on, list) and all(isinstance(event, str) for event in on):
+        events = dict.fromkeys(on)
+    elif isinstance(on, dict):
+        events = on
+    else:
+        return "hold", "work_unresolved", {}
+    push = events.get("push")
+    if (any(event in events for event in ("release", "workflow_call"))
+            or (isinstance(push, dict) and any(key in push for key in ("tags", "tags-ignore")))
+            or job.get("environment")):
         return "hold", "release_path", {}
     if (job.get("container") or job.get("services") or job.get("env") or doc.get("env")
             or job.get("needs") or job.get("outputs")

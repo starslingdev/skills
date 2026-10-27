@@ -309,6 +309,22 @@ echo "formatting checked"
             doc["jobs"]["syntax"]["steps"][-1][key] = value
             self.assertEqual(lb.admit(doc, "syntax", {"src/check.py": "100644"})[0], "hold")
 
+    def test_release_gate_uses_trigger_keys_not_branch_or_path_text(self):
+        for triggers in ({"push": {"paths": ["docs/release-notes/**"]}},
+                         {"push": {"branches": ["release-docs"]}},
+                         {"pull_request": {"paths": ["docs/tags/**"]}}):
+            doc = fixture()
+            doc["on"] = triggers
+            with self.subTest(triggers=triggers):
+                self.assertEqual(len(self.detect(doc)[0]), 1)
+        for triggers in ("release", ["push", "release"], {"workflow_call": {}},
+                         {"push": {"tags": ["v*"]}}, {"push": {"tags-ignore": ["draft-*"]}}):
+            doc = fixture()
+            doc["on"] = triggers
+            with self.subTest(triggers=triggers):
+                self.assertEqual(lb.admit(doc, "syntax", {"src/check.py": "100644"})[:2],
+                                 ("hold", "release_path"))
+
     def test_native_arguments_are_not_inferred_from_printed_prose(self):
         self.assertTrue(lb.native_command("dotnet publish -r osx-arm64"))
         self.assertTrue(lb.native_command("cargo build --target=aarch64-apple-darwin"))
@@ -438,6 +454,30 @@ echo "formatting checked"
             swapped = report.replace("120s p50", "SWAP").replace("180s p50", "120s p50").replace("SWAP", "180s p50")
             self.assertFalse(vr.check_opt92_linux_benchmark(swapped, path).ok)
             findings[0]["linux_benchmark"]["observations"][0]["job"] = "other"
+            path.write_text(json.dumps({"findings": findings}))
+            self.assertFalse(vr.check_opt92_linux_benchmark(report, path).ok)
+
+    def test_verifier_binds_visible_identity_and_completed_checks(self):
+        findings, _ = self.detect()
+        proof = findings[0]["linux_benchmark"]
+        proof["checks"].append("literal | paths\nwith ``` delimiters")
+        report = "\n".join(bp._opt92_unrouted_block(findings, "https://example.invalid/catalog"))
+        where = next(line for line in report.splitlines() if line.startswith("- **Where:**"))
+        checks = next(line for line in report.splitlines() if line.startswith("- **Checks completed:**"))
+        with tempfile.TemporaryDirectory(prefix="review-opt92-visible-") as tmp:
+            path = Path(tmp) / "review-findings.json"
+            path.write_text(json.dumps({"findings": findings}))
+            self.assertTrue(vr.check_opt92_linux_benchmark(report, path).ok)
+            replacements = [(where, where.replace(WF, ".github/workflows/native.yml")),
+                            (where, where.replace("syntax", "native-ios-build")),
+                            (where, where.replace("windows-2022", "macos-26")),
+                            (where, where.replace("x64", "arm64")),
+                            (checks, "- **Checks completed:** All native tests proved portable."),
+                            (checks, ""), (checks, checks + "\n" + checks)]
+            for old, new in replacements:
+                with self.subTest(new=new):
+                    self.assertFalse(vr.check_opt92_linux_benchmark(report.replace(old, new), path).ok)
+            proof["checks"] = "not a list"
             path.write_text(json.dumps({"findings": findings}))
             self.assertFalse(vr.check_opt92_linux_benchmark(report, path).ok)
 
