@@ -1196,7 +1196,9 @@ unversioned and updates by reinstall from `main`.
   gate, say no file-backed required gate exists, and frame the real test jobs
   as gating zero merges. The scan now records which workflows post commit
   statuses (through the statuses API, `createCommitStatus`, or a known status
-  action, in the workflow, a local action, or a repo-local script it runs). A
+  action, in the workflow, a local action, or a repo-local script it runs; a
+  local action's own entrypoint, such as its `main:` script or a script its
+  composite steps run from the action's folder, is looked up in that folder). A
   required context named in one of them is never counted external: the gate
   stays an unresolved best guess, the spine is not narrowed, no check is called
   non-required on its account, and the report names the status. Which jobs the

@@ -5187,7 +5187,26 @@ _STATUS_POST_RE = re.compile(
 # `python ./ci/status.py`, `require('./.github/scripts/x.js')`).
 _LOCAL_SCRIPT_REF_RE = re.compile(
     r"(?<![\w./$-])(?:\./)?((?:[\w.-]+/)*[\w.-]+\.(?:js|mjs|cjs|ts|mts|cts|py|sh|bash|rb))\b")
+# A script a composite action runs from its OWN directory
+# (`node ${{ github.action_path }}/scripts/x.mjs`, `"$GITHUB_ACTION_PATH/x.py"`).
+_ACTION_PATH_SCRIPT_REF_RE = re.compile(
+    r"(?:\$\{\{\s*github\.action_path\s*\}\}|\$\{?GITHUB_ACTION_PATH\}?)/"
+    r"((?:[\w.-]+/)*[\w.-]+\.(?:js|mjs|cjs|ts|mts|cts|py|sh|bash|rb))\b")
 _STATUS_SOURCE_MAX_CHARS = 256_000
+
+
+def _local_action_dirs(root: Path, ref: str, text: str) -> list[Path]:
+    """The directories a local action's relative entrypoints resolve against: the
+    action's own directory (a node action's `main:` / `pre:` / `post:` and a
+    composite step's `github.action_path` scripts live there), plus that of every
+    local action its text delegates to. A reusable workflow (`.yml` ref) has none:
+    its `run:` steps start in the workspace, i.e. the repository root."""
+    dirs: list[Path] = []
+    for r in [ref] + _NESTED_LOCAL_USES_RE.findall(text):
+        base = _local_ref_path(root, r.split("@")[0].strip())
+        if base is not None and base.suffix not in (".yml", ".yaml") and base not in dirs:
+            dirs.append(base)
+    return dirs
 
 
 def _build_workflow_status_publishers(
@@ -5201,14 +5220,17 @@ def _build_workflow_status_publishers(
     through the statuses API, with no `needs:` edge to them. collect_runs reads this
     to tell that case from a real outside gate (a CLA bot or security app, which no
     workflow here names). A workflow counts when its own YAML, a local action it
-    uses, or a repo-local script it runs posts a status; `text` is all of those
+    uses, or a repo-local script it runs posts a status (a local action's own
+    entrypoints, `main:` / `pre:` / `post:` and `github.action_path` scripts, are
+    resolved from the action's directory first); `text` is all of those
     sources, so collect_runs can check whether a required context's literal name
     appears in them. Only status-posting workflows are recorded (so the map is
     empty on most repos), and each source is capped so a huge script can't bloat
     the findings document. Which jobs the publisher waits on is NOT traced."""
     out: dict[str, dict[str, Any]] = {}
     for rel, doc, raw in parsed:
-        sources: list[tuple[str, str]] = [(rel, raw)]
+        # (label, text, action dirs its relative entrypoints resolve against first)
+        sources: list[tuple[str, str, list[Path]]] = [(rel, raw, [])]
         for job in _jobs_from_doc(doc).values():
             if not isinstance(job, dict):
                 continue
@@ -5219,25 +5241,29 @@ def _build_workflow_status_publishers(
                     if text is None:
                         text = _read_local_action(root, u)
                     if text:
-                        sources.append((u, text))
+                        sources.append((u, text, _local_action_dirs(root, u, text)))
         seen = {rel}
-        for _src, text in list(sources):
-            for ref in _LOCAL_SCRIPT_REF_RE.findall(text):
-                if ref in seen:
-                    continue
-                seen.add(ref)
-                path = _local_ref_path(root, "./" + ref)
+        for _src, text, action_dirs in list(sources):
+            cands = [(d, ref) for ref in _ACTION_PATH_SCRIPT_REF_RE.findall(text)
+                     for d in action_dirs]
+            cands += [(d, ref) for ref in _LOCAL_SCRIPT_REF_RE.findall(text)
+                      for d in action_dirs + [root]]
+            for base, ref in cands:
                 try:
-                    if path is None or not path.is_file():
+                    label = os.path.relpath(os.path.normpath(base / ref), root)
+                    path = _local_ref_path(root, "./" + label)
+                    if label in seen or path is None or not path.is_file():
                         continue
-                    sources.append((ref, path.read_text(encoding="utf-8",
-                                                        errors="replace")))
+                    seen.add(label)
+                    sources.append((label.replace(os.sep, "/"),
+                                    path.read_text(encoding="utf-8", errors="replace"),
+                                    []))
                 except (OSError, ValueError):
                     continue
-        if not any(_STATUS_POST_RE.search(t) for _s, t in sources):
+        if not any(_STATUS_POST_RE.search(t) for _s, t, _d in sources):
             continue
-        out[rel] = {"sources": [s for s, _t in sources],
-                    "text": "\n".join(t[:_STATUS_SOURCE_MAX_CHARS] for _s, t in sources)}
+        out[rel] = {"sources": [s for s, _t, _d in sources],
+                    "text": "\n".join(t[:_STATUS_SOURCE_MAX_CHARS] for _s, t, _d in sources)}
     return out
 
 

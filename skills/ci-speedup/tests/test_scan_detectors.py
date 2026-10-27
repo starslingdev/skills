@@ -5142,3 +5142,43 @@ jobs:
     script = pubs[".github/workflows/script.yml"]
     assert ".github/scripts/aggregate.js" in script["sources"]
     assert "Script CI" in script["text"]
+
+
+@pytest.mark.parametrize("action_yml,entry", [
+    ("runs:\n  using: node20\n  main: dist/index.js\n", "dist/index.js"),
+    ("runs:\n  using: node20\n  pre: dist/setup.js\n  main: dist/noop.js\n",
+     "dist/setup.js"),
+    ("runs:\n  using: node20\n  main: dist/noop.js\n  post: 'dist/post.js'\n",
+     "dist/post.js"),
+    ("runs:\n  using: composite\n  steps:\n"
+     "    - run: node ${{ github.action_path }}/scripts/post.mjs\n      shell: bash\n",
+     "scripts/post.mjs"),
+    ("runs:\n  using: composite\n  steps:\n"
+     "    - run: python \"$GITHUB_ACTION_PATH/scripts/post.py\"\n      shell: bash\n",
+     "scripts/post.py"),
+], ids=["node-main", "node-pre", "node-post", "composite-action_path",
+        "composite-GITHUB_ACTION_PATH"])
+def test_workflow_status_publishers_resolves_local_action_entrypoints_from_action_dir(
+        tmp_path: Path, action_yml: str, entry: str):
+    """A local action's `main:` / `pre:` / `post:` entrypoint, and a composite step
+    that runs a script under `github.action_path`, live in the ACTION directory, not
+    the repo root. When that file is what posts the required status, the workflow is
+    still a publisher; resolving it from the root would miss it and keep the status
+    framed as an outside gate."""
+    _write_workflow(tmp_path, "aggregate.yml", """name: Aggregate
+on: pull_request
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/aggregate
+""")
+    action = tmp_path / ".github" / "actions" / "aggregate"
+    (action / Path(entry).parent).mkdir(parents=True)
+    (action / "action.yml").write_text("name: aggregate\n" + action_yml, encoding="utf-8")
+    (action / entry).write_text(
+        "await octokit.rest.repos.createCommitStatus({ context: 'All CI' })\n",
+        encoding="utf-8")
+    pubs = _scan(tmp_path).get("workflow_status_publishers")
+    assert set(pubs) == {".github/workflows/aggregate.yml"}
+    assert "All CI" in pubs[".github/workflows/aggregate.yml"]["text"]
