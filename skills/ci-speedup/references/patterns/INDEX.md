@@ -91,7 +91,6 @@ This order is also the compiled file's order; contributors see `README.md`.
 - OPT63 — Dependency Install with Cache Disabled (MEDIUM, static) — --no-cache installs on persistent runners
 - OPT86 — CI Compiles a Dependency That Ships Prebuilt (HIGH, data-driven) — source builds of wheels or native add-ons
 - OPT91 — The Compile Is the Long Pole and Nobody Profiled It (HIGH, data-driven) — slow compile, profile it first
-- OPT92 — A Job Is a Candidate for a Linux Benchmark (MEDIUM, data-driven) — supported portable work, observed runtime only
 - OPT94 — The .NET SDK Reconciles Unrelated Machine-Wide Workloads (MEDIUM, data-driven) — benchmark a pinned isolated SDK
 ## Category 13 — Hidden Failures and Dead Config
 - OPT64 — Repeated Workflow Attempts From Same Failing Job (LOW, data-driven) — re-runs of the same failing job
