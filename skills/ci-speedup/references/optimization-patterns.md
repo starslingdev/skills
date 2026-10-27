@@ -37,7 +37,7 @@ Checkout · 6. Conditional Execution · 7. Trigger and Scope · 8. Release Workf
 12. Build Caching (Language-Agnostic) · 13. Hidden Failures and Dead Config ·
 14. Structural / Critical-Path Levers
 
-- **Category 1 — Caching** (`OPT1`–): tool installs, build/test caches, dynamic cache keys, and the one pattern pointed the other way — a cache measured to cost more than it saves (`OPT79`).
+- **Category 1 — Caching** (`OPT1`–): tool installs, build/test caches, dynamic cache keys, and the one pattern pointed the other way — a cache measured to cost more than it saves (`OPT79`), NuGet restores placed on a slower Windows disk (`OPT93`).
 - **Category 2 — Redundancy**: duplicate env, repeated setup sequences, redundant build steps, repeated fixed setup across independent small jobs (`OPT77`).
 - **Category 3 — Docker**: sleep-based readiness, over-broad `compose up`.
 - **Category 4 — Parallelization**: needless `needs:` serialization, unsharded long jobs, a test worker count nobody measured (`OPT88`), the slowest platform compiling its own tests (`OPT89`).
@@ -48,7 +48,7 @@ Checkout · 6. Conditional Execution · 7. Trigger and Scope · 8. Release Workf
 - **Category 9 — Queue Times and Concurrency**: missing/!coarse concurrency groups.
 - **Category 10 — Timing Anomalies**: failure-rate / bimodal duration signals (advisory), and the same job measured faster on another runner class (`OPT81`).
 - **Category 11 — Stack-Specific**: turbo task outputs, unstable turbo env keys, type-aware ESLint on a slow lint job (`OPT82`).
-- **Category 12 — Build Caching (language-agnostic)**: uncached compiled-language builds, a dependency compiled from source when a prebuilt package exists (`OPT86`), a compile nobody profiled (`OPT91`).
+- **Category 12 — Build Caching (language-agnostic)**: uncached compiled-language builds, a dependency compiled from source when a prebuilt package exists (`OPT86`), a compile nobody profiled (`OPT91`), a machine-wide .NET SDK reconciling unrelated workloads (`OPT94`).
 - **Category 13 — Hidden Failures and Dead Config**: dead env vars, misconfigured caches.
 - **Category 14 — Structural / Critical-Path Levers** (`OPT70`–`OPT75`, `OPT78`, `OPT83`–`OPT85`, `OPT87`): routed from the measured long pole (see ARCHITECTURE §11), not a flat grep. `OPT85` (tests run in many processes instead of one) and `OPT87` (tests wait on a slow dependency they do not verify) have no router yet: like `OPT74`, they are catalogued for application from the drilled pole's log and are reported as without a detector. `OPT78` is routed by the drill-time leaf detector rather than the structural router; `OPT83` and `OPT84` are routed by structural passes over the drilled poles' step decomposition plus the workflow YAML, not by the log leaves (`OPT84` also follows the step's `package.json` scripts).
 
@@ -902,13 +902,13 @@ title_template: "NuGet restores to a slower disk on Windows runners"
 
 **Not auto-detected yet.** No audit phase emits this entry or claims to have checked it. Apply it manually to the audited repository's logs and comparable job measurements.
 
-**Anti-pattern:** NuGet's effective package and HTTP cache paths sit on a demonstrably slower disk, and cold restore spends measurable time there. Default profile placement alone is not a defect. Establish the actual paths, disks and restore cost from logs; preserve deliberately faster local or NVMe placement.
+**Anti-pattern:** NuGet's effective package and HTTP cache paths sit on a demonstrably slower disk, and cold restore spends measurable time there. Default profile placement alone is not a defect. Logs establish where packages are restored and how long restore takes; whether another disk is faster is established only by the benchmark below. Preserve deliberately faster local or NVMe placement.
 
 **Fix recipe:** on equivalent runner hardware and the same toolchain, benchmark `NUGET_PACKAGES` and `NUGET_HTTP_CACHE_PATH` under runner temp after verifying its disk. Explicitly print the effective paths, verify restore/build/test behavior, and measure cold and warm whole jobs separately. Moving both paths together cannot isolate either path's individual contribution. A cold pilot with remote caching disabled does not predict the production warm path.
 
 If `actions/cache` persists the package cache, change its path and version the cache key while retaining OS, architecture and dependency scoping. Never remotely persist HTTP caches or credentials. Include remote restore/save transfer cost in the comparison; reject a change that shortens restore but lengthens the job.
 
-**Sizing: uncredited.** No detector or sizing model. Report the audited repository's sample sizes, hardware and cache-state exclusions. No billing or production speedup claim follows from a small cold pilot.
+**Sizing: uncredited.** No detector or sizing model. In the finding or PR description of the benchmark, report the audited repository's sample sizes, hardware and cache-state exclusions. No billing or production speedup claim follows from a small cold pilot.
 
 **Risk: MEDIUM.** Changing paths without changing cache keys or validating actual disk placement can make the job slower or restore an incompatible cache.
 
@@ -2684,9 +2684,9 @@ title_template: "Missing `paths`/`paths-ignore` on Expensive Workflows"
 
 **Fix**: Add `paths-ignore` for documentation, markdown files, and other non-code changes. Or use `paths` to restrict to relevant source directories.
 
-**Fail closed:** the always-running verdict must check every detector and intermediate job whose failure can suppress a required suite. Listing them in `needs:` is not an assertion. Accept a skipped suite only after successful detection with a valid explicit unchanged output; reject failures and cancellations, including an unchanged output written before failure. A strict suite-success assertion also rejects an upstream failure that skips the suite.
+**Fail closed:** when a scoped workflow or job is a required check, a job-level `if:` alone is not safe: a failed detector skips the suite, and a skipped required check reads green. Add an always-running verdict job (`if: always()`) that `needs:` the detector, every intermediate job whose failure can suppress a suite, and the suites, and make that verdict the required check. Listing jobs in `needs:` is not an assertion: the verdict must fail unless the detector succeeded AND each suite either succeeded or was skipped because the detector validly reported unchanged (its output exactly `'false'`). Reject failures and cancellations, including an unchanged output written before failure. A strict "every suite succeeded" assertion is right only when a suite is never skipped on purpose; with intentional skips it turns every unchanged PR red. ci-secure's required-checks-skippable fact lists the assertion forms it can verify.
 
-**Required-status-check caveat (the "Pending" landmine)**: if any check this workflow produces is a required status check, do NOT skip it with `paths`/`paths-ignore` (or `branches:` filters / `[skip ci]`) — a workflow skipped by filtering leaves its required check "Pending" and the PR can never merge; official guidance says not to use path or branch filtering on required workflows. The documented-safe shape is a job-level `if:` restating the filter (a skipped job reports Success and satisfies the gate). The no-op twin-workflow (same workflow AND job name, inverse filter) is a community-known workaround, NOT in any current GitHub docs edition. Treat required-status UNKNOWN as required: when branch protection/rulesets are unreadable (the common case on repos you don't admin), assume every check this workflow produces may be required.
+**Required-status-check caveat (the "Pending" landmine)**: if any check this workflow produces is a required status check, do NOT skip it with `paths`/`paths-ignore` (or `branches:` filters / `[skip ci]`) — a workflow skipped by filtering leaves its required check "Pending" and the PR can never merge; official guidance says not to use path or branch filtering on required workflows. GitHub documents a job-level `if:` restating the filter (a skipped job reports Success and satisfies the gate), but on its own it shares the skipped-reads-green hole above; the safe shape is that `if:` plus the fail-closed verdict job as the required check. The no-op twin-workflow (same workflow AND job name, inverse filter) is a community-known workaround, NOT in any current GitHub docs edition. Treat required-status UNKNOWN as required: when branch protection/rulesets are unreadable (the common case on repos you don't admin), assume every check this workflow produces may be required.
 
 **Real-world example (better-auth)**: e2e.yml runs all 8 jobs on docs-only PRs.
 
@@ -4521,7 +4521,7 @@ title_template: "The compile is the long pole and nobody profiled it"
 
 ---
 
-### OPT94 — The .NET SDK Reconciles Unrelated Machine-Wide Workloads
+### OPT94 — The .NET SDK Can Reconcile Unrelated Machine-Wide Workloads
 
 <!-- METADATA
 pattern: OPT94
@@ -4531,12 +4531,12 @@ detector: manual
 risk: MEDIUM
 affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml,global.json"
 fix_strategy: benchmark-isolated-dotnet-sdk
-title_template: "The .NET SDK reconciles unrelated machine-wide workloads"
+title_template: "The .NET SDK can reconcile unrelated machine-wide workloads"
 -->
 
 **Not auto-detected yet.** No audit phase emits this entry or claims to have checked it. Apply it manually using the audited repository's workload-installation logs and whole-job timings.
 
-**Anti-pattern:** installing the required .NET workloads reconciles unrelated machine-wide workloads. Logs must identify that work and its measured cost; a slow setup step or a machine-wide SDK path alone is insufficient.
+**Anti-pattern:** installing the required .NET workloads can reconcile unrelated machine-wide workloads. Logs must identify that work and its measured cost; a slow setup step or a machine-wide SDK path alone is insufficient.
 
 **Fix recipe:** benchmark a pinned SDK installed with `actions/setup-dotnet` and `DOTNET_INSTALL_DIR` under runner temp. Explicitly install and verify the pinned required workloads, selected `dotnet` executable path, SDK version and installation mode. Directory existence does not establish a usable installation. Preserve the build, tests and packaging checks, and state which release paths the comparison actually exercised.
 
@@ -4754,7 +4754,7 @@ title_template: "Dead Workflow Env Vars / Config"
 ## Category 14: Structural / Critical-Path Levers
 
 These patterns are a **different class** from everything above. The catalog
-patterns OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86 and OPT88–OPT91 are *hygiene*: each is a named,
+patterns OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93 and OPT94 are *hygiene*: each is a named,
 locally-checkable defect with
 a mechanical, low-risk fix, detected by matching workflow YAML against the
 catalog. OPT81, like OPT79 and OPT80, is derived from run history rather than matched against YAML, and its A2 advisory is risk MEDIUM. On real repos almost every hygiene hit moves **~0 developer
@@ -4833,7 +4833,7 @@ The deterministic router stops there — it routes on **dominant category alone*
 
 **Fix recipe**: Adopt change-scoped execution for the dominant step, with the mandatory guardrail below. E.g. `turbo run build test --filter='...[origin/${{ github.base_ref }}]'`, `nx affected -t build test --base=origin/${{ github.base_ref }}`, or `vitest --changed origin/${{ github.base_ref }}`. The base must be the **merge base**, not `HEAD~1` — and it must EXIST in the clone: the default `actions/checkout` is a shallow, single-branch clone where `origin/${{ github.base_ref }}` does not resolve. Add `fetch-depth: 0` (or a targeted `git fetch origin ${{ github.base_ref }}` step) to the scoped job's checkout (an explicit exception to OPT28's shallow-checkout guidance). turbo/nx fail loudly on an unresolvable base, but `vitest --changed` against a missing ref can resolve to "no changed files" and exit 0 green — exactly the false pass Mandatory Guardrail #1 exists to prevent.
 
-**Fail closed:** the always-running verdict must check every detector and intermediate job whose failure can suppress a required suite. Listing them in `needs:` is not an assertion. Accept a skipped suite only after successful detection with a valid explicit unchanged output; reject failures and cancellations, including an unchanged output written before failure. A strict suite-success assertion also rejects an upstream failure that skips the suite.
+**Fail closed:** when scoping is done by a detector job whose output gates other jobs via `needs:`, an always-running verdict job must check the detector and every intermediate job whose failure can suppress a required suite. Listing them in `needs:` is not an assertion. Accept a skipped suite only after successful detection with a valid explicit unchanged output; reject failures and cancellations, including an unchanged output written before failure. A strict suite-success assertion is right only when a suite is never skipped on purpose; with intentional skips it turns every unchanged PR red. In-job affected-only runners (`turbo --filter`, `nx affected`, `vitest --changed`) need no verdict job, but the job must fail when the changed-set computation fails — never fall back to "nothing changed".
 
 **Mandatory guardrail (this pattern is invalid without it)**:
 

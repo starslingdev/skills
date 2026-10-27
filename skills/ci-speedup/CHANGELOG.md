@@ -13,7 +13,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
-- **2026-10-26** — Add manual OPT93 NuGet disk-placement and OPT94 isolated .NET SDK guidance; strengthen OPT32/70 fail-closed verdict guidance and OPT79 whole-job validation. Catalog: 89 → 91 entries.
+- **2026-10-26** — Add manual OPT93 NuGet disk-placement and OPT94 isolated .NET SDK guidance. Catalog: 89 → 91 entries.
 
 - **2026-10-22** — **Eval sessions now record how much of the reference
   material the agent read, with a committed baseline.** Every eval run records
@@ -892,6 +892,8 @@ unversioned and updates by reinstall from `main`.
   re-rendered. (#72)
 
 ### Changed
+
+- **2026-10-26** — Strengthen OPT32/70 fail-closed verdict guidance and OPT79 whole-job validation.
 
 - **2026-10-22** — **The pattern catalog is now one file per pattern plus an
   index.** An agent reviewing a finding reads that one pattern's file instead

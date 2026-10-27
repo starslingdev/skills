@@ -6,15 +6,15 @@ detector: manual
 risk: MEDIUM
 affected_files: '.github/workflows/*.yml,.github/workflows/*.yaml,global.json'
 fix_strategy: benchmark-isolated-dotnet-sdk
-title_template: 'The .NET SDK reconciles unrelated machine-wide workloads'
+title_template: 'The .NET SDK can reconcile unrelated machine-wide workloads'
 category: 12
 ---
 
-# OPT94 — The .NET SDK Reconciles Unrelated Machine-Wide Workloads
+# OPT94 — The .NET SDK Can Reconcile Unrelated Machine-Wide Workloads
 
 **Not auto-detected yet.** No audit phase emits this entry or claims to have checked it. Apply it manually using the audited repository's workload-installation logs and whole-job timings.
 
-**Anti-pattern:** installing the required .NET workloads reconciles unrelated machine-wide workloads. Logs must identify that work and its measured cost; a slow setup step or a machine-wide SDK path alone is insufficient.
+**Anti-pattern:** installing the required .NET workloads can reconcile unrelated machine-wide workloads. Logs must identify that work and its measured cost; a slow setup step or a machine-wide SDK path alone is insufficient.
 
 **Fix recipe:** benchmark a pinned SDK installed with `actions/setup-dotnet` and `DOTNET_INSTALL_DIR` under runner temp. Explicitly install and verify the pinned required workloads, selected `dotnet` executable path, SDK version and installation mode. Directory existence does not establish a usable installation. Preserve the build, tests and packaging checks, and state which release paths the comparison actually exercised.
 
