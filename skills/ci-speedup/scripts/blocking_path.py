@@ -9568,6 +9568,34 @@ def _data_driven_for_pole(pole: dict[str, Any],
     return out
 
 
+def _windows_setup_guidance(f: dict[str, Any], catalog_url: str) -> str:
+    """Optional manual benchmark pointer; never changes routing or sizing."""
+    if f.get("pattern") != "OPT72":
+        return ""
+    samples = f.get("runner_labels")
+    if not isinstance(samples, list) or not samples:
+        return ""
+    for labels in samples:
+        if not isinstance(labels, list) or not any(
+                re.fullmatch(r"windows(?:-[a-z0-9.]+)*", str(label), re.I)
+                for label in labels):
+            return ""
+        if any(re.match(r"(?:ubuntu|macos|linux)(?:-|$)", str(label), re.I)
+               for label in labels):
+            return ""
+    step = str((f.get("decomposition") or {}).get("dominant_step") or "")
+    if re.search(r"setup-dotnet|dotnet\s+workload\s+install|install\s+\.net\s+workloads?", step, re.I):
+        target, anchor, label = ("OPT94", "opt94--the-net-sdk-can-reconcile-unrelated-machine-wide-workloads",
+                                 "isolated .NET SDK setup")
+    elif re.search(r"(?:nuget|dotnet)\s+restore|restore\s+(?:nuget|\.net)(?:\s+packages)?", step, re.I):
+        target, anchor, label = ("OPT93", "opt93--nuget-restores-to-a-slower-disk-on-windows-runners",
+                                 "NuGet cache placement")
+    else:
+        return ""
+    return (f"- **Windows setup benchmark:** [{target}]({catalog_url}#{anchor}) "
+            f"describes a manual benchmark for {label}; no additional credit is assigned.")
+
+
 def _structural_block(findings: list[dict[str, Any]],
                       catalog_url: str) -> list[str]:
     """Render the structural-track finding(s) (OPT70–75) routed to this pole - LOUD, as
@@ -9594,6 +9622,9 @@ def _structural_block(findings: list[dict[str, Any]],
             out.append(f"- **Rollout:** {_flatten_cell(str(f['rollout']))}")
         if f.get("failure_mode"):
             out.append(f"- **Failure mode:** {_flatten_cell(str(f['failure_mode']))}")
+        guidance = _windows_setup_guidance(f, catalog_url)
+        if guidance:
+            out.append(guidance)
         anchor = f.get("fix_recipe_anchor")
         url = f"{catalog_url}#{anchor}" if anchor else catalog_url
         out += [f"- **Catalog (background + fix recipe):** {url}", ""]
@@ -9632,6 +9663,9 @@ def _sibling_structural_annotation(
             out.append(f"- **Rollout:** {_flatten_cell(str(f['rollout']))}")
         if f.get("failure_mode"):
             out.append(f"- **Failure mode:** {_flatten_cell(str(f['failure_mode']))}")
+        guidance = _windows_setup_guidance(f, catalog_url)
+        if guidance:
+            out.append(guidance)
         anchor = f.get("fix_recipe_anchor")
         url = f"{catalog_url}#{anchor}" if anchor else catalog_url
         out += [f"- **Catalog (background + fix recipe):** {url}", ""]

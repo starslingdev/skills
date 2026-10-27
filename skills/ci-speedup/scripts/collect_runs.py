@@ -19000,6 +19000,10 @@ def _detect_structural_candidates(
                 evidence, me, assumption, decomp=decomp, required_status=req_status,
                 affected_jobs=([check_name] if mapping is None else None),
             )
+            if pat == "OPT72" and mapping is not None:
+                # Preserve every sampled runner, including missing labels; a mixed
+                # or unknown population cannot support Windows-only guidance.
+                f["runner_labels"] = [j.get("labels") or [] for j in job_inst]
             # Disambiguate per-check rows: append the target check so two levers on
             # different checks (or the speed-up + de-scope on one) read distinctly.
             f["title"] = f"{_STRUCTURAL_META[pat]['title']} — `{check_name}`"

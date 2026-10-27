@@ -72,6 +72,7 @@ TRIAGE_ALLOWLIST = {
     "report uses ASCII hyphens only (no em/en/figure/bar/minus dash)": AUTO_SEED,                   # check_no_typographic_dashes
     "code fences are balanced (no stray ``` breaking out of a fence)": AUTO_SEED,                   # check_fences_balanced
     "every rendered finding pattern exists in the findings JSON": AUTO_SEED,                        # check_rendered_patterns_exist
+    "Windows setup benchmark pointers match their measured OPT72 card": AUTO_SEED,
     "every data-driven finding carries a measured signal (no unsupported claims)": AUTO_SEED,       # check_data_driven_have_signal
     "report drills every gating pole, each with a hand-off prompt": AUTO_SEED,                      # check_speed_poles_complete
     "aggregation-gate poles tell the upstream story, never an optimize-this prompt": AUTO_SEED,    # check_aggregation_gate_poles_never_prescribe
@@ -179,6 +180,7 @@ CHECK_CLASS = {
     "report uses ASCII hyphens only (no em/en/figure/bar/minus dash)": "other",           # pure formatting, no semantic root-cause fits
     "code fences are balanced (no stray ``` breaking out of a fence)": "other",           # structural corruption guard, no semantic root-cause fits
     "every rendered finding pattern exists in the findings JSON": "fabricated-or-unsupported-finding",  # rendered claim not backed by findings
+    "Windows setup benchmark pointers match their measured OPT72 card": "fabricated-or-unsupported-finding",
     "every data-driven finding carries a measured signal (no unsupported claims)": "estimated-not-measured",  # exact match
     "report drills every gating pole, each with a hand-off prompt": "missing-second-pole-or-finding",  # a required pole/finding is missing
     "aggregation-gate poles tell the upstream story, never an optimize-this prompt": "prescribed-a-fix",  # an "optimize this step" prompt over a `needs:`-only success sink that runs no work
