@@ -11,7 +11,7 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
 
 ## [Unreleased]
 
-- **2026-10-27** — **Added** (registry `ci-score-v0.1.5`, OD-CS23): the
+- **2026-10-27** — **Added** (registry `ci-score-v0.1.6`, OD-CS24, on top of `ci-score-v0.1.5`): the
   pinning check credits GitHub's workflow lockfile
   (`.github/workflows/actions.lock`, public preview 2026-10-14). The
   lockfile records the exact commit each action runs at while the YAML keeps
