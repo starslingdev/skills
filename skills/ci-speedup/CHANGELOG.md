@@ -13,6 +13,8 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-10-27** — Windows OPT72 cards can point to the manual NuGet cache-placement or isolated .NET SDK benchmark when their measured dominant step matches. Routing and sizing are unchanged; the report verifier rejects misplaced or unsupported pointers.
+
 - **2026-10-26** — Add manual OPT93 NuGet disk-placement and OPT94 isolated .NET SDK guidance. Catalog: 89 → 91 entries.
 
 - **2026-10-22** — **Eval sessions now record how much of the reference

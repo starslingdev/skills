@@ -2052,6 +2052,66 @@ def check_skill_commit_provenance(report: str, skill_repo: Path | None) -> Check
         "report so it carries a `scripts tree` token)"))
 
 
+def check_windows_setup_guidance(report: str, findings_path: Path | None) -> Check:
+    """Independently validate manual pointers against their own structural card."""
+    name = "Windows setup benchmark pointers match their measured OPT72 card"
+    for glyph in _TYPOGRAPHIC_DASHES:
+        report = report.replace(glyph, "-")
+    marker = "- **Windows setup benchmark:**"
+    if findings_path is None:
+        return Check(name, marker not in report, "pointer requires findings JSON")
+    try:
+        data = json.loads(findings_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return Check(name, False, f"could not read findings JSON: {exc}")
+    findings = [f for f in _as_list(_as_dict(data).get("findings")) if isinstance(f, dict)]
+    blocks = re.findall(
+        r"\*\*📐 (?:Structural root-cause|Sibling matrix leg)[^\n]*\n"
+        r"(?:(?!\*\*📐 |\n##)[\s\S])*?- \*\*Catalog \(background \+ fix recipe\):\*\*[^\n]*",
+        report)
+    seen = 0
+    for block in blocks:
+        lines = [line for line in block.splitlines() if marker in line]
+        seen += len(lines)
+        if not lines:
+            continue
+        if len(lines) != 1:
+            return Check(name, False, "duplicate benchmark pointer")
+        line = lines[0]
+        matched = False
+        for f in findings:
+            title = _flatten_cell(str(f.get("title") or f.get("pattern") or ""))
+            for glyph in _TYPOGRAPHIC_DASHES:
+                title = title.replace(glyph, "-")
+            if f.get("pattern") != "OPT72" or f"OPT72 · {title}**" not in block.splitlines()[0]:
+                continue
+            samples = f.get("runner_labels")
+            if not isinstance(samples, list) or not samples:
+                continue
+            if any(not isinstance(labels, list) or not any(
+                    re.fullmatch(r"windows(?:-[a-z0-9.]+)*", str(label), re.I) for label in labels)
+                    or any(re.match(r"(?:ubuntu|macos|linux)(?:-|$)", str(label), re.I) for label in labels)
+                    for labels in samples):
+                continue
+            step = str(_as_dict(f.get("decomposition")).get("dominant_step") or "")
+            if re.search(r"setup-dotnet|dotnet\s+workload\s+install|install\s+\.net\s+workloads?", step, re.I):
+                target, anchor, label = ("OPT94", "opt94-the-net-sdk-can-reconcile-unrelated-machine-wide-workloads", "isolated .NET SDK setup")
+            elif re.search(r"(?:nuget|dotnet)\s+restore|restore\s+(?:nuget|\.net)(?:\s+packages)?", step, re.I):
+                target, anchor, label = ("OPT93", "opt93-nuget-restores-to-a-slower-disk-on-windows-runners", "NuGet cache placement")
+            else:
+                continue
+            url = block.split("- **Catalog (background + fix recipe):** ", 1)[1].strip().split("#", 1)[0]
+            expected = (f"{marker} [{target}]({url}#{anchor}) describes a manual benchmark "
+                        f"for {label}; no additional credit is assigned.")
+            if line == expected:
+                matched = True
+        if not matched:
+            return Check(name, False, "benchmark pointer lacks matching Windows .NET OPT72 evidence")
+    if seen != report.count(marker):
+        return Check(name, False, "benchmark pointer outside its structural card")
+    return Check(name, True, "benchmark pointers remain uncredited and evidence-matched")
+
+
 def check_rendered_patterns_exist(report: str, findings_path: Path | None) -> Check:
     """Every OPT-id rendered as a finding (the Also-noticed appendix) must be a real
     pattern in the findings JSON - the report never invents a finding. The
@@ -13888,6 +13948,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_no_domain_leakage(report),
         check_skill_commit_provenance(report, skill_repo),
         check_rendered_patterns_exist(report, findings_path),
+        check_windows_setup_guidance(report, findings_path),
         check_data_driven_have_signal(findings_path),
         check_speed_poles_complete(report, findings_path),
         check_aggregation_gate_poles_never_prescribe(report, findings_path),
