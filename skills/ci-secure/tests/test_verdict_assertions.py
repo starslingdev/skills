@@ -580,5 +580,44 @@ class WorkflowStatusFunctionTests(unittest.TestCase):
                 self.assertNotEqual(va.analyze(timed_gate(cond), "verdict")[0], "pass")
 
 
+
+class RunnerSemanticsTests(unittest.TestCase):
+    """Values the runner fixes, not the workflow, cannot carry an assertion."""
+
+    def test_runner_default_variables_cannot_carry_the_result(self):
+        # GitHub sets GITHUB_* and RUNNER_* itself; a workflow `env:` of the
+        # same name does not change what the shell sees.
+        for name in ("GITHUB_ACTIONS", "RUNNER_OS"):
+            jobs = graph(f'test "${name}" = true')
+            jobs["verdict"]["env"] = {name: "${{ needs.suite.result == 'success' }}"}
+            with self.subTest(name=name):
+                self.assertNotEqual(va.analyze(jobs, "verdict")[0], "pass")
+
+    def test_array_interpolated_into_a_script_is_not_its_items(self):
+        script = "\n".join(f'test "${{{{ needs.*.result }}}}" != "[\'{state}\']"'
+                           for state in ("failure", "cancelled", "skipped"))
+        self.assertNotEqual(va.analyze(graph(script), "verdict")[0], "pass")
+
+    def test_step_status_condition_is_not_a_dependency_check(self):
+        # At step scope success() reads earlier steps, so this never runs.
+        jobs = graph("exit 1")
+        jobs["verdict"]["steps"][0]["if"] = "!success()"
+        self.assertNotEqual(va.analyze(jobs, "verdict")[0], "pass")
+
+    def test_container_shell_is_not_assumed(self):
+        # A job container may have no bash; GitHub then runs `sh`.
+        jobs = graph(STRICT)
+        jobs["verdict"]["container"] = "debian:stable-slim"
+        self.assertNotEqual(va.analyze(jobs, "verdict")[0], "pass")
+
+    def test_earlier_step_environment_writes_void_the_suite_allowance(self):
+        jobs = graph("pytest -q")
+        jobs["verdict"]["steps"].insert(0, {"run": 'echo "PYTEST_ADDOPTS=--collect-only" >> "$GITHUB_ENV"'})
+        self.assertNotEqual(fact(jobs), "pass")
+        for source in ("go test -count=0 ./...", "go test -count 0 ./...", "pytest @args.txt"):
+            with self.subTest(source=source):
+                self.assertNotEqual(fact(graph(source)), "pass")
+
+
 if __name__ == "__main__":
     unittest.main()

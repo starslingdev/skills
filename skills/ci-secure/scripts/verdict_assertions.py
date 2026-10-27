@@ -380,6 +380,9 @@ def run_step(source, env, results, outputs, direct, shell="bash"):
         if STEP_STATUS_FUNCTION.search(match[1]):
             raise Unknown("step status function is not a dependency result assertion")
         value = expression(match[1], results, outputs, direct)
+        if isinstance(value, list):
+            # An array interpolates as `Array`, not as its items.
+            raise Unknown("array interpolated into a script")
         return str(value).lower() if isinstance(value, bool) else str(value)
 
     source = re.sub(r"\$\{\{(.*?)\}\}", substitute, str(source), flags=re.S)
@@ -401,8 +404,10 @@ def run_step(source, env, results, outputs, direct, shell="bash"):
     # evaluation, expansion, pipes, command substitution or redirections.
     if any(key in env for key in ("BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "PATH")):
         raise Unknown("shell behavior overridden by environment")
+    # The runner sets GITHUB_* and RUNNER_* itself; a workflow `env:` of the
+    # same name does not reach the shell, so those names stay unresolved.
     resolved_env = {key: re.sub(r"\$\{\{(.*?)\}\}", substitute, str(value), flags=re.S)
-                    for key, value in env.items()}
+                    for key, value in env.items() if not re.match(r"(?:GITHUB|RUNNER)_", str(key))}
     if len(source.splitlines()) > 32:
         raise Unknown("verdict command limit")
     if shell not in ("bash", "sh"):
@@ -472,7 +477,8 @@ def verdict_success(job, results, outputs):
         # GitHub-hosted Linux and macOS images default `run:` to bash. Any
         # other label (self-hosted, larger runners, Windows) is not inferred.
         hosted_unix = isinstance(runner, str) and re.fullmatch(r"(?:ubuntu|macos)-[\w.-]+", runner)
-        default = "bash" if hosted_unix else "unknown"
+        # A job container may lack bash, and GitHub then runs `sh`.
+        default = "bash" if hosted_unix and not job.get("container") else "unknown"
         shell = step.get("shell", job.get("defaults", {}).get("run", {}).get("shell", default))
         if shell not in ("bash", "sh"):
             literal = str(step.get("run", "")).strip()

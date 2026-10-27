@@ -538,8 +538,11 @@ validate a quoted value against the exact `^(true|false)$` expression
 values are not evaluated as commands. `else`/`elif`, nesting, loops, pipes,
 redirections, command substitution, unquoted variables and patterns are
 unmeasured. A `run:` step without `shell:` is read as bash only on a
-GitHub-hosted `ubuntu-*` or `macos-*` label; on any other runner set
-`shell: bash` on the step.
+GitHub-hosted `ubuntu-*` or `macos-*` label without a job `container:`; on
+any other runner set `shell: bash` on the step. Workflow `env:` entries named
+`GITHUB_*` or `RUNNER_*` are ignored, because the runner sets those itself,
+and an array interpolated into a script (it renders as `Array`) is
+unmeasured.
 Strict suite-success assertions reject skipped suites. An intentional skip
 requires successful detection and an explicit valid boolean output; a literal
 false output written before failure is not a valid no-op, and a computed
@@ -587,7 +590,9 @@ listed execution flags (for example `-k`/`-m`/`-n`/`-x` for pytest, `-race`/
 `-count`/`-timeout` for Go, `--workspace`/`-p`/`--all-features` for Cargo,
 paths and `--coverage`/`--ci` after `--` for the Node runners; Cargo's
 positional name filter and other Node pass-through flags can select nothing
-and still exit 0, so they are not exempt). It requires fatal job and step
+and still exit 0, so they are not exempt, as are `go test -count=0` and a
+pytest `@file` argument; a job whose earlier `run:` writes `$GITHUB_ENV` or
+`$GITHUB_PATH` gets no exemption). It requires fatal job and step
 results, a stock shell, and no environment overrides. Help, version,
 collection and listing modes, compile-only and test-filter flags that can
 select nothing (`-run`, `--no-run`, `--if-present`), negation, shell operators

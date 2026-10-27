@@ -233,6 +233,13 @@ entries are dated (UTC). Format loosely follows
   - Cargo's positional test-name filter and Node pass-through flags other
     than `--coverage`/`--ci` (for example `--passWithNoTests`) no longer
     count as an ordinary suite, since they can run nothing and exit 0.
+  - Values the runner fixes cannot carry an assertion: a workflow `env:`
+    named `GITHUB_*`/`RUNNER_*` is ignored (the runner sets those), an
+    array such as `needs.*.result` interpolated into a script is
+    unmeasured (it renders as `Array`), and a summary job in a `container:`
+    is not assumed to have bash. A job whose earlier `run:` writes
+    `$GITHUB_ENV`/`$GITHUB_PATH`, and `go test -count=0` or a pytest
+    `@file` argument, no longer count as an ordinary suite.
 
 - **2026-10-22** — **The five eval scenarios now run at the same time.** The
   shared eval runner starts every session at once (at most five; `--jobs N` or

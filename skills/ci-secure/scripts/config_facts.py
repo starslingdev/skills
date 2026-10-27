@@ -2014,7 +2014,7 @@ _SUITE_FLAGS = {
               ("--features=", "--package=", "--target=", "-j")),
     "node": (set(), set(), ()),
 }
-_SUITE_ARGUMENT = re.compile(r"[\w.:/@*\[\]+=,-]+")
+_SUITE_ARGUMENT = re.compile(r"(?!@)[\w.:/@*\[\]+=,-]+")
 
 
 def _runs_own_suite(line: str) -> bool:
@@ -2054,6 +2054,8 @@ def _runs_own_suite(line: str) -> bool:
         word = rest[i]
         if word in switches:
             i += 1
+        elif word in ("-count=0", "-count=00") or (word == "-count" and rest[i + 1:i + 2] in (["0"], ["00"])):
+            return False  # `go test -count=0` runs nothing and exits 0
         elif word in valued and i + 1 < len(rest) and rest[i + 1] and not rest[i + 1].startswith("-"):
             i += 2
         elif word.startswith("-") and any(word.startswith(p) and len(word) > len(p) for p in prefixed):
@@ -2144,6 +2146,11 @@ def _required_checks_skippable(
                     and _job.get("continue-on-error") in (None, False)
                     and step.step.get("continue-on-error") in (None, False)
                     and not step.gated and not step.background and not step.in_parallel_group
+                    for step in _scan()._iter_job_steps(_job)
+                ) or _needs_of(_job) and any(
+                    # An earlier `run:` can rewrite the suite's environment
+                    # or PATH for every later step: no allowance then.
+                    re.search(r"GITHUB_(?:ENV|PATH)", str(step.step.get("run", "")))
                     for step in _scan()._iter_job_steps(_job)
                 ):
                     assertion, evidence = _verdict_assertions().analyze(jobs, key, doc)
