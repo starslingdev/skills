@@ -1162,7 +1162,7 @@ def _setup_cache_state(action: str, ref: str, with_in: dict[str, Any],
     return "off"
 
 
-_BOM = "﻿"
+_BOM = chr(0xFEFF)   # built at runtime: no invisible character in the source
 
 
 def _root_package_json(root: Path) -> tuple[Any, str | None]:
