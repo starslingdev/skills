@@ -15608,25 +15608,27 @@ def _repo_published_required(
     req_names: "frozenset[str] | set[str]",
     status_publishers: "dict[str, dict[str, Any]] | None",
 ) -> frozenset[str]:
-    """The required contexts this repo plausibly PUBLISHES ITSELF (issue #119): a
-    workflow that posts commit statuses (scan.py's `workflow_status_publishers` — its
-    YAML, a local action, or a repo-local script it runs calls the statuses API) also
-    contains the context's literal name. Such a context (an in-repo `All CI`
+    """The required contexts this repo PUBLISHES ITSELF (issue #119): a workflow that
+    posts commit statuses (scan.py's `workflow_status_publishers` — its YAML, a local
+    action, or a repo-local script it runs calls the statuses API) posts exactly this
+    context as a literal, or (when a publisher builds its context at run time) holds
+    exactly this name as a string literal. Such a context (an in-repo `All CI`
     aggregate) names no job and has no `needs:` edge to the tests it waits on, so a
-    job-name mismatch alone must not prove it is an outside gate. Conservative by
-    design: a false match only leaves required reachability unresolved (a best-guess
-    pole), it never claims a check gates or skips the merge. Which jobs the publisher
-    waits on is not traced."""
-    if not req_names or not status_publishers:
+    job-name mismatch alone must not prove it is an outside gate. A name that merely
+    appears in a publisher (a title, a comment, the checks an aggregator waits on) is
+    not matched: a false match would un-scope a correctly scoped gate. Which jobs the
+    publisher waits on is not traced."""
+    if not req_names or not isinstance(status_publishers, dict) or not status_publishers:
         return frozenset()
-    texts = [str((p or {}).get("text") or "") for p in status_publishers.values()
-             if isinstance(p, dict)]
-    out: set[str] = set()
-    for r in req_names:
-        pat = _re.compile(r"(?<![\w-])" + _re.escape(str(r)) + r"(?![\w-])")
-        if any(pat.search(t) for t in texts):
-            out.add(r)
-    return frozenset(out)
+    posted: set[str] = set()
+    for p in status_publishers.values():
+        if not isinstance(p, dict):
+            continue
+        for key in ("contexts", "names"):
+            vals = p.get(key)
+            if isinstance(vals, list):
+                posted.update(str(v).strip() for v in vals)
+    return frozenset(r for r in req_names if str(r).strip() in posted)
 
 
 def _required_reachability_unresolved(

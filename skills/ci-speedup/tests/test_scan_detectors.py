@@ -5138,10 +5138,10 @@ jobs:
 """)
     pubs = _scan(tmp_path).get("workflow_status_publishers")
     assert set(pubs) == {".github/workflows/aggregate.yml", ".github/workflows/script.yml"}
-    assert "All CI" in pubs[".github/workflows/aggregate.yml"]["text"]
+    assert pubs[".github/workflows/aggregate.yml"]["contexts"] == ["All CI"]
     script = pubs[".github/workflows/script.yml"]
     assert ".github/scripts/aggregate.js" in script["sources"]
-    assert "Script CI" in script["text"]
+    assert script["contexts"] == ["Script CI"] and "names" not in script
 
 
 @pytest.mark.parametrize("action_yml,entry", [
@@ -5181,4 +5181,90 @@ jobs:
         encoding="utf-8")
     pubs = _scan(tmp_path).get("workflow_status_publishers")
     assert set(pubs) == {".github/workflows/aggregate.yml"}
-    assert "All CI" in pubs[".github/workflows/aggregate.yml"]["text"]
+    assert pubs[".github/workflows/aggregate.yml"]["contexts"] == ["All CI"]
+
+
+def test_workflow_status_publishers_follows_script_imports(tmp_path: Path):
+    """The script a workflow runs often imports a helper that posts the status
+    (`require('./lib/post.js')`, relative to the SCRIPT's folder). Following only the
+    first script would miss the publisher and keep the status an outside gate."""
+    _write_workflow(tmp_path, "aggregate.yml", """name: Aggregate
+on: pull_request
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - run: node .github/scripts/aggregate.js
+""")
+    lib = tmp_path / ".github" / "scripts" / "lib"
+    lib.mkdir(parents=True)
+    (lib.parent / "aggregate.js").write_text(
+        "const post = require('./lib/post.js')\npost('All CI')\n", encoding="utf-8")
+    (lib / "post.js").write_text(
+        "module.exports = (ctx) => octokit.rest.repos.createCommitStatus({ context: ctx })\n",
+        encoding="utf-8")
+    pubs = _scan(tmp_path).get("workflow_status_publishers")
+    assert set(pubs) == {".github/workflows/aggregate.yml"}
+    assert ".github/scripts/lib/post.js" in pubs[".github/workflows/aggregate.yml"]["sources"]
+    # The context is passed in at run time, so the literal fallback carries the name.
+    import collect_runs as cr
+    assert cr._repo_published_required({"All CI", "Lint"}, pubs) == {"All CI"}
+
+
+def test_workflow_status_publishers_keeps_context_name_past_the_size_cap(tmp_path: Path):
+    """A bundled entrypoint (`dist/index.js`) is often over the per-source cap. When the
+    context literal sits past the cap, the stored text must still carry it; otherwise
+    the workflow is recorded as a publisher but collect cannot match the name, and the
+    status silently falls back to an outside gate."""
+    import collect_runs as cr
+    _write_workflow(tmp_path, "aggregate.yml", """name: Aggregate
+on: pull_request
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - run: node dist/index.js
+""")
+    (tmp_path / "dist").mkdir()
+    (tmp_path / "dist" / "index.js").write_text(
+        "octokit.rest.repos.createCommitStatus(x);\n" + ("var a=1;" * 40_000)
+        + "\nconst CONTEXT = 'All CI';\n", encoding="utf-8")
+    pubs = _scan(tmp_path).get("workflow_status_publishers")
+    assert set(pubs) == {".github/workflows/aggregate.yml"}
+    assert len(json.dumps(pubs)) < 400_000
+    assert cr._repo_published_required({"All CI"}, pubs) == {"All CI"}
+
+
+def test_repo_published_required_matches_posted_context_not_any_mention(tmp_path: Path):
+    """A required name that merely APPEARS in a status-posting workflow (its title, a
+    comment, the list of checks an aggregator waits on) is not posted by it. Counting
+    it would un-scope a correctly scoped gate (an external `Vercel` app check next to
+    a real `Test` job) or relabel a CLA bot as repo-published. Only the context the
+    workflow actually posts, a literal `context` value, counts."""
+    import collect_runs as cr
+    _write_workflow(tmp_path, "preview.yml", """name: Deploy preview to Vercel
+on: pull_request
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run build  # runs on ci
+      - run: gh api repos/${{ github.repository }}/statuses/${{ github.sha }} -f context='Preview' -f state=success
+""")
+    _write_workflow(tmp_path, "aggregate.yml", """name: Aggregate
+on: pull_request
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const waitFor = ['Test', 'license/cla']
+            await github.rest.repos.createCommitStatus({ ...context.repo,
+              sha: context.sha, state: 'success', context: "All CI" })
+""")
+    pubs = _scan(tmp_path).get("workflow_status_publishers")
+    assert set(pubs) == {".github/workflows/preview.yml", ".github/workflows/aggregate.yml"}
+    req = {"Vercel", "Test", "license/cla", "ci", "build", "All CI", "Preview"}
+    assert cr._repo_published_required(req, pubs) == {"All CI", "Preview"}

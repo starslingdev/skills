@@ -2969,9 +2969,14 @@ consumes it:
 - **A status the repo posts itself is not an outside gate (issue #119).** scan.py records
   `workflow_status_publishers`: each workflow whose YAML, local action, or repo-local script
   posts a commit status (a `repos/…/statuses/<sha>` call, `createCommitStatus`, a known
-  status action), with those sources' text. A required context whose literal name appears
-  there (`_repo_published_required`) is an in-repo aggregate that may wait on any job with
-  no `needs:` edge. The sampler never calls the suite unsatisfiable on its account
+  status action), with the literal contexts those sources post (`contexts`). Only when a
+  context is built at run time does it keep the sources' string literals (`names`) as a
+  looser fallback; no raw source text is stored. Local-action entrypoints resolve from the
+  action's folder, and scripts are followed transitively (bounded). A required context
+  equal to one of those (`_repo_published_required`) is an in-repo aggregate that may wait
+  on any job with no `needs:` edge. A name that merely appears in a publisher (its title,
+  a comment, the checks an aggregator waits on) does not count: that would un-scope a
+  correctly scoped gate. The sampler never calls the suite unsatisfiable on its account
   (`required_checks_repo_published`), `_required_suite_all_external` returns False, and
   when it names no job (`_required_reachability_unresolved`) the scoper stays inert and
   the structural stamp says `unknown`, never `not-required`. The pole is an `unresolved`

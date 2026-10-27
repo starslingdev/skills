@@ -1198,12 +1198,14 @@ unversioned and updates by reinstall from `main`.
   statuses (through the statuses API, `createCommitStatus`, or a known status
   action, in the workflow, a local action, or a repo-local script it runs; a
   local action's own entrypoint, such as its `main:` script or a script its
-  composite steps run from the action's folder, is looked up in that folder). A
-  required context named in one of them is never counted external: the gate
+  composite steps run from the action's folder, is looked up in that folder, and
+  a script's own imports are followed). A required context one of them posts is
+  never counted external: the gate
   stays an unresolved best guess, the spine is not narrowed, no check is called
   non-required on its account, and the report names the status. Which jobs the
-  publisher waits on is not traced. A gate no workflow names (a CLA bot, a
-  security app) still classifies as external.
+  publisher waits on is not traced. A name that only appears in such a
+  workflow, such as its title or the list of checks an aggregator waits on, does
+  not count, so a CLA bot or a deploy app's status still classifies as external.
 
 - **2026-10-21** — **The "unnecessary `needs:`" finding (OPT21) no longer
   tells a team to remove a deliberate gate, or credits a saving for it.** A job

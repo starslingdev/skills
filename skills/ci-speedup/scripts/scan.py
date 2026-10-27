@@ -5194,7 +5194,66 @@ _LOCAL_SCRIPT_REF_RE = re.compile(
 _ACTION_PATH_SCRIPT_REF_RE = re.compile(
     r"(?:\$\{\{\s*github\.action_path\s*\}\}|\$\{?GITHUB_ACTION_PATH\}?)/"
     r"((?:[\w.-]+/)*[\w.-]+\.(?:js|mjs|cjs|ts|mts|cts|py|sh|bash|rb))\b")
+# The context a status call POSTS, written as a literal: `context: 'All CI'`,
+# `"context": "All CI"`, `context="All CI"` (a Python kwarg), `-f context='All CI'` /
+# `-f context=CI` (gh api), `-f "context=All CI"`, an unquoted YAML action input
+# (`context: All CI`), or go-github's `Context: github.String("All CI")`.
+_STATUS_CONTEXT_LITERAL_RES = (
+    re.compile(r"\bcontext['\"]?\s*[:=]\s*(['\"`])([^'\"`\n]{1,200})\1", re.IGNORECASE),
+    re.compile(r"['\"]context=([^'\"\n]{1,200})['\"]", re.IGNORECASE),
+    re.compile(r"(?<![\w.])context=([^\s'\"`\\;&|)]{1,200})", re.IGNORECASE),
+    re.compile(r"^[ \t]*context:[ \t]*([^\s'\"`#{\[|>][^#\n]{0,199}?)[ \t]*$",
+               re.IGNORECASE | re.MULTILINE),
+    re.compile(r"\bContext:\s*github\.\w+\(\s*\"([^\"\n]{1,200})\""),
+)
+# A context set from something that is not a literal (`context: ctx`,
+# `context: CONTEXT }`, `context: `CI / ${x}``), or an action whose context input is
+# not called `context` (ouzi-dev/commit-status-updater's `name:`). The posted name
+# can't be read, so the publisher's string literals are kept to match against.
+_STATUS_CONTEXT_DYNAMIC_RE = re.compile(
+    r"\bcontext['\"]?\s*[:=]\s*(?:[A-Za-z_][\w.\[\]]*\s*(?:[,})]|$)|`[^`\n]*\$\{)"
+    r"|ouzi-dev/commit-status-updater@",
+    re.IGNORECASE | re.MULTILINE)
+# String literals (quoted, or a YAML scalar value) a dynamic publisher's sources hold.
+_STRING_LITERAL_RE = re.compile(r"(['\"`])([^'\"`\n\\]{1,200})\1")
+_YAML_SCALAR_RE = re.compile(
+    r"^[ \t]*-?[ \t]*[\w.-]+:[ \t]+([^\s'\"`#{\[|>&*!][^#\n]{0,199}?)[ \t]*$", re.MULTILINE)
 _STATUS_SOURCE_MAX_CHARS = 256_000
+_MAX_STATUS_SOURCES = 64
+
+
+def _status_contexts(texts: list[str]) -> "tuple[list[str], list[str] | None]":
+    """(the literal contexts the sources post, or the string literals to match when
+    some context is not a literal — else None). Literals carrying `$` are a shell or
+    expression interpolation, not a name, and count as dynamic. No literal at all
+    (`create_status(state, url, desc, ctx)` positionally) also counts as dynamic."""
+    contexts: set[str] = set()
+    dynamic = False
+    for t in texts:
+        for rx in _STATUS_CONTEXT_LITERAL_RES:
+            for m in rx.finditer(t):
+                val = m.group(m.lastindex or 1).strip()
+                if "$" in val:
+                    dynamic = True
+                elif val:
+                    contexts.add(val)
+        if _STATUS_CONTEXT_DYNAMIC_RE.search(t):
+            dynamic = True
+    if contexts and not dynamic:
+        return sorted(contexts), None
+    names: set[str] = set(contexts)
+    total = 0
+    for t in texts:
+        for v in ([m.group(2) for m in _STRING_LITERAL_RE.finditer(t)]
+                  + [m.group(1) for m in _YAML_SCALAR_RE.finditer(t)]):
+            v = v.strip()
+            if not v or "${" in v or v in names:
+                continue
+            total += len(v)
+            if total > _STATUS_SOURCE_MAX_CHARS:
+                break
+            names.add(v)
+    return sorted(contexts), sorted(names)
 
 
 def _local_action_dirs(root: Path, ref: str, text: str) -> list[Path]:
@@ -5215,24 +5274,30 @@ def _build_workflow_status_publishers(
     root: Path, parsed: list[tuple[str, dict, str]],
 ) -> dict[str, dict[str, Any]]:
     """Workflows that POST commit statuses themselves (issue #119), as
-    `{workflow_file: {"sources": [path, ...], "text": <their text>}}`.
+    `{workflow_file: {"sources": [path, ...], "contexts": [name, ...],
+    "names": [literal, ...]}}` (`names` only when some posted context is not a
+    literal).
 
     A required check that names no job is not proof of an external gate: an in-repo
     "aggregate" job can watch the test jobs and post one required status (`All CI`)
     through the statuses API, with no `needs:` edge to them. collect_runs reads this
-    to tell that case from a real outside gate (a CLA bot or security app, which no
-    workflow here names). A workflow counts when its own YAML, a local action it
-    uses, or a repo-local script it runs posts a status (a local action's own
-    entrypoints, `main:` / `pre:` / `post:` and `github.action_path` scripts, are
-    resolved from the action's directory first); `text` is all of those
-    sources, so collect_runs can check whether a required context's literal name
-    appears in them. Only status-posting workflows are recorded (so the map is
-    empty on most repos), and each source is capped so a huge script can't bloat
-    the findings document. Which jobs the publisher waits on is NOT traced."""
+    to tell that case from a real outside gate (a CLA bot or security app). A
+    workflow counts when its own YAML, a local action it uses, or a repo-local
+    script it runs (followed transitively, bounded) posts a status (a local action's
+    own entrypoints, `main:` / `pre:` / `post:` and `github.action_path` scripts,
+    are resolved from the action's directory first). `contexts` are the literal
+    context values those sources post. A name that merely appears in a publisher
+    (its title, a comment, the checks an aggregator waits on) is NOT one: counting
+    it would un-scope a correctly scoped gate. Only when a context is built at run
+    time is `names` kept, the sources' string literals (capped in total), as the
+    looser fallback. Only status-posting workflows are recorded (so the map is
+    empty on most repos), and no raw source text is stored. Which jobs the
+    publisher waits on is NOT traced."""
     out: dict[str, dict[str, Any]] = {}
     for rel, doc, raw in parsed:
-        # (label, text, action dirs its relative entrypoints resolve against first)
-        sources: list[tuple[str, str, list[Path]]] = [(rel, raw, [])]
+        # (label, text, action dirs its entrypoints resolve against, dirs its plain
+        # relative refs resolve against before the root: a script's own folder)
+        sources: list[tuple[str, str, list[Path], list[Path]]] = [(rel, raw, [], [])]
         for job in _jobs_from_doc(doc).values():
             if not isinstance(job, dict):
                 continue
@@ -5243,13 +5308,18 @@ def _build_workflow_status_publishers(
                     if text is None:
                         text = _read_local_action(root, u)
                     if text:
-                        sources.append((u, text, _local_action_dirs(root, u, text)))
+                        sources.append((u, text, _local_action_dirs(root, u, text), []))
         seen = {rel}
-        for _src, text, action_dirs in list(sources):
+        i = 0
+        # Follow script references transitively (an entry script importing the helper
+        # that posts), bounded so a large tree can't make this unbounded.
+        while i < len(sources) and len(sources) < _MAX_STATUS_SOURCES:
+            _src, text, action_dirs, rel_dirs = sources[i]
+            i += 1
             cands = [(d, ref) for ref in _ACTION_PATH_SCRIPT_REF_RE.findall(text)
                      for d in action_dirs]
             cands += [(d, ref) for ref in _LOCAL_SCRIPT_REF_RE.findall(text)
-                      for d in action_dirs + [root]]
+                      for d in action_dirs + rel_dirs + [root]]
             for base, ref in cands:
                 try:
                     label = os.path.relpath(os.path.normpath(base / ref), root)
@@ -5259,13 +5329,17 @@ def _build_workflow_status_publishers(
                     seen.add(label)
                     sources.append((label.replace(os.sep, "/"),
                                     path.read_text(encoding="utf-8", errors="replace"),
-                                    []))
+                                    [], [path.parent]))
                 except (OSError, ValueError):
                     continue
-        if not any(_STATUS_POST_RE.search(t) for _s, t, _d in sources):
+        if not any(_STATUS_POST_RE.search(t) for _s, t, _a, _r in sources):
             continue
-        out[rel] = {"sources": [s for s, _t, _d in sources],
-                    "text": "\n".join(t[:_STATUS_SOURCE_MAX_CHARS] for _s, t, _d in sources)}
+        contexts, names = _status_contexts([t for _s, t, _a, _r in sources])
+        entry: dict[str, Any] = {"sources": [s for s, _t, _a, _r in sources],
+                                 "contexts": contexts}
+        if names is not None:
+            entry["names"] = names
+        out[rel] = entry
     return out
 
 

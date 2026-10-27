@@ -5125,7 +5125,7 @@ _AGG_JOB_GRAPH = {
 _AGG_CRIT = {_AGG_CI_WF: {"job_p50": {"Test": 600.0, "Lint": 60.0}},
              _AGG_WF: {"job_p50": {"Publish aggregate": 30.0}}}
 # What scan.py stamps for a workflow that posts commit statuses (#119).
-_AGG_PUBLISHERS = {_AGG_WF: {"sources": [_AGG_WF], "text": _AGG_YAML}}
+_AGG_PUBLISHERS = {_AGG_WF: {"sources": [_AGG_WF], "contexts": ["All CI"]}}
 
 
 def test_repo_published_aggregate_status_is_not_proven_external():
