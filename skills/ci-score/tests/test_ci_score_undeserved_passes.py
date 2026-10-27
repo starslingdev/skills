@@ -103,6 +103,9 @@ def test_a_reusable_workflow_called_from_a_pr_workflow_is_graded(tmp_path):
     got = _fact(doc, SHALLOW)
     assert got["state"] == "fail", got
     assert got["files"] == [".github/workflows/test.yml"], got
+    # test.yml has no pull_request trigger: the card names it as what it is
+    assert got["evidence"] == ("fetch-depth: 0 on 1 reusable workflow(s) a PR-gating "
+                               "workflow calls, e.g. .github/workflows/test.yml"), got
 
 
 def test_a_self_repository_call_is_followed_too(tmp_path):
@@ -272,9 +275,9 @@ def test_an_unread_composite_is_disclosed_in_the_pinning_and_caching_evidence(tm
     doc = _collect(tmp_path, {"package.json": "{}\n", ".github/workflows/ci.yml": SETUP_CALLER})
     pinned, cache = _fact(doc, PINNED), _fact(doc, CACHE)
     assert pinned["state"] == "pass", pinned
-    assert "1 local action(s) could not be read" in pinned["evidence"], pinned
+    assert "not read, so nothing inside was graded: ./ci/setup (no action.yml in the checkout; it may be checked out at run time)" in pinned["evidence"], pinned
     assert "./ci/setup" in pinned["evidence"], pinned
-    assert "1 local action(s) could not be read" in cache["evidence"], cache
+    assert "not read, so nothing inside was graded: ./ci/setup (no action.yml" in cache["evidence"], cache
 
 
 # ---- 3. remote reusable workflows in the pinning count -----------------------
@@ -300,6 +303,18 @@ def test_a_remote_reusable_workflow_counts_in_pinning(tmp_path):
     assert got["state"] == "fail", got
     assert got["evidence"].startswith("1 of 2 "), got["evidence"]
     assert got["files"] == [".github/workflows/ci.yml"], got
+
+
+def test_a_tagged_remote_reusable_workflow_earns_no_lockfile_credit(tmp_path):
+    # GitHub does not lock another repository's reusable workflow yet, so a
+    # hand-written lockfile entry for one enforces nothing: only a SHA counts
+    call = "org/shared/.github/workflows/ci.yml@v1"
+    doc = _collect(tmp_path, {".github/workflows/ci.yml": _remote_caller("v1"),
+                              LOCK: _lockfile([f"actions/checkout@{SHA}", call],
+                                              deps=[call])})
+    got = _fact(doc, PINNED)
+    assert got["state"] == "fail", got
+    assert got["evidence"].startswith("1 of 2 remote action references pinned, 0 via lockfile"), got
 
 
 def test_negative_control_a_sha_pinned_remote_reusable_workflow_counts_as_pinned(tmp_path):
@@ -430,6 +445,22 @@ def test_negative_control_every_malformed_lockfile_grants_nothing(tmp_path, name
     assert "grants no credit" in got["evidence"], (name, got)
 
 
+@__import__("pytest").mark.parametrize("version", ["v0.0.2", "v0.0.3"])
+def test_the_documented_lockfile_versions_earn_credit(tmp_path, version):
+    lock = _lockfile(BOTH).replace("version: 'v0.0.3'", f"version: '{version}'")
+    doc = _collect(tmp_path, {".github/workflows/ci.yml": TAGGED, LOCK: lock})
+    assert _fact(doc, PINNED)["state"] == "pass", _fact(doc, PINNED)
+
+
+def test_negative_control_an_undocumented_lockfile_version_grants_nothing(tmp_path):
+    # a format GitHub has not documented may mean something else entirely
+    lock = _lockfile(BOTH).replace("version: 'v0.0.3'", "version: 'v1.0.0'")
+    doc = _collect(tmp_path, {".github/workflows/ci.yml": TAGGED, LOCK: lock})
+    got = _fact(doc, PINNED)
+    assert got["state"] == "fail" and got["evidence"].startswith("0 of 2 "), got
+    assert "format version v1.0.0 is not one GitHub documents" in got["evidence"], got
+
+
 def test_negative_control_a_lockfile_symlinked_outside_the_repo_grants_nothing(tmp_path):
     import os
     (tmp_path / "outside.lock").write_text(_lockfile(BOTH))
@@ -460,7 +491,7 @@ def test_a_composite_chain_past_the_depth_limit_is_not_read_and_is_disclosed(tmp
     errs = doc["data_sources"]["composite_parse_errors"]
     assert any("nested more than 16 deep" in e for e in errs), errs
     got = _fact(doc, PINNED)
-    assert got["evidence"].startswith("1 of 1 ") and "could not be read" in got["evidence"], got
+    assert got["evidence"].startswith("1 of 1 ") and "not read, so nothing inside was graded" in got["evidence"], got
 
 
 def test_composites_past_the_read_limit_are_not_read_and_are_disclosed(tmp_path):
@@ -582,6 +613,6 @@ def test_negative_control_a_composite_symlinked_outside_the_repo_fails_closed(tm
     assert code == 0, doc
     # the file the link points at is not this repository's: never read
     assert _fact(doc, CACHE)["state"] == "fail", _fact(doc, CACHE)
-    assert "could not be read" in _fact(doc, CACHE)["evidence"], _fact(doc, CACHE)
+    assert "not read, so nothing inside was graded: ./ci/setup (resolves outside the repository)" in _fact(doc, CACHE)["evidence"], _fact(doc, CACHE)
     assert any("./ci/setup" in e for e in doc["data_sources"]["composite_parse_errors"]), \
         doc["data_sources"]

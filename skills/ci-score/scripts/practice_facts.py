@@ -1276,6 +1276,10 @@ def _job_pr_events(job: dict, events: set[str]) -> set[str]:
 _LOCKFILE_REL = ".github/workflows/actions.lock"
 _LOCK_VERSION_RE = re.compile(r"\Av\d+\.\d+\.\d+\Z")
 _LOCK_COMMIT_RE = re.compile(r"\Asha1-[0-9a-f]{40}\Z")
+# The format versions GitHub documents: v0.0.2 in the docs' example lockfile,
+# v0.0.3 as gh actions-lock writes it. The tool is pre-1.0 and says its format
+# may change, so any other version may mean something else: no credit.
+_LOCK_VERSIONS = ("v0.0.2", "v0.0.3")
 
 
 class _StrictLockLoader(yaml.SafeLoader):
@@ -1303,7 +1307,8 @@ _StrictLockLoader.add_constructor(
 
 
 def _lock_key(action: str, ref: str) -> str:
-    # the lockfile folds owner and repo case; refs are case-sensitive
+    # engine assumption (GitHub's docs are silent): owner and repo names
+    # match case-insensitively, as GitHub resolves them; refs are exact
     return f"{action.strip().lower()}@{ref.strip()}"
 
 
@@ -1315,8 +1320,9 @@ def _lock_ref_key(text: Any) -> str | None:
 
 
 def _load_lockfile(root: Path) -> tuple[str, dict[str, set[str]], set[str]]:
-    """(state, per_workflow, any_workflow). `state` is "absent", "valid" or
-    "invalid". `per_workflow` maps a workflow file to the references the
+    """(state, per_workflow, any_workflow). `state` is "absent", "valid",
+    "invalid", or "version:<v>" for a well-formed version GitHub does not
+    document (`_LOCK_VERSIONS`), which covers nothing. `per_workflow` maps a workflow file to the references the
     lockfile covers for it: listed under that workflow AND carrying a valid
     dependency entry (a full commit). `any_workflow` is the union over every
     workflow list and every entry's own `uses:` list, again only references
@@ -1325,8 +1331,8 @@ def _load_lockfile(root: Path) -> tuple[str, dict[str, set[str]], set[str]]:
     Fails CLOSED: a lockfile that cannot be read, does not parse, carries an
     unknown top-level key, or holds ANY malformed list or entry (a commit that
     is not `sha1-` plus 40 hex, a missing ref / owner_id / repo_id) is
-    "invalid" and covers nothing, the same way the `gh actions-lock` CLI
-    refuses a corrupt lockfile rather than reading part of it."""
+    "invalid" and covers nothing: a partly-read lockfile is never credited,
+    as the `gh actions-lock` CLI refuses a corrupt one."""
     path = root / _LOCKFILE_REL
     bad = ("invalid", {}, set())
     try:
@@ -1345,6 +1351,8 @@ def _load_lockfile(root: Path) -> tuple[str, dict[str, set[str]], set[str]]:
     if not (isinstance(doc.get("version"), str) and _LOCK_VERSION_RE.match(doc["version"])
             and isinstance(wfs, dict) and isinstance(deps, dict)):
         return bad
+    if doc["version"] not in _LOCK_VERSIONS:
+        return f"version:{doc['version']}", {}, set()
     valid: set[str] = set()
     nested: set[str] = set()
     for key, entry in deps.items():
@@ -1492,7 +1500,15 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path) -> dict[str
             offenders.append(rel)
     uniq_offenders = sorted(set(offenders))
     if offenders:
-        evidence = (f"fetch-depth: 0 on {len(uniq_offenders)} PR-gating workflow(s), "
+        # a called reusable workflow has no pull_request trigger of its own:
+        # name it as what it is, so nobody hunts it for one
+        triggered = {rel for rel, _doc in pr_wfs}
+        n_called = sum(1 for rel in uniq_offenders if rel not in triggered)
+        n_gating = len(uniq_offenders) - n_called
+        kinds = [f"{n_gating} PR-gating workflow(s)"] if n_gating else []
+        if n_called:
+            kinds.append(f"{n_called} reusable workflow(s) a PR-gating workflow calls")
+        evidence = (f"fetch-depth: 0 on {' and '.join(kinds)}, "
                     f"e.g. {', '.join(uniq_offenders[:3])}")
     elif not pr_wfs:
         evidence = "no PR-gating workflows"
@@ -1684,11 +1700,14 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path) -> dict[str
     # another repository's reusable workflow (`jobs.x.uses: org/r/...yml@ref`).
     # A reference also counts as pinned when the workflow lockfile covers it:
     # a valid entry listed under its own workflow file, or, inside a local
-    # action reached only through `$/`, a valid entry the lockfile lists.
+    # action reached only through `$/`, a valid entry under every workflow
+    # that reaches it. A call to another repository's reusable workflow is
+    # pinned ONLY by a full SHA: GitHub does not lock those calls yet, so a
+    # lockfile entry for one enforces nothing (OD-CS24; revisit if it does).
     workflow_rels = {os.path.normpath(rel) for rel, _doc, _raw in parsed}
     self_locked = {rel: wfs for rel, _doc, wfs in local_composites if wfs}
     lock_state, lock_per_wf, _lock_any = _load_lockfile(root)
-    remote_refs = [(rel, ua) for rel, steps in step_sources for step in steps
+    remote_refs = [(rel, ua, True) for rel, steps in step_sources for step in steps
                    if (ua := _step_uses(step))]
     reusable_calls = 0
     for rel, doc, _raw in parsed:
@@ -1696,19 +1715,19 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path) -> dict[str
             uses = job.get("uses")
             if isinstance(uses, str) and not _is_local_uses(uses) and "@" in uses:
                 action, _, ref = uses.partition("@")
-                remote_refs.append((rel, (action, ref)))
+                remote_refs.append((rel, (action, ref), False))
                 reusable_calls += 1
     pinned = total = via_lock = 0
     offenders_ranked: list[tuple[int, str]] = []
-    for rel, ua in remote_refs:
+    for rel, ua, lockable in remote_refs:
         total += 1
         norm = os.path.normpath(rel)
         key = _lock_key(ua[0], ua[1])
         if _SHA40_RE.match(ua[1]):
             pinned += 1
-        elif (key in lock_per_wf.get(norm, ()) if norm in workflow_rels
-              else (rel in self_locked and all(
-                  key in lock_per_wf.get(wf, ()) for wf in self_locked[rel]))):
+        elif lockable and (key in lock_per_wf.get(norm, ()) if norm in workflow_rels
+                           else (rel in self_locked and all(
+                               key in lock_per_wf.get(wf, ()) for wf in self_locked[rel]))):
             pinned += 1
             via_lock += 1
         else:
@@ -1734,15 +1753,25 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path) -> dict[str
         if lock_state == "invalid":
             evidence += (f"; {_LOCKFILE_REL} is not a readable, well-formed lockfile, "
                          f"so it grants no credit")
+        elif lock_state.startswith("version:"):
+            evidence += (f"; {_LOCKFILE_REL} format version {lock_state[len('version:'):]} "
+                         f"is not one GitHub documents ({', '.join(_LOCK_VERSIONS)}), "
+                         f"so it grants no credit")
         facts["ci.security.pinned-action-shas"] = fact(
             "pass" if pinned * 100 >= total * 95 else "fail", evidence, offender_files)
 
     # A local action the scan could not read may hold the cache step or
     # unpinned actions: never graded either way, and disclosed on both cards
     # so neither state reads as covering it (data_sources carries the list).
+    # A path with no action.yml in the checkout is usually one a job checks
+    # out at run time (a shared-actions repo), so the wording says so instead
+    # of reading as a broken repository.
     if unread_actions:
-        note = (f"; {len(unread_actions)} local action(s) could not be read and "
-                f"were not graded: {', '.join(unread_actions[:3])}")
+        shown = [e.replace(" (no readable action.yml or action.yaml)",
+                           " (no action.yml in the checkout; it may be checked out at run time)")
+                 for e in unread_actions[:3]]
+        more = f" and {len(unread_actions) - 3} more" if len(unread_actions) > 3 else ""
+        note = f"; not read, so nothing inside was graded: {', '.join(shown)}{more}"
         for check in ("ci.cache.dependency-cache", "ci.security.pinned-action-shas"):
             facts[check]["evidence"] += note
 

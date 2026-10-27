@@ -214,7 +214,7 @@ the practice matters. The score card links every check name here.
 
 ### Pinned action SHAs
 
-**The fact:** at least 95% of remote action references are pinned - to a full commit SHA, or by a valid entry in GitHub's workflow lockfile (.github/workflows/actions.lock) - across workflow steps, job-level calls to another repository's reusable workflow, AND local composite actions wherever a uses: path places them (first-party actions/* included - the pinning practice does not exempt them; the evidence always shows pinned-of-total, and how many of those the lockfile pins). A tag-referenced action counts as lockfile-pinned only when the lockfile lists it under its own workflow file and carries a full-commit entry for it, or, inside a local action every reference reaches through $/, when the lockfile lists it with a full-commit entry under every workflow file that reaches that action; a ./ action runs whatever is in the workspace, so the lockfile cannot cover what it uses. A lockfile that cannot be read, or is malformed anywhere, grants no credit at all (OD-CS24). The threshold asks 'is pinning an adopted, automated practice?': >=95% admits Renovate-style stragglers (at most 1 in 20) while rejecting partial adoption, and is gaming-resistant - reaching it from a low base means actually pinning the fleet (OD-CS17)
+**The fact:** at least 95% of remote action references are pinned - to a full commit SHA, or by a valid entry in GitHub's workflow lockfile (.github/workflows/actions.lock) - across workflow steps, job-level calls to another repository's reusable workflow, AND local composite actions wherever a uses: path places them (first-party actions/* included - the pinning practice does not exempt them; the evidence always shows pinned-of-total, and how many of those the lockfile pins). A tag-referenced action counts as lockfile-pinned only when the lockfile lists it under its own workflow file and carries a full-commit entry for it, or, inside a local action every reference reaches through $/, when the lockfile lists it with a full-commit entry under every workflow file that reaches that action; a ./ action runs whatever is in the workspace, so the lockfile cannot cover what it uses. A job-level call to another repository's reusable workflow counts as pinned only with a full commit SHA: GitHub does not lock those calls yet, so a lockfile entry for one enforces nothing and earns no credit (to revisit if GitHub starts locking them). A lockfile that cannot be read, is malformed anywhere, or carries a format version GitHub does not document (v0.0.2, v0.0.3) grants no credit at all (OD-CS24). The threshold asks 'is pinning an adopted, automated practice?': >=95% admits Renovate-style stragglers (at most 1 in 20) while rejecting partial adoption, and is gaming-resistant - reaching it from a low base means actually pinning the fleet (OD-CS17)
 
 **Why it matters:** A tag like @v4 can be silently repointed by whoever owns the action - pinning the exact commit means CI only ever runs code you chose.
 
@@ -412,9 +412,12 @@ repository's reusable workflow, and counts a tag reference as pinned when
 `.github/workflows/actions.lock` (public preview 2026-10-14, written by the
 `gh actions-lock` CLI extension) lists it under its own workflow with a
 full-commit entry; the evidence says how many were pinned that way. Inside a
-local action, lockfile credit needs a `$/` reference, because GitHub
-documents that a `./` action is never followed or locked. A lockfile that
-cannot be read, or is malformed anywhere, grants nothing. Recomputed over the
+local action, lockfile credit needs a `$/` reference, because GitHub's
+`gh actions-lock` documentation says a `./` action is never followed or
+locked, and an entry under every workflow that reaches the action. A call to
+another repository's reusable workflow is pinned only by a full SHA, because
+GitHub does not lock those calls yet. A lockfile that cannot be read, is
+malformed anywhere, or carries an undocumented format version grants nothing. Recomputed over the
 frozen calibration controls, no fact moves (91 and 82 hold). The rationale is
 OD-CS24 in the spec's `decision_log`.
 

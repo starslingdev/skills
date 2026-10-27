@@ -20,8 +20,14 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
   own workflow and holds a full-commit entry for it, and the evidence says
   how many: "2 of 2 remote action references pinned, 2 via lockfile". Inside
   a local action, credit needs a `$/` reference, since GitHub never follows
-  or locks a `./` action. A lockfile that cannot be read, or is malformed
-  anywhere, grants nothing and the evidence says so. Without a lockfile the
+  or locks a `./` action. A call to another repository's reusable workflow
+  is pinned only by a full SHA, never by the lockfile: GitHub documents that
+  it does not lock those calls yet, so an entry for one enforces nothing (to
+  revisit if GitHub starts locking them). A lockfile that cannot be read, is
+  malformed anywhere, or carries a format version GitHub does not document
+  (anything but v0.0.2 or v0.0.3) grants nothing and the evidence says so.
+  OD-CS24 is proposed and ships on owner approval of the pull request.
+  Without a lockfile the
   evidence carries no lockfile wording (the reach fixes below can still
   change its counts).
 
@@ -58,8 +64,12 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
     `./ci/setup.yml` is read. A local action whose path is a symbolic link
     out of the checkout is never read. Inside a `$/` action, lockfile credit
     needs an entry under every workflow that reaches it. A local action the
-    scan could not read is now named in the caching and pinning evidence,
-    not only in `data_sources`. A lockfile with a duplicated key, a commit
+    scan could not read is now named in the caching and pinning evidence
+    ("not read, so nothing inside was graded: …"; a path with no action.yml
+    in the checkout says it may be checked out at run time), not only in
+    `data_sources`. When the full-history offender is a called reusable
+    workflow, the shallow-checkout evidence names it as one instead of as a
+    PR-gating workflow. A lockfile with a duplicated key, a commit
     or version followed by trailing text, or a symbolic link out of the
     checkout is malformed and grants nothing.
   - Both frozen calibration controls score exactly as before (no fact or
