@@ -120,6 +120,34 @@ def test_setup_node_auto_cache_needs_the_root_checkout(tmp_path):
     assert f["state"] == "fail", f
 
 
+@pytest.mark.parametrize("steps", [
+    # setup-node runs before the checkout: the workspace is empty when it looks
+    ("uses: actions/setup-node@v5", "uses: actions/checkout@v5", "run: npm ci"),
+    # no checkout at all in the job
+    ("uses: actions/setup-node@v5", "run: npm ci"),
+])
+def test_setup_node_auto_cache_needs_a_finished_checkout(tmp_path, steps):
+    """setup-node's automatic cache reads package.json when the step runs. With
+    no root checkout finished before it, there is no file to read, so the
+    default is not credited (ci-speedup's `_opt79_workspace_states`)."""
+    (tmp_path / "package.json").write_text('{"packageManager": "npm@10.9.0"}')
+    f = facts_for(tmp_path, _steps_wf(*steps))[CACHE]
+    assert f["state"] == "fail", f
+
+
+def test_setup_node_auto_cache_in_a_local_composite_is_credited(tmp_path):
+    """A local composite action is read from the checked-out workspace, so the
+    repository is already checked out when its steps run."""
+    (tmp_path / "package.json").write_text('{"packageManager": "npm@10.9.0"}')
+    act = tmp_path / ".github" / "actions" / "setup"
+    act.mkdir(parents=True)
+    (act / "action.yml").write_text(
+        "runs:\n  using: composite\n  steps:\n    - uses: actions/setup-node@v5\n")
+    f = facts_for(tmp_path, _steps_wf("uses: actions/checkout@v5",
+                                      "uses: ./.github/actions/setup", "run: npm ci"))[CACHE]
+    assert f["state"] == "pass", f
+
+
 # ---------------------------------------------------------------------------
 # 2. A matrix generated at runtime
 # ---------------------------------------------------------------------------

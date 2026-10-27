@@ -1219,19 +1219,29 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path) -> dict[str
     # setup-gradle) - ci-speedup's table, copied above.
     hits = []
     package_json = _read_root_package_json(root)
+    composite_rels = {rel for rel, _doc in composites}
     for rel, steps in step_sources:
+        # setup-node reads package.json when its step runs, so the file counts
+        # only once a root checkout has FINISHED earlier in the job (ci-speedup's
+        # `_opt79_workspace_states`). A local composite action is itself read
+        # from the checked-out workspace, so its steps start checked out.
+        checked_out = rel in composite_rels
         workspace_moved = False
         for step in steps:
             ua = _step_uses(step)
             with_ = step.get("with") if isinstance(step.get("with"), dict) else {}
-            workspace_moved = workspace_moved or _checkout_moves_workspace(step)
+            if _checkout_moves_workspace(step):
+                workspace_moved = True
+            elif ua and ua[0].lower() == "actions/checkout":
+                checked_out = True
+            ws_unknown = workspace_moved or not checked_out
             if ua and _CACHE_ACTION_RE.search(ua[0]):
                 hits.append(rel)
             elif ua and "setup-" in ua[0] and any(
                     k in ("cache", "enable-cache") and v not in (False, "false", None, "")
                     for k, v in with_.items()):
                 hits.append(rel)
-            elif _step_caches_by_default(step, package_json, workspace_moved):
+            elif _step_caches_by_default(step, package_json, ws_unknown):
                 hits.append(rel)
     if hits:
         facts["ci.cache.dependency-cache"] = fact(

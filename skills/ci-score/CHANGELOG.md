@@ -23,7 +23,10 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
   versions before the default turned on. A SHA-pinned action names no
   version, as in the speed engine, so a default-on action pinned by SHA
   counts as caching and setup-node counts only when its v5 and v6 rules
-  agree.
+  agree. setup-node's default is credited only after a checkout of this
+  repository to the workspace root has run earlier in the same job: before
+  any checkout, or after a checkout into a sub-path or of another
+  repository, there is no `package.json` for it to read.
 - **2026-10-27** — **Fixed**: a test job whose matrix is generated at
   runtime (`matrix: ${{ fromJSON(...) }}`) no longer fails Test sharding; it
   passes, because the job does run a matrix. A generated matrix on a job that
