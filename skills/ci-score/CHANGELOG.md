@@ -19,63 +19,89 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
   A tag reference now counts as pinned when the lockfile lists it under its
   own workflow and holds a full-commit entry for it, and the evidence says
   how many: "2 of 2 remote action references pinned, 2 via lockfile". Inside
-  a local action, credit needs a `$/` reference, since GitHub never follows
-  or locks a `./` action. A call to another repository's reusable workflow
-  is pinned only by a full SHA, never by the lockfile: GitHub documents that
-  it does not lock those calls yet, so an entry for one enforces nothing (to
-  revisit if GitHub starts locking them). A lockfile that cannot be read, is
-  malformed anywhere, or carries a format version GitHub does not document
-  (anything but v0.0.2 or v0.0.3) grants nothing and the evidence says so.
-  OD-CS24 is proposed and ships on owner approval of the pull request.
-  Without a lockfile the
-  evidence carries no lockfile wording (the reach fixes below can still
-  change its counts).
+  a local action, credit needs every reference to reach it through `$/`
+  (GitHub never follows or locks a `./` action) and an entry under every
+  workflow that reaches it. A call to another repository's reusable workflow
+  is pinned only by a full SHA, never by the lockfile: the `gh actions-lock`
+  README states that such calls are not locked (github/gh-actions-lock#179,
+  open), even though GitHub's docs page says reusable workflows are pinned,
+  so until the tool locks them an entry for one enforces nothing. A lockfile
+  grants nothing, and the evidence says so, when it cannot be read, is a
+  symbolic link out of the checkout, sits at a path whose case differs from
+  `.github/workflows/actions.lock`, carries a format version other than the
+  two GitHub documents (v0.0.2, v0.0.3), or is malformed anywhere: a
+  duplicated key, trailing text after a commit or version, an entry whose
+  `ref` contradicts its key (GitHub's commit-keyed nested entries, which keep
+  their tag as `ref`, stay valid), a listed reference with no entry, or a
+  workflow key that is not exactly `.github/workflows/<file>`. Without a
+  lockfile the evidence carries no lockfile wording (the reach fixes below
+  can still change its counts).
 
-- **2026-10-27** — **Fixed**: three places where a check passed on workflow
-  content the scan never read.
+- **2026-10-27** — **Fixed**: checks passed, or failed, on workflow content
+  the scan never read.
   - A reusable workflow in the same repository (`on: workflow_call`) that a
     pull-request job calls was never graded on the pull-request path, so a
     full-history checkout inside it passed the shallow-checkout check. Called
     workflows are now followed (`./` and `$/`, nested calls included, 16
-    deep at most) and graded with the pull-request events of the workflow
-    that calls them. A calling job that can never run on a pull request
-    reaches nothing, and a call that cannot be followed (outside the
-    repository, missing, or unparseable) is named in the evidence instead of
-    being graded either way. The trigger-level checks (concurrency groups,
-    cancelling superseded runs, path filters) still read only the workflows
-    a pull request triggers, since those settings belong there.
+    deep at most) and graded with the pull-request events that reach them:
+    the caller's events, narrowed by the calling job's own `if:` (a workflow
+    that pull requests trigger directly also gains the events of a
+    pull-request workflow that calls it). A calling job that can never run
+    on a pull request reaches nothing. A called workflow's
+    `fetch-depth: ${{ inputs.x }}` takes each calling job's `with:` value,
+    else the input's default; a depth no rule resolves leaves the job
+    ungraded and named in the evidence. A call that cannot be followed
+    (outside the repository, missing, unparseable, or holding a duplicated
+    key) is named in the evidence instead of being graded either way. When
+    the full-history offender is a called workflow, the evidence names it as
+    one. The trigger-level checks (concurrency groups, cancelling superseded
+    runs, path filters) still read only the workflows a pull request
+    triggers, since those settings belong there.
   - Local composite actions were read only from `.github/actions/`. An
     action at `./ci/setup` or `$/tools/x` was invisible: its cache step did
     not count (a wrong fail) and its unpinned actions were left out of the
     pinning count (a wrong pass). Every local action a step's `uses:` names
-    is now read wherever it lives, with nested references followed (16 deep,
-    256 files at most). A reference that resolves outside the repository, or
-    names no readable `action.yml`, is never read and is recorded by name in
-    `data_sources.composite_parse_errors`.
+    is now read wherever it lives, including a directory named like
+    `./ci/setup.yml`, with nested references followed (16 deep, 256 files at
+    most). A reference is never read when it resolves outside the
+    repository (by path, or by a symbolic link, under `.github/actions/`
+    too), names no readable `action.yml` or `action.yaml`, differs in case
+    from the repository's own path (a case-insensitive disk would otherwise
+    read it, though no runner can), or names a file with a duplicated key;
+    each is recorded in `data_sources.composite_parse_errors`. Inside a
+    local action, a cache input written `${{ inputs.cache }}` counts only
+    when a caller's `with:` value or the input's default turns it on; one
+    that cannot be resolved earns nothing and is named.
   - A job-level call to another repository's reusable workflow
     (`jobs.ci.uses: org/shared/.github/workflows/ci.yml@main`) was left out
     of the pinning count, so one pinned step read "1 of 1" and passed. It
     now reads "1 of 2" and fails; a SHA-pinned call counts as pinned. The
-    evidence notes how many reusable-workflow calls were counted.
-  - Review follow-ups to the above. A workflow that is triggered by pull
-    requests itself and is also called by another pull-request workflow now
-    gains its caller's events. A calling job's `if:` narrows the events that
-    reach the workflow it calls. A step action directory named like
-    `./ci/setup.yml` is read. A local action whose path is a symbolic link
-    out of the checkout is never read. Inside a `$/` action, lockfile credit
-    needs an entry under every workflow that reaches it. A local action the
-    scan could not read is now named in the caching and pinning evidence
-    ("not read, so nothing inside was graded: …"; a path with no action.yml
-    in the checkout says it may be checked out at run time), not only in
-    `data_sources`. When the full-history offender is a called reusable
-    workflow, the shallow-checkout evidence names it as one instead of as a
-    PR-gating workflow. A lockfile with a duplicated key, a commit
-    or version followed by trailing text, or a symbolic link out of the
-    checkout is malformed and grants nothing.
+    evidence notes how many reusable-workflow calls were counted. A
+    repository whose only remote reference is such a call moves from not
+    applicable to a fail ("0 of 1").
+  - Content the scan could not read is now named on the caching, pinning
+    and shallow-checkout cards ("not read, so nothing inside was graded:
+    …"), not only in `data_sources`: local actions not read (a path with no
+    `action.yml` in the checkout says it may be checked out at run time),
+    workflow files that do not parse, step lists that are not lists, and
+    reusable-workflow calls not followed. A full-history job exempt only
+    because a local action it uses could not be read says so ("exempt only
+    because ./shared/setup could not be read") instead of claiming it walks
+    git history.
+  - Owner decision (2026-10-27): when nothing readable shows a dependency
+    cache, no readable language `setup-*` step could carry one, and no job
+    installs dependencies without reaching an unread local action, but an
+    unread local action could hold the cache step, dependency caching is
+    not applicable and the evidence names the action(s). A readable
+    `setup-*` step with no cache, or a job whose dependencies plainly
+    install uncached, still fails.
   - Both frozen calibration controls score exactly as before (no fact or
-    evidence string moves). Other repositories can score LOWER: an action
-    outside `.github/actions/` or a called workflow can expose an unpinned
-    action or a full-history checkout that was never read before.
+    evidence string moves; a committed snapshot of every fact now enforces
+    it). Other repositories can score LOWER: an action outside
+    `.github/actions/` or a called workflow can expose an unpinned action or
+    a full-history checkout that was never read before. A repository can
+    also score higher where an unread local action is the only place its
+    dependency cache could be.
 
 - **2026-10-10** — **Fixed**: actions referenced with GitHub's
   self-repository prefix (`uses: $/path`, shipped 2026-07-30) are local to

@@ -7,9 +7,10 @@ walks local composite actions and the repo-root build-tool config probes) →
 `compute_ci_score` → write `findings.json` carrying the `ci_score` stamp.
 
 LOCAL-CHECKOUT-ONLY (OD-L2, owner-decided): the scorer's input surface is
-three classes — workflow YAML, `.github/actions/**` composite actions, and
-repo-ROOT build-tool configs. A partial fetch (e.g. workflows-only via an API)
-silently turns failing checks `not_applicable` and INFLATES the grade, so this
+workflow YAML, `.github/actions/**` composite actions plus every local action
+any `uses:` names wherever it lives, the workflow lockfile
+(`.github/workflows/actions.lock`), and repo-ROOT build-tool configs. A
+partial fetch (e.g. workflows-only via an API) silently turns failing checks `not_applicable` and INFLATES the grade, so this
 collector refuses politely outside a full checkout rather than guessing. No
 network, ever: everything is read from the local tree; the offline contract
 cell runs this module with sockets booby-trapped.
@@ -256,7 +257,7 @@ def collect(root: Path, spec_path: Path = _DEFAULT_SPEC) -> tuple[dict[str, Any]
         # step budget in practice_facts.py), but any RecursionError /
         # MemoryError it could still raise must become an honest
         # ci_score_error marker, never a traceback with no output.
-        doc["practice_facts"] = pf_mod._practice_facts(parsed, root)
+        doc["practice_facts"] = pf_mod._practice_facts(parsed, root, parse_errors)
         # Parallel steps (GitHub Actions `parallel:` groups and their wait/cancel
         # control steps): every check reads the child steps through one walker;
         # record what it read so the report header can disclose it — including a
