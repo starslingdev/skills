@@ -2174,8 +2174,7 @@ def test_a_bare_needs_chain_is_not_an_always_running_producer(tmp_path):
     needs fails — and a skipped required check is exactly what GitHub reports
     as passed. Calling it "runs whatever else happens" describes the opposite
     of what it does. The predicate is the one the fix recipe names: the
-    producer itself carries `always()` / `!cancelled()` / `success() ||
-    failure()`."""
+    producer itself carries `always()`."""
     body = """\
 name: ci
 on: [pull_request]
@@ -4341,7 +4340,7 @@ def test_success_or_failure_with_needs_is_skippable(tmp_path):
     GitHub skips the verdict job too — and a skipped required check is exactly
     what it reports as passed. Treating it as never-skipping certified the one
     shape this fact recommends, so the recommended fix was itself bypassable.
-    `always()` and `!cancelled()` both still run when a dependency skips."""
+    `always()` still runs when a dependency skips."""
     body = """\
 name: ci
 on: [pull_request]
@@ -4364,7 +4363,7 @@ jobs:
     assert f["outcome"] == "fail", f["evidence"]
 
 
-@pytest.mark.parametrize("cond", ["always()", "${{ always() }}", "'!cancelled()'"])
+@pytest.mark.parametrize("cond", ["always()", "${{ always() }}"])
 def test_the_recommended_verdict_conditions_still_certify(tmp_path, cond):
     """The control: the conditions the fix recipe actually recommends do run
     when a dependency is skipped, so the verdict job still reports."""
@@ -4389,6 +4388,36 @@ jobs:
     out = _facts_with(tmp_path / cond.strip("'${} ()!")[:10], {"ci.yml": body},
                       ["test"])
     assert _outcome(out, _FACT)["outcome"] == "pass", _outcome(out, _FACT)
+
+
+@pytest.mark.parametrize("cond", ["'!cancelled()'", "${{ !cancelled() }}"])
+def test_a_not_cancelled_verdict_is_skipped_by_a_cancelled_run(tmp_path, cond):
+    """`!cancelled()` is not `always()` on a job with `needs:`: when the run is
+    cancelled (by hand, or by a newer push under a concurrency group), the
+    verdict is skipped, and GitHub reports a skipped required check as passed.
+    Only `always()` keeps the verdict reporting in every run state."""
+    body = f"""\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  suite:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest -v
+  test:
+    needs: [suite]
+    if: {cond}
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{{{ needs.suite.result }}}}" = success
+"""
+    out = _facts_with(tmp_path / "nc", {"ci.yml": body}, ["test"])
+    f = _outcome(out, _FACT)
+    assert f["outcome"] == "fail", f
+    assert "cancelled" in f["evidence"], f["evidence"]
 
 
 def test_a_matrix_job_does_not_produce_the_bare_context(tmp_path):
@@ -4487,7 +4516,7 @@ jobs:
 def test_a_constant_condition_does_not_certify_a_job_with_needs(tmp_path, cond):
     """A constant `if:` does not make a job unskippable once it has `needs:`.
     GitHub skips a dependent when a dependency skips unless the condition is
-    `always()` or `!cancelled()`; `if: true` is neither. Certifying it was the
+    `always()`; `if: true` is not. Certifying it was the
     same false green as `success() || failure()`, one condition over — and the
     check it certified can be satisfied without the suite running."""
     body = f"""\

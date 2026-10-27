@@ -999,10 +999,10 @@ def _suite_failure_swallowed(rel: str,
 # unreadable, and never a fail for it either.
 
 # Conditions that cannot skip the job — the WHOLE condition, not a substring
-# of it. `always()` runs it in every result state and `!cancelled()` unless the
-# run was cancelled, so both keep the check reporting, which is the property
-# this fact is about. `success() || failure()` is NOT a third spelling of the
-# same thing once the job has `needs:` — see `_NEVER_SKIPS_WITHOUT_NEEDS`.
+# of it. `always()` runs it in every result state, which keeps the check
+# reporting — the property this fact is about. `!cancelled()` and
+# `success() || failure()` are NOT other spellings of it once the job has
+# `needs:` — see `_NEVER_SKIPS_WITHOUT_NEEDS`.
 #
 # Matching these as substrings was the defect: `always() && <fork guard>` runs
 # in every result state AND only when the guard holds, so it skips exactly like
@@ -1010,12 +1010,12 @@ def _suite_failure_swallowed(rel: str,
 # tokens prepended. A condition this list does not recognise is treated as
 # skippable, so the failure direction of a mis-parse is a false RED (visible,
 # arguable) rather than a false green.
-# Conditions that run the job whatever its dependencies did. `always()` and
-# `!cancelled()` both still run when a dependency is SKIPPED, which is the
-# state that matters here.
+# Conditions that run the job whatever its dependencies did and whatever
+# happened to the run. Only `always()` does: `!cancelled()` skips the job when
+# the run is cancelled (by hand, or by a newer push under a concurrency group),
+# and a skipped required check is what GitHub reports as passed.
 _NEVER_SKIPS = {
     "always()",
-    "!cancelled()",
     "always()||cancelled()",
 }
 # These run the job every time ONLY when nothing upstream can skip or fail
@@ -1025,12 +1025,16 @@ _NEVER_SKIPS = {
 # SKIPPED, neither predicate holds and GitHub skips the job too — and a skipped
 # required check is what it reports as passed. Certifying it meant the verdict
 # job this fact RECOMMENDS could itself be bypassed, so the recommendation is
-# `always()` or `!cancelled()`.
+# `always()`.
 _NEVER_SKIPS_WITHOUT_NEEDS = {
     "success()",
+    # Without `needs:` the job starts at once, so a cancellation reports it
+    # cancelled (red), never skipped. With `needs:` a cancelled run skips it.
+    "!cancelled()",
     # A CONSTANT condition is not `always()` either. GitHub skips a dependent
     # when a dependency skips unless the condition is `always()` or
-    # `!cancelled()`, and `if: true` is neither — so with `needs:` it is as
+    # `!cancelled()` (and skips on a cancelled run unless it is `always()`),
+    # and `if: true` is neither — so with `needs:` it is as
     # bypassable as the suite it gates. Without `needs:` it cannot be false,
     # and reding it would be a false RED on a repo that did nothing wrong.
     "true",
@@ -1117,7 +1121,7 @@ def _skip_path(jobs: dict[str, dict], key: str,
     skips (GitHub skips the dependents). Both report the check as skipped, and
     a skipped required check is green — so both are the same defect here.
 
-    A never-skipping condition (`always()`, `!cancelled()`) stops the walk in
+    A never-skipping condition (`always()`) stops the walk in
     BOTH directions: such a job
     runs whatever its dependencies did, which is exactly what makes the
     verdict-job pattern work. Recursion is cycle-guarded (`seen`) because a
@@ -1152,7 +1156,7 @@ def _skip_path(jobs: dict[str, dict], key: str,
     # check. So the walk does not go looking for an always-running ancestor:
     # there is no arrangement of ancestors that makes a bare dependent
     # unskippable, and saying otherwise described the opposite of what it does.
-    # The producer has to carry `always()` or `!cancelled()` ITSELF — which is
+    # The producer has to carry `always()` ITSELF — which is
     # what the fix recipe says. (`success() || failure()` does not qualify
     # here: a skipped dependency makes both predicates false.)
     if needs:

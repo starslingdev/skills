@@ -894,6 +894,7 @@ unversioned and updates by reinstall from `main`.
 ### Changed
 
 - **2026-10-26** — Strengthen OPT32/70 fail-closed verdict guidance and OPT79 whole-job validation.
+- **2026-10-26** — Required-check verdict guidance (OPT22, OPT24, OPT25, OPT75, OPT77 and the report text for relocated or consolidated work) recommends `if: always()` only: a `!cancelled()` verdict is skipped on a cancelled run, and a skipped required check reads as passed.
 
 - **2026-10-22** — **The pattern catalog is now one file per pattern plus an
   index.** An agent reviewing a finding reads that one pattern's file instead

@@ -240,6 +240,13 @@ entries are dated (UTC). Format loosely follows
     is not assumed to have bash. A job whose earlier `run:` writes
     `$GITHUB_ENV`/`$GITHUB_PATH`, and `go test -count=0` or a pytest
     `@file` argument, no longer count as an ordinary suite.
+  - A summary job guarded by `if: ${{ !cancelled() }}` no longer counts as
+    always running: when the run is cancelled (by hand, or by a newer push
+    under a concurrency group) that job is skipped, and GitHub reports a
+    skipped required check as passed. Only `if: always()` qualifies, and the
+    fix recipe now recommends it alone. Without `needs:` the condition is
+    still accepted, since such a job starts at once and a cancellation
+    reports it cancelled.
 
 - **2026-10-22** — **The five eval scenarios now run at the same time.** The
   shared eval runner starts every session at once (at most five; `--jobs N` or

@@ -208,7 +208,8 @@ two moved numbers.
   branch — the branch whose protection is being read — so every pull request
   this fact gates is inside that filter anyway.)
   **To fix a fail**: add one job that carries the required check's name, runs
-  `if: always()` (or `!cancelled()`), `needs:` the
+  `if: always()` (not `!cancelled()`: a cancelled run skips that job, and a
+  skipped required check reads as passed), `needs:` the
   conditional suites (and the detector that decides them), and fails unless the
   detector succeeded and each suite either passed or was skipped on a valid
   "unchanged" decision — then point branch protection at that job's name
