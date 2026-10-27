@@ -206,6 +206,16 @@ def _outside_checkout(path):
     return path
 
 
+def _data_target(directory, target):
+    """Keep every final destination inside the chosen local data directory."""
+    if target.is_symlink():
+        raise ValueError('census output target must not be a symlink')
+    resolved = _outside_checkout(target)
+    if directory not in resolved.parents:
+        raise ValueError('census output escaped the data directory')
+    return resolved
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--repositories', type=Path, help='JSON array of public owner/repository names')
@@ -218,22 +228,24 @@ def main():
     if Path(args.report).name != args.report:
         parser.error('--report must be a basename')
     directory.mkdir(parents=True, exist_ok=True)
-    snapshots = directory / 'snapshots'
+    snapshots = _data_target(directory, directory / 'snapshots')
+    report_path = _data_target(directory, directory / args.report)
     snapshots.mkdir(exist_ok=True)
     if args.repositories:
         for repo in json.loads(args.repositories.read_text()):
-            target = snapshots / (repo.replace('/', '__') + '.json')
+            target = _data_target(directory, snapshots / (repo.replace('/', '__') + '.json'))
             if not target.exists():
                 target.write_text(json.dumps(capture(repo), indent=2) + '\n')
     rows = []
     for path in sorted(snapshots.glob('*.json')):
+        path = _data_target(directory, path)
         row = measure(json.loads(path.read_text()), args.engine_root)
         rows.append(row)
         print(path.name + ': ' + row['outcome'], flush=True)
     report = summarize(rows)
     if args.compare:
         report['comparison'] = compare(json.loads(args.compare.read_text())['repositories'], rows)
-    (directory / args.report).write_text(json.dumps(report, indent=2) + '\n')
+    report_path.write_text(json.dumps(report, indent=2) + '\n')
     print(json.dumps({key: value for key, value in report.items()
                       if key not in ('repositories', 'comparison')}, indent=2))
 

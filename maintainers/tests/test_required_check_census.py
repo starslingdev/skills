@@ -2,6 +2,8 @@
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -104,3 +106,30 @@ def test_comparison_audits_summary_pass_hidden_by_another_failing_check():
     report = engine().compare(before, after)
     assert report['summary_transitions'] == {'unmeasured->pass': 1}
     assert len(report['summary_requires_manual_review']) == 1
+
+
+@pytest.mark.parametrize('symlink_kind', ['snapshots', 'snapshot_file', 'report'])
+def test_capture_destinations_cannot_follow_symlinks_into_source(tmp_path, monkeypatch, symlink_kind):
+    import sys
+    import json
+    census = engine()
+    source, data = tmp_path / 'source', tmp_path / 'data'
+    source.mkdir()
+    data.mkdir()
+    monkeypatch.setattr(census, 'ROOT', source)
+    repositories = tmp_path / 'repositories.json'
+    repositories.write_text(json.dumps(['sample/project']))
+    monkeypatch.setattr(census, 'capture', lambda repo: snapshot())
+    monkeypatch.setattr(census, 'measure', lambda item, root: {
+        'repository': 'sample/project', 'outcome': 'not_applicable', 'summaries': []})
+    if symlink_kind == 'snapshots':
+        (data / 'snapshots').symlink_to(source, target_is_directory=True)
+    elif symlink_kind == 'snapshot_file':
+        (data / 'snapshots').mkdir()
+        (data / 'snapshots/sample__project.json').symlink_to(source / 'generated.json')
+    else:
+        (data / 'report.json').symlink_to(source / 'generated.json')
+    monkeypatch.setattr(sys, 'argv', ['census', '--repositories', str(repositories), '--data-dir', str(data)])
+    with pytest.raises(ValueError, match='source checkout|symlink|data directory'):
+        census.main()
+    assert not list(source.iterdir())
