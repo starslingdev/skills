@@ -1,4 +1,4 @@
-# CI Score v0.1.4 — methodology
+# CI Score v0.1.5 — methodology
 
 > **CI Score gauges best-practice adherence on CI speed and gate hygiene: a
 > straightforward pass/fail rubric of best-practice checks computed from a
@@ -84,7 +84,7 @@ number:
 |---|---|
 | Dependency caching | some workflow configures it (`actions/cache` or a setup action's cache input) *(n/a when the repo installs no dependencies at all — no manifest, no install command, and no language setup action)* |
 | Build caching | a build-tool cache is configured *(n/a without a build tool)* |
-| Shallow checkout | no PR-triggered workflow uses `fetch-depth: 0` |
+| Shallow checkout | no PR-triggered workflow, or same-repository reusable workflow it calls, uses `fetch-depth: 0` |
 | Test sharding / matrix | a test job runs sharded or as a matrix *(n/a when there is no test-like job to shard)* |
 | Change-scoped builds | CI scopes work to what changed (task-graph filters, affected/changed modes, or a changed-files step) *(n/a without a task graph)* |
 | Concurrency groups | PR workflows declare a `concurrency` group |
@@ -92,7 +92,7 @@ number:
 | Path filters | some PR workflow scopes itself with `paths` |
 | Job timeouts | `timeout-minutes` is set (GitHub's default is 6 hours) |
 | Scoped OIDC id-token | `id-token: write` at job level, never workflow-wide *(n/a when unused)* |
-| Pinned action SHAs | **≥95%** of remote action references are SHA-pinned — full adoption with room for Renovate-style stragglers (at most 1 in 20); the evidence always shows pinned-of-total. The threshold is a ratio, so a repo with fewer than 20 references has no straggler allowance: one unpinned reference fails it |
+| Pinned action SHAs | **≥95%** of remote action references (steps, composite actions, and calls to other repositories' reusable workflows) are pinned to a commit SHA or by GitHub's workflow lockfile — full adoption with room for Renovate-style stragglers (at most 1 in 20); the evidence always shows pinned-of-total. The threshold is a ratio, so a repo with fewer than 20 references has no straggler allowance: one unpinned reference fails it |
 
 Every published best-practice page maps to a check except
 *keep-advisory-checks-non-blocking*: whether an advisory check blocks merges
@@ -108,7 +108,7 @@ the practice matters. The score card links every check name here.
 
 ### Dependency caching
 
-**The fact:** at least one workflow or local composite action configures dependency caching (a cache action - actions/cache incl. restore/save, rust-cache, buildjet - or a setup-* action's cache input). Caching housed in cross-repo reusable workflows is not visible; run the score in that repo.
+**The fact:** at least one workflow or local composite action (any local action a step's uses: names - ./ or $/, wherever it lives - plus everything under .github/actions/) configures dependency caching (a cache action - actions/cache incl. restore/save, rust-cache, buildjet - or a setup-* action's cache input). Caching housed in cross-repo reusable workflows is not visible; run the score in that repo.
 
 **Not applicable when:** the repo shows NO dependency-install signal at all - no dependency manifest at the repo root (package.json / lockfiles / requirements*.txt / pyproject.toml / go.mod / Cargo.toml / build.gradle / pom.xml / *.csproj / mix.exs / build.sbt / Gemfile / composer.json / pubspec.yaml and the like), no dependency-install command in any workflow or composite step (pip / npm / pnpm / yarn / bun / poetry / uv / composer / bundle / gem / conda / mvn / gradle / dotnet / mix / cabal / stack with an install-style verb, or `go mod download` / `cargo fetch`), and no language setup action (actions/setup-node / setup-python / setup-java / setup-dotnet / setup-go / setup-ruby and the like) - and no cache is already configured; with nothing installed there is nothing to cache, so a missing cache is never a fail (OD-CS19). Any one of those three signals makes the check applicable. OR CI is delegated to cross-repo reusable workflows and no local caching is visible - a mechanism this fact cannot see is never failed
 
@@ -130,7 +130,7 @@ the practice matters. The score card links every check name here.
 
 ### Shallow checkout
 
-**The fact:** no checkout step on a PR-GATING workflow sets fetch-depth: 0 (structure-walked; comments never count; a JOB THAT WALKS GIT HISTORY - changelog generation, a merge-base or base-SHA diff, tag/describe, changeset versioning - is exempt: full history is load-bearing there and shallowing it would break the job; post-merge automation - a pull_request trigger whose types are only [closed], e.g. backport/changelog jobs - is exempt too: it needs history and gates nobody; a job whose own if: can never be true for a pull-request event - e.g. github.event_name == 'push', or a job scoped to the merge queue with github.event_name == 'merge_group', which is not a pull-request event - is exempt too: no pull request waits for it. Only simple, fully resolvable event_name conditions are read; anything else keeps the job on the PR path, including a bare literal if: false, which the grammar does not read and which is therefore still graded - a known miss in the fail-closed direction, costing at most a finding that was already reported)
+**The fact:** no checkout step on a PR-GATING workflow sets fetch-depth: 0 (structure-walked; comments never count; a JOB THAT WALKS GIT HISTORY - changelog generation, a merge-base or base-SHA diff, tag/describe, changeset versioning - is exempt: full history is load-bearing there and shallowing it would break the job; post-merge automation - a pull_request trigger whose types are only [closed], e.g. backport/changelog jobs - is exempt too: it needs history and gates nobody; a job whose own if: can never be true for a pull-request event - e.g. github.event_name == 'push', or a job scoped to the merge queue with github.event_name == 'merge_group', which is not a pull-request event - is exempt too: no pull request waits for it. Only simple, fully resolvable event_name conditions are read; anything else keeps the job on the PR path, including a bare literal if: false, which the grammar does not read and which is therefore still graded - a known miss in the fail-closed direction, costing at most a finding that was already reported; a same-repository reusable workflow (on: workflow_call) that a PR-reachable job calls - via ./ or $/, directly or through nested calls - is on the PR path and graded the same way, its jobs' if: judged against the caller's pull-request events, while a call from a job that can never run on a pull request reaches nothing; a call that cannot be followed (a path outside the repository, a file that is missing or does not parse, or a chain more than 16 deep) is never graded either way and is named in the evidence)
 
 **Why it matters:** CI downloads your repo's entire history when it only needs today's code.
 
@@ -214,7 +214,7 @@ the practice matters. The score card links every check name here.
 
 ### Pinned action SHAs
 
-**The fact:** at least 95% of remote action references are pinned to a full commit SHA, across workflow files AND local composite actions (first-party actions/* included - the pinning practice does not exempt them; the evidence always shows pinned-of-total). The threshold asks 'is pinning an adopted, automated practice?': >=95% admits Renovate-style stragglers (at most 1 in 20) while rejecting partial adoption, and is gaming-resistant - reaching it from a low base means actually pinning the fleet (OD-CS17)
+**The fact:** at least 95% of remote action references are pinned - to a full commit SHA, or by a valid entry in GitHub's workflow lockfile (.github/workflows/actions.lock) - across workflow steps, job-level calls to another repository's reusable workflow, AND local composite actions wherever a uses: path places them (first-party actions/* included - the pinning practice does not exempt them; the evidence always shows pinned-of-total, and how many of those the lockfile pins). A tag-referenced action counts as lockfile-pinned only when the lockfile lists it under its own workflow file and carries a full-commit entry for it, or, inside a local action every reference reaches through $/, when the lockfile carries a full-commit entry for it; a ./ action runs whatever is in the workspace, so the lockfile cannot cover what it uses. A lockfile that cannot be read, or is malformed anywhere, grants no credit at all (OD-CS23). The threshold asks 'is pinning an adopted, automated practice?': >=95% admits Renovate-style stragglers (at most 1 in 20) while rejecting partial adoption, and is gaming-resistant - reaching it from a low base means actually pinning the fleet (OD-CS17)
 
 **Why it matters:** A tag like @v4 can be silently repointed by whoever owns the action - pinning the exact commit means CI only ever runs code you chose.
 
@@ -398,6 +398,25 @@ and the other holds at 82. The rationale is OD-CS22 in the spec's
 nothing else — their facts and scores are unchanged — and the published worked
 example keeps its own frozen `v0.1.3` stamp, since a snapshot records what the
 engine said on the day it ran.
+
+**v0.1.5 (2026-10-27, OD-CS23)** closes three places where a check passed on
+workflow content it never read, and credits GitHub's workflow lockfile. A
+reusable workflow in the same repository that a pull-request job calls runs on
+every pull request, so **shallow checkout** now grades it with the workflow
+that calls it (a calling job that can never run on a pull request reaches
+nothing, and a call that cannot be followed is named rather than graded).
+Local composite actions are read from every `uses:` path — `./ci/setup` and
+`$/tools/x`, not only `.github/actions/` — so their cache steps and unpinned
+actions count. **Pinned action SHAs** now counts a job-level call to another
+repository's reusable workflow, and counts a tag reference as pinned when
+`.github/workflows/actions.lock` (public preview 2026-10-14, written by the
+`gh actions-lock` CLI extension) lists it under its own workflow with a
+full-commit entry; the evidence says how many were pinned that way. Inside a
+local action, lockfile credit needs a `$/` reference, because GitHub
+documents that a `./` action is never followed or locked. A lockfile that
+cannot be read, or is malformed anywhere, grants nothing. Recomputed over the
+frozen calibration controls, no fact moves (91 and 82 hold). The rationale is
+OD-CS23 in the spec's `decision_log`.
 
 The v1-granular rubric (measured-magnitude gating, tiers, weights,
 nine refusal conditions) was **punted before publication by owner decision

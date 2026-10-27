@@ -11,6 +11,48 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
 
 ## [Unreleased]
 
+- **2026-10-27** — **Added** (registry `ci-score-v0.1.5`, OD-CS23): the
+  pinning check credits GitHub's workflow lockfile
+  (`.github/workflows/actions.lock`, public preview 2026-10-14). The
+  lockfile records the exact commit each action runs at while the YAML keeps
+  its tags, so a repository that locked every action used to fail pinning.
+  A tag reference now counts as pinned when the lockfile lists it under its
+  own workflow and holds a full-commit entry for it, and the evidence says
+  how many: "2 of 2 remote action references pinned, 2 via lockfile". Inside
+  a local action, credit needs a `$/` reference, since GitHub never follows
+  or locks a `./` action. A lockfile that cannot be read, or is malformed
+  anywhere, grants nothing and the evidence says so. Repositories without a
+  lockfile keep byte-identical evidence.
+
+- **2026-10-27** — **Fixed**: three places where a check passed on workflow
+  content the scan never read.
+  - A reusable workflow in the same repository (`on: workflow_call`) that a
+    pull-request job calls was never graded on the pull-request path, so a
+    full-history checkout inside it passed the shallow-checkout check. Called
+    workflows are now followed (`./` and `$/`, nested calls included, 16
+    deep at most) and graded with the pull-request events of the workflow
+    that calls them. A calling job that can never run on a pull request
+    reaches nothing, and a call that cannot be followed (outside the
+    repository, missing, or unparseable) is named in the evidence instead of
+    being graded either way. The trigger-level checks (concurrency groups,
+    cancelling superseded runs, path filters) still read only the workflows
+    a pull request triggers, since those settings belong there.
+  - Local composite actions were read only from `.github/actions/`. An
+    action at `./ci/setup` or `$/tools/x` was invisible: its cache step did
+    not count (a wrong fail) and its unpinned actions were left out of the
+    pinning count (a wrong pass). Every local action a step's `uses:` names
+    is now read wherever it lives, with nested references followed (16 deep,
+    256 files at most). A reference that resolves outside the repository, or
+    names no readable `action.yml`, is never read and is recorded by name in
+    `data_sources.composite_parse_errors`.
+  - A job-level call to another repository's reusable workflow
+    (`jobs.ci.uses: org/shared/.github/workflows/ci.yml@main`) was left out
+    of the pinning count, so one pinned step read "1 of 1" and passed. It
+    now reads "1 of 2" and fails; a SHA-pinned call counts as pinned. The
+    evidence notes how many reusable-workflow calls were counted.
+  - Both frozen calibration controls score exactly as before (no fact or
+    evidence string moves).
+
 - **2026-10-10** — **Fixed**: actions referenced with GitHub's
   self-repository prefix (`uses: $/path`, shipped 2026-07-30) are local to
   the repository, exactly like `uses: ./path`, but were counted as unpinned

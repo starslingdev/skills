@@ -17,10 +17,14 @@ predates this and matches raw code, but its only effect is a PASS (it never
 turns a comment into a false FAIL). A false FAIL on a public page is this
 design's worst outcome, and no substring path can produce one from a comment.
 
-VISIBILITY: workflow files plus LOCAL COMPOSITE ACTIONS
-(.github/actions/**/action.yml). Cross-repo reusable workflows remain
-invisible; the affected facts land not_applicable-with-evidence naming what was
-searched, never a confident claim about unseen files.
+VISIBILITY: workflow files plus LOCAL COMPOSITE ACTIONS (everything under
+.github/actions/**, and every local action a step's `uses:` names wherever it
+lives, followed through nested references), plus the workflow lockfile
+(.github/workflows/actions.lock) for the pinning check. Same-repository
+reusable workflows a pull-request job calls are graded on the PR path.
+Cross-repo reusable workflows' CONTENTS remain invisible (their reference is
+counted for pinning); the affected facts land not_applicable-with-evidence
+naming what was searched, never a confident claim about unseen files.
 
 This module is a self-contained COPY of the helpers it needs (cross-skill
 imports are forbidden — a skill must install standalone). It shares no code
@@ -324,7 +328,7 @@ def _automation_only(parsed: list[tuple[str, dict, str]], root: Path) -> bool:
         for jid, job in _wf_jobs(doc).items():
             if _TESTISH_RE.search(jid) or _TESTISH_RE.search(str(job.get("name", ""))):
                 return False  # signal 1 (test-like job name)
-    step_sources = _step_sources(parsed, _composite_action_docs(root))
+    step_sources = _step_sources(parsed, _composite_action_docs(root, parsed=parsed))
     if _has_test_command(step_sources):
         return False  # signal 1 (test-runner command)
     if _has_build_signal(parsed, root, step_sources):
@@ -610,7 +614,7 @@ def _step_walk_stats(parsed: list[tuple[str, dict, str]], root: Path) -> dict[st
     different read than the checks made. The collector records this; the
     report header discloses it."""
     stats = _new_step_stats()
-    _step_sources(parsed, _composite_action_docs(root), stats)
+    _step_sources(parsed, _composite_action_docs(root, parsed=parsed), stats)
     return stats
 
 
@@ -992,29 +996,140 @@ def _job_if_excludes_pull_requests(job: dict, doc: dict) -> bool:
         return False
 
 
-def _composite_action_docs(root: Path,
-                           errors: list[str] | None = None) -> list[tuple[str, dict]]:
+def _composite_action_docs(root: Path, errors: list[str] | None = None,
+                           parsed: list[tuple[str, dict, str]] | None = None,
+                           ) -> list[tuple[str, dict]]:
     """Local composite actions' parsed action.yml files - setup (and its
     caching / pinning) frequently lives there rather than in the workflow.
-    With `errors`, an action file that cannot be read or parsed, or is not a
-    mapping, is appended by name (the collector records them as
-    `data_sources.composite_parse_errors`, the way it records
+    With `parsed`, every local action a `uses:` names is read too, wherever
+    it lives (`_local_composites`). With `errors`, an action file that cannot
+    be read or parsed, or is not a mapping, is appended by name (the collector
+    records them as `data_sources.composite_parse_errors`, the way it records
     `workflow_parse_errors`)."""
-    out: list[tuple[str, dict]] = []
+    return [(rel, doc) for rel, doc, _locked in
+            _local_composites(root, parsed or [], errors)]
+
+
+# How many distinct local action files one scan reads through `uses:`
+# references. A real repository has a handful; past the cap the reference is
+# recorded as unread, never silently dropped.
+_MAX_LOCAL_COMPOSITES = 256
+
+
+def _local_action_key(uses: Any) -> str | None:
+    """The `./…` / `$/…` path of a step-level local ACTION reference, or None
+    (remote, docker://, or a reusable-workflow `.yml` path)."""
+    if not isinstance(uses, str) or not _is_local_uses(uses):
+        return None
+    key = uses.split("@")[0].strip()
+    return None if key.endswith((".yml", ".yaml")) else key
+
+
+def _local_composites(root: Path, parsed: list[tuple[str, dict, str]],
+                      errors: list[str] | None = None,
+                      ) -> list[tuple[str, dict, bool]]:
+    """(rel, doc, self_locked) for every local action the scan reads: each
+    `action.yml` under `.github/actions/**`, plus each action a step's `uses:`
+    names wherever it lives (`./ci/setup`, `$/tools/x`), followed through the
+    local references inside those actions. The `uses:` path is the truth: an
+    action outside `.github/actions/` is as much a part of the job as one
+    inside it, and skipping it hid both its cache step and its unpinned
+    actions.
+
+    Fails CLOSED, the same rules as the history read: a reference that
+    resolves outside the repository root, names no readable `action.yml` /
+    `action.yaml`, sits deeper than `_MAX_LOCAL_ACTION_DEPTH`, or arrives past
+    `_MAX_LOCAL_COMPOSITES` is never read and is appended to `errors` by its
+    reference, so nothing it holds can earn credit unseen.
+
+    `self_locked` is True only when every reference that reaches the action
+    is a self-repository `$/` reference from a workflow or from another
+    self-locked action: `$/` runs at the workflow's own commit, so a workflow
+    lockfile covers the actions it uses, while `./` runs whatever is in the
+    workspace and the lockfile cannot cover it."""
+    root_n = os.path.normpath(os.path.abspath(root))
+    docs: dict[str, dict] = {}
+    unreadable: set[str] = set()
+    arrivals: dict[str, list[tuple[str | None, bool]]] = {}
+    errs: list[str] = []
+    queue: list[tuple[str, str | None, int]] = []
+
+    def load(path: Path, rel: str) -> None:
+        try:
+            doc = yaml.safe_load(path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, ValueError, yaml.YAMLError):
+            doc = None
+        if not isinstance(doc, dict):
+            unreadable.add(rel)
+            errs.append(rel)
+            return
+        docs[rel] = doc
+        for step in _composite_steps(doc):
+            key = _local_action_key(step.get("uses"))
+            if key is not None:
+                queue.append((key, rel, 0))
+
     for pattern in ("action.yml", "action.yaml"):
         for path in sorted((root / ".github" / "actions").rglob(pattern)):
-            rel = str(path.relative_to(root))
+            load(path, str(path.relative_to(root)))
+    # depth counts nested hops; seeds from the walk above restart at 0 only
+    # for the first hop, then grow like any other chain
+    queue = [(k, p, 1) for k, p, _d in queue]
+    for _rel, doc, _raw in parsed:
+        for job in _wf_jobs(doc).values():
+            for step in _job_steps(job):
+                key = _local_action_key(step.get("uses"))
+                if key is not None:
+                    queue.append((key, None, 0))
+    while queue:
+        key, parent, depth = queue.pop(0)
+        base = _local_ref_path(root, key)
+        if base is None:
+            errs.append(f"{key} (resolves outside the repository)")
+            continue
+        found = None
+        for cand in (base / "action.yml", base / "action.yaml"):
             try:
-                doc = yaml.safe_load(path.read_text(encoding="utf-8", errors="replace"))
-            except (OSError, yaml.YAMLError):
-                if errors is not None:
-                    errors.append(rel)
+                if cand.is_file():
+                    found = cand
+                    break
+            except (OSError, ValueError):
                 continue
-            if isinstance(doc, dict):
-                out.append((rel, doc))
-            elif errors is not None:
-                errors.append(rel)
-    return out
+        if found is None:
+            errs.append(f"{key} (no readable action.yml or action.yaml)")
+            continue
+        rel = Path(os.path.relpath(os.path.normpath(os.path.abspath(found)), root_n)).as_posix()
+        if depth > _MAX_LOCAL_ACTION_DEPTH:
+            errs.append(f"{key} (nested more than {_MAX_LOCAL_ACTION_DEPTH} deep)")
+            continue
+        if rel in unreadable:
+            continue
+        arrivals.setdefault(rel, []).append((parent, key.startswith("$/")))
+        if rel in docs:
+            continue
+        if len(docs) >= _MAX_LOCAL_COMPOSITES:
+            errs.append(f"{key} (past the {_MAX_LOCAL_COMPOSITES}-action read limit)")
+            continue
+        before = len(queue)
+        load(found, rel)
+        queue[before:] = [(k, p, depth + 1) for k, p, _d in queue[before:]]
+
+    # self-locked: every arrival is `$/` from a workflow or a self-locked
+    # action. Start optimistic for referenced actions and only ever lower a
+    # flag, so the loop terminates (cycles included).
+    locked = {rel: rel in arrivals for rel in docs}
+    changed = True
+    while changed:
+        changed = False
+        for rel, arr in arrivals.items():
+            if locked.get(rel) and any(
+                    not dollar or (p is not None and not locked.get(p, False))
+                    for p, dollar in arr):
+                locked[rel] = False
+                changed = True
+    if errors is not None:
+        errors.extend(dict.fromkeys(errs))
+    return [(rel, doc, locked[rel]) for rel, doc in docs.items()]
 
 
 def _unreadable_step_sources(parsed: list[tuple[str, dict, str]],
@@ -1031,7 +1146,7 @@ def _unreadable_step_sources(parsed: list[tuple[str, dict, str]],
             if steps is not None and not isinstance(steps, list):
                 bad_lists.append(f"{rel}: jobs.{jid}.steps")
     parse_errors: list[str] = []
-    for rel, doc in _composite_action_docs(root, parse_errors):
+    for rel, doc in _composite_action_docs(root, parse_errors, parsed):
         runs = doc.get("runs")
         steps = runs.get("steps") if isinstance(runs, dict) else None
         if steps is not None and not isinstance(steps, list):
@@ -1048,6 +1163,138 @@ def _conc_cancels_basic(conc: Any) -> bool:
     return val is not None and val is not False
 
 
+def _pr_path_workflows(parsed: list[tuple[str, dict, str]],
+                       pr_wfs: list[tuple[str, dict]],
+                       ) -> tuple[list[tuple[str, dict, dict]], list[str]]:
+    """(entries, unread_calls) for the job-level checks on the PR path.
+
+    `entries` is every PR-gating workflow as (rel, doc, doc), followed by every
+    same-repository reusable workflow (`jobs.x.uses: ./.github/workflows/y.yml`
+    or `$/…`) that a PR-reachable job calls, directly or through nested calls,
+    as (rel, doc, event_doc). A callee's own trigger is `workflow_call`, but it
+    runs on every pull request its caller runs on, and inside it
+    `github.event_name` is the CALLER's event: `event_doc` carries those
+    pull-request event names, so a callee job's own `if:` is judged against
+    the events that actually reach it. A calling job whose `if:` can never be
+    true for a pull request reaches nothing.
+
+    `unread_calls` names each local call on the PR path that could not be
+    followed: a path outside the repository root, a file that is not a parsed
+    workflow (missing or unparseable), or a chain deeper than
+    `_MAX_LOCAL_ACTION_DEPTH`. Those are never graded as clean or as dirty;
+    the caller discloses them."""
+    by_rel = {os.path.normpath(rel): (rel, doc) for rel, doc, _raw in parsed}
+    roots = {os.path.normpath(rel) for rel, _doc in pr_wfs}
+    events: dict[str, set[str]] = {}
+    unread: list[str] = []
+    queue = [(doc, set(_wf_pr_event_names(doc)), 0) for _rel, doc in pr_wfs]
+    while queue:
+        doc, evs, depth = queue.pop(0)
+        ev_doc = {"on": sorted(evs)}
+        for job in _wf_jobs(doc).values():
+            uses = job.get("uses")
+            if not (isinstance(uses, str) and _is_local_uses(uses)):
+                continue
+            if _job_if_excludes_pull_requests(job, ev_doc):
+                continue
+            key = uses.split("@")[0].strip()
+            rest = key[2:]
+            target = os.path.normpath(rest) if rest else ""
+            if (not rest or os.path.isabs(rest) or target == ".."
+                    or target.startswith(".." + os.sep) or target not in by_rel
+                    or depth >= _MAX_LOCAL_ACTION_DEPTH):
+                unread.append(key)
+                continue
+            if target in roots or evs <= events.get(target, set()):
+                continue  # graded as a PR workflow already, or no new events
+            events.setdefault(target, set()).update(evs)
+            queue.append((by_rel[target][1], set(events[target]), depth + 1))
+    callees = sorted((by_rel[t][0], by_rel[t][1], {"on": sorted(e)})
+                     for t, e in events.items())
+    return ([(rel, doc, doc) for rel, doc in pr_wfs] + callees,
+            sorted(set(unread)))
+
+
+# GitHub workflow lockfile (public preview 2026-10-14; written by the
+# `gh actions-lock` CLI extension): `.github/workflows/actions.lock` records,
+# per workflow file, the exact commit every action reference runs at, while
+# the YAML keeps its tags. Shape (format version v0.0.x):
+#   version: 'v0.0.3'
+#   workflows: {'.github/workflows/ci.yml': ['actions/checkout@v7.0.1', ...]}
+#   dependencies: {'actions/checkout@v7.0.1': {ref, commit: 'sha1-<40 hex>',
+#                                              owner_id, repo_id, uses?}}
+_LOCKFILE_REL = ".github/workflows/actions.lock"
+_LOCK_VERSION_RE = re.compile(r"^v\d+\.\d+\.\d+$")
+_LOCK_COMMIT_RE = re.compile(r"^sha1-[0-9a-f]{40}$")
+
+
+def _lock_key(action: str, ref: str) -> str:
+    # the lockfile folds owner and repo case; refs are case-sensitive
+    return f"{action.strip().lower()}@{ref.strip()}"
+
+
+def _lock_ref_key(text: Any) -> str | None:
+    if not isinstance(text, str) or "@" not in text:
+        return None
+    action, _, ref = text.partition("@")
+    return _lock_key(action, ref)
+
+
+def _load_lockfile(root: Path) -> tuple[str, dict[str, set[str]], set[str]]:
+    """(state, per_workflow, any_workflow). `state` is "absent", "valid" or
+    "invalid". `per_workflow` maps a workflow file to the references the
+    lockfile covers for it: listed under that workflow AND carrying a valid
+    dependency entry (a full commit). `any_workflow` is the union over every
+    workflow list and every entry's own `uses:` list, again only references
+    with a valid entry.
+
+    Fails CLOSED: a lockfile that cannot be read, does not parse, carries an
+    unknown top-level key, or holds ANY malformed list or entry (a commit that
+    is not `sha1-` plus 40 hex, a missing ref / owner_id / repo_id) is
+    "invalid" and covers nothing, the same way the `gh actions-lock` CLI
+    refuses a corrupt lockfile rather than reading part of it."""
+    path = root / _LOCKFILE_REL
+    try:
+        if not path.exists():
+            return "absent", {}, set()
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, yaml.YAMLError):
+        return "invalid", {}, set()
+    bad = ("invalid", {}, set())
+    if not isinstance(doc, dict) or set(doc) - {"version", "workflows", "dependencies"}:
+        return bad
+    wfs, deps = doc.get("workflows"), doc.get("dependencies")
+    if not (isinstance(doc.get("version"), str) and _LOCK_VERSION_RE.match(doc["version"])
+            and isinstance(wfs, dict) and isinstance(deps, dict)):
+        return bad
+    valid: set[str] = set()
+    nested: set[str] = set()
+    for key, entry in deps.items():
+        k = _lock_ref_key(key)
+        if (k is None or not isinstance(entry, dict)
+                or not isinstance(entry.get("ref"), str)
+                or not (isinstance(entry.get("commit"), str)
+                        and _LOCK_COMMIT_RE.match(entry["commit"]))
+                or not all(isinstance(entry.get(f), int) and not isinstance(entry.get(f), bool)
+                           for f in ("owner_id", "repo_id"))):
+            return bad
+        uses = entry.get("uses", [])
+        if not isinstance(uses, list) or any(_lock_ref_key(u) is None for u in uses):
+            return bad
+        valid.add(k)
+        nested.update(_lock_ref_key(u) for u in uses)
+    per_workflow: dict[str, set[str]] = {}
+    for wf, refs in wfs.items():
+        if not isinstance(wf, str) or not isinstance(refs, list):
+            return bad
+        keys = [_lock_ref_key(r) for r in refs]
+        if any(k is None for k in keys):
+            return bad
+        per_workflow[os.path.normpath(wf)] = {k for k in keys if k in valid}
+    listed = set().union(*per_workflow.values()) if per_workflow else set()
+    return "valid", per_workflow, listed | (nested & valid)
+
+
 def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path) -> dict[str, Any]:
     """The eleven CI Score v0.1-basic facts. Shape per fact:
     {"state": "pass"|"fail"|"not_applicable", "evidence": str, "files": [..<=3]}.
@@ -1055,7 +1302,8 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path) -> dict[str
     thing to look at."""
     pr_wfs = [(rel, doc) for rel, doc, _raw in parsed if _wf_is_pr_gating(doc)]
     remote_reusables = _remote_reusable_refs(parsed)
-    composites = _composite_action_docs(root)
+    local_composites = _local_composites(root, parsed)
+    composites = [(rel, doc) for rel, doc, _locked in local_composites]
     # steps everywhere the repo's own files define them: workflows + local
     # composite actions (the "runs.steps" shape), leaf steps via the walker
     # (children of `parallel:` groups included).
@@ -1143,7 +1391,9 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path) -> dict[str
     offenders = []
     carved_out = 0   # PR-gating jobs that take full history AND need it
     off_pr_path = 0  # jobs whose own `if:` can never be true on a pull request
-    for rel, doc in pr_wfs:
+    # PR workflows plus the same-repository reusable workflows they call
+    pr_path, unread_calls = _pr_path_workflows(parsed, pr_wfs)
+    for rel, doc, event_doc in pr_path:
         for job_name, job in _wf_jobs(doc).items():
             takes_full_history = any(
                 str((step.get("with") if isinstance(step.get("with"), dict) else {})
@@ -1154,7 +1404,7 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path) -> dict[str
             # A job whose own `if:` can never be true for a pull-request event
             # is not on the PR path at all — no pull request waits for it, so
             # its checkout depth is not a PR-speed fact.
-            if _job_if_excludes_pull_requests(job, doc):
+            if _job_if_excludes_pull_requests(job, event_doc):
                 off_pr_path += 1
                 continue
             if _job_needs_git_history(job, job_name, local_history_actions):
@@ -1185,6 +1435,10 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path) -> dict[str
         evidence = ("no PR-gating workflow checks out full history (post-merge "
                     "automation like backport/changelog jobs is exempt - it needs "
                     "history and gates nobody)")
+    if unread_calls:
+        # never graded either way: disclosed, so a pass never reads as covering it
+        evidence += (f"; {len(unread_calls)} reusable workflow call(s) on the PR path "
+                     f"could not be read and were not graded: {', '.join(unread_calls[:3])}")
     facts["ci.checkout.shallow-clone"] = fact(
         "fail" if offenders else ("pass" if pr_wfs else "not_applicable"),
         evidence, offenders)
@@ -1347,31 +1601,60 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path) -> dict[str
     # exempt them. The threshold asks "is pinning an adopted, automated
     # practice?": it admits Renovate-style stragglers (<=1 in 20) and rejects
     # partial adoption (OD-CS17). Integer arithmetic - no float boundary.
-    pinned = total = 0
+    # Every remote reference counts: step-level actions AND job-level calls to
+    # another repository's reusable workflow (`jobs.x.uses: org/r/...yml@ref`).
+    # A reference also counts as pinned when the workflow lockfile covers it:
+    # a valid entry listed under its own workflow file, or, inside a local
+    # action reached only through `$/`, a valid entry the lockfile lists.
+    workflow_rels = {os.path.normpath(rel) for rel, _doc, _raw in parsed}
+    self_locked = {rel for rel, _doc, locked in local_composites if locked}
+    lock_state, lock_per_wf, lock_any = _load_lockfile(root)
+    remote_refs = [(rel, ua) for rel, steps in step_sources for step in steps
+                   if (ua := _step_uses(step))]
+    reusable_calls = 0
+    for rel, doc, _raw in parsed:
+        for job in _wf_jobs(doc).values():
+            uses = job.get("uses")
+            if isinstance(uses, str) and not _is_local_uses(uses) and "@" in uses:
+                action, _, ref = uses.partition("@")
+                remote_refs.append((rel, (action, ref)))
+                reusable_calls += 1
+    pinned = total = via_lock = 0
     offenders_ranked: list[tuple[int, str]] = []
-    for rel, steps in step_sources:
-        for step in steps:
-            ua = _step_uses(step)
-            if not ua:
-                continue
-            total += 1
-            if _SHA40_RE.match(ua[1]):
-                pinned += 1
-            else:
-                # Third-party offenders sort FIRST: pointing the maintainer at
-                # actions/labeler while an unpinned third-party action holds
-                # release credentials is worse than no file list.
-                first_party = ua[0].startswith(("actions/", "github/"))
-                offenders_ranked.append((1 if first_party else 0, rel))
+    for rel, ua in remote_refs:
+        total += 1
+        norm = os.path.normpath(rel)
+        key = _lock_key(ua[0], ua[1])
+        if _SHA40_RE.match(ua[1]):
+            pinned += 1
+        elif (key in lock_per_wf.get(norm, ()) if norm in workflow_rels
+              else (rel in self_locked and key in lock_any)):
+            pinned += 1
+            via_lock += 1
+        else:
+            # Third-party offenders sort FIRST: pointing the maintainer at
+            # actions/labeler while an unpinned third-party action holds
+            # release credentials is worse than no file list.
+            first_party = ua[0].startswith(("actions/", "github/"))
+            offenders_ranked.append((1 if first_party else 0, rel))
     offender_files = [rel for _rank, rel in sorted(set(offenders_ranked))]
     if total == 0:
         facts["ci.security.pinned-action-shas"] = fact(
             "not_applicable", "no remote actions used in workflow or local composite action files", [])
     else:
+        # With no lockfile and no reusable-workflow call the evidence is
+        # byte-identical to before; each addition says what it counted.
+        scope = "workflow + local composite action files"
+        if reusable_calls:
+            scope += f", including {reusable_calls} reusable-workflow call(s)"
+        head = (f"{pinned} of {total} remote action references pinned, {via_lock} via "
+                f"lockfile ({_LOCKFILE_REL})" if lock_state == "valid" else
+                f"{pinned} of {total} remote action references SHA-pinned")
+        evidence = f"{head} ({scope}; passes at >=95%)"
+        if lock_state == "invalid":
+            evidence += (f"; {_LOCKFILE_REL} is not a readable, well-formed lockfile, "
+                         f"so it grants no credit")
         facts["ci.security.pinned-action-shas"] = fact(
-            "pass" if pinned * 100 >= total * 95 else "fail",
-            f"{pinned} of {total} remote action references SHA-pinned "
-            f"(workflow + local composite action files; passes at >=95%)",
-            offender_files)
+            "pass" if pinned * 100 >= total * 95 else "fail", evidence, offender_files)
 
     return facts
