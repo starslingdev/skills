@@ -1274,8 +1274,32 @@ def _job_pr_events(job: dict, events: set[str]) -> set[str]:
 #   dependencies: {'actions/checkout@v7.0.1': {ref, commit: 'sha1-<40 hex>',
 #                                              owner_id, repo_id, uses?}}
 _LOCKFILE_REL = ".github/workflows/actions.lock"
-_LOCK_VERSION_RE = re.compile(r"^v\d+\.\d+\.\d+$")
-_LOCK_COMMIT_RE = re.compile(r"^sha1-[0-9a-f]{40}$")
+_LOCK_VERSION_RE = re.compile(r"\Av\d+\.\d+\.\d+\Z")
+_LOCK_COMMIT_RE = re.compile(r"\Asha1-[0-9a-f]{40}\Z")
+
+
+class _StrictLockLoader(yaml.SafeLoader):
+    """SafeLoader that refuses a duplicated mapping key. Plain yaml keeps the
+    LAST of two equal keys, so a malformed entry followed by a valid one
+    would read as valid; the lockfile reader must see the whole file."""
+
+
+def _no_duplicate_keys(loader: yaml.SafeLoader, node: Any, deep: bool = False) -> Any:
+    seen = set()
+    for key_node, _value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            dup = key in seen
+            seen.add(key)
+        except TypeError:  # an unhashable key: not a lockfile either
+            raise yaml.YAMLError("unhashable mapping key")
+        if dup:
+            raise yaml.YAMLError(f"duplicate mapping key {key!r}")
+    return loader.construct_mapping(node, deep=deep)
+
+
+_StrictLockLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _no_duplicate_keys)
 
 
 def _lock_key(action: str, ref: str) -> str:
@@ -1304,13 +1328,17 @@ def _load_lockfile(root: Path) -> tuple[str, dict[str, set[str]], set[str]]:
     "invalid" and covers nothing, the same way the `gh actions-lock` CLI
     refuses a corrupt lockfile rather than reading part of it."""
     path = root / _LOCKFILE_REL
-    try:
-        if not path.exists():
-            return "absent", {}, set()
-        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, yaml.YAMLError):
-        return "invalid", {}, set()
     bad = ("invalid", {}, set())
+    try:
+        if not path.exists() and not path.is_symlink():
+            return "absent", {}, set()
+        # a symbolic link out of the checkout is not this repository's lockfile
+        real_root = os.path.realpath(root)
+        if os.path.commonpath([real_root, os.path.realpath(path)]) != real_root:
+            return bad
+        doc = yaml.load(path.read_text(encoding="utf-8"), Loader=_StrictLockLoader)
+    except (OSError, ValueError, yaml.YAMLError):
+        return bad
     if not isinstance(doc, dict) or set(doc) - {"version", "workflows", "dependencies"}:
         return bad
     wfs, deps = doc.get("workflows"), doc.get("dependencies")

@@ -59,7 +59,9 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
     out of the checkout is never read. Inside a `$/` action, lockfile credit
     needs an entry under every workflow that reaches it. A local action the
     scan could not read is now named in the caching and pinning evidence,
-    not only in `data_sources`.
+    not only in `data_sources`. A lockfile with a duplicated key, a commit
+    or version followed by trailing text, or a symbolic link out of the
+    checkout is malformed and grants nothing.
   - Both frozen calibration controls score exactly as before (no fact or
     evidence string moves). Other repositories can score LOWER: an action
     outside `.github/actions/` or a called workflow can expose an unpinned

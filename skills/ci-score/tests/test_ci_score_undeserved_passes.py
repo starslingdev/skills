@@ -404,6 +404,84 @@ def test_lockfile_credit_inside_a_composite_needs_a_self_repository_reference(tm
     assert _fact(doc, PINNED)["evidence"].startswith("1 of 2 ")
 
 
+_ENTRY = f"commit: 'sha1-{SHA2}'"
+
+
+@__import__("pytest").mark.parametrize("name,mutate", [
+    ("unknown top-level key", lambda t: t + "extra: 1\n"),
+    ("missing owner_id", lambda t: t.replace("        owner_id: 44036562\n", "", 1)),
+    ("bad version", lambda t: t.replace("version: 'v0.0.3'", "version: 'v0.0'")),
+    ("commit with a trailing newline",
+     lambda t: t.replace(_ENTRY, f'commit: "sha1-{SHA2}\\n"')),
+    # yaml keeps the LAST of two equal keys; a strict reader refuses the file
+    ("duplicate dependency key", lambda t: t.replace(
+        "dependencies:\n",
+        "dependencies:\n    'actions/checkout@v7.0.1':\n        ref: 'v7.0.1'\n"
+        "        commit: 'sha1-not-a-commit'\n        owner_id: 1\n        repo_id: 2\n")),
+    ("duplicate workflow key", lambda t: t.replace(
+        "workflows:\n", "workflows:\n    '.github/workflows/ci.yml': []\n")),
+])
+def test_negative_control_every_malformed_lockfile_grants_nothing(tmp_path, name, mutate):
+    bad = mutate(_lockfile(BOTH))
+    assert bad != _lockfile(BOTH), name
+    doc = _collect(tmp_path, {".github/workflows/ci.yml": TAGGED, LOCK: bad})
+    got = _fact(doc, PINNED)
+    assert got["state"] == "fail" and got["evidence"].startswith("0 of 2 "), (name, got)
+    assert "grants no credit" in got["evidence"], (name, got)
+
+
+def test_negative_control_a_lockfile_symlinked_outside_the_repo_grants_nothing(tmp_path):
+    import os
+    (tmp_path / "outside.lock").write_text(_lockfile(BOTH))
+    root = tmp_path / "repo"
+    (root / ".github" / "workflows").mkdir(parents=True)
+    _git(root, "init", "-q")
+    (root / ".github/workflows/ci.yml").write_text(_y(TAGGED))
+    os.symlink(str(tmp_path / "outside.lock"), str(root / LOCK))
+    _git(root, "add", ".github")
+    _git(root, "commit", "-qm", "init")
+    doc, code = cc_mod.collect(root)
+    assert code == 0, doc
+    got = _fact(doc, PINNED)
+    assert got["evidence"].startswith("0 of 2 ") and "grants no credit" in got["evidence"], got
+
+
+def test_a_composite_chain_past_the_depth_limit_is_not_read_and_is_disclosed(tmp_path):
+    files = {".github/workflows/ci.yml": SETUP_CALLER.replace("./ci/setup", "./a/0")}
+    for i in range(18):
+        files[f"a/{i}/action.yml"] = f"""
+            runs:
+              using: composite
+              steps:
+                - uses: ./a/{i + 1}
+            """
+    files["a/18/action.yml"] = CACHED_UNPINNED_SETUP
+    doc = _collect(tmp_path, files)
+    errs = doc["data_sources"]["composite_parse_errors"]
+    assert any("nested more than 16 deep" in e for e in errs), errs
+    got = _fact(doc, PINNED)
+    assert got["evidence"].startswith("1 of 1 ") and "could not be read" in got["evidence"], got
+
+
+def test_composites_past_the_read_limit_are_not_read_and_are_disclosed(tmp_path):
+    steps = "\n".join(f"          - uses: ./a/{i}" for i in range(260))
+    files = {".github/workflows/ci.yml": f"""
+    on: pull_request
+    jobs:
+      test:
+        runs-on: ubuntu-latest
+        steps:
+          - uses: actions/checkout@{SHA}
+{steps}
+    """}
+    for i in range(260):
+        files[f"a/{i}/action.yml"] = "runs: {using: composite, steps: [{uses: x/y@v1}]}\n"
+    doc = _collect(tmp_path, files)
+    errs = doc["data_sources"]["composite_parse_errors"]
+    assert sum("past the 256-action read limit" in e for e in errs) == 4, errs
+    assert _fact(doc, PINNED)["evidence"].startswith("1 of 257 "), _fact(doc, PINNED)
+
+
 def test_no_lockfile_keeps_the_evidence_byte_identical(tmp_path):
     doc = _collect(tmp_path, {".github/workflows/ci.yml": TAGGED})
     assert _fact(doc, PINNED)["evidence"] == (
