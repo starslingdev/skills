@@ -5,7 +5,7 @@ ci-speedup's scanner, 2026-07-16).
 composite actions and returns the eleven pass/fail CONFIGURATION FACTS the CI
 Score consumes (each fact: {"state": "pass"|"fail"|"not_applicable",
 "evidence": str, "files": [..<=3]}). `ci_score.compute_ci_score` maps these
-onto the frozen v0.1.4 registry and does the arithmetic.
+onto the frozen v0.1.6 registry and does the arithmetic.
 
 STRUCTURE, NOT SUBSTRINGS: every fact walks the parsed workflow (jobs, steps,
 with-blocks, on-blocks). The only substring matching is over the CODE inside a
@@ -1018,11 +1018,12 @@ _MAX_LOCAL_COMPOSITES = 256
 
 def _local_action_key(uses: Any) -> str | None:
     """The `./…` / `$/…` path of a step-level local ACTION reference, or None
-    (remote, docker://, or a reusable-workflow `.yml` path)."""
+    (remote or docker://). A step-level `uses:` always names an action
+    directory, even one called `setup.yml`: reusable workflows are called at
+    job level, so no suffix is filtered here."""
     if not isinstance(uses, str) or not _is_local_uses(uses):
         return None
-    key = uses.split("@")[0].strip()
-    return None if key.endswith((".yml", ".yaml")) else key
+    return uses.split("@")[0].strip()
 
 
 def _local_composites(root: Path, parsed: list[tuple[str, dict, str]],
@@ -1042,11 +1043,13 @@ def _local_composites(root: Path, parsed: list[tuple[str, dict, str]],
     `_MAX_LOCAL_COMPOSITES` is never read and is appended to `errors` by its
     reference, so nothing it holds can earn credit unseen.
 
-    `self_locked` is True only when every reference that reaches the action
-    is a self-repository `$/` reference from a workflow or from another
-    self-locked action: `$/` runs at the workflow's own commit, so a workflow
-    lockfile covers the actions it uses, while `./` runs whatever is in the
-    workspace and the lockfile cannot cover it."""
+    `self_locked` is the set of workflow files that reach the action, and is
+    set only when every reference that reaches it is a self-repository `$/`
+    reference from a workflow or from another self-locked action (else None):
+    `$/` runs at the workflow's own commit, so a workflow lockfile covers the
+    actions it uses, while `./` runs whatever is in the workspace and the
+    lockfile cannot cover it. Credit then needs an entry under every one of
+    those workflows, never one borrowed from a workflow that does not run it."""
     root_n = os.path.normpath(os.path.abspath(root))
     docs: dict[str, dict] = {}
     unreadable: set[str] = set()
@@ -1075,12 +1078,15 @@ def _local_composites(root: Path, parsed: list[tuple[str, dict, str]],
     # depth counts nested hops; seeds from the walk above restart at 0 only
     # for the first hop, then grow like any other chain
     queue = [(k, p, 1) for k, p, _d in queue]
-    for _rel, doc, _raw in parsed:
+    wf_marks: dict[str, str] = {}  # "wf:<rel>" parent marker -> workflow rel
+    for wf_rel, doc, _raw in parsed:
+        mark = "\0wf:" + os.path.normpath(wf_rel)
+        wf_marks[mark] = os.path.normpath(wf_rel)
         for job in _wf_jobs(doc).values():
             for step in _job_steps(job):
                 key = _local_action_key(step.get("uses"))
                 if key is not None:
-                    queue.append((key, None, 0))
+                    queue.append((key, mark, 0))
     while queue:
         key, parent, depth = queue.pop(0)
         base = _local_ref_path(root, key)
@@ -1097,6 +1103,15 @@ def _local_composites(root: Path, parsed: list[tuple[str, dict, str]],
                 continue
         if found is None:
             errs.append(f"{key} (no readable action.yml or action.yaml)")
+            continue
+        # a symbolic link out of the checkout is not this repository's file
+        try:
+            real_root = os.path.realpath(root_n)
+            if os.path.commonpath([real_root, os.path.realpath(found)]) != real_root:
+                errs.append(f"{key} (resolves outside the repository)")
+                continue
+        except ValueError:
+            errs.append(f"{key} (resolves outside the repository)")
             continue
         rel = Path(os.path.relpath(os.path.normpath(os.path.abspath(found)), root_n)).as_posix()
         if depth > _MAX_LOCAL_ACTION_DEPTH:
@@ -1123,13 +1138,26 @@ def _local_composites(root: Path, parsed: list[tuple[str, dict, str]],
         changed = False
         for rel, arr in arrivals.items():
             if locked.get(rel) and any(
-                    not dollar or (p is not None and not locked.get(p, False))
+                    not dollar or (p not in wf_marks and not locked.get(p, False))
                     for p, dollar in arr):
                 locked[rel] = False
                 changed = True
+    # the workflows that reach each action, directly or through other actions:
+    # lockfile credit inside it needs an entry under EVERY one of them
+    reach: dict[str, set[str]] = {rel: set() for rel in docs}
+    changed = True
+    while changed:
+        changed = False
+        for rel, arr in arrivals.items():
+            for p, _dollar in arr:
+                add = {wf_marks[p]} if p in wf_marks else reach.get(p, set())
+                if not add <= reach.setdefault(rel, set()):
+                    reach[rel] |= add
+                    changed = True
     if errors is not None:
         errors.extend(dict.fromkeys(errs))
-    return [(rel, doc, locked[rel]) for rel, doc in docs.items()]
+    return [(rel, doc, frozenset(reach[rel]) if locked[rel] and reach[rel] else None)
+            for rel, doc in docs.items()]
 
 
 def _unreadable_step_sources(parsed: list[tuple[str, dict, str]],
@@ -1184,18 +1212,22 @@ def _pr_path_workflows(parsed: list[tuple[str, dict, str]],
     `_MAX_LOCAL_ACTION_DEPTH`. Those are never graded as clean or as dirty;
     the caller discloses them."""
     by_rel = {os.path.normpath(rel): (rel, doc) for rel, doc, _raw in parsed}
-    roots = {os.path.normpath(rel) for rel, _doc in pr_wfs}
-    events: dict[str, set[str]] = {}
+    # A PR workflow that another PR workflow also calls starts from its own
+    # events and gains the caller's: `github.event_name` inside the call is
+    # the caller's event, so a job scoped to it runs on pull requests too.
+    own = {os.path.normpath(rel): set(_wf_pr_event_names(doc)) for rel, doc in pr_wfs}
+    events: dict[str, set[str]] = {t: set(e) for t, e in own.items()}
     unread: list[str] = []
-    queue = [(doc, set(_wf_pr_event_names(doc)), 0) for _rel, doc in pr_wfs]
+    queue = [(doc, set(own[os.path.normpath(rel)]), 0) for rel, doc in pr_wfs]
     while queue:
         doc, evs, depth = queue.pop(0)
-        ev_doc = {"on": sorted(evs)}
         for job in _wf_jobs(doc).values():
             uses = job.get("uses")
             if not (isinstance(uses, str) and _is_local_uses(uses)):
                 continue
-            if _job_if_excludes_pull_requests(job, ev_doc):
+            # only the events the calling job itself can run on reach the callee
+            job_evs = _job_pr_events(job, evs)
+            if not job_evs:
                 continue
             key = uses.split("@")[0].strip()
             rest = key[2:]
@@ -1205,14 +1237,32 @@ def _pr_path_workflows(parsed: list[tuple[str, dict, str]],
                     or depth >= _MAX_LOCAL_ACTION_DEPTH):
                 unread.append(key)
                 continue
-            if target in roots or evs <= events.get(target, set()):
-                continue  # graded as a PR workflow already, or no new events
-            events.setdefault(target, set()).update(evs)
+            if job_evs <= events.get(target, set()):
+                continue  # no new events reach it
+            events.setdefault(target, set()).update(job_evs)
             queue.append((by_rel[target][1], set(events[target]), depth + 1))
+    entries = []
+    for rel, doc in pr_wfs:
+        norm = os.path.normpath(rel)
+        entries.append((rel, doc, doc if events[norm] == own[norm]
+                        else {"on": sorted(events[norm])}))
     callees = sorted((by_rel[t][0], by_rel[t][1], {"on": sorted(e)})
-                     for t, e in events.items())
-    return ([(rel, doc, doc) for rel, doc in pr_wfs] + callees,
-            sorted(set(unread)))
+                     for t, e in events.items() if t not in own)
+    return entries + callees, sorted(set(unread))
+
+
+def _job_pr_events(job: dict, events: set[str]) -> set[str]:
+    """The pull-request events in `events` for which the job's own `if:` can
+    be true. Fails closed: no condition, or one that cannot be resolved,
+    keeps every event."""
+    cond = job.get("if")
+    if not isinstance(cond, str) or not cond.strip():
+        return set(events)
+    try:
+        tokens = _tokenize_if(cond)
+        return {ev for ev in events if _eval_if_for_event(tokens, ev)}
+    except _UnresolvableIf:
+        return set(events)
 
 
 # GitHub workflow lockfile (public preview 2026-10-14; written by the
@@ -1302,7 +1352,8 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path) -> dict[str
     thing to look at."""
     pr_wfs = [(rel, doc) for rel, doc, _raw in parsed if _wf_is_pr_gating(doc)]
     remote_reusables = _remote_reusable_refs(parsed)
-    local_composites = _local_composites(root, parsed)
+    unread_actions: list[str] = []
+    local_composites = _local_composites(root, parsed, unread_actions)
     composites = [(rel, doc) for rel, doc, _locked in local_composites]
     # steps everywhere the repo's own files define them: workflows + local
     # composite actions (the "runs.steps" shape), leaf steps via the walker
@@ -1607,8 +1658,8 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path) -> dict[str
     # a valid entry listed under its own workflow file, or, inside a local
     # action reached only through `$/`, a valid entry the lockfile lists.
     workflow_rels = {os.path.normpath(rel) for rel, _doc, _raw in parsed}
-    self_locked = {rel for rel, _doc, locked in local_composites if locked}
-    lock_state, lock_per_wf, lock_any = _load_lockfile(root)
+    self_locked = {rel: wfs for rel, _doc, wfs in local_composites if wfs}
+    lock_state, lock_per_wf, _lock_any = _load_lockfile(root)
     remote_refs = [(rel, ua) for rel, steps in step_sources for step in steps
                    if (ua := _step_uses(step))]
     reusable_calls = 0
@@ -1628,7 +1679,8 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path) -> dict[str
         if _SHA40_RE.match(ua[1]):
             pinned += 1
         elif (key in lock_per_wf.get(norm, ()) if norm in workflow_rels
-              else (rel in self_locked and key in lock_any)):
+              else (rel in self_locked and all(
+                  key in lock_per_wf.get(wf, ()) for wf in self_locked[rel]))):
             pinned += 1
             via_lock += 1
         else:
@@ -1656,5 +1708,14 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path) -> dict[str
                          f"so it grants no credit")
         facts["ci.security.pinned-action-shas"] = fact(
             "pass" if pinned * 100 >= total * 95 else "fail", evidence, offender_files)
+
+    # A local action the scan could not read may hold the cache step or
+    # unpinned actions: never graded either way, and disclosed on both cards
+    # so neither state reads as covering it (data_sources carries the list).
+    if unread_actions:
+        note = (f"; {len(unread_actions)} local action(s) could not be read and "
+                f"were not graded: {', '.join(unread_actions[:3])}")
+        for check in ("ci.cache.dependency-cache", "ci.security.pinned-action-shas"):
+            facts[check]["evidence"] += note
 
     return facts

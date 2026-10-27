@@ -21,8 +21,9 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
   how many: "2 of 2 remote action references pinned, 2 via lockfile". Inside
   a local action, credit needs a `$/` reference, since GitHub never follows
   or locks a `./` action. A lockfile that cannot be read, or is malformed
-  anywhere, grants nothing and the evidence says so. Repositories without a
-  lockfile keep byte-identical evidence.
+  anywhere, grants nothing and the evidence says so. Without a lockfile the
+  evidence carries no lockfile wording (the reach fixes below can still
+  change its counts).
 
 - **2026-10-27** — **Fixed**: three places where a check passed on workflow
   content the scan never read.
@@ -50,8 +51,19 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
     of the pinning count, so one pinned step read "1 of 1" and passed. It
     now reads "1 of 2" and fails; a SHA-pinned call counts as pinned. The
     evidence notes how many reusable-workflow calls were counted.
+  - Review follow-ups to the above. A workflow that is triggered by pull
+    requests itself and is also called by another pull-request workflow now
+    gains its caller's events. A calling job's `if:` narrows the events that
+    reach the workflow it calls. A step action directory named like
+    `./ci/setup.yml` is read. A local action whose path is a symbolic link
+    out of the checkout is never read. Inside a `$/` action, lockfile credit
+    needs an entry under every workflow that reaches it. A local action the
+    scan could not read is now named in the caching and pinning evidence,
+    not only in `data_sources`.
   - Both frozen calibration controls score exactly as before (no fact or
-    evidence string moves).
+    evidence string moves). Other repositories can score LOWER: an action
+    outside `.github/actions/` or a called workflow can expose an unpinned
+    action or a full-history checkout that was never read before.
 
 - **2026-10-10** — **Fixed**: actions referenced with GitHub's
   self-repository prefix (`uses: $/path`, shipped 2026-07-30) are local to

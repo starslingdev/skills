@@ -266,6 +266,17 @@ def test_a_missing_composite_is_recorded_not_silently_skipped(tmp_path):
     assert any("./ci/setup" in e for e in doc["data_sources"]["composite_parse_errors"])
 
 
+def test_an_unread_composite_is_disclosed_in_the_pinning_and_caching_evidence(tmp_path):
+    # the unread action may hold unpinned actions or the cache step: a pass
+    # or fail that did not see it must say so on the card itself
+    doc = _collect(tmp_path, {"package.json": "{}\n", ".github/workflows/ci.yml": SETUP_CALLER})
+    pinned, cache = _fact(doc, PINNED), _fact(doc, CACHE)
+    assert pinned["state"] == "pass", pinned
+    assert "1 local action(s) could not be read" in pinned["evidence"], pinned
+    assert "./ci/setup" in pinned["evidence"], pinned
+    assert "1 local action(s) could not be read" in cache["evidence"], cache
+
+
 # ---- 3. remote reusable workflows in the pinning count -----------------------
 
 def _remote_caller(ref: str) -> str:
@@ -398,3 +409,101 @@ def test_no_lockfile_keeps_the_evidence_byte_identical(tmp_path):
     assert _fact(doc, PINNED)["evidence"] == (
         "0 of 2 remote action references SHA-pinned (workflow + local composite "
         "action files; passes at >=95%)")
+
+
+# ---- 5. review follow-ups ----------------------------------------------------
+
+def test_a_pr_workflow_called_by_another_pr_workflow_gets_the_callers_events(tmp_path):
+    # test.yml is itself a pull_request workflow, but ci.yml also calls it on
+    # pull_request_target, where github.event_name is the CALLER's event: its
+    # pull_request_target-only full-history job runs on pull requests too.
+    callee = FULL_HISTORY_CALLEE.replace("on: workflow_call", "on: [pull_request, workflow_call]")
+    callee = callee.replace(
+        "runs-on: ubuntu-latest",
+        "if: github.event_name == 'pull_request_target'\n        runs-on: ubuntu-latest")
+    doc = _collect(tmp_path, {
+        ".github/workflows/ci.yml": CALLER.replace("on: pull_request", "on: pull_request_target"),
+        ".github/workflows/test.yml": callee})
+    got = _fact(doc, SHALLOW)
+    assert got["state"] == "fail", got
+    assert got["files"] == [".github/workflows/test.yml"], got
+
+
+def test_a_calling_jobs_if_narrows_the_events_the_callee_sees(tmp_path):
+    # the calling job only runs on pull_request, so the callee's
+    # pull_request_target-only full-history job never runs through it
+    callee = FULL_HISTORY_CALLEE.replace(
+        "runs-on: ubuntu-latest",
+        "if: github.event_name == 'pull_request_target'\n        runs-on: ubuntu-latest")
+    doc = _collect(tmp_path, {
+        ".github/workflows/ci.yml": """
+            on: [pull_request, pull_request_target]
+            jobs:
+              test:
+                if: github.event_name == 'pull_request'
+                uses: ./.github/workflows/test.yml
+            """,
+        ".github/workflows/test.yml": callee})
+    assert _fact(doc, SHALLOW)["state"] == "pass", _fact(doc, SHALLOW)
+
+
+def test_lockfile_credit_inside_a_composite_needs_every_reaching_workflow_locked(tmp_path):
+    composite = """
+        runs:
+          using: composite
+          steps:
+            - uses: actions/setup-go@v7.0.0
+        """
+    wf = f"""
+        on: pull_request
+        jobs:
+          test:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@{SHA}
+              - uses: $/.github/actions/go
+        """
+    # other.yml reaches the same `$/` action but the lockfile does not cover it
+    doc = _collect(tmp_path, {".github/workflows/ci.yml": wf,
+                              ".github/workflows/other.yml": wf,
+                              ".github/actions/go/action.yml": composite,
+                              LOCK: _lockfile(BOTH[1:])})
+    got = _fact(doc, PINNED)
+    assert got["evidence"].startswith("2 of 3 remote action references pinned, 0 via lockfile"), got
+    assert got["files"] == [".github/actions/go/action.yml"], got
+
+
+def test_a_step_action_directory_named_like_yaml_is_read(tmp_path):
+    # a step-level `uses:` is always an action directory, never a workflow
+    doc = _collect(tmp_path, {"package.json": "{}\n",
+                              ".github/workflows/ci.yml":
+                                  SETUP_CALLER.replace("./ci/setup", "./ci/setup.yml"),
+                              "ci/setup.yml/action.yml": CACHED_UNPINNED_SETUP})
+    got = _fact(doc, CACHE)
+    assert got["state"] == "pass", got
+    assert got["files"] == ["ci/setup.yml/action.yml"], got
+
+
+def test_negative_control_a_composite_symlinked_outside_the_repo_fails_closed(tmp_path):
+    import os
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "action.yml").write_text(_y(CACHED_UNPINNED_SETUP))
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root, "init", "-q")
+    for rel, text in {"package.json": "{}\n", ".github/workflows/ci.yml": SETUP_CALLER}.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(_y(text))
+        _git(root, "add", rel)
+    (root / "ci").mkdir()
+    os.symlink(str(outside), str(root / "ci" / "setup"))
+    _git(root, "add", "ci/setup")
+    _git(root, "commit", "-qm", "init")
+    doc, code = cc_mod.collect(root)
+    assert code == 0, doc
+    # the file the link points at is not this repository's: never read
+    assert _fact(doc, CACHE)["state"] == "fail", _fact(doc, CACHE)
+    assert "could not be read" in _fact(doc, CACHE)["evidence"], _fact(doc, CACHE)
+    assert any("./ci/setup" in e for e in doc["data_sources"]["composite_parse_errors"]), \
+        doc["data_sources"]
