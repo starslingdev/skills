@@ -22,6 +22,10 @@ class Unknown(ValueError):
     pass
 
 
+# Scenario key: whether the whole workflow run was cancelled.
+WORKFLOW_CANCELLED = ("", "<workflow cancelled>")
+
+
 # GitHub expression function names are case-insensitive. Any job `if:` naming a
 # status function replaces the implicit success(), so the job may run after an
 # ancestor failed, was cancelled or was skipped.
@@ -138,8 +142,13 @@ class Expression:
             if not self.take("(") or not self.take(")"):
                 raise Unknown("status function arguments")
             states = [self.results[n] for n in self.direct]
+            if token.lower() == "cancelled":
+                # True only when the WORKFLOW was cancelled. A dependency that
+                # timed out reports `cancelled` while cancelled() stays false,
+                # so this is a scenario (see analyze), never a needs result.
+                return self.outputs.get(WORKFLOW_CANCELLED, False)
             return {"always": True, "success": all(x == "success" for x in states),
-                    "failure": "failure" in states, "cancelled": "cancelled" in states}[token.lower()]
+                    "failure": "failure" in states}[token.lower()]
         if token.lower() == "contains":
             if not self.take("("):
                 raise Unknown("contains syntax")
@@ -176,45 +185,191 @@ def strings(value):
             yield from strings(child)
 
 
-def bash_guard(source, env):
-    """A complete if/exit guard, not a general shell control-flow interpreter.
+_VARIABLE = r"\$(?:([A-Za-z_]\w*)|\{([A-Za-z_]\w*)\})"
+_WORD = re.compile(r"""\s*("[^"]*"|'[^']*'|&&|\|\||[^\s"']+)""")
+_SET_FLAGS = {"-e", "-u", "-x", "-eu", "-ue", "-ex", "-xe", "-eux", "-eo", "-euo", "-euxo", "-o",
+              "pipefail"}
+_KEYWORD = re.compile(r"(?:if|elif|else|then|fi|while|until|for|case|do|done)\b")
 
-    Supported conditions are literal scalar comparisons and the exact boolean
-    validation regexp. Both sides of comparisons are quoted, so Bash pattern
-    matching, word splitting and globbing cannot change their interpretation.
-    """
-    match = re.fullmatch(
-        r'\s*if\s+\[\[\s+(.+?)\s+\]\]\s*;\s*then\s+'
-        r'(?:echo\s+"[A-Za-z0-9 .,:!/_-]*"\s*\n\s*)?'
-        r'exit\s+([01])\s*\n\s*fi\s*', source, re.S)
-    if not match:
-        raise Unknown("unsupported shell guard")
-    clauses = re.split(r"\s+\|\|\s+", match[1])
-    if len(clauses) > 8:
-        raise Unknown("shell guard clause limit")
-    checks = []
-    def scalar(value):
-        variable = re.fullmatch(r"\$(?:([A-Za-z_]\w*)|\{([A-Za-z_]\w*)\})", value)
-        if variable:
-            name = variable[1] or variable[2]
-            if name not in env or "\0" in env[name]:
-                raise Unknown("unresolved shell guard variable")
-            return env[name]
-        if not re.fullmatch(r"[A-Za-z0-9_.-]*", value):
-            raise Unknown("unsupported shell guard operand")
-        return value
-    for clause in clauses:
-        compare = re.fullmatch(r'"([^"\n]*)"\s+(==|!=)\s+"([^"\n]*)"', clause)
-        boolean = re.fullmatch(r'(!\s+)?"([^"\n]*)"\s+=~\s+\^\(true\|false\)\$', clause)
-        if compare:
-            equal = scalar(compare[1]) == scalar(compare[3])
-            checks.append(equal if compare[2] == "==" else not equal)
-        elif boolean:
-            valid = scalar(boolean[2]) in ("true", "false")
-            checks.append(not valid if boolean[1] else valid)
-        else:
+
+def _words(text):
+    words, rest = [], text.strip()
+    while rest:
+        match = _WORD.match(rest)
+        if not match:
+            raise Unknown("unsupported shell quoting")
+        words.append(match[1])
+        rest = rest[match.end():].strip()
+    return words
+
+
+def _operand(word, env):
+    """A test operand as data: a quoted literal, one quoted variable, or a
+    bare literal without glob, expansion or splitting characters."""
+    variable = re.fullmatch('"' + _VARIABLE + '"', word)
+    if variable:
+        name = variable[1] or variable[2]
+        if name not in env:
+            raise Unknown("unresolved shell guard variable")
+        return env[name]
+    literal = re.fullmatch(r'"([^"$`\\]*)"' + "|'([^']*)'", word)
+    if literal:
+        return literal[1] if literal[1] is not None else literal[2]
+    if re.fullmatch(r"[A-Za-z0-9_.:/-]+", word):
+        return word
+    raise Unknown("unsupported shell guard operand")
+
+
+def _primary(words, env, double, shell):
+    negate = False
+    if double and words[:1] == ["!"]:
+        negate, words = True, words[1:]
+    if len(words) != 3:
+        raise Unknown("unsupported shell guard condition")
+    left, op, right = words
+    if op == "=~":
+        if not double or right != "^(true|false)$":
             raise Unknown("unsupported shell guard condition")
-    return match[2] == "0" if any(checks) else True
+        value = _operand(left, env) in ("true", "false")
+    elif op in ("=", "==", "!="):
+        if op == "==" and shell != "bash":
+            # POSIX test has no `==`; dash (Ubuntu's sh) errors on it.
+            raise Unknown("non-POSIX test operator under sh")
+        value = (_operand(left, env) == _operand(right, env)) == (op != "!=")
+    else:
+        raise Unknown("unsupported shell guard condition")
+    return value != negate
+
+
+def _split(words):
+    """[a, '&&', b, ...] groups; mixed `&&`/`||` precedence is refused."""
+    parts, current = [], []
+    for word in words:
+        if word in ("&&", "||"):
+            if not current:
+                raise Unknown("unsupported shell guard condition")
+            parts += [current, word]
+            current = []
+        else:
+            current.append(word)
+    if not current:
+        raise Unknown("unsupported shell guard condition")
+    parts.append(current)
+    operators = {parts[i] for i in range(1, len(parts), 2)}
+    if len(operators) > 1:
+        raise Unknown("mixed shell guard operators")
+    return parts[0::2], operators == {"||"}
+
+
+def _test(words, env, shell):
+    """One `[ ... ]`, `[[ ... ]]` or `test ...` command as a boolean."""
+    if words[0] == "[[":
+        if shell != "bash" or words[-1] != "]]" or len(words) < 3:
+            raise Unknown("unsupported shell test")
+        groups, either = _split(words[1:-1])
+        values = [_primary(group, env, True, shell) for group in groups]
+        return any(values) if either else all(values)
+    if words[0] == "[":
+        if words[-1] != "]":
+            raise Unknown("unsupported shell test")
+        return _primary(words[1:-1], env, False, shell)
+    if words[0] == "test":
+        return _primary(words[1:], env, False, shell)
+    raise Unknown("unsupported shell guard condition")
+
+
+def _condition(text, env, shell):
+    """An `if` list of tests joined by one kind of `&&`/`||`. Only the
+    bracket boundaries split it: `||` inside [[ ]] belongs to the test."""
+    words = _words(text)
+    groups, current, depth = [], [], 0
+    for word in words:
+        depth += word == "[["
+        depth -= word == "]]"
+        if word in ("&&", "||") and depth == 0:
+            groups += [current, word]
+            current = []
+        else:
+            current.append(word)
+    groups.append(current)
+    if any(not g for g in groups[0::2]) or len({groups[i] for i in range(1, len(groups), 2)}) > 1:
+        raise Unknown("unsupported shell guard condition")
+    values = [_test(g, env, shell) for g in groups[0::2]]
+    return any(values) if "||" in groups[1::2] else all(values)
+
+
+def _command(line, env, shell):
+    """One supported simple command: True/False for its exit status, or
+    ("exit", bool) for an explicit exit."""
+    for match in re.finditer(_VARIABLE, line):
+        if (match[1] or match[2]) not in env:
+            raise Unknown("unresolved shell guard variable")
+    if re.search(r"[$`\\;&|<>]", re.sub(_VARIABLE, "", line)):
+        # No command substitution, redirection, pipes or lists.
+        raise Unknown("unsupported shell control flow")
+    words = _words(line)
+    head = words[0]
+    if head == "echo":
+        return True
+    if head == "set":
+        flags = words[1:]
+        if not flags or any(flag not in _SET_FLAGS for flag in flags):
+            raise Unknown("unsupported shell option")
+        if "pipefail" in flags and shell != "bash":
+            raise Unknown("pipefail requires bash")
+        return True
+    if words in (["true"], [":"]):
+        return True
+    if words == ["false"]:
+        return False
+    if len(words) == 2 and head == "exit":
+        variable = re.fullmatch('"?' + _VARIABLE + '"?', words[1])
+        status = env[variable[1] or variable[2]] if variable else words[1]
+        if status not in ("0", "1"):
+            raise Unknown("unsupported exit status")
+        return ("exit", status == "0")
+    if head in ("test", "[", "[["):
+        return _test(words, env, shell)
+    raise Unknown("unsupported verdict command")
+
+
+def shell_script(source, env, shell):
+    """Evaluate a bounded errexit script: simple commands, explicit exits and
+    flat `if CONDITION; then ... fi` blocks over quoted scalar data.
+
+    GitHub runs bash and sh steps with errexit, so a failing command ends the
+    step. Variables are compared as data and never re-parsed as script text.
+    Anything else (else/elif, nesting, loops, pipes, substitutions) is Unknown.
+    """
+    lines = [x.strip() for x in source.splitlines()
+             if x.strip() and not x.lstrip().startswith("#")]
+    if len(lines) > 32:
+        raise Unknown("verdict command limit")
+    i = 0
+    while i < len(lines):
+        guard = re.fullmatch(r"if\s+(.+?)\s*;\s*then", lines[i])
+        if guard:
+            end = next((j for j in range(i + 1, len(lines)) if lines[j] == "fi"), None)
+            if end is None:
+                raise Unknown("unsupported shell control flow")
+            body = lines[i + 1:end]
+            if any(_KEYWORD.match(x) for x in body):
+                raise Unknown("unsupported shell control flow")
+            taken = _condition(guard[1], env, shell)
+            i = end + 1
+            if not taken:
+                continue
+        else:
+            if _KEYWORD.match(lines[i]):
+                raise Unknown("unsupported shell control flow")
+            body, i = [lines[i]], i + 1
+        for text in body:
+            result = _command(text, env, shell)
+            if isinstance(result, tuple):
+                return result[1]
+            if not result:
+                return False
+    return True
 
 
 def run_step(source, env, results, outputs, direct, shell="bash"):
@@ -250,52 +405,10 @@ def run_step(source, env, results, outputs, direct, shell="bash"):
                     for key, value in env.items()}
     if len(source.splitlines()) > 32:
         raise Unknown("verdict command limit")
-    if source.lstrip().startswith("if "):
-        if shell != "bash":
-            raise Unknown("shell guard requires bash")
-        # Quoted variables are scalar data, not script text. Evaluate their
-        # values without turning quotes/newlines in an invalid output into code.
-        return bash_guard(source, resolved_env)
-    for key, text in resolved_env.items():
-        if not re.fullmatch(r"[\w.-]*", text):
-            raise Unknown("unsupported verdict environment value")
-        source = source.replace("${" + key + "}", text)
-        source = re.sub(r"\$" + re.escape(key) + r"\b", lambda _: text, source)
-    lines = [x.strip() for x in source.splitlines() if x.strip() and not x.lstrip().startswith("#")]
-    if len(lines) > 32:
-        raise Unknown("verdict command limit")
-    for line in lines:
-        if re.search(r"[;$`|&<>\\]", line):
-            raise Unknown("unsupported shell control flow")
-        try:
-            words = shlex.split(line)
-        except ValueError as exc:
-            raise Unknown("unsupported shell quoting") from exc
-        if not words:
-            continue
-        if words[0] == "echo":
-            continue
-        if words in (["true"], [":"], ["set", "-e"], ["set", "-eu"]):
-            continue
-        if words == ["false"]:
-            return False
-        if len(words) == 2 and words[0] == "exit" and words[1] in ("0", "1"):
-            return words[1] == "0"
-        if words[0] in ("test", "["):
-            args = words[1:]
-            if words[0] == "[":
-                if not args or args.pop() != "]":
-                    raise Unknown("unsupported shell test")
-            if len(args) == 3 and args[1] == "==" and shell != "bash":
-                # POSIX test has no `==`; dash (Ubuntu's sh) errors on it.
-                raise Unknown("non-POSIX test operator under sh")
-            if len(args) == 3 and args[1] in ("=", "==", "!="):
-                equal = args[0] == args[2]
-                if not (equal if args[1] in ("=", "==") else not equal):
-                    return False
-                continue
-        raise Unknown("unsupported verdict command")
-    return True
+    if shell not in ("bash", "sh"):
+        # verdict_success admits only a literal `exit N` or echo here.
+        return source.strip() != "exit 1"
+    return shell_script(source, resolved_env, shell)
 
 
 def action_success(step, job, results, direct):
@@ -356,16 +469,17 @@ def verdict_success(job, results, outputs):
         if working_directory not in (None, "."):
             raise Unknown("unresolved verdict working directory")
         runner = job.get("runs-on", "")
-        hosted_unix = {"ubuntu-latest", "ubuntu-22.04", "ubuntu-24.04", "ubuntu-26.04",
-                       "ubuntu-22.04-arm", "ubuntu-24.04-arm", "macos-latest", "macos-14", "macos-15", "macos-26",
-                       "macos-15-intel", "macos-26-intel"}
-        default = "bash" if isinstance(runner, str) and runner in hosted_unix else "unknown"
+        # GitHub-hosted Linux and macOS images default `run:` to bash. Any
+        # other label (self-hosted, larger runners, Windows) is not inferred.
+        hosted_unix = isinstance(runner, str) and re.fullmatch(r"(?:ubuntu|macos)-[\w.-]+", runner)
+        default = "bash" if hosted_unix else "unknown"
         shell = step.get("shell", job.get("defaults", {}).get("run", {}).get("shell", default))
         if shell not in ("bash", "sh"):
             literal = str(step.get("run", "")).strip()
             if shell not in ("unknown", "pwsh", "powershell") or not re.fullmatch(
                     r"exit [01]|echo (?:[A-Za-z][A-Za-z0-9 ,.:-]*|\"[A-Za-z][A-Za-z0-9 ,.:-]*\"|'[A-Za-z][A-Za-z0-9 ,.:-]*')", literal):
-                raise Unknown("unsupported verdict shell")
+                raise Unknown("unsupported verdict shell: the runner's default shell is not known; "
+                              "set `shell: bash` on the step")
         if step.get("continue-on-error") not in (None, False, True):
             raise Unknown("step continue-on-error")
         env = dict(job.get("env") or {})
@@ -566,7 +680,11 @@ def analyze(jobs, key, workflow=None):
         unknown = None
         for values in itertools.product(sorted(domain), repeat=len(refs)):
             outputs = dict(zip(refs, values))
-            for outcomes in itertools.product(("success", "failure", "cancelled"), repeat=len(ancestors)):
+            for outcomes, cancelled in (
+                    (o, c) for o in itertools.product(("success", "failure", "cancelled"), repeat=len(ancestors))
+                    # A cancelled workflow is its own scenario; a failed or
+                    # timed-out job leaves cancelled() false.
+                    for c in ((False, True) if "cancelled" in o else (False,))):
                 seeds = dict(zip(ancestors, outcomes))
                 # A bypass must hold for every context value and every branch
                 # of an unevaluable condition: failure takes precedence over
@@ -576,6 +694,7 @@ def analyze(jobs, key, workflow=None):
                     for context_values in itertools.product(context_domain, repeat=len(contexts)):
                         env = dict(outputs)
                         env.update({("", c): v for c, v in zip(contexts, context_values)})
+                        env[WORKFLOW_CANCELLED] = cancelled
                         pending = [{}]
                         while pending:
                             choices = pending.pop()

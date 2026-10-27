@@ -526,13 +526,20 @@ a detector in `needs:` without checking its result does not close the hole.
 
 The bounded analyzer supports literal dependency graphs, result comparisons,
 `contains(needs.*.result, ...)`, boolean expressions, scalar env/exit-code
-propagation, and simple failure-propagating `test`/`[` assertions in bash/sh.
-It also supports complete Bash `if [[ ... ]]; then` guards whose body is an
-optional literal echo followed by `exit 0` or `exit 1`. Conditions can combine
-quoted scalar equality/inequality checks with `||` and validate a quoted value
-against the exact `^(true|false)$` expression (optionally negated). Variables
-remain data: quotes or newlines in their values are not evaluated as commands.
-Other branch bodies, trailing commands, patterns and shells are unmeasured.
+propagation, and ordinary multi-line bash/sh scripts run with errexit: `set`
+with `-e`/`-u`/`-x`/`-o pipefail` (pipefail in bash only), `echo` lines,
+`true`/`false`, `exit 0`/`exit 1` (or a variable holding one), standalone
+`test`/`[`/`[[` checks, and flat `if CONDITION; then ... fi` blocks whose body
+is echo lines and an exit. A condition is one or more `[ ... ]`, `test` or
+`[[ ... ]]` checks joined by a single kind of `&&` or `||`; a check compares a
+quoted variable or literal with `=`/`!=` (`==` in bash), and `[[ ]]` can also
+validate a quoted value against the exact `^(true|false)$` expression
+(optionally negated). Variables remain data: quotes or newlines in their
+values are not evaluated as commands. `else`/`elif`, nesting, loops, pipes,
+redirections, command substitution, unquoted variables and patterns are
+unmeasured. A `run:` step without `shell:` is read as bash only on a
+GitHub-hosted `ubuntu-*` or `macos-*` label; on any other runner set
+`shell: bash` on the step.
 Strict suite-success assertions reject skipped suites. An intentional skip
 requires successful detection and an explicit valid boolean output; a literal
 false output written before failure is not a valid no-op, and a computed
@@ -540,6 +547,9 @@ output a failed detector may have written is unproved, so the fact withholds
 rather than pass. It walks ancestors. An intermediate job whose `if:` names a
 status function (`success()`, `always()`, `cancelled()`, `failure()`, in any
 letter case) can run after an ancestor failed, so its condition is evaluated
+(`cancelled()` reports whether the whole run was cancelled, not a dependency
+result: a dependency that timed out is `cancelled` while `cancelled()` stays
+false, and a cancelled run is evaluated as its own scenario)
 and, when it runs after a non-success dependency, its own steps decide its
 result: a gate that reports success over a failed detector and a skipped suite
 fails the fact, and a gate whose steps are unresolved is unmeasured. A
@@ -575,7 +585,9 @@ producer-execution check. The exemption supports a single-line `pytest` or
 `test` or `run test`, with test paths, packages or node ids and each runner's
 listed execution flags (for example `-k`/`-m`/`-n`/`-x` for pytest, `-race`/
 `-count`/`-timeout` for Go, `--workspace`/`-p`/`--all-features` for Cargo,
-arguments after `--` for the Node runners). It requires fatal job and step
+paths and `--coverage`/`--ci` after `--` for the Node runners; Cargo's
+positional name filter and other Node pass-through flags can select nothing
+and still exit 0, so they are not exempt). It requires fatal job and step
 results, a stock shell, and no environment overrides. Help, version,
 collection and listing modes, compile-only and test-filter flags that can
 select nothing (`-run`, `--no-run`, `--if-present`), negation, shell operators

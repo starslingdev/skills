@@ -91,7 +91,7 @@ class VerdictTests(unittest.TestCase):
 
     def test_bash_guard_unknown_syntax_and_shell_hold(self):
         env = {"RESULT": "failure", "CHANGED": "false"}
-        for source in (GUARD + "echo done\n", GUARD.replace("exit 1", "false || true"),
+        for source in ('echo "$(date)"\n' + GUARD, GUARD.replace("exit 1", "false || true"),
                        GUARD.replace("^(true|false)$", ".*"),
                        GUARD.replace('"success"', "success*")):
             with self.subTest(source=source), self.assertRaises(va.Unknown):
@@ -455,7 +455,10 @@ class OrdinarySuiteTests(unittest.TestCase):
                 "cargo test -- --list", "cargo test --help", "cargo --version", "pytest -q tests/; true",
                 "pytest -k x; true", "pytest --co tests", "pytest --collect-only -q tests",
                 "pytest -q tests/ $EXTRA", "pytest --setup-plan", "pytest --fixtures tests",
-                "pytest -h", "pytest -q tests/ # skip", "yarn test & wait")
+                "pytest -h", "pytest -q tests/ # skip", "yarn test & wait",
+                # Filters and pass-through flags that can select nothing and exit 0.
+                "cargo test nonexistent_filter", "npm test -- --passWithNoTests",
+                "npm test -- --grep=nomatch", "yarn test -- --showConfig")
 
     def test_common_runners_with_arguments_are_ordinary_suites(self):
         for source in self.ACCEPTED:
@@ -475,6 +478,106 @@ class OrdinarySuiteTests(unittest.TestCase):
             jobs["verdict"]["continue-on-error"] = True
             with self.subTest(source=source, job_tolerated=True):
                 self.assertNotEqual(fact(jobs), "pass")
+
+
+_SCAFFOLD = Path(__file__).resolve().parents[1] / "scaffold" / "ci-secure.yml"
+
+# The exactly-one-of-two arbitration between mutually exclusive suites, written
+# as an ordinary multi-line bash script under `set -euo pipefail`.
+ARBITER = """set -euo pipefail
+echo "self-hosted suite: ${SELF_HOSTED}"
+echo "fork suite:        ${FORK}"
+# Exactly one of the two is meant to run.
+if [ "${SELF_HOSTED}" = "success" ] && [ "${FORK}" = "skipped" ]; then
+  echo "test passed (self-hosted suite)."
+  exit 0
+fi
+if [ "${FORK}" = "success" ] && [ "${SELF_HOSTED}" = "skipped" ]; then
+  echo "test passed (fork suite)."
+  exit 0
+fi
+echo "::error::no passing verdict (self-hosted=${SELF_HOSTED}, fork=${FORK})"
+exit 1
+"""
+
+
+def arbiter(script=ARBITER, runs_on="ubuntu-latest"):
+    head = "github.event.pull_request.head.repo.full_name == github.repository"
+    return {
+        "test-self": {"if": head, "runs-on": runs_on, "steps": [{"run": "run-tests"}]},
+        "test-fork": {"if": "github.event.pull_request.head.repo.full_name != github.repository",
+                      "runs-on": "ubuntu-latest", "steps": [{"run": "run-tests"}]},
+        "verdict": {"needs": ["test-self", "test-fork"], "if": "always()", "runs-on": runs_on,
+                    "steps": [{"env": {"SELF_HOSTED": "${{ needs.test-self.result }}",
+                                       "FORK": "${{ needs.test-fork.result }}"},
+                               "run": script}]},
+    }
+
+
+class MultiLineScriptTests(unittest.TestCase):
+    """Ordinary `set -euo pipefail` + `if [ ... ]; then exit N; fi` verdicts."""
+
+    def test_shipped_scaffold_verdict_is_proved(self):
+        import yaml
+        doc = yaml.safe_load(_SCAFFOLD.read_text())
+        self.assertEqual(va.analyze(doc["jobs"], "verdict", doc)[0], "pass")
+
+    def test_exactly_one_arbitration_between_routed_suites_passes(self):
+        self.assertEqual(va.analyze(arbiter(), "verdict")[0], "pass")
+
+    def test_script_accepting_a_skipped_suite_fails(self):
+        for loose in (ARBITER.replace('[ "${SELF_HOSTED}" = "success" ]', '[ "${SELF_HOSTED}" != "failure" ]', 1),
+                      ARBITER.replace("exit 1\n", "exit 0\n"),
+                      ARBITER.replace("\nexit 1\n", "\n")):
+            with self.subTest(loose=loose):
+                self.assertNotEqual(va.analyze(arbiter(loose), "verdict")[0], "pass")
+        # A script that accepts anything after the guards is a reproduced bypass.
+        self.assertEqual(va.analyze(arbiter(ARBITER.replace("\nexit 1\n", "\n")), "verdict")[0], "fail")
+
+    def test_unsupported_script_forms_stay_unmeasured(self):
+        for odd in (ARBITER.replace("set -euo pipefail", "set +e"),
+                    ARBITER.replace("  exit 0\nfi\nif", "  exit 0\nelse\n  exit 0\nfi\nif", 1),
+                    ARBITER.replace('echo "fork suite:        ${FORK}"', 'echo "$(id)"'),
+                    ARBITER.replace('[ "${SELF_HOSTED}" = "success" ]', '[ ${SELF_HOSTED} = "success" ]', 1),
+                    ARBITER.replace('[ "${SELF_HOSTED}" = "success" ]', '[ "${UNSET}" = "success" ]', 1)):
+            with self.subTest(odd=odd):
+                self.assertEqual(va.analyze(arbiter(odd), "verdict")[0], "unmeasured")
+
+    def test_hosted_linux_label_defaults_to_bash(self):
+        self.assertEqual(va.analyze(arbiter(runs_on="ubuntu-slim"), "verdict")[0], "pass")
+        reason = va.analyze(arbiter(runs_on=["self-hosted", "linux"]), "verdict")[1]
+        self.assertIn("shell: bash", reason)
+
+    def test_double_brackets_need_bash(self):
+        script = ARBITER.replace('[ "${SELF_HOSTED}" = "success" ]', '[[ "${SELF_HOSTED}" == "success" ]]', 1)
+        self.assertEqual(va.analyze(arbiter(script), "verdict")[0], "pass")
+        jobs = arbiter(script)
+        jobs["verdict"]["steps"][0]["shell"] = "sh"
+        self.assertEqual(va.analyze(jobs, "verdict")[0], "unmeasured")
+
+
+def timed_gate(cond):
+    """A gate that can run after its detector timed out (job result cancelled
+    while the workflow is not cancelled) and lets the suite be skipped."""
+    return {
+        "detect": {"runs-on": "ubuntu-latest", "timeout-minutes": 5, "steps": [{"run": "detect"}]},
+        "gate": {"needs": ["detect"], "if": cond, "runs-on": "ubuntu-latest",
+                 "steps": [{"env": {"R": "${{ needs.detect.result }}"}, "run": 'test "$R" != failure'}]},
+        "suite": {"needs": ["gate"], "runs-on": "ubuntu-latest", "steps": [{"run": "run-tests"}]},
+        "verdict": {"needs": ["gate", "suite"], "if": "always()", "runs-on": "ubuntu-latest",
+                    "steps": [{"env": {"OK": "${{ needs.gate.result == 'success' && "
+                                             "(needs.suite.result == 'success' || needs.suite.result == 'skipped') }}"},
+                               "run": 'test "$OK" = true'}]},
+    }
+
+
+class WorkflowStatusFunctionTests(unittest.TestCase):
+    def test_cancelled_function_is_not_a_dependency_result(self):
+        # cancelled() is true only when the workflow is cancelled; a timed-out
+        # dependency reports `cancelled` while cancelled() stays false.
+        for cond in ("${{ !cancelled() }}", "!Cancelled()"):
+            with self.subTest(cond=cond):
+                self.assertNotEqual(va.analyze(timed_gate(cond), "verdict")[0], "pass")
 
 
 if __name__ == "__main__":

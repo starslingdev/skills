@@ -70,7 +70,6 @@ entries are dated (UTC). Format loosely follows
   where the secret lists answer 403 (recorded for a non-collaborator) the
   secrets check stays unmeasured. The CI gate does not read them (they stay
   unmeasured there, each a non-blocking warning line). (2026-10-26)
-
 - ci-secure: new config hygiene check `sec.deps.update-cooldown` — every
   configured dependency update tool waits at least 3 days before proposing a
   fresh release (Dependabot `cooldown`, Renovate `minimumReleaseAge`), the
@@ -220,6 +219,20 @@ entries are dated (UTC). Format loosely follows
     a head-repository match and its negation) are evaluated on both
     branches, so a verdict requiring exactly one of them to succeed can pass
     instead of being unmeasured.
+  - Ordinary multi-line summary scripts are read: `set -euo pipefail`,
+    echo lines, and flat `if [ ... ] && [ ... ]; then ... exit N; fi`
+    blocks, so ci-secure's own gate scaffold and the common
+    exactly-one-of-two arbitration pass instead of being unmeasured.
+    `else`, nesting, pipes and substitutions stay unmeasured.
+  - `cancelled()` in a job condition means the whole run was cancelled, not
+    that a dependency was: a gate guarded by `!cancelled()` that runs green
+    after its detector timed out no longer lets the check pass.
+  - A summary step without `shell:` is read as bash on any GitHub-hosted
+    `ubuntu-*`/`macos-*` label; on other runners the unmeasured reason now
+    says to set `shell: bash`.
+  - Cargo's positional test-name filter and Node pass-through flags other
+    than `--coverage`/`--ci` (for example `--passWithNoTests`) no longer
+    count as an ordinary suite, since they can run nothing and exit 0.
 
 - **2026-10-22** — **The five eval scenarios now run at the same time.** The
   shared eval runner starts every session at once (at most five; `--jobs N` or

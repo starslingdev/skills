@@ -2042,8 +2042,11 @@ def _runs_own_suite(line: str) -> bool:
     if runner == "node":
         # Arguments after `--` go to the repository's own test script; a flag
         # before it (`--if-present`) changes whether anything runs at all.
+        # Pass-through flags are the test runner's own (`--passWithNoTests`,
+        # `--grep`, `--showConfig` can run nothing and exit 0): only paths and
+        # the coverage/CI switches are accepted.
         return not rest or (rest[0] == "--" and all(
-            _SUITE_ARGUMENT.fullmatch(w) and not re.search(r"(?:^|-)(?:help|version|list)", w)
+            w in ("--coverage", "--ci") or (not w.startswith("-") and _SUITE_ARGUMENT.fullmatch(w))
             for w in rest[1:]))
     switches, valued, prefixed = _SUITE_FLAGS[runner]
     i = 0
@@ -2055,8 +2058,10 @@ def _runs_own_suite(line: str) -> bool:
             i += 2
         elif word.startswith("-") and any(word.startswith(p) and len(word) > len(p) for p in prefixed):
             i += 1
-        elif not word.startswith("-") and _SUITE_ARGUMENT.fullmatch(word):
-            i += 1  # a test path, package pattern or node id
+        elif runner != "cargo" and not word.startswith("-") and _SUITE_ARGUMENT.fullmatch(word):
+            # A test path, package pattern or node id. Cargo's positional is a
+            # name filter that can match nothing and still exit 0.
+            i += 1
         else:
             return False
     return True
