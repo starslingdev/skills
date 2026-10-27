@@ -1,4 +1,5 @@
 """Synthetic verdict graphs: no repository commands or network calls."""
+import copy
 import importlib.util
 from pathlib import Path
 import unittest
@@ -619,6 +620,64 @@ class RunnerSemanticsTests(unittest.TestCase):
         for source in ("go test -count=0 ./...", "go test -count 0 ./...", "pytest @args.txt"):
             with self.subTest(source=source):
                 self.assertNotEqual(fact(graph(source)), "pass")
+
+
+class RequiredCheckEdgePins(unittest.TestCase):
+    def test_duplicate_required_names_keep_all_skippable_producers_failing(self):
+        jobs = {
+            "first": {"name": "verdict", "if": False, "runs-on": "ubuntu-latest",
+                      "steps": [{"run": "pytest -q"}]},
+            "second": {"name": "verdict", "if": False, "runs-on": "ubuntu-latest",
+                       "steps": [{"run": "pytest -q"}]},
+        }
+        self.assertEqual(fact(jobs), "fail")
+        # A known always-running producer prevents both jobs being skipped.
+        jobs["second"].pop("if")
+        self.assertEqual(fact(jobs), "pass")
+        self.assertEqual(fact(dict(reversed(list(jobs.items())))), "pass")
+
+    def test_suite_test_step_condition_withholds_strict_summary_pass(self):
+        jobs = {
+            "suite": {"runs-on": "ubuntu-latest", "steps": [
+                {"if": "vars.RUN_TESTS == 'yes'", "run": "pytest -q"}]},
+            "verdict": {"needs": "suite", "if": "always()", "runs-on": "ubuntu-latest",
+                        "steps": [{"run": 'test "${{ needs.suite.result }}" = success'}]},
+        }
+        self.assertEqual(fact(jobs), "unmeasured")
+        # An output reference skips the strict shortcut; the enumerated path
+        # must withhold the pass too.
+        enumerated = copy.deepcopy(jobs)
+        enumerated["verdict"]["steps"].append({"run": 'test "${{ needs.suite.outputs.mode }}" != off'})
+        self.assertEqual(fact(enumerated), "unmeasured")
+        del jobs["suite"]["steps"][0]["if"]
+        del enumerated["suite"]["steps"][0]["if"]
+        self.assertEqual(fact(jobs), "pass")
+        self.assertEqual(fact(enumerated), "pass")
+
+    def test_failure_function_reaches_failed_grandparent(self):
+        jobs = {
+            "build": {"runs-on": "ubuntu-latest", "steps": [{"run": "make"}]},
+            "suite": {"needs": "build", "runs-on": "ubuntu-latest",
+                      "steps": [{"run": "pytest -q"}]},
+            "recover": {"needs": "suite", "if": "failure() && needs.suite.result == 'skipped'", "runs-on": "ubuntu-latest",
+                        "steps": [{"run": "exit 0"}]},
+            "verdict": {"needs": "recover", "if": "always()", "runs-on": "ubuntu-latest",
+                        "steps": [{"run": 'test "${{ needs.recover.result }}" = success'}]},
+        }
+        self.assertEqual(fact(jobs), "fail")
+
+    def test_conditional_step_keeps_literal_output_failure_evidence(self):
+        # A literal declared output is reproducible whatever the steps did, so
+        # an unrelated conditional step must not erase a concrete failure.
+        jobs = {
+            "check": {"runs-on": "ubuntu-latest", "outputs": {"ok": "true"}, "steps": [
+                {"if": "vars.EXTRA == 'yes'", "run": "lint"}, {"run": "pytest -q"}]},
+            "verdict": {"needs": "check", "if": "always()", "runs-on": "ubuntu-latest",
+                        "steps": [{"run": 'test "${{ needs.check.outputs.ok }}" = true'}]},
+        }
+        self.assertEqual(fact(jobs), "fail")
+        del jobs["check"]["steps"][0]["if"]
+        self.assertEqual(fact(jobs), "fail")
 
 
 if __name__ == "__main__":

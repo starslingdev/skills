@@ -187,9 +187,9 @@ entries are dated (UTC). Format loosely follows
 - 2026-10-27: Required-summary coverage now reads strict jq assertions, resolves
   verdict-action tags only to the reviewed commit, and proves large strict
   aggregates without enumerating every result combination. Scores can move
-  from unmeasured to pass or fail. Conditional upstream steps cannot establish
-  suite execution merely because their job reports success, including steps
-  inside `parallel:` groups, conditional groups and background steps.
+  from unmeasured to pass or fail. The conditional-step rule from #150 now
+  also sees steps inside `parallel:` groups, conditional groups and background
+  steps, and the large-aggregate shortcut refuses any upstream step `if:`.
 
 - **2026-10-26** — **A required check that used to pass can now fail or
   become unmeasured.** `sec.required-checks.skippable` no longer accepts an
@@ -311,6 +311,16 @@ entries are dated (UTC). Format loosely follows
 - 2026-10-27: Strict jq verdicts with inline dependency JSON remain unmeasured
   when dependencies declare outputs; quoted environment-variable input keeps
   the JSON separate from shell source.
+
+- **2026-10-27** — **The required-check verdict no longer passes a summary job
+  whose upstream test step may never have run, and `failure()` now sees failed
+  jobs further up the chain.** A dependency that reports success can still have
+  skipped a step behind its own `if:`, so such a dependency now leaves the
+  verdict unmeasured instead of passing. Its literal declared outputs still
+  count as evidence, so a reproducible bypass through it still fails. A job's
+  `failure()` condition is now true when any ancestor failed, not only a
+  direct dependency, matching GitHub. Two skippable jobs sharing a required
+  check name stay pinned as a failing verdict. (#150)
 
 - **2026-10-22** — **`sec.codeowners.workflows` no longer passes on a
   CODEOWNERS rule the branch does not enforce.** CODEOWNERS only requests an
