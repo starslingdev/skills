@@ -18,9 +18,10 @@ license: MIT
 questions about **live CI data** — one run, one job, one attempt, or an
 account's runner-minutes — from StarSling's control plane, with structured
 JSON on stdout and a stable exit-code table. **No `sling` command changes
-GitHub or CI state**: it reads and analyzes. The one command that changes
-anything at all, `sling update`, reinstalls `sling` on the user's own
-machine — and, like `sling login`, the user runs it, never you.
+GitHub or CI state**: it reads and analyzes. A few change only the user's
+own machine — `login`/`logout` (the credential), `org switch` (the saved
+default org) and `update` (the installed binary); the user runs `login` and
+`update`, never you.
 
 **This skill's job is picking the right tool per request.** Live question
 about a run, a job, or spend → `sling`. Anything that *changes* CI state →
@@ -114,10 +115,12 @@ Do this once per session, before the first `sling` command.
    switching the default rather than by adding a flag to the call. **`sling
    time` rejects `--org` outright** — switch the default for it too.
    `runs list`, `jobs list`, `usage` and `top` take either flag but reject
-   both together (`Use --org or --repo, not both.`). No command reads the
-   git remote: without `--repo` a listing covers the whole org, and `sling
-   time`'s repo view needs `--repo`. It takes `owner/name` — a bare repo
-   name is rejected.
+   both together (`Use --org or --repo, not both.`) — keep `--repo`, which
+   names its org, and drop `--org`. No command fills in `--repo` from the git
+   remote: without it `runs list`, `usage` and `top` cover the whole org,
+   `jobs list` needs `--run`, `--repo` or a window, and `sling time`'s repo
+   view needs `--repo`. For "my" or "this repo" asks, pass `--repo` from the
+   checkout's `origin`. It takes `owner/name` — a bare repo name is rejected.
 
    `doctor`'s `org` check also fails when you belong to **no** orgs, which
    looks similar and is not this. There is no slug to switch to — that is
@@ -254,7 +257,7 @@ reading YAML yourself.
 | The same, as percentiles across a repo | `sling` | `sling time --repo <owner/name> --window <n>d` (`--repo` is required; `--org` is rejected) |
 | Which part of a workflow is slow — its critical path, hop by hop | `sling` | `sling time --repo <owner/name> --workflow <name>` |
 | Whether Afterburner, a provider or a tier changes the timings | `sling` | `sling time --repo <owner/name> --workflow <name> --group-by afterburner\|provider\|tier` — compare the per-hop `delta`; `--group-by` alone mixes different jobs |
-| Recent runs and their status | `sling` | `sling runs list [--branch --status --conclusion --trigger --workflow-path --label --window --limit]` |
+| Recent runs and their status | `sling` | `sling runs list [--repo <owner/name>] [--branch --status --conclusion --trigger --workflow-path --label --window --limit]` |
 | Detail on one run (its jobs, attempts, runner) | `sling` | `sling runs show <run id\|URL> [--wait] [--fail-fast]` |
 | Which jobs in a run failed, or jobs across a repo | `sling` | `sling jobs list --run <id>` / `--repo <owner/name>` [`--afterburner engaged\|not-engaged`] |
 | Which step in a job failed, and each step's duration | `sling` | `sling jobs show <job id\|URL>` |
@@ -265,8 +268,8 @@ reading YAML yourself.
 | What is owed this period, or past invoices | `sling` | `sling bill`, `sling bill history` |
 | Which runner labels/sizes exist and what they cost | `sling` | `sling labels list` |
 | Identity, org, credential, environment health | `sling` | `sling whoami`, `sling doctor`, `sling org switch` — and `sling login`, which the **user** runs, not you |
-| Updating `sling` itself, or turning its background updates off/on | the user | `sling update [--off\|--on]` — **ask the user to run `sling update`**; never run it yourself |
-| **Re-run a run or its failed jobs** | `gh` | `gh run rerun <run-id> [--failed]` |
+| Updating `sling` itself, or turning its background updates off/on | the user | `sling update [--off\|--on]` — **ask the user to run `sling update`** (when `doctor`'s `version` row names another `fix_command`, give them that; when it reads up to date, say so); never run it yourself |
+| **Re-run a run or its failed jobs** | `gh` | `gh run rerun <run-id> [--failed \| --job <job-id>] -R <owner/name>` |
 | **Cancel an in-progress run** | `gh` | `gh run cancel <run-id>` |
 | **Trigger a workflow (`workflow_dispatch`)** | `gh` | `gh workflow run <workflow> [-f key=value]` |
 | **Enable or disable a workflow** | `gh` | `gh workflow enable\|disable <workflow>` |
@@ -379,12 +382,13 @@ re-verify on upgrade.
   `--on` toggle background updates. Under `--agent` it prints
   `{"result": "current"|"updated"|"failed"|"unmanaged", …}`; a failed check
   exits `5`, a failed install `1`, a copy the installer did not place `2`.
-- **The version can change mid-session.** About once a day, after any
-  command, an installer-placed `sling` updates itself in a detached process —
+- **The version can change mid-session.** About once a day, after most
+  commands, an installer-placed `sling` updates itself in a detached process —
   silent under `--agent`, never touching stdout or the exit code, and off
-  when `CI` or `SLING_NO_AUTO_UPDATE` is set or after `sling update --off`.
-  Re-read `doctor`'s `version` row rather than trusting a version you saw
-  earlier. Opting out is the user's choice, never yours.
+  when `CI` or `SLING_NO_AUTO_UPDATE` is set (not empty/`0`/`false`) or after
+  `sling update --off`.
+  When a result contradicts this skill, check `sling --version` (local, no
+  network) before trusting one seen earlier. Opting out is the user's choice.
 - **Exit `4` does not always mean the credential is stale, and its message
   misdirects when it does not.** An org StarSling was never installed on
   fails with `You don't have access to org "<name>". Run \`sling login\`` —
@@ -392,7 +396,7 @@ re-verify on upgrade.
   Read the message before acting on the code: a named org means the app is
   missing there, not that the login is.
 - **An empty listing is a coverage hole, never a finding.** `sling runs list
-  --repo <name>` returns `{"runs": []}` and exit `0` both when the repo truly
+  --repo <owner/name>` returns `{"runs": []}` and exit `0` both when the repo truly
   had no runs in the window and when StarSling is not watching that repo at
   all. The payload cannot tell them apart, so an empty result means this
   check did NOT run — say so with the reason you cannot rule out, rather than
@@ -410,8 +414,8 @@ re-verify on upgrade.
   and when one fires report the timeout itself: a killed command produced no
   result, and "no result" is never "no findings". A *refused* connection
   returns exit `5` cleanly.
-- **Unknown flags are ignored, not rejected.** `sling runs list --bogus`
-  exits `0` and returns unfiltered rows. Exit `0` is therefore not evidence
+- **Unknown flags are ignored, not rejected** (except by `logs` and `update`,
+  which exit `2`). `sling runs list --bogus` exits `0` and returns unfiltered rows. Exit `0` is therefore not evidence
   that a filter applied — check the rows you got back before reporting a
   filtered answer.
 - **`--help` lists an abridged flag set.** `runs list --help` omits

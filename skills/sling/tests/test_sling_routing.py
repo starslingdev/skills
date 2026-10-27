@@ -219,7 +219,45 @@ _MUTATING_ACTIONS = ("rerun", "cancel", "trigger", "enable", "disable",
 # The same actions as a USER would phrase them, for scanning eval prompts.
 # Kept as one derived set so the two guards can never disagree about what
 # counts as mutating — they did, and `trigger` fell through the gap.
-_MUTATING_VERBS = _MUTATING_ACTIONS + ("re-run", "kick off", "approve")
+_MUTATING_VERBS = _MUTATING_ACTIONS + ("re-run", "kick off", "approve",
+                                       "retry", "restart", "dispatch")
+# Words a CLI command could be NAMED with if it changed GitHub or CI state. Wider
+# than the routing verbs on purpose: the name detector below is the guard's only
+# teeth that do not depend on a hand-kept list, and a narrow one let `re-run`,
+# `retry`, `dispatch`, `approve`, `workflow run` and `secrets set` through.
+_MUTATING_NAME_WORDS = frozenset(_MUTATING_VERBS + (
+    "set", "create", "write", "kill", "abort", "stop", "start", "deploy",
+    "merge", "push", "run"))
+
+
+def _named_for_a_state_change(name: str) -> bool:
+    """True when a command name carries a state-changing word: as a token, as
+    its hyphen-joined form (`re-run` -> `rerun`), or as a plural (`reruns`).
+    `runs` is a noun here (`runs list`), never the verb `run`."""
+    low = name.lower()
+    tokens = set(low.split()) | set(low.replace("-", " ").split()) | {
+        t.replace("-", "") for t in low.split()} | {low}
+    return any(t in _MUTATING_NAME_WORDS
+               or (t.endswith("s") and t[:-1] != "run" and t[:-1] in _MUTATING_NAME_WORDS)
+               for t in tokens)
+
+
+def _is_mutating_ask(prompt: str) -> bool:
+    """Whole-word match, so `what triggers does this workflow have` (a file
+    read) is not mistaken for the verb `trigger`."""
+    low = prompt.lower()
+    return any(re.search(rf"\b{re.escape(v)}\b", low) for v in _MUTATING_VERBS)
+
+
+def test_state_change_name_detector_catches_known_shapes():
+    """Self-test of the detector the read-only guard leans on: each of these
+    names survived the previous, seven-word version."""
+    for bad in ("rerun", "runs re-run", "re-run", "retry", "runs retry", "dispatch",
+                "approve", "secrets set", "workflow run", "reruns", "runs dispatch",
+                "cancel-run", "runs delete", "restart"):
+        assert _named_for_a_state_change(bad), bad
+    for ok in sorted(_COMMANDS):
+        assert not _named_for_a_state_change(ok), f"`{ok}` misread as state-changing"
 
 
 @pytest.mark.parametrize("verb", _MUTATING_ACTIONS)
@@ -250,7 +288,7 @@ def test_read_only_claim_matches_the_captured_surface():
     # may be named for a GitHub state change (`run cancel`, `rerun`, ...). A
     # release that adds one must be re-classified on purpose, not slip through.
     named_for_a_state_change = sorted(
-        c for c in _COMMANDS if set(c.replace("-", " ").split()) & set(_MUTATING_ACTIONS))
+        c for c in _COMMANDS if _named_for_a_state_change(c))
     assert not named_for_a_state_change, (
         f"the surface captures GitHub-state-changing command(s) "
         f"{named_for_a_state_change} while the skill says no sling command changes "
@@ -323,13 +361,20 @@ def test_scope_flag_rules_match_the_captured_surface():
             f"a `sling {cmd}` heading in the reference offers --org, which the binary "
             f"rejects with exit 2")
         assert f"`{cmd}` rejects --org" in _SURFACE["global_flags_note"]
+    assert {"runs list", "jobs list", "usage", "top"} <= set(sf["rejects_org_with_repo"]), (
+        "the capture lost a not-both command; the 0.1.124 binary rejects --org with "
+        "--repo on runs list, jobs list, usage and top")
     for cmd in sf["rejects_org_with_repo"]:
         assert f"`{cmd}`" in step4, f"step 4 no longer names `{cmd}` among the not-both commands"
         assert any(cmd in ln and "not both" in ln for ln in glob.splitlines()), (
             f"the reference's scope-flag table no longer says `{cmd}` rejects --org with --repo")
     assert "not both" in step4, "step 4 lost the --org/--repo not-both rule"
-    assert "no command reads the git remote" in step4, (
+    assert "no command fills in `--repo` from the git remote" in step4, (
         "step 4 no longer says --repo is never read from the git remote")
+    # `doctor`'s `git_remote` check DOES read the remote, so the absolute form
+    # of the claim is false and must not come back.
+    assert "no command reads the git remote" not in step4, (
+        "step 4 claims no command reads the git remote; `doctor`'s git_remote does")
     for where, text in _shipped_text():
         low = " ".join(text.split()).lower()
         assert "defaults to the git remote" not in low, (
@@ -356,11 +401,15 @@ def test_routing_evals_agree_with_the_surface_and_the_split():
 
 
 def test_no_mutating_ask_routes_to_sling():
-    """The one-line version of the whole contract."""
-    for r in _ROUTING["routings"]:
-        if any(v in r["prompt"].lower() for v in _MUTATING_VERBS):
-            assert r["route"] != "sling", (
-                f"{r['prompt']!r} routes a GitHub state change to sling, which makes none")
+    """The one-line version of the whole contract. A state-change ask goes to
+    `gh` and nowhere else: `!= "sling"` alone let one be handed to the user as
+    "run `sling update`", or dropped as `none`, with the suite green."""
+    hits = [r for r in _ROUTING["routings"] if _is_mutating_ask(r["prompt"])]
+    assert len(hits) >= 5, f"only {len(hits)} state-change asks in the evals"
+    for r in hits:
+        assert r["route"] == "gh" and r.get("command", "").startswith("gh "), (
+            f"{r['prompt']!r} routes a GitHub state change to {r['route']!r}; "
+            f"state changes route to `gh`")
 
 
 def test_repo_wide_asks_leave_this_skill_for_the_owning_audit_skill():

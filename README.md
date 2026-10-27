@@ -223,11 +223,11 @@ ask *"why did this job fail?"*
 
 The skill is named after the CLI it drives. The other three skills read your
 workflow files; this one reads your **live CI**, through
-[`sling`](https://docs.starsling.dev/sling-cli), StarSling's read-only CLI: why a job failed (classified server-side, no LLM in the loop),
+[`sling`](https://docs.starsling.dev/sling-cli), StarSling's CLI, read-only against your CI: why a job failed (classified server-side, no LLM in the loop),
 where a run's wall-clock actually went, only the log lines that matter, and
 what your runner minutes cost, broken down by repo, workflow, or label.
 
-**The routing is the point.** `sling` is read-only, so an agent that only
+**The routing is the point.** `sling` changes nothing on GitHub, so an agent that only
 knows `sling` will invent a `sling rerun` that does not exist, and an agent
 that only knows `gh` will download a whole transcript to grep it. The skill
 carries the table that decides which tool answers which ask — reads about a

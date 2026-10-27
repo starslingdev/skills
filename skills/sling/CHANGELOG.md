@@ -25,8 +25,8 @@ All notable changes to the `sling` skill. Unversioned; dated (UTC).
   sample; "is Afterburner faster" routes to `--workflow` plus `--group-by`,
   since `--group-by` alone compares different mixes of jobs), `sling jobs list --afterburner engaged|not-engaged` and the
   optional Afterburner job fields, `sling labels list --org` private-beta
-  rows (`private_beta: true`), and `sling bill`'s optional free-credit and
-  projection fields (`amount_due_usd` is still what is owed). Four routing
+  rows (`private_beta: true`), and `sling bill`'s optional free-credit fields and
+  month-end projection (`amount_due_usd` is still what is owed). Four routing
   eval rows pin the new asks, two of them as user-run.
 
 - **2026-08-26** — **The launch-announcement prompts are pinned in the routing
@@ -139,12 +139,30 @@ All notable changes to the `sling` skill. Unversioned; dated (UTC).
   0.1.124.** `runs list`, `jobs list`, `usage` and `top` reject `--org`
   together with `--repo` (exit `2`, `Use --org or --repo, not both.`);
   `time` rejects `--org` outright (exit `2`); and no command reads `--repo`
-  from the git remote — without it a listing covers the whole org, and
-  `time`'s repo view needs `--repo`. The preflight's wrong-org step, the
+  from the git remote — without it `runs list`, `usage` and `top` cover the
+  whole org, `jobs list` exits `2` unless given `--run`, `--repo` or a
+  window, and `time`'s repo view needs `--repo`. With both flags, keep
+  `--repo` (it names the org) and drop `--org`. The preflight's wrong-org step, the
   reference's Global flags section and the captured surface now say so, and
   a guard pins each rule to the capture.
 - **2026-10-27** — The `gh` fallback reference now says `sling` "makes no
   change to GitHub" instead of "read-only in this release".
+- **2026-10-27** — **The state-change guard could be routed around.** A
+  re-run or cancel ask routed to the user (as "run `sling update`") or to
+  nothing passed, because the check was only "not `sling`"; state-change asks
+  must now route to `gh`. The command-name check matched seven words and
+  missed `re-run`, `retry`, `dispatch`, `approve`, `workflow run` and
+  `secrets set`; it now covers those shapes and has a self-test. The
+  not-both scope-flag list gained a positive control.
+- **2026-10-27** — **Corrections found in review.** "No command reads the git
+  remote" is now "no command fills in `--repo` from the git remote" (`doctor`'s
+  `git_remote` check reads it); the intro no longer claims `sling update` is
+  the only local change (`login`, `logout` and `org switch` change local
+  state too); "is Afterburner faster" routes to `--workflow` plus
+  `--group-by`; the update route defers to `doctor`'s `fix_command` on a copy
+  the installer did not place; the bill example's Afterburner values are
+  synthetic; the re-run row names `--job` and `-R`; the README no longer calls `sling`
+  read-only outright; and the security notes disclose the daily self-update.
 
 - **2026-08-31** — **The commands-must-exist guard no longer stops reading at
   a `"detail"` string.** Documenting `doctor`'s `agent_skill` row meant

@@ -50,7 +50,7 @@
     "--help"
   ],
   "scope_flags": {
-    "_comment": "--org <slug> and --repo <owner/name> are per-command, not global. Every rejection below exits 2 with nothing on stdout. No command reads --repo from the git remote of the current directory; without --repo, a list or cost command covers the whole org.",
+    "_comment": "--org <slug> and --repo <owner/name> are per-command, not global. Every rejection below exits 2 with nothing on stdout. No command reads --repo from the git remote of the current directory; without --repo, runs list, usage and top cover the whole org, and jobs list exits 2 unless given --run, --repo or a window.",
     "rejects_org_and_repo": [
       "logs"
     ],

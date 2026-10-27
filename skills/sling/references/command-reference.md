@@ -42,9 +42,13 @@ every rejection below exits `2` with nothing on stdout:
 
 For `logs` and `time`, switch the default org (`sling org switch`) instead
 of flagging the call. **No command reads `--repo` from the git remote** of
-the current directory: without it, a list or cost command covers the whole
-org (verified from inside a checkout, which returned another repo's runs),
-and `sling time` with no target and no `--repo` is a usage error.
+the current directory: without it, `runs list`, `usage` and `top` cover the
+whole org (verified from inside a checkout, which returned another repo's
+runs), `jobs list` exits `2` (`Narrow the listing: pass --run <id>, --repo
+<owner/name>, or a time window.`), and `sling time` with no target and no
+`--repo` is a usage error. Only `doctor`'s `git_remote` check reads the
+remote, and it never feeds `--repo`. With both flags, keep `--repo` (it names
+the org) and drop `--org`.
 
 | Flag | Meaning |
 |---|---|
@@ -127,18 +131,18 @@ changes the user's machine: surface it, never run it.
 not run at all (`clock_skew` and `org` under an unreachable control plane
 read `ok: false, skipped: true, "not checked"`). Read `detail`; a skipped
 check is never a pass. An outdated-but-working version reads `ok: true,
-warn: true` with the upgrade one-liner in `fix_command` — advisory, not a
-failure (up to date it reads `ok: true, "up to date (<version>)"`).
+warn: true` with the update command in `fix_command` (`sling update` on an
+installer-placed copy, as above) — advisory, not a failure (up to date it reads `ok: true, "up to date (<version>)"`).
 
 **`auto_update` is advisory and can never fail the run.** It is always
-`ok: true` except when the binary was not placed by the installer at all,
-which reads `ok: false, skipped: true` — a non-verdict, so it never
+`ok: true` except for a copy with no installer record at all (the last row
+below), which reads `ok: false, skipped: true` — a non-verdict, so it never
 contributes to exit `10`. Its shapes:
 
 | Shape | Row |
 |---|---|
 | Installer-placed, updates on | `ok: true`, `"on; last checked <time> UTC: <outcome>"` (or `"on; not checked yet"`) |
-| Installer-placed, turned off | `ok: true`, `"off (<why>); …"` — `<why>` is `CI is set`, `SLING_NO_AUTO_UPDATE is set`, or `sling update --off` |
+| Installer-placed, turned off | `ok: true`, `"off (<why>); …"` — `<why>` is e.g. `CI is set`, `SLING_NO_AUTO_UPDATE is set`, `sling update --off`, or that the environment could not be read |
 | Installer-placed, last background check failed | `ok: true, warn: true`, `"on; … To retry now:"`, `fix_command: "sling update"` |
 | A copy the installer did not place, with a safe swap | `ok: true, warn: true`, `"off — the StarSling installer didn't place this sling; to swap it for one that updates itself:"`, with the swap line in `fix_command` |
 | A copy with no safe one-line swap | `ok: true, warn: true`, `"off — … and it has no safe one-line swap …"` (the detail points at `sling update` for why), no `fix_command` |
@@ -206,7 +210,8 @@ Present since 0.1.84; the parser is strict (an unknown argument, or `--off`
 with `--on`, exits `2`).
 
 Under `--agent` it prints one object on stdout (the update itself was
-deliberately not run while capturing; these are the CLI's stated outcomes):
+deliberately not run while capturing, since it changes the machine; these are
+the CLI's defined outcomes, not a captured run):
 
 | Outcome | stdout | Exit |
 |---|---|---|
@@ -217,17 +222,19 @@ deliberately not run while capturing; these are the CLI's stated outcomes):
 | A binary the installer did not place | `{"result": "unmanaged", "reason": "…", "install": "…"}` — `install` is the replacement line, absent when there is no safe one | `2` |
 
 `--off` / `--on` turn background updates off and on for this install
-(`{"auto_update": "off"}` / `"on"` under `--agent`); `sling update` still
+(`{"auto_update": "off"}` / `"on"` under `--agent`; a copy the installer did
+not place gets the `unmanaged` object and exit `2` instead); `sling update` still
 works on demand while they are off. Opting out is the user's decision.
 
-**Background self-update.** About once a day, after any command finishes, an
+**Background self-update.** About once a day, after most commands finish
+(not `--version`, `--help`, a bare `sling` or `sling update` itself), an
 installer-placed `sling` checks for a newer release and installs it in a
 detached process. Nothing is written to stdout and the exit code is never
 touched; under `--agent` / `--json` it is silent (at most one stderr line, in
 human mode on a terminal). It is off when `CI` or `SLING_NO_AUTO_UPDATE` is
 set to anything but empty, `0` or `false`, and after `sling update --off`.
-So **the version can change mid-session**: re-read `doctor`'s `version` row
-when the version matters, rather than trusting one seen earlier.
+So **the version can change mid-session**: check `sling --version` (local, no
+network) when the version matters, rather than trusting one seen earlier.
 
 ### `sling logout`, `sling org switch [slug] [--no-input]`
 
@@ -296,7 +303,7 @@ went over its billed size at any point); `not-engaged` the rest; any other
 value exits `2`. Rows on runners that report Afterburner carry optional
 fields — `afterburner_engaged`, `afterburner_coverage`,
 `afterburner_complete`, `afterburner_rate` — absent elsewhere, so a parser
-must not require them. `--org` together with `--repo` exits `2`.
+must not require them; `label`, `runner_id` and `duration_ms` are optional too. `--org` together with `--repo` exits `2`.
 
 ### `sling jobs show <job id | URL>`
 
@@ -512,7 +519,7 @@ is a change against the prior comparable window.
  "amount_usd": 98.76, "credits_usd": 8, "amount_due_usd": 90.76,
  "free_credit_total_usd": 8, "free_credit_remaining_usd": 0,
  "line_items": [{"label": "starsling-ubuntu-24.04", "minutes": 40227, "usd": 321.816,
-                 "afterburner_rate": 0.88, "afterburner_engaged_jobs": 1810}],
+                 "afterburner_rate": 0.5, "afterburner_engaged_jobs": 100}],
  "projected_month_end_usd": 192.4}
 ```
 

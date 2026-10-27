@@ -95,7 +95,7 @@
       "prompt": "re-run the failed jobs",
       "route": "gh",
       "command": "gh run rerun",
-      "why": "changes state; sling is read-only"
+      "why": "changes state; no sling command changes GitHub"
     },
     {
       "prompt": "cancel that run",
