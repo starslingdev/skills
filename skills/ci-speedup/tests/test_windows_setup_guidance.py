@@ -127,3 +127,16 @@ def test_full_report_headline_totals_and_sizing_are_byte_identical(tmp_path):
     path = tmp_path / "findings.json"
     path.write_text(json.dumps(doc))
     assert vr.check_windows_setup_guidance(report, path).ok
+
+
+@pytest.mark.parametrize("step,target", [
+    ("NuGet restore", "OPT93"), ("dotnet workload install android", "OPT94"),
+])
+def test_pointer_anchor_resolves_to_its_catalog_heading(step, target):
+    """The deep link must land on the target's heading (GitHub slug), not the page top."""
+    catalog = (SKILL / "references" / "optimization-patterns.md").read_text(encoding="utf-8")
+    heading = next(m.group(1) for m in re.finditer(r"^#{1,6}\s+(.+?)\s*$", catalog, re.M)
+                   if m.group(1).startswith(f"{target} "))
+    slug = re.sub(r"\s", "-", re.sub(r"[^\w\s-]", "", heading.strip().lower()))
+    line = next(l for l in render(finding(step)).splitlines() if "Windows setup benchmark:" in l)
+    assert f"https://example.invalid/catalog#{slug})" in line

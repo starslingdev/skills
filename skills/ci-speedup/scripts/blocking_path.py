@@ -9585,10 +9585,10 @@ def _windows_setup_guidance(f: dict[str, Any], catalog_url: str) -> str:
             return ""
     step = str((f.get("decomposition") or {}).get("dominant_step") or "")
     if re.search(r"setup-dotnet|dotnet\s+workload\s+install|install\s+\.net\s+workloads?", step, re.I):
-        target, anchor, label = ("OPT94", "opt94-the-net-sdk-can-reconcile-unrelated-machine-wide-workloads",
+        target, anchor, label = ("OPT94", "opt94--the-net-sdk-can-reconcile-unrelated-machine-wide-workloads",
                                  "isolated .NET SDK setup")
     elif re.search(r"(?:nuget|dotnet)\s+restore|restore\s+(?:nuget|\.net)(?:\s+packages)?", step, re.I):
-        target, anchor, label = ("OPT93", "opt93-nuget-restores-to-a-slower-disk-on-windows-runners",
+        target, anchor, label = ("OPT93", "opt93--nuget-restores-to-a-slower-disk-on-windows-runners",
                                  "NuGet cache placement")
     else:
         return ""
