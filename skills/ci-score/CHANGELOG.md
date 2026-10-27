@@ -11,6 +11,41 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
 
 ## [Unreleased]
 
+- **2026-10-27** — **Fixed**: a repository whose setup action caches
+  dependencies by default no longer fails Dependency caching. `setup-go` v4+
+  and `setup-uv` v5+ with no cache input, `setup-ruby` with
+  `bundler-cache: true`, `setup-node` v5+ when `package.json` names the
+  package manager, and `gradle/actions/setup-gradle` were all graded "no
+  cache". The rules are the speed engine's own table, copied rather than
+  imported, and a repo-level test pins the two by constant and by verdict.
+  An explicit opt-out (`cache: false`, `enable-cache: false`,
+  `package-manager-cache: false`, `cache-disabled: true`) still fails, as do
+  versions before the default turned on. A SHA-pinned action names no
+  version, as in the speed engine, so a default-on action pinned by SHA
+  counts as caching and setup-node counts only when its v5 and v6 rules
+  agree.
+- **2026-10-27** — **Fixed**: a test job whose matrix is generated at
+  runtime (`matrix: ${{ fromJSON(...) }}`) no longer fails Test sharding; it
+  passes, because the job does run a matrix. A generated matrix on a job that
+  is not test-like earns nothing, the same rule a written-out matrix gets.
+- **2026-10-27** — **Fixed**: a repository whose every job calls a reusable
+  workflow from another repository no longer fails Job timeouts. A calling
+  job cannot set `timeout-minutes`, so the check is now not applicable there,
+  the same handoff Dependency caching and Test sharding already make. One job
+  that runs its own steps keeps the check graded.
+- **2026-10-27** — **Fixed**: a full-history checkout step whose own `if:`
+  can never be true on a pull request (for example
+  `if: github.event_name == 'push'`) no longer fails Shallow checkout. The
+  same fail-closed reading the job-level `if:` gets applies: a condition it
+  cannot fully resolve still counts.
+- **2026-10-27** — **Changed**: the CI Score registry is bumped to
+  `ci-score-v0.1.5` (OD-CS23). Job timeouts gains a not-applicable gate and
+  the shallow-checkout reachability exemption widens from jobs to steps, and
+  the rubric's own rule bumps `spec_version` when a gate moves. Check count
+  (11), bands, formula, refusals and scorer arithmetic are unchanged. Both
+  frozen calibration controls produce identical facts; committed corpus and
+  synthetic stamps carry the new `spec_version` field and nothing else.
+
 - **2026-10-10** — **Fixed**: actions referenced with GitHub's
   self-repository prefix (`uses: $/path`, shipped 2026-07-30) are local to
   the repository, exactly like `uses: ./path`, but were counted as unpinned

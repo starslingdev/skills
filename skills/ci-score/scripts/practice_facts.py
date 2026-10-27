@@ -5,7 +5,7 @@ ci-speedup's scanner, 2026-07-16).
 composite actions and returns the eleven pass/fail CONFIGURATION FACTS the CI
 Score consumes (each fact: {"state": "pass"|"fail"|"not_applicable",
 "evidence": str, "files": [..<=3]}). `ci_score.compute_ci_score` maps these
-onto the frozen v0.1.4 registry and does the arithmetic.
+onto the frozen v0.1.5 registry and does the arithmetic.
 
 STRUCTURE, NOT SUBSTRINGS: every fact walks the parsed workflow (jobs, steps,
 with-blocks, on-blocks). The only substring matching is over the CODE inside a
@@ -28,6 +28,7 @@ with ci-speedup at runtime.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -1039,6 +1040,144 @@ def _unreadable_step_sources(parsed: list[tuple[str, dict, str]],
     return bad_lists, parse_errors
 
 
+# ---- Setup actions whose caching is on by default ----------------------------
+#
+# CANONICAL SOURCE: `skills/ci-speedup/scripts/collect_runs.py` —
+# `_OPT79_SETUP_CACHE_INPUTS`, `_OPT79_SETUP_NODE_AUTO_CACHE_FROM_MAJOR`,
+# `_OPT79_SETUP_NODE_V5_PM_RE`, `_OPT79_SETUP_NODE_NPM_RE`, `_OPT79_OFF_VALUES`,
+# `_opt79_ref_major`, `_opt79_setup_node_auto_cache` and
+# `_opt79_setup_cache_state`. A COPY, not an import (each skill installs
+# standalone); `tests/test_ci_score_setup_cache_parity.py` pins the two tables.
+# `{action: (the input that switches its cache, the first major whose default
+# is ON, or None when the default is OFF)}`; every other setup-* action is
+# switched by `cache:` and is off without it. A SHA or branch ref names no
+# major, so a default-on action pinned by SHA counts as caching (a `# v5`
+# comment beside the SHA is not read, exactly as in ci-speedup).
+_SETUP_CACHE_INPUTS: dict[str, tuple[str, int | None]] = {
+    "actions/setup-go": ("cache", 4),
+    "astral-sh/setup-uv": ("enable-cache", 5),
+    "ruby/setup-ruby": ("bundler-cache", None),
+}
+_SETUP_NODE_AUTO_CACHE_FROM_MAJOR = 5
+_SETUP_NODE_V5_PM_RE = re.compile(r"^(?:\^)?(npm|yarn|pnpm)@")
+_SETUP_NODE_NPM_RE = re.compile(r"(\^)?npm(@.*)?")   # fullmatch = JS ^…$
+_SETUP_OFF_VALUES = ("false", "no", "off")
+# Actions that restore a dependency cache of their own without `cache` in the
+# action name or an `owner/setup-*` shape (ci-speedup's
+# `_OPT79_OTHER_CACHE_USES_RE`, minus the ones `_CACHE_ACTION_RE` already
+# matches). Gradle's are on unless `cache-disabled` is set true.
+_DEFAULT_ON_CACHE_ACTIONS_RE = re.compile(
+    r"^(gradle/actions/setup-gradle|gradle/gradle-build-action|bahmutov/npm-install)$",
+    re.IGNORECASE)
+
+
+def _ref_major(ref: str) -> int | None:
+    """The major a `uses:` ref names (`v5`, `v5.1`, `5.1.2`), or None for a
+    SHA (even one starting with digits) or a branch."""
+    m = re.fullmatch(r"v?(\d+)(?:\.\d+){0,2}", (ref or "").strip())
+    if not m or len(m.group(1)) > 4:
+        return None
+    return int(m.group(1))
+
+
+def _setup_node_auto_cache(major: int | None, package_json: Any) -> str:
+    """setup-node v5+'s automatic cache for one parsed `package.json`: `on`,
+    `off`, or `maybe` (file unread/invalid, or a SHA ref on which the v5 and
+    v6+ rules disagree)."""
+    if not isinstance(package_json, dict):
+        return "maybe"
+
+    def _v5() -> bool:
+        pm = package_json.get("packageManager")
+        return isinstance(pm, str) and bool(_SETUP_NODE_V5_PM_RE.match(pm))
+
+    def _v6() -> bool:
+        dev = package_json.get("devEngines")
+        dev_pm = dev.get("packageManager") if isinstance(dev, dict) else None
+        items = (dev_pm if isinstance(dev_pm, list) else [dev_pm]) if dev_pm else []
+        for obj in items:
+            nm = obj.get("name") if isinstance(obj, dict) else None
+            if isinstance(nm, str) and _SETUP_NODE_NPM_RE.fullmatch(nm):
+                return True
+        pm = package_json.get("packageManager")
+        return isinstance(pm, str) and bool(_SETUP_NODE_NPM_RE.fullmatch(pm))
+
+    if major is None:
+        a, b = _v5(), _v6()
+        return ("on" if a else "off") if a == b else "maybe"
+    if major == _SETUP_NODE_AUTO_CACHE_FROM_MAJOR:
+        return "on" if _v5() else "off"
+    return "on" if _v6() else "off"
+
+
+def _setup_cache_state(action: str, ref: str, with_in: dict[str, Any],
+                       package_json: Any = None) -> str:
+    """Whether a `setup-*` step restores a cache: `on`, `off`, `maybe` or
+    `expr` (its cache input is an unevaluated `${{ … }}` expression). An input
+    that is SET decides it; an absent one falls back to the action's default."""
+    action = action.strip().lower()
+    major = _ref_major(ref)
+    input_name, on_from = _SETUP_CACHE_INPUTS.get(action, ("cache", None))
+    raw = with_in.get(input_name)
+    node_auto = action == "actions/setup-node" and (
+        major is None or major >= _SETUP_NODE_AUTO_CACHE_FROM_MAJOR)
+    if raw is not None:
+        val = str(raw).strip()
+        if "${{" in val:
+            return "expr"
+        if not val and node_auto:
+            raw = None   # setup-node v5+: an EMPTY `cache:` falls through to auto
+        else:
+            return "off" if (not val or val.lower() in _SETUP_OFF_VALUES) else "on"
+    if on_from is not None and (major is None or major >= on_from):
+        return "on"
+    if node_auto:
+        pmc = with_in.get("package-manager-cache")
+        pmc_val = "" if pmc is None else str(pmc).strip()
+        if "${{" in pmc_val:
+            return "expr"
+        # `(input || 'true').toUpperCase() === 'TRUE'`
+        if pmc_val and pmc_val.upper() != "TRUE":
+            return "off"
+        return _setup_node_auto_cache(major, package_json)
+    return "off"
+
+
+def _read_root_package_json(root: Path) -> Any:
+    """The repo-root package.json, parsed, or None when absent or invalid
+    (setup-node treats both as "no package manager")."""
+    try:
+        return json.loads((root / "package.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _checkout_moves_workspace(step: dict) -> bool:
+    """A checkout of another repository, or into a sub-path: the workspace-root
+    package.json setup-node reads is then not the one this scan read."""
+    ua = _step_uses(step)
+    if not ua or ua[0].lower() != "actions/checkout":
+        return False
+    w = step.get("with") if isinstance(step.get("with"), dict) else {}
+    path = str(w.get("path") or "").strip()
+    return bool(w.get("repository")) or path not in ("", ".", "./")
+
+
+def _step_caches_by_default(step: dict, package_json: Any, workspace_moved: bool) -> bool:
+    """A step whose own action restores a dependency cache with no `cache:`
+    input (or through a differently-named input): ci-speedup's rules."""
+    ua = _step_uses(step)
+    if not ua:
+        return False
+    with_ = step.get("with") if isinstance(step.get("with"), dict) else {}
+    if _DEFAULT_ON_CACHE_ACTIONS_RE.match(ua[0]):
+        return str(with_.get("cache-disabled", "")).strip().lower() != "true"
+    if not re.match(r"^[\w.-]+/setup-[\w.-]+$", ua[0]):
+        return False
+    pj = None if workspace_moved else package_json
+    return _setup_cache_state(ua[0], ua[1], with_, pj) in ("on", "expr")
+
+
 def _conc_cancels_basic(conc: Any) -> bool:
     """cancel-in-progress set and not literally false - a templated
     expression is conditional cancellation, which is the practice too."""
@@ -1074,16 +1213,25 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path) -> dict[str
     # 1. Dependency caching: a cache action (actions/cache incl. /restore
     # /save, Swatinem/rust-cache, buildjet/cache, ccache-action - anything
     # whose action name says cache), or a setup-* step's truthy cache input.
+    # Also a setup action whose caching is ON BY DEFAULT or switched by a
+    # differently-named input (setup-go v4+, setup-uv v5+, setup-ruby's
+    # bundler-cache, setup-node v5+ with a package-manager field,
+    # setup-gradle) - ci-speedup's table, copied above.
     hits = []
+    package_json = _read_root_package_json(root)
     for rel, steps in step_sources:
+        workspace_moved = False
         for step in steps:
             ua = _step_uses(step)
             with_ = step.get("with") if isinstance(step.get("with"), dict) else {}
+            workspace_moved = workspace_moved or _checkout_moves_workspace(step)
             if ua and _CACHE_ACTION_RE.search(ua[0]):
                 hits.append(rel)
             elif ua and "setup-" in ua[0] and any(
                     k in ("cache", "enable-cache") and v not in (False, "false", None, "")
                     for k, v in with_.items()):
+                hits.append(rel)
+            elif _step_caches_by_default(step, package_json, workspace_moved):
                 hits.append(rel)
     if hits:
         facts["ci.cache.dependency-cache"] = fact(
@@ -1143,19 +1291,28 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path) -> dict[str
     offenders = []
     carved_out = 0   # PR-gating jobs that take full history AND need it
     off_pr_path = 0  # jobs whose own `if:` can never be true on a pull request
+    off_pr_steps = 0  # jobs whose every full-history checkout STEP is PR-excluded
     for rel, doc in pr_wfs:
         for job_name, job in _wf_jobs(doc).items():
-            takes_full_history = any(
-                str((step.get("with") if isinstance(step.get("with"), dict) else {})
-                    .get("fetch-depth")).strip("'\"") == "0"
-                for step in _job_steps(job))
-            if not takes_full_history:
+            full_history_steps = [
+                step for step in _job_steps(job)
+                if str((step.get("with") if isinstance(step.get("with"), dict) else {})
+                       .get("fetch-depth")).strip("'\"") == "0"]
+            if not full_history_steps:
                 continue
             # A job whose own `if:` can never be true for a pull-request event
             # is not on the PR path at all — no pull request waits for it, so
             # its checkout depth is not a PR-speed fact.
             if _job_if_excludes_pull_requests(job, doc):
                 off_pr_path += 1
+                continue
+            # The same PR-reachability read as the job-level `if:` above, on
+            # the checkout STEP's own `if:`: a step that can never run for a
+            # pull-request event takes no history on the PR path. Fails
+            # closed - an unresolvable step `if:` still counts.
+            if all(_job_if_excludes_pull_requests(step, doc)
+                   for step in full_history_steps):
+                off_pr_steps += 1
                 continue
             if _job_needs_git_history(job, job_name, local_history_actions):
                 carved_out += 1
@@ -1167,7 +1324,7 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path) -> dict[str
                     f"e.g. {', '.join(uniq_offenders[:3])}")
     elif not pr_wfs:
         evidence = "no PR-gating workflows"
-    elif carved_out or off_pr_path:
+    elif carved_out or off_pr_path or off_pr_steps:
         # A pass that an exemption produced must SAY so. `fetch-depth: 0` is
         # right there in a PR-triggered workflow, and evidence claiming
         # otherwise sends the maintainer to a file that contradicts the card.
@@ -1178,7 +1335,10 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path) -> dict[str
         if off_pr_path:
             why.append(f"{off_pr_path} cannot run on a pull request at all (a "
                        f"job-level if: that is never true for a pull-request event)")
-        evidence = (f"{carved_out + off_pr_path} job(s) in PR-triggered workflow(s) "
+        if off_pr_steps:
+            why.append(f"{off_pr_steps} take(s) full history only in a checkout "
+                       f"step whose own if: is never true for a pull-request event")
+        evidence = (f"{carved_out + off_pr_path + off_pr_steps} job(s) in PR-triggered workflow(s) "
                     f"check out full history and are exempt: " + "; ".join(why) +
                     "; no other PR-gating job takes full history")
     else:
@@ -1203,6 +1363,17 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path) -> dict[str
                 has_testish_job = True
             strategy = job.get("strategy")
             matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
+            if isinstance(matrix, str) and "${{" in matrix:
+                # A matrix GENERATED at runtime (`${{ fromJSON(...) }}`): the
+                # job runs a matrix whose axes this scan cannot read. On a
+                # test-like job that is the practice (the fact is "a test-like
+                # job runs a matrix"); on any other job no axis is visible to
+                # call shard-like, so the job-name rule decides, as it does
+                # for a literal matrix.
+                if testish and not matched:
+                    hits.append(rel)
+                    matched = True
+                continue
             if not isinstance(matrix, dict):
                 continue
             shard_axis = any(_SHARD_AXIS_RE.search(str(k)) for k in matrix
@@ -1311,13 +1482,28 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path) -> dict[str
         hits or [rel for rel, _doc in pr_wfs])
 
     # 9. Job timeouts: a JOB carries timeout-minutes (never a comment).
+    # A job that calls a reusable workflow (`uses:` at job level) cannot set
+    # timeout-minutes at all; a LOCAL callee's own jobs are graded where they
+    # are defined. When every job delegates and some delegate cross-repo, the
+    # jobs that could carry a timeout live where this scan cannot see:
+    # not_applicable, never a fail (the same handoff as caching/sharding).
     hits = [rel for rel, doc, _raw in parsed
             if any("timeout-minutes" in j for j in _wf_jobs(doc).values())]
-    facts["ci.hygiene.job-timeouts"] = fact(
-        "pass" if hits else "fail",
-        (f"timeout-minutes set in {len(hits)} workflow(s)" if hits
-         else "no job sets timeout-minutes (GitHub's default is 360 minutes)"),
-        hits or [rel for rel, _doc, _raw in parsed])
+    runs_own_steps = any("uses" not in j for _rel, doc, _raw in parsed
+                         for j in _wf_jobs(doc).values())
+    if not hits and remote_reusables and not runs_own_steps:
+        facts["ci.hygiene.job-timeouts"] = fact(
+            "not_applicable",
+            "every job calls a reusable workflow, so none can set timeout-minutes here; "
+            f"CI is delegated to cross-repo reusable workflow(s) "
+            f"({', '.join(remote_reusables[:2])}) whose jobs are not visible from this repo",
+            [])
+    else:
+        facts["ci.hygiene.job-timeouts"] = fact(
+            "pass" if hits else "fail",
+            (f"timeout-minutes set in {len(hits)} workflow(s)" if hits
+             else "no job sets timeout-minutes (GitHub's default is 360 minutes)"),
+            hits or [rel for rel, _doc, _raw in parsed])
 
     # 10. Scoped id-token: job-level grants pass; a workflow-level id-token
     # grant - explicit or via write-all - fails.
