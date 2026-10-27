@@ -619,5 +619,43 @@ class RunnerSemanticsTests(unittest.TestCase):
                 self.assertNotEqual(fact(graph(source)), "pass")
 
 
+class RequiredCheckEdgePins(unittest.TestCase):
+    def test_duplicate_required_names_keep_all_skippable_producers_failing(self):
+        jobs = {
+            "first": {"name": "verdict", "if": False, "runs-on": "ubuntu-latest",
+                      "steps": [{"run": "pytest -q"}]},
+            "second": {"name": "verdict", "if": False, "runs-on": "ubuntu-latest",
+                       "steps": [{"run": "pytest -q"}]},
+        }
+        self.assertEqual(fact(jobs), "fail")
+        # A known always-running producer prevents both jobs being skipped.
+        jobs["second"].pop("if")
+        self.assertEqual(fact(jobs), "pass")
+        self.assertEqual(fact(dict(reversed(list(jobs.items())))), "pass")
+
+    def test_suite_test_step_condition_withholds_strict_summary_pass(self):
+        jobs = {
+            "suite": {"runs-on": "ubuntu-latest", "steps": [
+                {"if": "vars.RUN_TESTS == 'yes'", "run": "pytest -q"}]},
+            "verdict": {"needs": "suite", "if": "always()", "runs-on": "ubuntu-latest",
+                        "steps": [{"run": 'test "${{ needs.suite.result }}" = success'}]},
+        }
+        self.assertEqual(fact(jobs), "unmeasured")
+        del jobs["suite"]["steps"][0]["if"]
+        self.assertEqual(fact(jobs), "pass")
+
+    def test_failure_function_reaches_failed_grandparent(self):
+        jobs = {
+            "build": {"runs-on": "ubuntu-latest", "steps": [{"run": "make"}]},
+            "suite": {"needs": "build", "runs-on": "ubuntu-latest",
+                      "steps": [{"run": "pytest -q"}]},
+            "recover": {"needs": "suite", "if": "failure() && needs.suite.result == 'skipped'", "runs-on": "ubuntu-latest",
+                        "steps": [{"run": "exit 0"}]},
+            "verdict": {"needs": "recover", "if": "always()", "runs-on": "ubuntu-latest",
+                        "steps": [{"run": 'test "${{ needs.recover.result }}" = success'}]},
+        }
+        self.assertEqual(fact(jobs), "fail")
+
+
 if __name__ == "__main__":
     unittest.main()

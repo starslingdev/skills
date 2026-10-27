@@ -67,7 +67,7 @@ class Expression:
     """GitHub's supported boolean/string subset, with complete token coverage."""
     TOKEN = re.compile(r"\s*(('[^']*(?:''[^']*)*')|(&&|\|\||==|!=|[!(),])|([A-Za-z_][\w.*-]*)|([01]))")
 
-    def __init__(self, source, results, outputs, direct):
+    def __init__(self, source, results, outputs, direct, failure_scope=None):
         self.tokens = []
         source = unwrap(source)
         if len(source) > 4096:
@@ -82,6 +82,7 @@ class Expression:
             source = source[m.end():]
         self.i = 0
         self.results, self.outputs, self.direct = results, outputs, direct
+        self.failure_scope = direct if failure_scope is None else failure_scope
 
     def take(self, token):
         if self.i < len(self.tokens) and self.tokens[self.i] == token:
@@ -148,7 +149,7 @@ class Expression:
                 # so this is a scenario (see analyze), never a needs result.
                 return self.outputs.get(WORKFLOW_CANCELLED, False)
             return {"always": True, "success": all(x == "success" for x in states),
-                    "failure": "failure" in states}[token.lower()]
+                    "failure": any(self.results[n] == "failure" for n in self.failure_scope)}[token.lower()]
         if token.lower() == "contains":
             if not self.take("("):
                 raise Unknown("contains syntax")
@@ -170,8 +171,8 @@ class Expression:
         raise Unknown("unresolved expression context")
 
 
-def expression(source, results, outputs, direct):
-    return Expression(source, results, outputs, direct).evaluate()
+def expression(source, results, outputs, direct, failure_scope=None):
+    return Expression(source, results, outputs, direct, failure_scope).evaluate()
 
 
 def strings(value):
@@ -544,6 +545,18 @@ def analyze(jobs, key, workflow=None):
         # (they can all skip), so it cannot certify a pass, only reproduce a
         # skip that GitHub decides at the caller.
         uncertified = [n for n in ancestors if "uses" in jobs[n]]
+        # A successful job result does not prove its conditionally executed
+        # steps ran. Keep such dependency execution unmeasured; a concrete
+        # failing job path can still establish a failure below.
+        uncertified.extend(n for n in ancestors if any(
+            isinstance(step, dict) and "if" in step
+            and unwrap(step["if"]).lower() not in ("true", "always()", "success()")
+            for step in jobs[n].get("steps", [])))
+        ancestor_scope = {}
+        for name in order:
+            ancestor_scope[name] = set(needs(jobs[name]))
+            for parent in needs(jobs[name]):
+                ancestor_scope[name].update(ancestor_scope[parent])
         swallowers = set()
         for name in ancestors:
             job = jobs[name]
@@ -631,7 +644,7 @@ def analyze(jobs, key, workflow=None):
                     continue
                 cond = job.get("if", "true")
                 try:
-                    runs, resolved = truth(expression(cond, results, env, parents)), True
+                    runs, resolved = truth(expression(cond, results, env, parents, ancestor_scope[name])), True
                 except Unknown:
                     if name not in choices:
                         raise _Choice(name)
@@ -728,7 +741,7 @@ def analyze(jobs, key, workflow=None):
         if unknown:
             return "unmeasured", unknown
         if uncertified:
-            return "unmeasured", "reusable-workflow or matrix result cannot certify the verdict: " + ", ".join(sorted(set(uncertified)))
+            return "unmeasured", "reusable-workflow, matrix or conditional-step result cannot certify the verdict: " + ", ".join(sorted(set(uncertified)))
         return "pass", "executed assertion rejects upstream failure, cancellation and invalid skip decisions"
     except (Unknown, TypeError, KeyError, AttributeError, RecursionError) as exc:
         return "unmeasured", str(exc)

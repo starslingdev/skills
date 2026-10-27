@@ -298,6 +298,10 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- 2026-10-27: Required-check verdicts withhold a pass when upstream steps can
+  be skipped, and evaluate job-level `failure()` across all ancestors.
+  Duplicate skippable check names remain a failing regression pin.
+
 - **2026-10-22** — **`sec.codeowners.workflows` no longer passes on a
   CODEOWNERS rule the branch does not enforce.** CODEOWNERS only requests an
   owner's review; it binds only when the default branch requires review from
