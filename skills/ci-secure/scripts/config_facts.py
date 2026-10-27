@@ -99,6 +99,7 @@ import itertools
 import json
 import logging
 import re
+import shlex
 import sys
 from functools import lru_cache
 from pathlib import Path
@@ -1993,6 +1994,74 @@ def _templated_refusal_note(docs: list[tuple[str, dict]], context: str) -> str |
     return None
 
 
+# Test-runner invocations that execute the repository's own suite and exit
+# nonzero when it fails. Each runner names the flags that keep that true; any
+# other flag (help, version, collection/listing, compile-only, filters that can
+# select nothing and still exit 0, `--if-present`) is refused, as is any shell
+# metacharacter, so `|| true`, `; true`, `&`, negation and expansions never
+# reach the allow-list.
+_SUITE_FLAGS = {
+    "pytest": ({"-q", "-v", "-vv", "-x", "-s", "-l", "-ra", "-rA", "--quiet", "--verbose",
+                "--exitfirst", "--strict-markers", "--showlocals"},
+               {"-k", "-m", "-n"},
+               ("--maxfail=", "--tb=", "--durations=", "--cov=", "--cov-report=", "-n=")),
+    "go": ({"-v", "-race", "-short", "-cover", "-failfast"},
+           {"-timeout", "-count", "-p", "-tags", "-coverprofile"},
+           ("-timeout=", "-count=", "-p=", "-tags=", "-coverprofile=")),
+    "cargo": ({"--workspace", "--all", "--all-features", "--all-targets", "--release", "--locked",
+               "--frozen", "--offline", "-q", "-v", "--quiet", "--verbose", "--no-fail-fast"},
+              {"-p", "--package", "--features", "-F", "-j", "--jobs", "--target"},
+              ("--features=", "--package=", "--target=", "-j")),
+    "node": (set(), set(), ()),
+}
+_SUITE_ARGUMENT = re.compile(r"[\w.:/@*\[\]+=,-]+")
+
+
+def _runs_own_suite(line: str) -> bool:
+    """True when one `run:` line is a supported, fatal test-suite invocation."""
+    if re.search(r"[;&|<>$`\\(){}#!\n]", line):
+        return False
+    try:
+        words = shlex.split(line)
+    except ValueError:
+        return False
+    if words[:3] in (["python", "-m", "pytest"], ["python3", "-m", "pytest"]):
+        runner, rest = "pytest", words[3:]
+    elif words[:1] == ["pytest"]:
+        runner, rest = "pytest", words[1:]
+    elif words[:2] == ["go", "test"]:
+        runner, rest = "go", words[2:]
+    elif words[:2] == ["cargo", "test"]:
+        runner, rest = "cargo", words[2:]
+    elif words[:1] in (["npm"], ["pnpm"], ["yarn"]) and words[1:2] == ["test"]:
+        runner, rest = "node", words[2:]
+    elif words[:1] in (["npm"], ["pnpm"], ["yarn"]) and words[1:3] == ["run", "test"]:
+        runner, rest = "node", words[3:]
+    else:
+        return False
+    if runner == "node":
+        # Arguments after `--` go to the repository's own test script; a flag
+        # before it (`--if-present`) changes whether anything runs at all.
+        return not rest or (rest[0] == "--" and all(
+            _SUITE_ARGUMENT.fullmatch(w) and not re.search(r"(?:^|-)(?:help|version|list)", w)
+            for w in rest[1:]))
+    switches, valued, prefixed = _SUITE_FLAGS[runner]
+    i = 0
+    while i < len(rest):
+        word = rest[i]
+        if word in switches:
+            i += 1
+        elif word in valued and i + 1 < len(rest) and rest[i + 1] and not rest[i + 1].startswith("-"):
+            i += 2
+        elif word.startswith("-") and any(word.startswith(p) and len(word) > len(p) for p in prefixed):
+            i += 1
+        elif not word.startswith("-") and _SUITE_ARGUMENT.fullmatch(word):
+            i += 1  # a test path, package pattern or node id
+        else:
+            return False
+    return True
+
+
 @lru_cache(maxsize=1)
 def _verdict_assertions() -> ModuleType:
     return _load_sibling("ci_secure_verdict_assertions",
@@ -2063,8 +2132,7 @@ def _required_checks_skippable(
                     len(_code_lines(str(step.step.get("run", "")))) == 1
                     # A command-name mention is not proof of executed tests:
                     # help/version/collection modes, wrappers and negation hold.
-                    and re.fullmatch(r"(?:python3? -m )?pytest(?: (?:-[qv]|--quiet|--verbose))*",
-                                     _code_lines(str(step.step.get("run", "")))[0])
+                    and _runs_own_suite(_code_lines(str(step.step.get("run", "")))[0])
                     and not any((doc.get("env"), _job.get("env"), step.step.get("env")))
                     and step.step.get("shell", _job.get("defaults", {}).get("run", {}).get("shell",
                         doc.get("defaults", {}).get("run", {}).get("shell"))) in (None, "bash", "sh", "pwsh", "powershell")

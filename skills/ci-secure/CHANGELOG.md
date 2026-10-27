@@ -13,8 +13,6 @@ entries are dated (UTC). Format loosely follows
 
 ### Added
 
-- **2026-10-27** — Required-check assertion analysis now includes literal output and shell/environment comparison values in its bounded domain. Ordinary-suite exemptions require a supported test invocation with fatal results; help, version, collection and negated commands cannot certify verification.
-
 - ci-secure: "If a push credential leaks" — three new config hygiene checks,
   read over the GitHub API the way the required-checks and fork-approval
   checks already are. A credential that can push workflow files (GitHub's
@@ -72,8 +70,6 @@ entries are dated (UTC). Format loosely follows
   where the secret lists answer 403 (recorded for a non-collaborator) the
   secrets check stays unmeasured. The CI gate does not read them (they stay
   unmeasured there, each a non-blocking warning line). (2026-10-26)
-
-- **2026-10-26** — Required-check F7 now analyzes supported verdict assertions and their dependency chain, including a reviewed immutable `alls-green` revision and its allowed lists. Reproduced failure/cancellation-to-skipped-suite green paths fail; unknown scripts, action revisions and unsupported expressions are unmeasured. This extension preserves the API gate and existing fact IDs; stronger pass semantics and changed unmeasured coverage can change both the score and its denominator.
 
 - ci-secure: new config hygiene check `sec.deps.update-cooldown` — every
   configured dependency update tool waits at least 3 days before proposing a
@@ -188,6 +184,34 @@ entries are dated (UTC). Format loosely follows
   and full scope statement in `references/security-facts.md`.
 
 ### Changed
+
+- **2026-10-26** — **A required check that used to pass can now fail or
+  become unmeasured.** `sec.required-checks.skippable` no longer accepts an
+  always-running verdict job just because it runs: it now reads what the
+  verdict asserts and walks its dependency chain (including a reviewed,
+  pinned `alls-green` revision and its allowed lists). When detection fails
+  or is cancelled, the suites skip and the verdict still goes green, the
+  check fails. Unknown scripts, action revisions and unsupported expressions
+  are unmeasured, which removes the check from the score's denominator, so
+  scores before and after this change are not directly comparable. The
+  bounded value domain includes literal outputs and shell/environment
+  comparison values. A job that runs its own suite is still not asked to
+  assert on its dependencies, provided the test invocation is supported and
+  fatal; help, version, collection and negated commands do not count. The API
+  gate and fact IDs are unchanged. Follow-up hardening:
+  - An intermediate job whose condition names a status function in any
+    letter case (`success() || …`, `Always()`, `!Cancelled()`) is now
+    evaluated rather than assumed to skip after a failure; a gate that
+    reports success over a failed detector fails the check instead of
+    passing, and one whose steps cannot be resolved is unmeasured.
+  - A reusable-workflow caller or matrix output producer can now reproduce
+    a failure; neither can certify a pass.
+  - The ordinary-suite allowance now covers `go test`, `cargo test`,
+    `npm`/`pnpm`/`yarn test` and `pytest` with paths and common execution
+    flags, which had become unmeasured; listing, compile-only, empty-filter
+    and `|| true`-style forms are still refused.
+  - `test`/`[` with `==` under `shell: sh` is unmeasured, since dash rejects
+    it, instead of being read as a passing assertion.
 
 - **2026-10-22** — **The five eval scenarios now run at the same time.** The
   shared eval runner starts every session at once (at most five; `--jobs N` or

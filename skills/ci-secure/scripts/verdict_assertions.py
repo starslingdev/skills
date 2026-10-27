@@ -22,6 +22,13 @@ class Unknown(ValueError):
     pass
 
 
+# GitHub expression function names are case-insensitive. Any job `if:` naming a
+# status function replaces the implicit success(), so the job may run after an
+# ancestor failed, was cancelled or was skipped.
+STATUS_FUNCTION = re.compile(r"\b(success|always|cancelled|failure)\s*\(", re.I)
+STEP_STATUS_FUNCTION = re.compile(r"\b(success|failure|cancelled)\s*\(", re.I)
+
+
 def needs(job):
     value = job.get("needs", [])
     if isinstance(value, str):
@@ -119,13 +126,13 @@ class Expression:
             return token == "true"
         if token in ("0", "1"):
             return int(token)
-        if token in ("always", "success", "failure", "cancelled"):
+        if token.lower() in ("always", "success", "failure", "cancelled"):
             if not self.take("(") or not self.take(")"):
                 raise Unknown("status function arguments")
             states = [self.results[n] for n in self.direct]
             return {"always": True, "success": all(x == "success" for x in states),
-                    "failure": "failure" in states, "cancelled": "cancelled" in states}[token]
-        if token == "contains":
+                    "failure": "failure" in states, "cancelled": "cancelled" in states}[token.lower()]
+        if token.lower() == "contains":
             if not self.take("("):
                 raise Unknown("contains syntax")
             array = self.disjunction()
@@ -204,7 +211,7 @@ def run_step(source, env, results, outputs, direct, shell="bash"):
     if len(str(source)) > 8192 or len(str(env)) > 8192:
         raise Unknown("verdict command size limit")
     def substitute(match):
-        if re.search(r"\b(success|failure|cancelled)\s*\(", match[1]):
+        if STEP_STATUS_FUNCTION.search(match[1]):
             raise Unknown("step status function is not a dependency result assertion")
         value = expression(match[1], results, outputs, direct)
         return str(value).lower() if isinstance(value, bool) else str(value)
@@ -268,6 +275,9 @@ def run_step(source, env, results, outputs, direct, shell="bash"):
             if words[0] == "[":
                 if not args or args.pop() != "]":
                     raise Unknown("unsupported shell test")
+            if len(args) == 3 and args[1] == "==" and shell != "bash":
+                # POSIX test has no `==`; dash (Ubuntu's sh) errors on it.
+                raise Unknown("non-POSIX test operator under sh")
             if len(args) == 3 and args[1] in ("=", "==", "!="):
                 equal = args[0] == args[2]
                 if not (equal if args[1] in ("=", "==") else not equal):
@@ -321,7 +331,7 @@ def verdict_success(job, results, outputs):
         if "if" in step:
             # At step scope success() refers to preceding steps, not needs.
             cond = unwrap(step["if"])
-            if re.search(r"\b(success|failure|cancelled)\s*\(", cond):
+            if STEP_STATUS_FUNCTION.search(cond):
                 raise Unknown("step status expression")
             if not truth(expression(cond, results, outputs, direct)):
                 continue
@@ -358,9 +368,15 @@ def analyze(jobs, key, workflow=None):
     """Return pass/fail/unmeasured and the supported path or refusal.
 
     A strict suite-success assertion can be proved independently of arbitrary
-    suite conditions. Otherwise enumerate one failed/cancelled ancestor at a
-    time, including outputs written before that failure. Successful detectors'
-    valid/invalid output decisions are also enumerated. All limits withhold.
+    suite conditions, unless an intermediate can run after an ancestor failed.
+    Otherwise enumerate failed/cancelled ancestors. A failed producer's output
+    is reproducible only when it is a literal or empty; any other value written
+    before a failure is unproved, so it can withhold but never fail or pass.
+    An intermediate whose `if:` names a status function is evaluated, and when
+    it runs after a non-success dependency its own steps must be resolved.
+    Successful detectors' valid/invalid output decisions are also enumerated.
+    Reusable-workflow callers and matrix output producers can reproduce a
+    hole but cannot certify a pass. All limits withhold.
     """
     try:
         if workflow:
@@ -392,14 +408,17 @@ def analyze(jobs, key, workflow=None):
         if not direct:
             return "pass", "no verdict dependencies"
         ancestors = order[:-1]
+        # A reusable caller's result summarizes jobs this file does not show
+        # (they can all skip), so it cannot certify a pass, only reproduce a
+        # skip that GitHub decides at the caller.
+        uncertified = [n for n in ancestors if "uses" in jobs[n]]
+        swallowers = set()
         for name in ancestors:
             job = jobs[name]
-            if "uses" in job:
-                raise Unknown("reusable-workflow dependency: " + name)
             if job.get("continue-on-error"):
                 raise Unknown("dependency tolerates failure: " + name)
-            if needs(job) and re.search(r"\b(always|cancelled|failure)\s*\(", unwrap(job.get("if", ""))):
-                raise Unknown("intermediate may swallow ancestor failure: " + name)
+            if needs(job) and STATUS_FUNCTION.search(unwrap(job.get("if", ""))):
+                swallowers.add(name)
         refs = set()
         for name in order:
             text = str(jobs[name])
@@ -407,7 +426,7 @@ def analyze(jobs, key, workflow=None):
         # No accepting non-success combination implies skipped suites cannot
         # pass. Cap combinations; this proof does not rely on job if semantics.
         verdict_refs = re.findall(r"needs\.([\w-]+)\.outputs\.([\w-]+)", str(jobs[key]))
-        if len(direct) <= 5 and not verdict_refs:
+        if len(direct) <= 5 and not verdict_refs and not swallowers and not uncertified:
             strict = True
             for states in itertools.product(("success", "failure", "cancelled", "skipped"), repeat=len(direct)):
                 if all(s == "success" for s in states):
@@ -441,8 +460,12 @@ def analyze(jobs, key, workflow=None):
                     domain.update(str(value) for value in mapping.values()
                                   if isinstance(value, (str, int, bool)) and "${{" not in str(value))
         for parent, _ in refs:
-            if parent not in jobs or jobs[parent].get("strategy", {}).get("matrix"):
+            if parent not in jobs:
                 raise Unknown("unresolved detector output producer")
+            # Matrix legs can write different values; the last one wins, so a
+            # valid-skip decision on such an output cannot certify a pass.
+            if jobs[parent].get("strategy", {}).get("matrix") or "uses" in jobs[parent]:
+                uncertified.append(parent)
         if len(refs) > 3 or len(domain) ** len(refs) * 3 ** len(ancestors) > 16000:
             raise Unknown("detector output enumeration limit")
         refs = sorted(refs)
@@ -457,13 +480,21 @@ def analyze(jobs, key, workflow=None):
                     for name in ancestors:
                         job = jobs[name]
                         parents = needs(job)
-                        if any(results[n] != "success" for n in parents):
+                        parents_ok = all(results[n] == "success" for n in parents)
+                        if not parents_ok and name not in swallowers:
                             results[name] = "skipped"
                             continue
                         cond = job.get("if", "true")
                         runs = truth(expression(cond, results, outputs, parents))
+                        if runs and not parents_ok:
+                            # Running after a non-success dependency: its own
+                            # steps decide whether it reports success.
+                            if "uses" in job:
+                                raise Unknown("reusable workflow runs after ancestor failure: " + name)
+                            results[name] = "success" if verdict_success(job, results, outputs) else "failure"
+                            continue
                         results[name] = seeds[name] if runs else "skipped"
-                        if not runs:
+                        if not runs and parents_ok:
                             # Only this explicit boolean-output decision is a
                             # supported intentional skip contract. Arbitrary
                             # predicates cannot establish valid unchanged work.
@@ -481,7 +512,9 @@ def analyze(jobs, key, workflow=None):
                         concrete = True
                         for (parent, output), value in outputs.items():
                             declared = (jobs[parent].get("outputs") or {}).get(output)
-                            if declared is None:
+                            if parent in uncertified:
+                                concrete &= results[parent] != "success" and value == ""
+                            elif declared is None:
                                 concrete &= value == ""
                             elif isinstance(declared, str) and "${{" not in declared:
                                 concrete &= value == declared or (results[parent] != "success" and value == "")
@@ -497,6 +530,8 @@ def analyze(jobs, key, workflow=None):
                     unknown = str(exc)
         if unknown:
             return "unmeasured", unknown
+        if uncertified:
+            return "unmeasured", "reusable-workflow or matrix result cannot certify the verdict: " + ", ".join(sorted(set(uncertified)))
         return "pass", "executed assertion rejects upstream failure, cancellation and invalid skip decisions"
     except (Unknown, TypeError, KeyError, AttributeError, RecursionError) as exc:
         return "unmeasured", str(exc)

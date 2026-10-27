@@ -534,10 +534,20 @@ against the exact `^(true|false)$` expression (optionally negated). Variables
 remain data: quotes or newlines in their values are not evaluated as commands.
 Other branch bodies, trailing commands, patterns and shells are unmeasured.
 Strict suite-success assertions reject skipped suites. An intentional skip
-requires successful detection and an explicit valid boolean output; a false
-output written before failure is not a valid no-op. It walks ancestors, and
-withholds on cycles, unresolved reusable-workflow dependencies, potentially
-swallowing intermediates and traversal/enumeration limits. Unknown shell
+requires successful detection and an explicit valid boolean output; a literal
+false output written before failure is not a valid no-op, and a computed
+output a failed detector may have written is unproved, so the fact withholds
+rather than pass. It walks ancestors. An intermediate job whose `if:` names a
+status function (`success()`, `always()`, `cancelled()`, `failure()`, in any
+letter case) can run after an ancestor failed, so its condition is evaluated
+and, when it runs after a non-success dependency, its own steps decide its
+result: a gate that reports success over a failed detector and a skipped suite
+fails the fact, and a gate whose steps are unresolved is unmeasured. A
+reusable-workflow caller or a matrix job producing a referenced output can
+reproduce a failure (for example, a caller skipped because detection failed)
+but never certifies a pass. Cycles and traversal/enumeration limits withhold.
+Under `shell: sh`, `test`/`[` with `==` is not POSIX (dash rejects it) and is
+unmeasured. Unknown shell
 control flow, jq pipelines, scripts and action implementations are unmeasured.
 The reviewed `re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35`
 revision is supported with `jobs: ${{ toJSON(needs) }}` and literal JSON or
@@ -552,11 +562,17 @@ contract was checked against that revision's
 and [result rules](https://github.com/re-actors/alls-green/blob/b5b5b37504aa4183270bd3d855c52a67f212be35/src/job_outcome.py).
 
 Ordinary producers with a supported, unconditional test invocation retain the
-producer-execution check. The exemption supports direct `pytest` and
-`python`/`python3 -m pytest`, optionally with quiet/verbose flags, and requires
-fatal job and step results, a stock shell, and no environment overrides.
-Help, version, collection modes, negation and
-unresolved wrappers do not establish that tests execute. F9 still independently
+producer-execution check. The exemption supports a single-line `pytest` or
+`python`/`python3 -m pytest`, `go test`, `cargo test`, and `npm`/`pnpm`/`yarn`
+`test` or `run test`, with test paths, packages or node ids and each runner's
+listed execution flags (for example `-k`/`-m`/`-n`/`-x` for pytest, `-race`/
+`-count`/`-timeout` for Go, `--workspace`/`-p`/`--all-features` for Cargo,
+arguments after `--` for the Node runners). It requires fatal job and step
+results, a stock shell, and no environment overrides. Help, version,
+collection and listing modes, compile-only and test-filter flags that can
+select nothing (`-run`, `--no-run`, `--if-present`), negation, shell operators
+such as `|| true` or `;`, expansions and unresolved wrappers do not establish
+that tests execute. F9 still independently
 checks swallowed suite failures.
 Assertions must execute and propagate failure. Echoing a status is not an
 assertion; a disabled assertion cannot gate the verdict.

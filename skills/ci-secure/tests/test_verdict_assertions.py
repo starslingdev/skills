@@ -302,5 +302,123 @@ class VerdictTests(unittest.TestCase):
             docs, "owner/repo", lambda _: (["verdict"], "test"))[0], "fail")
 
 
+def gated(cond, gate_steps=None):
+    """Detector -> conditional suite -> intermediate gate -> strict verdict."""
+    jobs = graph(STRICT)
+    jobs["changes"]["outputs"]["changed"] = "${{ steps.f.outputs.changed }}"
+    jobs["gate"] = {"needs": ["changes", "suite"], "if": cond, "runs-on": "ubuntu-latest",
+                    "steps": gate_steps or [{"run": "echo ok"}]}
+    jobs["verdict"] = {"needs": ["gate"], "if": "always()", "runs-on": "ubuntu-latest",
+                       "steps": [{"run": 'test "${{ needs.gate.result }}" = "success"'}]}
+    return jobs
+
+
+def fact(jobs, doc=None):
+    doc = doc or {"on": ["pull_request"], "jobs": jobs}
+    return cf._required_checks_skippable([("ci.yml", doc)], "owner/repo",
+                                         lambda _: (["verdict"], "test"))[0]
+
+
+class SwallowingIntermediateTests(unittest.TestCase):
+    CONDS = ("success() || needs.suite.result == 'skipped'", "${{ Always() }}",
+             "${{ !Cancelled() }}", "ALWAYS()", "Failure() || Success()")
+
+    def test_reproducible_swallow_fails(self):
+        for cond in self.CONDS:
+            with self.subTest(cond=cond):
+                self.assertEqual(va.analyze(gated(cond), "verdict")[0], "fail")
+                self.assertEqual(fact(gated(cond)), "fail")
+
+    def test_unresolved_swallowing_steps_are_unmeasured(self):
+        for cond in self.CONDS:
+            with self.subTest(cond=cond):
+                jobs = gated(cond, [{"run": "./check-results.sh"}])
+                self.assertEqual(va.analyze(jobs, "verdict")[0], "unmeasured")
+
+    def test_intermediate_that_rejects_failed_ancestors_passes(self):
+        steps = [{"run": 'test "${{ needs.changes.result }}" = success'},
+                 {"run": 'test "${{ needs.suite.result == \'success\' || '
+                         "(needs.suite.result == 'skipped' && needs.changes.outputs.changed == 'false') }}\" = true"}]
+        jobs = gated("success() || needs.suite.result == 'skipped'", steps)
+        jobs["changes"]["outputs"]["changed"] = "false"
+        self.assertEqual(va.analyze(jobs, "verdict")[0], "pass")
+
+    def test_plain_condition_intermediate_keeps_implicit_success(self):
+        jobs = gated("needs.changes.outputs.changed == 'true' || needs.changes.outputs.changed == 'false'")
+        self.assertNotEqual(va.analyze(jobs, "verdict")[0], "fail")
+
+
+class ShapeCoverageTests(unittest.TestCase):
+    def test_detector_writes_unchanged_then_fails_never_passes(self):
+        # A non-literal output: whether the failing detector wrote `false`
+        # before failing is not established, so this is not provable either way.
+        jobs = graph('test "${{ needs.changes.outputs.changed == \'false\' || '
+                     'needs.suite.result == \'success\' }}" = "true"', True)
+        jobs["changes"]["outputs"]["changed"] = "${{ steps.f.outputs.changed }}"
+        self.assertEqual(va.analyze(jobs, "verdict")[0], "unmeasured")
+
+    def test_reusable_suite_caller_skipped_by_failed_detector_fails(self):
+        jobs = graph(FAIL_ONLY)
+        jobs["suite"].pop("steps")
+        jobs["suite"].pop("runs-on")
+        jobs["suite"]["uses"] = "./.github/workflows/suite.yml"
+        self.assertEqual(va.analyze(jobs, "verdict")[0], "fail")
+        self.assertEqual(fact(jobs), "fail")
+
+    def test_matrix_detector_hole_fails(self):
+        jobs = graph(FAIL_ONLY)
+        jobs["changes"]["strategy"] = {"matrix": {"part": ["one", "two"]}}
+        jobs["changes"]["outputs"]["changed"] = "${{ steps.f.outputs.changed }}"
+        self.assertEqual(va.analyze(jobs, "verdict")[0], "fail")
+        self.assertEqual(fact(jobs), "fail")
+
+    def test_sh_double_equals_is_not_a_proved_assertion(self):
+        for op in ("==",):
+            jobs = graph(f'test "${{{{ needs.suite.result }}}}" {op} success')
+            jobs["verdict"]["steps"][0]["shell"] = "sh"
+            self.assertNotEqual(va.analyze(jobs, "verdict")[0], "pass")
+        jobs = graph('[ "${{ needs.suite.result }}" == success ]')
+        jobs["verdict"]["defaults"] = {"run": {"shell": "sh"}}
+        self.assertNotEqual(va.analyze(jobs, "verdict")[0], "pass")
+        jobs = graph('test "${{ needs.suite.result }}" = success')
+        jobs["verdict"]["steps"][0]["shell"] = "sh"
+        self.assertEqual(va.analyze(jobs, "verdict")[0], "pass")
+
+
+class OrdinarySuiteTests(unittest.TestCase):
+    ACCEPTED = ("npm test", "npm run test", "pnpm test", "pnpm run test", "yarn test",
+                "yarn run test", "npm test -- --coverage", "go test ./...", "go test -race -count=1 ./pkg/...",
+                "go test -v -timeout 10m ./...", "cargo test", "cargo test --workspace --all-features",
+                "cargo test -p core --locked", "pytest -q tests/", "pytest tests/unit -x",
+                "python -m pytest -k 'not slow' -m unit tests", "pytest -n auto --maxfail=1 --tb=short",
+                "python3 -m pytest -vv tests/test_api.py::test_get")
+    REJECTED = ("npm test --if-present", "npm run test --if-present", "npm --version", "npm test || true",
+                "pnpm test; true", "! npm test", "go test -run '^$' ./...", "go test -list . ./...",
+                "go test -c ./...", "go version", "go test ./... || true", "cargo test --no-run",
+                "cargo test -- --list", "cargo test --help", "cargo --version", "pytest -q tests/; true",
+                "pytest -k x; true", "pytest --co tests", "pytest --collect-only -q tests",
+                "pytest -q tests/ $EXTRA", "pytest --setup-plan", "pytest --fixtures tests",
+                "pytest -h", "pytest -q tests/ # skip", "yarn test & wait")
+
+    def test_common_runners_with_arguments_are_ordinary_suites(self):
+        for source in self.ACCEPTED:
+            with self.subTest(source=source):
+                self.assertEqual(fact(graph(source)), "pass")
+
+    def test_nonexecuting_or_nonfatal_runner_forms_are_not_exempt(self):
+        for source in self.REJECTED:
+            with self.subTest(source=source):
+                self.assertNotEqual(fact(graph(source)), "pass")
+        for source in ("npm test", "go test ./...", "cargo test"):
+            jobs = graph(source)
+            jobs["verdict"]["steps"][0]["continue-on-error"] = True
+            with self.subTest(source=source, tolerated=True):
+                self.assertNotEqual(fact(jobs), "pass")
+            jobs = graph(source)
+            jobs["verdict"]["continue-on-error"] = True
+            with self.subTest(source=source, job_tolerated=True):
+                self.assertNotEqual(fact(jobs), "pass")
+
+
 if __name__ == "__main__":
     unittest.main()
