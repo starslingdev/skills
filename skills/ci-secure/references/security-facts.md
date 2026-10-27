@@ -545,7 +545,15 @@ result: a gate that reports success over a failed detector and a skipped suite
 fails the fact, and a gate whose steps are unresolved is unmeasured. A
 reusable-workflow caller or a matrix job producing a referenced output can
 reproduce a failure (for example, a caller skipped because detection failed)
-but never certifies a pass. Cycles and traversal/enumeration limits withhold.
+but never certifies a pass. Scalar `github.*` values in job conditions and the
+verdict are evaluated for every literal those conditions compare against, so
+suites routed by event (`github.event_name == 'push'` and its negation, or a
+head-repository match and its negation) are judged on both branches, and a
+skip decided by the event alone is a valid skip. Any other condition that
+cannot be evaluated is explored both ways: a bypass that holds on every branch
+fails the fact even when an unrelated job's condition is unresolved, while a
+bypass that depends on how that condition resolves is unmeasured. Cycles and
+traversal/enumeration limits withhold.
 Under `shell: sh`, `test`/`[` with `==` is not POSIX (dash rejects it) and is
 unmeasured. Unknown shell
 control flow, jq pipelines, scripts and action implementations are unmeasured.

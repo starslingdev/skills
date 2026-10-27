@@ -27,6 +27,14 @@ class Unknown(ValueError):
 # ancestor failed, was cancelled or was skipped.
 STATUS_FUNCTION = re.compile(r"\b(success|always|cancelled|failure)\s*\(", re.I)
 STEP_STATUS_FUNCTION = re.compile(r"\b(success|failure|cancelled)\s*\(", re.I)
+CONTEXT = re.compile(r"\bgithub\.[A-Za-z_][\w.*-]*", re.I)
+
+
+class _Choice(Exception):
+    """A job condition that cannot be evaluated: both branches are explored."""
+    def __init__(self, name):
+        super().__init__(name)
+        self.name = name
 
 
 def needs(job):
@@ -147,6 +155,9 @@ class Expression:
         m = re.fullmatch(r"needs\.([\w-]+)\.(result|outputs\.([\w-]+))", token)
         if m and m[1] in self.direct:
             return self.results[m[1]] if m[2] == "result" else self.outputs.get((m[1], m[3]), "")
+        if ("", token.lower()) in self.outputs:
+            # An enumerated `github.*` context value (see analyze).
+            return self.outputs[("", token.lower())]
         raise Unknown("unresolved expression context")
 
 
@@ -466,68 +477,128 @@ def analyze(jobs, key, workflow=None):
             # valid-skip decision on such an output cannot certify a pass.
             if jobs[parent].get("strategy", {}).get("matrix") or "uses" in jobs[parent]:
                 uncertified.append(parent)
-        if len(refs) > 3 or len(domain) ** len(refs) * 3 ** len(ancestors) > 16000:
+        # Scalar `github.*` values in job conditions and the verdict are
+        # enumerated over the same literal domain plus an unseen value, so
+        # event-routed suites (`event_name == 'push'` / `!= 'push'`) are
+        # evaluated on both branches. Any other unevaluable job condition is a
+        # free choice: both branches are explored.
+        context_sources = [str(jobs[name].get("if", "")) for name in ancestors] + list(strings(jobs[key]))
+        contexts = sorted({m.lower().rstrip(".") for text in context_sources
+                           for m in CONTEXT.findall(text) if "*" not in m})
+        if len(contexts) > 3:
+            contexts = []
+        # A context value is only compared against literals in those same
+        # conditions and the verdict, so that is its distinguishing domain.
+        context_domain = {"", "unseen-context-value"}
+        for text in context_sources:
+            context_domain.update(re.findall(r"'([^']*)'", text))
+            context_domain.update(re.findall(r'"([^"\n]*)"', text))
+        context_domain = sorted(context_domain)
+        if (len(refs) > 3 or len(domain) ** len(refs) * 3 ** len(ancestors)
+                * len(context_domain) ** len(contexts) > 20000):
             raise Unknown("detector output enumeration limit")
         refs = sorted(refs)
+
+        def simulate(env, seeds, choices):
+            results, invalid_skip = {}, False
+            for name in ancestors:
+                job = jobs[name]
+                parents = needs(job)
+                parents_ok = all(results[n] == "success" for n in parents)
+                if not parents_ok and name not in swallowers:
+                    results[name] = "skipped"
+                    continue
+                cond = job.get("if", "true")
+                try:
+                    runs, resolved = truth(expression(cond, results, env, parents)), True
+                except Unknown:
+                    if name not in choices:
+                        raise _Choice(name)
+                    runs, resolved = choices[name], False
+                if runs and not parents_ok:
+                    # Running after a non-success dependency: its own
+                    # steps decide whether it reports success.
+                    if "uses" in job:
+                        raise Unknown("reusable workflow runs after ancestor failure: " + name)
+                    results[name] = "success" if verdict_success(job, results, env) else "failure"
+                    continue
+                results[name] = seeds[name] if runs else "skipped"
+                if not runs and parents_ok and resolved:
+                    # Supported intentional skips: the explicit boolean-output
+                    # decision, or routing on the triggering event alone.
+                    # Arbitrary predicates cannot establish valid unchanged work.
+                    text = unwrap(cond)
+                    match = re.fullmatch(r"needs\.([\w-]+)\.outputs\.([\w-]+)\s*==\s*'true'", text)
+                    if match:
+                        if env.get((match[1], match[2])) != "false":
+                            invalid_skip = True
+                    elif "needs." in text or STATUS_FUNCTION.search(text) or not CONTEXT.search(text):
+                        raise Unknown("unresolved intentional skip condition")
+            return results, invalid_skip
+
+        def leaf(outputs, env, results, invalid_skip):
+            """("cx", message) for a reproduced bypass, "maybe" or "ok"."""
+            failed = next((n for n in ancestors if results[n] in ("failure", "cancelled")), None)
+            if failed is None and not invalid_skip:
+                return "ok", None
+            if not verdict_success(jobs[key], results, env):
+                return "ok", None
+            visible = ", ".join(n + "=" + results[n] for n in direct)
+            cause = f"`{failed}` is {results[failed]}" if failed else "an invalid detection output skips a suite"
+            concrete = True
+            for (parent, output), value in outputs.items():
+                declared = (jobs[parent].get("outputs") or {}).get(output)
+                if parent in uncertified:
+                    concrete &= results[parent] != "success" and value == ""
+                elif declared is None:
+                    concrete &= value == ""
+                elif isinstance(declared, str) and "${{" not in declared:
+                    concrete &= value == declared or (results[parent] != "success" and value == "")
+                else:
+                    # A failed producer may terminate before it writes
+                    # outputs. Successful arbitrary scripts' output domains
+                    # are not execution evidence.
+                    concrete &= results[parent] != "success" and value == ""
+            if concrete:
+                return "cx", f"{cause}, but `{key}` succeeds ({visible})"
+            return "maybe", "an accepting output assignment is not proved reachable"
+
         unknown = None
         for values in itertools.product(sorted(domain), repeat=len(refs)):
             outputs = dict(zip(refs, values))
             for outcomes in itertools.product(("success", "failure", "cancelled"), repeat=len(ancestors)):
                 seeds = dict(zip(ancestors, outcomes))
-                results = {}
-                invalid_skip = False
+                # A bypass must hold for every context value and every branch
+                # of an unevaluable condition: failure takes precedence over
+                # unrelated unknowns, but never rests on a guessed value.
+                verdicts = []
                 try:
-                    for name in ancestors:
-                        job = jobs[name]
-                        parents = needs(job)
-                        parents_ok = all(results[n] == "success" for n in parents)
-                        if not parents_ok and name not in swallowers:
-                            results[name] = "skipped"
-                            continue
-                        cond = job.get("if", "true")
-                        runs = truth(expression(cond, results, outputs, parents))
-                        if runs and not parents_ok:
-                            # Running after a non-success dependency: its own
-                            # steps decide whether it reports success.
-                            if "uses" in job:
-                                raise Unknown("reusable workflow runs after ancestor failure: " + name)
-                            results[name] = "success" if verdict_success(job, results, outputs) else "failure"
-                            continue
-                        results[name] = seeds[name] if runs else "skipped"
-                        if not runs and parents_ok:
-                            # Only this explicit boolean-output decision is a
-                            # supported intentional skip contract. Arbitrary
-                            # predicates cannot establish valid unchanged work.
-                            match = re.fullmatch(r"needs\.([\w-]+)\.outputs\.([\w-]+)\s*==\s*'true'", unwrap(cond))
-                            if not match:
-                                raise Unknown("unresolved intentional skip condition")
-                            if outputs.get((match[1], match[2])) != "false":
-                                invalid_skip = True
-                    failed = next((n for n in ancestors if results[n] in ("failure", "cancelled")), None)
-                    if failed is None and not invalid_skip:
-                        continue
-                    if verdict_success(jobs[key], results, outputs):
-                        visible = ", ".join(n + "=" + results[n] for n in direct)
-                        cause = f"`{failed}` is {results[failed]}" if failed else "an invalid detection output skips a suite"
-                        concrete = True
-                        for (parent, output), value in outputs.items():
-                            declared = (jobs[parent].get("outputs") or {}).get(output)
-                            if parent in uncertified:
-                                concrete &= results[parent] != "success" and value == ""
-                            elif declared is None:
-                                concrete &= value == ""
-                            elif isinstance(declared, str) and "${{" not in declared:
-                                concrete &= value == declared or (results[parent] != "success" and value == "")
-                            else:
-                                # A failed producer may terminate before it
-                                # writes outputs. Successful arbitrary scripts'
-                                # output domains are not execution evidence.
-                                concrete &= results[parent] != "success" and value == ""
-                        if concrete:
-                            return "fail", f"{cause}, but `{key}` succeeds ({visible})"
-                        unknown = "an accepting output assignment is not proved reachable"
+                    for context_values in itertools.product(context_domain, repeat=len(contexts)):
+                        env = dict(outputs)
+                        env.update({("", c): v for c, v in zip(contexts, context_values)})
+                        pending = [{}]
+                        while pending:
+                            choices = pending.pop()
+                            try:
+                                results, invalid_skip = simulate(env, seeds, choices)
+                            except _Choice as choice:
+                                if len(choices) >= 4:
+                                    raise Unknown("unresolved job condition limit")
+                                pending += [{**choices, choice.name: True}, {**choices, choice.name: False}]
+                                continue
+                            try:
+                                verdicts.append(leaf(outputs, env, results, invalid_skip))
+                            except Unknown as exc:
+                                verdicts.append(("maybe", str(exc)))
                 except Unknown as exc:
                     unknown = str(exc)
+                    continue
+                if verdicts and all(kind == "cx" for kind, _ in verdicts):
+                    return "fail", verdicts[0][1]
+                if any(kind == "cx" for kind, _ in verdicts):
+                    unknown = "a bypass depends on an unresolved job condition or event context"
+                elif any(kind == "maybe" for kind, _ in verdicts):
+                    unknown = next(text for kind, text in verdicts if kind == "maybe")
         if unknown:
             return "unmeasured", unknown
         if uncertified:

@@ -385,6 +385,63 @@ class ShapeCoverageTests(unittest.TestCase):
         self.assertEqual(va.analyze(jobs, "verdict")[0], "pass")
 
 
+class UnresolvedConditionTests(unittest.TestCase):
+    """Failure precedence over unrelated unknowns, and event-routed suites."""
+
+    def build_chain(self, assertion, lint_if="github.event_name == 'pull_request'"):
+        return {
+            "build": {"runs-on": "ubuntu-latest", "steps": [{"run": "make build"}]},
+            "unit": {"needs": "build", "runs-on": "ubuntu-latest", "steps": [{"run": "run-unit"}]},
+            "e2e": {"needs": "build", "runs-on": "ubuntu-latest", "steps": [{"run": "run-e2e"}]},
+            "lint": {"if": lint_if, "runs-on": "ubuntu-latest", "steps": [{"run": "lint"}]},
+            "verdict": {"needs": ["unit", "e2e", "lint"], "if": "always()", "runs-on": "ubuntu-latest",
+                        "steps": [{"run": assertion}]},
+        }
+
+    def test_failed_build_skipping_tests_fails_despite_unresolved_unrelated_condition(self):
+        for lint_if in ("github.event_name == 'pull_request'",
+                        "contains(github.event.pull_request.labels.*.name, 'lint')",
+                        "vars.RUN_LINT == 'yes'"):
+            jobs = self.build_chain(FAIL_ONLY, lint_if)
+            with self.subTest(lint_if=lint_if):
+                self.assertEqual(va.analyze(jobs, "verdict")[0], "fail")
+                self.assertEqual(fact(jobs), "fail")
+
+    def test_unresolved_condition_the_counterexample_depends_on_withholds(self):
+        assertion = ('test "${{ !contains(needs.*.result, \'failure\') && '
+                     'needs.lint.result == \'success\' }}" = "true"')
+        jobs = self.build_chain(assertion, "vars.RUN_LINT == 'yes'")
+        self.assertEqual(va.analyze(jobs, "verdict")[0], "unmeasured")
+
+    EXACTLY_ONE = ('test "${{ (needs.self.result == \'success\' && needs.fork.result == \'skipped\') || '
+                   "(needs.fork.result == 'success' && needs.self.result == 'skipped') }}\" = \"true\"")
+
+    def routed(self, self_if, fork_if, assertion=None):
+        return {
+            "self": {"if": self_if, "runs-on": "ubuntu-latest", "steps": [{"run": "pytest -v"}]},
+            "fork": {"if": fork_if, "runs-on": "ubuntu-latest", "steps": [{"run": "pytest -v"}]},
+            "verdict": {"needs": ["self", "fork"], "if": "always()", "runs-on": "ubuntu-latest",
+                        "steps": [{"run": assertion or self.EXACTLY_ONE}]},
+        }
+
+    def test_mutually_exclusive_event_routed_suites_pass(self):
+        pairs = [("github.event_name == 'push'", "github.event_name != 'push'"),
+                 ("github.event.pull_request.head.repo.full_name == github.repository",
+                  "github.event.pull_request.head.repo.full_name != github.repository"),
+                 ("github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository",
+                  "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository")]
+        for self_if, fork_if in pairs:
+            with self.subTest(self_if=self_if):
+                self.assertEqual(va.analyze(self.routed(self_if, fork_if), "verdict")[0], "pass")
+
+    def test_event_routed_suites_with_lenient_verdict_still_fail(self):
+        jobs = self.routed("github.event_name == 'push'", "github.event_name != 'push'",
+                           'test "${{ !contains(needs.*.result, \'failure\') }}" = "true"')
+        jobs["self"]["needs"] = "build"
+        jobs["build"] = {"runs-on": "ubuntu-latest", "steps": [{"run": "make"}]}
+        self.assertEqual(va.analyze(jobs, "verdict")[0], "fail")
+
+
 class OrdinarySuiteTests(unittest.TestCase):
     ACCEPTED = ("npm test", "npm run test", "pnpm test", "pnpm run test", "yarn test",
                 "yarn run test", "npm test -- --coverage", "go test ./...", "go test -race -count=1 ./pkg/...",

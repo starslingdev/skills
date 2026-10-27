@@ -212,6 +212,14 @@ entries are dated (UTC). Format loosely follows
     and `|| true`-style forms are still refused.
   - `test`/`[` with `==` under `shell: sh` is unmeasured, since dash rejects
     it, instead of being read as a passing assertion.
+  - A job condition the analysis cannot evaluate no longer hides a bypass
+    elsewhere: when a failed build skips the tests and the aggregator still
+    succeeds however that unrelated condition resolves, the check fails
+    instead of becoming unmeasured.
+  - Suites routed by event (`github.event_name == 'push'` and its negation,
+    a head-repository match and its negation) are evaluated on both
+    branches, so a verdict requiring exactly one of them to succeed can pass
+    instead of being unmeasured.
 
 - **2026-10-22** — **The five eval scenarios now run at the same time.** The
   shared eval runner starts every session at once (at most five; `--jobs N` or
