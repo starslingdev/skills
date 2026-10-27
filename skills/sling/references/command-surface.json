@@ -1,5 +1,5 @@
 {
-  "_comment": "The complete set of sling subcommands, captured from `sling --help` and each `sling <cmd> --help` on v0.1.124 (2026-10-27). This file exists so a test can prove SKILL.md never routes to a subcommand that does not exist, and never routes a GitHub state change to sling. Update it, and the changelog, when a sling release adds or removes a command.",
+  "_comment": "The complete set of sling subcommands, captured from `sling --help` and each `sling <cmd> --help` on v0.1.124 (2026-10-27). The scope_flags rules were captured by running each command under `--agent`, not read from help text, which renders them abridged. This file exists so a test can prove SKILL.md never routes to a subcommand that does not exist, and never routes a GitHub state change to sling. Update it, and the changelog, when a sling release adds or removes a command; a new command must also be given a reviewed entry in `classification`.",
   "cli_version": "0.1.124",
   "captured_utc": "2026-10-27",
   "changes_github_state": false,
@@ -41,6 +41,45 @@
     "commands": [
       "login",
       "update"
+    ]
+  },
+  "classification": {
+    "_comment": "One reviewed class per captured command, so a new command fails the suite until someone classifies it on purpose. read_only: reads data or local state and changes nothing. local_only: changes only the user's own local sling state (the saved credential or the default org), never GitHub or CI. local_only_user_runs: changes only the user's machine and the USER runs it, never the agent. There is no class for a GitHub or CI state change: such a command would have to route to the user or to gh, and the contract would change with it.",
+    "login": "local_only_user_runs",
+    "logout": "local_only",
+    "whoami": "read_only",
+    "doctor": "read_only",
+    "update": "local_only_user_runs",
+    "org switch": "local_only",
+    "runs list": "read_only",
+    "runs show": "read_only",
+    "jobs list": "read_only",
+    "jobs show": "read_only",
+    "logs": "read_only",
+    "resolve": "read_only",
+    "why": "read_only",
+    "time": "read_only",
+    "usage": "read_only",
+    "top": "read_only",
+    "bill": "read_only",
+    "bill history": "read_only",
+    "labels list": "read_only",
+    "exit-codes": "read_only"
+  },
+  "doctor_checks": {
+    "_comment": "The nine check keys `sling doctor --agent` emitted on v0.1.124, split by whether a failing row is something the agent acts on (actionable) or only reports (advisory: never makes doctor unhealthy, and its fix_command is never run by the agent).",
+    "actionable": [
+      "token",
+      "control_plane",
+      "clock_skew",
+      "git_remote",
+      "patch_tooling",
+      "version",
+      "org"
+    ],
+    "advisory": [
+      "auto_update",
+      "agent_skill"
     ]
   },
   "global_flags": [

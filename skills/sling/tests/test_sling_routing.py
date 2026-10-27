@@ -16,9 +16,10 @@ can be wrong while every other check in the repo stays green:
    `sling`, or a GitHub-state-changing command appears in the surface while
    the skill still says no `sling` command changes GitHub, the contract is
    broken in the direction that costs the user runner-minutes or a
-   cancelled deploy. The one `sling` command that changes anything at all,
-   `update`, changes only the user's machine, and is routed to the user —
-   never run by the agent — exactly like `login`.
+   cancelled deploy. A few `sling` commands change the user's own machine
+   (`login`/`logout` the credential, `org switch` the default org, `update`
+   the installed binary) and none changes GitHub; `login` and `update` are
+   routed to the user, never run by the agent.
 
 `references/command-surface.json` is the pinned capture of what the CLI
 actually offers, so these tests are deterministic and need no network.
@@ -216,18 +217,22 @@ def test_the_quoted_output_allowance_covers_the_detail_the_binary_prints():
 # The canonical state-changing actions, as the routing table names them.
 _MUTATING_ACTIONS = ("rerun", "cancel", "trigger", "enable", "disable",
                      "download", "delete")
-# The same actions as a USER would phrase them, for scanning eval prompts.
-# Kept as one derived set so the two guards can never disagree about what
-# counts as mutating — they did, and `trigger` fell through the gap.
-_MUTATING_VERBS = _MUTATING_ACTIONS + ("re-run", "kick off", "approve",
-                                       "retry", "restart", "dispatch")
+# The same actions as a USER would phrase them, for scanning eval prompts and
+# the routing table's ask cells. Kept as one derived set so the guards can never
+# disagree about what counts as mutating — they did, and `trigger` fell through
+# the gap; `stop`, `kill` and `abort` fell through it later ("stop that run"
+# routed to `sling` with the suite green).
+_MUTATING_VERBS = _MUTATING_ACTIONS + (
+    "re-run", "kick off", "approve", "reject", "retry", "restart", "dispatch",
+    "stop", "kill", "abort", "terminate", "halt", "start", "requeue", "replay",
+    "resume", "pause")
 # Words a CLI command could be NAMED with if it changed GitHub or CI state. Wider
-# than the routing verbs on purpose: the name detector below is the guard's only
-# teeth that do not depend on a hand-kept list, and a narrow one let `re-run`,
-# `retry`, `dispatch`, `approve`, `workflow run` and `secrets set` through.
+# than the routing verbs on purpose: a narrow list once let `re-run`, `retry`,
+# `dispatch`, `approve`, `workflow run` and `secrets set` through. The name
+# detector is only a backstop: every captured command must also carry a
+# reviewed `classification` in the surface (see the no-GitHub-state test).
 _MUTATING_NAME_WORDS = frozenset(_MUTATING_VERBS + (
-    "set", "create", "write", "kill", "abort", "stop", "start", "deploy",
-    "merge", "push", "run"))
+    "set", "create", "write", "deploy", "merge", "push", "run"))
 
 
 def _named_for_a_state_change(name: str) -> bool:
@@ -244,20 +249,34 @@ def _named_for_a_state_change(name: str) -> bool:
 
 def _is_mutating_ask(prompt: str) -> bool:
     """Whole-word match, so `what triggers does this workflow have` (a file
-    read) is not mistaken for the verb `trigger`."""
-    low = prompt.lower()
-    return any(re.search(rf"\b{re.escape(v)}\b", low) for v in _MUTATING_VERBS)
+    read) is not mistaken for the verb `trigger`. A verb whose object is
+    `sling` itself ("stop sling from updating itself") is about the user's own
+    machine, not GitHub or CI state, so it does not count."""
+    low = " ".join(prompt.lower().replace("`", "").split())
+    return any(re.search(rf"\b{re.escape(v)}\b(?!\s+sling\b)", low)
+               for v in _MUTATING_VERBS)
 
 
 def test_state_change_name_detector_catches_known_shapes():
-    """Self-test of the detector the read-only guard leans on: each of these
-    names survived the previous, seven-word version."""
+    """Self-test of the detectors the state-change guards lean on. Most names
+    below are hyphenated, plural or synonym forms that an exact match against
+    the seven routing-table actions (`rerun`, `cancel`, ...) would miss. The
+    asks are user phrasings a narrower verb list let route to `sling` or to
+    nothing with the suite green; the negatives are reads and asks about
+    `sling` itself."""
     for bad in ("rerun", "runs re-run", "re-run", "retry", "runs retry", "dispatch",
                 "approve", "secrets set", "workflow run", "reruns", "runs dispatch",
-                "cancel-run", "runs delete", "restart"):
+                "cancel-run", "runs delete", "restart", "runs requeue", "replay",
+                "runs resume", "pause", "runs stop", "kill"):
         assert _named_for_a_state_change(bad), bad
     for ok in sorted(_COMMANDS):
         assert not _named_for_a_state_change(ok), f"`{ok}` misread as state-changing"
+    for ask in ("stop that run", "abort the deploy run", "kill the job",
+                "halt the nightly workflow", "pause that workflow"):
+        assert _is_mutating_ask(ask), ask
+    for ask in ("stop sling from updating itself", "what triggers does this workflow have",
+                "why did this job fail"):
+        assert not _is_mutating_ask(ask), ask
 
 
 @pytest.mark.parametrize("verb", _MUTATING_ACTIONS)
@@ -271,7 +290,51 @@ def test_every_mutating_verb_is_routed_to_gh(verb: str):
         f"{verb!r} appears in the routing table but not on a `gh` row")
 
 
-def test_read_only_claim_matches_the_captured_surface():
+def _routing_section() -> str:
+    i = _BODY.index("## The routing table")
+    return _BODY[i:_BODY.index("**Ambiguous asks.**", i)]
+
+
+def _routing_table_rows() -> list[list[str]]:
+    """The routing table's data rows, split into cells on unescaped pipes."""
+    rows = []
+    for ln in _routing_section().splitlines():
+        if ln.startswith("|") and not ln.startswith("|---"):
+            cells = [c.strip() for c in re.split(r"(?<!\\)\|", ln)[1:-1]]
+            if cells and cells[0] != "User is asking about...":
+                rows.append(cells)
+    return rows
+
+
+def test_every_state_change_row_in_the_routing_table_routes_to_gh():
+    """Per row, not per verb. The per-verb check above is satisfied by ANY `gh`
+    row naming the verb, so a second "Cancel a stuck run quickly" row routed to
+    `sling` sat beside the real one with the suite green."""
+    rows = _routing_table_rows()
+    assert len(rows) >= 20, f"the routing table parsed to only {len(rows)} rows"
+    hits = [r for r in rows if _is_mutating_ask(r[0].replace("*", ""))]
+    assert len(hits) >= 6, f"only {len(hits)} state-change rows found: {hits}"
+    for ask, route, command in (r[:3] for r in hits):
+        assert route == "`gh`" and command.startswith("`gh "), (
+            f"routing-table row {ask!r} is a state change routed to {route} / "
+            f"{command[:40]!r}; state changes route to `gh`")
+
+
+def test_the_change_question_sends_state_changes_to_gh_directly():
+    """Decision step 1 is the sentence an agent reads before the table. If it
+    softens to "try `sling` first, then `gh`", every state change costs a
+    failed or invented `sling` call first."""
+    sec = _routing_section()
+    step1 = " ".join(sec[sec.index("**1."):sec.index("**2.")].split()).lower()
+    assert ("use `gh` directly; do not attempt a `sling` subcommand for these "
+            "under any name") in step1, (
+        "decision step 1 no longer sends state changes straight to `gh`")
+    assert "the one local change" not in " ".join(_BODY.split()).lower(), (
+        "the body calls `sling update` the one local change; `login`, `logout` and "
+        "`org switch` change local state too")
+
+
+def test_no_github_state_change_claim_matches_the_captured_surface():
     """If a sling release ships a command that changes GitHub or CI state, the
     capture changes and this fails — before the skill can keep telling users
     no `sling` command changes GitHub.
@@ -296,6 +359,19 @@ def test_read_only_claim_matches_the_captured_surface():
     local = set(_SURFACE["local_only_user_runs"]["commands"])
     assert not local & set(_SURFACE["github_state_changing_commands"]), (
         "a command is classed as both local-only and GitHub-state-changing")
+    # The name detector only catches names that LOOK like a state change. The
+    # real gate is a reviewed class per captured command: a new command fails
+    # here until someone decides, on purpose, what it changes.
+    cls = {k: v for k, v in _SURFACE["classification"].items() if not k.startswith("_")}
+    assert set(cls) == _COMMANDS, (
+        f"command(s) with no reviewed classification: {sorted(_COMMANDS - set(cls))}; "
+        f"classified but not captured: {sorted(set(cls) - _COMMANDS)}")
+    allowed = {"read_only", "local_only", "local_only_user_runs"}
+    assert set(cls.values()) <= allowed, (
+        f"unknown classification(s) {sorted(set(cls.values()) - allowed)}; a GitHub "
+        f"state change has no class here because the contract would change with it")
+    assert {c for c, v in cls.items() if v == "local_only_user_runs"} == local, (
+        "classification and local_only_user_runs disagree about who runs what")
     # The description carries the CONSEQUENCE (state changes route to gh) rather than
     # the word "read-only" — the documented description shape is ~150 chars, and the
     # routing rule is what a router needs. The mechanism lives in the body.
@@ -340,8 +416,10 @@ def test_scope_flag_rules_match_the_captured_surface():
     """`--org`/`--repo` are per-command, and three rules were wrong on both
     0.1.8 and 0.1.124 before this guard: `time` rejects `--org` outright,
     four list/cost commands reject the pair together, and no command reads
-    `--repo` from the git remote. Pin each rule to the capture, in the step
-    that tells an agent which flag to reach for and in the reference."""
+    `--repo` from the git remote. The first two are pinned to the capture's
+    `scope_flags` lists, in the step that tells an agent which flag to reach
+    for and in the reference. The git-remote rule has no capture field: it is
+    pinned as prose, and the next test bans its inversion everywhere."""
     sf = _SURFACE["scope_flags"]
     assert "time" in sf["rejects_org"], (
         "the 0.1.124 capture showed `sling time --org` exits 2; re-verify on the "
@@ -368,17 +446,80 @@ def test_scope_flag_rules_match_the_captured_surface():
         assert f"`{cmd}`" in step4, f"step 4 no longer names `{cmd}` among the not-both commands"
         assert any(cmd in ln and "not both" in ln for ln in glob.splitlines()), (
             f"the reference's scope-flag table no longer says `{cmd}` rejects --org with --repo")
-    assert "not both" in step4, "step 4 lost the --org/--repo not-both rule"
+    # The rejection itself, quoted, beside the command list — not just the words
+    # "not both", which "the old not both error is gone" also contains.
+    assert "reject both together (`use --org or --repo, not both.`)" in step4, (
+        "step 4 lost the quoted not-both rejection next to its command list")
     assert "no command fills in `--repo` from the git remote" in step4, (
         "step 4 no longer says --repo is never read from the git remote")
+    assert "for \"my\" or \"this repo\" asks, pass `--repo` from the checkout's `origin`" \
+        in step4, "step 4 lost the instruction to pass --repo from the checkout's origin"
     # `doctor`'s `git_remote` check DOES read the remote, so the absolute form
     # of the claim is false and must not come back.
     assert "no command reads the git remote" not in step4, (
         "step 4 claims no command reads the git remote; `doctor`'s git_remote does")
+
+
+# A claim that --repo is filled in from the checkout, in any wording. Negated
+# statements of the true rule ("never read from the git remote") are allowed.
+_REPO_FROM_GIT = re.compile(
+    r"--repo[^.]{0,80}?(falls? back|defaults?(?:ed)?|inferred|read from|taken from)"
+    r"[^.]{0,40}?(git remote|origin|\bgit\b)")
+_NEGATION = re.compile(r"\b(never|not|no|nothing)\b|n't\b")
+
+
+def _repo_from_git_claims(text: str) -> list[str]:
+    low = " ".join(text.split()).lower()
+    return [m.group(0) for m in _REPO_FROM_GIT.finditer(low)
+            if not _NEGATION.search(m.group(0))]
+
+
+def test_no_shipped_text_says_repo_comes_from_the_git_remote():
+    """A phrase ban caught one wording ("defaults to the git remote") and let
+    "omit `--repo`: it falls back to the checkout's `origin`" through. Every
+    command scopes to the whole org (or exits 2) without `--repo`, so any such
+    claim gives a wrongly-scoped answer that looks fine."""
+    assert _repo_from_git_claims("omit `--repo`: it falls back to the checkout's `origin`.")
+    assert not _repo_from_git_claims("`--repo` is never read from the git remote.")
     for where, text in _shipped_text():
-        low = " ".join(text.split()).lower()
-        assert "defaults to the git remote" not in low, (
-            f"{where} claims --repo defaults to the git remote; no command reads it")
+        hits = _repo_from_git_claims(text)
+        assert not hits, f"{where} says --repo comes from the git remote: {hits}"
+
+
+def _sling_spans(text: str, cmd: str) -> list[str]:
+    """Each code span (inline or fenced line) that invokes `sling <cmd>`, from
+    the command name to the end of the span."""
+    out = []
+    for inline, fenced in _CODE.findall(text):
+        for span in ([inline] if inline else fenced.splitlines()):
+            for m in re.finditer(rf"\bsling {re.escape(cmd)}(?![\w-])", span):
+                out.append(span[m.start():])
+    return out
+
+
+def test_no_example_passes_a_scope_flag_the_command_rejects():
+    """Prose said `time` rejects `--org` while the table could still show
+    `sling time --org <slug>`, and a logs row could gain `--org`, with the
+    suite green. The examples are what an agent copies, so ban the flag in
+    every code span that runs those commands — and ban `--org` beside
+    `--repo` anywhere, which no command accepts."""
+    sf = _SURFACE["scope_flags"]
+    banned = {c: ("--org",) for c in sf["rejects_org"]}
+    for c in sf["rejects_org_and_repo"]:
+        banned[c] = ("--org", "--repo")
+    assert banned, "no scope-flag rejections captured; the guard would be vacuous"
+    both = re.compile(r"--org\s+<[^>]*>\s+--repo|--repo\s+<[^>]*>\s+--org")
+    for where, text in _shipped_text():
+        for cmd, flags in banned.items():
+            for span in _sling_spans(text, cmd):
+                for flag in flags:
+                    assert flag not in span, (
+                        f"{where}: `{span[:70]}` passes {flag}, which `sling {cmd}` "
+                        f"rejects with exit 2")
+        for inline, fenced in _CODE.findall(text):
+            assert not both.search(inline or fenced), (
+                f"{where}: a code span passes --org together with --repo, which "
+                f"every command rejects: `{(inline or fenced)[:70]}`")
 
 
 def test_routing_evals_agree_with_the_surface_and_the_split():
@@ -398,6 +539,12 @@ def test_routing_evals_agree_with_the_surface_and_the_split():
                 f"{prompt!r} routes to the user a command that is not local-only")
         if route == "gh":
             assert r["command"].startswith("gh "), prompt
+        # Optional flags for the command, kept apart from it so `command` is
+        # always a bare command the membership checks above can test.
+        if "args" in r:
+            assert route in {"sling", "user"} and isinstance(r["args"], str), prompt
+            assert r["args"].startswith("--"), (
+                f"{prompt!r}: `args` holds flags only; the command goes in `command`")
 
 
 def test_no_mutating_ask_routes_to_sling():
@@ -1024,25 +1171,53 @@ def test_routing_artifact_is_load_bearing():
         # added on the 0.1.124 re-pin: the critical-path view, and the one
         # command the user runs rather than the agent
         "which part of this workflow is slow": "sling time",
+        "is Afterburner making our jobs faster": "sling time",
+        # the two commands the user runs rather than the agent
         "update sling to the latest version": "sling update",
+        "sign me in to sling": "sling login",
     }
     by_prompt = {r["prompt"]: r for r in rows}
     for prompt, command in required.items():
         assert prompt in by_prompt, f"the routing artifact lost {prompt!r}"
         got = by_prompt[prompt].get("command", "")
-        assert got.startswith(command), (
+        assert got == command or got.startswith(command + " "), (
             f"{prompt!r} now routes to {got!r}, expected {command!r}")
+    # The flags are the answer for these two: `sling time` without `--workflow`
+    # has no critical path, and `--group-by` without `--workflow` compares
+    # different mixes of jobs rather than like for like.
+    required_args = {
+        "which part of this workflow is slow": ("--repo", "--workflow"),
+        "is Afterburner making our jobs faster": ("--workflow", "--group-by afterburner"),
+    }
+    for prompt, flags in required_args.items():
+        args = by_prompt[prompt].get("args", "")
+        for flag in flags:
+            assert flag in args, f"{prompt!r} lost {flag!r} from its args ({args!r})"
+    row = next((c for c in _routing_table_rows() if "--group-by afterburner" in c[2]), None)
+    assert row, "the routing table lost its `--group-by afterburner` row"
+    assert "compare the per-hop `delta`" in row[2] and "alone mixes different jobs" in row[2], (
+        "the Afterburner row lost its warning to compare the per-hop delta, not the "
+        "pooled `--group-by` table")
+
+
+def _base_command(cmd: str) -> str:
+    toks = cmd.removeprefix("sling ").split()
+    return " ".join(toks[:2]) if " ".join(toks[:2]) in _COMMANDS else toks[0]
 
 
 def test_routing_artifact_commands_exist_in_the_routing_table():
     """Every sling command the artifact names must appear in SKILL.md's routing
-    table, so the two contracts cannot drift apart silently."""
+    table, so the two contracts cannot drift apart silently. Inside a table row
+    and as the full backticked command: a bare word anywhere in the body ("labels")
+    let a command fall out of the table with the suite green."""
+    table = "\n".join(" | ".join(r) for r in _routing_table_rows())
     for r in _ROUTING["routings"]:
         cmd = r.get("command", "")
         if cmd.startswith("sling "):
-            head = " ".join(cmd.split()[:2])
-            assert head.split()[1] in _BODY or head in _BODY, (
-                f"{r['prompt']!r} routes to {cmd!r}, which SKILL.md's table never names")
+            base = _base_command(cmd)
+            assert re.search(rf"`sling {re.escape(base)}(?=[`\s\[])", table), (
+                f"{r['prompt']!r} routes to `sling {base}`, which SKILL.md's routing "
+                f"table never names")
 
 
 def test_evals_encode_rules_the_suite_cannot_otherwise_see():
@@ -1068,28 +1243,105 @@ def test_evals_encode_rules_the_suite_cannot_otherwise_see():
 # shape that drifts from the check list the preflight tells an agent to act on.
 
 # Versions the docs cite deliberately as HISTORY, not as the current pin:
-# 0.1.2 is the `fix_command: "sling update"` anecdote, 0.1.84 is the release
-# that added `sling update`, and 0.1.123 is the outdated-binary side of the
-# reference's illustrative `version` upgrade row. Never add the previous pin
-# here: that is how a missed surface would hide.
-_HISTORICAL_VERSIONS = {"0.1.2", "0.1.84", "0.1.123"}
+# 0.1.2 is the `fix_command: "sling update"` anecdote and 0.1.84 is the release
+# that added `sling update`. Never add the previous pin here: that is how a
+# missed surface would hide.
+_HISTORICAL_VERSIONS = {"0.1.2", "0.1.84"}
+# The one line allowed to cite the version before the pin: the outdated-binary
+# side of the reference's illustrative `version` upgrade row. Exempted as a
+# LINE, so the same version anywhere else still fails.
+_ILLUSTRATIVE_LINES = {
+    "references/command-reference.md":
+        '"detail": "version 0.1.123\\n0.1.124 is available, to update:",',
+}
 # Scoped to sling's own 0.1.x family: these files also cite `gh` and the
 # Actions runner, whose versions are not this skill's to pin.
 _VERSION_RE = re.compile(r"\bv?(0\.1\.\d+)\b")
+_PIN_SURFACES = (["SKILL.md"]
+                 + [f"references/{p.name}" for p in sorted((_SKILL / "references").glob("*.md"))]
+                 + [f"evals/{p.name}" for p in sorted((_SKILL / "evals").glob("*.json"))])
 
 
-@pytest.mark.parametrize("name", ["SKILL.md", "references/command-reference.md"])
+@pytest.mark.parametrize("name", _PIN_SURFACES)
 def test_every_live_version_pin_matches_the_captured_cli_version(name):
     """A re-pin that misses a surface leaves the skill asserting two different
     versions of the truth, and nothing goes red. `command-surface.json` is the
-    capture of record, so every other live mention must agree with it."""
+    capture of record, so every other live mention must agree with it — in the
+    WHOLE file: the frontmatter description and the smaller references were
+    once outside the scan, and a stale `v0.1.8` in either passed."""
     pinned = _SURFACE["cli_version"]
-    text = _BODY if name == "SKILL.md" else (_SKILL / name).read_text()
-    found = set(_VERSION_RE.findall(text)) - _HISTORICAL_VERSIONS
-    assert found == {pinned}, (
-        f"{name} cites version(s) {sorted(found)} but "
+    found: set[str] = set()
+    for line in (_SKILL / name).read_text().splitlines():
+        if line.strip() == _ILLUSTRATIVE_LINES.get(name):
+            found |= set(_VERSION_RE.findall(line)) - {"0.1.123"}
+        else:
+            found |= set(_VERSION_RE.findall(line))
+    found -= _HISTORICAL_VERSIONS
+    assert found <= {pinned}, (
+        f"{name} cites version(s) {sorted(found - {pinned})} but "
         f"command-surface.json pins {pinned!r}. Re-pin every surface together, "
         f"or add a deliberate historical citation to _HISTORICAL_VERSIONS.")
+    if name in ("SKILL.md", "references/command-reference.md"):
+        assert found == {pinned}, f"{name} no longer states the pinned version {pinned}"
+
+
+def test_the_illustrative_version_line_is_still_there():
+    """The line exemption above must point at a real line, or it is dead code
+    that a later edit could quietly widen."""
+    ref = (_SKILL / "references" / "command-reference.md").read_text()
+    assert any(ln.strip() == _ILLUSTRATIVE_LINES["references/command-reference.md"]
+               for ln in ref.splitlines())
+
+
+def test_the_agent_surfaces_fix_commands_and_never_runs_them():
+    """Step 2 is where an agent meets `sling update` first, as the `version`
+    row's `fix_command`. "Either way run it yourself" there was a one-line
+    change with the suite green. Pin the step, and ban "run it yourself"
+    anywhere it is not inside a never / do-not / rather-than clause."""
+    step = " ".join(_preflight_step(2).split()).lower()
+    assert "fix_command" in step and "`sling update`" in step
+    assert "surface it to the user rather than running it yourself" in step, (
+        "step 2 no longer says to surface the `version` row's fix_command rather "
+        "than run it")
+    for where, text in _shipped_text():
+        low = " ".join(text.split()).lower()
+        for m in re.finditer(r"\brun(?:ning)? it yourself", low):
+            before = low[max(0, m.start() - 40):m.start()]
+            assert re.search(r"\b(never|not|rather than|instead of)\b|n't\b", before), (
+                f"{where} tells the agent to run something itself: "
+                f"…{low[max(0, m.start() - 40):m.end()]}")
+
+
+_NUMBER_WORDS = {"seven": 7, "eight": 8, "nine": 9, "six": 6, "five": 5, "ten": 10}
+
+
+def test_doctor_check_keys_match_the_captured_split():
+    """The capture records which `doctor` rows are actionable and which are
+    advisory. The reference's example must emit exactly those keys, and step 2
+    must list exactly the actionable ones: moving `auto_update` into the
+    actionable list (an agent then "fixes" an advisory row by updating sling)
+    passed with the suite green."""
+    dc = _SURFACE["doctor_checks"]
+    actionable, advisory = set(dc["actionable"]), set(dc["advisory"])
+    assert actionable and advisory and not actionable & advisory
+    ref = (_SKILL / "references" / "command-reference.md").read_text()
+    block = ref[ref.index('{"checks": ['):]
+    block = block[:block.index("```")]
+    keys = re.findall(r'"key":\s*"([a-z_]+)"', block)
+    assert sorted(keys) == sorted(actionable | advisory), (
+        f"the reference's doctor example emits {keys}, the capture records "
+        f"{sorted(actionable | advisory)}")
+    step = " ".join(_preflight_step(2).split())
+    m = re.search(r"(\w+) of the (\w+) are actionable — (.*?) — so", step)
+    assert m, "step 2 no longer lists the actionable checks"
+    listed = set(re.findall(r"`([a-z_]+)`", m.group(3)))
+    assert listed == actionable, (
+        f"step 2 lists {sorted(listed)} as actionable; the capture says {sorted(actionable)}")
+    assert _NUMBER_WORDS.get(m.group(1).lower()) == len(actionable)
+    assert _NUMBER_WORDS.get(m.group(2).lower()) == len(actionable | advisory)
+    for key in advisory:
+        assert re.search(rf"the other \w+, [^.]*`{key}`[^.]*are advisory", step), (
+            f"step 2 no longer names `{key}` as advisory")
 
 
 def test_the_surface_captures_provenance_agree_with_each_other():

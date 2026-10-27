@@ -1,5 +1,5 @@
 {
-  "_comment": "The routing contract this skill exists to enforce. `route` is the tool or skill that must answer the prompt (`user` means the user runs the command themselves, never the agent); `why` records the rule that decides it. Pinned by tests/test_sling_routing.py.",
+  "_comment": "The routing contract this skill exists to enforce. `route` is the tool or skill that must answer the prompt (`user` means the user runs the command themselves, never the agent); `command` is the bare command and the optional `args` holds the flags that make it the right answer; `why` records the rule that decides it. Pinned by tests/test_sling_routing.py.",
   "routings": [
     {
       "prompt": "why did this job fail",
@@ -71,19 +71,27 @@
       "prompt": "which part of this workflow is slow",
       "route": "sling",
       "command": "sling time",
-      "why": "read, one workflow's critical path hop by hop: `time --repo <owner/name> --workflow <name>`"
+      "args": "--repo <owner/name> --workflow <name>",
+      "why": "read, one workflow's critical path hop by hop"
     },
     {
       "prompt": "is Afterburner making our jobs faster",
       "route": "sling",
       "command": "sling time",
-      "why": "read, like-for-like per-hop delta for one workflow split by where jobs ran: `time --repo <owner/name> --workflow <name> --group-by afterburner`"
+      "args": "--repo <owner/name> --workflow <name> --group-by afterburner",
+      "why": "read, like-for-like per-hop delta for one workflow split by where jobs ran; `--group-by` alone compares different mixes of jobs"
     },
     {
       "prompt": "update sling to the latest version",
       "route": "user",
       "command": "sling update",
       "why": "changes only the user's machine, no GitHub state; the user runs it, like login"
+    },
+    {
+      "prompt": "sign me in to sling",
+      "route": "user",
+      "command": "sling login",
+      "why": "a browser device-code approval only a person can complete; the user runs it, never with --agent"
     },
     {
       "prompt": "stop sling from updating itself",
@@ -102,6 +110,12 @@
       "route": "gh",
       "command": "gh run cancel",
       "why": "changes state"
+    },
+    {
+      "prompt": "kill the stuck deploy run",
+      "route": "gh",
+      "command": "gh run cancel",
+      "why": "changes state; killing a run is cancelling it"
     },
     {
       "prompt": "kick off the release workflow",

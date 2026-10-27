@@ -11,23 +11,30 @@ All notable changes to the `sling` skill. Unversioned; dated (UTC).
   since 0.1.84) reinstalls `sling` on the user's machine and changes no
   GitHub or CI state; its `--agent` results (`current` / `updated` /
   `failed` / `unmanaged`) and exit codes (`5` for a failed check, `1` for a
-  failed install) are in the reference. Like `sling login`, the user runs it,
-  never the agent. A note covers the once-a-day background update an
-  installer-placed `sling` runs after any command: silent under `--agent`,
-  never touching stdout or the exit code, off under `CI` /
-  `SLING_NO_AUTO_UPDATE` or after `sling update --off` — so the version can
-  change mid-session, and opting out is the user's choice.
+  failed install, `2` for a copy the installer did not place) are in the
+  reference. Like `sling login`, the user runs it, never the agent; when
+  `doctor`'s `version` row names a different `fix_command` (a copy the
+  installer did not place), the user is given that line instead. A note
+  covers the once-a-day background update an installer-placed `sling` runs
+  after most commands (not `--version`, `--help`, or `sling update` itself):
+  silent under `--agent`, never touching stdout or the exit code, off under
+  `CI` / `SLING_NO_AUTO_UPDATE` or after `sling update --off` — so the
+  version can change mid-session, and opting out is the user's choice.
 - **2026-10-27** — **New read views in the routing table and reference.**
   `sling time --repo <owner/name> --workflow <name>` (one workflow plus its
   critical path, hop by hop — "which part of this workflow is slow"),
   `--group-by afterburner|provider|tier` (per-group percentiles and counts,
   with per-hop deltas against the baseline group that refuse a too-small
   sample; "is Afterburner faster" routes to `--workflow` plus `--group-by`,
-  since `--group-by` alone compares different mixes of jobs), `sling jobs list --afterburner engaged|not-engaged` and the
-  optional Afterburner job fields, `sling labels list --org` private-beta
-  rows (`private_beta: true`), and `sling bill`'s optional free-credit fields and
-  month-end projection (`amount_due_usd` is still what is owed). Four routing
-  eval rows pin the new asks, two of them as user-run.
+  since `--group-by` alone compares different mixes of jobs), `sling jobs
+  list --afterburner engaged|not-engaged` and the optional Afterburner job
+  fields, `sling labels list --org` private-beta rows (`private_beta:
+  true`), and `sling bill`'s optional free-credit fields and month-end
+  projection (`amount_due_usd` is still what is owed). The JSON examples for
+  these views use synthetic, round values. Routing eval rows pin the new
+  asks, with the flags that make them right (`--workflow`, `--group-by
+  afterburner`) in a new optional `args` field, plus user-run rows for
+  `sling update`, `sling update --off` and `sling login`.
 
 - **2026-08-26** — **The launch-announcement prompts are pinned in the routing
   eval.** "why did CI fail on my last push", "what's breaking the nightly
@@ -79,18 +86,26 @@ All notable changes to the `sling` skill. Unversioned; dated (UTC).
 - **2026-10-27** — **Re-pinned every version-pinned fact against `sling`
   v0.1.124** and **documented `doctor`'s new `auto_update` check**, which
   makes nine. It is advisory like `agent_skill`: always `ok: true`
-  (possibly `warn: true`) except `ok: false, skipped: true` on a binary the
-  installer did not place, so it never sets exit `10`. The `version` check's
-  `fix_command` is now `sling update` on a normal install, otherwise the
-  installer one-liner (or a line that sets a copy aside first), or absent;
-  the rule stays "surface it, never run it". The read-only guard is
-  reshaped rather than dropped: the contract is now "no `sling` command
+  (possibly `warn: true`) except `ok: false, skipped: true` on a copy with
+  no installer record at all, so it never sets exit `10`. The `version`
+  check's `fix_command` is now `sling update` on a normal install, otherwise
+  the installer one-liner (or a line that sets a copy aside first), or
+  absent; the rule stays "surface it, never run it". The intro now says a
+  few commands change only the user's machine (`login`/`logout`, `org
+  switch`, `update`) and none changes GitHub or CI state. The routing guard
+  is reshaped rather than dropped: the contract is "no `sling` command
   changes GitHub or CI state", `update` joins `login` in a local-only,
-  user-runs-it group, and the guard still fails if a command named for a
-  GitHub state change (re-run, cancel, …) is ever captured or routed to
-  `sling`. Re-verified unchanged on 0.1.124: `--compact` absent, `logs`
-  rejects `--org`/`--repo`, an empty scope-flag value exits `2`,
-  `exit-codes` lists only `0`–`5`, a nonexistent subcommand exits `1`.
+  user-runs-it group, every captured command carries a reviewed
+  classification (so a new command fails until it is classified on
+  purpose), and `doctor`'s actionable and advisory check keys are recorded
+  in the capture. The guards are mutation-tested: every state-change row of
+  the routing table and every state-change eval ask (stop / kill / abort /
+  requeue / pause style included) must route to `gh`; no example passes a
+  scope flag its command rejects; no shipped text says `--repo` comes from
+  the git remote; and the version pin is checked across every shipped file,
+  frontmatter included. Re-verified unchanged on 0.1.124: `--compact`
+  absent, `logs` rejects `--org`/`--repo`, an empty scope-flag value exits
+  `2`, `exit-codes` lists only `0`–`5`, a nonexistent subcommand exits `1`.
 
 - **2026-08-31** — **Re-pinned every version-pinned fact against `sling`
   v0.1.8** (what the installer serves since 2026-08-31) and **documented
@@ -133,36 +148,28 @@ All notable changes to the `sling` skill. Unversioned; dated (UTC).
 
 - **2026-10-27** — **The skill said `sling update` does not exist, and that
   no `sling` command changes anything.** Both were true when written and
-  are false now; the Gotchas bullet and the guard's historical allowance
-  that carried them are gone.
+  are false now; the Gotchas bullet that carried them is gone. The guard's
+  allowance for naming a missing command in order to warn about it remains,
+  but no longer has `sling update` as its live case.
 - **2026-10-27** — **Three scope-flag claims were wrong on both 0.1.8 and
   0.1.124.** `runs list`, `jobs list`, `usage` and `top` reject `--org`
   together with `--repo` (exit `2`, `Use --org or --repo, not both.`);
-  `time` rejects `--org` outright (exit `2`); and no command reads `--repo`
-  from the git remote — without it `runs list`, `usage` and `top` cover the
-  whole org, `jobs list` exits `2` unless given `--run`, `--repo` or a
-  window, and `time`'s repo view needs `--repo`. With both flags, keep
-  `--repo` (it names the org) and drop `--org`. The preflight's wrong-org step, the
-  reference's Global flags section and the captured surface now say so, and
-  a guard pins each rule to the capture.
-- **2026-10-27** — The `gh` fallback reference now says `sling` "makes no
-  change to GitHub" instead of "read-only in this release".
-- **2026-10-27** — **The state-change guard could be routed around.** A
-  re-run or cancel ask routed to the user (as "run `sling update`") or to
-  nothing passed, because the check was only "not `sling`"; state-change asks
-  must now route to `gh`. The command-name check matched seven words and
-  missed `re-run`, `retry`, `dispatch`, `approve`, `workflow run` and
-  `secrets set`; it now covers those shapes and has a self-test. The
-  not-both scope-flag list gained a positive control.
-- **2026-10-27** — **Corrections found in review.** "No command reads the git
-  remote" is now "no command fills in `--repo` from the git remote" (`doctor`'s
-  `git_remote` check reads it); the intro no longer claims `sling update` is
-  the only local change (`login`, `logout` and `org switch` change local
-  state too); "is Afterburner faster" routes to `--workflow` plus
-  `--group-by`; the update route defers to `doctor`'s `fix_command` on a copy
-  the installer did not place; the bill example's Afterburner values are
-  synthetic; the re-run row names `--job` and `-R`; the README no longer calls `sling`
-  read-only outright; and the security notes disclose the daily self-update.
+  `time` rejects `--org` outright (exit `2`); and no command fills in
+  `--repo` from the git remote — without it `runs list`, `usage` and `top`
+  cover the whole org, `jobs list` exits `2` unless given `--run`, `--repo`
+  or a window, and `time`'s repo view needs `--repo`. With both flags, keep
+  `--repo` (it names the org) and drop `--org`. The preflight's wrong-org
+  step, the exit-`2` recovery, the reference's Global flags section and the
+  captured surface now say so, and a guard pins each rule to the capture.
+- **2026-10-27** — **The `gh` fallback reference no longer calls `sling`
+  read-only.** It now says `sling` "makes no change to GitHub" instead of
+  "read-only in this release".
+- **2026-10-27** — **A state-change eval row could route to `none` with the
+  suite green.** The check was only "not `sling`"; state-change asks must
+  now route to `gh` with a `gh` command.
+- **2026-10-27** — **Smaller corrections.** The re-run row names `--job` and
+  `-R`; the README no longer calls `sling` read-only outright; and the
+  security notes disclose the daily self-update.
 
 - **2026-08-31** — **The commands-must-exist guard no longer stops reading at
   a `"detail"` string.** Documenting `doctor`'s `agent_skill` row meant

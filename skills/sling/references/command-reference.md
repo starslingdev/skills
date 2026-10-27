@@ -1,8 +1,9 @@
 # `sling` command reference (verified)
 
 Every flag list and JSON shape below was **read off the binary**, not off
-documentation: each command was run with `--agent` against a live control
-plane on **`sling` v0.1.124**, 2026-10-27. Where the published docs and the
+documentation, except where a section says otherwise: each command was run
+with `--agent` against a live control plane on **`sling` v0.1.124**,
+2026-10-27. Where the published docs and the
 binary disagree, the binary wins and the disagreement is noted.
 
 Field names are `snake_case` everywhere **except `whoami`**. Objects are
@@ -146,7 +147,7 @@ contributes to exit `10`. Its shapes:
 | Installer-placed, last background check failed | `ok: true, warn: true`, `"on; … To retry now:"`, `fix_command: "sling update"` |
 | A copy the installer did not place, with a safe swap | `ok: true, warn: true`, `"off — the StarSling installer didn't place this sling; to swap it for one that updates itself:"`, with the swap line in `fix_command` |
 | A copy with no safe one-line swap | `ok: true, warn: true`, `"off — … and it has no safe one-line swap …"` (the detail points at `sling update` for why), no `fix_command` |
-| Not installer-placed at all | `ok: false, skipped: true`, `"off — this sling wasn't placed by the StarSling installer, so it can't update itself"` |
+| No installer record at all | `ok: false, skipped: true`, `"off — this sling wasn't placed by the StarSling installer, so it can't update itself"` |
 
 Every `fix_command` here changes the user's machine — **surface it, never
 run it**, and never turn background updates off or on yourself.
@@ -438,18 +439,20 @@ Percentiles per phase per runner label across a repo:
 
 **`--workflow <name>`** narrows to one workflow and adds its dominant
 critical path, hop by hop — the answer to "which part of this workflow is
-slow":
+slow". Shown here as `--workflow <name> --group-by afterburner` output, so
+each hop's `cells[]` carries one entry per group, with its `delta` against
+the baseline group (values synthetic):
 
 ```json
 {"level": "repo", "workflow": "<workflow name>", "phases": [...],
- "critical_path": {"path": ["setup", "build", "test"], "runs": 1940,
-                   "path_runs": 912, "min_sample": 20,
+ "critical_path": {"path": ["setup", "build", "test"], "runs": 1000,
+                   "path_runs": 500, "min_sample": 20,
                    "hops": [{"job_name": "build", "label": "<runner label>",
-                             "cells": [{"group": "on", "p50_ms": 131000, "n": 79,
-                                        "delta": {"kind": "estimate", "ms": -23000,
-                                                  "pct": -14.9, "error_ms": 9000,
-                                                  "baseline_p50_ms": 154000}}]}],
-                   "total": [{"group": "on", "p50_ms": 1232000}]}}
+                             "cells": [{"group": "on", "p50_ms": 120000, "n": 50,
+                                        "delta": {"kind": "estimate", "ms": -20000,
+                                                  "pct": -14.3, "error_ms": 10000,
+                                                  "baseline_p50_ms": 140000}}]}],
+                   "total": [{"group": "on", "p50_ms": 1200000}]}}
 ```
 
 Hops are started→completed of successful jobs on each hop's runner label.
@@ -460,15 +463,15 @@ zero**.
 **`--group-by afterburner|provider|tier`** splits the repo view by where
 each job ran, adding a `grouping` object: per-group job counts (and, for
 Afterburner, how many were captured and engaged) and p50/p95/p99 per phase
-per group:
+per group (values synthetic):
 
 ```json
 {"grouping": {"group_by": "afterburner", "baseline": "off",
-              "groups": [{"key": "on", "jobs": 178, "captured": 178, "engaged": 59},
-                         {"key": "off", "jobs": 499, "captured": 0, "engaged": 0},
-                         {"key": "unknown", "jobs": 79}],
-              "phases": [{"phase": "steps", "group": "on", "p50_ms": 56000,
-                          "p95_ms": 375000, "p99_ms": 616000, "jobs": 178}]}}
+              "groups": [{"key": "on", "jobs": 200, "captured": 200, "engaged": 50},
+                         {"key": "off", "jobs": 500, "captured": 0, "engaged": 0},
+                         {"key": "unknown", "jobs": 100}],
+              "phases": [{"phase": "steps", "group": "on", "p50_ms": 60000,
+                          "p95_ms": 300000, "p99_ms": 600000, "jobs": 200}]}}
 ```
 
 The grouped phase table carries **no deltas**: each group pools whatever jobs
@@ -528,8 +531,9 @@ Report `amount_due_usd`, not `amount_usd`, when the user asks what is owed —
 they differ by `credits_usd`. `free_credit_total_usd` /
 `free_credit_remaining_usd` (optional) describe a free-credit grant; they
 are context, not the amount owed — still report `amount_due_usd`.
-`projected_month_end_usd` is a projection, not a bill. Line items may carry
-optional Afterburner counts (`afterburner_rate`,
+`projected_month_end_usd` is a projection, not a bill. The Afterburner
+values in the example above are illustrative, not a capture. Line items may
+carry optional Afterburner counts (`afterburner_rate`,
 `afterburner_total_jobs`, `afterburner_known_jobs`,
 `afterburner_measured_jobs`, `afterburner_engaged_jobs`). `status: "open"`
 means the period is still accruing; it is not a final number.

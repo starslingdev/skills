@@ -106,7 +106,8 @@ Do this once per session, before the first `sling` command.
 4. **Wrong org — you belong to several and have not picked one.** `doctor`'s
    `org` check naming multiple slugs, an exit `2` about org ambiguity, or an
    id that resolves to nothing but plausibly exists in another of your orgs:
-   `sling org switch <slug>`, or pass `--org <slug>` on the single command.
+   `sling org switch <slug>`, or pass `--org <slug>` on a single command that
+   accepts it (see below).
 
    `--org` and `--repo <owner/name>` are per-command flags, accepted by most
    data commands but **not by `sling logs`**, which parses strictly and
@@ -240,8 +241,8 @@ reading before the first parse.
 *change* CI state — re-run a job, cancel a run, trigger a workflow, flip a
 workflow on or off, pull down an artifact — no `sling` command does it.
 Use `gh` directly; do not attempt a `sling` subcommand for these under any
-name. Updating `sling` itself is the one local change, and it is the user's
-to run (`sling update`).
+name. Updating `sling` itself (`sling update`) changes only the user's
+machine, and the user runs it, never you.
 
 **2. If it only reads: is it about one run, one job, or aggregate
 cost/usage — or about the repo's CI *configuration* as a whole?** One run,
@@ -348,7 +349,7 @@ a parseable one tells you what happened; only `$?` does.
 |---|---|---|
 | `0` | Success | — |
 | `1` | Unexpected internal error (a crash) — **or a subcommand that does not exist** | Read stderr first. `unknown command "<name>" for "sling"` is a routing mistake, not a crash: the binary lists its real commands, so correct the name against that list rather than filing a bug — an invented or mistyped name lands here. stderr naming an environment variable (`SLING_HOST must be a valid https URL …`) is an environment fix, not a bug. Anything else: do not retry blindly, and surface the stderr text as a bug report |
-| `2` | Usage — bad flags, a prompt refused under `--agent`, org ambiguity, **or no orgs at all** | Read the stderr first. `You don't belong to any orgs yet.` → step 5, the app is not installed; never a flag problem. Org-ambiguous → pass `--org` or `sling org switch`. Otherwise fix the invocation against `sling <cmd> --help` |
+| `2` | Usage — bad flags, a prompt refused under `--agent`, org ambiguity, **or no orgs at all** | Read the stderr first. `You don't belong to any orgs yet.` → step 5, the app is not installed; never a flag problem. Org-ambiguous → `sling org switch <slug>` (or `--org` where the command accepts it: not `logs` or `time`, and never beside `--repo`). Otherwise fix the invocation against `sling <cmd> --help` |
 | `3` | Not found — no such run/job/attempt in any org you can access, or a real job that stores no logs | **A pasted URL from a third-party org lands here, not on exit `4`** — the resolver searches your orgs and reports not-found (`No run/job/attempt matches that id in an org you can access`). For an org the user does not belong to, do not suggest installing the app on it: fall back to the `gh` read path (public repos answer) and say the richer `sling` diagnosis is unavailable. Otherwise try `sling resolve`, confirm the org, then ask the user to confirm the id |
 | `4` | Auth — **or no StarSling installation on that org, or a third party's org named via a flag.** Read the stderr text before acting | `You don't have access to org "<name>"` → the app is not installed there (or the user is not a member); point them at `https://github.com/apps/starslingdev`, do NOT retry login. Anything else → ask the user to run `sling login` themselves (a browser approval, never `--agent`), then retry once. If the retry exits `4` again, STOP and report what was verified — never ask for a second login |
 | `5` | Control-plane or API error (5xx or transport) | Retry once after a short backoff (~2s); on a second failure fall back to the `gh` read equivalent and **say** `sling` was unreachable |
