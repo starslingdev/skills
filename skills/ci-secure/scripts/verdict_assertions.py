@@ -509,7 +509,9 @@ def analyze(jobs, key, workflow=None):
     it runs after a non-success dependency its own steps must be resolved.
     Successful detectors' valid/invalid output decisions are also enumerated.
     Reusable-workflow callers and matrix output producers can reproduce a
-    hole but cannot certify a pass. All limits withhold.
+    hole but cannot certify a pass; nor can an ancestor with conditional steps,
+    though its literal outputs still count as failure evidence. All limits
+    withhold.
     """
     try:
         if workflow:
@@ -546,12 +548,13 @@ def analyze(jobs, key, workflow=None):
         # skip that GitHub decides at the caller.
         uncertified = [n for n in ancestors if "uses" in jobs[n]]
         # A successful job result does not prove its conditionally executed
-        # steps ran. Keep such dependency execution unmeasured; a concrete
-        # failing job path can still establish a failure below.
-        uncertified.extend(n for n in ancestors if any(
+        # steps ran, so such an ancestor withholds a pass. It stays out of
+        # `uncertified`: its literal declared outputs are still reproducible,
+        # so a concrete failing path through it can establish a failure.
+        conditional_steps = [n for n in ancestors if any(
             isinstance(step, dict) and "if" in step
             and unwrap(step["if"]).lower() not in ("true", "always()", "success()")
-            for step in jobs[n].get("steps", [])))
+            for step in jobs[n].get("steps", []))]
         ancestor_scope = {}
         for name in order:
             ancestor_scope[name] = set(needs(jobs[name]))
@@ -571,7 +574,7 @@ def analyze(jobs, key, workflow=None):
         # No accepting non-success combination implies skipped suites cannot
         # pass. Cap combinations; this proof does not rely on job if semantics.
         verdict_refs = re.findall(r"needs\.([\w-]+)\.outputs\.([\w-]+)", str(jobs[key]))
-        if len(direct) <= 5 and not verdict_refs and not swallowers and not uncertified:
+        if len(direct) <= 5 and not verdict_refs and not swallowers and not uncertified and not conditional_steps:
             strict = True
             for states in itertools.product(("success", "failure", "cancelled", "skipped"), repeat=len(direct)):
                 if all(s == "success" for s in states):
@@ -741,7 +744,9 @@ def analyze(jobs, key, workflow=None):
         if unknown:
             return "unmeasured", unknown
         if uncertified:
-            return "unmeasured", "reusable-workflow, matrix or conditional-step result cannot certify the verdict: " + ", ".join(sorted(set(uncertified)))
+            return "unmeasured", "reusable-workflow or matrix result cannot certify the verdict: " + ", ".join(sorted(set(uncertified)))
+        if conditional_steps:
+            return "unmeasured", "a successful result does not prove conditional steps ran: " + ", ".join(conditional_steps)
         return "pass", "executed assertion rejects upstream failure, cancellation and invalid skip decisions"
     except (Unknown, TypeError, KeyError, AttributeError, RecursionError) as exc:
         return "unmeasured", str(exc)

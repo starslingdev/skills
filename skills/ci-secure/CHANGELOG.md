@@ -298,9 +298,15 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
-- 2026-10-27: Required-check verdicts withhold a pass when upstream steps can
-  be skipped, and evaluate job-level `failure()` across all ancestors.
-  Duplicate skippable check names remain a failing regression pin.
+- **2026-10-27** — **The required-check verdict no longer passes a summary job
+  whose upstream test step may never have run, and `failure()` now sees failed
+  jobs further up the chain.** A dependency that reports success can still have
+  skipped a step behind its own `if:`, so such a dependency now leaves the
+  verdict unmeasured instead of passing. Its literal declared outputs still
+  count as evidence, so a reproducible bypass through it still fails. A job's
+  `failure()` condition is now true when any ancestor failed, not only a
+  direct dependency, matching GitHub. Two skippable jobs sharing a required
+  check name stay pinned as a failing verdict. (#150)
 
 - **2026-10-22** — **`sec.codeowners.workflows` no longer passes on a
   CODEOWNERS rule the branch does not enforce.** CODEOWNERS only requests an

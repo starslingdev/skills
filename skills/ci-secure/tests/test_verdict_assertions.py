@@ -1,4 +1,5 @@
 """Synthetic verdict graphs: no repository commands or network calls."""
+import copy
 import importlib.util
 from pathlib import Path
 import unittest
@@ -641,8 +642,15 @@ class RequiredCheckEdgePins(unittest.TestCase):
                         "steps": [{"run": 'test "${{ needs.suite.result }}" = success'}]},
         }
         self.assertEqual(fact(jobs), "unmeasured")
+        # An output reference skips the strict shortcut; the enumerated path
+        # must withhold the pass too.
+        enumerated = copy.deepcopy(jobs)
+        enumerated["verdict"]["steps"].append({"run": 'test "${{ needs.suite.outputs.mode }}" != off'})
+        self.assertEqual(fact(enumerated), "unmeasured")
         del jobs["suite"]["steps"][0]["if"]
+        del enumerated["suite"]["steps"][0]["if"]
         self.assertEqual(fact(jobs), "pass")
+        self.assertEqual(fact(enumerated), "pass")
 
     def test_failure_function_reaches_failed_grandparent(self):
         jobs = {
@@ -654,6 +662,19 @@ class RequiredCheckEdgePins(unittest.TestCase):
             "verdict": {"needs": "recover", "if": "always()", "runs-on": "ubuntu-latest",
                         "steps": [{"run": 'test "${{ needs.recover.result }}" = success'}]},
         }
+        self.assertEqual(fact(jobs), "fail")
+
+    def test_conditional_step_keeps_literal_output_failure_evidence(self):
+        # A literal declared output is reproducible whatever the steps did, so
+        # an unrelated conditional step must not erase a concrete failure.
+        jobs = {
+            "check": {"runs-on": "ubuntu-latest", "outputs": {"ok": "true"}, "steps": [
+                {"if": "vars.EXTRA == 'yes'", "run": "lint"}, {"run": "pytest -q"}]},
+            "verdict": {"needs": "check", "if": "always()", "runs-on": "ubuntu-latest",
+                        "steps": [{"run": 'test "${{ needs.check.outputs.ok }}" = true'}]},
+        }
+        self.assertEqual(fact(jobs), "fail")
+        del jobs["check"]["steps"][0]["if"]
         self.assertEqual(fact(jobs), "fail")
 
 
