@@ -1188,6 +1188,26 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-10-27** — **A required status that the repo publishes itself is no
+  longer treated as an outside gate (#119).** When branch protection requires
+  one commit status (say `All CI`) that a workflow in the repo posts after
+  watching the test jobs, that status names no job and has no `needs:` edge to
+  the tests. The report used to read that mismatch as proof of an external
+  gate, say no file-backed required gate exists, and frame the real test jobs
+  as gating zero merges. The scan now records which workflows post commit
+  statuses (through the statuses API, `createCommitStatus`, or a known status
+  action, in the workflow, a local action, or a repo-local script it runs; a
+  local action's own entrypoint, such as its `main:` script or a script its
+  composite steps run from the action's folder, is looked up in that folder, and
+  a script's own imports are followed). A required context one of them posts is
+  never counted external: the gate
+  stays an unresolved best guess, the spine is not narrowed, no check is called
+  non-required on its account, the checkout-stall finding (OPT80) no longer says
+  the merge does not wait on a job, and the report names the status. Which jobs the
+  publisher waits on is not traced. A name that only appears in such a
+  workflow, such as its title or the list of checks an aggregator waits on, does
+  not count, so a CLA bot or a deploy app's status still classifies as external.
+
 - **2026-10-21** — **The "unnecessary `needs:`" finding (OPT21) no longer
   tells a team to remove a deliberate gate, or credits a saving for it.** A job
   that waits on a cheap check job (lint, pre-commit, a format or type check, a

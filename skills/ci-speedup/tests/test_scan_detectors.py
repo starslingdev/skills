@@ -5091,3 +5091,197 @@ jobs:
       - run: pnpm lint
 """
     assert "OPT12" in _scan_one(tmp_path, pos)
+
+
+def test_workflow_status_publishers_records_in_repo_status_posters(tmp_path: Path):
+    """Issue #119: scan records the workflows that post commit statuses themselves, so
+    collect_runs can tell an in-repo aggregate status (`All CI`) from an outside gate.
+    Covers a `gh api .../statuses/<sha>` call in the YAML, an `actions/github-script`
+    step whose repo-local script calls `createCommitStatus`, and a workflow that only
+    READS statuses (`commits/<sha>/statuses`) or posts nothing, which must not count."""
+    _write_workflow(tmp_path, "aggregate.yml", """name: Aggregate
+on: pull_request
+jobs:
+  publish:
+    name: Publish aggregate
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh api repos/${{ github.repository }}/statuses/${{ github.sha }} -f context='All CI' -f state=pending
+""")
+    _write_workflow(tmp_path, "script.yml", """name: Script aggregate
+on: pull_request
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const run = require('./.github/scripts/aggregate.js')
+            await run({ github, context })
+""")
+    scripts = tmp_path / ".github" / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "aggregate.js").write_text(
+        "module.exports = async ({ github, context }) => {\n"
+        "  await github.rest.repos.createCommitStatus({ ...context.repo,\n"
+        "    sha: context.sha, state: 'success', context: 'Script CI' })\n}\n",
+        encoding="utf-8")
+    _write_workflow(tmp_path, "reader.yml", """name: Reader
+on: pull_request
+jobs:
+  read:
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh api repos/${{ github.repository }}/commits/${{ github.sha }}/statuses
+      - run: echo 'All CI'
+""")
+    pubs = _scan(tmp_path).get("workflow_status_publishers")
+    assert set(pubs) == {".github/workflows/aggregate.yml", ".github/workflows/script.yml"}
+    assert pubs[".github/workflows/aggregate.yml"]["contexts"] == ["All CI"]
+    script = pubs[".github/workflows/script.yml"]
+    assert ".github/scripts/aggregate.js" in script["sources"]
+    assert script["contexts"] == ["Script CI"] and "names" not in script
+
+
+@pytest.mark.parametrize("action_yml,entry", [
+    ("runs:\n  using: node20\n  main: dist/index.js\n", "dist/index.js"),
+    ("runs:\n  using: node20\n  pre: dist/setup.js\n  main: dist/noop.js\n",
+     "dist/setup.js"),
+    ("runs:\n  using: node20\n  main: dist/noop.js\n  post: 'dist/post.js'\n",
+     "dist/post.js"),
+    ("runs:\n  using: composite\n  steps:\n"
+     "    - run: node ${{ github.action_path }}/scripts/post.mjs\n      shell: bash\n",
+     "scripts/post.mjs"),
+    ("runs:\n  using: composite\n  steps:\n"
+     "    - run: python \"$GITHUB_ACTION_PATH/scripts/post.py\"\n      shell: bash\n",
+     "scripts/post.py"),
+], ids=["node-main", "node-pre", "node-post", "composite-action_path",
+        "composite-GITHUB_ACTION_PATH"])
+def test_workflow_status_publishers_resolves_local_action_entrypoints_from_action_dir(
+        tmp_path: Path, action_yml: str, entry: str):
+    """A local action's `main:` / `pre:` / `post:` entrypoint, and a composite step
+    that runs a script under `github.action_path`, live in the ACTION directory, not
+    the repo root. When that file is what posts the required status, the workflow is
+    still a publisher; resolving it from the root would miss it and keep the status
+    framed as an outside gate."""
+    _write_workflow(tmp_path, "aggregate.yml", """name: Aggregate
+on: pull_request
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/aggregate
+""")
+    action = tmp_path / ".github" / "actions" / "aggregate"
+    (action / Path(entry).parent).mkdir(parents=True)
+    (action / "action.yml").write_text("name: aggregate\n" + action_yml, encoding="utf-8")
+    (action / entry).write_text(
+        "await octokit.rest.repos.createCommitStatus({ context: 'All CI' })\n",
+        encoding="utf-8")
+    pubs = _scan(tmp_path).get("workflow_status_publishers")
+    assert set(pubs) == {".github/workflows/aggregate.yml"}
+    assert pubs[".github/workflows/aggregate.yml"]["contexts"] == ["All CI"]
+
+
+def test_workflow_status_publishers_follows_script_imports(tmp_path: Path):
+    """The script a workflow runs often imports a helper that posts the status
+    (`require('./lib/post.js')`, relative to the SCRIPT's folder). Following only the
+    first script would miss the publisher and keep the status an outside gate."""
+    _write_workflow(tmp_path, "aggregate.yml", """name: Aggregate
+on: pull_request
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - run: node .github/scripts/aggregate.js
+""")
+    lib = tmp_path / ".github" / "scripts" / "lib"
+    lib.mkdir(parents=True)
+    (lib.parent / "aggregate.js").write_text(
+        "const post = require('./lib/post.js')\npost('All CI')\n", encoding="utf-8")
+    (lib / "post.js").write_text(
+        "module.exports = (ctx) => octokit.rest.repos.createCommitStatus({ context: ctx })\n",
+        encoding="utf-8")
+    pubs = _scan(tmp_path).get("workflow_status_publishers")
+    assert set(pubs) == {".github/workflows/aggregate.yml"}
+    assert ".github/scripts/lib/post.js" in pubs[".github/workflows/aggregate.yml"]["sources"]
+    # The context is passed in at run time, so the literal fallback carries the name.
+    import collect_runs as cr
+    assert cr._repo_published_required({"All CI", "Lint"}, pubs) == {"All CI"}
+
+
+def test_workflow_status_publishers_keeps_context_name_past_the_size_cap(tmp_path: Path):
+    """A bundled entrypoint (`dist/index.js`) is often over the per-source cap. When the
+    context literal sits past the cap, the stored text must still carry it; otherwise
+    the workflow is recorded as a publisher but collect cannot match the name, and the
+    status silently falls back to an outside gate."""
+    import collect_runs as cr
+    _write_workflow(tmp_path, "aggregate.yml", """name: Aggregate
+on: pull_request
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - run: node dist/index.js
+""")
+    (tmp_path / "dist").mkdir()
+    (tmp_path / "dist" / "index.js").write_text(
+        "octokit.rest.repos.createCommitStatus(x);\n" + ("var a=1;" * 40_000)
+        + "\nconst CONTEXT = 'All CI';\n", encoding="utf-8")
+    pubs = _scan(tmp_path).get("workflow_status_publishers")
+    assert set(pubs) == {".github/workflows/aggregate.yml"}
+    assert len(json.dumps(pubs)) < 400_000
+    assert cr._repo_published_required({"All CI"}, pubs) == {"All CI"}
+
+
+@pytest.mark.parametrize("text,want", [
+    ("gh api repos/o/r/statuses/$SHA -f \"context=All CI\" -f state=success", ["All CI"]),
+    ("gh api repos/o/r/statuses/$SHA -f context='All CI'", ["All CI"]),
+    ("gh api repos/o/r/statuses/$SHA -f context=lint", ["lint"]),
+    ("      context: All CI\n", ["All CI"]),
+    ('Context: github.String("Go CI"),', ["Go CI"]),
+    ("create_status(state='success', context=\"Py CI\")", ["Py CI"]),
+])
+def test_status_contexts_reads_each_literal_form_once(text: str, want: list):
+    """Each way of writing a literal context yields exactly that name, with no
+    fragment (`All` from `"context=All CI"`) or wrapper (`github.String(...)`) that a
+    short required name could then falsely match."""
+    sys.path.insert(0, str(_SKILL_DIR / "scripts"))
+    import scan  # noqa: E402
+    assert scan._status_contexts([text]) == (want, None)
+
+
+def test_repo_published_required_matches_posted_context_not_any_mention(tmp_path: Path):
+    """A required name that merely APPEARS in a status-posting workflow (its title, a
+    comment, the list of checks an aggregator waits on) is not posted by it. Counting
+    it would un-scope a correctly scoped gate (an external `Vercel` app check next to
+    a real `Test` job) or relabel a CLA bot as repo-published. Only the context the
+    workflow actually posts, a literal `context` value, counts."""
+    import collect_runs as cr
+    _write_workflow(tmp_path, "preview.yml", """name: Deploy preview to Vercel
+on: pull_request
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run build  # runs on ci
+      - run: gh api repos/${{ github.repository }}/statuses/${{ github.sha }} -f context='Preview' -f state=success
+""")
+    _write_workflow(tmp_path, "aggregate.yml", """name: Aggregate
+on: pull_request
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const waitFor = ['Test', 'license/cla']
+            await github.rest.repos.createCommitStatus({ ...context.repo,
+              sha: context.sha, state: 'success', context: "All CI" })
+""")
+    pubs = _scan(tmp_path).get("workflow_status_publishers")
+    assert set(pubs) == {".github/workflows/preview.yml", ".github/workflows/aggregate.yml"}
+    req = {"Vercel", "Test", "license/cla", "ci", "build", "All CI", "Preview"}
+    assert cr._repo_published_required(req, pubs) == {"All CI", "Preview"}

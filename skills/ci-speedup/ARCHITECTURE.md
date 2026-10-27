@@ -2966,6 +2966,21 @@ consumes it:
   `triggerdotdev/trigger.dev`, whose required `All PR Checks` aggregator gates every PR but
   whose required `Devin Review` status is never a check-run). A fully-external suite
   (nothing observable) still falls back to the PR-floor.
+- **A status the repo posts itself is not an outside gate (issue #119).** scan.py records
+  `workflow_status_publishers`: each workflow whose YAML, local action, or repo-local script
+  posts a commit status (a `repos/…/statuses/<sha>` call, `createCommitStatus`, a known
+  status action), with the literal contexts those sources post (`contexts`). Only when a
+  context is built at run time does it keep the sources' string literals (`names`) as a
+  looser fallback; no raw source text is stored. Local-action entrypoints resolve from the
+  action's folder, and scripts are followed transitively (bounded). A required context
+  equal to one of those (`_repo_published_required`) is an in-repo aggregate that may wait
+  on any job with no `needs:` edge. A name that merely appears in a publisher (its title,
+  a comment, the checks an aggregator waits on) does not count: that would un-scope a
+  correctly scoped gate. The sampler never calls the suite unsatisfiable on its account
+  (`required_checks_repo_published`), `_required_suite_all_external` returns False, and
+  when it names no job (`_required_reachability_unresolved`) the scoper stays inert and
+  the structural stamp says `unknown`, never `not-required`. The pole is an `unresolved`
+  best guess; which jobs the publisher waits on is not traced.
 - **No silent drop.** Excluded checks are recorded on `cp["dropped_non_required_checks"]`
   (sibling to `dropped_non_pr_checks`) AND surfaced as a report footnote ("Narrowed to
   merge-blocking checks: …"); a dropped check loses its structural pole/findings but the

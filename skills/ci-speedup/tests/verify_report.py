@@ -8464,6 +8464,9 @@ def _vr_opt80_merge_gating_problems(f: dict, data: dict) -> list[str]:
     if data.get("required_checks_complete") is not True:
         return ["the required-check read was not complete, so no job is shown to "
                 "be on the merge-gating path"]
+    if _vr_required_reachability_unresolved(data):
+        return ["a required status is published by this repo's own workflow and "
+                "names no job, so which jobs the merge waits on is unknown"]
     req = {str(r) for r in _as_list(data.get("required_checks"))}
     rc, rj, jk = (str(mg.get("required_check") or ""), str(mg.get("required_job") or ""),
                   str(mg.get("job_key") or ""))
@@ -8685,6 +8688,30 @@ _VR_OPT80_MERGE_WAIT_CLAIM_RE = re.compile(
 _VR_OPT80_SLOWEST_JOB = "is this workflow's slowest job"
 
 
+def _vr_required_reachability_unresolved(data: dict) -> bool:
+    """Minimal own copy of `collect_runs._required_reachability_unresolved` (issue
+    #119): some required context is one a workflow that posts commit statuses posts
+    (`workflow_status_publishers`: exactly equal to one of an entry's `contexts`, or
+    its `names` fallback) and no YAML job in `workflow_job_graph` is that context's
+    check-run. Such a context (an in-repo `All CI` aggregate) waits on jobs no
+    `needs:` edge records, so no job can be called off the merge wait."""
+    pubs = _as_dict(data.get("workflow_status_publishers"))
+    posted = {str(s).strip() for p in pubs.values() if isinstance(p, dict)
+              for k in ("contexts", "names") for s in _as_list(p.get(k))}
+    if not posted:
+        return False
+    graph = _as_dict(data.get("workflow_job_graph"))
+    names = data.get("workflow_names")
+    for r in {str(x) for x in _as_list(data.get("required_checks"))}:
+        if r.strip() not in posted:
+            continue
+        if not any(_vr_opt80_check_names_job(r, str(k), _as_dict(n),
+                                             _vr_opt80_workflow_prefixes(str(w), names))
+                   for w, wjobs in graph.items() for k, n in _as_dict(wjobs).items()):
+            return True
+    return False
+
+
 def _vr_opt80_tail_withheld_expected(f: dict, data: dict) -> "set[str] | None":
     """The reasons the stamped facts allow, in the collector's gate order, or
     None when the doc predates the facts (no `declared_pr_workflows`)."""
@@ -8700,6 +8727,10 @@ def _vr_opt80_tail_withheld_expected(f: dict, data: dict) -> "set[str] | None":
     if not (data.get("required_checks_complete") is True
             and _as_list(data.get("required_checks"))
             and _as_dict(_as_dict(data.get("workflow_job_graph")).get(wf))):
+        return {"merge_gating_unknown"}
+    # A required status the repo publishes itself, naming no job: which jobs the
+    # merge waits on is unknown, so "not merge-gating" is not a stamped fact.
+    if _vr_required_reachability_unresolved(data):
         return {"merge_gating_unknown"}
     return {"not_merge_gating", "tail_not_derivable"}
 
