@@ -4,8 +4,9 @@ Each cell below is a repository doing the right thing, paired with a negative
 control that must keep failing, so no fix can over-credit:
 
 1. Dependency caching that is ON BY DEFAULT (setup-go v4+, setup-uv v5+,
-   setup-node v5+ with a package-manager field, setup-gradle) or switched on by
-   an input other than `cache:` (setup-ruby's `bundler-cache`).
+   setup-node v5+ with a package-manager field, gradle/actions/setup-gradle,
+   gradle/gradle-build-action, bahmutov/npm-install) or switched on by an
+   input other than `cache:` (setup-ruby's `bundler-cache`).
 2. Test sharding through a matrix GENERATED AT RUNTIME
    (`matrix: ${{ fromJSON(...) }}`), which has no mapping to read axes from.
 3. Job timeouts on a repository whose every job delegates to a cross-repo
@@ -22,6 +23,8 @@ from pathlib import Path
 
 import pytest
 import yaml
+
+from _baseline_engine import assert_toward_credit, baseline_engine
 
 _SKILL_DIR = Path(__file__).resolve().parents[1]
 
@@ -45,8 +48,23 @@ SHALLOW = "ci.checkout.shallow-clone"
 
 
 def facts_for(root: Path, *files: tuple[str, str]) -> dict:
+    """The facts for these files, after checking every case against the
+    pre-OD-CS23 engine: no verdict in this module may move away from credit
+    (`_baseline_engine`), so "no score can drop" holds case by case."""
     parsed = [(rel, yaml.safe_load(raw) or {}, raw) for rel, raw in files]
-    return pf_mod._practice_facts(parsed, root)
+    facts = pf_mod._practice_facts(parsed, root)
+    base = baseline_engine()
+    if base is not None:
+        assert_toward_credit(base._practice_facts(parsed, root), facts)
+    return facts
+
+
+def _manifest(root: Path, name: str, content: str) -> None:
+    """Write a manifest; a Go module also gets the `go.sum` setup-go's default
+    cache keys on (without it, setup-go restores nothing)."""
+    (root / name).write_text(content)
+    if name == "go.mod":
+        (root / "go.sum").write_text("")
 
 
 def _steps_wf(*steps: str, runs_on: str = "ubuntu-latest") -> tuple[str, str]:
@@ -61,7 +79,8 @@ def _steps_wf(*steps: str, runs_on: str = "ubuntu-latest") -> tuple[str, str]:
 @pytest.mark.parametrize("manifest,content,step", [
     # setup-go caches by default from v4 (its `cache` input defaults to true)
     ("go.mod", "module x\n", "uses: actions/setup-go@v5"),
-    # a SHA names no major: a default-on action counts as caching (ci-speedup)
+    # a SHA names no major; its `# v5` version comment names a default-on
+    # release, so the comment rule leaves the credit in place
     ("go.mod", "module x\n", f"uses: actions/setup-go@{SHA} # v5"),
     # setup-uv caches by default from v5 (`enable-cache: auto`)
     ("pyproject.toml", "[project]\nname='x'\n", "uses: astral-sh/setup-uv@v6"),
@@ -78,7 +97,7 @@ def _steps_wf(*steps: str, runs_on: str = "ubuntu-latest") -> tuple[str, str]:
      "uses: actions/setup-node@v6"),
 ])
 def test_caching_on_by_default_passes(tmp_path, manifest, content, step):
-    (tmp_path / manifest).write_text(content)
+    _manifest(tmp_path, manifest, content)
     f = facts_for(tmp_path, _steps_wf("uses: actions/checkout@v5", step, "run: make test"))[CACHE]
     assert f["state"] == "pass", f
 
@@ -105,7 +124,7 @@ def test_caching_on_by_default_passes(tmp_path, manifest, content, step):
     ("package.json", '{"packageManager": "pnpm@9.1.0"}', f"uses: actions/setup-node@{SHA}"),
 ])
 def test_caching_off_stays_a_fail(tmp_path, manifest, content, step):
-    (tmp_path / manifest).write_text(content)
+    _manifest(tmp_path, manifest, content)
     f = facts_for(tmp_path, _steps_wf("uses: actions/checkout@v5", step, "run: make test"))[CACHE]
     assert f["state"] == "fail", f
 
@@ -149,7 +168,7 @@ def test_setup_node_auto_cache_needs_a_finished_checkout(tmp_path, steps):
     ("go.mod", f"{{uses: actions/setup-go@{SHA}, with: {{cache: true}}}} # v3", "pass"),
 ])
 def test_a_sha_pin_version_comment_decides_the_default(tmp_path, manifest, step, state):
-    (tmp_path / manifest).write_text("module x\n" if manifest == "go.mod" else "[project]\n")
+    _manifest(tmp_path, manifest, "module x\n" if manifest == "go.mod" else "[project]\n")
     f = facts_for(tmp_path, _steps_wf("uses: actions/checkout@v5", step, "run: make test"))[CACHE]
     assert f["state"] == state, f
 
@@ -173,7 +192,7 @@ def test_a_sha_pin_version_comment_decides_the_default(tmp_path, manifest, step,
 ])
 def test_setup_uv_default_is_credited_only_on_github_hosted_runners(tmp_path, runs_on, step, state):
     (tmp_path / "pyproject.toml").write_text("[project]\n")
-    (tmp_path / "go.mod").write_text("module x\n")
+    _manifest(tmp_path, "go.mod", "module x\n")
     f = facts_for(tmp_path, _steps_wf("uses: actions/checkout@v5", step, "run: make test",
                                       runs_on=runs_on))[CACHE]
     assert f["state"] == state, f
@@ -320,3 +339,293 @@ def test_a_step_if_negating_pull_request_still_counts_under_pull_request_target(
     f = facts_for(tmp_path, _step_if_wf("github.event_name != 'pull_request'",
                                         on="on: [pull_request_target]\n"))[SHALLOW]
     assert f["state"] == "fail", f
+
+
+# ---------------------------------------------------------------------------
+# Review fixes (#154): each case below was credited by mistake before them
+# ---------------------------------------------------------------------------
+
+def _cache(root: Path, *steps: str, runs_on: str = "ubuntu-latest") -> dict:
+    return facts_for(root, _steps_wf(*steps, runs_on=runs_on))[CACHE]
+
+
+@pytest.mark.parametrize("step,state", [
+    # every common pin-comment spelling names the release it pins
+    (f"uses: actions/setup-go@{SHA} # tag=v3.5.0", "fail"),
+    (f"uses: actions/setup-go@{SHA} # ratchet:actions/setup-go@v3", "fail"),
+    (f"uses: actions/setup-go@{SHA} # pin@v3", "fail"),
+    (f'uses: "actions/setup-go@{SHA}" # v3', "fail"),
+    (f"uses: 'actions/setup-go@{SHA}' # v3.5.0", "fail"),
+    # a flow-mapping step carries its comment after the closing brace
+    (f"{{uses: actions/setup-go@{SHA}}} # v3", "fail"),
+    (f"{{uses: actions/setup-go@{SHA}, with: {{go-version: '1.22'}}}} # v3", "fail"),
+    # a comment that is there but names no release cannot vouch for the pin
+    (f"uses: actions/setup-go@{SHA} # pinned by the platform team", "fail"),
+    # controls
+    (f"uses: actions/setup-go@{SHA} # v3.5.0", "fail"),
+    (f"uses: actions/setup-go@{SHA} # v4", "pass"),
+    (f"uses: actions/setup-go@{SHA} # tag=v5.0.2", "pass"),
+    (f"uses: actions/setup-go@{SHA} # ratchet:actions/setup-go@v5", "pass"),
+    (f"{{uses: actions/setup-go@{SHA}}} # v5", "pass"),
+    (f"uses: actions/setup-go@{SHA}", "pass"),
+])
+def test_every_version_comment_spelling_is_read(tmp_path, step, state):
+    _manifest(tmp_path, "go.mod", "module x\n")
+    assert _cache(tmp_path, "uses: actions/checkout@v5", step, "run: go test")["state"] == state
+
+
+def test_a_version_comment_in_a_composite_is_read(tmp_path):
+    _manifest(tmp_path, "go.mod", "module x\n")
+    act = tmp_path / ".github" / "actions" / "setup"
+    act.mkdir(parents=True)
+    (act / "action.yml").write_text(
+        f"runs:\n  using: composite\n  steps:\n    - uses: actions/setup-go@{SHA} # v3\n")
+    f = _cache(tmp_path, "uses: actions/checkout@v5", "uses: ./.github/actions/setup",
+               "run: go test")
+    assert f["state"] == "fail", f
+
+
+def test_a_composite_action_file_is_read_once(tmp_path, monkeypatch):
+    """The composite's raw text (for version comments) comes from the same
+    read that parsed it: no second read that could see different bytes."""
+    _manifest(tmp_path, "go.mod", "module x\n")
+    act = tmp_path / ".github" / "actions" / "setup"
+    act.mkdir(parents=True)
+    (act / "action.yml").write_text(
+        "runs:\n  using: composite\n  steps:\n    - uses: actions/setup-go@v5\n")
+    reads: list[str] = []
+    real = Path.read_text
+
+    def counting(self, *a, **k):
+        if self.name == "action.yml":
+            reads.append(str(self))
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_text", counting)
+    pf_mod._practice_facts([("ci.yml", {"on": "pull_request", "jobs": {}}, "")], tmp_path)
+    assert len(reads) == len(set(reads)), reads
+
+
+@pytest.mark.parametrize("pkg,steps,state", [
+    # `package-manager-cache: ${{ … }}` decides nothing by itself: read as its
+    # default (`true`), the automatic cache still needs a manager to key on
+    ('{"name": "x"}', ("uses: actions/checkout@v5",), "fail"),
+    ('{"name": "x"}', (), "fail"),
+    ('{"packageManager": "npm@10.9.0"}', (), "fail"),
+    # control: a manager field after a root checkout caches
+    ('{"packageManager": "npm@10.9.0"}', ("uses: actions/checkout@v5",), "pass"),
+])
+def test_an_expression_package_manager_cache_is_read_as_its_default(tmp_path, pkg, steps, state):
+    (tmp_path / "package.json").write_text(pkg)
+    step = ('{uses: actions/setup-node@v5, with: '
+            '{package-manager-cache: "${{ inputs.cache }}"}}')
+    assert _cache(tmp_path, *steps, step, "run: npm ci")["state"] == state
+
+
+@pytest.mark.parametrize("files,steps,state", [
+    # setup-go's default cache keys on go.sum in the checked-out workspace
+    ({"go.mod": "module x\n"}, ("uses: actions/setup-go@v5", "uses: actions/checkout@v5"), "fail"),
+    ({"go.mod": "module x\n"}, ("uses: actions/checkout@v5", "uses: actions/setup-go@v5"), "fail"),
+    ({"go.mod": "module x\n", "go.sum": ""},
+     ("uses: actions/setup-go@v5", "uses: actions/checkout@v5"), "fail"),
+    ({"go.mod": "module x\n", "go.sum": ""},
+     ("{uses: actions/checkout@v5, with: {repository: o/r}}", "uses: actions/setup-go@v5"), "fail"),
+    # controls
+    ({"go.mod": "module x\n", "go.sum": ""},
+     ("uses: actions/checkout@v5", "uses: actions/setup-go@v5"), "pass"),
+    ({"svc/go.sum": ""},
+     ("uses: actions/checkout@v5",
+      "{uses: actions/setup-go@v5, with: {cache-dependency-path: svc/go.sum}}"), "pass"),
+    ({"svc/go.sum": ""},
+     ("uses: actions/checkout@v5",
+      "{uses: actions/setup-go@v5, with: {cache-dependency-path: 'svc/*.sum'}}"), "pass"),
+    ({"go.sum": ""},
+     ("uses: actions/checkout@v5",
+      "{uses: actions/setup-go@v5, with: {cache-dependency-path: missing/go.sum}}"), "fail"),
+])
+def test_setup_go_default_needs_a_checkout_and_a_go_sum(tmp_path, files, steps, state):
+    for rel, text in files.items():
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(text)
+    assert _cache(tmp_path, *steps, "run: go build")["state"] == state
+
+
+@pytest.mark.parametrize("runs_on,state", [
+    ("ubuntu-selfhosted-pool", "fail"),
+    ("self-hosted", "fail"),
+    ("windows-builders", "fail"),
+    ("macos-m1-farm", "fail"),
+    ("ubuntu-latest", "pass"),
+    ("ubuntu-24.04", "pass"),
+    ("ubuntu-24.04-arm", "pass"),
+    ("ubuntu-slim", "pass"),
+    ("macos-15", "pass"),
+    ("macos-15-intel", "pass"),
+    ("macos-15-xlarge", "pass"),
+    ("windows-2025", "pass"),
+    ("windows-11-arm", "pass"),
+])
+def test_only_published_github_hosted_labels_earn_setup_uvs_default(tmp_path, runs_on, state):
+    (tmp_path / "pyproject.toml").write_text("[project]\n")
+    f = _cache(tmp_path, "uses: actions/checkout@v5", "uses: astral-sh/setup-uv@v6",
+               "run: uv sync", runs_on=runs_on)
+    assert f["state"] == state, f
+
+
+@pytest.mark.parametrize("files,step", [
+    # action inputs are case-insensitive: `Cache: false` is `cache: false`
+    ({"go.mod": "module x\n", "go.sum": ""}, "{uses: actions/setup-go@v5, with: {Cache: false}}"),
+    ({"pyproject.toml": "[project]\n"}, "{uses: astral-sh/setup-uv@v6, with: {Enable-Cache: false}}"),
+    ({"build.gradle": ""}, "{uses: gradle/actions/setup-gradle@v4, with: {Cache-Disabled: true}}"),
+    ({"package.json": '{"packageManager": "npm@10.9.0"}'},
+     "{uses: actions/setup-node@v5, with: {Package-Manager-Cache: false}}"),
+])
+def test_input_names_are_read_case_insensitively(tmp_path, files, step):
+    for rel, text in files.items():
+        (tmp_path / rel).write_text(text)
+    f = _cache(tmp_path, "uses: actions/checkout@v5", step, "run: make")
+    assert f["state"] == "fail", f
+
+
+def test_a_bom_prefixed_package_json_is_named_not_credited(tmp_path):
+    """setup-node reads package.json as UTF-8 and hands it to JSON.parse with
+    no BOM strip, so a byte-order mark turns its automatic cache off. The
+    fail names it rather than leaving a silent "no cache"."""
+    (tmp_path / "package.json").write_bytes(b'\xef\xbb\xbf{"packageManager": "npm@10.9.0"}')
+    f = _cache(tmp_path, "uses: actions/checkout@v5", "uses: actions/setup-node@v5", "run: npm ci")
+    assert f["state"] == "fail", f
+    assert ("setup-node@v5 default cache could not be resolved: package.json starts with a "
+            "byte-order mark" in f["evidence"]), f
+
+
+@pytest.mark.parametrize("pkg,step,reason", [
+    ("not json", "uses: actions/setup-node@v5", "package.json is not valid JSON"),
+    ("[1, 2]", "uses: actions/setup-node@v5", "package.json is not a JSON object"),
+    ('{"packageManager": "pnpm@9.1.0"}', f"uses: actions/setup-node@{SHA}",
+     "a SHA pin names no release, and setup-node v5 and v6 decide this package.json differently"),
+])
+def test_an_unresolved_default_is_named_in_the_fail(tmp_path, pkg, step, reason):
+    (tmp_path / "package.json").write_text(pkg)
+    f = _cache(tmp_path, "uses: actions/checkout@v5", step, "run: npm ci")
+    assert f["state"] == "fail", f
+    ref = step.split("@", 1)[1]
+    assert f"setup-node@{ref} default cache could not be resolved: {reason}" in f["evidence"], f
+    assert f["files"] == ["ci.yml"], f
+    raw = _steps_wf("uses: actions/checkout@v5", step)[1]
+    recorded = pf_mod._unresolved_setup_defaults([("ci.yml", yaml.safe_load(raw), raw)], tmp_path)
+    assert recorded == [{"file": "ci.yml", "step": f"actions/setup-node@{ref}",
+                         "reason": reason}], recorded
+
+
+def test_an_unresolved_default_is_recorded_in_data_sources(tmp_path):
+    import subprocess
+    cc = _load("ci_score_collect_config_undeserved_fails", "scripts/collect_config.py")
+    root = tmp_path / "repo"
+    (root / ".github" / "workflows").mkdir(parents=True)
+    wf = _steps_wf("uses: actions/checkout@v5", "uses: actions/setup-node@v5", "run: npm ci")[1]
+    (root / ".github" / "workflows" / "ci.yml").write_text(wf)
+    (root / "package.json").write_text("{nope")
+    env = {"PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": str(root),
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    for args in (["init", "-q"], ["add", "."], ["commit", "-qm", "x"]):
+        subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True, env=env)
+    doc, code = cc.collect(root)
+    assert code == 0
+    assert doc["data_sources"]["unresolved_setup_defaults"] == [
+        {"file": ".github/workflows/ci.yml", "step": "actions/setup-node@v5",
+         "reason": "package.json is not valid JSON"}]
+
+
+def test_a_resolved_repo_records_nothing(tmp_path):
+    (tmp_path / "package.json").write_text('{"packageManager": "npm@10.9.0"}')
+    raw = _steps_wf("uses: actions/checkout@v5", "uses: actions/setup-node@v5")[1]
+    assert pf_mod._unresolved_setup_defaults([("ci.yml", yaml.safe_load(raw), raw)],
+                                             tmp_path) == []
+
+
+@pytest.mark.parametrize("comment,state", [
+    # owner decision 3 (OD-CS23): a version comment may settle a SHA pin the
+    # v5 and v6 rules disagree on, but only when every release it names caches
+    ("# v5.0.0", "pass"),
+    ("# tag=v5", "pass"),
+    ("# v6.0.0", "fail"),
+    ("", "fail"),
+    ("# pinned", "fail"),
+])
+def test_a_version_comment_settles_an_undecided_setup_node_pin(tmp_path, comment, state):
+    (tmp_path / "package.json").write_text('{"packageManager": "yarn@4.1.0"}')
+    f = _cache(tmp_path, "uses: actions/checkout@v5",
+               f"uses: actions/setup-node@{SHA} {comment}".rstrip(), "run: yarn install")
+    assert f["state"] == state, f
+
+
+def test_a_comment_cannot_settle_a_pin_without_a_root_checkout(tmp_path):
+    (tmp_path / "package.json").write_text('{"packageManager": "yarn@4.1.0"}')
+    f = _cache(tmp_path, f"uses: actions/setup-node@{SHA} # v5.0.0", "run: yarn install")
+    assert f["state"] == "fail", f
+
+
+_RACING_CHECKOUTS = {
+    # a checkout in the same `parallel:` group may still be running
+    "same group": ("on: pull_request\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n"
+                   "      - parallel:\n"
+                   "          - uses: actions/checkout@v5\n"
+                   "          - uses: {action}\n"
+                   "      - run: make\n"),
+    # a background checkout may still be running when the next step starts
+    "background": ("on: pull_request\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n"
+                   "      - uses: actions/checkout@v5\n        background: true\n"
+                   "      - uses: {action}\n"
+                   "      - run: make\n"),
+    # control: a checkout in an EARLIER group has finished (implicit wait)
+    "earlier group": ("on: pull_request\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n"
+                      "      - parallel:\n"
+                      "          - uses: actions/checkout@v5\n"
+                      "          - run: echo hi\n"
+                      "      - uses: {action}\n"
+                      "      - run: make\n"),
+}
+
+
+@pytest.mark.parametrize("shape,state", [("same group", "fail"), ("background", "fail"),
+                                         ("earlier group", "pass")])
+@pytest.mark.parametrize("action", ["actions/setup-node@v5", "actions/setup-go@v5"])
+def test_a_checkout_that_may_still_be_running_does_not_count(tmp_path, shape, state, action):
+    (tmp_path / "package.json").write_text('{"packageManager": "npm@10.9.0"}')
+    _manifest(tmp_path, "go.mod", "module x\n")
+    raw = _RACING_CHECKOUTS[shape].replace("{action}", action)
+    f = facts_for(tmp_path, ("ci.yml", raw))[CACHE]
+    assert f["state"] == state, f
+
+
+# --- test gaps the mutation review found ------------------------------------
+
+def test_one_unconditional_full_history_checkout_still_counts(tmp_path):
+    wf = ("ci.yml", "on: [pull_request, push]\njobs:\n  test:\n    steps:\n"
+          "      - uses: actions/checkout@v4\n"
+          "        if: github.event_name == 'push'\n"
+          "        with:\n          fetch-depth: 0\n"
+          "      - uses: actions/checkout@v4\n"
+          "        with:\n          fetch-depth: 0\n"
+          "      - run: pytest\n")
+    assert facts_for(tmp_path, wf)[SHALLOW]["state"] == "fail"
+
+
+def test_a_checkout_of_another_repository_does_not_feed_setup_node(tmp_path):
+    (tmp_path / "package.json").write_text('{"packageManager": "npm@10.9.0"}')
+    f = _cache(tmp_path, "{uses: actions/checkout@v5, with: {repository: o/r}}",
+               "uses: actions/setup-node@v5", "run: npm ci")
+    assert f["state"] == "fail", f
+
+
+def test_a_local_reusable_chain_keeps_job_timeouts_graded(tmp_path):
+    caller = ("ci.yml", PR_ON + "jobs:\n  t:\n    uses: ./.github/workflows/a.yml\n")
+    mid = ("a.yml", "on: workflow_call\njobs:\n  b:\n    uses: ./.github/workflows/b.yml\n")
+    assert facts_for(tmp_path, caller, mid)[TIMEOUTS]["state"] == "fail"
+
+
+def test_a_literal_string_matrix_is_not_credited(tmp_path):
+    wf = ("ci.yml", PR_ON + "jobs:\n  test:\n    strategy:\n      matrix: not-an-expression\n"
+          "    steps:\n      - run: pytest\n")
+    assert facts_for(tmp_path, wf)[SHARD]["state"] == "fail"
