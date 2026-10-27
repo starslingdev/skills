@@ -15638,8 +15638,11 @@ def _required_reachability_unresolved(
     """True when some required context names no job here but the repo publishes it
     itself (`_repo_published_required`). Its real inputs are unknown, so the `needs:`
     reachability from the OTHER required checks is incomplete: neither "all external"
-    nor "not required" can be claimed. The scoper, the PR-floor fallback and the
-    structural not-required stamp all read this one test, so they never disagree."""
+    nor "not required" can be claimed. The scoper and the structural not-required
+    stamp both read this one test, so they never disagree. The PR-floor fallback
+    (`_required_suite_all_external`) checks `_repo_published_required` directly; it
+    only matters when no required check names a job, and then every published name
+    names no job either, so it agrees with this test."""
     published = _repo_published_required(req_names, status_publishers)
     return any(_check_to_job_node(r, job_graph or {}, crit_by_wf) is None
                for r in published)

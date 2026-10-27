@@ -5287,6 +5287,11 @@ def test_collect_repo_published_aggregate_is_not_a_pr_floor_fallback(monkeypatch
     md = bp.render(out, {}, {}, {}, "2026-10-27")
     assert "No file-backed required gate" not in md
     assert "All CI" in md   # the repo-published status is named, not silently absent
+    # The footnote sits in the Data sources footer, AFTER the gate; it must not point
+    # the reader "below" to a gate that is above it.
+    note = next(ln for ln in md.splitlines() if "posted by this repo's own workflow" in ln)
+    assert md.index(note) > md.index("Test")
+    assert "gate below" not in note
 
 
 # ---------------------------------------------------------------------------

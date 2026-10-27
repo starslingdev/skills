@@ -4654,7 +4654,8 @@ def _provenance_block(doc: dict[str, Any], repo: str, captured_at: str) -> list[
         out.append(f"> - ⚠️ **Required status posted by this repo's own workflow:** "
                    f"{shown}{more} — a workflow here publishes it as a commit status, so it "
                    "is not an outside gate, but which checks it waits on isn't traced. The "
-                   "gate below is the slowest check on a typical PR (a best guess), and no "
+                   "gate shown in this report is the slowest check on a typical PR (a best "
+                   "guess), and no "
                    "check is labelled non-required on its account.")
     if captured_at:
         out.append(f"> - **Step internals + cross-run checks (the per-pole drill-downs):** the "

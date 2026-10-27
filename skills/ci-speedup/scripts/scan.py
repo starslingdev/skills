@@ -5172,10 +5172,12 @@ def _build_workflow_job_graph(
     return graph
 
 
-# A commit-status WRITE: a `repos/<owner>/<repo>/statuses/<sha>` call (gh api, curl,
+# A commit-status call: a `repos/<owner>/<repo>/statuses/<sha>` call (gh api, curl,
 # octokit.request, a Python f-string — the trailing `/` before the sha keeps the
 # `commits/<sha>/statuses` LIST read out), an Octokit / PyGithub / go-github
-# create-status call, or a known status-publishing marketplace action.
+# create-status call, or a known status-publishing marketplace action. The HTTP
+# method is NOT checked, so a GET on `repos/.../statuses/<sha>` also counts: an
+# over-match only leaves the required gate unresolved, never claims gating.
 _STATUS_POST_RE = re.compile(
     r"repos/(?:\$\{\{[^}]*\}\}|[^\s'\"`])*?/statuses/"
     r"|\bcreate_?(?:commit_?)?status\s*\("
