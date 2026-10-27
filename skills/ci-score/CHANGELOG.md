@@ -23,10 +23,13 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
   `package-manager-cache: false`, `cache-disabled: true`) still fails, as do
   versions before the default turned on. A SHA-pinned action names no
   version, as in the speed engine, so a default-on action pinned by SHA
-  counts as caching, even when the SHA is a release from before the default
-  turned on, and setup-node counts only when its v5 and v6 rules agree.
+  counts as caching unless a `# vN` comment beside the SHA names a release
+  from before the default turned on (`@<sha> # v3.5.0` on setup-go earns
+  nothing), and setup-node counts only when its v5 and v6 rules agree.
   setup-uv's default (`enable-cache: auto`) caches only on GitHub-hosted
-  runners, and it is credited whatever the runner. setup-node's default is credited only after a checkout of this
+  runners, so with no input it counts only when the job's `runs-on` is a
+  literal GitHub-hosted label (`ubuntu-*`, `windows-*`, `macos-*`); on any
+  other runner, `enable-cache: true` earns it, and the fix says so. setup-node's default is credited only after a checkout of this
   repository to the workspace root has run earlier in the same job: before
   any checkout, or after a checkout into a sub-path or of another
   repository, there is no `package.json` for it to read.

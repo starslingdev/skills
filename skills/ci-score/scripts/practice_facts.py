@@ -1163,9 +1163,52 @@ def _checkout_moves_workspace(step: dict) -> bool:
     return bool(w.get("repository")) or path not in ("", ".", "./")
 
 
-def _step_caches_by_default(step: dict, package_json: Any, workspace_moved: bool) -> bool:
+# ---- ci-score's own narrowing of the copied verdict (OD-CS23, owner decisions)
+#
+# ci-speedup counts an unseen cache as ON because there that can only withhold
+# a savings claim; here the same choice would hand out a pass. So two rules
+# sit in the per-step WRAPPER below, never in the shared `_setup_cache_state`
+# (which the parity test pins verdict for verdict). Both only ever WITHHOLD
+# credit the shared verdict gave; neither can add one.
+#
+# 1. A SHA-pinned action carrying a version comment (`@<sha> # v3.5.0`) is
+#    re-checked at the commented major: a comment naming a release from before
+#    caching became the default earns nothing. No comment: credited as before.
+# 2. setup-uv's input-free default (`enable-cache: auto`) caches only on
+#    GitHub-hosted runners, so it is credited only when the job's `runs-on` is a
+#    literal GitHub-hosted image label. Any other runner earns the credit by
+#    adding `enable-cache: true`.
+_SHA_REF_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+_USES_VERSION_COMMENT_RE = re.compile(
+    r"""uses:\s*['"]?([\w.-]+/[\w./-]+)@([0-9a-fA-F]{40})['"]?[ \t]*#[ \t]*v?(\d{1,4})(?:\.\d+){0,2}\b""")
+_GITHUB_HOSTED_LABEL_RE = re.compile(r"^(ubuntu|windows|macos)-[\w.-]+$", re.IGNORECASE)
+_RUNNER_GATED_DEFAULTS = {"astral-sh/setup-uv": "enable-cache"}
+
+
+def _sha_version_comments(texts: list[str]) -> dict[tuple[str, str], set[int]]:
+    """{(action, sha): {majors}} from `uses: owner/action@<sha> # vN` comments
+    in the raw workflow / composite text (YAML parsing drops comments)."""
+    out: dict[tuple[str, str], set[int]] = {}
+    for text in texts:
+        for m in _USES_VERSION_COMMENT_RE.finditer(text or ""):
+            out.setdefault((m.group(1).lower(), m.group(2).lower()), set()).add(int(m.group(3)))
+    return out
+
+
+def _runs_on_github_hosted(runs_on: Any) -> bool:
+    """A literal GitHub-hosted image label, as a string or a one-item list.
+    Expressions, other labels, groups/objects and multi-label lists: False."""
+    if isinstance(runs_on, list) and len(runs_on) == 1:
+        runs_on = runs_on[0]
+    return isinstance(runs_on, str) and bool(_GITHUB_HOSTED_LABEL_RE.match(runs_on.strip()))
+
+
+def _step_caches_by_default(step: dict, package_json: Any, workspace_moved: bool,
+                            version_comments: dict[tuple[str, str], set[int]] | None = None,
+                            github_hosted: bool = True) -> bool:
     """A step whose own action restores a dependency cache with no `cache:`
-    input (or through a differently-named input): ci-speedup's rules."""
+    input (or through a differently-named input): ci-speedup's rules, then
+    ci-score's two withholding rules (see above)."""
     ua = _step_uses(step)
     if not ua:
         return False
@@ -1175,7 +1218,18 @@ def _step_caches_by_default(step: dict, package_json: Any, workspace_moved: bool
     if not re.match(r"^[\w.-]+/setup-[\w.-]+$", ua[0]):
         return False
     pj = None if workspace_moved else package_json
-    return _setup_cache_state(ua[0], ua[1], with_, pj) in ("on", "expr")
+    if _setup_cache_state(ua[0], ua[1], with_, pj) not in ("on", "expr"):
+        return False
+    action = ua[0].strip().lower()
+    gate = _RUNNER_GATED_DEFAULTS.get(action)
+    if gate and with_.get(gate) is None and not github_hosted:
+        return False
+    ref = (ua[1] or "").strip()
+    if _SHA_REF_RE.match(ref):
+        for major in (version_comments or {}).get((action, ref.lower()), ()):
+            if _setup_cache_state(ua[0], f"v{major}", with_, pj) not in ("on", "expr"):
+                return False
+    return True
 
 
 def _conc_cancels_basic(conc: Any) -> bool:
@@ -1219,13 +1273,29 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path) -> dict[str
     # setup-gradle) - ci-speedup's table, copied above.
     hits = []
     package_json = _read_root_package_json(root)
-    composite_rels = {rel for rel, _doc in composites}
-    for rel, steps in step_sources:
+    raw_texts = [raw for _rel, _doc, raw in parsed]
+    for crel, _cdoc in composites:
+        try:
+            raw_texts.append((root / crel).read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            pass
+    version_comments = _sha_version_comments(raw_texts)
+    # The same walk `_step_sources` makes, keeping each job's `runs-on`
+    # (a composite's runner is its caller's, unknown from its own file).
+    cache_sources: list[tuple[str, list[dict], bool, bool]] = []
+    for rel, doc, _raw in parsed:
+        for job in _wf_jobs(doc).values():
+            cache_sources.append((rel, _job_steps(job), False,
+                                  _runs_on_github_hosted(job.get("runs-on"))))
+    for rel, doc in composites:
+        if isinstance(doc.get("runs"), dict):
+            cache_sources.append((rel, _composite_steps(doc), True, False))
+    for rel, steps, is_composite, github_hosted in cache_sources:
         # setup-node reads package.json when its step runs, so the file counts
         # only once a root checkout has FINISHED earlier in the job (ci-speedup's
         # `_opt79_workspace_states`). A local composite action is itself read
         # from the checked-out workspace, so its steps start checked out.
-        checked_out = rel in composite_rels
+        checked_out = is_composite
         workspace_moved = False
         for step in steps:
             ua = _step_uses(step)
@@ -1241,7 +1311,8 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path) -> dict[str
                     k in ("cache", "enable-cache") and v not in (False, "false", None, "")
                     for k, v in with_.items()):
                 hits.append(rel)
-            elif _step_caches_by_default(step, package_json, ws_unknown):
+            elif _step_caches_by_default(step, package_json, ws_unknown,
+                                         version_comments, github_hosted):
                 hits.append(rel)
     if hits:
         facts["ci.cache.dependency-cache"] = fact(

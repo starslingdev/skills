@@ -10,6 +10,21 @@ the other about the same line of YAML.
 
 It lives at the repo ROOT: a cross-skill read is normal here and forbidden
 inside either skill's own suite.
+
+DOCUMENTED CARVE-OUTS (OD-CS23, owner decisions 2026-10-27). ci-score narrows
+the shared verdict in its per-step wrapper, `_step_caches_by_default`, and
+nowhere else, so `_setup_cache_state` stays identical to ci-speedup's:
+
+1. A SHA ref carrying a `# vN` version comment is re-checked at that major; a
+   comment naming a release from before the default turned on earns nothing.
+   ci-speedup does not read version comments.
+2. setup-uv with no `enable-cache` input is credited only on a literal
+   GitHub-hosted `runs-on` label (`enable-cache: auto` caches only there).
+   ci-speedup does not gate on the runner.
+
+Both rules only WITHHOLD. `test_the_wrapper_only_withholds` pins that, and
+pins that without a version comment and on a GitHub-hosted runner the wrapper
+gives exactly the shared verdict.
 """
 from __future__ import annotations
 
@@ -86,3 +101,21 @@ def test_the_verdicts_match(sides, action, ref):
             want = speed._opt79_setup_cache_state(uses, with_in, pj)
             got = score._setup_cache_state(action, ref, with_in, pj)
             assert got == want, (uses, with_in, pj)
+
+
+@pytest.mark.parametrize("action", _ACTIONS)
+@pytest.mark.parametrize("ref", _REFS)
+def test_the_wrapper_only_withholds(sides, action, ref):
+    speed, score = sides
+    sha = ref.lower() if score._SHA_REF_RE.match(ref) else None
+    for with_in in _WITHS:
+        for pj in _PJS:
+            uses = f"{action}@{ref}" if ref else action
+            shared = speed._opt79_setup_cache_state(uses, with_in, pj) in ("on", "expr")
+            step = {"uses": uses, "with": with_in}
+            # no comment, GitHub-hosted runner: the carve-outs are inert
+            assert score._step_caches_by_default(step, pj, False) == shared, (uses, with_in, pj)
+            for comments in ({}, {(action, sha): {3}}, {(action, sha): {4, 5}}) if sha else ({},):
+                for hosted in (True, False):
+                    got = score._step_caches_by_default(step, pj, False, comments, hosted)
+                    assert not got or shared, (uses, with_in, pj, comments, hosted)

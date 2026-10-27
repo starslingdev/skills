@@ -49,9 +49,9 @@ def facts_for(root: Path, *files: tuple[str, str]) -> dict:
     return pf_mod._practice_facts(parsed, root)
 
 
-def _steps_wf(*steps: str) -> tuple[str, str]:
+def _steps_wf(*steps: str, runs_on: str = "ubuntu-latest") -> tuple[str, str]:
     body = "".join(f"      - {s}\n" for s in steps)
-    return ("ci.yml", PR_ON + "jobs:\n  test:\n    steps:\n" + body)
+    return ("ci.yml", PR_ON + f"jobs:\n  test:\n    runs-on: {runs_on}\n    steps:\n" + body)
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +132,71 @@ def test_setup_node_auto_cache_needs_a_finished_checkout(tmp_path, steps):
     default is not credited (ci-speedup's `_opt79_workspace_states`)."""
     (tmp_path / "package.json").write_text('{"packageManager": "npm@10.9.0"}')
     f = facts_for(tmp_path, _steps_wf(*steps))[CACHE]
+    assert f["state"] == "fail", f
+
+
+@pytest.mark.parametrize("manifest,step,state", [
+    # a SHA pin whose version comment names a release from before the default
+    # turned on earns nothing (owner decision, OD-CS23)
+    ("go.mod", f"uses: actions/setup-go@{SHA} # v3.5.0", "fail"),
+    ("go.mod", f"uses: actions/setup-go@{SHA}  #v3", "fail"),
+    ("pyproject.toml", f"uses: astral-sh/setup-uv@{SHA} # v4.2.0", "fail"),
+    # a comment naming a default-on release, or no comment, credits as before
+    ("go.mod", f"uses: actions/setup-go@{SHA} # v4", "pass"),
+    ("go.mod", f"uses: actions/setup-go@{SHA} # v5.0.2", "pass"),
+    ("go.mod", f"uses: actions/setup-go@{SHA}", "pass"),
+    # an explicit cache input decides whatever the comment says
+    ("go.mod", f"{{uses: actions/setup-go@{SHA}, with: {{cache: true}}}} # v3", "pass"),
+])
+def test_a_sha_pin_version_comment_decides_the_default(tmp_path, manifest, step, state):
+    (tmp_path / manifest).write_text("module x\n" if manifest == "go.mod" else "[project]\n")
+    f = facts_for(tmp_path, _steps_wf("uses: actions/checkout@v5", step, "run: make test"))[CACHE]
+    assert f["state"] == state, f
+
+
+@pytest.mark.parametrize("runs_on,step,state", [
+    # setup-uv's default (`enable-cache: auto`) caches only on GitHub-hosted
+    # runners: an input-free step is credited only on a literal hosted label
+    ("[self-hosted, linux]", "uses: astral-sh/setup-uv@v5", "fail"),
+    ("my-runner", "uses: astral-sh/setup-uv@v6", "fail"),
+    ("${{ matrix.os }}", "uses: astral-sh/setup-uv@v5", "fail"),
+    ("{group: big}", "uses: astral-sh/setup-uv@v5", "fail"),
+    ("[ubuntu-latest, self-hosted]", "uses: astral-sh/setup-uv@v5", "fail"),
+    ("ubuntu-latest", "uses: astral-sh/setup-uv@v5", "pass"),
+    ("windows-2022", "uses: astral-sh/setup-uv@v6", "pass"),
+    ("[macos-14]", "uses: astral-sh/setup-uv@v5", "pass"),
+    ("ubuntu-24.04", f"uses: astral-sh/setup-uv@{SHA}", "pass"),
+    # an explicit enable-cache: true caches on any runner
+    ("[self-hosted, linux]", "{uses: astral-sh/setup-uv@v5, with: {enable-cache: true}}", "pass"),
+    # other default-on actions are not runner-gated
+    ("[self-hosted, linux]", "uses: actions/setup-go@v5", "pass"),
+])
+def test_setup_uv_default_is_credited_only_on_github_hosted_runners(tmp_path, runs_on, step, state):
+    (tmp_path / "pyproject.toml").write_text("[project]\n")
+    (tmp_path / "go.mod").write_text("module x\n")
+    f = facts_for(tmp_path, _steps_wf("uses: actions/checkout@v5", step, "run: make test",
+                                      runs_on=runs_on))[CACHE]
+    assert f["state"] == state, f
+
+
+def test_the_cache_fix_names_setup_uvs_input():
+    """An input-free setup-uv that earns no credit is fixed by one input."""
+    rr = _load("ci_score_render_report_undeserved_fails", "scripts/render_report.py")
+    recipe = rr._FIX_TABLE["ci.cache.dependency-cache"]["recipe"]
+    assert "enable-cache: true" in recipe, recipe
+    assert "self-hosted" not in recipe.lower(), recipe
+
+
+def test_setup_uv_default_in_a_composite_is_not_credited(tmp_path):
+    """A composite action runs on whatever runner calls it, so its runner is
+    not known from its own file: the input-free default earns nothing."""
+    (tmp_path / "pyproject.toml").write_text("[project]\n")
+    act = tmp_path / ".github" / "actions" / "setup"
+    act.mkdir(parents=True)
+    (act / "action.yml").write_text(
+        "runs:\n  using: composite\n  steps:\n    - uses: astral-sh/setup-uv@v5\n")
+    f = facts_for(tmp_path, _steps_wf("uses: actions/checkout@v5",
+                                      "uses: ./.github/actions/setup", "run: uv sync"))[CACHE]
     assert f["state"] == "fail", f
 
 
