@@ -583,7 +583,8 @@ variable containing exactly that expression. Inline JSON holds when a dependency
 declares outputs, whose quotes are not safe to interpolate into shell source.
 No extra commands, alternate
 filters, partial JSON, omitted exit-status option or shell environment
-replacement is accepted. A single strict jq or reviewed-action step can prove
+replacement is accepted. Exported Bash functions and case variants of shell-control
+environment names also withhold the proof. A single strict jq or reviewed-action step can prove
 large dependency sets without exponential enumeration; every dependency must
 succeed, and conditional upstream steps still withhold execution proof.
 The reviewed `re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35`

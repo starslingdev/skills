@@ -304,6 +304,9 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- 2026-10-27: Verdict shell proofs remain unmeasured when exported Bash
+  functions or case variants of shell-control environment names are present.
+
 - 2026-10-27: Strict jq verdicts with inline dependency JSON remain unmeasured
   when dependencies declare outputs; quoted environment-variable input keeps
   the JSON separate from shell source.

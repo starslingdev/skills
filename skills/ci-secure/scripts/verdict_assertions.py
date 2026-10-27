@@ -451,7 +451,10 @@ def run_step(source, env, results, outputs, direct, shell="bash"):
     """Return shell success only for fully understood, failure-propagating text."""
     if len(str(source)) > 8192 or len(str(env)) > 8192:
         raise Unknown("verdict command size limit")
-    if any(key in env for key in ("BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "PATH")):
+    if any(str(key).upper() in ("BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "PATH")
+           or str(key).upper().startswith("BASH_FUNC_") for key in env):
+        # Exported Bash functions can replace commands. Windows environment
+        # names can alias by case, so case variants also withhold the proof.
         raise Unknown("shell behavior overridden by environment")
     if _jq_needs(source, env, shell):
         return all(results[name] == "success" for name in direct)
@@ -481,7 +484,10 @@ def run_step(source, env, results, outputs, direct, shell="bash"):
             raise Unknown("literal shell variable in single quotes")
     # Substitution is limited to scalar statuses/numeric exit codes. No shell
     # evaluation, expansion, pipes, command substitution or redirections.
-    if any(key in env for key in ("BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "PATH")):
+    if any(str(key).upper() in ("BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "PATH")
+           or str(key).upper().startswith("BASH_FUNC_") for key in env):
+        # Exported Bash functions can replace commands. Windows environment
+        # names can alias by case, so case variants also withhold the proof.
         raise Unknown("shell behavior overridden by environment")
     # The runner sets GITHUB_* and RUNNER_* itself; a workflow `env:` of the
     # same name does not reach the shell, so those names stay unresolved.

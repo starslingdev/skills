@@ -156,3 +156,13 @@ def test_intermediate_inline_json_with_outputs_stays_unmeasured():
                       'steps': [{'run': "jq -e 'all(.result == \"success\")' <<< '${{ toJSON(needs) }}'"}]}
     jobs['verdict']['needs'] = ['middle']
     assert va.analyze(jobs, 'verdict')[0] == 'unmeasured'
+
+
+@pytest.mark.parametrize('override', ['BASH_FUNC_jq%%', 'Path', 'Bash_Env', 'bashopts'])
+def test_jq_holds_exported_functions_and_case_variant_shell_overrides(override):
+    jobs = suites(1)
+    jobs['verdict']['steps'] = [{
+        'shell': 'bash',
+        'run': 'jq -e \'all(.result == "success")\' <<< "$RESULTS"',
+        'env': {'RESULTS': '${{ toJSON(needs) }}', override: '() { return 0; }'}}]
+    assert va.analyze(jobs, 'verdict')[0] == 'unmeasured'
