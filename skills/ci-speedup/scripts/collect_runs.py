@@ -4019,8 +4019,17 @@ def _select_repr_shas(
     fetch_checks: Callable[[str], dict[str, float] | None],
     req_names: frozenset[str],
     target: int,
+    repo_published: frozenset[str] = frozenset(),
 ) -> tuple[list[str], list[dict[str, float]], dict[str, list[float]], dict[str, Any]]:
     """Pick up to `target` PR head-SHAs for the measured critical path.
+
+    REPO-PUBLISHED status (issue #119): a required context the repo posts itself
+    (`repo_published`, from `_repo_published_required` — an in-repo aggregate `All CI`
+    status) is never a check-run either, but it is not an outside gate. When one is
+    unobservable, the observable-subset re-selection below runs even if NOTHING else
+    required was observed (every recent PR then qualifies), so the suite is never
+    promoted to the external-gate fallback on its account. Those names are reported in
+    `required_checks_repo_published`, apart from `required_checks_unobservable`.
 
     Walks candidates NEWEST-FIRST (by their most-recent run timestamp in
     `sha_ts`), fetches each one's `{check_name: duration}` via `fetch_checks`,
@@ -4143,12 +4152,15 @@ def _select_repr_shas(
     # unsatisfiable promotion below (PR-floor fallback, unchanged); a fully-observable
     # suite that's merely short is also left as-is (a genuinely partial-suite repo).
     required_checks_unobservable: list[str] = []
+    required_checks_repo_published: list[str] = []
     if req_names and len(repr_shas) < target and fb_per_sha:
         observed: set[str] = set().union(*(set(fm) for fm in fb_per_sha))
         req_observable = set(req_names) & observed
         req_unobservable = set(req_names) - observed
-        if req_observable and req_unobservable:
-            required_checks_unobservable = sorted(req_unobservable)
+        unobs_published = req_unobservable & set(repo_published)
+        if req_unobservable and (req_observable or unobs_published):
+            required_checks_repo_published = sorted(unobs_published)
+            required_checks_unobservable = sorted(req_unobservable - unobs_published)
             repr_shas, per_sha_checks, check_durs = [], [], {}
             for sha, fm in zip(fb_shas, fb_per_sha):
                 if req_observable <= set(fm):
@@ -4168,6 +4180,7 @@ def _select_repr_shas(
         # AND "excluded as unobservable"), which would otherwise be a contradictory state
         # (`required_suite_scoped=False` alongside a populated unobservable list).
         required_checks_unobservable = []
+        required_checks_repo_published = []
     sample_diag = {
         "target": target,
         "kept": len(repr_shas),
@@ -4183,6 +4196,10 @@ def _select_repr_shas(
         # the report can name what was scoped out, never silently treated as satisfied.
         "required_checks_unobservable": required_checks_unobservable,
     }
+    if required_checks_repo_published:
+        # Required statuses the repo posts itself (issue #119): unobservable as check-runs
+        # too, but NOT an outside gate. Stamped only when present (byte-identical otherwise).
+        sample_diag["required_checks_repo_published"] = required_checks_repo_published
     # The walk now pursues the full target past the old `max(target*3, target+8)`
     # cap, so a rejection-heavy window can issue many more check-run fetches than the
     # kept count implies. Surface that cost when it exceeds the old cap so a slow run
@@ -4246,6 +4263,8 @@ def _sampling_provenance_fields(sample_diag: dict[str, Any]) -> dict[str, Any]:
             sample_diag.get("required_suite_unsatisfiable", False),
         "required_checks_unobservable":
             sample_diag.get("required_checks_unobservable", []),
+        **({"required_checks_repo_published": sample_diag["required_checks_repo_published"]}
+           if sample_diag.get("required_checks_repo_published") else {}),
     }
 
 
@@ -15578,11 +15597,53 @@ def _required_reachable_checks(
     return kept
 
 
+def _repo_published_required(
+    req_names: "frozenset[str] | set[str]",
+    status_publishers: "dict[str, dict[str, Any]] | None",
+) -> frozenset[str]:
+    """The required contexts this repo plausibly PUBLISHES ITSELF (issue #119): a
+    workflow that posts commit statuses (scan.py's `workflow_status_publishers` — its
+    YAML, a local action, or a repo-local script it runs calls the statuses API) also
+    contains the context's literal name. Such a context (an in-repo `All CI`
+    aggregate) names no job and has no `needs:` edge to the tests it waits on, so a
+    job-name mismatch alone must not prove it is an outside gate. Conservative by
+    design: a false match only leaves required reachability unresolved (a best-guess
+    pole), it never claims a check gates or skips the merge. Which jobs the publisher
+    waits on is not traced."""
+    if not req_names or not status_publishers:
+        return frozenset()
+    texts = [str((p or {}).get("text") or "") for p in status_publishers.values()
+             if isinstance(p, dict)]
+    out: set[str] = set()
+    for r in req_names:
+        pat = _re.compile(r"(?<![\w-])" + _re.escape(str(r)) + r"(?![\w-])")
+        if any(pat.search(t) for t in texts):
+            out.add(r)
+    return frozenset(out)
+
+
+def _required_reachability_unresolved(
+    req_names: "frozenset[str] | set[str]",
+    crit_by_wf: dict[str, dict[str, Any]],
+    job_graph: dict[str, dict[str, dict[str, Any]]] | None,
+    status_publishers: "dict[str, dict[str, Any]] | None",
+) -> bool:
+    """True when some required context names no job here but the repo publishes it
+    itself (`_repo_published_required`). Its real inputs are unknown, so the `needs:`
+    reachability from the OTHER required checks is incomplete: neither "all external"
+    nor "not required" can be claimed. The scoper, the PR-floor fallback and the
+    structural not-required stamp all read this one test, so they never disagree."""
+    published = _repo_published_required(req_names, status_publishers)
+    return any(_check_to_job_node(r, job_graph or {}, crit_by_wf) is None
+               for r in published)
+
+
 def _required_suite_all_external(
     required_checks: "RequiredChecks | None",
     req_names: "frozenset[str] | set[str]",
     crit_by_wf: dict[str, dict[str, Any]],
     job_graph: dict[str, dict[str, dict[str, Any]]] | None,
+    status_publishers: "dict[str, dict[str, Any]] | None" = None,
 ) -> bool:
     """True when a COMPLETE, non-empty required suite resolved but NOT ONE required check
     anchors a file-backed job in this repo — every required check is external/managed (a
@@ -15599,9 +15660,15 @@ def _required_suite_all_external(
     Needs a job graph to tell external from file-backed; without one we can't prove
     external, so return False (conservative — leaves the spine as an unresolved best guess
     rather than over-claiming a PR-floor). Shares `_check_to_job_node` with the scoper, so
-    the two never disagree on which case a repo is in."""
+    the two never disagree on which case a repo is in.
+
+    A required context the repo publishes itself (`_repo_published_required`, issue
+    #119) is never counted external: a context-to-job-name mismatch is not proof of
+    an outside gate, so the suite stays unresolved instead of demoted to a PR-floor."""
     if not (required_checks is not None and required_checks.complete
             and req_names and job_graph):
+        return False
+    if _repo_published_required(req_names, status_publishers):
         return False
     return not any(
         _check_to_job_node(r, job_graph, crit_by_wf) is not None for r in req_names)
@@ -15614,6 +15681,7 @@ def _scope_spine_to_required(
     crit_by_wf: dict[str, dict[str, Any]],
     job_graph: dict[str, dict[str, dict[str, Any]]] | None,
     required_suite_unsatisfiable: bool,
+    status_publishers: "dict[str, dict[str, Any]] | None" = None,
 ) -> tuple[dict[str, float], list[str], bool]:
     """Restrict the critical-path spine to merge-blocking (required-reachable) checks,
     returning (kept_p50, dropped_sorted, scoped). The pole is the slowest thing on the spine,
@@ -15642,6 +15710,10 @@ def _scope_spine_to_required(
         is the designed handler for that external-gate case (it renders the file-backed
         floor + a demotion banner); scoping here would drop the very file-backed work the
         fallback then re-surfaces, contradicting it. Stay inert and let the fallback own it.
+      - **a required context the repo publishes itself names no job** (issue #119: an
+        in-repo aggregate status that waits on the tests with no `needs:` edge) → the
+        reachability from the other required checks is incomplete, so dropping a check
+        could drop a real gate. Stay inert; the pole is an unresolved best guess.
     Also never empties the spine on an over-tight match (`if not keep`).
 
     With no usable job graph (a degraded scan, or a findings doc predating the
@@ -15655,6 +15727,8 @@ def _scope_spine_to_required(
     # anything; an all-external required set (no required check maps to a workflow job)
     # belongs to the PR-floor fallback, not this filter.
     if not any(_check_to_job_node(r, job_graph, crit_by_wf) is not None for r in req_names):
+        return pr_check_p50, [], False
+    if _required_reachability_unresolved(req_names, crit_by_wf, job_graph, status_publishers):
         return pr_check_p50, [], False
     keep = _required_reachable_checks(pr_check_p50, req_names, job_graph, crit_by_wf)
     if not keep:
@@ -18757,6 +18831,7 @@ def _detect_structural_candidates(
     triaged_fast_workflows: "set[str] | list[str] | None" = None,
     wf_docs: "dict[str, dict[str, Any]] | None" = None,
     overlap_withheld: "list[dict[str, Any]] | None" = None,
+    status_publishers: "dict[str, dict[str, Any]] | None" = None,
 ) -> list[dict[str, Any]]:
     """Route the top measured critical-path checks into STRUCTURAL candidates
     instead of the old inherent-cost dead-end. For each top check: map it to its
@@ -18791,6 +18866,10 @@ def _detect_structural_candidates(
     req_names = required_checks.names if required_checks is not None else frozenset()
     reachable_required = _required_reachable_checks(
         [n for n, _ in pr_checks_tuple], req_names, job_graph, crit_by_wf)
+    # A required status the repo publishes itself, naming no job (issue #119), may wait
+    # on any check with no `needs:` edge: not-required is then unprovable — UNKNOWN.
+    reach_unresolved = _required_reachability_unresolved(
+        req_names, crit_by_wf, job_graph, status_publishers)
 
     # ---- 1. Top-N critical-path checks → per-check structural lever ----
     for check_name, check_p50 in pr_checks_tuple[:top_n]:
@@ -18838,7 +18917,7 @@ def _detect_structural_candidates(
             req_status = "unknown"
         elif check_name in reachable_required:
             req_status = "required"
-        elif required_checks.complete:
+        elif required_checks.complete and not reach_unresolved:
             req_status = "not-required"
         else:
             req_status = "unknown"
@@ -24506,7 +24585,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         return m
 
     repr_shas, per_sha_checks, check_durs, sample_diag = _select_repr_shas(
-        _rep_ts, _checks_for, req_names, _REPR_PR_TARGET)
+        _rep_ts, _checks_for, req_names, _REPR_PR_TARGET,
+        repo_published=_repo_published_required(
+            req_names, findings_doc.get("workflow_status_publishers")))
     # Config-era thin-flip (issue #74, direction (a): the timing spine flips WITH the rule). Now that
     # the PR gate sample (`per_sha_checks`) is in hand we can tell whether a `disclosed_pre` straddle's
     # kept PRE era actually produced a gate-bearing check IN THE SAMPLE. When it did not (the gate PRs
@@ -24710,7 +24791,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     pr_check_p50, dropped_non_required, spine_required_scoped = _scope_spine_to_required(
         pr_check_p50, required_checks, req_names, crit_by_wf,
         findings_doc.get("workflow_job_graph"),
-        bool(sample_diag.get("required_suite_unsatisfiable")))
+        bool(sample_diag.get("required_suite_unsatisfiable")),
+        status_publishers=findings_doc.get("workflow_status_publishers"))
     if dropped_non_required:
         logger.info("critical path: dropped %d non-required (non-merge-gating) "
                     "check(s): %s", len(dropped_non_required),
@@ -25219,7 +25301,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     cp = findings_doc["pr_critical_path"]
     unsatisfiable = bool(sample_diag.get("required_suite_unsatisfiable"))
     required_all_external = not unsatisfiable and _required_suite_all_external(
-        required_checks, req_names, crit_by_wf, findings_doc.get("workflow_job_graph"))
+        required_checks, req_names, crit_by_wf, findings_doc.get("workflow_job_graph"),
+        status_publishers=findings_doc.get("workflow_status_publishers"))
     file_poles = [p for p in poles if p.get("workflow_file") and p.get("job")]
     if (unsatisfiable or required_all_external) and file_poles:
         cp["gate_kind"] = "pr_floor_fallback"
@@ -25936,7 +26019,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         triaged_fast_workflows=triaged_fast_workflows,
         chain_members=_chain_ctx_members, chain_p50_s=_chain_ctx_p50,
         chain_win_s=_chain_ctx_win,
-        wf_docs=_wf_docs, overlap_withheld=_overlap_withheld)
+        wf_docs=_wf_docs, overlap_withheld=_overlap_withheld,
+        status_publishers=findings_doc.get("workflow_status_publishers"))
     # Stamped only when a lever was held back, so a repo without `parallel:`
     # groups or background steps keeps a byte-identical findings document.
     if _overlap_withheld:

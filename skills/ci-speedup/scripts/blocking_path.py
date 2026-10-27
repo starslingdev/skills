@@ -4644,6 +4644,18 @@ def _provenance_block(doc: dict[str, Any], repo: str, captured_at: str) -> list[
                    "GitHub-App commit status / external gate), so they can't be timed. The "
                    "gate was measured on the **observable** required subset; these aren't on "
                    "the critical path and aren't confirmed satisfied here, just unmeasurable.")
+    # Issue #119: a required status a workflow in THIS repo posts itself (an aggregate that
+    # watches the other checks). Not an outside gate, but which checks it waits on isn't
+    # traced, so the gate is a best guess and no check is called non-required on its account.
+    repo_pub = cp.get("required_checks_repo_published") or []
+    if repo_pub:
+        shown = ", ".join(f"`{_clean_label(n)}`" for n in repo_pub[:4])
+        more = f" +{len(repo_pub) - 4} more" if len(repo_pub) > 4 else ""
+        out.append(f"> - ⚠️ **Required status posted by this repo's own workflow:** "
+                   f"{shown}{more} — a workflow here publishes it as a commit status, so it "
+                   "is not an outside gate, but which checks it waits on isn't traced. The "
+                   "gate below is the slowest check on a typical PR (a best guess), and no "
+                   "check is labelled non-required on its account.")
     if captured_at:
         out.append(f"> - **Step internals + cross-run checks (the per-pole drill-downs):** the "
                    f"pole jobs' raw logs, fetched **{captured_at}** (newer than the "

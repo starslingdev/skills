@@ -5172,6 +5172,75 @@ def _build_workflow_job_graph(
     return graph
 
 
+# A commit-status WRITE: a `repos/<owner>/<repo>/statuses/<sha>` call (gh api, curl,
+# octokit.request, a Python f-string — the trailing `/` before the sha keeps the
+# `commits/<sha>/statuses` LIST read out), an Octokit / PyGithub / go-github
+# create-status call, or a known status-publishing marketplace action.
+_STATUS_POST_RE = re.compile(
+    r"repos/(?:\$\{\{[^}]*\}\}|[^\s'\"`])*?/statuses/"
+    r"|\bcreate_?(?:commit_?)?status\s*\("
+    r"|\bcreateCommitStatus\b|\bCreateStatus\s*\("
+    r"|\buses:\s*['\"]?(?:Sibz/github-status-action|ouzi-dev/commit-status-updater"
+    r"|myrotvorets/set-commit-status-action|guibranco/github-status-action-v2)@",
+    re.IGNORECASE)
+# A repo-relative script path a workflow runs (`node .github/scripts/agg.mjs`,
+# `python ./ci/status.py`, `require('./.github/scripts/x.js')`).
+_LOCAL_SCRIPT_REF_RE = re.compile(
+    r"(?<![\w./$-])(?:\./)?((?:[\w.-]+/)*[\w.-]+\.(?:js|mjs|cjs|ts|mts|cts|py|sh|bash|rb))\b")
+_STATUS_SOURCE_MAX_CHARS = 256_000
+
+
+def _build_workflow_status_publishers(
+    root: Path, parsed: list[tuple[str, dict, str]],
+) -> dict[str, dict[str, Any]]:
+    """Workflows that POST commit statuses themselves (issue #119), as
+    `{workflow_file: {"sources": [path, ...], "text": <their text>}}`.
+
+    A required check that names no job is not proof of an external gate: an in-repo
+    "aggregate" job can watch the test jobs and post one required status (`All CI`)
+    through the statuses API, with no `needs:` edge to them. collect_runs reads this
+    to tell that case from a real outside gate (a CLA bot or security app, which no
+    workflow here names). A workflow counts when its own YAML, a local action it
+    uses, or a repo-local script it runs posts a status; `text` is all of those
+    sources, so collect_runs can check whether a required context's literal name
+    appears in them. Only status-posting workflows are recorded (so the map is
+    empty on most repos), and each source is capped so a huge script can't bloat
+    the findings document. Which jobs the publisher waits on is NOT traced."""
+    out: dict[str, dict[str, Any]] = {}
+    for rel, doc, raw in parsed:
+        sources: list[tuple[str, str]] = [(rel, raw)]
+        for job in _jobs_from_doc(doc).values():
+            if not isinstance(job, dict):
+                continue
+            for s in _steps(job):
+                u = _uses(s).split("@")[0].strip()
+                if _is_local_uses(u):
+                    text = _LOCAL_ACTION_TEXT.get(u)
+                    if text is None:
+                        text = _read_local_action(root, u)
+                    if text:
+                        sources.append((u, text))
+        seen = {rel}
+        for _src, text in list(sources):
+            for ref in _LOCAL_SCRIPT_REF_RE.findall(text):
+                if ref in seen:
+                    continue
+                seen.add(ref)
+                path = _local_ref_path(root, "./" + ref)
+                try:
+                    if path is None or not path.is_file():
+                        continue
+                    sources.append((ref, path.read_text(encoding="utf-8",
+                                                        errors="replace")))
+                except (OSError, ValueError):
+                    continue
+        if not any(_STATUS_POST_RE.search(t) for _s, t in sources):
+            continue
+        out[rel] = {"sources": [s for s, _t in sources],
+                    "text": "\n".join(t[:_STATUS_SOURCE_MAX_CHARS] for _s, t in sources)}
+    return out
+
+
 def _reconcile_opt1_opt2(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """OPT1 (Unnecessary Tool Install — *remove* the `playwright install`) and OPT2
     (Uncached Large Downloads — *cache* the SAME install) both fire on a job that
@@ -5496,6 +5565,10 @@ def scan(root: Path, catalog_path: Path) -> dict[str, Any]:
         # collect_runs to scope the critical-path pole to merge-blocking (required-
         # reachable) work. Repo-agnostic; harmless if unconsumed.
         "workflow_job_graph": _build_workflow_job_graph(parsed),
+        # Workflows that post commit statuses themselves (an in-repo aggregate
+        # status), so collect_runs never mistakes such a required context for an
+        # external gate just because it names no job (issue #119).
+        "workflow_status_publishers": _build_workflow_status_publishers(root, parsed),
         # Each workflow's own top-level `name:` (absent when it declares none).
         # A required check context `<workflow> / <job>` names THIS workflow's
         # job only when the prefix is this name (or, unnamed, its file path).

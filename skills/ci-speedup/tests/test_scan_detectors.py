@@ -5091,3 +5091,54 @@ jobs:
       - run: pnpm lint
 """
     assert "OPT12" in _scan_one(tmp_path, pos)
+
+
+def test_workflow_status_publishers_records_in_repo_status_posters(tmp_path: Path):
+    """Issue #119: scan records the workflows that post commit statuses themselves, so
+    collect_runs can tell an in-repo aggregate status (`All CI`) from an outside gate.
+    Covers a `gh api .../statuses/<sha>` call in the YAML, an `actions/github-script`
+    step whose repo-local script calls `createCommitStatus`, and a workflow that only
+    READS statuses (`commits/<sha>/statuses`) or posts nothing, which must not count."""
+    _write_workflow(tmp_path, "aggregate.yml", """name: Aggregate
+on: pull_request
+jobs:
+  publish:
+    name: Publish aggregate
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh api repos/${{ github.repository }}/statuses/${{ github.sha }} -f context='All CI' -f state=pending
+""")
+    _write_workflow(tmp_path, "script.yml", """name: Script aggregate
+on: pull_request
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const run = require('./.github/scripts/aggregate.js')
+            await run({ github, context })
+""")
+    scripts = tmp_path / ".github" / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "aggregate.js").write_text(
+        "module.exports = async ({ github, context }) => {\n"
+        "  await github.rest.repos.createCommitStatus({ ...context.repo,\n"
+        "    sha: context.sha, state: 'success', context: 'Script CI' })\n}\n",
+        encoding="utf-8")
+    _write_workflow(tmp_path, "reader.yml", """name: Reader
+on: pull_request
+jobs:
+  read:
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh api repos/${{ github.repository }}/commits/${{ github.sha }}/statuses
+      - run: echo 'All CI'
+""")
+    pubs = _scan(tmp_path).get("workflow_status_publishers")
+    assert set(pubs) == {".github/workflows/aggregate.yml", ".github/workflows/script.yml"}
+    assert "All CI" in pubs[".github/workflows/aggregate.yml"]["text"]
+    script = pubs[".github/workflows/script.yml"]
+    assert ".github/scripts/aggregate.js" in script["sources"]
+    assert "Script CI" in script["text"]

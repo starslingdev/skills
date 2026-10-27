@@ -5089,3 +5089,201 @@ def test_the_parallel_steps_held_back_row_renders_and_verifies(tmp_path):
     dropped = "\n".join(ln for ln in footer.splitlines()
                         if not ln.startswith("| parallel steps: held back"))
     assert not vr.check_coverage_disclosed(dropped, path).ok
+
+
+# ---------------------------------------------------------------------------
+# Issue #119: a required commit status the repo PUBLISHES ITSELF (an in-repo
+# "aggregate" job that posts `All CI` through the statuses API after watching the
+# test jobs) is not proof of an external gate. Its context names no job, and no
+# `needs:` edge ties it to the tests, so the old "no job anchors it -> external"
+# rule demoted the real tests to a PR-floor ("gates zero merges") framing.
+# ---------------------------------------------------------------------------
+
+_AGG_WF = ".github/workflows/aggregate.yml"
+_AGG_CI_WF = ".github/workflows/ci.yml"
+_AGG_YAML = (
+    "name: Aggregate\n"
+    "on: pull_request\n"
+    "jobs:\n"
+    "  publish:\n"
+    "    name: Publish aggregate\n"
+    "    runs-on: ubuntu-latest\n"
+    "    steps:\n"
+    "      - run: |\n"
+    "          gh api repos/${{ github.repository }}/statuses/${{ github.event.pull_request.head.sha }} \\\n"
+    "            -f state=pending -f context='All CI'\n")
+_AGG_CI_YAML = (
+    "on: pull_request\n"
+    "jobs:\n"
+    "  test:\n    name: Test\n    runs-on: ubuntu-latest\n    steps:\n      - run: make test\n"
+    "  lint:\n    name: Lint\n    runs-on: ubuntu-latest\n    steps:\n      - run: make lint\n")
+_AGG_JOB_GRAPH = {
+    _AGG_CI_WF: {"test": {"name": "Test", "needs": [], "reusable": False},
+                 "lint": {"name": "Lint", "needs": [], "reusable": False}},
+    _AGG_WF: {"publish": {"name": "Publish aggregate", "needs": [], "reusable": False}},
+}
+_AGG_CRIT = {_AGG_CI_WF: {"job_p50": {"Test": 600.0, "Lint": 60.0}},
+             _AGG_WF: {"job_p50": {"Publish aggregate": 30.0}}}
+# What scan.py stamps for a workflow that posts commit statuses (#119).
+_AGG_PUBLISHERS = {_AGG_WF: {"sources": [_AGG_WF], "text": _AGG_YAML}}
+
+
+def test_repo_published_aggregate_status_is_not_proven_external():
+    # The context `All CI` maps to no job, but a workflow in this repo names it AND posts
+    # commit statuses, so a name mismatch alone must not prove an external gate.
+    required = cr.RequiredChecks(frozenset({"All CI"}), complete=True)
+    assert cr._required_suite_all_external(
+        required, required.names, _AGG_CRIT, _AGG_JOB_GRAPH,
+        status_publishers=_AGG_PUBLISHERS) is False
+
+
+def test_repo_published_required_status_keeps_the_spine_unscoped():
+    # Mixed required set: `Lint` anchors a job, `All CI` is published in-repo. The
+    # aggregate may wait on `Test` with no `needs:` edge, so scoping to `Lint`'s
+    # reachability would drop `Test` as non-required. Reachability is unresolved: inert.
+    required = cr.RequiredChecks(frozenset({"All CI", "Lint"}), complete=True)
+    pr_check_p50 = {"Test": 600.0, "Lint": 60.0, "Publish aggregate": 30.0}
+    kept, dropped, scoped = cr._scope_spine_to_required(
+        pr_check_p50, required, required.names, _AGG_CRIT, _AGG_JOB_GRAPH, False,
+        status_publishers=_AGG_PUBLISHERS)
+    assert (kept, dropped, scoped) == (pr_check_p50, [], False)
+
+
+def test_sampler_does_not_call_a_repo_published_status_unsatisfiable():
+    # `All CI` is a commit status, so it never appears among check-runs. When the repo
+    # publishes it, the sample must not be promoted to the external-gate fallback.
+    sha_ts = {f"s{i}": f"{100 - i:04d}" for i in range(8)}
+
+    def fetch(sha):
+        return {"Test": 600.0, "Lint": 60.0, "Publish aggregate": 30.0}
+
+    repr_shas, _per, _durs, diag = cr._select_repr_shas(
+        sha_ts, fetch, frozenset({"All CI"}), 8, repo_published=frozenset({"All CI"}))
+    assert diag["required_suite_unsatisfiable"] is False
+    assert len(repr_shas) == 8
+    assert diag["required_checks_repo_published"] == ["All CI"]
+
+
+def test_external_required_check_still_classifies_external_with_publishers_present():
+    # Control: a genuinely external gate (a CLA bot) that NO workflow file names stays
+    # external, even when the repo has an unrelated status-publishing workflow.
+    required = cr.RequiredChecks(frozenset({"license/cla"}), complete=True)
+    assert cr._required_suite_all_external(
+        required, required.names, _AGG_CRIT, _AGG_JOB_GRAPH,
+        status_publishers=_AGG_PUBLISHERS) is True
+    assert cr._required_suite_all_external(
+        required, required.names, _AGG_CRIT, _AGG_JOB_GRAPH) is True
+    # ...and the sampler still promotes the external-gate fallback for it.
+    sha_ts = {f"s{i}": f"{100 - i:04d}" for i in range(4)}
+    _r, _p, _d, diag = cr._select_repr_shas(
+        sha_ts, lambda sha: {"Test": 600.0}, frozenset({"license/cla"}), 4,
+        repo_published=frozenset())
+    assert diag["required_suite_unsatisfiable"] is True
+    # A context that is named in a workflow which posts NO statuses is not "published".
+    assert cr._repo_published_required(frozenset({"All CI"}), {}) == frozenset()
+
+
+class _FakeRepoPublishedAggregateClient:
+    """8 PRs; ci.yml runs `Test` (600s) + `Lint` (60s), aggregate.yml runs `Publish
+    aggregate`. Branch protection requires ONE commit status, `All CI`, which never
+    shows up as a check-run (it is a status the aggregate job posts)."""
+    gave_up = False
+
+    def _bump(self, *, query: bool = False, error: bool = False) -> None:
+        self.queries += int(query)
+        self.errors += int(error)
+
+    def __init__(self) -> None:
+        self.queries = 0
+        self.errors = 0
+        self._shas = [f"s{i}" for i in range(1, 9)]
+        self._jobs = {101 + i: [_collect_job("Test", 600), _collect_job("Lint", 60)]
+                      for i in range(8)}
+        self._jobs.update({201 + i: [_collect_job("Publish aggregate", 30)]
+                           for i in range(8)})
+
+    def available(self) -> bool:
+        return True
+
+    def _runs(self, wf_id: int) -> list[dict]:
+        def run(rid, sha, wall):
+            return {"id": rid, "event": "pull_request", "head_sha": sha,
+                    "status": "completed", "conclusion": "success",
+                    "created_at": _iso(0), "run_started_at": _iso(0),
+                    "updated_at": _iso(wall)}
+        if wf_id == 1:
+            return [run(101 + i, s, 610) for i, s in enumerate(self._shas)]
+        if wf_id == 2:
+            return [run(201 + i, s, 40) for i, s in enumerate(self._shas)]
+        return []
+
+    def json(self, endpoint: str, allow_missing: bool = False):
+        self.queries += 1
+        if endpoint.startswith("repos/o/r/actions/workflows?"):
+            return {"workflows": [
+                {"id": 1, "path": _AGG_CI_WF, "name": "ci"},
+                {"id": 2, "path": _AGG_WF, "name": "Aggregate"}]}
+        m = re.match(r"repos/o/r/actions/workflows/(\d+)/runs\?(.*)", endpoint)
+        if m:
+            wf_id, qs = int(m.group(1)), m.group(2)
+            if re.search(r"per_page=1(?![0-9])", qs):
+                return {"total_count": 30}
+            return {"workflow_runs": self._runs(wf_id)}
+        m = re.match(r"repos/o/r/actions/runs/(\d+)/jobs", endpoint)
+        if m:
+            return {"jobs": self._jobs.get(int(m.group(1)), [])}
+        m = re.match(r"repos/o/r/commits/([^/]+)/check-runs", endpoint)
+        if m:
+            return {"check_runs": [
+                {"name": n, "started_at": _iso(0), "completed_at": _iso(d)}
+                for n, d in (("Test", 600), ("Lint", 60), ("Publish aggregate", 30))]}
+        if endpoint == "repos/o/r":
+            return {"default_branch": "main"}
+        if endpoint == "repos/o/r/branches/main/protection/required_status_checks":
+            return {"contexts": ["All CI"]}
+        if endpoint.endswith("contents/" + _AGG_CI_WF):
+            return {"content": base64.b64encode(_AGG_CI_YAML.encode()).decode()}
+        if endpoint.endswith("contents/" + _AGG_WF):
+            return {"content": base64.b64encode(_AGG_YAML.encode()).decode()}
+        return None
+
+    def text(self, endpoint: str, allow_missing: bool = False):
+        self.queries += 1
+        return ""
+
+
+def test_collect_repo_published_aggregate_is_not_a_pr_floor_fallback(monkeypatch, tmp_path):
+    # End to end through the real collect(): the in-repo aggregate publisher keeps the
+    # gate UNRESOLVED (a best guess) instead of demoting the real tests to a PR-floor
+    # "no file-backed required gate" framing, and no test job is called non-required.
+    import importlib.util
+    import yaml
+    # Load scan.py under a unique name: `scan` alone would clash with ci-secure's module.
+    spec = importlib.util.spec_from_file_location(
+        "ci_speedup_scan_issue119", _SCRIPTS / "scan.py")
+    _scan = importlib.util.module_from_spec(spec)
+    sys.modules["ci_speedup_scan_issue119"] = _scan  # @dataclass resolves __module__ here
+    spec.loader.exec_module(_scan)
+    # The publisher map is exactly what scan.py derives from these two workflow files.
+    assert _scan._build_workflow_status_publishers(tmp_path, [
+        (_AGG_CI_WF, yaml.safe_load(_AGG_CI_YAML), _AGG_CI_YAML),
+        (_AGG_WF, yaml.safe_load(_AGG_YAML), _AGG_YAML)]) == _AGG_PUBLISHERS
+    monkeypatch.setattr(cr, "GhClient", _FakeRepoPublishedAggregateClient)
+    doc = {
+        "workflow_job_graph": _AGG_JOB_GRAPH,
+        "workflow_status_publishers": _AGG_PUBLISHERS,
+        "findings": [{"id": "f1", "workflow_file": _AGG_CI_WF},
+                     {"id": "f2", "workflow_file": _AGG_WF}],
+    }
+    out = cr.collect(doc, "o/r", max_runs=8, shallow_runs=8)
+    cp = out["pr_critical_path"]
+    assert cp.get("gate_kind") != "pr_floor_fallback"
+    assert cp.get("required_suite_unsatisfiable") is False
+    assert cp.get("provenance") == "unresolved"
+    assert not any(p.get("pr_floor_fallback") for p in cp.get("poles") or [])
+    assert cp["critical_path_check"] == "Test"
+    assert not [f for f in out.get("findings") or []
+                if f.get("required_status") == "not-required"]
+    md = bp.render(out, {}, {}, {}, "2026-10-27")
+    assert "No file-backed required gate" not in md
+    assert "All CI" in md   # the repo-published status is named, not silently absent
