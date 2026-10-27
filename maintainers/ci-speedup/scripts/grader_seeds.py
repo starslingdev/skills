@@ -119,6 +119,7 @@ TRIAGE_ALLOWLIST = {
     "type-aware lint findings are uncredited, name their rules and carry the ledger": AUTO_SEED,  # check_opt82_type_aware_lint_uncredited
     "parallel-step findings re-derive from the pole, stay uncredited and pair with their card": AUTO_SEED,  # check_opt83_parallel_steps
     "tool-swap findings re-derive from the pole, stay uncredited and pair with their card": AUTO_SEED,  # check_opt84_tool_swap
+    "Linux benchmark cards have measured runtime, no credited saving and one placement": AUTO_SEED,
     "OPT79 findings re-derive by their arm, and pole caches render": AUTO_SEED,                  # check_opt79_findings_rederived
     "OPT80 tail lines re-derive and pair with their stamped blocks": AUTO_SEED,                  # check_opt80_tail_lines
     "OPT80 slowest-job sentence pairs with its withheld reason": AUTO_SEED,                      # check_opt80_tail_withheld_reasons
@@ -225,6 +226,7 @@ CHECK_CLASS = {
     "type-aware lint findings are uncredited, name their rules and carry the ledger": "fabricated-or-unsupported-finding",  # an uncredited lint finding carrying a number, naming no rule, or missing its ledger
     "parallel-step findings re-derive from the pole, stay uncredited and pair with their card": "fabricated-or-unsupported-finding",  # a parallel-steps finding carrying a number, an un-re-derivable upper bound, or a card that claims more
     "tool-swap findings re-derive from the pole, stay uncredited and pair with their card": "fabricated-or-unsupported-finding",  # a tool-swap finding carrying a number, a ceiling that is not the step's own p50, or a card that claims more
+    "Linux benchmark cards have measured runtime, no credited saving and one placement": "fabricated-or-unsupported-finding",
     "OPT79 findings re-derive by their arm, and pole caches render": "fabricated-or-unsupported-finding",  # a merge-wait figure the measured excess and headroom do not support
     "OPT80 tail lines re-derive and pair with their stamped blocks": "fabricated-or-unsupported-finding",  # a tail line whose N or X the per-run checkout rows and stall proofs do not re-derive, or that is misplaced, unpaired, in legacy wording, or on a job the collector's gate would not stamp
     "OPT80 slowest-job sentence pairs with its withheld reason": "fabricated-or-unsupported-finding",  # a merge-wait claim, or a no-tail-line reason, the stamped facts do not support

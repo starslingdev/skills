@@ -942,6 +942,8 @@ class _VrWithheldRow(NamedTuple):
 
 
 _VR_WITHHELD_ROWS = (
+    _VrWithheldRow("opt92_withheld_candidates", "Linux benchmark: held back",
+                   "candidate job(s)", "Why a job produced no Linux benchmark card", "job"),
     _VrWithheldRow(_VR_OPT79_WITHHELD_DOC_KEY, "cache hit/miss verdicts",
                    "candidate cache(s)",
                    "Why a candidate cache produced no finding and no uncredited line",
@@ -1243,6 +1245,13 @@ _VR_PARALLEL_STEPS_WITHHOLD_PHRASES = {
         "cutting one does not come straight off the job; no saving is claimed",
 }
 _VR_WITHHELD_PHRASES_BY_KEY = {
+    "opt92_withheld_candidates": {
+        "runner_unresolved": "the runner or its architecture is not explicitly supported",
+        "work_unresolved": "the job runs commands, actions or inputs outside the supported portability rules",
+        "native_work": "the job explicitly builds, tests, signs or packages native platform work",
+        "release_path": "the job participates in a release or publishing path",
+        "history_unmatched": "no comparable executed hosted sample has complete source and toolchain evidence for this job",
+    },
     _VR_OPT77_WITHHELD_DOC_KEY: _VR_OPT77_WITHHOLD_PHRASES,
     _VR_PARALLEL_STEPS_WITHHELD_DOC_KEY: _VR_PARALLEL_STEPS_WITHHOLD_PHRASES,
     _VR_OPT79_WITHHELD_DOC_KEY: _VR_OPT79_HELD_BACK_REASONS,
@@ -9795,6 +9804,106 @@ def _vr_opt84_prettier_dual_run_reasons(block: dict, t: dict) -> list[str]:
     return why
 
 
+def check_opt92_linux_benchmark(report: str, findings_path: Path | None) -> Check:
+    name = "Linux benchmark cards have measured runtime, no credited saving and one placement"
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return Check(name, 'id="opt92-' not in report, err, skipped='id="opt92-' not in report)
+    errors = []
+    data = _as_dict(data)
+    findings = [f for f in _as_list(data.get("findings"))
+                if isinstance(f, dict) and f.get("pattern") == "OPT92"]
+    heads = [m.start() for m in re.finditer(r"^## .+", report, re.M)]
+    rendered = {(w, c) for w, c, _ in _pole_header_sections(report)}
+    poles = [p for p in _as_list(_as_dict(data.get("pr_critical_path")).get("poles"))
+             if isinstance(p, dict)]
+    for f in findings:
+        proof = _as_dict(f.get("linux_benchmark"))
+        fid = re.sub(r"[^A-Za-z0-9_.:-]+", "_", str(f.get("id") or "x"))
+        marker = f'<a id="opt92-{fid}"></a>'
+        body = ""
+        if report.count(marker) != 1:
+            errors.append(fid + ": expected exactly one card")
+        else:
+            at = report.index(marker)
+            h0 = max((h for h in heads if h < at), default=-1)
+            h1 = min((h for h in heads if h > at), default=len(report))
+            head = report[h0:report.find("\n", h0)] if h0 >= 0 else ""
+            mine = {(Path(str(p.get("workflow_file") or "")).name, _strip_scope(str(p.get("check") or "")))
+                    for p in poles if p.get("workflow_file") == f.get("workflow_file")
+                    and p.get("job") == proof.get("job")}
+            under = {(w, c) for w, c, _ in _pole_header_sections(head + "\n")}
+            if not (bool(under & mine) if mine & rendered else head == "## Linux benchmark candidates"):
+                errors.append(fid + ": card outside its matching pole or dedicated section")
+            next_card = report.find('<a id="opt92-', at + len(marker))
+            end = min(h1, next_card) if next_card >= 0 else h1
+            body = report[at:end].split("- **Catalog:**", 1)[0]
+            if "No saving is claimed or included in totals." not in body:
+                errors.append(fid + ": no-saving disclosure missing")
+            if re.search(r"\$\d|\b\d+(?:\.\d+)?\s*(?:%|min/mo)|\bsaves?\s+\d", body, re.I):
+                errors.append(fid + ": price or saving on uncredited card")
+        if any(f.get(k) is not None for k in ("wall_clock_p50_s", "runner_min_saving")) or f.get("realization") != "none" or f.get("sizing_basis") != "uncredited":
+            errors.append(fid + ": uncredited contract changed")
+        observations = [o for o in _as_list(proof.get("observations")) if isinstance(o, dict)]
+        for reason, count in _as_dict(proof.get("sample_exclusions")).items():
+            phrases = {"budget": "the evidence request budget was exhausted",
+                       "logs": "action-log provenance or the selected toolchain could not be verified",
+                       "source": "matching workflow, configuration or source-tree evidence was unavailable"}
+            if (reason not in phrases or not isinstance(count, int) or isinstance(count, bool) or count <= 0
+                    or f"{count} observation(s) excluded because {phrases.get(reason)}" not in body):
+                errors.append(fid + ": sample exclusion disclosure missing or invalid")
+        if proof.get("required_toolchain") and any(
+                x.get("toolchains") != proof["required_toolchain"] for x in observations):
+            errors.append(fid + ": observed toolchain does not match the operation contract")
+        if proof.get("benchmark_runner") and (
+                str(proof["benchmark_runner"]) not in body or
+                str(proof.get("benchmark_architecture")) not in body):
+            errors.append(fid + ": proposed runner or architecture missing")
+        if any(not isinstance(action, str) or action not in body
+               for action in _as_list(proof.get("benchmark_action_pins"))):
+            errors.append(fid + ": benchmark action revisions missing")
+        executed_workflow = proof.get("history_basis") == "executed-workflow"
+        if executed_workflow:
+            for observation in observations:
+                provenance = _as_dict(observation.get("provenance"))
+                actions = _as_dict(provenance.get("action_revisions"))
+                expected = {"actions/checkout": "fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09",
+                            "swift-actions/setup-swift": "7ca6abe6b3b0e8b5421b88be48feee39cbf52c6a"}
+                if (not re.fullmatch(r"[0-9a-f]{40}", str(provenance.get("executed_sha", "")))
+                        or provenance.get("audited_source_sha") != proof.get("source_sha")
+                        or not re.fullmatch(r"[0-9a-f]{64}", str(proof.get("workflow_sha256", "")))
+                        or provenance.get("workflow_sha256") != proof.get("workflow_sha256")
+                        or not re.fullmatch(r"[0-9a-f]{64}", str(provenance.get("config_sha256", "")))
+                        or {k.split('@')[0]: v for k, v in actions.items()} != expected
+                        or len(actions) != 2
+                        or provenance.get("toolchains") != {"swift": "6.1.3"}
+                        or provenance.get("architecture") != proof.get("architecture")):
+                    errors.append(fid + ": executed workflow/action/toolchain evidence is incomplete")
+        if any((not executed_workflow and (x.get("head_sha") != proof.get("source_sha") or x.get("event") != "push"))
+               or (executed_workflow and x.get("event") not in ("push", "pull_request"))
+               or x.get("job") != proof.get("job")
+               or x.get("runner") != proof.get("runner") or x.get("conclusion") != "success"
+               for x in observations):
+            errors.append(fid + ": observation source, event or runner does not match")
+        durations = [x.get("duration_s") for x in observations]
+        if (not durations or any(not isinstance(x, (int, float)) or isinstance(x, bool) or x <= 0 for x in durations)
+                or proof.get("sample_count") != len(durations)):
+            errors.append(fid + ": missing executed history")
+        else:
+            ordered = sorted(durations)
+            mid = len(ordered) // 2
+            median = ordered[mid] if len(ordered) % 2 else (ordered[mid - 1] + ordered[mid]) / 2
+            if proof.get("job_p50_s") != median:
+                errors.append(fid + ": runtime does not match observations")
+            if f"**Observed job runtime:** {median:.0f}s p50 across {len(durations)}" not in body:
+                errors.append(fid + ": runtime missing or mislabeled")
+        if not proof.get("checks") or not re.fullmatch(r"[0-9a-f]{40}", str(proof.get("source_sha", ""))):
+            errors.append(fid + ": portability/source evidence missing")
+    if len(re.findall(r'<a id="opt92-[^\"]+"></a>', report)) != len(findings):
+        errors.append("card without a corresponding finding")
+    return Check(name, not errors, "; ".join(errors) or "all Linux benchmark cards remain uncredited")
+
+
 def check_opt84_tool_swap(report: str, findings_path: Path | None) -> Check:
     """Every OPT84 finding sits on a drilled long pole, re-derives its step, share
     and ceiling from that pole's stamped step p50s, names only table rows with
@@ -13911,6 +14020,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_opt82_type_aware_lint_uncredited(report, findings_path),
         check_opt83_parallel_steps(report, findings_path),
         check_opt84_tool_swap(report, findings_path),
+        check_opt92_linux_benchmark(report, findings_path),
         check_opt79_findings_rederived(report, findings_path),
         check_opt81_runner_comparison_rederived(report, findings_path),
         check_tier2_total_deoverlapped(report, findings_path, report_path),

@@ -137,7 +137,9 @@ two moved numbers.
   `secrets: inherit`; secrets are passed by name so a called workflow's blast
   radius is visible in the caller.
 - **`sec.required-checks.skippable`** — every status check the default branch
-  REQUIRES is produced by a job that always runs. GitHub counts a skipped
+  REQUIRES has a producer that always runs and, for a verdict aggregator,
+  rejects upstream failure and invalid skip decisions within the supported
+  assertion language. GitHub counts a skipped
   required check as a pass, so a check only a conditional job reports can be
   satisfied by never running it. The pass shape is the always-running verdict
   job that `needs:` the conditional suites and asserts their results. Required
@@ -154,7 +156,7 @@ two moved numbers.
   same reason. Whether a workflow's jobs can report on a pull request at all is
   three-valued, and each value is treated differently. A `pull_request`
   workflow, a plain `push`, or a push over every branch (`branches: ['**']`)
-  CAN report, so an always-running job there certifies the check. A push
+  CAN report; an always-running producer with a proved verdict can certify the check. A push
   restricted to TAGS provably cannot — no pull-request branch push matches it —
   so a same-named job in a tag-only release workflow is not a producer at all.
   A matrix job's contexts come from the combinations the matrix can actually
@@ -513,3 +515,67 @@ two moved numbers.
   (https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/choosing-permissions-for-a-github-app)
   and for fine-grained tokens
   (https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens).
+
+
+### Required-verdict coverage (2026-10-26)
+
+F7 keeps its API gate and fact ID. Producer execution alone is no longer
+sufficient for an aggregator. A supported counterexample where detection fails
+or is cancelled, suites skip and the verdict succeeds fails the fact. Listing
+a detector in `needs:` without checking its result does not close the hole.
+
+The bounded analyzer supports literal dependency graphs, result comparisons,
+`contains(needs.*.result, ...)`, boolean expressions, scalar env/exit-code
+propagation, and simple failure-propagating `test`/`[` assertions in bash/sh.
+It also supports complete Bash `if [[ ... ]]; then` guards whose body is an
+optional literal echo followed by `exit 0` or `exit 1`. Conditions can combine
+quoted scalar equality/inequality checks with `||` and validate a quoted value
+against the exact `^(true|false)$` expression (optionally negated). Variables
+remain data: quotes or newlines in their values are not evaluated as commands.
+Other branch bodies, trailing commands, patterns and shells are unmeasured.
+Strict suite-success assertions reject skipped suites. An intentional skip
+requires successful detection and an explicit valid boolean output; a false
+output written before failure is not a valid no-op. It walks ancestors, and
+withholds on cycles, unresolved reusable-workflow dependencies, potentially
+swallowing intermediates and traversal/enumeration limits. Unknown shell
+control flow, jq pipelines, scripts and action implementations are unmeasured.
+The reviewed `re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35`
+revision is supported with `jobs: ${{ toJSON(needs) }}` and literal JSON or
+comma-separated allowed lists. Its default requires success; `allowed-skips`
+also accepts skipped results, while `allowed-failures` accepts cancellation
+as well as failure and skipping. Those allowances still undergo the ancestor
+and invalid-decision checks. Overridden execution environments, unknown inputs
+and other revisions are unmeasured. An action name alone is not proof. The
+contract was checked against that revision's
+[entry point](https://github.com/re-actors/alls-green/blob/b5b5b37504aa4183270bd3d855c52a67f212be35/action.yml),
+[input and exit handling](https://github.com/re-actors/alls-green/blob/b5b5b37504aa4183270bd3d855c52a67f212be35/src/normalize_needed_jobs_status.py),
+and [result rules](https://github.com/re-actors/alls-green/blob/b5b5b37504aa4183270bd3d855c52a67f212be35/src/job_outcome.py).
+
+Ordinary producers executing their own recognized verification suite retain
+the existing producer-execution check; F9 owns swallowed suite failures.
+Assertions must execute and propagate failure. Echoing a status is not an
+assertion; a disabled assertion cannot gate the verdict.
+
+This strengthens score meaning without adding a fact. The machine
+aggregate remains `100 × passed / scored`: pass→fail lowers the score and
+pass→unmeasured changes the denominator. Compare historical runs using their
+engine revision and coverage, not the number alone. Unknown assertions are
+reported as coverage gaps, not passes or guessed failures.
+
+For a detector whose `changed` output is explicitly `true` or `false`, a
+supported verdict can require both a successful detector and the expected
+suite result. The detector and suite jobs must also be present in the workflow:
+
+```yaml
+verdict:
+  needs: [changes, suite]
+  if: always()
+  runs-on: ubuntu-latest
+  steps:
+    - env:
+        OK: >-
+          ${{ needs.changes.result == 'success' &&
+              ((needs.changes.outputs.changed == 'true' && needs.suite.result == 'success') ||
+               (needs.changes.outputs.changed == 'false' && needs.suite.result == 'skipped')) }}
+      run: test "$OK" = true
+```

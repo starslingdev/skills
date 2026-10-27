@@ -27,6 +27,8 @@ alias_note: 'Alias anchor: findings files stamped before the GFM anchor fix link
 
 **Fix**: Add `paths-ignore` for documentation, markdown files, and other non-code changes. Or use `paths` to restrict to relevant source directories.
 
+**Fail closed:** the always-running verdict must check every detector and intermediate job whose failure can suppress a required suite. Listing them in `needs:` is not an assertion. Accept a skipped suite only after successful detection with a valid explicit unchanged output; reject failures and cancellations, including an unchanged output written before failure. A strict suite-success assertion also rejects an upstream failure that skips the suite.
+
 **Required-status-check caveat (the "Pending" landmine)**: if any check this workflow produces is a required status check, do NOT skip it with `paths`/`paths-ignore` (or `branches:` filters / `[skip ci]`) — a workflow skipped by filtering leaves its required check "Pending" and the PR can never merge; official guidance says not to use path or branch filtering on required workflows. The documented-safe shape is a job-level `if:` restating the filter (a skipped job reports Success and satisfies the gate). The no-op twin-workflow (same workflow AND job name, inverse filter) is a community-known workaround, NOT in any current GitHub docs edition. Treat required-status UNKNOWN as required: when branch protection/rulesets are unreadable (the common case on repos you don't admin), assume every check this workflow produces may be required.
 
 **Real-world example (better-auth)**: e2e.yml runs all 8 jobs on docs-only PRs.

@@ -17,8 +17,8 @@ license: MIT
 
 # ci-speedup — CI Optimization Audit for GitHub Actions
 
-Audits a repository's GitHub Actions workflows against an 89-pattern
-catalog — 78 **hygiene/data-driven** patterns plus 11 **structural /
+Audits a repository's GitHub Actions workflows against a 92-pattern
+catalog — 81 **hygiene/data-driven** patterns plus 11 **structural /
 critical-path** patterns routed from the measured long pole — and
 produces a **root-cause-analysis** report with measured impact on two
 axes — developer wall-clock wait and runner-minutes (cloud bill). The
@@ -417,7 +417,7 @@ agreement. A finding only one pass would defend is cut or escalated, not kept.
 
 ## Pattern catalog
 
-Patterns live one per file in `references/patterns/opt<N>-*.md` (89 patterns
+Patterns live one per file in `references/patterns/opt<N>-*.md` (92 patterns
 in 14 categories, from Caching to **Structural / Critical-Path Levers**). Each
 file's frontmatter declares the id, impact tier, finding class (`static` /
 `data-driven` / `structural`), detector and fix strategy slug; structural

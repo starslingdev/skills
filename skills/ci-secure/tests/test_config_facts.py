@@ -1381,7 +1381,7 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - run: echo "assert the suite that should have run passed"
+      - run: test "${{ !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && !contains(needs.*.result, 'skipped') }}" = true
 """
 
 
@@ -1417,7 +1417,9 @@ def test_required_check_produced_only_by_a_conditional_job_fails(tmp_path):
 
 def test_the_always_running_verdict_job_passes(tmp_path):
     """The #49 fix shape: two mutually-exclusive suite jobs, and one
-    always-running job that carries the required check name."""
+    always-running job with a strict result assertion carrying the required check name.
+    This checks gate safety; intentional mutually exclusive skips need a
+    separate explicit selection assertion."""
     f = _outcome(_facts_with(tmp_path, {"ci.yml": _VERDICT_PATTERN}, ["test"]),
                  _FACT)
     assert f["outcome"] == "pass", f["evidence"]
@@ -4382,7 +4384,7 @@ jobs:
     if: {cond}
     runs-on: ubuntu-latest
     steps:
-      - run: echo verdict
+      - run: test "${{{{ needs.suite.result }}}}" = success
 """
     out = _facts_with(tmp_path / cond.strip("'${} ()!")[:10], {"ci.yml": body},
                       ["test"])

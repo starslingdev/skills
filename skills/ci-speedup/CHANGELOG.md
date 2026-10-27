@@ -13,6 +13,10 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-10-26** — Add a bounded Swift formatting operation rule to OPT92, requiring observed toolchain-version evidence and an explicit Linux x64 benchmark. Missing source configuration or scoped action-log evidence holds the job back.
+
+- **2026-10-26** — Add OPT92 Linux benchmark candidates for a restricted set of positively supported portable operations with executed source-matched history. Cards report observed runtime, remain uncredited and appear once at their pole or in their own section. Add manual OPT93 NuGet disk-placement and OPT94 isolated .NET SDK guidance; strengthen OPT32/70 fail-closed verdict guidance and OPT79 whole-job validation. Catalog: 89 → 92 entries. No installed-workload-cache or Homebrew saving pattern is added.
+
 - **2026-10-22** — **Eval sessions now record how much of the reference
   material the agent read, with a committed baseline.** Every eval run records
   the bytes and lines the agent pulled from `references/` (per file), whether

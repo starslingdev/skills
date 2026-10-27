@@ -37,6 +37,8 @@ The deterministic router stops there — it routes on **dominant category alone*
 
 **Fix recipe**: Adopt change-scoped execution for the dominant step, with the mandatory guardrail below. E.g. `turbo run build test --filter='...[origin/${{ github.base_ref }}]'`, `nx affected -t build test --base=origin/${{ github.base_ref }}`, or `vitest --changed origin/${{ github.base_ref }}`. The base must be the **merge base**, not `HEAD~1` — and it must EXIST in the clone: the default `actions/checkout` is a shallow, single-branch clone where `origin/${{ github.base_ref }}` does not resolve. Add `fetch-depth: 0` (or a targeted `git fetch origin ${{ github.base_ref }}` step) to the scoped job's checkout (an explicit exception to OPT28's shallow-checkout guidance). turbo/nx fail loudly on an unresolvable base, but `vitest --changed` against a missing ref can resolve to "no changed files" and exit 0 green — exactly the false pass Mandatory Guardrail #1 exists to prevent.
 
+**Fail closed:** the always-running verdict must check every detector and intermediate job whose failure can suppress a required suite. Listing them in `needs:` is not an assertion. Accept a skipped suite only after successful detection with a valid explicit unchanged output; reject failures and cancellations, including an unchanged output written before failure. A strict suite-success assertion also rejects an upstream failure that skips the suite.
+
 **Mandatory guardrail (this pattern is invalid without it)**:
 
 1. **Full fallback on resolution error.** If the scoper errors, can't resolve the graph, or returns an empty set on a non-trivial diff, run the **full** build/suite. Never let "couldn't figure out what changed" become "ran nothing → green".

@@ -883,6 +883,35 @@ engine's; the hit and miss matchers are deliberately **independent** re-readings
 — a verifier sharing the engine's matcher could not catch a mislabelled row — so
 they are only spot-checked, line by line.
 
+**Whole-job validation:** compare the whole job as well as the measured restore/install/post-save block: a cache can shorten one step while lengthening the job; this is manual validation guidance, not a change to OPT79's block-based detector.
+
+---
+
+### OPT93 — NuGet Restores to a Slower Disk on Windows Runners
+
+<!-- METADATA
+pattern: OPT93
+impact: MEDIUM
+class: data-driven
+detector: manual
+risk: MEDIUM
+affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml,NuGet.Config"
+fix_strategy: benchmark-nuget-cache-placement
+title_template: "NuGet restores to a slower disk on Windows runners"
+-->
+
+**Not auto-detected yet.** No audit phase emits this entry or claims to have checked it. Apply it manually to the audited repository's logs and comparable job measurements.
+
+**Anti-pattern:** NuGet's effective package and HTTP cache paths sit on a demonstrably slower disk, and cold restore spends measurable time there. Default profile placement alone is not a defect. Establish the actual paths, disks and restore cost from logs; preserve deliberately faster local or NVMe placement.
+
+**Fix recipe:** on equivalent runner hardware and the same toolchain, benchmark `NUGET_PACKAGES` and `NUGET_HTTP_CACHE_PATH` under runner temp after verifying its disk. Explicitly print the effective paths, verify restore/build/test behavior, and measure cold and warm whole jobs separately. Moving both paths together cannot isolate either path's individual contribution. A cold pilot with remote caching disabled does not predict the production warm path.
+
+If `actions/cache` persists the package cache, change its path and version the cache key while retaining OS, architecture and dependency scoping. Never remotely persist HTTP caches or credentials. Include remote restore/save transfer cost in the comparison; reject a change that shortens restore but lengthens the job.
+
+**Sizing: uncredited.** No detector or sizing model. Report the audited repository's sample sizes, hardware and cache-state exclusions. No billing or production speedup claim follows from a small cold pilot.
+
+**Risk: MEDIUM.** Changing paths without changing cache keys or validating actual disk placement can make the job slower or restore an incompatible cache.
+
 ---
 
 ### OPT11 — Redundant Environment Variables
@@ -2654,6 +2683,8 @@ title_template: "Missing `paths`/`paths-ignore` on Expensive Workflows"
 ```
 
 **Fix**: Add `paths-ignore` for documentation, markdown files, and other non-code changes. Or use `paths` to restrict to relevant source directories.
+
+**Fail closed:** the always-running verdict must check every detector and intermediate job whose failure can suppress a required suite. Listing them in `needs:` is not an assertion. Accept a skipped suite only after successful detection with a valid explicit unchanged output; reject failures and cancellations, including an unchanged output written before failure. A strict suite-success assertion also rejects an upstream failure that skips the suite.
 
 **Required-status-check caveat (the "Pending" landmine)**: if any check this workflow produces is a required status check, do NOT skip it with `paths`/`paths-ignore` (or `branches:` filters / `[skip ci]`) — a workflow skipped by filtering leaves its required check "Pending" and the PR can never merge; official guidance says not to use path or branch filtering on required workflows. The documented-safe shape is a job-level `if:` restating the filter (a skipped job reports Success and satisfies the gate). The no-op twin-workflow (same workflow AND job name, inverse filter) is a community-known workaround, NOT in any current GitHub docs edition. Treat required-status UNKNOWN as required: when branch protection/rulesets are unreadable (the common case on repos you don't admin), assume every check this workflow produces may be required.
 
@@ -4490,6 +4521,75 @@ title_template: "The compile is the long pole and nobody profiled it"
 
 ---
 
+### OPT92 — A Job Is a Candidate for a Linux Benchmark
+
+<!-- METADATA
+pattern: OPT92
+impact: MEDIUM
+class: data-driven
+detector: linux-benchmark
+risk: MEDIUM
+affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml"
+fix_strategy: benchmark-portable-job-on-linux
+title_template: "A job is a candidate for a Linux benchmark"
+-->
+
+**TL;DR:** benchmark a narrowly supported portable validation job on Linux. Its current runtime is an observation, not a saving, a price ceiling or evidence that Linux will be faster.
+
+**Detection:** positive operation rules, never absence of native-tool names. The operation rules cover committed-content whitespace checks, isolated CPython syntax compilation and dedicated Swift source formatting. Every step must resolve to one of these rules; setup alone is insufficient:
+
+- `git show --check --format= --no-ext-diff --no-textconv HEAD` checks committed content without external diff drivers or text conversion.
+- `python -I -S -m compileall -q <relative-path>` compiles syntax without executing project modules. Isolation disables environment-driven Python startup, local module shadowing and site hooks. It requires an exact CPython version and matching explicit architecture from the supported setup action. The audited commit's tree must contain Python input files under that path and no symlinks or submodules; an unread tree holds.
+- Checkout and Python setup accept only the selected revisions and restricted inputs documented in `scripts/linux_benchmark.py`. Other revisions, local/composite actions, downloaded tools and wrappers hold. No project script is assumed portable without reading it; v1 has no project-script admission rule.
+- Dedicated Swift formatting accepts only the reviewed checkout and Swift setup revisions in `scripts/linux_benchmark.py`, Swift 6.1.3, an explicit static JSON configuration and tracked regular inputs. It recognizes literal `swift format lint` and a bounded copy/format/diff block; application builds, tests, package plugins, unknown shell commands and existing backup destinations hold. The setup action does not fail on a version mismatch, so its own log section must confirm the selected version. Its Linux installer requires x64; the benchmark names Ubuntu 24.04 x64 and records any architecture change. Missing source/configuration or scoped log evidence holds.
+
+The runner must have an explicit supported hosted label and architecture. Runner aliases, expressions, custom runners, native builds/tests, unknown working directories or environments, conditional work, dependency jobs and publishing paths hold. Literal non-OS matrices with explicit unique leg names can qualify: at most four axes and 32 legs, literal string values, and direct `matrix.<axis>` substitutions only. Each leg independently passes the operation rules and matches its own history. Generated default names, include/exclude, unresolved expressions and possible name collisions hold. Matrix expansion never resolves a runner expression. Generic .NET, Cargo, Flutter, Electron, Tauri, React Native and CMake commands never imply portability. The same work appearing on a Linux matrix leg does not establish redundant native coverage.
+
+**Measurement:** require a clean workflow checkout of the audited repository and successful executed occurrences of the exact job, on the same runner label, in the collector's sample window. Whitespace/Python rules require push observations at the audited commit. The dedicated Swift rule also accepts push/PR observations whose executed workflow exactly matches the audited workflow: resolve the checkout commit and action revisions from scoped action logs, read the workflow and input tree at that commit, and independently check the audited input tree. The explicit formatter configuration must match across both commits. Never substitute a PR head SHA for its executed merge SHA. At most 32 additional API requests are allowed per audit; missing, skipped, ambiguous, unreadable or budget-limited evidence holds. Record sample count, median job runtime, observation links and available workflow frequency. Do not extrapolate a saving from frequency.
+
+A manual trigger alone does not establish a release path. A workflow offering `workflow_dispatch` can qualify from its eligible push history when all work satisfies the operation rules; release markers and deployment environments still hold.
+
+**Fix recipe:** benchmark unsigned validation on Linux at the same commit, with equivalent toolchain versions, dependencies and architecture where possible. Record Linux-specific setup changes. Compare collected and executed tests, outputs and whole-job duration. Retain the native job until representative runs demonstrate equivalent coverage. Keep Apple builds, native platform tests and Windows packaging native.
+
+**Sizing: uncredited.** `wall_clock_p50_s=None`, `runner_min_saving=None`, `realization="none"`, `sizing_basis="uncredited"`. Render once at the matching pole or in the dedicated Linux benchmark section. Never include the card in totals, Tier 2 or Also noticed. Held candidates use the shared disclosure with their actual reason. No prices, weighted minutes or predicted savings.
+
+**Risk: MEDIUM.** Syntax or whitespace equivalence is a scoped claim. It does not establish equivalent application behavior across operating systems.
+
+The Swift rule follows the selected [setup action bundle](https://github.com/swift-actions/setup-swift/blob/7ca6abe6b3b0e8b5421b88be48feee39cbf52c6a/dist/index.js) and [formatter release](https://github.com/swiftlang/swift-format/tree/4c2421c14ce852fd455c257b4e8b9cae156302f1). Log provenance reads runner preparation and the initial checkout/setup steps; later project output cannot establish action revisions, the executed commit or toolchain version.
+
+Runner architectures follow the [GitHub-hosted runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners). Action inputs are restricted to the selected [checkout revision](https://github.com/actions/checkout/blob/11d5960a326750d5838078e36cf38b85af677262/action.yml) and [Python setup revision](https://github.com/actions/setup-python/blob/a26af69be951a213d495a4c3e4e4022e16d87065/action.yml). Updating these supported revisions requires another contract review and regression check.
+
+---
+
+### OPT94 — The .NET SDK Reconciles Unrelated Machine-Wide Workloads
+
+<!-- METADATA
+pattern: OPT94
+impact: MEDIUM
+class: data-driven
+detector: manual
+risk: MEDIUM
+affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml,global.json"
+fix_strategy: benchmark-isolated-dotnet-sdk
+title_template: "The .NET SDK reconciles unrelated machine-wide workloads"
+-->
+
+**Not auto-detected yet.** No audit phase emits this entry or claims to have checked it. Apply it manually using the audited repository's workload-installation logs and whole-job timings.
+
+**Anti-pattern:** installing the required .NET workloads reconciles unrelated machine-wide workloads. Logs must identify that work and its measured cost; a slow setup step or a machine-wide SDK path alone is insufficient.
+
+**Fix recipe:** benchmark a pinned SDK installed with `actions/setup-dotnet` and `DOTNET_INSTALL_DIR` under runner temp. Explicitly install and verify the pinned required workloads, selected `dotnet` executable path, SDK version and installation mode. Directory existence does not establish a usable installation. Preserve the build, tests and packaging checks, and state which release paths the comparison actually exercised.
+
+Compare whole jobs on equivalent runner hardware and separate cold/warm states. A before/after observation across revisions does not attribute every second to SDK isolation; name simultaneous changes and the sample size.
+
+**Windows Installer caution:** restoring MSI-managed workload directories does not recreate installer state. Do not suggest that shortcut without a verified installation/restoration contract. This is not a prohibition on relocatable SDK or Xcode caches. Installed-folder caching has no standalone entry here.
+
+**Sizing: uncredited.** No detector or sizing model; only the audited repository's comparable measurements can establish a saving.
+
+**Risk: MEDIUM.** SDK resolution and installer state affect correctness as well as startup time; keep required platform and release validation.
+
+---
+
 ### OPT64 — Repeated Workflow Attempts From Same Failing Job
 
 <!-- METADATA
@@ -4772,6 +4872,8 @@ The deterministic router stops there — it routes on **dominant category alone*
 - **Diverge from the shipped artifact.** Testing unbuilt source while production ships `dist/` (subpath exports, build-time defines, custom transforms, `tsconfig` path remapping) means the gate validates something the user never runs.
 
 **Fix recipe**: Adopt change-scoped execution for the dominant step, with the mandatory guardrail below. E.g. `turbo run build test --filter='...[origin/${{ github.base_ref }}]'`, `nx affected -t build test --base=origin/${{ github.base_ref }}`, or `vitest --changed origin/${{ github.base_ref }}`. The base must be the **merge base**, not `HEAD~1` — and it must EXIST in the clone: the default `actions/checkout` is a shallow, single-branch clone where `origin/${{ github.base_ref }}` does not resolve. Add `fetch-depth: 0` (or a targeted `git fetch origin ${{ github.base_ref }}` step) to the scoped job's checkout (an explicit exception to OPT28's shallow-checkout guidance). turbo/nx fail loudly on an unresolvable base, but `vitest --changed` against a missing ref can resolve to "no changed files" and exit 0 green — exactly the false pass Mandatory Guardrail #1 exists to prevent.
+
+**Fail closed:** the always-running verdict must check every detector and intermediate job whose failure can suppress a required suite. Listing them in `needs:` is not an assertion. Accept a skipped suite only after successful detection with a valid explicit unchanged output; reject failures and cancellations, including an unchanged output written before failure. A strict suite-success assertion also rejects an upstream failure that skips the suite.
 
 **Mandatory guardrail (this pattern is invalid without it)**:
 

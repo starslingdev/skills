@@ -277,3 +277,10 @@ catalog/doc mismatch. Mechanically, in ONE change:
   hash in `tests/fixtures/cloak-manifest.json`, or the cloak-prune step drops
   it;
 - update the list and rejection record in THIS document in the same change.
+
+F7's required-verdict assertion extension (2026-10-26) belongs to the existing
+API-gated configuration fact, not a new attack vector or offline guess about
+branch protection. It catches a required check that runs but accepts missing
+verification. Its stronger pass meaning and unmeasured assertion coverage are
+documented in `security-facts.md`; historical score values are not equivalent
+measurements merely because this extension preserves the fact IDs.

@@ -33,8 +33,8 @@ THE FACTS
                                           checkout sets persist-credentials:
                                           false
   F7 sec.required-checks.skippable        every required status check is
-                                          produced by a job that always runs
-                                          (API-gated)
+                                          produced by an always-running job with
+                                          a proved verdict when aggregating (API-gated)
   F8 sec.fork-approval.effective          fork-PR CI approval gates more than
                                           accounts new to GitHub (API-gated)
   F9 sec.gate.test-failure-fatal          no job that runs the test/lint suite
@@ -1993,6 +1993,12 @@ def _templated_refusal_note(docs: list[tuple[str, dict]], context: str) -> str |
     return None
 
 
+@lru_cache(maxsize=1)
+def _verdict_assertions() -> ModuleType:
+    return _load_sibling("ci_secure_verdict_assertions",
+                         Path(__file__).resolve().parent / "verdict_assertions.py")
+
+
 def _required_checks_skippable(
     docs: list[tuple[str, dict]],
     repo: str | None,
@@ -2026,6 +2032,7 @@ def _required_checks_skippable(
     bypassable: list[str] = []
     unjudged: list[str] = []
     gated = 0
+    traced_contexts = 0
     for context in contexts:
         producers = _context_producers(docs, context)
         if not producers:
@@ -2045,12 +2052,27 @@ def _required_checks_skippable(
                 f"job name, or a stale entry"
                 + (f"; {note})" if note else ")"))
             continue
+        traced_contexts += 1
         skips: list[str] = []
         unknown: list[str] = []
         always_runs = False
         for rel, key, _job, jobs, doc, ability in producers:
             reason = _skip_path(jobs, key)
             if reason is None:
+                if _needs_of(_job) and not any(
+                    _block_runs_verification_suite(str(step.step.get("run", "")))
+                    and len(_code_lines(str(step.step.get("run", "")))) == 1
+                    and not re.search(r"[;&|\n$]", _code_lines(str(step.step.get("run", "")))[0])
+                    and not step.gated and not step.background and not step.in_parallel_group
+                    for step in _scan()._iter_job_steps(_job)
+                ):
+                    assertion, evidence = _verdict_assertions().analyze(jobs, key, doc)
+                    if assertion == "fail":
+                        skips.append(f"`{context}` ← {rel}: {evidence}")
+                        continue
+                    if assertion == "unmeasured":
+                        unknown.append(f"`{context}` ← {rel}: verdict assertion not proved ({evidence})")
+                        continue
                 if ability == _ABILITY_YES:
                     always_runs = True
                     break
@@ -2085,10 +2107,9 @@ def _required_checks_skippable(
         # judged against was itself a floor — a check configured only in the
         # unread source is invisible here.
         return "fail", (
-            f"on {detail}, GitHub reports a SKIPPED required check as passed, "
-            "and "
+            f"on {detail}, a required check can accept missing verification: "
             + _capped(bypassable, 3)
-            + " — so nothing in these workflows is guaranteed to report it."
+            + " — the required check does not reliably reject missing verification."
             + tail)
     if unjudged:
         # A pass is a claim about EVERY required check. The ordinary shape of a
@@ -2103,12 +2124,17 @@ def _required_checks_skippable(
                   if gated else
                   f"none of the {len(contexts)} required check(s) could be "
                   f"traced to a job in these workflows")
+        if traced_contexts > gated:
+            traced = (f"{traced_contexts} of {len(contexts)} required check(s) have "
+                      f"a known producer, but only {gated} have proved execution "
+                      "and supported verdict behavior")
         return "unmeasured", (
             f"unmeasured: {traced}, so whether every required check on {detail} "
             f"survives a skipped job was not established." + tail)
     return "pass", (
         f"all {gated} required check(s) on {detail} have a producer that runs "
-        f"whatever else happens.")
+        f"whatever else happens, with supported verdict assertions rejecting "
+        f"upstream failure where the producer aggregates dependencies.")
 
 
 # --- F8: fork-PR CI approval that gates nobody real --------------------------
@@ -4006,9 +4032,9 @@ def compute_config_facts(
         ("unmeasured", gap_reason) if gap else _required_checks_skippable(
             docs, repo, required_contexts_fetcher or _required_contexts_via_gh))
     add("sec.required-checks.skippable",
-        "every required status check is produced by a job that always runs "
-        "(GitHub counts a SKIPPED required check as a pass, so a check only a "
-        "conditional job reports can be satisfied without running)",
+        "every required status check has an always-running producer and a "
+        "proved assertion when aggregating dependencies (a skipped check or "
+        "a green verdict accepting missing verification can satisfy the gate)",
         True, rc_outcome == "pass", rc_evidence, outcome=rc_outcome)
 
     fa_outcome, fa_evidence = _fork_approval_effective(

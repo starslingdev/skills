@@ -70,6 +70,9 @@ entries are dated (UTC). Format loosely follows
   where the secret lists answer 403 (recorded for a non-collaborator) the
   secrets check stays unmeasured. The CI gate does not read them (they stay
   unmeasured there, each a non-blocking warning line). (2026-10-26)
+
+- **2026-10-26** — Required-check F7 now analyzes supported verdict assertions and their dependency chain, including a reviewed immutable `alls-green` revision and its allowed lists. Reproduced failure/cancellation-to-skipped-suite green paths fail; unknown scripts, action revisions and unsupported expressions are unmeasured. This extension preserves the API gate and existing fact IDs; stronger pass semantics and changed unmeasured coverage can change both the score and its denominator.
+
 - ci-secure: new config hygiene check `sec.deps.update-cooldown` — every
   configured dependency update tool waits at least 3 days before proposing a
   fresh release (Dependabot `cooldown`, Renovate `minimumReleaseAge`), the
