@@ -5377,3 +5377,17 @@ def test_vr_opt80_withheld_reason_is_unknown_when_a_required_status_is_repo_publ
     assert vr._vr_opt80_tail_withheld_expected(f, data(["Lint"], pubs)) == {
         "not_merge_gating", "tail_not_derivable"}
     assert vr._vr_opt80_tail_withheld_problems(f, data(["Lint"], pubs)) == []
+
+
+def test_vr_required_reachability_matches_posted_context_exactly():
+    """The verifier's copy must agree with the collector's exact match: a required
+    `All CI` is not repo-published because a workflow posts `All CI / extra`."""
+    import verify_report as vr
+    data = {"required_checks": ["All CI"], "workflow_job_graph": _AGG_JOB_GRAPH,
+            "workflow_status_publishers": {
+                _AGG_WF: {"sources": [_AGG_WF], "contexts": ["All CI / extra"]}}}
+    assert vr._vr_required_reachability_unresolved(data) is False
+    assert cr._required_reachability_unresolved(
+        {"All CI"}, {}, _AGG_JOB_GRAPH, data["workflow_status_publishers"]) is False
+    data["workflow_status_publishers"][_AGG_WF]["contexts"] = ["All CI"]
+    assert vr._vr_required_reachability_unresolved(data) is True

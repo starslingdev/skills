@@ -8688,34 +8688,22 @@ _VR_OPT80_MERGE_WAIT_CLAIM_RE = re.compile(
 _VR_OPT80_SLOWEST_JOB = "is this workflow's slowest job"
 
 
-def _vr_strings_in(value: object) -> list[str]:
-    """Every string nested anywhere in `value` (dict values, list items)."""
-    if isinstance(value, str):
-        return [value]
-    if isinstance(value, dict):
-        return [s for v in value.values() for s in _vr_strings_in(v)]
-    if isinstance(value, list):
-        return [s for v in value for s in _vr_strings_in(v)]
-    return []
-
-
 def _vr_required_reachability_unresolved(data: dict) -> bool:
     """Minimal own copy of `collect_runs._required_reachability_unresolved` (issue
-    #119): some required context is named by a workflow that posts commit statuses
-    (`workflow_status_publishers`, every string an entry carries but its `sources`
-    paths) and no YAML job in `workflow_job_graph` is that context's check-run. Such
-    a context (an in-repo `All CI` aggregate) waits on jobs no `needs:` edge records,
-    so no job can be called off the merge wait."""
+    #119): some required context is one a workflow that posts commit statuses posts
+    (`workflow_status_publishers`: exactly equal to one of an entry's `contexts`, or
+    its `names` fallback) and no YAML job in `workflow_job_graph` is that context's
+    check-run. Such a context (an in-repo `All CI` aggregate) waits on jobs no
+    `needs:` edge records, so no job can be called off the merge wait."""
     pubs = _as_dict(data.get("workflow_status_publishers"))
-    texts = [s for p in pubs.values() if isinstance(p, dict)
-             for k, v in p.items() if k != "sources" for s in _vr_strings_in(v)]
-    if not texts:
+    posted = {str(s).strip() for p in pubs.values() if isinstance(p, dict)
+              for k in ("contexts", "names") for s in _as_list(p.get(k))}
+    if not posted:
         return False
     graph = _as_dict(data.get("workflow_job_graph"))
     names = data.get("workflow_names")
     for r in {str(x) for x in _as_list(data.get("required_checks"))}:
-        pat = re.compile(r"(?<![\w-])" + re.escape(r) + r"(?![\w-])")
-        if not any(pat.search(t) for t in texts):
+        if r.strip() not in posted:
             continue
         if not any(_vr_opt80_check_names_job(r, str(k), _as_dict(n),
                                              _vr_opt80_workflow_prefixes(str(w), names))

@@ -1202,7 +1202,8 @@ unversioned and updates by reinstall from `main`.
   a script's own imports are followed). A required context one of them posts is
   never counted external: the gate
   stays an unresolved best guess, the spine is not narrowed, no check is called
-  non-required on its account, and the report names the status. Which jobs the
+  non-required on its account, the checkout-stall finding (OPT80) no longer says
+  the merge does not wait on a job, and the report names the status. Which jobs the
   publisher waits on is not traced. A name that only appears in such a
   workflow, such as its title or the list of checks an aggregator waits on, does
   not count, so a CLA bot or a deploy app's status still classifies as external.
