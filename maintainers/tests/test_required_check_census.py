@@ -133,3 +133,25 @@ def test_capture_destinations_cannot_follow_symlinks_into_source(tmp_path, monke
     with pytest.raises(ValueError, match='source checkout|symlink|data directory'):
         census.main()
     assert not list(source.iterdir())
+
+
+def test_shared_summary_name_records_each_job_and_is_ambiguous():
+    data = snapshot()
+    other = snapshot('echo "${{ needs.suite.result }}"')['workflows'][0]
+    data['workflows'].append(dict(other, path='.github/workflows/other.yml'))
+    report = engine().measure(data, ROOT)
+    rows = {row['path']: row for row in report['summaries']}
+    assert all(row['ambiguous'] for row in rows.values())
+    assert rows['.github/workflows/ci.yml']['assertion'] == 'pass'
+    assert rows['.github/workflows/other.yml']['assertion'] == 'fail'
+
+
+def test_comparison_audits_newly_passing_job_masked_by_shared_name():
+    def row(assertion):
+        return [{'repository': 'sample/project', 'revision': 'a' * 40, 'outcome': 'pass',
+                 'summaries': [{'path': 'ci.yml', 'job': 'gate', 'context': 'gate', 'outcome': 'pass',
+                                'ambiguous': True, 'assertion': 'pass'},
+                               {'path': 'other.yml', 'job': 'gate', 'context': 'gate', 'outcome': 'pass',
+                                'ambiguous': True, 'assertion': assertion}]}]
+    report = engine().compare(row('unmeasured'), row('pass'))
+    assert [item['after']['path'] for item in report['summary_requires_manual_review']] == ['other.yml']

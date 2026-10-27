@@ -109,6 +109,11 @@ def measure(snapshot, engine_root):
         except (yaml.YAMLError, ValueError, TypeError) as exc:
             errors.append({'path': item['path'], 'reason': type(exc).__name__})
     selected = snapshot.get('summary_jobs')
+    # The fact matches producers by display name across every workflow, so a
+    # shared name combines jobs: one supported job can hide a sibling's
+    # change. Each row also records its own job's assertion for comparison.
+    names = collections.Counter(cf._display_name(key, job) for _, doc in docs
+                                for key, job in cf._jobs(doc))
     summaries = []
     for rel, doc in docs:
         for key, job in cf._jobs(doc):
@@ -122,17 +127,18 @@ def measure(snapshot, engine_root):
                 outcome, evidence = cf._required_checks_skippable(
                     docs, snapshot['repository'],
                     lambda repo: ([context], 'hypothetical required summary checks'), **resolution_args)
+                assertion, detail = cf._verdict_assertions().analyze(dict(cf._jobs(doc)), key, doc, **resolution_args)
                 reason = None
                 if outcome == 'unmeasured':
-                    assertion, detail = cf._verdict_assertions().analyze(dict(cf._jobs(doc)), key, doc, **resolution_args)
                     # A proven assertion can still have an unknown producer or
                     # trigger. Do not misrank its proof as a refusal reason.
                     reason = detail if assertion == 'unmeasured' else 'producer or trigger unresolved'
             except Exception as exc:  # a census must retain coverage failures
                 outcome, evidence = 'unmeasured', 'engine error: ' + type(exc).__name__
-                reason = evidence
+                assertion, reason = 'unmeasured', evidence
             summaries.append({'path': rel, 'job': key, 'context': context,
-                              'outcome': outcome, 'evidence': evidence, 'reason': reason})
+                              'outcome': outcome, 'evidence': evidence, 'reason': reason,
+                              'assertion': assertion, 'ambiguous': names[context] > 1})
     contexts = sorted({row['context'] for row in summaries})
     started = time.monotonic()
     if errors:
@@ -186,7 +192,11 @@ def compare(before, after):
             previous, current = old_summaries[key], new_summaries[key]
             change = previous['outcome'] + '->' + current['outcome']
             summary_transitions[change] += 1
-            if current['outcome'] == 'pass' and previous['outcome'] != 'pass':
+            # A shared name's outcome can stay pass while this job's own
+            # assertion newly passes; audit that job too.
+            masked = (current.get('ambiguous') and current.get('assertion') == 'pass'
+                      and previous.get('assertion') != 'pass')
+            if masked or current['outcome'] == 'pass' and previous['outcome'] != 'pass':
                 summary_review.append({'repository': repository, 'transition': change,
                                        'before': previous, 'after': current})
         transition = a['outcome'] + '->' + b['outcome']

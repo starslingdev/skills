@@ -98,4 +98,7 @@ reports repository-level unmeasured share, and lists both repository and
 summary transitions needing hand review. Every newly passing result needs a
 written review of the immutable workflow before calling the change precise.
 A failing sibling summary must not hide another summary's newly passing result.
+Summary jobs that share a display name are marked `ambiguous`, because the
+fact combines them; each row also records its own job's `assertion`, and a
+newly passing assertion on an ambiguous row is listed for review.
 Captured workflows and reports remain private local data, never PR attachments.
