@@ -77,7 +77,7 @@
       "prompt": "is Afterburner making our jobs faster",
       "route": "sling",
       "command": "sling time",
-      "why": "read, timings split by where jobs ran: `time --repo <owner/name> --group-by afterburner`"
+      "why": "read, like-for-like per-hop delta for one workflow split by where jobs ran: `time --repo <owner/name> --workflow <name> --group-by afterburner`"
     },
     {
       "prompt": "update sling to the latest version",

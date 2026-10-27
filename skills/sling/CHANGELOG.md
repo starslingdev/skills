@@ -22,7 +22,8 @@ All notable changes to the `sling` skill. Unversioned; dated (UTC).
   critical path, hop by hop — "which part of this workflow is slow"),
   `--group-by afterburner|provider|tier` (per-group percentiles and counts,
   with per-hop deltas against the baseline group that refuse a too-small
-  sample), `sling jobs list --afterburner engaged|not-engaged` and the
+  sample; "is Afterburner faster" routes to `--workflow` plus `--group-by`,
+  since `--group-by` alone compares different mixes of jobs), `sling jobs list --afterburner engaged|not-engaged` and the
   optional Afterburner job fields, `sling labels list --org` private-beta
   rows (`private_beta: true`), and `sling bill`'s optional free-credit and
   projection fields (`amount_due_usd` is still what is owed). Four routing

@@ -487,8 +487,9 @@ workflow is written the way it is. That second question is `ci-speedup`.
 
 `--org` and `--repo` are mutually exclusive: both together exit `2` (`Use
 --org or --repo, not both.`). The same holds for `sling top`. There is no
-Afterburner axis here; split timings by Afterburner with `sling time --repo
-<owner/name> --group-by afterburner`.
+Afterburner axis here; compare timings with and without Afterburner with `sling
+time --repo <owner/name> --workflow <name> --group-by afterburner` (the per-hop
+`delta`).
 
 ### `sling top [--by workflow|job|label|repo|branch] [--metric runner-minutes|cost|jobs|p95-duration] [-n <count>] [--org <slug> | --repo <owner/name>] [--window <n>d | --month]`
 

@@ -253,7 +253,7 @@ reading YAML yourself.
 | Where a run's wall-clock went (queue wait vs. provision vs. steps vs. teardown) | `sling` | `sling time <run\|job\|attempt id\|URL>` |
 | The same, as percentiles across a repo | `sling` | `sling time --repo <owner/name> --window <n>d` (`--repo` is required; `--org` is rejected) |
 | Which part of a workflow is slow — its critical path, hop by hop | `sling` | `sling time --repo <owner/name> --workflow <name>` |
-| Whether Afterburner, a provider or a tier changes the timings | `sling` | `sling time --repo <owner/name> --group-by afterburner\|provider\|tier` |
+| Whether Afterburner, a provider or a tier changes the timings | `sling` | `sling time --repo <owner/name> --workflow <name> --group-by afterburner\|provider\|tier` — compare the per-hop `delta`; `--group-by` alone mixes different jobs |
 | Recent runs and their status | `sling` | `sling runs list [--branch --status --conclusion --trigger --workflow-path --label --window --limit]` |
 | Detail on one run (its jobs, attempts, runner) | `sling` | `sling runs show <run id\|URL> [--wait] [--fail-fast]` |
 | Which jobs in a run failed, or jobs across a repo | `sling` | `sling jobs list --run <id>` / `--repo <owner/name>` [`--afterburner engaged\|not-engaged`] |
