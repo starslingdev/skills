@@ -1,14 +1,15 @@
 {
-  "_comment": "The complete set of sling subcommands, captured from `sling --help` on v0.1.8 (2026-08-31). This file exists so a test can prove SKILL.md never routes to a subcommand that does not exist. Update it, and the changelog, when a sling release adds or removes a command.",
-  "cli_version": "0.1.8",
-  "captured_utc": "2026-08-31",
-  "read_only": true,
+  "_comment": "The complete set of sling subcommands, captured from `sling --help` and each `sling <cmd> --help` on v0.1.124 (2026-10-27). This file exists so a test can prove SKILL.md never routes to a subcommand that does not exist, and never routes a GitHub state change to sling. Update it, and the changelog, when a sling release adds or removes a command.",
+  "cli_version": "0.1.124",
+  "captured_utc": "2026-10-27",
+  "changes_github_state": false,
   "groups": {
     "auth_and_setup": [
       "login",
       "logout",
       "whoami",
       "doctor",
+      "update",
       "org switch"
     ],
     "inspect": [
@@ -34,14 +35,38 @@
       "exit-codes"
     ]
   },
+  "github_state_changing_commands": [],
+  "local_only_user_runs": {
+    "_comment": "Commands that change only the user's own machine (a credential, an installed binary) and that the USER runs, never the agent. None of them touches GitHub or CI state.",
+    "commands": [
+      "login",
+      "update"
+    ]
+  },
   "global_flags": [
     "--agent",
     "--json",
-    "--org",
-    "--repo",
     "--version",
     "--help"
   ],
+  "scope_flags": {
+    "_comment": "--org <slug> and --repo <owner/name> are per-command, not global. Every rejection below exits 2 with nothing on stdout. No command reads --repo from the git remote of the current directory; without --repo, a list or cost command covers the whole org.",
+    "rejects_org_and_repo": [
+      "logs"
+    ],
+    "rejects_org": [
+      "time"
+    ],
+    "rejects_org_with_repo": [
+      "runs list",
+      "jobs list",
+      "usage",
+      "top"
+    ],
+    "repo_required_for_repo_view": [
+      "time"
+    ]
+  },
   "exit_codes": {
     "0": "success",
     "1": "unexpected internal error",
@@ -53,6 +78,5 @@
     "7": "rate limited",
     "10": "remote outcome failed (doctor unhealthy, or runs show --wait on a non-success run)"
   },
-  "mutating_commands": [],
-  "global_flags_note": "--org and --repo are rejected by `logs` (strict parser, exit 2); every other data command accepts them. Unknown flags are ignored everywhere except `logs`."
+  "global_flags_note": "`logs` rejects --org and --repo (strict parser, exit 2, `Unknown flag \"--org\"`). `time` rejects --org outright (exit 2) and needs --repo for its repo view, which it never reads from git. `runs list`, `jobs list`, `usage` and `top` reject --org together with --repo (exit 2, `Use --org or --repo, not both.`). Unknown flags are ignored everywhere except `logs` and `update`."
 }

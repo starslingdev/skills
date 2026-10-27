@@ -1,5 +1,5 @@
 {
-  "_comment": "The routing contract this skill exists to enforce. `route` is the tool or skill that must answer the prompt; `why` records the rule that decides it. Pinned by tests/test_sling_routing.py.",
+  "_comment": "The routing contract this skill exists to enforce. `route` is the tool or skill that must answer the prompt (`user` means the user runs the command themselves, never the agent); `why` records the rule that decides it. Pinned by tests/test_sling_routing.py.",
   "routings": [
     {
       "prompt": "why did this job fail",
@@ -66,6 +66,30 @@
       "route": "sling",
       "command": "sling whoami",
       "why": "read, identity"
+    },
+    {
+      "prompt": "which part of this workflow is slow",
+      "route": "sling",
+      "command": "sling time",
+      "why": "read, one workflow's critical path hop by hop: `time --repo <owner/name> --workflow <name>`"
+    },
+    {
+      "prompt": "is Afterburner making our jobs faster",
+      "route": "sling",
+      "command": "sling time",
+      "why": "read, timings split by where jobs ran: `time --repo <owner/name> --group-by afterburner`"
+    },
+    {
+      "prompt": "update sling to the latest version",
+      "route": "user",
+      "command": "sling update",
+      "why": "changes only the user's machine, no GitHub state; the user runs it, like login"
+    },
+    {
+      "prompt": "stop sling from updating itself",
+      "route": "user",
+      "command": "sling update --off",
+      "why": "opting out of background updates is the user's choice; the user runs it"
     },
     {
       "prompt": "re-run the failed jobs",

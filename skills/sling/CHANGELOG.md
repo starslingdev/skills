@@ -6,6 +6,28 @@ All notable changes to the `sling` skill. Unversioned; dated (UTC).
 
 ### Added
 
+- **2026-10-27** — **`sling update` and background self-update are
+  documented, and routed to the user.** `sling update [--off|--on]` (present
+  since 0.1.84) reinstalls `sling` on the user's machine and changes no
+  GitHub or CI state; its `--agent` results (`current` / `updated` /
+  `failed` / `unmanaged`) and exit codes (`5` for a failed check, `1` for a
+  failed install) are in the reference. Like `sling login`, the user runs it,
+  never the agent. A note covers the once-a-day background update an
+  installer-placed `sling` runs after any command: silent under `--agent`,
+  never touching stdout or the exit code, off under `CI` /
+  `SLING_NO_AUTO_UPDATE` or after `sling update --off` — so the version can
+  change mid-session, and opting out is the user's choice.
+- **2026-10-27** — **New read views in the routing table and reference.**
+  `sling time --repo <owner/name> --workflow <name>` (one workflow plus its
+  critical path, hop by hop — "which part of this workflow is slow"),
+  `--group-by afterburner|provider|tier` (per-group percentiles and counts,
+  with per-hop deltas against the baseline group that refuse a too-small
+  sample), `sling jobs list --afterburner engaged|not-engaged` and the
+  optional Afterburner job fields, `sling labels list --org` private-beta
+  rows (`private_beta: true`), and `sling bill`'s optional free-credit and
+  projection fields (`amount_due_usd` is still what is owed). Four routing
+  eval rows pin the new asks, two of them as user-run.
+
 - **2026-08-26** — **The launch-announcement prompts are pinned in the routing
   eval.** "why did CI fail on my last push", "what's breaking the nightly
   build", and "is this test actually broken or just flaky" are published as
@@ -53,6 +75,22 @@ All notable changes to the `sling` skill. Unversioned; dated (UTC).
 
 ### Changed
 
+- **2026-10-27** — **Re-pinned every version-pinned fact against `sling`
+  v0.1.124** and **documented `doctor`'s new `auto_update` check**, which
+  makes nine. It is advisory like `agent_skill`: always `ok: true`
+  (possibly `warn: true`) except `ok: false, skipped: true` on a binary the
+  installer did not place, so it never sets exit `10`. The `version` check's
+  `fix_command` is now `sling update` on a normal install, otherwise the
+  installer one-liner (or a line that sets a copy aside first), or absent;
+  the rule stays "surface it, never run it". The read-only guard is
+  reshaped rather than dropped: the contract is now "no `sling` command
+  changes GitHub or CI state", `update` joins `login` in a local-only,
+  user-runs-it group, and the guard still fails if a command named for a
+  GitHub state change (re-run, cancel, …) is ever captured or routed to
+  `sling`. Re-verified unchanged on 0.1.124: `--compact` absent, `logs`
+  rejects `--org`/`--repo`, an empty scope-flag value exits `2`,
+  `exit-codes` lists only `0`–`5`, a nonexistent subcommand exits `1`.
+
 - **2026-08-31** — **Re-pinned every version-pinned fact against `sling`
   v0.1.8** (what the installer serves since 2026-08-31) and **documented
   `doctor`'s new `agent_skill` check** in all **four** shapes it emits
@@ -91,6 +129,21 @@ All notable changes to the `sling` skill. Unversioned; dated (UTC).
   <github-url>`).
 
 ### Fixed
+
+- **2026-10-27** — **The skill said `sling update` does not exist, and that
+  no `sling` command changes anything.** Both were true when written and
+  are false now; the Gotchas bullet and the guard's historical allowance
+  that carried them are gone.
+- **2026-10-27** — **Three scope-flag claims were wrong on both 0.1.8 and
+  0.1.124.** `runs list`, `jobs list`, `usage` and `top` reject `--org`
+  together with `--repo` (exit `2`, `Use --org or --repo, not both.`);
+  `time` rejects `--org` outright (exit `2`); and no command reads `--repo`
+  from the git remote — without it a listing covers the whole org, and
+  `time`'s repo view needs `--repo`. The preflight's wrong-org step, the
+  reference's Global flags section and the captured surface now say so, and
+  a guard pins each rule to the capture.
+- **2026-10-27** — The `gh` fallback reference now says `sling` "makes no
+  change to GitHub" instead of "read-only in this release".
 
 - **2026-08-31** — **The commands-must-exist guard no longer stops reading at
   a `"detail"` string.** Documenting `doctor`'s `agent_skill` row meant

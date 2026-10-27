@@ -8,15 +8,17 @@ can be wrong while every other check in the repo stays green:
 1. **It names a `sling` subcommand that does not exist.** This is the
    failure the skill was written to prevent (an agent inventing `sling
    rerun`), so shipping it in our own routing table would be the joke
-   writing itself. It is not hypothetical: `sling doctor` on v0.1.2 emits
-   `fix_command: "sling update"`, and `sling update` is rejected by the
-   binary as unknown — a wrong command name survives being printed by the
-   tool itself.
+   writing itself. It is not hypothetical: `sling doctor` on v0.1.2 emitted
+   `fix_command: "sling update"` long before `sling update` existed — a
+   wrong command name survives being printed by the tool itself.
 2. **The read/write split drifts.** Every routing rule reduces to "does
-   this change CI state?" If a mutating verb ever routes to `sling`, or a
-   mutating command appears in the surface while the skill still says
-   read-only, the contract is broken in the direction that costs the user
-   runner-minutes or a cancelled deploy.
+   this change GitHub or CI state?" If a mutating verb ever routes to
+   `sling`, or a GitHub-state-changing command appears in the surface while
+   the skill still says no `sling` command changes GitHub, the contract is
+   broken in the direction that costs the user runner-minutes or a
+   cancelled deploy. The one `sling` command that changes anything at all,
+   `update`, changes only the user's machine, and is routed to the user —
+   never run by the agent — exactly like `login`.
 
 `references/command-surface.json` is the pinned capture of what the CLI
 actually offers, so these tests are deterministic and need no network.
@@ -130,8 +132,7 @@ def _assert_only_real_commands(text: str, where: str) -> None:
     """A `sling <cmd>` a reader could act on must exist — with one allowance:
     naming a non-command in order to WARN about it is the opposite of the
     failure, so it passes only when the same file says the command is not real.
-    `sling update` is the live case: `sling doctor` recommends it and the
-    binary rejects it, so warning about it by name is the useful thing to do.
+    (`sling update` was the original case, before a release added it.)
 
     One WORD is waved through rather than one field: `doctor`'s `agent_skill`
     row prints "sling skill installed for …", and `skill` is a noun there, not
@@ -233,11 +234,30 @@ def test_every_mutating_verb_is_routed_to_gh(verb: str):
 
 
 def test_read_only_claim_matches_the_captured_surface():
-    """If a sling release ships a write command, the capture changes and this
-    fails — before the skill can keep telling users sling cannot change
-    anything."""
-    assert _SURFACE["read_only"] is True
-    assert _SURFACE["mutating_commands"] == []
+    """If a sling release ships a command that changes GitHub or CI state, the
+    capture changes and this fails — before the skill can keep telling users
+    no `sling` command changes GitHub.
+
+    Reshaped on the 0.1.124 re-pin. The old claim was "sling changes nothing at
+    all", and `sling update` (which reinstalls sling on the user's machine)
+    falsified it: an honest re-capture made this test red. The contract that
+    matters to routing is narrower and still true — nothing in `sling` touches
+    GitHub — so that is what is pinned now, and the local-only commands are
+    pinned separately, as user-run, by the next test."""
+    assert _SURFACE["changes_github_state"] is False
+    assert _SURFACE["github_state_changing_commands"] == []
+    # Teeth that do not depend on the hand-kept list above: no captured command
+    # may be named for a GitHub state change (`run cancel`, `rerun`, ...). A
+    # release that adds one must be re-classified on purpose, not slip through.
+    named_for_a_state_change = sorted(
+        c for c in _COMMANDS if set(c.replace("-", " ").split()) & set(_MUTATING_ACTIONS))
+    assert not named_for_a_state_change, (
+        f"the surface captures GitHub-state-changing command(s) "
+        f"{named_for_a_state_change} while the skill says no sling command changes "
+        f"GitHub. Route them to the user or to gh, and reshape this contract.")
+    local = set(_SURFACE["local_only_user_runs"]["commands"])
+    assert not local & set(_SURFACE["github_state_changing_commands"]), (
+        "a command is classed as both local-only and GitHub-state-changing")
     # The description carries the CONSEQUENCE (state changes route to gh) rather than
     # the word "read-only" — the documented description shape is ~150 chars, and the
     # routing rule is what a router needs. The mechanism lives in the body.
@@ -247,17 +267,90 @@ def test_read_only_claim_matches_the_captured_surface():
     # clause as the state-change language.
     assert re.search(r"state changes?[^.]{0,60}`gh`", _FRONT["description"]), (
         "the description no longer says state changes route to `gh` in one clause")
-    assert "read-only" in _BODY, "the body no longer states that sling is read-only"
+    assert "no `sling` command changes github" in " ".join(_BODY.split()).lower(), (
+        "the body no longer states that no sling command changes GitHub")
+    assert "no `sling` command that changes anything" not in _BODY.lower(), (
+        "the body claims sling changes nothing at all — `sling update` does, locally")
+
+
+def test_local_only_commands_are_routed_to_the_user():
+    """`login` and `update` change only the user's machine — a credential, an
+    installed binary — and the user runs both. If the skill ever stops saying
+    so, or an eval routes one to the agent, an agent reinstalls sling or hangs on
+    a device code on the user's behalf."""
+    local = _SURFACE["local_only_user_runs"]["commands"]
+    assert {"login", "update"} <= set(local), f"local-only group lost a command: {local}"
+    body = " ".join(_BODY.split()).lower()
+    for cmd in local:
+        assert cmd in _COMMANDS, f"local-only `{cmd}` is not in the captured surface"
+        assert f"ask the user to run `sling {cmd}`" in body, (
+            f"SKILL.md no longer hands `sling {cmd}` to the user")
+    for row in _ROUTING["routings"]:
+        head = " ".join(row.get("command", "").split()[:2]).removeprefix("sling ")
+        if row.get("command", "").startswith("sling ") and head in local:
+            assert row["route"] == "user", (
+                f"{row['prompt']!r} routes the local-only `sling {head}` to "
+                f"{row['route']!r}; the user runs it, never the agent")
+    table = [ln for ln in _BODY.splitlines()
+             if ln.startswith("|") and "`sling update" in ln]
+    assert table, "the routing table no longer covers `sling update`"
+    assert all(ln.split("|")[2].strip() == "the user" for ln in table), (
+        "a routing-table row puts `sling update` in someone else's hands than the user's")
+
+
+def test_scope_flag_rules_match_the_captured_surface():
+    """`--org`/`--repo` are per-command, and three rules were wrong on both
+    0.1.8 and 0.1.124 before this guard: `time` rejects `--org` outright,
+    four list/cost commands reject the pair together, and no command reads
+    `--repo` from the git remote. Pin each rule to the capture, in the step
+    that tells an agent which flag to reach for and in the reference."""
+    sf = _SURFACE["scope_flags"]
+    assert "time" in sf["rejects_org"], (
+        "the 0.1.124 capture showed `sling time --org` exits 2; re-verify on the "
+        "binary before removing it")
+    assert "logs" in sf["rejects_org_and_repo"]
+    step4 = " ".join(_preflight_step(4).split()).lower()
+    ref = (_SKILL / "references" / "command-reference.md").read_text()
+    glob = ref[ref.index("## Global flags"):ref.index("## The precondition")]
+    for cmd in sf["rejects_org"]:
+        assert f"`sling {cmd}` rejects `--org`" in step4, (
+            f"step 4 no longer says `sling {cmd}` rejects --org")
+        rows = [ln for ln in glob.splitlines() if ln.startswith(f"| `sling {cmd}`")]
+        assert rows and "rejected" in rows[0].split("|")[2], (
+            f"the reference's scope-flag table no longer says `sling {cmd}` rejects --org")
+        heads = [ln for ln in ref.splitlines() if ln.startswith(f"### `sling {cmd}")]
+        assert heads and not any("--org" in h for h in heads), (
+            f"a `sling {cmd}` heading in the reference offers --org, which the binary "
+            f"rejects with exit 2")
+        assert f"`{cmd}` rejects --org" in _SURFACE["global_flags_note"]
+    for cmd in sf["rejects_org_with_repo"]:
+        assert f"`{cmd}`" in step4, f"step 4 no longer names `{cmd}` among the not-both commands"
+        assert any(cmd in ln and "not both" in ln for ln in glob.splitlines()), (
+            f"the reference's scope-flag table no longer says `{cmd}` rejects --org with --repo")
+    assert "not both" in step4, "step 4 lost the --org/--repo not-both rule"
+    assert "no command reads the git remote" in step4, (
+        "step 4 no longer says --repo is never read from the git remote")
+    for where, text in _shipped_text():
+        low = " ".join(text.split()).lower()
+        assert "defaults to the git remote" not in low, (
+            f"{where} claims --repo defaults to the git remote; no command reads it")
 
 
 def test_routing_evals_agree_with_the_surface_and_the_split():
+    local = set(_SURFACE["local_only_user_runs"]["commands"])
     for r in _ROUTING["routings"]:
         route, prompt = r["route"], r["prompt"]
-        assert route in {"sling", "gh", "ci-score", "ci-speedup",
+        assert route in {"sling", "gh", "user", "ci-score", "ci-speedup",
                          "ci-secure", "file-edit", "none"}, prompt
         if route == "sling":
             cmd = r["command"].removeprefix("sling ")
             assert cmd in _COMMANDS, f"{prompt!r} routes to unknown `sling {cmd}`"
+            assert cmd not in local, (
+                f"{prompt!r} has the agent run the user-run `sling {cmd}`")
+        if route == "user":
+            head = " ".join(r["command"].split()[:2]).removeprefix("sling ")
+            assert r["command"].startswith("sling ") and head in local, (
+                f"{prompt!r} routes to the user a command that is not local-only")
         if route == "gh":
             assert r["command"].startswith("gh "), prompt
 
@@ -267,7 +360,7 @@ def test_no_mutating_ask_routes_to_sling():
     for r in _ROUTING["routings"]:
         if any(v in r["prompt"].lower() for v in _MUTATING_VERBS):
             assert r["route"] != "sling", (
-                f"{r['prompt']!r} routes a state change to a read-only CLI")
+                f"{r['prompt']!r} routes a GitHub state change to sling, which makes none")
 
 
 def test_repo_wide_asks_leave_this_skill_for_the_owning_audit_skill():
@@ -531,7 +624,7 @@ def test_a_non_zero_exit_is_not_documented_as_an_empty_stdout():
 
 
 def test_exit_one_covers_a_subcommand_that_does_not_exist():
-    """`sling update` — this skill's own headline gotcha — exits `1`, not `2`.
+    """A subcommand that does not exist (`sling nosuchcmd`) exits `1`, not `2`.
     An exit-1 row that says only "a crash ... this is a bug report, not a
     routing decision" sends an agent that typo'd a subcommand off to file a bug
     instead of reading the `unknown command` list the binary just printed."""
@@ -541,8 +634,8 @@ def test_exit_one_covers_a_subcommand_that_does_not_exist():
     ctx = low[low.index("unexpected internal error"):][:600]
     assert "unknown command" in ctx, (
         "the exit-1 row does not mention that a nonexistent subcommand exits "
-        "1 — the skill's own `sling update` gotcha lands here and the row "
-        "tells the agent to treat it as a crash")
+        "1 — an invented name lands here and the row tells the agent to treat "
+        "it as a crash")
 
 
 def test_the_scope_flag_gotcha_reports_the_exit_code_the_binary_returns():
@@ -823,6 +916,8 @@ _GOTCHA_CLAUSES = [
     ("`sling bill` has two totals", "amount_due"),
     ("no client-side timeout", "report the timeout itself"),
     ("`sling why` on a run (id or url) can answer for one selected job", "jobs list --run"),
+    ("`sling update` exists, and the user runs it", "never you"),
+    ("the version can change mid-session", "opting out is the user's choice"),
 ]
 
 
@@ -863,7 +958,7 @@ def test_routing_artifact_is_load_bearing():
     repointing a spend prompt at `sling why` passed. Mirror ci-score's house pattern —
     a floor, no duplicates, and required prompt→command pins."""
     rows = _ROUTING["routings"]
-    assert len(rows) >= 28, f"the routing artifact shrank to {len(rows)} rows"
+    assert len(rows) >= 34, f"the routing artifact shrank to {len(rows)} rows"
     prompts = [r["prompt"] for r in rows]
     assert len(prompts) == len(set(prompts)), "duplicate prompts in the routing artifact"
     required = {
@@ -877,6 +972,10 @@ def test_routing_artifact_is_load_bearing():
         "why did CI fail on my last push": "sling why",
         "what's breaking the nightly build": "sling why",
         "is this test actually broken or just flaky": "sling why",
+        # added on the 0.1.124 re-pin: the critical-path view, and the one
+        # command the user runs rather than the agent
+        "which part of this workflow is slow": "sling time",
+        "update sling to the latest version": "sling update",
     }
     by_prompt = {r["prompt"]: r for r in rows}
     for prompt, command in required.items():
@@ -920,9 +1019,11 @@ def test_evals_encode_rules_the_suite_cannot_otherwise_see():
 # shape that drifts from the check list the preflight tells an agent to act on.
 
 # Versions the docs cite deliberately as HISTORY, not as the current pin:
-# 0.1.2 is the `fix_command: "sling update"` anecdote, and 0.1.7 is the
-# outdated-binary side of the reference's illustrative `version` upgrade row.
-_HISTORICAL_VERSIONS = {"0.1.2", "0.1.7"}
+# 0.1.2 is the `fix_command: "sling update"` anecdote, 0.1.84 is the release
+# that added `sling update`, and 0.1.123 is the outdated-binary side of the
+# reference's illustrative `version` upgrade row. Never add the previous pin
+# here: that is how a missed surface would hide.
+_HISTORICAL_VERSIONS = {"0.1.2", "0.1.84", "0.1.123"}
 # Scoped to sling's own 0.1.x family: these files also cite `gh` and the
 # Actions runner, whose versions are not this skill's to pin.
 _VERSION_RE = re.compile(r"\bv?(0\.1\.\d+)\b")
@@ -952,14 +1053,14 @@ def test_the_surface_captures_provenance_agree_with_each_other():
 
 def test_every_doctor_check_key_is_named_in_the_preflight():
     """The preflight tells an agent which rows to act on; the reference
-    documents what `doctor` emits. A release that adds a check (0.1.8 added
-    `agent_skill`) must land on BOTH, or the agent meets a row its contract
-    never mentions."""
+    documents what `doctor` emits. A release that adds a check (`agent_skill`,
+    then `auto_update`) must land on BOTH, or the agent meets a row its
+    contract never mentions."""
     ref = (_SKILL / "references" / "command-reference.md").read_text()
     block = ref[ref.index('{"checks": ['):]
     block = block[:block.index("```")]
     keys = re.findall(r'"key":\s*"([a-z_]+)"', block)
-    assert len(keys) >= 8, f"doctor example lists only {keys}"
+    assert len(keys) >= 9, f"doctor example lists only {keys}"
     step = _preflight_step(2)
     missing = [k for k in keys if f"`{k}`" not in step]
     assert not missing, (

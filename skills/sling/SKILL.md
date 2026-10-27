@@ -17,9 +17,10 @@ license: MIT
 `sling` is StarSling's agent-first CLI for GitHub Actions. It answers
 questions about **live CI data** — one run, one job, one attempt, or an
 account's runner-minutes — from StarSling's control plane, with structured
-JSON on stdout and a stable exit-code table. In this release it is
-**read-only**: it reads and analyzes, and there is no `sling` command that
-changes anything in GitHub.
+JSON on stdout and a stable exit-code table. **No `sling` command changes
+GitHub or CI state**: it reads and analyzes. The one command that changes
+anything at all, `sling update`, reinstalls `sling` on the user's own
+machine — and, like `sling login`, the user runs it, never you.
 
 **This skill's job is picking the right tool per request.** Live question
 about a run, a job, or spend → `sling`. Anything that *changes* CI state →
@@ -29,7 +30,7 @@ that owns it and stop. Do not invent a `sling` subcommand for something
 surface](references/command-surface.json) is the complete list.
 
 Every fact in this skill's command reference was read off `sling` itself
-(v0.1.8) rather than from documentation — see
+(v0.1.124) rather than from documentation — see
 [references/command-reference.md](references/command-reference.md) for the
 verified per-command JSON shapes.
 
@@ -48,29 +49,31 @@ Do this once per session, before the first `sling` command.
 2. **Is the environment healthy?** `sling doctor --agent`. It emits
    `{"checks": [{"key", "ok", "detail", ...}]}` on stdout and **exits `10`
    when a real check fails** (`0` when healthy). The checks name the
-   problem. Seven of the eight are actionable — `token`, `control_plane`,
+   problem. Seven of the nine are actionable — `token`, `control_plane`,
    `clock_skew`, `git_remote`, `patch_tooling`, `version`, `org` — so act on
-   the one that is `ok: false` instead of guessing (the eighth, `agent_skill`,
-   is advisory only; see below) — and when SEVERAL are `ok: false`, act on
+   the one that is `ok: false` instead of guessing (the other two,
+   `auto_update` and `agent_skill`, are advisory only; see below) — and when SEVERAL are `ok: false`, act on
    `control_plane` first: an unreachable control plane fails `token` and `org`
    as dependents, and the `token` check still attaches `fix_command: "sling
    login"` — a wrong lead during an outage, since the device flow cannot reach
    the control plane either. Network first, never login. `"skipped": true` can
    also mean "not checked" for exactly this reason — read `detail`, not just
    the flag. A `version` check with `warn: true` is an upgrade
-   notice, not a failure — any `fix_command` it carries is the installer
-   one-liner, a shell pipeline, so surface it to the user rather than running
-   it yourself. `version` reads `ok: false, skipped: true` when it could not
+   notice, not a failure — its `fix_command` is `sling update` on a normal
+   install, otherwise the installer one-liner (a shell pipeline) or nothing;
+   either way surface it to the user rather than running it yourself.
+   `version` reads `ok: false, skipped: true` when it could not
    compare at all (installer URL unreachable, served version unreadable) —
    that is "not checked", not "out of date".
-   The `agent_skill` row is likewise advisory and can never make `doctor`
+   The `auto_update` and `agent_skill` rows are likewise advisory and can never make `doctor`
    unhealthy: a check counts as failing only when it is `ok: false` AND not
-   `skipped`, and this row's only `ok: false` shape is also `skipped: true`.
-   It reports whether this skill is installed for a coding agent on the
-   machine, and it can read "not installed" while you are reading the skill,
-   because it only looks in a fixed set of directories. So report the row with
-   its detail and never run its `fix_command` yourself — installing is the
-   user's call
+   `skipped`, and each row's only `ok: false` shape is also `skipped: true`.
+   `auto_update` says whether this `sling` updates itself in the background.
+   `agent_skill` says whether this skill is installed for a coding agent on
+   the machine, and can read "not installed" while you are reading the skill,
+   because it only looks in a fixed set of directories. Report either row
+   with its detail and never run its `fix_command` yourself — installing and
+   updating are the user's call
    (see [references/command-reference.md](references/command-reference.md)).
 
 3. **Not authenticated** (`doctor`'s `token` check fails, or a command exits
@@ -104,13 +107,17 @@ Do this once per session, before the first `sling` command.
    id that resolves to nothing but plausibly exists in another of your orgs:
    `sling org switch <slug>`, or pass `--org <slug>` on the single command.
 
-   `--org` and `--repo <owner/name>` are accepted by most subcommands but
-   **not by `sling logs`**, which parses strictly and rejects both with exit
-   `2` (`Unknown flag "--org"`). That is the command this routing table
-   reaches for most, so fix a wrong org for a logs read by switching the
-   default rather than by adding a flag to the call. `--repo` otherwise
-   defaults to the git remote of the current directory, and takes
-   `owner/name` — a bare repo name is rejected with exit `2`.
+   `--org` and `--repo <owner/name>` are per-command flags, accepted by most
+   data commands but **not by `sling logs`**, which parses strictly and
+   rejects both (`Unknown flag "--org"`); every rejection here is exit `2`. That is the command
+   this routing table reaches for most, so fix a wrong org for a logs read by
+   switching the default rather than by adding a flag to the call. **`sling
+   time` rejects `--org` outright** — switch the default for it too.
+   `runs list`, `jobs list`, `usage` and `top` take either flag but reject
+   both together (`Use --org or --repo, not both.`). No command reads the
+   git remote: without `--repo` a listing covers the whole org, and `sling
+   time`'s repo view needs `--repo`. It takes `owner/name` — a bare repo
+   name is rejected.
 
    `doctor`'s `org` check also fails when you belong to **no** orgs, which
    looks similar and is not this. There is no slug to switch to — that is
@@ -182,7 +189,7 @@ per-command wording.
 
 **Do not describe it as an alias for a longer flag list.** The published docs
 call it "exactly equivalent to `--json --compact --no-input --no-color
---yes`", and on v0.1.8 `--compact` is not a flag this binary has at all:
+--yes`", and on v0.1.124 `--compact` is not a flag this binary has at all:
 passing it changes nothing because unknown flags are ignored, not because it
 does anything. Output is pretty-printed, indented JSON either way, so feed
 stdout to a real JSON parser and never to a line-oriented one that assumes
@@ -228,9 +235,10 @@ reading before the first parse.
 
 **1. Does the request change anything, or only read?** If the user wants to
 *change* CI state — re-run a job, cancel a run, trigger a workflow, flip a
-workflow on or off, pull down an artifact — `sling` cannot do it in this
-release. Use `gh` directly; do not attempt a `sling` subcommand for these
-under any name.
+workflow on or off, pull down an artifact — no `sling` command does it.
+Use `gh` directly; do not attempt a `sling` subcommand for these under any
+name. Updating `sling` itself is the one local change, and it is the user's
+to run (`sling update`).
 
 **2. If it only reads: is it about one run, one job, or aggregate
 cost/usage — or about the repo's CI *configuration* as a whole?** One run,
@@ -243,10 +251,12 @@ reading YAML yourself.
 |---|---|---|
 | Why a specific job failed | `sling` | `sling why <run\|job\|attempt id\|URL>` |
 | Where a run's wall-clock went (queue wait vs. provision vs. steps vs. teardown) | `sling` | `sling time <run\|job\|attempt id\|URL>` |
-| The same, as percentiles across a repo | `sling` | `sling time --repo <owner/name> --window <n>d` |
+| The same, as percentiles across a repo | `sling` | `sling time --repo <owner/name> --window <n>d` (`--repo` is required; `--org` is rejected) |
+| Which part of a workflow is slow — its critical path, hop by hop | `sling` | `sling time --repo <owner/name> --workflow <name>` |
+| Whether Afterburner, a provider or a tier changes the timings | `sling` | `sling time --repo <owner/name> --group-by afterburner\|provider\|tier` |
 | Recent runs and their status | `sling` | `sling runs list [--branch --status --conclusion --trigger --workflow-path --label --window --limit]` |
 | Detail on one run (its jobs, attempts, runner) | `sling` | `sling runs show <run id\|URL> [--wait] [--fail-fast]` |
-| Which jobs in a run failed, or jobs across a repo | `sling` | `sling jobs list --run <id>` / `--repo <owner/name>` |
+| Which jobs in a run failed, or jobs across a repo | `sling` | `sling jobs list --run <id>` / `--repo <owner/name>` [`--afterburner engaged\|not-engaged`] |
 | Which step in a job failed, and each step's duration | `sling` | `sling jobs show <job id\|URL>` |
 | Only the log lines that matter for a failure | `sling` | `sling logs <run\|job\|attempt id\|URL> [--grep <re>] [--since <dur>] [--limit <n>]` |
 | Turning a pasted Actions URL into a run/job/attempt id | `sling` | `sling resolve <id\|URL> [--target run\|job\|attempt]` — a run id covering several jobs is **ambiguous**: exit `2`, `{"candidates": […]}` on stdout. Pass one of the returned candidate ids (`att_<jobid>.<n>`) or `--target run`; `--target job`/`attempt` re-state the kind and return the same ambiguity |
@@ -255,6 +265,7 @@ reading YAML yourself.
 | What is owed this period, or past invoices | `sling` | `sling bill`, `sling bill history` |
 | Which runner labels/sizes exist and what they cost | `sling` | `sling labels list` |
 | Identity, org, credential, environment health | `sling` | `sling whoami`, `sling doctor`, `sling org switch` — and `sling login`, which the **user** runs, not you |
+| Updating `sling` itself, or turning its background updates off/on | the user | `sling update [--off\|--on]` — **ask the user to run `sling update`**; never run it yourself |
 | **Re-run a run or its failed jobs** | `gh` | `gh run rerun <run-id> [--failed]` |
 | **Cancel an in-progress run** | `gh` | `gh run cancel <run-id>` |
 | **Trigger a workflow (`workflow_dispatch`)** | `gh` | `gh workflow run <workflow> [-f key=value]` |
@@ -291,7 +302,7 @@ skill from inventing one:
 
 The short version, grouped the way `sling --help` groups them:
 
-- **Auth & setup** — `login`, `logout`, `whoami`, `doctor`, `org switch`.
+- **Auth & setup** — `login`, `logout`, `whoami`, `doctor`, `update`, `org switch`.
 - **Inspect CI** — `runs list`, `runs show`, `jobs list`, `jobs show`,
   `logs`, `resolve`.
 - **Diagnose** — `why` (classification, evidence, suggested actions, and a
@@ -333,7 +344,7 @@ a parseable one tells you what happened; only `$?` does.
 | Code | Meaning | What to do |
 |---|---|---|
 | `0` | Success | — |
-| `1` | Unexpected internal error (a crash) — **or a subcommand that does not exist** | Read stderr first. `unknown command "<name>" for "sling"` is a routing mistake, not a crash: the binary lists its real commands, so correct the name against that list rather than filing a bug — this is where the `doctor` `fix_command` gotcha below lands. stderr naming an environment variable (`SLING_HOST must be a valid https URL …`) is an environment fix, not a bug. Anything else: do not retry blindly, and surface the stderr text as a bug report |
+| `1` | Unexpected internal error (a crash) — **or a subcommand that does not exist** | Read stderr first. `unknown command "<name>" for "sling"` is a routing mistake, not a crash: the binary lists its real commands, so correct the name against that list rather than filing a bug — an invented or mistyped name lands here. stderr naming an environment variable (`SLING_HOST must be a valid https URL …`) is an environment fix, not a bug. Anything else: do not retry blindly, and surface the stderr text as a bug report |
 | `2` | Usage — bad flags, a prompt refused under `--agent`, org ambiguity, **or no orgs at all** | Read the stderr first. `You don't belong to any orgs yet.` → step 5, the app is not installed; never a flag problem. Org-ambiguous → pass `--org` or `sling org switch`. Otherwise fix the invocation against `sling <cmd> --help` |
 | `3` | Not found — no such run/job/attempt in any org you can access, or a real job that stores no logs | **A pasted URL from a third-party org lands here, not on exit `4`** — the resolver searches your orgs and reports not-found (`No run/job/attempt matches that id in an org you can access`). For an org the user does not belong to, do not suggest installing the app on it: fall back to the `gh` read path (public repos answer) and say the richer `sling` diagnosis is unavailable. Otherwise try `sling resolve`, confirm the org, then ask the user to confirm the id |
 | `4` | Auth — **or no StarSling installation on that org, or a third party's org named via a flag.** Read the stderr text before acting | `You don't have access to org "<name>"` → the app is not installed there (or the user is not a member); point them at `https://github.com/apps/starslingdev`, do NOT retry login. Anything else → ask the user to run `sling login` themselves (a browser approval, never `--agent`), then retry once. If the retry exits `4` again, STOP and report what was verified — never ask for a second login |
@@ -342,7 +353,7 @@ a parseable one tells you what happened; only `$?` does.
 | `7` | Rate limited (HTTP 429) | Back off and retry once. On a second `429`, stop: fall back to the `gh` read equivalent and say `sling` was rate limited |
 | `10` | Remote outcome failed — `doctor` unhealthy, or `runs show --wait` on a run that did not succeed | **Not a CLI error.** This is the answer: report the unhealthy check, or the run's failure |
 
-`sling exit-codes` on v0.1.8 prints only `0`–`5`; codes `6`, `7`, and `10`
+`sling exit-codes` on v0.1.124 prints only `0`–`5`; codes `6`, `7`, and `10`
 are real and documented (and `doctor --help` names `10` itself), so treat
 that help text as abridged. Any non-zero code not in this table: surface
 stderr to the user rather than guessing a recovery.
@@ -352,18 +363,28 @@ stderr to the user rather than guessing a recovery.
 These are the places where `sling` behaves differently from what its own
 output, its `--help`, or its documentation implies. Each was found by
 running the binary; none of them announce themselves at runtime. Everything
-version-pinned here was verified against `sling` v0.1.8 and `gh` 2.93.0 —
+version-pinned here was verified against `sling` v0.1.124 and `gh` 2.93.0 —
 re-verify on upgrade.
 
-- **`doctor`'s `fix_command` is advice, not a verified command.** On 0.1.2
-  its `version` check recommended a command that did not exist — it emitted
-  `"fix_command": "sling update"`, and `sling update` does not exist in any
-  release (0.1.8 still rejects it as unknown; the check now emits the
-  installer one-liner instead). Other checks emit templates with unfilled
-  placeholders: `git_remote` suggests `git remote add origin <github-url>`
-  verbatim. Never run a `fix_command` unchecked. The general lesson outlives
-  the original bug: a command name printed by a tool is not proof the tool
-  has it.
+- **`doctor`'s `fix_command` is advice, not a verified command.** Some
+  checks emit templates with unfilled placeholders: `git_remote` suggests
+  `git remote add origin <github-url>` verbatim. Others are real commands
+  that change the user's machine — `version`'s `sling update`, or an
+  installer line — and are the user's to run. Never run a `fix_command`
+  unchecked. (On 0.1.2 the `version` check named `sling update` before that
+  command existed: a command name printed by a tool is not proof the tool
+  has it.)
+- **`sling update` exists, and the user runs it — never you.** It reinstalls
+  `sling` on the user's machine (no GitHub or CI state changes); `--off` /
+  `--on` toggle background updates. Under `--agent` it prints
+  `{"result": "current"|"updated"|"failed"|"unmanaged", …}`; a failed check
+  exits `5`, a failed install `1`, a copy the installer did not place `2`.
+- **The version can change mid-session.** About once a day, after any
+  command, an installer-placed `sling` updates itself in a detached process —
+  silent under `--agent`, never touching stdout or the exit code, and off
+  when `CI` or `SLING_NO_AUTO_UPDATE` is set or after `sling update --off`.
+  Re-read `doctor`'s `version` row rather than trusting a version you saw
+  earlier. Opting out is the user's choice, never yours.
 - **Exit `4` does not always mean the credential is stale, and its message
   misdirects when it does not.** An org StarSling was never installed on
   fails with `You don't have access to org "<name>". Run \`sling login\`` —
@@ -410,8 +431,8 @@ re-verify on upgrade.
 - **Exit `10` is an answer, not a failure.** `doctor` unhealthy and `runs
   show --wait` on a failed run both exit `10`. Report what it says. Exit `6`
   likewise carries a real result, flagged partial.
-- **`--agent` silently includes `--yes`.** Harmless while `sling` is
-  read-only, but do not treat a confirmation prompt as a safety net.
+- **`--agent` silently includes `--yes`.** Harmless on data commands, which
+  change nothing, but do not treat a confirmation prompt as a safety net.
 - **`sling runs show` gives no `job_id`** — its `jobs[]` carry `job_name`
   and `attempts[]` only. Use `jobs list --run <id>` or `resolve` when you
   need job ids.
