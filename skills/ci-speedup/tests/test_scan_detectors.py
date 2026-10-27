@@ -5235,6 +5235,23 @@ jobs:
     assert cr._repo_published_required({"All CI"}, pubs) == {"All CI"}
 
 
+@pytest.mark.parametrize("text,want", [
+    ("gh api repos/o/r/statuses/$SHA -f \"context=All CI\" -f state=success", ["All CI"]),
+    ("gh api repos/o/r/statuses/$SHA -f context='All CI'", ["All CI"]),
+    ("gh api repos/o/r/statuses/$SHA -f context=lint", ["lint"]),
+    ("      context: All CI\n", ["All CI"]),
+    ('Context: github.String("Go CI"),', ["Go CI"]),
+    ("create_status(state='success', context=\"Py CI\")", ["Py CI"]),
+])
+def test_status_contexts_reads_each_literal_form_once(text: str, want: list):
+    """Each way of writing a literal context yields exactly that name, with no
+    fragment (`All` from `"context=All CI"`) or wrapper (`github.String(...)`) that a
+    short required name could then falsely match."""
+    sys.path.insert(0, str(_SKILL_DIR / "scripts"))
+    import scan  # noqa: E402
+    assert scan._status_contexts([text]) == (want, None)
+
+
 def test_repo_published_required_matches_posted_context_not_any_mention(tmp_path: Path):
     """A required name that merely APPEARS in a status-posting workflow (its title, a
     comment, the list of checks an aggregator waits on) is not posted by it. Counting

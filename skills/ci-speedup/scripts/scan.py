@@ -5201,9 +5201,9 @@ _ACTION_PATH_SCRIPT_REF_RE = re.compile(
 _STATUS_CONTEXT_LITERAL_RES = (
     re.compile(r"\bcontext['\"]?\s*[:=]\s*(['\"`])([^'\"`\n]{1,200})\1", re.IGNORECASE),
     re.compile(r"['\"]context=([^'\"\n]{1,200})['\"]", re.IGNORECASE),
-    re.compile(r"(?<![\w.])context=([^\s'\"`\\;&|)]{1,200})", re.IGNORECASE),
-    re.compile(r"^[ \t]*context:[ \t]*([^\s'\"`#{\[|>][^#\n]{0,199}?)[ \t]*$",
-               re.IGNORECASE | re.MULTILINE),
+    re.compile(r"(?<![\w.'\"])context=([^\s'\"`\\;&|)]{1,200})", re.IGNORECASE),
+    re.compile(r"^[ \t]*context:[ \t]*([^\s'\"`#{\[|>(][^#\n(){}]{0,199}?)[ \t]*$",
+               re.MULTILINE),
     re.compile(r"\bContext:\s*github\.\w+\(\s*\"([^\"\n]{1,200})\""),
 )
 # A context set from something that is not a literal (`context: ctx`,
@@ -5211,7 +5211,8 @@ _STATUS_CONTEXT_LITERAL_RES = (
 # not called `context` (ouzi-dev/commit-status-updater's `name:`). The posted name
 # can't be read, so the publisher's string literals are kept to match against.
 _STATUS_CONTEXT_DYNAMIC_RE = re.compile(
-    r"\bcontext['\"]?\s*[:=]\s*(?:[A-Za-z_][\w.\[\]]*\s*(?:[,})]|$)|`[^`\n]*\$\{)"
+    r"\bcontext['\"]?\s*(?::\s*[A-Za-z_][\w.\[\]]*\s*(?:[,})]|$)"
+    r"|=\s*[A-Za-z_][\w.\[\]]*\s*[,})]|[:=]\s*`[^`\n]*\$\{)"
     r"|ouzi-dev/commit-status-updater@",
     re.IGNORECASE | re.MULTILINE)
 # String literals (quoted, or a YAML scalar value) a dynamic publisher's sources hold.
