@@ -621,6 +621,15 @@ def analyze(jobs, key, workflow=None, action_resolver=None):
         direct = needs(jobs[key])
         if not direct:
             return "pass", "no verdict dependencies"
+        # Inline expression substitution happens before shell parsing. Output
+        # keys and values can contain quotes, unlike fixed result strings.
+        # A quoted env variable passes JSON as data instead and stays supported.
+        for name in order:
+            if (any(jobs[parent].get("outputs") for parent in needs(jobs[name]))
+                    and any(isinstance(step, dict)
+                            and _jq_needs(step.get("run", ""), {}, "bash")
+                            for step in jobs[name].get("steps", []))):
+                raise Unknown("inline dependency JSON contains unproved output quoting")
         ancestors = order[:-1]
         # A reusable caller's result summarizes jobs this file does not show
         # (they can all skip), so it cannot certify a pass, only reproduce a

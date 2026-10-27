@@ -579,7 +579,9 @@ Two complete bash commands are supported exceptions: `jq -e` (or
 `--exit-status`) with either `all(.[]; .result == "success")` or
 `all(.result == "success")`, reading the complete `toJSON(needs)` value via
 `<<<`. The input must be a single-quoted expression or a quoted environment
-variable containing exactly that expression. No extra commands, alternate
+variable containing exactly that expression. Inline JSON holds when a dependency
+declares outputs, whose quotes are not safe to interpolate into shell source.
+No extra commands, alternate
 filters, partial JSON, omitted exit-status option or shell environment
 replacement is accepted. A single strict jq or reviewed-action step can prove
 large dependency sets without exponential enumeration; every dependency must

@@ -304,6 +304,10 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- 2026-10-27: Strict jq verdicts with inline dependency JSON remain unmeasured
+  when dependencies declare outputs; quoted environment-variable input keeps
+  the JSON separate from shell source.
+
 - **2026-10-22** — **`sec.codeowners.workflows` no longer passes on a
   CODEOWNERS rule the branch does not enforce.** CODEOWNERS only requests an
   owner's review; it binds only when the default branch requires review from

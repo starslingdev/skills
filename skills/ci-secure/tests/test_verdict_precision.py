@@ -136,3 +136,23 @@ def test_jq_does_not_treat_reserved_runner_environment_as_workflow_data():
         'run': 'jq -e \'all(.result == "success")\' <<< "$RUNNER_RESULTS"',
         'env': {'RUNNER_RESULTS': '${{ toJSON(needs) }}'}}]
     assert va.analyze(jobs, 'verdict')[0] == 'unmeasured'
+
+
+def test_inline_needs_json_with_outputs_cannot_certify_shell_quoting():
+    jobs = suites()
+    jobs['suite0']['outputs'] = {'message': "' || true; echo '"}
+    jobs['verdict']['steps'] = [{'run': "jq -e 'all(.result == \"success\")' <<< '${{ toJSON(needs) }}'"}]
+    assert va.analyze(jobs, 'verdict')[0] == 'unmeasured'
+    jobs['verdict']['steps'] = [{
+        'run': 'jq -e \'all(.result == "success")\' <<< "$RESULTS"',
+        'env': {'RESULTS': '${{ toJSON(needs) }}'}}]
+    assert va.analyze(jobs, 'verdict')[0] == 'pass'
+
+
+def test_intermediate_inline_json_with_outputs_stays_unmeasured():
+    jobs = suites(1)
+    jobs['suite0']['outputs'] = {'message': "' || true; echo '"}
+    jobs['middle'] = {'needs': ['suite0'], 'if': 'always()', 'runs-on': 'ubuntu-latest',
+                      'steps': [{'run': "jq -e 'all(.result == \"success\")' <<< '${{ toJSON(needs) }}'"}]}
+    jobs['verdict']['needs'] = ['middle']
+    assert va.analyze(jobs, 'verdict')[0] == 'unmeasured'
