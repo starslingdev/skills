@@ -38,7 +38,7 @@ def test_every_check_is_classified():
 
 def test_classification_counts_match_spec():
     counts = Counter(gs.TRIAGE_ALLOWLIST.values())
-    assert counts[gs.AUTO_SEED] == 74   # +1 (OPT84 tool swaps: the card's ceiling is the step's own p50, no other number); +1 (a pole's step list says how many skipped or untimeable steps it leaves out); +2 (a cited or stamped step never outlasts its job: the skipped-step year-1 start class); +1 (OPT83 parallel steps, below); +1 (OPT81 runner-class comparisons, below); +1 (OPT82 type-aware lint, below); +1 (OPT79 pole cache, below); +1 (OPT80 slowest job without a tail line: its sentence pairs with its stamped withheld reason, and no merge wait is claimed without a tail axis);
+    assert counts[gs.AUTO_SEED] == 73   # +1 (OPT84 tool swaps: the card's ceiling is the step's own p50, no other number); +1 (a pole's step list says how many skipped or untimeable steps it leaves out); +2 (a cited or stamped step never outlasts its job: the skipped-step year-1 start class); +1 (OPT83 parallel steps, below); +1 (OPT81 runner-class comparisons, below); +1 (OPT82 type-aware lint, below); +1 (OPT79 pole cache, below); +1 (OPT80 slowest job without a tail line: its sentence pairs with its stamped withheld reason, and no merge wait is claimed without a tail axis);
     # +1 (pre-flip audit: static-only banner matches CI shape — no dormant-repo hedge at a live no-PR-gating repo, no "no run timing" beside priced timed runs);
     # +2 (issue #114: crowned cluster lever is on the merge-gating spine — no off-spine crown; issue #115: headline leads with the observed wall when the chain sum diverges from the makespan);
     # +1 (issue #106: every 🤖 gap-fill evidence line is verbatim from the captured job log — the injection-residual grounding backstop);
@@ -78,7 +78,6 @@ def test_classification_counts_match_spec():
     #     per-run checkout rows and stall proofs, and pairs with exactly one stamped block).
     # +1 (OPT81: runner-class comparisons re-derive from their stamped runs, A2 carries no number,
     #     and every card pairs the publisher disclosure).
-    # +1 OPT92: measured runtime, uncredited sizing and unique card placement.
     assert counts[gs.EXCLUDE] == 1
     assert counts[gs.TRIAGE] == 3  # +1 (declared drilled-run timelines are readable: a bundle-copy fault)
 

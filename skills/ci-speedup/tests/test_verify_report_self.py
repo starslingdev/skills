@@ -11097,7 +11097,6 @@ _HOSTILE_JOB_NAMES = (
     "<details>", "<https://example.test>", "A&B", "A&amp;B", "~~gone~~",
 )
 _FEEDS_BY_KEY = {
-    "opt92_withheld_candidates": "Why a job produced no Linux benchmark card",
     "opt77_withheld_candidates":
         "Why a group of small jobs sharing one setup produced no finding",
     "opt79_withheld_candidates": _CACHE_FEEDS,

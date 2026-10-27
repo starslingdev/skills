@@ -5462,7 +5462,6 @@ _OPT81_WITHHELD_DOC_KEY = "opt81_withheld_candidates"
 _OPT82_WITHHELD_DOC_KEY = "opt82_withheld_candidates"
 _OPT83_WITHHELD_DOC_KEY = "opt83_withheld_candidates"
 _OPT84_WITHHELD_DOC_KEY = "opt84_withheld_candidates"
-_OPT92_WITHHELD_DOC_KEY = "opt92_withheld_candidates"
 _PARALLEL_STEPS_WITHHELD_DOC_KEY = "parallel_steps_withheld_candidates"
 class WithheldRow(NamedTuple):
     """One pattern's whole registration in the held-back disclosure.
@@ -5487,8 +5486,6 @@ class WithheldRow(NamedTuple):
 
 
 _WITHHELD_ROWS: tuple[WithheldRow, ...] = (
-    WithheldRow(_OPT92_WITHHELD_DOC_KEY, "Linux benchmark: held back",
-                "candidate job(s)", "Why a job produced no Linux benchmark card", "job"),
     WithheldRow(_OPT79_WITHHELD_DOC_KEY, "cache hit/miss verdicts",
                 "candidate cache(s)",
                 "Why a candidate cache produced no finding and no uncredited line",
@@ -5798,13 +5795,6 @@ _PARALLEL_STEPS_WITHHOLD_PHRASES: dict[str, str] = {
         "cutting one does not come straight off the job; no saving is claimed",
 }
 _WITHHELD_PHRASES_BY_KEY: dict[str, dict[str, str]] = {
-    _OPT92_WITHHELD_DOC_KEY: {
-        "runner_unresolved": "the runner or its architecture is not explicitly supported",
-        "work_unresolved": "the job runs commands, actions or inputs outside the supported portability rules",
-        "native_work": "the job explicitly builds, tests, signs or packages native platform work",
-        "release_path": "the job participates in a release or publishing path",
-        "history_unmatched": "no comparable executed hosted sample has complete source and toolchain evidence for this job",
-    },
     _OPT77_WITHHELD_DOC_KEY: _OPT77_WITHHOLD_PHRASES,
     _PARALLEL_STEPS_WITHHELD_DOC_KEY: _PARALLEL_STEPS_WITHHOLD_PHRASES,
     _OPT80_WITHHELD_DOC_KEY: _OPT80_WITHHOLD_PHRASES,
@@ -8885,58 +8875,6 @@ def _opt84_unrouted_block(findings: list[dict[str, Any]], catalog_url: str) -> l
     return out
 
 
-def _opt92_findings(findings):
-    return [f for f in findings if f.get("pattern") == "OPT92" and isinstance(f.get("linux_benchmark"), dict)]
-
-
-def _opt92_for_pole(pole, findings):
-    return [f for f in _opt92_findings(findings)
-            if f.get("workflow_file") == pole.get("workflow_file")
-            and f["linux_benchmark"].get("job") == pole.get("job")]
-
-
-def _opt92_card(f, catalog_url):
-    proof = f["linux_benchmark"]
-    fid = re.sub(r"[^A-Za-z0-9_.:-]+", "_", str(f.get("id") or "x"))
-    clean = lambda x: _flatten_cell(str(x))
-    target = (f"Use `{clean(proof['benchmark_runner'])}` ({clean(proof['benchmark_architecture'])}); "
-              "record the architecture change from the observed runner. "
-              if proof.get("benchmark_runner") else "")
-    if proof.get("benchmark_action_pins"):
-        target += "Pin the benchmark actions to " + ", ".join(
-            f"`{clean(action)}`" for action in proof["benchmark_action_pins"]) + ". "
-    exclusions = proof.get("sample_exclusions") or {}
-    reasons = {"budget": "the evidence request budget was exhausted",
-               "logs": "action-log provenance or the selected toolchain could not be verified",
-               "source": "matching workflow, configuration or source-tree evidence was unavailable"}
-    sample_limits = (["- **Sample limits:** " + "; ".join(
-        f"{count} observation(s) excluded because {reasons.get(reason, 'evidence was incomplete')}"
-        for reason, count in sorted(exclusions.items())) + "."] if exclusions else [])
-    return [f'<a id="opt92-{fid}"></a>', "",
-            "**OPT92 · A job is a candidate for a Linux benchmark** · uncredited, benchmark first", "",
-            f"- **Where:** `{clean(f['workflow_file'])}` ▸ `{clean(proof['job'])}` on "
-            f"`{clean(proof['runner'])}` ({clean(proof['architecture'])}).",
-            f"- **Observed job runtime:** {proof['job_p50_s']:.0f}s p50 across "
-            f"{proof['sample_count']} successful comparable sample(s). No saving is claimed or included in totals.",
-            *sample_limits,
-            "- **Checks completed:** " + "; ".join(clean(x) for x in proof["checks"]) + ".",
-            "- **Benchmark:** run unsigned validation on Linux at the same commit, with equivalent toolchain "
-            "versions, dependencies and architecture where possible. " + target + "Record Linux-specific setup changes; "
-            "compare collected and executed tests, outputs and whole-job duration. Keep the native job until "
-            "representative runs demonstrate equivalent coverage. Keep Apple builds and Windows packaging native.",
-            f"- **Catalog:** {catalog_url}#{f['fix_recipe_anchor']}", ""]
-
-
-def _opt92_unrouted_block(findings, catalog_url):
-    if not findings:
-        return []
-    out = ['<a id="linux-benchmarks"></a>', "", "## Linux benchmark candidates", "",
-           "These jobs are not rendered as long poles above. Uncredited; benchmark first.", ""]
-    for f in findings:
-        out += _opt92_card(f, catalog_url)
-    return out
-
-
 def _also_noticed_block(findings: list[dict[str, Any]],
                         catalog_url: str,
                         shallow_note: str = "",
@@ -9037,7 +8975,6 @@ def _also_noticed_block(findings: list[dict[str, Any]],
             and str(f.get("pattern", "")) != "OPT81"             # → its pole / own §
             and str(f.get("pattern", "")) != "OPT83"             # → its pole / own §
             and str(f.get("pattern", "")) != "OPT84"             # → its pole / own §
-            and str(f.get("pattern", "")) != "OPT92"             # → its pole / own §
             and not _on_pole_job(f)                               # valueless + all-pole-job → already AS a pole (#5)
             and not _is_opt79_pole_finding(f)]                    # OPT79 pole cache → its own block (at its pole, or `_opt79_off_pole_block`)
     if not elig:
@@ -10183,7 +10120,6 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     if (not tier2_lines and not also_lines and not queue_lines
             and not incomplete and not broken and not uncredited_lines
             and not withheld_n and not opt79_off_pole and not opt81_n
-            and not _opt92_findings(all_findings)
             and not parallel_n):
         return ""  # nothing static to say — caller keeps the one-line note
 
@@ -10359,7 +10295,6 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     _o84_lines = _opt84_unrouted_block(_opt84_findings(all_findings), catalog_url)
     if _o84_lines:
         out += ["---", "", *_o84_lines]
-    out += _opt92_unrouted_block(_opt92_findings(all_findings), catalog_url)
     if also_lines:
         out += ["---", "", *also_lines]
     # Measured net-negative caches that could not be PRICED (three cases: the
@@ -11575,7 +11510,6 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
     opt81_rendered: set[int] = set()
     opt83_rendered: set[int] = set()
     opt84_rendered: set[int] = set()
-    opt92_rendered: set[int] = set()
     opt79_at_pole: set[str] = set()
     for i, p in enumerate(pole_wfs, 1):
         check = _clean_label(str(p.get("check", "")))
@@ -12021,10 +11955,6 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
                 if id(_o84) not in opt84_rendered:
                     opt84_rendered.add(id(_o84))
                     out += _opt84_card(_o84, catalog_url)
-            for _o92 in _opt92_for_pole(p, all_findings):
-                if id(_o92) not in opt92_rendered:
-                    opt92_rendered.add(id(_o92))
-                    out += _opt92_card(_o92, catalog_url)
             continue
         out += _floor_note(p, floor_pool)
         # OPT80's tail line sits beside the pole's merge-wait figure, as its own
@@ -12197,10 +12127,6 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
                 continue
             opt84_rendered.add(id(_o84))
             out += _opt84_card(_o84, catalog_url)
-        for _o92 in _opt92_for_pole(p, all_findings):
-            if id(_o92) not in opt92_rendered:
-                opt92_rendered.add(id(_o92))
-                out += _opt92_card(_o92, catalog_url)
         # OPT81 on THIS pole: the measured runner-class gap, or the runner-size
         # advisory as the LAST option — after the pole's own prompt and any OPT75
         # decomposition, never above a credited lever. A log-level leaf that
@@ -12297,8 +12223,6 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
         catalog_url)
     if _o84_lines:
         out += ["---", "", *_o84_lines]
-    out += _opt92_unrouted_block(
-        [f for f in _opt92_findings(all_findings) if id(f) not in opt92_rendered], catalog_url)
     if also_lines:
         out += ["---", "", *also_lines]
     if shallow_note and not queue_lines and not also_lines:
