@@ -520,3 +520,5 @@ constants and the shared cache tail fraction are asserted **identical** to the
 engine's; the hit and miss matchers are deliberately **independent** re-readings
 — a verifier sharing the engine's matcher could not catch a mislabelled row — so
 they are only spot-checked, line by line.
+
+**Whole-job validation:** compare the whole job as well as the measured restore/install/post-save block: a cache can shorten one step while lengthening the job; this is manual validation guidance, not a change to OPT79's block-based detector.

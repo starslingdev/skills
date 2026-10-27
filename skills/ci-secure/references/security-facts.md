@@ -137,7 +137,9 @@ two moved numbers.
   `secrets: inherit`; secrets are passed by name so a called workflow's blast
   radius is visible in the caller.
 - **`sec.required-checks.skippable`** — every status check the default branch
-  REQUIRES is produced by a job that always runs. GitHub counts a skipped
+  REQUIRES has a producer that always runs and, for a verdict aggregator,
+  rejects upstream failure and invalid skip decisions within the supported
+  assertion language. GitHub counts a skipped
   required check as a pass, so a check only a conditional job reports can be
   satisfied by never running it. The pass shape is the always-running verdict
   job that `needs:` the conditional suites and asserts their results. Required
@@ -154,7 +156,7 @@ two moved numbers.
   same reason. Whether a workflow's jobs can report on a pull request at all is
   three-valued, and each value is treated differently. A `pull_request`
   workflow, a plain `push`, or a push over every branch (`branches: ['**']`)
-  CAN report, so an always-running job there certifies the check. A push
+  CAN report; an always-running producer with a proved verdict can certify the check. A push
   restricted to TAGS provably cannot — no pull-request branch push matches it —
   so a same-named job in a tag-only release workflow is not a producer at all.
   A matrix job's contexts come from the combinations the matrix can actually
@@ -206,9 +208,14 @@ two moved numbers.
   branch — the branch whose protection is being read — so every pull request
   this fact gates is inside that filter anyway.)
   **To fix a fail**: add one job that carries the required check's name, runs
-  `if: always()` (or `!cancelled()`), `needs:` the
-  conditional suites, and fails unless the suite that should have run passed —
-  then point branch protection at that job's name instead of the suites'.
+  `if: always()` (not `!cancelled()`: a cancelled run skips that job, and a
+  skipped required check reads as passed), `needs:` the
+  conditional suites (and the detector that decides them), and fails unless the
+  detector succeeded and each suite either passed or was skipped on a valid
+  "unchanged" decision — then point branch protection at that job's name
+  instead of the suites'. The assertion forms the check can read are listed
+  under [Required-verdict coverage](#required-verdict-coverage-2026-10-26);
+  anything else leaves the check unmeasured.
   `success() || failure()` is deliberately NOT accepted on a job with
   `needs:`. It reads like `always()` and is not: when a dependency is SKIPPED
   neither predicate holds, so GitHub skips the verdict job too — and a skipped
@@ -513,3 +520,113 @@ two moved numbers.
   (https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/choosing-permissions-for-a-github-app)
   and for fine-grained tokens
   (https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens).
+
+
+### Required-verdict coverage (2026-10-26)
+
+F7 keeps its API gate and fact ID. Producer execution alone is no longer
+sufficient for an aggregator. A supported counterexample where detection fails
+or is cancelled, suites skip and the verdict succeeds fails the fact. Listing
+a detector in `needs:` without checking its result does not close the hole.
+
+The bounded analyzer supports literal dependency graphs, result comparisons,
+`contains(needs.*.result, ...)`, boolean expressions, scalar env/exit-code
+propagation, and ordinary multi-line bash/sh scripts run with errexit: `set`
+with `-e`/`-u`/`-x`/`-o pipefail` (pipefail in bash only), `echo` lines,
+`true`/`false`, `exit 0`/`exit 1` (or a variable holding one), standalone
+`test`/`[`/`[[` checks, and flat `if CONDITION; then ... fi` blocks whose body
+is echo lines and an exit. A condition is one or more `[ ... ]`, `test` or
+`[[ ... ]]` checks joined by a single kind of `&&` or `||`; a check compares a
+quoted variable or literal with `=`/`!=` (`==` in bash), and `[[ ]]` can also
+validate a quoted value against the exact `^(true|false)$` expression
+(optionally negated). Variables remain data: quotes or newlines in their
+values are not evaluated as commands. `else`/`elif`, nesting, loops, pipes,
+redirections, command substitution, unquoted variables and patterns are
+unmeasured. A `run:` step without `shell:` is read as bash only on a
+GitHub-hosted `ubuntu-*` or `macos-*` label without a job `container:`; on
+any other runner set `shell: bash` on the step. Workflow `env:` entries named
+`GITHUB_*` or `RUNNER_*` are ignored, because the runner sets those itself,
+and an array interpolated into a script (it renders as `Array`) is
+unmeasured.
+Strict suite-success assertions reject skipped suites. An intentional skip
+requires successful detection and an explicit valid boolean output; a literal
+false output written before failure is not a valid no-op, and a computed
+output a failed detector may have written is unproved, so the fact withholds
+rather than pass. It walks ancestors. An intermediate job whose `if:` names a
+status function (`success()`, `always()`, `cancelled()`, `failure()`, in any
+letter case) can run after an ancestor failed, so its condition is evaluated
+(`cancelled()` reports whether the whole run was cancelled, not a dependency
+result: a dependency that timed out is `cancelled` while `cancelled()` stays
+false, and a cancelled run is evaluated as its own scenario)
+and, when it runs after a non-success dependency, its own steps decide its
+result: a gate that reports success over a failed detector and a skipped suite
+fails the fact, and a gate whose steps are unresolved is unmeasured. A
+reusable-workflow caller or a matrix job producing a referenced output can
+reproduce a failure (for example, a caller skipped because detection failed)
+but never certifies a pass. Scalar `github.*` values in job conditions and the
+verdict are evaluated for every literal those conditions compare against, so
+suites routed by event (`github.event_name == 'push'` and its negation, or a
+head-repository match and its negation) are judged on both branches, and a
+skip decided by the event alone is a valid skip. Any other condition that
+cannot be evaluated is explored both ways: a bypass that holds on every branch
+fails the fact even when an unrelated job's condition is unresolved, while a
+bypass that depends on how that condition resolves is unmeasured. Cycles and
+traversal/enumeration limits withhold.
+Under `shell: sh`, `test`/`[` with `==` is not POSIX (dash rejects it) and is
+unmeasured. Unknown shell
+control flow, jq pipelines, scripts and action implementations are unmeasured.
+The reviewed `re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35`
+revision is supported with `jobs: ${{ toJSON(needs) }}` and literal JSON or
+comma-separated allowed lists. Its default requires success; `allowed-skips`
+also accepts skipped results, while `allowed-failures` accepts cancellation
+as well as failure and skipping. Those allowances still undergo the ancestor
+and invalid-decision checks. Overridden execution environments, unknown inputs
+and other revisions are unmeasured. An action name alone is not proof. The
+contract was checked against that revision's
+[entry point](https://github.com/re-actors/alls-green/blob/b5b5b37504aa4183270bd3d855c52a67f212be35/action.yml),
+[input and exit handling](https://github.com/re-actors/alls-green/blob/b5b5b37504aa4183270bd3d855c52a67f212be35/src/normalize_needed_jobs_status.py),
+and [result rules](https://github.com/re-actors/alls-green/blob/b5b5b37504aa4183270bd3d855c52a67f212be35/src/job_outcome.py).
+
+Ordinary producers with a supported, unconditional test invocation retain the
+producer-execution check. The exemption supports a single-line `pytest` or
+`python`/`python3 -m pytest`, `go test`, `cargo test`, and `npm`/`pnpm`/`yarn`
+`test` or `run test`, with test paths, packages or node ids and each runner's
+listed execution flags (for example `-k`/`-m`/`-n`/`-x` for pytest, `-race`/
+`-count`/`-timeout` for Go, `--workspace`/`-p`/`--all-features` for Cargo,
+paths and `--coverage`/`--ci` after `--` for the Node runners; Cargo's
+positional name filter and other Node pass-through flags can select nothing
+and still exit 0, so they are not exempt, as are `go test -count=0` and a
+pytest `@file` argument; a job whose earlier `run:` writes `$GITHUB_ENV` or
+`$GITHUB_PATH` gets no exemption). It requires fatal job and step
+results, a stock shell, and no environment overrides. Help, version,
+collection and listing modes, compile-only and test-filter flags that can
+select nothing (`-run`, `--no-run`, `--if-present`), negation, shell operators
+such as `|| true` or `;`, expansions and unresolved wrappers do not establish
+that tests execute. F9 still independently
+checks swallowed suite failures.
+Assertions must execute and propagate failure. Echoing a status is not an
+assertion; a disabled assertion cannot gate the verdict.
+
+This strengthens score meaning without adding a fact. The machine
+aggregate remains `100 × passed / scored`: pass→fail lowers the score and
+pass→unmeasured changes the denominator. Compare historical runs using their
+engine revision and coverage, not the number alone. Unknown assertions are
+reported as coverage gaps, not passes or guessed failures.
+
+For a detector whose `changed` output is explicitly `true` or `false`, a
+supported verdict can require both a successful detector and the expected
+suite result. The detector and suite jobs must also be present in the workflow:
+
+```yaml
+verdict:
+  needs: [changes, suite]
+  if: always()
+  runs-on: ubuntu-latest
+  steps:
+    - env:
+        OK: >-
+          ${{ needs.changes.result == 'success' &&
+              ((needs.changes.outputs.changed == 'true' && needs.suite.result == 'success') ||
+               (needs.changes.outputs.changed == 'false' && needs.suite.result == 'skipped')) }}
+      run: test "$OK" = true
+```

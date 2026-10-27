@@ -184,6 +184,70 @@ entries are dated (UTC). Format loosely follows
 
 ### Changed
 
+- **2026-10-26** — **A required check that used to pass can now fail or
+  become unmeasured.** `sec.required-checks.skippable` no longer accepts an
+  always-running verdict job just because it runs: it now reads what the
+  verdict asserts and walks its dependency chain (including a reviewed,
+  pinned `alls-green` revision and its allowed lists). When detection fails
+  or is cancelled, the suites skip and the verdict still goes green, the
+  check fails. Unknown scripts, action revisions and unsupported expressions
+  are unmeasured, which removes the check from the score's denominator, so
+  scores before and after this change are not directly comparable. The
+  bounded value domain includes literal outputs and shell/environment
+  comparison values. A job that runs its own suite is still not asked to
+  assert on its dependencies, provided the test invocation is supported and
+  fatal; help, version, collection and negated commands do not count. The API
+  gate and fact IDs are unchanged. Follow-up hardening:
+  - An intermediate job whose condition names a status function in any
+    letter case (`success() || …`, `Always()`, `!Cancelled()`) is now
+    evaluated rather than assumed to skip after a failure; a gate that
+    reports success over a failed detector fails the check instead of
+    passing, and one whose steps cannot be resolved is unmeasured.
+  - A reusable-workflow caller or matrix output producer can now reproduce
+    a failure; neither can certify a pass.
+  - The ordinary-suite allowance now covers `go test`, `cargo test`,
+    `npm`/`pnpm`/`yarn test` and `pytest` with paths and common execution
+    flags, which had become unmeasured; listing, compile-only, empty-filter
+    and `|| true`-style forms are still refused.
+  - `test`/`[` with `==` under `shell: sh` is unmeasured, since dash rejects
+    it, instead of being read as a passing assertion.
+  - A job condition the analysis cannot evaluate no longer hides a bypass
+    elsewhere: when a failed build skips the tests and the aggregator still
+    succeeds however that unrelated condition resolves, the check fails
+    instead of becoming unmeasured.
+  - Suites routed by event (`github.event_name == 'push'` and its negation,
+    a head-repository match and its negation) are evaluated on both
+    branches, so a verdict requiring exactly one of them to succeed can pass
+    instead of being unmeasured.
+  - Ordinary multi-line summary scripts are read: `set -euo pipefail`,
+    echo lines, and flat `if [ ... ] && [ ... ]; then ... exit N; fi`
+    blocks, so ci-secure's own gate scaffold and the common
+    exactly-one-of-two arbitration pass instead of being unmeasured.
+    `else`, nesting, pipes and substitutions stay unmeasured.
+  - `cancelled()` in a job condition means the whole run was cancelled, not
+    that a dependency was: a gate guarded by `!cancelled()` that runs green
+    after its detector timed out no longer lets the check pass.
+  - A summary step without `shell:` is read as bash on any GitHub-hosted
+    `ubuntu-*`/`macos-*` label; on other runners the unmeasured reason now
+    says to set `shell: bash`.
+  - Cargo's positional test-name filter and Node pass-through flags other
+    than `--coverage`/`--ci` (for example `--passWithNoTests`) no longer
+    count as an ordinary suite, since they can run nothing and exit 0.
+  - Values the runner fixes cannot carry an assertion: a workflow `env:`
+    named `GITHUB_*`/`RUNNER_*` is ignored (the runner sets those), an
+    array such as `needs.*.result` interpolated into a script is
+    unmeasured (it renders as `Array`), and a summary job in a `container:`
+    is not assumed to have bash. A job whose earlier `run:` writes
+    `$GITHUB_ENV`/`$GITHUB_PATH`, and `go test -count=0` or a pytest
+    `@file` argument, no longer count as an ordinary suite.
+  - A summary job guarded by `if: ${{ !cancelled() }}` no longer counts as
+    always running: when the run is cancelled (by hand, or by a newer push
+    under a concurrency group) that job is skipped, and GitHub reports a
+    skipped required check as passed. Only `if: always()` qualifies, and the
+    fix recipe now recommends it alone. Without `needs:` the condition is
+    still accepted, since such a job starts at once and a cancellation
+    reports it cancelled.
+
 - **2026-10-22** — **The five eval scenarios now run at the same time.** The
   shared eval runner starts every session at once (at most five; `--jobs N` or
   `SKILL_EVALS_JOBS` to change it), each in its own sandbox, skill copy and

@@ -19,7 +19,7 @@ _REQUIRED = ("pattern", "impact", "class", "detector", "affected_files", "title_
 
 
 def test_every_file_is_named_for_its_pattern_and_carries_the_required_keys():
-    assert len(_FILES) >= 89
+    assert len(_FILES) >= 91
     ids = []
     for p in _FILES:
         meta, opt_id, _title, body = scan.parse_pattern_file(p)

@@ -33,8 +33,8 @@ THE FACTS
                                           checkout sets persist-credentials:
                                           false
   F7 sec.required-checks.skippable        every required status check is
-                                          produced by a job that always runs
-                                          (API-gated)
+                                          produced by an always-running job with
+                                          a proved verdict when aggregating (API-gated)
   F8 sec.fork-approval.effective          fork-PR CI approval gates more than
                                           accounts new to GitHub (API-gated)
   F9 sec.gate.test-failure-fatal          no job that runs the test/lint suite
@@ -99,6 +99,7 @@ import itertools
 import json
 import logging
 import re
+import shlex
 import sys
 from functools import lru_cache
 from pathlib import Path
@@ -998,10 +999,10 @@ def _suite_failure_swallowed(rel: str,
 # unreadable, and never a fail for it either.
 
 # Conditions that cannot skip the job — the WHOLE condition, not a substring
-# of it. `always()` runs it in every result state and `!cancelled()` unless the
-# run was cancelled, so both keep the check reporting, which is the property
-# this fact is about. `success() || failure()` is NOT a third spelling of the
-# same thing once the job has `needs:` — see `_NEVER_SKIPS_WITHOUT_NEEDS`.
+# of it. `always()` runs it in every result state, which keeps the check
+# reporting — the property this fact is about. `!cancelled()` and
+# `success() || failure()` are NOT other spellings of it once the job has
+# `needs:` — see `_NEVER_SKIPS_WITHOUT_NEEDS`.
 #
 # Matching these as substrings was the defect: `always() && <fork guard>` runs
 # in every result state AND only when the guard holds, so it skips exactly like
@@ -1009,12 +1010,12 @@ def _suite_failure_swallowed(rel: str,
 # tokens prepended. A condition this list does not recognise is treated as
 # skippable, so the failure direction of a mis-parse is a false RED (visible,
 # arguable) rather than a false green.
-# Conditions that run the job whatever its dependencies did. `always()` and
-# `!cancelled()` both still run when a dependency is SKIPPED, which is the
-# state that matters here.
+# Conditions that run the job whatever its dependencies did and whatever
+# happened to the run. Only `always()` does: `!cancelled()` skips the job when
+# the run is cancelled (by hand, or by a newer push under a concurrency group),
+# and a skipped required check is what GitHub reports as passed.
 _NEVER_SKIPS = {
     "always()",
-    "!cancelled()",
     "always()||cancelled()",
 }
 # These run the job every time ONLY when nothing upstream can skip or fail
@@ -1024,12 +1025,16 @@ _NEVER_SKIPS = {
 # SKIPPED, neither predicate holds and GitHub skips the job too — and a skipped
 # required check is what it reports as passed. Certifying it meant the verdict
 # job this fact RECOMMENDS could itself be bypassed, so the recommendation is
-# `always()` or `!cancelled()`.
+# `always()`.
 _NEVER_SKIPS_WITHOUT_NEEDS = {
     "success()",
+    # Without `needs:` the job starts at once, so a cancellation reports it
+    # cancelled (red), never skipped. With `needs:` a cancelled run skips it.
+    "!cancelled()",
     # A CONSTANT condition is not `always()` either. GitHub skips a dependent
     # when a dependency skips unless the condition is `always()` or
-    # `!cancelled()`, and `if: true` is neither — so with `needs:` it is as
+    # `!cancelled()` (and skips on a cancelled run unless it is `always()`),
+    # and `if: true` is neither — so with `needs:` it is as
     # bypassable as the suite it gates. Without `needs:` it cannot be false,
     # and reding it would be a false RED on a repo that did nothing wrong.
     "true",
@@ -1116,7 +1121,7 @@ def _skip_path(jobs: dict[str, dict], key: str,
     skips (GitHub skips the dependents). Both report the check as skipped, and
     a skipped required check is green — so both are the same defect here.
 
-    A never-skipping condition (`always()`, `!cancelled()`) stops the walk in
+    A never-skipping condition (`always()`) stops the walk in
     BOTH directions: such a job
     runs whatever its dependencies did, which is exactly what makes the
     verdict-job pattern work. Recursion is cycle-guarded (`seen`) because a
@@ -1151,7 +1156,7 @@ def _skip_path(jobs: dict[str, dict], key: str,
     # check. So the walk does not go looking for an always-running ancestor:
     # there is no arrangement of ancestors that makes a bare dependent
     # unskippable, and saying otherwise described the opposite of what it does.
-    # The producer has to carry `always()` or `!cancelled()` ITSELF — which is
+    # The producer has to carry `always()` ITSELF — which is
     # what the fix recipe says. (`success() || failure()` does not qualify
     # here: a skipped dependency makes both predicates false.)
     if needs:
@@ -1993,6 +1998,87 @@ def _templated_refusal_note(docs: list[tuple[str, dict]], context: str) -> str |
     return None
 
 
+# Test-runner invocations that execute the repository's own suite and exit
+# nonzero when it fails. Each runner names the flags that keep that true; any
+# other flag (help, version, collection/listing, compile-only, filters that can
+# select nothing and still exit 0, `--if-present`) is refused, as is any shell
+# metacharacter, so `|| true`, `; true`, `&`, negation and expansions never
+# reach the allow-list.
+_SUITE_FLAGS = {
+    "pytest": ({"-q", "-v", "-vv", "-x", "-s", "-l", "-ra", "-rA", "--quiet", "--verbose",
+                "--exitfirst", "--strict-markers", "--showlocals"},
+               {"-k", "-m", "-n"},
+               ("--maxfail=", "--tb=", "--durations=", "--cov=", "--cov-report=", "-n=")),
+    "go": ({"-v", "-race", "-short", "-cover", "-failfast"},
+           {"-timeout", "-count", "-p", "-tags", "-coverprofile"},
+           ("-timeout=", "-count=", "-p=", "-tags=", "-coverprofile=")),
+    "cargo": ({"--workspace", "--all", "--all-features", "--all-targets", "--release", "--locked",
+               "--frozen", "--offline", "-q", "-v", "--quiet", "--verbose", "--no-fail-fast"},
+              {"-p", "--package", "--features", "-F", "-j", "--jobs", "--target"},
+              ("--features=", "--package=", "--target=", "-j")),
+    "node": (set(), set(), ()),
+}
+_SUITE_ARGUMENT = re.compile(r"(?!@)[\w.:/@*\[\]+=,-]+")
+
+
+def _runs_own_suite(line: str) -> bool:
+    """True when one `run:` line is a supported, fatal test-suite invocation."""
+    if re.search(r"[;&|<>$`\\(){}#!\n]", line):
+        return False
+    try:
+        words = shlex.split(line)
+    except ValueError:
+        return False
+    if words[:3] in (["python", "-m", "pytest"], ["python3", "-m", "pytest"]):
+        runner, rest = "pytest", words[3:]
+    elif words[:1] == ["pytest"]:
+        runner, rest = "pytest", words[1:]
+    elif words[:2] == ["go", "test"]:
+        runner, rest = "go", words[2:]
+    elif words[:2] == ["cargo", "test"]:
+        runner, rest = "cargo", words[2:]
+    elif words[:1] in (["npm"], ["pnpm"], ["yarn"]) and words[1:2] == ["test"]:
+        runner, rest = "node", words[2:]
+    elif words[:1] in (["npm"], ["pnpm"], ["yarn"]) and words[1:3] == ["run", "test"]:
+        runner, rest = "node", words[3:]
+    else:
+        return False
+    if runner == "node":
+        # Arguments after `--` go to the repository's own test script; a flag
+        # before it (`--if-present`) changes whether anything runs at all.
+        # Pass-through flags are the test runner's own (`--passWithNoTests`,
+        # `--grep`, `--showConfig` can run nothing and exit 0): only paths and
+        # the coverage/CI switches are accepted.
+        return not rest or (rest[0] == "--" and all(
+            w in ("--coverage", "--ci") or (not w.startswith("-") and _SUITE_ARGUMENT.fullmatch(w))
+            for w in rest[1:]))
+    switches, valued, prefixed = _SUITE_FLAGS[runner]
+    i = 0
+    while i < len(rest):
+        word = rest[i]
+        if word in switches:
+            i += 1
+        elif word in ("-count=0", "-count=00") or (word == "-count" and rest[i + 1:i + 2] in (["0"], ["00"])):
+            return False  # `go test -count=0` runs nothing and exits 0
+        elif word in valued and i + 1 < len(rest) and rest[i + 1] and not rest[i + 1].startswith("-"):
+            i += 2
+        elif word.startswith("-") and any(word.startswith(p) and len(word) > len(p) for p in prefixed):
+            i += 1
+        elif runner != "cargo" and not word.startswith("-") and _SUITE_ARGUMENT.fullmatch(word):
+            # A test path, package pattern or node id. Cargo's positional is a
+            # name filter that can match nothing and still exit 0.
+            i += 1
+        else:
+            return False
+    return True
+
+
+@lru_cache(maxsize=1)
+def _verdict_assertions() -> ModuleType:
+    return _load_sibling("ci_secure_verdict_assertions",
+                         Path(__file__).resolve().parent / "verdict_assertions.py")
+
+
 def _required_checks_skippable(
     docs: list[tuple[str, dict]],
     repo: str | None,
@@ -2026,6 +2112,7 @@ def _required_checks_skippable(
     bypassable: list[str] = []
     unjudged: list[str] = []
     gated = 0
+    traced_contexts = 0
     for context in contexts:
         producers = _context_producers(docs, context)
         if not producers:
@@ -2045,12 +2132,38 @@ def _required_checks_skippable(
                 f"job name, or a stale entry"
                 + (f"; {note})" if note else ")"))
             continue
+        traced_contexts += 1
         skips: list[str] = []
         unknown: list[str] = []
         always_runs = False
         for rel, key, _job, jobs, doc, ability in producers:
             reason = _skip_path(jobs, key)
             if reason is None:
+                if _needs_of(_job) and not any(
+                    len(_code_lines(str(step.step.get("run", "")))) == 1
+                    # A command-name mention is not proof of executed tests:
+                    # help/version/collection modes, wrappers and negation hold.
+                    and _runs_own_suite(_code_lines(str(step.step.get("run", "")))[0])
+                    and not any((doc.get("env"), _job.get("env"), step.step.get("env")))
+                    and step.step.get("shell", _job.get("defaults", {}).get("run", {}).get("shell",
+                        doc.get("defaults", {}).get("run", {}).get("shell"))) in (None, "bash", "sh", "pwsh", "powershell")
+                    and _job.get("continue-on-error") in (None, False)
+                    and step.step.get("continue-on-error") in (None, False)
+                    and not step.gated and not step.background and not step.in_parallel_group
+                    for step in _scan()._iter_job_steps(_job)
+                ) or _needs_of(_job) and any(
+                    # An earlier `run:` can rewrite the suite's environment
+                    # or PATH for every later step: no allowance then.
+                    re.search(r"GITHUB_(?:ENV|PATH)", str(step.step.get("run", "")))
+                    for step in _scan()._iter_job_steps(_job)
+                ):
+                    assertion, evidence = _verdict_assertions().analyze(jobs, key, doc)
+                    if assertion == "fail":
+                        skips.append(f"`{context}` ← {rel}: {evidence}")
+                        continue
+                    if assertion == "unmeasured":
+                        unknown.append(f"`{context}` ← {rel}: verdict assertion not proved ({evidence})")
+                        continue
                 if ability == _ABILITY_YES:
                     always_runs = True
                     break
@@ -2085,10 +2198,10 @@ def _required_checks_skippable(
         # judged against was itself a floor — a check configured only in the
         # unread source is invisible here.
         return "fail", (
-            f"on {detail}, GitHub reports a SKIPPED required check as passed, "
-            "and "
-            + _capped(bypassable, 3)
-            + " — so nothing in these workflows is guaranteed to report it."
+            f"on {detail}, a required check can go green without its tests "
+            "having run (GitHub reports a SKIPPED required check as passed, and "
+            "a summary job can accept a skipped suite): "
+            + _capped(bypassable, 3) + "."
             + tail)
     if unjudged:
         # A pass is a claim about EVERY required check. The ordinary shape of a
@@ -2103,12 +2216,17 @@ def _required_checks_skippable(
                   if gated else
                   f"none of the {len(contexts)} required check(s) could be "
                   f"traced to a job in these workflows")
+        if traced_contexts > gated:
+            traced = (f"{traced_contexts} of {len(contexts)} required check(s) have "
+                      f"a known producer, but only {gated} have proved execution "
+                      "and supported verdict behavior")
         return "unmeasured", (
             f"unmeasured: {traced}, so whether every required check on {detail} "
             f"survives a skipped job was not established." + tail)
     return "pass", (
         f"all {gated} required check(s) on {detail} have a producer that runs "
-        f"whatever else happens.")
+        f"whatever else happens, with supported verdict assertions rejecting "
+        f"upstream failure where the producer aggregates dependencies.")
 
 
 # --- F8: fork-PR CI approval that gates nobody real --------------------------
@@ -4006,9 +4124,9 @@ def compute_config_facts(
         ("unmeasured", gap_reason) if gap else _required_checks_skippable(
             docs, repo, required_contexts_fetcher or _required_contexts_via_gh))
     add("sec.required-checks.skippable",
-        "every required status check is produced by a job that always runs "
-        "(GitHub counts a SKIPPED required check as a pass, so a check only a "
-        "conditional job reports can be satisfied without running)",
+        "every required status check has an always-running producer and a "
+        "proved assertion when aggregating dependencies (a skipped check or "
+        "a green verdict accepting missing verification can satisfy the gate)",
         True, rc_outcome == "pass", rc_evidence, outcome=rc_outcome)
 
     fa_outcome, fa_evidence = _fork_approval_effective(

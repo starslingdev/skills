@@ -310,7 +310,7 @@ merges until that admin-only step is done. If the consolidation routes the old
 checks' work behind a `needs:` edge and an aggregator, see OPT75's
 [dependency-failure skip caveat](#opt75--long-pole-optimize-or-relocate-the-dominant-step)
 — a dependent skipped by a failed dependency reports skipped, not failed, so the
-aggregator must run with `always()` (or `!cancelled()`) and propagate every
+aggregator must run with `always()` (not `!cancelled()`, which a cancelled run skips) and propagate every
 `needs.<job>.result`, and keeping the required check name on that aggregator
 re-gates the merge without an admin.
 
