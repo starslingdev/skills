@@ -2079,12 +2079,40 @@ def _verdict_assertions() -> ModuleType:
                          Path(__file__).resolve().parent / "verdict_assertions.py")
 
 
+def _verdict_action_via_gh(reference):
+    """Resolve only the modeled verdict action's tag to an immutable commit."""
+    prefix = _verdict_assertions().ALLS_GREEN.split("@")[0] + "@"
+    if not isinstance(reference, str) or not reference.startswith(prefix):
+        return None
+    version = reference[len(prefix):]
+    if not re.fullmatch(r"[A-Za-z0-9_.][A-Za-z0-9_./-]{0,127}", version):
+        return None
+    try:
+        gh = _gh_utils()
+        if not gh.check_prereqs():
+            return None
+        response = json.loads(gh.run_gh_api(
+            "repos/" + prefix[:-1] + "/commits/" + quote(version, safe="")))
+        sha = response.get("sha")
+        return sha if isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{40}", sha) else None
+    except Exception:
+        return None
+
+
 def _required_checks_skippable(
     docs: list[tuple[str, dict]],
     repo: str | None,
     fetcher,
+    action_resolver=None,
 ) -> tuple[str, str]:
     """(outcome, evidence) for `sec.required-checks.skippable`."""
+    resolutions = {}
+    def resolve_action(reference):
+        if reference not in resolutions:
+            if len(resolutions) >= 16 or action_resolver is None:
+                return None
+            resolutions[reference] = action_resolver(reference)
+        return resolutions[reference]
     if not repo:
         return "unmeasured", (
             "unmeasured: which status checks the branch requires is an API "
@@ -2157,7 +2185,8 @@ def _required_checks_skippable(
                     re.search(r"GITHUB_(?:ENV|PATH)", str(step.step.get("run", "")))
                     for step in _scan()._iter_job_steps(_job)
                 ):
-                    assertion, evidence = _verdict_assertions().analyze(jobs, key, doc)
+                    assertion, evidence = _verdict_assertions().analyze(
+                        jobs, key, doc, action_resolver=resolve_action)
                     if assertion == "fail":
                         skips.append(f"`{context}` ← {rel}: {evidence}")
                         continue
@@ -3986,6 +4015,7 @@ def compute_config_facts(
     fork_approval_fetcher: Any = None,
     codeowner_review_fetcher: Any = None,
     push_access_fetcher: Any = None,
+    verdict_action_resolver: Any = None,
 ) -> dict[str, Any]:
     """Every fact, every time — pass/fail/unmeasured, never silently absent.
 
@@ -4122,7 +4152,8 @@ def compute_config_facts(
     # verdict nothing would read.
     rc_outcome, rc_evidence = (
         ("unmeasured", gap_reason) if gap else _required_checks_skippable(
-            docs, repo, required_contexts_fetcher or _required_contexts_via_gh))
+            docs, repo, required_contexts_fetcher or _required_contexts_via_gh,
+            action_resolver=verdict_action_resolver or _verdict_action_via_gh))
     add("sec.required-checks.skippable",
         "every required status check has an always-running producer and a "
         "proved assertion when aggregating dependencies (a skipped check or "

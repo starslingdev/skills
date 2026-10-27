@@ -184,6 +184,13 @@ entries are dated (UTC). Format loosely follows
 
 ### Changed
 
+- 2026-10-27: Required-summary coverage now reads strict jq assertions, resolves
+  verdict-action tags only to the reviewed commit, and proves large strict
+  aggregates without enumerating every result combination. Scores can move
+  from unmeasured to pass or fail. The conditional-step rule from #150 now
+  also sees steps inside `parallel:` groups, conditional groups and background
+  steps, and the large-aggregate shortcut refuses any upstream step `if:`.
+
 - **2026-10-26** — **A required check that used to pass can now fail or
   become unmeasured.** `sec.required-checks.skippable` no longer accepts an
   always-running verdict job just because it runs: it now reads what the
@@ -297,6 +304,13 @@ entries are dated (UTC). Format loosely follows
   no detector, catalog entry, pattern id or count changes.
 
 ### Fixed
+
+- 2026-10-27: Verdict shell proofs remain unmeasured when exported Bash
+  functions or case variants of shell-control environment names are present.
+
+- 2026-10-27: Strict jq verdicts with inline dependency JSON remain unmeasured
+  when dependencies declare outputs; quoted environment-variable input keeps
+  the JSON separate from shell source.
 
 - **2026-10-27** — **The required-check verdict no longer passes a summary job
   whose upstream test step may never have run, and `failure()` now sees failed

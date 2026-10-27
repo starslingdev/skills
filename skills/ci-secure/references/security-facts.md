@@ -575,13 +575,30 @@ traversal/enumeration limits withhold.
 Under `shell: sh`, `test`/`[` with `==` is not POSIX (dash rejects it) and is
 unmeasured. Unknown shell
 control flow, jq pipelines, scripts and action implementations are unmeasured.
+Two complete bash commands are supported exceptions: `jq -e` (or
+`--exit-status`) with either `all(.[]; .result == "success")` or
+`all(.result == "success")`, reading the complete `toJSON(needs)` value via
+`<<<`. The input must be a single-quoted expression or a quoted environment
+variable containing exactly that expression. Inline JSON holds when a dependency
+declares outputs, whose quotes are not safe to interpolate into shell source.
+No extra commands, alternate
+filters, partial JSON, omitted exit-status option or shell environment
+replacement is accepted. Exported Bash functions and case variants of shell-control
+environment names also withhold the proof. A single strict jq or reviewed-action step can prove
+large dependency sets without exponential enumeration; every dependency must
+succeed, and conditional upstream steps still withhold execution proof,
+including steps inside `parallel:` groups, conditional groups and steps that may
+run in the background.
 The reviewed `re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35`
 revision is supported with `jobs: ${{ toJSON(needs) }}` and literal JSON or
 comma-separated allowed lists. Its default requires success; `allowed-skips`
 also accepts skipped results, while `allowed-failures` accepts cancellation
 as well as failure and skipping. Those allowances still undergo the ancestor
 and invalid-decision checks. Overridden execution environments, unknown inputs
-and other revisions are unmeasured. An action name alone is not proof. The
+and other revisions are unmeasured. Tags are resolved through the API and
+accepted only when they point to the reviewed commit, with at most sixteen
+unique resolutions per fact evaluation. An unreadable or different commit
+withholds the proof. An action name alone is not proof. The
 contract was checked against that revision's
 [entry point](https://github.com/re-actors/alls-green/blob/b5b5b37504aa4183270bd3d855c52a67f212be35/action.yml),
 [input and exit handling](https://github.com/re-actors/alls-green/blob/b5b5b37504aa4183270bd3d855c52a67f212be35/src/normalize_needed_jobs_status.py),

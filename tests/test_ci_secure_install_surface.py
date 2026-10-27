@@ -63,6 +63,7 @@ _FORBIDDEN_FILE_NAMES = {
     # install or be collected by the ordinary `pytest` run.
     "run_skill_evals.py",
     "eval_gh_shim.py",
+    "required_check_census.py",
 }
 
 # Directory names that mark the same thing.
@@ -249,3 +250,7 @@ def test_detectors_actually_fire():
     assert _is_forbidden_file("run_skill_evals.py") and _is_forbidden_file("eval_gh_shim.py")
     assert "loops" in _FORBIDDEN_DIR_NAMES
     assert "dogfood" in _FORBIDDEN_DIR_NAMES
+
+
+def test_required_check_census_is_maintainer_only():
+    assert _is_forbidden_file('required_check_census.py')

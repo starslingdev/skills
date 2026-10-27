@@ -373,10 +373,128 @@ def shell_script(source, env, shell):
     return True
 
 
+_NEEDS_JSON = re.compile(r"\$\{\{\s*toJSON\(needs\)\s*\}\}", re.I)
+_JQ_FILTERS = {'all(.[]; .result == "success")', 'all(.result == "success")'}
+
+
+def _jq_needs(source, env, shell):
+    """Only an entire fatal jq command over the complete dependency object.
+
+    No jq evaluator, shell execution or arbitrary JSON expression is involved.
+    These two filters iterate every dependency value and require success.
+    """
+    match = re.fullmatch(r"jq\s+(?:-e|--exit-status)\s+'([^'\n]+)'\s+<<<\s+(.+)",
+                         str(source).strip())
+    if not match or match[1] not in _JQ_FILTERS or shell != "bash":
+        return False
+    data = match[2]
+    if data.startswith("'") and data.endswith("'"):
+        return bool(_NEEDS_JSON.fullmatch(data[1:-1]))
+    variable = re.fullmatch('"' + _VARIABLE + '"', data)
+    if variable:
+        name = variable[1] or variable[2]
+        if re.match(r"(?:GITHUB|RUNNER)_", name):
+            return False
+        value = env.get(name)
+        return isinstance(value, str) and bool(_NEEDS_JSON.fullmatch(value))
+    return False
+
+
+_TRIVIAL_STEP_CONDITIONS = ("true", "always()", "success()")
+
+
+def _unproved_step_execution(job, trivial=_TRIVIAL_STEP_CONDITIONS):
+    """Whether a successful job result may not show that every step ran.
+
+    Walks `parallel:` groups (a flat `steps` read misses their children); a
+    group's condition applies to everything inside it. A conditional step or
+    group, a step that may run in the background, or a group this walk cannot
+    read withholds the execution proof.
+    """
+    pending = [(job.get("steps") if isinstance(job, dict) else None, 0)]
+    seen = 0
+    while pending:
+        steps, depth = pending.pop()
+        if steps is None and depth == 0:
+            continue
+        if not isinstance(steps, list) or depth > 8:
+            return True
+        for step in steps:
+            seen += 1
+            if seen > 1024:
+                return True
+            if not isinstance(step, dict):
+                if depth:
+                    return True
+                continue
+            if "if" in step and unwrap(step["if"]).lower() not in trivial:
+                return True
+            if "background" in step and step["background"] is not False:
+                return True
+            if "parallel" in step:
+                pending.append((step["parallel"], depth + 1))
+    return False
+
+
+def _strict_aggregate_shape(job):
+    """A single, unconditional conjunction of every direct success result.
+
+    This structural proof avoids exponential enumeration for large gates. A
+    permissive input, extra step or arbitrary script never enters this path.
+    verdict_success still validates all execution settings before it is used.
+    """
+    steps = job.get("steps")
+    if not isinstance(steps, list) or len(steps) != 1 or not isinstance(steps[0], dict):
+        return False
+    step = steps[0]
+    if "if" in step or step.get("continue-on-error") not in (None, False):
+        return False
+    if step.get("uses") == ALLS_GREEN:
+        inputs = step.get("with")
+        return isinstance(inputs, dict) and set(inputs) == {"jobs"}
+    env = dict(job.get("env") or {})
+    env.update(step.get("env") or {})
+    return _jq_needs(step.get("run", ""), env, "bash")
+
+
+def _resolve_action_tags(jobs, resolver):
+    """Resolve only this modeled action's tags, once each, with a hard budget."""
+    resolved = {}
+    prefix = ALLS_GREEN.split("@")[0] + "@"
+    for job in jobs.values():
+        for step in job.get("steps", []):
+            if not isinstance(step, dict):
+                continue
+            ref = step.get("uses", "")
+            if not isinstance(ref, str) or not ref.startswith(prefix):
+                continue
+            version = ref[len(prefix):]
+            if re.fullmatch(r"[a-fA-F0-9]{40}", version):
+                continue
+            if not re.fullmatch(r"[A-Za-z0-9_.][A-Za-z0-9_./-]{0,127}", version):
+                continue
+            if ref not in resolved:
+                if len(resolved) >= 16:
+                    raise Unknown("verdict action resolution limit")
+                try:
+                    resolved[ref] = resolver(ref)
+                except Exception:
+                    resolved[ref] = None
+            if resolved[ref] == ALLS_GREEN.split("@")[1]:
+                step["uses"] = ALLS_GREEN
+
+
 def run_step(source, env, results, outputs, direct, shell="bash"):
     """Return shell success only for fully understood, failure-propagating text."""
     if len(str(source)) > 8192 or len(str(env)) > 8192:
         raise Unknown("verdict command size limit")
+    if any(str(key).upper() in ("BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "PATH")
+           or str(key).upper().startswith("BASH_FUNC_") for key in env):
+        # Exported Bash functions can replace commands. Windows environment
+        # names can alias by case, so case variants also withhold the proof.
+        raise Unknown("shell behavior overridden by environment")
+    if _jq_needs(source, env, shell):
+        return all(results[name] == "success" for name in direct)
     def substitute(match):
         if STEP_STATUS_FUNCTION.search(match[1]):
             raise Unknown("step status function is not a dependency result assertion")
@@ -403,7 +521,10 @@ def run_step(source, env, results, outputs, direct, shell="bash"):
             raise Unknown("literal shell variable in single quotes")
     # Substitution is limited to scalar statuses/numeric exit codes. No shell
     # evaluation, expansion, pipes, command substitution or redirections.
-    if any(key in env for key in ("BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "PATH")):
+    if any(str(key).upper() in ("BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "PATH")
+           or str(key).upper().startswith("BASH_FUNC_") for key in env):
+        # Exported Bash functions can replace commands. Windows environment
+        # names can alias by case, so case variants also withhold the proof.
         raise Unknown("shell behavior overridden by environment")
     # The runner sets GITHUB_* and RUNNER_* itself; a workflow `env:` of the
     # same name does not reach the shell, so those names stay unresolved.
@@ -497,7 +618,7 @@ def verdict_success(job, results, outputs):
     return True
 
 
-def analyze(jobs, key, workflow=None):
+def analyze(jobs, key, workflow=None, action_resolver=None):
     """Return pass/fail/unmeasured and the supported path or refusal.
 
     A strict suite-success assertion can be proved independently of arbitrary
@@ -514,8 +635,11 @@ def analyze(jobs, key, workflow=None):
     withhold.
     """
     try:
-        if workflow:
+        if action_resolver is not None or workflow:
             jobs = copy.deepcopy(jobs)
+        if action_resolver is not None:
+            _resolve_action_tags(jobs, action_resolver)
+        if workflow:
             inherited = workflow.get("defaults", {}).get("run", {})
             for job in jobs.values():
                 run_defaults = dict(inherited)
@@ -542,19 +666,26 @@ def analyze(jobs, key, workflow=None):
         direct = needs(jobs[key])
         if not direct:
             return "pass", "no verdict dependencies"
+        # Inline expression substitution happens before shell parsing. Output
+        # keys and values can contain quotes, unlike fixed result strings.
+        # A quoted env variable passes JSON as data instead and stays supported.
+        for name in order:
+            if (any(jobs[parent].get("outputs") for parent in needs(jobs[name]))
+                    and any(isinstance(step, dict)
+                            and _jq_needs(step.get("run", ""), {}, "bash")
+                            for step in jobs[name].get("steps", []))):
+                raise Unknown("inline dependency JSON contains unproved output quoting")
         ancestors = order[:-1]
         # A reusable caller's result summarizes jobs this file does not show
         # (they can all skip), so it cannot certify a pass, only reproduce a
         # skip that GitHub decides at the caller.
         uncertified = [n for n in ancestors if "uses" in jobs[n]]
         # A successful job result does not prove its conditionally executed
-        # steps ran, so such an ancestor withholds a pass. It stays out of
+        # steps ran (including steps inside `parallel:` groups and background
+        # steps), so such an ancestor withholds a pass. It stays out of
         # `uncertified`: its literal declared outputs are still reproducible,
         # so a concrete failing path through it can establish a failure.
-        conditional_steps = [n for n in ancestors if any(
-            isinstance(step, dict) and "if" in step
-            and unwrap(step["if"]).lower() not in ("true", "always()", "success()")
-            for step in jobs[n].get("steps", []))]
+        conditional_steps = [n for n in ancestors if _unproved_step_execution(jobs[n])]
         ancestor_scope = {}
         for name in order:
             ancestor_scope[name] = set(needs(jobs[name]))
@@ -574,6 +705,22 @@ def analyze(jobs, key, workflow=None):
         # No accepting non-success combination implies skipped suites cannot
         # pass. Cap combinations; this proof does not rely on job if semantics.
         verdict_refs = re.findall(r"needs\.([\w-]+)\.outputs\.([\w-]+)", str(jobs[key]))
+        if (len(direct) > 5 and not verdict_refs and not swallowers and not uncertified
+                and not conditional_steps and _strict_aggregate_shape(jobs[key])
+                and not any(_unproved_step_execution(jobs[name], trivial=())
+                            for name in ancestors)):
+            # The recognized conjunction is separable: replacing any one
+            # dependency by a non-success result makes the whole assertion
+            # false. Validate the modeled execution path for every operand.
+            strict = True
+            for name in direct:
+                for state in ("failure", "cancelled", "skipped"):
+                    results = dict.fromkeys(direct, "success")
+                    results[name] = state
+                    if verdict_success(jobs[key], results, {}):
+                        strict = False
+            if strict:
+                return "pass", "strict aggregate rejects every non-success dependency result"
         if len(direct) <= 5 and not verdict_refs and not swallowers and not uncertified and not conditional_steps:
             strict = True
             for states in itertools.product(("success", "failure", "cancelled", "skipped"), repeat=len(direct)):

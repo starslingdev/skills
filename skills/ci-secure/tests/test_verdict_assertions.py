@@ -58,12 +58,14 @@ class VerdictTests(unittest.TestCase):
         jobs['verdict']['steps'][0]['run'] = FAIL_ONLY
         self.assertEqual(self.outcome(jobs), 'fail')
 
-    def test_matrix_detector_outputs_and_jq_assertions_remain_unmeasured(self):
+    def test_matrix_detector_outputs_hold_and_only_strict_jq_is_measured(self):
         jobs = graph(SAFE, True)
         jobs['changes']['strategy'] = {'matrix': {'part': ['one', 'two']}}
         self.assertEqual(self.outcome(jobs), 'unmeasured')
         jobs = graph('jq -e \'all(.[]; .result == "success")\' <<< "$NEEDS"', True)
         jobs['verdict']['steps'][0]['env'] = {'NEEDS': '${{ toJSON(needs) }}'}
+        self.assertEqual(self.outcome(jobs), 'pass')
+        jobs['verdict']['steps'][0]['run'] = jobs['verdict']['steps'][0]['run'].replace('== "success"', '!= "failure"')
         self.assertEqual(self.outcome(jobs), 'unmeasured')
 
     def test_false_output_before_failure_is_not_unchanged(self):

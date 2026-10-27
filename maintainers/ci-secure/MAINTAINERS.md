@@ -72,3 +72,33 @@ sessions on the shared runner, the same one ci-speedup uses:
 are `gate` tier and run at once, up to `--jobs`, default five). It spends
 real tokens and is never part of `pytest`; `skills/ci-secure/evals/README.md`
 covers what runs, the exit codes, and what the checks cannot judge.
+
+## Required-summary census
+
+`scripts/required_check_census.py` captures public workflow blobs at immutable
+revisions and measures F7 with the hypothetical assumption that every selected
+summary job is required. It never reads or changes branch protection and never
+executes repository commands. Discovery selects dependent jobs whose steps or
+environment reference dependency results or the supported verdict action;
+review those roles and freeze `summary_jobs` as `[workflow_path, job_id]` pairs
+in each local snapshot before comparing engines. Results retain that selection.
+
+Keep the repository-list JSON, snapshots, tag resolutions and reports outside
+this checkout. The command refuses an output directory inside the source tree:
+
+```bash
+uv run --no-project --python 3.13 --with pyyaml python maintainers/ci-secure/scripts/required_check_census.py --repositories /tmp/public-repositories.json --data-dir /tmp/required-summary-census --report before.json
+```
+
+Repeat with the same data directory, `--report after.json` and
+`--compare /tmp/required-summary-census/before.json`; use `--engine-root` to
+select a different engine checkout. Existing snapshots are reused, including
+recorded tag resolutions. The report ranks individual summary refusal reasons,
+reports repository-level unmeasured share, and lists both repository and
+summary transitions needing hand review. Every newly passing result needs a
+written review of the immutable workflow before calling the change precise.
+A failing sibling summary must not hide another summary's newly passing result.
+Summary jobs that share a display name are marked `ambiguous`, because the
+fact combines them; each row also records its own job's `assertion`, and a
+newly passing assertion on an ambiguous row is listed for review.
+Captured workflows and reports remain private local data, never PR attachments.
