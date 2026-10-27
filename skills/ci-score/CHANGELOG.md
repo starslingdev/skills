@@ -11,50 +11,79 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
 
 ## [Unreleased]
 
-- **2026-10-27** — **Fixed**: a repository whose setup action caches
+- **2026-10-27** — **Fixed** (#154): a repository whose setup action caches
   dependencies by default no longer fails Dependency caching. `setup-go` v4+
   and `setup-uv` v5+ with no cache input, `setup-ruby` with
   `bundler-cache: true`, `setup-node` v5+ when `package.json` names the
   package manager (v5: npm, yarn or pnpm; v6+: npm only),
   `gradle/actions/setup-gradle`, `gradle/gradle-build-action` and
-  `bahmutov/npm-install` were all graded "no cache" (#154). The rules are the speed engine's own table, copied rather than
-  imported, and a repo-level test pins the two by constant and by verdict.
-  An explicit opt-out (`cache: false`, `enable-cache: false`,
-  `package-manager-cache: false`, `cache-disabled: true`) still fails, as do
-  versions before the default turned on. A SHA-pinned action names no
-  version, as in the speed engine, so a default-on action pinned by SHA
-  counts as caching unless a `# vN` comment beside the SHA names a release
-  from before the default turned on (`@<sha> # v3.5.0` on setup-go earns
-  nothing), and setup-node counts only when its v5 and v6 rules agree.
-  setup-uv's default (`enable-cache: auto`) caches only on GitHub-hosted
-  runners, so with no input it counts only when the job's `runs-on` is a
-  literal GitHub-hosted label (`ubuntu-*`, `windows-*`, `macos-*`); on any
-  other runner, `enable-cache: true` earns it, and the fix says so. setup-node's default is credited only after a checkout of this
-  repository to the workspace root has run earlier in the same job: before
-  any checkout, or after a checkout into a sub-path or of another
-  repository, there is no `package.json` for it to read.
-- **2026-10-27** — **Fixed**: a test job whose matrix is generated at
+  `bahmutov/npm-install` were all graded "no cache". The rules are the speed
+  engine's own table, copied rather than imported, and a repo-level test pins
+  the two by constant and by verdict. An explicit opt-out (`cache: false`,
+  `enable-cache: false`, `package-manager-cache: false`,
+  `cache-disabled: true`) still fails, as do versions before the default
+  turned on. An explicit cache input other than `false` is credited on any
+  runner, exactly as before.
+- **2026-10-27** — **Fixed** (#154): default-on credit is given only where
+  the action really restores a cache. A SHA-pinned action names no version,
+  so it counts as caching unless its version comment (`# v3.5.0`,
+  `# tag=v3.5.0`, `# ratchet:owner/action@v3`, `# pin@v3`, including after a
+  quoted `uses:` or a flow-mapping `}`) names a release from before the
+  default turned on, or names no release at all. setup-uv's default
+  (`enable-cache: auto`) caches only on GitHub-hosted runners, so with no
+  input it counts only on one of GitHub's published hosted-runner labels
+  (`ubuntu-latest`, `ubuntu-24.04-arm`, `windows-2025`, `macos-15` and the
+  like, not a custom label such as `ubuntu-selfhosted-pool`), and never
+  inside a local composite action; `enable-cache: true` earns it anywhere,
+  and the fix says so. setup-node and setup-go read the checked-out
+  workspace when their step runs, so their default counts only after a
+  checkout of this repository to the workspace root has finished earlier in
+  the same job. Before any checkout there is nothing to read; after a
+  checkout into a sub-path or of another repository, the file the action
+  reads is not the one this scan read; and a checkout still running in the
+  same `parallel:` group, or started with `background: true`, has not
+  finished. setup-go also needs a `go.sum` (at the root or at its
+  `cache-dependency-path`), its cache key. A `package-manager-cache` written
+  as an expression is read as its default, so it still needs a manager in
+  `package.json`. Input names are read case-insensitively, so `Cache: false`
+  is an opt-out.
+- **2026-10-27** — **Fixed** (#154): a SHA-pinned setup-node whose v5 and v6
+  rules disagree for this `package.json` (for example `packageManager:
+  yarn@4.1.0`) is credited when every release its version comment names
+  caches (`@<sha> # v5.0.0`), by owner decision. No comment, or a comment
+  naming v6, still earns nothing.
+- **2026-10-27** — **Fixed** (#154): a default the scan cannot decide is no
+  longer a silent fail. A `package.json` that cannot be read, is not JSON, is
+  not an object, or starts with a byte-order mark (which setup-node's own
+  parse rejects), and a SHA pin the setup-node rules disagree on, are named
+  in the Dependency caching evidence ("setup-node@v5 default cache could not
+  be resolved: package.json is not valid JSON") and recorded as
+  `data_sources.unresolved_setup_defaults`.
+- **2026-10-27** — **Fixed** (#154): a test job whose matrix is generated at
   runtime (`matrix: ${{ fromJSON(...) }}`) no longer fails Test sharding; it
   passes, because the job does run a matrix. A generated matrix on a job that
   is not test-like earns nothing, the same rule a written-out matrix gets.
-- **2026-10-27** — **Fixed**: a repository whose every job calls a reusable
-  workflow from another repository no longer fails Job timeouts. A calling
-  job cannot set `timeout-minutes`, so the check is now not applicable there,
-  the same handoff Dependency caching and Test sharding already make. One job
-  that runs its own steps keeps the check graded. A repository with no other
-  applicable check now gets the all-not-applicable refusal instead of a 0.
-- **2026-10-27** — **Fixed**: a full-history checkout step whose own `if:`
-  can never be true on a pull request (for example
+- **2026-10-27** — **Fixed** (#154): a repository whose every job calls a
+  reusable workflow from another repository no longer fails Job timeouts. A
+  calling job cannot set `timeout-minutes`, so the check is now not
+  applicable there, the same handoff Dependency caching and Test sharding
+  already make. One job that runs its own steps keeps the check graded. A
+  repository with no other applicable check now gets the all-not-applicable
+  refusal instead of a 0.
+- **2026-10-27** — **Fixed** (#154): a full-history checkout step whose own
+  `if:` can never be true on a pull request (for example
   `if: github.event_name == 'push'`) no longer fails Shallow checkout. The
   same fail-closed reading the job-level `if:` gets applies: a condition it
   cannot fully resolve still counts.
-- **2026-10-27** — **Changed**: the CI Score registry is bumped to
+- **2026-10-27** — **Changed** (#154): the CI Score registry is bumped to
   `ci-score-v0.1.5` (OD-CS23). Job timeouts gains a not-applicable gate and
   the shallow-checkout reachability exemption widens from jobs to steps, and
   the rubric's own rule bumps `spec_version` when a gate moves. Check count
-  (11), bands, formula, refusals and scorer arithmetic are unchanged. Both
-  frozen calibration controls produce identical facts; committed corpus and
-  synthetic stamps carry the new `spec_version` field and nothing else.
+  (11), bands, formula, refusals and scorer arithmetic are unchanged. Run
+  against the previous engine, both frozen calibration controls produce
+  identical facts, and a test now re-checks that, and that no case moves a
+  verdict away from credit, on every run. Committed corpus and synthetic
+  stamps carry the new `spec_version` field and nothing else.
 
 - **2026-10-10** — **Fixed**: actions referenced with GitHub's
   self-repository prefix (`uses: $/path`, shipped 2026-07-30) are local to

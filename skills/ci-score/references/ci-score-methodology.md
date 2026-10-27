@@ -108,7 +108,7 @@ the practice matters. The score card links every check name here.
 
 ### Dependency caching
 
-**The fact:** at least one workflow or local composite action configures dependency caching (a cache action - actions/cache incl. restore/save, rust-cache, buildjet - or a setup-* action's cache input; or a setup action whose cache is ON BY DEFAULT or switched by a differently-named input, using the speed engine's own table: actions/setup-go v4+ and astral-sh/setup-uv v5+ unless their cache input is set off (setup-uv's default, enable-cache: auto, caches only on GitHub-hosted runners, so with no enable-cache input it counts only when the job's runs-on is a literal GitHub-hosted label - ubuntu-*, windows-*, macos-*, as a string or a one-item list; on any other runner, enable-cache: true earns it), ruby/setup-ruby with bundler-cache, actions/setup-node v5+ when the repo-root package.json names the package manager (v5: npm/yarn/pnpm in packageManager; v6+: npm only, in devEngines.packageManager or packageManager) unless package-manager-cache is set off and only once a checkout of this repository to the workspace root has run earlier in the same job, gradle/actions/setup-gradle and gradle/gradle-build-action unless cache-disabled is true, and bahmutov/npm-install; a SHA- or branch-pinned ref names no version, so a default-on action counts as caching unless a # vN version comment beside the SHA names a release from before the default turned on, and setup-node counts only when its v5 and v6 rules agree). Caching housed in cross-repo reusable workflows is not visible; run the score in that repo.
+**The fact:** at least one workflow or local composite action configures dependency caching (a cache action - actions/cache incl. restore/save, rust-cache, buildjet - or a setup-* action's explicit cache or enable-cache input set to any value other than false, credited on any runner as before; or a setup action whose cache is ON BY DEFAULT or switched by a differently-named input, using the speed engine's own table: actions/setup-go v4+ unless cache is set off, and only once a checkout of this repository to the workspace root has finished earlier in the same job and a go.sum exists at the repo root or at the step's cache-dependency-path; astral-sh/setup-uv v5+ unless enable-cache is set off (its default, enable-cache: auto, caches only on GitHub-hosted runners, so with no enable-cache input it counts only when the job's runs-on is one of GitHub's published hosted-runner image labels - ubuntu-latest, ubuntu-24.04, ubuntu-24.04-arm, ubuntu-slim, windows-2025, windows-11-arm, macos-15, macos-15-intel, macos-15-xlarge and the like - as a string or a one-item list, and never inside a local composite action, whose runner is its caller's; on any other runner, enable-cache: true earns it); ruby/setup-ruby with bundler-cache; actions/setup-node v5+ when the repo-root package.json names the package manager (v5: npm/yarn/pnpm in packageManager; v6+: npm only, in devEngines.packageManager or packageManager) unless package-manager-cache is set off (an expression there is read as its default, true), and only once a checkout of this repository to the workspace root has finished earlier in the same job; gradle/actions/setup-gradle and gradle/gradle-build-action unless cache-disabled is true; and bahmutov/npm-install. A checkout has finished when it ran earlier in sequence or in an earlier parallel: group, not when it shares the step's group or is an earlier background: true checkout. with: input names are read case-insensitively. A SHA- or branch-pinned ref names no version, so a default-on action counts as caching unless a version comment beside the SHA (# vN, # tag=vN, # ratchet:owner/action@vN, # pin@vN) names a release from before the default turned on, or names no release at all; setup-node counts only when its v5 and v6 rules agree, or when every release its version comment names caches. A default this scan cannot decide (a package.json that cannot be read, is not JSON, is not an object, or starts with a byte-order mark, which setup-node's own parse rejects; a SHA pin the setup-node rules disagree on) earns nothing and is named in the fail evidence and in data_sources.unresolved_setup_defaults). Caching housed in cross-repo reusable workflows is not visible; run the score in that repo.
 
 **Not applicable when:** the repo shows NO dependency-install signal at all - no dependency manifest at the repo root (package.json / lockfiles / requirements*.txt / pyproject.toml / go.mod / Cargo.toml / build.gradle / pom.xml / *.csproj / mix.exs / build.sbt / Gemfile / composer.json / pubspec.yaml and the like), no dependency-install command in any workflow or composite step (pip / npm / pnpm / yarn / bun / poetry / uv / composer / bundle / gem / conda / mvn / gradle / dotnet / mix / cabal / stack with an install-style verb, or `go mod download` / `cargo fetch`), and no language setup action (actions/setup-node / setup-python / setup-java / setup-dotnet / setup-go / setup-ruby and the like) - and no cache is already configured; with nothing installed there is nothing to cache, so a missing cache is never a fail (OD-CS19). Any one of those three signals makes the check applicable. OR CI is delegated to cross-repo reusable workflows and no local caching is visible - a mechanism this fact cannot see is never failed
 
@@ -405,15 +405,28 @@ engine said on the day it ran.
 follow the practice. **Dependency caching** credits a setup action whose cache
 is on by default or switched by an input other than `cache:` (setup-go v4+,
 setup-uv v5+, setup-ruby's `bundler-cache`, setup-node v5+ when `package.json`
-names the package manager, setup-gradle); the rules are the speed engine's own,
-copied and pinned to it by a test, and an explicit opt-out such as
-`cache: false` or `package-manager-cache: false` still fails. A SHA-pinned
-action names no version, so a default-on action pinned by SHA counts as
-caching unless its `# vN` comment names a release from before the default
-turned on, and setup-node counts only when its v5 and v6 rules agree.
-setup-uv's default (`enable-cache: auto`) caches only on GitHub-hosted
-runners, so with no input it counts only on a literal GitHub-hosted
-`runs-on` label; `enable-cache: true` earns it on any runner. **Test
+names the package manager, `gradle/actions/setup-gradle`,
+`gradle/gradle-build-action`, `bahmutov/npm-install`); the rules are the speed
+engine's own, copied and pinned to it by a test, and an explicit opt-out such as
+`cache: false` or `package-manager-cache: false` still fails. Two owner rules
+narrow that credit in ci-score only. A SHA-pinned action names no version, so a
+default-on action pinned by SHA counts as caching unless its version comment
+(`# v3.5.0`, `# tag=v3.5.0`, `# ratchet:owner/action@v3`, `# pin@v3`) names a
+release from before the default turned on, or names no release at all. And
+setup-uv's default (`enable-cache: auto`) caches only on GitHub-hosted runners,
+so with no input it counts only on one of GitHub's published hosted-runner
+labels, and never inside a local composite action; `enable-cache: true` earns
+it on any runner. The credit also waits for what the action actually reads:
+setup-node and setup-go count only after a checkout of this repository to the
+workspace root has finished earlier in the job (not one still running in the
+same `parallel:` group or in the background), setup-go needs a `go.sum`, and a
+`package-manager-cache` written as an expression is read as its default.
+Input names are read case-insensitively. Owner decision 3 adds one credit: a
+SHA-pinned setup-node whose v5 and v6 rules disagree counts when every release
+its version comment names caches. A default this scan cannot decide (an
+unreadable or invalid `package.json`, an undecided SHA pin) earns nothing and is
+named in the fail and in `data_sources.unresolved_setup_defaults`. An explicit
+cache input other than `false` is credited on any runner, as before. **Test
 sharding** reads a matrix generated at runtime (`matrix: ${{ fromJSON(...) }}`)
 as a matrix: it passes on a test-like job, and on any other job the job-name
 rule decides, as for a literal matrix. Pass, not "not applicable", because the
@@ -422,11 +435,15 @@ calls a reusable workflow and some call is cross-repo, since a calling job
 cannot set `timeout-minutes`; one job with its own steps keeps it graded.
 **Shallow checkout** applies the v0.1.4 reachability rule to a checkout step's
 own `if:`, with the same fail-closed grammar. Every change moves a verdict
-from fail to pass or not applicable, never the other way. Recomputed over the
-frozen calibration controls, all eleven facts are identical on both; committed
-corpus stamps carry the new `spec_version` and nothing else. One edge: a
-repository whose only applicable check was job timeouts (every job delegated
-cross-repo) moves from a 0 grade to the all-not-applicable refusal.
+toward credit (fail to pass, fail to not applicable, or not applicable to
+pass), so a check that newly becomes applicable arrives passing; the
+withholding rules only narrow credit this change adds, since v0.1.4 credited no
+default-on cache at all. Run against the v0.1.4 engine over the frozen
+calibration controls, all eleven facts are identical on both, state and
+evidence, and a test re-checks that on every run; committed corpus stamps carry
+the new `spec_version` and nothing else. One edge: a repository whose only
+applicable check was job timeouts (every job delegated cross-repo) moves from a
+0 grade to the all-not-applicable refusal.
 
 The v1-granular rubric (measured-magnitude gating, tiers, weights,
 nine refusal conditions) was **punted before publication by owner decision
