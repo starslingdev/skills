@@ -5287,3 +5287,88 @@ def test_collect_repo_published_aggregate_is_not_a_pr_floor_fallback(monkeypatch
     md = bp.render(out, {}, {}, {}, "2026-10-27")
     assert "No file-backed required gate" not in md
     assert "All CI" in md   # the repo-published status is named, not silently absent
+
+
+# ---------------------------------------------------------------------------
+# Issue #119, OPT80: the checkout-stall finding's "merge does not wait on this job"
+# sentence. With the in-repo `All CI` aggregate required, no `needs:` edge ties it
+# to `test`, so which jobs the merge waits on is UNKNOWN - never "not merge-gating".
+# ---------------------------------------------------------------------------
+
+def _opt80_repo_published_publishers(tmp_path):
+    """The publisher map exactly as scan.py derives it from a workflow that posts
+    the `All CI` status with a literal context."""
+    import importlib.util
+    import yaml
+    name = "ci_speedup_scan_issue119"
+    _scan = sys.modules.get(name)
+    if _scan is None:
+        spec = importlib.util.spec_from_file_location(name, _SCRIPTS / "scan.py")
+        _scan = importlib.util.module_from_spec(spec)
+        sys.modules[name] = _scan  # @dataclass resolves __module__ here
+        spec.loader.exec_module(_scan)
+    pubs = _scan._build_workflow_status_publishers(tmp_path, [
+        (_AGG_CI_WF, yaml.safe_load(_AGG_CI_YAML), _AGG_CI_YAML),
+        (_AGG_WF, yaml.safe_load(_AGG_YAML), _AGG_YAML)])
+    assert pubs, "scan.py found no status publisher in the aggregate workflow"
+    return pubs
+
+
+_OPT80_AGG_CRIT = {_AGG_CI_WF: {"job_p50": {"Test": 600.0, "Lint": 60.0},
+                                "event_scope": "pull_request"},
+                   _AGG_WF: {"job_p50": {"Publish aggregate": 30.0},
+                             "event_scope": "pull_request"}}
+
+
+def test_opt80_merge_gating_is_unknown_when_a_required_status_is_repo_published(tmp_path):
+    pubs = _opt80_repo_published_publishers(tmp_path)
+    crit = _OPT80_AGG_CRIT[_AGG_CI_WF]
+    for names in ({"All CI"}, {"All CI", "Lint"}):
+        req = cr.RequiredChecks(frozenset(names), complete=True)
+        got = cr._opt80_merge_gating_jobs(
+            _AGG_CI_WF, req, _AGG_JOB_GRAPH, _OPT80_AGG_CRIT, workflow_names={},
+            status_publishers=pubs)
+        assert got is None, (names, got)
+        assert cr._opt80_tail_withheld_reason(
+            True, crit, got, None) == "merge_gating_unknown", names
+    # Controls: no publisher map is the old, resolved read; and a repo-published
+    # status that is NOT required leaves the required set resolved.
+    req = cr.RequiredChecks(frozenset({"All CI"}), complete=True)
+    assert cr._opt80_merge_gating_jobs(
+        _AGG_CI_WF, req, _AGG_JOB_GRAPH, _OPT80_AGG_CRIT, workflow_names={}) == {}
+    req = cr.RequiredChecks(frozenset({"Lint"}), complete=True)
+    assert set(cr._opt80_merge_gating_jobs(
+        _AGG_CI_WF, req, _AGG_JOB_GRAPH, _OPT80_AGG_CRIT, workflow_names={},
+        status_publishers=pubs)) == {"lint"}
+
+
+def test_vr_opt80_withheld_reason_is_unknown_when_a_required_status_is_repo_published(
+        tmp_path):
+    import verify_report as vr
+    pubs = _opt80_repo_published_publishers(tmp_path)
+    f = {"id": "f1", "pattern": "OPT80", "workflow_file": _AGG_CI_WF,
+         "evidence": vr._VR_OPT80_TAIL_WITHHELD_SENTENCES["not_merge_gating"].format(
+             job="Test", pause="45"),
+         "checkout_stall": {"job": "Test", "on_critical_path": True,
+                            "tail_run_longest_pause_s": 45.0,
+                            "tail_axis_withheld_reason": "not_merge_gating"}}
+
+    def data(required, publishers):
+        return {"declared_pr_workflows": [_AGG_CI_WF],
+                "per_workflow_timing": _OPT80_AGG_CRIT,
+                "required_checks_complete": True, "required_checks": required,
+                "workflow_job_graph": _AGG_JOB_GRAPH,
+                "workflow_status_publishers": publishers}
+
+    for required in (["All CI"], ["All CI", "Lint"]):
+        assert vr._vr_opt80_tail_withheld_expected(
+            f, data(required, pubs)) == {"merge_gating_unknown"}, required
+        problems = vr._vr_opt80_tail_withheld_problems(f, data(required, pubs))
+        assert any("stamped facts give merge_gating_unknown" in p
+                   for p in problems), problems
+    # Controls: no publisher map, or only a resolved required check.
+    assert vr._vr_opt80_tail_withheld_expected(f, data(["All CI"], None)) == {
+        "not_merge_gating", "tail_not_derivable"}
+    assert vr._vr_opt80_tail_withheld_expected(f, data(["Lint"], pubs)) == {
+        "not_merge_gating", "tail_not_derivable"}
+    assert vr._vr_opt80_tail_withheld_problems(f, data(["Lint"], pubs)) == []

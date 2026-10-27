@@ -10602,6 +10602,7 @@ def _opt80_merge_gating_jobs(
     job_graph: dict[str, dict[str, dict[str, Any]]] | None,
     crit_by_wf: dict[str, dict[str, Any]],
     workflow_names: dict[str, Any] | None = None,
+    status_publishers: "dict[str, dict[str, Any]] | None" = None,
 ) -> dict[str, dict[str, Any]] | None:
     """The YAML jobs of `wf_path` a merge waits on, `{job_key: evidence}`, or None
     when that cannot be known. A job is merge-gating when its check is REQUIRED,
@@ -10612,7 +10613,10 @@ def _opt80_merge_gating_jobs(
     every match.
 
     None (unknown) whenever the required set is unread, partial or empty, or the
-    workflow has no job graph: the slowest job of a pull-request workflow is NOT
+    workflow has no job graph, or a required context is one the repo publishes
+    itself and names no job (`_required_reachability_unresolved`, issue #119: an
+    in-repo `All CI` aggregate waits on jobs no `needs:` edge records, so "the
+    merge does not wait on this job" cannot be claimed). The slowest job of a pull-request workflow is NOT
     assumed to gate the merge (a slow non-required benchmark beside a required
     fast `test` is the case this exists for). The evidence names the required
     check and job, so the self-check re-derives it from `required_checks` and
@@ -10622,6 +10626,9 @@ def _opt80_merge_gating_jobs(
         return None
     jobs = job_graph.get(wf_path) or {}
     if not jobs:
+        return None
+    if _required_reachability_unresolved(required_checks.names, crit_by_wf,
+                                         job_graph, status_publishers):
         return None
     out: dict[str, dict[str, Any]] = {}
     anchors: list[tuple[str, str]] = []
@@ -25591,7 +25598,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             # and an unknown merge wait is never claimed.
             merge_gating_jobs=_opt80_merge_gating_jobs(
                 wf_path, required_checks, findings_doc.get("workflow_job_graph"),
-                crit_by_wf, workflow_names=findings_doc.get("workflow_names")))
+                crit_by_wf, workflow_names=findings_doc.get("workflow_names"),
+                status_publishers=findings_doc.get("workflow_status_publishers")))
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
 
