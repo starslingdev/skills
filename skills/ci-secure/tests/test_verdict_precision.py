@@ -166,3 +166,33 @@ def test_jq_holds_exported_functions_and_case_variant_shell_overrides(override):
         'run': 'jq -e \'all(.result == "success")\' <<< "$RESULTS"',
         'env': {'RESULTS': '${{ toJSON(needs) }}', override: '() { return 0; }'}}]
     assert va.analyze(jobs, 'verdict')[0] == 'unmeasured'
+
+
+@pytest.mark.parametrize('count', [2, 18])
+@pytest.mark.parametrize('placement', ['child', 'group', 'nested', 'background', 'top-background', 'unreadable'])
+def test_grouped_suite_steps_cannot_certify_execution(count, placement):
+    # A parallel group hides its children from a flat `steps` read. A skipped
+    # or backgrounded test there still lets the job report success.
+    jobs = suites(count)
+    group = {'parallel': [{'run': 'pytest'}, {'run': 'ruff check'}]}
+    if placement == 'child':
+        group['parallel'][0]['if'] = 'false'
+    elif placement == 'group':
+        group['if'] = "github.event_name == 'push'"
+    elif placement == 'nested':
+        group['parallel'][1] = {'parallel': [{'run': 'pytest', 'if': 'false'}]}
+    elif placement == 'background':
+        group['parallel'][0]['background'] = True
+    elif placement == 'top-background':
+        group = {'run': 'pytest', 'background': True}
+    else:
+        group['parallel'] = 'pytest'
+    jobs['suite0']['steps'] = [group]
+    assert va.analyze(jobs, 'verdict')[0] != 'pass'
+
+
+@pytest.mark.parametrize('count', [2, 18])
+def test_unconditional_parallel_suite_steps_still_pass(count):
+    jobs = suites(count)
+    jobs['suite0']['steps'] = [{'parallel': [{'run': 'pytest'}, {'run': 'ruff check'}]}]
+    assert va.analyze(jobs, 'verdict')[0] == 'pass'

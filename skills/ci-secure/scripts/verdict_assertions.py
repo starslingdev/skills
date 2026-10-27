@@ -399,6 +399,42 @@ def _jq_needs(source, env, shell):
     return False
 
 
+_TRIVIAL_STEP_CONDITIONS = ("true", "always()", "success()")
+
+
+def _unproved_step_execution(job, trivial=_TRIVIAL_STEP_CONDITIONS):
+    """Whether a successful job result may not show that every step ran.
+
+    Walks `parallel:` groups (a flat `steps` read misses their children); a
+    group's condition applies to everything inside it. A conditional step or
+    group, a step that may run in the background, or a group this walk cannot
+    read withholds the execution proof.
+    """
+    pending = [(job.get("steps") if isinstance(job, dict) else None, 0)]
+    seen = 0
+    while pending:
+        steps, depth = pending.pop()
+        if steps is None and depth == 0:
+            continue
+        if not isinstance(steps, list) or depth > 8:
+            return True
+        for step in steps:
+            seen += 1
+            if seen > 1024:
+                return True
+            if not isinstance(step, dict):
+                if depth:
+                    return True
+                continue
+            if "if" in step and unwrap(step["if"]).lower() not in trivial:
+                return True
+            if "background" in step and step["background"] is not False:
+                return True
+            if "parallel" in step:
+                pending.append((step["parallel"], depth + 1))
+    return False
+
+
 def _strict_aggregate_shape(job):
     """A single, unconditional conjunction of every direct success result.
 
@@ -643,10 +679,7 @@ def analyze(jobs, key, workflow=None, action_resolver=None):
         uncertified = [n for n in ancestors if "uses" in jobs[n]]
         # A successful dependency can still have skipped its test step. The
         # summary result alone does not prove execution of conditional steps.
-        uncertified.extend(n for n in ancestors if any(
-            isinstance(step, dict) and "if" in step
-            and unwrap(step["if"]).lower() not in ("true", "always()", "success()")
-            for step in jobs[n].get("steps", [])))
+        uncertified.extend(n for n in ancestors if _unproved_step_execution(jobs[n]))
         swallowers = set()
         for name in ancestors:
             job = jobs[name]
@@ -663,8 +696,8 @@ def analyze(jobs, key, workflow=None, action_resolver=None):
         verdict_refs = re.findall(r"needs\.([\w-]+)\.outputs\.([\w-]+)", str(jobs[key]))
         if (len(direct) > 5 and not verdict_refs and not swallowers and not uncertified
                 and _strict_aggregate_shape(jobs[key])
-                and not any("if" in step for name in ancestors
-                            for step in jobs[name].get("steps", []) if isinstance(step, dict))):
+                and not any(_unproved_step_execution(jobs[name], trivial=())
+                            for name in ancestors)):
             # The recognized conjunction is separable: replacing any one
             # dependency by a non-success result makes the whole assertion
             # false. Validate the modeled execution path for every operand.

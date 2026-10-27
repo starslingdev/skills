@@ -586,7 +586,9 @@ filters, partial JSON, omitted exit-status option or shell environment
 replacement is accepted. Exported Bash functions and case variants of shell-control
 environment names also withhold the proof. A single strict jq or reviewed-action step can prove
 large dependency sets without exponential enumeration; every dependency must
-succeed, and conditional upstream steps still withhold execution proof.
+succeed, and conditional upstream steps still withhold execution proof,
+including steps inside `parallel:` groups, conditional groups and steps that may
+run in the background.
 The reviewed `re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35`
 revision is supported with `jobs: ${{ toJSON(needs) }}` and literal JSON or
 comma-separated allowed lists. Its default requires success; `allowed-skips`

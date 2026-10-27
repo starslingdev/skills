@@ -188,7 +188,8 @@ entries are dated (UTC). Format loosely follows
   verdict-action tags only to the reviewed commit, and proves large strict
   aggregates without enumerating every result combination. Scores can move
   from unmeasured to pass or fail. Conditional upstream steps cannot establish
-  suite execution merely because their job reports success.
+  suite execution merely because their job reports success, including steps
+  inside `parallel:` groups, conditional groups and background steps.
 
 - **2026-10-26** — **A required check that used to pass can now fail or
   become unmeasured.** `sec.required-checks.skippable` no longer accepts an
