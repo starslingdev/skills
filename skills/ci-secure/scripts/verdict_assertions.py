@@ -418,7 +418,8 @@ def run_step(source, env, results, outputs, direct, shell="bash"):
 
 def action_success(step, job, results, direct):
     if step.get("uses") != ALLS_GREEN:
-        raise Unknown("unverified verdict action revision")
+        raise Unknown("an action step other than re-actors/alls-green pinned to "
+                      + ALLS_GREEN.split("@")[1] + " is not read")
     if job.get("env") or step.get("env") or job.get("container") or job.get("services"):
         raise Unknown("verdict action execution environment overridden")
     if job.get("defaults", {}).get("run", {}).get("working-directory") not in (None, "."):

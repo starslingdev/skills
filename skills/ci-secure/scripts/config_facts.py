@@ -2194,9 +2194,10 @@ def _required_checks_skippable(
         # judged against was itself a floor — a check configured only in the
         # unread source is invisible here.
         return "fail", (
-            f"on {detail}, a required check can accept missing verification: "
-            + _capped(bypassable, 3)
-            + " — the required check does not reliably reject missing verification."
+            f"on {detail}, a required check can go green without its tests "
+            "having run (GitHub reports a SKIPPED required check as passed, and "
+            "a summary job can accept a skipped suite): "
+            + _capped(bypassable, 3) + "."
             + tail)
     if unjudged:
         # A pass is a claim about EVERY required check. The ordinary shape of a

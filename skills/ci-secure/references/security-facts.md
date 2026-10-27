@@ -209,8 +209,12 @@ two moved numbers.
   this fact gates is inside that filter anyway.)
   **To fix a fail**: add one job that carries the required check's name, runs
   `if: always()` (or `!cancelled()`), `needs:` the
-  conditional suites, and fails unless the suite that should have run passed —
-  then point branch protection at that job's name instead of the suites'.
+  conditional suites (and the detector that decides them), and fails unless the
+  detector succeeded and each suite either passed or was skipped on a valid
+  "unchanged" decision — then point branch protection at that job's name
+  instead of the suites'. The assertion forms the check can read are listed
+  under [Required-verdict coverage](#required-verdict-coverage-2026-10-26);
+  anything else leaves the check unmeasured.
   `success() || failure()` is deliberately NOT accepted on a job with
   `needs:`. It reads like `always()` and is not: when a dependency is SKIPPED
   neither predicate holds, so GitHub skips the verdict job too — and a skipped
