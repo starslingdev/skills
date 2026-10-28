@@ -12,9 +12,9 @@ It lives at the repo ROOT: a cross-skill read is normal here and forbidden
 inside either skill's own suite.
 
 DOCUMENTED CARVE-OUTS (two owner rules, 2026-10-27; recorded under OD-CS23,
-PROPOSED). ci-score narrows the shared verdict in its per-step wrapper,
-`_step_caches_by_default`, and nowhere else, so `_setup_cache_state` stays
-identical to ci-speedup's:
+PROPOSED). ci-score narrows the shared verdict in its per-step wrapper or
+the walk that calls it (`_step_caches_by_default`, `_dependency_cache_walk`),
+and nowhere else, so `_setup_cache_state` stays identical to ci-speedup's:
 
 1. A SHA ref carrying a version comment (`# vN`, `# tag=vN`,
    `# ratchet:owner/action@vN`, `# pin@vN`) is re-checked at that major; a
@@ -24,8 +24,11 @@ identical to ci-speedup's:
    GitHub-hosted `runs-on` label (`enable-cache: auto` caches only there).
    ci-speedup does not gate on the runner.
 
-And readings that also only withhold: `with:` keys case-insensitively;
-setup-node's `package-manager-cache: ${{ … }}` read as its default `true`
+`with:` keys are read case-insensitively in both directions: the shared
+verdict is computed from the lower-cased inputs, so `Cache: npm` reads exactly
+as `cache: npm` and `Cache: false` as `cache: false` (the test below checks an
+upper-cased spelling never earns more than the lower-cased one). And readings
+that only withhold: setup-node's `package-manager-cache: ${{ … }}` read as its default `true`
 (so the automatic cache still needs a manager in package.json); setup-go's
 default only after a finished root checkout and with a go.sum.
 
@@ -172,7 +175,7 @@ def test_the_wrapper_only_withholds(sides, action, ref, tmp_path):
     bare_root = tmp_path / "bare"
     bare_root.mkdir()
     key = (action.lower(), sha)
-    comment_sets = ({}, {key: {3}}, {key: {4, 5}}, {key: {5}}, {key: {6}},
+    comment_sets = ({}, {key: {3}}, {key: {4, 5}}, {key: {3, 5}}, {key: {5}}, {key: {6}},
                     {key: {None}}) if sha else ({},)
     for with_in in _WITHS:
         for pj in _PJS:

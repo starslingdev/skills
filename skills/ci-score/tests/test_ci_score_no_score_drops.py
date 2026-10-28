@@ -1,13 +1,16 @@
-"""The two frozen calibration controls, fact by fact, and against the base engine.
+"""The two frozen calibration controls, fact by fact, and OD-CS23 against the base engine.
 
 OD-CS23 states that both frozen controls keep every one of the eleven facts
 identical, state AND evidence, and that no score can drop. Both are asserted
 here rather than stated: `_FROZEN_FACTS` is the full fact set the current
 engine produces for each control (recomputed by running the collector over
-the frozen trees; never hand-written), and the same trees are scored by the
-pre-OD-CS23 engine (`_baseline_engine`) to prove no fact moved away from
-credit and neither score fell. The per-case version of the second check runs
-inside `test_ci_score_undeserved_fails.facts_for`.
+the frozen trees; never hand-written; measured identical to the pre-OD-CS23
+engine's output when it was recorded), and the same trees are scored by the
+pre-OD-CS23 engine (`_baseline_engine`) to check no fact moved away from
+credit and neither score fell. The same direction check runs over an explicit
+list of OD-CS23 cases (`OD_CS23_CASES`), with `INTENDED_DROPS` as the
+allowlist later changes extend on purpose. Where the base engine cannot be
+read (no repository around this copy), those tests skip visibly.
 
 The one documented exception to "no score can drop" is not a drop: a
 repository whose only applicable check was job timeouts (every job delegated
@@ -132,8 +135,6 @@ def _collect(root: Path, engine=None) -> dict:
         def load(mod_name, filename):
             return engine if filename == "practice_facts.py" else real(mod_name, filename)
 
-        if not hasattr(engine, "_unresolved_setup_defaults"):
-            engine._unresolved_setup_defaults = lambda *_a: []   # added by OD-CS23
         cc_mod._load_sibling = load
         try:
             doc, code = cc_mod.collect(root)
@@ -151,14 +152,140 @@ def test_every_fact_of_a_frozen_control_is_pinned(name, tmp_path):
     assert "unresolved_setup_defaults" not in doc["data_sources"]
 
 
-@pytest.mark.parametrize("name", sorted(_FROZEN_FACTS))
-def test_no_control_fact_or_score_moves_away_from_credit(name, tmp_path):
+def _base_or_skip():
     base = baseline_engine()
     if base is None:
-        pytest.skip("installed copy: no git history to read the base engine from")
+        pytest.skip("no repository around this copy: the base engine cannot be read "
+                    "from git history, so the comparison does not run here")
+    return base
+
+
+@pytest.mark.parametrize("name", sorted(_FROZEN_FACTS))
+def test_no_control_fact_or_score_moves_away_from_credit(name, tmp_path):
+    """`_FROZEN_FACTS` above pins every fact exactly; this adds the direction
+    check and the score against the base engine."""
+    base = _base_or_skip()
     root = _control(name, tmp_path)
     before, after = _collect(root, base), _collect(root)
     assert_toward_credit(before["practice_facts"], after["practice_facts"], f"{name}: ")
     assert after["ci_score"]["value"] >= before["ci_score"]["value"]
-    # and, measured: nothing moved at all on either control
-    assert after["practice_facts"] == before["practice_facts"]
+
+
+# ---- OD-CS23 cases, through both engines ------------------------------------
+#
+# An explicit list: each OD-CS23 change's credited shape and the withheld
+# shapes next to it. Every case is scored by the base engine and the current
+# one, and no fact may move away from credit. Not every test in the suite runs
+# through the base engine (later changes may move verdicts on purpose); a later
+# PR that drops a verdict here on purpose adds it to INTENDED_DROPS with the
+# owner decision or PR that made the call.
+_SHA = "8f4b7f84864484a7bf31766abe9204da3cbe65b3"
+_PR_ON = "on:\n  pull_request:\n"
+_GO = {"go.mod": "module x\n", "go.sum": ""}
+_UV = {"pyproject.toml": "[project]\n"}
+
+
+def _wf(*steps: str, runs_on: str = "ubuntu-latest") -> str:
+    body = "".join(f"      - {s}\n" for s in steps)
+    return _PR_ON + f"jobs:\n  test:\n    runs-on: {runs_on}\n    steps:\n" + body
+
+
+_CO = "uses: actions/checkout@v5"
+OD_CS23_CASES = {
+    # 1. dependency caching on by default, and the shapes it is withheld from
+    "go-v5": (_GO, [_wf(_CO, "uses: actions/setup-go@v5")]),
+    "go-sha-v5": (_GO, [_wf(_CO, f"uses: actions/setup-go@{_SHA} # v5")]),
+    "go-sha-v3": (_GO, [_wf(_CO, f"uses: actions/setup-go@{_SHA} # v3")]),
+    "go-sha-date": (_GO, [_wf(_CO, f"uses: actions/setup-go@{_SHA} # 2024-05-01")]),
+    "go-no-checkout": (_GO, [_wf("uses: actions/setup-go@v5")]),
+    "go-dep-path-expr": ({"go.mod": "module x\n"}, [_wf(
+        _CO, "{uses: actions/setup-go@v5, with: {cache-dependency-path: '${{ inputs.p }}'}}")]),
+    "uv-v6": (_UV, [_wf(_CO, "uses: astral-sh/setup-uv@v6")]),
+    "uv-self-hosted": (_UV, [_wf(_CO, "uses: astral-sh/setup-uv@v6", runs_on="self-hosted")]),
+    "uv-expr-runner": (_UV, [_wf(_CO, "uses: astral-sh/setup-uv@v6",
+                                 runs_on="${{ matrix.os }}")]),
+    "ruby-bundler": ({"Gemfile": "source 'x'\n"},
+                     [_wf(_CO, "{uses: ruby/setup-ruby@v1, with: {bundler-cache: true}}")]),
+    "gradle": ({"build.gradle": ""}, [_wf(_CO, "uses: gradle/actions/setup-gradle@v4")]),
+    "node-v5-npm": ({"package.json": '{"packageManager": "npm@10.9.0"}'},
+                    [_wf(_CO, "uses: actions/setup-node@v5")]),
+    "node-v6-dev": ({"package.json": '{"devEngines": {"packageManager": {"name": "npm"}}}'},
+                    [_wf(_CO, "uses: actions/setup-node@v6")]),
+    "node-sha-yarn-v5": ({"package.json": '{"packageManager": "yarn@4.1.0"}'},
+                         [_wf(_CO, f"uses: actions/setup-node@{_SHA} # v5")]),
+    "node-sha-yarn-v6": ({"package.json": '{"packageManager": "yarn@4.1.0"}'},
+                         [_wf(_CO, f"uses: actions/setup-node@{_SHA} # v6")]),
+    "node-bad-json": ({"package.json": "not json"}, [_wf(_CO, "uses: actions/setup-node@v5")]),
+    "node-racing": ({"package.json": '{"packageManager": "npm@10.9.0"}'}, [_wf(
+        "{uses: actions/checkout@v5, background: true}", "uses: actions/setup-node@v5")]),
+    # explicit inputs in any case (item 1 of the second review round)
+    "node-v4-Cache-npm": ({"package.json": "{}"},
+                          [_wf(_CO, "{uses: actions/setup-node@v4, with: {Cache: npm}}")]),
+    "uv-v4-Enable-Cache": (_UV, [_wf(_CO, "{uses: astral-sh/setup-uv@v4, "
+                                          "with: {Enable-Cache: true}}")]),
+    "go-v5-Cache-false": (_GO, [_wf(_CO, "{uses: actions/setup-go@v5, with: {Cache: false}}")]),
+    # 2. a matrix generated at runtime
+    "generated-matrix": ({}, [_PR_ON + "jobs:\n  test:\n    runs-on: ubuntu-latest\n"
+                          "    strategy:\n      matrix: ${{ fromJSON(needs.plan.outputs.m) }}\n"
+                          "    steps:\n      - run: pytest\n"]),
+    # 3. every job delegated to a cross-repo reusable workflow
+    "all-delegated": ({}, [_PR_ON + "jobs:\n"
+                       "  ci:\n    uses: my-org/workflows/.github/workflows/ci.yml@v1\n"]),
+    # 4. a full-history checkout step that never runs on a pull request
+    "step-if-push": ({}, ["on: [pull_request, push]\njobs:\n  test:\n    runs-on: ubuntu-latest\n"
+                          "    steps:\n      - uses: actions/checkout@v4\n"
+                          "        if: github.event_name == 'push'\n"
+                          "        with:\n          fetch-depth: 0\n      - run: pytest\n"]),
+}
+# {(case_id, check): "<owner decision / PR that made the drop on purpose>"}
+INTENDED_DROPS: dict[tuple[str, str], str] = {}
+
+_pf_now = _load("ci_score_practice_facts_no_score_drops", "scripts/practice_facts.py")
+
+
+@pytest.mark.parametrize("case_id", sorted(OD_CS23_CASES))
+def test_no_od_cs23_case_moves_away_from_credit(case_id, tmp_path):
+    base = _base_or_skip()
+    files, workflows = OD_CS23_CASES[case_id]
+    for rel, text in files.items():
+        (tmp_path / rel).write_text(text)
+    import yaml
+    parsed = [(f"w{i}.yml", yaml.safe_load(raw) or {}, raw) for i, raw in enumerate(workflows)]
+    allowed = frozenset(check for (cid, check) in INTENDED_DROPS if cid == case_id)
+    assert_toward_credit(base._practice_facts(parsed, tmp_path),
+                         _pf_now._practice_facts(parsed, tmp_path), f"{case_id}: ", allowed)
+
+
+def test_intended_drops_name_listed_cases():
+    for case_id, check in INTENDED_DROPS:
+        assert case_id in OD_CS23_CASES, case_id
+        assert INTENDED_DROPS[(case_id, check)].strip(), (case_id, check)
+
+
+def test_the_base_engine_takes_a_newer_collectors_arguments(tmp_path):
+    """A later collector may pass more arguments (e.g. `parse_errors`); the
+    old two-argument engine must still run under it."""
+    base = _base_or_skip()
+    parsed = [("ci.yml", {"on": "pull_request", "jobs": {}}, "")]
+    assert base._practice_facts(parsed, tmp_path, [], parse_errors=[]) == \
+        base._practice_facts(parsed, tmp_path)
+    assert base._unresolved_setup_defaults(parsed, tmp_path) == []
+
+
+def test_an_unreadable_base_commit_raises_with_gits_error(monkeypatch):
+    """Inside a repository, a base commit git cannot read is an error, never a
+    silent None that would turn the comparison off."""
+    import _baseline_engine as be
+    if not (be._REPO_ROOT / ".git").exists():
+        pytest.skip("no repository around this copy: nothing to read the base engine from")
+    monkeypatch.setattr(be, "_cached", [])
+    monkeypatch.setattr(be, "BASE_COMMIT", "0" * 40)
+    with pytest.raises(AssertionError, match="cannot be read from this checkout.*fatal"):
+        be.baseline_engine()
+
+
+def test_no_repository_means_no_base_engine(monkeypatch, tmp_path):
+    import _baseline_engine as be
+    monkeypatch.setattr(be, "_cached", [])
+    monkeypatch.setattr(be, "_REPO_ROOT", tmp_path)
+    assert be.baseline_engine() is None

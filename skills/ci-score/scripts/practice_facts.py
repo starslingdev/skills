@@ -1070,8 +1070,8 @@ def _unreadable_step_sources(parsed: list[tuple[str, dict, str]],
 # switched by `cache:` and is off without it. A SHA or branch ref names no
 # major, so in this shared verdict a default-on action pinned by SHA counts as
 # caching: the shared verdict never reads a `# v5` comment beside the SHA,
-# exactly as in ci-speedup. ci-score's wrapper below does
-# (`_step_caches_by_default`).
+# exactly as in ci-speedup. ci-score's rules live in the wrapper or walk
+# below (`_step_caches_by_default`, `_dependency_cache_walk`), never here.
 _SETUP_CACHE_INPUTS: dict[str, tuple[str, int | None]] = {
     "actions/setup-go": ("cache", 4),
     "astral-sh/setup-uv": ("enable-cache", 5),
@@ -1163,17 +1163,24 @@ def _setup_cache_state(action: str, ref: str, with_in: dict[str, Any],
 
 
 _BOM = chr(0xFEFF)   # built at runtime: no invisible character in the source
+_PJ_BOM_REASON = ("package.json starts with a byte-order mark, which setup-node's "
+                  "JSON parse rejects")
+# Reasons that DECIDE the default off (named as "earns no default cache"),
+# as opposed to the ones that leave it undecided ("could not be resolved").
+_DECIDED_OFF_REASONS = frozenset({_PJ_BOM_REASON})
 
 
 def _root_package_json(root: Path) -> tuple[Any, str | None]:
     """(the repo-root package.json as setup-node parses it, why it could not
-    be). Absent: `(None, None)` - setup-node then finds no package manager, a
-    plain off. Present but unusable: `(None or the parsed non-object, reason)`;
-    the shared verdict reads that as undecided, and the caching fact names the
-    reason (`_unresolved_setup_defaults`). setup-node reads the file with
+    be). Absent: `(None, None)` - setup-node then finds no package manager, so
+    the default is not credited and not named. Present but unusable: `(None or
+    the parsed non-object, reason)`; the shared verdict reads that as
+    undecided, and the caching fact names the reason
+    (`_unresolved_setup_defaults`). setup-node reads the file with
     `fs.readFileSync(…, 'utf-8')` and hands it to `JSON.parse` with no BOM
-    strip, so a byte-order mark makes it fail there too: it is named, never
-    credited."""
+    strip, so a byte-order mark makes it fail there too: that one is decided
+    off (setup-node cannot use the file), named as "earns no default cache",
+    never credited."""
     path = root / "package.json"
     try:
         text = path.read_text(encoding="utf-8")
@@ -1182,8 +1189,7 @@ def _root_package_json(root: Path) -> tuple[Any, str | None]:
     except (OSError, ValueError):
         return None, "package.json could not be read"
     if text.startswith(_BOM):
-        return None, ("package.json starts with a byte-order mark, which setup-node's "
-                      "JSON parse rejects")
+        return None, _PJ_BOM_REASON
     try:
         doc = json.loads(text)
     except ValueError:
@@ -1246,30 +1252,42 @@ def _workspace_states(steps: list[dict], group_of: dict[int, int],
 #
 # ci-speedup counts an unseen cache as ON because there that can only withhold
 # a savings claim; here the same choice would hand out a pass. So the rules
-# below sit in the per-step WRAPPER, never in the shared `_setup_cache_state`
-# (which the parity test pins verdict for verdict). Every rule but one only
-# WITHHOLDS credit the shared verdict gave:
+# below sit in the per-step wrapper (`_step_caches_by_default`) or the walk
+# that calls it (`_dependency_cache_walk`), never in the shared
+# `_setup_cache_state` (which the parity test pins verdict for verdict). Every
+# rule but one only WITHHOLDS credit the shared verdict gave:
 #
 # 1. A SHA-pinned action carrying a version comment (`@<sha> # v3.5.0`,
 #    `# tag=v3.5.0`, `# ratchet:owner/action@v3`, `# pin@v3`) is re-checked at
 #    the commented major: a comment naming a release from before caching
 #    became the default earns nothing, and so does a comment that names no
 #    release at all (it is there, so the pin is meant to be read by it, and
-#    what it says cannot be read). No comment: the shared verdict stands.
+#    what it says cannot be read). A date (`# 2024-05-01`), a range
+#    (`# 20.x`) or a major no release of the action has had is not a release.
+#    No comment: the shared verdict stands. Gradle's and npm-install's
+#    default-on actions always cache, so their comments are not read.
 # 2. setup-uv's input-free default (`enable-cache: auto`) caches only on
 #    GitHub-hosted runners, so it is credited only when the job's `runs-on` is
-#    one of GitHub's published image labels. Any other runner earns the
-#    credit with `enable-cache: true`.
+#    one of GitHub's published image labels. Any other runner, including a
+#    larger runner whose label its owner names, earns the credit with
+#    `enable-cache: true`.
 # 3. (The one rule that may ADD credit, owner decision 3.) A SHA-pinned
 #    setup-node whose v5 and v6 rules disagree (`maybe`) is credited when it
 #    carries version comment(s) and EVERY commented major caches for this repo.
 #
 # And four readings the shared verdict leaves open (all withhold only):
-# `with:` keys are read case-insensitively (GitHub matches action inputs that
-# way); `package-manager-cache: ${{ … }}` is read as its default `true`, so it
+# `package-manager-cache: ${{ … }}` is read as its default `true`, so it
 # still needs a manager in package.json; setup-go's default needs a finished
 # root checkout and a go.sum (its cache key); and a checkout that may still
 # be running (`parallel:` sibling, earlier `background: true`) does not count.
+# `with:` keys are read case-insensitively in both directions (GitHub matches
+# action inputs that way): the shared verdict is computed from the lower-cased
+# inputs, so `Cache: npm` opts in exactly as `Cache: false` opts out.
+#
+# A withhold this scan could not decide is never silent: it is recorded with
+# its reason (`{file, step, reason}`) and named in the fact's evidence. A
+# plain off (an opt-out, a pre-default release, no checkout at all, no
+# package manager in package.json) names nothing.
 _SHA_REF_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 # `uses: owner/action@<sha>` and whatever follows on the same line.
 _USES_SHA_LINE_RE = re.compile(
@@ -1278,38 +1296,69 @@ _USES_SHA_LINE_RE = re.compile(
 # after whitespace, a quote, or a closing `}` / `]` / `,` of a flow mapping.
 _TRAILING_COMMENT_RE = re.compile(r"""(?:^|[\s'"}\],])#(.*)$""")
 # The release a pin comment names: `v3`, `3.5.0`, `tag=v3.5.0`,
-# `ratchet:owner/action@v3`, `pin@v3`, `owner/action@v3`.
+# `ratchet:owner/action@v3`, `pin@v3`, `owner/action@v3`. A number followed
+# by `-` (a date such as `2024-05-01`) or by `.x` / another word character (a
+# range such as `20.x`) names no release.
 _COMMENT_VERSION_RE = re.compile(
-    r"""^\s*(?:tag\s*=\s*|ratchet:\s*[\w./-]*@|pin@|[\w.-]+/[\w./-]+@|@)?v?(\d{1,4})(?:\.\d+){0,2}\b""",
+    r"""^\s*(?:tag\s*=\s*|ratchet:\s*[\w./-]*@|pin@|[\w.-]+/[\w./-]+@|@)?v?(\d{1,4})(?:\.\d+){0,2}(?![\w-]|\.\w)""",
     re.IGNORECASE)
-# GitHub's published hosted-runner image labels (docs: "GitHub-hosted runners"
-# reference, and the macOS larger-runner labels). Larger Linux / Windows
-# runners carry names their owner chooses, which no pattern can tell from a
-# self-hosted label, so they earn the credit the same way any runner does:
-# with `enable-cache: true`.
+# The highest major a version comment may name for each default-on action
+# (its current major plus headroom); anything above, or below 1, is a toolchain
+# version, a date or a typo, never one of the action's releases.
+_PLAUSIBLE_MAJOR = {"actions/setup-go": 9, "actions/setup-node": 9,
+                    "astral-sh/setup-uv": 15, "ruby/setup-ruby": 5}
+_PLAUSIBLE_MAJOR_DEFAULT = 20
+# GitHub's published hosted-runner image labels. Source: the "GitHub-hosted
+# runners" reference
+# (https://docs.github.com/en/actions/reference/runners/github-hosted-runners),
+# which lists the ubuntu-*, windows-*, macos-* and `xcode-27` labels, plus the
+# macOS larger-runner labels. Larger Linux / Windows runners carry names their
+# owner chooses, which no pattern can tell from a self-hosted label, so they
+# earn the credit the same way any runner does: with `enable-cache: true`.
 _GITHUB_HOSTED_LABEL_RE = re.compile(
     r"^(?:ubuntu-(?:latest|slim|\d+\.\d+(?:-arm)?)"
     r"|windows-(?:latest|\d{4}(?:-vs\d{4})?|11(?:-vs\d{4})?-arm)"
     r"|macos-(?:latest|\d+)(?:-intel|-large|-xlarge)?"
     r"|xcode-\d+)$", re.IGNORECASE)
 _RUNNER_GATED_DEFAULTS = {"astral-sh/setup-uv": "enable-cache"}
-_SHA_UNDECIDED = ("a SHA pin names no release, and setup-node v5 and v6 decide this "
-                  "package.json differently")
+_UNDECIDED_TAIL = "and setup-node v5 and v6 decide this package.json differently"
+_SHA_UNDECIDED = f"a SHA pin names no release, {_UNDECIDED_TAIL}"
+_REF_UNDECIDED = f"a branch or SHA ref names no release, {_UNDECIDED_TAIL}"
+_RUNNER_UNREAD_TAIL = ("so this scan cannot tell whether the runner is GitHub-hosted, the "
+                       "only place setup-uv's default (enable-cache: auto) caches")
+_RUNS_ON_EXPR = f"runs-on is an expression, {_RUNNER_UNREAD_TAIL}"
+_RUNS_ON_GROUP = f"runs-on is a runner group or object, {_RUNNER_UNREAD_TAIL}"
+_WS_RACING = ("a checkout may still be running when this step starts (a parallel: "
+              "sibling, or an earlier background: true checkout), so what the action "
+              "reads from the workspace is not settled")
+_WS_MOVED = ("the checkout before this step went to a sub-path or another repository, "
+             "so the workspace root is not the tree this scan read")
 
 
-def _sha_version_comments(texts: list[str]) -> dict[tuple[str, str], set[int | None]]:
+def _sha_version_comments(texts: list[str],
+                          unparsed: dict[tuple[str, str], list[str]] | None = None,
+                          ) -> dict[tuple[str, str], set[int | None]]:
     """{(action, sha): {majors}} from version comments on `uses:
     owner/action@<sha>` lines in the raw workflow / composite text (YAML
-    parsing drops comments). A comment that names no release adds None."""
+    parsing drops comments). A comment that names no release (or a major
+    outside the action's plausible range) adds None, and with `unparsed` its
+    text is kept under the same key, for the evidence."""
     out: dict[tuple[str, str], set[int | None]] = {}
     for text in texts:
         for m in _USES_SHA_LINE_RE.finditer(text or ""):
             c = _TRAILING_COMMENT_RE.search(m.group(3))
             if not c:
                 continue
+            action = m.group(1).lower()
+            key = (action, m.group(2).lower())
             v = _COMMENT_VERSION_RE.match(c.group(1))
-            out.setdefault((m.group(1).lower(), m.group(2).lower()), set()).add(
-                int(v.group(1)) if v else None)
+            major = int(v.group(1)) if v else None
+            if major is not None and not (
+                    1 <= major <= _PLAUSIBLE_MAJOR.get(action, _PLAUSIBLE_MAJOR_DEFAULT)):
+                major = None
+            out.setdefault(key, set()).add(major)
+            if major is None and unparsed is not None:
+                unparsed.setdefault(key, []).append(c.group(1).strip())
     return out
 
 
@@ -1321,31 +1370,63 @@ def _runs_on_github_hosted(runs_on: Any) -> bool:
     return isinstance(runs_on, str) and bool(_GITHUB_HOSTED_LABEL_RE.match(runs_on.strip()))
 
 
-def _go_sum_present(root: Path, dep_path: Any) -> bool:
-    """setup-go keys its cache on `cache-dependency-path` (files or globs, one
+def _runs_on_unread(runs_on: Any) -> str | None:
+    """Why this scan cannot read the runner from `runs-on` (an expression, or
+    a group / object), or None when it is literal labels."""
+    if isinstance(runs_on, dict):
+        return _RUNS_ON_GROUP
+    items = runs_on if isinstance(runs_on, list) else [runs_on]
+    if any(isinstance(x, str) and "${{" in x for x in items):
+        return _RUNS_ON_EXPR
+    if any(isinstance(x, (dict, list)) for x in items):
+        return _RUNS_ON_GROUP
+    return None
+
+
+def _go_sum_check(root: Path, dep_path: Any) -> tuple[bool, str | None]:
+    """(a go.sum setup-go keys on exists, why it could not be checked).
+    setup-go keys its cache on `cache-dependency-path` (files or globs, one
     per line) or, without it, on the workspace's `go.sum`; with no such file it
-    restores nothing. An expression, an absolute path or one leaving the
-    repository cannot be checked here: False (fail closed)."""
+    restores nothing. An expression, an absolute path, one leaving the
+    repository, or only `!` exclusions cannot be checked here: not credited
+    (fail closed), and the reason is returned so the fact can name it."""
     val = "" if dep_path is None else str(dep_path)
     if not val.strip():
-        return (root / "go.sum").is_file()
+        return (root / "go.sum").is_file(), None
     if "${{" in val:
-        return False
+        return False, ("cache-dependency-path is an expression, so the go.sum setup-go "
+                       "keys its cache on cannot be checked")
+    unread: str | None = None
+    includes = 0
     for line in val.splitlines():
         p = line.strip().strip("'\"")
         if p.startswith("./"):
             p = p[2:]
-        if not p or p.startswith(("!", "/")) or ".." in Path(p).parts:
+        if not p or p.startswith("!"):
+            continue
+        includes += 1
+        if p.startswith("/"):
+            unread = unread or (f"cache-dependency-path '{p}' is an absolute path, outside "
+                                f"the tree this scan read")
+            continue
+        if ".." in Path(p).parts:
+            unread = unread or (f"cache-dependency-path '{p}' leaves the repository (..), "
+                                f"so it cannot be checked")
             continue
         if any(ch in p for ch in "*?["):
             try:
                 if any(x.is_file() for x in root.glob(p)):
-                    return True
+                    return True, None
             except (ValueError, NotImplementedError, OSError):
                 continue
         elif (root / p).is_file():
-            return True
-    return False
+            return True, None
+    if unread:
+        return False, unread
+    if not includes:
+        return False, ("cache-dependency-path has only exclusion (!) patterns, so no "
+                       "go.sum to key on can be checked")
+    return False, None
 
 
 def _step_caches_by_default(step: dict, package_json: Any, workspace_unknown: bool,
@@ -1353,15 +1434,20 @@ def _step_caches_by_default(step: dict, package_json: Any, workspace_unknown: bo
                             github_hosted: bool = True, *, root: Path | None = None,
                             package_json_problem: str | None = None,
                             unresolved: list[dict[str, str]] | None = None,
-                            rel: str = "") -> bool:
+                            rel: str = "", workspace: str | None = None,
+                            runner_unread: str | None = None,
+                            comment_texts: dict[tuple[str, str], list[str]] | None = None,
+                            ) -> bool:
     """A step whose own action restores a dependency cache with no `cache:`
     input (or through a differently-named input): ci-speedup's verdict, then
     ci-score's rules (see above). `workspace_unknown`: no root checkout of this
     repository has finished before the step (none yet, a moved one, or one
-    that may still be running), so nothing read from the workspace counts.
-    `root` None skips the go.sum check (the parity harness has no tree). A
-    default left undecided by an unusable package.json or an undecided SHA pin
-    is appended to `unresolved` as `{file, step, reason}`."""
+    that may still be running), so nothing read from the workspace counts;
+    `workspace` is that state (`none`, `moved`, `racing`), for the reason.
+    `root` None skips the go.sum check (the parity harness has no tree).
+    `runner_unread` is why the job's `runs-on` could not be read. A withhold
+    this scan could not decide is appended to `unresolved` as
+    `{file, step, reason}`; a plain off appends nothing."""
     ua = _step_uses(step)
     if not ua:
         return False
@@ -1375,7 +1461,9 @@ def _step_caches_by_default(step: dict, package_json: Any, workspace_unknown: bo
     action = ua[0].strip().lower()
     ref = (ua[1] or "").strip()
     pj = None if workspace_unknown else package_json
-    shared = _setup_cache_state(ua[0], ua[1], with_, pj)
+    # The shared verdict reads the lower-cased inputs: GitHub matches input
+    # names case-insensitively, so `Cache: npm` is `cache: npm`.
+    shared = _setup_cache_state(ua[0], ua[1], with_lc, pj)
     eff = dict(with_lc)
     if (action == "actions/setup-node"
             and "${{" in str(eff.get("package-manager-cache") or "")
@@ -1383,8 +1471,18 @@ def _step_caches_by_default(step: dict, package_json: Any, workspace_unknown: bo
         # the expression is the only thing undecided: read it as its default
         eff["package-manager-cache"] = "true"
     state = _setup_cache_state(ua[0], ua[1], eff, pj)
-    comments = ((version_comments or {}).get((action, ref.lower()), set())
+    key = (action, ref.lower())
+    comments = ((version_comments or {}).get(key, set())
                 if _SHA_REF_RE.match(ref) else set())
+    texts = (comment_texts or {}).get(key) or []
+    comment_reason = (f"version comment '{texts[0]}' names no release" if texts
+                      else "a version comment names no release")
+    ws_reason = {"racing": _WS_RACING, "moved": _WS_MOVED}.get(workspace or "")
+
+    def withhold(reason: str | None) -> bool:
+        if reason and unresolved is not None:
+            unresolved.append({"file": rel, "step": f"{ua[0]}@{ref}", "reason": reason})
+        return False
 
     def at(major: int) -> str:
         return _setup_cache_state(ua[0], f"v{major}", eff, pj)
@@ -1395,22 +1493,34 @@ def _step_caches_by_default(step: dict, package_json: Any, workspace_unknown: bo
           and None not in comments and all(at(m) == "on" for m in comments)):
         pass   # owner decision 3: every commented release caches
     else:
-        if state == "maybe" and not workspace_unknown and unresolved is not None:
-            reason = package_json_problem or (
-                _SHA_UNDECIDED if isinstance(pj, dict) and _ref_major(ref) is None else None)
-            if reason:
-                unresolved.append({"file": rel, "step": f"{ua[0]}@{ref}", "reason": reason})
+        if state != "maybe":
+            return False
+        if workspace_unknown:
+            # The workspace is the cause, never package.json: name a racing or
+            # moved checkout when the default would otherwise not be off; no
+            # checkout at all is a plain off.
+            would = _setup_cache_state(ua[0], ua[1], eff, package_json)
+            return withhold(ws_reason if would != "off" else None)
+        if package_json_problem:
+            return withhold(package_json_problem)
+        if comments:
+            # a comment naming releases decides it (none caches): a plain off
+            return withhold(comment_reason if None in comments else None)
+        if isinstance(pj, dict) and _ref_major(ref) is None:
+            return withhold(_SHA_UNDECIDED if _SHA_REF_RE.match(ref) else _REF_UNDECIDED)
         return False
     if action == "actions/setup-go" and eff.get("cache") is None:
         if workspace_unknown:
-            return False
-        if root is not None and not _go_sum_present(root, eff.get("cache-dependency-path")):
-            return False
+            return withhold(ws_reason)
+        if root is not None:
+            present, why = _go_sum_check(root, eff.get("cache-dependency-path"))
+            if not present:
+                return withhold(why)
     gate = _RUNNER_GATED_DEFAULTS.get(action)
     if gate and eff.get(gate) is None and not github_hosted:
-        return False
+        return withhold(runner_unread)
     if None in comments:
-        return False
+        return withhold(comment_reason)
     return all(at(m) in ("on", "expr") for m in comments)
 
 
@@ -1425,21 +1535,23 @@ def _dependency_cache_walk(parsed: list[tuple[str, dict, str]], root: Path,
     package_json, pj_problem = _root_package_json(root)
     raw_texts = [raw for _rel, _doc, raw in parsed]
     raw_texts.extend(composite_raw.get(crel, "") for crel, _cdoc in composites)
-    version_comments = _sha_version_comments(raw_texts)
+    comment_texts: dict[tuple[str, str], list[str]] = {}
+    version_comments = _sha_version_comments(raw_texts, comment_texts)
     # The same walk `_step_sources` makes, keeping each job's `runs-on` (a
     # composite's runner is its caller's, unknown from its own file) and its
     # `parallel:` groups.
-    cache_sources: list[tuple[str, list[dict], dict[int, int], bool, bool]] = []
+    cache_sources: list[tuple[str, list[dict], dict[int, int], bool, bool, str | None]] = []
     for rel, doc, _raw in parsed:
         for job in _wf_jobs(doc).values():
             group_of: dict[int, int] = {}
             steps = _job_steps(job, group_of)
+            runs_on = job.get("runs-on")
             cache_sources.append((rel, steps, group_of, False,
-                                  _runs_on_github_hosted(job.get("runs-on"))))
+                                  _runs_on_github_hosted(runs_on), _runs_on_unread(runs_on)))
     for rel, doc in composites:
         if isinstance(doc.get("runs"), dict):
-            cache_sources.append((rel, _composite_steps(doc), {}, True, False))
-    for rel, steps, group_of, is_composite, github_hosted in cache_sources:
+            cache_sources.append((rel, _composite_steps(doc), {}, True, False, None))
+    for rel, steps, group_of, is_composite, github_hosted, runner_unread in cache_sources:
         # setup-node and setup-go read the workspace when their step runs, so
         # it counts only once a root checkout has FINISHED earlier in the job.
         # A local composite action is itself read from the checked-out
@@ -1451,13 +1563,16 @@ def _dependency_cache_walk(parsed: list[tuple[str, dict, str]], root: Path,
             if ua and _CACHE_ACTION_RE.search(ua[0]):
                 hits.append(rel)
             elif ua and "setup-" in ua[0] and any(
-                    k in ("cache", "enable-cache") and v not in (False, "false", None, "")
+                    str(k).strip().lower() in ("cache", "enable-cache")
+                    and v not in (False, "false", None, "")
                     for k, v in with_.items()):
                 hits.append(rel)
             elif _step_caches_by_default(step, package_json, ws != "root",
                                          version_comments, github_hosted, root=root,
                                          package_json_problem=pj_problem,
-                                         unresolved=unresolved, rel=rel):
+                                         unresolved=unresolved, rel=rel, workspace=ws,
+                                         runner_unread=runner_unread,
+                                         comment_texts=comment_texts):
                 hits.append(rel)
     seen: set[tuple[str, str, str]] = set()
     unique = []
@@ -1467,6 +1582,20 @@ def _dependency_cache_walk(parsed: list[tuple[str, dict, str]], root: Path,
             seen.add(key)
             unique.append(u)
     return hits, unique
+
+
+def _unresolved_evidence(unresolved: list[dict[str, str]]) -> str:
+    """`; <step> <verdict>: <reason>` for the first three recorded defaults,
+    and how many more there are: what the caching fact appends to its
+    evidence, so a withhold is never a silent fail."""
+    if not unresolved:
+        return ""
+    named = "; ".join(
+        f"{u['step'].split('/', 1)[-1]} "
+        f"{'earns no default cache' if u['reason'] in _DECIDED_OFF_REASONS else 'default cache could not be resolved'}"
+        f": {u['reason']}" for u in unresolved[:3])
+    more = f" (and {len(unresolved) - 3} more)" if len(unresolved) > 3 else ""
+    return f"; {named}{more}"
 
 
 def _unresolved_setup_defaults(parsed: list[tuple[str, dict, str]],
@@ -1531,7 +1660,8 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path) -> dict[str
         facts["ci.cache.dependency-cache"] = fact(
             "not_applicable",
             "CI is delegated to cross-repo reusable workflow(s) "
-            f"({', '.join(remote_reusables[:2])}); caching there is not visible from this repo",
+            f"({', '.join(remote_reusables[:2])}); caching there is not visible from this repo"
+            + _unresolved_evidence(unresolved),
             [])
     elif not (_has_dep_manifest(root) or _has_install_signal(step_sources)):
         # No manifest AND no inline install — nothing is installed, so there is
@@ -1542,15 +1672,10 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path) -> dict[str
             "no dependency manifest and no dependency-install step detected; nothing to cache",
             [])
     else:
+        # A withheld default is never a silent fail: name it
+        # (data_sources.unresolved_setup_defaults records it too).
         evidence = ("no cache action and no setup-* cache input in any workflow or "
-                    "local composite action")
-        if unresolved:
-            # A default this scan could not decide is never a silent fail:
-            # name it (data_sources.unresolved_setup_defaults records it too).
-            named = "; ".join(f"{u['step'].split('/', 1)[-1]} default cache could not be "
-                              f"resolved: {u['reason']}" for u in unresolved[:3])
-            more = f" (and {len(unresolved) - 3} more)" if len(unresolved) > 3 else ""
-            evidence += f"; {named}{more}"
+                    "local composite action") + _unresolved_evidence(unresolved)
         facts["ci.cache.dependency-cache"] = fact(
             "fail", evidence, [u["file"] for u in unresolved])
 
