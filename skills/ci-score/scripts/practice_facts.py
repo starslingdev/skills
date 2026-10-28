@@ -1018,14 +1018,29 @@ def _composite_action_docs(root: Path, errors: list[str] | None = None,
 _MAX_LOCAL_COMPOSITES = 256
 
 
-def _local_action_key(uses: Any) -> str | None:
-    """The `./…` / `$/…` path of a step-level local ACTION reference, or None
-    (remote or docker://). A step-level `uses:` always names an action
-    directory, even one called `setup.yml`: reusable workflows are called at
-    job level, so no suffix is filtered here."""
+def _local_uses_key(uses: Any) -> str | None:
+    """The `./…` / `$/…` path of a local `uses:` reference, or None (remote
+    or docker://). At step level it always names an action directory, even
+    one called `setup.yml`; at job level, a reusable workflow file. No suffix
+    is filtered here: the level the `uses:` sits at decides which it is."""
     if not isinstance(uses, str) or not _is_local_uses(uses):
         return None
     return uses.split("@")[0].strip()
+
+
+def _local_call_target(key: str) -> str:
+    """The normalized repository path a local job-level `uses:` key names
+    (`./.github/workflows/x.yml` -> `.github/workflows/x.yml`), or "" when
+    the key names nothing after its prefix."""
+    rest = key[2:]
+    return os.path.normpath(rest) if rest else ""
+
+
+def _with_map(node: dict) -> dict:
+    """A step's or calling job's `with:` mapping; {} when absent or not a
+    mapping."""
+    w = node.get("with")
+    return w if isinstance(w, dict) else {}
 
 
 # ---- What a runner checks out: exact path spelling ---------------------------
@@ -1150,14 +1165,13 @@ def _outside_root(root: Path, path: Path) -> bool:
 def _local_composites(root: Path, parsed: list[tuple[str, dict, str]],
                       errors: list[str] | None = None,
                       info: dict[str, Any] | None = None,
-                      ) -> list[tuple[str, dict, bool]]:
+                      ) -> list[tuple[str, dict, frozenset[str] | None]]:
     """(rel, doc, self_locked) for every local action the scan reads: each
     `action.yml` under `.github/actions/**`, plus each action a step's `uses:`
     names wherever it lives (`./ci/setup`, `$/tools/x`), followed through the
     local references inside those actions. The `uses:` path is the truth: an
     action outside `.github/actions/` is as much a part of the job as one
-    inside it, and skipping it hid both its cache step and its unpinned
-    actions.
+    inside it, cache step and remote actions included.
 
     Fails CLOSED, the same rules as the history read: a reference that
     resolves outside the repository root, names no readable `action.yml` /
@@ -1182,27 +1196,23 @@ def _local_composites(root: Path, parsed: list[tuple[str, dict, str]],
     the last of two equal keys and would hide the first; a file that fails to
     load is named with its reason.
 
-    With `info`, also fills: `unread_keys` (every step-level local reference
-    whose action was not read, for any reason), `unread_reasons` (reference
-    -> the first reason it was not read, None when its file was already named
-    by the walk that failed on it), `key_rel` (reference -> the action file it
-    read), and `caller_withs` (action file -> the `with:` mapping of every
-    step that reaches it, for resolving `inputs.*`)."""
+    With `info`, also fills: `unread_reasons` (every step-level local
+    reference whose action was not read, for any reason -> the first reason,
+    None when its file was already named by the walk that failed on it),
+    `key_rel` (reference -> the action file it read), and `caller_withs`
+    (action file -> the `with:` mapping of every step that reaches it, for
+    resolving `inputs.*`)."""
     root_n = os.path.normpath(os.path.abspath(root))
     tracked = _git_tracked(root)
     docs: dict[str, dict] = {}
     unreadable: set[str] = set()
     arrivals: dict[str, list[tuple[str | None, bool]]] = {}
     errs: list[str] = []
-    unread_keys: dict[str, str | None] = {}
+    unread_reasons: dict[str, str | None] = {}
     key_rel: dict[str, str] = {}
     caller_withs: dict[str, list[dict]] = {}
     case_targets: set[str] = set()
     queue: list[tuple[str, str | None, int, dict]] = []
-
-    def with_of(step: dict) -> dict:
-        w = step.get("with")
-        return w if isinstance(w, dict) else {}
 
     def load(path: Path, rel: str) -> None:
         why = "not a mapping"
@@ -1223,9 +1233,9 @@ def _local_composites(root: Path, parsed: list[tuple[str, dict, str]],
             return
         docs[rel] = doc
         for step in _composite_steps(doc):
-            key = _local_action_key(step.get("uses"))
+            key = _local_uses_key(step.get("uses"))
             if key is not None:
-                queue.append((key, rel, 0, with_of(step)))
+                queue.append((key, rel, 0, _with_map(step)))
 
     for pattern in ("action.yml", "action.yaml"):
         for path in sorted((root / ".github" / "actions").rglob(pattern)):
@@ -1246,12 +1256,12 @@ def _local_composites(root: Path, parsed: list[tuple[str, dict, str]],
         wf_marks[mark] = os.path.normpath(wf_rel)
         for job in _wf_jobs(doc).values():
             for step in _job_steps(job):
-                key = _local_action_key(step.get("uses"))
+                key = _local_uses_key(step.get("uses"))
                 if key is not None:
-                    queue.append((key, mark, 0, with_of(step)))
+                    queue.append((key, mark, 0, _with_map(step)))
 
     def unread(key: str, why: str | None) -> None:
-        unread_keys.setdefault(key, why)
+        unread_reasons.setdefault(key, why)
         if why is not None:
             errs.append(f"{key} ({why})")
 
@@ -1350,8 +1360,8 @@ def _local_composites(root: Path, parsed: list[tuple[str, dict, str]],
     if errors is not None:
         errors.extend(dict.fromkeys(errs))
     if info is not None:
-        info.update(unread_keys=list(unread_keys), unread_reasons=dict(unread_keys),
-                    key_rel=key_rel, caller_withs=caller_withs)
+        info.update(unread_reasons=unread_reasons, key_rel=key_rel,
+                    caller_withs=caller_withs)
     return [(rel, doc, frozenset(reach[rel]) if locked[rel] and reach[rel] else None)
             for rel, doc in docs.items()]
 
@@ -1440,17 +1450,15 @@ def _pr_path_workflows(parsed: list[tuple[str, dict, str]],
     while queue:
         doc, evs, depth = queue.pop(0)
         for job in _wf_jobs(doc).values():
-            uses = job.get("uses")
-            if not (isinstance(uses, str) and _is_local_uses(uses)):
+            key = _local_uses_key(job.get("uses"))
+            if key is None:
                 continue
             # only the events the calling job itself can run on reach the callee
             job_evs = _job_pr_events(job, evs)
             if not job_evs:
                 continue
-            key = uses.split("@")[0].strip()
-            rest = key[2:]
-            target = os.path.normpath(rest) if rest else ""
-            if (not rest or os.path.isabs(rest) or target == ".."
+            target = _local_call_target(key)
+            if (not target or os.path.isabs(target) or target == ".."
                     or target.startswith(".." + os.sep) or target not in by_rel):
                 unread.append(key)
                 continue
@@ -1468,8 +1476,7 @@ def _pr_path_workflows(parsed: list[tuple[str, dict, str]],
                 unread.append(key)
                 refused.add(target)
                 continue
-            w = job.get("with")
-            call_withs.setdefault(target, []).append(w if isinstance(w, dict) else {})
+            call_withs.setdefault(target, []).append(_with_map(job))
             if job_evs <= events.get(target, set()):
                 continue  # no new events reach it
             events.setdefault(target, set()).update(job_evs)
@@ -1559,52 +1566,16 @@ def _lock_ref_key(text: Any) -> str | None:
 _LOCK_WORKFLOW_KEY_RE = re.compile(r"\A\.github/workflows/[^/]+\Z")
 
 
-def _lockfile_path_state(root: Path, tracked: Any = _UNSET) -> str | None:
-    """None when `.github/workflows/actions.lock` exists with that exact
-    spelling, "absent" when it does not exist at all, or "case:<path>" when
-    only a spelling that differs in case exists. git's file list decides when
-    the root is a work tree and git tracks the file; otherwise the directory
-    listings are scanned with case folded, so the answer is the same on a
-    case-sensitive and a case-insensitive disk. A wrong-case lockfile does not
-    exist on a Linux runner, and GitHub reads only the exact path."""
-    if tracked is _UNSET:
-        tracked = _git_tracked(root)
-    if tracked is not None:
-        if _LOCKFILE_REL in tracked.exact:
-            return None
-        variants = tracked.folded.get(_fold(_LOCKFILE_REL))
-        if variants:
-            return f"case:{variants[0]}"
-    cur = os.path.normpath(os.path.abspath(root))
-    seen: list[str] = []
-    for part in _LOCKFILE_REL.split("/"):
-        try:
-            with os.scandir(cur) as entries:
-                names = [e.name for e in entries]
-        except OSError:
-            return "absent"
-        if part in names:
-            seen.append(part)
-        else:
-            folded = [n for n in names if n.casefold() == part.casefold()]
-            if not folded:
-                return "absent"
-            seen.append(folded[0])
-        cur = os.path.join(cur, seen[-1])
-    actual = "/".join(seen)
-    return None if actual == _LOCKFILE_REL else f"case:{actual}"
-
-
-def _load_lockfile(root: Path) -> tuple[str, dict[str, set[str]], set[str]]:
-    """(state, per_workflow, any_workflow). `state` is "absent", "valid",
-    "invalid", "case:<path>" for a lockfile whose path differs from
+def _load_lockfile(root: Path) -> tuple[str, dict[str, set[str]]]:
+    """(state, per_workflow). `state` is "absent", "valid", "invalid",
+    "case:<path>" for a lockfile whose path differs from
     `.github/workflows/actions.lock` only in case (it covers nothing: a runner
-    does not see it), or "version:<v>" for a well-formed version GitHub does
-    not document (`_LOCK_VERSIONS`), which covers nothing. `per_workflow`
-    maps a workflow file to the references the lockfile covers for it: listed
-    under that workflow AND carrying a valid dependency entry (a full
-    commit). `any_workflow` is the union over every workflow list and every
-    entry's own `uses:` list.
+    does not see it, and GitHub reads only the exact path; `_path_state`
+    decides, from git's file list when there is one), or "version:<v>" for a
+    well-formed version GitHub does not document (`_LOCK_VERSIONS`), which
+    covers nothing. `per_workflow` maps a workflow file to the references the
+    lockfile covers for it: listed under that workflow AND carrying a valid
+    dependency entry (a full commit).
 
     Fails CLOSED: a lockfile that cannot be read, does not parse, carries an
     unknown top-level key, or holds ANY malformed list or entry is "invalid"
@@ -1619,16 +1590,15 @@ def _load_lockfile(root: Path) -> tuple[str, dict[str, set[str]], set[str]]:
     normalizes to another spelling could stand in for, or collide with, the
     real one)."""
     path = root / _LOCKFILE_REL
-    bad = ("invalid", {}, set())
+    bad: tuple[str, dict[str, set[str]]] = ("invalid", {})
     try:
-        spelled = _lockfile_path_state(root)
-        if spelled == "absent" and not path.is_symlink():
-            return "absent", {}, set()
-        if spelled is not None and spelled.startswith("case:"):
-            return spelled, {}, set()
+        spelled, actual = _path_state(root, _LOCKFILE_REL, _git_tracked(root))
+        if spelled == "case":
+            return f"case:{actual}", {}
+        if spelled in ("missing", "unlisted") and not path.is_symlink():
+            return "absent", {}
         # a symbolic link out of the checkout is not this repository's lockfile
-        real_root = os.path.realpath(root)
-        if os.path.commonpath([real_root, os.path.realpath(path)]) != real_root:
+        if _outside_root(root, path):
             return bad
         doc = yaml.load(path.read_text(encoding="utf-8"), Loader=_StrictLockLoader)
     except (OSError, ValueError, yaml.YAMLError):
@@ -1640,7 +1610,7 @@ def _load_lockfile(root: Path) -> tuple[str, dict[str, set[str]], set[str]]:
             and isinstance(wfs, dict) and isinstance(deps, dict)):
         return bad
     if doc["version"] not in _LOCK_VERSIONS:
-        return f"version:{doc['version']}", {}, set()
+        return f"version:{doc['version']}", {}
     valid: set[str] = set()
     nested: set[str] = set()
     for key, entry in deps.items():
@@ -1676,8 +1646,7 @@ def _load_lockfile(root: Path) -> tuple[str, dict[str, set[str]], set[str]]:
         per_workflow[wf] = set(keys)
     if not nested <= valid:
         return bad
-    listed = set().union(*per_workflow.values()) if per_workflow else set()
-    return "valid", per_workflow, listed | nested
+    return "valid", per_workflow
 
 
 # ---- Content the scan could not read ----------------------------------------
@@ -1703,18 +1672,25 @@ def _input_default(inputs: Any, name: str) -> Any:
     return spec.get("default") if isinstance(spec, dict) else None
 
 
-def _resolve_input(value: Any, withs: list[dict], default: Any,
+def _input_name(value: Any) -> str | None:
+    """`<name>` when `value` is exactly `${{ inputs.<name> }}`, else None."""
+    m = _INPUT_EXPR_RE.match(value.strip()) if isinstance(value, str) else None
+    return m.group(1) if m else None
+
+
+def _resolve_input(value: Any, withs: list[dict], inputs: Any,
                    direct: bool = False) -> list[Any]:
     """Every value `${{ inputs.<name> }}` takes across the callers in `withs`
-    (each caller's own `with:` value, else `default`), with `_UNRESOLVED`
-    wherever no plain value is known: no caller value and no default, or a
-    value that is itself an expression. `direct` adds the empty value a
-    workflow triggered directly (not called) sees. A plain value is returned
-    as is; any other expression comes back as `_UNRESOLVED`."""
-    m = _INPUT_EXPR_RE.match(value.strip()) if isinstance(value, str) else None
-    if m is None:
+    (each caller's own `with:` value, else the default the `inputs:` spec
+    declares), with `_UNRESOLVED` wherever no plain value is known: no caller
+    value and no default, or a value that is itself an expression. `direct`
+    adds the empty value a workflow triggered directly (not called) sees. A
+    plain value is returned as is; any other expression comes back as
+    `_UNRESOLVED`."""
+    name = _input_name(value)
+    if name is None:
         return [_UNRESOLVED if _is_expression(value) else value]
-    name = m.group(1)
+    default = _input_default(inputs, name)
     out: list[Any] = []
     for w in withs or ([] if direct else [{}]):
         v = w.get(name, default) if isinstance(w, dict) else default
@@ -1805,9 +1781,8 @@ def _literally_false(cond: Any) -> bool:
 
 def _step_code(step: dict) -> list[str]:
     """A step's `run:` and `with.script` code, shell comments stripped."""
-    with_ = step.get("with") if isinstance(step.get("with"), dict) else {}
-    return [_SHELL_COMMENT_RE.sub("", c) for c in (step.get("run"), with_.get("script"))
-            if isinstance(c, str)]
+    code = (step.get("run"), _with_map(step).get("script"))
+    return [_SHELL_COMMENT_RE.sub("", c) for c in code if isinstance(c, str)]
 
 
 def _wf_runs_uncalled(doc: dict) -> bool:
@@ -1822,17 +1797,10 @@ def _wf_runs_uncalled(doc: dict) -> bool:
 
 
 def _trigger_inputs(doc: dict, trigger: str) -> Any:
+    """The `inputs:` spec of one trigger (`on.workflow_call.inputs`), or None."""
     on = doc.get("on", doc.get(True))
     spec = on.get(trigger) if isinstance(on, dict) else None
     return spec.get("inputs") if isinstance(spec, dict) else None
-
-
-def _workflow_call_inputs(doc: dict) -> Any:
-    return _trigger_inputs(doc, "workflow_call")
-
-
-def _workflow_dispatch_inputs(doc: dict) -> Any:
-    return _trigger_inputs(doc, "workflow_dispatch")
 
 
 def _all_call_withs(parsed: list[tuple[str, dict, str]]) -> dict[str, list[dict]]:
@@ -1841,14 +1809,17 @@ def _all_call_withs(parsed: list[tuple[str, dict, str]]) -> dict[str, list[dict]
     out: dict[str, list[dict]] = {}
     for _rel, doc, _raw in parsed:
         for job in _wf_jobs(doc).values():
-            uses = job.get("uses")
-            if isinstance(uses, str) and _is_local_uses(uses):
-                rest = uses.split("@")[0].strip()[2:]
-                if rest:
-                    w = job.get("with")
-                    out.setdefault(os.path.normpath(rest), []).append(
-                        w if isinstance(w, dict) else {})
+            key = _local_uses_key(job.get("uses"))
+            target = _local_call_target(key) if key is not None else ""
+            if target:
+                out.setdefault(target, []).append(_with_map(job))
     return out
+
+
+def _first_three(names: list[str]) -> str:
+    """"a, b, c and N more": the first three names, then a count of the rest."""
+    more = f" and {len(names) - 3} more" if len(names) > 3 else ""
+    return f"{', '.join(names[:3])}{more}"
 
 
 def _unread_note(entries: list[str]) -> str:
@@ -1860,9 +1831,8 @@ def _unread_note(entries: list[str]) -> str:
     # broken repository.
     shown = [e.replace(_NO_ACTION_FILE,
                        " (no action.yml in the checkout; it may be checked out at run time)")
-             for e in entries[:3]]
-    more = f" and {len(entries) - 3} more" if len(entries) > 3 else ""
-    return f"; not read, so nothing inside was graded: {', '.join(shown)}{more}"
+             for e in entries]
+    return f"; not read, so nothing inside was graded: {_first_three(shown)}"
 
 
 def _workflow_parse_errors_on_disk(parsed: list[tuple[str, dict, str]],
@@ -1930,24 +1900,24 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path,
     # is disclosed.
     hits = []
     cache_unresolved: list[str] = []
-    caller_withs = read_info.get("caller_withs", {})
+    caller_withs = read_info["caller_withs"]
     wf_docs = {os.path.normpath(rel): doc for rel, doc, _raw in graded}
     wf_call_withs = _all_call_withs(parsed)
 
     def cache_values(rel: str, v: Any) -> list[Any]:
-        m = _INPUT_EXPR_RE.match(v.strip()) if isinstance(v, str) else None
         if rel in comp_docs:
-            default = _input_default(comp_docs[rel].get("inputs"), m.group(1)) if m else None
-            return _resolve_input(v, caller_withs.get(rel, []), default)
+            return _resolve_input(v, caller_withs.get(rel, []), comp_docs[rel].get("inputs"))
         norm = os.path.normpath(rel)
         doc = wf_docs.get(norm)
         if doc is None:
             return [_UNRESOLVED if _is_expression(v) else v]
-        default = _input_default(_workflow_call_inputs(doc), m.group(1)) if m else None
-        vals = _resolve_input(v, wf_call_withs.get(norm, []), default,
+        vals = _resolve_input(v, wf_call_withs.get(norm, []),
+                              _trigger_inputs(doc, "workflow_call"),
                               direct=_wf_runs_uncalled(doc))
         # a manual run takes the workflow_dispatch input's own default
-        dispatch = _input_default(_workflow_dispatch_inputs(doc), m.group(1)) if m else None
+        name = _input_name(v)
+        dispatch = (_input_default(_trigger_inputs(doc, "workflow_dispatch"), name)
+                    if name else None)
         return vals + ([dispatch] if dispatch is not None else [])
 
     for rel, steps in graded_sources:
@@ -1981,9 +1951,8 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path,
     # or a file that would not load is not; and no install anywhere runs with
     # no such action before it in its job. Readable local actions are followed
     # in step order, so an unread action they run counts in place.
-    unread_keys = set(read_info.get("unread_keys", []))
-    unread_reasons = read_info.get("unread_reasons", {})
-    key_rel = read_info.get("key_rel", {})
+    unread_reasons = read_info["unread_reasons"]
+    key_rel = read_info["key_rel"]
     pr_jobs = {(os.path.normpath(rel), jid) for rel, doc, event_doc in pr_path
                for jid, job in _wf_jobs(doc).items()
                if not _job_if_excludes_pull_requests(job, event_doc)}
@@ -1996,10 +1965,10 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path,
         for s in steps:
             if _literally_false(s.get("if")):
                 continue
-            k = _local_action_key(s.get("uses"))
+            k = _local_uses_key(s.get("uses"))
             if k is not None:
-                if k in unread_keys:
-                    if on_pr and unread_reasons.get(k) == _NO_ACTION_REASON:
+                if k in unread_reasons:
+                    if on_pr and unread_reasons[k] == _NO_ACTION_REASON:
                         pending.append(k)
                 elif key_rel.get(k) in comp_docs and key_rel[k] not in seen:
                     sub_p, sub_u = _scan(_composite_steps(comp_docs[key_rel[k]]), on_pr,
@@ -2027,7 +1996,7 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path,
     readable_setup = any(
         (ua := _step_uses(s)) and ("setup-" in ua[0] or any(
             k in ("cache", "enable-cache")
-            for k in (s.get("with") if isinstance(s.get("with"), dict) else {})))
+            for k in _with_map(s)))
         for _rel, steps in graded_sources for s in steps)
     if hits:
         facts["ci.cache.dependency-cache"] = fact(
@@ -2062,11 +2031,9 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path,
             "no cache action and no setup-* cache input in any workflow or local composite action",
             [])
     if cache_unresolved and not hits:
-        names = list(dict.fromkeys(cache_unresolved))
-        more = f" and {len(names) - 3} more" if len(names) > 3 else ""
         facts["ci.cache.dependency-cache"]["evidence"] += (
             "; cache input set by an expression that could not be resolved, so not "
-            f"credited: {', '.join(names[:3])}{more}")
+            f"credited: {_first_three(list(dict.fromkeys(cache_unresolved)))}")
 
     # 2. Build caching: applicable only when a detectable build tool exists.
     tools = sorted({name for name, probe in (
@@ -2109,26 +2076,17 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path,
     triggered_norm = {os.path.normpath(rel) for rel, _doc in pr_wfs}
     for rel, doc, event_doc in pr_path:
         norm = os.path.normpath(rel)
-        on = doc.get("on", doc.get(True))
-        wf_call = on.get("workflow_call") if isinstance(on, dict) else None
-        call_inputs = wf_call.get("inputs") if isinstance(wf_call, dict) else None
+        call_inputs = _trigger_inputs(doc, "workflow_call")
         for job_name, job in _wf_jobs(doc).items():
             # `fetch-depth: ${{ inputs.x }}` in a called workflow takes each
             # caller's value (else the input default); any other expression,
             # or an input nothing resolves, leaves the job ungraded, disclosed
             depths: list[Any] = []
             for step in _job_steps(job):
-                with_ = step.get("with") if isinstance(step.get("with"), dict) else {}
-                if "fetch-depth" not in with_:
-                    continue
-                raw = with_.get("fetch-depth")
-                m = _INPUT_EXPR_RE.match(raw.strip()) if isinstance(raw, str) else None
-                if m is not None:
-                    depths += _resolve_input(raw, call_withs.get(norm, []),
-                                             _input_default(call_inputs, m.group(1)),
-                                             direct=norm in triggered_norm)
-                else:
-                    depths.append(_UNRESOLVED if _is_expression(raw) else raw)
+                with_ = _with_map(step)
+                if "fetch-depth" in with_:
+                    depths += _resolve_input(with_["fetch-depth"], call_withs.get(norm, []),
+                                             call_inputs, direct=norm in triggered_norm)
             depth_strs = [None if d is _UNRESOLVED else str(d).strip("'\"") for d in depths]
             takes_full_history = "0" in depth_strs
             if not takes_full_history and None not in depth_strs:
@@ -2381,7 +2339,7 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path,
     # locks them, a lockfile entry for one enforces nothing (OD-CS24).
     workflow_rels = {os.path.normpath(rel) for rel, _doc, _raw in parsed}
     self_locked = {rel: wfs for rel, _doc, wfs in local_composites if wfs}
-    lock_state, lock_per_wf, _lock_any = _load_lockfile(root)
+    lock_state, lock_per_wf = _load_lockfile(root)
     remote_refs = [(rel, ua, True) for rel, steps in graded_sources for step in steps
                    if (ua := _step_uses(step))]
     reusable_calls = 0
@@ -2416,9 +2374,9 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path,
         facts["ci.security.pinned-action-shas"] = fact(
             "not_applicable", "no remote actions used in workflow or local composite action files", [])
     else:
-        # With no lockfile, no reusable-workflow call and nothing unread, the
-        # wording is the same as before (the counts can still move, now that
-        # more files are read); each addition says what it counted.
+        # The base sentence gains a clause only for what applies: the
+        # reusable-workflow calls counted, the lockfile credit, or why a
+        # lockfile grants none.
         scope = "workflow + local composite action files"
         if reusable_calls:
             scope += f", including {reusable_calls} reusable-workflow call(s)"
