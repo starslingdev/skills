@@ -11,6 +11,11 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
 
 ## [Unreleased]
 
+- **2026-10-28** — **Fixed**: strict YAML reads instantiate the existing
+  SafeLoader subclass directly, removing ambiguous generic loader calls
+  flagged by Bandit B506. Duplicate-key and Python-tag rejection remain
+  intact, and parser resources are released on success and errors.
+
 - **2026-10-27** — **Added** (#156, registry `ci-score-v0.1.6`, OD-CS24, on top of `ci-score-v0.1.5`): the
   pinning check credits GitHub's workflow lockfile
   (`.github/workflows/actions.lock`, public preview 2026-10-14). The
