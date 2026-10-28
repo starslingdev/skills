@@ -1879,6 +1879,25 @@ def _step_caches_by_default(step: dict, package_json: Any, workspace_unknown: bo
     return all(at(m) in ("on", "expr") for m in comments)
 
 
+# The `owner/setup-*` shape `_step_caches_by_default` grades (any case).
+_SETUP_SHAPE_RE = re.compile(r"^[\w.-]+/setup-[\w.-]+$", re.IGNORECASE)
+
+
+def _cache_switch_input(action: str) -> str | None:
+    """The input that switches an action's dependency cache, lower-cased (the
+    key GitHub matches in any case), or None for an action with no cache
+    switch: Gradle's and npm-install's `cache-disabled`, a setup action's
+    entry in `_SETUP_CACHE_INPUTS` (setup-ruby `bundler-cache`, setup-uv
+    `enable-cache`), else `cache` for any action whose name holds `setup-`.
+    Action names match in any case."""
+    if _DEFAULT_ON_CACHE_ACTIONS_RE.match(action):
+        return "cache-disabled"
+    name = action.strip().lower()
+    if "setup-" not in name:
+        return None
+    return _SETUP_CACHE_INPUTS.get(name, ("cache", None))[0]
+
+
 def _dependency_cache_walk(parsed: list[tuple[str, dict, str]], root: Path,
                            composites: list[tuple[str, dict]],
                            composite_raw: dict[str, str],
@@ -1888,13 +1907,21 @@ def _dependency_cache_walk(parsed: list[tuple[str, dict, str]], root: Path,
     unresolved, files whose cache input is an expression that resolves to no
     caching value). One walk over every job and local composite action;
     `parsed` is the workflows the caching check grades. `cache_values(rel, v)`
-    (`_cache_input_resolver`, OD-CS24) gives every value an explicit `cache:`
-    / `enable-cache:` input takes; without it a value stands as written.
+    (`_cache_input_resolver`, OD-CS24) gives every value an expression on a
+    cache switch takes; without it every expression is unresolved.
 
-    An explicit input set by an expression decides the step on its own: it
-    earns credit only when some resolved value caches, and it never falls
-    through to the action's default (whose shared verdict reads any
-    expression as on), so an unresolved expression earns nothing."""
+    A LITERAL `cache:` / `enable-cache:` value on a `setup-` action keeps the
+    rule it has always had (any value but false or empty is credited; owner
+    decision A leaves that to a separate change). An EXPRESSION on the input
+    that switches the action's cache (`_cache_switch_input`: setup-ruby
+    `bundler-cache`, setup-uv `enable-cache`, Gradle `cache-disabled`, else
+    `cache`; action names in any case) decides its step on its own: each value
+    it resolves to is put back in place and graded by the same verdict a
+    written value gets (`_step_caches_by_default`), and the step is credited
+    when any of them caches. It never falls back to the action's default,
+    whose shared verdict reads any expression as on: an expression that does
+    not resolve earns nothing and is disclosed. An expression on a key the
+    action does not read changes nothing (its default decides)."""
     hits: list[str] = []
     unresolved: list[dict[str, str]] = []
     expr_unresolved: list[str] = []
@@ -1903,24 +1930,44 @@ def _dependency_cache_walk(parsed: list[tuple[str, dict, str]], root: Path,
     raw_texts.extend(composite_raw.get(crel, "") for crel, _cdoc in composites)
     comment_texts: dict[tuple[str, str], list[str]] = {}
     version_comments = _sha_version_comments(raw_texts, comment_texts)
+    if cache_values is None:
+        def cache_values(_rel: str, v: Any) -> list[Any]:
+            return [_UNRESOLVED if _is_expression(v) else v]
 
-    def explicit_cache(rel: str, with_: dict) -> str | None:
-        """`on` when an explicit cache input caches; `withheld` when one is
-        an expression that resolves to no caching value; else None (no
-        explicit input, or only plain off values: the default decides)."""
-        saw_expr = unread = False
-        for k, v in with_.items():
-            if str(k).strip().lower() not in ("cache", "enable-cache"):
+    def literal_cache(ua: tuple, with_: dict) -> bool:
+        # the literal rule, unchanged (owner decision A)
+        return "setup-" in ua[0] and any(
+            str(k).strip().lower() in ("cache", "enable-cache") and not _is_expression(v)
+            and v not in (False, "false", None, "")
+            for k, v in with_.items())
+
+    def expression_cache(rel: str, step: dict, ua: tuple, with_: dict,
+                         by_default: Any) -> str | None:
+        """`on` when an expression on the action's cache switch resolves to a
+        value that caches; `off` when it resolves only to values that do not,
+        or does not resolve (then `rel` is disclosed); None when the switch
+        carries no expression (the default decides)."""
+        key = _cache_switch_input(ua[0])
+        exprs = [v for k, v in with_.items()
+                 if key and str(k).strip().lower() == key and _is_expression(v)]
+        if not exprs:
+            return None
+        rest = {k: v for k, v in with_.items() if str(k).strip().lower() != key}
+        unread = False
+        for x in (x for v in exprs for x in cache_values(rel, v)):
+            if x is _UNRESOLVED:
+                unread = True
                 continue
-            vals = cache_values(rel, v) if cache_values is not None else [v]
-            if any(x is not _UNRESOLVED and x not in (False, "false", None, "")
-                   for x in vals):
+            placed = dict(step)
+            placed["with"] = {**rest, key: x}
+            if by_default(placed) or (
+                    not _SETUP_SHAPE_RE.match(ua[0])
+                    and not _DEFAULT_ON_CACHE_ACTIONS_RE.match(ua[0])
+                    and _setup_cache_state(ua[0], ua[1] or "", {key: x}) == "on"):
                 return "on"
-            saw_expr = saw_expr or _is_expression(v)
-            unread = unread or any(x is _UNRESOLVED for x in vals)
         if unread:
             expr_unresolved.append(rel)
-        return "withheld" if saw_expr else None
+        return "off"
 
     def scan(rel: str, steps: list[dict], group_of: dict[int, int], start: str,
              github_hosted: bool, runner_unread: str | None) -> None:
@@ -1933,14 +1980,19 @@ def _dependency_cache_walk(parsed: list[tuple[str, dict, str]], root: Path,
             if ua and _CACHE_ACTION_RE.search(ua[0]):
                 hits.append(rel)
                 continue
-            explicit = explicit_cache(rel, with_) if ua and "setup-" in ua[0] else None
-            if explicit == "on":
+            if ua and literal_cache(ua, with_):
                 hits.append(rel)
-            elif explicit is None and _step_caches_by_default(
-                    step, package_json, ws != "root", version_comments, github_hosted,
+                continue
+
+            def by_default(s: dict, ws: str = ws) -> bool:
+                return _step_caches_by_default(
+                    s, package_json, ws != "root", version_comments, github_hosted,
                     root=root, package_json_problem=pj_problem, unresolved=unresolved,
                     rel=rel, workspace=ws, runner_unread=runner_unread,
-                    comment_texts=comment_texts):
+                    comment_texts=comment_texts)
+
+            explicit = expression_cache(rel, step, ua, with_, by_default) if ua else None
+            if explicit == "on" or (explicit is None and by_default(step)):
                 hits.append(rel)
 
     # The same walk `_step_sources` makes, keeping each job's `runs-on` and its
@@ -2003,7 +2055,8 @@ def _cache_input_resolver(parsed: list[tuple[str, dict, str]],
     value, else the action's own input default; inside a workflow it takes
     every calling job's `with:` value, else the `workflow_call` input default
     (and the empty value a trigger other than a call sees, plus a manual
-    run's `workflow_dispatch` default). Any other expression -
+    run's `workflow_dispatch` default). An input the workflow declares under
+    neither trigger has no value this scan can read. Any other expression -
     `${{ env.X }}`, `${{ matrix.x }}`, `${{ inputs.x || 'npm' }}` - is
     `_UNRESOLVED`: it earns nothing and is disclosed."""
     wf_docs = {os.path.normpath(rel): doc for rel, doc, _raw in graded}
@@ -2016,31 +2069,47 @@ def _cache_input_resolver(parsed: list[tuple[str, dict, str]],
         doc = wf_docs.get(norm)
         if doc is None:
             return [_UNRESOLVED if _is_expression(v) else v]
-        vals = _resolve_input(v, wf_call_withs.get(norm, []),
-                              _trigger_inputs(doc, "workflow_call"),
+        name = _input_name(v)
+        call_inputs = _trigger_inputs(doc, "workflow_call")
+        dispatch_inputs = _trigger_inputs(doc, "workflow_dispatch")
+        if name and not any(isinstance(i, dict) and name in i
+                            for i in (call_inputs, dispatch_inputs)):
+            return [_UNRESOLVED]
+        vals = _resolve_input(v, wf_call_withs.get(norm, []), call_inputs,
                               direct=_wf_runs_uncalled(doc))
         # a manual run takes the workflow_dispatch input's own default
-        name = _input_name(v)
-        dispatch = (_input_default(_trigger_inputs(doc, "workflow_dispatch"), name)
-                    if name else None)
+        dispatch = _input_default(dispatch_inputs, name) if name else None
         return vals + ([dispatch] if dispatch is not None else [])
 
     return cache_values
 
 
 def _cache_walk_inputs(parsed: list[tuple[str, dict, str]], root: Path,
+                       read: tuple[list[tuple[str, dict]], dict[str, str],
+                                   dict[str, list[dict]]] | None = None,
                        ) -> tuple[list[str], list[dict[str, str]], list[str]]:
-    """`_dependency_cache_walk` over exactly what `_practice_facts` grades:
-    every local action `_local_composites` reads, and every workflow except
-    a called one no PR path could read (`_pr_path_workflows`)."""
-    raw: dict[str, str] = {}
-    info: dict[str, Any] = {}
-    composites = [(rel, doc) for rel, doc, _locked in
-                  _local_composites(root, parsed, None, info, raw_out=raw)]
+    """`_dependency_cache_walk` over exactly what the caching fact grades, for
+    the card and the collector alike: every workflow except a called one no
+    PR path could read (`_pr_path_workflows`' `unread_files`), and the local
+    actions `_local_composites` reads from THOSE workflows (plus its
+    `.github/actions/**` seed walk), so an action that only an unread
+    workflow runs earns nothing. Returns (hits, unresolved setup defaults,
+    files with an unresolved cache expression). `read` is a caller's own
+    `_local_composites` read over all of `parsed` (composites, raw texts,
+    caller withs): reused when every workflow is graded, so each action file
+    is read once."""
     pr_wfs = [(rel, doc) for rel, doc, _raw in parsed if _wf_is_pr_gating(doc)]
     unread_files = _pr_path_workflows(parsed, pr_wfs)[3]
     graded = [p for p in parsed if os.path.normpath(p[0]) not in unread_files]
-    resolver = _cache_input_resolver(parsed, graded, dict(composites), info["caller_withs"])
+    if read is not None and len(graded) == len(parsed):
+        composites, raw, caller_withs = read
+    else:
+        raw = {}
+        info: dict[str, Any] = {}
+        composites = [(rel, doc) for rel, doc, _locked in
+                      _local_composites(root, graded, None, info, raw_out=raw)]
+        caller_withs = info["caller_withs"]
+    resolver = _cache_input_resolver(parsed, graded, dict(composites), caller_withs)
     return _dependency_cache_walk(graded, root, composites, raw, resolver)
 
 
@@ -2551,10 +2620,10 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path,
     # ci-score's wrapper. A default left undecided is named in the evidence.
     # A cache input set by an expression earns credit only when it resolves
     # (`_cache_input_resolver`, OD-CS24): any other expression earns nothing
-    # and is disclosed.
-    cache_values = _cache_input_resolver(parsed, graded, comp_docs, read_info["caller_withs"])
-    hits, unresolved, cache_unresolved = _dependency_cache_walk(
-        graded, root, composites, composite_raw, cache_values)
+    # and is disclosed. The walk is the collector's own (`_cache_walk_inputs`),
+    # so a local action only an unread workflow runs earns nothing on either.
+    hits, unresolved, cache_unresolved = _cache_walk_inputs(
+        parsed, root, (composites, composite_raw, read_info["caller_withs"]))
     # Owner decision 2026-10-27 (OD-CS24): not_applicable only when a local
     # action that is not in the checkout is the ONLY thing that could explain
     # the missing cache. All of these must hold: no readable step is a setup-*
@@ -2612,7 +2681,7 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path,
     # action (OD-CS23), or a cache input under any key case
     readable_setup = any(
         (ua := _step_uses(s)) and (
-            "setup-" in ua[0] or _DEFAULT_ON_CACHE_ACTIONS_RE.match(ua[0])
+            "setup-" in ua[0].lower() or _DEFAULT_ON_CACHE_ACTIONS_RE.match(ua[0])
             or any(str(k).strip().lower() in ("cache", "enable-cache")
                    for k in _with_map(s)))
         for _rel, steps in graded_sources for s in steps)

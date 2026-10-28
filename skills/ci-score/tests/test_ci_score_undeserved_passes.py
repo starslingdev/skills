@@ -1840,3 +1840,133 @@ def test_a_step_scoped_full_history_checkout_in_a_called_workflow_is_exempt(tmp_
     assert got["state"] == "pass", got
     assert ("1 take(s) full history only in a checkout step whose own if: is never true"
             in got["evidence"]), got
+
+
+# ---- merge-resolution review (#156 over #154) --------------------------------
+#
+# An expression on a setup action's cache switch is resolved and every value
+# it can take is graded by the shared verdict, exactly as a value written in
+# place; only an expression nothing resolves is withheld (and named). The
+# switch is the input the action reads (setup-ruby `bundler-cache`, setup-uv
+# `enable-cache`, Gradle `cache-disabled`, else `cache`), the action name is
+# matched in any case, and an action's caching is read only from the
+# workflows the check grades. A LITERAL cache value keeps its current verdict
+# (owner decision A: that is a separate change).
+
+RUBY_FILES = {"Gemfile": "source 'https://rubygems.org'\n"}
+
+
+@pytest.mark.parametrize("files,step,install", [
+    ({"package.json": "{}\n"}, "uses: actions/Setup-Node@v4\n        with:\n"
+                               "          cache: ${{ inputs.pm }}", "run: npm ci"),
+    (GO_FILES, "uses: Actions/Setup-Go@v5\n        with:\n"
+               "          cache: ${{ env.GO_CACHE }}", "run: go mod download"),
+    (RUBY_FILES, "uses: ruby/setup-ruby@v1\n        with:\n"
+                 "          bundler-cache: ${{ env.BC }}", "run: bundle install"),
+    ({"build.gradle": "x\n"}, "uses: gradle/actions/setup-gradle@v4\n        with:\n"
+                              "          cache-disabled: ${{ env.NO_CACHE }}", "run: ./gradlew build"),
+], ids=["mixed-case-setup-node", "mixed-case-setup-go", "setup-ruby-bundler-cache",
+        "gradle-cache-disabled"])
+def test_an_unresolved_expression_on_the_actions_own_cache_switch_earns_nothing(
+        tmp_path, files, step, install):
+    doc = _collect(tmp_path, {**files, ".github/workflows/ci.yml": _job_wf(step, install)})
+    assert _fact(doc, CACHE) == {
+        "state": "fail", "evidence": CACHE_FAIL + UNRESOLVED_CACHE + ".github/workflows/ci.yml",
+        "files": []}, _fact(doc, CACHE)
+    assert doc["data_sources"]["unresolved_cache_expressions"] == [
+        ".github/workflows/ci.yml"], doc["data_sources"]
+
+
+def test_a_composite_bundler_cache_input_whose_default_is_false_earns_nothing(tmp_path):
+    doc = _collect(tmp_path, {**RUBY_FILES,
+                              ".github/workflows/ci.yml": SETUP_CALLER.replace(
+                                  "npm test", "bundle exec rake"),
+                              "ci/setup/action.yml": "inputs:\n  bc: {default: 'false'}\n"
+                              + _composite("uses: ruby/setup-ruby@v1\n      with:\n"
+                                           "        bundler-cache: ${{ inputs.bc }}")})
+    assert _fact(doc, CACHE) == {"state": "fail", "evidence": CACHE_FAIL, "files": []}, \
+        _fact(doc, CACHE)
+
+
+def test_an_expression_on_an_input_the_action_does_not_read_leaves_its_default(tmp_path):
+    # setup-uv is switched by enable-cache; a `cache:` key is not its input,
+    # so its default (auto: on, on a GitHub-hosted runner) decides the step
+    doc = _collect(tmp_path, {"pyproject.toml": "[project]\nname = 'x'\n",
+                              ".github/workflows/ci.yml": _job_wf(
+                                  "uses: astral-sh/setup-uv@v5\n        with:\n"
+                                  "          cache: ${{ env.X }}", "run: uv sync")})
+    assert _fact(doc, CACHE) == {"state": "pass", "evidence": CACHE_PASS_ONE,
+                                 "files": [".github/workflows/ci.yml"]}, _fact(doc, CACHE)
+    assert "unresolved_cache_expressions" not in doc["data_sources"], doc["data_sources"]
+
+
+def test_an_empty_resolved_cache_value_falls_through_to_setup_node_v5_auto_cache(tmp_path):
+    doc = _collect(tmp_path, {"package.json": '{"packageManager": "npm@10.0.0"}\n',
+                              ".github/workflows/ci.yml": f"""
+        on:
+          pull_request:
+          workflow_call:
+            inputs:
+              pm: {{type: string, default: ''}}
+        jobs:
+          t:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@{SHA}
+              - uses: actions/setup-node@v5
+                with: {{cache: '${{{{ inputs.pm }}}}'}}
+              - run: npm ci
+        """})
+    assert _fact(doc, CACHE) == {"state": "pass", "evidence": CACHE_PASS_ONE,
+                                 "files": [".github/workflows/ci.yml"]}, _fact(doc, CACHE)
+
+
+def test_control_a_literal_cache_no_on_setup_go_keeps_its_current_verdict(tmp_path):
+    # Owner decision A: a LITERAL off value keeps the verdict it has on main
+    # (credited, as any non-empty literal was); changing it is a separate PR.
+    doc = _collect(tmp_path, {**GO_FILES, ".github/workflows/ci.yml": _job_wf(
+        "uses: actions/setup-go@v5\n        with: {cache: 'no'}", "run: go mod download")})
+    assert _fact(doc, CACHE) == {"state": "pass", "evidence": CACHE_PASS_ONE,
+                                 "files": [".github/workflows/ci.yml"]}, _fact(doc, CACHE)
+
+
+def test_od5_a_mixed_case_setup_step_is_readable_setup(tmp_path):
+    doc = _collect(tmp_path, {"package.json": "{}\n", ".github/workflows/ci.yml": _job_wf(
+        "uses: Actions/Setup-Node@v4", "uses: ./.github/actions/fetched", "run: npm ci")})
+    assert _fact(doc, CACHE) == {
+        "state": "fail",
+        "evidence": CACHE_FAIL + "; " + NOT_READ + "./.github/actions/fetched" + NO_FILE_NOTE,
+        "files": []}, _fact(doc, CACHE)
+
+
+UNREAD_CALLEE = f"""
+    on: workflow_call
+    jobs:
+      x:
+        runs-on: ubuntu-latest
+        runs-on: ubuntu-latest
+        steps:
+          - uses: actions/checkout@{SHA}
+          - uses: ./ci/cachey
+    """
+
+
+def test_a_composite_reached_only_from_an_unread_workflow_earns_nothing(tmp_path):
+    doc = _collect(tmp_path, {"package.json": "{}\n",
+                              ".github/workflows/ci.yml": CALLER,
+                              ".github/workflows/test.yml": UNREAD_CALLEE,
+                              "ci/cachey/action.yml": _composite(
+                                  f"uses: actions/cache@{SHA}\n      with: {{path: x, key: y}}")})
+    got = _fact(doc, CACHE)
+    assert got["state"] == "fail", got
+    assert got["files"] == [] and "ci/cachey" not in got["evidence"], got
+
+
+def test_a_setup_default_reached_only_from_an_unread_workflow_is_not_recorded(tmp_path):
+    # the collector's data_sources read the same graded set as the card
+    doc = _collect(tmp_path, {"package.json": '{"packageManager": "yarn@4.0.0"}\n',
+                              ".github/workflows/ci.yml": CALLER,
+                              ".github/workflows/test.yml": UNREAD_CALLEE,
+                              "ci/cachey/action.yml": _composite(f"uses: actions/setup-node@{SHA}")})
+    assert "unresolved_setup_defaults" not in doc["data_sources"], doc["data_sources"]
+    assert _fact(doc, CACHE)["files"] == [], _fact(doc, CACHE)

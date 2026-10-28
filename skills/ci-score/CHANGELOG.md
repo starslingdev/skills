@@ -81,16 +81,29 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
     reached only through a wrong-case path earns nothing. Outside a git work
     tree the directory listing decides, and a directory that cannot be
     listed fails closed ("directory could not be listed").
-  - A dependency cache input set by an expression earns credit only when it
-    resolves to a value that turns caching on. `${{ inputs.cache }}` inside
-    a local action takes each caller's `with:` value, else the action's
-    input default; inside a reusable workflow, each calling job's `with:`
-    value, else the `workflow_call` default. Any other expression
-    (`${{ env.X }}`, `${{ matrix.x }}`, `${{ inputs.cache || 'npm' }}`) used
-    to count as a truthy string; it now earns nothing and is named on the
-    card. Such an input decides its step on its own: it never falls back to
-    the setup action's default-on cache (#154), which would otherwise read any
-    expression as caching. Input names match in any case, as in #154.
+  - A dependency cache switch set by an expression earns credit only when it
+    resolves to a value that turns caching on. The switch is the input the
+    action itself reads: `bundler-cache` for setup-ruby, `enable-cache` for
+    setup-uv, `cache-disabled` for Gradle's actions and npm-install, `cache`
+    for every other `setup-*` action; action and input names match in any
+    case (`Actions/Setup-Go` is `actions/setup-go`). An expression on a key
+    the action does not read (`cache:` on setup-uv) changes nothing: the
+    action's default decides. `${{ inputs.cache }}` inside a local action
+    takes each caller's `with:` value, else the action's input default;
+    inside a reusable workflow, each calling job's `with:` value, else the
+    `workflow_call` default (an input the workflow declares nowhere has no
+    value). Each value it resolves to is graded exactly as if written in
+    place, by the same rule as #154's defaults, so an empty value on
+    setup-node v5+ falls through to its automatic cache, and the step earns
+    credit when any of them caches. Any other expression (`${{ env.X }}`,
+    `${{ matrix.x }}`, `${{ inputs.cache || 'npm' }}`) used to count as a
+    truthy string; it now earns nothing and is named on the card and in
+    `data_sources.unresolved_cache_expressions`. Such a switch never falls
+    back to the action's default-on cache (#154), which would otherwise read
+    any expression as caching. A value written literally keeps its verdict.
+  - The dependency-caching check, card and `data_sources` alike, reads a
+    local action only from the workflows it grades: an action that only an
+    unread called workflow runs earns nothing.
   - A job-level call to another repository's reusable workflow
     (`jobs.ci.uses: org/shared/.github/workflows/ci.yml@main`) was left out
     of the pinning count, so one pinned step read "1 of 1" and passed. It

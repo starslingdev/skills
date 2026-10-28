@@ -285,9 +285,19 @@ def collect(root: Path, spec_path: Path = _DEFAULT_SPEC) -> tuple[dict[str, Any]
         # A setup action's default cache that could not be decided (an
         # unusable package.json, a SHA pin the v5 and v6 rules disagree on):
         # recorded the same way, and named in the caching fact's evidence.
-        unresolved = pf_mod._unresolved_setup_defaults(parsed, root)
+        # A cache switch set by an expression this scan could not resolve
+        # (not credited) is recorded beside them, by file.
+        # (An engine without the shared walk - the "no score can drop" base -
+        # records only the defaults.)
+        walk = getattr(pf_mod, "_cache_walk_inputs", None)
+        if walk is not None:
+            _hits, unresolved, unresolved_exprs = walk(parsed, root)
+        else:
+            unresolved, unresolved_exprs = pf_mod._unresolved_setup_defaults(parsed, root), []
         if unresolved:
             doc["data_sources"]["unresolved_setup_defaults"] = unresolved
+        if unresolved_exprs:
+            doc["data_sources"]["unresolved_cache_expressions"] = unresolved_exprs
         if logger.isEnabledFor(logging.DEBUG):
             states = {k: v.get("state") for k, v in doc["practice_facts"].items()}
             logger.debug("practice facts: %s", states)
