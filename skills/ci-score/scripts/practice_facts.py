@@ -2188,7 +2188,7 @@ def _pr_path_workflows(parsed: list[tuple[str, dict, str]],
                 continue
             if target not in strict_ok:
                 try:
-                    yaml.load(raw_by[target], Loader=_StrictLockLoader)
+                    yaml.load(raw_by[target], Loader=_StrictWorkflowLoader)
                     strict_ok[target] = True
                 except (ValueError, yaml.YAMLError):
                     strict_ok[target] = False
@@ -2268,6 +2268,26 @@ def _no_duplicate_keys(loader: yaml.SafeLoader, node: Any, deep: bool = False) -
 
 _StrictLockLoader.add_constructor(
     yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _no_duplicate_keys)
+
+
+class _StrictWorkflowLoader(_StrictLockLoader):
+    """Strict mappings with GitHub's YAML 1.2 boolean spellings.
+
+    PyYAML's YAML 1.1 resolver aliases ON and YES (also OFF and NO), which
+    would falsely reject distinct environment-variable names as duplicates.
+    Keep the inherited duplicate-key constructor, but copy the resolver table
+    so changing workflow booleans cannot alter lockfile or composite readers.
+    """
+    yaml_implicit_resolvers = {
+        ch: [(tag, pattern) for tag, pattern in entries
+             if tag != "tag:yaml.org,2002:bool"]
+        for ch, entries in _StrictLockLoader.yaml_implicit_resolvers.items()
+    }
+
+
+_StrictWorkflowLoader.add_implicit_resolver(
+    "tag:yaml.org,2002:bool", re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"),
+    list("tTfF"))
 
 
 def _lock_key(action: str, ref: str) -> str:

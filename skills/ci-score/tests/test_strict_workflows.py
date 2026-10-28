@@ -36,3 +36,33 @@ def test_valid_workflow_remains_unchanged(tmp_path):
     assert code == 0
     assert "workflow_parse_errors" not in doc["data_sources"]
     assert doc["practice_facts"]["ci.security.pinned-action-shas"]["state"] == "pass"
+
+
+@pytest.mark.parametrize('trigger', ['pull_request', 'workflow_call'])
+def test_boolean_like_env_names_are_distinct_string_keys(tmp_path, trigger):
+    workflow = VALID.replace('on: pull_request',
+        f'on: {trigger}\nenv: {{ON: "1", YES: "2", OFF: "3", NO: "4"}}')
+    files = {'.github/workflows/ci.yml': workflow}
+    if trigger == 'workflow_call':
+        files['.github/workflows/caller.yml'] = (
+            'on: pull_request\njobs:\n  test:\n    uses: ./.github/workflows/ci.yml\n')
+    root = _make_repo(tmp_path, files)
+    doc, code = cc_mod.collect(root)
+    assert code == 0
+    assert 'workflow_parse_errors' not in doc['data_sources']
+    fact = doc['practice_facts']['ci.security.pinned-action-shas']
+    assert fact['state'] == 'pass'
+    assert 'not read' not in fact['evidence']
+    parsed, _, errors = cc_mod._read_workflows(root)
+    workflow_doc = next(d for p, d, _ in parsed if p.endswith('/ci.yml'))
+    assert workflow_doc['env'] == {'ON': '1', 'YES': '2', 'OFF': '3', 'NO': '4'}
+    assert workflow_doc['on'] == trigger
+
+
+def test_repeated_boolean_like_env_name_is_still_rejected(tmp_path):
+    root = _make_repo(tmp_path, {'.github/workflows/ci.yml':
+        VALID + 'env: {ON: "1", ON: "2"}\n'})
+    doc, code = cc_mod.collect(root)
+    assert code == 2
+    assert doc['data_sources']['workflow_parse_error_reasons'] == {
+        '.github/workflows/ci.yml': "duplicated key 'ON'"}

@@ -13,7 +13,9 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
 
 - **2026-10-28** — **Fixed**: every workflow uses the strict YAML reader. A
   duplicate key leaves the workflow ungraded and names the key in the unread
-  evidence and parse-error reasons. This corrects the existing read contract;
+  evidence and parse-error reasons. Workflow booleans use GitHub's YAML 1.2
+  spellings so distinct names such as `ON` and `YES` remain readable.
+  This corrects the existing read contract;
   the registry rules and version are unchanged.
 
 - **2026-10-27** — **Added** (#156, registry `ci-score-v0.1.6`, OD-CS24, on top of `ci-score-v0.1.5`): the

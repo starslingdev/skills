@@ -150,7 +150,7 @@ def _read_workflows(root: Path, reasons: dict[str, str] | None = None) -> tuple[
         rel = str(path.relative_to(root))
         try:
             raw = path.read_text(encoding="utf-8", errors="replace")
-            doc = yaml.load(raw, Loader=_workflow_yaml._StrictLockLoader)
+            doc = yaml.load(raw, Loader=_workflow_yaml._StrictWorkflowLoader)
         except (OSError, yaml.YAMLError) as exc:
             logger.debug("workflow parse failed: %s (%s)", rel, type(exc).__name__)
             errors.append(rel)
