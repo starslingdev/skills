@@ -238,7 +238,13 @@ OD_CS23_CASES = {
                           "        with:\n          fetch-depth: 0\n      - run: pytest\n"]),
 }
 # {(case_id, check): "<owner decision / PR that made the drop on purpose>"}
-INTENDED_DROPS: dict[tuple[str, str], str] = {}
+INTENDED_DROPS: dict[tuple[str, str], str] = {
+    ("all-delegated", "ci.security.pinned-action-shas"):
+        "OD-CS24 / #156: a job-level call to another repository's reusable "
+        "workflow is a remote reference and counts for pinning, pinned only by "
+        "a full SHA; a repository whose only remote reference is such a call "
+        "on a tag moves not_applicable -> fail ('0 of 1')",
+}
 
 _pf_now = _load("ci_score_practice_facts_no_score_drops", "scripts/practice_facts.py")
 

@@ -11,6 +11,142 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
 
 ## [Unreleased]
 
+- **2026-10-27** — **Added** (#156, registry `ci-score-v0.1.6`, OD-CS24, on top of `ci-score-v0.1.5`): the
+  pinning check credits GitHub's workflow lockfile
+  (`.github/workflows/actions.lock`, public preview 2026-10-14). The
+  lockfile records the exact commit each action runs at while the YAML keeps
+  its tags, so a repository that locked every action used to fail pinning.
+  A tag reference now counts as pinned when the lockfile lists it under its
+  own workflow and holds a full-commit entry for it, and the evidence says
+  how many: "2 of 2 remote action references pinned, 2 via lockfile". Inside
+  a local action, credit needs every reference to reach it through `$/`
+  (GitHub never follows or locks a `./` action) and an entry under every
+  workflow that reaches it. A call to another repository's reusable workflow
+  is pinned only by a full SHA, never by the lockfile: the `gh actions-lock`
+  README states that such calls are not locked (github/gh-actions-lock#179,
+  open), even though GitHub's docs page says reusable workflows are pinned,
+  so until the tool locks them an entry for one enforces nothing. A lockfile
+  grants nothing, and the evidence says so, when it cannot be read, is a
+  symbolic link out of the checkout, sits at a path whose case differs from
+  `.github/workflows/actions.lock`, carries a format version other than the
+  two GitHub documents (v0.0.2, v0.0.3), or is malformed anywhere: a
+  duplicated key, trailing text after a commit or version, an entry whose
+  `ref` contradicts its key (GitHub's commit-keyed nested entries, which keep
+  their tag as `ref`, stay valid), a listed reference with no entry, or a
+  workflow key that is not exactly `.github/workflows/<file>`. Without a
+  lockfile the evidence carries no lockfile wording (the reach fixes below
+  can still change its counts).
+
+- **2026-10-27** — **Fixed** (#156): checks passed, or failed, on workflow content
+  the scan never read.
+  - A reusable workflow in the same repository (`on: workflow_call`) that a
+    pull-request job calls was never graded on the pull-request path, so a
+    full-history checkout inside it passed the shallow-checkout check. Called
+    workflows are now followed (`./` and `$/`, nested calls included, 16
+    deep at most) and graded with the pull-request events that reach them:
+    the caller's events, narrowed by the calling job's own `if:` (a workflow
+    that pull requests trigger directly also gains the events of a
+    pull-request workflow that calls it). A calling job that can never run
+    on a pull request reaches nothing. A called workflow's
+    `fetch-depth: ${{ inputs.x }}` takes each calling job's `with:` value
+    (any caller passing 0 fails it), else the input's default, plus the empty
+    value a workflow that pull requests also trigger directly sees. On any
+    job on the pull-request path, a `fetch-depth` set by an expression no
+    rule resolves leaves the job ungraded and named in the evidence. A call
+    that cannot be followed (outside the repository, missing, unparseable,
+    holding a duplicated key, or more than 16 deep) is named in the evidence
+    instead of being graded either way; a called workflow no pull-request
+    path reads is left out of the caching and pinning checks too, so the
+    "not read" note those cards carry is true. When
+    the full-history offender is a called workflow, the evidence names it as
+    one. The trigger-level checks (concurrency groups, cancelling superseded
+    runs, path filters) still read only the workflows a pull request
+    triggers, since those settings belong there.
+  - Local composite actions were read only from `.github/actions/`. An
+    action at `./ci/setup` or `$/tools/x` was invisible: its cache step did
+    not count (a wrong fail) and its unpinned actions were left out of the
+    pinning count (a wrong pass). Every local action a step's `uses:` names
+    is now read wherever it lives, including a directory named like
+    `./ci/setup.yml`, with nested references followed (16 deep, 256 files at
+    most). A reference is never read when it resolves outside the
+    repository (by path, or by a symbolic link, under `.github/actions/`
+    too), names no readable `action.yml` or `action.yaml`, is not a spelling
+    git tracks, or names a file that does not load (a duplicated key, a YAML
+    error, not a mapping); each is recorded in
+    `data_sources.composite_parse_errors` with its reason. The spelling
+    check reads git's own file list, the exact paths a runner checks out,
+    so every disk gives the same answer: a wrong-case path does not exist on
+    a Linux runner (the common case), so the scan refuses it rather than
+    grade a file that may not run, and an action under `.github/actions/`
+    reached only through a wrong-case path earns nothing. Outside a git work
+    tree the directory listing decides, and a directory that cannot be
+    listed fails closed ("directory could not be listed").
+  - A dependency cache switch set by an expression earns credit only when it
+    resolves to a value that turns caching on. The switch is the input the
+    action itself reads: `bundler-cache` for setup-ruby, `enable-cache` for
+    setup-uv, `cache-disabled` for Gradle's actions and npm-install, `cache`
+    for every other `setup-*` action; action and input names match in any
+    case (`Actions/Setup-Go` is `actions/setup-go`). An expression on a key
+    the action does not read (`cache:` on setup-uv) changes nothing: the
+    action's default decides. `${{ inputs.cache }}` inside a local action
+    takes each caller's `with:` value, else the action's input default;
+    inside a reusable workflow, each calling job's `with:` value, else the
+    `workflow_call` default (an input the workflow declares nowhere has no
+    value). Each value it resolves to is graded exactly as if written in
+    place, by the same rule as #154's defaults, so an empty value on
+    setup-node v5+ falls through to its automatic cache, and the step earns
+    credit when any of them caches. Any other expression (`${{ env.X }}`,
+    `${{ matrix.x }}`, `${{ inputs.cache || 'npm' }}`) used to count as a
+    truthy string; it now earns nothing and is named on the card and in
+    `data_sources.unresolved_cache_expressions`. Such a switch never falls
+    back to the action's default-on cache (#154), which would otherwise read
+    any expression as caching. A value written literally keeps its verdict.
+  - The dependency-caching check, card and `data_sources` alike, reads a
+    local action only from the workflows it grades: an action that only an
+    unread called workflow runs earns nothing.
+  - A job-level call to another repository's reusable workflow
+    (`jobs.ci.uses: org/shared/.github/workflows/ci.yml@main`) was left out
+    of the pinning count, so one pinned step read "1 of 1" and passed. It
+    now reads "1 of 2" and fails; a SHA-pinned call counts as pinned. The
+    evidence notes how many reusable-workflow calls were counted. A
+    repository whose only remote reference is such a call moves from not
+    applicable to a fail ("0 of 1").
+  - Content the scan could not read is now named on the caching, pinning
+    and shallow-checkout cards ("not read, so nothing inside was graded:
+    …"), not only in `data_sources`: local actions not read (a path with no
+    `action.yml` in the checkout says it may be checked out at run time),
+    workflow files that do not parse, step lists that are not lists, and
+    reusable-workflow calls not followed. A full-history job exempt only
+    because a local action it uses, or one that action reaches, could not
+    be read (missing, outside the repository, in the wrong case, or more
+    than 16 deep) is still exempt, since it cannot be proven history-free;
+    the card now says so ("exempt only because ./shared/setup could not be
+    read") instead of claiming the job walks git history.
+  - Owner decision (2026-10-27): dependency caching is not applicable only
+    when a local action that is not in the checkout is the only thing that
+    could explain the missing cache. Nothing readable shows a cache; no
+    readable step is a `setup-*` action or carries a cache input; the
+    action has no `action.yml` in the checkout (a wrong-case path, a path
+    outside the repository or a file that does not load does not count),
+    runs in a job on the pull-request path before an install, build or test
+    step (readable local actions are followed in step order), and its own
+    `if:` is not literally false; and no install anywhere runs without such
+    an action before it in its job. A readable default-on cache action
+    (#154: `gradle/gradle-build-action`, `bahmutov/npm-install`) counts as a
+    step that could cache, as a `setup-*` step does. The card says so, and
+    the "not read" note names the action. Anything else fails.
+  - #154's step-level `if:` exemption for a full-history checkout applies
+    on the whole pull-request path: inside a called workflow it is judged
+    against the events that reach it, and a `fetch-depth` resolved from a
+    caller's input counts only on a step that can run on a pull request.
+  - Both frozen calibration controls score exactly as before (no fact or
+    evidence string moves; a committed snapshot of every fact now enforces
+    it). Other repositories can score LOWER: an action outside
+    `.github/actions/` or a called workflow can expose an unpinned action or
+    a full-history checkout that was never read before. A repository can
+    also score higher where an unread local action is the only place its
+    dependency cache could be.
+
 - **2026-10-27** — **Fixed** (#154): a repository whose setup action caches
   dependencies by default no longer fails Dependency caching. `setup-go` v4+
   and `setup-uv` v5+ with no cache input, `setup-ruby` with

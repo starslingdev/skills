@@ -2,14 +2,15 @@
 the CI Score, offline, from a local checkout only.
 
 Flow: verify the target is a git checkout → read + parse
-`.github/workflows/*.yml|yaml` → `_practice_facts(parsed, root)` (which itself
+`.github/workflows/*.yml|yaml` → `_practice_facts(parsed, root, parse_errors)` (which itself
 walks local composite actions and the repo-root build-tool config probes) →
 `compute_ci_score` → write `findings.json` carrying the `ci_score` stamp.
 
 LOCAL-CHECKOUT-ONLY (OD-L2, owner-decided): the scorer's input surface is
-three classes — workflow YAML, `.github/actions/**` composite actions, and
-repo-ROOT build-tool configs. A partial fetch (e.g. workflows-only via an API)
-silently turns failing checks `not_applicable` and INFLATES the grade, so this
+workflow YAML, `.github/actions/**` composite actions plus every local action
+any `uses:` names wherever it lives, the workflow lockfile
+(`.github/workflows/actions.lock`), and repo-ROOT build-tool configs. A
+partial fetch (e.g. workflows-only via an API) silently turns failing checks `not_applicable` and INFLATES the grade, so this
 collector refuses politely outside a full checkout rather than guessing. No
 network, ever: everything is read from the local tree; the offline contract
 cell runs this module with sockets booby-trapped.
@@ -256,7 +257,7 @@ def collect(root: Path, spec_path: Path = _DEFAULT_SPEC) -> tuple[dict[str, Any]
         # step budget in practice_facts.py), but any RecursionError /
         # MemoryError it could still raise must become an honest
         # ci_score_error marker, never a traceback with no output.
-        doc["practice_facts"] = pf_mod._practice_facts(parsed, root)
+        doc["practice_facts"] = pf_mod._practice_facts(parsed, root, parse_errors)
         # Parallel steps (GitHub Actions `parallel:` groups and their wait/cancel
         # control steps): every check reads the child steps through one walker;
         # record what it read so the report header can disclose it — including a
@@ -284,9 +285,19 @@ def collect(root: Path, spec_path: Path = _DEFAULT_SPEC) -> tuple[dict[str, Any]
         # A setup action's default cache that could not be decided (an
         # unusable package.json, a SHA pin the v5 and v6 rules disagree on):
         # recorded the same way, and named in the caching fact's evidence.
-        unresolved = pf_mod._unresolved_setup_defaults(parsed, root)
+        # A cache switch set by an expression this scan could not resolve
+        # (not credited) is recorded beside them, by file.
+        # (An engine without the shared walk - the "no score can drop" base -
+        # records only the defaults.)
+        walk = getattr(pf_mod, "_cache_walk_inputs", None)
+        if walk is not None:
+            _hits, unresolved, unresolved_exprs = walk(parsed, root)
+        else:
+            unresolved, unresolved_exprs = pf_mod._unresolved_setup_defaults(parsed, root), []
         if unresolved:
             doc["data_sources"]["unresolved_setup_defaults"] = unresolved
+        if unresolved_exprs:
+            doc["data_sources"]["unresolved_cache_expressions"] = unresolved_exprs
         if logger.isEnabledFor(logging.DEBUG):
             states = {k: v.get("state") for k, v in doc["practice_facts"].items()}
             logger.debug("practice facts: %s", states)
