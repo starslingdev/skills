@@ -1774,3 +1774,69 @@ def test_an_inner_action_past_the_depth_cap_is_exempt_only_because_of_it(tmp_pat
     doc = _collect(tmp_path, files)
     assert _fact(doc, SHALLOW)["evidence"] == _exempt_only(
         "./a/17", "./a/17 (nested more than 16 deep)"), _fact(doc, SHALLOW)
+
+
+# ---- 7. OD-CS23 (#154) and OD-CS24 (#156) together ----------------------------
+#
+# Both changed the dependency-caching walk; the merged engine applies both rule
+# sets. An explicit cache input set by an expression decides its step: it never
+# falls back to the default-on credit, whose shared verdict reads any
+# expression as caching.
+
+GO_FILES = {"go.mod": "module x\n", "go.sum": ""}
+GO_CALLER = SETUP_CALLER.replace("npm test", "go test ./...")
+
+
+def test_an_unresolved_cache_expression_never_falls_back_to_a_default_on_cache(tmp_path):
+    doc = _collect(tmp_path, {**GO_FILES, ".github/workflows/ci.yml": GO_CALLER,
+                              "ci/setup/action.yml": _composite(
+                                  f"uses: actions/setup-go@{SHA} # v5\n      with:\n"
+                                  "        cache: \"${{ env.GO_CACHE }}\"")})
+    assert _fact(doc, CACHE) == {
+        "state": "fail", "evidence": CACHE_FAIL + UNRESOLVED_CACHE + "ci/setup/action.yml",
+        "files": []}, _fact(doc, CACHE)
+
+
+def test_a_cache_input_every_caller_turns_off_never_falls_back_to_the_default(tmp_path):
+    doc = _collect(tmp_path, {**GO_FILES, ".github/workflows/ci.yml": _job_wf(
+        "uses: ./ci/setup\n        with: {cache: false}", "run: go test ./..."),
+        "ci/setup/action.yml": "inputs:\n  cache: {default: 'true'}\n" + _composite(
+            "uses: actions/setup-go@v5\n      with:\n        cache: ${{ inputs.cache }}")})
+    assert _fact(doc, CACHE) == {"state": "fail", "evidence": CACHE_FAIL, "files": []}, \
+        _fact(doc, CACHE)
+
+
+def test_negative_control_a_default_on_setup_with_no_cache_input_is_still_credited(tmp_path):
+    doc = _collect(tmp_path, {**GO_FILES, ".github/workflows/ci.yml": GO_CALLER,
+                              "ci/setup/action.yml": _composite("uses: actions/setup-go@v5")})
+    assert _fact(doc, CACHE) == {"state": "pass", "evidence": CACHE_PASS_ONE,
+                                 "files": ["ci/setup/action.yml"]}, _fact(doc, CACHE)
+
+
+def test_od5_a_readable_default_on_cache_action_turned_off_still_fails(tmp_path):
+    doc = _collect(tmp_path, {"package.json": "{}\n", ".github/workflows/ci.yml": _job_wf(
+        f"uses: gradle/gradle-build-action@{SHA}\n        with: {{cache-disabled: true}}",
+        "uses: ./shared/setup", "run: npm ci")})
+    assert _fact(doc, CACHE) == {
+        "state": "fail",
+        "evidence": CACHE_FAIL + "; " + NOT_READ + "./shared/setup" + NO_FILE_NOTE,
+        "files": []}, _fact(doc, CACHE)
+
+
+def test_a_step_scoped_full_history_checkout_in_a_called_workflow_is_exempt(tmp_path):
+    doc = _collect(tmp_path, {".github/workflows/ci.yml": CALLER,
+                              ".github/workflows/test.yml": f"""
+        on: workflow_call
+        jobs:
+          unit:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@{SHA}
+                if: github.event_name == 'push'
+                with: {{fetch-depth: 0}}
+              - run: pytest
+        """})
+    got = _fact(doc, SHALLOW)
+    assert got["state"] == "pass", got
+    assert ("1 take(s) full history only in a checkout step whose own if: is never true"
+            in got["evidence"]), got

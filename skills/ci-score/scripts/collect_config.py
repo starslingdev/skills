@@ -282,6 +282,12 @@ def collect(root: Path, spec_path: Path = _DEFAULT_SPEC) -> tuple[dict[str, Any]
             doc["data_sources"]["unreadable_step_lists"] = bad_lists
         if composite_errors:
             doc["data_sources"]["composite_parse_errors"] = composite_errors
+        # A setup action's default cache that could not be decided (an
+        # unusable package.json, a SHA pin the v5 and v6 rules disagree on):
+        # recorded the same way, and named in the caching fact's evidence.
+        unresolved = pf_mod._unresolved_setup_defaults(parsed, root)
+        if unresolved:
+            doc["data_sources"]["unresolved_setup_defaults"] = unresolved
         if logger.isEnabledFor(logging.DEBUG):
             states = {k: v.get("state") for k, v in doc["practice_facts"].items()}
             logger.debug("practice facts: %s", states)
