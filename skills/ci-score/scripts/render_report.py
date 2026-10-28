@@ -79,7 +79,8 @@ _FIX_TABLE: dict[str, dict[str, str]] = {
                    "enable the setup action's cache input (e.g.\n"
                    "- uses: actions/setup-node@<sha>\n"
                    "  with: {cache: npm}\n"
-                   ") or add an actions/cache step keyed on the lockfile. If the\n"
+                   "; for astral-sh/setup-uv, add `enable-cache: true`)\n"
+                   "or add an actions/cache step keyed on the lockfile. If the\n"
                    "deps are installed inline with no manifest, add the manifest\n"
                    "first, then key the cache on it"),
     },
@@ -529,7 +530,7 @@ def render_report(doc: dict[str, Any], registry: dict[str, Any]) -> str:
         lines += ["## Recommendations", "",
                   "Every applicable check passes — nothing to recommend. "
                   "(Re-run after CI changes; the practices above are the "
-                  "full v0.1.4 rubric.)", ""]
+                  "full v0.1.5 rubric.)", ""]
         lines += _render_appendix(registry)
         return "\n".join(lines) + "\n"
 

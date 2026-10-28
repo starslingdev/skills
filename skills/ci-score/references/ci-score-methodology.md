@@ -1,4 +1,4 @@
-# CI Score v0.1.4 — methodology
+# CI Score v0.1.5 — methodology
 
 > **CI Score gauges best-practice adherence on CI speed and gate hygiene: a
 > straightforward pass/fail rubric of best-practice checks computed from a
@@ -82,15 +82,15 @@ number:
 
 | Check | The fact |
 |---|---|
-| Dependency caching | some workflow configures it (`actions/cache` or a setup action's cache input) *(n/a when the repo installs no dependencies at all — no manifest, no install command, and no language setup action)* |
+| Dependency caching | some workflow configures it (`actions/cache`, a setup action's cache input, or a setup action whose cache is on by default) *(n/a when the repo installs no dependencies at all — no manifest, no install command, and no language setup action)* |
 | Build caching | a build-tool cache is configured *(n/a without a build tool)* |
-| Shallow checkout | no PR-triggered workflow uses `fetch-depth: 0` |
-| Test sharding / matrix | a test job runs sharded or as a matrix *(n/a when there is no test-like job to shard)* |
+| Shallow checkout | no PR-triggered workflow uses `fetch-depth: 0` on the pull-request path |
+| Test sharding / matrix | a test job runs sharded or as a matrix, including one generated at runtime *(n/a when there is no test-like job to shard)* |
 | Change-scoped builds | CI scopes work to what changed (task-graph filters, affected/changed modes, or a changed-files step) *(n/a without a task graph)* |
 | Concurrency groups | PR workflows declare a `concurrency` group |
 | Superseded runs cancelled | ...with `cancel-in-progress` |
 | Path filters | some PR workflow scopes itself with `paths` |
-| Job timeouts | `timeout-minutes` is set (GitHub's default is 6 hours) |
+| Job timeouts | `timeout-minutes` is set (GitHub's default is 6 hours) *(n/a when every job delegates to a reusable workflow and some of them live in another repo)* |
 | Scoped OIDC id-token | `id-token: write` at job level, never workflow-wide *(n/a when unused)* |
 | Pinned action SHAs | **≥95%** of remote action references are SHA-pinned — full adoption with room for Renovate-style stragglers (at most 1 in 20); the evidence always shows pinned-of-total. The threshold is a ratio, so a repo with fewer than 20 references has no straggler allowance: one unpinned reference fails it |
 
@@ -108,7 +108,7 @@ the practice matters. The score card links every check name here.
 
 ### Dependency caching
 
-**The fact:** at least one workflow or local composite action configures dependency caching (a cache action - actions/cache incl. restore/save, rust-cache, buildjet - or a setup-* action's cache input). Caching housed in cross-repo reusable workflows is not visible; run the score in that repo.
+**The fact:** at least one workflow or local composite action configures dependency caching (a cache action - actions/cache incl. restore/save, rust-cache, buildjet - or a setup-* action's explicit cache or enable-cache input set to any value other than false, credited on any runner as before; or a setup action whose cache is ON BY DEFAULT or switched by a differently-named input, using the speed engine's own table: actions/setup-go v4+ unless cache is set off, and only once a checkout of this repository to the workspace root has finished earlier in the same job and a go.sum exists at the repo root or at the step's cache-dependency-path; astral-sh/setup-uv v5+ unless enable-cache is set off (its default, enable-cache: auto, caches only on GitHub-hosted runners, so with no enable-cache input it counts only when the job's runs-on is one of GitHub's published hosted-runner image labels - ubuntu-latest, ubuntu-24.04, ubuntu-24.04-arm, ubuntu-slim, windows-2025, windows-11-arm, macos-15, macos-15-intel, macos-15-xlarge and the like - as a string or a one-item list, and never inside a local composite action, whose runner is its caller's; on any other runner, including a larger runner whose label its owner names, enable-cache: true earns it); ruby/setup-ruby with bundler-cache; actions/setup-node v5+ when the repo-root package.json names the package manager (v5: npm/yarn/pnpm in packageManager; v6+: npm only, in devEngines.packageManager or packageManager) unless package-manager-cache is set off (an expression there is read as its default, true), and only once a checkout of this repository to the workspace root has finished earlier in the same job; gradle/actions/setup-gradle and gradle/gradle-build-action unless cache-disabled is true; and bahmutov/npm-install. A checkout has finished when it ran earlier in sequence or in an earlier parallel: group, not when it shares the step's group or is an earlier background: true checkout. with: input names are read case-insensitively in both directions, so Cache: npm opts in exactly as cache: npm does and Cache: false opts out exactly as cache: false does. A SHA- or branch-pinned ref names no version, so a default-on setup action counts as caching unless a version comment beside the SHA (# vN, # tag=vN, # ratchet:owner/action@vN, # pin@vN, # owner/action@vN, # @vN) names a release from before the default turned on, or names no release at all (a date such as 2024-05-01, a range such as 20.x, or a major the action has never released is not a release); gradle's and npm-install's default-on actions always cache, so their comments are not read; setup-node counts only when its v5 and v6 rules agree, or when every release its version comment names caches. A default this scan cannot decide earns nothing and is named in the evidence (could not be resolved) and in data_sources.unresolved_setup_defaults: a package.json that cannot be read, is not JSON or is not an object; a SHA or branch ref the setup-node rules disagree on; a version comment that names no release; a runs-on expression or runner group for setup-uv's default; a cache-dependency-path that is an expression, an absolute path, outside the repository (..) or only exclusions (!); a checkout that may still be running, or that went to a sub-path or another repository. A package.json setup-node cannot use because it starts with a byte-order mark (setup-node's own parse rejects it) is decided off, and named and recorded the same way (earns no default cache). An opt-out, a pre-default release (including one a version comment names), no package manager in package.json, and no checkout at all are plain offs and name nothing). Caching housed in cross-repo reusable workflows is not visible; run the score in that repo.
 
 **Not applicable when:** the repo shows NO dependency-install signal at all - no dependency manifest at the repo root (package.json / lockfiles / requirements*.txt / pyproject.toml / go.mod / Cargo.toml / build.gradle / pom.xml / *.csproj / mix.exs / build.sbt / Gemfile / composer.json / pubspec.yaml and the like), no dependency-install command in any workflow or composite step (pip / npm / pnpm / yarn / bun / poetry / uv / composer / bundle / gem / conda / mvn / gradle / dotnet / mix / cabal / stack with an install-style verb, or `go mod download` / `cargo fetch`), and no language setup action (actions/setup-node / setup-python / setup-java / setup-dotnet / setup-go / setup-ruby and the like) - and no cache is already configured; with nothing installed there is nothing to cache, so a missing cache is never a fail (OD-CS19). Any one of those three signals makes the check applicable. OR CI is delegated to cross-repo reusable workflows and no local caching is visible - a mechanism this fact cannot see is never failed
 
@@ -130,7 +130,7 @@ the practice matters. The score card links every check name here.
 
 ### Shallow checkout
 
-**The fact:** no checkout step on a PR-GATING workflow sets fetch-depth: 0 (structure-walked; comments never count; a JOB THAT WALKS GIT HISTORY - changelog generation, a merge-base or base-SHA diff, tag/describe, changeset versioning - is exempt: full history is load-bearing there and shallowing it would break the job; post-merge automation - a pull_request trigger whose types are only [closed], e.g. backport/changelog jobs - is exempt too: it needs history and gates nobody; a job whose own if: can never be true for a pull-request event - e.g. github.event_name == 'push', or a job scoped to the merge queue with github.event_name == 'merge_group', which is not a pull-request event - is exempt too: no pull request waits for it. Only simple, fully resolvable event_name conditions are read; anything else keeps the job on the PR path, including a bare literal if: false, which the grammar does not read and which is therefore still graded - a known miss in the fail-closed direction, costing at most a finding that was already reported)
+**The fact:** no checkout step on a PR-GATING workflow sets fetch-depth: 0 (structure-walked; comments never count; a JOB THAT WALKS GIT HISTORY - changelog generation, a merge-base or base-SHA diff, tag/describe, changeset versioning - is exempt: full history is load-bearing there and shallowing it would break the job; post-merge automation - a pull_request trigger whose types are only [closed], e.g. backport/changelog jobs - is exempt too: it needs history and gates nobody; a job whose own if: can never be true for a pull-request event - e.g. github.event_name == 'push', or a job scoped to the merge queue with github.event_name == 'merge_group', which is not a pull-request event - is exempt too: no pull request waits for it; and the same rule reads a checkout STEP's own if: - a job whose every fetch-depth: 0 checkout step carries an if: that can never be true for a pull-request event takes no full history on the PR path and is exempt. Only simple, fully resolvable event_name conditions are read; anything else keeps the job on the PR path, including a bare literal if: false, which the grammar does not read and which is therefore still graded - a known miss in the fail-closed direction, costing at most a finding that was already reported)
 
 **Why it matters:** CI downloads your repo's entire history when it only needs today's code.
 
@@ -140,7 +140,7 @@ the practice matters. The score card links every check name here.
 
 ### Test sharding / matrix
 
-**The fact:** a test-like job (test/spec/e2e/integration/unit in its id or name) runs a matrix, or any job's matrix axis is shard-like (shard/chunk/split/partition)
+**The fact:** a test-like job (test/spec/e2e/integration/unit in its id or name) runs a matrix, or any job's matrix axis is shard-like (shard/chunk/split/partition). A matrix generated at runtime (matrix: ${{ fromJSON(...) }}) is a matrix: on a test-like job it passes; on any other job no axis is visible to call shard-like, so the job-name rule decides, exactly as for a literal matrix
 
 **Not applicable when:** no test-like job (test/spec/e2e/integration/unit in an id or name) and no shard-like matrix axis exists in any parsed workflow - you cannot shard tests you do not have, so a missing shard is never a fail (OD-CS19); OR CI is delegated to cross-repo reusable workflows and no local test job is visible
 
@@ -194,7 +194,9 @@ the practice matters. The score card links every check name here.
 
 ### Job timeouts
 
-**The fact:** workflow jobs set timeout-minutes (any usage; GitHub's default is 360 minutes)
+**The fact:** workflow jobs set timeout-minutes (any usage; GitHub's default is 360 minutes). A job that calls a reusable workflow cannot set timeout-minutes; a local reusable workflow's own jobs are graded where they are defined
+
+**Not applicable when:** no job sets timeout-minutes, every job in every parsed workflow calls a reusable workflow (none runs steps of its own), and at least one of those calls is cross-repo - the jobs that could carry a timeout live where this scan cannot see, and a mechanism this fact cannot see is never failed. A single job that runs its own steps keeps the check applicable
 
 **Why it matters:** A hung job bills the full 6-hour GitHub default before dying - a timeout caps the damage at minutes.
 
@@ -398,6 +400,58 @@ and the other holds at 82. The rationale is OD-CS22 in the spec's
 nothing else — their facts and scores are unchanged — and the published worked
 example keeps its own frozen `v0.1.3` stamp, since a snapshot records what the
 engine said on the day it ran.
+
+**v0.1.5 (2026-10-27, OD-CS23)** stops four checks failing repositories that
+follow the practice. **Dependency caching** credits a setup action whose cache
+is on by default or switched by an input other than `cache:` (setup-go v4+,
+setup-uv v5+, setup-ruby's `bundler-cache`, setup-node v5+ when `package.json`
+names the package manager, `gradle/actions/setup-gradle`,
+`gradle/gradle-build-action`, `bahmutov/npm-install`); the rules are the speed
+engine's own, copied and pinned to it by a test, and an explicit opt-out such as
+`cache: false` or `package-manager-cache: false` still fails. Two owner rules
+narrow that credit in ci-score only. A SHA-pinned action names no version, so a
+default-on action pinned by SHA counts as caching unless its version comment
+(`# v3.5.0`, `# tag=v3.5.0`, `# ratchet:owner/action@v3`, `# pin@v3`) names a
+release from before the default turned on, or names no release at all. And
+setup-uv's default (`enable-cache: auto`) caches only on GitHub-hosted runners,
+so with no input it counts only on one of GitHub's published hosted-runner
+labels, and never inside a local composite action; `enable-cache: true` earns
+it on any runner. The credit also waits for what the action actually reads:
+setup-node and setup-go count only after a checkout of this repository to the
+workspace root has finished earlier in the job (not one still running in the
+same `parallel:` group or in the background), setup-go needs a `go.sum`, and a
+`package-manager-cache` written as an expression is read as its default.
+Input names are read case-insensitively in both directions (`Cache: npm` opts
+in, `Cache: false` opts out). A date, a range such as `20.x` or an implausible
+major in a version comment is not a release. Owner decision 3 adds one credit: a
+SHA-pinned setup-node whose v5 and v6 rules disagree counts when every release
+its version comment names caches. A default this scan cannot decide (an
+unreadable or invalid `package.json`, an undecided SHA or branch ref, a version
+comment naming no release, an unreadable `runs-on` for setup-uv, an uncheckable
+`cache-dependency-path`, a checkout still running or moved) earns nothing and
+is named in the evidence and in `data_sources.unresolved_setup_defaults`; a
+`package.json` with a byte-order mark is decided off and named the same way. An explicit
+cache input other than `false` is credited on any runner, as before. **Test
+sharding** reads a matrix generated at runtime (`matrix: ${{ fromJSON(...) }}`)
+as a matrix: it passes on a test-like job, and on any other job the job-name
+rule decides, as for a literal matrix. Pass, not "not applicable", because the
+fact as written is satisfied. **Job timeouts** is not applicable when every job
+calls a reusable workflow and some call is cross-repo, since a calling job
+cannot set `timeout-minutes`; one job with its own steps keeps it graded.
+**Shallow checkout** applies the v0.1.4 reachability rule to a checkout step's
+own `if:`, with the same fail-closed grammar. Every change moves a verdict
+toward credit (fail to pass, fail to not applicable, or not applicable to
+pass), so a check that newly becomes applicable arrives passing; the
+withholding rules only narrow credit this change adds, since v0.1.4 credited no
+default-on cache at all. Run against the v0.1.4 engine over the frozen
+calibration controls, all eleven facts were identical on both, state and
+evidence, when the controls' facts were pinned; a test pins those facts, and
+re-checks the controls and an explicit list of OD-CS23 cases against the
+v0.1.4 engine for any move away from credit (later changes that drop a
+verdict on purpose are listed in an allowlist); committed corpus stamps carry
+the new `spec_version` and nothing else. One edge: a repository whose only
+applicable check was job timeouts (every job delegated cross-repo) moves from a
+0 grade to the all-not-applicable refusal.
 
 The v1-granular rubric (measured-magnitude gating, tiers, weights,
 nine refusal conditions) was **punted before publication by owner decision
