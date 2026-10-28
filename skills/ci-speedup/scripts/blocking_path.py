@@ -9597,7 +9597,7 @@ def _windows_setup_guidance(f: dict[str, Any], catalog_url: str) -> str:
                for label in labels):
             return ""
     step = str((f.get("decomposition") or {}).get("dominant_step") or "")
-    if re.search(r"setup-dotnet|dotnet\s+workload\s+install|install\s+\.net\s+workloads?", step, re.I):
+    if re.search(r"setup-dotnet|dotnet\s+workload\s+install|install\s+\.net\s+workloads?|^(?:setup|set\s+up|install)\s+\.net(?:\s+\d+(?:\.\d+)*(?:\.x)?)?(?:\s+sdk)?\s*$", step, re.I):
         target, anchor, label = ("OPT94", "opt94--the-net-sdk-can-reconcile-unrelated-machine-wide-workloads",
                                  "isolated .NET SDK setup")
     elif re.search(r"(?:nuget|dotnet)\s+restore|restore\s+(?:nuget|\.net)(?:\s+packages)?", step, re.I):
@@ -10208,6 +10208,7 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     out += _metadata_table(doc, repo)
     # An unscanned file must never read as clean — keep the coverage warning on top.
     out += _coverage_gap_banner(doc.get("scan_incomplete"))
+    out += _unresolved_gate_lines(doc.get("pr_critical_path") or {})
     # WHY there is no measured spine decides what this banner may claim. A BROKEN FETCH
     # (the workflow-list fetch died; the breaker aborted the gh pass; every run-list
     # fetch 5xx'd) produces the same empty `pr_critical_path` as a genuinely dormant
@@ -10380,6 +10381,13 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
 _LAST_CLAIMS: claims.ClaimSet | None = None
 
 
+def _unresolved_gate_lines(cp: dict[str, Any]) -> list[str]:
+    """Keep the reason beside the gate, independent of sampling footnotes."""
+    if cp.get("provenance") != "unresolved" or not cp.get("unresolved_reason"):
+        return []
+    return ["> **Merge gate unresolved:** " + _clean_label(str(cp["unresolved_reason"])), ""]
+
+
 def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
            samples: dict[str, dict[str, Any]] | None = None,
            log_runs: dict[str, str] | None = None,
@@ -10433,8 +10441,9 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
             # invariant on a real all-fileless degenerate repo.
             return _strip_emdashes("\n".join([
                 f"# {doc.get('repo', 'repo')} — why is the merge slow?", "",
-                *_deg_era_lines, *_deg_fileless_lines]))
-        return "_No measured critical path in this findings JSON._"
+                *_unresolved_gate_lines(cp), *_deg_era_lines, *_deg_fileless_lines]))
+        return _strip_emdashes("\n".join(
+            _unresolved_gate_lines(cp) + ["_No measured critical path in this findings JSON._"]))
     repo = doc.get("repo", "repo")
     catalog_url = _build_catalog_url(doc.get("skill_commit_sha"))
     all_findings = _dedupe_findings(list(doc.get("findings") or []))
@@ -11117,6 +11126,7 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
     # The PR-floor demotion banner sits right under the coverage warning: it reframes
     # everything below as the PR-floor, so it must be read before the bottom line.
     out += _pr_floor_fallback_banner(doc, cp)
+    out += _unresolved_gate_lines(cp)
 
     # Executive summary - the one number a reader wants (total merge wait) and the
     # single biggest measured win, scannable above the framing paragraph. The win is

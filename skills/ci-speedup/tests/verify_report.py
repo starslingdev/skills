@@ -2094,7 +2094,7 @@ def check_windows_setup_guidance(report: str, findings_path: Path | None) -> Che
                     for labels in samples):
                 continue
             step = str(_as_dict(f.get("decomposition")).get("dominant_step") or "")
-            if re.search(r"setup-dotnet|dotnet\s+workload\s+install|install\s+\.net\s+workloads?", step, re.I):
+            if re.search(r"setup-dotnet|dotnet\s+workload\s+install|install\s+\.net\s+workloads?|^(?:setup|set\s+up|install)\s+\.net(?:\s+\d+(?:\.\d+)*(?:\.x)?)?(?:\s+sdk)?\s*$", step, re.I):
                 target, anchor, label = ("OPT94", "opt94--the-net-sdk-can-reconcile-unrelated-machine-wide-workloads", "isolated .NET SDK setup")
             elif re.search(r"(?:nuget|dotnet)\s+restore|restore\s+(?:nuget|\.net)(?:\s+packages)?", step, re.I):
                 target, anchor, label = ("OPT93", "opt93--nuget-restores-to-a-slower-disk-on-windows-runners", "NuGet cache placement")
@@ -8732,6 +8732,16 @@ def _vr_opt80_tail_withheld_expected(f: dict, data: dict) -> "set[str] | None":
     # merge waits on is unknown, so "not merge-gating" is not a stamped fact.
     if _vr_required_reachability_unresolved(data):
         return {"merge_gating_unknown"}
+    # A shared check name cannot identify one workflow's job. Mirror the
+    # collector's ambiguity refusal, including workflow-prefix disambiguation.
+    graph = _as_dict(data.get("workflow_job_graph"))
+    for required in _as_list(data.get("required_checks")):
+        hits = [(str(w), str(k)) for w, jobs in graph.items()
+                for k, node in _as_dict(jobs).items()
+                if _vr_opt80_check_names_job(str(required), str(k), _as_dict(node),
+                    _vr_opt80_workflow_prefixes(str(w), data.get("workflow_names")))]
+        if len(hits) > 1 and any(w == wf for w, _ in hits):
+            return {"merge_gating_unknown"}
     return {"not_merge_gating", "tail_not_derivable"}
 
 

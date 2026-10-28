@@ -105,8 +105,9 @@ def test_verifier_accepts_valid_pointer_and_rejects_wrong_context(tmp_path):
     assert not vr.check_windows_setup_guidance(report + "\n" + pointer, path).ok
 
 
-def test_full_report_headline_totals_and_sizing_are_byte_identical(tmp_path):
-    f = finding("dotnet workload install android")
+@pytest.mark.parametrize("step", ["dotnet workload install android", "Setup .NET", "Install .NET SDK"])
+def test_full_report_headline_totals_and_sizing_are_byte_identical(tmp_path, step):
+    f = finding(step)
     f["title"] += " — `build`"
     doc = {"repo": "sample/project", "scanned_at": "2026-01-01T00:00:00Z",
            "findings": [f],

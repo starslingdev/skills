@@ -489,12 +489,12 @@ _MAX_LOCAL_ACTION_DEPTH = 16
 
 def _local_ref_path(root: Path, ref: str) -> "Path | None":
     """`<root>/<ref[2:]>` for a local ref (`./…` or `$/…`), or None when that
-    path lands outside the repository root (`$/../x`, `$//abs`): a file there
+    path resolves outside the repository root (including symlinks): a file there
     is not this repository's, so the caller fails CLOSED on it."""
     base = root / ref[2:]  # strip leading "./" or "$/"
     try:
-        root_n = os.path.normpath(os.path.abspath(root))
-        base_n = os.path.normpath(os.path.abspath(base))
+        root_n = os.path.realpath(root)
+        base_n = os.path.realpath(base)
         if os.path.commonpath([root_n, base_n]) != root_n:
             return None
     except ValueError:
@@ -813,6 +813,8 @@ def _read_local_action(root: Path, ref: str) -> "str | None":
         base / "action.yml", base / "action.yaml"]
     for cand in candidates:
         try:
+            if _local_ref_path(root, "./" + os.path.relpath(cand, root)) is None:
+                continue
             return cand.read_text(encoding="utf-8", errors="replace")
         except (OSError, ValueError):   # ValueError: an embedded NUL byte
             continue
@@ -5218,7 +5220,7 @@ _STATUS_CONTEXT_DYNAMIC_RE = re.compile(
 # String literals (quoted, or a YAML scalar value) a dynamic publisher's sources hold.
 _STRING_LITERAL_RE = re.compile(r"(['\"`])([^'\"`\n\\]{1,200})\1")
 _YAML_SCALAR_RE = re.compile(
-    r"^[ \t]*-?[ \t]*[\w.-]+:[ \t]+([^\s'\"`#{\[|>&*!][^#\n]{0,199}?)[ \t]*$", re.MULTILINE)
+    r"^[ \t]*(?:-[ \t]+)?[\w.-]+:[ \t]+([^\s'\"`#{\[|>&*!][^#\n]{0,199}?)[ \t]*$", re.MULTILINE)
 _STATUS_SOURCE_MAX_CHARS = 256_000
 _MAX_STATUS_SOURCES = 64
 
