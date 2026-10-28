@@ -77,6 +77,9 @@ def _load_sibling(mod_name: str, filename: str):
     return mod
 
 
+_workflow_yaml = _load_sibling("ci_score_workflow_yaml", "practice_facts.py")
+
+
 def _git(root: Path, *args: str) -> str | None:
     """One local git plumbing call; None on any failure (git absent, not a
     repo). Local-only — git never touches the network for these."""
@@ -131,7 +134,7 @@ def _provenance(root: Path) -> str | None:
     return f"{sha}-dirty" if dirty else sha
 
 
-def _read_workflows(root: Path) -> tuple[list[tuple[str, dict, str]], list[str], list[str]]:
+def _read_workflows(root: Path, reasons: dict[str, str] | None = None) -> tuple[list[tuple[str, dict, str]], list[str], list[str]]:
     """(parsed, workflow_files, parse_errors). `workflow_files` counts every
     on-disk workflow file (that count drives the no-workflows refusal
     honestly); `parsed` carries only the mapping-shaped docs the facts can
@@ -147,10 +150,12 @@ def _read_workflows(root: Path) -> tuple[list[tuple[str, dict, str]], list[str],
         rel = str(path.relative_to(root))
         try:
             raw = path.read_text(encoding="utf-8", errors="replace")
-            doc = yaml.safe_load(raw)
+            doc = yaml.load(raw, Loader=_workflow_yaml._StrictLockLoader)
         except (OSError, yaml.YAMLError) as exc:
             logger.debug("workflow parse failed: %s (%s)", rel, type(exc).__name__)
             errors.append(rel)
+            if reasons is not None and isinstance(exc, _workflow_yaml._DuplicateKeyError):
+                reasons[rel] = str(exc)
             continue
         if isinstance(doc, dict):
             parsed.append((rel, doc, raw))
@@ -222,11 +227,15 @@ def collect(root: Path, spec_path: Path = _DEFAULT_SPEC) -> tuple[dict[str, Any]
         return doc, 2
     doc["commit_sha"] = commit
 
-    parsed, workflow_files, parse_errors = _read_workflows(root)
+    parse_reasons: dict[str, str] = {}
+    parsed, workflow_files, parse_errors = _read_workflows(root, parse_reasons)
     doc["scanned_workflows"] = len(workflow_files)
     doc["workflow_files"] = workflow_files
     if parse_errors:
         doc["data_sources"]["workflow_parse_errors"] = parse_errors
+
+    if parse_reasons:
+        doc["data_sources"]["workflow_parse_error_reasons"] = parse_reasons
 
     if workflow_files and not parsed:
         # Files exist but NONE parsed: every practice fact would be computed
@@ -257,7 +266,7 @@ def collect(root: Path, spec_path: Path = _DEFAULT_SPEC) -> tuple[dict[str, Any]
         # step budget in practice_facts.py), but any RecursionError /
         # MemoryError it could still raise must become an honest
         # ci_score_error marker, never a traceback with no output.
-        doc["practice_facts"] = pf_mod._practice_facts(parsed, root, parse_errors)
+        doc["practice_facts"] = pf_mod._practice_facts(parsed, root, parse_errors, parse_reasons)
         # Parallel steps (GitHub Actions `parallel:` groups and their wait/cancel
         # control steps): every check reads the child steps through one walker;
         # record what it read so the report header can disclose it — including a

@@ -2567,7 +2567,8 @@ def _workflow_parse_errors_on_disk(parsed: list[tuple[str, dict, str]],
 
 
 def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path,
-                    workflow_parse_errors: list[str] | None = None) -> dict[str, Any]:
+                    workflow_parse_errors: list[str] | None = None,
+                    workflow_parse_error_reasons: dict[str, str] | None = None) -> dict[str, Any]:
     """The eleven CI Score v0.1-basic facts. Shape per fact:
     {"state": "pass"|"fail"|"not_applicable", "evidence": str, "files": [..<=3]}.
     Evidence is NEVER empty: a failed check must hand the maintainer the exact
@@ -3144,7 +3145,9 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path,
     # not parse is named once, as that workflow. The caching and pinning cards
     # name a call only when the file it names was read by no PR path: those
     # checks leave such a file out (`unread_files`), so the note is true.
-    parse_errs = [f"{rel} (does not parse as a workflow)" for rel in workflow_parse_errors]
+    reasons = workflow_parse_error_reasons or {}
+    parse_errs = [f"{rel} ({reasons.get(rel, 'does not parse as a workflow')})"
+                  for rel in workflow_parse_errors]
     followed = {os.path.normpath(rel) for rel, _doc, _event in pr_path}
     calls = [f"{key} (reusable workflow call not followed)" for key in shallow_calls
              if os.path.normpath(key[2:]) not in followed]
