@@ -1239,7 +1239,7 @@ def _local_composites(root: Path, parsed: list[tuple[str, dict, str]],
             doc, why = None, "could not be read"
         else:
             try:
-                doc = yaml.load(text, Loader=_StrictLockLoader)
+                doc = _load_strict_yaml(text)
             except _DuplicateKeyError as exc:
                 doc, why = None, str(exc)
             except (ValueError, yaml.YAMLError):
@@ -2188,7 +2188,7 @@ def _pr_path_workflows(parsed: list[tuple[str, dict, str]],
                 continue
             if target not in strict_ok:
                 try:
-                    yaml.load(raw_by[target], Loader=_StrictLockLoader)
+                    _load_strict_yaml(raw_by[target])
                     strict_ok[target] = True
                 except (ValueError, yaml.YAMLError):
                     strict_ok[target] = False
@@ -2270,6 +2270,20 @@ _StrictLockLoader.add_constructor(
     yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _no_duplicate_keys)
 
 
+def _load_strict_yaml(text: str) -> Any:
+    """Parse one document with safe constructors and strict mapping keys.
+
+    Instantiate the SafeLoader subclass directly so the safety boundary is
+    explicit to static analyzers. Keep PyYAML's single-document semantics
+    and release parser resources even when construction rejects the input.
+    """
+    loader = _StrictLockLoader(text)
+    try:
+        return loader.get_single_data()
+    finally:
+        loader.dispose()
+
+
 def _lock_key(action: str, ref: str) -> str:
     # engine assumption (GitHub's docs are silent): owner and repo names
     # match case-insensitively, as GitHub resolves them; refs are exact
@@ -2320,7 +2334,7 @@ def _load_lockfile(root: Path) -> tuple[str, dict[str, set[str]]]:
         # a symbolic link out of the checkout is not this repository's lockfile
         if _outside_root(root, path):
             return bad
-        doc = yaml.load(path.read_text(encoding="utf-8"), Loader=_StrictLockLoader)
+        doc = _load_strict_yaml(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, yaml.YAMLError):
         return bad
     if not isinstance(doc, dict) or set(doc) - {"version", "workflows", "dependencies"}:
