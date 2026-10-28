@@ -588,7 +588,11 @@ environment names also withhold the proof. A single strict jq or reviewed-action
 large dependency sets without exponential enumeration; every dependency must
 succeed, and conditional upstream steps still withhold execution proof,
 including steps inside `parallel:` groups, conditional groups and steps that may
-run in the background.
+run in the background. An upstream step with `continue-on-error` set to
+anything other than literal boolean or case-insensitive string `false` also
+withholds a pass: its job can succeed without that step passing. The same
+rule covers parallel groups and their nested steps. These execution gaps do
+not discard literal declared outputs that can still prove a concrete failure.
 The reviewed `re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35`
 revision is supported with `jobs: ${{ toJSON(needs) }}` and literal JSON or
 comma-separated allowed lists. Its default requires success; `allowed-skips`

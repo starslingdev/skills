@@ -196,3 +196,52 @@ def test_unconditional_parallel_suite_steps_still_pass(count):
     jobs = suites(count)
     jobs['suite0']['steps'] = [{'parallel': [{'run': 'pytest'}, {'run': 'ruff check'}]}]
     assert va.analyze(jobs, 'verdict')[0] == 'pass'
+
+
+@pytest.mark.parametrize('count', [1, 6, 18])
+@pytest.mark.parametrize('value', [True, 'true', 'TRUE', '${{ matrix.experimental }}', None, 0, ''])
+@pytest.mark.parametrize('placement', ['step', 'parallel', 'nested', 'group'])
+def test_tolerated_suite_step_cannot_certify_pass(count, value, placement):
+    jobs = suites(count)
+    step = {'run': 'pytest', 'continue-on-error': value}
+    if placement == 'parallel':
+        step = {'parallel': [step]}
+    elif placement == 'nested':
+        step = {'parallel': [{'parallel': [step]}]}
+    elif placement == 'group':
+        step = {'parallel': [{'run': 'pytest'}], 'continue-on-error': value}
+    jobs['suite0']['steps'] = [step]
+    state, reason = va.analyze(jobs, 'verdict')
+    assert state == 'unmeasured'
+    assert 'suite0' in reason
+    assert 'step is allowed to fail' in reason
+
+
+@pytest.mark.parametrize('value', [False, 'false', 'FALSE'])
+@pytest.mark.parametrize('count', [1, 6, 18])
+def test_literal_false_tolerance_preserves_pass(value, count):
+    jobs = suites(count)
+    jobs['suite0']['steps'][0]['continue-on-error'] = value
+    assert va.analyze(jobs, 'verdict')[0] == 'pass'
+
+
+def test_tolerated_step_keeps_literal_output_failure_evidence():
+    jobs = suites(1)
+    jobs['suite0']['outputs'] = {'ok': 'true'}
+    jobs['suite0']['steps'] = [
+        {'run': 'pytest'}, {'run': 'lint', 'continue-on-error': True}]
+    jobs['verdict']['steps'] = [
+        {'run': 'test "${{ needs.suite0.outputs.ok }}" = true'}]
+    assert va.analyze(jobs, 'verdict')[0] == 'fail'
+
+
+def test_tolerated_step_blocks_enumerated_pass():
+    jobs = suites(1)
+    jobs['suite0']['outputs'] = {'ok': 'true'}
+    jobs['suite0']['steps'][0]['continue-on-error'] = True
+    jobs['verdict']['steps'] = [{'run':
+        'test "${{ needs.suite0.result }}" = success\n'
+        'test "${{ needs.suite0.outputs.ok }}" = true'}]
+    state, reason = va.analyze(jobs, 'verdict')
+    assert state == 'unmeasured'
+    assert 'suite0' in reason and 'step is allowed to fail' in reason
