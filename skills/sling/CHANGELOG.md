@@ -6,6 +6,12 @@ All notable changes to the `sling` skill. Unversioned; dated (UTC).
 
 ### Added
 
+- **2026-10-27** — Routing guards cover wrapped and escaped code spans, advisory
+  doctor fixes, additional state-changing names, all semantic version pins,
+  split scope flags, decision examples, and the skill line budget. Remote
+  wording checks distinguish repository scope from doctor diagnostics.
+  Command-reference examples use illustrative round values and identifiers.
+
 - **2026-10-27** — **`sling update` and background self-update are
   documented, and routed to the user.** `sling update [--off|--on]` (present
   since 0.1.84) reinstalls `sling` on the user's machine and changes no
