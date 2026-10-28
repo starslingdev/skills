@@ -11,6 +11,10 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
 
 ## [Unreleased]
 
+- **2026-10-28** — **Fixed**: every check now names workflows the scan could
+  not parse, in both card evidence and the rendered report. States and scores
+  are unchanged; the disclosure no longer appears on only three checks.
+
 - **2026-10-27** — **Added** (#156, registry `ci-score-v0.1.6`, OD-CS24, on top of `ci-score-v0.1.5`): the
   pinning check credits GitHub's workflow lockfile
   (`.github/workflows/actions.lock`, public preview 2026-10-14). The

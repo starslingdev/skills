@@ -3155,4 +3155,12 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path,
                            ("ci.checkout.shallow-clone", base)):
         facts[check]["evidence"] += _unread_note(entries)
 
+    # Every check reads workflows, even when its applicability also depends
+    # on root configuration. Keep the unread-workflow boundary on each card;
+    # the three cards above already carry it with their richer source notes.
+    for check in facts:
+        if check not in {"ci.cache.dependency-cache", "ci.security.pinned-action-shas",
+                         "ci.checkout.shallow-clone"}:
+            facts[check]["evidence"] += _unread_note(parse_errs)
+
     return facts
