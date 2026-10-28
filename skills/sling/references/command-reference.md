@@ -498,7 +498,7 @@ workflow is written the way it is. That second question is `ci-speedup`.
 {"group_by": "repo", "window": {"from": "…", "to": "…"},
  "plan": {"status": "paid", "period_source": "install_cycle"},
  "rows": [{"key": "owner/repo", "runner_minutes": 5000, "jobs": 2000,
-           "cost_usd": 40, "pct_of_total": 50}]}
+           "cost_usd": 40, "pct_of_total": 100}]}
 ```
 
 `--org` and `--repo` are mutually exclusive: both together exit `2` (`Use
