@@ -6,7 +6,7 @@ All notable changes to the `sling` skill. Unversioned; dated (UTC).
 
 ### Added
 
-- **2026-10-27** — Routing guards cover wrapped and escaped code spans, advisory
+- **2026-10-28** — Routing guards cover wrapped and escaped code spans, advisory
   doctor fixes, additional state-changing names, all semantic version pins,
   split scope flags, decision examples, and the skill line budget. Remote
   wording checks distinguish repository scope from doctor diagnostics.
