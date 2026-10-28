@@ -11,7 +11,7 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
 
 ## [Unreleased]
 
-- **2026-10-28** — **Fixed** (registry `ci-score-v0.1.7`, OD-CS25): literal
+- **2026-10-28** — **Fixed** (#161, registry `ci-score-v0.1.7`, OD-CS25): literal
   cache switches use the same verdict as resolved expressions. Off values
   no longer earn credit, and the evidence names their step and value.
   Explicit setup-uv `enable-cache: auto` receives the default's runner gate;
