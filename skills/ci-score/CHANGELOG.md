@@ -23,42 +23,54 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
   `enable-cache: false`, `package-manager-cache: false`,
   `cache-disabled: true`) still fails, as do versions before the default
   turned on. An explicit cache input other than `false` is credited on any
-  runner, exactly as before.
-- **2026-10-27** — **Fixed** (#154): default-on credit is given only where
-  the action really restores a cache. A SHA-pinned action names no version,
-  so it counts as caching unless its version comment (`# v3.5.0`,
-  `# tag=v3.5.0`, `# ratchet:owner/action@v3`, `# pin@v3`, including after a
-  quoted `uses:` or a flow-mapping `}`) names a release from before the
-  default turned on, or names no release at all. setup-uv's default
-  (`enable-cache: auto`) caches only on GitHub-hosted runners, so with no
-  input it counts only on one of GitHub's published hosted-runner labels
-  (`ubuntu-latest`, `ubuntu-24.04-arm`, `windows-2025`, `macos-15` and the
-  like, not a custom label such as `ubuntu-selfhosted-pool`), and never
-  inside a local composite action; `enable-cache: true` earns it anywhere,
-  and the fix says so. setup-node and setup-go read the checked-out
-  workspace when their step runs, so their default counts only after a
-  checkout of this repository to the workspace root has finished earlier in
-  the same job. Before any checkout there is nothing to read; after a
-  checkout into a sub-path or of another repository, the file the action
-  reads is not the one this scan read; and a checkout still running in the
-  same `parallel:` group, or started with `background: true`, has not
-  finished. setup-go also needs a `go.sum` (at the root or at its
-  `cache-dependency-path`), its cache key. A `package-manager-cache` written
-  as an expression is read as its default, so it still needs a manager in
-  `package.json`. Input names are read case-insensitively, so `Cache: false`
-  is an opt-out.
+  runner, exactly as before, and input names are read case-insensitively in
+  both directions: `Cache: npm`, `Enable-Cache: true` and `Cache: pip` now
+  pass (they failed before), and `Cache: false` is an opt-out. The default-on
+  credit is given only where the action really restores a cache:
+  - A SHA-pinned setup action names no version, so it counts as caching
+    unless its version comment (`# v3.5.0`, `# tag=v3.5.0`,
+    `# ratchet:owner/action@v3`, `# pin@v3`, `# owner/action@v3`, `# @v3`,
+    including after a quoted `uses:` or a flow-mapping `}`) names a release
+    from before the default turned on, or names no release at all. A date
+    (`# 2024-05-01`), a range (`# 20.x`) or a major the action never
+    released is not a release. Gradle's and npm-install's actions always
+    cache, so their comments are not read.
+  - setup-uv's default (`enable-cache: auto`) caches only on GitHub-hosted
+    runners, so with no input it counts only on one of GitHub's published
+    hosted-runner labels (`ubuntu-latest`, `ubuntu-24.04-arm`,
+    `windows-2025`, `macos-15`, `xcode-27` and the like, not a custom label
+    such as `ubuntu-selfhosted-pool`), and never inside a local composite
+    action; `enable-cache: true` earns it anywhere, larger runners included,
+    and the fix says so.
+  - setup-node and setup-go read the checked-out workspace when their step
+    runs, so their default counts only after a checkout of this repository
+    to the workspace root has finished earlier in the same job. Before any
+    checkout there is nothing to read; after a checkout into a sub-path or
+    of another repository, the file the action reads is not the one this
+    scan read; and a checkout still running in the same `parallel:` group,
+    or started with `background: true`, has not finished. setup-go also
+    needs a `go.sum` (at the root or at its `cache-dependency-path`), its
+    cache key. A `package-manager-cache` written as an expression is read as
+    its default, so it still needs a manager in `package.json`.
 - **2026-10-27** — **Fixed** (#154): a SHA-pinned setup-node whose v5 and v6
   rules disagree for this `package.json` (for example `packageManager:
   yarn@4.1.0`) is credited when every release its version comment names
   caches (`@<sha> # v5.0.0`), by owner decision. No comment, or a comment
   naming v6, still earns nothing.
 - **2026-10-27** — **Fixed** (#154): a default the scan cannot decide is no
-  longer a silent fail. A `package.json` that cannot be read, is not JSON, is
-  not an object, or starts with a byte-order mark (which setup-node's own
-  parse rejects), and a SHA pin the setup-node rules disagree on, are named
-  in the Dependency caching evidence ("setup-node@v5 default cache could not
-  be resolved: package.json is not valid JSON") and recorded as
-  `data_sources.unresolved_setup_defaults`.
+  longer a silent fail. A `package.json` that cannot be read, is not JSON or
+  is not an object, a SHA or branch ref the setup-node rules disagree on, a
+  version comment that names no release, a `runs-on` expression or runner
+  group under setup-uv's default, a `cache-dependency-path` that is an
+  expression, absolute, outside the repository or only `!` exclusions, and a
+  checkout still running or moved elsewhere are named in the Dependency
+  caching evidence ("setup-node@v5 default cache could not be resolved:
+  package.json is not valid JSON"), including when the check is not
+  applicable, and recorded as `data_sources.unresolved_setup_defaults`. A
+  `package.json` starting with a byte-order mark, which setup-node's own
+  parse rejects, is decided off and named the same way ("earns no default
+  cache"). An opt-out, a pre-default release and no checkout at all name
+  nothing.
 - **2026-10-27** — **Fixed** (#154): a test job whose matrix is generated at
   runtime (`matrix: ${{ fromJSON(...) }}`) no longer fails Test sharding; it
   passes, because the job does run a matrix. A generated matrix on a job that
@@ -81,8 +93,10 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
   the rubric's own rule bumps `spec_version` when a gate moves. Check count
   (11), bands, formula, refusals and scorer arithmetic are unchanged. Run
   against the previous engine, both frozen calibration controls produce
-  identical facts, and a test now re-checks that, and that no case moves a
-  verdict away from credit, on every run. Committed corpus and synthetic
+  identical facts. A test pins those facts and re-checks both controls, and
+  an explicit list of OD-CS23 cases, against the previous engine for any
+  move away from credit; a later change that drops a verdict on purpose
+  adds it to an allowlist. Committed corpus and synthetic
   stamps carry the new `spec_version` field and nothing else.
 
 - **2026-10-10** — **Fixed**: actions referenced with GitHub's
