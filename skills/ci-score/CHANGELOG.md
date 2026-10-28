@@ -11,6 +11,15 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
 
 ## [Unreleased]
 
+- **2026-10-28** — **Fixed**: every workflow uses the strict YAML reader. A
+  duplicate key leaves the workflow ungraded and names the key in the unread
+  evidence and parse-error reasons. Workflow booleans use GitHub's YAML 1.2
+  spellings so distinct names such as `ON` and `YES` remain readable.
+  Workflow reads use the explicit safe-loader lifecycle, preserving the
+  Bandit B506 fix and cleanup on parsing errors.
+  This corrects the existing read contract;
+  the registry rules and version are unchanged.
+
 - **2026-10-28** — **Fixed**: strict YAML reads instantiate the existing
   SafeLoader subclass directly, removing ambiguous generic loader calls
   flagged by Bandit B506. Duplicate-key and Python-tag rejection remain
