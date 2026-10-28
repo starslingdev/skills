@@ -172,7 +172,10 @@ All notable changes to the `sling` skill. Unversioned; dated (UTC).
   the capture; the git-remote rule has no capture field and is a prose ban.
 - **2026-10-27** — **A state-change eval row could route to `none` with the
   suite green.** The check was only "not `sling`"; state-change asks must
-  now route to `gh` with a `gh` command.
+  now route to `gh` with a `gh` command. Asking how to change state ("how
+  do I cancel a run", "how can I re-run the failed jobs") now counts as a
+  state-change ask too; questions about what happened ("how long did …",
+  "why did … stop") stay read-only.
 
 - **2026-08-31** — **The commands-must-exist guard no longer stops reading at
   a `"detail"` string.** Documenting `doctor`'s `agent_skill` row meant

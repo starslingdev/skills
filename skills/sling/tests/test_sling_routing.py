@@ -302,6 +302,9 @@ _QUESTION_OPENER = re.compile(
 _ASKED_FOR = re.compile(
     r"(?:\bplease|\bcan you|\bcould you|\bwould you|\bi want to|\bi'd like to|\bi need to)\s+$")
 _CLAUSE_LEAD = re.compile(r"^(?:(?:and|then|also|now|so|just)\s+)*")
+# Asking HOW to perform an action ("how do I cancel a run", "how to trigger
+# the deploy") is asking to change state, even though it opens as a question.
+_HOW_TO = re.compile(r"^how\s+(?:(?:do|can|could|should|would)\s+(?:i|we)|to)\s+$")
 
 
 def _is_mutating_ask(prompt: str) -> bool:
@@ -309,14 +312,14 @@ def _is_mutating_ask(prompt: str) -> bool:
     (imperative), or right after please / can you / I want to / to. In a
     clause that opens as a question ("why did the job abort", "why is my job
     slow to start") the word is described, not requested, so only the
-    please / can you form counts there."""
+    please / can you form and how-do-I / how-to count there."""
     low = _flat(prompt.replace("`", "").replace("*", ""))
     for clause in re.split(r"[.?!;,:()—]+", low):
         clause = _CLAUSE_LEAD.sub("", clause.strip())
         question = bool(_QUESTION_OPENER.match(clause))
         for m in _VERB_RE.finditer(clause):
             before = clause[:m.start()]
-            if _ASKED_FOR.search(before):
+            if _ASKED_FOR.search(before) or _HOW_TO.match(before):
                 return True
             if not question and (not before.strip() or re.search(r"\bto\s+$", before)):
                 return True
@@ -344,14 +347,18 @@ def test_state_change_name_detector_catches_known_shapes():
                 "re-execute the failed jobs", "re-running the failed jobs",
                 "can you terminate the deploy", "i want to restart the build",
                 # `sling's` names a run, not the binary
-                "cancel sling's last run", "stop sling's nightly deploy run"):
+                "cancel sling's last run", "stop sling's nightly deploy run",
+                # asking HOW to change state is still a state-change ask
+                "how do I cancel a run", "how can I re-run the failed jobs",
+                "how to trigger the deploy workflow"):
         assert _is_mutating_ask(ask), ask
     for ask in ("stop sling from updating itself", "what triggers does this workflow have",
                 "why did this job fail",
                 # read-only diagnosis: the action word is described, not requested
                 "why is my job slow to start", "why did the job abort",
                 "why did my job stop at step 3", "how many times did this job retry",
-                "when did the run start"):
+                "when did the run start", "how long did the job take to start",
+                "how many times did the deploy restart"):
         assert not _is_mutating_ask(ask), ask
 
 
