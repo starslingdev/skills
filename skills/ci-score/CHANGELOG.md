@@ -11,7 +11,7 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
 
 ## [Unreleased]
 
-- **2026-10-27** — **Fixed**: every workflow uses the strict YAML reader. A
+- **2026-10-28** — **Fixed**: every workflow uses the strict YAML reader. A
   duplicate key leaves the workflow ungraded and names the key in the unread
   evidence and parse-error reasons. This corrects the existing read contract;
   the registry rules and version are unchanged.
