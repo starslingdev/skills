@@ -245,3 +245,16 @@ def test_tolerated_step_blocks_enumerated_pass():
     state, reason = va.analyze(jobs, 'verdict')
     assert state == 'unmeasured'
     assert 'suite0' in reason and 'step is allowed to fail' in reason
+
+
+@pytest.mark.parametrize('earlier', [{'if': 'false', 'run': 'lint'}, {'background': True, 'run': 'lint'}])
+@pytest.mark.parametrize('nested', [False, True])
+def test_tolerated_step_reason_survives_earlier_execution_gap(earlier, nested):
+    jobs = suites(1)
+    step = {'run': 'pytest', 'continue-on-error': True}
+    if nested:
+        step = {'parallel': [step]}
+    jobs['suite0']['steps'] = [earlier, step]
+    state, reason = va.analyze(jobs, 'verdict')
+    assert state == 'unmeasured'
+    assert 'suite0' in reason and 'step is allowed to fail' in reason

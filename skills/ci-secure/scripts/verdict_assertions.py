@@ -403,7 +403,7 @@ def _jq_needs(source, env, shell):
 _TRIVIAL_STEP_CONDITIONS = ("true", "always()", "success()")
 
 
-def _unproved_step_execution(job, trivial=_TRIVIAL_STEP_CONDITIONS):
+def _unproved_step_execution(job, trivial=_TRIVIAL_STEP_CONDITIONS, tolerance_only=False):
     """Whether success may not show that every step ran and had to pass.
 
     Walks `parallel:` groups (a flat `steps` read misses their children); a
@@ -433,9 +433,9 @@ def _unproved_step_execution(job, trivial=_TRIVIAL_STEP_CONDITIONS):
                     and not (isinstance(step["continue-on-error"], str)
                              and step["continue-on-error"].lower() == "false")):
                 return "a step is allowed to fail"
-            if "if" in step and unwrap(step["if"]).lower() not in trivial:
+            if not tolerance_only and "if" in step and unwrap(step["if"]).lower() not in trivial:
                 return True
-            if "background" in step and step["background"] is not False:
+            if not tolerance_only and "background" in step and step["background"] is not False:
                 return True
             if "parallel" in step:
                 pending.append((step["parallel"], depth + 1))
@@ -701,6 +701,14 @@ def analyze(jobs, key, workflow=None, action_resolver=None):
         # so a concrete failing path through it can establish a failure.
         conditional_steps = {n: reason for n in ancestors
                              for reason in [_unproved_step_execution(jobs[n])] if reason}
+        # An earlier conditional/background step may have stopped the first
+        # walk before a later tolerated failure. Reuse the bounded walker for
+        # that diagnostic only; neither the pass guard nor failure evidence changes.
+        for name, reason in conditional_steps.items():
+            if reason is True:
+                tolerance = _unproved_step_execution(jobs[name], tolerance_only=True)
+                if isinstance(tolerance, str):
+                    conditional_steps[name] = tolerance
         ancestor_scope = {}
         for name in order:
             ancestor_scope[name] = set(needs(jobs[name]))
