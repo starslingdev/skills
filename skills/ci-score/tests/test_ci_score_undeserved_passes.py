@@ -58,7 +58,7 @@ def _git(root: Path, *args: str) -> None:
                         "HOME": str(root)})
 
 
-def _collect(tmp_path: Path, files: dict[str, str]) -> dict:
+def _make_repo(tmp_path: Path, files: dict[str, str]) -> Path:
     root = tmp_path / "repo"
     root.mkdir(parents=True)
     _git(root, "init", "-q")
@@ -67,7 +67,11 @@ def _collect(tmp_path: Path, files: dict[str, str]) -> dict:
         (root / rel).write_text(_y(text))
         _git(root, "add", rel)
     _git(root, "commit", "-qm", "init")
-    doc, code = cc_mod.collect(root)
+    return root
+
+
+def _collect(tmp_path: Path, files: dict[str, str]) -> dict:
+    doc, code = cc_mod.collect(_make_repo(tmp_path, files))
     assert code == 0, doc
     return doc
 
@@ -258,10 +262,13 @@ def test_negative_control_a_composite_path_that_escapes_the_repo_fails_closed(tm
     doc = _collect(tmp_path, {"package.json": "{}\n",
                               ".github/workflows/ci.yml":
                                   SETUP_CALLER.replace("./ci/setup", "./../outside")})
-    # the file outside the checkout is never read: its cache earns nothing
-    # (not_applicable rather than fail since the 2026-10-27 owner decision:
-    # the unread action is the only place a cache could be)
-    assert _fact(doc, CACHE)["state"] == "not_applicable"
+    # the file outside the checkout is never read: its cache earns nothing,
+    # and a path outside the repository is not an action fetched at run time,
+    # so the owner decision's not_applicable does not apply
+    assert _fact(doc, CACHE) == {
+        "state": "fail",
+        "evidence": CACHE_FAIL + "; " + NOT_READ + "./../outside (resolves outside the repository)",
+        "files": []}, _fact(doc, CACHE)
     assert _fact(doc, PINNED)["evidence"].startswith("1 of 1 ")
     assert any("./../outside" in e for e in doc["data_sources"]["composite_parse_errors"])
 
@@ -624,9 +631,9 @@ def test_negative_control_a_composite_symlinked_outside_the_repo_fails_closed(tm
     _git(root, "commit", "-qm", "init")
     doc, code = cc_mod.collect(root)
     assert code == 0, doc
-    # the file the link points at is not this repository's: never read
-    # (not_applicable, naming it, under the 2026-10-27 owner decision)
-    assert _fact(doc, CACHE)["state"] == "not_applicable", _fact(doc, CACHE)
+    # the file the link points at is not this repository's: never read, and
+    # not an action fetched at run time either, so the check fails
+    assert _fact(doc, CACHE)["state"] == "fail", _fact(doc, CACHE)
     assert "not read, so nothing inside was graded: ./ci/setup (resolves outside the repository)" in _fact(doc, CACHE)["evidence"], _fact(doc, CACHE)
     assert any("./ci/setup" in e for e in doc["data_sources"]["composite_parse_errors"]), \
         doc["data_sources"]
@@ -635,6 +642,11 @@ def test_negative_control_a_composite_symlinked_outside_the_repo_fails_closed(tm
 # ---- 6. second review round: content the scan could not read -----------------
 
 NOT_READ = "not read, so nothing inside was graded: "
+NO_FILE_NOTE = " (no action.yml in the checkout; it may be checked out at run time)"
+CACHE_FAIL = "no cache action and no setup-* cache input in any workflow or local composite action"
+NA_EVIDENCE = ("no readable workflow or local action configures a cache or has a setup-* "
+               "step that could; a local action that is not in the checkout runs before "
+               "an install, build or test step and may hold the cache")
 
 
 def _case_insensitive_fs(path: Path) -> bool:
@@ -753,9 +765,15 @@ def test_a_lockfile_in_the_wrong_case_grants_nothing(tmp_path):
     doc = _collect(tmp_path, {".github/workflows/ci.yml": TAGGED,
                               ".github/workflows/Actions.lock": _lockfile(BOTH)})
     got = _fact(doc, PINNED)
-    assert got["state"] == "fail" and got["evidence"].startswith("0 of 2 "), got
-    if _case_insensitive_fs(tmp_path):
-        assert "path case does not match the repository" in got["evidence"], got
+    # unconditional: the lockfile path check folds case itself, so a
+    # case-sensitive disk reports the same thing
+    assert got == {
+        "state": "fail",
+        "evidence": ("0 of 2 remote action references SHA-pinned (workflow + local composite "
+                     "action files; passes at >=95%); .github/workflows/Actions.lock: path "
+                     "case does not match the repository (a runner reads "
+                     ".github/workflows/actions.lock), so it grants no credit"),
+        "files": [".github/workflows/ci.yml"]}, got
 
 
 def test_a_uses_path_in_the_wrong_case_earns_nothing(tmp_path):
@@ -763,11 +781,12 @@ def test_a_uses_path_in_the_wrong_case_earns_nothing(tmp_path):
                               ".github/workflows/ci.yml": SETUP_CALLER.replace("./ci/setup",
                                                                                "./CI/Setup"),
                               "ci/setup/action.yml": CACHED_UNPINNED_SETUP})
-    got = _fact(doc, CACHE)
-    assert got["state"] != "pass", got
-    assert NOT_READ + "./CI/Setup" in got["evidence"], got
-    if _case_insensitive_fs(tmp_path):
-        assert "./CI/Setup (path case does not match the repository)" in got["evidence"], got
+    # the same on a case-sensitive and a case-insensitive disk: git's file list
+    # decides, and a wrong-case path is not an action fetched at run time
+    assert _fact(doc, CACHE) == {
+        "state": "fail",
+        "evidence": CACHE_FAIL + "; " + NOT_READ + "./CI/Setup (path case does not match the repository)",
+        "files": []}, _fact(doc, CACHE)
 
 
 def test_a_seeded_action_file_symlinked_outside_the_repo_is_not_read(tmp_path):
@@ -869,6 +888,10 @@ def test_an_unresolvable_callee_depth_is_not_graded_and_is_disclosed(tmp_path):
         "ref: 'v7.0.1'", "ref: 'v6.0.0'")),
     ("listed reference with no dependency entry", lambda t: t.replace(
         "workflows:\n", "workflows:\n    '.github/workflows/other.yml':\n        - 'x/y@v1'\n")),
+    ("workflow key that normalizes to another path", lambda t: t.replace(
+        "workflows:\n", "workflows:\n    '.github/workflows/..': []\n")),
+    ("entry ref in a different case from its key", lambda t: t.replace(
+        "ref: 'v7.0.1'", "ref: 'V7.0.1'")),
 ])
 def test_negative_control_an_inconsistent_lockfile_grants_nothing(tmp_path, name, mutate):
     bad = mutate(_lockfile(BOTH))
@@ -954,8 +977,9 @@ def test_a_composite_with_a_duplicate_key_is_not_read_and_is_disclosed(tmp_path)
                   shell: bash
             """})
     got = _fact(doc, PINNED)
-    assert NOT_READ in got["evidence"] and "ci/setup/action.yml" in got["evidence"], got
-    assert "ci/setup/action.yml" in doc["data_sources"]["composite_parse_errors"]
+    assert got["evidence"].endswith(NOT_READ + "ci/setup/action.yml (duplicated key 'runs')"), got
+    assert doc["data_sources"]["composite_parse_errors"] == [
+        "ci/setup/action.yml (duplicated key 'runs')"], doc["data_sources"]
 
 
 def test_a_callee_workflow_with_a_duplicate_key_is_not_graded(tmp_path):
@@ -964,8 +988,18 @@ def test_a_callee_workflow_with_a_duplicate_key_is_not_graded(tmp_path):
     doc = _collect(tmp_path, {".github/workflows/ci.yml": CALLER,
                               ".github/workflows/test.yml": callee})
     got = _fact(doc, SHALLOW)
-    assert "could not be read and were not graded: ./.github/workflows/test.yml" in \
-        got["evidence"], got
+    assert got["evidence"] == (
+        "no PR-gating workflow checks out full history (post-merge automation like "
+        "backport/changelog jobs is exempt - it needs history and gates nobody); 1 reusable "
+        "workflow call(s) on the PR path could not be read and were not graded: "
+        "./.github/workflows/test.yml"), got
+    # the callee is not graded for pinning either, and the note there is true
+    assert _fact(doc, PINNED) == {
+        "state": "not_applicable",
+        "evidence": ("no remote actions used in workflow or local composite action files; "
+                     + NOT_READ + "./.github/workflows/test.yml (reusable workflow call not "
+                     "followed)"),
+        "files": []}, _fact(doc, PINNED)
 
 
 # Owner decision 2026-10-27 (OD-CS24): with nothing readable that shows a
@@ -984,13 +1018,10 @@ def test_an_unread_action_that_could_hold_the_cache_is_not_applicable(tmp_path):
               - uses: ./shared/setup
               - run: npm ci
         """})
-    got = _fact(doc, CACHE)
-    assert got["state"] == "not_applicable", got
-    assert got["evidence"].startswith(
-        "no readable workflow or local action configures a cache or has a setup-* "
-        "step that could; the cache may live in local action(s) the scan could not "
-        "read: ./shared/setup"), got
-    assert NOT_READ + "./shared/setup" in got["evidence"], got
+    assert _fact(doc, CACHE) == {
+        "state": "not_applicable",
+        "evidence": NA_EVIDENCE + "; " + NOT_READ + "./shared/setup" + NO_FILE_NOTE,
+        "files": []}, _fact(doc, CACHE)
 
 
 def test_an_unread_action_alone_with_a_manifest_is_not_applicable(tmp_path):
@@ -1239,3 +1270,507 @@ def test_the_calibration_controls_keep_every_fact(tmp_path, name):
     assert code == 0, doc
     want = json.loads(_CONTROL_FACTS.read_text(encoding="utf-8"))[name]
     assert doc["practice_facts"] == want
+
+
+# ---- 9. third review round ---------------------------------------------------
+
+import os  # noqa: E402
+
+import pytest  # noqa: E402
+import yaml  # noqa: E402
+
+pf_mod = _load("ci_score_practice_facts_undeserved", "scripts/practice_facts.py")
+
+
+def _job_wf(*steps: str, on: str = "pull_request", job: str = "t") -> str:
+    """One job: a SHA-pinned checkout, then `steps` (each a step body; extra
+    lines of a step are indented 8 spaces)."""
+    body = "".join(f"\n      - {s}" for s in steps)
+    return (f"on: {on}\njobs:\n  {job}:\n    runs-on: ubuntu-latest\n    steps:\n"
+            f"      - uses: actions/checkout@{SHA}{body}\n")
+
+
+def _composite(*steps: str) -> str:
+    body = "".join(f"\n    - {s}" for s in steps)
+    return f"runs:\n  using: composite\n  steps:{body}\n"
+
+
+SHALLOW_PASS = ("no PR-gating workflow checks out full history (post-merge automation like "
+                "backport/changelog jobs is exempt - it needs history and gates nobody)")
+UNRESOLVED_CACHE = "; cache input set by an expression that could not be resolved, so not credited: "
+CACHE_PASS_ONE = "dependency caching configured in 1 workflow/action file(s)"
+
+
+# Owner decision (5), as the owner stated it: not_applicable only when an
+# unread local action is the ONLY thing that could explain the missing cache.
+
+def test_od5_a_readable_setup_step_outside_the_language_list_still_fails(tmp_path):
+    doc = _collect(tmp_path, {"requirements.txt": "x\n", ".github/workflows/ci.yml": _job_wf(
+        f"uses: prefix-dev/setup-pixi@{SHA}\n        with: {{cache: false}}",
+        "uses: ./.github/actions/missing", "run: pytest")})
+    assert _fact(doc, CACHE) == {
+        "state": "fail",
+        "evidence": CACHE_FAIL + "; " + NOT_READ + "./.github/actions/missing" + NO_FILE_NOTE,
+        "files": []}, _fact(doc, CACHE)
+
+
+def test_od5_an_unread_action_after_the_install_explains_nothing(tmp_path):
+    doc = _collect(tmp_path, {"requirements.txt": "x\n", ".github/workflows/ci.yml": _job_wf(
+        "run: pip install -r requirements.txt", "run: pytest",
+        "uses: ./.github/actions/notify")})
+    assert _fact(doc, CACHE) == {
+        "state": "fail",
+        "evidence": CACHE_FAIL + "; " + NOT_READ + "./.github/actions/notify" + NO_FILE_NOTE,
+        "files": []}, _fact(doc, CACHE)
+
+
+def test_od5_a_wrong_case_path_is_not_an_action_fetched_at_run_time(tmp_path):
+    doc = _collect(tmp_path, {"package.json": "{}\n",
+                              ".github/workflows/ci.yml": _job_wf("uses: ./ci/setup", "run: npm test"),
+                              "ci/Setup/action.yml": _composite("run: echo hi\n      shell: bash")})
+    assert _fact(doc, CACHE) == {
+        "state": "fail",
+        "evidence": CACHE_FAIL + "; " + NOT_READ + "./ci/setup (path case does not match the repository)",
+        "files": []}, _fact(doc, CACHE)
+
+
+def test_od5_an_unread_action_in_a_job_off_the_pr_path_explains_nothing(tmp_path):
+    doc = _collect(tmp_path, {
+        "Cargo.toml": "[package]\nname = 'x'\n",
+        ".github/workflows/ci.yml": _job_wf("run: cargo build", "run: cargo test"),
+        ".github/workflows/release.yml": _job_wf("uses: ./.github/actions/notify", on="push")})
+    assert _fact(doc, CACHE) == {
+        "state": "fail",
+        "evidence": CACHE_FAIL + "; " + NOT_READ + "./.github/actions/notify" + NO_FILE_NOTE,
+        "files": []}, _fact(doc, CACHE)
+
+
+@pytest.mark.parametrize("cond", ["false", "${{ false }}"])
+def test_od5_an_unread_step_that_never_runs_explains_nothing(tmp_path, cond):
+    doc = _collect(tmp_path, {"package.json": "{}\n", ".github/workflows/ci.yml": _job_wf(
+        f"uses: ./nope\n        if: {cond}", "run: npm ci", "run: npm test")})
+    assert _fact(doc, CACHE) == {
+        "state": "fail",
+        "evidence": CACHE_FAIL + "; " + NOT_READ + "./nope" + NO_FILE_NOTE,
+        "files": []}, _fact(doc, CACHE)
+
+
+def test_od5_an_unread_action_reached_through_a_readable_composite_counts(tmp_path):
+    doc = _collect(tmp_path, {"package.json": "{}\n",
+                              ".github/workflows/ci.yml": _job_wf("uses: ./ci/outer", "run: npm ci"),
+                              "ci/outer/action.yml": _composite("uses: ./missing")})
+    assert _fact(doc, CACHE) == {
+        "state": "not_applicable",
+        "evidence": NA_EVIDENCE + "; " + NOT_READ + "./missing" + NO_FILE_NOTE,
+        "files": []}, _fact(doc, CACHE)
+
+
+def test_od5_an_install_inside_a_readable_composite_before_the_unread_action_fails(tmp_path):
+    doc = _collect(tmp_path, {"package.json": "{}\n",
+                              ".github/workflows/ci.yml": _job_wf(
+                                  "uses: ./ci/install", "uses: ./missing", "run: npm test"),
+                              "ci/install/action.yml": _composite("run: npm ci\n      shell: bash")})
+    assert _fact(doc, CACHE) == {
+        "state": "fail",
+        "evidence": CACHE_FAIL + "; " + NOT_READ + "./missing" + NO_FILE_NOTE,
+        "files": []}, _fact(doc, CACHE)
+
+
+def test_od5_one_action_under_two_spellings_is_followed_both_ways(tmp_path):
+    wf = (_job_wf("uses: ./ci/outer", "run: npm ci", job="a").rstrip("\n") + "\n"
+          + _job_wf("uses: $/ci/outer", "run: npm ci", job="b").split("jobs:\n", 1)[1])
+    doc = _collect(tmp_path, {"package.json": "{}\n", ".github/workflows/ci.yml": wf,
+                              "ci/outer/action.yml": _composite("uses: ./missing")})
+    assert _fact(doc, CACHE) == {
+        "state": "not_applicable",
+        "evidence": NA_EVIDENCE + "; " + NOT_READ + "./missing" + NO_FILE_NOTE,
+        "files": []}, _fact(doc, CACHE)
+
+
+def test_a_composite_cache_input_any_caller_turns_on_passes(tmp_path):
+    wf = (_job_wf("uses: ./ci/setup\n        with: {cache: npm}", "run: npm ci", job="a")
+          .rstrip("\n") + "\n"
+          + _job_wf("uses: ./ci/setup", "run: npm ci", job="b").split("jobs:\n", 1)[1])
+    doc = _collect(tmp_path, {"package.json": "{}\n", ".github/workflows/ci.yml": wf,
+                              "ci/setup/action.yml":
+                                  EXPR_CACHE_SETUP.replace("DEFAULT", "{default: 'false'}")})
+    assert _fact(doc, CACHE) == {"state": "pass", "evidence": CACHE_PASS_ONE,
+                                 "files": ["ci/setup/action.yml"]}, _fact(doc, CACHE)
+
+
+# Case checks read git's own file list: what a runner checks out.
+
+def test_the_case_check_reads_gits_file_list(tmp_path):
+    root = _make_repo(tmp_path, {"ci/setup/action.yml": CACHED_UNPINNED_SETUP})
+    assert pf_mod._case_mismatch(root, root / "CI" / "Setup" / "action.yml") is True
+    assert pf_mod._case_mismatch(root, root / "ci" / "setup" / "action.yml") is False
+
+
+def test_the_case_check_reads_the_directory_listing_outside_a_git_work_tree(tmp_path):
+    root = tmp_path / "plain"
+    (root / "ci" / "setup").mkdir(parents=True)
+    (root / "ci" / "setup" / "action.yml").write_text(_y(CACHED_UNPINNED_SETUP))
+    assert pf_mod._case_mismatch(root, root / "CI" / "Setup" / "action.yml") is True
+    assert pf_mod._case_mismatch(root, root / "ci" / "setup" / "action.yml") is False
+
+
+@pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                    reason="root lists any directory, so the permission error never happens")
+def test_a_directory_that_cannot_be_listed_fails_closed(tmp_path):
+    root = tmp_path / "plain"
+    files = {"requirements.txt": "x\n",
+             ".github/workflows/ci.yml": _job_wf("uses: ./.github/actions/setup",
+                                                 "run: pip install -r requirements.txt"),
+             ".github/actions/Setup/action.yml": _composite(
+                 f"uses: actions/cache@{SHA}\n      with: {{path: x, key: k}}")}
+    for rel, text in files.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(text)
+    raw = files[".github/workflows/ci.yml"]
+    os.chmod(root / ".github" / "actions", 0o111)
+    try:
+        facts = pf_mod._practice_facts(
+            [(".github/workflows/ci.yml", yaml.safe_load(raw), raw)], root, [])
+        mismatch = pf_mod._case_mismatch(root, root / ".github/actions/setup/action.yml")
+    finally:
+        os.chmod(root / ".github" / "actions", 0o755)
+    assert mismatch is True
+    assert facts[CACHE] == {
+        "state": "fail",
+        "evidence": CACHE_FAIL + "; " + NOT_READ + "./.github/actions/setup (directory could not be listed)",
+        "files": []}, facts[CACHE]
+
+
+@pytest.mark.skipif(sys.platform != "darwin",
+                    reason="a decomposed name on disk that git stores composed is a macOS behaviour")
+def test_a_decomposed_directory_name_is_not_a_case_mismatch(tmp_path):
+    nfc, nfd = "café", "café"
+    doc = _collect(tmp_path, {"requirements.txt": "x\n",
+                              ".github/workflows/ci.yml": _job_wf(
+                                  f"uses: ./.github/actions/{nfc}",
+                                  "run: pip install -r requirements.txt"),
+                              f".github/actions/{nfd}/action.yml": _composite(
+                                  f"uses: actions/cache@{SHA}\n      with: {{path: x, key: k}}")})
+    assert "composite_parse_errors" not in doc["data_sources"], doc["data_sources"]
+    assert _fact(doc, CACHE) == {"state": "pass", "evidence": CACHE_PASS_ONE,
+                                 "files": [f".github/actions/{nfc}/action.yml"]}, _fact(doc, CACHE)
+
+
+def test_an_action_reached_only_by_a_wrong_case_reference_earns_nothing(tmp_path):
+    # the seed walk reads every action.yml under .github/actions, but the only
+    # reference to this one is in the wrong case: on a Linux runner its cache
+    # step never runs, so it earns nothing
+    doc = _collect(tmp_path, {"requirements.txt": "x\n",
+                              ".github/workflows/ci.yml": _job_wf(
+                                  "uses: ./.github/actions/setup",
+                                  "run: pip install -r requirements.txt"),
+                              ".github/actions/Setup/action.yml": _composite(
+                                  f"uses: actions/cache@{SHA}\n      with: {{path: x, key: k}}")})
+    assert _fact(doc, CACHE) == {
+        "state": "fail",
+        "evidence": CACHE_FAIL + "; " + NOT_READ + "./.github/actions/setup (path case does not match the repository)",
+        "files": []}, _fact(doc, CACHE)
+    assert _fact(doc, PINNED)["evidence"].startswith("1 of 1 "), _fact(doc, PINNED)
+
+
+# Unresolved expressions earn nothing, everywhere.
+
+@pytest.mark.parametrize("expr", [
+    "${{ env.NODE_CACHE }}", "${{ matrix.cache }}", "${{ inputs.cache || 'npm' }}",
+    "${{ github.event_name == 'never' && 'npm' || '' }}"])
+def test_a_composite_cache_expression_that_is_not_a_plain_input_earns_nothing(tmp_path, expr):
+    doc = _collect(tmp_path, {"package.json": "{}\n", ".github/workflows/ci.yml": SETUP_CALLER,
+                              "ci/setup/action.yml": _composite(
+                                  f"uses: actions/setup-node@{SHA}\n      with:\n"
+                                  f"        cache: \"{expr}\"")})
+    assert _fact(doc, CACHE) == {
+        "state": "fail", "evidence": CACHE_FAIL + UNRESOLVED_CACHE + "ci/setup/action.yml",
+        "files": []}, _fact(doc, CACHE)
+
+
+def test_a_workflow_cache_expression_earns_nothing(tmp_path):
+    doc = _collect(tmp_path, {"package.json": "{}\n", ".github/workflows/ci.yml": _job_wf(
+        f"uses: actions/setup-node@{SHA}\n        with: {{cache: \"${{{{ matrix.pm }}}}\"}}",
+        "run: npm ci")})
+    assert _fact(doc, CACHE) == {
+        "state": "fail",
+        "evidence": CACHE_FAIL + UNRESOLVED_CACHE + ".github/workflows/ci.yml",
+        "files": []}, _fact(doc, CACHE)
+
+
+CACHE_CALLEE = f"""
+    on:
+      workflow_call:
+        inputs:
+          cache: {{type: string, default: DEFAULT}}
+    jobs:
+      b:
+        runs-on: ubuntu-latest
+        steps:
+          - uses: actions/checkout@{SHA}
+          - uses: actions/setup-node@{SHA}
+            with: {{cache: '${{{{ inputs.cache }}}}'}}
+          - run: npm ci
+    """
+
+
+@pytest.mark.parametrize("with_,default,want", [
+    ("", "''", "fail"), ("with: {cache: ''}", "npm", "fail"),
+    ("with: {cache: npm}", "''", "pass"), ("", "npm", "pass")])
+def test_a_called_workflows_cache_input_resolves_against_its_callers(tmp_path, with_, default, want):
+    doc = _collect(tmp_path, {"package.json": "{}\n",
+                              ".github/workflows/ci.yml": _input_caller(with_),
+                              ".github/workflows/build.yml": CACHE_CALLEE.replace("DEFAULT", default)})
+    if want == "pass":
+        assert _fact(doc, CACHE) == {"state": "pass", "evidence": CACHE_PASS_ONE,
+                                     "files": [".github/workflows/build.yml"]}, _fact(doc, CACHE)
+    else:
+        assert _fact(doc, CACHE) == {"state": "fail", "evidence": CACHE_FAIL,
+                                     "files": []}, _fact(doc, CACHE)
+
+
+def test_negative_control_a_manual_runs_cache_input_default_counts(tmp_path):
+    doc = _collect(tmp_path, {"package.json": "{}\n", ".github/workflows/ci.yml": f"""
+        on:
+          pull_request:
+          workflow_dispatch:
+            inputs:
+              cache: {{default: npm}}
+        jobs:
+          t:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/setup-node@{SHA}
+                with: {{cache: '${{{{ inputs.cache }}}}'}}
+              - run: npm ci
+        """})
+    assert _fact(doc, CACHE) == {"state": "pass", "evidence": CACHE_PASS_ONE,
+                                 "files": [".github/workflows/ci.yml"]}, _fact(doc, CACHE)
+
+
+def test_a_composite_cache_input_default_counts_when_no_caller_passes_one(tmp_path):
+    doc = _collect(tmp_path, {"package.json": "{}\n", ".github/workflows/ci.yml": SETUP_CALLER,
+                              "ci/setup/action.yml": EXPR_CACHE_SETUP.replace("DEFAULT", "{default: npm}")})
+    assert _fact(doc, CACHE) == {"state": "pass", "evidence": CACHE_PASS_ONE,
+                                 "files": ["ci/setup/action.yml"]}, _fact(doc, CACHE)
+
+
+def test_more_than_three_unresolved_cache_inputs_say_how_many_more(tmp_path):
+    steps = "".join(f"\n          - uses: ./ci/{n}" for n in "abcd")
+    files = {"package.json": "{}\n",
+             ".github/workflows/ci.yml": SETUP_CALLER.replace("\n          - uses: ./ci/setup", steps)}
+    for n in "abcd":
+        files[f"ci/{n}/action.yml"] = EXPR_CACHE_SETUP.replace("DEFAULT", "{required: true}")
+    doc = _collect(tmp_path, files)
+    assert _fact(doc, CACHE)["evidence"] == (
+        CACHE_FAIL + UNRESOLVED_CACHE + "ci/a/action.yml, ci/b/action.yml, ci/c/action.yml "
+        "and 1 more"), _fact(doc, CACHE)
+
+
+def test_a_pr_workflows_own_unresolved_depth_is_disclosed(tmp_path):
+    doc = _collect(tmp_path, {".github/workflows/ci.yml": f"""
+        on: pull_request
+        jobs:
+          t:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@{SHA}
+                with: {{fetch-depth: '${{{{ vars.DEPTH }}}}'}}
+              - run: npm test
+        """})
+    assert _fact(doc, SHALLOW) == {
+        "state": "pass",
+        "evidence": SHALLOW_PASS + "; 1 job(s) on the PR path set fetch-depth by an expression "
+                    "that could not be resolved and were not graded: .github/workflows/ci.yml",
+        "files": []}, _fact(doc, SHALLOW)
+
+
+def test_any_caller_passing_full_history_fails_the_callee(tmp_path):
+    doc = _collect(tmp_path, {
+        ".github/workflows/a.yml": _input_caller("with: {fetch-depth: 1}"),
+        ".github/workflows/b.yml": _input_caller("with: {fetch-depth: 0}"),
+        ".github/workflows/build.yml": INPUT_CALLEE.replace("DEFAULT", "1")})
+    assert _fact(doc, SHALLOW) == {
+        "state": "fail",
+        "evidence": ("fetch-depth: 0 on 1 reusable workflow(s) a PR-gating workflow calls, "
+                     "e.g. .github/workflows/build.yml"),
+        "files": [".github/workflows/build.yml"]}, _fact(doc, SHALLOW)
+
+
+DIRECT_AND_CALLED = INPUT_CALLEE.replace(
+    "on:\n      workflow_call:", "on:\n      pull_request:\n      workflow_call:").replace(
+    "DEFAULT", "0")
+
+
+def test_a_workflow_triggered_directly_sees_an_empty_input(tmp_path):
+    # nobody calls it: on its own pull_request trigger the input is empty, so
+    # the default (0) never applies
+    doc = _collect(tmp_path, {".github/workflows/build.yml": DIRECT_AND_CALLED})
+    assert _fact(doc, SHALLOW) == {"state": "pass", "evidence": SHALLOW_PASS,
+                                   "files": []}, _fact(doc, SHALLOW)
+
+
+def test_a_workflow_triggered_directly_and_called_with_full_history_fails(tmp_path):
+    doc = _collect(tmp_path, {".github/workflows/build.yml": DIRECT_AND_CALLED,
+                              ".github/workflows/ci.yml": _input_caller("with: {fetch-depth: 0}")})
+    got = _fact(doc, SHALLOW)
+    assert got["state"] == "fail" and got["files"] == [".github/workflows/build.yml"], got
+
+
+def test_an_unresolved_depth_off_the_pr_path_is_not_counted(tmp_path):
+    doc = _collect(tmp_path, {".github/workflows/ci.yml": f"""
+        on: [pull_request, push]
+        jobs:
+          t:
+            if: github.event_name == 'push'
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@{SHA}
+                with: {{fetch-depth: '${{{{ vars.DEPTH }}}}'}}
+        """})
+    assert _fact(doc, SHALLOW)["evidence"] == SHALLOW_PASS, _fact(doc, SHALLOW)
+
+
+def test_an_unresolved_depth_in_a_history_job_is_not_counted(tmp_path):
+    doc = _collect(tmp_path, {".github/workflows/ci.yml": f"""
+        on: pull_request
+        jobs:
+          release:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@{SHA}
+                with: {{fetch-depth: '${{{{ vars.DEPTH }}}}'}}
+        """})
+    assert _fact(doc, SHALLOW)["evidence"] == SHALLOW_PASS, _fact(doc, SHALLOW)
+
+
+# No self-contradicting cards: a callee the PR path cannot read is graded
+# nowhere, so the "not read" note on caching and pinning is true.
+
+def test_a_callee_with_two_jobs_keys_is_not_graded_for_pinning(tmp_path):
+    caller = CALLER.rstrip() + f"""
+      lint:
+        runs-on: ubuntu-latest
+        steps:
+          - uses: actions/checkout@{SHA}
+    """
+    doc = _collect(tmp_path, {".github/workflows/ci.yml": caller,
+                              ".github/workflows/test.yml": """
+        on: workflow_call
+        jobs:
+          a:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: evil/x@main
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/setup-go@v5
+        """})
+    assert _fact(doc, PINNED) == {
+        "state": "pass",
+        "evidence": ("1 of 1 remote action references SHA-pinned (workflow + local composite "
+                     "action files; passes at >=95%); " + NOT_READ
+                     + "./.github/workflows/test.yml (reusable workflow call not followed)"),
+        "files": []}, _fact(doc, PINNED)
+
+
+def test_a_callee_with_two_steps_keys_is_not_graded_for_caching(tmp_path):
+    doc = _collect(tmp_path, {"requirements.txt": "x\n", ".github/workflows/ci.yml": CALLER,
+                              ".github/workflows/test.yml": f"""
+        on: workflow_call
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: evil/x@main
+            steps:
+              - run: pip install -r requirements.txt
+              - uses: actions/cache@{SHA}
+                with: {{path: x, key: k}}
+        """})
+    assert _fact(doc, CACHE) == {
+        "state": "fail",
+        "evidence": (CACHE_FAIL + "; " + NOT_READ
+                     + "./.github/workflows/test.yml (reusable workflow call not followed)"),
+        "files": []}, _fact(doc, CACHE)
+
+
+def test_an_unparseable_callee_is_named_once_on_every_card(tmp_path):
+    doc = _collect(tmp_path, {
+        ".github/workflows/ci.yml": f"""
+            on: pull_request
+            jobs:
+              t:
+                uses: ./.github/workflows/build.yml
+              u:
+                runs-on: ubuntu-latest
+                steps:
+                  - uses: actions/checkout@{SHA}
+            """,
+        ".github/workflows/build.yml": BROKEN_CALLEE})
+    note = "; " + NOT_READ + ".github/workflows/build.yml (does not parse as a workflow)"
+    assert _fact(doc, SHALLOW)["evidence"] == SHALLOW_PASS + note, _fact(doc, SHALLOW)
+    assert _fact(doc, PINNED)["evidence"] == (
+        "1 of 1 remote action references SHA-pinned (workflow + local composite action files; "
+        "passes at >=95%)" + note), _fact(doc, PINNED)
+
+
+def test_a_direct_call_derives_unparseable_workflows_from_disk(tmp_path):
+    root = tmp_path / "plain"
+    (root / ".github" / "workflows").mkdir(parents=True)
+    raw = _job_wf("run: echo")
+    (root / ".github/workflows/ci.yml").write_text(raw)
+    (root / ".github/workflows/broken.yml").write_text(_y(BROKEN_CALLEE))
+    facts = pf_mod._practice_facts([(".github/workflows/ci.yml", yaml.safe_load(raw), raw)], root)
+    assert facts[PINNED]["evidence"] == (
+        "1 of 1 remote action references SHA-pinned (workflow + local composite action files; "
+        "passes at >=95%); " + NOT_READ + ".github/workflows/broken.yml (does not parse as a "
+        "workflow)"), facts[PINNED]
+
+
+# The history exemption for a chain with an unread link: the job is still
+# exempt (fail-closed), and the card says the exemption rests on that link.
+
+def _exempt_only(link: str, note: str) -> str:
+    return ("1 job(s) in PR-triggered workflow(s) check out full history and are exempt: "
+            f"1 exempt only because {link} could not be read; no other PR-gating job takes "
+            f"full history; {NOT_READ}{note}")
+
+
+def test_a_readable_action_calling_a_missing_one_is_exempt_only_because_of_it(tmp_path):
+    doc = _collect(tmp_path, {".github/workflows/ci.yml": FULL_HISTORY_WITH_LOCAL,
+                              "shared/setup/action.yml": _composite("uses: ./missing/inner")})
+    assert _fact(doc, SHALLOW)["evidence"] == _exempt_only(
+        "./missing/inner", "./missing/inner" + NO_FILE_NOTE), _fact(doc, SHALLOW)
+
+
+def test_an_inner_action_linked_outside_the_repo_is_exempt_only_because_of_it(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "action.yml").write_text(_composite("run: git log -5\n      shell: bash"))
+    doc = _repo_with_links(tmp_path, {".github/workflows/ci.yml": FULL_HISTORY_WITH_LOCAL,
+                                      "shared/setup/action.yml": _composite("uses: ./ci/inner")},
+                           {"ci/inner": str(outside)})
+    assert _fact(doc, SHALLOW)["evidence"] == _exempt_only(
+        "./ci/inner", "./ci/inner (resolves outside the repository)"), _fact(doc, SHALLOW)
+
+
+def test_a_wrong_case_inner_action_is_exempt_only_because_of_it(tmp_path):
+    doc = _collect(tmp_path, {".github/workflows/ci.yml": FULL_HISTORY_WITH_LOCAL,
+                              "shared/setup/action.yml": _composite("uses: ./CI/Inner"),
+                              "ci/inner/action.yml": _composite("run: git log -5\n      shell: bash")})
+    assert _fact(doc, SHALLOW)["evidence"] == _exempt_only(
+        "./CI/Inner", "./CI/Inner (path case does not match the repository)"), _fact(doc, SHALLOW)
+
+
+def test_an_inner_action_past_the_depth_cap_is_exempt_only_because_of_it(tmp_path):
+    files = {".github/workflows/ci.yml": FULL_HISTORY_WITH_LOCAL,
+             "shared/setup/action.yml": _composite("uses: ./a/1")}
+    for i in range(1, 17):
+        files[f"a/{i}/action.yml"] = _composite(f"uses: ./a/{i + 1}")
+    files["a/17/action.yml"] = _composite("run: git log -5\n      shell: bash")
+    doc = _collect(tmp_path, files)
+    assert _fact(doc, SHALLOW)["evidence"] == _exempt_only(
+        "./a/17", "./a/17 (nested more than 16 deep)"), _fact(doc, SHALLOW)

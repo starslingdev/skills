@@ -684,7 +684,8 @@ def test_a_composite_action_that_fails_to_parse_is_recorded_by_name(tmp_path):
         ".github/actions/list/action.yaml": "- not a mapping\n"}))
     assert code == 0
     assert doc["data_sources"]["composite_parse_errors"] == [
-        ".github/actions/bad/action.yml", ".github/actions/list/action.yaml"]
+        ".github/actions/bad/action.yml (does not parse as YAML)",
+        ".github/actions/list/action.yaml (not a mapping)"]
 
 
 def test_readable_step_lists_and_composites_add_no_record(tmp_path):

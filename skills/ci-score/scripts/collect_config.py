@@ -2,7 +2,7 @@
 the CI Score, offline, from a local checkout only.
 
 Flow: verify the target is a git checkout → read + parse
-`.github/workflows/*.yml|yaml` → `_practice_facts(parsed, root)` (which itself
+`.github/workflows/*.yml|yaml` → `_practice_facts(parsed, root, parse_errors)` (which itself
 walks local composite actions and the repo-root build-tool config probes) →
 `compute_ci_score` → write `findings.json` carrying the `ci_score` stamp.
 

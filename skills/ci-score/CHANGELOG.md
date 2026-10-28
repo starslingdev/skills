@@ -48,11 +48,16 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
     that pull requests trigger directly also gains the events of a
     pull-request workflow that calls it). A calling job that can never run
     on a pull request reaches nothing. A called workflow's
-    `fetch-depth: ${{ inputs.x }}` takes each calling job's `with:` value,
-    else the input's default; a depth no rule resolves leaves the job
-    ungraded and named in the evidence. A call that cannot be followed
-    (outside the repository, missing, unparseable, or holding a duplicated
-    key) is named in the evidence instead of being graded either way. When
+    `fetch-depth: ${{ inputs.x }}` takes each calling job's `with:` value
+    (any caller passing 0 fails it), else the input's default, plus the empty
+    value a workflow that pull requests also trigger directly sees. On any
+    job on the pull-request path, a `fetch-depth` set by an expression no
+    rule resolves leaves the job ungraded and named in the evidence. A call
+    that cannot be followed (outside the repository, missing, unparseable,
+    holding a duplicated key, or more than 16 deep) is named in the evidence
+    instead of being graded either way; a called workflow no pull-request
+    path reads is left out of the caching and pinning checks too, so the
+    "not read" note those cards carry is true. When
     the full-history offender is a called workflow, the evidence names it as
     one. The trigger-level checks (concurrency groups, cancelling superseded
     runs, path filters) still read only the workflows a pull request
@@ -65,13 +70,25 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
     `./ci/setup.yml`, with nested references followed (16 deep, 256 files at
     most). A reference is never read when it resolves outside the
     repository (by path, or by a symbolic link, under `.github/actions/`
-    too), names no readable `action.yml` or `action.yaml`, differs in case
-    from the repository's own path (a case-insensitive disk would otherwise
-    read it, though no runner can), or names a file with a duplicated key;
-    each is recorded in `data_sources.composite_parse_errors`. Inside a
-    local action, a cache input written `${{ inputs.cache }}` counts only
-    when a caller's `with:` value or the input's default turns it on; one
-    that cannot be resolved earns nothing and is named.
+    too), names no readable `action.yml` or `action.yaml`, is not a spelling
+    git tracks, or names a file that does not load (a duplicated key, a YAML
+    error, not a mapping); each is recorded in
+    `data_sources.composite_parse_errors` with its reason. The spelling
+    check reads git's own file list, the exact paths a runner checks out,
+    so every disk gives the same answer: a wrong-case path does not exist on
+    a Linux runner (the common case), so the scan refuses it rather than
+    grade a file that may not run, and an action under `.github/actions/`
+    reached only through a wrong-case path earns nothing. Outside a git work
+    tree the directory listing decides, and a directory that cannot be
+    listed fails closed ("directory could not be listed").
+  - A dependency cache input set by an expression earns credit only when it
+    resolves to a value that turns caching on. `${{ inputs.cache }}` inside
+    a local action takes each caller's `with:` value, else the action's
+    input default; inside a reusable workflow, each calling job's `with:`
+    value, else the `workflow_call` default. Any other expression
+    (`${{ env.X }}`, `${{ matrix.x }}`, `${{ inputs.cache || 'npm' }}`) used
+    to count as a truthy string; it now earns nothing and is named on the
+    card.
   - A job-level call to another repository's reusable workflow
     (`jobs.ci.uses: org/shared/.github/workflows/ci.yml@main`) was left out
     of the pinning count, so one pinned step read "1 of 1" and passed. It
@@ -85,16 +102,22 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
     `action.yml` in the checkout says it may be checked out at run time),
     workflow files that do not parse, step lists that are not lists, and
     reusable-workflow calls not followed. A full-history job exempt only
-    because a local action it uses could not be read says so ("exempt only
-    because ./shared/setup could not be read") instead of claiming it walks
-    git history.
-  - Owner decision (2026-10-27): when nothing readable shows a dependency
-    cache, no readable language `setup-*` step could carry one, and no job
-    installs dependencies without reaching an unread local action, but an
-    unread local action could hold the cache step, dependency caching is
-    not applicable and the evidence names the action(s). A readable
-    `setup-*` step with no cache, or a job whose dependencies plainly
-    install uncached, still fails.
+    because a local action it uses, or one that action reaches, could not
+    be read (missing, outside the repository, in the wrong case, or more
+    than 16 deep) is still exempt, since it cannot be proven history-free;
+    the card now says so ("exempt only because ./shared/setup could not be
+    read") instead of claiming the job walks git history.
+  - Owner decision (2026-10-27): dependency caching is not applicable only
+    when a local action that is not in the checkout is the only thing that
+    could explain the missing cache. Nothing readable shows a cache; no
+    readable step is a `setup-*` action or carries a cache input; the
+    action has no `action.yml` in the checkout (a wrong-case path, a path
+    outside the repository or a file that does not load does not count),
+    runs in a job on the pull-request path before an install, build or test
+    step (readable local actions are followed in step order), and its own
+    `if:` is not literally false; and no install anywhere runs without such
+    an action before it in its job. The card says so, and the "not read"
+    note names the action. Anything else fails.
   - Both frozen calibration controls score exactly as before (no fact or
     evidence string moves; a committed snapshot of every fact now enforces
     it). Other repositories can score LOWER: an action outside
