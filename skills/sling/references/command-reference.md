@@ -1,8 +1,9 @@
 # `sling` command reference (verified)
 
 Every flag list and JSON shape below was **read off the binary**, not off
-documentation: each command was run with `--agent` against a live control
-plane on **`sling` v0.1.8**, 2026-08-31. Where the published docs and the
+documentation, except where a section says otherwise: each command was run
+with `--agent` against a live control plane on **`sling` v0.1.124**,
+2026-10-27. Where the published docs and the
 binary disagree, the binary wins and the disagreement is noted.
 
 Field names are `snake_case` everywhere **except `whoami`**. Objects are
@@ -16,33 +17,53 @@ context, not data — never report it as a finding.
 
 ## Contents
 
-- **Global flags** — `--agent`, `--org`, `--repo`, `SLING_HOST`, and the
-  unknown-flag trap
-- **Auth & setup** — `doctor`, `whoami`, `login`, `logout`, `org switch`
+- **Global flags** — `--agent`, the per-command `--org` / `--repo` rules,
+  `SLING_HOST`, and the unknown-flag trap
+- **Auth & setup** — `doctor`, `whoami`, `login`, `update` (and background
+  self-update), `logout`, `org switch`
 - **Inspect** — `runs list`, `runs show`, `jobs list`, `jobs show`, `logs`,
   `resolve`
-- **Diagnose** — `why`, `time` (one run), `time --repo` (percentiles)
+- **Diagnose** — `why`, `time` (one run), `time --repo` (percentiles,
+  `--workflow` critical path, `--group-by` splits)
 - **Cost & capacity** — `usage`, `top`, `bill`, `bill history`, `labels list`
 
 Each entry gives the flags and the verified JSON response shape.
 
 ## Global flags
 
-Available on the root command and every subcommand **except `sling logs`**, whose strict parser rejects `--org` and `--repo` with exit `2` (`Unknown flag "--org"`) — switch the default org (`sling org switch`) instead of flagging a logs call.
+`--agent`, `--json`, `--version` and `--help` work everywhere. The two scope
+flags, `--org <slug>` and `--repo <owner/name>`, are **per-command**, and
+every rejection below exits `2` with nothing on stdout:
+
+| Command | `--org` | `--repo` |
+|---|---|---|
+| `sling logs` | rejected (`Unknown flag "--org"`) | rejected |
+| `sling time` | **rejected outright**, even beside `--repo` | **required** for the repo view |
+| `sling runs list`, `jobs list`, `usage`, `top` | accepted | accepted — but **not both together** (`Use --org or --repo, not both.`) |
+
+For `logs` and `time`, switch the default org (`sling org switch`) instead
+of flagging the call. **No command reads `--repo` from the git remote** of
+the current directory: without it, `runs list`, `usage` and `top` cover the
+whole org (verified from inside a checkout, which returned another repo's
+runs), `jobs list` exits `2` (`Narrow the listing: pass --run <id>, --repo
+<owner/name>, or a time window.`), and `sling time` with no target and no
+`--repo` is a usage error. Only `doctor`'s `git_remote` check reads the
+remote, and it never feeds `--repo`. With both flags, keep `--repo` (it names
+the org) and drop `--org`.
 
 | Flag | Meaning |
 |---|---|
-| `--agent` | Machine mode. The PUBLISHED DOCS call it equivalent to `--json --compact --no-input --no-color --yes`; no help page says that, and `--compact` is not a flag this binary has (0.1.8) — it changes nothing because unknown flags are ignored. Pass it on every **data** command — never on `sling login`, and give `sling org switch` an explicit slug |
+| `--agent` | Machine mode. The PUBLISHED DOCS call it equivalent to `--json --compact --no-input --no-color --yes`; no help page says that, and `--compact` is not a flag this binary has (0.1.124) — it changes nothing because unknown flags are ignored. Pass it on every **data** command — never on `sling login`, and give `sling org switch` an explicit slug |
 | `--json` | JSON on stdout (implied by `--agent`) |
-| `--org <slug>` | Org context. Auto-resolved when unambiguous; default set by `sling org switch` |
-| `--repo <owner/name>` | Repo context. Defaults to the git remote of the current directory |
+| `--org <slug>` | Org context, where accepted. Auto-resolved when unambiguous; default set by `sling org switch` |
+| `--repo <owner/name>` | Repo context, where accepted. Never defaulted from git; a bare repo name is rejected |
 | `--version`, `-v` / `--help`, `-h` | Version / help |
 
 `SLING_HOST` (env only, no flag) overrides the control-plane base URL for
 self-hosted or development control planes. It must be `https://` — or
 `http://` on a loopback host.
 
-**Unknown flags are ignored rather than rejected — except by `sling logs`, the one strict parser.** `sling runs list
+**Unknown flags are ignored rather than rejected — except by `sling logs` and `sling update`, the strict parsers.** `sling runs list
 --bogus` exits `0` and returns unfiltered rows. Do not read a `0` as proof
 that a filter was applied; check the returned rows.
 
@@ -83,26 +104,55 @@ Exits `0` healthy, **`10` unhealthy**.
             {"key": "git_remote", "ok": true, "detail": "origin → …"},
             {"key": "patch_tooling", "ok": true, "detail": "git found (/usr/bin/git)"},
             {"key": "version", "ok": true, "warn": true,
-             "detail": "version 0.1.7\n0.1.8 is available, to update:",
-             "fix_command": "<the installer one-liner from the installation page>"},
+             "detail": "version 0.1.123\n0.1.124 is available, to update:",
+             "fix_command": "sling update"},
+            {"key": "auto_update", "ok": true,
+             "detail": "on; not checked yet"},
             {"key": "org", "ok": true, "detail": "starslingdev (paid)"},
             {"key": "agent_skill", "ok": true,
              "detail": "sling skill installed for Claude Code"}]}
 ```
 
-The `version` row above is shown deliberately in its OUTDATED shape, so the
-upgrade fields are visible; a current binary reports
-`{"key": "version", "ok": true, "detail": "up to date (0.1.8)"}` with no
-`warn` and no `fix_command`. Every other row is a live 0.1.8 capture.
+Nine checks. The `version` row above is shown deliberately in its OUTDATED
+shape, so the upgrade fields are visible; a current binary reports
+`{"key": "version", "ok": true, "detail": "up to date (0.1.124)"}` with no
+`warn` and no `fix_command`. The `auto_update` row is the installer-placed,
+updates-on shape. Every other row is a live 0.1.124 capture.
+
+**The `version` row's `fix_command` depends on how `sling` was installed.**
+On a normal install (placed by the StarSling installer) it is `sling update`.
+On a binary the installer did not place, it is the installer one-liner — or,
+for a copy sitting where the installer would write, a longer shell line that
+sets the copy aside and runs the installer — and for a copy with no safe
+one-line fix it is absent, with the detail ending "this copy has no safe
+one-line update (`sling update` says why)". Every form is a command that
+changes the user's machine: surface it, never run it.
 
 `"skipped": true` means the check produced NO verdict — a check that could
 not run at all (`clock_skew` and `org` under an unreachable control plane
 read `ok: false, skipped: true, "not checked"`). Read `detail`; a skipped
 check is never a pass. An outdated-but-working version reads `ok: true,
-warn: true` with the upgrade one-liner in `fix_command` — advisory, not a
-failure (up to date it reads `ok: true, "up to date (<version>)"`).
+warn: true` with the update command in `fix_command` (`sling update` on an
+installer-placed copy, as above) — advisory, not a failure (up to date it reads `ok: true, "up to date (<version>)"`).
 
-**`agent_skill` (new in 0.1.8) is advisory and can never fail the run.**
+**`auto_update` is advisory and can never fail the run.** It is always
+`ok: true` except for a copy with no installer record at all (the last row
+below), which reads `ok: false, skipped: true` — a non-verdict, so it never
+contributes to exit `10`. Its shapes:
+
+| Shape | Row |
+|---|---|
+| Installer-placed, updates on | `ok: true`, `"on; last checked <time> UTC: <outcome>"` (or `"on; not checked yet"`) |
+| Installer-placed, turned off | `ok: true`, `"off (<why>); …"` — `<why>` is e.g. `CI is set`, `SLING_NO_AUTO_UPDATE is set`, `sling update --off`, or that the environment could not be read |
+| Installer-placed, last background check failed | `ok: true, warn: true`, `"on; … To retry now:"`, `fix_command: "sling update"` |
+| A copy the installer did not place, with a safe swap | `ok: true, warn: true`, `"off — the StarSling installer didn't place this sling; to swap it for one that updates itself:"`, with the swap line in `fix_command` |
+| A copy with no safe one-line swap | `ok: true, warn: true`, `"off — … and it has no safe one-line swap …"` (the detail points at `sling update` for why), no `fix_command` |
+| No installer record at all | `ok: false, skipped: true`, `"off — this sling wasn't placed by the StarSling installer, so it can't update itself"` |
+
+Every `fix_command` here changes the user's machine — **surface it, never
+run it**, and never turn background updates off or on yourself.
+
+**`agent_skill` is advisory and can never fail the run.**
 `doctor` is unhealthy only when a check is `ok: false` AND not `skipped`, and
 this check's only `ok: false` shape is also `skipped: true` — so it never
 contributes to exit `10`. It reports whether this skill is installed for a
@@ -140,7 +190,8 @@ it with its detail; do not act on it, and do not treat it as a failure.
 
 ### `sling login [--force] [--clear]`
 
-GitHub device-code flow, and **the one command an agent should not run**:
+GitHub device-code flow, and **a command an agent must never run** (like
+`sling update` and `sling logout`):
 it prints a code, opens a browser approval page, and blocks until a human
 approves it. Ask the user to run it in their own terminal. Never pass
 `--agent` — that carries `--no-input`, so the prompt is refused with exit
@@ -151,14 +202,54 @@ approves it. Ask the user to run it in their own terminal. Never pass
 per user, owner-only — so one sign-in covers every agent running as that
 user.
 
+### `sling update [--off | --on] [--json]`
+
+Reinstalls `sling` on the user's machine through the same installer, when a
+newer release is served. It changes **no GitHub or CI state** — only the
+installed binary — and it is, like `login`, **a command the user runs, not
+the agent**: surface it when `doctor` suggests it, never run it yourself.
+Present since 0.1.84; the parser is strict (an unknown argument, or `--off`
+with `--on`, exits `2`).
+
+Under `--agent` it prints one object on stdout (the update itself was
+deliberately not run while capturing, since it changes the machine; these are
+the CLI's defined outcomes, not a captured run):
+
+| Outcome | stdout | Exit |
+|---|---|---|
+| Already current | `{"result": "current", "version": "…"}` | `0` |
+| Updated | `{"result": "updated", "from": "…", "to": "…"}` | `0` |
+| The check failed (installer URL unreachable or unreadable) | `{"result": "failed", "stage": "check", "detail": "…"}` | `5` |
+| The install failed (previous version stays active) | `{"result": "failed", "stage": "install", "detail": "…"}` | `1` |
+| A binary the installer did not place | `{"result": "unmanaged", "reason": "…", "install": "…"}` — `install` is the replacement line, absent when there is no safe one | `2` |
+
+`--off` / `--on` turn background updates off and on for this install
+(`{"auto_update": "off"}` / `"on"` under `--agent`; a copy the installer did
+not place gets the `unmanaged` object and exit `2` instead); `sling update` still
+works on demand while they are off. Opting out is the user's decision.
+
+**Background self-update.** About once a day, after most commands finish
+(not `--version`, `--help`, a bare `sling` or `sling update` itself), an
+installer-placed `sling` checks for a newer release and installs it in a
+detached process. Nothing is written to stdout and the exit code is never
+touched; under `--agent` / `--json` it is silent (at most one stderr line, in
+human mode on a terminal). It is off when `CI` or `SLING_NO_AUTO_UPDATE` is
+set to anything but empty, `0` or `false`, and after `sling update --off`.
+So **the version can change mid-session**: check `sling --version` (local, no
+network) when the version matters, rather than trusting one seen earlier.
+
 ### `sling logout`, `sling org switch [slug] [--no-input]`
+
+`logout` deletes the saved credential, and only the user can sign back in,
+so the user runs it, never the agent. `org switch <slug>` is the agent's to
+run.
 
 `org switch` with no slug opens a picker; under `--agent` (which implies
 `--no-input`) that is refused with exit `2`, so pass the slug.
 
 ## Inspect
 
-### `sling runs list [filters] [--limit <n>] [--cursor <c>]`
+### `sling runs list [filters] [--org <slug> | --repo <owner/name>] [--limit <n>] [--cursor <c>]`
 
 Filters, all server-side and freely combinable: `--branch`, `--status`
 (`queued`, `in_progress`, `completed`), `--conclusion` (`success`,
@@ -179,7 +270,8 @@ them were confirmed to filter for real.
  "has_more": false, "next_cursor": null, "local": {"org": "starslingdev"}}
 ```
 
-Page with `--cursor` while `has_more` is true.
+Page with `--cursor` while `has_more` is true. `--org` and `--repo` together
+exit `2` (`Use --org or --repo, not both.`).
 
 ### `sling runs show <run id | URL> [--wait] [--fail-fast] [--wait-timeout <d>]`
 
@@ -201,15 +293,23 @@ soon as any job fails; `--wait-timeout` caps the wait.
 Note the shape: `jobs[]` here carries `job_name` and `attempts[]` but no
 `job_id`. To get job ids, use `jobs list --run <id>`, or `resolve`.
 
-### `sling jobs list --run <id> | --repo <owner/name> [window] [--conclusion <c>]`
+### `sling jobs list --run <id> | --repo <owner/name> [window] [--conclusion <c>] [--afterburner engaged|not-engaged]`
 
 ```json
 {"jobs": [{"job_id": "97912608061", "run_id": "32881736257",
            "name": "<job name>", "status": "completed",
-           "conclusion": "failure", "runner_id": "1000520625", "attempt": 1,
+           "conclusion": "failure", "label": "<runner label>",
+           "runner_id": "1000520625", "attempt": 1,
            "duration_ms": 3000, "created_at": "…"}],
  "has_more": false, "local": {"org": "…", "run_id": "…"}}
 ```
+
+`--afterburner engaged` keeps only jobs where Afterburner engaged (the job
+went over its billed size at any point); `not-engaged` the rest; any other
+value exits `2`. Rows on runners that report Afterburner carry optional
+fields — `afterburner_engaged`, `afterburner_coverage`,
+`afterburner_complete`, `afterburner_rate` — absent elsewhere, so a parser
+must not require them; `label`, `runner_id` and `duration_ms` are optional too. `--org` together with `--repo` exits `2`.
 
 ### `sling jobs show <job id | URL>`
 
@@ -325,7 +425,13 @@ Classified server-side, with no LLM in the loop.
 `0` with a reason — a zero there means *not separately measured*, not
 *instant*. Saying otherwise turns a measurement gap into a false finding.
 
-### `sling time --repo <owner/name> [--window <n>d | --month | --from/--to]`
+### `sling time --repo <owner/name> [--workflow <name>] [--group-by afterburner|provider|tier] [--window <n>d | --month | --from/--to]`
+
+**`--repo` is required for this view and is never read from the git
+remote**: `sling time` with no target and no `--repo` exits `2`, even inside
+a checkout. **`--org` is rejected outright** (exit `2`, "`sling time`
+decomposes one repo or one target, so `--org` … doesn't apply"), with or
+without `--repo` — switch the default org instead.
 
 Percentiles per phase per runner label across a repo:
 
@@ -335,6 +441,49 @@ Percentiles per phase per runner label across a repo:
              "p50_ms": 46000, "p95_ms": 506900, "p99_ms": 586240, "jobs": 199}],
  "meta": {"source": "steps", "truncated": [...]}}
 ```
+
+**`--workflow <name>`** narrows to one workflow and adds its dominant
+critical path, hop by hop — the answer to "which part of this workflow is
+slow". Shown here as `--workflow <name> --group-by afterburner` output, so
+each hop's `cells[]` carries one entry per group, with its `delta` against
+the baseline group (values synthetic; trimmed here to the `on` group):
+
+```json
+{"level": "repo", "workflow": "<workflow name>", "phases": [...],
+ "critical_path": {"path": ["setup", "build", "test"], "runs": 1000,
+                   "path_runs": 500, "min_sample": 20,
+                   "hops": [{"job_name": "build", "label": "<runner label>",
+                             "cells": [{"group": "on", "p50_ms": 120000, "n": 50,
+                                        "delta": {"kind": "estimate", "ms": -20000,
+                                                  "pct": -14.3, "error_ms": 10000,
+                                                  "baseline_p50_ms": 140000}}]}],
+                   "total": [{"group": "on", "p50_ms": 1200000}]}}
+```
+
+Hops are started→completed of successful jobs on each hop's runner label.
+A `delta` of `{"kind": "insufficient_sample"}` means fewer than `min_sample`
+jobs on one side — **report that as "not enough runs to compare", never as
+zero**.
+
+**`--group-by afterburner|provider|tier`** splits the repo view by where
+each job ran, adding a `grouping` object: per-group job counts (and, for
+Afterburner, how many were captured and engaged) and p50/p95/p99 per phase
+per group (values synthetic):
+
+```json
+{"grouping": {"group_by": "afterburner", "baseline": "off",
+              "groups": [{"key": "on", "jobs": 200, "captured": 200, "engaged": 50},
+                         {"key": "off", "jobs": 500, "captured": 0, "engaged": 0},
+                         {"key": "unknown", "jobs": 100}],
+              "phases": [{"phase": "steps", "group": "on", "p50_ms": 60000,
+                          "p95_ms": 300000, "p99_ms": 600000, "jobs": 200}]}}
+```
+
+The grouped phase table carries **no deltas**: each group pools whatever jobs
+ran in it, so a phase difference measures the job mix, not the runner. The
+like-for-like comparison against the `baseline` group is the per-hop `delta`
+of `--workflow` combined with `--group-by`. `unknown` is jobs with no
+placement record, and never carries a delta.
 
 This is the one `sling` command that spans many runs. It is still
 *measurement*, not an audit: it says which phase is slow, never why the
@@ -351,7 +500,13 @@ workflow is written the way it is. That second question is `ci-speedup`.
            "cost_usd": 43.21, "pct_of_total": 49.46}]}
 ```
 
-### `sling top [--by workflow|job|label|repo|branch] [--metric runner-minutes|cost|jobs|p95-duration] [-n <count>] [--window <n>d | --month]`
+`--org` and `--repo` are mutually exclusive: both together exit `2` (`Use
+--org or --repo, not both.`). The same holds for `sling top`. There is no
+Afterburner axis here; compare timings with and without Afterburner with `sling
+time --repo <owner/name> --workflow <name> --group-by afterburner` (the per-hop
+`delta`).
+
+### `sling top [--by workflow|job|label|repo|branch] [--metric runner-minutes|cost|jobs|p95-duration] [-n <count>] [--org <slug> | --repo <owner/name>] [--window <n>d | --month]`
 
 ```json
 {"by": "workflow", "metric": "runner-minutes", "window": {"from": "…", "to": "…"},
@@ -364,19 +519,30 @@ workflow is written the way it is. That second question is `ci-speedup`.
 do not print that as a repo name without saying what it means. `trend_pct`
 is a change against the prior comparable window.
 
-### `sling bill [--month YYYY-MM] [--select <a,b>]` and `sling bill history`
+### `sling bill [--month YYYY-MM] [--select <a,b>]` and `sling bill history [-n <count>] [--after <invoice_id>]`
 
 ```json
 {"period": {"from": "…", "to": "…"}, "status": "open",
  "period_source": "install_cycle", "runner_minutes": 12345,
- "amount_usd": 98.76, "credits_usd": 0, "amount_due_usd": 98.76,
- "line_items": [{"label": "starsling-ubuntu-24.04", "minutes": 40227, "usd": 321.816}]}
+ "amount_usd": 98.76, "credits_usd": 8, "amount_due_usd": 90.76,
+ "free_credit_total_usd": 8, "free_credit_remaining_usd": 0,
+ "line_items": [{"label": "starsling-ubuntu-24.04", "minutes": 12345, "usd": 98.76,
+                 "afterburner_rate": 0.5, "afterburner_engaged_jobs": 100}],
+ "projected_month_end_usd": 192.4}
 ```
 
 `bill history` returns `{"invoices": [ …the same shape plus "invoice_id"… ]}`.
 Report `amount_due_usd`, not `amount_usd`, when the user asks what is owed —
-they differ by `credits_usd`. `status: "open"` means the period is still
-accruing; it is not a final number.
+they differ by `credits_usd`. `free_credit_total_usd` /
+`free_credit_remaining_usd` (optional) describe a free-credit grant; they
+are context, not the amount owed — still report `amount_due_usd`.
+`projected_month_end_usd` is a projection, not a bill. The values in
+the example above are illustrative, not a capture; the field names are the
+binary's. Line items may
+carry optional Afterburner counts (`afterburner_rate`,
+`afterburner_total_jobs`, `afterburner_known_jobs`,
+`afterburner_measured_jobs`, `afterburner_engaged_jobs`). `status: "open"`
+means the period is still accruing; it is not a final number.
 
 **Both scope flags take a value.** `sling <cmd> --help` renders them as
 `[--org | --repo <r>]`, which reads as though `--org` were a bare switch — it
@@ -385,9 +551,16 @@ is not. A scope flag with no value is rejected rather than swallowed:
 empty value).` on stderr. Loud rather than silent — but it is still a bad
 invocation, so pass the slug.
 
-### `sling labels list`
+### `sling labels list [--org <slug>]`
 
 ```json
 {"labels": [{"label": "starsling-ubuntu-24.04", "cpu": 4, "memory_gb": 16,
-             "arch": "x64", "price_per_min_usd": 0.008}]}
+             "arch": "x64", "price_per_min_usd": 0.008},
+            {"label": "<private-beta label>", "cpu": 16, "memory_gb": 64,
+             "arch": "x64", "price_per_min_usd": 0.032, "private_beta": true}]}
 ```
+
+Rows with `private_beta: true` are that org's private-beta labels — the
+default org's, or those of the org named by `--org`. Say so before
+suggesting one for `runs-on`, and never present one as generally
+available.

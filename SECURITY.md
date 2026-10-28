@@ -20,7 +20,9 @@ identifiers you ask about to StarSling's control plane and reads back the CI
 data StarSling already collects for your organization. It authenticates via a
 GitHub device flow and stores its credential at `~/.config/sling/credentials`
 (owner-only). It is read-only against your CI, and the skill routes anything
-that changes state to your own `gh`.
+that changes state to your own `gh`. A `sling` placed by StarSling's installer
+also checks for a newer release about once a day and updates itself; set
+`SLING_NO_AUTO_UPDATE=1` or run `sling update --off` to turn that off.
 
 - **Runs with your own `gh` auth.** The skill reads the audited repository's
   GitHub Actions run/job/log data and workflow YAML through a fixed set of

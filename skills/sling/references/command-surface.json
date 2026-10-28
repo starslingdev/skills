@@ -1,14 +1,15 @@
 {
-  "_comment": "The complete set of sling subcommands, captured from `sling --help` on v0.1.8 (2026-08-31). This file exists so a test can prove SKILL.md never routes to a subcommand that does not exist. Update it, and the changelog, when a sling release adds or removes a command.",
-  "cli_version": "0.1.8",
-  "captured_utc": "2026-08-31",
-  "read_only": true,
+  "_comment": "The complete set of sling subcommands, captured from `sling --help` and each `sling <cmd> --help` on v0.1.124 (2026-10-27). The scope_flags rules were captured by running each command under `--agent`, not read from help text, which renders them abridged. This file exists so a test can prove SKILL.md never routes to a subcommand that does not exist, and never routes a GitHub state change to sling. Update it, and the changelog, when a sling release adds or removes a command; a new command must also be given a reviewed entry in `classification`.",
+  "cli_version": "0.1.124",
+  "captured_utc": "2026-10-27",
+  "changes_github_state": false,
   "groups": {
     "auth_and_setup": [
       "login",
       "logout",
       "whoami",
       "doctor",
+      "update",
       "org switch"
     ],
     "inspect": [
@@ -34,14 +35,78 @@
       "exit-codes"
     ]
   },
+  "github_state_changing_commands": [],
+  "local_only_user_runs": {
+    "_comment": "Commands that change only the user's own machine (a credential, an installed binary) and that the USER runs, never the agent. `logout` is here because it deletes the saved credential and only the user can sign back in. None of them touches GitHub or CI state.",
+    "commands": [
+      "login",
+      "logout",
+      "update"
+    ]
+  },
+  "classification": {
+    "_comment": "One reviewed class per captured command, so a new command fails the suite until someone classifies it on purpose. read_only: reads data or local state, and the command itself changes nothing (an installer-placed sling may still update itself in the background afterwards). local_only: changes only the user's own local sling state (the saved default org), never GitHub or CI, and the agent may run it. local_only_user_runs: changes only the user's machine and the USER runs it, never the agent. There is no class for a GitHub or CI state change: such a command would have to route to the user or to gh, and the contract would change with it.",
+    "login": "local_only_user_runs",
+    "logout": "local_only_user_runs",
+    "whoami": "read_only",
+    "doctor": "read_only",
+    "update": "local_only_user_runs",
+    "org switch": "local_only",
+    "runs list": "read_only",
+    "runs show": "read_only",
+    "jobs list": "read_only",
+    "jobs show": "read_only",
+    "logs": "read_only",
+    "resolve": "read_only",
+    "why": "read_only",
+    "time": "read_only",
+    "usage": "read_only",
+    "top": "read_only",
+    "bill": "read_only",
+    "bill history": "read_only",
+    "labels list": "read_only",
+    "exit-codes": "read_only"
+  },
+  "doctor_checks": {
+    "_comment": "The nine check keys `sling doctor --agent` emitted on v0.1.124, split by whether a failing row is something the agent acts on (actionable) or only reports (advisory: never makes doctor unhealthy). The agent never runs any row's fix_command itself: `version`'s `sling update` and `token`'s `sling login` go to the user.",
+    "actionable": [
+      "token",
+      "control_plane",
+      "clock_skew",
+      "git_remote",
+      "patch_tooling",
+      "version",
+      "org"
+    ],
+    "advisory": [
+      "auto_update",
+      "agent_skill"
+    ]
+  },
   "global_flags": [
     "--agent",
     "--json",
-    "--org",
-    "--repo",
     "--version",
     "--help"
   ],
+  "scope_flags": {
+    "_comment": "--org <slug> and --repo <owner/name> are per-command, not global. Every rejection below exits 2 with nothing on stdout. No command reads --repo from the git remote of the current directory; without --repo, runs list, usage and top cover the whole org, and jobs list exits 2 unless given --run, --repo or a window.",
+    "rejects_org_and_repo": [
+      "logs"
+    ],
+    "rejects_org": [
+      "time"
+    ],
+    "rejects_org_with_repo": [
+      "runs list",
+      "jobs list",
+      "usage",
+      "top"
+    ],
+    "repo_required_for_repo_view": [
+      "time"
+    ]
+  },
   "exit_codes": {
     "0": "success",
     "1": "unexpected internal error",
@@ -53,6 +118,5 @@
     "7": "rate limited",
     "10": "remote outcome failed (doctor unhealthy, or runs show --wait on a non-success run)"
   },
-  "mutating_commands": [],
-  "global_flags_note": "--org and --repo are rejected by `logs` (strict parser, exit 2); every other data command accepts them. Unknown flags are ignored everywhere except `logs`."
+  "global_flags_note": "`logs` rejects --org and --repo (strict parser, exit 2, `Unknown flag \"--org\"`). `time` rejects --org outright (exit 2) and needs --repo for its repo view, which it never reads from git. `runs list`, `jobs list`, `usage` and `top` reject --org together with --repo (exit 2, `Use --org or --repo, not both.`). Unknown flags are ignored everywhere except `logs` and `update`."
 }
