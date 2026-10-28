@@ -550,6 +550,15 @@ def build_summary(doc: dict[str, Any], findings_path: str = "FINDINGS.json",
                    "Ranking falls back to the slowest checks across sampled PRs.")
     out.append("")
 
+    repo_pub = cp.get("required_checks_repo_published") or []
+    if repo_pub and not cp.get("unresolved_reason"):
+        out.append("Required status posted by this repo's own workflow: "
+                   + ", ".join(repo_pub) + "; which checks it waits on is not traced.")
+    if cp.get("provenance") == "unresolved" and cp.get("unresolved_reason"):
+        out.append("Merge gate unresolved: " + str(cp["unresolved_reason"]))
+    if repo_pub or cp.get("unresolved_reason"):
+        out.append("")
+
     # PR-FLOOR fallback: no required check resolved to a workflow file (the required
     # suite is external/managed, or no sampled PR carried it). The spine below is the
     # measured PR-floor, NOT the branch-protection gate. State it once so the agent

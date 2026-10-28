@@ -1188,6 +1188,15 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-10-28** — Repo-published required statuses are named in the agent
+  summary, and an independent unresolved-gate reason stays visible beside the
+  report headline when sampling footnote metadata is absent. Status-source
+  reads reject symlinks outside the checkout; context extraction no longer
+  retries overlapping indentation matches on long whitespace. The report
+  self-check accepts an unknown merge-gating result when the same required
+  check name belongs to multiple workflows. Windows setup cards also recognize
+  common .NET SDK setup names without adding savings credit or changing totals.
+
 - **2026-10-27** — **A required status that the repo publishes itself is no
   longer treated as an outside gate (#119).** When branch protection requires
   one commit status (say `All CI`) that a workflow in the repo posts after
