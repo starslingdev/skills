@@ -19,7 +19,9 @@ All notable changes to the `sling` skill. Unversioned; dated (UTC).
   after most commands (not `--version`, `--help`, or `sling update` itself):
   silent under `--agent`, never touching stdout or the exit code, off under
   `CI` / `SLING_NO_AUTO_UPDATE` or after `sling update --off` — so the
-  version can change mid-session, and opting out is the user's choice.
+  version can change mid-session, and opting out is the user's choice. The
+  repo's security notes disclose the daily self-update and how to turn it
+  off.
 - **2026-10-27** — **New read views in the routing table and reference.**
   `sling time --repo <owner/name> --workflow <name>` (one workflow plus its
   critical path, hop by hop — "which part of this workflow is slow"),
@@ -90,22 +92,33 @@ All notable changes to the `sling` skill. Unversioned; dated (UTC).
   no installer record at all, so it never sets exit `10`. The `version`
   check's `fix_command` is now `sling update` on a normal install, otherwise
   the installer one-liner (or a line that sets a copy aside first), or
-  absent; the rule stays "surface it, never run it". The intro now says a
-  few commands change only the user's machine (`login`/`logout`, `org
-  switch`, `update`) and none changes GitHub or CI state. The routing guard
-  is reshaped rather than dropped: the contract is "no `sling` command
-  changes GitHub or CI state", `update` joins `login` in a local-only,
-  user-runs-it group, every captured command carries a reviewed
-  classification (so a new command fails until it is classified on
-  purpose), and `doctor`'s actionable and advisory check keys are recorded
-  in the capture. The guards are mutation-tested: every state-change row of
-  the routing table and every state-change eval ask (stop / kill / abort /
-  requeue / pause style included) must route to `gh`; no example passes a
-  scope flag its command rejects; no shipped text says `--repo` comes from
-  the git remote; and the version pin is checked across every shipped file,
-  frontmatter included. Re-verified unchanged on 0.1.124: `--compact`
-  absent, `logs` rejects `--org`/`--repo`, an empty scope-flag value exits
-  `2`, `exit-codes` lists only `0`–`5`, a nonexistent subcommand exits `1`.
+  absent; the rule stays "surface it, never run it". The Gotchas bullet
+  that said `sling update` does not exist, and the claim that no `sling`
+  command changes anything, are gone: both were true when written and are
+  false on 0.1.124. The intro now says a few commands change only the
+  user's machine (`login`/`logout`, `org switch`, `update`) and none changes
+  GitHub or CI state; the user runs `login`, `logout` and `update`, and
+  `org switch <slug>` is the agent's to run. `logout` is user-run because
+  it deletes the saved credential and only the user can sign back in. The
+  `gh` fallback reference and the README no longer call `sling` read-only
+  outright; they say it makes no change to GitHub. The re-run row names
+  `--job` and `-R`. The routing guard is reshaped rather than dropped: the
+  contract is "no `sling` command changes GitHub or CI state", `update` and
+  `logout` join `login` in a local-only, user-runs-it group, every captured
+  command carries a reviewed classification (so a new command fails until
+  it is classified on purpose), and `doctor`'s actionable and advisory
+  check keys are recorded in the capture. The guards are mutation-tested:
+  every state-change row of the routing table and every state-change eval
+  ask (stop / kill / abort / requeue / pause style, and inflected forms
+  such as "cancelling" or "re-running", included) must route to `gh`, while
+  a read-only question about one ("why did the job abort") is not mistaken
+  for a state change; no example or eval row passes a scope flag its
+  command rejects; no shipped text or eval says `--repo` comes from the git
+  remote; and the version pin is checked across SKILL.md (frontmatter
+  included), every reference and every eval file. Re-verified unchanged on
+  0.1.124: `--compact` absent, `logs` rejects `--org`/`--repo`, an empty
+  scope-flag value exits `2`, `exit-codes` lists only `0`–`5`, a
+  nonexistent subcommand exits `1`.
 
 - **2026-08-31** — **Re-pinned every version-pinned fact against `sling`
   v0.1.8** (what the installer serves since 2026-08-31) and **documented
@@ -146,11 +159,6 @@ All notable changes to the `sling` skill. Unversioned; dated (UTC).
 
 ### Fixed
 
-- **2026-10-27** — **The skill said `sling update` does not exist, and that
-  no `sling` command changes anything.** Both were true when written and
-  are false now; the Gotchas bullet that carried them is gone. The guard's
-  allowance for naming a missing command in order to warn about it remains,
-  but no longer has `sling update` as its live case.
 - **2026-10-27** — **Three scope-flag claims were wrong on both 0.1.8 and
   0.1.124.** `runs list`, `jobs list`, `usage` and `top` reject `--org`
   together with `--repo` (exit `2`, `Use --org or --repo, not both.`);
@@ -160,16 +168,11 @@ All notable changes to the `sling` skill. Unversioned; dated (UTC).
   or a window, and `time`'s repo view needs `--repo`. With both flags, keep
   `--repo` (it names the org) and drop `--org`. The preflight's wrong-org
   step, the exit-`2` recovery, the reference's Global flags section and the
-  captured surface now say so, and a guard pins each rule to the capture.
-- **2026-10-27** — **The `gh` fallback reference no longer calls `sling`
-  read-only.** It now says `sling` "makes no change to GitHub" instead of
-  "read-only in this release".
+  captured surface now say so. Guards pin the `time` and not-both rules to
+  the capture; the git-remote rule has no capture field and is a prose ban.
 - **2026-10-27** — **A state-change eval row could route to `none` with the
   suite green.** The check was only "not `sling`"; state-change asks must
   now route to `gh` with a `gh` command.
-- **2026-10-27** — **Smaller corrections.** The re-run row names `--job` and
-  `-R`; the README no longer calls `sling` read-only outright; and the
-  security notes disclose the daily self-update.
 
 - **2026-08-31** — **The commands-must-exist guard no longer stops reading at
   a `"detail"` string.** Documenting `doctor`'s `agent_skill` row meant

@@ -37,16 +37,17 @@
   },
   "github_state_changing_commands": [],
   "local_only_user_runs": {
-    "_comment": "Commands that change only the user's own machine (a credential, an installed binary) and that the USER runs, never the agent. None of them touches GitHub or CI state.",
+    "_comment": "Commands that change only the user's own machine (a credential, an installed binary) and that the USER runs, never the agent. `logout` is here because it deletes the saved credential and only the user can sign back in. None of them touches GitHub or CI state.",
     "commands": [
       "login",
+      "logout",
       "update"
     ]
   },
   "classification": {
-    "_comment": "One reviewed class per captured command, so a new command fails the suite until someone classifies it on purpose. read_only: reads data or local state and changes nothing. local_only: changes only the user's own local sling state (the saved credential or the default org), never GitHub or CI. local_only_user_runs: changes only the user's machine and the USER runs it, never the agent. There is no class for a GitHub or CI state change: such a command would have to route to the user or to gh, and the contract would change with it.",
+    "_comment": "One reviewed class per captured command, so a new command fails the suite until someone classifies it on purpose. read_only: reads data or local state, and the command itself changes nothing (an installer-placed sling may still update itself in the background afterwards). local_only: changes only the user's own local sling state (the saved default org), never GitHub or CI, and the agent may run it. local_only_user_runs: changes only the user's machine and the USER runs it, never the agent. There is no class for a GitHub or CI state change: such a command would have to route to the user or to gh, and the contract would change with it.",
     "login": "local_only_user_runs",
-    "logout": "local_only",
+    "logout": "local_only_user_runs",
     "whoami": "read_only",
     "doctor": "read_only",
     "update": "local_only_user_runs",
@@ -67,7 +68,7 @@
     "exit-codes": "read_only"
   },
   "doctor_checks": {
-    "_comment": "The nine check keys `sling doctor --agent` emitted on v0.1.124, split by whether a failing row is something the agent acts on (actionable) or only reports (advisory: never makes doctor unhealthy, and its fix_command is never run by the agent).",
+    "_comment": "The nine check keys `sling doctor --agent` emitted on v0.1.124, split by whether a failing row is something the agent acts on (actionable) or only reports (advisory: never makes doctor unhealthy). The agent never runs any row's fix_command itself: `version`'s `sling update` and `token`'s `sling login` go to the user.",
     "actionable": [
       "token",
       "control_plane",

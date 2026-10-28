@@ -20,8 +20,8 @@ account's runner-minutes — from StarSling's control plane, with structured
 JSON on stdout and a stable exit-code table. **No `sling` command changes
 GitHub or CI state**: it reads and analyzes. A few change only the user's
 own machine — `login`/`logout` (the credential), `org switch` (the saved
-default org) and `update` (the installed binary); the user runs `login` and
-`update`, never you.
+default org) and `update` (the installed binary); the user runs `login`,
+`logout` and `update`, never you; `org switch <slug>` is yours to run.
 
 **This skill's job is picking the right tool per request.** Live question
 about a run, a job, or spend → `sling`. Anything that *changes* CI state →
@@ -113,8 +113,8 @@ Do this once per session, before the first `sling` command.
    data commands but **not by `sling logs`**, which parses strictly and
    rejects both (`Unknown flag "--org"`); every rejection here is exit `2`. That is the command
    this routing table reaches for most, so fix a wrong org for a logs read by
-   switching the default rather than by adding a flag to the call. **`sling
-   time` rejects `--org` outright** — switch the default for it too.
+   switching the default rather than by adding a flag to the call.
+   **`sling time` rejects `--org` outright** — switch the default for it too.
    `runs list`, `jobs list`, `usage` and `top` take either flag but reject
    both together (`Use --org or --repo, not both.`) — keep `--repo`, which
    names its org, and drop `--org`. No command fills in `--repo` from the git
@@ -255,7 +255,7 @@ reading YAML yourself.
 |---|---|---|
 | Why a specific job failed | `sling` | `sling why <run\|job\|attempt id\|URL>` |
 | Where a run's wall-clock went (queue wait vs. provision vs. steps vs. teardown) | `sling` | `sling time <run\|job\|attempt id\|URL>` |
-| The same, as percentiles across a repo | `sling` | `sling time --repo <owner/name> --window <n>d` (`--repo` is required; `--org` is rejected) |
+| The same, as percentiles across a repo | `sling` | `sling time --repo <owner/name> --window <n>d` (`--repo` is required; for another org, switch the default) |
 | Which part of a workflow is slow — its critical path, hop by hop | `sling` | `sling time --repo <owner/name> --workflow <name>` |
 | Whether Afterburner, a provider or a tier changes the timings | `sling` | `sling time --repo <owner/name> --workflow <name> --group-by afterburner\|provider\|tier` — compare the per-hop `delta`; `--group-by` alone mixes different jobs |
 | Recent runs and their status | `sling` | `sling runs list [--repo <owner/name>] [--branch --status --conclusion --trigger --workflow-path --label --window --limit]` |
@@ -268,7 +268,7 @@ reading YAML yourself.
 | Runner-minutes and cost attributed per repo/workflow/label/day | `sling` | `sling usage [--group-by <axis>] [--window <n>d]` |
 | What is owed this period, or past invoices | `sling` | `sling bill`, `sling bill history` |
 | Which runner labels/sizes exist and what they cost | `sling` | `sling labels list` |
-| Identity, org, credential, environment health | `sling` | `sling whoami`, `sling doctor`, `sling org switch` — and `sling login`, which the **user** runs, not you |
+| Identity, org, credential, environment health | `sling` | `sling whoami`, `sling doctor`, `sling org switch` — and `sling login` / `sling logout`, which the **user** runs, not you: ask the user to run `sling logout` (it deletes the saved credential) |
 | Updating `sling` itself, or turning its background updates off/on | the user | `sling update [--off\|--on]` — **ask the user to run `sling update`** (when `doctor`'s `version` row names another `fix_command`, give them that; when it reads up to date, say so); never run it yourself |
 | **Re-run a run or its failed jobs** | `gh` | `gh run rerun <run-id> [--failed \| --job <job-id>] -R <owner/name>` |
 | **Cancel an in-progress run** | `gh` | `gh run cancel <run-id>` |

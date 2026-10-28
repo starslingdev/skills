@@ -190,7 +190,8 @@ it with its detail; do not act on it, and do not treat it as a failure.
 
 ### `sling login [--force] [--clear]`
 
-GitHub device-code flow, and **the one command an agent should not run**:
+GitHub device-code flow, and **a command an agent must never run** (like
+`sling update` and `sling logout`):
 it prints a code, opens a browser approval page, and blocks until a human
 approves it. Ask the user to run it in their own terminal. Never pass
 `--agent` — that carries `--no-input`, so the prompt is refused with exit
@@ -238,6 +239,10 @@ So **the version can change mid-session**: check `sling --version` (local, no
 network) when the version matters, rather than trusting one seen earlier.
 
 ### `sling logout`, `sling org switch [slug] [--no-input]`
+
+`logout` deletes the saved credential, and only the user can sign back in,
+so the user runs it, never the agent. `org switch <slug>` is the agent's to
+run.
 
 `org switch` with no slug opens a picker; under `--agent` (which implies
 `--no-input`) that is refused with exit `2`, so pass the slug.
@@ -441,7 +446,7 @@ Percentiles per phase per runner label across a repo:
 critical path, hop by hop — the answer to "which part of this workflow is
 slow". Shown here as `--workflow <name> --group-by afterburner` output, so
 each hop's `cells[]` carries one entry per group, with its `delta` against
-the baseline group (values synthetic):
+the baseline group (values synthetic; trimmed here to the `on` group):
 
 ```json
 {"level": "repo", "workflow": "<workflow name>", "phases": [...],
@@ -521,7 +526,7 @@ is a change against the prior comparable window.
  "period_source": "install_cycle", "runner_minutes": 12345,
  "amount_usd": 98.76, "credits_usd": 8, "amount_due_usd": 90.76,
  "free_credit_total_usd": 8, "free_credit_remaining_usd": 0,
- "line_items": [{"label": "starsling-ubuntu-24.04", "minutes": 40227, "usd": 321.816,
+ "line_items": [{"label": "starsling-ubuntu-24.04", "minutes": 12345, "usd": 98.76,
                  "afterburner_rate": 0.5, "afterburner_engaged_jobs": 100}],
  "projected_month_end_usd": 192.4}
 ```
@@ -531,8 +536,9 @@ Report `amount_due_usd`, not `amount_usd`, when the user asks what is owed —
 they differ by `credits_usd`. `free_credit_total_usd` /
 `free_credit_remaining_usd` (optional) describe a free-credit grant; they
 are context, not the amount owed — still report `amount_due_usd`.
-`projected_month_end_usd` is a projection, not a bill. The Afterburner
-values in the example above are illustrative, not a capture. Line items may
+`projected_month_end_usd` is a projection, not a bill. The values in
+the example above are illustrative, not a capture; the field names are the
+binary's. Line items may
 carry optional Afterburner counts (`afterburner_rate`,
 `afterburner_total_jobs`, `afterburner_known_jobs`,
 `afterburner_measured_jobs`, `afterburner_engaged_jobs`). `status: "open"`

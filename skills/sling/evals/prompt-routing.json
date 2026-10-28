@@ -96,7 +96,8 @@
     {
       "prompt": "stop sling from updating itself",
       "route": "user",
-      "command": "sling update --off",
+      "command": "sling update",
+      "args": "--off",
       "why": "opting out of background updates is the user's choice; the user runs it"
     },
     {
