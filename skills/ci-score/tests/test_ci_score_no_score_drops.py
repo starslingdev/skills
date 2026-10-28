@@ -237,8 +237,30 @@ OD_CS23_CASES = {
                           "        if: github.event_name == 'push'\n"
                           "        with:\n          fetch-depth: 0\n      - run: pytest\n"]),
 }
+# OD-CS25 intentionally removes literal cache credit from these inputs.
+OD_CS23_CASES.update({
+    "go-cache-no": (_GO, [_wf(_CO, "{uses: actions/setup-go@v5, with: {cache: 'no'}}")]),
+    "go-Cache-No": (_GO, [_wf(_CO, "{uses: actions/setup-go@v5, with: {Cache: 'No'}}")]),
+    "node-cache-off": ({"package.json": "{}"}, [_wf(_CO,
+        "{uses: actions/setup-node@v4, with: {cache: 'off'}}")]),
+    "uv-cache-False": (_UV, [_wf(_CO,
+        "{uses: astral-sh/setup-uv@v5, with: {enable-cache: 'False'}}")]),
+    "uv-auto-self-hosted": (_UV, [_wf(_CO,
+        "{uses: astral-sh/setup-uv@v5, with: {enable-cache: auto}}",
+        runs_on="[self-hosted, linux]")]),
+})
 # {(case_id, check): "<owner decision / PR that made the drop on purpose>"}
 INTENDED_DROPS: dict[tuple[str, str], str] = {
+    ("go-cache-no", "ci.cache.dependency-cache"):
+        "OD-CS25: cache no is not an enabled cache switch",
+    ("go-Cache-No", "ci.cache.dependency-cache"):
+        "OD-CS25: case-insensitive cache No is not an enabled cache switch",
+    ("node-cache-off", "ci.cache.dependency-cache"):
+        "OD-CS25: cache off is not a supported package manager",
+    ("uv-cache-False", "ci.cache.dependency-cache"):
+        "OD-CS25: enable-cache False does not enable caching",
+    ("uv-auto-self-hosted", "ci.cache.dependency-cache"):
+        "OD-CS25: auto requires a literal GitHub-hosted label; use enable-cache true",
     ("all-delegated", "ci.security.pinned-action-shas"):
         "OD-CS24 / #156: a job-level call to another repository's reusable "
         "workflow is a remote reference and counts for pinning, pinned only by "

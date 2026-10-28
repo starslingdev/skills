@@ -1310,8 +1310,9 @@ def test_od5_a_readable_setup_step_outside_the_language_list_still_fails(tmp_pat
         "uses: ./.github/actions/missing", "run: pytest")})
     assert _fact(doc, CACHE) == {
         "state": "fail",
-        "evidence": CACHE_FAIL + "; " + NOT_READ + "./.github/actions/missing" + NO_FILE_NOTE,
-        "files": []}, _fact(doc, CACHE)
+        "evidence": CACHE_FAIL + f"; setup-pixi@{SHA} is not credited: "
+                    "cache input cache: 'False' earns no caching credit; " + NOT_READ + "./.github/actions/missing" + NO_FILE_NOTE,
+        "files": [".github/workflows/ci.yml"]}, _fact(doc, CACHE)
 
 
 def test_od5_an_unread_action_after_the_install_explains_nothing(tmp_path):
@@ -1802,7 +1803,9 @@ def test_a_cache_input_every_caller_turns_off_never_falls_back_to_the_default(tm
         "uses: ./ci/setup\n        with: {cache: false}", "run: go test ./..."),
         "ci/setup/action.yml": "inputs:\n  cache: {default: 'true'}\n" + _composite(
             "uses: actions/setup-go@v5\n      with:\n        cache: ${{ inputs.cache }}")})
-    assert _fact(doc, CACHE) == {"state": "fail", "evidence": CACHE_FAIL, "files": []}, \
+    assert _fact(doc, CACHE) == {"state": "fail", "evidence": CACHE_FAIL + "; setup-go@v5 is not credited: "
+        "cache input cache: 'False' earns no caching credit",
+        "files": ["ci/setup/action.yml"]}, \
         _fact(doc, CACHE)
 
 
@@ -1884,7 +1887,9 @@ def test_a_composite_bundler_cache_input_whose_default_is_false_earns_nothing(tm
                               "ci/setup/action.yml": "inputs:\n  bc: {default: 'false'}\n"
                               + _composite("uses: ruby/setup-ruby@v1\n      with:\n"
                                            "        bundler-cache: ${{ inputs.bc }}")})
-    assert _fact(doc, CACHE) == {"state": "fail", "evidence": CACHE_FAIL, "files": []}, \
+    assert _fact(doc, CACHE) == {"state": "fail", "evidence": CACHE_FAIL + "; setup-ruby@v1 is not credited: "
+        "cache input bundler-cache: 'false' earns no caching credit",
+        "files": ["ci/setup/action.yml"]}, \
         _fact(doc, CACHE)
 
 
@@ -1921,12 +1926,12 @@ def test_an_empty_resolved_cache_value_falls_through_to_setup_node_v5_auto_cache
                                  "files": [".github/workflows/ci.yml"]}, _fact(doc, CACHE)
 
 
-def test_control_a_literal_cache_no_on_setup_go_keeps_its_current_verdict(tmp_path):
-    # Owner decision A: a LITERAL off value keeps the verdict it has on main
-    # (credited, as any non-empty literal was); changing it is a separate PR.
+def test_a_literal_cache_no_on_setup_go_no_longer_earns_credit(tmp_path):
+    # OD-CS25 implements owner decision A: literal off values earn no credit.
     doc = _collect(tmp_path, {**GO_FILES, ".github/workflows/ci.yml": _job_wf(
         "uses: actions/setup-go@v5\n        with: {cache: 'no'}", "run: go mod download")})
-    assert _fact(doc, CACHE) == {"state": "pass", "evidence": CACHE_PASS_ONE,
+    assert _fact(doc, CACHE) == {"state": "fail", "evidence": CACHE_FAIL +
+        "; setup-go@v5 is not credited: cache input cache: 'no' earns no caching credit",
                                  "files": [".github/workflows/ci.yml"]}, _fact(doc, CACHE)
 
 
