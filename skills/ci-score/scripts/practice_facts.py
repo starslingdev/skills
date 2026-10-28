@@ -519,6 +519,14 @@ def _walk_steps(steps: Any, stats: dict[str, Any] | None = None,
         return out
     if _budget is None:
         _budget = [_MAX_WALK_STEPS]
+
+    def keep(step: dict) -> None:
+        out.append(step)
+        if _group_of is not None and _group is not None:
+            _group_of[id(step)] = _group
+        if stats is not None and _side_by_side:
+            stats["steps_in_groups"] += 1
+
     path = _path | {id(steps)}
     for i, step in enumerate(steps):
         if _budget[0] <= 0:
@@ -540,11 +548,7 @@ def _walk_steps(steps: Any, stats: dict[str, Any] | None = None,
         if _PARALLEL_KEY in step:
             group = step.get(_PARALLEL_KEY)
             if is_leaf:
-                out.append(step)
-                if _group_of is not None and _group is not None:
-                    _group_of[id(step)] = _group
-                if stats is not None and _side_by_side:
-                    stats["steps_in_groups"] += 1
+                keep(step)
             undocumented = [r for r, hit in (("in_composite", in_composite),
                                               ("nested", _depth > 0),
                                               ("beside_run_uses", is_leaf)) if hit]
@@ -580,11 +584,7 @@ def _walk_steps(steps: Any, stats: dict[str, Any] | None = None,
             if stats is not None:
                 stats["control_steps"] += 1
             continue
-        if stats is not None and _side_by_side:
-            stats["steps_in_groups"] += 1
-        if _group_of is not None and _group is not None:
-            _group_of[id(step)] = _group
-        out.append(step)
+        keep(step)
     return out
 
 
@@ -1247,8 +1247,7 @@ def _workspace_states(steps: list[dict], group_of: dict[int, int],
     return states
 
 
-# ---- ci-score's own narrowing of the copied verdict (two owner rules plus
-# owner decision 3, 2026-10-27; recorded under OD-CS23, PROPOSED)
+# ---- ci-score's own narrowing of the copied verdict (OD-CS23)
 #
 # ci-speedup counts an unseen cache as ON because there that can only withhold
 # a savings claim; here the same choice would hand out a pass. So the rules
@@ -1487,12 +1486,11 @@ def _step_caches_by_default(step: dict, package_json: Any, workspace_unknown: bo
     def at(major: int) -> str:
         return _setup_cache_state(ua[0], f"v{major}", eff, pj)
 
-    if shared in ("on", "expr") and state in ("on", "expr"):
-        pass
-    elif (shared in ("on", "expr", "maybe") and state == "maybe" and comments
-          and None not in comments and all(at(m) == "on" for m in comments)):
-        pass   # owner decision 3: every commented release caches
-    else:
+    credited = shared in ("on", "expr") and state in ("on", "expr")
+    if (not credited and shared in ("on", "expr", "maybe") and state == "maybe" and comments
+            and None not in comments and all(at(m) == "on" for m in comments)):
+        credited = True   # owner decision 3: every commented release caches
+    if not credited:
         if state != "maybe":
             return False
         if workspace_unknown:
@@ -1537,26 +1535,12 @@ def _dependency_cache_walk(parsed: list[tuple[str, dict, str]], root: Path,
     raw_texts.extend(composite_raw.get(crel, "") for crel, _cdoc in composites)
     comment_texts: dict[tuple[str, str], list[str]] = {}
     version_comments = _sha_version_comments(raw_texts, comment_texts)
-    # The same walk `_step_sources` makes, keeping each job's `runs-on` (a
-    # composite's runner is its caller's, unknown from its own file) and its
-    # `parallel:` groups.
-    cache_sources: list[tuple[str, list[dict], dict[int, int], bool, bool, str | None]] = []
-    for rel, doc, _raw in parsed:
-        for job in _wf_jobs(doc).values():
-            group_of: dict[int, int] = {}
-            steps = _job_steps(job, group_of)
-            runs_on = job.get("runs-on")
-            cache_sources.append((rel, steps, group_of, False,
-                                  _runs_on_github_hosted(runs_on), _runs_on_unread(runs_on)))
-    for rel, doc in composites:
-        if isinstance(doc.get("runs"), dict):
-            cache_sources.append((rel, _composite_steps(doc), {}, True, False, None))
-    for rel, steps, group_of, is_composite, github_hosted, runner_unread in cache_sources:
+
+    def scan(rel: str, steps: list[dict], group_of: dict[int, int], start: str,
+             github_hosted: bool, runner_unread: str | None) -> None:
         # setup-node and setup-go read the workspace when their step runs, so
         # it counts only once a root checkout has FINISHED earlier in the job.
-        # A local composite action is itself read from the checked-out
-        # workspace, so its steps start checked out.
-        states = _workspace_states(steps, group_of, "root" if is_composite else "none")
+        states = _workspace_states(steps, group_of, start)
         for step, ws in zip(steps, states):
             ua = _step_uses(step)
             with_ = step.get("with") if isinstance(step.get("with"), dict) else {}
@@ -1574,6 +1558,21 @@ def _dependency_cache_walk(parsed: list[tuple[str, dict, str]], root: Path,
                                          runner_unread=runner_unread,
                                          comment_texts=comment_texts):
                 hits.append(rel)
+
+    # The same walk `_step_sources` makes, keeping each job's `runs-on` and its
+    # `parallel:` groups.
+    for rel, doc, _raw in parsed:
+        for job in _wf_jobs(doc).values():
+            group_of: dict[int, int] = {}
+            steps = _job_steps(job, group_of)
+            runs_on = job.get("runs-on")
+            scan(rel, steps, group_of, "none",
+                 _runs_on_github_hosted(runs_on), _runs_on_unread(runs_on))
+    # A local composite action is itself read from the checked-out workspace,
+    # so its steps start checked out; its runner is its caller's, unknown here.
+    for rel, doc in composites:
+        if isinstance(doc.get("runs"), dict):
+            scan(rel, _composite_steps(doc), {}, "root", False, None)
     seen: set[tuple[str, str, str]] = set()
     unique = []
     for u in unresolved:
@@ -1590,10 +1589,14 @@ def _unresolved_evidence(unresolved: list[dict[str, str]]) -> str:
     evidence, so a withhold is never a silent fail."""
     if not unresolved:
         return ""
-    named = "; ".join(
-        f"{u['step'].split('/', 1)[-1]} "
-        f"{'earns no default cache' if u['reason'] in _DECIDED_OFF_REASONS else 'default cache could not be resolved'}"
-        f": {u['reason']}" for u in unresolved[:3])
+
+    def verdict(reason: str) -> str:
+        if reason in _DECIDED_OFF_REASONS:
+            return "earns no default cache"
+        return "default cache could not be resolved"
+
+    named = "; ".join(f"{u['step'].split('/', 1)[-1]} {verdict(u['reason'])}: {u['reason']}"
+                      for u in unresolved[:3])
     more = f" (and {len(unresolved) - 3} more)" if len(unresolved) > 3 else ""
     return f"; {named}{more}"
 

@@ -218,7 +218,7 @@ OD_CS23_CASES = {
     "node-bad-json": ({"package.json": "not json"}, [_wf(_CO, "uses: actions/setup-node@v5")]),
     "node-racing": ({"package.json": '{"packageManager": "npm@10.9.0"}'}, [_wf(
         "{uses: actions/checkout@v5, background: true}", "uses: actions/setup-node@v5")]),
-    # explicit inputs in any case (item 1 of the second review round)
+    # explicit inputs in any case
     "node-v4-Cache-npm": ({"package.json": "{}"},
                           [_wf(_CO, "{uses: actions/setup-node@v4, with: {Cache: npm}}")]),
     "uv-v4-Enable-Cache": (_UV, [_wf(_CO, "{uses: astral-sh/setup-uv@v4, "

@@ -336,7 +336,7 @@ def test_a_step_if_negating_pull_request_still_counts_under_pull_request_target(
 
 
 # ---------------------------------------------------------------------------
-# Review fixes (#154): each case below was credited by mistake before them
+# 5. Default-on credit withheld: version comments, runners, go.sum, workspace
 # ---------------------------------------------------------------------------
 
 def _cache(root: Path, *steps: str, runs_on: str = "ubuntu-latest") -> dict:
@@ -582,7 +582,7 @@ def test_a_checkout_that_may_still_be_running_does_not_count(tmp_path, shape, st
     assert f["state"] == state, f
 
 
-# --- test gaps the mutation review found ------------------------------------
+# --- edge cases --------------------------------------------------------------
 
 def test_one_unconditional_full_history_checkout_still_counts(tmp_path):
     wf = ("ci.yml", "on: [pull_request, push]\njobs:\n  test:\n    steps:\n"
@@ -615,7 +615,7 @@ def test_a_literal_string_matrix_is_not_credited(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Second review round (#154)
+# 6. Input-name case, and naming every withheld default with its reason
 # ---------------------------------------------------------------------------
 
 def _write(root: Path, files: dict) -> None:
