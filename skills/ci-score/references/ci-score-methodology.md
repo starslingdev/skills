@@ -1,4 +1,4 @@
-# CI Score v0.1.6 — methodology
+# CI Score v0.1.8 — methodology
 
 > **CI Score gauges best-practice adherence on CI speed and gate hygiene: a
 > straightforward pass/fail rubric of best-practice checks computed from a
@@ -131,6 +131,8 @@ the practice matters. The score card links every check name here.
 ### Shallow checkout
 
 **The fact:** no checkout step on a PR-GATING workflow sets fetch-depth: 0 (structure-walked; comments never count; a JOB THAT WALKS GIT HISTORY - changelog generation, a merge-base or base-SHA diff, tag/describe, changeset versioning - is exempt: full history is load-bearing there and shallowing it would break the job; post-merge automation - a pull_request trigger whose types are only [closed], e.g. backport/changelog jobs - is exempt too: it needs history and gates nobody; a job whose own if: can never be true for a pull-request event - e.g. github.event_name == 'push', or a job scoped to the merge queue with github.event_name == 'merge_group', which is not a pull-request event - is exempt too: no pull request waits for it; and the same rule reads a checkout STEP's own if: - a job whose every fetch-depth: 0 checkout step carries an if: that can never be true for a pull-request event takes no full history on the PR path and is exempt. Only simple, fully resolvable event_name conditions are read; anything else keeps the job on the PR path, including a bare literal if: false, which the grammar does not read and which is therefore still graded - a known miss in the fail-closed direction, costing at most a finding that was already reported; a same-repository reusable workflow (on: workflow_call) that a PR-reachable job calls - via ./ or $/, directly or through nested calls - is on the PR path and graded the same way, its jobs' if: judged against the caller's pull-request events, while a call from a job that can never run on a pull request reaches nothing; a call that cannot be followed (a path outside the repository, a file that is missing, does not parse or repeats a key, or a chain more than 16 deep) is never graded either way and is named in the evidence; a called workflow's fetch-depth: ${{ inputs.<name> }} takes each calling job's with: value, else the input's default, and a depth set by any expression that cannot be resolved leaves the job ungraded and named in the evidence; a job exempt only because a local action it uses, or one that action reaches, could not be read (missing, outside the repository, in the wrong case, or more than 16 deep) stays exempt, since it cannot be proven history-free, and the evidence says the exemption rests on that action, naming it). Content the scan could not read (a local action, a workflow that does not parse, a step list that is not a list, a reusable-workflow call it could not follow) is named in the card evidence, not only in data_sources.
+
+**Not applicable when:** every PR-gating job calls a reusable workflow in another repository; checkout happens there and is not visible from this repository. A local job or local reusable-workflow call keeps the check applicable
 
 **Why it matters:** CI downloads your repo's entire history when it only needs today's code.
 
@@ -503,3 +505,10 @@ The v1-granular rubric (measured-magnitude gating, tiers, weights,
 nine refusal conditions) was **punted before publication by owner decision
 OD-CS15** — its record and rationale live in the spec's `decision_log`, and
 its machinery remains available to a future v2 in git history.
+
+**v0.1.8 (2026-10-28, OD-CS26)** makes shallow checkout not applicable
+when every PR-gating job delegates to another repository. The checkout cannot
+be inspected locally. Removing the old pass can lower the score: synthetic
+SHA-pinned and tag-pinned handoffs move 40 → 25 and 20 → 0. Both frozen
+controls retain every fact. This version follows the reserved v0.1.7 cache
+off-values change; the second PR to merge must rebase and preserve both decisions.

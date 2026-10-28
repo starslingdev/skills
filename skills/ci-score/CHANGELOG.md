@@ -11,6 +11,11 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
 
 ## [Unreleased]
 
+- **2026-10-28** — **Changed** (registry `ci-score-v0.1.8`, OD-CS26): shallow
+  checkout is not applicable when every PR-gating job calls another repository.
+  The checkout is invisible locally, so it no longer earns a pass. Scores may
+  fall; local jobs and local reusable-workflow calls remain applicable.
+
 - **2026-10-27** — **Added** (#156, registry `ci-score-v0.1.6`, OD-CS24, on top of `ci-score-v0.1.5`): the
   pinning check credits GitHub's workflow lockfile
   (`.github/workflows/actions.lock`, public preview 2026-10-14). The

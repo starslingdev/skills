@@ -2877,8 +2877,21 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path,
         evidence += (f"; {len(depth_unresolved)} job(s) on the PR path set fetch-depth by "
                      f"an expression that could not be resolved and were not graded: "
                      f"{', '.join(rels[:3])}")
+    # A wholly external PR path exposes no checkout to grade. Keep mixed
+    # paths and unread local calls applicable: their local work is not proof
+    # that every checkout lives in another repository.
+    pr_reachable_jobs = [job for _rel, doc, event_doc in pr_path
+                         for job in _wf_jobs(doc).values()
+                         if not _job_if_excludes_pull_requests(job, event_doc)]
+    all_external = bool(pr_reachable_jobs) and all(
+        isinstance(job.get("uses"), str) and not _is_local_uses(job["uses"])
+        and "@" in job["uses"] for job in pr_reachable_jobs)
+    if all_external:
+        evidence = ("every PR-gating job calls another repository's reusable workflow; "
+                    "checkout happens there and is not visible from this repository")
     facts["ci.checkout.shallow-clone"] = fact(
-        "fail" if offenders else ("pass" if pr_wfs else "not_applicable"),
+        "not_applicable" if all_external else
+        ("fail" if offenders else ("pass" if pr_wfs else "not_applicable")),
         evidence, offenders)
 
     # 4. Test sharding / matrix: a matrix on a TEST-LIKE job (test/spec/e2e/

@@ -239,6 +239,9 @@ OD_CS23_CASES = {
 }
 # {(case_id, check): "<owner decision / PR that made the drop on purpose>"}
 INTENDED_DROPS: dict[tuple[str, str], str] = {
+    ("all-delegated", "ci.checkout.shallow-clone"):
+        "OD-CS26: every PR-gating job calls an external reusable workflow; "
+        "checkout is not visible, so pass becomes not_applicable",
     ("all-delegated", "ci.security.pinned-action-shas"):
         "OD-CS24 / #156: a job-level call to another repository's reusable "
         "workflow is a remote reference and counts for pinning, pinned only by "
