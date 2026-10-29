@@ -1188,6 +1188,17 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-10-29** — OPT14 (repeated checkout/setup without artifact handoff)
+  and OPT12 (duplicated setup across jobs) no longer treat mutually exclusive
+  jobs as duplicated work. A same-repo / fork split (one job runs on push or a
+  same-repo PR, the other only on a fork PR) runs exactly one job per run, yet
+  was reported as two co-running setup copies and credited runner-minutes for
+  a handoff that could never save anything. Jobs whose `if:` conditions are
+  provably disjoint (opposite `==` / `!=` on the same operands, or `==` to
+  different literals, combined with `&&` / `||`) are dropped from the pair;
+  any condition outside that grammar is treated as co-running, so real
+  duplicates still fire.
+
 - **2026-10-28** — Repo-published required statuses are named in the agent
   summary, and an independent unresolved-gate reason stays visible beside the
   report headline when sampling footnote metadata is absent. Status-source

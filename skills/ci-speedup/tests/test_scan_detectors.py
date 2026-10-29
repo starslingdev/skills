@@ -5285,3 +5285,119 @@ jobs:
     assert set(pubs) == {".github/workflows/preview.yml", ".github/workflows/aggregate.yml"}
     req = {"Vercel", "Test", "license/cla", "ci", "build", "All CI", "Preview"}
     assert cr._repo_published_required(req, pubs) == {"All CI", "Preview"}
+
+
+# =============================================================================
+# Mutually exclusive jobs are not duplicated work (OPT14 / OPT12)
+# =============================================================================
+# A same-repo/fork split (`test-self` runs on push or a same-repo PR, `test-fork`
+# only on a fork PR) runs EXACTLY ONE of the two jobs per run, so the pair never
+# co-runs: there is no second copy of checkout + install to hand off or dedupe.
+
+_EXCLUSIVE_SPLIT = """name: CI
+on: [push, pull_request]
+jobs:
+  test-self:
+    if: >-
+      github.event_name == 'push' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+      - run: pnpm install
+      - run: pnpm test
+  test-fork:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+      - run: pnpm install
+      - run: pnpm test
+"""
+
+
+def test_exclusive_job_pair_is_not_duplicated_setup(tmp_path: Path):
+    pats = _scan_one(tmp_path, _EXCLUSIVE_SPLIT)
+    assert "OPT14" not in pats
+    assert "OPT12" not in pats
+
+
+def test_negated_exclusive_pair_is_not_duplicated_setup(tmp_path: Path):
+    """The De Morgan form: `!= 'pull_request' || head == repo` vs
+    `== 'pull_request' && head != repo` (a `scan` / `scan-fork` split)."""
+    wf = _EXCLUSIVE_SPLIT.replace(
+        "github.event_name == 'push' ||",
+        "github.event_name != 'pull_request' ||")
+    pats = _scan_one(tmp_path, wf)
+    assert "OPT14" not in pats
+    assert "OPT12" not in pats
+
+
+def test_same_condition_pair_still_flagged(tmp_path: Path):
+    """Positive control: two jobs under the SAME condition co-run every time."""
+    cond = ("github.event_name == 'workflow_dispatch' || "
+            "github.event.pull_request.head.repo.full_name == github.repository")
+    wf = re.sub(r"if: >-\n(?:      .*\n){2}", f"if: {cond}\n", _EXCLUSIVE_SPLIT)
+    assert wf.count(cond) == 2
+    pats = _scan_one(tmp_path, wf)
+    assert "OPT14" in pats
+    assert "OPT12" in pats
+
+
+def test_unconditioned_pair_still_flagged(tmp_path: Path):
+    """Positive control: no `if:` at all — both jobs always run."""
+    wf = re.sub(r"    if: >-\n(?:      .*\n){2}", "", _EXCLUSIVE_SPLIT)
+    assert "if:" not in wf
+    pats = _scan_one(tmp_path, wf)
+    assert "OPT14" in pats
+    assert "OPT12" in pats
+
+
+def test_exclusive_pair_plus_a_co_running_job_still_fires(tmp_path: Path):
+    """A third unconditioned setup job co-runs with whichever split job runs,
+    so the finding still fires and names it."""
+    wf = _EXCLUSIVE_SPLIT + """  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+      - run: pnpm install
+      - run: pnpm lint
+"""
+    _write_workflow(tmp_path, "ci.yml", wf)
+    found = {f["pattern"]: f for f in _scan(tmp_path)["findings"]}
+    assert "OPT14" in found
+    assert "lint" in found["OPT14"]["affected_jobs"]
+
+
+def test_job_exclusivity_is_conservative():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("_scan_excl", _SCAN_SCRIPT)
+    scan = importlib.util.module_from_spec(spec)
+    sys.modules["_scan_excl"] = scan  # scan.py's @dataclass resolves __module__ here
+    spec.loader.exec_module(scan)
+    ex = scan._jobs_mutually_exclusive
+    assert ex({"if": "github.event_name == 'push'"},
+              {"if": "${{ github.event_name == 'pull_request' }}"})
+    assert ex({"if": "github.ref == 'refs/heads/main'"},
+              {"if": "github.ref != 'refs/heads/main'"})
+    assert ex({"if": "(a.b == 'x' || a.b == 'y') && c.d == e.f"},
+              {"if": "c.d != e.f"})
+    # Actions string comparison is case-insensitive: same literal, not exclusive.
+    assert not ex({"if": "github.event_name == 'push'"},
+                  {"if": "github.event_name == 'PUSH'"})
+    # Unknown / unparseable shapes are NOT exclusive (real duplicates still fire).
+    assert not ex({"if": "github.event_name == 'push'"}, {})
+    assert not ex({"if": "contains(github.ref, 'main')"},
+                  {"if": "!contains(github.ref, 'main')"})
+    assert not ex({"if": "github.event_name == 'push' || inputs.x"},
+                  {"if": "github.event_name == 'pull_request'"})
+    assert not ex({"if": "github.event_name != 'push'"},
+                  {"if": "github.event_name != 'pull_request'"})
