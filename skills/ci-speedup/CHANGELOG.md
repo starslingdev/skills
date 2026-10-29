@@ -1199,7 +1199,10 @@ unversioned and updates by reinstall from `main`.
   rather than credited; skipped jobs are no longer measured. Inside a reusable
   workflow call only the first child job to start is measured, since the other
   children may wait on a sibling. A workflow with no scanned job graph skips
-  this check and says so, instead of timing every job from the trigger.
+  this check and says so, instead of timing every job from the trigger. A
+  matrix job named only by a placeholder (`name: ${{ matrix.os }}`) is still
+  matched to its job, so its real queue, and the queue of jobs that wait on
+  it, is still reported.
 
 - **2026-10-28** — Repo-published required statuses are named in the agent
   summary, and an independent unresolved-gate reason stays visible beside the

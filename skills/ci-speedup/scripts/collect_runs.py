@@ -8215,15 +8215,28 @@ def _detect_opt43_queue_time(
         for jid, info in (job_graph or {}).items():
             if (info.get("name") or jid) == name:
                 return jid
+        # Reusable `<caller> / <child>` BEFORE templates: a leading-placeholder
+        # template (`${{ matrix.v }} / build`) would otherwise capture the child
+        # and hand it the wrong node's `needs`.
+        for jid, info in (job_graph or {}).items():
+            nm = info.get("name") or jid
+            if info.get("reusable") and name.startswith(nm + " / "):
+                return jid
         for jid, info in (job_graph or {}).items():
             nm = info.get("name") or jid
             if ((not _name_template_is_degenerate(nm) and _name_template_regex(nm).match(name))
                     or _static_matrix_leg_match(nm, bool(info.get("matrix")), name)):
                 return jid
-        for jid, info in (job_graph or {}).items():
-            nm = info.get("name") or jid
-            if info.get("reusable") and name.startswith(nm + " / "):
-                return jid
+        # A placeholder-only `name:` (`${{ matrix.os }}`) matches anything, so the
+        # passes above skip it. The candidate set here is this workflow's OWN
+        # runtime jobs, so a leftover job comes from one of those nodes; when they
+        # all share one `needs` set, which one does not change the runnable time.
+        degen = [jid for jid, info in (job_graph or {}).items()
+                 if not info.get("reusable")
+                 and _name_template_is_degenerate(info.get("name") or jid)]
+        if degen and len({tuple(sorted(job_graph[jid].get("needs") or []))
+                          for jid in degen}) == 1:
+            return degen[0]
         return None
 
     by_job: dict[str, list[tuple[float, str, int]]] = {}

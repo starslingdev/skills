@@ -1862,7 +1862,7 @@ wait (queue time)"** section ABOVE the hygiene appendix (with a Contents pointer
 ranked by P90, excluded from `_also_noticed_block`. For a `needs:`-gated job the
 metric is measured from when its last needed upstream job completed (upstream run time
 is never queue), and the embedded agent prompt (`_hygiene_prompt(wait=True)`) frames it
-as wall-clock wait, not a bill cut. See the OPT43 note in §3 and `collect_runs`
+as wall-clock wait, not a bill cut. See `collect_runs`
 `_detect_opt43_queue_time` (`wc_p50` holds the floor-capped **savable** wait for
 this family; the raw P90 is in `wall_clock_uncapped_p50_s`, present only when a
 bound actually capped the P90 — absent when nothing capped, where `wc_p50` is
