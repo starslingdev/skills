@@ -70,7 +70,8 @@ These rules apply to EVERY shipped skill — `ci-speedup`, `ci-score`,
 - **Tests.** From the repo root, `python3 -m pytest -v` runs every suite (the
   root `pyproject.toml` wires the paths). The suite needs pytest **and PyYAML** —
   `pip install -e ".[dev]"` installs both; without yaml, pytest aborts at
-  collection with `INTERNALERROR` and no test runs. CI runs the same command; the
+  collection with `INTERNALERROR` and no test runs. CI runs the same full suite with four workers
+  (`python3 -m pytest -v -n 4 --dist worksteal`); the
   `.githooks/pre-commit` hook runs it locally (`git config core.hooksPath
   .githooks`).
 
