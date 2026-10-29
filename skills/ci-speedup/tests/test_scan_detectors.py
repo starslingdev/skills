@@ -5388,8 +5388,9 @@ def test_job_exclusivity_is_conservative():
               {"if": "${{ github.event_name == 'pull_request' }}"})
     assert ex({"if": "github.ref == 'refs/heads/main'"},
               {"if": "github.ref != 'refs/heads/main'"})
-    assert ex({"if": "(a.b == 'x' || a.b == 'y') && c.d == e.f"},
-              {"if": "c.d != e.f"})
+    assert ex({"if": "(inputs.b == 'x' || inputs.b == 'y') && "
+                     "github.head_ref == github.ref_name"},
+              {"if": "github.head_ref != github.ref_name"})
     # Actions string comparison is case-insensitive: same literal, not exclusive.
     assert not ex({"if": "github.event_name == 'push'"},
                   {"if": "github.event_name == 'PUSH'"})
@@ -5401,3 +5402,41 @@ def test_job_exclusivity_is_conservative():
                   {"if": "github.event_name == 'pull_request'"})
     assert not ex({"if": "github.event_name != 'push'"},
                   {"if": "github.event_name != 'pull_request'"})
+
+
+def _load_scan_excl():
+    import importlib.util
+    if "_scan_excl" in sys.modules:
+        return sys.modules["_scan_excl"]
+    spec = importlib.util.spec_from_file_location("_scan_excl", _SCAN_SCRIPT)
+    scan = importlib.util.module_from_spec(spec)
+    sys.modules["_scan_excl"] = scan
+    spec.loader.exec_module(scan)
+    return scan
+
+
+def test_numeric_looking_literals_are_not_proof_of_exclusivity():
+    """Actions coerces mismatched types to numbers: with a numeric input
+    `shards = 1`, both `== '1'` and `== '1.0'` are true, and a null value
+    equals both `''` and `'0'` (each becomes 0). Different literals only
+    prove disjointness when at least one cannot be read as a number."""
+    ex = _load_scan_excl()._jobs_mutually_exclusive
+    assert not ex({"if": "inputs.shards == '1'"}, {"if": "inputs.shards == '1.0'"})
+    assert not ex({"if": "inputs.flag == ''"}, {"if": "inputs.flag == '0'"})
+    assert not ex({"if": "inputs.n == '0x10'"}, {"if": "inputs.n == '16'"})
+    # One non-numeric literal still proves it (a number never equals NaN).
+    assert ex({"if": "inputs.mode == 'fast'"}, {"if": "inputs.mode == '1'"})
+
+
+def test_job_specific_contexts_are_not_proof_of_exclusivity():
+    """`needs.*` resolves per job (a job that does not directly need `build`
+    sees null), and `github.job` differs per job, so the same path text in two
+    jobs' conditions need not be the same value."""
+    ex = _load_scan_excl()._jobs_mutually_exclusive
+    assert not ex({"if": "needs.build.outputs.flag == 'yes'"},
+                  {"if": "needs.build.outputs.flag != 'yes'"})
+    assert not ex({"if": "github.job == 'a'"}, {"if": "github.job == 'b'"})
+    assert not ex({"if": "matrix.os == 'linux'"}, {"if": "matrix.os == 'mac'"})
+    # Run-wide contexts still prove it.
+    assert ex({"if": "inputs.mode == 'fast'"}, {"if": "inputs.mode == 'slow'"})
+    assert ex({"if": "vars.MODE == 'a'"}, {"if": "vars.MODE != 'a'"})

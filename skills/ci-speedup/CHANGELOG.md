@@ -1197,7 +1197,10 @@ unversioned and updates by reinstall from `main`.
   provably disjoint (opposite `==` / `!=` on the same operands, or `==` to
   different literals, combined with `&&` / `||`) are dropped from the pair;
   any condition outside that grammar is treated as co-running, so real
-  duplicates still fire.
+  duplicates still fire. Only run-wide contexts (`github`, `inputs`, `vars`)
+  count as proof — `needs.*` and `github.job` can differ per job — and two
+  literals that both read as numbers (`'1'` / `'1.0'`, `''` / `'0'`) are not
+  proof, since Actions compares a numeric or null value as a number.
 
 - **2026-10-28** — Repo-published required statuses are named in the agent
   summary, and an independent unresolved-gate reason stays visible beside the

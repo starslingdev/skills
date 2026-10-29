@@ -1790,6 +1790,39 @@ _IF_TOKEN_RE = re.compile(
     r"|(?P<str>'(?:[^']|'')*')"
     r"|(?P<path>[A-Za-z_][\w-]*(?:\.[A-Za-z_][\w-]*|\[\d+\])*))")
 _IF_DNF_CAP = 64
+# Only contexts whose value is the same for every job in a run can prove two
+# jobs disjoint. `needs.*` resolves per job (a job that does not directly need
+# `build` sees null), `github.job` is each job's own id, and `matrix` /
+# `strategy` / `steps` / `env` are per job or unavailable at job level.
+_IF_RUN_WIDE_ROOTS = ("github", "inputs", "vars")
+_IF_PER_JOB_GITHUB = ("github.job", "github.action")
+
+
+def _if_path_is_run_wide(path: str) -> bool:
+    root = re.split(r"[.\[]", path, maxsplit=1)[0]
+    if root not in _IF_RUN_WIDE_ROOTS:
+        return False
+    return not any(path == p or path.startswith(p) for p in _IF_PER_JOB_GITHUB)
+
+
+def _if_literal_may_be_number(lit: str) -> bool:
+    """Actions coerces mismatched operand types to numbers, so a numeric (or
+    null / boolean) context value equals every literal that reads as the same
+    number: `'1'` and `'1.0'`, or `''` and `'0'` (both 0). Err wide: anything
+    Python reads as a number, plus empty / whitespace-only."""
+    t = lit.strip()
+    if not t:
+        return True
+    try:
+        float(t)
+        return True
+    except ValueError:
+        pass
+    try:
+        int(t, 0)
+        return True
+    except ValueError:
+        return False
 
 
 class _IfUnparsed(Exception):
@@ -1835,6 +1868,8 @@ def _if_dnf(expr: object) -> list[frozenset] | None:
         if kind == "path":
             if peek() == ("op", "("):
                 raise _IfUnparsed  # a function call
+            if not _if_path_is_run_wide(val.lower()):
+                raise _IfUnparsed  # same text, possibly a different value per job
             return ("path", val.lower())
         if kind == "str":
             return ("str", val[1:-1].replace("''", "'").lower())
@@ -1893,7 +1928,9 @@ def _atoms_contradict(a: tuple, b: tuple) -> bool:
         path_a = [o for o in ops_a if o[0] == "path"]
         path_b = [o for o in ops_b if o[0] == "path"]
         return (len(lit_a) == len(lit_b) == 1 and path_a == path_b
-                and lit_a[0] != lit_b[0])
+                and lit_a[0] != lit_b[0]
+                and not (_if_literal_may_be_number(lit_a[0][1])
+                         and _if_literal_may_be_number(lit_b[0][1])))
     return False
 
 
