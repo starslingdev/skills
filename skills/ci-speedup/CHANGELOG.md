@@ -1188,6 +1188,16 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-10-29** — **Excessive Queue Time (OPT43) no longer reports an
+  upstream job's run time as queue.** A `needs:`-gated job is now measured
+  from when its last needed upstream job completed, not from when the run was
+  triggered, so a verdict job that starts seconds after a 4.5-minute test job
+  shows ~0 queue instead of a "P90 queue 334s" finding that double-counted the
+  test job's own long-pole fix. Real runner-pool queueing after the upstream
+  finishes is still flagged. A gated sample whose upstream completion isn't in
+  the sampled run, or a job that matches no job in the workflow, is excluded
+  rather than credited; skipped jobs are no longer measured.
+
 - **2026-10-28** — Repo-published required statuses are named in the agent
   summary, and an independent unresolved-gate reason stays visible beside the
   report headline when sampling footnote metadata is absent. Status-source

@@ -1860,9 +1860,9 @@ critical-path spine (job start → finish) doesn't capture, and it carries no
 runner-minute saving. So `_queue_wait_block` renders it in its own **"⏳ Pre-start
 wait (queue time)"** section ABOVE the hygiene appendix (with a Contents pointer),
 ranked by P90, excluded from `_also_noticed_block`. For a `needs:`-gated job the
-metric is wait-to-start — it includes the gating job's run time, so the embedded agent
-prompt (`_hygiene_prompt(wait=True)`) frames it as wall-clock wait bounded by the
-gating job's own fix, not a bill cut. See the OPT43 note in §3 and `collect_runs`
+metric is measured from when its last needed upstream job completed (upstream run time
+is never queue), and the embedded agent prompt (`_hygiene_prompt(wait=True)`) frames it
+as wall-clock wait, not a bill cut. See the OPT43 note in §3 and `collect_runs`
 `_detect_opt43_queue_time` (`wc_p50` holds the floor-capped **savable** wait for
 this family; the raw P90 is in `wall_clock_uncapped_p50_s`, present only when a
 bound actually capped the P90 — absent when nothing capped, where `wc_p50` is

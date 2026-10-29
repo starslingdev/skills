@@ -154,6 +154,85 @@ def test_opt43_run_trigger_present_but_none_falls_back_to_job_created():
     assert len(out) == 1 and out[0]["wall_clock_p50_s"] == 90.0
 
 
+# The `needs:` verdict shape of the reported false positive: `test` needs
+# `test-self` + `test-fork`; the upstream pytest job runs ~4m32s.
+_VERDICT_GRAPH = {
+    "test-self": {"name": "test (self-hosted)", "needs": []},
+    "test-fork": {"name": "test (fork)", "needs": []},
+    "verdict": {"name": "test", "needs": ["test-self", "test-fork"]},
+}
+
+
+def _verdict_run(*, upstream_queue: float = 5.0, verdict_gap: float = 3.0,
+                 with_fork: bool = True, with_self: bool = True) -> list[dict]:
+    """One run: trigger at t=-upstream_queue, `test (self-hosted)` 0→272s,
+    `test (fork)` skipped at t=0, verdict `test` starts `verdict_gap`s after the
+    upstream finished."""
+    trig = _ts(-upstream_queue)
+    jobs: list[dict] = []
+    if with_self:
+        up = _job("test (self-hosted)", 272, start=0)
+        up["_run_created_at"] = trig
+        jobs.append(up)
+    if with_fork:
+        fork = _job("test (fork)", 0, start=0)
+        fork["conclusion"] = "skipped"
+        fork["_run_created_at"] = trig
+        jobs.append(fork)
+    v = _job("test", 2, start=272 + verdict_gap)
+    v["_run_created_at"] = trig
+    jobs.append(v)
+    return jobs
+
+
+def test_opt43_needs_job_not_charged_upstream_run_time():
+    # The reported false positive: the verdict starts 3s after its upstream finishes,
+    # but measured from the run trigger it reads ~280s "queue" — that is the upstream
+    # job RUNNING, not runner-pool queueing. Measured from when the verdict became
+    # runnable (its last `needs:` upstream completed) the queue is ~3s → no OPT43.
+    runs = [_verdict_run() for _ in range(9)]
+    out = _detect_opt43_queue_time("ci.yml", runs, 0, is_pr_workflow=True,
+                                   job_graph=_VERDICT_GRAPH)
+    assert [f["affected_jobs"] for f in out if f["pattern"] == "OPT43"] == []
+
+
+def test_opt43_needs_job_that_really_queued_is_still_flagged():
+    # Positive control: the same verdict waits 150s for a runner AFTER its upstream
+    # finished — real runner-pool queueing, still detected, sized from runnable time.
+    runs = [_verdict_run(verdict_gap=150) for _ in range(5)]
+    out = _detect_opt43_queue_time("ci.yml", runs, 0, is_pr_workflow=True,
+                                   job_graph=_VERDICT_GRAPH)
+    assert [f["affected_jobs"] for f in out] == [["test"]]
+    assert out[0]["wall_clock_p50_s"] == 150.0
+
+
+def test_opt43_entry_job_still_measured_from_run_trigger():
+    # An un-gated job's runnable time IS the run trigger: 90s pickup is still flagged.
+    runs = [_verdict_run(upstream_queue=90) for _ in range(3)]
+    out = _detect_opt43_queue_time("ci.yml", runs, 0, is_pr_workflow=True,
+                                   job_graph=_VERDICT_GRAPH)
+    assert [(f["affected_jobs"], f["wall_clock_p50_s"]) for f in out] == [
+        (["test (self-hosted)"], 90.0)]
+
+
+def test_opt43_needs_job_excluded_when_upstream_completion_unknown():
+    # A needed upstream absent from the sampled run: the runnable time is unknowable,
+    # so the sample is EXCLUDED — never credited from the run trigger (~575s here).
+    runs = [_verdict_run(with_self=False, verdict_gap=300) for _ in range(5)]
+    out = _detect_opt43_queue_time("ci.yml", runs, 0, is_pr_workflow=True,
+                                   job_graph=_VERDICT_GRAPH)
+    assert out == []
+
+
+def test_opt43_job_absent_from_graph_is_excluded():
+    # With the workflow's job graph in hand, a sampled job that maps to no graph node
+    # can't be classed entry-vs-gated, so it is excluded rather than credited.
+    runs = [[_job("mystery", 30, run_created_offset=400)] for _ in range(3)]
+    out = _detect_opt43_queue_time("ci.yml", runs, 0, is_pr_workflow=True,
+                                   job_graph=_VERDICT_GRAPH)
+    assert out == []
+
+
 def test_opt43_release_threshold_is_higher():
     # 90s queue is under the 120s release/scheduled threshold → no finding.
     runs = [[_job("test", 30, run_created_offset=90)] for _ in range(3)]

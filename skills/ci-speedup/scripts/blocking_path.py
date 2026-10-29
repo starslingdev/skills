@@ -7966,9 +7966,8 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
     if wait:
         saving = ("Cost: developer WALL-CLOCK wait before the job starts (queue / "
                   "wait-to-start) - NOT a runner-bill saving and NOT off the critical "
-                  "path. For a `needs:`-gated job this span includes the gating job's "
-                  "own run time, so the savable part is bounded by the gating job's own "
-                  "fix.")
+                  "path. For a `needs:`-gated job it is measured from when its last "
+                  "needed upstream job completed, so upstream run time is not counted.")
     elif tier2:
         rmin = _rmin_of(members)
         cert = _tier2_cert_summary(members[0])
@@ -8221,8 +8220,8 @@ def _queue_wait_block(findings: list[dict[str, Any]], catalog_url: str,
              "measures each job from start to finish). Usually runner-pool saturation or "
              "a restrictive concurrency group. Ranked by savable wait (the floor-capped "
              "addressable part; each finding's evidence quotes the raw P90 queue). **Note:** "
-             "for a `needs:`-gated job this is *wait-to-start* — it includes the gating job's "
-             "run time, so the savable part is bounded by the gating job's own fix.", ""]
+             "for a `needs:`-gated job the *wait-to-start* is measured from when its last "
+             "needed upstream job completed, so upstream run time is never counted as queue.", ""]
     if shallow_note:
         lines += [f"> ⚠️ _{shallow_note}_", ""]
     if dropped:

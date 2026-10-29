@@ -8174,21 +8174,23 @@ def _detect_opt43_queue_time(
     wf_path: str, jobs_per_run: list[list[dict[str, Any]]], start_idx: int,
     is_pr_workflow: bool,
     all_status_runs: list[dict[str, Any]] | None = None,
+    job_graph: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """P90 wait-to-start per job across runs; flag >60s PR / >120s release. Catalog body OPT43.
+    """P90 queue per job across runs; flag >60s PR / >120s release. Catalog body OPT43.
 
-    Wait = job `started_at` − the RUN's `created_at` (the trigger), tagged onto each job
-    as `_run_created_at` by `_accumulate_jobs`. Anchoring on the run's created_at — not
-    the job's — is the load-bearing choice: GitHub stamps a GATED job's own `created_at`
-    when its `needs:` dependency RESOLVES, so `started − job.created` sees only this
-    job's own runner pickup and HIDES everything the developer waited on upstream — the
-    gating job(s)' queue AND run time (~4m vs an ~18m real wait-to-start on one measured
-    repo). The run trigger captures that full pre-start wait the developer experiences.
-    CAVEAT: for a gated job this number therefore includes the
-    gating job's RUN time, so it is wall-clock time-to-start, not pure queue — the note
-    + size_note say so, and the realized saving is bounded by the gating job's own fix.
-    Falls back to the job's `created_at` only when the run trigger time is absent (older
-    data / direct unit calls)."""
+    Queue = job `started_at` − the moment the job became RUNNABLE. For an entry job
+    (no `needs:`) that is the RUN's `created_at` (the trigger, tagged onto each job as
+    `_run_created_at` by `_accumulate_jobs`). For a `needs:`-gated job it is the
+    latest `completed_at` of its needed upstream jobs in the SAME run, resolved
+    through `job_graph` (this workflow's scanned `{job_id: {name, needs, …}}`).
+    Measuring a gated job from the trigger instead would charge the upstream jobs'
+    RUN time as queue (a verdict that starts 3s after a 4m32s pytest job read
+    "P90 queue 334s") and double-count the upstream job's own long-pole fix.
+    With `job_graph` in hand, a sample whose runnable time is unknowable — the job
+    maps to no graph node, or a needed upstream has no completion in the run — is
+    EXCLUDED, never credited. Skipped jobs never ran on a runner and are skipped.
+    Without `job_graph` (direct unit calls) the trigger anchor stands, falling back
+    to the job's `created_at` only when the trigger time is absent."""
     # Run windows for the sibling-overlap attribution below: a queued job
     # whose wait overlapped ANOTHER in-flight run of the SAME workflow is
     # plausibly self-inflicted (a concurrency group would have prevented the
@@ -8206,15 +8208,60 @@ def _detect_opt43_queue_time(
         if w_start and w_end and w_end > w_start:
             run_windows.append((_run_id(r), w_start, w_end))
 
+    def _node_of(name: str) -> str | None:
+        """This workflow's job id producing the sampled job `name` (exact display
+        name → matrix template → static matrix leg → reusable `<caller> / <child>`),
+        or None when no node of `job_graph` produces it."""
+        for jid, info in (job_graph or {}).items():
+            if (info.get("name") or jid) == name:
+                return jid
+        for jid, info in (job_graph or {}).items():
+            nm = info.get("name") or jid
+            if ((not _name_template_is_degenerate(nm) and _name_template_regex(nm).match(name))
+                    or _static_matrix_leg_match(nm, bool(info.get("matrix")), name)):
+                return jid
+        for jid, info in (job_graph or {}).items():
+            nm = info.get("name") or jid
+            if info.get("reusable") and name.startswith(nm + " / "):
+                return jid
+        return None
+
     by_job: dict[str, list[tuple[float, str, int]]] = {}
     for run_idx, run_jobs in enumerate(jobs_per_run):
+        nodes = {id(j): _node_of(str(j.get("name", ""))) for j in run_jobs} if job_graph else {}
         for j in run_jobs:
+            if str(j.get("conclusion") or "").lower() == "skipped":
+                continue  # never ran on a runner: no queue to measure
             name = str(j.get("name", ""))
-            q = _duration_s(j.get("_run_created_at") or j.get("created_at"),
-                            j.get("started_at"))
+            runnable = j.get("_run_created_at") or j.get("created_at")
+            if job_graph:
+                node = nodes.get(id(j))
+                if node is None:
+                    continue  # can't tell entry from gated: exclude, never credit
+                needs = list(job_graph[node].get("needs") or [])
+                if needs:
+                    # A gated job becomes runnable when its LAST needed upstream
+                    # completes; time before that is the upstream RUNNING, not queue.
+                    ends: list[Any] = []
+                    for need in needs:
+                        done = [_parse_dt(u.get("completed_at")) for u in run_jobs
+                                if nodes.get(id(u)) == need]
+                        if not done or not all(done):
+                            ends = []
+                            break  # upstream completion unknown: exclude the sample
+                        ends.append(max(done))
+                    if not ends:
+                        continue
+                    runnable = max(ends).isoformat()
+            q = _duration_s(runnable, j.get("started_at"))
             if q is not None and q >= 0:
                 by_job.setdefault(name, []).append(
                     (q, str(j.get("html_url") or ""), run_idx))
+            elif q is not None and job_graph and q > -5:
+                # second-granularity stamps: a verdict picked up the same second its
+                # upstream completed can read a hair negative — that is ~0 queue.
+                by_job.setdefault(name, []).append(
+                    (0.0, str(j.get("html_url") or ""), run_idx))
 
     def _sibling_overlap_ratio(samples: list[tuple[float, str, int]]) -> float | None:
         """Share of queued samples whose queue interval overlapped an in-flight
@@ -8287,19 +8334,19 @@ def _detect_opt43_queue_time(
                 summary=(f"job `{job_name}` waited P90 {p90:.0f}s in queue over "
                          f"{len(samples)} sampled runs (threshold {threshold:.0f}s "
                          f"for {kind} workflows)."),
-                note="Wait-to-start (run trigger → job started) is developer wait "
-                     "before this job runs. For a job gated by `needs:` it spans the "
-                     "gating job(s)' own queue AND run time — so the savable portion is "
-                     "whatever the gating job's own fix removes, not necessarily the "
-                     "whole number. The link opens the worst-queued run.")
+                note="Queue = time from when the job became runnable (the run "
+                     "trigger, or for a `needs:`-gated job the moment its last needed "
+                     "upstream job completed) to when it started on a runner — "
+                     "developer wait that no step of the job itself causes. The link "
+                     "opens the worst-queued run.")
             f = _new_finding(
                 "OPT43", "MEDIUM", "Excessive Queue Time", wf_path, job_name,
                 f"job `{job_name}` P90 queue {p90:.0f}s over {len(samples)} runs "
                 f"(threshold {threshold:.0f}s for {kind} workflows)",
                 "excessive-queue-time", "opt43--excessive-queue-time", idx,
                 wc_p50=round(p90, 1), rm=None,
-                size_note="wall-clock wait before the job starts (a gated job's "
-                          "number includes the gating job(s) it waits on)",
+                size_note="wall-clock wait between the job becoming runnable and "
+                          "starting (upstream `needs:` run time excluded)",
                 realization="direct", measured_evidence=me,
             )
             # Structured cause attribution (config-controllable causes vs
@@ -16446,12 +16493,9 @@ def _clone_jobs_per_run_by_wf(
 
 
 def _stamp_run_context(run: dict[str, Any], jobs: list[dict[str, Any]]) -> None:
-    # Tag each job with the RUN's created_at (trigger time). OPT43 wait-to-start is
-    # measured from the trigger, not the job's own `created_at`: GitHub stamps a
-    # GATED job's `created_at` when its `needs:` dependency resolves, so
-    # `started - job.created` sees only this job's own pickup and HIDES the upstream
-    # gating cost (the gating job's queue + run time) the developer also waited on.
-    # OPT43 reads `_run_created_at` (see its docstring for the not-pure-queue caveat).
+    # Tag each job with the RUN's created_at (trigger time) — OPT43's runnable-time
+    # anchor for an ENTRY job. A `needs:`-gated job is instead measured from its last
+    # needed upstream's completion (see `_detect_opt43_queue_time`).
     run_created = run.get("created_at")
     ev = str(run.get("event") or "")
     rid = _run_id(run)
@@ -25665,7 +25709,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         new = _detect_opt43_queue_time(
             wf_path, jobs_per_run, next_id, is_pr,
             all_status_runs=(_all_status_page(wf_path, wf_id)
-                             if wf_id is not None else None))
+                             if wf_id is not None else None),
+            job_graph=(findings_doc.get("workflow_job_graph") or {}).get(wf_path))
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
 
