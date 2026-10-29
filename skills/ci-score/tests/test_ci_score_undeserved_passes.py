@@ -990,15 +990,13 @@ def test_a_callee_workflow_with_a_duplicate_key_is_not_graded(tmp_path):
     got = _fact(doc, SHALLOW)
     assert got["evidence"] == (
         "no PR-gating workflow checks out full history (post-merge automation like "
-        "backport/changelog jobs is exempt - it needs history and gates nobody); 1 reusable "
-        "workflow call(s) on the PR path could not be read and were not graded: "
-        "./.github/workflows/test.yml"), got
+        "backport/changelog jobs is exempt - it needs history and gates nobody); "
+        + NOT_READ + ".github/workflows/test.yml (duplicated key 'jobs')"), got
     # the callee is not graded for pinning either, and the note there is true
     assert _fact(doc, PINNED) == {
         "state": "not_applicable",
         "evidence": ("no remote actions used in workflow or local composite action files; "
-                     + NOT_READ + "./.github/workflows/test.yml (reusable workflow call not "
-                     "followed)"),
+                     + NOT_READ + ".github/workflows/test.yml (duplicated key 'jobs')"),
         "files": []}, _fact(doc, PINNED)
 
 
@@ -1673,7 +1671,7 @@ def test_a_callee_with_two_jobs_keys_is_not_graded_for_pinning(tmp_path):
         "state": "pass",
         "evidence": ("1 of 1 remote action references SHA-pinned (workflow + local composite "
                      "action files; passes at >=95%); " + NOT_READ
-                     + "./.github/workflows/test.yml (reusable workflow call not followed)"),
+                     + ".github/workflows/test.yml (duplicated key 'jobs')"),
         "files": []}, _fact(doc, PINNED)
 
 
@@ -1694,7 +1692,7 @@ def test_a_callee_with_two_steps_keys_is_not_graded_for_caching(tmp_path):
     assert _fact(doc, CACHE) == {
         "state": "fail",
         "evidence": (CACHE_FAIL + "; " + NOT_READ
-                     + "./.github/workflows/test.yml (reusable workflow call not followed)"),
+                     + ".github/workflows/test.yml (duplicated key 'steps')"),
         "files": []}, _fact(doc, CACHE)
 
 

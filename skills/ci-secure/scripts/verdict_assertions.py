@@ -403,13 +403,14 @@ def _jq_needs(source, env, shell):
 _TRIVIAL_STEP_CONDITIONS = ("true", "always()", "success()")
 
 
-def _unproved_step_execution(job, trivial=_TRIVIAL_STEP_CONDITIONS):
-    """Whether a successful job result may not show that every step ran.
+def _unproved_step_execution(job, trivial=_TRIVIAL_STEP_CONDITIONS, tolerance_only=False):
+    """Whether success may not show that every step ran and had to pass.
 
     Walks `parallel:` groups (a flat `steps` read misses their children); a
     group's condition applies to everything inside it. A conditional step or
     group, a step that may run in the background, or a group this walk cannot
-    read withholds the execution proof.
+    read withholds the execution proof. A tolerated failure returns its reason
+    so the verdict can name it without discarding literal output evidence.
     """
     pending = [(job.get("steps") if isinstance(job, dict) else None, 0)]
     seen = 0
@@ -427,9 +428,14 @@ def _unproved_step_execution(job, trivial=_TRIVIAL_STEP_CONDITIONS):
                 if depth:
                     return True
                 continue
-            if "if" in step and unwrap(step["if"]).lower() not in trivial:
+            if ("continue-on-error" in step
+                    and step["continue-on-error"] is not False
+                    and not (isinstance(step["continue-on-error"], str)
+                             and step["continue-on-error"].lower() == "false")):
+                return "a step is allowed to fail"
+            if not tolerance_only and "if" in step and unwrap(step["if"]).lower() not in trivial:
                 return True
-            if "background" in step and step["background"] is not False:
+            if not tolerance_only and "background" in step and step["background"] is not False:
                 return True
             if "parallel" in step:
                 pending.append((step["parallel"], depth + 1))
@@ -634,6 +640,14 @@ def analyze(jobs, key, workflow=None, action_resolver=None):
     though its literal outputs still count as failure evidence. All limits
     withhold.
     """
+    conditional_steps = {}
+
+    def execution_note():
+        return "; ".join(
+            name + ": " + (reason if isinstance(reason, str) else
+                           "a successful result does not prove conditional steps ran")
+            for name, reason in conditional_steps.items())
+
     try:
         if action_resolver is not None or workflow:
             jobs = copy.deepcopy(jobs)
@@ -682,10 +696,19 @@ def analyze(jobs, key, workflow=None, action_resolver=None):
         uncertified = [n for n in ancestors if "uses" in jobs[n]]
         # A successful job result does not prove its conditionally executed
         # steps ran (including steps inside `parallel:` groups and background
-        # steps), so such an ancestor withholds a pass. It stays out of
+        # steps), or that tolerated steps passed. Such an ancestor stays out of
         # `uncertified`: its literal declared outputs are still reproducible,
         # so a concrete failing path through it can establish a failure.
-        conditional_steps = [n for n in ancestors if _unproved_step_execution(jobs[n])]
+        conditional_steps = {n: reason for n in ancestors
+                             for reason in [_unproved_step_execution(jobs[n])] if reason}
+        # An earlier conditional/background step may have stopped the first
+        # walk before a later tolerated failure. Reuse the bounded walker for
+        # that diagnostic only; neither the pass guard nor failure evidence changes.
+        for name, reason in conditional_steps.items():
+            if reason is True:
+                tolerance = _unproved_step_execution(jobs[name], tolerance_only=True)
+                if isinstance(tolerance, str):
+                    conditional_steps[name] = tolerance
         ancestor_scope = {}
         for name in order:
             ancestor_scope[name] = set(needs(jobs[name]))
@@ -889,11 +912,11 @@ def analyze(jobs, key, workflow=None, action_resolver=None):
                 elif any(kind == "maybe" for kind, _ in verdicts):
                     unknown = next(text for kind, text in verdicts if kind == "maybe")
         if unknown:
-            return "unmeasured", unknown
+            return "unmeasured", unknown + ("; " + execution_note() if conditional_steps else "")
         if uncertified:
             return "unmeasured", "reusable-workflow or matrix result cannot certify the verdict: " + ", ".join(sorted(set(uncertified)))
         if conditional_steps:
-            return "unmeasured", "a successful result does not prove conditional steps ran: " + ", ".join(conditional_steps)
+            return "unmeasured", execution_note()
         return "pass", "executed assertion rejects upstream failure, cancellation and invalid skip decisions"
     except (Unknown, TypeError, KeyError, AttributeError, RecursionError) as exc:
-        return "unmeasured", str(exc)
+        return "unmeasured", str(exc) + ("; " + execution_note() if conditional_steps else "")

@@ -25377,6 +25377,16 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         _pole_is_required_reachable(
             cp.get("critical_path_check"), req_names,
             findings_doc.get("workflow_job_graph"), crit_by_wf))
+    if (cp["provenance"] == "unresolved" and _required_reachability_unresolved(
+            req_names, crit_by_wf, findings_doc.get("workflow_job_graph"),
+            findings_doc.get("workflow_status_publishers"))):
+        published = sorted(name for name in _repo_published_required(
+            req_names, findings_doc.get("workflow_status_publishers"))
+            if _check_to_job_node(name, findings_doc.get("workflow_job_graph") or {},
+                                  crit_by_wf) is None)
+        cp["unresolved_reason"] = (
+            "Required status posted by this repo's own workflow: " + ", ".join(published)
+            + "; which checks it waits on is not traced. The displayed gate is a best guess.")
     # Run-frequency is a CORE input: a wall-clock saving on a workflow that
     # rarely runs removes little developer wait, no matter how big per-run. Share
     # = this workflow's 30d volume / the busiest PR-triggered workflow's volume.

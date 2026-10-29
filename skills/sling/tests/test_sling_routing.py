@@ -68,7 +68,7 @@ def _user_run_command(row: dict) -> str | None:
 # prose like "`sling logs` is a filter" put a word after a command name and had
 # to be special-cased, and a prose-scoped scan could not see the frontmatter
 # description at all, which is where an unreal `sling runs` was in fact shipped.
-_CODE = re.compile(r"`([^`\n]+)`|```[a-z]*\n(.*?)```", re.S)
+_CODE = re.compile(r"(?<![\\`])`((?:\\`|[^`])+?)(?<!\\)`(?!`)|```[a-z]*\n(.*?)```", re.S)
 _GROUPS = {c.split()[0] for c in _COMMANDS if " " in c}
 
 
@@ -77,7 +77,7 @@ def _code_lines(text: str) -> list[str]:
     an agent copies and runs."""
     out = []
     for inline, fenced in _CODE.findall(text):
-        out += [inline] if inline else fenced.splitlines()
+        out += [" ".join(inline.split())] if inline else fenced.splitlines()
     return out
 
 
@@ -93,7 +93,7 @@ def _mentions(text: str) -> set[str]:
     """
     found: set[str] = set()
     for inline, fenced in _CODE.findall(text):
-        span = inline or fenced
+        span = " ".join(inline.split()) if inline else fenced
         for m in re.finditer(r"\bsling\s+(.*)", span):
             toks: list[str] = []
             for raw in m.group(1).split():
@@ -255,7 +255,8 @@ _MUTATING_VERBS = _MUTATING_ACTIONS + (
 # name detector is only a backstop: every captured command must also carry a
 # reviewed `classification` in the surface (see the no-GitHub-state test).
 _MUTATING_NAME_WORDS = frozenset(_MUTATING_VERBS + (
-    "set", "create", "write", "deploy", "merge", "push", "run"))
+    "set", "create", "write", "deploy", "merge", "push", "run",
+    "annotate", "label", "tag", "comment", "lock"))
 
 
 def _named_for_a_state_change(name: str) -> bool:
@@ -263,6 +264,8 @@ def _named_for_a_state_change(name: str) -> bool:
     its hyphen-joined form (`re-run` -> `rerun`), or as a plural (`reruns`).
     `runs` is a noun here (`runs list`), never the verb `run`."""
     low = name.lower()
+    if low == "labels list":  # Captured read-only catalog command; labels is a noun.
+        return False
     tokens = set(low.split()) | set(low.replace("-", " ").split()) | {
         t.replace("-", "") for t in low.split()} | {low}
     return any(t in _MUTATING_NAME_WORDS
@@ -583,6 +586,8 @@ def _repo_from_git_claims(text: str) -> list[str]:
     low = _flat(text).replace("`", "")
     hits = []
     for sentence in re.split(r"(?<=[.!?])\s+", low):
+        if not re.search(r"\brepo\b", sentence):
+            continue
         hits += [m.group(0) for m in _REPO_FILL.finditer(sentence)
                  if not _NEGATED_BEFORE.search(sentence[:m.start()])]
         if re.search(r"\boptional\b", sentence) and re.search(r"\b(?:origin|remote)\b", sentence):
@@ -1438,9 +1443,9 @@ _ILLUSTRATIVE_LINES = {
     "references/command-reference.md":
         '"detail": "version 0.1.123\\n0.1.124 is available, to update:",',
 }
-# Scoped to sling's own 0.1.x family: these files also cite `gh` and the
-# Actions runner, whose versions are not this skill's to pin.
-_VERSION_RE = re.compile(r"\bv?(0\.1\.\d+)\b")
+# Scan all semantic versions; explicitly attributed gh/runner versions are
+# excluded below because they are not sling pins.
+_VERSION_RE = re.compile(r"\bv?(\d+\.\d+\.\d+)\b")
 _PIN_SURFACES = (["SKILL.md"]
                  + [f"references/{p.name}" for p in _REFERENCES]
                  + [f"evals/{p.name}" for p in sorted((_SKILL / "evals").glob("*.json"))])
@@ -1456,6 +1461,9 @@ def test_every_live_version_pin_matches_the_captured_cli_version(name):
     pinned = _SURFACE["cli_version"]
     found: set[str] = set()
     for line in (_SKILL / name).read_text().splitlines():
+        # The reference also quotes gh and the Actions runner versions.
+        line = re.sub(r"`?gh`? (?:version )?v?\d+\.\d+\.\d+", "", line)
+        line = re.sub(r"Current runner version: '[^']+'", "", line)
         versions = set(_VERSION_RE.findall(line))
         if line.strip() == _ILLUSTRATIVE_LINES.get(name):
             versions.discard("0.1.123")
@@ -1568,3 +1576,46 @@ def test_every_doctor_check_key_is_named_in_the_preflight():
     assert not missing, (
         f"preflight step 2 never names doctor check(s) {missing}, which "
         f"references/command-reference.md documents `doctor` as emitting.")
+
+
+@pytest.mark.parametrize("n", range(1, 7))
+def test_every_preflight_step_parses_real_code_spans(n):
+    spans = _code_lines(_preflight_step(n))
+    assert spans
+    assert not any(s in {", and", "and", "rejects", "), same split — your own orgs are listed by"}
+                   or s.startswith((",", "),")) for s in spans), spans
+    # Known commands after wrapped and nested quoted spans must stay visible.
+    for command in re.findall(r"(?<!\\)`(sling [^`]+)`", _preflight_step(n)):
+        assert " ".join(command.split()) in spans
+
+
+def test_advisory_rows_never_instruct_the_agent_to_run_a_fix():
+    for where, text in _shipped_text():
+        prose = _flat(re.sub(r"```.*?```", " ", text, flags=re.S))
+        for sentence in re.split(r"(?<=[.!?])\s+", prose):
+            if re.search(r"\b(?:auto_update|agent_skill)\b", sentence) and re.search(r"\brun\b", sentence):
+                assert re.search(r"\b(?:never|not|no)\b|n't\b", sentence), (where, sentence)
+
+
+def test_scope_flags_cannot_be_split_across_spans():
+    sf = _SURFACE["scope_flags"]
+    for where, text in _shipped_text():
+        for sentence in re.split(r"(?<=[.!?])\s+", _flat(text)):
+            if "--org" not in sentence:
+                continue
+            for cmd in sf["rejects_org"] + sf["rejects_org_and_repo"]:
+                for span in _sling_spans(sentence, cmd):
+                    if "--repo" in span:
+                        # Explicit prohibitions describe invalid combinations.
+                        assert re.search(r"\b(?:never|not|no|rejects?|rejected|without)\b", sentence), (where, sentence)
+
+
+def test_decision_step_one_keeps_state_change_examples():
+    section = _routing_section()
+    step = _flat(section[section.index("**1."):section.index("**2.")])
+    for pattern in (r"re-?run", r"cancel", r"trigger", r"workflow on or off|enable.*disable", r"(?:pull down|download) an artifact"):
+        assert re.search(pattern, step), pattern
+
+
+def test_skill_stays_below_500_lines():
+    assert len(_SKILL_MD.splitlines()) < 500
