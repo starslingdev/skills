@@ -3564,14 +3564,32 @@ def test_detached_head_at_the_local_default_tip_is_not_skew(tmp_path):
     assert cr._root_branch_skew(root, "main") is None
 
 
-def test_detached_head_with_identical_workflows_tree_is_not_skew(tmp_path):
-    """Detached one non-workflow commit behind the tip: the parsed YAML is byte-identical."""
+def test_detached_head_behind_the_tip_still_warns_even_with_identical_workflows(tmp_path):
+    """Detectors read more than `.github/workflows` from the checkout (local composite
+    actions, package.json), so an identical workflows tree is not proof of no skew — and
+    an attached `main` behind `origin/main` already warns. Only the exact tip is exempt."""
     root = tmp_path / "repo"
     _init_repo(root)
-    _commit_file(root, "README.md", "docs only\n", "docs")
+    _commit_file(root, "package.json", '{"scripts": {}}\n', "manifest only")
     _git(root, "update-ref", "refs/remotes/origin/main", "HEAD")
     _git(root, "checkout", "-q", "--detach", "HEAD~1")
-    assert cr._root_branch_skew(root, "main") is None
+    skew = cr._root_branch_skew(root, "main")
+    assert skew and "DETACHED HEAD" in skew["reason"]
+
+
+def test_detached_head_at_a_stale_local_default_still_warns_when_origin_moved(tmp_path):
+    """`origin/<default>` is the branch the sampled runs came from: a detached HEAD at a
+    stale local `main` is skew even though it equals that local tip."""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    _commit_file(root, ".github/workflows/new.yml",
+                 "on: pull_request\njobs:\n  a:\n    runs-on: ubuntu-latest\n"
+                 "    steps:\n      - run: true\n", "new workflow")
+    _git(root, "update-ref", "refs/remotes/origin/main", "HEAD")
+    _git(root, "reset", "-q", "--hard", "HEAD~1")        # local main stays behind origin
+    _git(root, "checkout", "-q", "--detach")
+    skew = cr._root_branch_skew(root, "main")
+    assert skew and "DETACHED HEAD" in skew["reason"]
 
 
 def test_detached_head_off_the_default_tip_still_warns(tmp_path):

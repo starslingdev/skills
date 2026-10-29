@@ -251,8 +251,9 @@ def funnel_reason_chain(doc: dict[str, Any]) -> tuple[list[str], str | None]:
 
     # Stage 0 — the gh timing tier itself ran at all.
     if "gh-timing" not in (ds.get("tiers_run") or []):
-        reason = ds.get("partial_reason") or "the gh data pass did not run"
-        lines.append(_BRK + f"gh data pass did NOT run — {reason}")
+        reason = str(ds.get("partial_reason") or "the gh data pass did not run")
+        lines.append(_BRK + (reason if reason.startswith("gh data pass")
+                             else f"gh data pass did NOT run — {reason}"))
         return lines, "collection"
 
     # Stage 1 — workflows discovered/analyzed.
@@ -348,8 +349,9 @@ def _break_is_transient(doc: dict[str, Any], stage: str | None) -> bool:
     ds = doc.get("data_sources") or {}
     cp = doc.get("pr_critical_path") or {}
     if stage == "collection":
-        # A mid-collection abort / API refusal is transient; a missing/unauth gh CLI or
-        # a --repo-less static run is not fixed by re-running the same way.
+        # A mid-collection abort / API refusal is transient; a gh pass that could not
+        # start (no gh / token, or a sandboxed shell) or a --repo-less static run is not
+        # fixed by re-running the SAME way — it needs gh access or `--repo` first.
         return ds.get("partial_kind") == "collection_failed"
     if stage in ("runs", "drill"):
         return True  # a run-list / job-log fetch wipeout is a gh-side gap
@@ -398,10 +400,9 @@ def _durable_hint(stage: str | None, doc: dict[str, Any]) -> str:
     if stage == "collection":
         if ds.get("partial_kind") == "static_only":
             return "Re-run with --repo <owner/name> to measure CI timings."
-        # The reason line above already names the probe failure; give the next step.
-        return ("If `gh auth status` succeeds in a normal terminal, this shell is likely "
-                "sandboxed or has no network access — retry the same audit with network "
-                "/ host access; otherwise install gh or run `gh auth login`.")
+        # The reason line above already names the probe failure AND the sandbox remedy.
+        return ("Fix gh access as the reason above says (or install gh / run `gh auth "
+                "login`), then re-run the same audit.")
     return "Re-running will reproduce it."
 
 
@@ -549,6 +550,10 @@ def build_summary(doc: dict[str, Any], findings_path: str = "FINDINGS.json",
     if rc:
         out.append("Required (gating) checks — already resolved from rulesets + branch "
                    f"protection: {', '.join(rc)}.")
+    elif (isinstance(doc.get("data_sources"), dict)
+          and "tiers_run" in doc["data_sources"]
+          and "gh-timing" not in (doc["data_sources"]["tiers_run"] or [])):
+        out.append("Required (gating) checks: not queried — the gh data pass did not run.")
     elif rc == [] and rc_complete:
         out.append("Required (gating) checks: NONE declared — the repo readably configures "
                    "zero required checks (rulesets + branch protection already read; do NOT "

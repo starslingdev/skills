@@ -194,7 +194,8 @@ cardinal bug, and it has a dozen possible sites — this is the list of them.
      failed during collection". Never re-derive a `data_sources` value a helper already
      owns. **All four keys are stamped on EVERY exit from `collect()`, even when empty**
      — an early return that omitted them made the verify invariant SKIP (see link 3).
-     **`gh_unavailable` means gh is genuinely absent — NOT an API refusal.** `available()`
+     **`gh_unavailable` means the gh pass could not start (gh absent, logged out, or a
+     sandboxed shell with no keychain) — NOT an API refusal.** `available()`
      is a `gh auth status` probe, and that probe makes a live API call to verify the
      token, so it ALSO returns non-zero when gh is installed and a token is stored but the
      API does not accept the credential — a secondary-rate-limit 403, a transport / 5xx
@@ -211,7 +212,12 @@ cardinal bug, and it has a dozen possible sites — this is the list of them.
      never that the API would accept it), so the disclosure names both remedies — wait out
      a rate limit, or re-authenticate — rather than asserting one; and an ambiguous probe
      failure (a hung `gh auth token`, `TimeoutExpired`) also routes LOUD, never back to
-     the quiet path that would re-open the silent drop.
+     the quiet path that would re-open the silent drop. A sandboxed / no-network shell
+     can land on EITHER side (no keychain → `gh_unavailable`; a readable token →
+     `api_blocked`), so both reasons quote gh's own error line (`_gh_probe_error_line`,
+     which skips gh's bare host-name line) and name the "retry with network / host
+     access" remedy. `gh_unavailable` therefore never reads as a quiet repo: the report
+     renders a "run history was not read" banner, not the dormant-repo one.
   2. **Renderer.** `blocking_path._coverage_note` renders it at the severity the DATA
      says, branching on `partial_kind` and never string-matching the prose. Only
      `sample_thinned` may carry the minimizing suffix ("a few runs/jobs are absent
@@ -2563,7 +2569,8 @@ future change to the budget has to be a deliberate edit.
     repo's timings, silently. Unverifiable (no remote, not a checkout) falls back
     to the API.
   - **Right commit line?** `_root_branch_skew` compares HEAD against the repo's
-    `default_branch` — a feature branch, a detached HEAD, or a `main` that is
+    `default_branch` — a feature branch, a detached HEAD (unless it is exactly the
+    default tip, as `git worktree add --detach` leaves it), or a `main` that is
     behind/ahead of `origin/main`. This is the half `-dirty` cannot see: a clean
     checkout on a feature branch has no uncommitted change, so the stamped sha is
     perfectly *true* while the detectors parse YAML that produced **none** of the

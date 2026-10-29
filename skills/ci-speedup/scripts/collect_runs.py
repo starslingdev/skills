@@ -1519,8 +1519,7 @@ class GhClient:
             return True
         # Keep the probe's own words: a sandboxed / offline shell and a logged-out gh
         # both land here, and only gh's message tells them apart.
-        first = next((ln.strip() for ln in f"{r.stderr or ''}\n{r.stdout or ''}".splitlines()
-                      if ln.strip()), "")
+        first = _gh_probe_error_line(f"{r.stderr or ''}\n{r.stdout or ''}")
         self.probe_failure = (f"`gh auth status` exited {r.returncode}"
                               + (f": {first}" if first else ""))
         return False
@@ -1529,9 +1528,10 @@ class GhClient:
         """Called only when `available()` is False, to say WHY — the two causes are
         OPPOSITE and must not be conflated:
 
-          * ``"absent"`` — the gh binary is missing OR no token is configured. The gh
-            pass genuinely cannot run; a static-scan-only report is the honest fallback
-            (`gh_unavailable`), and its empty spine may legitimately read as a quiet repo.
+          * ``"absent"`` — the gh binary is missing OR no token is readable (logged out,
+            or a sandboxed shell with no keychain access). The gh pass cannot run; a
+            static-scan-only report is the honest fallback (`gh_unavailable`) — but its
+            empty spine says nothing about the repo, since nothing was measured.
           * ``"api_blocked"`` — gh IS installed and a token IS configured, but the
             `available()` probe still failed: the credential check did NOT come back
             clean. That covers a rate-limit / secondary-limit block, a transport / 5xx
@@ -1702,7 +1702,7 @@ def _paginate(client: GhClient, path: str, key: str, *, params: str = "",
 # report contradicting its own disclosure and downgrading a total collection failure
 # to a rounding error.
 _PARTIAL_STATIC_ONLY = "static_only"            # no --repo: the gh pass never ran
-_PARTIAL_GH_UNAVAILABLE = "gh_unavailable"      # gh missing / not authenticated
+_PARTIAL_GH_UNAVAILABLE = "gh_unavailable"      # gh pass could not start (no gh / token)
 _PARTIAL_COLLECTION_FAILED = "collection_failed"  # NOTHING was measured (whole-repo gap)
 _PARTIAL_WORKFLOW_MISSING = "workflow_missing"  # >=1 workflow dropped out of the sample
 _PARTIAL_SAMPLE_THINNED = "sample_thinned"      # some calls failed; the sample is thinner
@@ -1710,12 +1710,33 @@ _PARTIAL_SAMPLE_THINNED = "sample_thinned"      # some calls failed; the sample 
 _PARTIAL_MINOR_KINDS = frozenset({_PARTIAL_SAMPLE_THINNED})
 
 
+_GH_HOST_LINE = re.compile(r"^[A-Za-z0-9.-]+(:\d+)?$")
+
+
+def _gh_probe_error_line(text: str) -> str:
+    """The line of `gh auth status` output that carries its error. gh prints each host
+    on a bare line (`github.com`) ABOVE an indented, status-glyph-marked error, so the
+    first non-blank line is usually just the host name: skip host lines and drop the
+    leading `X` / `✗` / `!` glyph."""
+    for ln in text.splitlines():
+        s = ln.strip()
+        if not s or _GH_HOST_LINE.match(s):
+            continue
+        return re.sub(r"^[X✗×!]\s+", "", s)
+    return ""
+
+
+_GH_SANDBOX_HINT = ("If `gh auth status` succeeds in a normal terminal, this shell is "
+                    "likely sandboxed or has no network access — retry the audit with "
+                    "network / host access.")
+
+
 def _gh_unavailable_reason(probe_failure: str | None) -> str:
     """The `gh_unavailable` reason: the probe's own failure, plus the cause it most often
     hides. A sandboxed / no-network shell fails `gh auth status` (and, with no keychain,
     `gh auth token`) even when gh works in the user's terminal — so never assert "not
     authenticated" as THE cause, and never imply a retry would reproduce it."""
-    probe = probe_failure or "`gh auth status` failed"
+    probe = (probe_failure or "`gh auth status` failed").rstrip(".")
     return (f"gh data pass could not start: {probe}. gh may be missing or logged out — "
             "or this shell is sandboxed / has no network access (gh works in a normal "
             "terminal but not here). If `gh auth status` succeeds elsewhere, retry the "
@@ -20110,24 +20131,20 @@ def _workflows_are_dirty(root: "Path | None") -> bool:
 
 
 def _detached_head_matches_default(root: "Path", default_branch: str) -> bool:
-    """Does a DETACHED HEAD parse the same workflow YAML as the default branch's tip?
+    """Is a DETACHED HEAD exactly the default branch's tip?
 
-    CI runners and git worktrees check out a detached HEAD exactly at `origin/<default>`;
-    that is not skew. Compared against `origin/<default>` when fetched (the branch the
-    sampled runs came from), else the local `<default>`. True when HEAD is that commit,
-    or when its `.github/workflows` tree is byte-identical to the tip's (only that tree
-    feeds the detectors). No ref to compare against → False: keep the warning."""
+    `git worktree add --detach` (and CI jobs that check out a bare SHA) leave a detached
+    HEAD at `origin/<default>`; that is not skew. Compared against `origin/<default>` when
+    fetched (the branch the sampled runs came from), else the local `<default>`. Only the
+    exact commit counts: detectors also read files outside `.github/workflows` (local
+    composite actions, package.json), and an attached `main` behind `origin/main` already
+    warns, so an identical workflows tree is not proof of no skew. No ref to compare
+    against -> False: keep the warning."""
+    head = _git_out(root, "rev-parse", "HEAD")
     for ref in (f"refs/remotes/origin/{default_branch}", f"refs/heads/{default_branch}"):
         tip = _git_out(root, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
-        if not tip:
-            continue
-        if _git_out(root, "rev-parse", "HEAD") == tip:
-            return True
-        head_tree = _git_out(root, "rev-parse", "--verify", "--quiet",
-                             "HEAD:.github/workflows")
-        tip_tree = _git_out(root, "rev-parse", "--verify", "--quiet",
-                            f"{tip}:.github/workflows")
-        return bool(head_tree) and head_tree == tip_tree
+        if tip:
+            return bool(head) and head == tip
     return False
 
 
@@ -20154,7 +20171,7 @@ def _root_branch_skew(root: "Path | None",
 
     What we can see, cheaply and offline:
       * the checked-out branch differs from the repo's default branch (incl. a detached
-        HEAD), or
+        HEAD that is not exactly the default tip — see `_detached_head_matches_default`), or
       * it IS the default branch but the local tracking ref `origin/<default>` shows the
         checkout is behind (stale) or ahead (unpushed local commits).
     A checkout with no `origin/<default>` ref (never fetched, a shallow tarball) can't
@@ -23831,17 +23848,22 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         # mid-collection abort (`gave_up`) already uses — so the coverage banner and
         # `_measurement_is_broken` announce the hole instead of hiding it.
         if client.diagnose_unavailability() == "api_blocked":
+            # A sandboxed shell that can still read gh's stored token lands HERE, not on
+            # `gh_unavailable` — so this reason names that cause and gh's own words too.
+            _probe = getattr(client, "probe_failure", None)
             findings_doc["data_sources"] = {
                 "tiers_run": [], "gh_available": True,
                 "gh_query_count": client.queries, "gh_error_count": client.errors,
                 "partial_reason": (
                     "gh is installed and a token is configured, but the GitHub API "
-                    "REFUSED the collection before any run could be sampled (a rate-limit "
-                    "/ secondary-limit block, a transport error, or an expired / revoked "
-                    "/ insufficiently-scoped token) — so NO CI data was measured. This "
+                    "REFUSED the collection before any run could be sampled "
+                    + (f"({_probe.rstrip('.')}) " if _probe else "")
+                    + "— a rate-limit / secondary-limit block, a transport error, an "
+                    "expired / revoked / insufficiently-scoped token, or a sandboxed / "
+                    "offline shell — so NO CI data was measured. This "
                     "report is static-scan-only and is NOT a trustworthy CI audit; re-run "
                     "once the block clears — wait out a rate limit, or re-authenticate "
-                    "gh (`gh auth status`) if the token is invalid."),
+                    "gh (`gh auth status`) if the token is invalid. " + _GH_SANDBOX_HINT),
                 "partial_kind": _PARTIAL_COLLECTION_FAILED,
                 "run_list_fetch_failures": [], "job_fetch_failures": [],
             }
