@@ -923,6 +923,25 @@ def test_diag_durable_break_says_property_not_rerun():
     assert "RE-RUN the SAME audit" not in s
 
 
+def test_diag_gh_pass_that_never_ran_is_not_called_a_property_of_the_repo():
+    # A gh pass that could not start (no gh, no auth — or a sandboxed / offline shell
+    # where `gh auth status` fails) measured NOTHING about the repo. The diagnostics used
+    # to say "a broken run" and then "a PROPERTY of the repo … re-running reproduces it"
+    # in the same block — self-contradictory, and false for the sandbox case, where a
+    # retry with network access recovers the full pass.
+    doc = _fdoc(
+        ds={"tiers_run": [], "partial_kind": "gh_unavailable",
+            "partial_reason": "gh data pass could not start: `gh auth status` failed "
+                              "(error connecting to api.github.com)"},
+        per_workflow_monthly_volume={})
+    s = build_summary(doc)
+    assert "EMPTY-SPINE DIAGNOSTICS" in s
+    assert "error connecting to api.github.com" in s
+    assert "PROPERTY of the repo" not in s
+    assert "re-running reproduces it" not in s
+    assert "sandbox" in s and "network" in s
+
+
 def test_diag_transient_classifier_pr_kept_keys_on_fetch_failures():
     assert _break_is_transient(_fdoc(cp={"sample_fetch_failures": 2}), "pr_kept") is True
     assert _break_is_transient(_fdoc(cp={"sample_fetch_failures": 0}), "pr_kept") is False

@@ -1188,6 +1188,19 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-10-29** — When the gh data pass cannot start, the empty-spine
+  diagnostics no longer call the result "a property of the repo" that
+  "re-running reproduces" (it contradicted the "broken run" line above it).
+  The reason now quotes the first line of the failed `gh auth status` probe
+  and names the sandboxed / no-network shell cause with its remedy (retry with
+  network / host access) instead of asserting gh is unauthenticated.
+
+- **2026-10-29** — A detached HEAD at the default branch's tip (how CI runners
+  and git worktrees check out) no longer triggers a false "workflow YAML
+  source skew" warning. No skew is reported when HEAD is the default tip or
+  its `.github/workflows` tree is identical to the tip's; a detached HEAD with
+  different workflows, or with no default ref to compare, still warns.
+
 - **2026-10-28** — Repo-published required statuses are named in the agent
   summary, and an independent unresolved-gate reason stays visible beside the
   report headline when sampling footnote metadata is absent. Status-source

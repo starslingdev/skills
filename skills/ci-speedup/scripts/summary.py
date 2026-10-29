@@ -396,8 +396,12 @@ def _durable_hint(stage: str | None, doc: dict[str, Any]) -> str:
         return ("No scan finding referenced a real workflow file — the repo's CI may be "
                 "trivial or not GitHub Actions.")
     if stage == "collection":
-        return (ds.get("partial_reason")
-                or "the gh CLI is unavailable/unauthenticated; re-running as-is won't help.")
+        if ds.get("partial_kind") == "static_only":
+            return "Re-run with --repo <owner/name> to measure CI timings."
+        # The reason line above already names the probe failure; give the next step.
+        return ("If `gh auth status` succeeds in a normal terminal, this shell is likely "
+                "sandboxed or has no network access — retry the same audit with network "
+                "/ host access; otherwise install gh or run `gh auth login`.")
     return "Re-running will reproduce it."
 
 
@@ -452,6 +456,11 @@ def empty_spine_diagnostics(doc: dict[str, Any], findings_path: str,
         if cmd:
             out.append("Re-run:")
             out.append("  " + cmd)
+    elif stage == "collection":
+        # The gh pass never ran, so nothing about the repo was measured — calling the
+        # empty spine a property of the repo would contradict the "broken run" line above.
+        out.append("Nothing was measured, so this says nothing about the repo. "
+                   + _durable_hint(stage, doc))
     else:
         out.append("This empty spine is a PROPERTY of the repo in this window, not a "
                    "transient gap — re-running reproduces it. " + _durable_hint(stage, doc))

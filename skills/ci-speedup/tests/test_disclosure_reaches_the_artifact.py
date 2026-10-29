@@ -374,7 +374,32 @@ def test_a_genuinely_absent_gh_still_reads_as_a_quiet_static_only_run(monkeypatc
 
     report = bp.render(out)
     assert "Collection FAILED" not in report
-    assert "gh CLI not available or not authenticated" in report
+    assert "gh data pass could not start" in report
+
+
+def test_a_failed_gh_probe_names_its_stderr_and_the_sandbox_cause(monkeypatch):
+    """A sandboxed / no-network shell fails `gh auth status` (and, with no keychain, the
+    offline `gh auth token` probe too) even when gh works fine in a normal terminal. The
+    reason used to be a bare "gh CLI not available or not authenticated" — blaming auth
+    and hiding the probe's own error. It must quote the probe's first stderr line and
+    name the sandbox / no-network cause with its remedy (retry with network access)."""
+    def _run(argv, *a, **k):
+        if argv[1:3] == ["auth", "status"]:
+            return subprocess.CompletedProcess(
+                argv, 1, "", "\nerror connecting to api.github.com\ncheck your internet\n")
+        if argv[1:3] == ["auth", "token"]:
+            return subprocess.CompletedProcess(argv, 1, "", "no oauth token\n")
+        return subprocess.CompletedProcess(argv, 0, "gh version 2.60.0\n", "")
+    monkeypatch.delenv("CI_SPEEDUP_GH_FIXTURES", raising=False)
+    monkeypatch.setattr(cr.subprocess, "run", _run)
+    out = cr.collect(_doc(), "o/r", max_runs=8, shallow_runs=8)
+    ds = out["data_sources"]
+    assert ds["partial_kind"] == cr._PARTIAL_GH_UNAVAILABLE
+    reason = ds["partial_reason"]
+    assert "error connecting to api.github.com" in reason
+    assert "check your internet" not in reason      # first non-blank line only
+    assert "sandbox" in reason and "network" in reason
+    assert "gh CLI not available or not authenticated" not in reason
 
 
 # ---------------------------------------------------------------------------

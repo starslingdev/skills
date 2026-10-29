@@ -812,6 +812,8 @@ class GhClient:
         # lifetime. Both unset (the default) is byte-identical to the live path
         # that existed before this seam: neither branch below is ever taken.
         self._fixtures_dir = os.environ.get("CI_SPEEDUP_GH_FIXTURES") or None
+        # Why `available()` last returned False (gh's first stderr line), or None.
+        self.probe_failure: str | None = None
         self._record_dir = os.environ.get("CI_SPEEDUP_GH_RECORD") or None
         # Record-mode collision guard: fixture filename -> the endpoint that
         # first wrote it this session. `_fixture_name` is lossy (see its
@@ -1510,9 +1512,18 @@ class GhClient:
             r = subprocess.run(
                 ["gh", "auth", "status"], capture_output=True, text=True, timeout=10,
             )
-            return r.returncode == 0
-        except (OSError, subprocess.TimeoutExpired):
+        except (OSError, subprocess.TimeoutExpired) as e:
+            self.probe_failure = f"`gh auth status` could not run: {e}"
             return False
+        if r.returncode == 0:
+            return True
+        # Keep the probe's own words: a sandboxed / offline shell and a logged-out gh
+        # both land here, and only gh's message tells them apart.
+        first = next((ln.strip() for ln in f"{r.stderr or ''}\n{r.stdout or ''}".splitlines()
+                      if ln.strip()), "")
+        self.probe_failure = (f"`gh auth status` exited {r.returncode}"
+                              + (f": {first}" if first else ""))
+        return False
 
     def diagnose_unavailability(self) -> str:
         """Called only when `available()` is False, to say WHY — the two causes are
@@ -1697,6 +1708,18 @@ _PARTIAL_WORKFLOW_MISSING = "workflow_missing"  # >=1 workflow dropped out of th
 _PARTIAL_SAMPLE_THINNED = "sample_thinned"      # some calls failed; the sample is thinner
 # Only this kind may be rendered as a minor caveat. Everything else is a hole.
 _PARTIAL_MINOR_KINDS = frozenset({_PARTIAL_SAMPLE_THINNED})
+
+
+def _gh_unavailable_reason(probe_failure: str | None) -> str:
+    """The `gh_unavailable` reason: the probe's own failure, plus the cause it most often
+    hides. A sandboxed / no-network shell fails `gh auth status` (and, with no keychain,
+    `gh auth token`) even when gh works in the user's terminal — so never assert "not
+    authenticated" as THE cause, and never imply a retry would reproduce it."""
+    probe = probe_failure or "`gh auth status` failed"
+    return (f"gh data pass could not start: {probe}. gh may be missing or logged out — "
+            "or this shell is sandboxed / has no network access (gh works in a normal "
+            "terminal but not here). If `gh auth status` succeeds elsewhere, retry the "
+            "audit with network / host access.")
 
 
 def _partial_reason(errors: int,
@@ -20086,6 +20109,28 @@ def _workflows_are_dirty(root: "Path | None") -> bool:
     return bool(out)
 
 
+def _detached_head_matches_default(root: "Path", default_branch: str) -> bool:
+    """Does a DETACHED HEAD parse the same workflow YAML as the default branch's tip?
+
+    CI runners and git worktrees check out a detached HEAD exactly at `origin/<default>`;
+    that is not skew. Compared against `origin/<default>` when fetched (the branch the
+    sampled runs came from), else the local `<default>`. True when HEAD is that commit,
+    or when its `.github/workflows` tree is byte-identical to the tip's (only that tree
+    feeds the detectors). No ref to compare against → False: keep the warning."""
+    for ref in (f"refs/remotes/origin/{default_branch}", f"refs/heads/{default_branch}"):
+        tip = _git_out(root, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
+        if not tip:
+            continue
+        if _git_out(root, "rev-parse", "HEAD") == tip:
+            return True
+        head_tree = _git_out(root, "rev-parse", "--verify", "--quiet",
+                             "HEAD:.github/workflows")
+        tip_tree = _git_out(root, "rev-parse", "--verify", "--quiet",
+                            f"{tip}:.github/workflows")
+        return bool(head_tree) and head_tree == tip_tree
+    return False
+
+
 def _root_branch_skew(root: "Path | None",
                       default_branch: str | None) -> dict[str, Any] | None:
     """Is the checkout we're about to parse workflow YAML from on a DIFFERENT commit
@@ -20120,6 +20165,8 @@ def _root_branch_skew(root: "Path | None",
     if not branch:
         return None
     if branch == "HEAD":
+        if _detached_head_matches_default(root, default_branch):
+            return None                   # CI / worktree checkout of the default tip
         return {"branch": None, "default_branch": default_branch,
                 "reason": "the checkout is on a DETACHED HEAD, not the default branch "
                           f"`{default_branch}`"}
@@ -23801,7 +23848,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             return findings_doc
         findings_doc["data_sources"] = {
             "tiers_run": [], "gh_available": False,
-            "partial_reason": "gh CLI not available or not authenticated",
+            "partial_reason": _gh_unavailable_reason(getattr(client, "probe_failure", None)),
             "partial_kind": _PARTIAL_GH_UNAVAILABLE,
             "run_list_fetch_failures": [], "job_fetch_failures": [],
         }
