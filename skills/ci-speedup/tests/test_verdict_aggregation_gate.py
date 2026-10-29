@@ -108,6 +108,38 @@ def test_summary_does_not_call_the_verdict_addressable():
     assert "• test  [" not in block, block
 
 
+def _addressable_block(s: str) -> str:
+    block = s[s.index("Addressable long poles"):]
+    return block[:block.index("\n\n")]
+
+
+def test_summary_without_a_drill_bundle_still_lists_the_suite():
+    # No drill logs captured: the fallback collapses matrix siblings by base name. It must
+    # not fold the 4m32s `test (self-hosted)` suite into a `test` row and then drop that
+    # row as the verdict gate — the digest would report zero fixable checks.
+    doc = _doc()
+    doc.pop("data_bundle")
+    block = _addressable_block(build_summary(doc))
+    assert "• test (self-hosted)  [ci.yml]  P50 4m 32s" in block, block
+    assert "• test  [" not in block, block
+
+
+def test_summary_keeps_a_gate_with_a_specific_structural_lever_addressable():
+    # The renderer keeps the drill for a sink carrying a SPECIFIC structural lever
+    # (OPT70/71/72) — that lever is measured content of its own. The digest must agree
+    # and keep the check fixable rather than listing it as an inert aggregation gate.
+    doc = _doc()
+    lever = copy.deepcopy(doc["findings"][0])
+    lever.update(pattern="OPT70", id="f-opt70", affected_jobs=["test"],
+                 pr_critical_path_check="test",
+                 title="Scope the suite to the changed paths — `test`")
+    doc["findings"].append(lever)
+    assert "**Aggregation gate" not in _section(_render(doc), "test")
+    block = _addressable_block(build_summary(doc))
+    assert "• test  [ci.yml]" in block, block
+    assert "Aggregation gates" not in build_summary(doc)
+
+
 # ── Bug 2: a structural card renders only under the pole it names ─────────────────────
 
 def test_structural_card_renders_only_under_its_own_pole():

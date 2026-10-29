@@ -1194,7 +1194,9 @@ unversioned and updates by reinstall from `main`.
   slowest upstream (kept as a chain stage when it ends a `needs:` chain), the
   suite it waits on is ranked Long pole 1, no "speed up the dominant step"
   (OPT75) lever is routed to it, and the data-pass summary lists it under
-  "Aggregation gates" instead of "Addressable long poles". Structural cards
+  "Aggregation gates" instead of "Addressable long poles" (unless, as in the
+  report, a specific structural lever keeps it fixable; with no drill logs the
+  suite keeps its own name rather than folding into the gate's). Structural cards
   now render only under the pole they name: two measured checks such as `test`
   and `test (self-hosted)` are no longer folded together as a matrix base and
   its leg. The Bottom line no longer calls a check "slower" than a `needs:`
