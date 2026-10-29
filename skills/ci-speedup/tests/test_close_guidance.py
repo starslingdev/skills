@@ -198,10 +198,15 @@ def test_experimental_question_tool_is_mirrored_in_the_plain_message():
     option with the always-last save dropped. The contract must (a) mirror the same
     question + options in the plain message when the tool is experimental, (b) forbid
     claiming to wait on a choice the user cannot see, and (c) keep >=2 options."""
-    contract = _interaction_contract(_SKILL_MD)
-    assert "experimental" in contract
-    assert "ALSO end your plain message with the same question" in contract, \
-        "an experimental question tool is not mirrored in the plain message"
-    assert "Never say you are waiting on a choice" in contract
-    assert "visible in your own last message" in contract
-    assert "≥2 options" in contract, "the >=2-option floor is not pinned"
+    contract = _interaction_contract(_SKILL_MD).replace("**", "")
+    # Long contiguous phrases: a shortened, negated or re-scoped rule goes red.
+    assert ("experimental — call it when exposed, and ALSO end your plain message "
+            "with the same question as a numbered option list, same options, same "
+            "order, sent before the call") in contract, \
+        "experimental tool not mirrored, re-scoped, or mirrored after a call that may hang"
+    assert ("Never say you are waiting on a choice unless its options are visible "
+            "in your own last message.") in contract
+    assert "(always ≥2 options unless a step below drops one by name)" in contract, \
+        "the >=2-option floor (with its named-exception carve-out) is not pinned"
+    assert ("phase 6's save option still last and verbatim "
+            "(`None, just save the report (.md)`)") in contract
