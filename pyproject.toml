@@ -8,6 +8,8 @@ dependencies = []
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
+    # CI distributes the complete suite across four worker processes.
+    "pytest-xdist>=3.5,<4",
     # The suite HARD-requires PyYAML: several ci-score tests exec
     # `skills/ci-score/scripts/collect_config.py` by file path at module scope, and
     # that script `sys.exit(1)`s when yaml is missing — a SystemExit during pytest's

@@ -21,6 +21,7 @@
 # accumulate as a stale uncloaked workflow file in a working tree — which is
 # also what an install into an already-used checkout would leave behind.
 import hashlib as _hl, json as _json, pathlib as _pl
+import tempfile as _tempfile
 
 _MANIFEST_NAME = "cloak-manifest.json"
 
@@ -58,7 +59,16 @@ def _materialize_cloaked_fixtures():
             out.parent.mkdir(parents=True, exist_ok=True)
             data = f.read_bytes()
             if not out.exists() or out.read_bytes() != data:
-                out.write_bytes(data)
+                # xdist workers collect concurrently. Publish complete bytes so
+                # another worker never hashes a partly written fixture. Keep the
+                # temporary outside dst, whose stale-output census prunes files.
+                with _tempfile.NamedTemporaryFile(dir=src.parent, delete=False) as tmp:
+                    tmp.write(data)
+                    staged = _pl.Path(tmp.name)
+                try:
+                    staged.replace(out)
+                finally:
+                    staged.unlink(missing_ok=True)
             discovered[key(out)] = _hl.sha256(data).hexdigest()
 
     # Prune: a materialized file with no manifest entry is stale output from a
