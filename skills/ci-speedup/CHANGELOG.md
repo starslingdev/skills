@@ -1188,6 +1188,13 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-10-29** — The fix question at the close can no longer go unseen on Codex.
+  When the host's question tool is experimental, the same question and its options
+  now also end the plain closing message, in the same order; the agent never says it
+  is waiting on a choice unless the options are visible in its own last message; and
+  every question offers at least two options (a live Codex close sent the question
+  through a tool that never rendered, offered one option, and dropped the save).
+
 - **2026-10-28** — Repo-published required statuses are named in the agent
   summary, and an independent unresolved-gate reason stays visible beside the
   report headline when sampling footnote metadata is absent. Status-source

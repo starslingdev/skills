@@ -59,3 +59,17 @@ def test_close_surfaces_the_ci_score_honestly():
     assert "states the refusal reason instead of a score" in close  # refusal
     assert "data_sources.ci_score_error" in close                   # scoring failed
     assert "omits the score line" in close                          # absent stamp
+
+
+def test_experimental_question_tool_is_mirrored_in_the_plain_message():
+    """Mirror of ci-speedup's pin (live Codex run, 2026-10-29): the experimental
+    `request_user_input` tool can be called and never render, stranding the user.
+    The shared contract must mirror the question + options in the plain message
+    and forbid claiming to wait on a choice the user cannot see."""
+    start = _SKILL_MD.index("**Interaction contract")
+    end = _SKILL_MD.index("**agent-independent**", start)
+    contract = re.sub(r"\s+", " ", _SKILL_MD[start:end])
+    assert "ALSO end your plain message with the same question" in contract
+    assert "Never say you are waiting on a choice" in contract
+    assert "visible in your own last message" in contract
+    assert "≥2 options" in contract

@@ -125,14 +125,14 @@ quick win (OPT78 stamps HIGH on its drill-down). Details + intent-recovery comma
 ## Phases
 
 **Interaction contract (phases 1 and 6).** Both user-facing questions are a **single
-structured question** — one question, one page, fixed-order options, nothing open-ended,
+structured question** — one question, one page, fixed-order options (always **≥2 options**), nothing open-ended,
 no machinery narration — **via your platform's structured-question tool where one exists**:
 `AskUserQuestion` on Claude Code; on Codex, its built-in user-input request tool
-(`request_user_input` / `tool/requestUserInput`, experimental — call it when exposed). Only with **no** such tool, ask the **same** question
-as **one plain message** — same options, same order, same ≤4-option fold, phase 6's save
-option still **last** and verbatim (`None, just save the report (.md)`), no re-offer after
+(`request_user_input` / `tool/requestUserInput`, experimental — call it when exposed, **and ALSO end your plain message with the same question** as a numbered option list, same options, same order: an experimental tool can silently fail to render — live Codex run 2026-10-29). With **no** such tool, that plain message alone asks it
+— same options, same order, same ≤4-option fold, phase 6's save option still **last** and verbatim (`None, just save the report (.md)`), no re-offer after
 a save pick, the default one keystroke ("Reply **y** to audit <owner/repo>, or name a
-different repo/path"). Only the delivery mechanism varies; the contract is **agent-independent.**
+different repo/path"). **Never say you are waiting on a choice unless its options are visible in your own last message.**
+Only the delivery mechanism varies; the contract is **agent-independent.**
 
 1. **Pick repo — default to the current repo, but confirm first.** But FIRST, the
    gh gate: if `gh` isn't installed or `gh auth status` fails (sandboxed agent

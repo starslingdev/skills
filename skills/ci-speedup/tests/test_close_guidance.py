@@ -181,3 +181,27 @@ def test_skill_body_line_budget_guard_actually_fires_when_over():
     body = _skill_body_line_count(over)
     assert body == _SKILL_BODY_LINE_BUDGET          # frontmatter stripped, body isolated
     assert not (body < _SKILL_BODY_LINE_BUDGET)     # exactly at budget → the guard trips
+
+
+# --- Experimental-tool delivery (live Codex run, 2026-10-29) ------------------------
+
+def _interaction_contract(skill_md: str) -> str:
+    start = skill_md.index("**Interaction contract")
+    end = skill_md.index("agent-independent", start)
+    return re.sub(r"\s+", " ", skill_md[start:end])
+
+
+def test_experimental_question_tool_is_mirrored_in_the_plain_message():
+    """A live Codex close sent its fix question through the experimental
+    `request_user_input` tool, which never rendered; the agent then said it was
+    "waiting for your choice above" when nothing was visible, and offered a single
+    option with the always-last save dropped. The contract must (a) mirror the same
+    question + options in the plain message when the tool is experimental, (b) forbid
+    claiming to wait on a choice the user cannot see, and (c) keep >=2 options."""
+    contract = _interaction_contract(_SKILL_MD)
+    assert "experimental" in contract
+    assert "ALSO end your plain message with the same question" in contract, \
+        "an experimental question tool is not mirrored in the plain message"
+    assert "Never say you are waiting on a choice" in contract
+    assert "visible in your own last message" in contract
+    assert "≥2 options" in contract, "the >=2-option floor is not pinned"

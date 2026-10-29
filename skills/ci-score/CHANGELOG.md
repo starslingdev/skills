@@ -11,6 +11,12 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
 
 ## [Unreleased]
 
+- **2026-10-29** — **Fixed**: the step-0 and close questions can no longer go
+  unseen on Codex. When the host's question tool is experimental, the same question
+  and options also end the plain message, in the same order; the agent never says it
+  is waiting on a choice it has not visibly shown; every question offers at least two
+  options. Same fix as ci-speedup's shared interaction contract.
+
 - **2026-10-28** — **Changed** (registry `ci-score-v0.1.8`, OD-CS26): shallow
   checkout is not applicable when every PR-gating job calls another repository.
   The checkout is invisible locally, so it no longer earns a pass. Scores may
