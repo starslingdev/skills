@@ -1009,3 +1009,20 @@ def test_a_genuinely_empty_collection_still_returns_empty(monkeypatch):
         client = cr.GhClient()
         assert cr._paginate(client, "repos/o/r/actions/workflows", "workflows") == []
         assert client.errors == 0, f"{body} is genuinely empty, not a coverage gap"
+
+
+def test_failed_gh_probe_skips_successful_accounts(monkeypatch):
+    status = (
+        "github.example.com\n"
+        "  ✓ Logged in to github.example.com account example (keyring)\n"
+        "  - Active account: true\n"
+        "github.com\n"
+        "  X Failed to log in to github.com using token (GH_TOKEN)\n"
+        "  - The token in GH_TOKEN is invalid.\n"
+    )
+    monkeypatch.delenv("CI_SPEEDUP_GH_FIXTURES", raising=False)
+    monkeypatch.setattr(cr.subprocess, "run", _real_gh_probe(status, 1))
+    out = cr.collect(_doc(), "o/r", max_runs=8, shallow_runs=8)
+    report = bp.render(out)
+    assert "Failed to log in to github.com using token (GH_TOKEN)" in report
+    assert "Logged in to github.example.com" not in report

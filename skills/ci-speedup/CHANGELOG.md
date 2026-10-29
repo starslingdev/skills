@@ -1188,6 +1188,9 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-10-29** — Failed gh probes select the error account rather than an
+  earlier successful login when multiple hosts or accounts are configured (#169).
+
 - **2026-10-29** — When the gh data pass cannot start, the empty-spine
   diagnostics no longer call the result "a property of the repo" that
   "re-running reproduces" (it contradicted the "broken run" line above it).

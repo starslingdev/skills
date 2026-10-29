@@ -1717,12 +1717,16 @@ def _gh_probe_error_line(text: str) -> str:
     """The line of `gh auth status` output that carries its error. gh prints each host
     on a bare line (`github.com`) ABOVE an indented, status-glyph-marked error, so the
     first non-blank line is usually just the host name: skip host lines and drop the
-    leading `X` / `✗` / `!` glyph."""
-    for ln in text.splitlines():
-        s = ln.strip()
-        if not s or _GH_HOST_LINE.match(s):
+    leading `X` / `✗` / `!` glyph. Prefer a marked failure over a successful
+    account listed earlier when gh checks multiple hosts or accounts."""
+    lines = [ln.strip() for ln in text.splitlines()]
+    for s in lines:
+        if re.match(r"^[X✗×!]\s+", s):
+            return re.sub(r"^[X✗×!]\s+", "", s)
+    for s in lines:
+        if not s or _GH_HOST_LINE.match(s) or s.startswith(("✓", "-")):
             continue
-        return re.sub(r"^[X✗×!]\s+", "", s)
+        return s
     return ""
 
 
