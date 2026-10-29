@@ -5449,3 +5449,12 @@ def test_deeply_nested_condition_does_not_crash_the_scan():
     ex = _load_scan_excl()._jobs_mutually_exclusive
     deep = "(" * 2000 + "github.event_name == 'push'" + ")" * 2000
     assert not ex({"if": deep}, {"if": "github.event_name == 'pull_request'"})
+
+
+def test_unicode_conditions_are_not_proof_of_exclusivity():
+    # Actions uses .NET OrdinalIgnoreCase: both Greek sigma forms compare equal,
+    # whereas Python lower() leaves final sigma distinct. Do not infer disjoint
+    # jobs from a Unicode folding model that differs from the expression engine.
+    ex = _load_scan_excl()._jobs_mutually_exclusive
+    assert not ex({"if": "inputs.mode == 'Σ'"}, {"if": "inputs.mode == 'ς'"})
+    assert not ex({"if": "inputs.mode == 'K'"}, {"if": "inputs.mode != 'K'"})

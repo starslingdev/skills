@@ -1837,6 +1837,11 @@ def _if_dnf(expr: object) -> list[frozenset] | None:
     if not isinstance(expr, str):
         return None
     s = expr.strip()
+    # Actions uses .NET OrdinalIgnoreCase, not Python Unicode lower(): e.g.
+    # Greek sigma and final sigma compare equal there but lower differently.
+    # Only ASCII folding is shared, so leave other conditions unproven.
+    if not s.isascii():
+        return None
     m = re.fullmatch(r"\$\{\{(.*)\}\}", s, re.S)
     if m:
         s = m.group(1).strip()

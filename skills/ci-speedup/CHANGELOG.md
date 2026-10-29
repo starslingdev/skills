@@ -1188,6 +1188,8 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-10-29** — Job-exclusivity proofs only fold ASCII conditions; Unicode literals whose Actions comparison differs from Python lowercasing no longer hide duplicated setup (PR #171).
+
 - **2026-10-29** — OPT14 (repeated checkout/setup without artifact handoff)
   and OPT12 (duplicated setup across jobs) no longer treat mutually exclusive
   jobs as duplicated work. A same-repo / fork split (one job runs on push or a
