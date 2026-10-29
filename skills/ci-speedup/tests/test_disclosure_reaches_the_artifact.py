@@ -374,7 +374,109 @@ def test_a_genuinely_absent_gh_still_reads_as_a_quiet_static_only_run(monkeypatc
 
     report = bp.render(out)
     assert "Collection FAILED" not in report
-    assert "gh CLI not available or not authenticated" in report
+    assert "gh data pass could not start" in report
+
+
+def test_a_failed_gh_probe_names_its_stderr_and_the_sandbox_cause(monkeypatch):
+    """A sandboxed / no-network shell fails `gh auth status` (and, with no keychain, the
+    offline `gh auth token` probe too) even when gh works fine in a normal terminal. The
+    reason used to be a bare "gh CLI not available or not authenticated" — blaming auth
+    and hiding the probe's own error. It must quote the probe's first stderr line and
+    name the sandbox / no-network cause with its remedy (retry with network access)."""
+    def _run(argv, *a, **k):
+        if argv[1:3] == ["auth", "status"]:
+            return subprocess.CompletedProcess(
+                argv, 1, "", "\nerror connecting to api.github.com\ncheck your internet\n")
+        if argv[1:3] == ["auth", "token"]:
+            return subprocess.CompletedProcess(argv, 1, "", "no oauth token\n")
+        return subprocess.CompletedProcess(argv, 0, "gh version 2.60.0\n", "")
+    monkeypatch.delenv("CI_SPEEDUP_GH_FIXTURES", raising=False)
+    monkeypatch.setattr(cr.subprocess, "run", _run)
+    out = cr.collect(_doc(), "o/r", max_runs=8, shallow_runs=8)
+    ds = out["data_sources"]
+    assert ds["partial_kind"] == cr._PARTIAL_GH_UNAVAILABLE
+    reason = ds["partial_reason"]
+    assert "error connecting to api.github.com" in reason
+    assert "check your internet" not in reason      # first non-blank line only
+    assert "sandbox" in reason and "network" in reason
+    assert "gh CLI not available or not authenticated" not in reason
+
+
+# Real `gh auth status` failure output (gh 2.100): a bare hostname line, then the
+# indented, X-marked error. Taking the first non-blank line quoted "github.com".
+_REAL_GH_AUTH_STATUS_FAILURE = (
+    "github.com\n"
+    "  X Failed to log in to github.com using token (GH_TOKEN)\n"
+    "  - Active account: true\n"
+    "  - The token in GH_TOKEN is invalid.\n")
+
+
+def _real_gh_probe(status_stderr: str, token_rc: int):
+    def _run(argv, *a, **k):
+        if argv[1:3] == ["auth", "status"]:
+            return subprocess.CompletedProcess(argv, 1, "", status_stderr)
+        if argv[1:3] == ["auth", "token"]:
+            return subprocess.CompletedProcess(argv, token_rc, "", "")
+        return subprocess.CompletedProcess(argv, 0, "gh version 2.100.0\n", "")
+    return _run
+
+
+def test_a_real_gh_probe_failure_quotes_the_error_not_the_hostname(monkeypatch):
+    """gh prints the host name on its own line before the error, so "first non-blank
+    line" quoted `github.com` — the reason never carried gh's own words."""
+    monkeypatch.delenv("CI_SPEEDUP_GH_FIXTURES", raising=False)
+    monkeypatch.setattr(cr.subprocess, "run", _real_gh_probe(_REAL_GH_AUTH_STATUS_FAILURE, 1))
+    out = cr.collect(_doc(), "o/r", max_runs=8, shallow_runs=8)
+    reason = out["data_sources"]["partial_reason"]
+    assert "Failed to log in to github.com using token (GH_TOKEN)" in reason
+    assert "exited 1: github.com." not in reason
+    assert "X Failed" not in reason                 # gh's status glyph is dropped
+
+
+def test_a_missing_gh_binary_says_the_probe_could_not_run(monkeypatch):
+    def _run(argv, *a, **k):
+        raise FileNotFoundError(2, "No such file or directory", "gh")
+    monkeypatch.delenv("CI_SPEEDUP_GH_FIXTURES", raising=False)
+    monkeypatch.setattr(cr.subprocess, "run", _run)
+    out = cr.collect(_doc(), "o/r", max_runs=8, shallow_runs=8)
+    ds = out["data_sources"]
+    assert ds["partial_kind"] == cr._PARTIAL_GH_UNAVAILABLE
+    assert "`gh auth status` could not run" in ds["partial_reason"]
+
+
+def test_an_api_blocked_probe_names_the_sandbox_cause_and_gh_words(monkeypatch):
+    """A sandboxed shell that can still read gh's stored token lands on `api_blocked`
+    (the loud collection-failure path). Its reason blamed only a rate limit or the
+    token; the sandbox / no-network cause and gh's own error must be named there too."""
+    monkeypatch.delenv("CI_SPEEDUP_GH_FIXTURES", raising=False)
+    monkeypatch.setattr(cr.subprocess, "run", _real_gh_probe(_REAL_GH_AUTH_STATUS_FAILURE, 0))
+    out = cr.collect(_doc(), "o/r", max_runs=8, shallow_runs=8)
+    ds = out["data_sources"]
+    assert ds["partial_kind"] == cr._PARTIAL_COLLECTION_FAILED
+    reason = ds["partial_reason"]
+    assert "Failed to log in to github.com using token (GH_TOKEN)" in reason
+    assert "sandboxed" in reason and "network / host access" in reason
+    assert "rate-limit" in reason and "re-authenticate" in reason   # old causes kept
+
+
+def test_a_gh_pass_that_never_started_is_not_rendered_as_a_dormant_repo(monkeypatch):
+    """The summary stopped calling a never-started gh pass a property of the repo; the
+    REPORT must agree. It rendered the dormant-repo banner ("an archived, brand-new, or
+    low-activity repo ... Re-run once the repo has recent Actions runs") and told the
+    reader to pass `--repo` they had already passed."""
+    monkeypatch.delenv("CI_SPEEDUP_GH_FIXTURES", raising=False)
+    monkeypatch.setattr(cr.subprocess, "run", _real_gh_probe(_REAL_GH_AUTH_STATUS_FAILURE, 1))
+    out = cr.collect(_doc(), "o/r", max_runs=8, shallow_runs=8)
+    assert out["data_sources"]["partial_kind"] == cr._PARTIAL_GH_UNAVAILABLE
+    report = bp.render(out)
+    for lie in ("an archived, brand-new, or low-activity repo",
+                "No run history to measure",
+                "Re-run once the repo has recent Actions runs",
+                "Pass `--repo owner/repo`"):
+        assert lie not in report, lie
+    assert "says nothing about whether this repo's CI is quiet" in report
+    assert "network / host access" in report
+    assert "access.." not in report                  # no doubled period after the reason
 
 
 # ---------------------------------------------------------------------------
@@ -907,3 +1009,20 @@ def test_a_genuinely_empty_collection_still_returns_empty(monkeypatch):
         client = cr.GhClient()
         assert cr._paginate(client, "repos/o/r/actions/workflows", "workflows") == []
         assert client.errors == 0, f"{body} is genuinely empty, not a coverage gap"
+
+
+def test_failed_gh_probe_skips_successful_accounts(monkeypatch):
+    status = (
+        "github.example.com\n"
+        "  ✓ Logged in to github.example.com account example (keyring)\n"
+        "  - Active account: true\n"
+        "github.com\n"
+        "  X Failed to log in to github.com using token (GH_TOKEN)\n"
+        "  - The token in GH_TOKEN is invalid.\n"
+    )
+    monkeypatch.delenv("CI_SPEEDUP_GH_FIXTURES", raising=False)
+    monkeypatch.setattr(cr.subprocess, "run", _real_gh_probe(status, 1))
+    out = cr.collect(_doc(), "o/r", max_runs=8, shallow_runs=8)
+    report = bp.render(out)
+    assert "Failed to log in to github.com using token (GH_TOKEN)" in report
+    assert "Logged in to github.example.com" not in report

@@ -1188,6 +1188,32 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-10-29** — Failed gh probes select the error account rather than an
+  earlier successful login when multiple hosts or accounts are configured (#169).
+
+- **2026-10-29** — When the gh data pass cannot start, the empty-spine
+  diagnostics no longer call the result "a property of the repo" that
+  "re-running reproduces" (it contradicted the "broken run" line above it).
+  The reason now quotes gh's own error line from the failed `gh auth status`
+  probe (skipping gh's bare host-name line) and names the sandboxed /
+  no-network shell cause with its remedy (retry with network / host access)
+  instead of asserting gh is unauthenticated. The same cause, remedy and gh
+  error now appear in the API-refused (`collection_failed`) reason, which a
+  sandboxed shell that can still read gh's stored token reaches. The report
+  agrees with the summary: a gh pass that could not start renders a "Run
+  history was not read" banner instead of the dormant-repo one ("an archived,
+  brand-new, or low-activity repo"), its Data sources row no longer says to
+  pass the `--repo` that was passed, the footer note loses a doubled period,
+  and the summary no longer says rulesets were "already queried (do NOT
+  re-probe gh)" when gh never ran.
+
+- **2026-10-29** — A detached HEAD exactly at the default branch's tip (as
+  `git worktree add --detach` leaves it) no longer triggers a false "workflow
+  YAML source skew" warning. Any other detached HEAD still warns — including
+  one whose `.github/workflows` tree matches the tip, since detectors also
+  read local composite actions and `package.json` — as does a detached HEAD
+  with no default ref to compare against.
+
 - **2026-10-28** — Repo-published required statuses are named in the agent
   summary, and an independent unresolved-gate reason stays visible beside the
   report headline when sampling footnote metadata is absent. Status-source

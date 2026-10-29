@@ -5455,7 +5455,7 @@ def _coverage_note(ds: dict[str, Any]) -> str:
                 "necessarily absent - it may simply never have been measured.")
     # static_only / gh_unavailable: the gh pass never ran at all, which the report
     # already says up top. State the reason plainly; neither minimize nor alarm.
-    return f" **Note:** {reason}.{named_part}"
+    return f" **Note:** {str(reason).rstrip('.')}.{named_part}"
 
 
 # ONE held-back disclosure, shared by every pattern that can measure a candidate
@@ -6024,6 +6024,8 @@ def _data_sources_footer(doc: dict[str, Any], repo: str,
                      "Critical-path + per-step P50"))
     else:
         rows.append(("gh runs/jobs API (timestamps)", "not run",
+                     "gh could not start (the reason is in the Note)"
+                     if ds.get("partial_kind") == "gh_unavailable" else
                      "Pass `--repo owner/repo` (with `gh`) to sample run/job timing"))
     if "job-logs" in tiers or "logs" in tiers:
         # collect_runs names this tier "job-logs"; accept the legacy "logs" too. Count
@@ -10197,6 +10199,7 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
                       if isinstance(evs, list) and _PR_GATING_EVENTS.intersection(
                           str(e) for e in evs)]
     no_pr_gating = bool(_wt) and not _pr_gating_wfs
+    gh_never_started = ds.get("partial_kind") == "gh_unavailable"
 
     # Machine-readable static-only marker (an HTML comment, invisible in rendered
     # markdown). `verify_report._is_static_only` keys off THIS, not the human banner
@@ -10263,6 +10266,18 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
                 "(runner-minutes), not measured developer wall-clock. If PR-triggered "
                 "CI is added later, re-run to get the measured wall-clock critical "
                 "path.", ""]
+    elif gh_never_started:
+        # The gh pass could not start (no gh / token, or a sandboxed / offline shell):
+        # NOTHING about the repo was read, so the dormant-repo hedge would be a guess
+        # dressed as a diagnosis — and its remedy ("re-run once the repo has runs") wrong.
+        _why = str(ds.get("partial_reason") or "the gh data pass could not start").rstrip(".")
+        out += ["> [!IMPORTANT]",
+                f"> **Run history was not read.** {_why}. Nothing was measured, so the "
+                "absence of a spine below says nothing about whether this repo's CI is "
+                "quiet. What follows is **static-only**: workflow hygiene from pattern "
+                "analysis, scoped to the **cloud bill** (runner-minutes), not measured "
+                "developer wall-clock. Re-run with working gh access to get the measured "
+                "wall-clock critical path.", ""]
     else:
         # A PR-gating workflow EXISTS but produced no sampled PR run timing. When
         # non-PR runs WERE timed, the repo is demonstrably not dormant — say what is
@@ -10303,6 +10318,10 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
         bottom = ["> **Bottom line.** This repo's current workflows never run on PRs, "
                   "so there is no merge wait to rank — the findings below are about "
                   "the cloud bill (runner-minutes), not developer wall-clock."]
+    elif gh_never_started:
+        bottom = ["> **Bottom line.** The gh data pass never started, so this report "
+                  "can't rank what a PR waits on before the merge — a gap in this run, "
+                  "not a verdict on your CI."]
     else:
         bottom = ["> **Bottom line.** No PR run timing was available, so this report "
                   "can't rank what a PR waits on before the merge."]

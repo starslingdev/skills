@@ -3518,3 +3518,99 @@ def test_opt84_detector_crash_skips_and_discloses_through_collect(tmp_path, monk
     assert "opt84-" not in report
     ok = _verify(report_path, findings_path, env)
     assert ok.returncode == 0, f"{ok.stdout}\n{ok.stderr}"
+
+
+# ---------------------------------------------------------------------------
+# A detached HEAD that IS the default branch's tip is not skew. CI runners and git
+# worktrees check out a detached HEAD exactly at `origin/<default>`; the YAML parsed
+# there is byte-identical to the branch the sampled runs came from. Before the fix any
+# detached HEAD was reported as "workflow YAML source skew" — a false warning the report
+# repeated. Only a detached HEAD whose workflows differ from the default tip is skew.
+# ---------------------------------------------------------------------------
+
+_GIT_ID_ENV = {"GIT_AUTHOR_NAME": "ci-speedup-test", "GIT_AUTHOR_EMAIL": "test@example.com",
+               "GIT_COMMITTER_NAME": "ci-speedup-test",
+               "GIT_COMMITTER_EMAIL": "test@example.com"}
+
+
+def _git(root: Path, *args: str) -> str:
+    return subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True,
+                          text=True, env={**os.environ, **_GIT_ID_ENV}).stdout.strip()
+
+
+def _commit_file(root: Path, rel: str, text: str, msg: str) -> None:
+    p = root / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(text, encoding="utf-8")
+    _git(root, "add", rel)
+    _git(root, "commit", "-q", "-m", msg)
+
+
+def test_detached_head_at_the_remote_default_tip_is_not_skew(tmp_path):
+    """The CI / worktree shape: detached exactly at `origin/main`, no local `main`."""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    _git(root, "update-ref", "refs/remotes/origin/main", "HEAD")
+    _git(root, "checkout", "-q", "--detach")
+    _git(root, "branch", "-q", "-D", "main")
+    assert cr._root_branch_skew(root, "main") is None
+
+
+def test_detached_head_at_the_local_default_tip_is_not_skew(tmp_path):
+    """No `origin/main` ref fetched; the local `main` is the only default tip to compare."""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    _git(root, "checkout", "-q", "--detach")
+    assert cr._root_branch_skew(root, "main") is None
+
+
+def test_detached_head_behind_the_tip_still_warns_even_with_identical_workflows(tmp_path):
+    """Detectors read more than `.github/workflows` from the checkout (local composite
+    actions, package.json), so an identical workflows tree is not proof of no skew — and
+    an attached `main` behind `origin/main` already warns. Only the exact tip is exempt."""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    _commit_file(root, "package.json", '{"scripts": {}}\n', "manifest only")
+    _git(root, "update-ref", "refs/remotes/origin/main", "HEAD")
+    _git(root, "checkout", "-q", "--detach", "HEAD~1")
+    skew = cr._root_branch_skew(root, "main")
+    assert skew and "DETACHED HEAD" in skew["reason"]
+
+
+def test_detached_head_at_a_stale_local_default_still_warns_when_origin_moved(tmp_path):
+    """`origin/<default>` is the branch the sampled runs came from: a detached HEAD at a
+    stale local `main` is skew even though it equals that local tip."""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    _commit_file(root, ".github/workflows/new.yml",
+                 "on: pull_request\njobs:\n  a:\n    runs-on: ubuntu-latest\n"
+                 "    steps:\n      - run: true\n", "new workflow")
+    _git(root, "update-ref", "refs/remotes/origin/main", "HEAD")
+    _git(root, "reset", "-q", "--hard", "HEAD~1")        # local main stays behind origin
+    _git(root, "checkout", "-q", "--detach")
+    skew = cr._root_branch_skew(root, "main")
+    assert skew and "DETACHED HEAD" in skew["reason"]
+
+
+def test_detached_head_off_the_default_tip_still_warns(tmp_path):
+    """Control: detached at a commit whose workflows differ from the tip IS skew."""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    _commit_file(root, ".github/workflows/new.yml",
+                 "on: pull_request\njobs:\n  a:\n    runs-on: ubuntu-latest\n"
+                 "    steps:\n      - run: true\n", "new workflow")
+    _git(root, "update-ref", "refs/remotes/origin/main", "HEAD")
+    _git(root, "checkout", "-q", "--detach", "HEAD~1")
+    skew = cr._root_branch_skew(root, "main")
+    assert skew and "DETACHED HEAD" in skew["reason"]
+    assert skew["branch"] is None and skew["default_branch"] == "main"
+
+
+def test_detached_head_with_no_default_ref_to_compare_still_warns(tmp_path):
+    """Control: nothing to compare against (no `main`, no `origin/main`) — keep warning."""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    _git(root, "checkout", "-q", "--detach")
+    _git(root, "branch", "-q", "-D", "main")
+    skew = cr._root_branch_skew(root, "main")
+    assert skew and "DETACHED HEAD" in skew["reason"]
