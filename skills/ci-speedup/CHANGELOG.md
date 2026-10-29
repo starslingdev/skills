@@ -1188,6 +1188,22 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-10-29** — Preserve measured OPT70/OPT72 findings on short terminal build jobs; the aggregation-gate filter now honors the renderer's specific-build-lever exemption (#170).
+
+- **2026-10-29** — A required verdict job that only `needs:` the real suite
+  (e.g. a ~3s `test` gate reading `needs.*.result`) is no longer reported as an
+  addressable long pole. It renders as an aggregation gate pointing at its
+  slowest upstream (kept as a chain stage when it ends a `needs:` chain), the
+  suite it waits on is ranked Long pole 1, no "speed up the dominant step"
+  (OPT75) lever is routed to it, and the data-pass summary lists it under
+  "Aggregation gates" instead of "Addressable long poles" (unless, as in the
+  report, a specific structural lever keeps it fixable; with no drill logs the
+  suite keeps its own name rather than folding into the gate's). Structural cards
+  now render only under the pole they name: two measured checks such as `test`
+  and `test (self-hosted)` are no longer folded together as a matrix base and
+  its leg. The Bottom line no longer calls a check "slower" than a `needs:`
+  chain it is faster than.
+
 - **2026-10-28** — Repo-published required statuses are named in the agent
   summary, and an independent unresolved-gate reason stays visible beside the
   report headline when sampling footnote metadata is absent. Status-source
