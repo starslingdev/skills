@@ -251,6 +251,10 @@ OD_CS23_CASES.update({
 })
 # {(case_id, check): "<owner decision / PR that made the drop on purpose>"}
 INTENDED_DROPS: dict[tuple[str, str], str] = {
+    ("all-delegated", "ci.checkout.shallow-clone"):
+        "OD-CS26: every PR-gating job calls an external reusable workflow; "
+        "checkout is not visible, so pass becomes not_applicable",
+
     ("go-cache-no", "ci.cache.dependency-cache"):
         "OD-CS25: cache no is not an enabled cache switch",
     ("go-Cache-No", "ci.cache.dependency-cache"):

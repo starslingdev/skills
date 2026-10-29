@@ -11,6 +11,11 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
 
 ## [Unreleased]
 
+- **2026-10-28** — **Changed** (registry `ci-score-v0.1.8`, OD-CS26): shallow
+  checkout is not applicable when every PR-gating job calls another repository.
+  The checkout is invisible locally, so it no longer earns a pass. Scores may
+  fall; local jobs and local reusable-workflow calls remain applicable.
+
 - **2026-10-28** — **Fixed** (#161, registry `ci-score-v0.1.7`, OD-CS25): literal
   cache switches use the same verdict as resolved expressions. Off values
   no longer earn credit, and the evidence names their step and value.
