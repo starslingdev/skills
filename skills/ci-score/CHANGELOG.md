@@ -11,6 +11,13 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
 
 ## [Unreleased]
 
+- **2026-10-28** — **Fixed** (#161, registry `ci-score-v0.1.7`, OD-CS25): literal
+  cache switches use the same verdict as resolved expressions. Off values
+  no longer earn credit, and the evidence names their step and value.
+  Explicit setup-uv `enable-cache: auto` receives the default's runner gate;
+  `enable-cache: true` enables caching on any runner. Some scores deliberately
+  fall; both frozen controls retain every fact and score.
+
 - **2026-10-28** — **Fixed**: every check now names workflows the scan could
   not parse, in both card evidence and the rendered report. States and scores
   are unchanged; the disclosure no longer appears on only three checks.

@@ -1849,6 +1849,12 @@ def _step_caches_by_default(step: dict, package_json: Any, workspace_unknown: bo
         credited = True   # owner decision 3: every commented release caches
     if not credited:
         if state != "maybe":
+            switch = _SETUP_CACHE_INPUTS.get(action, ("cache", None))[0]
+            value = eff.get(switch)
+            if value is not None and str(value).strip().lower() in _SETUP_OFF_VALUES:
+                # Some actions reject off spellings instead of disabling the
+                # cache. Name the value without claiming a parser behavior.
+                return withhold(f"cache input {switch}: {str(value)!r} earns no caching credit")
             return False
         if workspace_unknown:
             # The workspace is the cause, never package.json: name a racing or
@@ -1872,8 +1878,20 @@ def _step_caches_by_default(step: dict, package_json: Any, workspace_unknown: bo
             if not present:
                 return withhold(why)
     gate = _RUNNER_GATED_DEFAULTS.get(action)
-    if gate and eff.get(gate) is None and not github_hosted:
+    gate_value = eff.get(gate) if gate else None
+    if isinstance(gate_value, str):
+        gate_value = gate_value.strip()
+    if gate and gate_value in (None, "auto") and not github_hosted:
+        if gate_value == "auto":
+            return withhold((runner_unread + "; " if runner_unread else "") +
+                            "enable-cache: auto needs a literal GitHub-hosted runner "
+                            "label; set enable-cache: true to enable caching on any runner")
         return withhold(runner_unread)
+    # Version comments constrain automatic defaults, not an explicit switch
+    # that the shared verdict already found enabled.
+    switch = _SETUP_CACHE_INPUTS.get(action, ("cache", None))[0]
+    if str(eff.get(switch) or "").strip():
+        return True
     if None in comments:
         return withhold(comment_reason)
     return all(at(m) in ("on", "expr") for m in comments)
@@ -1910,9 +1928,8 @@ def _dependency_cache_walk(parsed: list[tuple[str, dict, str]], root: Path,
     (`_cache_input_resolver`, OD-CS24) gives every value an expression on a
     cache switch takes; without it every expression is unresolved.
 
-    A LITERAL `cache:` / `enable-cache:` value on a `setup-` action keeps the
-    rule it has always had (any value but false or empty is credited; owner
-    decision A leaves that to a separate change). An EXPRESSION on the input
+    A literal value and a resolved expression use the same shared verdict
+    and ci-score wrapper (OD-CS25). An EXPRESSION on the input
     that switches the action's cache (`_cache_switch_input`: setup-ruby
     `bundler-cache`, setup-uv `enable-cache`, Gradle `cache-disabled`, else
     `cache`; action names in any case) decides its step on its own: each value
@@ -1934,22 +1951,14 @@ def _dependency_cache_walk(parsed: list[tuple[str, dict, str]], root: Path,
         def cache_values(_rel: str, v: Any) -> list[Any]:
             return [_UNRESOLVED if _is_expression(v) else v]
 
-    def literal_cache(ua: tuple, with_: dict) -> bool:
-        # the literal rule, unchanged (owner decision A)
-        return "setup-" in ua[0] and any(
-            str(k).strip().lower() in ("cache", "enable-cache") and not _is_expression(v)
-            and v not in (False, "false", None, "")
-            for k, v in with_.items())
-
-    def expression_cache(rel: str, step: dict, ua: tuple, with_: dict,
-                         by_default: Any) -> str | None:
-        """`on` when an expression on the action's cache switch resolves to a
-        value that caches; `off` when it resolves only to values that do not,
-        or does not resolve (then `rel` is disclosed); None when the switch
-        carries no expression (the default decides)."""
+    def explicit_cache(rel: str, step: dict, ua: tuple, with_: dict,
+                       by_default: Any) -> str | None:
+        """Grade the actual cache switch, literal or resolved expression.
+        An unresolved expression is disclosed; an absent switch leaves the
+        default to decide."""
         key = _cache_switch_input(ua[0])
         exprs = [v for k, v in with_.items()
-                 if key and str(k).strip().lower() == key and _is_expression(v)]
+                 if key and str(k).strip().lower() == key]
         if not exprs:
             return None
         rest = {k: v for k, v in with_.items() if str(k).strip().lower() != key}
@@ -1980,9 +1989,6 @@ def _dependency_cache_walk(parsed: list[tuple[str, dict, str]], root: Path,
             if ua and _CACHE_ACTION_RE.search(ua[0]):
                 hits.append(rel)
                 continue
-            if ua and literal_cache(ua, with_):
-                hits.append(rel)
-                continue
 
             def by_default(s: dict, ws: str = ws) -> bool:
                 return _step_caches_by_default(
@@ -1991,7 +1997,7 @@ def _dependency_cache_walk(parsed: list[tuple[str, dict, str]], root: Path,
                     rel=rel, workspace=ws, runner_unread=runner_unread,
                     comment_texts=comment_texts)
 
-            explicit = expression_cache(rel, step, ua, with_, by_default) if ua else None
+            explicit = explicit_cache(rel, step, ua, with_, by_default) if ua else None
             if explicit == "on" or (explicit is None and by_default(step)):
                 hits.append(rel)
 
@@ -2027,6 +2033,8 @@ def _unresolved_evidence(unresolved: list[dict[str, str]]) -> str:
         return ""
 
     def verdict(reason: str) -> str:
+        if reason.startswith("cache input "):
+            return "is not credited"
         if reason in _DECIDED_OFF_REASONS:
             return "earns no default cache"
         return "default cache could not be resolved"
