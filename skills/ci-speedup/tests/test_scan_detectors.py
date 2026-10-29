@@ -5375,6 +5375,7 @@ def test_exclusive_pair_plus_a_co_running_job_still_fires(tmp_path: Path):
     found = {f["pattern"]: f for f in _scan(tmp_path)["findings"]}
     assert "OPT14" in found
     assert "lint" in found["OPT14"]["affected_jobs"]
+    assert "OPT12" in found
 
 
 def test_job_exclusivity_is_conservative():
@@ -5440,3 +5441,11 @@ def test_job_specific_contexts_are_not_proof_of_exclusivity():
     # Run-wide contexts still prove it.
     assert ex({"if": "inputs.mode == 'fast'"}, {"if": "inputs.mode == 'slow'"})
     assert ex({"if": "vars.MODE == 'a'"}, {"if": "vars.MODE != 'a'"})
+
+
+def test_deeply_nested_condition_does_not_crash_the_scan():
+    """A pathological `if:` (hundreds of nested parentheses) is 'cannot
+    prove', never an uncaught RecursionError that kills the whole audit."""
+    ex = _load_scan_excl()._jobs_mutually_exclusive
+    deep = "(" * 2000 + "github.event_name == 'push'" + ")" * 2000
+    assert not ex({"if": deep}, {"if": "github.event_name == 'pull_request'"})

@@ -1912,7 +1912,7 @@ def _if_dnf(expr: object) -> list[frozenset] | None:
 
     try:
         dnf = disj()
-    except _IfUnparsed:
+    except (_IfUnparsed, RecursionError):  # pathological nesting = cannot prove
         return None
     return dnf if i == len(toks) and dnf else None
 
@@ -2688,9 +2688,10 @@ def _detect_opt12(doc: dict, raw: str) -> list[Hit]:
             continue
         sig = tuple(_step_sig(s) for s in steps)
         by_sig.setdefault(sig, []).append(name)
+    all_jobs = _jobs_from_doc(doc)
     hits: list[Hit] = []
     for sig, names in by_sig.items():
-        names = _co_running(_jobs_from_doc(doc), names)  # exclusive jobs never co-run
+        names = _co_running(all_jobs, names)  # exclusive jobs never co-run
         if len(names) < 2 or not any(_SETUP_SIG_RE.search(s) for s in sig):
             continue
         hits.append(Hit(
