@@ -8212,9 +8212,10 @@ def _detect_opt43_queue_time(
         """This workflow's job id producing the sampled job `name` (exact display
         name → matrix template → static matrix leg → reusable `<caller> / <child>`),
         or None when no node of `job_graph` produces it."""
-        for jid, info in (job_graph or {}).items():
-            if (info.get("name") or jid) == name:
-                return jid
+        exact = [jid for jid, info in (job_graph or {}).items()
+                 if (info.get("name") or jid) == name]
+        if exact:
+            return exact[0] if len(exact) == 1 else None
         # Reusable `<caller> / <child>` BEFORE templates: a leading-placeholder
         # template (`${{ matrix.v }} / build`) would otherwise capture the child
         # and hand it the wrong node's `needs`.
@@ -8222,11 +8223,14 @@ def _detect_opt43_queue_time(
             nm = info.get("name") or jid
             if info.get("reusable") and name.startswith(nm + " / "):
                 return jid
+        matches = []
         for jid, info in (job_graph or {}).items():
             nm = info.get("name") or jid
             if ((not _name_template_is_degenerate(nm) and _name_template_regex(nm).match(name))
                     or _static_matrix_leg_match(nm, bool(info.get("matrix")), name)):
-                return jid
+                matches.append(jid)
+        if matches:
+            return matches[0] if len(matches) == 1 else None
         # A placeholder-only `name:` (`${{ matrix.os }}`) matches anything, so the
         # passes above skip it. The candidate set here is this workflow's OWN
         # runtime jobs, so a leftover job comes from one of those nodes; when they
@@ -8239,7 +8243,7 @@ def _detect_opt43_queue_time(
             return degen[0]
         return None
 
-    by_job: dict[str, list[tuple[float, str, int]]] = {}
+    by_job: dict[str, list[tuple[float, str, int, Any, Any]]] = {}
     for run_idx, run_jobs in enumerate(jobs_per_run):
         nodes = {id(j): _node_of(str(j.get("name", ""))) for j in run_jobs} if job_graph else {}
         # A reusable call's children (`<caller> / <child>`) all map to the CALLER's
@@ -8289,23 +8293,25 @@ def _detect_opt43_queue_time(
             q = _duration_s(runnable, j.get("started_at"))
             if q is not None and q >= 0:
                 by_job.setdefault(name, []).append(
-                    (q, str(j.get("html_url") or ""), run_idx))
+                    (q, str(j.get("html_url") or ""), run_idx,
+                     _parse_dt(runnable), _parse_dt(j.get("started_at"))))
             elif q is not None and job_graph and q > -5:
                 # second-granularity stamps: a verdict picked up the same second its
                 # upstream completed can read a hair negative — that is ~0 queue.
                 by_job.setdefault(name, []).append(
-                    (0.0, str(j.get("html_url") or ""), run_idx))
+                    (0.0, str(j.get("html_url") or ""), run_idx,
+                     _parse_dt(j.get("started_at")), _parse_dt(j.get("started_at"))))
 
-    def _sibling_overlap_ratio(samples: list[tuple[float, str, int]]) -> float | None:
+    def _sibling_overlap_ratio(samples: list[tuple[float, str, int, Any, Any]]) -> float | None:
         """Share of queued samples whose queue interval overlapped an in-flight
         sibling run of this workflow (windows from the ALL-STATUS slice; a
         sibling is any OTHER run, so the sampled run's own window is excluded
-        by identity of its start). None when nothing is computable — and None
+        by run ID). None when nothing is computable — and None
         MUST stay None downstream: no attribution is never an exoneration."""
         if not run_windows:
             return None
         checked = overlapped = 0
-        for _q, _url, run_idx in samples:
+        for _q, _url, run_idx, q_start, q_end in samples:
             jobs = jobs_per_run[run_idx]
             # Self-exclusion is by RUN ID, never by timestamp equality: the
             # window starts at run_started_at while the queue interval starts
@@ -8315,11 +8321,8 @@ def _detect_opt43_queue_time(
             own_ids = {str(j.get("run_id")) for j in jobs if j.get("run_id") is not None}
             if not own_ids:
                 continue  # can't identify the run: unattributable, not a vote
-            q_starts = [_parse_dt(j.get("_run_created_at") or j.get("created_at"))
-                        for j in jobs]
-            q_ends = [_parse_dt(j.get("started_at")) for j in jobs]
-            q_start = min((s for s in q_starts if s), default=None)
-            q_end = max((e for e in q_ends if e), default=None)
+            # Use this job's measured runnable-to-start interval, never the
+            # workflow span (which includes upstream execution and other jobs).
             if not (q_start and q_end) or q_end <= q_start:
                 continue
             checked += 1
@@ -8336,11 +8339,11 @@ def _detect_opt43_queue_time(
     for job_name, samples in by_job.items():
         if len(samples) < 3:
             continue
-        qs = [q for q, _url, _ri in samples]
+        qs = [sample[0] for sample in samples]
         p90 = _percentile(qs, 90)
         if p90 > threshold:
             idx += 1
-            worst_q, worst_url, _worst_ri = max(samples, key=lambda qu: qu[0])
+            worst_q, worst_url, *_ = max(samples, key=lambda qu: qu[0])
             kind = "PR" if is_pr_workflow else "release/scheduled"
             overlap = _sibling_overlap_ratio(samples)
             if overlap is None:

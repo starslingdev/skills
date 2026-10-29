@@ -1188,6 +1188,11 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-10-29** — OPT43 attributes sibling overlap only during the measured
+  job's runnable-to-start queue interval, excluding upstream execution. Ambiguous
+  display names and matrix templates are excluded instead of choosing an
+  arbitrary dependency graph node and inventing queue time (#167).
+
 - **2026-10-29** — **Excessive Queue Time (OPT43) no longer reports an
   upstream job's run time as queue.** A `needs:`-gated job is now measured
   from when its last needed upstream job completed, not from when the run was

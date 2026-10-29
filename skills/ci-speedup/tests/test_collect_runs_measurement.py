@@ -352,6 +352,42 @@ def test_opt43_reusable_child_not_captured_by_leading_placeholder_template():
         (["Suite / build"], 90.0)]
 
 
+def test_opt43_overlap_excludes_upstream_execution():
+    # A sibling ended while the upstream was still running. It cannot explain
+    # the verdict's 150s queue AFTER the upstream completes at t=272.
+    runs = [_verdict_run(verdict_gap=150) for _ in range(3)]
+    for jobs in runs:
+        for job in jobs:
+            job["run_id"] = 1
+    sibling = {"id": 2, "run_started_at": _ts(0), "updated_at": _ts(200)}
+    findings = _detect_opt43_queue_time(
+        "ci.yml", runs, 0, is_pr_workflow=True,
+        job_graph=_VERDICT_GRAPH, all_status_runs=[sibling])
+    assert len(findings) == 1
+    assert findings[0]["queue_cause"] == "provider_congestion"
+    sibling["updated_at"] = _ts(300)
+    findings = _detect_opt43_queue_time(
+        "ci.yml", runs, 0, is_pr_workflow=True,
+        job_graph=_VERDICT_GRAPH, all_status_runs=[sibling])
+    assert findings[0]["queue_cause"] == "config_controllable"
+
+
+def test_opt43_duplicate_display_names_do_not_choose_arbitrary_needs():
+    # Both graph nodes display as `test`. The later one needs `build`; picking
+    # the first node (an entry job) invents 243s queue for that gated job.
+    graph = {"build": {"name": "build", "needs": []},
+             "early": {"name": "test", "needs": []},
+             "late": {"name": "test", "needs": ["build"]}}
+    def run():
+        build = _job("build", 240, start=0, run_created_offset=5)
+        early = _job("test", 30, start=0, run_created_offset=5)
+        late = _job("test", 30, start=243, run_created_offset=248)
+        return [build, early, late]
+    assert _detect_opt43_queue_time(
+        "ci.yml", [run() for _ in range(3)], 0, is_pr_workflow=True,
+        job_graph=graph) == []
+
+
 def test_opt43_release_threshold_is_higher():
     # 90s queue is under the 120s release/scheduled threshold → no finding.
     runs = [[_job("test", 30, run_created_offset=90)] for _ in range(3)]
