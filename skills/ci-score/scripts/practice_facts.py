@@ -1239,7 +1239,7 @@ def _local_composites(root: Path, parsed: list[tuple[str, dict, str]],
             doc, why = None, "could not be read"
         else:
             try:
-                doc = yaml.load(text, Loader=_StrictLockLoader)
+                doc = _load_strict_yaml(text)
             except _DuplicateKeyError as exc:
                 doc, why = None, str(exc)
             except (ValueError, yaml.YAMLError):
@@ -2188,7 +2188,7 @@ def _pr_path_workflows(parsed: list[tuple[str, dict, str]],
                 continue
             if target not in strict_ok:
                 try:
-                    yaml.load(raw_by[target], Loader=_StrictLockLoader)
+                    _load_strict_yaml(raw_by[target], workflow=True)
                     strict_ok[target] = True
                 except (ValueError, yaml.YAMLError):
                     strict_ok[target] = False
@@ -2270,6 +2270,41 @@ _StrictLockLoader.add_constructor(
     yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _no_duplicate_keys)
 
 
+class _StrictWorkflowLoader(_StrictLockLoader):
+    """Strict mappings with GitHub's YAML 1.2 boolean spellings.
+
+    PyYAML's YAML 1.1 resolver aliases ON and YES (also OFF and NO), which
+    would falsely reject distinct environment-variable names as duplicates.
+    Keep the inherited duplicate-key constructor, but copy the resolver table
+    so changing workflow booleans cannot alter lockfile or composite readers.
+    """
+    yaml_implicit_resolvers = {
+        ch: [(tag, pattern) for tag, pattern in entries
+             if tag != "tag:yaml.org,2002:bool"]
+        for ch, entries in _StrictLockLoader.yaml_implicit_resolvers.items()
+    }
+
+
+_StrictWorkflowLoader.add_implicit_resolver(
+    "tag:yaml.org,2002:bool", re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"),
+    list("tTfF"))
+
+
+def _load_strict_yaml(text: str, *, workflow: bool = False) -> Any:
+    """Parse one document with safe constructors and strict mapping keys.
+
+    Instantiate the SafeLoader subclass directly so the safety boundary is
+    explicit to static analyzers. Keep PyYAML's single-document semantics
+    and release parser resources even when construction rejects the input.
+    Workflows use GitHub boolean spellings; other readers retain their rules.
+    """
+    loader = _StrictWorkflowLoader(text) if workflow else _StrictLockLoader(text)
+    try:
+        return loader.get_single_data()
+    finally:
+        loader.dispose()
+
+
 def _lock_key(action: str, ref: str) -> str:
     # engine assumption (GitHub's docs are silent): owner and repo names
     # match case-insensitively, as GitHub resolves them; refs are exact
@@ -2320,7 +2355,7 @@ def _load_lockfile(root: Path) -> tuple[str, dict[str, set[str]]]:
         # a symbolic link out of the checkout is not this repository's lockfile
         if _outside_root(root, path):
             return bad
-        doc = yaml.load(path.read_text(encoding="utf-8"), Loader=_StrictLockLoader)
+        doc = _load_strict_yaml(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, yaml.YAMLError):
         return bad
     if not isinstance(doc, dict) or set(doc) - {"version", "workflows", "dependencies"}:
@@ -2567,7 +2602,8 @@ def _workflow_parse_errors_on_disk(parsed: list[tuple[str, dict, str]],
 
 
 def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path,
-                    workflow_parse_errors: list[str] | None = None) -> dict[str, Any]:
+                    workflow_parse_errors: list[str] | None = None,
+                    workflow_parse_error_reasons: dict[str, str] | None = None) -> dict[str, Any]:
     """The eleven CI Score v0.1-basic facts. Shape per fact:
     {"state": "pass"|"fail"|"not_applicable", "evidence": str, "files": [..<=3]}.
     Evidence is NEVER empty: a failed check must hand the maintainer the exact
@@ -3144,7 +3180,9 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path,
     # not parse is named once, as that workflow. The caching and pinning cards
     # name a call only when the file it names was read by no PR path: those
     # checks leave such a file out (`unread_files`), so the note is true.
-    parse_errs = [f"{rel} (does not parse as a workflow)" for rel in workflow_parse_errors]
+    reasons = workflow_parse_error_reasons or {}
+    parse_errs = [f"{rel} ({reasons.get(rel, 'does not parse as a workflow')})"
+                  for rel in workflow_parse_errors]
     followed = {os.path.normpath(rel) for rel, _doc, _event in pr_path}
     calls = [f"{key} (reusable workflow call not followed)" for key in shallow_calls
              if os.path.normpath(key[2:]) not in followed]
