@@ -11,6 +11,10 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
 
 ## [Unreleased]
 
+- **2026-10-28** — **Fixed**: every check now names workflows the scan could
+  not parse, in both card evidence and the rendered report. States and scores
+  are unchanged; the disclosure no longer appears on only three checks.
+
 - **2026-10-28** — **Fixed**: every workflow uses the strict YAML reader. A
   duplicate key leaves the workflow ungraded and names the key in the unread
   evidence and parse-error reasons. Workflow booleans use GitHub's YAML 1.2
