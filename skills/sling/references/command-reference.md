@@ -28,6 +28,7 @@ context, not data — never report it as a finding.
 - **Cost & capacity** — `usage`, `top`, `bill`, `bill history`, `labels list`
 
 Each entry gives the flags and the verified JSON response shape.
+Examples use illustrative values, not live measurements or identifiers.
 
 ## Global flags
 
@@ -262,7 +263,7 @@ mutually exclusive; two of them is a usage error.
 them were confirmed to filter for real.
 
 ```json
-{"runs": [{"run_id": "32881984759", "run_url": "https://github.com/…/actions/runs/…",
+{"runs": [{"run_id": "1000", "run_url": "https://github.com/…/actions/runs/…",
            "workflow_path": ".github/workflows/ci.yml", "branch": "main",
            "trigger": "schedule", "status": "completed", "conclusion": "skipped",
            "created_at": "2026-08-25T18:08:11.000Z", "duration_ms": 1000,
@@ -280,9 +281,9 @@ exit `2` (`Use --org or --repo, not both.`).
          "trigger": "schedule", "status": "completed", "conclusion": "failure",
          "created_at": "…", "duration_ms": 11000},
  "jobs": [{"job_name": "<job name>",
-           "attempts": [{"attempt_id": "att_97912608061.1", "attempt": 1,
+           "attempts": [{"attempt_id": "att_2000.1", "attempt": 1,
                          "status": "completed", "conclusion": "failure",
-                         "runner_id": "1000520625", "duration_ms": 3000}]}],
+                         "runner_id": "3000", "duration_ms": 3000}]}],
  "local": {"org": "…", "run_id": "…"}}
 ```
 
@@ -296,10 +297,10 @@ Note the shape: `jobs[]` here carries `job_name` and `attempts[]` but no
 ### `sling jobs list --run <id> | --repo <owner/name> [window] [--conclusion <c>] [--afterburner engaged|not-engaged]`
 
 ```json
-{"jobs": [{"job_id": "97912608061", "run_id": "32881736257",
+{"jobs": [{"job_id": "2000", "run_id": "1000",
            "name": "<job name>", "status": "completed",
            "conclusion": "failure", "label": "<runner label>",
-           "runner_id": "1000520625", "attempt": 1,
+           "runner_id": "3000", "attempt": 1,
            "duration_ms": 3000, "created_at": "…"}],
  "has_more": false, "local": {"org": "…", "run_id": "…"}}
 ```
@@ -317,7 +318,7 @@ Per-attempt step timings — the fastest way to see which step failed.
 
 ```json
 {"run_id": "…", "run_url": "…", "job_name": "…",
- "attempts": [{"attempt_id": "att_97912608061.1", "attempt": 1,
+ "attempts": [{"attempt_id": "att_2000.1", "attempt": 1,
                "status": "completed", "conclusion": "failure", "runner_id": "…",
                "duration_ms": 3000,
                "steps": [{"name": "Set up job", "number": 1, "status": "completed",
@@ -351,11 +352,11 @@ Turns a pasted Actions URL or a bare id into the ids everything else takes.
 The first move when an id does not resolve.
 
 ```json
-{"resolved": {"id": "att_97912608061.1", "kind": "attempt", "run_id": "…",
+{"resolved": {"id": "att_2000.1", "kind": "attempt", "run_id": "…",
               "org": "starslingdev", "repo": "<repo>",
-              "job_id": "97912608061", "attempt": 1, "job_name": "…",
+              "job_id": "2000", "attempt": 1, "job_name": "…",
               "runner_id": "…", "runner_name": "GitHub Actions …"},
- "local": {"input": "32881736257"}}
+ "local": {"input": "1000"}}
 ```
 
 **An ambiguous input exits `2` and still returns JSON.** A run id covering
@@ -363,8 +364,8 @@ more than one job cannot resolve to a single attempt, so `resolve` lists
 what it found rather than guessing:
 
 ```json
-{"candidates": [{"id": "att_98038364232.1", "kind": "attempt",
-                 "run_id": "…", "job_id": "98038364232", "attempt": 1,
+{"candidates": [{"id": "att_2001.1", "kind": "attempt",
+                 "run_id": "…", "job_id": "2001", "attempt": 1,
                  "job_name": "…"}, …]}
 ```
 
@@ -438,7 +439,7 @@ Percentiles per phase per runner label across a repo:
 ```json
 {"level": "repo", "repo": "owner/name", "window": {"from": "…", "to": "…"},
  "phases": [{"phase": "steps", "label": "starsling-ubuntu-24.04",
-             "p50_ms": 46000, "p95_ms": 506900, "p99_ms": 586240, "jobs": 199}],
+             "p50_ms": 60000, "p95_ms": 300000, "p99_ms": 600000, "jobs": 200}],
  "meta": {"source": "steps", "truncated": [...]}}
 ```
 
@@ -496,8 +497,8 @@ workflow is written the way it is. That second question is `ci-speedup`.
 ```json
 {"group_by": "repo", "window": {"from": "…", "to": "…"},
  "plan": {"status": "paid", "period_source": "install_cycle"},
- "rows": [{"key": "owner/repo", "runner_minutes": 5320, "jobs": 2381,
-           "cost_usd": 43.21, "pct_of_total": 49.46}]}
+ "rows": [{"key": "owner/repo", "runner_minutes": 5000, "jobs": 2000,
+           "cost_usd": 40, "pct_of_total": 100}]}
 ```
 
 `--org` and `--repo` are mutually exclusive: both together exit `2` (`Use
@@ -510,9 +511,9 @@ time --repo <owner/name> --workflow <name> --group-by afterburner` (the per-hop
 
 ```json
 {"by": "workflow", "metric": "runner-minutes", "window": {"from": "…", "to": "…"},
- "rows": [{"key": "ci", "repo": "<repo>", "runner_minutes": 70145, "cost_usd": 56.12,
-           "runs": 14852, "jobs": 31983, "p50_ms": 70000, "p95_ms": 184000,
-           "p99_ms": 354810, "queue_wait_ms": 14000, "trend_pct": 154.6}]}
+ "rows": [{"key": "ci", "repo": "<repo>", "runner_minutes": 10000, "cost_usd": 80,
+           "runs": 1000, "jobs": 2000, "p50_ms": 60000, "p95_ms": 180000,
+           "p99_ms": 360000, "queue_wait_ms": 10000, "trend_pct": 50}]}
 ```
 
 `repo` can be the literal string `"(multiple)"` when one key spans repos —

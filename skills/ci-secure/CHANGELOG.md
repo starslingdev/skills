@@ -305,6 +305,12 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-10-28** — Required summary checks no longer certify upstream jobs
+  with a step allowed to fail. Literal `false` keeps the existing proof; other
+  `continue-on-error` values, including expressions and values inside parallel
+  groups, withhold a pass and name the job even after an earlier conditional
+  or background step. Literal outputs can still prove a concrete failure.
+
 - 2026-10-27: Verdict shell proofs remain unmeasured when exported Bash
   functions or case variants of shell-control environment names are present.
 

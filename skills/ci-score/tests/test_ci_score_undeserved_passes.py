@@ -990,15 +990,13 @@ def test_a_callee_workflow_with_a_duplicate_key_is_not_graded(tmp_path):
     got = _fact(doc, SHALLOW)
     assert got["evidence"] == (
         "no PR-gating workflow checks out full history (post-merge automation like "
-        "backport/changelog jobs is exempt - it needs history and gates nobody); 1 reusable "
-        "workflow call(s) on the PR path could not be read and were not graded: "
-        "./.github/workflows/test.yml"), got
+        "backport/changelog jobs is exempt - it needs history and gates nobody); "
+        + NOT_READ + ".github/workflows/test.yml (duplicated key 'jobs')"), got
     # the callee is not graded for pinning either, and the note there is true
     assert _fact(doc, PINNED) == {
         "state": "not_applicable",
         "evidence": ("no remote actions used in workflow or local composite action files; "
-                     + NOT_READ + "./.github/workflows/test.yml (reusable workflow call not "
-                     "followed)"),
+                     + NOT_READ + ".github/workflows/test.yml (duplicated key 'jobs')"),
         "files": []}, _fact(doc, PINNED)
 
 
@@ -1310,8 +1308,9 @@ def test_od5_a_readable_setup_step_outside_the_language_list_still_fails(tmp_pat
         "uses: ./.github/actions/missing", "run: pytest")})
     assert _fact(doc, CACHE) == {
         "state": "fail",
-        "evidence": CACHE_FAIL + "; " + NOT_READ + "./.github/actions/missing" + NO_FILE_NOTE,
-        "files": []}, _fact(doc, CACHE)
+        "evidence": CACHE_FAIL + f"; setup-pixi@{SHA} is not credited: "
+                    "cache input cache: 'False' earns no caching credit; " + NOT_READ + "./.github/actions/missing" + NO_FILE_NOTE,
+        "files": [".github/workflows/ci.yml"]}, _fact(doc, CACHE)
 
 
 def test_od5_an_unread_action_after_the_install_explains_nothing(tmp_path):
@@ -1672,7 +1671,7 @@ def test_a_callee_with_two_jobs_keys_is_not_graded_for_pinning(tmp_path):
         "state": "pass",
         "evidence": ("1 of 1 remote action references SHA-pinned (workflow + local composite "
                      "action files; passes at >=95%); " + NOT_READ
-                     + "./.github/workflows/test.yml (reusable workflow call not followed)"),
+                     + ".github/workflows/test.yml (duplicated key 'jobs')"),
         "files": []}, _fact(doc, PINNED)
 
 
@@ -1693,7 +1692,7 @@ def test_a_callee_with_two_steps_keys_is_not_graded_for_caching(tmp_path):
     assert _fact(doc, CACHE) == {
         "state": "fail",
         "evidence": (CACHE_FAIL + "; " + NOT_READ
-                     + "./.github/workflows/test.yml (reusable workflow call not followed)"),
+                     + ".github/workflows/test.yml (duplicated key 'steps')"),
         "files": []}, _fact(doc, CACHE)
 
 
@@ -1802,7 +1801,9 @@ def test_a_cache_input_every_caller_turns_off_never_falls_back_to_the_default(tm
         "uses: ./ci/setup\n        with: {cache: false}", "run: go test ./..."),
         "ci/setup/action.yml": "inputs:\n  cache: {default: 'true'}\n" + _composite(
             "uses: actions/setup-go@v5\n      with:\n        cache: ${{ inputs.cache }}")})
-    assert _fact(doc, CACHE) == {"state": "fail", "evidence": CACHE_FAIL, "files": []}, \
+    assert _fact(doc, CACHE) == {"state": "fail", "evidence": CACHE_FAIL + "; setup-go@v5 is not credited: "
+        "cache input cache: 'False' earns no caching credit",
+        "files": ["ci/setup/action.yml"]}, \
         _fact(doc, CACHE)
 
 
@@ -1884,7 +1885,9 @@ def test_a_composite_bundler_cache_input_whose_default_is_false_earns_nothing(tm
                               "ci/setup/action.yml": "inputs:\n  bc: {default: 'false'}\n"
                               + _composite("uses: ruby/setup-ruby@v1\n      with:\n"
                                            "        bundler-cache: ${{ inputs.bc }}")})
-    assert _fact(doc, CACHE) == {"state": "fail", "evidence": CACHE_FAIL, "files": []}, \
+    assert _fact(doc, CACHE) == {"state": "fail", "evidence": CACHE_FAIL + "; setup-ruby@v1 is not credited: "
+        "cache input bundler-cache: 'false' earns no caching credit",
+        "files": ["ci/setup/action.yml"]}, \
         _fact(doc, CACHE)
 
 
@@ -1921,12 +1924,12 @@ def test_an_empty_resolved_cache_value_falls_through_to_setup_node_v5_auto_cache
                                  "files": [".github/workflows/ci.yml"]}, _fact(doc, CACHE)
 
 
-def test_control_a_literal_cache_no_on_setup_go_keeps_its_current_verdict(tmp_path):
-    # Owner decision A: a LITERAL off value keeps the verdict it has on main
-    # (credited, as any non-empty literal was); changing it is a separate PR.
+def test_a_literal_cache_no_on_setup_go_no_longer_earns_credit(tmp_path):
+    # OD-CS25 implements owner decision A: literal off values earn no credit.
     doc = _collect(tmp_path, {**GO_FILES, ".github/workflows/ci.yml": _job_wf(
         "uses: actions/setup-go@v5\n        with: {cache: 'no'}", "run: go mod download")})
-    assert _fact(doc, CACHE) == {"state": "pass", "evidence": CACHE_PASS_ONE,
+    assert _fact(doc, CACHE) == {"state": "fail", "evidence": CACHE_FAIL +
+        "; setup-go@v5 is not credited: cache input cache: 'no' earns no caching credit",
                                  "files": [".github/workflows/ci.yml"]}, _fact(doc, CACHE)
 
 
