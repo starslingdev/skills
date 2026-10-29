@@ -18852,8 +18852,13 @@ def _is_aggregation_gate_check(
     Such a check's wait IS its `needs:` upstream, so routing a "speed up this step" lever
     to it is inert advice (there is nothing inside a verdict step to speed up, and moving
     it off the PR path defeats the reason it exists). The structural router skips it; its
-    upstream members carry their own levers."""
+    upstream members carry their own levers. Build-dominated work is exempt:
+    it carries the specific OPT70/OPT72 lever the renderer also preserves."""
     if check_p50 > _AGG_GATE_TRIVIAL_S:
+        return False
+    # Preserve the renderer's specific-lever exemption: build-dominated work
+    # routes to OPT70/OPT72 even when the terminal job takes under 30 seconds.
+    if decomp is not None and decomp.get("dominant_category") == "build":
         return False
     jobs = (job_graph or {}).get(wf_path) or {}
     if not isinstance(jobs, dict) or not jobs:

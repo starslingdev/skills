@@ -1188,6 +1188,8 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-10-29** — Preserve measured OPT70/OPT72 findings on short terminal build jobs; the aggregation-gate filter now honors the renderer's specific-build-lever exemption (#170).
+
 - **2026-10-29** — A required verdict job that only `needs:` the real suite
   (e.g. a ~3s `test` gate reading `needs.*.result`) is no longer reported as an
   addressable long pole. It renders as an aggregation gate pointing at its

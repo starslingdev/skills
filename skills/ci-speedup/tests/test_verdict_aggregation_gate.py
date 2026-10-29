@@ -165,3 +165,26 @@ def test_bottom_line_never_calls_a_faster_check_slower_than_the_chain(monkeypatc
 def test_bottom_line_on_the_repro_names_no_false_slower_check():
     bl = _bottom_line(_render(_doc()))
     assert "is slower (~11s)" not in bl, bl
+
+
+def test_short_terminal_build_keeps_its_specific_structural_lever():
+    # A short package build can have the same needs shape as a verdict, but its
+    # measured build work is the specific OPT70 exemption the renderer preserves.
+    def job(name, duration, step):
+        return {"name": name, "html_url": "https://github.com/acme/repo/runs/1",
+                "started_at": "2026-01-01T00:00:00Z",
+                "completed_at": f"2026-01-01T00:00:{duration:02d}Z",
+                "steps": [{"name": step, "started_at": "2026-01-01T00:00:00Z",
+                           "completed_at": f"2026-01-01T00:00:{duration:02d}Z"}]}
+
+    runs = [[job("a", 5, "Run tests"), job("b", 5, "Run tests"),
+             job("package", 20, "Build package")] for _ in range(5)]
+    out = cr._detect_structural_candidates(
+        (("package", 20.0), ("a", 5.0), ("b", 5.0)), [],
+        {_CI: cr._critical_path(runs)}, {_CI: runs},
+        cr.RequiredChecks(frozenset({"package"}), complete=True),
+        {_CI: {"pull_request"}}, {}, 0,
+        job_graph={_CI: {"a": {"needs": []}, "b": {"needs": []},
+                         "package": {"needs": ["a", "b"]}}})
+    assert any(f["pattern"] == "OPT70" and f["affected_jobs"] == ["package"]
+               for f in out)

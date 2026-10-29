@@ -4024,7 +4024,8 @@ required in effect), so the p50 tie-break puts the real time-holder at Long pole
 and the 3s sink after it; before this a required verdict headed the report ahead of
 the suite it waits on (starslingdev/skills: `test`, 3s, ahead of `test
 (self-hosted)`, 4m32s). The structural router (`collect_runs._is_aggregation_gate_check`,
-the same (a)–(d) test) routes no lever to a sink, and `summary.py` lists sinks under
+the same (a)–(d) test, exempting measured build work that routes to OPT70/OPT72)
+routes no lever to a verdict sink, and `summary.py` lists sinks under
 "Aggregation gates", never under "Addressable long poles".
 
 Two coupled invariants hold the seam:
