@@ -8229,6 +8229,23 @@ def _detect_opt43_queue_time(
     by_job: dict[str, list[tuple[float, str, int]]] = {}
     for run_idx, run_jobs in enumerate(jobs_per_run):
         nodes = {id(j): _node_of(str(j.get("name", ""))) for j in run_jobs} if job_graph else {}
+        # A reusable call's children (`<caller> / <child>`) all map to the CALLER's
+        # node, whose `needs` say nothing about the children's own `needs` inside
+        # the called workflow. Only the earliest-started child of each call is
+        # known to be runnable when the call was; later children may be gated on
+        # a sibling child, so they are excluded rather than credited.
+        first_child: dict[str, tuple[Any, int]] = {}
+        for j in run_jobs:
+            node = nodes.get(id(j))
+            if (node is None or not job_graph[node].get("reusable")
+                    or str(j.get("conclusion") or "").lower() == "skipped"):
+                continue
+            st = _parse_dt(j.get("started_at"))
+            if st is None:
+                continue
+            cur = first_child.get(node)
+            if cur is None or st < cur[0]:
+                first_child[node] = (st, id(j))
         for j in run_jobs:
             if str(j.get("conclusion") or "").lower() == "skipped":
                 continue  # never ran on a runner: no queue to measure
@@ -8238,6 +8255,9 @@ def _detect_opt43_queue_time(
                 node = nodes.get(id(j))
                 if node is None:
                     continue  # can't tell entry from gated: exclude, never credit
+                if (job_graph[node].get("reusable")
+                        and (first_child.get(node) or (None, None))[1] != id(j)):
+                    continue  # a later reusable child: its own `needs` are unseen
                 needs = list(job_graph[node].get("needs") or [])
                 if needs:
                     # A gated job becomes runnable when its LAST needed upstream
@@ -25706,11 +25726,21 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         # The sibling windows come from the SAME cached all-status page the
         # run-elimination block below fetches (net zero extra gh calls); with
         # no wf_id the page is unfetchable and the attribution stays None.
-        new = _detect_opt43_queue_time(
-            wf_path, jobs_per_run, next_id, is_pr,
-            all_status_runs=(_all_status_page(wf_path, wf_id)
-                             if wf_id is not None else None),
-            job_graph=(findings_doc.get("workflow_job_graph") or {}).get(wf_path))
+        # Without this workflow's scanned job graph OPT43 cannot tell an entry job
+        # from a `needs:`-gated one; timing every job from the run trigger would
+        # charge upstream RUN time as queue. Skip it and disclose by name instead.
+        _opt43_graph = (findings_doc.get("workflow_job_graph") or {}).get(wf_path)
+        if not isinstance(_opt43_graph, dict) or not _opt43_graph:
+            _skip_detectors(wf_path, ["OPT43"],
+                            "the workflow's job graph is missing, so queue time "
+                            "can't be separated from upstream job run time")
+            new = []
+        else:
+            new = _detect_opt43_queue_time(
+                wf_path, jobs_per_run, next_id, is_pr,
+                all_status_runs=(_all_status_page(wf_path, wf_id)
+                                 if wf_id is not None else None),
+                job_graph=_opt43_graph)
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
 

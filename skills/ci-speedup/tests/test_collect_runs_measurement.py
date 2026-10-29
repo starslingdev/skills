@@ -233,6 +233,44 @@ def test_opt43_job_absent_from_graph_is_excluded():
     assert out == []
 
 
+# A reusable-workflow call: GitHub names its jobs `<caller> / <child>`, and the
+# caller's graph node carries only the CALLER's `needs`, not the children's.
+_REUSABLE_GRAPH = {"call": {"name": "call", "needs": [], "reusable": True}}
+
+
+def _reusable_run(*, trigger_queue: float = 5.0, test_gap: float = 3.0) -> list[dict]:
+    """`call / build` 0→240s (picked up `trigger_queue`s after the trigger); inside
+    the called workflow `call / test` needs `call / build` and starts `test_gap`s
+    after it finishes — a dependency the caller's graph node cannot see."""
+    trig = _ts(-trigger_queue)
+    build = _job("call / build", 240, start=0)
+    test = _job("call / test", 30, start=240 + test_gap)
+    for j in (build, test):
+        j["_run_created_at"] = trig
+    return [build, test]
+
+
+def test_opt43_reusable_child_not_charged_sibling_child_run_time():
+    # A gated child of a reusable call reads ~248s from the run trigger, but that is
+    # its sibling child RUNNING. Its own `needs` live in the called workflow, so
+    # only the earliest-started child per call (necessarily runnable when the call
+    # was) is measured; later children are excluded, never credited.
+    runs = [_reusable_run() for _ in range(5)]
+    out = _detect_opt43_queue_time("ci.yml", runs, 0, is_pr_workflow=True,
+                                   job_graph=_REUSABLE_GRAPH)
+    assert [f["affected_jobs"] for f in out] == []
+
+
+def test_opt43_reusable_first_child_real_queue_still_flagged():
+    # Positive control: the call's first child waits 90s for a runner after the
+    # trigger — real queueing, still flagged; the gated sibling stays excluded.
+    runs = [_reusable_run(trigger_queue=90) for _ in range(3)]
+    out = _detect_opt43_queue_time("ci.yml", runs, 0, is_pr_workflow=True,
+                                   job_graph=_REUSABLE_GRAPH)
+    assert [(f["affected_jobs"], f["wall_clock_p50_s"]) for f in out] == [
+        (["call / build"], 90.0)]
+
+
 def test_opt43_release_threshold_is_higher():
     # 90s queue is under the 120s release/scheduled threshold → no finding.
     runs = [[_job("test", 30, run_created_offset=90)] for _ in range(3)]

@@ -1196,7 +1196,10 @@ unversioned and updates by reinstall from `main`.
   test job's own long-pole fix. Real runner-pool queueing after the upstream
   finishes is still flagged. A gated sample whose upstream completion isn't in
   the sampled run, or a job that matches no job in the workflow, is excluded
-  rather than credited; skipped jobs are no longer measured.
+  rather than credited; skipped jobs are no longer measured. Inside a reusable
+  workflow call only the first child job to start is measured, since the other
+  children may wait on a sibling. A workflow with no scanned job graph skips
+  this check and says so, instead of timing every job from the trigger.
 
 - **2026-10-28** — Repo-published required statuses are named in the agent
   summary, and an independent unresolved-gate reason stays visible beside the
