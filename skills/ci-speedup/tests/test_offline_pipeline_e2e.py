@@ -2085,6 +2085,21 @@ def test_collect_credits_the_chained_pole_cache_untouched(tmp_path, monkeypatch)
     assert _opt79_rows(doc) == []
 
 
+def test_collect_does_not_charge_a_needs_job_its_upstream_run_time_as_queue(
+        tmp_path, monkeypatch):
+    """`chained.yml`'s `verify` (`needs: prep`) starts 2s after the 120s `prep`
+    finishes on every sampled run. Timed from the run trigger it reads 122s, above
+    the 60s PR bar, but that is `prep` RUNNING, not runner queueing. The real
+    collect() must hand OPT43 the scanned job graph so `verify` is timed from
+    `prep`'s completion and draws no queue finding. A call site that drops the
+    graph brings the false positive back, and this test goes red."""
+    doc = _collect_in_process(tmp_path, monkeypatch)
+    opt43 = [(f["workflow_file"], f["affected_jobs"], f.get("evidence"))
+             for f in doc["findings"] if f.get("pattern") == "OPT43"
+             and f.get("workflow_file") == _CHAINED]
+    assert opt43 == [], opt43
+
+
 @pytest.mark.parametrize("how", ["zeroed", "off_spine"])
 def test_collect_demotes_a_pole_finding_with_no_merge_wait_left(
         tmp_path, monkeypatch, how):
