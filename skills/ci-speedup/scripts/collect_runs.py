@@ -18810,6 +18810,82 @@ def _collapse_pr_floor_siblings(
             if not (p.get("workflow_file") and p.get("job")) or id(p) in kept]
 
 
+# The aggregation-gate (success-sink / verdict job) trivial threshold. Kept equal to
+# `blocking_path._AGG_GATE_TRIVIAL_S`, the renderer's copy of the same shape test.
+_AGG_GATE_TRIVIAL_S = 30.0
+
+
+def _agg_job_name_produces(job_name: str, is_matrix: bool, check: str) -> bool:
+    """True iff a job whose display `name:` is `job_name` produces the check-run `check`:
+    the exact name, a `${{ }}` name template, or a static matrix job's `Name (leg…)` legs.
+    Mirrors `blocking_path._agg_job_produces_check`; an all-placeholder template never
+    matches (it would bind any check)."""
+    if not job_name:
+        return False
+    if job_name == check:
+        return True
+    if "${{" in job_name:
+        parts = re.split(r"\$\{\{.*?\}\}", job_name)
+        if not any(p.strip() for p in parts):
+            return False
+        return bool(re.match("^" + ".+?".join(re.escape(p) for p in parts) + "$", check))
+    if is_matrix:
+        return bool(re.match("^" + re.escape(job_name) + r"(?: \(.*\))?$", check))
+    return False
+
+
+def _is_aggregation_gate_check(
+        check_name: str, check_p50: float, wf_path: str,
+        decomp: dict[str, Any] | None,
+        job_graph: dict[str, dict[str, dict[str, Any]]] | None,
+        measured_checks: "set[str] | frozenset[str]") -> bool:
+    """Is `check_name` a success-aggregation (verdict) job: the trivial sink that exists
+    only to `needs:` the real jobs so one check can be the required status check?
+
+    The same structural test the renderer applies (`blocking_path._agg_gate_shape`):
+    (a) its P50 is at most `_AGG_GATE_TRIVIAL_S`; (b) its job is a terminal node whose
+    transitive `needs:` closure holds >= 2 jobs and covers every non-terminal job in its
+    workflow; (c) no sampled step of its own exceeds the trivial threshold; (d) at least
+    one upstream job produces a measured check. Duration alone never matches: a real 3s
+    lint job with no `needs:` fails (b).
+
+    Such a check's wait IS its `needs:` upstream, so routing a "speed up this step" lever
+    to it is inert advice (there is nothing inside a verdict step to speed up, and moving
+    it off the PR path defeats the reason it exists). The structural router skips it; its
+    upstream members carry their own levers."""
+    if check_p50 > _AGG_GATE_TRIVIAL_S:
+        return False
+    jobs = (job_graph or {}).get(wf_path) or {}
+    if not isinstance(jobs, dict) or not jobs:
+        return False
+    cands = [k for k, m in jobs.items()
+             if _agg_job_name_produces(str((m or {}).get("name") or k),
+                                       bool((m or {}).get("matrix")), check_name)]
+    if len(cands) != 1:
+        return False
+    jid = cands[0]
+    needs_of = {k: [str(n) for n in ((m or {}).get("needs") or [])] for k, m in jobs.items()}
+    depended_on = {n for ns in needs_of.values() for n in ns}
+    if jid in depended_on:
+        return False
+    closure: set[str] = set()
+    frontier = list(needs_of.get(jid) or [])
+    while frontier:
+        n = frontier.pop()
+        if n in closure or n not in jobs:
+            continue
+        closure.add(n)
+        frontier.extend(needs_of.get(n) or [])
+    if len(closure) < 2 or not {k for k in jobs if k in depended_on} <= closure:
+        return False
+    if decomp is not None and any(float(p or 0.0) > _AGG_GATE_TRIVIAL_S
+                                  for _n, _c, p in (decomp.get("steps") or [])):
+        return False
+    return any(_agg_job_name_produces(str((jobs.get(j) or {}).get("name") or j),
+                                      bool((jobs.get(j) or {}).get("matrix")), m)
+               for j in closure for m in measured_checks if m != check_name)
+
+
 # VERBATIM-SYNC INVARIANT: the body of this function MUST match `_wf_is_file_backed` in
 # skills/ci-speedup/tests/verify_report.py EXACTLY (a source-equality test pins it). The structural
 # admission gate DROPS a name-inferred file-backed lever here; verify_report's invariant FLAGS one in a
@@ -18903,6 +18979,11 @@ def _detect_structural_candidates(
             # category and misroutes (e.g. OPT75 instead of OPT72 for a cold build).
             decomp = _measured_decomposition(_decompose_job_steps(
                 job_inst, bimodal=job_bimodal_all.get(check_name)))
+            # A verdict / aggregation job's wait IS its `needs:` upstream: no lever of its
+            # own, so route nothing to it (its upstream members are routed on their own).
+            if _is_aggregation_gate_check(check_name, check_p50, wf_path, decomp,
+                                          job_graph, set(all_check_p50)):
+                continue
             # Skip the structural lever ONLY if a hygiene fix already MATERIALLY
             # shortened this pole (>= half its measured p50). A trivial cache (e.g.
             # a 2s Playwright download on a 342s pole) must NOT suppress the

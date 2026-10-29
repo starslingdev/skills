@@ -1,0 +1,1148 @@
+{
+ "commit_sha": "3a5823c29c4f80804a730ff6f207bb39e83287ed",
+ "data_bundle": {
+  "logs": [
+   {
+    "check": "test (self-hosted)",
+    "duration_s": 272.0,
+    "job": "test (self-hosted)",
+    "workflow_file": ".github/workflows/ci.yml"
+   },
+   {
+    "check": "test",
+    "duration_s": 2.0,
+    "job": "test",
+    "workflow_file": ".github/workflows/ci.yml"
+   }
+  ]
+ },
+ "findings": [
+  {
+   "affected_jobs": [
+    "test (self-hosted)"
+   ],
+   "decomposition": {
+    "dominant_category": "test",
+    "dominant_p50_s": 257.0,
+    "dominant_share": 0.945,
+    "dominant_step": "Run tests",
+    "job_p50_s": 272.0,
+    "redundant_ratio": 0.05
+   },
+   "evidence": "critical-path check `test (self-hosted)` (272s): dominant step `Run tests` (test, 94% of job `test (self-hosted)`)",
+   "failure_mode": "the dominant-step remedy ranges from LOW (cache an install) to HIGH (scope a test/build, inheriting OPT70) \u2014 the candidate carries the risk of whichever specific lever its dominant category routes to",
+   "fix_recipe_anchor": "opt75--long-pole-optimize-or-relocate-the-dominant-step",
+   "fix_strategy": "decompose-inherent-cost-pole",
+   "guardrail": "carry the guardrail of the routed lever (e.g. OPT70's full-suite fallback if the dominant step is a test being scoped); never present the decomposition as free; if the remedy MOVES the step out of this check, re-establish the required coverage in the SAME change - a needs: edge alone orders jobs, it does not gate merges, so the required check goes green while the moved work failed. The route that needs no admin: keep the REQUIRED CHECK NAME on a verdict job that needs: the relocated jobs, runs with always() (not !cancelled(), which a cancelled run skips) and exits non-zero unless every `needs.<job>.result` is success, treating failure, cancelled and skipped alike as a fail - a dependent skipped by a FAILED dependency reports skipped rather than failed, so always() WITHOUT propagating the results still green-lights the merge. The alternative - adding the new job's check name to branch protection or the ruleset as a required check - is admin-only and is the operator's step, never an action of this audit. Do not ship the relocation ungated while waiting on it. Moving a step off the PR path as advisory is open only to genuinely advisory work: a non-required job feeding a required aggregator is required in effect, full stop, whatever the aggregator's verdict logic does with its result, and this chains at every hop - follow the chain until it reaches a required check name or runs out. A leaky verdict is a reason to fix the verdict, never a licence to de-scope the job feeding it; the nuance can only make MORE things required, never fewer. An unknown required status is treated as required, never as permission to de-scope",
+   "id": "f16",
+   "line": 0,
+   "measured_signal": "critical-path check `test (self-hosted)` (272s): dominant step `Run tests` (test, 94% of job `test (self-hosted)`)",
+   "pattern": "OPT75",
+   "pattern_class": "structural",
+   "pr_critical_path_check": "test (self-hosted)",
+   "pr_critical_path_s": 272.0,
+   "realization": "direct",
+   "required_status": "required",
+   "risk": "MEDIUM",
+   "rollout": "the routed lever's rollout; re-measure the pole's p50 after the dominant step is attacked \u2014 the next-largest step becomes the target",
+   "runner_min_saving": null,
+   "severity": "HIGH",
+   "structural": true,
+   "tier": 1,
+   "title": "The long pole's time is one addressable step \u2014 speed it up or move it off the PR path \u2014 `test (self-hosted)`",
+   "wall_clock_p50_s": 128.5,
+   "workflow_file": ".github/workflows/ci.yml"
+  },
+  {
+   "affected_jobs": [
+    "test"
+   ],
+   "decomposition": {
+    "dominant_category": "other",
+    "dominant_p50_s": 1.0,
+    "dominant_share": 0.5,
+    "dominant_step": "Require the suite that should have run to have passed",
+    "job_p50_s": 2.0,
+    "redundant_ratio": null
+   },
+   "evidence": "critical-path check `test` (3s): dominant step `Require the suite that should have run to have passed` (other, 50% of job `test`)",
+   "failure_mode": "the dominant-step remedy ranges from LOW (cache an install) to HIGH (scope a test/build, inheriting OPT70) \u2014 the candidate carries the risk of whichever specific lever its dominant category routes to",
+   "fix_recipe_anchor": "opt75--long-pole-optimize-or-relocate-the-dominant-step",
+   "fix_strategy": "decompose-inherent-cost-pole",
+   "guardrail": "carry the guardrail of the routed lever (e.g. OPT70's full-suite fallback if the dominant step is a test being scoped); never present the decomposition as free; if the remedy MOVES the step out of this check, re-establish the required coverage in the SAME change - a needs: edge alone orders jobs, it does not gate merges, so the required check goes green while the moved work failed. The route that needs no admin: keep the REQUIRED CHECK NAME on a verdict job that needs: the relocated jobs, runs with always() (not !cancelled(), which a cancelled run skips) and exits non-zero unless every `needs.<job>.result` is success, treating failure, cancelled and skipped alike as a fail - a dependent skipped by a FAILED dependency reports skipped rather than failed, so always() WITHOUT propagating the results still green-lights the merge. The alternative - adding the new job's check name to branch protection or the ruleset as a required check - is admin-only and is the operator's step, never an action of this audit. Do not ship the relocation ungated while waiting on it. Moving a step off the PR path as advisory is open only to genuinely advisory work: a non-required job feeding a required aggregator is required in effect, full stop, whatever the aggregator's verdict logic does with its result, and this chains at every hop - follow the chain until it reaches a required check name or runs out. A leaky verdict is a reason to fix the verdict, never a licence to de-scope the job feeding it; the nuance can only make MORE things required, never fewer. An unknown required status is treated as required, never as permission to de-scope",
+   "id": "f17",
+   "line": 0,
+   "measured_signal": "critical-path check `test` (3s): dominant step `Require the suite that should have run to have passed` (other, 50% of job `test`)",
+   "pattern": "OPT75",
+   "pattern_class": "structural",
+   "pr_critical_path_check": "test (self-hosted)",
+   "pr_critical_path_s": 272.0,
+   "realization": "none",
+   "required_status": "required",
+   "risk": "MEDIUM",
+   "rollout": "the routed lever's rollout; re-measure the pole's p50 after the dominant step is attacked \u2014 the next-largest step becomes the target",
+   "runner_min_saving": null,
+   "severity": "HIGH",
+   "structural": true,
+   "tier": 2,
+   "title": "The long pole's time is one addressable step \u2014 speed it up or move it off the PR path \u2014 `test`",
+   "wall_clock_p50_s": null,
+   "workflow_file": ".github/workflows/ci.yml"
+  }
+ ],
+ "pr_critical_path": {
+  "chain_facts": [
+   {
+    "chain": [
+     "python floor"
+    ],
+    "chain_s": 17.0,
+    "chain_win_s": 5.0,
+    "co_longest_n": 1,
+    "fallback": null,
+    "makespan_basis": "latest-attempt check-run intervals, span-capped per check",
+    "makespan_s": 22.0,
+    "member_spans_s": {
+     "python floor": 17.0
+    },
+    "runner_up_s": 12.0,
+    "sha": "713aad1adbc27817a98d08ba871023ac51d62937"
+   },
+   {
+    "chain": [
+     "python floor"
+    ],
+    "chain_s": 19.0,
+    "chain_win_s": 4.0,
+    "co_longest_n": 1,
+    "fallback": null,
+    "makespan_basis": "latest-attempt check-run intervals, span-capped per check",
+    "makespan_s": 25.0,
+    "member_spans_s": {
+     "python floor": 19.0
+    },
+    "runner_up_s": 15.0,
+    "sha": "e34161e4c845252f043136444acfcf0e0469b69f"
+   },
+   {
+    "chain": [
+     "test (self-hosted)",
+     "test"
+    ],
+    "chain_s": 275.0,
+    "chain_win_s": 259.0,
+    "co_longest_n": 1,
+    "fallback": null,
+    "makespan_basis": "latest-attempt check-run intervals, span-capped per check",
+    "makespan_s": 293.0,
+    "member_spans_s": {
+     "test": 3.0,
+     "test (self-hosted)": 272.0
+    },
+    "runner_up_s": 16.0,
+    "sha": "4d14bb785b1641ad6cff0b8ab117fe72cbd9452c"
+   },
+   {
+    "chain": [
+     "test (self-hosted)",
+     "test"
+    ],
+    "chain_s": 259.0,
+    "chain_win_s": 242.0,
+    "co_longest_n": 1,
+    "fallback": null,
+    "makespan_basis": "latest-attempt check-run intervals, span-capped per check",
+    "makespan_s": 261.0,
+    "member_spans_s": {
+     "test": 3.0,
+     "test (self-hosted)": 256.0
+    },
+    "runner_up_s": 17.0,
+    "sha": "1715b7c3f1bc33e1701afdfdcddfccd1bca90b7f"
+   },
+   {
+    "chain": [
+     "test (self-hosted)",
+     "test"
+    ],
+    "chain_s": 264.0,
+    "chain_win_s": 245.0,
+    "co_longest_n": 1,
+    "fallback": null,
+    "makespan_basis": "latest-attempt check-run intervals, span-capped per check",
+    "makespan_s": 274.0,
+    "member_spans_s": {
+     "test": 3.0,
+     "test (self-hosted)": 261.0
+    },
+    "runner_up_s": 19.0,
+    "sha": "2a88003f8d9e72d73f0838327c41f19c1c3c91db"
+   },
+   {
+    "chain": [
+     "test (self-hosted)",
+     "test"
+    ],
+    "chain_s": 261.0,
+    "chain_win_s": 235.0,
+    "co_longest_n": 1,
+    "fallback": null,
+    "makespan_basis": "latest-attempt check-run intervals, span-capped per check",
+    "makespan_s": 271.0,
+    "member_spans_s": {
+     "test": 3.0,
+     "test (self-hosted)": 258.0
+    },
+    "runner_up_s": 26.0,
+    "sha": "43c7ccc46e5228404d4a33d046e128460a8a0ca6"
+   },
+   {
+    "chain": [
+     "test (self-hosted)",
+     "test"
+    ],
+    "chain_s": 275.0,
+    "chain_win_s": 257.0,
+    "co_longest_n": 1,
+    "fallback": null,
+    "makespan_basis": "latest-attempt check-run intervals, span-capped per check",
+    "makespan_s": 336.0,
+    "member_spans_s": {
+     "test": 3.0,
+     "test (self-hosted)": 272.0
+    },
+    "runner_up_s": 18.0,
+    "sha": "b545d8764a9f85e80946b1c883901a6019aa8285"
+   },
+   {
+    "chain": [
+     "test (self-hosted)",
+     "test"
+    ],
+    "chain_s": 275.0,
+    "chain_win_s": 256.0,
+    "co_longest_n": 1,
+    "fallback": null,
+    "makespan_basis": "latest-attempt check-run intervals, span-capped per check",
+    "makespan_s": 308.0,
+    "member_spans_s": {
+     "test": 3.0,
+     "test (self-hosted)": 272.0
+    },
+    "runner_up_s": 19.0,
+    "sha": "53f029f48f846a111eac0951906063f2a4c5d35a"
+   },
+   {
+    "chain": [
+     "test (self-hosted)",
+     "test"
+    ],
+    "chain_s": 274.0,
+    "chain_win_s": 255.0,
+    "co_longest_n": 1,
+    "fallback": null,
+    "makespan_basis": "latest-attempt check-run intervals, span-capped per check",
+    "makespan_s": 333.0,
+    "member_spans_s": {
+     "test": 2.0,
+     "test (self-hosted)": 272.0
+    },
+    "runner_up_s": 19.0,
+    "sha": "c15209447477c8de7f2a86bf287acef18fb72e73"
+   },
+   {
+    "chain": [
+     "test (self-hosted)",
+     "test"
+    ],
+    "chain_s": 275.0,
+    "chain_win_s": 258.0,
+    "co_longest_n": 1,
+    "fallback": null,
+    "makespan_basis": "latest-attempt check-run intervals, span-capped per check",
+    "makespan_s": 278.0,
+    "member_spans_s": {
+     "test": 3.0,
+     "test (self-hosted)": 272.0
+    },
+    "runner_up_s": 17.0,
+    "sha": "0a5866097a9108c815e94c22004f077311fd9231"
+   },
+   {
+    "chain": [
+     "test (self-hosted)",
+     "test"
+    ],
+    "chain_s": 257.0,
+    "chain_win_s": 236.0,
+    "co_longest_n": 1,
+    "fallback": null,
+    "makespan_basis": "latest-attempt check-run intervals, span-capped per check",
+    "makespan_s": 312.0,
+    "member_spans_s": {
+     "test": 3.0,
+     "test (self-hosted)": 254.0
+    },
+    "runner_up_s": 21.0,
+    "sha": "354bcfdb463724de8bf811de340d3f9382dd6e2f"
+   },
+   {
+    "chain": [
+     "test (self-hosted)",
+     "test"
+    ],
+    "chain_s": 274.0,
+    "chain_win_s": 256.0,
+    "co_longest_n": 1,
+    "fallback": null,
+    "makespan_basis": "latest-attempt check-run intervals, span-capped per check",
+    "makespan_s": 320.0,
+    "member_spans_s": {
+     "test": 2.0,
+     "test (self-hosted)": 272.0
+    },
+    "runner_up_s": 18.0,
+    "sha": "41829dd56e58aaa530fa38b2c4f3e69d3690fc1c"
+   },
+   {
+    "chain": [
+     "test (self-hosted)",
+     "test"
+    ],
+    "chain_s": 252.0,
+    "chain_win_s": 237.0,
+    "co_longest_n": 1,
+    "fallback": null,
+    "makespan_basis": "latest-attempt check-run intervals, span-capped per check",
+    "makespan_s": 262.0,
+    "member_spans_s": {
+     "test": 3.0,
+     "test (self-hosted)": 249.0
+    },
+    "runner_up_s": 15.0,
+    "sha": "60d54d0c2491f4a73556f97bd63c30c714a2ae43"
+   },
+   {
+    "chain": [
+     "test (self-hosted)",
+     "test"
+    ],
+    "chain_s": 268.0,
+    "chain_win_s": 212.0,
+    "co_longest_n": 1,
+    "fallback": null,
+    "makespan_basis": "latest-attempt check-run intervals, span-capped per check",
+    "makespan_s": 335.0,
+    "member_spans_s": {
+     "test": 3.0,
+     "test (self-hosted)": 265.0
+    },
+    "runner_up_s": 56.0,
+    "sha": "1616a8a029bab7d6dd00d9fb54405feaa5d5374f"
+   },
+   {
+    "chain": [
+     "test (self-hosted)",
+     "test"
+    ],
+    "chain_s": 251.0,
+    "chain_win_s": 232.0,
+    "co_longest_n": 1,
+    "fallback": null,
+    "makespan_basis": "latest-attempt check-run intervals, span-capped per check",
+    "makespan_s": 271.0,
+    "member_spans_s": {
+     "test": 3.0,
+     "test (self-hosted)": 248.0
+    },
+    "runner_up_s": 19.0,
+    "sha": "fc7df9b8dbcc6cc9131ff17ae2449ac07f8f1098"
+   },
+   {
+    "chain": [
+     "test (self-hosted)",
+     "test"
+    ],
+    "chain_s": 275.0,
+    "chain_win_s": 258.0,
+    "co_longest_n": 1,
+    "fallback": null,
+    "makespan_basis": "latest-attempt check-run intervals, span-capped per check",
+    "makespan_s": 311.0,
+    "member_spans_s": {
+     "test": 3.0,
+     "test (self-hosted)": 272.0
+    },
+    "runner_up_s": 17.0,
+    "sha": "659232dd02c8ea05a6bf0f0d528b36db02c16f2b"
+   },
+   {
+    "chain": [
+     "test (self-hosted)",
+     "test"
+    ],
+    "chain_s": 257.0,
+    "chain_win_s": 238.0,
+    "co_longest_n": 1,
+    "fallback": null,
+    "makespan_basis": "latest-attempt check-run intervals, span-capped per check",
+    "makespan_s": 267.0,
+    "member_spans_s": {
+     "test": 3.0,
+     "test (self-hosted)": 254.0
+    },
+    "runner_up_s": 19.0,
+    "sha": "ae4545846edc17b3dac0cab9d7815a7fe523e359"
+   },
+   {
+    "chain": [
+     "test (self-hosted)",
+     "test"
+    ],
+    "chain_s": 275.0,
+    "chain_win_s": 257.0,
+    "co_longest_n": 1,
+    "fallback": null,
+    "makespan_basis": "latest-attempt check-run intervals, span-capped per check",
+    "makespan_s": 317.0,
+    "member_spans_s": {
+     "test": 3.0,
+     "test (self-hosted)": 272.0
+    },
+    "runner_up_s": 18.0,
+    "sha": "0f905c341bfccc32a331fc80d146349ece17fd5f"
+   },
+   {
+    "chain": [
+     "test (self-hosted)",
+     "test"
+    ],
+    "chain_s": 275.0,
+    "chain_win_s": 260.0,
+    "co_longest_n": 1,
+    "fallback": null,
+    "makespan_basis": "latest-attempt check-run intervals, span-capped per check",
+    "makespan_s": 292.0,
+    "member_spans_s": {
+     "test": 3.0,
+     "test (self-hosted)": 272.0
+    },
+    "runner_up_s": 15.0,
+    "sha": "da10d59f118d1465951169ec84366824bfbcba96"
+   },
+   {
+    "chain": [
+     "test (self-hosted)",
+     "test"
+    ],
+    "chain_s": 275.0,
+    "chain_win_s": 255.0,
+    "co_longest_n": 1,
+    "fallback": null,
+    "makespan_basis": "latest-attempt check-run intervals, span-capped per check",
+    "makespan_s": 306.0,
+    "member_spans_s": {
+     "test": 3.0,
+     "test (self-hosted)": 272.0
+    },
+    "runner_up_s": 20.0,
+    "sha": "06bda8411d626d9e35766cea58b565ea7abfaac7"
+   }
+  ],
+  "chain_summary": {
+   "chain_p50_s": 271.0,
+   "chain_win_p50_s": 250.0,
+   "divergence_pct": -7.35,
+   "makespan_p50_s": 292.5,
+   "modal_chain": [
+    "test (self-hosted)",
+    "test"
+   ],
+   "modal_n": 18,
+   "n": 20,
+   "runner_up_p50_s": 18.0
+  },
+  "check_present_n_pr": 20,
+  "checks": [
+   {
+    "name": "test (self-hosted)",
+    "p50_s": 272.0,
+    "pole_n": 18,
+    "present_on": 18,
+    "timing_source": "workflow_jobs",
+    "workflow_file": ".github/workflows/ci.yml"
+   },
+   {
+    "name": "python floor",
+    "p50_s": 18.5,
+    "pole_n": 2,
+    "present_on": 20,
+    "timing_source": "pr_check_runs",
+    "workflow_file": ".github/workflows/python-floor.yml"
+   },
+   {
+    "name": "test",
+    "p50_s": 3.0,
+    "pole_n": 0,
+    "present_on": 18,
+    "timing_source": "workflow_jobs",
+    "workflow_file": ".github/workflows/ci.yml"
+   },
+   {
+    "name": "ci-secure",
+    "p50_s": 3.0,
+    "pole_n": 0,
+    "present_on": 20,
+    "timing_source": "pr_check_runs",
+    "workflow_file": ".github/workflows/ci-secure-check.yml"
+   },
+   {
+    "name": "ci-secure (self-hosted)",
+    "p50_s": 11.0,
+    "pole_n": 0,
+    "present_on": 20,
+    "timing_source": "pr_check_runs",
+    "workflow_file": ".github/workflows/ci-secure-check.yml"
+   }
+  ],
+  "critical_path_check": "test (self-hosted)",
+  "critical_path_s": 272.0,
+  "poles": [
+   {
+    "check": "test (self-hosted)",
+    "dominant_category": "test",
+    "dominant_p50_s": 257.0,
+    "dominant_share": 0.945,
+    "dominant_step": "Run tests",
+    "headline_runner": "starsling-ubuntu-24.04",
+    "job": "test (self-hosted)",
+    "job_p50_s": 272.0,
+    "p50_s": 272.0,
+    "repr_run_created_at": "2026-10-28T06:00:33Z",
+    "repr_run_era": "pre",
+    "repr_run_era_basis": "content",
+    "repr_run_head_sha": "354bcfdb463724de8bf811de340d3f9382dd6e2f",
+    "steps": [
+     {
+      "category": "test",
+      "p50_s": 257.0,
+      "step": "Run tests"
+     },
+     {
+      "category": "checkout",
+      "p50_s": 6.0,
+      "step": "Checkout"
+     },
+     {
+      "category": "install",
+      "p50_s": 2.0,
+      "step": "Install test dependencies"
+     },
+     {
+      "category": "setup",
+      "p50_s": 1.0,
+      "step": "Set up runner"
+     },
+     {
+      "category": "setup",
+      "p50_s": 1.0,
+      "step": "Set up Python"
+     },
+     {
+      "category": "setup",
+      "p50_s": 1.0,
+      "step": "Set up job"
+     },
+     {
+      "category": "setup",
+      "p50_s": 1.0,
+      "step": "Set up Node"
+     },
+     {
+      "category": "other",
+      "p50_s": 1.0,
+      "step": "Complete runner"
+     },
+     {
+      "category": "post",
+      "p50_s": 1.0,
+      "step": "Post Checkout"
+     },
+     {
+      "category": "post",
+      "p50_s": 1.0,
+      "step": "Post Set up Node"
+     }
+    ],
+    "timing_source": "workflow_jobs",
+    "workflow_file": ".github/workflows/ci.yml"
+   },
+   {
+    "check": "test",
+    "dominant_category": "other",
+    "dominant_p50_s": 1.0,
+    "dominant_share": 0.5,
+    "dominant_step": "Require the suite that should have run to have passed",
+    "headline_runner": "ubuntu-latest",
+    "job": "test",
+    "job_p50_s": 2.0,
+    "p50_s": 3.0,
+    "repr_run_created_at": "2026-10-28T06:00:33Z",
+    "repr_run_era": "pre",
+    "repr_run_era_basis": "content",
+    "repr_run_head_sha": "354bcfdb463724de8bf811de340d3f9382dd6e2f",
+    "steps": [
+     {
+      "category": "other",
+      "p50_s": 1.0,
+      "step": "Require the suite that should have run to have passed"
+     },
+     {
+      "category": "other",
+      "p50_s": 1.0,
+      "step": "Complete job"
+     }
+    ],
+    "timing_source": "workflow_jobs",
+    "workflow_file": ".github/workflows/ci.yml"
+   }
+  ],
+  "populations": [
+   [
+    0.05,
+    [
+     [
+      "python floor",
+      17.0
+     ],
+     [
+      "ci-secure (self-hosted)",
+      10.0
+     ],
+     [
+      "ci-secure",
+      2.0
+     ]
+    ]
+   ],
+   [
+    0.05,
+    [
+     [
+      "python floor",
+      19.0
+     ],
+     [
+      "ci-secure (self-hosted)",
+      12.0
+     ],
+     [
+      "ci-secure",
+      3.0
+     ]
+    ]
+   ],
+   [
+    0.05,
+    [
+     [
+      "test (self-hosted)",
+      272.0
+     ],
+     [
+      "python floor",
+      16.0
+     ],
+     [
+      "ci-secure (self-hosted)",
+      12.0
+     ],
+     [
+      "test",
+      3.0
+     ],
+     [
+      "ci-secure",
+      3.0
+     ]
+    ]
+   ],
+   [
+    0.05,
+    [
+     [
+      "test (self-hosted)",
+      256.0
+     ],
+     [
+      "python floor",
+      17.0
+     ],
+     [
+      "ci-secure (self-hosted)",
+      11.0
+     ],
+     [
+      "ci-secure",
+      4.0
+     ],
+     [
+      "test",
+      3.0
+     ]
+    ]
+   ],
+   [
+    0.05,
+    [
+     [
+      "test (self-hosted)",
+      261.0
+     ],
+     [
+      "python floor",
+      19.0
+     ],
+     [
+      "ci-secure (self-hosted)",
+      12.0
+     ],
+     [
+      "test",
+      3.0
+     ],
+     [
+      "ci-secure",
+      2.0
+     ]
+    ]
+   ],
+   [
+    0.05,
+    [
+     [
+      "test (self-hosted)",
+      258.0
+     ],
+     [
+      "python floor",
+      26.0
+     ],
+     [
+      "ci-secure (self-hosted)",
+      11.0
+     ],
+     [
+      "test",
+      3.0
+     ],
+     [
+      "ci-secure",
+      3.0
+     ]
+    ]
+   ],
+   [
+    0.05,
+    [
+     [
+      "test (self-hosted)",
+      272.0
+     ],
+     [
+      "python floor",
+      18.0
+     ],
+     [
+      "ci-secure (self-hosted)",
+      12.0
+     ],
+     [
+      "test",
+      3.0
+     ],
+     [
+      "ci-secure",
+      3.0
+     ]
+    ]
+   ],
+   [
+    0.05,
+    [
+     [
+      "test (self-hosted)",
+      272.0
+     ],
+     [
+      "python floor",
+      19.0
+     ],
+     [
+      "ci-secure (self-hosted)",
+      12.0
+     ],
+     [
+      "test",
+      3.0
+     ],
+     [
+      "ci-secure",
+      3.0
+     ]
+    ]
+   ],
+   [
+    0.05,
+    [
+     [
+      "test (self-hosted)",
+      272.0
+     ],
+     [
+      "python floor",
+      19.0
+     ],
+     [
+      "ci-secure (self-hosted)",
+      11.0
+     ],
+     [
+      "ci-secure",
+      3.0
+     ],
+     [
+      "test",
+      2.0
+     ]
+    ]
+   ],
+   [
+    0.05,
+    [
+     [
+      "test (self-hosted)",
+      272.0
+     ],
+     [
+      "python floor",
+      17.0
+     ],
+     [
+      "ci-secure (self-hosted)",
+      9.0
+     ],
+     [
+      "test",
+      3.0
+     ],
+     [
+      "ci-secure",
+      2.0
+     ]
+    ]
+   ],
+   [
+    0.05,
+    [
+     [
+      "test (self-hosted)",
+      254.0
+     ],
+     [
+      "python floor",
+      21.0
+     ],
+     [
+      "ci-secure (self-hosted)",
+      9.0
+     ],
+     [
+      "test",
+      3.0
+     ],
+     [
+      "ci-secure",
+      2.0
+     ]
+    ]
+   ],
+   [
+    0.05,
+    [
+     [
+      "test (self-hosted)",
+      272.0
+     ],
+     [
+      "python floor",
+      18.0
+     ],
+     [
+      "ci-secure (self-hosted)",
+      12.0
+     ],
+     [
+      "ci-secure",
+      3.0
+     ],
+     [
+      "test",
+      2.0
+     ]
+    ]
+   ],
+   [
+    0.05,
+    [
+     [
+      "test (self-hosted)",
+      249.0
+     ],
+     [
+      "python floor",
+      15.0
+     ],
+     [
+      "ci-secure (self-hosted)",
+      10.0
+     ],
+     [
+      "test",
+      3.0
+     ],
+     [
+      "ci-secure",
+      3.0
+     ]
+    ]
+   ],
+   [
+    0.05,
+    [
+     [
+      "test (self-hosted)",
+      265.0
+     ],
+     [
+      "python floor",
+      56.0
+     ],
+     [
+      "ci-secure (self-hosted)",
+      12.0
+     ],
+     [
+      "test",
+      3.0
+     ],
+     [
+      "ci-secure",
+      2.0
+     ]
+    ]
+   ],
+   [
+    0.05,
+    [
+     [
+      "test (self-hosted)",
+      248.0
+     ],
+     [
+      "python floor",
+      19.0
+     ],
+     [
+      "ci-secure (self-hosted)",
+      12.0
+     ],
+     [
+      "test",
+      3.0
+     ],
+     [
+      "ci-secure",
+      3.0
+     ]
+    ]
+   ],
+   [
+    0.05,
+    [
+     [
+      "test (self-hosted)",
+      272.0
+     ],
+     [
+      "python floor",
+      17.0
+     ],
+     [
+      "ci-secure (self-hosted)",
+      9.0
+     ],
+     [
+      "test",
+      3.0
+     ],
+     [
+      "ci-secure",
+      2.0
+     ]
+    ]
+   ],
+   [
+    0.05,
+    [
+     [
+      "test (self-hosted)",
+      254.0
+     ],
+     [
+      "python floor",
+      19.0
+     ],
+     [
+      "ci-secure (self-hosted)",
+      9.0
+     ],
+     [
+      "test",
+      3.0
+     ],
+     [
+      "ci-secure",
+      3.0
+     ]
+    ]
+   ],
+   [
+    0.05,
+    [
+     [
+      "test (self-hosted)",
+      272.0
+     ],
+     [
+      "python floor",
+      18.0
+     ],
+     [
+      "ci-secure (self-hosted)",
+      12.0
+     ],
+     [
+      "test",
+      3.0
+     ],
+     [
+      "ci-secure",
+      3.0
+     ]
+    ]
+   ],
+   [
+    0.05,
+    [
+     [
+      "test (self-hosted)",
+      272.0
+     ],
+     [
+      "python floor",
+      15.0
+     ],
+     [
+      "ci-secure (self-hosted)",
+      9.0
+     ],
+     [
+      "test",
+      3.0
+     ],
+     [
+      "ci-secure",
+      3.0
+     ]
+    ]
+   ],
+   [
+    0.05,
+    [
+     [
+      "test (self-hosted)",
+      272.0
+     ],
+     [
+      "python floor",
+      20.0
+     ],
+     [
+      "ci-secure (self-hosted)",
+      11.0
+     ],
+     [
+      "test",
+      3.0
+     ],
+     [
+      "ci-secure",
+      2.0
+     ]
+    ]
+   ]
+  ],
+  "required_check_conditionality": {
+   "ci-secure": "unconditional",
+   "python floor": "unconditional",
+   "test": "unconditional"
+  },
+  "required_suite_scoped": true,
+  "sample_complete": true,
+  "sample_target": 20,
+  "sampled_pr_count": 20,
+  "spine_required_scoped": true
+ },
+ "repo": "starslingdev/skills",
+ "repo_visibility": "public",
+ "required_checks": [
+  "ci-secure",
+  "python floor",
+  "test"
+ ],
+ "required_checks_complete": true,
+ "scanned_at": "2026-10-29T05:21:00.258775+00:00",
+ "skill_commit_sha": "3a5823c",
+ "workflow_job_graph": {
+  ".github/workflows/ci.yml": {
+   "test-fork": {
+    "continue_on_error": false,
+    "matrix": false,
+    "name": "test (fork)",
+    "needs": [],
+    "reusable": false,
+    "timeout_minutes": true
+   },
+   "test-self": {
+    "continue_on_error": false,
+    "matrix": false,
+    "name": "test (self-hosted)",
+    "needs": [],
+    "reusable": false,
+    "timeout_minutes": true
+   },
+   "verdict": {
+    "continue_on_error": false,
+    "matrix": false,
+    "name": "test",
+    "needs": [
+     "test-self",
+     "test-fork"
+    ],
+    "reusable": false,
+    "timeout_minutes": true
+   }
+  }
+ }
+}

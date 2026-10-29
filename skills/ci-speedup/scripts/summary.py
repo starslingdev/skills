@@ -640,10 +640,28 @@ def build_summary(doc: dict[str, Any], findings_path: str = "FINDINGS.json",
                    for e in logs]
     else:
         drilled = _collapse_poles([p for p in poles if p.get("workflow_file")])
+    # An aggregation (verdict) gate is NOT addressable: its wait is its `needs:` upstream.
+    # Same structural test the renderer applies, so the digest and the report agree.
+    from blocking_path import _agg_gate_shape, _check_name
+    graph = doc.get("workflow_job_graph")
+    cp_checks = cp.get("checks") or []
+    agg_gates: dict[tuple[str, str], str] = {}
+    for p in poles:
+        shape = _agg_gate_shape(p, graph, cp_checks)
+        if shape:
+            agg_gates[(str(p.get("check")), Path(str(p.get("workflow_file") or "")).name)] = (
+                _check_name(shape["slowest"]))
+    drilled = [d for d in drilled if (str(d[0]), d[1]) not in agg_gates]
     out.append(f"Addressable long poles — the fixable critical path ({len(drilled)}):")
     for check, wf, p50 in drilled:
         out.append(f"  • {check}  [{wf or '—'}]  P50 {_clock(p50)}")
     out.append("")
+    if agg_gates:
+        out.append("Aggregation gates — not addressable; each waits on its slowest `needs:` "
+                   f"upstream ({len(agg_gates)}):")
+        for (check, wf), upstream in agg_gates.items():
+            out.append(f"  • {check}  [{wf or '—'}]  → waits on {upstream}")
+        out.append("")
 
     # Structural root causes deduped to distinct patterns (the catalog routes one per
     # matrix leg, so the raw list repeats); one representative title each.
