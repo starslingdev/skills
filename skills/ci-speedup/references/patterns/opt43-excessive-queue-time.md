@@ -15,7 +15,7 @@ category: 9
 
 **Detection heuristic**:
 
-- Compute the wait-to-start per job across recent runs as **run `created_at` (the trigger) → job `started_at`** — NOT the job's own `created_at`. GitHub stamps a *gated* job's `created_at` when its `needs:` dependency resolves, so `started − job.created` sees only that job's own runner pickup and hides the upstream gating cost (the gating job's queue + run time) the developer also waited on (it can undercount by minutes). Measuring from the run trigger captures the full pre-start wait the developer experiences. **Caveat:** for a gated job this number then *includes* the gating job's run time, so it is wall-clock time-to-start, not pure queue — the savable portion is bounded by the gating job's own fix. Entry (un-gated) jobs are unaffected: their `created_at` ≈ the run trigger.
+- Compute the queue per job across recent runs as **runnable time → job `started_at`**. An entry (un-gated) job is runnable at the **run `created_at`** (the trigger). A `needs:`-gated job is runnable when its **last needed upstream job completes** (the latest `completed_at` among its `needs:` jobs in the same run) — measuring it from the trigger would count the upstream jobs' run time as queue and double-count the upstream job's own long-pole fix. A gated sample whose upstream completion is not in the sampled run is excluded, never credited; skipped jobs are not measured.
 - Use **percentile-based baselines by trigger type** (PR runs typically queue differently than release/schedule runs)
 - Flag P90 queue time >60s for PR jobs, >120s for release jobs
 

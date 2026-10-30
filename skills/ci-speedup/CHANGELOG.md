@@ -1188,6 +1188,27 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-10-29** — OPT43 attributes sibling overlap only during the measured
+  job's runnable-to-start queue interval, excluding upstream execution. Ambiguous
+  display names and matrix templates are excluded instead of choosing an
+  arbitrary dependency graph node and inventing queue time (#167).
+
+- **2026-10-29** — **Excessive Queue Time (OPT43) no longer reports an
+  upstream job's run time as queue.** A `needs:`-gated job is now measured
+  from when its last needed upstream job completed, not from when the run was
+  triggered, so a verdict job that starts seconds after a 4.5-minute test job
+  shows ~0 queue instead of a "P90 queue 334s" finding that double-counted the
+  test job's own long-pole fix. Real runner-pool queueing after the upstream
+  finishes is still flagged. A gated sample whose upstream completion isn't in
+  the sampled run, or a job that matches no job in the workflow, is excluded
+  rather than credited; skipped jobs are no longer measured. Inside a reusable
+  workflow call only the first child job to start is measured, since the other
+  children may wait on a sibling. A workflow with no scanned job graph skips
+  this check and says so, instead of timing every job from the trigger. A
+  matrix job named only by a placeholder (`name: ${{ matrix.os }}`) is still
+  matched to its job, so its real queue, and the queue of jobs that wait on
+  it, is still reported.
+
 - **2026-10-29** — Preserve measured OPT70/OPT72 findings on short terminal build jobs; the aggregation-gate filter now honors the renderer's specific-build-lever exemption (#170).
 
 - **2026-10-29** — A required verdict job that only `needs:` the real suite
