@@ -476,7 +476,7 @@ DELIVER & VERIFY
 
 ## ⏳ Pre-start wait (queue time)
 
-> Time a PR waits in queue **before its jobs start running** - developer wall-clock the critical-path spine above does **not** capture (the spine measures each job from start to finish). Usually runner-pool saturation or a restrictive concurrency group. Ranked by savable wait (the floor-capped addressable part; each finding's evidence quotes the raw P90 queue). **Note:** for a `needs:`-gated job this is *wait-to-start* - it includes the gating job's run time, so the savable part is bounded by the gating job's own fix.
+> Time a PR waits in queue **before its jobs start running** - developer wall-clock the critical-path spine above does **not** capture (the spine measures each job from start to finish). Usually runner-pool saturation or a restrictive concurrency group. Ranked by savable wait (the floor-capped addressable part; each finding's evidence quotes the raw P90 queue). **Note:** for a `needs:`-gated job the *wait-to-start* is measured from when its last needed upstream job completed, so upstream run time is never counted as queue.
 
 > ⚠️ _Approximate: computed across all workflows, but 9 capped workflow(s) still use the shallow 10-run job sample for finding/queue values; 8 runner-minute source workflow(s) still use a shallow 10-run cost-spine sample. Figures can shift run-to-run; re-run with `--shallow-runs 20` to confirm exact values._
 
@@ -498,7 +498,7 @@ investigate it in the repo and apply a safe change.
 Pattern: OPT43 - Excessive Queue Time.
 Where: tests_mcp.yml (windows-latest - msedge); tests_mcp.yml (ubuntu-latest - firefox); tests_mcp.yml (macos-latest - chrome); tests_mcp.yml (macos-latest - chromium); tests_mcp.yml (ubuntu-latest - chromium); tests_mcp.yml (macos-latest - webkit); tests_mcp.yml (windows-latest - firefox); tests_mcp.yml (windows-latest - chromium); +33 more (see findings JSON).
 What ci-speedup saw: job `windows-latest - msedge` P90 queue 4396s over 8 runs (threshold 60s for PR workflows)
-Cost: developer WALL-CLOCK wait before the job starts (queue / wait-to-start) - NOT a runner-bill saving and NOT off the critical path. For a `needs:`-gated job this span includes the gating job's own run time, so the savable part is bounded by the gating job's own fix.
+Cost: developer WALL-CLOCK wait before the job starts (queue / wait-to-start) - NOT a runner-bill saving and NOT off the critical path. For a `needs:`-gated job it is measured from when its last needed upstream job completed, so upstream run time is not counted.
 
 Read the catalog entry (background, fix recipe, and guardrail):
   https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt43--excessive-queue-time

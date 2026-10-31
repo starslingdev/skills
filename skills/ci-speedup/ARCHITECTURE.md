@@ -1860,9 +1860,9 @@ critical-path spine (job start → finish) doesn't capture, and it carries no
 runner-minute saving. So `_queue_wait_block` renders it in its own **"⏳ Pre-start
 wait (queue time)"** section ABOVE the hygiene appendix (with a Contents pointer),
 ranked by P90, excluded from `_also_noticed_block`. For a `needs:`-gated job the
-metric is wait-to-start — it includes the gating job's run time, so the embedded agent
-prompt (`_hygiene_prompt(wait=True)`) frames it as wall-clock wait bounded by the
-gating job's own fix, not a bill cut. See the OPT43 note in §3 and `collect_runs`
+metric is measured from when its last needed upstream job completed (upstream run time
+is never queue), and the embedded agent prompt (`_hygiene_prompt(wait=True)`) frames it
+as wall-clock wait, not a bill cut. See `collect_runs`
 `_detect_opt43_queue_time` (`wc_p50` holds the floor-capped **savable** wait for
 this family; the raw P90 is in `wall_clock_uncapped_p50_s`, present only when a
 bound actually capped the P90 — absent when nothing capped, where `wc_p50` is
@@ -4009,12 +4009,24 @@ aggregation gate whose wait IS its `needs:` upstream — names the slowest measu
 upstream member with its P50, and closes with a pointer to the pole that drills
 that member (an anchor when it renders, otherwise a named check plus what a re-run
 would do — never a dead link). It renders **no drill, no floor note, and no agent
-prompt**. Crowning/ranking is untouched (the frequency crown is correct data), and
-a sink that is itself a **modal-chain member** keeps the chain-stage framing (the
-chain model already frames it as serialized; no double-framing). A pole carrying a
-matched log-detector leaf or a routed structural lever also keeps today's render —
-there the drill is not inert, and suppressing it would silently drop a measured
-lever.
+prompt**. A sink that is itself a **modal-chain member** (only ever the chain's
+last stage — a sink is terminal) still renders as the aggregation gate, with its
+chain stage stated in the same role line, so the verdict job ending a
+`suite → verdict` chain never gets a drill of its own verdict step. A pole carrying
+a matched log-detector leaf or a routed *specific* structural lever (OPT70/71/72)
+keeps today's render — there the drill is not inert, and suppressing it would
+silently drop a measured lever; the generic OPT75 ("speed up the dominant step")
+does not count, because on a sink that step is the verdict itself.
+
+**Ranking, routing and the digest agree.** The sink's slowest measured upstream
+member inherits the sink's gate rank (a job a required verdict `needs:` is
+required in effect), so the p50 tie-break puts the real time-holder at Long pole 1
+and the 3s sink after it; before this a required verdict headed the report ahead of
+the suite it waits on (starslingdev/skills: `test`, 3s, ahead of `test
+(self-hosted)`, 4m32s). The structural router (`collect_runs._is_aggregation_gate_check`,
+the same (a)–(d) test, exempting measured build work that routes to OPT70/OPT72)
+routes no lever to a verdict sink, and `summary.py` lists sinks under
+"Aggregation gates", never under "Addressable long poles".
 
 Two coupled invariants hold the seam:
 `verify_report.check_speed_poles_complete` **exempts** such a pole from the
