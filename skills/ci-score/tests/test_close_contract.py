@@ -59,3 +59,48 @@ def test_close_surfaces_the_ci_score_honestly():
     assert "states the refusal reason instead of a score" in close  # refusal
     assert "data_sources.ci_score_error" in close                   # scoring failed
     assert "omits the score line" in close                          # absent stamp
+
+
+def test_experimental_question_tool_is_mirrored_in_the_plain_message():
+    """Mirror of ci-speedup's pin (live Codex run, 2026-10-29): the experimental
+    `request_user_input` tool can be called and never render, stranding the user.
+    The shared contract must mirror the question + options in the plain message
+    and forbid claiming to wait on a choice the user cannot see."""
+    start = _SKILL_MD.index("**Interaction contract")
+    end = _SKILL_MD.index("**agent-independent**", start)
+    contract = re.sub(r"\s+", " ", _SKILL_MD[start:end]).replace("**", "")
+    # Long contiguous phrases: a shortened, negated or re-scoped rule goes red.
+    assert "call it when exposed, never predict it absent" in contract
+    assert ("and ALSO end your plain message with the same question as a "
+            "numbered option list, same options, same order, sent before the "
+            "call") in contract, "mirror missing, re-scoped, or sent after a call that may hang"
+    assert ("Never say you are waiting on a choice unless its options are "
+            "visible in your own last message.") in contract
+    assert "(always ≥2 options unless a step below drops one by name)" in contract
+    assert ("the close's save option still last and verbatim "
+            "(`None, just save the report (.md)`)") in contract
+
+
+def test_every_close_delivery_passage_carries_the_experimental_tool_mirror():
+    """The interaction contract gained the experimental-tool mirror, but the
+    step-4 kickoff, the close-invariants bullet and references/close-contract.md
+    still split delivery into "tool where one exists" vs "printed list where none
+    does". Followed literally, a Codex close calls the experimental tool, prints
+    no list, and strands the user when the tool fails to render. Every passage
+    that states that split must also carry the mirror rule."""
+    passages = {
+        "SKILL.md step-4 kickoff": _SKILL_MD[
+            _SKILL_MD.index("a SEPARATE structured-question tool call"):
+            _SKILL_MD.index("Ending the turn after (a)")],
+        "SKILL.md close invariants": _SKILL_MD[
+            _SKILL_MD.index("**The close = the close text, THEN the question"):
+            _SKILL_MD.index("- **Menu shapes.**")],
+        "close-contract.md": _CLOSE_CONTRACT[
+            _CLOSE_CONTRACT.index("**End the close BY ASKING the question"):
+            _CLOSE_CONTRACT.index("What never completes it")],
+    }
+    for name, text in passages.items():
+        flat = re.sub(r"\s+", " ", text)
+        assert "experimental" in flat and "ALSO print" in flat, (
+            f"{name}: delivery split omits the experimental-tool mirror "
+            "(an unrendered Codex question tool leaves no visible options)")

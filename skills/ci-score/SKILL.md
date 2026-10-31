@@ -55,19 +55,19 @@ it claims nothing further about workflow security.
 All paths below are relative to this skill's directory.
 
 **Interaction contract (steps 0 and 4).** Both user-facing questions are a
-**single structured question** — one question, fixed-order options, nothing
-open-ended, no machinery narration — **via your platform's
+**single structured question** — one question, fixed-order options (always
+**≥2 options** unless a step below drops one by name), nothing open-ended, no machinery narration — **via your platform's
 structured-question tool where one exists**: `AskUserQuestion` on Claude
 Code; on Codex, its built-in user-input request tool (`request_user_input`
-/ `tool/requestUserInput`, experimental — **call it when exposed**; check
-for it and attempt the call before ever falling back, exactly as
-ci-speedup does — a live ci-score Codex run skipped straight to the
-plain-message branch because this contract predicted the tool would be
-absent instead of trying it). Only when the tool is genuinely **absent or
-the call fails**, ask the **same** question as **one plain message** — same options, same order, the close's save option still **last**
+/ `tool/requestUserInput`, experimental — **call it when exposed**, never
+predict it absent (a live ci-score Codex run skipped it on that prediction), **and ALSO end your
+plain message with the same question** as a numbered option list, same options,
+same order, sent before the call: an experimental tool can silently fail to render
+or never return — live Codex run 2026-10-29). Only when the tool is genuinely **absent or the call fails**,
+that plain message alone asks it — same options, same order, the close's save option still **last**
 and verbatim (`None, just save the report (.md)`), the target confirm still
-one keystroke ("Reply **y** to score <owner/repo>, or name a different
-repo/path"). Only the delivery mechanism varies; the contract is
+one keystroke ("Reply **y** to score <owner/repo>, or name a different repo/path").
+**Never say you are waiting on a choice unless its options are visible in your own last message.** Only the delivery mechanism varies; the contract is
 **agent-independent**. This whole contract mirrors ci-speedup's interaction
 contract — same tools, same fallback shape, same verbatim save option —
 keep the two parallel when either changes.
@@ -140,7 +140,8 @@ keep the two parallel when either changes.
    note), sent as an ordinary message and never packed into the question
    call, then (b) the kickoff question per the interaction contract above
    — a SEPARATE structured-question tool call where one exists
-   (`AskUserQuestion` on Claude Code); where none does (most Codex runs),
+   (`AskUserQuestion` on Claude Code; for Codex's experimental tool, ALSO print
+   the option list below); where none does (most Codex runs),
    the question IS the FINAL block of that message: the numbered option
    list itself, same fixed options in the same order, save option last and
    verbatim, and the turn ends on it. **Writing close text never completes
@@ -172,7 +173,8 @@ one-line incident anchor; hold them while you follow the protocol:
   question does. The options exist ONLY in the question: the
   structured-question tool where the platform has one (`AskUserQuestion` on
   Claude Code); the final printed option list where it doesn't (most Codex
-  runs). **Never narrate the menu in prose** ahead of the question (three live
+  runs) — and for Codex's experimental tool, ALSO print that list, since the
+  tool can fail to render. **Never narrate the menu in prose** ahead of the question (three live
   misses — quasar 2026-07-29 twice, plus a Codex run — had perfect content and
   asked no question at all).
 - **Menu shapes.** First close: up to **TWO fix slots** (a one-edit-closes-both

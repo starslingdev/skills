@@ -1188,6 +1188,14 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-10-29** — The fix question at the close can no longer go unseen on Codex.
+  When the host's question tool is experimental, the same question and its options
+  now also end the plain closing message, in the same order, sent before the tool
+  call; the agent never says it is waiting on a choice unless the options are visible
+  in its own last message; and every question offers at least two options unless a
+  step names the exception (a live Codex close sent the question
+  through a tool that never rendered, offered one option, and dropped the save).
+
 - **2026-10-29** — Job-exclusivity proofs only fold ASCII conditions; Unicode literals whose Actions comparison differs from Python lowercasing no longer hide duplicated setup (PR #171).
 
 - **2026-10-29** — OPT14 (repeated checkout/setup without artifact handoff)
