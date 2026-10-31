@@ -154,6 +154,240 @@ def test_opt43_run_trigger_present_but_none_falls_back_to_job_created():
     assert len(out) == 1 and out[0]["wall_clock_p50_s"] == 90.0
 
 
+# The `needs:` verdict shape of the reported false positive: `test` needs
+# `test-self` + `test-fork`; the upstream pytest job runs ~4m32s.
+_VERDICT_GRAPH = {
+    "test-self": {"name": "test (self-hosted)", "needs": []},
+    "test-fork": {"name": "test (fork)", "needs": []},
+    "verdict": {"name": "test", "needs": ["test-self", "test-fork"]},
+}
+
+
+def _verdict_run(*, upstream_queue: float = 5.0, verdict_gap: float = 3.0,
+                 with_fork: bool = True, with_self: bool = True) -> list[dict]:
+    """One run: trigger at t=-upstream_queue, `test (self-hosted)` 0→272s,
+    `test (fork)` skipped at t=0, verdict `test` starts `verdict_gap`s after the
+    upstream finished."""
+    trig = _ts(-upstream_queue)
+    jobs: list[dict] = []
+    if with_self:
+        up = _job("test (self-hosted)", 272, start=0)
+        up["_run_created_at"] = trig
+        jobs.append(up)
+    if with_fork:
+        fork = _job("test (fork)", 0, start=0)
+        fork["conclusion"] = "skipped"
+        fork["_run_created_at"] = trig
+        jobs.append(fork)
+    v = _job("test", 2, start=272 + verdict_gap)
+    v["_run_created_at"] = trig
+    jobs.append(v)
+    return jobs
+
+
+def test_opt43_needs_job_not_charged_upstream_run_time():
+    # The reported false positive: the verdict starts 3s after its upstream finishes,
+    # but measured from the run trigger it reads ~280s "queue" — that is the upstream
+    # job RUNNING, not runner-pool queueing. Measured from when the verdict became
+    # runnable (its last `needs:` upstream completed) the queue is ~3s → no OPT43.
+    runs = [_verdict_run() for _ in range(9)]
+    out = _detect_opt43_queue_time("ci.yml", runs, 0, is_pr_workflow=True,
+                                   job_graph=_VERDICT_GRAPH)
+    assert [f["affected_jobs"] for f in out if f["pattern"] == "OPT43"] == []
+
+
+def test_opt43_needs_job_that_really_queued_is_still_flagged():
+    # Positive control: the same verdict waits 150s for a runner AFTER its upstream
+    # finished — real runner-pool queueing, still detected, sized from runnable time.
+    runs = [_verdict_run(verdict_gap=150) for _ in range(5)]
+    out = _detect_opt43_queue_time("ci.yml", runs, 0, is_pr_workflow=True,
+                                   job_graph=_VERDICT_GRAPH)
+    assert [f["affected_jobs"] for f in out] == [["test"]]
+    assert out[0]["wall_clock_p50_s"] == 150.0
+
+
+def test_opt43_entry_job_still_measured_from_run_trigger():
+    # An un-gated job's runnable time IS the run trigger: 90s pickup is still flagged.
+    runs = [_verdict_run(upstream_queue=90) for _ in range(3)]
+    out = _detect_opt43_queue_time("ci.yml", runs, 0, is_pr_workflow=True,
+                                   job_graph=_VERDICT_GRAPH)
+    assert [(f["affected_jobs"], f["wall_clock_p50_s"]) for f in out] == [
+        (["test (self-hosted)"], 90.0)]
+
+
+def test_opt43_needs_job_excluded_when_upstream_completion_unknown():
+    # A needed upstream absent from the sampled run: the runnable time is unknowable,
+    # so the sample is EXCLUDED — never credited from the run trigger (~577s here).
+    runs = [_verdict_run(with_self=False, verdict_gap=300) for _ in range(5)]
+    out = _detect_opt43_queue_time("ci.yml", runs, 0, is_pr_workflow=True,
+                                   job_graph=_VERDICT_GRAPH)
+    assert out == []
+
+
+def test_opt43_job_absent_from_graph_is_excluded():
+    # With the workflow's job graph in hand, a sampled job that maps to no graph node
+    # can't be classed entry-vs-gated, so it is excluded rather than credited.
+    runs = [[_job("mystery", 30, run_created_offset=400)] for _ in range(3)]
+    out = _detect_opt43_queue_time("ci.yml", runs, 0, is_pr_workflow=True,
+                                   job_graph=_VERDICT_GRAPH)
+    assert out == []
+
+
+# A reusable-workflow call: GitHub names its jobs `<caller> / <child>`, and the
+# caller's graph node carries only the CALLER's `needs`, not the children's.
+_REUSABLE_GRAPH = {"call": {"name": "call", "needs": [], "reusable": True}}
+
+
+def _reusable_run(*, trigger_queue: float = 5.0, test_gap: float = 3.0) -> list[dict]:
+    """`call / build` 0→240s (picked up `trigger_queue`s after the trigger); inside
+    the called workflow `call / test` needs `call / build` and starts `test_gap`s
+    after it finishes — a dependency the caller's graph node cannot see."""
+    trig = _ts(-trigger_queue)
+    build = _job("call / build", 240, start=0)
+    test = _job("call / test", 30, start=240 + test_gap)
+    for j in (build, test):
+        j["_run_created_at"] = trig
+    return [build, test]
+
+
+def test_opt43_reusable_child_not_charged_sibling_child_run_time():
+    # A gated child of a reusable call reads ~248s from the run trigger, but that is
+    # its sibling child RUNNING. Its own `needs` live in the called workflow, so
+    # only the earliest-started child per call (necessarily runnable when the call
+    # was) is measured; later children are excluded, never credited.
+    runs = [_reusable_run() for _ in range(5)]
+    out = _detect_opt43_queue_time("ci.yml", runs, 0, is_pr_workflow=True,
+                                   job_graph=_REUSABLE_GRAPH)
+    assert [f["affected_jobs"] for f in out] == []
+
+
+def test_opt43_reusable_first_child_real_queue_still_flagged():
+    # Positive control: the call's first child waits 90s for a runner after the
+    # trigger — real queueing, still flagged; the gated sibling stays excluded.
+    runs = [_reusable_run(trigger_queue=90) for _ in range(3)]
+    out = _detect_opt43_queue_time("ci.yml", runs, 0, is_pr_workflow=True,
+                                   job_graph=_REUSABLE_GRAPH)
+    assert [(f["affected_jobs"], f["wall_clock_p50_s"]) for f in out] == [
+        (["call / build"], 90.0)]
+
+
+def test_opt43_placeholder_named_matrix_entry_job_still_flagged():
+    # A matrix job whose `name:` is only a placeholder (`${{ matrix.os }}`) expands
+    # to `macos-latest` etc. It is in the workflow and ungated, so its 600s pickup
+    # is real queue and must still be flagged, not dropped as "matches no job".
+    graph = {"test_extension": {"name": "${{ matrix.os }}", "needs": [],
+                                "matrix": True}}
+    runs = [[_job("macos-latest", 30, run_created_offset=600),
+             _job("ubuntu-latest", 30, run_created_offset=5)] for _ in range(3)]
+    out = _detect_opt43_queue_time("ci.yml", runs, 0, is_pr_workflow=True,
+                                   job_graph=graph)
+    assert [(f["affected_jobs"], f["wall_clock_p50_s"]) for f in out] == [
+        (["macos-latest"], 600.0)]
+
+
+def test_opt43_placeholder_named_gated_job_timed_from_its_upstream():
+    # The same placeholder-named matrix, gated on `build`: timed from `build`'s
+    # completion (3s), not the run trigger (~243s) → no finding.
+    graph = {"build": {"name": "build", "needs": []},
+             "test": {"name": "${{ matrix.os }}", "needs": ["build"], "matrix": True}}
+    def run():
+        b = _job("build", 240, start=0, run_created_offset=5)
+        t = _job("macos-latest", 30, start=243)
+        t["_run_created_at"] = b["_run_created_at"]
+        return [b, t]
+    out = _detect_opt43_queue_time("ci.yml", [run() for _ in range(5)], 0,
+                                   is_pr_workflow=True, job_graph=graph)
+    assert out == []
+
+
+def test_opt43_job_gated_on_placeholder_matrix_resolves_its_upstream():
+    # `deploy` needs the placeholder-named matrix; it waits 150s for a runner after
+    # the last leg finishes. The legs must resolve to their node so `deploy`'s
+    # runnable time is known and its real queue is flagged, not dropped.
+    graph = {"test": {"name": "${{ matrix.os }}", "needs": [], "matrix": True},
+             "deploy": {"name": "deploy", "needs": ["test"]}}
+    def run():
+        a = _job("macos-latest", 200, start=0, run_created_offset=5)
+        b = _job("ubuntu-latest", 100, start=0)
+        d = _job("deploy", 10, start=350)
+        b["_run_created_at"] = d["_run_created_at"] = a["_run_created_at"]
+        return [a, b, d]
+    out = _detect_opt43_queue_time("ci.yml", [run() for _ in range(3)], 0,
+                                   is_pr_workflow=True, job_graph=graph)
+    assert [(f["affected_jobs"], f["wall_clock_p50_s"]) for f in out] == [
+        (["deploy"], 150.0)]
+
+
+def test_opt43_gated_job_timed_from_the_last_matrix_leg():
+    # Upstream legs finish at 100s and 240s; the verdict starts 3s after the LAST
+    # leg. Anchoring on the first leg would read 143s of "queue".
+    graph = {"build": {"name": "build", "needs": [], "matrix": True},
+             "verdict": {"name": "verdict", "needs": ["build"]}}
+    def run():
+        a = _job("build (a)", 100, start=0, run_created_offset=5)
+        b = _job("build (b)", 240, start=0)
+        v = _job("verdict", 5, start=243)
+        b["_run_created_at"] = v["_run_created_at"] = a["_run_created_at"]
+        return [a, b, v]
+    out = _detect_opt43_queue_time("ci.yml", [run() for _ in range(5)], 0,
+                                   is_pr_workflow=True, job_graph=graph)
+    assert out == []
+
+
+def test_opt43_reusable_child_not_captured_by_leading_placeholder_template():
+    # A `${{ matrix.v }} / build` template also matches the reusable child
+    # `Suite / build`. The child belongs to the `Suite` call (needs `pre`), so it
+    # is timed from `pre`'s completion: 90s of real queue, not ~295s.
+    graph = {"m": {"name": "${{ matrix.v }} / build", "needs": [], "matrix": True},
+             "pre": {"name": "pre", "needs": []},
+             "Suite": {"name": "Suite", "needs": ["pre"], "reusable": True}}
+    def run():
+        p = _job("pre", 200, start=0, run_created_offset=5)
+        c = _job("Suite / build", 30, start=290)
+        c["_run_created_at"] = p["_run_created_at"]
+        return [p, c]
+    out = _detect_opt43_queue_time("ci.yml", [run() for _ in range(3)], 0,
+                                   is_pr_workflow=True, job_graph=graph)
+    assert [(f["affected_jobs"], f["wall_clock_p50_s"]) for f in out] == [
+        (["Suite / build"], 90.0)]
+
+
+def test_opt43_overlap_excludes_upstream_execution():
+    # A sibling ended while the upstream was still running. It cannot explain
+    # the verdict's 150s queue AFTER the upstream completes at t=272.
+    runs = [_verdict_run(verdict_gap=150) for _ in range(3)]
+    for jobs in runs:
+        for job in jobs:
+            job["run_id"] = 1
+    sibling = {"id": 2, "run_started_at": _ts(0), "updated_at": _ts(200)}
+    findings = _detect_opt43_queue_time(
+        "ci.yml", runs, 0, is_pr_workflow=True,
+        job_graph=_VERDICT_GRAPH, all_status_runs=[sibling])
+    assert len(findings) == 1
+    assert findings[0]["queue_cause"] == "provider_congestion"
+    sibling["updated_at"] = _ts(300)
+    findings = _detect_opt43_queue_time(
+        "ci.yml", runs, 0, is_pr_workflow=True,
+        job_graph=_VERDICT_GRAPH, all_status_runs=[sibling])
+    assert findings[0]["queue_cause"] == "config_controllable"
+
+
+def test_opt43_duplicate_display_names_do_not_choose_arbitrary_needs():
+    # Both graph nodes display as `test`. The later one needs `build`; picking
+    # the first node (an entry job) invents 243s queue for that gated job.
+    graph = {"build": {"name": "build", "needs": []},
+             "early": {"name": "test", "needs": []},
+             "late": {"name": "test", "needs": ["build"]}}
+    def run():
+        build = _job("build", 240, start=0, run_created_offset=5)
+        early = _job("test", 30, start=0, run_created_offset=5)
+        late = _job("test", 30, start=243, run_created_offset=248)
+        return [build, early, late]
+    assert _detect_opt43_queue_time(
+        "ci.yml", [run() for _ in range(3)], 0, is_pr_workflow=True,
+        job_graph=graph) == []
+
+
 def test_opt43_release_threshold_is_higher():
     # 90s queue is under the 120s release/scheduled threshold → no finding.
     runs = [[_job("test", 30, run_created_offset=90)] for _ in range(3)]

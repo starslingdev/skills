@@ -5285,3 +5285,176 @@ jobs:
     assert set(pubs) == {".github/workflows/preview.yml", ".github/workflows/aggregate.yml"}
     req = {"Vercel", "Test", "license/cla", "ci", "build", "All CI", "Preview"}
     assert cr._repo_published_required(req, pubs) == {"All CI", "Preview"}
+
+
+# =============================================================================
+# Mutually exclusive jobs are not duplicated work (OPT14 / OPT12)
+# =============================================================================
+# A same-repo/fork split (`test-self` runs on push or a same-repo PR, `test-fork`
+# only on a fork PR) runs EXACTLY ONE of the two jobs per run, so the pair never
+# co-runs: there is no second copy of checkout + install to hand off or dedupe.
+
+_EXCLUSIVE_SPLIT = """name: CI
+on: [push, pull_request]
+jobs:
+  test-self:
+    if: >-
+      github.event_name == 'push' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+      - run: pnpm install
+      - run: pnpm test
+  test-fork:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+      - run: pnpm install
+      - run: pnpm test
+"""
+
+
+def test_exclusive_job_pair_is_not_duplicated_setup(tmp_path: Path):
+    pats = _scan_one(tmp_path, _EXCLUSIVE_SPLIT)
+    assert "OPT14" not in pats
+    assert "OPT12" not in pats
+
+
+def test_negated_exclusive_pair_is_not_duplicated_setup(tmp_path: Path):
+    """The De Morgan form: `!= 'pull_request' || head == repo` vs
+    `== 'pull_request' && head != repo` (a `scan` / `scan-fork` split)."""
+    wf = _EXCLUSIVE_SPLIT.replace(
+        "github.event_name == 'push' ||",
+        "github.event_name != 'pull_request' ||")
+    pats = _scan_one(tmp_path, wf)
+    assert "OPT14" not in pats
+    assert "OPT12" not in pats
+
+
+def test_same_condition_pair_still_flagged(tmp_path: Path):
+    """Positive control: two jobs under the SAME condition co-run every time."""
+    cond = ("github.event_name == 'workflow_dispatch' || "
+            "github.event.pull_request.head.repo.full_name == github.repository")
+    wf = re.sub(r"if: >-\n(?:      .*\n){2}", f"if: {cond}\n", _EXCLUSIVE_SPLIT)
+    assert wf.count(cond) == 2
+    pats = _scan_one(tmp_path, wf)
+    assert "OPT14" in pats
+    assert "OPT12" in pats
+
+
+def test_unconditioned_pair_still_flagged(tmp_path: Path):
+    """Positive control: no `if:` at all — both jobs always run."""
+    wf = re.sub(r"    if: >-\n(?:      .*\n){2}", "", _EXCLUSIVE_SPLIT)
+    assert "if:" not in wf
+    pats = _scan_one(tmp_path, wf)
+    assert "OPT14" in pats
+    assert "OPT12" in pats
+
+
+def test_exclusive_pair_plus_a_co_running_job_still_fires(tmp_path: Path):
+    """A third unconditioned setup job co-runs with whichever split job runs,
+    so the finding still fires and names it."""
+    wf = _EXCLUSIVE_SPLIT + """  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+      - run: pnpm install
+      - run: pnpm lint
+"""
+    _write_workflow(tmp_path, "ci.yml", wf)
+    found = {f["pattern"]: f for f in _scan(tmp_path)["findings"]}
+    assert "OPT14" in found
+    assert "lint" in found["OPT14"]["affected_jobs"]
+    assert "OPT12" in found
+
+
+def test_job_exclusivity_is_conservative():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("_scan_excl", _SCAN_SCRIPT)
+    scan = importlib.util.module_from_spec(spec)
+    sys.modules["_scan_excl"] = scan  # scan.py's @dataclass resolves __module__ here
+    spec.loader.exec_module(scan)
+    ex = scan._jobs_mutually_exclusive
+    assert ex({"if": "github.event_name == 'push'"},
+              {"if": "${{ github.event_name == 'pull_request' }}"})
+    assert ex({"if": "github.ref == 'refs/heads/main'"},
+              {"if": "github.ref != 'refs/heads/main'"})
+    assert ex({"if": "(inputs.b == 'x' || inputs.b == 'y') && "
+                     "github.head_ref == github.ref_name"},
+              {"if": "github.head_ref != github.ref_name"})
+    # Actions string comparison is case-insensitive: same literal, not exclusive.
+    assert not ex({"if": "github.event_name == 'push'"},
+                  {"if": "github.event_name == 'PUSH'"})
+    # Unknown / unparseable shapes are NOT exclusive (real duplicates still fire).
+    assert not ex({"if": "github.event_name == 'push'"}, {})
+    assert not ex({"if": "contains(github.ref, 'main')"},
+                  {"if": "!contains(github.ref, 'main')"})
+    assert not ex({"if": "github.event_name == 'push' || inputs.x"},
+                  {"if": "github.event_name == 'pull_request'"})
+    assert not ex({"if": "github.event_name != 'push'"},
+                  {"if": "github.event_name != 'pull_request'"})
+
+
+def _load_scan_excl():
+    import importlib.util
+    if "_scan_excl" in sys.modules:
+        return sys.modules["_scan_excl"]
+    spec = importlib.util.spec_from_file_location("_scan_excl", _SCAN_SCRIPT)
+    scan = importlib.util.module_from_spec(spec)
+    sys.modules["_scan_excl"] = scan
+    spec.loader.exec_module(scan)
+    return scan
+
+
+def test_numeric_looking_literals_are_not_proof_of_exclusivity():
+    """Actions coerces mismatched types to numbers: with a numeric input
+    `shards = 1`, both `== '1'` and `== '1.0'` are true, and a null value
+    equals both `''` and `'0'` (each becomes 0). Different literals only
+    prove disjointness when at least one cannot be read as a number."""
+    ex = _load_scan_excl()._jobs_mutually_exclusive
+    assert not ex({"if": "inputs.shards == '1'"}, {"if": "inputs.shards == '1.0'"})
+    assert not ex({"if": "inputs.flag == ''"}, {"if": "inputs.flag == '0'"})
+    assert not ex({"if": "inputs.n == '0x10'"}, {"if": "inputs.n == '16'"})
+    # One non-numeric literal still proves it (a number never equals NaN).
+    assert ex({"if": "inputs.mode == 'fast'"}, {"if": "inputs.mode == '1'"})
+
+
+def test_job_specific_contexts_are_not_proof_of_exclusivity():
+    """`needs.*` resolves per job (a job that does not directly need `build`
+    sees null), and `github.job` differs per job, so the same path text in two
+    jobs' conditions need not be the same value."""
+    ex = _load_scan_excl()._jobs_mutually_exclusive
+    assert not ex({"if": "needs.build.outputs.flag == 'yes'"},
+                  {"if": "needs.build.outputs.flag != 'yes'"})
+    assert not ex({"if": "github.job == 'a'"}, {"if": "github.job == 'b'"})
+    assert not ex({"if": "matrix.os == 'linux'"}, {"if": "matrix.os == 'mac'"})
+    # Run-wide contexts still prove it.
+    assert ex({"if": "inputs.mode == 'fast'"}, {"if": "inputs.mode == 'slow'"})
+    assert ex({"if": "vars.MODE == 'a'"}, {"if": "vars.MODE != 'a'"})
+
+
+def test_deeply_nested_condition_does_not_crash_the_scan():
+    """A pathological `if:` (hundreds of nested parentheses) is 'cannot
+    prove', never an uncaught RecursionError that kills the whole audit."""
+    ex = _load_scan_excl()._jobs_mutually_exclusive
+    deep = "(" * 2000 + "github.event_name == 'push'" + ")" * 2000
+    assert not ex({"if": deep}, {"if": "github.event_name == 'pull_request'"})
+
+
+def test_unicode_conditions_are_not_proof_of_exclusivity():
+    # Actions uses .NET OrdinalIgnoreCase: both Greek sigma forms compare equal,
+    # whereas Python lower() leaves final sigma distinct. Do not infer disjoint
+    # jobs from a Unicode folding model that differs from the expression engine.
+    ex = _load_scan_excl()._jobs_mutually_exclusive
+    assert not ex({"if": "inputs.mode == 'Σ'"}, {"if": "inputs.mode == 'ς'"})
+    assert not ex({"if": "inputs.mode == 'K'"}, {"if": "inputs.mode != 'K'"})

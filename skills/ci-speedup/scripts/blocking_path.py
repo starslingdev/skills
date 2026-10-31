@@ -7966,9 +7966,8 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
     if wait:
         saving = ("Cost: developer WALL-CLOCK wait before the job starts (queue / "
                   "wait-to-start) - NOT a runner-bill saving and NOT off the critical "
-                  "path. For a `needs:`-gated job this span includes the gating job's "
-                  "own run time, so the savable part is bounded by the gating job's own "
-                  "fix.")
+                  "path. For a `needs:`-gated job it is measured from when its last "
+                  "needed upstream job completed, so upstream run time is not counted.")
     elif tier2:
         rmin = _rmin_of(members)
         cert = _tier2_cert_summary(members[0])
@@ -8221,8 +8220,8 @@ def _queue_wait_block(findings: list[dict[str, Any]], catalog_url: str,
              "measures each job from start to finish). Usually runner-pool saturation or "
              "a restrictive concurrency group. Ranked by savable wait (the floor-capped "
              "addressable part; each finding's evidence quotes the raw P90 queue). **Note:** "
-             "for a `needs:`-gated job this is *wait-to-start* — it includes the gating job's "
-             "run time, so the savable part is bounded by the gating job's own fix.", ""]
+             "for a `needs:`-gated job the *wait-to-start* is measured from when its last "
+             "needed upstream job completed, so upstream run time is never counted as queue.", ""]
     if shallow_note:
         lines += [f"> ⚠️ _{shallow_note}_", ""]
     if dropped:
@@ -9359,7 +9358,9 @@ def _wf_conflict(wf_a: str, wf_b: str) -> bool:
 
 
 def _structural_for_pole(pole: dict[str, Any],
-                         findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+                         findings: list[dict[str, Any]],
+                         spine_checks: list[dict[str, Any]] | None = None
+                         ) -> list[dict[str, Any]]:
     """The structural-track findings (OPT70–75, `structural: true`) routed to THIS pole.
     The structural track is rendered AS the pole (ARCHITECTURE §11) and is excluded from
     the off-path 'Also noticed' appendix precisely because the pole represents it — so
@@ -9372,11 +9373,27 @@ def _structural_for_pole(pole: dict[str, Any],
     render (lancedb/lancedb), so it mirrors how collect_runs routes a structural finding to
     its critical-path check rather than name-folding across the whole matrix base. A finding
     from a DIFFERENT workflow file never joins (`_wf_conflict`), so a cross-workflow
-    check-name collision (`Python 3.13` in two workflows) can't mis-attribute either."""
+    check-name collision (`Python 3.13` in two workflows) can't mis-attribute either.
+
+    TWO MEASURED CHECKS ARE NEVER A BASE AND ITS LEG. `spine_checks` (the measured spine,
+    `pr_critical_path.checks`) names every check-run the sample saw. When the finding's job
+    and the pole's check are BOTH measured check-runs of their own in this workflow, they are
+    two distinct checks that merely look like `<base> (<params>)` — `test` and `test
+    (self-hosted)` on starslingdev/skills, a verdict job and the suite it needs — so the
+    base↔leg fold is refused and each card renders only under the pole it names. A real
+    matrix base is never a check-run of its own (GitHub reports only the legs), so the
+    legitimate fold is untouched."""
     targets = [t for t in (str(pole.get("check", "")), str(pole.get("job", ""))) if t]
     if not targets:
         return []
     pole_wf = str(pole.get("workflow_file") or "")
+    measured = {str(_as_dict(c).get("name") or "") for c in (spine_checks or [])
+                if not _wf_conflict(pole_wf, str(_as_dict(c).get("workflow_file") or ""))}
+    measured.discard("")
+
+    def _distinct_checks(a: str, b: str) -> bool:
+        return a != b and a in measured and b in measured
+
     out: list[dict[str, Any]] = []
     for f in findings:
         if not (f.get("structural")
@@ -9400,7 +9417,8 @@ def _structural_for_pole(pole: dict[str, Any],
         # shared-matrix-base fold (`_same_matrix`) would render it under this pole with a
         # false "it IS this pole" claim (lancedb/lancedb). Mirrors `_data_driven_for_pole`'s
         # `_job_targets_pole` minus that `_same_matrix` sibling fold.
-        if any(j == t or _matrix_base(t) == j or _matrix_base(j) == t
+        if any(j == t or ((_matrix_base(t) == j or _matrix_base(j) == t)
+                          and not _distinct_checks(j, t))
                for j in jobs for t in targets):
             out.append(f)
     return out
@@ -9410,7 +9428,9 @@ def _collapsed_sibling_structural(
         rep: dict[str, Any],
         rendered_poles: list[dict[str, Any]],
         file_poles: list[dict[str, Any]],
-        findings: list[dict[str, Any]]) -> list[tuple[str, dict[str, Any]]]:
+        findings: list[dict[str, Any]],
+        spine_checks: list[dict[str, Any]] | None = None
+        ) -> list[tuple[str, dict[str, Any]]]:
     """Structural levers (OPT70/71/72/74/75) carried by a matrix SIBLING leg that
     `by_matrix` COLLAPSED into `rep`. One representative pole is rendered per matrix
     (the slowest leg); the faster legs are dropped from `rendered_poles`. Because
@@ -9429,7 +9449,8 @@ def _collapsed_sibling_structural(
     # Structural findings already rendered AT some pole — never re-annotate those (a
     # finding whose `affected_jobs` names the matrix BASE joins `rep` via base↔leg
     # expansion and is shown there already).
-    already = {id(f) for q in rendered_poles for f in _structural_for_pole(q, findings)}
+    already = {id(f) for q in rendered_poles
+               for f in _structural_for_pole(q, findings, spine_checks)}
     rendered_checks = {str(q.get("check", "")) for q in rendered_poles}
     out: list[tuple[str, dict[str, Any]]] = []
     seen: set[int] = set()
@@ -9440,7 +9461,7 @@ def _collapsed_sibling_structural(
         if not _same_matrix(leg_check, rep_check,
                             str(leg.get("workflow_file", "")), rep_wf):
             continue  # not a sibling of this representative's matrix
-        for f in _structural_for_pole(leg, findings):
+        for f in _structural_for_pole(leg, findings, spine_checks):
             if id(f) in already or id(f) in seen:
                 continue
             seen.add(id(f))
@@ -9458,7 +9479,8 @@ _PER_POLE_STRUCTURAL_PATTERNS = _STRUCTURAL_PATTERNS - {"OPT73"}
 def _undisclosed_pole_structural(
         findings: list[dict[str, Any]],
         rendered_poles: list[dict[str, Any]],
-        file_poles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        file_poles: list[dict[str, Any]],
+        spine_checks: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     """Per-pole structural levers (OPT70/71/72/74/75) that render NOWHERE in the markdown.
 
     A per-pole structural finding is rendered AS its home pole (`_structural_for_pole`) or
@@ -9484,10 +9506,10 @@ def _undisclosed_pole_structural(
     file-backed lever whose check name collides with a rendered pole in a DIFFERENT workflow."""
     rendered: set[int] = set()
     for p in rendered_poles:
-        for f in _structural_for_pole(p, findings):
+        for f in _structural_for_pole(p, findings, spine_checks):
             rendered.add(id(f))
         for _leg, f in _collapsed_sibling_structural(
-                p, rendered_poles, file_poles, findings):
+                p, rendered_poles, file_poles, findings, spine_checks):
             rendered.add(id(f))
     out: list[dict[str, Any]] = []
     for f in findings:
@@ -10591,7 +10613,12 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
         return present.get(name, 0) > npop * _RARE_PRESENCE_FRAC
 
     def _pole_typical(p: dict[str, Any]) -> bool:
-        return _typical_check(str(p.get("check", "")))
+        # The slowest upstream of a TYPICAL aggregation gate is on the typical path too: a PR
+        # that waits on the gate waits on it (`_agg_upstream_typical`, filled below once the
+        # gate shapes are known, before any pole is ordered).
+        return (_typical_check(str(p.get("check", "")))
+                or (str(p.get("check", "")), str(p.get("workflow_file") or ""))
+                in _agg_upstream_typical)
 
     def _opt_in_rare_check(name: str) -> bool:
         # The OPT-IN / RARE class — the one the level-1 footnote frames "a typical PR doesn't wait
@@ -10632,10 +10659,34 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
     # mirroring the `_pole_typical` required exemption so a required gate still headlines. When
     # pole_count is unavailable (no populations) `_gatef` is 0 for all, so this reduces to the
     # prior pure-p50 order — and a single typical pole is unaffected either way.
-    def _gate_rank(p: dict[str, Any]) -> int:
+    def _own_gate_rank(p: dict[str, Any]) -> int:
         if str(p.get("check", "")) in _required_names:
             return npop + 1
         return _gatef(p)
+
+    # An AGGREGATION GATE (a `needs:`-everything verdict job, `_agg_gate_shape`) holds no time
+    # of its own: its wait IS its slowest `needs:` upstream member. So that member inherits the
+    # gate's rank (a job a required verdict needs is required in effect), and the p50
+    # tie-break then puts the real time-holder FIRST and the trivial gate after it. Without
+    # this a required 3s verdict headed the poles ahead of the 4m32s suite it waits on.
+    _agg_upstream_rank: dict[tuple[str, str], int] = {}
+    _agg_upstream_typical: set[tuple[str, str]] = set()
+    for _ap in (p for p in poles if _is_file_pole(p)):
+        _ash = _agg_gate_shape(_ap, doc.get("workflow_job_graph"),
+                               list(cp.get("checks") or []))
+        if not _ash:
+            continue
+        _ak = (_check_name(_ash["slowest"]),
+               str(_ash["slowest"].get("workflow_file") or _ap.get("workflow_file") or ""))
+        _agg_upstream_rank[_ak] = max(_agg_upstream_rank.get(_ak, 0), _own_gate_rank(_ap))
+        if _typical_check(str(_ap.get("check", ""))):
+            _agg_upstream_typical.add(_ak)
+
+    def _agg_key_of(p: dict[str, Any]) -> tuple[str, str]:
+        return (str(p.get("check", "")), str(p.get("workflow_file") or ""))
+
+    def _gate_rank(p: dict[str, Any]) -> int:
+        return max(_own_gate_rank(p), _agg_upstream_rank.get(_agg_key_of(p), 0))
 
     def _by_gate_then_p50(ps: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return sorted(ps, key=lambda p: (-_gate_rank(p), -(_num(p.get("p50_s")) or 0.0)))
@@ -11058,8 +11109,15 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
                 f"**{merge_dur} until all checks finish** — the slowest check a typical PR "
                 f"waits on is `{floor_name}` (~{slowest_dur}); `{gate_check}` is the check "
                 "most PRs gate on (drilled below). ")))
-    if minority_slow:
-        ms = minority_slow[0]
+    # The Bottom line's "`X` is slower (~T)" compares X against the wait it just headlined.
+    # `minority_slow` is "slower than the top pole's OWN p50", which is that wait only when the
+    # gate is a single check: on a `needs:` chain the headline wait is the chain total, and the
+    # top pole may be a short chain stage, so an 11s check read "slower" than a 4m32s chain.
+    # Keep only checks genuinely slower than the chain total there.
+    _ms_lead = ([c for c in minority_slow if (_num(c.get("p50_s")) or 0.0) > _chain_total]
+                if chain_active else minority_slow)
+    if _ms_lead:
+        ms = _ms_lead[0]
         ms_name = str(ms.get("name", ""))
         ms_slow = _clock(_num(ms.get("p50_s")))
         if _ms_is_file(ms):
@@ -11574,21 +11632,27 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
         head_s, bi_caveat = _pole_headline(p)
         dur = _clock(head_s)
         _raw_check = str(p.get("check", ""))
-        # AGGREGATION-GATE (success-sink) detection — issue #1, see `_agg_gate_shape`. Three
-        # deliberate carve-outs: a modal-chain MEMBER keeps the chain-stage framing (the chain
-        # rendering wins; never double-frame), and a pole carrying real measured content of its
-        # own — a matched log-detector leaf, or a structural lever routed to it — keeps today's
-        # rendering, because there the drill/prompt is NOT inert and suppressing it would
-        # silently drop a measured lever that renders nowhere else.
+        # AGGREGATION-GATE (success-sink) detection — issue #1, see `_agg_gate_shape`. Two
+        # deliberate carve-outs: a pole carrying real measured content of its own — a matched
+        # log-detector leaf, or a SPECIFIC structural lever (OPT70/71/72) routed to it — keeps
+        # today's rendering, because there the drill/prompt is NOT inert and suppressing it
+        # would silently drop a measured lever that renders nowhere else. The generic OPT75
+        # ("speed up the dominant step") is NOT such content on a sink: its dominant step is the
+        # verdict itself, so it is exactly the inert advice this shape exists to suppress (the
+        # engine no longer routes one there; an older findings file may still carry it).
+        # A modal-chain member that IS a sink (only ever the chain's LAST stage — a sink is a
+        # terminal node) renders as the aggregation gate, with its chain stage kept in the
+        # role line: its stage time is the verdict's own seconds, and the chain's wait is the
+        # upstream stage the pointer below links to.
         _agg_key = pole_owner_keys.get(id(p))
         _agg = None
-        if (not (chain_active and _raw_check in set(_chain_modal))
-                and _pole_leaves[id(p)][1] is None
-                and not _structural_for_pole(p, all_findings)):
+        if (_pole_leaves[id(p)][1] is None
+                and not [f for f in _structural_for_pole(p, all_findings, cp.get("checks"))
+                         if str(f.get("pattern", "")) != "OPT75"]):
             _agg = _agg_gate_shape(
                 p, doc.get("workflow_job_graph"), list(checks or src),
                 steps.get(_agg_key) if _agg_key is not None else None)
-        if chain_active and _raw_check in set(_chain_modal):
+        if chain_active and _raw_check in set(_chain_modal) and not _agg:
             # ENG-1 PR-N2: a chain MEMBER must never carry the concurrent
             # framing — `needs:` serializes it; its time ADDS to the headline
             # chain wait instead of overlapping. Claims layer (pole_role_line).
@@ -11631,11 +11695,19 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
             if not _agg["steps_known"]:
                 _ag_tail += (" (No per-step data was captured for this check; the shape is read "
                              "from its `needs:` structure and its measured P50.)")
+            _ag_fields: dict[str, Any] = {}
+            if chain_active and _raw_check in set(_chain_modal):
+                _stage = _chain_modal.index(_raw_check) + 1
+                _ag_fields = {"stage": _stage, "chain_len": len(_chain_modal)}
+                _ag_tail += (f" It is stage {_stage}/{len(_chain_modal)} of the {_chain_label} "
+                             f"gate chain: `needs:` serializes it after that upstream, so its "
+                             f"{dur} adds to the chain wait in the headline.")
             role = cs.add(claims.Claim(
                 kind="pole_role_line", subject=check,
                 fields={"dur": dur, "job_id": str(_agg["job_id"]),
                         "upstream_n": len(_agg["upstream"]),
-                        "upstream_slowest": _ag_slow, "upstream_dur": _ag_dur},
+                        "upstream_slowest": _ag_slow, "upstream_dur": _ag_dur,
+                        **_ag_fields},
                 rendered=_strip_emdashes(
                     f"**Aggregation gate — it exists to be the single required check.** Its "
                     f"job (`{_agg['job_id']}`) runs no work of its own ({dur}); it `needs:` "
@@ -11896,7 +11968,7 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
         # is rendered AS the pole, so join it back here — without this the finding (its
         # risk/guardrail/rollout) renders nowhere and the pole falsely reads as a
         # coverage gap (it matched a measured catalog lever, just not a log detector).
-        structural = _structural_for_pole(p, all_findings)
+        structural = _structural_for_pole(p, all_findings, cp.get("checks"))
         # Data-driven catalog finding(s) (e.g. OPT24) that fired ON this pole with a
         # credited wall-clock saving. They render in 'Also noticed' (not AS the pole), but
         # they ARE a catalog match — so they must suppress the false "coverage gap" read +
@@ -12131,7 +12203,7 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
         # would otherwise render nowhere (a silent drop). Surface it here, carrying the
         # sibling's own measured numbers; never let the lever vanish from the markdown.
         sibling_struct = _collapsed_sibling_structural(p, pole_wfs, file_poles,
-                                                       all_findings)
+                                                       all_findings, cp.get("checks"))
         if sibling_struct:
             # Collapse the DUPLICATE case (issue #53): a sibling whose lever is IDENTICAL to
             # the pole's own (same routed pattern + dominant-step base + category) adds one
@@ -12208,7 +12280,8 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
     # (`_is_pole_structural`), so one on a non-rendered pole would otherwise survive only in
     # findings.json. Surface a COUNT (not a silent drop), mirroring the appendix's "+N more …
     # kept in the findings JSON". Never invents numbers — only states that they exist.
-    undisclosed = _undisclosed_pole_structural(all_findings, pole_wfs, file_poles)
+    undisclosed = _undisclosed_pole_structural(all_findings, pole_wfs, file_poles,
+                                               cp.get("checks"))
     # Partition for an honest disclosure (R3): file-backed levers rank below the rendered
     # poles; name-stub ones are on managed/unresolved checks (no single workflow file). Both
     # are disclosed so NEITHER is silently dropped from the count, and a managed check is
@@ -12591,7 +12664,8 @@ def _gap_poles(doc: dict[str, Any],
     _iso = doc.get("test_runner_isolation")
 
     def _catalog_covers(pole: dict[str, Any]) -> bool:
-        return bool(_structural_for_pole(pole, findings)
+        return bool(_structural_for_pole(
+                        pole, findings, (doc.get("pr_critical_path") or {}).get("checks"))
                     or _data_driven_for_pole(pole, findings)
                     or _opt79_pole_covers(_opt79_pole_for(pole, findings))
                     or _opt82_pole_for(pole, findings))
