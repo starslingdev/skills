@@ -1188,6 +1188,22 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-10-29** — Job-exclusivity proofs only fold ASCII conditions; Unicode literals whose Actions comparison differs from Python lowercasing no longer hide duplicated setup (PR #171).
+
+- **2026-10-29** — OPT14 (repeated checkout/setup without artifact handoff)
+  and OPT12 (duplicated setup across jobs) no longer treat mutually exclusive
+  jobs as duplicated work. A same-repo / fork split (one job runs on push or a
+  same-repo PR, the other only on a fork PR) runs exactly one job per run, yet
+  was reported as two co-running setup copies and credited runner-minutes for
+  a handoff that could never save anything. Jobs whose `if:` conditions are
+  provably disjoint (opposite `==` / `!=` on the same operands, or `==` to
+  different literals, combined with `&&` / `||`) are dropped from the pair;
+  any condition outside that grammar is treated as co-running, so real
+  duplicates still fire. Only run-wide contexts (`github`, `inputs`, `vars`)
+  count as proof — `needs.*` and `github.job` can differ per job — and two
+  literals that both read as numbers (`'1'` / `'1.0'`, `''` / `'0'`) are not
+  proof, since Actions compares a numeric or null value as a number.
+
 - **2026-10-29** — OPT43 attributes sibling overlap only during the measured
   job's runnable-to-start queue interval, excluding upstream execution. Ambiguous
   display names and matrix templates are excluded instead of choosing an
