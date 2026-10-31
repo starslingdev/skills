@@ -1,5 +1,14 @@
 #!/bin/bash
 
+# `git commit` exports GIT_DIR, GIT_INDEX_FILE (and sometimes GIT_WORK_TREE)
+# to hook children. This hook runs the full pytest suite, and fixture tests
+# that shell out to `git` would otherwise operate on the REAL repository
+# instead of their tmp fixture dir (observed: HEAD resets, index truncation,
+# stray fixture commits on real refs). Drop the inherited variables first,
+# before even the `git rev-parse` below, so every git invocation in this
+# hook and its children sees the repository the hook runs in.
+unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_INDEX_VERSION
+
 echo "Running tests..."
 
 # Guarded: if this cd ever fails, the hook must NOT go on to run pytest from
