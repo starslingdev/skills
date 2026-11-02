@@ -60,6 +60,7 @@ EXCLUDE = "exclude"       # run/harness artifact → never a skill bug
 # 3 TRIAGE — a new `verify_report` check makes `test_every_check_is_classified` go red until it's
 # classified here (so no check is ever left undisposed).
 TRIAGE_ALLOWLIST = {
+    "wall-clock headline carries next gate and verification guidance": AUTO_SEED,
     "primary section present (Long poles)": AUTO_SEED,                                              # check_primary_section_present
     "static-only banner matches CI shape": AUTO_SEED,                                               # check_static_only_banner_matches_ci_shape
     "headline names the wall-clock (merge-wait) axis": AUTO_SEED,                                   # check_headline_names_wall_clock
@@ -170,7 +171,8 @@ CLASS_ENUM = frozenset({
 CHECK_CLASS = {
     "primary section present (Long poles)": "missing-phase-check",                       # a required phase section is absent
     "static-only banner matches CI shape": "fabricated-or-unsupported-finding",          # dormant-repo banner asserted at a live no-PR-gating repo / "no run timing" beside priced timed runs — the report contradicts its own data
-    "headline names the wall-clock (merge-wait) axis": "ambiguous-phase-instruction",     # headline mislabels the axis it renders
+    "headline names the wall-clock (merge-wait) axis": "ambiguous-phase-instruction",
+    "wall-clock headline carries next gate and verification guidance": "missing-phase-check",     # headline mislabels the axis it renders
     "every #pole-N / #also-noticed / #pre-start-wait / #runner-minute-reductions reference resolves to an anchor": "missing-phase-check",  # broken cross-reference — a rendering-completeness gap
     "RCA hands off via prompts (never prescribes a fix, never dead-ends)": "prescribed-a-fix",  # exact match
     "agent-prompt MEASURED CAUSE never asserts timeline steps the pole doesn't render": "fabricated-or-unsupported-finding",  # a canned cause asserts a timeline shape the report contradicts

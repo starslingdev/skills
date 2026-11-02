@@ -304,6 +304,33 @@ finding.)
 
 ## 7. Report structure
 
+### How to check it worked
+
+Every measured wall-clock headline includes a **What gates next** line and this
+fixed protocol. The next-gate label and seconds come from the floor already
+used to size that headline; no new timing collection is added. For a cluster
+fix, use its applied cross-workflow bound rather than a sibling that descends
+with the fix. If the saved evidence cannot name a single next gate (for example,
+a population-weighted bound or a chain without a named competing path), say
+that the next gate is unavailable instead of inventing a label or duration.
+These are modeled post-fix floors, not observed after measurements.
+
+- **Measure:** time from the push's first job created to the last job finished,
+  across **all** workflows the push triggers. The last workflow to finish sets
+  the end, including workflows that start later.
+- **Runs:** at least 2 before and 2 after, plus one unchanged rerun as a noise
+  control.
+- **Don't** sum workflow durations, and don't average per-job ratios. Both hide
+  a gain on the one workflow that gates.
+- **Caches:** judge cache-touching fixes on the second run after the change.
+
+The interval is `max(job.completed_at) - min(job.created_at)` over the complete
+push cohort. It includes scheduling and cross-workflow delays. Neither the
+longest individual workflow duration nor the old gate's duration is a substitute
+when workflows start at different times. The phase-7 plan uses this same
+push-wide definition.
+
+
 **The report opens with a `## Contents` TOC, and every entry is an anchor link.**
 It MUST anchor-link the reversal table, every Tier (1/2/3), **every finding
 (`W1…Wn` / `R1…Rn`) as a nested child**, "The stacked wall-clock model", and

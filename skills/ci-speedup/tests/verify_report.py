@@ -596,6 +596,44 @@ def check_headline_names_wall_clock(report: str) -> Check:
                  else f"headline names no wall-clock/merge axis: {bottom[:60]!r}")
 
 
+def check_headline_followup(report: str, findings_path: Path | None = None) -> Check:
+    """Every measured wall-clock headline includes a next gate and a measurement protocol."""
+    name = "wall-clock headline carries next gate and verification guidance"
+    measured = False
+    if findings_path:
+        try:
+            doc = json.loads(Path(findings_path).read_text())
+            cp = doc.get("pr_critical_path") if isinstance(doc, dict) else None
+            measured = bool(cp.get("poles")) if isinstance(cp, dict) else False
+        except (OSError, ValueError, TypeError):
+            pass
+    if not measured:
+        measured = bool(re.search(r"^> \*\*Bottom line\.\*\* A typical PR waits", report, re.MULTILINE))
+    if not measured:
+        return Check(name, True, "no measured wall-clock headline", skipped=True)
+    # Restrict to the headline block, so an appendix or quoted prompt cannot
+    # satisfy the requirement on behalf of the report's actual headline.
+    match = re.search(r"^> \*\*Bottom line\.\*\*.*?(?=^## |\Z)", report, re.MULTILINE | re.DOTALL)
+    if not match:
+        return Check(name, False, "missing wall-clock headline")
+    block = match[0]
+    gates = re.findall(r"^> \*\*What gates next:\*\* (.+)$", block, re.MULTILINE)
+    if len(gates) != 1 or not (
+            re.fullmatch(r"After this fix, CI is gated by `[^`]+` at ~\d+ s\.", gates[0])
+            or gates[0] == "The next gate is unavailable from the saved floor evidence; re-measure all workflows after the change."):
+        return Check(name, False, "missing or malformed gates-next line")
+    required = [
+        "> **How to check it worked**",
+        "> - **Measure:** time from the push's first job created to the last job finished, across **all** workflows the push triggers.",
+        "> - **Runs:** at least 2 before and 2 after, plus one unchanged rerun as a noise control.",
+        "> - **Don't** sum workflow durations, and don't average per-job ratios. Both hide a gain on the one workflow that gates.",
+        "> - **Caches:** judge cache-touching fixes on the second run after the change.",
+    ]
+    missing = [line for line in required if block.splitlines().count(line) != 1]
+    return Check(name, not missing, "next gate and full verification protocol present" if not missing
+                 else "missing or duplicated how-to-check instructions: " + "; ".join(missing))
+
+
 def check_also_noticed_count_honest(report: str) -> Check:
     """When the TOC advertises 'Also noticed - N findings', N must equal what the
     appendix accounts for: the rows shown PLUS the '+K more' pointer. A miscount
@@ -13974,6 +14012,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_primary_section_present(report, findings_path),
         check_static_only_banner_matches_ci_shape(report, findings_path),
         check_headline_names_wall_clock(report),
+        check_headline_followup(report, findings_path),
         check_pole_anchors_resolve(report),
         check_rca_hands_off_never_prescribes(report),
         check_measured_cause_matches_rendered_timeline(report),
