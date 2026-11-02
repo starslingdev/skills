@@ -897,6 +897,8 @@ unversioned and updates by reinstall from `main`.
 
 ### Changed
 
+- **2026-11-02** — OPT70 requires a full run for lockfile, scoping-config and workflow changes, an unscoped default-branch or scheduled suite under OPT90's post-merge guardrail, and a one-time skip-logic test. OPT84 adds `bun check` as a recipe-only alternative with vendor benchmarks against older Bun; TypeScript 7 remains the default.
+
 - **2026-10-26** — Strengthen OPT32/70 fail-closed verdict guidance and OPT79 whole-job validation.
 - **2026-10-26** — Required-check verdict guidance (OPT22, OPT24, OPT25, OPT75, OPT77 and the report text for relocated or consolidated work) recommends `if: always()` only: a `!cancelled()` verdict is skipped on a cancelled run, and a skipped required check reads as passed.
 

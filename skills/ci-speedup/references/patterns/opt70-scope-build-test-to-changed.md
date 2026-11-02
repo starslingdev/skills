@@ -39,13 +39,25 @@ The deterministic router stops there — it routes on **dominant category alone*
 
 **Fail closed:** when scoping is done by a detector job whose output gates other jobs via `needs:`, an always-running verdict job must check the detector and every intermediate job whose failure can suppress a required suite. Listing them in `needs:` is not an assertion. Accept a skipped suite only after successful detection with a valid explicit unchanged output; reject failures and cancellations, including an unchanged output written before failure. A strict suite-success assertion is right only when a suite is never skipped on purpose; with intentional skips it turns every unchanged PR red. In-job affected-only runners (`turbo --filter`, `nx affected`, `vitest --changed`) need no verdict job, but the job must fail when the changed-set computation fails — never fall back to "nothing changed".
 
+**Run everything when the ground shifts:** any change to the lockfile(s), to the scoping tool's config (`nx.json`, `turbo.json`, `pnpm-workspace.yaml`, root `package.json`), or to `.github/workflows/**` must bypass scoping and run the full set.
+
+**A full run after merge:** run the unscoped full suite on every push to the default branch, or at least on a schedule. Follow [OPT90's post-merge guardrail](#opt90--every-pull-request-pays-for-coverage-that-could-run-after-merge): every merged commit must be covered, failures must reach an owner, and a release must not ship a commit the full suite has not passed.
+
+**Test the skip logic once:**
+
+1. Make a throwaway branch with a change the scoper should catch, such as a change in a shared package.
+2. Confirm that the affected jobs run.
+3. Then make a change that is deliberately hidden from the scoper's dependency graph, and confirm the run fails or runs everything rather than going green with nothing tested.
+
 **Mandatory guardrail (this pattern is invalid without it)**:
 
 1. **Full fallback on resolution error.** If the scoper errors, can't resolve the graph, or returns an empty set on a non-trivial diff, run the **full** build/suite. Never let "couldn't figure out what changed" become "ran nothing → green".
 2. **Distinguish a build error from a test failure.** A non-zero exit from graph resolution / compilation must fail the gate, separately from "the scoped tests ran and failed". Don't collapse both into one exit code the scoper can zero out.
 3. **Output-diff before adoption.** Before cutting over, run scoped and full in parallel and diff the artifact/coverage set; adopt only when they match on the dimensions that matter (built outputs, covered files).
+4. **Bypass scoping for shared inputs.** Lockfile, scoping-config and workflow changes must run the full set, even when the scoper reports no affected targets.
+5. **Keep an unscoped safety net after merge.** The full suite must run on every push to the default branch or at least on a schedule, with OPT90's post-merge guardrail enforced. Test the skip logic above before relying on it.
 
-**Conservative rollout (REQUIRED)**: Run the scoped job **in parallel with** the existing full job for **N runs** (≥1–2 weeks of PR traffic), comparing pass/fail and coverage on every PR. Cut over only after the scoped job has matched the full job across the diff distribution — including at least one PR that touches a shared/base package. Keep the full job on the merge queue / `main` even after cutover, so the trunk is always validated end-to-end.
+**Conservative rollout (REQUIRED)**: Run the scoped job **in parallel with** the existing full job for **N runs** (≥1–2 weeks of PR traffic), comparing pass/fail and coverage on every PR. Cut over only after the scoped job has matched the full job across the diff distribution — including at least one PR that touches a shared/base package. Keep the unscoped full job on every push to the default branch or at least on a schedule even after cutover, under the post-merge guardrail above.
 
 **Sizing**: population-weighted Δ wall-clock = (dominant-step p50 − the scoped-run floor) × the share of PRs whose diff is narrow enough to scope, capped at the cross-workflow critical-path floor (the next-slowest check still gates the PR). Never size this off the single best-case PR.
 
