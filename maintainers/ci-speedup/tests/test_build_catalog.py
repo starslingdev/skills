@@ -35,6 +35,48 @@ def test_directory_and_compiled_file_parse_to_identical_entries():
     assert direct == compiled and len(direct) == len(list(bc.PATTERNS.glob("opt*.md")))
 
 
+def test_scoping_recipe_keeps_full_run_safety_nets_and_exercises_skip_logic():
+    text = (bc.PATTERNS / "opt70-scope-build-test-to-changed.md").read_text()
+    for phrase in (
+        "**Run everything when the ground shifts:**",
+        "any change to the lockfile(s), to the scoping tool's config "
+        "(`nx.json`, `turbo.json`, `pnpm-workspace.yaml`, root `package.json`), "
+        "or to `.github/workflows/**` must bypass scoping and run the full set",
+        "run the unscoped full suite on every push to the default branch, "
+        "or at least on a schedule",
+        "[OPT90's post-merge guardrail]",
+        "every merged commit must be covered",
+        "**Test the skip logic once:**",
+        "Make a throwaway branch with a change the scoper should catch, "
+        "such as a change in a shared package",
+        "Confirm that the affected jobs run",
+        "make a change that is deliberately hidden from the scoper's dependency graph",
+        "confirm the run fails or runs everything rather than going green with nothing tested",
+    ):
+        assert phrase in text
+    guardrail = text.split("**Mandatory guardrail", 1)[1].split("**Conservative rollout", 1)[0]
+    assert "Lockfile, scoping-config and workflow changes must run the full set" in guardrail
+    assert "The full suite must run on every push to the default branch or at least on a schedule" in guardrail
+
+
+def test_bun_check_recipe_is_an_alternative_with_bun_only_benchmarks():
+    text = (bc.PATTERNS / "opt84-slow-tool-on-pole-has-native-drop-in.md").read_text()
+    row = next(line for line in text.splitlines() if "| **`bun check`**" in line)
+    for phrase in (
+        "**`tsc --noEmit`**",
+        "recipe only, not detected in v1",
+        "alternative, not a drop-in: requires Bun in the job; type-check behavior "
+        "must be verified against `tsc` on the repo before switching",
+        "1.4–7.8× faster than v1.4.3",
+        "up to 15× for `bun check -b` versus the previous Bun",
+        "both compare against older Bun, not `tsc`; measure per repo",
+        "https://bun.com/blog/bun-v1.4.4#new-in-bun-check",
+    ):
+        assert phrase in row
+    assert "**TypeScript 7 stays the default recommendation** for `tsc --noEmit`, " \
+           "because it is the true drop-in" in text
+
+
 @pytest.fixture
 def tree(tmp_path):
     d = tmp_path / "patterns"
