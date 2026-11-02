@@ -64,6 +64,8 @@ _FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "gh_replay"
 
 sys.path.insert(0, str(_SCRIPTS))
 import collect_runs as cr  # noqa: E402
+import blocking_path as bp  # noqa: E402
+import run as _run_py  # noqa: E402
 
 # The synthetic repo/workflow the committed fixture corpus was recorded
 # against. `_REPO` must match the `owner/name` baked into every fixture
@@ -101,10 +103,11 @@ _JOB_ID = 9001
 #            so it costs exactly the per-job cap once. Every other OPT79 gate is
 #            answered from data already in hand, so no log is fetched for a job that
 #            could not produce a finding.)
-#   56  now  (+8 OPT79: `build-matrix.yml`'s `integration` job — that workflow's slowest —
-#            now also restores a cache before its install, so the uncredited path
-#            runs end to end: its second candidate job costs the per-job cap once
-#            more.)
+#   56  now  (+8 OPT79: `build-matrix.yml`'s `integration` job — then that workflow's
+#            slowest — now also restores a cache before its install: its second
+#            candidate job costs the per-job cap once more. Since the `e2e` job was
+#            added it is the credited below-the-long-pole finding instead, so the
+#            uncredited path no longer runs end to end; unit tests cover it.)
 #   56  still (OPT79 now reads the repo-root `package.json` to decide whether
 #            setup-node v5+'s AUTOMATIC cache is on. At most ONE read per repo, and
 #            only when a sampled job runs setup-node v5+ with no `cache:` input;
@@ -113,7 +116,76 @@ _JOB_ID = 9001
 #            pins `setup-node@v4`, so the read never happens here (asserted via
 #            `data_sources.setup_node_package_json.needed`), and on a repo that
 #            needs it the cost is +0 with a checkout, +1 without.)
-_GOLDEN_GH_QUERY_COUNT = 56
+#   68  then (+12 for the two OPT77 whole-workflow workflows added to the corpus,
+#            `checks.yml` (1004) and `gates.yml` (1005) — SIX calls each, and the
+#            same six any workflow costs: one all-status run-list page, three
+#            `runs/{id}/jobs` pages (three sampled runs each), one `per_page=1`
+#            monthly-volume count, and one `commits?path=<wf>&per_page=2`
+#            config-era boundary lookup. Both are push-only, so neither pays the
+#            event-scoped `event=pull_request` volume call a PR workflow does, and
+#            OPT77 reads no job logs at all — zero log fetches for either.)
+#   74  then (branch-only state, superseded) (+6 for the OPT82 lint workflow added to the corpus, `lint.yml` (1006):
+#            the same six calls `checks.yml` costs — one all-status run-list page,
+#            three `runs/{id}/jobs` pages, one `per_page=1` monthly-volume count and
+#            one `commits?path=<wf>&per_page=2` config-era lookup. Push-only, so no
+#            event-scoped volume call. The OPT82 detector ITSELF makes zero gh calls:
+#            its config fact is read from the `--root` checkout by scan.py and its
+#            timings are the jobs already sampled.)
+#   77  then (+9, on main before the OPT82 merge: OPT79's credited wall-clock arm: `chained.yml`'s `prep` — the slowest
+#            job of a workflow that gates pull requests — now restores a cache before
+#            `npm ci`, and the corpus carries three more sampled pull_request runs of
+#            it (7004-7006) so the hit and miss populations each reach the three-run
+#            minimum. +3 `runs/{id}/jobs` pages for those runs, +6 `prep` job logs for
+#            the cache probe (one per sampled occurrence, under the per-job cap of 8).
+#            No new check-runs or PR fetch: the new runs reuse existing head shas.)
+#   77  still (`build-matrix.yml` gains an `e2e` job, 240s and cacheless, on all
+#            12 sampled runs, so it becomes that workflow's long pole and the
+#            cached `integration` (180s) exercises OPT79's `below_long_pole` arm.
+#            Its jobs ride in the existing `runs/{id}/jobs` pages and it declares
+#            no cache, so it costs no call and no log fetch: measured, +0.)
+#   83  then (branch-only state, superseded) (main merged into the OPT82 branch: 68 + 6 for `lint.yml` (OPT82)
+#            + 9 for OPT79's credited wall-clock arm. The two ledgers are
+#            disjoint (`lint.yml` reads no logs; OPT79's calls are
+#            `chained.yml` runs and `prep` logs), so they add.)
+#   82  then (on main before the OPT82 merge: +5 for the ON-POLE OPT80 case: three more successful pull_request runs
+#            of `ci.yml` (5004-5006, reusing head shas aab2/aab3/aaaa so no new
+#            check-runs page is read) cost one `runs/{id}/jobs` page each (+3), and
+#            two of them are checkout tail runs whose logs OPT80 fetches to prove
+#            the stall (+2, one per tail run, inside `_OPT80_LOG_PROBE_MAX`). The
+#            tail line it stamps is derived from data already in hand: +0.
+#            The `..._branches_main_protection_required_status_checks.json`
+#            replay fixture costs +0 as well: the required-checks endpoint it
+#            answers was already called, so the fixture only supplies the
+#            response for an existing call.)
+#   88  then (main merged into the OPT82 branch again, after #114: 82 + 6 for
+#            `lint.yml` (OPT82). OPT80's five calls are `ci.yml` runs and
+#            their checkout logs; `lint.yml` reads no logs, so they add.)
+#   99  now  (main merged into the OPT81 branch, after #117: 88 + 11 for
+#            OPT81's measured half: `bench.yml` (1007), a push-only
+#            runner-comparison matrix. Its cost is the same any workflow pays: one
+#            all-status run-list page, EIGHT `runs/{id}/jobs` pages (eight sampled
+#            runs, two `bench` legs each), one `per_page=1` monthly-volume count and
+#            one `commits?path=<wf>&per_page=2` config-era lookup. OPT81 itself adds
+#            ZERO calls: both halves read only the jobs payloads and the critical
+#            path already in hand, with no log, no billing endpoint and no rate table.)
+#  105  now  (+6 for OPT83's corpus workflow `quality.yml` (1008), a pull_request
+#            workflow whose `quality` job is a required check: one all-status
+#            run-list page, three `runs/{id}/jobs` pages (8401-8403), one
+#            `per_page=1` monthly-volume count and one `commits?path=<wf>&per_page=2`
+#            config-era lookup. Its runs reuse the corpus's three PR head shas, so
+#            no new check-runs page or PR fetch is made (the existing pages carry
+#            its check run). The OPT83 detector itself makes ZERO calls: it reads
+#            the pole's stamped step decomposition and the workflow YAML.)
+#  111  now  (+6 for OPT84's corpus workflow `style.yml` (1009), a pull_request
+#            workflow whose `style` job is a required check: the same six calls
+#            `quality.yml` costs - one all-status run-list page, three
+#            `runs/{id}/jobs` pages (8501-8503), one `per_page=1` monthly-volume
+#            count and one `commits?path=<wf>&per_page=2` config-era lookup. Its
+#            runs reuse the corpus's three PR head shas, so no new check-runs page
+#            or PR fetch. The OPT84 detector itself makes ZERO calls: it reads the
+#            pole's stamped step decomposition, the workflow YAML and the scan's
+#            package.json / ESLint config facts from the checkout.)
+_GOLDEN_GH_QUERY_COUNT = 111
 # PR-H1: `push` is UNSCOPED (no `branches:`) so the same-head_sha push+PR run
 # pair in the corpus satisfies OPT47's structural precondition (a push scoped
 # only to the default branch is excluded by design).
@@ -126,7 +198,11 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # The name must equal the replayed `steps[].name` in the jobs fixtures
+      # ("Checkout"); the unnamed form folds to the same identity in production,
+      # so this is fixture consistency, not a detector fix.
+      - name: Checkout
+        uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -134,12 +210,21 @@ jobs:
         run: npm ci
       - name: Run tests
         run: npm test
+      # A `parallel:` group and a `wait-all:` on the POLE job (T8): the stamp
+      # names this job in `jobs_with_groups`, so the step drill and the long-pole
+      # map must word its steps as overlapping, end to end through the verifier.
+      - parallel:
+          - name: Docs
+            run: npm run docs
+          - name: Bundle size
+            run: npm run size
+      - wait-all:
 """
 
 # PR-H1: the second workflow (wf id 1002). Three tiny same-SKU matrix legs
 # (20/21/22s — each under OPT65's 60s tiny-job bar and under the workflow's own
-# floor, which is its SECOND-slowest job: build at 90s under integration at
-# 180s) drive the promotable OPT65 below-floor case, and its >10-run success
+# floor, which is its SECOND-slowest job: integration at 180s under the
+# cacheless e2e long pole at 240s) drive the promotable OPT65 below-floor case, and its >10-run success
 # sample makes the bill-pole fetch loop deepen a workflow OFFLINE (the shallow
 # depth is 10). Push-only, so it never joins the PR spine or the close's poles.
 _WF2_ID = 1002
@@ -152,8 +237,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build
-        run: npm run build
+      # A GitHub Actions `parallel:` group: the static detectors read both
+      # children through the step walker, and the findings carry the
+      # `parallel_steps` stamp that the report's "Parallel steps" row renders.
+      - parallel:
+          - name: Build
+            run: npm run build
+          - name: Build docs
+            run: npm run docs
   unit:
     runs-on: ubuntu-latest
     strategy:
@@ -174,6 +265,12 @@ jobs:
       - run: npm ci
       - name: Integration suite
         run: npm run integration
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: End-to-end suite
+        run: npm run e2e
   lint-eslint:
     name: lint (eslint)
     runs-on: ubuntu-latest
@@ -241,6 +338,17 @@ jobs:
 # ranking/cascade work is PR-N3's (recorded as-built in the plan).
 # Check-runs are named by the plain job name (GitHub's naming for plain jobs),
 # which is what the graph resolver keys on.
+#
+# `prep` also restores a cache before `npm ci`, and the corpus carries SIX
+# sampled pull_request runs (7001-7006, the last three reusing the first
+# three's head shas on later timestamps, so no new check-runs fixture and no
+# new PR population). Three are cache HITS (restore 30s + install 3s + post 0s
+# = 33s) and three are MISSES (1s + 7s + 4s = 12s): a 21s excess per hit on
+# the workflow's SLOWEST job, on a workflow that gates pull requests — OPT79's
+# credited WALL-CLOCK arm, capped at the 20s headroom to `verify`. Every `prep`
+# job is still exactly 120s in total (`Build artifact` absorbs the difference),
+# so prep's p50, the 220s chain, the poles order and every other corpus number
+# are unchanged by the cache steps.
 _WF3_ID = 1003
 _WF3_YAML = """name: Chained
 on:
@@ -251,6 +359,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: prep-deps-${{ hashFiles('**/package-lock.json') }}
+      - run: npm ci
       - name: Build artifact
         run: npm run build
       - uses: actions/upload-artifact@v4
@@ -270,7 +383,379 @@ jobs:
 """
 
 
-def _init_repo(root: Path, origin: str | None = _REPO) -> None:
+# OPT77's WHOLE-WORKFLOW arm, both outcomes. A group is "the whole workflow"
+# when every job the YAML DECLARES is a credited member and the sample carried
+# nothing else — there is then no remaining job to measure the consolidated job
+# against, so the comparison is against the gate the group sets TODAY (its
+# slowest member's measured p50). That arm has its own stamps
+# (`group_is_the_whole_workflow`, `gate_today_p50_s`, and `remaining_tallest_*`
+# deliberately `None`), its own rendered sentence, and its own re-derivation in
+# `verify_report`. None of it was reached by this e2e before these two
+# workflows existed: a hard `raise` placed inside either branch left the whole
+# test green.
+#
+# Both are PUSH-only, so neither joins the PR spine, the critical path or the
+# close's poles — the chain/headline assertions above are untouched by them.
+#
+# (wf id 1004) FIRES. Three independent same-runner jobs, each declaring the
+# same checkout → setup-node → `npm ci` prefix and measuring 400s (200s of
+# setup, a 200s task). The projection is `max(setup) + max(useful)` = 400s,
+# which is exactly the 400s the slowest member takes today, so consolidating
+# them does NOT lengthen the merge gate and the runner-minute saving is
+# credited. (The projection can never be BELOW the tallest member's own
+# setup + task, so an exact tie is the whole of this arm's firing region —
+# which is why the old "re-assemble the gate from step components" code could
+# fire almost nowhere.)
+_WF4_ID = 1004
+_WF4_YAML = """name: Checks
+on:
+  push:
+
+jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: npm run typecheck
+  contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: npm run contracts
+  schema:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: npm run schema
+"""
+
+# (wf id 1005) WITHHELD. The same shape, sized so the projection LOSES:
+# `alpha` and `beta` pay 100s of setup for a 10s task, `gamma` pays 60s for a
+# 50s task, and every one of them measures 110s. The consolidated job projects
+# to max(setup) 100s + max(task) 50s = 150s, which is 40s MORE than the 110s
+# the group sets today — so the bill saving is real but taking it would make
+# the merge wait longer. No finding; the group is disclosed on the findings
+# document and in the report's held-back row instead of vanishing.
+_WF5_ID = 1005
+_WF5_YAML = """name: Gates
+on:
+  push:
+
+jobs:
+  alpha:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: npm run alpha
+  beta:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: npm run beta
+  gamma:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: npm run gamma
+"""
+
+
+# OPT82 (lint builds the whole type graph), wf id 1006. One push-only job that
+# runs `npm run lint`, which resolves through the repo-tree package.json
+# (`lint` -> `lint:eslint` -> `eslint .`) to ESLint. It measures 93s at p50
+# (lint step 72s): above OPT82's 60s bar, and far below the 220s chain and the
+# 197s `CI / test` headline, so no pole, chain or headline assertion moves.
+# `build-matrix.yml`'s `lint (eslint)` job runs `npm run lint:eslint` too, at
+# 20s off that workflow's critical path: the below-threshold VERDICT, counted
+# and never listed as held back.
+# A second job, `eslint-web`, runs `npx eslint .` in `packages/web` (its
+# `defaults.run.working-directory`), whose own flat config sets
+# `projectService: process.env.CI` - a value this read cannot evaluate. At 75s
+# p50 it is over the bar, so it is HELD BACK and listed, never a verdict. It
+# rides on the same three sampled runs (`runs/820{1,2,3}/jobs` pages), so it
+# costs no gh call, and it is shorter than `eslint`, so lint.yml's long pole
+# does not move.
+_WF6_ID = 1006
+_WF6_YAML = """name: Lint
+on:
+  push:
+
+jobs:
+  eslint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Lint
+        run: npm run lint
+  eslint-web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Lint web
+        run: npx eslint .
+"""
+# `packages/web`'s own flat config: type-aware parsing hangs on an environment
+# variable, so whether the lint builds type information cannot be read offline.
+_ESLINT_CONFIG_WEB_UNRESOLVED = """export default [
+  {
+    languageOptions: { parserOptions: { projectService: process.env.CI } },
+    rules: { '@typescript-eslint/no-floating-promises': 'error' },
+  },
+];
+"""
+
+# The repo-tree side of OPT82: an ESLint flat config with type-aware parsing
+# on (`projectService: true`), two enumerable typescript-eslint rules, and one
+# CUSTOM rule whose source asks the parser for type information.
+_PACKAGE_JSON = """{
+  "name": "synthetic-repo",
+  "private": true,
+  "scripts": {
+    "lint": "npm run lint:eslint",
+    "lint:eslint": "eslint . --cache --max-warnings 0",
+    "lint:biome": "biome lint .",
+    "lint:stylelint": "stylelint 'src/**/*.css'",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "eslint": "^9.12.0"
+  }
+}
+"""
+# ESLint 9 is declared so the nested `packages/web` flat config does not apply
+# to the root `eslint` job (ESLint 9 looks the config up from the working
+# directory); without a version the root job is held back as ambiguous.
+_ESLINT_CONFIG_TYPE_AWARE = """import tseslint from 'typescript-eslint';
+import local from './eslint-rules/index.mjs';
+
+export default tseslint.config(
+  {
+    languageOptions: {
+      parserOptions: { projectService: true, tsconfigRootDir: import.meta.dirname },
+    },
+  },
+  {
+    plugins: { local },
+    rules: {
+      '@typescript-eslint/no-floating-promises': 'error',
+      '@typescript-eslint/no-misused-promises': 'error',
+      '@typescript-eslint/no-explicit-any': 'warn',
+      'local/no-unsafe-enum-access': 'error',
+    },
+  },
+);
+"""
+# The syntax-only twin: its rules block holds only `no-explicit-any`, with no
+# type-aware parsing and no type-checked preset. This pins the
+# `type_aware_parsing_off` VERDICT (a measured "no", not a held-back withhold)
+# for the lint job, and the detector emits nothing.
+_ESLINT_CONFIG_SYNTAX_ONLY = """import tseslint from 'typescript-eslint';
+
+export default tseslint.config(
+  { rules: { '@typescript-eslint/no-explicit-any': 'warn' } },
+);
+"""
+_ESLINT_RULES_INDEX = """import noUnsafeEnumAccess from './no-unsafe-enum-access.mjs';
+export default { rules: { 'no-unsafe-enum-access': noUnsafeEnumAccess } };
+"""
+_ESLINT_TYPED_RULE = """import { ESLintUtils } from '@typescript-eslint/utils';
+export default {
+  meta: { type: 'problem', schema: [] },
+  create(context) {
+    const checker = ESLintUtils.getParserServices(context).program.getTypeChecker();
+    return { MemberExpression(node) { void checker; void node; } };
+  },
+};
+"""
+
+
+# OPT81 A1 (wf id 1007, runs 8301-8308; these never collide with OPT82's
+# `lint.yml`, which holds 1006 / 8201-8203).
+# A runner-comparison matrix: one job, `bench`, with a
+# STATIC display name, run on a standard GitHub-hosted label and on a larger
+# GitHub-hosted size in every one of eight push runs (the workflow is
+# `on: push`) — the same steps on both, 150s at the median on `ubuntu-latest`
+# and 90s on `ubuntu-latest-8-cores`.
+# The repo's own history therefore already holds both distributions, eight
+# successful samples each, which is exactly what A1 compares; nothing is
+# projected.
+#
+# Blast radius, chosen deliberately: `bench` is this workflow's long pole, but
+# both labels run in every one of the eight runs, so A1 reads it as a runner
+# matrix: the gap is measured and stated, and no wall-clock is credited (every
+# run executes both legs). The workflow is push-only, so even a credited gap
+# would be floored to 0 by `bound_developer_facing` (not a pull-request wait).
+# The headline, the chain and every pole assertion above stay exactly as they
+# were. Making it the pole would have rewritten the headline to prove nothing
+# A1's own unit tests do not.
+# `timeout-minutes` is declared so OPT57 plans no extra event-scoped run list.
+_WF7_ID = 1007
+_WF7_YAML = """name: Bench
+on:
+  push:
+
+jobs:
+  bench:
+    name: bench
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        runner: [ubuntu-latest, ubuntu-latest-8-cores]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run benchmarks
+        run: npm run bench
+"""
+
+
+# OPT83 (independent steps on the long pole run one after another), wf id 1008,
+# runs 8401-8403 (never colliding with OPT81's `bench.yml`, 1007 / 8301-8308).
+# OPT83 is routed from the DRILLED POLES only, and the poles come from the pull
+# request critical path, so this is a pull_request workflow (a push-only one
+# would never be drilled) whose one job, `quality`, is a REQUIRED check (a
+# non-required check is scoped off the spine and never becomes a pole). It runs
+# on the same three PR head shas as the rest of the corpus, so it adds a check
+# run to each existing check-runs page and no new PR. At 96s it is the shortest
+# required check (under `verify`'s 100s, the 197s `CI / test` and the 220s
+# chain), so the chain, the headline, the critical-path check and the first
+# three poles are unchanged: it renders as pole 4.
+# Its steps: checkout 3s, `npm ci` 12s, then `Lint` 30s, `Typecheck` 25s and
+# `Unit tests` 25s, three compute steps written one after another, each at least
+# 20s and 15% of the job, none reading another's outputs, env or files and none
+# a build. OPT83 fires with an upper bound of 80 - 30 = 50s, uncredited.
+# Lint is Biome (never ESLint, so OPT82 stays on lint.yml), and scan steps
+# dominate (55s vs 25s of test), so OPT81's advisory reads it as not compute.
+_WF8_ID = 1008
+_WF8_YAML = """name: Quality
+on:
+  pull_request:
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - run: npm ci
+      - name: Lint
+        run: npx biome check .
+      - name: Typecheck
+        run: npx tsc --noEmit
+      - name: Unit tests
+        run: npm test
+"""
+# The withhold twin: `Lint` writes a value to GITHUB_OUTPUT that `Typecheck`
+# reads, so the steps are not independent. Same timings, same job: OPT83 must
+# hold the pole back and name it, never fire.
+_WF8_YAML_DEPENDENT = _WF8_YAML.replace(
+    "      - name: Lint\n        run: npx biome check .\n",
+    "      - name: Lint\n        id: lint\n"
+    "        run: npx biome check . && echo \"count=3\" >> \"$GITHUB_OUTPUT\"\n",
+).replace(
+    "        run: npx tsc --noEmit\n",
+    "        run: npx tsc --noEmit --maxNodeModuleJsDepth ${{ steps.lint.outputs.count }}\n")
+
+
+# OPT84 (a slow step on the long pole runs a tool that has a native drop-in),
+# wf id 1009, runs 8501-8503 (never colliding with OPT83's `quality.yml`, 1008 /
+# 8401-8403). Shaped like mastra's lint pole. OPT84 is routed from the DRILLED
+# POLES only, so, like `quality.yml`, this is a pull_request workflow whose one
+# job, `style`, is a REQUIRED check, run on the corpus's three PR head shas (one
+# more check run on each existing check-runs page, no new PR). At 92s it is the
+# shortest required check (under `quality`'s 96s), so the chain, the headline
+# and poles 1-4 are unchanged: it renders as pole 5 (the drill's cap). It must
+# stay at or above the 90s triage floor (`_TRIAGE_WALLCLOCK_FLOOR_S`): a 68s
+# version was triaged fast, its jobs never drilled, and it never became a pole.
+# Its steps: checkout 3s, `npm ci` 36s, then ONE heavy step, `Run lint and
+# format checks` (52s, 57% of the job), which runs `pnpm lint` in `apps/site`.
+# That package's own package.json resolves it to `eslint . && prettier --check .`
+# (two table tools on one step, so the split is unknown), declares `eslint` and
+# `prettier` and no `typescript`, and its flat config loads one framework plugin
+# (react), so the ESLint row is a dual-run. The config is not type-aware, so
+# OPT82 has nothing to report on this step and never defers it. OPT83 reads one
+# qualifying step (a verdict). OPT84 fires once, uncredited, ceiling 52s.
+# The workflow file is `style.yml`, not `lint.yml`: `lint.yml` is OPT82's
+# corpus workflow (1006).
+_WF9_ID = 1009
+_WF9_YAML = """name: Style
+on:
+  pull_request:
+
+jobs:
+  style:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - run: npm ci
+      - name: Run lint and format checks
+        working-directory: apps/site
+        run: pnpm lint
+"""
+_SITE_PACKAGE_JSON = """{
+  "name": "site",
+  "private": true,
+  "scripts": {
+    "lint": "eslint . && prettier --check ."
+  },
+  "devDependencies": {
+    "eslint": "^9.12.0",
+    "eslint-plugin-react": "^7.37.0",
+    "prettier": "^3.3.3"
+  }
+}
+"""
+_SITE_ESLINT_CONFIG = """import react from 'eslint-plugin-react';
+
+export default [
+  {
+    plugins: { react },
+    rules: { 'react/jsx-key': 'error' },
+  },
+];
+"""
+
+def _init_repo(root: Path, origin: str | None = _REPO,
+               eslint_config: str = _ESLINT_CONFIG_TYPE_AWARE,
+               quality_yaml: str = _WF8_YAML) -> None:
     """A one-commit git checkout carrying just the workflows the fixture corpus
     was recorded against. Committer identity travels via env vars (not global
     git config), so this works on a bare runner with no configured identity.
@@ -284,6 +769,25 @@ def _init_repo(root: Path, origin: str | None = _REPO) -> None:
     (root / ".github" / "workflows" / "ci.yml").write_text(_WF_YAML, encoding="utf-8")
     (root / ".github" / "workflows" / "build-matrix.yml").write_text(_WF2_YAML, encoding="utf-8")
     (root / ".github" / "workflows" / "chained.yml").write_text(_WF3_YAML, encoding="utf-8")
+    (root / ".github" / "workflows" / "checks.yml").write_text(_WF4_YAML, encoding="utf-8")
+    (root / ".github" / "workflows" / "gates.yml").write_text(_WF5_YAML, encoding="utf-8")
+    (root / ".github" / "workflows" / "lint.yml").write_text(_WF6_YAML, encoding="utf-8")
+    (root / ".github" / "workflows" / "bench.yml").write_text(_WF7_YAML, encoding="utf-8")
+    (root / ".github" / "workflows" / "quality.yml").write_text(quality_yaml, encoding="utf-8")
+    (root / ".github" / "workflows" / "style.yml").write_text(_WF9_YAML, encoding="utf-8")
+    (root / "apps" / "site").mkdir(parents=True)
+    (root / "apps" / "site" / "package.json").write_text(_SITE_PACKAGE_JSON, encoding="utf-8")
+    (root / "apps" / "site" / "eslint.config.mjs").write_text(
+        _SITE_ESLINT_CONFIG, encoding="utf-8")
+    (root / "package.json").write_text(_PACKAGE_JSON, encoding="utf-8")
+    (root / "eslint.config.mjs").write_text(eslint_config, encoding="utf-8")
+    (root / "eslint-rules").mkdir()
+    (root / "eslint-rules" / "index.mjs").write_text(_ESLINT_RULES_INDEX, encoding="utf-8")
+    (root / "eslint-rules" / "no-unsafe-enum-access.mjs").write_text(
+        _ESLINT_TYPED_RULE, encoding="utf-8")
+    (root / "packages" / "web").mkdir(parents=True)
+    (root / "packages" / "web" / "eslint.config.mjs").write_text(
+        _ESLINT_CONFIG_WEB_UNRESOLVED, encoding="utf-8")
     env = {**os.environ,
            "GIT_AUTHOR_NAME": "ci-speedup-test", "GIT_AUTHOR_EMAIL": "test@example.com",
            "GIT_COMMITTER_NAME": "ci-speedup-test", "GIT_COMMITTER_EMAIL": "test@example.com"}
@@ -300,7 +804,8 @@ def _init_repo(root: Path, origin: str | None = _REPO) -> None:
         subprocess.run(["git", "remote", "add", "origin",
                         f"https://github.com/{origin}.git"],
                        cwd=root, check=True, env=env)
-    subprocess.run(["git", "add", ".github"], cwd=root, check=True, env=env)
+    subprocess.run(["git", "add", ".github", "package.json", "eslint.config.mjs",
+                    "eslint-rules", "packages", "apps"], cwd=root, check=True, env=env)
     subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=root, check=True, env=env)
 
 
@@ -324,7 +829,8 @@ def _monthly_volume_endpoints_bracket() -> list[str]:
     for off in range(-1, 31):
         since = ((now + _dt.timedelta(seconds=off)) - _dt.timedelta(days=30)
                  ).strftime("%Y-%m-%dT%H:%M:%SZ")
-        for wf_id in (_WF_ID, _WF2_ID, _WF3_ID):
+        for wf_id in (_WF_ID, _WF2_ID, _WF3_ID, _WF4_ID, _WF5_ID, _WF6_ID, _WF7_ID,
+                      _WF8_ID, _WF9_ID):
             out.append(f"repos/{_REPO}/actions/workflows/{wf_id}/runs"
                        f"?per_page=1&created=>={since}")
             out.append(f"repos/{_REPO}/actions/workflows/{wf_id}/runs"
@@ -419,23 +925,65 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
 
     data = json.loads(findings_path.read_text(encoding="utf-8"))
 
+    # OPT82 end to end: scan read the type-aware config off the checkout, and
+    # the collector joined it to `lint.yml`'s 93s lint job through two package
+    # scripts. The finding carries NO number and names every enumerable rule,
+    # the custom one included.
+    o82 = [f for f in data["findings"] if f.get("pattern") == "OPT82"]
+    assert len(o82) == 1, [f.get("workflow_file") for f in o82]
+    tal = o82[0]["type_aware_lint"]
+    assert o82[0]["workflow_file"] == ".github/workflows/lint.yml"
+    assert o82[0]["affected_jobs"] == ["eslint"]
+    assert not (o82[0].get("wall_clock_p50_s") or 0) > 0
+    assert not o82[0].get("runner_min_saving")
+    assert [r["rule"] for r in tal["rules"]] == [
+        "@typescript-eslint/no-floating-promises",
+        "@typescript-eslint/no-misused-promises",
+        "local/no-unsafe-enum-access"], tal["rules"]
+    assert tal["lint_command"] == "eslint . --cache --max-warnings 0", tal
+    assert tal["ceiling_basis"] == "lint_step" and tal["ceiling_s"] == 72.0, tal
+    assert tal["lint_job_p50_s"] == 93.0, tal
+    # No sampled workflow declares `merge_group`: the collector stamps that, so
+    # the prompt keeps the full type-aware pass a required PR check.
+    assert tal.get("merge_group_workflows") == [], tal
+    # `build-matrix.yml`'s 20s `lint (eslint)` resolves to ESLint too, and is the
+    # below-threshold VERDICT — counted, never held back.
+    assert (data.get("opt82_withheld_by_gate") or {}).get(
+        "lint_job_below_cost_threshold") == 1, data.get("opt82_withheld_by_gate")
+    # `lint.yml`'s `eslint-web` (75s, `packages/web`) is the HELD-BACK case: its
+    # config's type-aware setting is an expression, so it is listed by name.
+    assert data.get("opt82_withheld_candidates") == [
+        {"workflow_file": ".github/workflows/lint.yml", "job": "eslint-web",
+         "gate": "type_aware_setting_unresolvable"}], data.get("opt82_withheld_candidates")
+    assert (data.get("opt82_withheld_by_gate") or {}).get(
+        "type_aware_setting_unresolvable") == 1, data.get("opt82_withheld_by_gate")
+
     # OPT77 end to end. `build-matrix.yml` carries three plain same-runner lint checks
-    # that each re-pay one 14s setup prefix before 6s of work, beside a 180s
-    # `integration` job that survives the consolidation. Both the detector's
+    # that each re-pay one 14s setup prefix before 6s of work, beside the 240s
+    # `e2e` job (the workflow's slowest; `integration` is next at 180s) that
+    # survives the consolidation. Both the detector's
     # DISPATCH and the supersede step that follows it were pinned only by reading
     # collect()'s source: `new = [] if True else _detect_opt77(...)` and deleting
     # the supersede line each left the whole suite green. This executes them.
-    o77 = [f for f in data["findings"] if f.get("pattern") == "OPT77"]
+    o77_all = [f for f in data["findings"] if f.get("pattern") == "OPT77"]
+    o77 = [f for f in o77_all if "build-matrix.yml" in str(f.get("workflow_file", ""))]
     assert len(o77) == 1, (
         "the three plain same-runner lint checks in build-matrix.yml must promote one "
         f"OPT77 consolidation (got {[f.get('affected_jobs') for f in o77]!r})")
     sc = o77[0].get("setup_consolidation") or {}
     assert sc.get("kind") == "opt77_repeated_setup", sc
+    # …and this one went down the ORDINARY arm, so it carries that arm's stamps
+    # and NOT the whole-workflow arm's. The two shapes are mutually exclusive;
+    # a finding carrying both is a finding whose gate cannot be re-derived.
+    assert sc.get("group_is_the_whole_workflow") is False, sc
+    assert sc.get("gate_today_p50_s") is None, sc
     assert sorted(sc.get("credited_jobs") or []) == [
         "lint (biome)", "lint (eslint)", "lint (stylelint)"], sc.get("credited_jobs")
     assert o77[0].get("wall_clock_p50_s") in (0, 0.0)
     assert float(sc.get("setup_p50_s") or 0.0) > 0.0
-    assert sc.get("remaining_tallest_job") == "integration", sc
+    # `e2e` (240s) is the tallest job left outside the group since it joined the
+    # corpus as build-matrix.yml's long pole; it was `integration` (180s) before.
+    assert sc.get("remaining_tallest_job") == "e2e", sc
     # ...and the round-up lever must not ALSO claim those three jobs: they are named
     # like matrix legs, so OPT65 groups them too, and one edit rendering as two
     # levers is exactly what the supersede step exists to stop.
@@ -465,9 +1013,70 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
         {"workflow_file": ".github/workflows/build-matrix.yml",
          "group": "ubuntu-latest/docs-format+docs-links+docs-spell",
          "jobs": ["docs-format", "docs-links", "docs-spell"],
-         "gate": "group_never_ran_complete_in_one_sampled_run"}], (
+         "gate": "group_never_ran_complete_in_one_sampled_run"},
+        # …and the WITHHOLD half of the whole-workflow arm (checks.yml's sibling,
+        # `gates.yml`, wf 1005). Three jobs are every job that workflow declares,
+        # so there is nothing left to measure the consolidated job against and the
+        # comparison is against the gate the group sets today: 110s, the slowest
+        # member's measured p50. The projection is max(setup) 100s + max(task) 50s
+        # = 150s, so taking the bill saving would make the merge wait 40s LONGER.
+        # Held back — and the two numbers that make the refusal checkable go onto
+        # the findings document with it, because the Data sources cell prints one
+        # reason for the whole list and cannot carry a per-candidate number.
+        {"workflow_file": ".github/workflows/gates.yml",
+         "group": "ubuntu-latest/alpha+beta+gamma",
+         "jobs": ["alpha", "beta", "gamma"],
+         "gate": "collapsing_the_whole_workflow_would_lengthen_the_merge_gate",
+         "gate_today_p50_s": 110.0,
+         "projected_consolidated_p50_s": 150.0}], (
         "the held-back docs group must be listed on the findings document: "
         f"{data.get('opt77_withheld_candidates')!r}")
+    # …counted on the per-gate tally too, so the whole-workflow refusal has a
+    # visible firing rate rather than being indistinguishable from a dead gate.
+    assert (data["opt77_withheld_by_gate"].get(
+        "collapsing_the_whole_workflow_would_lengthen_the_merge_gate") == 1), (
+        "the whole-workflow withhold must be counted once: "
+        f"{data.get('opt77_withheld_by_gate')!r}")
+    # …and no OPT77 finding was promoted for that workflow.
+    assert not [f for f in o77_all if "gates.yml" in str(f.get("workflow_file", ""))], (
+        "gates.yml's group projects ABOVE the gate it sets today — it must not "
+        "promote a finding")
+
+    # ---- OPT77's WHOLE-WORKFLOW arm, the FIRING half (checks.yml, wf 1004) ----
+    # The only OPT77 path that credits a group with no remaining job to measure
+    # against, and the only one with a separate re-derivation in verify_report.
+    # Nothing reached it before this fixture: a hard `raise` inside the FIRE
+    # branch, and separately inside the WITHHOLD branch, each left this e2e
+    # green (while a `raise` at `if not eligible:` reddened it — groups formed,
+    # but neither arm ran).
+    o77_whole = [f for f in o77_all if "checks.yml" in str(f.get("workflow_file", ""))]
+    assert len(o77_whole) == 1, (
+        "checks.yml's three same-runner jobs are every job it declares and their "
+        "projection ties the gate they set today — exactly one OPT77 finding "
+        f"(got {[f.get('affected_jobs') for f in o77_whole]!r})")
+    scw = o77_whole[0].get("setup_consolidation") or {}
+    assert scw.get("kind") == "opt77_repeated_setup", scw
+    assert scw.get("credited_jobs") == ["contracts", "schema", "typecheck"], scw
+    assert scw.get("group_is_the_whole_workflow") is True, scw
+    # Today's gate is the slowest member's MEASURED p50 (400s), never the sum of
+    # its step components — three members measuring 400s were once told in the
+    # report's own prose that they take 90s today.
+    assert scw.get("gate_today_p50_s") == 400.0, scw
+    assert scw.get("projected_consolidated_p50_s") == 400.0, scw
+    assert scw.get("workflow_declared_job_keys") == [
+        "contracts", "schema", "typecheck"], scw
+    # The ordinary arm's stamps are explicitly NULL here: there is no job outside
+    # the group, so naming one would be a fabrication — and a `None` that leaks
+    # into the rendered sentence is what the render assertions below rule out.
+    assert scw.get("remaining_tallest_job") is None, scw
+    assert scw.get("remaining_tallest_p50_s") is None, scw
+    assert o77_whole[0].get("wall_clock_p50_s") in (0, 0.0), o77_whole[0]
+    assert (o77_whole[0].get("runner_min_saving") or 0) > 0, o77_whole[0]
+    _ev_whole = str(o77_whole[0].get("evidence") or "")
+    assert ("against the 400s the group's slowest member takes today" in _ev_whole
+            and "does not lengthen that wait" in _ev_whole), _ev_whole
+    assert "None" not in _ev_whole, _ev_whole
+    assert "becomes this workflow's longest job" not in _ev_whole, _ev_whole
 
     # OPT79 end to end, including the LOG fetch nothing else in the plain path
     # makes. `build-matrix.yml`'s `deps` job restores a cache and then installs; the
@@ -476,10 +1085,17 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     # the detector's DISPATCH and the capped log probe that feeds it are only
     # reachable through collect(): short-circuiting the detector call, or
     # discarding its result, leaves every unit test green.
-    o79 = [f for f in data["findings"] if f.get("pattern") == "OPT79"]
-    assert len(o79) == 1, (
-        "the `deps` job in build-matrix.yml must promote one OPT79 net-negative cache "
-        f"(got {[f.get('affected_jobs') for f in o79]!r})")
+    o79_all = [f for f in data["findings"] if f.get("pattern") == "OPT79"]
+    # THREE OPT79 findings now: `deps` (below its workflow's floor — credited
+    # runner-minutes, Tier-2, `below_cluster_floor`), `integration` (AT or above
+    # build-matrix.yml's floor but below its slowest job `e2e` — credited
+    # runner-minutes, Tier-2, `below_long_pole`) and `prep` (chained.yml's slowest
+    # job, on a workflow that gates pull requests — credited WALL-CLOCK, no minutes).
+    assert sorted(tuple(f.get("affected_jobs") or []) for f in o79_all) == [
+        ("deps",), ("integration",), ("prep",)], (
+        "expected credited OPT79s on `deps` and `integration` and one pole OPT79 "
+        f"on `prep` (got {[f.get('affected_jobs') for f in o79_all]!r})")
+    o79 = [f for f in o79_all if f.get("affected_jobs") == ["deps"]]
     cn = o79[0].get("cache_net_negative") or {}
     assert cn.get("kind") == "opt79_net_negative_cache", cn
     assert cn.get("job") == "deps" and o79[0].get("affected_jobs") == ["deps"], cn
@@ -510,20 +1126,75 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     # counted. An empty tally is what a collect() that stopped passing the
     # accumulator to the detector produces.
     assert (_o79_gates.get("job_declares_no_cache_restore_step") or 0) > 0, _o79_gates
-    # The uncredited path end to end. `build-matrix.yml`'s `integration` job is that
-    # workflow's slowest job and also restores a cache before `npm ci`: 33s on
-    # its hit runs against 12s on its miss runs. It cannot be priced (it is not
-    # below the cluster floor), so it is reported with no number — and since the
-    # workflow runs only on push, never as a merge wait.
+    # The at-or-above-the-floor, below-the-long-pole arm end to end.
+    # `build-matrix.yml`'s `integration` job (180s) restores a cache before
+    # `npm ci`: 33s on its hit runs against 12s on its miss runs. It sits AT
+    # the workflow's cluster floor (the second-slowest job's p50 — itself), so the
+    # below-the-floor proof does not apply, but it is shorter than the slowest job
+    # `e2e` (240s): shrinking it cannot make the workflow take longer. Credited runner-minutes, with its own proof token and a margin
+    # measured against the slowest job, never against the floor.
+    o79_lp = next(f for f in o79_all if f.get("affected_jobs") == ["integration"])
+    lcn = o79_lp.get("cache_net_negative") or {}
+    assert lcn.get("kind") == "opt79_net_negative_cache", lcn
+    assert lcn.get("waste_s") == 21.0, lcn
+    assert lcn.get("hits") == 4 and lcn.get("misses") == 4, lcn
+    assert o79_lp.get("wall_clock_p50_s") in (0, 0.0), o79_lp
+    assert (o79_lp.get("runner_min_saving") or 0) > 0, o79_lp
+    _lcert = o79_lp.get("tier2_neutrality") or {}
+    assert _lcert.get("proof") == "below_long_pole", _lcert
+    assert _lcert.get("margin_s") == 60.0, _lcert            # 240s - 180s
+    assert "`e2e`" in str(_lcert.get("ref") or ""), _lcert
+    assert "shorter than the workflow's slowest job (`e2e`, 240s)" in str(o79_lp.get("size_note") or ""), o79_lp
+    # …and the uncredited list is EMPTY on this corpus: the only case it used to
+    # hold here was this job, and the long poles (`e2e`, `prep`) are either
+    # cacheless or credited.
     _unc = data.get("opt79_uncredited_pole_caches")
-    assert isinstance(_unc, list) and len(_unc) == 1, _unc
-    assert _unc[0].get("job") == "integration", _unc[0]
-    assert _unc[0].get("waste_s") == 21.0, _unc[0]
-    assert _unc[0].get("hits") == 4 and _unc[0].get("misses") == 4, _unc[0]
-    assert _unc[0].get("runner_min_saving") is None, _unc[0]
-    assert _unc[0].get("on_critical_path") is False, _unc[0]
-    assert _unc[0].get("workflow_gates_pull_requests") is False, _unc[0]
-    # Nothing was probed and withheld on this corpus: both candidates decided.
+    assert _unc == [], _unc
+    assert "job_not_strictly_below_the_workflow_cluster_floor" not in _o79_gates, _o79_gates
+    # The credited WALL-CLOCK arm end to end. `chained.yml`'s `prep` is that
+    # workflow's slowest job (120s; `verify` is next at 100s) and the workflow
+    # runs on pull requests, so its net-negative cache — 33s on 3 hit runs vs
+    # 12s on 3 miss runs, a 21s excess per hit — is ON the merge wait. It is
+    # sized as wall-clock, capped at the 20s headroom to `verify` (beyond that,
+    # `verify` gates the run), and states no runner-minutes.
+    pole79 = next(f for f in o79_all if f.get("affected_jobs") == ["prep"])
+    pcn = pole79.get("cache_net_negative") or {}
+    assert pcn.get("kind") == "opt79_pole_net_negative_cache", pcn
+    assert pcn.get("hits") == 3 and pcn.get("misses") == 3, pcn
+    assert pcn.get("hit_path_p50_s") == 33.0 and pcn.get("miss_path_p50_s") == 12.0, pcn
+    assert pcn.get("waste_s") == 21.0, pcn
+    assert pcn.get("on_critical_path") is True, pcn
+    assert pcn.get("workflow_gates_pull_requests") is True, pcn
+    _ps = pcn.get("pole_sizing") or {}
+    assert _ps.get("long_pole_job") == "prep" and _ps.get("next_tallest_job") == "verify", _ps
+    assert _ps.get("long_pole_p50_s") == 120.0 and _ps.get("floor_p50_s") == 100.0, _ps
+    assert _ps.get("headroom_s") == 20.0 and _ps.get("raw_wall_clock_s") == 20.0, _ps
+    assert _ps.get("capped_by_next_tallest_job") is True, _ps
+    # The generic cascade then runs over it; on this corpus nothing shrinks it
+    # further (the chain-aware critical-path bound allows up to the 23s chain
+    # headroom), so the credited number is the capped raw value.
+    assert pole79.get("wall_clock_uncapped_p50_s", pole79.get("wall_clock_p50_s")) == 20.0, pole79
+    assert pole79.get("wall_clock_p50_s") == 20.0, pole79
+    assert pole79.get("runner_min_saving") is None and pcn.get("runner_min_saving") is None
+    assert "tier2_neutrality" not in pole79, pole79
+    assert pole79.get("sizing_basis") == "measured" and pole79.get("tier") == 1, pole79
+    _pev = str(pole79.get("evidence") or "")
+    assert "`prep` is this workflow's slowest job at 120s" in _pev, _pev
+    assert "its next-tallest job, `verify`, runs 100s" in _pev, _pev
+    assert ("the audit caps the saving at that 20s gap, so up to 20s of the excess "
+            "comes off the merge wait on the 50% of sampled runs where the cache hit "
+            "(3 of 6 runs read)") in _pev, _pev
+    assert pcn.get("hit_share") == 0.5 and pcn.get("ambiguous_runs") == 0, pcn
+    # `verify` has `needs: prep` on this corpus, so it neither "finishes at"
+    # 100s nor sets the merge wait on its own: the cap compares job durations,
+    # not the chain. No sentence the pole finding emits may claim otherwise.
+    _pnote = str((pole79.get("measured_evidence") or {}).get("note") or "")
+    for _txt in (_pev, _pnote, str(pole79.get("size_note") or ""),
+                 str(pole79.get("measured_signal") or "")):
+        assert "finishes at" not in _txt, _txt
+        assert "sets the merge wait" not in _txt, _txt
+        assert "gates the merge wait" not in _txt, _txt
+    # Nothing was probed and withheld on this corpus: every candidate decided.
     assert data.get("opt79_withheld_candidates") == [], data.get(
         "opt79_withheld_candidates")
     # …and the run DECLARES those reads in its provenance, as its own row. The
@@ -533,11 +1204,12 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     # were read is the failure this separate row exists to prevent.
     _probe = (data.get("data_sources") or {}).get("cache_probe_logs")
     assert isinstance(_probe, dict), data.get("data_sources")
-    assert _probe.get("probed") == 16 and _probe.get("returned") == 16, _probe
+    # 8 `deps` + 8 `integration` + 6 `prep` (every sampled occurrence of it).
+    assert _probe.get("probed") == 22 and _probe.get("returned") == 22, _probe
     # PLANNED is stamped beside them: when the repo-wide budget cuts the plan the
     # comparison saw less of the repository than its selector asked for, and the
     # row has to say so. Here nothing was cut, so the two agree.
-    assert _probe.get("planned") == 16, _probe
+    assert _probe.get("planned") == 22, _probe
     # setup-node's automatic cache: no job in this corpus runs setup-node v5+
     # without a `cache:` input (`ci.yml` pins v4), so no cache count depends on
     # package.json and it is NOT read — no gh call, no disk read. The stamp says
@@ -552,10 +1224,12 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     # reach. Two mutants must redden it: short-circuiting the call
     # (`new = [] if True else _detect_opt80_…`) and discarding its result
     # (dropping the `findings.extend(new)`).
-    o80 = [f for f in data["findings"] if f.get("pattern") == "OPT80"]
-    assert len(o80) == 1, (
-        "build-matrix.yml's `smoke` job must promote exactly one OPT80 finding "
-        f"(got {[f.get('affected_jobs') for f in o80]!r})")
+    o80_all = [f for f in data["findings"] if f.get("pattern") == "OPT80"]
+    assert sorted(str((f.get("affected_jobs") or [""])[0]) for f in o80_all) == [
+        "smoke", "test"], (
+        "build-matrix.yml's `smoke` job and ci.yml's `test` job must each promote "
+        f"exactly one OPT80 finding (got {[f.get('affected_jobs') for f in o80_all]!r})")
+    o80 = [f for f in o80_all if f.get("affected_jobs") == ["smoke"]]
     cs = o80[0].get("checkout_stall") or {}
     assert cs.get("kind") == "opt80_checkout_tail_stall", cs
     assert cs.get("job") == "smoke" and o80[0]["affected_jobs"] == ["smoke"]
@@ -576,6 +1250,44 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     assert cs.get("logs_fetched") == 2, cs
     assert cs.get("logs_fetched") <= cs.get("log_probe_max")
     assert o80[0].get("tier2_neutrality", {}).get("proof") == "checkout_tail_excess"
+    # `smoke` is not build-matrix's slowest job (`integration` is), so it is off
+    # the critical path and carries no tail line. Its workflow being push-only
+    # would block the tail axis independently of that.
+    assert cs.get("on_critical_path") is False, cs
+    assert "tail_axis" not in cs, cs
+    # The ON-POLE pull-request case. ci.yml's `test` job is the PR critical path's
+    # slowest check (`CI / test`, 197s) and checks out in 5s on four of its six
+    # sampled pull_request runs and 125s / 95s on two (runs 5004 / 5005), whose
+    # logs hold the transfer at 17% for 90s / 60s. The median run never stalls,
+    # so `wall_clock_p50_s` stays 0 — but one run in three spends about 105s longer on
+    # checkout, and that is stamped as a SEPARATE tail axis, re-derived
+    # from the per-run durations and the proven runs alone:
+    #   sampled_runs 6, slow_runs 2, logs_read 2, tail_runs 2 (log-proven),
+    #   logs_clean 0, logs_unreadable 0 (both read logs prove the stall),
+    #   counted_runs 2 - 0 clean = 2, one_in_n round(6/2) = 3,
+    #   typical p50 5s, tail p50 median(125, 95) = 110s, loss 110 - 5 = 105s.
+    o80_pole = [f for f in o80_all if f.get("affected_jobs") == ["test"]]
+    cs_pole = o80_pole[0].get("checkout_stall") or {}
+    assert o80_pole[0]["workflow_file"].endswith("ci.yml"), o80_pole[0]
+    assert cs_pole.get("on_critical_path") is True, cs_pole
+    assert o80_pole[0].get("wall_clock_p50_s") in (0, 0.0), o80_pole[0]
+    assert cs_pole.get("tail_axis") == {
+        "sampled_runs": 6, "slow_runs": 2, "logs_read": 2, "tail_runs": 2,
+        "logs_clean": 0, "logs_unreadable": 0,
+        "counted_runs": 2, "one_in_n": 3,
+        "typical_checkout_p50_s": 5.0, "tail_checkout_p50_s": 110.0,
+        "tail_loss_s": 105.0, "on_critical_path": True,
+        # `CI / test` is a required check (the corpus's classic branch
+        # protection), so the merge waits on it: the tail line is earned. With
+        # no readable required set, or a slow job nothing requires, there is
+        # no tail line at all.
+        "merge_gating": {"basis": "required", "required_check": "CI / test",
+                         "required_job": "test", "job_key": "test"},
+    }, cs_pole.get("tail_axis")
+    # The tail line replaces the old "measured … but not credited in this
+    # version" sentence for the on-pole pull-request case only.
+    assert "not credited in this version" not in str(o80_pole[0].get("evidence")), (
+        o80_pole[0].get("evidence"))
     assert isinstance(data.get("opt80_withheld_by_gate"), dict), (
         "the per-gate withhold tally must be stamped on every collected run")
     # A candidate OPT80 measured and could NOT decide, end to end. build-matrix.yml's
@@ -645,11 +1357,21 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     member = next((f for f in data["findings"]
                    if f.get("pattern") == "OPT75"
                    and "chained.yml" in str(f.get("workflow_file", ""))), None)
-    if member is not None:
-        chain_win = float((pcp.get("chain_summary") or {}).get("chain_win_p50_s") or 0.0)
-        assert 0.0 < float(member.get("wall_clock_p50_s") or 0.0) <= chain_win + 0.1, (
+    # Stated, not guarded by `if member is not None`: the chain's OPT75 member is
+    # `verify`. `prep` routes to OPT72 (setup-dominated), and the OPT79 pole-cache
+    # finding's 20s wall-clock on `prep` does NOT suppress that structural lever:
+    # a hygiene saving suppresses a pole's structural lever only when it covers at
+    # least half the pole's p50 (60s of prep's 120s), and 20s does not.
+    assert member is not None and member.get("affected_jobs") == ["verify"], member
+    _prep_struct = [f for f in data["findings"]
+                    if "chained.yml" in str(f.get("workflow_file", ""))
+                    and f.get("structural") and f.get("affected_jobs") == ["prep"]]
+    assert [f.get("pattern") for f in _prep_struct] == ["OPT72"], _prep_struct
+    chain_win = float((pcp.get("chain_summary") or {}).get("chain_win_p50_s") or 0.0)
+    for _m in (member, _prep_struct[0]):
+        assert 0.0 < float(_m.get("wall_clock_p50_s") or 0.0) <= chain_win + 0.1, (
             "a chain member's lever must be positive and capped at the chain "
-            f"headroom (~{chain_win}s; got {member.get('wall_clock_p50_s')})")
+            f"headroom (~{chain_win}s; got {_m.get('wall_clock_p50_s')})")
 
     # ENG-1 PR-N1: the per-PR chain TIMING facts are stamped (data-only — the
     # argmax gate above is deliberately unchanged until PR-N2). The chained.yml
@@ -715,7 +1437,7 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     # Which YAML source fed the detectors is a fact ABOUT the report, so it is stamped.
     # `--root` is a real checkout of the synthetic repo here, so every workflow is read
     # off disk and none over the API.
-    assert ds.get("workflow_yaml_source") == {"checkout": 3, "api": 0}, (
+    assert ds.get("workflow_yaml_source") == {"checkout": 9, "api": 0}, (
         f"workflow YAML provenance not stamped as expected: {ds.get('workflow_yaml_source')!r}")
 
     render = subprocess.run(
@@ -740,6 +1462,119 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     assert verify.returncode == 0, (
         "verify_report rejected the offline-replayed report:\n"
         f"{verify.stdout}\n{verify.stderr}")
+    # The corpus's `parallel:` group reaches the stamp, the row and the verifier.
+    _par = data.get("parallel_steps") or {}
+    assert _par.get("groups") == 2 and _par.get("steps_in_groups") == 4, _par
+    assert _par.get("control_steps") == 1, _par
+    assert {"path": ".github/workflows/ci.yml", "job": "test"} in _par["jobs_with_groups"]
+    assert ("| Parallel steps | 4 step(s) inside `parallel:` groups read "
+            "(2 `parallel:` group(s) seen) · 1 `wait`/`wait-all`/`cancel` control "
+            "step(s) skipped (they run nothing) |") in report
+    # T8: the POLE job (`ci.yml` ▸ `test`) runs a group, so its drill never says
+    # the steps run one after another, and the verifier re-derived that.
+    _pole = re.search(r"^##\s+.*Long pole \d+: `ci\.yml` ▸ `CI / test`.*?(?=^##\s|\Z)",
+                      report, re.S | re.M)
+    assert _pole, re.findall(r"^##.*$", report, re.M)
+    for _ph in ("one after another", "they run in sequence and roughly add up",
+                "Because they're sequential"):
+        assert _ph not in _pole.group(0), _ph
+    assert "side by side in a `parallel:` group" in _pole.group(0)
+    assert "parallel-step read disclosed" in verify.stdout, verify.stdout[-2000:]
+
+    # OPT82 reaches the READER as its own card: the ledger requirement, the
+    # SIZING ceiling, the benchmark, and never "disable" about rules.
+    _o82_card = re.search(r"<summary><strong>OPT82 - .*?</details>", report, re.S)
+    assert _o82_card, "the OPT82 finding did not reach the rendered report"
+    _card = _o82_card.group(0)
+    assert "uncredited, benchmark first" in _card
+    assert "LEDGER (required before shipping)" in _card
+    assert "SIZING: uncredited." in _card and "measured 72s at p50" in _card, _card
+    assert "projectService:false" in _card
+    assert "local/no-unsafe-enum-access" in _card
+    assert not re.search(r"\bdisabl\w*\b[^.\n]{0,60}\brules?\b", _card, re.I)
+    assert "no merge queue" in " ".join(_card.split()), _card
+    # ...and the held-back lint job reaches the reader as the shared row: the
+    # job by name and the plain reason, never the gate code.
+    held82 = [ln for ln in report.splitlines()
+              if ln.startswith("| type-aware lint: held back |")]
+    assert len(held82) == 1, held82
+    assert "eslint-web" in held82[0], held82[0]
+    assert ("the ESLint config sets type-aware parsing from a value only known "
+            "when it runs") in held82[0], held82[0]
+    assert "type_aware_setting_unresolvable" not in report
+    # OPT80's tail line reaches the reader AT the pole it sits on, once, beside
+    # the pole's merge-wait figure — and nowhere a p50 number lives. The verifier
+    # above re-derived its numbers from the per-run durations and the proofs.
+    _pole_id = str(o80_pole[0]["id"])
+    _tail = "one run in 3 spends about 105s longer on checkout, and that run's log shows the fetch stalling"
+    # X is the median proven run's loss, not a ceiling: run 5004 lost 125 - 5 =
+    # 120s, more than the 105s stated. So the line never says "up to" X.
+    _proven_ids = {p.get("job_id") for p in cs_pole.get("proven_tail_runs") or []}
+    _losses = [float(r["checkout_s"]) - 5.0
+               for r in cs_pole.get("per_run_checkout_s") or []
+               if r.get("job_id") in _proven_ids]
+    assert max(_losses) == 120.0 > 105.0, _losses
+    assert "loses up to" not in report, "a median is not an upper bound"
+    _marker = f"<!-- opt80-tail:{_pole_id} -->"
+    assert report.count(_marker) == 1, _marker
+    _pole1 = report.split('<a id="pole-1"></a>', 1)[1].split('<a id="pole-2"></a>', 1)[0]
+    assert "▸ `CI / test`" in _pole1 and _marker in _pole1, (
+        "the tail line must render inside the `CI / test` long-pole section")
+    assert _tail in _pole1.split(_marker, 1)[1].split("\n\n", 1)[0], _pole1[:1200]
+    # Never in the headline / Bottom line, and never summed into any total (the
+    # sentence may be restated inside the finding's own runner-saving card).
+    _head = report.split("## 📋 Contents", 1)[0]
+    assert "longer on checkout" not in _head and "opt80-tail" not in _head, _head
+    _tier2 = report.split("## Runner-minute reductions", 1)[1].split("## 🧹", 1)[0]
+    assert _marker not in _tier2, "the tail line must never render as a Tier-2 row"
+    # The tail is never summed into a total: the replay corpus's runner-minute
+    # total and its sample size are pinned to the exact figures, so a tail that
+    # leaks into the credited minutes (or the sample count) moves a number here.
+    # 40 runs / 179 jobs / 7 workflows: main's 32 / 163 / 6 plus OPT81's push-only
+    # `bench.yml` (1007: 8 sampled runs, two `bench` legs each = 16 jobs); now
+    # 43 / 182 / 8 with OPT83's `quality.yml` (1008: 3 sampled runs, one job each);
+    # now 46 / 185 / 9 with OPT84's `style.yml` (1009: 3 sampled runs, one job each);
+    # now 46 / 186 / 9 with a cancelled `style-preview` job in run 8501, the corpus's one
+    # job run measured compute excludes (see the cost-spine footnote assertions below).
+    # The credited totals below do not move: neither OPT83 nor OPT84 credits anything.
+    assert "| **Runs analyzed** | 46 runs / 186 jobs across 9 workflows |" in report, (
+        _head)
+    # The excluded run reaches the real pipeline end to end: the spine stamps it, the
+    # footnote names it, and verify_report (run above) re-derives both.
+    _spine = data["runner_minute_spine"]
+    assert _spine["measured_compute_basis"] == "completed_job_runs_only"
+    assert _spine["excluded_unfinished"]["job_run_count"] == 1, _spine["excluded_unfinished"]
+    assert _spine["excluded_unfinished"]["by_reason"] == {
+        "timed_out": 0, "cancelled": 1, "kill_window": 0}
+    assert "1 timed-out, cancelled or killed job run (1 cancelled; 3 sampled min, " in (
+        report), report.split("Measured compute counts", 1)[-1][:400]
+    assert ("423 min/mo of wall-clock-neutral runner minutes is recoverable "
+            "(8 neutral findings; none can slow a merge)") in _head, _head
+    assert ("**423 min/mo credited after de-overlap** (naive sum 423 min/mo; "
+            "8 neutral findings;") in report
+    assert "not credited in this version" not in report.split(
+        '<a id="pole-2"></a>', 1)[0], "the on-pole PR case reads the tail line now"
+    # The self-check re-derives the tail line rather than reading it back: a
+    # tampered `one_in_n`, and separately a tail axis stamped on a finding that
+    # is off the critical path, must each fail verification.
+    # So must a tail axis on a job the required set does not name.
+    for _tamper80 in (
+            lambda cs, d: cs["tail_axis"].__setitem__("one_in_n", 2),
+            lambda cs, d: cs.__setitem__("on_critical_path", False),
+            lambda cs, d: d.__setitem__("required_checks", ["prep", "verify"])):
+        _bad80 = json.loads(findings_path.read_text(encoding="utf-8"))
+        _tamper80(next(f for f in _bad80["findings"]
+                       if f.get("id") == _pole_id)["checkout_stall"], _bad80)
+        _bad80_path = tmp_path / "findings_tampered_opt80.json"
+        _bad80_path.write_text(json.dumps(_bad80), encoding="utf-8")
+        _v80 = subprocess.run(
+            [sys.executable, str(_SKILL_DIR / "tests" / "verify_report.py"),
+             "--report", str(report_path), "--findings", str(_bad80_path)],
+            capture_output=True, text=True, env=env, timeout=60)
+        # Every check's name is printed, PASS or FAIL: assert the FAIL line itself.
+        assert _v80.returncode != 0 and (
+            "\nFAIL  OPT80 tail lines re-derive" in "\n" + _v80.stdout), (
+            _v80.stdout[-2000:])
 
     # The held-back candidate reaches the reader too, in plain English: the count,
     # the job, and a reason a product manager can read - never the gate name. The
@@ -755,12 +1590,39 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     held77 = [ln for ln in report.splitlines()
               if ln.startswith("| repeated-setup: held back |")]
     assert len(held77) == 1, held77
-    assert ("1 candidate job group(s) held back (docs-format + docs-links + "
-            + "docs-spell in build-matrix.yml): the sampled runs never had every job in "
-            + "the group run together, so the saving could not be measured."
+    # TWO groups, held back for two DIFFERENT reasons, one each — so the
+    # sentence names both groups, prints only the alphabetically first gate's
+    # reason, and hedges it as a TIE: with one candidate per reason there is no
+    # commonest one, and "most commonly" would be false of the split itself.
+    assert ("2 candidate job group(s) held back (alpha + beta + gamma in gates.yml, "
+            + "docs-format + docs-links + docs-spell in build-matrix.yml): "
+            + "equally often, every job the workflow declares is in the group, so "
+            + "the group sets the pull-request wait itself, and collapsing it into "
+            + "one job would make that wait longer."
             ) in held77[0], held77[0]
     assert "group_never_ran_complete_in_one_sampled_run" not in report
+    assert "collapsing_the_whole_workflow_would_lengthen_the_merge_gate" not in report
     assert "repeated-setup verdicts" not in report
+
+    # OPT77's whole-workflow arm reaches the READER. The detector and the
+    # verifier both passed above; a renderer that dropped the finding, or that
+    # printed the now-`None` `remaining_tallest_*` stamps into the sentence,
+    # would leave both green and ship "…below the None `None` job".
+    _whole_lines = [ln for ln in report.splitlines()
+                    if "the group's slowest member takes today" in ln]
+    assert _whole_lines, (
+        "the whole-workflow OPT77 finding is on the findings document but its "
+        "sentence is not in the rendered report")
+    for _ln in _whole_lines:
+        assert "against the 400s the group's slowest member takes today" in _ln, _ln
+        assert ("so the group sets the pull-request wait itself, and consolidating "
+                "it does not lengthen that wait.") in _ln, _ln
+        # The ordinary arm's two leaks, ruled out on the rendered line itself:
+        # a `None` from the nulled stamps, and the remaining-tallest clause that
+        # describes a job this workflow does not have.
+        assert "None" not in _ln, _ln
+        assert "becomes this workflow's longest job" not in _ln, _ln
+    assert str(o77_whole[0]["id"]) in report, o77_whole[0]["id"]
 
     # OPT80 reaches the READER, not just the findings document. The block above
     # proves the detector fired and the verifier accepted it; a renderer that
@@ -778,7 +1640,8 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
 
     # OPT79 reaches the READER too — the credited finding with the numbers it
     # was measured on, and the uncredited line with its own.
-    o79_rendered = [f for f in data["findings"] if f.get("pattern") == "OPT79"]
+    o79_rendered = [f for f in data["findings"] if f.get("pattern") == "OPT79"
+                    and f.get("affected_jobs") == ["deps"]]
     assert "A Cache That Costs More Than It Saves" in report, (
         "the OPT79 finding is in the findings document but not in the rendered "
         "report — the renderer dropped it")
@@ -789,23 +1652,58 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
             and "the hit path is 19s SLOWER" in _o79_ev), _o79_ev
     assert (f"~{o79_rendered[0]['runner_min_saving']:.0f} runner-min/mo"
             in _o79_ev), _o79_ev
-    assert "1 cache(s) measured net-negative on a job this audit cannot price" \
-        in report, "the uncredited OPT79 line did not reach the report"
-    assert ("a cache on `integration` in `.github/workflows/build-matrix.yml` "
-            "measured net-negative by 21s per cache hit (4 hit / 4 miss run(s) "
-            "sampled)") in report
-    assert "does not run on pull requests" in report
+    # The below-the-long-pole finding on `integration` reaches the reader as a
+    # credited runner-minute row with its own proof named, and the numberless
+    # "cannot price" line is gone: this corpus has no uncredited cache left.
+    assert str(o79_lp["id"]) in report, o79_lp["id"]
+    assert "`below_long_pole`" in report, (
+        "the below-the-long-pole certificate must be described to the reader")
+    assert "measured net-negative on a job this audit cannot price" not in report
+    assert "cannot prove that shrinking it leaves the merge gate unchanged" not in report
+    # …and the pole finding on `prep` reaches the reader as a finding with its
+    # merge-wait number, while no uncredited line claims a merge wait.
+    assert str(pole79["id"]) in report, pole79["id"]
+    _pole_lines = [ln for ln in report.splitlines()
+                   if "A Cache That Costs More Than It Saves" in ln and "20s" in ln]
+    assert _pole_lines, "the pole OPT79 finding's title and 20s did not render together"
+    assert any("up to **20s** off the merge wait on the 50% of sampled runs where "
+               "the cache hit (3 of 6 runs read)" in ln for ln in _pole_lines), _pole_lines
+    assert "is this workflow's slowest job, so the saving is on the merge wait" \
+        not in report
 
     # The self-check RE-DERIVES the OPT79 numbers, it does not read them back.
     # A findings file with the credited finding's excess tampered must fail
     # the report's own verification, and so must a tampered uncredited row.
     for _tamper, _check in (
             (lambda d: [f for f in d["findings"] if f.get("pattern") == "OPT79"
+                        and f.get("affected_jobs") == ["deps"]
                         ][0]["cache_net_negative"].__setitem__("waste_s", 900.0),
-             "Tier-2"),
-            (lambda d: d["opt79_uncredited_pole_caches"][0].__setitem__(
-                "waste_s", 900.0),
-             "uncredited net-negative caches")):
+             "waste_s 900.0 != 19.0"),
+            # the below-the-long-pole finding's excess, and separately its
+            # margin, are re-derived (the margin from the slowest job's p50)
+            (lambda d: next(f for f in d["findings"] if f.get("pattern") == "OPT79"
+                            and f.get("affected_jobs") == ["integration"]
+                            )["cache_net_negative"].__setitem__("waste_s", 900.0),
+             "waste_s 900.0 != 21.0"),
+            (lambda d: next(f for f in d["findings"] if f.get("pattern") == "OPT79"
+                            and f.get("affected_jobs") == ["integration"]
+                            )["tier2_neutrality"].__setitem__("margin_s", 61.0),
+             "below-long-pole margin 61.0 != re-derived 60.0"),
+            # the pole finding's measured excess, and separately its credited
+            # merge-wait number, are both re-derived rather than read back
+            (lambda d: next(f for f in d["findings"] if f.get("pattern") == "OPT79"
+                            and f.get("affected_jobs") == ["prep"]
+                            )["cache_net_negative"].__setitem__("waste_s", 900.0),
+             "pole_sizing.waste_s 21.0 != re-derived 900.0"),
+            (lambda d: next(f for f in d["findings"] if f.get("pattern") == "OPT79"
+                            and f.get("affected_jobs") == ["prep"]
+                            ).__setitem__("wall_clock_p50_s", 900.0),
+             "wall_clock_p50_s 900.0 != min(waste_s 21.0, headroom 20.0)"),
+            # a below-the-floor finding claiming merge-wait time it cannot have
+            (lambda d: next(f for f in d["findings"] if f.get("pattern") == "OPT79"
+                            and f.get("affected_jobs") == ["deps"]
+                            ).__setitem__("wall_clock_p50_s", 5),
+             "a runner-minute-certified OPT79 finding claims wall_clock_p50_s=5")):
         _bad = json.loads(findings_path.read_text(encoding="utf-8"))
         _tamper(_bad)
         _bad_path = tmp_path / "findings_tampered.json"
@@ -815,9 +1713,251 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
              "--report", str(report_path), "--findings", str(_bad_path)],
             capture_output=True, text=True, env=env, timeout=60)
         assert _v.returncode != 0, (
-            f"verify_report accepted a tampered OPT79 waste_s ({_check}):\n"
+            f"verify_report accepted a tampered OPT79 field ({_check}):\n"
             f"{_v.stdout}")
-        assert "waste_s" in _v.stdout, _v.stdout
+        # the FULL problem phrase, not just its last word: a different check
+        # failing on an unrelated field would otherwise satisfy this
+        assert _check in _v.stdout, (_check, _v.stdout)
+
+    # ---- OPT81, both halves, end to end ---------------------------------------
+    # A1 (bench.yml, wf 1007): one job measured on two runner classes in runs the
+    # repo already made. Every number is the corpus's own: 150s median on eight
+    # `ubuntu-latest` runs, 90s on eight `ubuntu-latest-8-cores` runs, the same
+    # five steps on both. Both labels run in every run (a runner matrix), so the
+    # 60s gap is stated and never credited.
+    o81 = [f for f in data["findings"] if f.get("pattern") == "OPT81"]
+    o81_a1 = [f for f in o81 if (f.get("faster_runner") or {}).get("half") == "A1"]
+    o81_a2 = [f for f in o81 if (f.get("faster_runner") or {}).get("half") == "A2"]
+    assert len(o81_a1) == 1, [f.get("affected_jobs") for f in o81_a1]
+    fr = o81_a1[0]["faster_runner"]
+    assert o81_a1[0]["workflow_file"] == ".github/workflows/bench.yml", o81_a1[0]
+    assert o81_a1[0]["affected_jobs"] == ["bench"], o81_a1[0]
+    assert {k: v for k, v in fr["slow"].items() if not k.endswith("_run_at")} == {"label": "ubuntu-latest", "class": "github-standard",
+                          "os": "linux", "arch": "x64", "size": "",
+                          "p50_s": 150.0, "n": 8}, fr["slow"]
+    assert {k: v for k, v in fr["fast"].items() if not k.endswith("_run_at")} == {"label": "ubuntu-latest-8-cores", "class": "github-larger",
+                          "os": "linux", "arch": "x64", "size": "8",
+                          "p50_s": 90.0, "n": 8}, fr["fast"]
+    assert fr["gap_s"] == 60.0 and fr["floor_s"] == 37.5, fr
+    assert fr["slow"]["first_run_at"] and fr["fast"]["last_run_at"], fr
+    assert len(fr["rows"]) == 16, fr["rows"]
+    assert fr["job_is_workflow_long_pole"] is True, fr
+    assert fr["runner_matrix"] is True, fr
+    assert fr["credited_pre_cascade_s"] == 0.0, fr
+    assert "every run executes both legs" in fr["credit_reason"], fr
+    assert o81_a1[0]["wall_clock_p50_s"] in (0, 0.0), o81_a1[0]
+    assert o81_a1[0]["runner_min_saving"] is None, o81_a1[0]
+    assert "runs this repository already made" in o81_a1[0]["evidence"]
+    assert cr._OPT81_DISCLOSURE in o81_a1[0]["evidence"]
+    # A2 (ci.yml `test`): the merge-gating long pole, dominant step `Run tests`
+    # (compute), on `ubuntu-latest`, with only the generic OPT75 decompose lever
+    # beside it. The advisory fires with no number anywhere.
+    assert len(o81_a2) == 1, [(f.get("workflow_file"), f.get("affected_jobs"))
+                              for f in o81_a2]
+    a2 = o81_a2[0]
+    assert a2["workflow_file"] == ".github/workflows/ci.yml", a2
+    assert a2["affected_jobs"] == ["test"], a2
+    assert a2.get("advisory") is True, a2
+    assert a2.get("wall_clock_p50_s") is None and a2.get("runner_min_saving") is None, a2
+    assert a2["faster_runner"]["dominant_step"] == "Run tests", a2["faster_runner"]
+    assert a2["faster_runner"]["benchmark_required"] is True
+    assert a2["faster_runner"]["cheaper_levers_checked"], a2["faster_runner"]
+    # …and NOT on chained.yml's `prep`: that pole already carries OPT72, a cheaper
+    # structural lever, so the last-resort advisory is suppressed and counted.
+    assert not [f for f in o81_a2 if "chained.yml" in f["workflow_file"]]
+    _g81 = data.get("opt81_withheld_by_gate")
+    assert isinstance(_g81, dict), data.get("opt81_withheld_by_gate")
+    assert _g81.get("a2_cheaper_structural_lever_on_the_pole") == 1, _g81
+    assert data.get("opt81_withheld_candidates") == [], data.get(
+        "opt81_withheld_candidates")
+    # The reader sees both: the measured A1 card in the runner-class section (its
+    # job is not a rendered pole) and the A2 advisory inside the `CI / test`
+    # pole's section, after its OPT75 block, each carrying the disclosure line.
+    assert report.count(cr._OPT81_DISCLOSURE) >= 2, report.count(cr._OPT81_DISCLOSURE)
+    _ci_pole = next(sec for sec in report.split("\n## ")
+                    if "Long pole" in sec.splitlines()[0]
+                    and "CI / test" in sec.splitlines()[0])
+    assert "OPT81" in _ci_pole, _ci_pole[:600]
+    assert _ci_pole.index("OPT75") < _ci_pole.index("OPT81"), (
+        "the advisory must render AFTER the pole's OPT75 decomposition")
+    # This render reads no job log, so the advisory's render-time log-level check
+    # cannot run: it fails closed to a held-back line, never a full recipe.
+    assert bp._OPT81_A2_HELD_NO_LOG in _ci_pole, _ci_pole[-1500:]
+    assert "installing the StarSling GitHub app" not in report
+    # With the pole's log read (and matching no log-level lever), the full
+    # advisory renders, states that the check passed, and still verifies.
+    _o81_log = tmp_path / "ci_test.log"
+    _o81_log.write_text("##[group]Run tests\nall tests passed\n##[endgroup]\n",
+                        encoding="utf-8")
+    _o81_report = tmp_path / "report_opt81_with_log.md"
+    _r = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "blocking_path.py"), "--in", str(findings_path),
+         "--out", str(_o81_report), "--log", f"ci.yml={_o81_log}"],
+        capture_output=True, text=True, env=env, timeout=60)
+    assert _r.returncode == 0, _r.stderr
+    _logged = _o81_report.read_text(encoding="utf-8")
+    _ci_pole_logged = next(sec for sec in _logged.split("\n## ")
+                           if "Long pole" in sec.splitlines()[0]
+                           and "CI / test" in sec.splitlines()[0])
+    assert "installing the StarSling GitHub app" in _ci_pole_logged
+    assert bp._OPT81_A2_LOG_CHECKED in _ci_pole_logged
+    _v = subprocess.run(
+        [sys.executable, str(_SKILL_DIR / "tests" / "verify_report.py"),
+         "--report", str(_o81_report), "--findings", str(findings_path)],
+        capture_output=True, text=True, env=env, timeout=60)
+    assert "OPT81 runner-class comparisons" in _v.stdout, _v.stdout
+    assert not [l for l in _v.stdout.splitlines()
+                if "OPT81" in l and "FAIL" in l], _v.stdout
+    # A tampered A1 median must redden the report's own self-check.
+    _bad = json.loads(findings_path.read_text(encoding="utf-8"))
+    [f for f in _bad["findings"] if f.get("pattern") == "OPT81"
+     and f["faster_runner"]["half"] == "A1"][0]["faster_runner"]["fast"]["p50_s"] = 80.0
+    _bad_path = tmp_path / "findings_tampered_opt81.json"
+    _bad_path.write_text(json.dumps(_bad), encoding="utf-8")
+    _v = subprocess.run(
+        [sys.executable, str(_SKILL_DIR / "tests" / "verify_report.py"),
+         "--report", str(report_path), "--findings", str(_bad_path)],
+        capture_output=True, text=True, env=env, timeout=60)
+    assert _v.returncode != 0 and "OPT81" in _v.stdout, _v.stdout
+
+    # ---- OPT83, end to end ----------------------------------------------------
+    # quality.yml (wf 1008) is pole 4: three compute steps written one after
+    # another (`Lint` 30s, `Typecheck` 25s, `Unit tests` 25s), independent per
+    # the YAML. One uncredited finding, its upper bound 80 - 30 = 50s, its card
+    # inside the `quality` pole's section after the pole's OPT75 block, and
+    # nowhere else: not in Also noticed, not in any total (the credited totals
+    # asserted above did not move).
+    o83 = [f for f in data["findings"] if f.get("pattern") == "OPT83"]
+    assert len(o83) == 1, [(f.get("workflow_file"), f.get("affected_jobs")) for f in o83]
+    f83 = o83[0]
+    st83 = f83["independent_steps"]
+    assert f83["workflow_file"] == ".github/workflows/quality.yml", f83
+    assert f83["affected_jobs"] == ["quality"], f83
+    assert f83["wall_clock_p50_s"] is None and f83["runner_min_saving"] is None, f83
+    assert f83["sizing_basis"] == "uncredited" and f83["risk"] == "MEDIUM", f83
+    assert [(s["step"], s["p50_s"]) for s in st83["steps"]] == [
+        ("Lint", 30.0), ("Typecheck", 25.0), ("Unit tests", 25.0)], st83["steps"]
+    assert st83["ceiling_s"] == 50.0 and st83["job_p50_s"] == 96.0, st83
+    assert all(st83["independence"].values()) and set(st83["independence"]) == set(cr._OPT83_INDEPENDENCE_KEYS)
+    # Every other drilled pole is a measured verdict (one compute step at most),
+    # never a held-back candidate: 4 with OPT84's one-heavy-step `style` pole.
+    assert data.get("opt83_withheld_by_gate") == {
+        "fewer_than_two_qualifying_steps": 4}, data.get("opt83_withheld_by_gate")
+    assert data.get("opt83_withheld_candidates") == [], data.get(
+        "opt83_withheld_candidates")
+    _q_pole = next(sec for sec in report.split("\n## ")
+                   if "Long pole" in sec.splitlines()[0]
+                   and "quality" in sec.splitlines()[0])
+    _card83 = f'<a id="opt83-{f83["id"]}"></a>'
+    assert report.count(_card83) == 1 and _card83 in _q_pole, _q_pole[-1500:]
+    # Placement, anchored on the OPT75 block's own heading (the bare string
+    # "OPT75" also appears in prose and prompts).
+    _o75_head = "**📐 Structural root-cause - OPT75 ·"
+    assert _o75_head in _q_pole, _q_pole[:2000]
+    assert _q_pole.index(_o75_head) < _q_pole.index(_card83), (
+        "the OPT83 card must render AFTER the pole's OPT75 decomposition")
+    # ...and before the next section and before any OPT81 card.
+    _at83 = report.index(_card83)
+    _q_start = report.rindex("\n## ", 0, _at83)
+    _q_end = report.find("\n## ", _at83)
+    assert _q_end > _at83 and _q_start < _at83, (_q_start, _at83, _q_end)
+    assert all(m.start() > _at83 for m in re.finditer(r'<a id="opt81-', report)
+               if _q_start < m.start() < _q_end), _q_pole[-2500:]
+    assert "up to 50s sooner" in _q_pole and bp._OPT83_SIZING_LABEL in " ".join(
+        _q_pole.split()), _q_pole[-2500:]
+    _also = report.split('<a id="also-noticed"></a>', 1)[-1]
+    assert "OPT83" not in _also.split("## 🗄️", 1)[0], "OPT83 leaked into Also noticed"
+    # A tampered upper bound must redden the report's own self-check.
+    _bad = json.loads(findings_path.read_text(encoding="utf-8"))
+    [f for f in _bad["findings"] if f.get("pattern") == "OPT83"][0][
+        "independent_steps"]["ceiling_s"] = 80.0
+    _bad_path = tmp_path / "findings_tampered_opt83.json"
+    _bad_path.write_text(json.dumps(_bad), encoding="utf-8")
+    _v = subprocess.run(
+        [sys.executable, str(_SKILL_DIR / "tests" / "verify_report.py"),
+         "--report", str(report_path), "--findings", str(_bad_path)],
+        capture_output=True, text=True, env=env, timeout=60)
+    assert _v.returncode != 0 and "ceiling_s 80.0 != re-derived 50.0" in _v.stdout, _v.stdout
+
+    # ---- OPT84, end to end ----------------------------------------------------
+    # style.yml (wf 1009) is pole 5, shaped like mastra's lint pole: one step,
+    # `Run lint and format checks` (52s of the 92s job), runs `pnpm lint` in
+    # `apps/site`, whose package.json resolves it to `eslint . && prettier
+    # --check .`. Two table tools on one step: ESLint -> oxlint as a dual-run
+    # (the site's config loads the react plugin) and Prettier -> oxfmt drop-in.
+    # One uncredited finding whose ceiling is the step's own p50, its card once
+    # inside the `style` pole's section, nowhere else, and no total moves (the
+    # credited totals asserted above are unchanged by it).
+    o84 = [f for f in data["findings"] if f.get("pattern") == "OPT84"]
+    assert len(o84) == 1, (data.get("opt84_withheld_by_gate"),
+                           data.get("opt84_withheld_candidates"))
+    f84 = o84[0]
+    ts84 = f84["tool_swap"]
+    assert f84["workflow_file"] == ".github/workflows/style.yml", f84
+    assert f84["affected_jobs"] == ["style"], f84
+    assert f84["wall_clock_p50_s"] is None and f84["runner_min_saving"] is None, f84
+    assert f84["sizing_basis"] == "uncredited", f84
+    assert f84["severity"] == "HIGH" and f84["risk"] == "HIGH", f84
+    assert ts84["step"] == "Run lint and format checks", ts84
+    assert ts84["command"] == "pnpm lint" and ts84["working_directory"] == "apps/site", ts84
+    assert ts84["resolved_leaves"] == ["eslint .", "prettier --check ."], ts84
+    _o84_pole = next(p for p in poles if p.get("job") == "style")
+    _o84_step = next(s for s in _o84_pole["steps"]
+                     if s["step"] == "Run lint and format checks")
+    assert ts84["ceiling_s"] == _o84_step["p50_s"] == 52.0, (ts84, _o84_step)
+    assert ts84["job_p50_s"] == _o84_pole["job_p50_s"] == 92.0, _o84_pole
+    assert ts84["split_unknown"] is True, ts84
+    _t84 = {t["row"]: t for t in ts84["tools"]}
+    assert list(_t84) == ["eslint", "prettier"], ts84["tools"]
+    assert _t84["eslint"]["fit"] == "dual-run", _t84["eslint"]
+    assert _t84["eslint"]["fit_reasons"] == [
+        "framework plugin react in `apps/site/eslint.config.mjs`"], _t84["eslint"]
+    assert _t84["prettier"]["fit"] == "drop-in" and _t84["prettier"]["fit_reasons"] == []
+    assert _t84["eslint"]["source_version"] == "^9.12.0", _t84["eslint"]
+    assert _t84["prettier"]["source_version"] == "^3.3.3", _t84["prettier"]
+    # The other four drilled poles exit before a finding, each for its own
+    # reason: `prep`'s `npm run build` names a script the corpus package.json
+    # does not declare and `quality`'s `npx tsc --noEmit` sits in a package that
+    # declares no `typescript` (both HELD BACK, listed with job and step);
+    # `quality`'s Biome lint is not in the table, and `verify` / `test` have no
+    # heavy scan or build step (verdicts, counted only).
+    assert data.get("opt84_withheld_by_gate") == {
+        "script_unresolvable": 1, "typescript_version_unreadable": 1,
+        "tool_not_in_table": 1, "no_candidate_step": 2}, data.get("opt84_withheld_by_gate")
+    assert data.get("opt84_withheld_candidates") == [
+        {"workflow_file": ".github/workflows/chained.yml", "job": "prep",
+         "gate": "script_unresolvable", "step": "Build artifact"},
+        {"workflow_file": ".github/workflows/quality.yml", "job": "quality",
+         "gate": "typescript_version_unreadable", "step": "Typecheck"}], data.get(
+        "opt84_withheld_candidates")
+    _row84 = next(ln for ln in report.splitlines() if "tool swap: held back" in ln)
+    # The shared row names both held-back steps; with a tie it states one reason.
+    assert "held back (prep (Build artifact), quality (Typecheck))" in _row84, _row84
+    assert bp._OPT84_WITHHOLD_PHRASES["script_unresolvable"] in _row84, _row84
+    # One card, inside the style pole's section, after its OPT75 block if any.
+    _s_pole = next(sec for sec in report.split("\n## ")
+                   if "Long pole" in sec.splitlines()[0]
+                   and "style" in sec.splitlines()[0])
+    _card84 = f'<a id="opt84-{f84["id"]}"></a>'
+    assert report.count(_card84) == 1 and _card84 in _s_pole, _s_pole[-2500:]
+    _flat84 = " ".join(_s_pole.split())
+    assert "- **Ceiling:** 52s, this step's measured p50" in _flat84, _s_pole[-2500:]
+    assert " ".join(bp._OPT84_SIZING_LABEL.split()) in _flat84
+    assert " ".join(bp._OPT84_SPLIT_UNKNOWN.split()) in _flat84
+    assert "fit: run both: framework plugin react" in _flat84, _s_pole[-2500:]
+    # OPT82's prompt (in Also noticed) names OPT84's table; an OPT84 CARD must not be there.
+    assert '<a id="opt84-' not in _also.split("## 🗄️", 1)[0], "OPT84 leaked into Also noticed"
+    assert "tool-swaps" not in report, "the style pole is rendered, so no own section"
+    assert "tool-swap findings re-derive from the pole" in verify.stdout, verify.stdout[-2000:]
+    # A tampered ceiling must redden the report's own self-check.
+    _bad84 = json.loads(findings_path.read_text(encoding="utf-8"))
+    [f for f in _bad84["findings"] if f.get("pattern") == "OPT84"][0][
+        "tool_swap"]["ceiling_s"] = 60.0
+    _bad84_path = tmp_path / "findings_tampered_opt84.json"
+    _bad84_path.write_text(json.dumps(_bad84), encoding="utf-8")
+    _v84 = _verify(report_path, _bad84_path, env)
+    assert _v84.returncode != 0 and "ceiling_s 60.0 != the step's p50 52.0" in _v84.stdout, (
+        _v84.stdout)
 
     # ---- PR-H1 (G5): the promoted-path backstop — UNCONDITIONAL. -------------
     # Before this, the replay corpus promoted nothing, so the Tier-2 render
@@ -897,6 +2037,152 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     assert (ds.get("cost_deepened_workflow_count") or 0) >= 1, (
         "the bill-pole deepen loop never ran offline "
         f"(cost_deepened_workflow_count={ds.get('cost_deepened_workflow_count')!r})")
+
+
+# ---- OPT79's pole arm through the REAL collect() ----
+#
+# The pole arm's two collect()-level steps were pinned only by unit tests that
+# call the helpers directly: the demotion of a pole finding that no longer
+# carries a merge wait, and the sampled events the detector is handed. These
+# drive the real collect() over the replay corpus in-process, so deleting the
+# demotion call, or handing the detector no events, fails a test.
+
+_CHAINED = ".github/workflows/chained.yml"
+
+
+def _collect_in_process(tmp_path, monkeypatch, edit_fixtures=None):
+    repo_root = tmp_path / "repo"
+    _init_repo(repo_root)
+    fixtures = _replay_dir(tmp_path)
+    if edit_fixtures is not None:
+        edit_fixtures(fixtures)
+    scan = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "scan.py"), "--root", str(repo_root),
+         "--repo", _REPO], capture_output=True, text=True, timeout=60)
+    assert scan.returncode == 0, scan.stderr
+    monkeypatch.setenv("CI_SPEEDUP_GH_FIXTURES", str(fixtures))
+    monkeypatch.delenv("CI_SPEEDUP_GH_RECORD", raising=False)
+    return cr.collect(json.loads(scan.stdout), _REPO, 20, root=repo_root)
+
+
+def _opt79_poles(doc):
+    return [f for f in doc["findings"] if f.get("pattern") == "OPT79"
+            and (f.get("cache_net_negative") or {}).get("kind")
+            == "opt79_pole_net_negative_cache"]
+
+
+def _opt79_rows(doc, wf=_CHAINED):
+    return [r for r in doc.get("opt79_uncredited_pole_caches") or []
+            if r.get("workflow_file") == wf]
+
+
+def test_collect_credits_the_chained_pole_cache_untouched(tmp_path, monkeypatch):
+    """The baseline the two tests below change one thing against."""
+    doc = _collect_in_process(tmp_path, monkeypatch)
+    poles = _opt79_poles(doc)
+    assert [(f["workflow_file"], f["affected_jobs"]) for f in poles] == [
+        (_CHAINED, ["prep"])], poles
+    assert _opt79_rows(doc) == []
+
+
+def test_collect_does_not_charge_a_needs_job_its_upstream_run_time_as_queue(
+        tmp_path, monkeypatch):
+    """`chained.yml`'s `verify` (`needs: prep`) starts 2s after the 120s `prep`
+    finishes on every sampled run. Timed from the run trigger it reads 122s, above
+    the 60s PR bar, but that is `prep` RUNNING, not runner queueing. The real
+    collect() must hand OPT43 the scanned job graph so `verify` is timed from
+    `prep`'s completion and draws no queue finding. A call site that drops the
+    graph brings the false positive back, and this test goes red."""
+    doc = _collect_in_process(tmp_path, monkeypatch)
+    opt43 = [(f["workflow_file"], f["affected_jobs"], f.get("evidence"))
+             for f in doc["findings"] if f.get("pattern") == "OPT43"
+             and f.get("workflow_file") == _CHAINED]
+    assert opt43 == [], opt43
+
+
+def test_collect_skips_opt43_and_discloses_when_the_job_graph_is_missing(
+        tmp_path, monkeypatch):
+    """A findings input with no `workflow_job_graph` gives OPT43 no way to tell an
+    entry job from a `needs:`-gated one. Timing every job from the run trigger
+    would bring back the 122s false positive on `verify` under copy that says
+    upstream run time was excluded, so OPT43 is skipped for the workflow and the
+    skip is disclosed by name instead."""
+    repo_root = tmp_path / "repo"
+    _init_repo(repo_root)
+    fixtures = _replay_dir(tmp_path)
+    scan = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "scan.py"), "--root", str(repo_root),
+         "--repo", _REPO], capture_output=True, text=True, timeout=60)
+    assert scan.returncode == 0, scan.stderr
+    scan_doc = json.loads(scan.stdout)
+    scan_doc.pop("workflow_job_graph", None)
+    monkeypatch.setenv("CI_SPEEDUP_GH_FIXTURES", str(fixtures))
+    monkeypatch.delenv("CI_SPEEDUP_GH_RECORD", raising=False)
+    doc = cr.collect(scan_doc, _REPO, 20, root=repo_root)
+    opt43 = [(f["workflow_file"], f["affected_jobs"])
+             for f in doc["findings"] if f.get("pattern") == "OPT43"]
+    assert opt43 == [], opt43
+    skipped = {e["workflow"]: e["detectors"]
+               for e in doc["data_sources"].get("detectors_skipped") or []}
+    assert "OPT43" in skipped.get(_CHAINED, []), skipped
+
+
+@pytest.mark.parametrize("how", ["zeroed", "off_spine"])
+def test_collect_demotes_a_pole_finding_with_no_merge_wait_left(
+        tmp_path, monkeypatch, how):
+    """A pole finding the cascade zeroed, or whose job the merge-gating spine
+    dropped, must leave collect() as an uncredited row that says why - never as
+    a credited finding. The cascade's verdict is simulated at the last stamp
+    collect() applies before demoting (the off-spine stamping), so the REAL
+    demotion call is what has to act on it."""
+    real = cr._stamp_off_spine_findings
+
+    def stamp(findings, *a, **k):
+        out = real(findings, *a, **k)
+        for f in findings:
+            if (f.get("cache_net_negative") or {}).get("kind") \
+                    == "opt79_pole_net_negative_cache":
+                if how == "off_spine":
+                    f["off_spine"] = True
+                else:
+                    wc = f["wall_clock_p50_s"]
+                    f.update(wall_clock_uncapped_p50_s=wc, wall_clock_p50_s=0.0,
+                             wall_clock_derivation=[{
+                                 "bound": "measured-critical-path", "from_s": wc,
+                                 "to_s": 0.0, "reason": "a slower check gates the PR"}])
+        return out
+
+    monkeypatch.setattr(cr, "_stamp_off_spine_findings", stamp)
+    doc = _collect_in_process(tmp_path, monkeypatch)
+    assert _opt79_poles(doc) == [], _opt79_poles(doc)
+    rows = _opt79_rows(doc)
+    assert len(rows) == 1, rows
+    want = {"zeroed": "pole_merge_wait_zeroed_by_cross_check",
+            "off_spine": "pole_workflow_off_merge_gating_spine"}[how]
+    assert rows[0]["job"] == "prep" and rows[0]["uncredited_reason"] == want, rows[0]
+    assert rows[0]["on_critical_path"] is False
+
+
+def test_collect_reads_pull_request_status_from_the_sampled_runs(tmp_path, monkeypatch):
+    """`chained.yml` DECLARES `pull_request`; with every sampled run re-labelled a
+    push, no measured pull request waits on it, so its pole cache is an
+    uncredited row (declared, not sampled) - not a merge-wait finding credited
+    off the declared trigger."""
+    def all_push(fixtures):
+        page = fixtures / cr._fixture_name(
+            f"repos/{_REPO}/actions/workflows/1003/runs?per_page=100", "json")
+        doc = json.loads(page.read_text(encoding="utf-8"))
+        for r in doc["workflow_runs"]:
+            r["event"] = "push"
+        page.write_text(json.dumps(doc), encoding="utf-8")
+
+    doc = _collect_in_process(tmp_path, monkeypatch, edit_fixtures=all_push)
+    assert _opt79_poles(doc) == [], _opt79_poles(doc)
+    rows = _opt79_rows(doc)
+    assert len(rows) == 1, rows
+    assert rows[0]["job"] == "prep"
+    assert rows[0]["workflow_gates_pull_requests"] is False
+    assert rows[0]["declares_pull_request"] is True
 
 
 def test_workflow_yaml_reads_the_checkout_not_the_api(tmp_path, monkeypatch):
@@ -1721,7 +3007,10 @@ def test_a_cache_probe_whose_logs_all_fail_is_named_and_disclosed(tmp_path):
                   if e["workflow"] == ".github/workflows/build-matrix.yml"), None)
     assert entry and "OPT79" in entry["detectors"], skipped
     assert "0 of 16 cache-probe job log(s)" in entry["reason"], entry
-    assert not [f for f in data["findings"] if f.get("pattern") == "OPT79"]
+    # Only `build-matrix.yml`'s logs are gone; `chained.yml`'s `prep` probe is
+    # intact, so its pole-cache finding still stands — and nothing else does.
+    assert [f.get("affected_jobs") for f in data["findings"]
+            if f.get("pattern") == "OPT79"] == [["prep"]]
     withheld = data.get("opt79_withheld_candidates")
     assert sorted(w["job"] for w in withheld) == ["deps", "integration"], withheld
     assert {w["gate"] for w in withheld} == {"population_truncated_by_unread_logs"}
@@ -1905,3 +3194,369 @@ def test_local_workflow_read_survives_a_path_the_os_rejects(tmp_path):
     root = tmp_path / "repo"
     (root / ".github" / "workflows").mkdir(parents=True)
     assert cr._read_local_workflow(root, ".github/workflows/x\0.yml") is None
+
+
+
+def test_opt82_type_aware_off_withholds_end_to_end(tmp_path):
+    """The WITHHOLD half of OPT82, through the real pipeline: the same corpus
+    and lint job, but an ESLint config with no type-aware parsing. No finding,
+    the `type_aware_parsing_off` verdict counted and never listed (only the
+    separate `eslint-web` job, whose own config cannot be read offline, is held
+    back), and the report still verifies."""
+    repo_root = tmp_path / "repo"
+    _init_repo(repo_root, eslint_config=_ESLINT_CONFIG_SYNTAX_ONLY)
+    findings_path = tmp_path / "findings.json"
+    report_path = tmp_path / "report.md"
+    env = _replay_env(_replay_dir(tmp_path))
+    run = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "run.py"),
+         "--root", str(repo_root), "--out", str(findings_path), "--repo", _REPO],
+        capture_output=True, text=True, env=env, timeout=60)
+    assert run.returncode == 0, run.stderr
+    data = json.loads(findings_path.read_text(encoding="utf-8"))
+    assert not [f for f in data["findings"] if f.get("pattern") == "OPT82"]
+    gates = data.get("opt82_withheld_by_gate") or {}
+    # Two verdicts: `lint.yml`'s `eslint` job (this test's syntax-only root
+    # config) and OPT84's `style.yml` lint, whose `apps/site` config is never
+    # type-aware.
+    assert gates.get("type_aware_parsing_off") == 2, gates
+    assert [c["job"] for c in data.get("opt82_withheld_candidates")] == ["eslint-web"]
+    cfg = next(c for c in data["type_aware_lint"]["configs"]
+               if c["path"] == "eslint.config.mjs")
+    assert cfg["type_aware"] == "off", cfg
+    report = _render(_SCRIPTS, findings_path, report_path, env)
+    assert "OPT82" not in report
+    assert _verify(report_path, findings_path, env).returncode == 0
+
+
+def test_opt82_detector_crash_skips_and_discloses_through_collect(tmp_path, monkeypatch):
+    """CRASH TRIPWIRE (collect half), driven through the real collector: a bug in
+    the OPT82 detector must skip OPT82 for that workflow — named in the report as
+    a detector that did not run — and never take the data pass down. The detector
+    is replaced with one that raises; `collect_runs.main` runs in-process over the
+    replayed corpus, then the artifact is rendered and verified. Remove the
+    call-site guard and this test fails with the RuntimeError itself."""
+    repo_root = tmp_path / "repo"
+    _init_repo(repo_root)
+    fixtures = _replay_dir(tmp_path)
+    env = _replay_env(fixtures)
+    findings_path = tmp_path / "findings.json"
+    report_path = tmp_path / "report.md"
+    scanned = subprocess.run(
+        # The provenance run.py would stamp, so the verifier's provenance check
+        # sees what a real run records.
+        [sys.executable, str(_SCRIPTS / "scan.py"), "--root", str(repo_root),
+         "--repo", _REPO, "--skill-commit-sha", _run_py._git_short_sha(_SCRIPTS)],
+        capture_output=True, text=True, env=env, timeout=60)
+    assert scanned.returncode == 0, scanned.stderr
+    findings_path.write_text(scanned.stdout, encoding="utf-8")
+    assert json.loads(scanned.stdout)["type_aware_lint"]["configs"], (
+        "the corpus must reach the detector, or the crash below is never exercised")
+
+    calls: list[str] = []
+
+    def _boom(wf_path, *a, **k):
+        calls.append(wf_path)
+        raise RuntimeError("injected OPT82 detector failure")
+
+    monkeypatch.setenv("CI_SPEEDUP_GH_FIXTURES", str(fixtures))
+    monkeypatch.delenv("CI_SPEEDUP_GH_RECORD", raising=False)
+    monkeypatch.setattr(cr, "_detect_opt82_type_aware_lint", _boom)
+    rc = cr.main(["--in", str(findings_path), "--out", str(findings_path),
+                  "--root", str(repo_root), "--repo", _REPO])
+    assert rc == 0
+    assert ".github/workflows/lint.yml" in calls, calls
+
+    data = json.loads(findings_path.read_text(encoding="utf-8"))
+    assert not [f for f in data["findings"] if f.get("pattern") == "OPT82"]
+    skipped = data["data_sources"].get("detectors_skipped") or []
+    entry = next(e for e in skipped if e["workflow"] == ".github/workflows/lint.yml")
+    assert "OPT82" in entry["detectors"]
+    assert "type-aware lint check failed (RuntimeError)" in entry["reason"], entry
+
+    # The pass survived the crash: a detector dispatched after OPT82 still ran.
+    assert [f for f in data["findings"] if f.get("pattern") == "OPT77"]
+
+    report = _render(_SCRIPTS, findings_path, report_path, env)
+    line = next(ln for ln in report.splitlines()
+                if "`lint.yml`: OPT82 did not run." in ln)
+    assert "UNKNOWN, not clean" in line
+    # The run-list family's unmeasured quantities are not what a skipped lint
+    # check leaves unmeasured; the disclosure must not claim them.
+    assert "re-run waste" not in line and "schedule burn" not in line, line
+    ok = _verify(report_path, findings_path, env)
+    assert ok.returncode == 0, f"{ok.stdout}\n{ok.stderr}"
+
+
+def test_opt82_unparsable_workflow_yaml_is_disclosed_as_skipped(tmp_path, monkeypatch):
+    """A lint workflow whose YAML the collector can parse from NEITHER source
+    (the checkout nor the default branch's copy) leaves OPT82 nothing to read
+    its lint step from. That must reach the reader as "OPT82 did not run" for
+    that workflow, never as an absent finding that reads as clean.
+
+    scan.py drops a workflow it cannot parse from the audit altogether, so the
+    scan runs over the intact corpus; the local file and the replayed contents
+    API are then broken before `collect_runs.main` runs in-process."""
+    import base64
+    broken = "name: Lint\non:\n  push:\n jobs:\n\t- bad indent\n"
+    repo_root = tmp_path / "repo"
+    _init_repo(repo_root)
+    fixtures = _replay_dir(tmp_path)
+    env = _replay_env(fixtures)
+    findings_path = tmp_path / "findings.json"
+    report_path = tmp_path / "report.md"
+    scanned = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "scan.py"), "--root", str(repo_root),
+         "--repo", _REPO, "--skill-commit-sha", _run_py._git_short_sha(_SCRIPTS)],
+        capture_output=True, text=True, env=env, timeout=60)
+    assert scanned.returncode == 0, scanned.stderr
+    findings_path.write_text(scanned.stdout, encoding="utf-8")
+
+    (repo_root / ".github" / "workflows" / "lint.yml").write_text(broken, encoding="utf-8")
+    (fixtures / "repos_synthetic_repo_contents_.github_workflows_lint.yml.json").write_text(
+        json.dumps({"encoding": "base64",
+                    "content": base64.b64encode(broken.encode()).decode()}),
+        encoding="utf-8")
+    monkeypatch.setenv("CI_SPEEDUP_GH_FIXTURES", str(fixtures))
+    monkeypatch.delenv("CI_SPEEDUP_GH_RECORD", raising=False)
+    rc = cr.main(["--in", str(findings_path), "--out", str(findings_path),
+                  "--root", str(repo_root), "--repo", _REPO])
+    assert rc == 0
+
+    data = json.loads(findings_path.read_text(encoding="utf-8"))
+    assert not [f for f in data["findings"] if f.get("pattern") == "OPT82"]
+    assert (data.get("opt82_withheld_by_gate") or {}).get("workflow_yaml_unparsed") == 1
+    skipped = data["data_sources"].get("detectors_skipped") or []
+    entry = next(e for e in skipped if e["workflow"] == ".github/workflows/lint.yml")
+    assert "OPT82" in entry["detectors"], entry
+    assert "could not be parsed" in entry["reason"], entry
+    report = _render(_SCRIPTS, findings_path, report_path, env)
+    line = next(ln for ln in report.splitlines()
+                if "`lint.yml`:" in ln and "did not run" in ln)
+    assert "OPT82" in line, line
+    ok = _verify(report_path, findings_path, env)
+    assert ok.returncode == 0, f"{ok.stdout}\n{ok.stderr}"
+
+
+def test_opt83_dependent_steps_are_held_back_end_to_end(tmp_path):
+    """The WITHHOLD twin of OPT83, through the real pipeline: the same corpus and
+    timings, but `Lint` writes a value to GITHUB_OUTPUT that `Typecheck` reads.
+    The steps are not independent, so no finding; the pole is HELD BACK (counted
+    and listed with its plain-English reason), named in the Data sources row,
+    and the report still verifies."""
+    repo_root = tmp_path / "repo"
+    _init_repo(repo_root, quality_yaml=_WF8_YAML_DEPENDENT)
+    findings_path = tmp_path / "findings.json"
+    report_path = tmp_path / "report.md"
+    env = _replay_env(_replay_dir(tmp_path))
+    run = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "run.py"),
+         "--root", str(repo_root), "--out", str(findings_path), "--repo", _REPO],
+        capture_output=True, text=True, env=env, timeout=60)
+    assert run.returncode == 0, run.stderr
+    data = json.loads(findings_path.read_text(encoding="utf-8"))
+    assert not [f for f in data["findings"] if f.get("pattern") == "OPT83"]
+    gates = data.get("opt83_withheld_by_gate") or {}
+    assert gates.get("sibling_reads_another_siblings_output") == 1, gates
+    assert data.get("opt83_withheld_candidates") == [
+        {"workflow_file": ".github/workflows/quality.yml", "job": "quality",
+         "gate": "sibling_reads_another_siblings_output",
+         "steps": ["Lint", "Typecheck", "Unit tests"]}], data.get(
+        "opt83_withheld_candidates")
+    report = _render(_SCRIPTS, findings_path, report_path, env)
+    assert "opt83-" not in report
+    row = next(ln for ln in report.splitlines() if "independent steps: held back" in ln)
+    # The row names the steps the run was decided on, not only the job.
+    assert "held back (quality (Lint + Typecheck + Unit tests))" in row, row
+    assert bp._OPT83_WITHHOLD_PHRASES["sibling_reads_another_siblings_output"] in row, row
+    ok = _verify(report_path, findings_path, env)
+    assert ok.returncode == 0, f"{ok.stdout}\n{ok.stderr}"
+
+
+def test_opt83_detector_crash_skips_and_discloses_through_collect(tmp_path, monkeypatch):
+    """CRASH TRIPWIRE, driven through the real collector: a bug in the OPT83
+    detector must skip OPT83 for that pole's workflow, named in the report as a
+    detector that did not run, and never take the data pass down. Remove the
+    call-site guard and this test fails with the RuntimeError itself."""
+    repo_root = tmp_path / "repo"
+    _init_repo(repo_root)
+    fixtures = _replay_dir(tmp_path)
+    env = _replay_env(fixtures)
+    findings_path = tmp_path / "findings.json"
+    report_path = tmp_path / "report.md"
+    scanned = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "scan.py"), "--root", str(repo_root),
+         "--repo", _REPO, "--skill-commit-sha", _run_py._git_short_sha(_SCRIPTS)],
+        capture_output=True, text=True, env=env, timeout=60)
+    assert scanned.returncode == 0, scanned.stderr
+    findings_path.write_text(scanned.stdout, encoding="utf-8")
+
+    calls: list[str] = []
+
+    def _boom(poles, *a, **k):
+        calls.append(str(poles[0].get("workflow_file") or ""))
+        raise RuntimeError("injected OPT83 detector failure")
+
+    monkeypatch.setenv("CI_SPEEDUP_GH_FIXTURES", str(fixtures))
+    monkeypatch.delenv("CI_SPEEDUP_GH_RECORD", raising=False)
+    monkeypatch.setattr(cr, "_detect_opt83_parallel_steps", _boom)
+    rc = cr.main(["--in", str(findings_path), "--out", str(findings_path),
+                  "--root", str(repo_root), "--repo", _REPO])
+    assert rc == 0
+    assert ".github/workflows/quality.yml" in calls, calls
+
+    data = json.loads(findings_path.read_text(encoding="utf-8"))
+    assert not [f for f in data["findings"] if f.get("pattern") == "OPT83"]
+    skipped = data["data_sources"].get("detectors_skipped") or []
+    entry = next(e for e in skipped if e["workflow"] == ".github/workflows/quality.yml")
+    assert "OPT83" in entry["detectors"]
+    # The skip is per pole: the reason names the pole's job, not only its workflow.
+    assert "parallel-steps check failed on job `quality` (RuntimeError)" in entry["reason"], entry
+    # The pass survived the crash: the detector dispatched after OPT83 still ran.
+    assert [f for f in data["findings"] if f.get("pattern") == "OPT81"
+            and (f.get("faster_runner") or {}).get("half") == "A2"]
+
+    report = _render(_SCRIPTS, findings_path, report_path, env)
+    assert any("`quality.yml`: OPT83 did not run." in ln for ln in report.splitlines())
+    ok = _verify(report_path, findings_path, env)
+    assert ok.returncode == 0, f"{ok.stdout}\n{ok.stderr}"
+
+
+def test_opt83_two_findings_and_its_order_before_opt81_a2_through_collect(tmp_path, monkeypatch):
+    """Two OPT83 findings through the real collector, and OPT83 running before
+    OPT81's runner-size advisory.
+
+    The corpus has one OPT83 pole (`quality.yml`). The other is the compute-
+    dominant `ci.yml` pole the A2 advisory fires on: a stand-in OPT83 finding is
+    returned for it (a real detector finding from the unit fixture, pointed at
+    that pole), so `collect()` sees OPT83 fire on two poles in two calls.
+      - the two findings get distinct ids (collect() bumps its next id after
+        each call), and render two distinct cards, one in each pole's section;
+      - A2 still fires beside the OPT83 finding on its pole (owner decision:
+        both stay visible; OPT83 is uncredited and needs a benchmark), and the
+        pole's section renders the OPT83 card before the A2 card.
+    The stand-in does not re-derive from the ci.yml pole, so the verifier is not
+    run here; the firing case above verifies end to end."""
+    import yaml
+    import test_opt83_parallel_steps as t83
+    repo_root = tmp_path / "repo"
+    _init_repo(repo_root)
+    fixtures = _replay_dir(tmp_path)
+    env = _replay_env(fixtures)
+    findings_path = tmp_path / "findings.json"
+    report_path = tmp_path / "report.md"
+    scanned = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "scan.py"), "--root", str(repo_root),
+         "--repo", _REPO, "--skill-commit-sha", _run_py._git_short_sha(_SCRIPTS)],
+        capture_output=True, text=True, env=env, timeout=60)
+    assert scanned.returncode == 0, scanned.stderr
+    findings_path.write_text(scanned.stdout, encoding="utf-8")
+
+    real = cr._detect_opt83_parallel_steps
+    stand_in_job: list[str] = []
+
+    def _wrap(poles, wf_docs, crit_by_wf, start_idx, **kw):
+        p = poles[0] if poles else {}
+        if str(p.get("workflow_file") or "") == ".github/workflows/ci.yml":
+            f = real([t83._pole()], {t83._WF: yaml.safe_load(t83._BASE_YAML)}, {},
+                     start_idx)[0]
+            job = str(p.get("job") or "")
+            f["workflow_file"] = ".github/workflows/ci.yml"
+            f["affected_jobs"] = [job]
+            f["independent_steps"].update({"job": job, "yaml_job": job,
+                                           "workflow_file": ".github/workflows/ci.yml"})
+            stand_in_job.append(job)
+            return [f]
+        return real(poles, wf_docs, crit_by_wf, start_idx, **kw)
+
+    monkeypatch.setenv("CI_SPEEDUP_GH_FIXTURES", str(fixtures))
+    monkeypatch.delenv("CI_SPEEDUP_GH_RECORD", raising=False)
+    monkeypatch.setattr(cr, "_detect_opt83_parallel_steps", _wrap)
+    rc = cr.main(["--in", str(findings_path), "--out", str(findings_path),
+                  "--root", str(repo_root), "--repo", _REPO])
+    assert rc == 0
+    assert stand_in_job, "the ci.yml pole was never offered to OPT83"
+
+    data = json.loads(findings_path.read_text(encoding="utf-8"))
+    o83 = [f for f in data["findings"] if f.get("pattern") == "OPT83"]
+    assert sorted(f["workflow_file"] for f in o83) == [
+        ".github/workflows/ci.yml", ".github/workflows/quality.yml"], o83
+    ids = [f["id"] for f in o83]
+    assert len(set(ids)) == 2, ids
+    every_id = [f["id"] for f in data["findings"]]
+    assert len(every_id) == len(set(every_id)), "finding ids collide"
+    # A2 fires on the ci.yml pole (see the firing case above) even with OPT83
+    # there: OPT83 is not a lever that holds the advisory back. Only chained.yml's
+    # OPT72 still does.
+    a2_ci = [f for f in data["findings"] if f.get("pattern") == "OPT81"
+             and (f.get("faster_runner") or {}).get("half") == "A2"
+             and f.get("workflow_file") == ".github/workflows/ci.yml"]
+    assert len(a2_ci) == 1, data.get("opt81_withheld_by_gate")
+    assert (data.get("opt81_withheld_by_gate") or {}).get(
+        "a2_cheaper_structural_lever_on_the_pole") == 1, data.get("opt81_withheld_by_gate")
+
+    report = _render(_SCRIPTS, findings_path, report_path, env)
+    anchors = re.findall(r'<a id="(opt83-[^"]+)"></a>', report)
+    assert sorted(anchors) == sorted(f"opt83-{i}" for i in ids), anchors
+    for f in o83:
+        at = report.index(f'<a id="opt83-{f["id"]}"></a>')
+        head = report[report.rindex("\n## ", 0, at):].splitlines()[1]
+        assert "Long pole" in head and Path(f["workflow_file"]).name in head, head
+    # On the ci.yml pole the OPT83 card renders first, the A2 advisory below it.
+    ci83 = next(f for f in o83 if f["workflow_file"].endswith("ci.yml"))
+    at83 = report.index(f'<a id="opt83-{ci83["id"]}"></a>')
+    sec_end = report.find("\n## ", at83)
+    assert "OPT81" in report[at83:sec_end if sec_end != -1 else len(report)], (
+        report[at83:at83 + 4000])
+
+
+def test_opt84_detector_crash_skips_and_discloses_through_collect(tmp_path, monkeypatch):
+    """CRASH TRIPWIRE, driven through the real collector: a bug in the OPT84
+    detector must skip OPT84 for that pole's workflow, named in the report as a
+    detector that did not run, and never take the data pass down. The tripwire
+    also proves the corpus reaches the new branch: `style.yml`'s pole must be
+    offered to the detector. Remove the call-site guard and this test fails
+    with the RuntimeError itself."""
+    repo_root = tmp_path / "repo"
+    _init_repo(repo_root)
+    fixtures = _replay_dir(tmp_path)
+    env = _replay_env(fixtures)
+    findings_path = tmp_path / "findings.json"
+    report_path = tmp_path / "report.md"
+    scanned = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "scan.py"), "--root", str(repo_root),
+         "--repo", _REPO, "--skill-commit-sha", _run_py._git_short_sha(_SCRIPTS)],
+        capture_output=True, text=True, env=env, timeout=60)
+    assert scanned.returncode == 0, scanned.stderr
+    findings_path.write_text(scanned.stdout, encoding="utf-8")
+
+    calls: list[str] = []
+
+    def _boom(poles, *a, **k):
+        calls.append(str(poles[0].get("workflow_file") or ""))
+        raise RuntimeError("injected OPT84 detector failure")
+
+    monkeypatch.setenv("CI_SPEEDUP_GH_FIXTURES", str(fixtures))
+    monkeypatch.delenv("CI_SPEEDUP_GH_RECORD", raising=False)
+    monkeypatch.setattr(cr, "_detect_opt84_tool_swap", _boom)
+    rc = cr.main(["--in", str(findings_path), "--out", str(findings_path),
+                  "--root", str(repo_root), "--repo", _REPO])
+    assert rc == 0
+    assert ".github/workflows/style.yml" in calls, calls
+
+    data = json.loads(findings_path.read_text(encoding="utf-8"))
+    assert not [f for f in data["findings"] if f.get("pattern") == "OPT84"]
+    skipped = data["data_sources"].get("detectors_skipped") or []
+    entry = next(e for e in skipped if e["workflow"] == ".github/workflows/style.yml")
+    assert "OPT84" in entry["detectors"]
+    assert "tool-swap check failed on job `style` (RuntimeError)" in entry["reason"], entry
+    # The pass survived the crash: OPT83 (before) and OPT81's advisory (after) ran.
+    assert [f for f in data["findings"] if f.get("pattern") == "OPT83"]
+    assert [f for f in data["findings"] if f.get("pattern") == "OPT81"
+            and (f.get("faster_runner") or {}).get("half") == "A2"]
+
+    report = _render(_SCRIPTS, findings_path, report_path, env)
+    assert any("`style.yml`: OPT84 did not run." in ln for ln in report.splitlines())
+    assert "opt84-" not in report
+    ok = _verify(report_path, findings_path, env)
+    assert ok.returncode == 0, f"{ok.stdout}\n{ok.stderr}"

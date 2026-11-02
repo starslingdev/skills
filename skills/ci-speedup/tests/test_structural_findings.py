@@ -103,6 +103,24 @@ def test_long_pole_is_decomposed_to_its_dominant_step():
     assert d["redundant_ratio"] == 4.0
 
 
+def test_dominant_lead_falls_back_past_control_steps_never_crowns_one():
+    """All-boilerplate job with a long `wait-all`: the fallback set drops the
+    control step (it runs nothing), so the crown goes to real boilerplate."""
+    lead = cr._dominant_category_lead(
+        [("Set up job", 3.0), ("wait-all", 50.0), ("Checkout", 5.0)])
+    assert lead == ("Checkout", 5.0), lead
+    # nothing but control steps: no step does the work
+    assert cr._dominant_category_lead([("wait", 5.0), ("wait-all", 3.0)]) is None
+
+
+def test_decompose_job_of_only_control_steps_returns_none():
+    d = cr._decompose_job_steps([_job("waits", [("wait", 5), ("wait-all", 3)])])
+    assert d is None
+    d = cr._decompose_job_steps([_job("noop", [("Set up job", 3), ("wait-all", 50),
+                                               ("Checkout", 5)])])
+    assert d is not None and d["dominant_step"] == "Checkout", d
+
+
 def test_decompose_aggregates_same_category_steps_not_single_max():
     # A multi-step pole with NO single dominant step: the job runs the same suite
     # back-to-back under four state-backend configs (four sequential `test` steps,
@@ -4913,3 +4931,464 @@ def test_cache_distribution_keeps_warm_runs_reaches_mostly_warm(tmp_path: Path):
     # churn. That demotion is the whole point of F2.
     assert cd["pr"]["upstream_median"] < 40.0
     assert cd["verdict"] in ("miss-tail", "mostly-warm") and cd["verdict"] != "churn", cd["verdict"]
+
+
+# --------------------------------------------------------------------------- #
+# Parallel steps: a `wait` step blocks on background work and does none itself
+# --------------------------------------------------------------------------- #
+
+def test_a_wait_step_is_never_crowned_the_dominant_step():
+    """With `background:` steps, a `wait` / `wait-all` step's duration is the
+    time it spent BLOCKED on other steps. Crowning it would hand the agent a
+    step that does no work. How the jobs API records overlapping steps is not
+    yet probed, so this is a guard only: the name is excluded from the crown."""
+    for wait_name in ("wait", "wait-all", "cancel", "Wait",
+                      "Wait for all background steps to complete"):
+        steps = [("Checkout", 10), ("Start db", 5), ("Run tests", 60),
+                 (wait_name, 300)]
+        d = cr._decompose_job_steps([_job("integration", steps)])
+        assert d is not None
+        assert d["dominant_step"] == "Run tests", (wait_name, d)
+        lead = cr._dominant_category_lead([(n, float(p)) for n, p in steps])
+        assert lead is not None and lead[0] == "Run tests", (wait_name, lead)
+        dom = bp._dominant_step_from_timeline(
+            {"job_dur_s": 375, "steps": [{"name": n, "dur_s": p} for n, p in steps]})
+        assert dom is not None and dom[0] == "Run tests", (wait_name, dom)
+
+
+def test_a_wait_step_is_not_crowned_even_in_an_all_boilerplate_job():
+    steps = [("Set up job", 3), ("wait-all", 90), ("Checkout", 5)]
+    d = cr._decompose_job_steps([_job("noop", steps)])
+    assert d is not None and d["dominant_step"] == "Checkout", d
+
+
+def test_a_step_merely_named_like_wait_is_still_work():
+    steps = [("Checkout", 10), ("Wait for deployment to be healthy", 120),
+             ("Run tests", 60)]
+    d = cr._decompose_job_steps([_job("deploy", steps)])
+    assert d is not None and d["dominant_step"] == "Wait for deployment to be healthy", d
+
+
+# --------------------------------------------------------------------------- #
+# Parallel steps: a lever priced from step times that overlap is held back
+# --------------------------------------------------------------------------- #
+
+_PAR_WF = ".github/workflows/ci.yml"
+
+
+def _par_doc(build_in_group: bool) -> dict:
+    build = [{"name": "Build", "run": "make"}, {"name": "Run tests", "run": "make test"}]
+    tail = [{"parallel": build}] if build_in_group else build
+    return {"jobs": {
+        "build-and-test": {"steps": [{"name": "Checkout", "uses": "actions/checkout@v4"},
+                                     {"name": "Install deps", "run": "npm ci"}] + tail},
+        "lint": {"steps": [{"name": "Lint", "run": "npm run lint"}]}}}
+
+
+def _par_structural(doc: dict, withheld: list) -> list:
+    runs = [[_job("build-and-test", _BUILD_TEST), _job("lint", _LINT)]
+            for _ in range(5)]
+    crit_by_wf = {_PAR_WF: cr._critical_path(runs)}
+    pr_checks = (("build-and-test", 300.0), ("lint", 100.0))
+    return cr._detect_structural_candidates(
+        pr_checks, [], crit_by_wf, {_PAR_WF: runs},
+        cr.RequiredChecks(frozenset({"build-and-test", "lint"}), complete=True),
+        {_PAR_WF: {"pull_request"}}, {}, 0,
+        wf_docs={_PAR_WF: doc}, overlap_withheld=withheld)
+
+
+def test_a_structural_lever_whose_dominant_step_runs_in_a_group_is_held_back():
+    """The dominant step's saving is priced as if the job's steps ran one after
+    another; inside a `parallel:` group they overlap, so cutting it comes off
+    the job only on the slowest branch. The credited lever is held back with a
+    listed reason; the pole keeps the renderer's generic hand-off."""
+    withheld: list = []
+    out = _par_structural(_par_doc(True), withheld)
+    levers = [f for f in out if f["pattern"] in ("OPT70", "OPT72", "OPT75")
+              and "build-and-test" in (f.get("affected_jobs") or [])]
+    assert levers == [], [(f["pattern"], f.get("wall_clock_p50_s")) for f in levers]
+    assert {(w["workflow_file"], w["job"], w["gate"]) for w in withheld} == {
+        (_PAR_WF, "build-and-test", "dominant_step_runs_inside_a_parallel_group")}
+    # The same job written flat keeps its credited lever and holds nothing back.
+    withheld = []
+    out = _par_structural(_par_doc(False), withheld)
+    assert any(f["pattern"] in ("OPT70", "OPT72", "OPT75")
+               and "build-and-test" in (f.get("affected_jobs") or []) for f in out)
+    assert withheld == []
+
+
+def test_opt24_holds_back_a_test_payload_that_runs_in_a_group():
+    runs = [[_job("test", [("Checkout", 20), ("Run tests", 420)])] for _ in range(3)]
+    flat = {"jobs": {"test": {"steps": [{"name": "Checkout", "uses": "actions/checkout@v4"},
+                                        {"name": "Run tests", "run": "pytest"}]}}}
+    grouped = {"jobs": {"test": {"steps": [
+        {"name": "Checkout", "uses": "actions/checkout@v4"},
+        {"parallel": [{"name": "Run tests", "run": "pytest"},
+                      {"name": "Lint", "run": "ruff ."}]}]}}}
+    assert cr._detect_opt24_long_test_no_sharding("ci.yml", runs, 0, wf_doc=flat)
+    withheld: list = []
+    out = cr._detect_opt24_long_test_no_sharding("ci.yml", runs, 0, wf_doc=grouped,
+                                                 overlap_withheld=withheld)
+    assert out == [], [f.get("wall_clock_p50_s") for f in out]
+    assert [(w["job"], w["gate"]) for w in withheld] == [
+        ("test", "dominant_step_runs_inside_a_parallel_group")]
+
+
+def test_a_named_control_step_is_never_crowned_the_dominant_step():
+    """S8: `- name: Wait for lint` / `wait: lint` renders under its `name:`, which
+    the bare control-name pattern cannot see. The collector reads the repo's
+    named control steps from the workflow YAML and never crowns one. A work
+    step merely named "Wait for ..." in a repo without such a control step is
+    still work (`test_a_step_merely_named_like_wait_is_still_work`)."""
+    doc = {"jobs": {"it": {"steps": [
+        {"run": "npm run lint", "id": "lint", "background": True},
+        {"name": "Run tests", "run": "npm test"},
+        {"name": "Wait for  lint", "wait": "lint"}]}}}
+    steps = [("Checkout", 10), ("Run tests", 60), ("Wait for lint", 300)]
+    saved = set(cr._YAML_CONTROL_STEP_NAMES)
+    try:
+        cr._set_yaml_control_step_names({_PAR_WF: doc})
+        d = cr._decompose_job_steps([_job("it", steps)])
+        assert d is not None and d["dominant_step"] == "Run tests", d
+        lead = cr._dominant_category_lead([(n, float(p)) for n, p in steps])
+        assert lead is not None and lead[0] == "Run tests", lead
+    finally:
+        cr._YAML_CONTROL_STEP_NAMES.clear()
+        cr._YAML_CONTROL_STEP_NAMES.update(saved)
+
+
+def _load_vr():
+    import importlib.util
+    name = "ci_speedup_verify_report_structural"
+    spec = importlib.util.spec_from_file_location(
+        name, _SKILL_DIR / "tests" / "verify_report.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_the_parallel_steps_held_back_row_renders_and_verifies(tmp_path):
+    """Collector, renderer and verifier name the same list and the same reason,
+    and the row the renderer writes passes the verifier; a report that drops
+    it fails."""
+    vr = _load_vr()
+    key = cr._PARALLEL_STEPS_WITHHELD_DOC_KEY
+    assert key == bp._PARALLEL_STEPS_WITHHELD_DOC_KEY == vr._VR_PARALLEL_STEPS_WITHHELD_DOC_KEY
+    assert bp._PARALLEL_STEPS_WITHHOLD_PHRASES == vr._VR_PARALLEL_STEPS_WITHHOLD_PHRASES
+    assert set(bp._PARALLEL_STEPS_WITHHOLD_PHRASES) == {cr._DOMINANT_STEP_OVERLAP_GATE}
+    rows = [{"workflow_file": _PAR_WF, "job": "build-and-test", "pattern": "OPT72",
+             "gate": cr._DOMINANT_STEP_OVERLAP_GATE}]
+    doc = {"data_sources": {}, key: rows}
+    path = tmp_path / "findings.json"
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    footer = "\n".join(bp._data_sources_footer(doc, "o/r"))
+    assert "| parallel steps: held back | 1 candidate lever(s) held back " \
+           "(build-and-test): the job's slowest steps run side by side" in footer, footer
+    assert vr.check_coverage_disclosed(footer, path).ok
+    dropped = "\n".join(ln for ln in footer.splitlines()
+                        if not ln.startswith("| parallel steps: held back"))
+    assert not vr.check_coverage_disclosed(dropped, path).ok
+
+
+# ---------------------------------------------------------------------------
+# Issue #119: a required commit status the repo PUBLISHES ITSELF (an in-repo
+# "aggregate" job that posts `All CI` through the statuses API after watching the
+# test jobs) is not proof of an external gate. Its context names no job, and no
+# `needs:` edge ties it to the tests, so the old "no job anchors it -> external"
+# rule demoted the real tests to a PR-floor ("gates zero merges") framing.
+# ---------------------------------------------------------------------------
+
+_AGG_WF = ".github/workflows/aggregate.yml"
+_AGG_CI_WF = ".github/workflows/ci.yml"
+_AGG_YAML = (
+    "name: Aggregate\n"
+    "on: pull_request\n"
+    "jobs:\n"
+    "  publish:\n"
+    "    name: Publish aggregate\n"
+    "    runs-on: ubuntu-latest\n"
+    "    steps:\n"
+    "      - run: |\n"
+    "          gh api repos/${{ github.repository }}/statuses/${{ github.event.pull_request.head.sha }} \\\n"
+    "            -f state=pending -f context='All CI'\n")
+_AGG_CI_YAML = (
+    "on: pull_request\n"
+    "jobs:\n"
+    "  test:\n    name: Test\n    runs-on: ubuntu-latest\n    steps:\n      - run: make test\n"
+    "  lint:\n    name: Lint\n    runs-on: ubuntu-latest\n    steps:\n      - run: make lint\n")
+_AGG_JOB_GRAPH = {
+    _AGG_CI_WF: {"test": {"name": "Test", "needs": [], "reusable": False},
+                 "lint": {"name": "Lint", "needs": [], "reusable": False}},
+    _AGG_WF: {"publish": {"name": "Publish aggregate", "needs": [], "reusable": False}},
+}
+_AGG_CRIT = {_AGG_CI_WF: {"job_p50": {"Test": 600.0, "Lint": 60.0}},
+             _AGG_WF: {"job_p50": {"Publish aggregate": 30.0}}}
+# What scan.py stamps for a workflow that posts commit statuses (#119).
+_AGG_PUBLISHERS = {_AGG_WF: {"sources": [_AGG_WF], "contexts": ["All CI"]}}
+
+
+def test_repo_published_aggregate_status_is_not_proven_external():
+    # The context `All CI` maps to no job, but a workflow in this repo names it AND posts
+    # commit statuses, so a name mismatch alone must not prove an external gate.
+    required = cr.RequiredChecks(frozenset({"All CI"}), complete=True)
+    assert cr._required_suite_all_external(
+        required, required.names, _AGG_CRIT, _AGG_JOB_GRAPH,
+        status_publishers=_AGG_PUBLISHERS) is False
+
+
+def test_repo_published_required_status_keeps_the_spine_unscoped():
+    # Mixed required set: `Lint` anchors a job, `All CI` is published in-repo. The
+    # aggregate may wait on `Test` with no `needs:` edge, so scoping to `Lint`'s
+    # reachability would drop `Test` as non-required. Reachability is unresolved: inert.
+    required = cr.RequiredChecks(frozenset({"All CI", "Lint"}), complete=True)
+    pr_check_p50 = {"Test": 600.0, "Lint": 60.0, "Publish aggregate": 30.0}
+    kept, dropped, scoped = cr._scope_spine_to_required(
+        pr_check_p50, required, required.names, _AGG_CRIT, _AGG_JOB_GRAPH, False,
+        status_publishers=_AGG_PUBLISHERS)
+    assert (kept, dropped, scoped) == (pr_check_p50, [], False)
+
+
+def test_sampler_does_not_call_a_repo_published_status_unsatisfiable():
+    # `All CI` is a commit status, so it never appears among check-runs. When the repo
+    # publishes it, the sample must not be promoted to the external-gate fallback.
+    sha_ts = {f"s{i}": f"{100 - i:04d}" for i in range(8)}
+
+    def fetch(sha):
+        return {"Test": 600.0, "Lint": 60.0, "Publish aggregate": 30.0}
+
+    repr_shas, _per, _durs, diag = cr._select_repr_shas(
+        sha_ts, fetch, frozenset({"All CI"}), 8, repo_published=frozenset({"All CI"}))
+    assert diag["required_suite_unsatisfiable"] is False
+    assert len(repr_shas) == 8
+    assert diag["required_checks_repo_published"] == ["All CI"]
+
+
+def test_external_required_check_still_classifies_external_with_publishers_present():
+    # Control: a genuinely external gate (a CLA bot) that NO workflow file names stays
+    # external, even when the repo has an unrelated status-publishing workflow.
+    required = cr.RequiredChecks(frozenset({"license/cla"}), complete=True)
+    assert cr._required_suite_all_external(
+        required, required.names, _AGG_CRIT, _AGG_JOB_GRAPH,
+        status_publishers=_AGG_PUBLISHERS) is True
+    assert cr._required_suite_all_external(
+        required, required.names, _AGG_CRIT, _AGG_JOB_GRAPH) is True
+    # ...and the sampler still promotes the external-gate fallback for it.
+    sha_ts = {f"s{i}": f"{100 - i:04d}" for i in range(4)}
+    _r, _p, _d, diag = cr._select_repr_shas(
+        sha_ts, lambda sha: {"Test": 600.0}, frozenset({"license/cla"}), 4,
+        repo_published=frozenset())
+    assert diag["required_suite_unsatisfiable"] is True
+    # A context that is named in a workflow which posts NO statuses is not "published".
+    assert cr._repo_published_required(frozenset({"All CI"}), {}) == frozenset()
+
+
+class _FakeRepoPublishedAggregateClient:
+    """8 PRs; ci.yml runs `Test` (600s) + `Lint` (60s), aggregate.yml runs `Publish
+    aggregate`. Branch protection requires ONE commit status, `All CI`, which never
+    shows up as a check-run (it is a status the aggregate job posts)."""
+    gave_up = False
+
+    def _bump(self, *, query: bool = False, error: bool = False) -> None:
+        self.queries += int(query)
+        self.errors += int(error)
+
+    def __init__(self) -> None:
+        self.queries = 0
+        self.errors = 0
+        self._shas = [f"s{i}" for i in range(1, 9)]
+        self._jobs = {101 + i: [_collect_job("Test", 600), _collect_job("Lint", 60)]
+                      for i in range(8)}
+        self._jobs.update({201 + i: [_collect_job("Publish aggregate", 30)]
+                           for i in range(8)})
+
+    def available(self) -> bool:
+        return True
+
+    def _runs(self, wf_id: int) -> list[dict]:
+        def run(rid, sha, wall):
+            return {"id": rid, "event": "pull_request", "head_sha": sha,
+                    "status": "completed", "conclusion": "success",
+                    "created_at": _iso(0), "run_started_at": _iso(0),
+                    "updated_at": _iso(wall)}
+        if wf_id == 1:
+            return [run(101 + i, s, 610) for i, s in enumerate(self._shas)]
+        if wf_id == 2:
+            return [run(201 + i, s, 40) for i, s in enumerate(self._shas)]
+        return []
+
+    def json(self, endpoint: str, allow_missing: bool = False):
+        self.queries += 1
+        if endpoint.startswith("repos/o/r/actions/workflows?"):
+            return {"workflows": [
+                {"id": 1, "path": _AGG_CI_WF, "name": "ci"},
+                {"id": 2, "path": _AGG_WF, "name": "Aggregate"}]}
+        m = re.match(r"repos/o/r/actions/workflows/(\d+)/runs\?(.*)", endpoint)
+        if m:
+            wf_id, qs = int(m.group(1)), m.group(2)
+            if re.search(r"per_page=1(?![0-9])", qs):
+                return {"total_count": 30}
+            return {"workflow_runs": self._runs(wf_id)}
+        m = re.match(r"repos/o/r/actions/runs/(\d+)/jobs", endpoint)
+        if m:
+            return {"jobs": self._jobs.get(int(m.group(1)), [])}
+        m = re.match(r"repos/o/r/commits/([^/]+)/check-runs", endpoint)
+        if m:
+            return {"check_runs": [
+                {"name": n, "started_at": _iso(0), "completed_at": _iso(d)}
+                for n, d in (("Test", 600), ("Lint", 60), ("Publish aggregate", 30))]}
+        if endpoint == "repos/o/r":
+            return {"default_branch": "main"}
+        if endpoint == "repos/o/r/branches/main/protection/required_status_checks":
+            return {"contexts": ["All CI"]}
+        if endpoint.endswith("contents/" + _AGG_CI_WF):
+            return {"content": base64.b64encode(_AGG_CI_YAML.encode()).decode()}
+        if endpoint.endswith("contents/" + _AGG_WF):
+            return {"content": base64.b64encode(_AGG_YAML.encode()).decode()}
+        return None
+
+    def text(self, endpoint: str, allow_missing: bool = False):
+        self.queries += 1
+        return ""
+
+
+def test_collect_repo_published_aggregate_is_not_a_pr_floor_fallback(monkeypatch, tmp_path):
+    # End to end through the real collect(): the in-repo aggregate publisher keeps the
+    # gate UNRESOLVED (a best guess) instead of demoting the real tests to a PR-floor
+    # "no file-backed required gate" framing, and no test job is called non-required.
+    import importlib.util
+    import yaml
+    # Load scan.py under a unique name: `scan` alone would clash with ci-secure's module.
+    spec = importlib.util.spec_from_file_location(
+        "ci_speedup_scan_issue119", _SCRIPTS / "scan.py")
+    _scan = importlib.util.module_from_spec(spec)
+    sys.modules["ci_speedup_scan_issue119"] = _scan  # @dataclass resolves __module__ here
+    spec.loader.exec_module(_scan)
+    # The publisher map is exactly what scan.py derives from these two workflow files.
+    assert _scan._build_workflow_status_publishers(tmp_path, [
+        (_AGG_CI_WF, yaml.safe_load(_AGG_CI_YAML), _AGG_CI_YAML),
+        (_AGG_WF, yaml.safe_load(_AGG_YAML), _AGG_YAML)]) == _AGG_PUBLISHERS
+    monkeypatch.setattr(cr, "GhClient", _FakeRepoPublishedAggregateClient)
+    doc = {
+        "workflow_job_graph": _AGG_JOB_GRAPH,
+        "workflow_status_publishers": _AGG_PUBLISHERS,
+        "findings": [{"id": "f1", "workflow_file": _AGG_CI_WF},
+                     {"id": "f2", "workflow_file": _AGG_WF}],
+    }
+    out = cr.collect(doc, "o/r", max_runs=8, shallow_runs=8)
+    cp = out["pr_critical_path"]
+    assert cp.get("gate_kind") != "pr_floor_fallback"
+    assert cp.get("required_suite_unsatisfiable") is False
+    assert cp.get("provenance") == "unresolved"
+    assert not any(p.get("pr_floor_fallback") for p in cp.get("poles") or [])
+    assert cp["critical_path_check"] == "Test"
+    assert not [f for f in out.get("findings") or []
+                if f.get("required_status") == "not-required"]
+    md = bp.render(out, {}, {}, {}, "2026-10-27")
+    assert "No file-backed required gate" not in md
+    assert "All CI" in md   # the repo-published status is named, not silently absent
+    # The footnote sits in the Data sources footer, AFTER the gate; it must not point
+    # the reader "below" to a gate that is above it.
+    note = next(ln for ln in md.splitlines()
+                if ln.startswith("> - ") and "posted by this repo's own workflow" in ln)
+    assert md.index(note) > md.index("Test")
+    assert "gate below" not in note
+
+
+# ---------------------------------------------------------------------------
+# Issue #119, OPT80: the checkout-stall finding's "merge does not wait on this job"
+# sentence. With the in-repo `All CI` aggregate required, no `needs:` edge ties it
+# to `test`, so which jobs the merge waits on is UNKNOWN - never "not merge-gating".
+# ---------------------------------------------------------------------------
+
+def _opt80_repo_published_publishers(tmp_path):
+    """The publisher map exactly as scan.py derives it from a workflow that posts
+    the `All CI` status with a literal context."""
+    import importlib.util
+    import yaml
+    name = "ci_speedup_scan_issue119"
+    _scan = sys.modules.get(name)
+    if _scan is None:
+        spec = importlib.util.spec_from_file_location(name, _SCRIPTS / "scan.py")
+        _scan = importlib.util.module_from_spec(spec)
+        sys.modules[name] = _scan  # @dataclass resolves __module__ here
+        spec.loader.exec_module(_scan)
+    pubs = _scan._build_workflow_status_publishers(tmp_path, [
+        (_AGG_CI_WF, yaml.safe_load(_AGG_CI_YAML), _AGG_CI_YAML),
+        (_AGG_WF, yaml.safe_load(_AGG_YAML), _AGG_YAML)])
+    assert pubs, "scan.py found no status publisher in the aggregate workflow"
+    return pubs
+
+
+_OPT80_AGG_CRIT = {_AGG_CI_WF: {"job_p50": {"Test": 600.0, "Lint": 60.0},
+                                "event_scope": "pull_request"},
+                   _AGG_WF: {"job_p50": {"Publish aggregate": 30.0},
+                             "event_scope": "pull_request"}}
+
+
+def test_opt80_merge_gating_is_unknown_when_a_required_status_is_repo_published(tmp_path):
+    pubs = _opt80_repo_published_publishers(tmp_path)
+    crit = _OPT80_AGG_CRIT[_AGG_CI_WF]
+    for names in ({"All CI"}, {"All CI", "Lint"}):
+        req = cr.RequiredChecks(frozenset(names), complete=True)
+        got = cr._opt80_merge_gating_jobs(
+            _AGG_CI_WF, req, _AGG_JOB_GRAPH, _OPT80_AGG_CRIT, workflow_names={},
+            status_publishers=pubs)
+        assert got is None, (names, got)
+        assert cr._opt80_tail_withheld_reason(
+            True, crit, got, None) == "merge_gating_unknown", names
+    # Controls: no publisher map is the old, resolved read; and a repo-published
+    # status that is NOT required leaves the required set resolved.
+    req = cr.RequiredChecks(frozenset({"All CI"}), complete=True)
+    assert cr._opt80_merge_gating_jobs(
+        _AGG_CI_WF, req, _AGG_JOB_GRAPH, _OPT80_AGG_CRIT, workflow_names={}) == {}
+    req = cr.RequiredChecks(frozenset({"Lint"}), complete=True)
+    assert set(cr._opt80_merge_gating_jobs(
+        _AGG_CI_WF, req, _AGG_JOB_GRAPH, _OPT80_AGG_CRIT, workflow_names={},
+        status_publishers=pubs)) == {"lint"}
+
+
+def test_vr_opt80_withheld_reason_is_unknown_when_a_required_status_is_repo_published(
+        tmp_path):
+    import verify_report as vr
+    pubs = _opt80_repo_published_publishers(tmp_path)
+    f = {"id": "f1", "pattern": "OPT80", "workflow_file": _AGG_CI_WF,
+         "evidence": vr._VR_OPT80_TAIL_WITHHELD_SENTENCES["not_merge_gating"].format(
+             job="Test", pause="45"),
+         "checkout_stall": {"job": "Test", "on_critical_path": True,
+                            "tail_run_longest_pause_s": 45.0,
+                            "tail_axis_withheld_reason": "not_merge_gating"}}
+
+    def data(required, publishers):
+        return {"declared_pr_workflows": [_AGG_CI_WF],
+                "per_workflow_timing": _OPT80_AGG_CRIT,
+                "required_checks_complete": True, "required_checks": required,
+                "workflow_job_graph": _AGG_JOB_GRAPH,
+                "workflow_status_publishers": publishers}
+
+    for required in (["All CI"], ["All CI", "Lint"]):
+        assert vr._vr_opt80_tail_withheld_expected(
+            f, data(required, pubs)) == {"merge_gating_unknown"}, required
+        problems = vr._vr_opt80_tail_withheld_problems(f, data(required, pubs))
+        assert any("stamped facts give merge_gating_unknown" in p
+                   for p in problems), problems
+    # Controls: no publisher map, or only a resolved required check.
+    assert vr._vr_opt80_tail_withheld_expected(f, data(["All CI"], None)) == {
+        "not_merge_gating", "tail_not_derivable"}
+    assert vr._vr_opt80_tail_withheld_expected(f, data(["Lint"], pubs)) == {
+        "not_merge_gating", "tail_not_derivable"}
+    assert vr._vr_opt80_tail_withheld_problems(f, data(["Lint"], pubs)) == []
+
+
+def test_vr_required_reachability_matches_posted_context_exactly():
+    """The verifier's copy must agree with the collector's exact match: a required
+    `All CI` is not repo-published because a workflow posts `All CI / extra`."""
+    import verify_report as vr
+    data = {"required_checks": ["All CI"], "workflow_job_graph": _AGG_JOB_GRAPH,
+            "workflow_status_publishers": {
+                _AGG_WF: {"sources": [_AGG_WF], "contexts": ["All CI / extra"]}}}
+    assert vr._vr_required_reachability_unresolved(data) is False
+    assert cr._required_reachability_unresolved(
+        {"All CI"}, {}, _AGG_JOB_GRAPH, data["workflow_status_publishers"]) is False
+    data["workflow_status_publishers"][_AGG_WF]["contexts"] = ["All CI"]
+    assert vr._vr_required_reachability_unresolved(data) is True

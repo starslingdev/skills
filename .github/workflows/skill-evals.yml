@@ -1,4 +1,4 @@
-# Behavioral eval suite for the ci-secure skill.
+# Behavioral eval suites for the ci-secure and ci-speedup skills.
 #
 # The rest of CI tests the scanner: deterministic Python, every push, every PR. This tests the
 # CONTRACT — the instructions in SKILL.md that a live agent reads and executes. A refactor can
@@ -6,14 +6,15 @@
 # this repository would notice.
 #
 # Each case scaffolds fixture workflows into a throwaway directory, drives one headless
-# `claude -p` session against it, and applies the case's own graders to the recorded tool calls
-# and output. See skills/ci-secure/evals/README.md for the cases and
-# maintainers/ci-secure/scripts/run_skill_evals.py for the harness.
+# `claude -p` session against it, and applies the entry's checks to the recorded tool calls
+# and output. See skills/ci-secure/evals/README.md and skills/ci-speedup/evals/README.md for
+# the cases, and maintainers/scripts/run_skill_evals.py for the shared runner both suites use.
 #
 # WHY THIS IS NOT THE `test` GATE, and is not required:
 #
 #   - It spends real tokens. One session per case, so it is path-filtered to the files that can
-#     actually change agent behaviour. A README or example PR never pays for it.
+#     actually change agent behaviour. An example or top-level docs PR never pays for it;
+#     an edit to an evals/ README does, because evals/** is in the filter.
 #   - It is non-deterministic. An agent can reach a correct outcome by a different route, so a
 #     required check here would be flaky, and a flaky gate gets disabled or ignored.
 #   - It cannot run on fork PRs at all: `pull_request` from a fork has no access to
@@ -36,7 +37,20 @@ on:
       - "skills/ci-secure/references/**"
       - "skills/ci-secure/scripts/**"
       - "skills/ci-secure/evals/**"
-      - "maintainers/ci-secure/scripts/run_skill_evals.py"
+      # ci-speedup's runnable evals.json entries. One workflow-level filter for both
+      # suites, so a change to either skill runs both (no classifier job by design).
+      - "skills/ci-speedup/SKILL.md"
+      - "skills/ci-speedup/references/**"
+      - "skills/ci-speedup/scripts/**"
+      - "skills/ci-speedup/evals/**"
+      # The session runs verify_report.py; the scaffold builds the fixture with the
+      # e2e test's helpers from its replay corpus.
+      - "skills/ci-speedup/tests/verify_report.py"
+      - "skills/ci-speedup/tests/test_offline_pipeline_e2e.py"
+      - "skills/ci-speedup/tests/fixtures/gh_replay/**"
+      - "maintainers/scripts/run_skill_evals.py"
+      - "maintainers/scripts/eval_gh_shim.py"
+      - "maintainers/scripts/eval_reading.py"
       - ".github/workflows/skill-evals.yml"
 
   # Manual: run it against any branch on demand, from the Actions tab or
@@ -45,15 +59,21 @@ on:
   # without pushing an empty commit.
   workflow_dispatch:
     inputs:
-      case:
-        description: "Single case to run (blank = all five)"
+      id:
+        description: "Single ci-secure evals.json entry id to run, a number 1-5 (blank = all five; ci-speedup always runs every entry of the chosen tier)"
         required: false
         type: string
       runs:
-        description: "Runs per case"
+        description: "Runs per case. Only 1 fits the job timeout; any other value is refused before a session starts"
         required: false
         default: "1"
         type: string
+      tier:
+        description: "gate = the per-PR regression entries (what pull requests run); measure = only the measurement entries (ci-speedup's quality-review-opt81; ci-secure has none and reports NOT RUN); all = both"
+        required: false
+        default: gate
+        type: choice
+        options: [gate, measure, all]
 
 # A superseded run is wasted tokens, not just wasted minutes.
 concurrency:
@@ -73,11 +93,12 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: starsling-ubuntu-24.04
-    # Above the harness's own worst case: five cases at the 900s per-run cap the case files
-    # declare is 75 minutes, so a lower budget here would kill a slow-but-healthy suite and
-    # report it as a behaviour change. A hung session must still not hold the pool: self-hosted
-    # jobs otherwise queue for hours with no signal.
-    timeout-minutes: 90
+    # Above the runner's own worst case: the five entries run in parallel (one round), so the
+    # longest per-session cap in evals.json (25 minutes) plus about 10 for setup (checkout, pip,
+    # the CLI install, five scaffolds). A lower budget would kill a slow-but-healthy suite before
+    # it writes its results and report it as a behaviour change. A hung session must still not
+    # hold the pool: self-hosted jobs otherwise queue for hours with no signal.
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -98,13 +119,15 @@ jobs:
       - name: Install Claude Code
         run: npm install -g @anthropic-ai/claude-code@2.1.235
 
-      # One run per case. Bump --runs only if the suite proves flaky in practice: every extra
-      # run is another full agent session.
+      # One run per case: every extra run is another full agent session, and the job timeout
+      # below holds exactly one. The runner writes its results file after every run, so a
+      # job killed at the timeout still uploads the verdicts it reached.
       - name: Run the eval cases
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          CASE: ${{ inputs.case }}
+          ID: ${{ inputs.id }}
           RUNS: ${{ inputs.runs }}
+          TIER: ${{ inputs.tier }}
           # The runner executes as root, and `claude` refuses `--permission-mode
           # bypassPermissions` under uid 0 unless a deliberate sandbox is declared: it prints
           # "cannot be used with root/sudo privileges" and exits before the first turn. That is
@@ -115,32 +138,130 @@ jobs:
           IS_SANDBOX: "1"
         # The harness separates "a case ran and failed" (1) from "the harness could not run at
         # all" (2), so preserve the distinction here rather than collapsing both into a red
-        # check that asserts a cause the workflow cannot know.
+        # check that asserts a cause the workflow cannot know. When both happen in one suite
+        # (a case failed, a later one could not run or the harness crashed) the exit is 1: a
+        # session that ran and failed is the stronger signal; the NOT RUN lines still print.
         run: |
           set -uo pipefail
           status=0
-          python3 maintainers/ci-secure/scripts/run_skill_evals.py \
-            --runs "${RUNS:-1}" ${CASE:+--case "$CASE"} || status=$?
+          # The job timeout budgets ONE run per case (GitHub expressions cannot scale it by
+          # `runs`), so a dispatch asking for more would be killed mid-suite. Refuse it before
+          # any session starts; dispatch the workflow again for another sample.
+          if [ "${RUNS:-1}" != "1" ]; then
+            echo "::error title=SKILL EVALS DID NOT RUN::runs=${RUNS} is not supported: the job timeout budgets one run per case. Nothing was verified; dispatch again for another run."
+            exit 2
+          fi
+          # Pull requests have no inputs: the gate tier, with no --all.
+          case "${TIER:-gate}" in
+            gate) tier_args="" ;;
+            measure) tier_args="--tier measure" ;;
+            all) tier_args="--all" ;;
+            *) echo "::error title=SKILL EVALS DID NOT RUN::tier=${TIER} is not gate, measure or all. Nothing was verified."; exit 2 ;;
+          esac
+          python3 maintainers/scripts/run_skill_evals.py --skill ci-secure \
+            --runs "${RUNS:-1}" ${ID:+--id "$ID"} $tier_args || status=$?
           if [ "$status" -eq 2 ]; then
-            echo "::error title=SKILL EVALS DID NOT RUN::The harness could not run (exit 2). Nothing was verified — this is a coverage gap, not a behaviour change. The reason is on the line above."
+            echo "::error title=SKILL EVALS DID NOT RUN::The harness could not run (exit 2). Nothing was verified — this is a coverage gap, not a behaviour change. The reason is on the NOT RUN or harness: line above."
           elif [ "$status" -ne 0 ]; then
-            echo "::error title=SKILL EVALS FAILED::A case ran and failed a grader (exit ${status})."
+            echo "::error title=SKILL EVALS FAILED::A ci-secure eval ran and failed a check (exit ${status})."
           fi
           exit "$status"
         # Defaults keep the automatic path unchanged: one run, every case.
 
-      # The harness writes the session of any case that failed. Grader names
-      # alone do not explain a failure, and "read the job log" is only useful
-      # advice if the log has the run in it.
-      - name: Keep the sessions that failed
-        if: failure()
+      # The runner keeps the session of any run that failed, and writes tokens and time per
+      # run. Check names alone do not explain a failure.
+      - name: Keep the sessions that failed and the per-run results
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: skill-eval-sessions
-          path: skill-eval-logs/
+          path: |
+            skill-eval-logs/
+            skill-eval-results/
           retention-days: 14
           if-no-files-found: ignore
 
+
+  # ci-speedup's runnable evals.json entries (a full audit of the synthetic repo against its
+  # offline replay corpus, the security ask that must route to ci-secure, and reading-sensitive
+  # cases), run by the shared runner. Same trust model as `evals` above. Pull requests run the
+  # four gate entries; quality-review-opt81 is a measurement (tier measure), run by dispatch.
+  ci-speedup-evals:
+    name: ci-speedup skill evals
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: starsling-ubuntu-24.04
+    # Entries run in parallel, except the three `serial` full audits (10, 11, 13), which write
+    # fixed /tmp paths and so take turns: worst case (tier all) is those three end to end at the
+    # runner's 1500s per-session cap, plus about 10 minutes of setup and scaffolds. Healthy runs
+    # take a few minutes; this only bounds a hung session.
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.12"
+
+      # The scaffold builds the synthetic repo with the offline e2e test's own helpers,
+      # and that module imports pytest.
+      - name: Install harness dependencies
+        run: pip install pytest pyyaml
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code@2.1.235
+
+      - name: Run the eval cases
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # SKILL.md's phase 1 runs `gh auth status` and stops without it. Every run-history
+          # read is answered from the replay corpus, so the read-only token is never used for
+          # a data call about the synthetic repo (the gh shim fails those closed).
+          GH_TOKEN: ${{ github.token }}
+          RUNS: ${{ inputs.runs }}
+          TIER: ${{ inputs.tier }}
+          IS_SANDBOX: "1"
+        run: |
+          set -uo pipefail
+          status=0
+          # The job timeout budgets ONE run per case (GitHub expressions cannot scale it by
+          # `runs`), so a dispatch asking for more would be killed mid-suite. Refuse it before
+          # any session starts; dispatch the workflow again for another sample.
+          if [ "${RUNS:-1}" != "1" ]; then
+            echo "::error title=SKILL EVALS DID NOT RUN::runs=${RUNS} is not supported: the job timeout budgets one run per case. Nothing was verified; dispatch again for another run."
+            exit 2
+          fi
+          # Pull requests have no inputs: the gate tier, with no --all.
+          case "${TIER:-gate}" in
+            gate) tier_args="" ;;
+            measure) tier_args="--tier measure" ;;
+            all) tier_args="--all" ;;
+            *) echo "::error title=SKILL EVALS DID NOT RUN::tier=${TIER} is not gate, measure or all. Nothing was verified."; exit 2 ;;
+          esac
+          python3 maintainers/scripts/run_skill_evals.py --skill ci-speedup \
+            --runs "${RUNS:-1}" $tier_args || status=$?
+          if [ "$status" -eq 2 ]; then
+            echo "::error title=SKILL EVALS DID NOT RUN::The harness could not run (exit 2). Nothing was verified — this is a coverage gap, not a behaviour change. The reason is on the NOT RUN or harness: line above."
+          elif [ "$status" -ne 0 ]; then
+            echo "::error title=SKILL EVALS FAILED::A ci-speedup eval ran and failed a check (exit ${status})."
+          fi
+          exit "$status"
+
+      - name: Keep the sessions that failed and the per-run results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-speedup-skill-eval-sessions
+          path: |
+            skill-eval-logs/
+            skill-eval-results/
+          retention-days: 14
+          if-no-files-found: ignore
 
   # ONE check name, always reported, mirroring `test`'s verdict job in ci.yml. The evals job is
   # conditional, and GitHub counts a skipped check as a pass — so a skip must be turned into a
@@ -148,7 +269,7 @@ jobs:
   # is used there: a cancelled run reports skipped, and skipped reads as green.
   verdict:
     name: skill evals
-    needs: [evals]
+    needs: [evals, ci-speedup-evals]
     # `always()` so a skipped or cancelled evals job still gets a verdict — but NOT on a fork
     # PR, where the check would be green over a session that could not happen. The fork job
     # below carries that case under a name that says so. The two conditions are exact
@@ -163,15 +284,21 @@ jobs:
       - name: Report
         env:
           RESULT: ${{ needs.evals.result }}
+          SPEEDUP_RESULT: ${{ needs.ci-speedup-evals.result }}
         run: |
           set -euo pipefail
-          echo "evals job: ${RESULT}"
-          case "${RESULT}" in
-            success)   echo "Skill evals passed."; exit 0 ;;
-            failure)   echo "::error::Skill evals FAILED. Read the job log: the harness prints whether a case ran and failed a grader, or whether it could not run at all."; exit 1 ;;
-            cancelled) echo "::warning::Skill evals were cancelled; nothing was verified."; exit 1 ;;
-            *)         echo "::error::Skill evals did not run (${RESULT}); that is not a pass."; exit 1 ;;
-          esac
+          status=0
+          for pair in "ci-secure:${RESULT:-}" "ci-speedup:${SPEEDUP_RESULT:-}"; do
+            suite="${pair%%:*}"; result="${pair#*:}"
+            echo "${suite} evals job: ${result}"
+            case "${result}" in
+              success)   echo "${suite} skill evals passed." ;;
+              failure)   echo "::error::${suite} skill evals FAILED. Read the job log: the harness prints whether a case ran and failed, or whether it could not run at all."; status=1 ;;
+              cancelled) echo "::warning::${suite} skill evals were cancelled; nothing was verified."; status=1 ;;
+              *)         echo "::error::${suite} skill evals did not run (${result}); that is not a pass."; status=1 ;;
+            esac
+          done
+          exit "$status"
 
   # The name is the message: this check being green must not read as "the contract was
   # verified". Failing an external contributor's PR for a secret they have no way to reach
@@ -194,7 +321,7 @@ jobs:
           echo ""
           echo "  This pull request comes from a fork. Fork runs cannot reach"
           echo "  ANTHROPIC_API_KEY, so no headless session could be started and"
-          echo "  none of the five behavioural cases was executed."
+          echo "  none of the ci-secure or ci-speedup behavioural cases was executed."
           echo ""
           echo "  This is a coverage gap, NOT a pass. Before merging a fork"
           echo "  change to SKILL.md, references/, scripts/ or evals/, push the"

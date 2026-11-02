@@ -17,8 +17,8 @@ license: MIT
 
 # ci-speedup — CI Optimization Audit for GitHub Actions
 
-Audits a repository's GitHub Actions workflows against a 78-pattern
-catalog — 71 **hygiene/data-driven** patterns plus 7 **structural /
+Audits a repository's GitHub Actions workflows against a 91-pattern
+catalog — 80 **hygiene/data-driven** patterns plus 11 **structural /
 critical-path** patterns routed from the measured long pole — and
 produces a **root-cause-analysis** report with measured impact on two
 axes — developer wall-clock wait and runner-minutes (cloud bill). The
@@ -47,7 +47,7 @@ findings with a stamped wall-clock-neutrality certificate promote into
 **"Runner-minute reductions (wall-clock-neutral)"**; they cut bill/capacity
 without touching the merge gate and must be source-backed. Everything else drops
 to **"Also noticed"**: modeled, uncertified, advisory, residual hygiene, or
-credited wall-clock levers flagged as on-path.
+credited wall-clock levers flagged as on-path (OPT81 and OPT79 pole findings render at their pole or in their own section, never there).
 
 The spine is **scoped to the merge-blocking checks**: when the data pass resolves
 a real required-check set (branch protection / rulesets, already fetched — read
@@ -77,7 +77,7 @@ detector, the agent writes a **log-grounded, clearly-labelled** root-cause readi
 (verbatim log lines, framed as a lead to verify) — a breakdown + fix prompt instead
 of a dead-end, never touching detection, ranking, or measured magnitudes.
 
-`scripts/scan.py` parses `references/optimization-patterns.md` and runs its
+`scripts/scan.py` parses `references/patterns/*.md` and runs its
 registered detectors against the repo — five deterministic flavors (per-file
 bespoke, declarative `match:`/`yaml_path:`, cross-workflow, repo-file,
 source-grep; `ARCHITECTURE.md`). `scripts/collect_runs.py` then adds the
@@ -97,13 +97,13 @@ that has produced confident-but-wrong findings before; they surface as a
 
 ## Structural / critical-path findings (the high-leverage track)
 
-On real repos almost every hygiene hit (OPT1–OPT69, OPT76, OPT77, OPT79, OPT80 — mostly declarative)
+On real repos almost every hygiene hit (OPT1–OPT69, OPT76, OPT77, OPT79–OPT82, OPT86, OPT88–OPT91, OPT93, OPT94 — mostly declarative)
 moves **~0 developer wall-clock** — the true bottleneck is usually a check working
 as intended that is simply the slowest thing gating the merge, with no catalog
-match. The **structural track** (category 14, OPT70–OPT75 plus OPT78) attacks that: a second
+match. The **structural track** (category 14, OPT70–OPT75, OPT78, OPT83–OPT85, OPT87) attacks that: a second
 finding class **routed from the measured critical path** in `collect_runs.py` (the
 long-pole job decomposed to steps, required checks cross-referenced, shared cluster
-work detected; OPT78 via a config-gated vitest log leaf), not a YAML match — still
+work detected; OPT78 via a config-gated vitest log leaf; OPT74/85/87 have no router yet), not a YAML match — still
 catalog OPT-ids. Routing + risk model: `ARCHITECTURE.md` §11.
 
 ### Risk & intent are mandatory (baked into every structural prompt)
@@ -388,7 +388,7 @@ dropped (never reframed into a softer finding):
    **OPT49/slow-setup and OPT51/install-ratio were CUT** — a duration/ratio never
    proves a cold cache (criterion 2); the verified slow-setup signal lives with
    OPT3/5/8/9 and OPT73. Rationale: the ⚠️ CUT notes in
-   [references/optimization-patterns.md](references/optimization-patterns.md).)
+   [references/patterns/](references/patterns/INDEX.md).)
 2. **Positive instance evidence** — proof the defect actually costs time on
    *this* repo: the cacheable step ran uncached with measurable cost, the
    long leg measurably gates the matrix, etc. The *absence* of a signal
@@ -417,17 +417,17 @@ agreement. A finding only one pass would defend is cut or escalated, not kept.
 
 ## Pattern catalog
 
-`references/optimization-patterns.md` declares all 78 patterns across 14
-categories (Caching, Redundancy, Docker, Parallelization, Actions and
-Checkout, Conditional Execution, Trigger and Scope, Release Workflow, Queue
-Times and Concurrency, Timing Anomalies, Stack-Specific, Build Caching,
-Hidden Failures and Dead Config, **Structural / Critical-Path Levers**). Each
-entry's METADATA block declares the pattern id, impact tier, finding class
-(`static` / `data-driven` / `structural`), detector type, and fix strategy
-slug; structural entries add a `risk` rating + mandatory guardrail/rollout.
+Patterns live one per file in `references/patterns/opt<N>-*.md` (91 patterns
+in 14 categories, from Caching to **Structural / Critical-Path Levers**). Each
+file's frontmatter declares the id, impact tier, finding class (`static` /
+`data-driven` / `structural`), detector and fix strategy slug; structural
+entries add a `risk` rating + mandatory guardrail/rollout. When a finding,
+prompt or review names `OPT<N>`, read that one file in full; read
+`references/patterns/INDEX.md` only to find which pattern covers a stack.
+Never open `references/optimization-patterns.md`: it is the generated public copy.
 
 Adding or cutting a pattern (catalog entry + detector registration, coverage
-bookkeeping, the intentionally-cut OPT49/50/51 / router-less OPT74 and OPT78 cases) is a
+bookkeeping, the intentionally-cut OPT49/50/51 / router-less OPT74, OPT78, OPT85 and OPT87 cases) is a
 contributor task — `maintainers/ci-speedup/MAINTAINERS.md` (source checkout
 only) § Adding a pattern to the catalog.
 
@@ -439,13 +439,13 @@ Reference docs (read on demand — each links one level deep from here; outside 
   the critical-path / long-pole / cluster-floor model (below-floor speedups
   save runner-minutes, zero wall-clock).
 - [references/savings-methodology.md](references/savings-methodology.md) —
-  two-axis sizing: Δ wall-clock ranks; measured runner-minute findings
-  promote; modeled residuals stay in "Also noticed".
-- [references/optimization-patterns.md](references/optimization-patterns.md) — the pattern catalog (every OPT-id).
+  two-axis sizing: Δ wall-clock ranks; measured runner-minute findings promote; modeled residuals stay in "Also noticed".
+  Measured compute counts completed job runs (timed-out, cancelled, and failed runs at or past the 6-hour timeout excluded, named in the spine footnote): modeled savings are capped at it; measured and failure-waste savings are checked against every sampled run.
+- [references/patterns/INDEX.md](references/patterns/INDEX.md) — the pattern index (every OPT-id; one file per pattern).
 - [references/spine-scoping.md](references/spine-scoping.md) — which checks
   form the spine (required-scoping, PR-floor fallback, one-path demotion).
 - [references/structural-track.md](references/structural-track.md) — the
-  OPT70–75 and OPT78 risk model + intent interrogation for structural prompts.
+  OPT70–75, OPT78, OPT83–85, OPT87 risk model + intent interrogation for structural prompts.
 - [references/gap-fill.md](references/gap-fill.md) — the coverage-gap
   fallback (4a/4b/4c) for poles the catalog can't analyse.
 - [references/adversarial-review-rubric.md](references/adversarial-review-rubric.md) — the hostile-review contract ("Quality review").
@@ -498,8 +498,8 @@ The scannable rule list; each is detailed in the section named in parentheses.
   "sampled 0/20 PRs", "found no drill logs", "the spine is empty", or "I couldn't X, so
   let me Y". A genuine coverage limit is stated once by the report's banners, not narrated.
 - **Emit a finding whose pattern id is not in the catalog** — both tracks emit only
-  catalog-declared OPT-ids (structural OPT70–75 and OPT78 are *routed* from the
-  critical path but still catalog-declared).
+  catalog-declared OPT-ids (structural OPT70–73, OPT75, OPT78, OPT83, OPT84 are *routed* from the
+  critical path but still catalog-declared; router-less OPT74/85/87 are never emitted).
 - **Emit a generic "slow step" finding** — a step taking N seconds is an observation;
   every finding names a specific root cause ("admission gate").
 - **Present a structural change as a safe quick win** — each states its `risk`,

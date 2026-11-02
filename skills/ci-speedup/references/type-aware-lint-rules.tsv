@@ -1,0 +1,88 @@
+# Type-aware typescript-eslint rules: every rule documented as `requiresTypeChecking`.
+#
+# Source: typescript-eslint, main branch at commit 706298716de5edb95ff58a1ba8806f88f87423e7,
+#   fetched 2026-10-07 (UTC).
+#   - The rule list is the generated `disable-type-checked` config
+#     (packages/eslint-plugin/src/configs/eslintrc/disable-type-checked.ts), which
+#     typescript-eslint generates from every rule whose `meta.docs.requiresTypeChecking`
+#     is true. See https://typescript-eslint.io/users/configs and
+#     https://typescript-eslint.io/rules/ (the "requires type information" column).
+#   - `syntax_only_equivalent` is the core ESLint rule a typescript-eslint EXTENSION
+#     rule builds on (`meta.docs.extendsBaseRule` in that rule's source,
+#     packages/eslint-plugin/src/rules/<rule>.ts; documented per rule under
+#     "Extension Rules" at https://typescript-eslint.io/rules/#extension-rules).
+#     `-` means typescript-eslint documents no syntax-only base rule. The base rule
+#     is NOT a drop-in replacement: it checks less, because it cannot see types.
+#     Whether it covers the same check in a given repo is the question the OPT82
+#     prompt asks, never an answer this file gives.
+#   - `type_checked_presets` lists the typescript-eslint type-checked presets that
+#     turn the rule on (from the generated recommended-, strict- and
+#     stylistic-type-checked-only configs). `strict` includes everything
+#     `recommended` does. The `all` preset turns every rule in this file on.
+#
+# Format: one rule per line, TAB-separated, sorted and deduplicated (a test pins
+# both). Lines starting with `#` are comments.
+# columns: rule	syntax_only_equivalent	type_checked_presets
+@typescript-eslint/await-thenable	-	recommended,strict
+@typescript-eslint/consistent-return	consistent-return	-
+@typescript-eslint/consistent-type-exports	-	-
+@typescript-eslint/dot-notation	dot-notation	stylistic
+@typescript-eslint/naming-convention	-	-
+@typescript-eslint/no-array-delete	-	recommended,strict
+@typescript-eslint/no-base-to-string	-	recommended,strict
+@typescript-eslint/no-confusing-void-expression	-	strict
+@typescript-eslint/no-deprecated	-	strict
+@typescript-eslint/no-duplicate-type-constituents	-	recommended,strict
+@typescript-eslint/no-floating-promises	-	recommended,strict
+@typescript-eslint/no-for-in-array	-	recommended,strict
+@typescript-eslint/no-generated-empty-object-type	-	strict
+@typescript-eslint/no-implied-eval	no-implied-eval	recommended,strict
+@typescript-eslint/no-meaningless-void-operator	-	strict
+@typescript-eslint/no-misused-promises	-	recommended,strict
+@typescript-eslint/no-misused-spread	-	strict
+@typescript-eslint/no-mixed-enums	-	strict
+@typescript-eslint/no-redundant-type-constituents	-	recommended,strict
+@typescript-eslint/no-unnecessary-boolean-literal-compare	-	strict
+@typescript-eslint/no-unnecessary-condition	-	strict
+@typescript-eslint/no-unnecessary-qualifier	-	-
+@typescript-eslint/no-unnecessary-template-expression	-	strict
+@typescript-eslint/no-unnecessary-type-arguments	-	strict
+@typescript-eslint/no-unnecessary-type-assertion	-	recommended,strict
+@typescript-eslint/no-unnecessary-type-conversion	-	strict
+@typescript-eslint/no-unnecessary-type-parameters	-	strict
+@typescript-eslint/no-unsafe-argument	-	recommended,strict
+@typescript-eslint/no-unsafe-assignment	-	recommended,strict
+@typescript-eslint/no-unsafe-call	-	recommended,strict
+@typescript-eslint/no-unsafe-enum-assignment	-	strict
+@typescript-eslint/no-unsafe-enum-comparison	-	recommended,strict
+@typescript-eslint/no-unsafe-member-access	-	recommended,strict
+@typescript-eslint/no-unsafe-return	-	recommended,strict
+@typescript-eslint/no-unsafe-type-assertion	-	-
+@typescript-eslint/no-unsafe-unary-minus	-	recommended,strict
+@typescript-eslint/no-useless-default-assignment	-	strict
+@typescript-eslint/non-nullable-type-assertion-style	-	stylistic
+@typescript-eslint/only-throw-error	no-throw-literal	recommended,strict
+@typescript-eslint/prefer-destructuring	prefer-destructuring	-
+@typescript-eslint/prefer-find	-	stylistic
+@typescript-eslint/prefer-includes	-	stylistic
+@typescript-eslint/prefer-nullish-coalescing	-	stylistic
+@typescript-eslint/prefer-optional-chain	-	stylistic
+@typescript-eslint/prefer-promise-reject-errors	prefer-promise-reject-errors	recommended,strict
+@typescript-eslint/prefer-readonly	-	-
+@typescript-eslint/prefer-readonly-parameter-types	-	-
+@typescript-eslint/prefer-reduce-type-parameter	-	strict
+@typescript-eslint/prefer-regexp-exec	-	stylistic
+@typescript-eslint/prefer-return-this-type	-	strict
+@typescript-eslint/prefer-string-starts-ends-with	-	stylistic
+@typescript-eslint/promise-function-async	-	-
+@typescript-eslint/related-getter-setter-pairs	-	strict
+@typescript-eslint/require-array-sort-compare	-	-
+@typescript-eslint/require-await	require-await	recommended,strict
+@typescript-eslint/restrict-plus-operands	-	recommended,strict
+@typescript-eslint/restrict-template-expressions	-	recommended,strict
+@typescript-eslint/return-await	-	strict
+@typescript-eslint/strict-boolean-expressions	-	-
+@typescript-eslint/strict-void-return	-	-
+@typescript-eslint/switch-exhaustiveness-check	-	-
+@typescript-eslint/unbound-method	-	recommended,strict
+@typescript-eslint/use-unknown-in-catch-callback-variable	-	strict

@@ -103,32 +103,107 @@ def _outcome(result, fact_id):
     raise AssertionError(f"{fact_id} missing from the fact table")
 
 
+# A recorded "the default branch requires review from Code Owners" answer. Every
+# call that names a repository injects it (or its own), so a covering
+# CODEOWNERS never sends a test to the real `gh`.
+_CO_ENFORCED = lambda repo: (True, "a ruleset on branch `main`")  # noqa: E731
+
+
+class _ClosedEnvironmentsGh:
+    """A recorded `gh` for the two environment facts: one environment that
+    requires a reviewer and blocks self-review, and no readable secret.
+
+    Every test in this file that names a repository reaches the environment
+    facts' default fetcher, so it is answered here instead of by the real
+    `gh` — nothing in the suite touches the network. Those facts' own
+    behaviour is tested in `test_push_access_facts.py`; here they pass, so a
+    count below is "the other facts plus two passes"."""
+
+    @staticmethod
+    def check_prereqs():
+        return True
+
+    @staticmethod
+    def run_gh_api(path, **kw):
+        base = path.split("/environments")[0].split("/actions")[0]
+        if path.endswith("/environments?per_page=100"):
+            return json.dumps({"total_count": 1, "environments": [{
+                "name": "prod", "can_admins_bypass": False,
+                "deployment_branch_policy": None,
+                "protection_rules": [{
+                    "type": "required_reviewers",
+                    "prevent_self_review": True,
+                    "reviewers": [{"type": "Team",
+                                   "reviewer": {"slug": "release"}}]}]}]})
+        if path.endswith("secrets?per_page=100"):
+            return json.dumps({"total_count": 0, "secrets": []})
+        if path == base:
+            return json.dumps({"default_branch": "main"})
+        raise AssertionError(f"unexpected endpoint {path}")
+
+
+@pytest.fixture(autouse=True)
+def _recorded_environments(monkeypatch):
+    # `raising=False`: the attribute is the fact's default fetcher; binding it
+    # by name keeps every other test's `gh` traffic exactly what it was.
+    monkeypatch.setattr(
+        cf, "_push_access_via_gh",
+        lambda repo: (cf._GhPushAccess(_ClosedEnvironmentsGh, repo),
+                      "recorded environment settings"),
+        raising=False)
+
+
+def _co_facts(root, files):
+    """The fact table for a test about how the CODEOWNERS FILE is parsed.
+
+    A covering file is only half of `sec.codeowners.workflows`; the other half
+    is whether the branch enforces it. These tests are about the file, so the
+    branch half is answered "enforced" here and a file-level pass reads as a
+    pass — the enforcement half has its own tests below."""
+    return cf.compute_config_facts(root, files, [], repo="owner/repo",
+                                   required_contexts_fetcher=lambda r: ([], "x"),
+                                   fork_approval_fetcher=lambda r: (
+                                       "first_time_contributors", "x"),
+                                   codeowner_review_fetcher=_CO_ENFORCED)
+
+
 # --- the clean repo ----------------------------------------------------------
 
 def test_a_well_configured_repo_passes_every_fact(tmp_path):
     root, files = _repo(tmp_path, {"ci.yml": _SAFE_WF})
+    (root / ".github" / "dependabot.yml").write_text(
+        "version: 2\nupdates:\n  - package-ecosystem: npm\n"
+        "    directory: /\n    schedule: {interval: weekly}\n"
+        "    cooldown: {default-days: 7}\n")
     # `sec.required-checks.skippable` reads branch protection, so the repo and
     # a recorded API response are supplied here; without them it is UNMEASURED
     # (asserted separately below), never a pass.
     out = cf.compute_config_facts(
         root, files, [], repo="owner/repo",
+        codeowner_review_fetcher=_CO_ENFORCED,
         required_contexts_fetcher=lambda repo: ([], "branch `main`"),
         fork_approval_fetcher=lambda repo: ("all_external_contributors", "x"))
     assert out["score"] == 100.0
-    assert out["passed"] == out["scored_count"] == 9
+    assert out["passed"] == out["scored_count"] == 13
     for f in out["facts"]:
         assert f["outcome"] == "pass", f"{f['fact_id']} failed: {f['evidence']}"
 
 
 def test_the_api_gated_facts_are_the_only_unmeasured_ones_offline(tmp_path):
-    """Offline, the six YAML/file facts still resolve and the two API-gated
-    ones disclose that they did not — a scan with no token is a smaller
-    measurement, not a cleaner repo."""
+    """Offline, the YAML facts still resolve and the six API-gated ones
+    disclose that they did not — a scan with no token is a smaller
+    measurement, not a cleaner repo. The CODEOWNERS fact is API-gated only
+    once a rule covers workflows (this fixture's does): whether the branch
+    ENFORCES that rule is a merge-rules read."""
     root, files = _repo(tmp_path, {"ci.yml": _SAFE_WF})
     out = cf.compute_config_facts(root, files, [])
-    assert sorted(out["unmeasured"]) == ["sec.fork-approval.effective",
-                                         "sec.required-checks.skippable"]
-    assert out["scored_count"] == 7 and out["applicable_count"] == 9
+    assert sorted(out["unmeasured"]) == ["sec.codeowners.workflows",
+                                         "sec.environments.approval-holds",
+                                         "sec.environments.branch-restricted",
+                                         "sec.fork-approval.effective",
+                                         "sec.required-checks.skippable",
+                                         "sec.secrets.environment-scoped"]
+    assert out["scored_count"] == 6 and out["applicable_count"] == 12
     assert "COVERAGE GAP" in out["caveat"]
 
 
@@ -206,12 +281,12 @@ def test_hostile_workflow_filename_is_neutralized_in_evidence(tmp_path):
 
 def test_codeowners_missing_and_noncovering_both_fail(tmp_path):
     root, files = _repo(tmp_path, {"ci.yml": _SAFE_WF}, codeowners=None)
-    assert _outcome(cf.compute_config_facts(root, files, []),
+    assert _outcome(_co_facts(root, files),
                     "sec.codeowners.workflows")["outcome"] == "fail"
 
     root2, files2 = _repo(tmp_path / "b", {"ci.yml": _SAFE_WF},
                           codeowners="*.go @backend\n")
-    f = _outcome(cf.compute_config_facts(root2, files2, []),
+    f = _outcome(_co_facts(root2, files2),
                  "sec.codeowners.workflows")
     assert f["outcome"] == "fail", (
         "an extension-only rule does not cover workflow files"
@@ -227,7 +302,7 @@ def test_codeowners_rule_for_one_workflow_file_does_not_cover_the_directory(tmp_
                  "/.github/workflows/deploy.yaml @sec\n"):
         root, files = _repo(tmp_path / rule.split("/")[-1].split(".")[0],
                             {"ci.yml": _SAFE_WF}, codeowners=rule)
-        f = _outcome(cf.compute_config_facts(root, files, []),
+        f = _outcome(_co_facts(root, files),
                      "sec.codeowners.workflows")
         assert f["outcome"] == "fail", f"{rule!r} covers one file, not the dir"
 
@@ -242,7 +317,7 @@ def test_codeowners_restricted_glob_does_not_cover_the_directory(tmp_path):
                               ".github/workflows/**/*release*.yml @sec\n")):
         root, files = _repo(tmp_path / f"g{i}", {"ci.yml": _SAFE_WF},
                             codeowners=rule)
-        f = _outcome(cf.compute_config_facts(root, files, []),
+        f = _outcome(_co_facts(root, files),
                      "sec.codeowners.workflows")
         assert f["outcome"] == "fail", (
             f"{rule!r} owns some workflows, not the directory")
@@ -258,14 +333,14 @@ def test_codeowners_rule_without_an_owner_does_not_cover_workflows(tmp_path):
                               "*\n")):
         root, files = _repo(tmp_path / f"o{i}", {"ci.yml": _SAFE_WF},
                             codeowners=rule)
-        f = _outcome(cf.compute_config_facts(root, files, []),
+        f = _outcome(_co_facts(root, files),
                      "sec.codeowners.workflows")
         assert f["outcome"] == "fail", f"{rule!r} names no owner"
     # The failure names the near-miss rather than reading as "you wrote
     # nothing" — otherwise the reader looks in the wrong place.
     root, files = _repo(tmp_path / "msg", {"ci.yml": _SAFE_WF},
                         codeowners=".github/workflows/\n")
-    f = _outcome(cf.compute_config_facts(root, files, []),
+    f = _outcome(_co_facts(root, files),
                  "sec.codeowners.workflows")
     # Pinned on `evidence` SPECIFICALLY. Concatenating evidence and fact before
     # the substring check meant either field could carry the message and the
@@ -281,7 +356,7 @@ def test_codeowners_last_matching_rule_wins(tmp_path):
     stopping at the first match reported the opposite."""
     root, files = _repo(tmp_path / "override", {"ci.yml": _SAFE_WF},
                         codeowners="* @team\n.github/workflows/\n")
-    f = _outcome(cf.compute_config_facts(root, files, []),
+    f = _outcome(_co_facts(root, files),
                  "sec.codeowners.workflows")
     assert f["outcome"] == "fail", (
         "the later ownerless rule is the one GitHub applies")
@@ -289,7 +364,7 @@ def test_codeowners_last_matching_rule_wins(tmp_path):
     # what GitHub applies, so it covers.
     root, files = _repo(tmp_path / "override2", {"ci.yml": _SAFE_WF},
                         codeowners=".github/workflows/\n* @team\n")
-    f = _outcome(cf.compute_config_facts(root, files, []),
+    f = _outcome(_co_facts(root, files),
                  "sec.codeowners.workflows")
     assert f["outcome"] == "pass", "the later owned rule is the one applied"
 
@@ -307,7 +382,7 @@ def test_codeowners_narrow_ownerless_override_strips_a_workflow(tmp_path):
     root, files = _repo(tmp_path / "one",
                         {"ci.yml": _SAFE_WF, "release.yml": _SAFE_WF},
                         codeowners="* @team\n.github/workflows/release.yml\n")
-    f = _outcome(cf.compute_config_facts(root, files, []),
+    f = _outcome(_co_facts(root, files),
                  "sec.codeowners.workflows")
     assert f["outcome"] == "fail", f
     assert "release.yml" in f["evidence"], f
@@ -316,14 +391,14 @@ def test_codeowners_narrow_ownerless_override_strips_a_workflow(tmp_path):
     root, files = _repo(tmp_path / "glob",
                         {"ci.yml": _SAFE_WF, "deploy-prod.yml": _SAFE_WF},
                         codeowners="* @team\n.github/workflows/*deploy*.yml\n")
-    f = _outcome(cf.compute_config_facts(root, files, []),
+    f = _outcome(_co_facts(root, files),
                  "sec.codeowners.workflows")
     assert f["outcome"] == "fail", f
     # A narrow rule that NAMES an owner is fine — the file is still owned.
     root, files = _repo(tmp_path / "owned",
                         {"ci.yml": _SAFE_WF, "release.yml": _SAFE_WF},
                         codeowners="* @team\n.github/workflows/release.yml @sec\n")
-    f = _outcome(cf.compute_config_facts(root, files, []),
+    f = _outcome(_co_facts(root, files),
                  "sec.codeowners.workflows")
     assert f["outcome"] == "pass", f
     # And a later directory rule re-owns every file under it, cancelling an
@@ -332,7 +407,7 @@ def test_codeowners_narrow_ownerless_override_strips_a_workflow(tmp_path):
                         {"ci.yml": _SAFE_WF, "release.yml": _SAFE_WF},
                         codeowners=".github/workflows/release.yml\n"
                                    ".github/workflows/ @team\n")
-    f = _outcome(cf.compute_config_facts(root, files, []),
+    f = _outcome(_co_facts(root, files),
                  "sec.codeowners.workflows")
     assert f["outcome"] == "pass", f
 
@@ -347,13 +422,13 @@ def test_codeowners_stale_ownerless_rule_for_a_deleted_workflow_still_passes(
     # Stale single-file rule (no gone.yml in the tree).
     root, files = _repo(tmp_path / "stale-file", {"ci.yml": _SAFE_WF},
                         codeowners="* @team\n.github/workflows/gone.yml\n")
-    f = _outcome(cf.compute_config_facts(root, files, []),
+    f = _outcome(_co_facts(root, files),
                  "sec.codeowners.workflows")
     assert f["outcome"] == "pass", f
     # Stale restricted glob that matches nothing present.
     root, files = _repo(tmp_path / "stale-glob", {"ci.yml": _SAFE_WF},
                         codeowners="* @team\n.github/workflows/*deploy*.yml\n")
-    f = _outcome(cf.compute_config_facts(root, files, []),
+    f = _outcome(_co_facts(root, files),
                  "sec.codeowners.workflows")
     assert f["outcome"] == "pass", f
 
@@ -366,7 +441,7 @@ def test_codeowners_owner_forms_are_recognized(tmp_path):
                               ".github/workflows/\n.github/workflows/ @sec\n")):
         root, files = _repo(tmp_path / f"w{i}", {"ci.yml": _SAFE_WF},
                             codeowners=rule)
-        f = _outcome(cf.compute_config_facts(root, files, []),
+        f = _outcome(_co_facts(root, files),
                      "sec.codeowners.workflows")
         assert f["outcome"] == "pass", f"{rule!r} names an owner"
 
@@ -383,7 +458,7 @@ def test_codeowners_directory_and_glob_forms_cover_workflows(tmp_path):
                               ".github/workflows/**/*.yaml @sec\n")):
         root, files = _repo(tmp_path / f"r{i}", {"ci.yml": _SAFE_WF},
                             codeowners=rule)
-        f = _outcome(cf.compute_config_facts(root, files, []),
+        f = _outcome(_co_facts(root, files),
                      "sec.codeowners.workflows")
         assert f["outcome"] == "pass", f"{rule!r} should cover workflows"
 
@@ -392,7 +467,7 @@ def test_codeowners_global_star_and_double_star_cover_workflows(tmp_path):
     for pattern in ("* @owners\n", ".github/** @sec\n"):
         root, files = _repo(tmp_path / pattern[:3].strip("*/. ") or "x",
                             {"ci.yml": _SAFE_WF}, codeowners=pattern)
-        f = _outcome(cf.compute_config_facts(root, files, []),
+        f = _outcome(_co_facts(root, files),
                      "sec.codeowners.workflows")
         assert f["outcome"] == "pass", f"{pattern!r} should cover workflows"
 
@@ -454,7 +529,7 @@ _CODEOWNERS_MATRIX = [
 def test_codeowners_matrix(tmp_path, label, body, expected):
     root, files = _repo(tmp_path / label, {"ci.yml": _SAFE_WF},
                         codeowners=body)
-    f = _outcome(cf.compute_config_facts(root, files, []),
+    f = _outcome(_co_facts(root, files),
                  "sec.codeowners.workflows")
     assert f["outcome"] == expected, f"{label}: {body!r} -> {f}"
 
@@ -478,7 +553,7 @@ def test_codeowners_is_read_from_every_candidate_location(tmp_path, location):
     root, files = _repo_with_codeowners_at(
         tmp_path / location.replace("/", "_"),
         {location: ".github/workflows/ @sec\n"})
-    f = _outcome(cf.compute_config_facts(root, files, []),
+    f = _outcome(_co_facts(root, files),
                  "sec.codeowners.workflows")
     assert f["outcome"] == "pass", f
     assert location in f["evidence"], f
@@ -494,7 +569,7 @@ def test_codeowners_candidate_precedence_is_github_then_root_then_docs(tmp_path)
         "CODEOWNERS": "* @team\n",
         "docs/CODEOWNERS": "* @team\n",
     })
-    f = _outcome(cf.compute_config_facts(root, files, []),
+    f = _outcome(_co_facts(root, files),
                  "sec.codeowners.workflows")
     assert f["outcome"] == "fail", f
     assert ".github/CODEOWNERS" in f["evidence"].replace("\\", "/"), f
@@ -503,7 +578,7 @@ def test_codeowners_candidate_precedence_is_github_then_root_then_docs(tmp_path)
         "CODEOWNERS": "*\n",
         "docs/CODEOWNERS": "* @team\n",
     })
-    f = _outcome(cf.compute_config_facts(root, files, []),
+    f = _outcome(_co_facts(root, files),
                  "sec.codeowners.workflows")
     assert f["outcome"] == "fail", f
 
@@ -515,7 +590,7 @@ def test_codeowners_utf8_bom_does_not_hide_the_first_rule(tmp_path):
     root, files = _repo(tmp_path, {"ci.yml": _SAFE_WF}, codeowners=None)
     (root / ".github" / "CODEOWNERS").write_bytes(
         b"\xef\xbb\xbf.github/workflows/ @sec-team\n")
-    f = _outcome(cf.compute_config_facts(root, files, []),
+    f = _outcome(_co_facts(root, files),
                  "sec.codeowners.workflows")
     assert f["outcome"] == "pass", f
 
@@ -533,9 +608,9 @@ def test_codeowners_undecodable_file_is_unmeasured_not_a_fail(tmp_path):
     assert "unmeasured" in f["evidence"], f
     assert "sec.codeowners.workflows" in out["unmeasured"]
     # ...and it is a coverage gap, not a silent pass. `applicable_count` stays
-    # 9 — every fact is still applicable — while only 6 score: this one plus
-    # both API-gated facts, which are unmeasured offline too.
-    assert out["scored_count"] == 6 and out["applicable_count"] == 9
+    # 12 — every fact is still applicable — while only 6 score: this one
+    # plus the five other API-gated facts, which are unmeasured offline too.
+    assert out["scored_count"] == 6 and out["applicable_count"] == 12
     assert "COVERAGE GAP" in out["caveat"]
 
 
@@ -563,6 +638,321 @@ def test_codeowners_unreadable_directory_is_one_unmeasured_row(tmp_path):
     assert f["outcome"] == "unmeasured", f
     # The OTHER facts still resolved — the failure is contained to this row.
     assert out["scored_count"] == 6, out
+
+
+# --- F3: is the CODEOWNERS rule ENFORCED? ------------------------------------
+#
+# CODEOWNERS only REQUESTS a review. It binds only when the default branch's
+# ruleset (`pull_request` rule, `require_code_owner_review`) or its classic
+# branch protection (`require_code_owner_reviews`) says so; otherwise any
+# approver merges a workflow change. A covering file passed this fact on
+# repositories where that was the case — telling the reader workflow changes
+# needed an owner's sign-off when they did not.
+
+_CO_FACT = "sec.codeowners.workflows"
+_PR_RULE_OWNER_REVIEW = [{"type": "pull_request", "parameters": {
+    "required_approving_review_count": 1,
+    "require_code_owner_review": True}}]
+_PR_RULE_NO_OWNER_REVIEW = [{"type": "pull_request", "parameters": {
+    "required_approving_review_count": 1,
+    "require_code_owner_review": False}}]
+_CLASSIC_OWNER_REVIEW = {"required_pull_request_reviews": {
+    "required_approving_review_count": 1,
+    "require_code_owner_reviews": True}}
+_CLASSIC_NO_OWNER_REVIEW = {"required_pull_request_reviews": {
+    "required_approving_review_count": 1,
+    "require_code_owner_reviews": False}}
+_ADMIN_403 = RuntimeError(
+    "API call failed: gh: Must have admin rights to Repository. (HTTP 403)")
+_NOT_PROTECTED_404 = RuntimeError(
+    'API call failed: {"message":"Branch not protected","status":"404"}'
+    "gh: Branch not protected (HTTP 404)")
+
+
+def _owner_review_gh(rules, classic, calls, branch=None):
+    """A stubbed `gh` whose merge-rule sources answer independently.
+
+    `branch` is the public branch endpoint's answer (`protected` is readable by
+    anyone with read access); it defaults to `protected: true`, which settles
+    nothing, so only the tests about it change the outcome through it.
+
+    Drives the REAL fetcher through `_gh_utils`, the same seam the F7 tests
+    use, so the shipped parsing is what gets exercised. Every path asked for is
+    recorded in `calls`.
+    """
+    class _Gh:
+        @staticmethod
+        def check_prereqs():
+            return True
+
+        @staticmethod
+        def run_gh_api(path, **kw):
+            calls.append(path)
+            if path == "repos/owner/repo":
+                return json.dumps({"default_branch": "main"})
+            if path == "repos/owner/repo/rules/branches/main":
+                answer = rules
+            elif path == "repos/owner/repo/branches/main/protection":
+                answer = classic
+            elif path == "repos/owner/repo/branches/main":
+                answer = {"name": "main", "protected": True} \
+                    if branch is None else branch
+            else:
+                raise AssertionError(f"unexpected endpoint {path}")
+            if isinstance(answer, Exception):
+                raise answer
+            return json.dumps(answer)
+    return _Gh
+
+
+def _owner_review_fact(tmp_path, rules, classic, *, repo="owner/repo",
+                       codeowners="/.github/workflows/ @sec-team\n",
+                       branch=None):
+    """The CODEOWNERS row and every gh path requested, for one repository.
+
+    The two other API-gated facts get recorded answers, so the ONLY gh traffic
+    left is this fact's own."""
+    root, files = _repo(tmp_path, {"ci.yml": _SAFE_WF}, codeowners=codeowners)
+    calls: list[str] = []
+    with mock.patch.object(cf, "_gh_utils",
+                           lambda: _owner_review_gh(rules, classic, calls,
+                                                    branch)):
+        out = cf.compute_config_facts(
+            root, files, [], repo=repo,
+            required_contexts_fetcher=lambda r: ([], "branch `main`"),
+            fork_approval_fetcher=lambda r: ("first_time_contributors", "x"))
+    return _outcome(out, _CO_FACT), calls
+
+
+def test_codeowners_enforced_by_a_ruleset_passes(tmp_path):
+    f, calls = _owner_review_fact(tmp_path, _PR_RULE_OWNER_REVIEW, _ADMIN_403)
+    assert f["outcome"] == "pass", f
+    assert "a ruleset on branch `main`" in f["evidence"], f
+    # A ruleset's yes settles it: the admin-only classic endpoint is not asked.
+    assert calls == ["repos/owner/repo",
+                     "repos/owner/repo/rules/branches/main"], calls
+
+
+def test_codeowners_enforced_by_classic_protection_only_passes(tmp_path):
+    f, _ = _owner_review_fact(tmp_path, _PR_RULE_NO_OWNER_REVIEW,
+                              _CLASSIC_OWNER_REVIEW)
+    assert f["outcome"] == "pass", f
+    assert "classic branch protection on `main`" in f["evidence"], f
+
+
+def test_codeowners_not_enforced_by_either_readable_source_fails(tmp_path):
+    """The reported case: a covering CODEOWNERS, a ruleset that requires an
+    approval but not a code owner's, and classic protection saying the same.
+    Any approver merges a workflow change, so the row must not read as a
+    pass, and it must name the setting that closes it."""
+    f, _ = _owner_review_fact(tmp_path, _PR_RULE_NO_OWNER_REVIEW,
+                              _CLASSIC_NO_OWNER_REVIEW)
+    assert f["outcome"] == "fail", f
+    ev = f["evidence"]
+    assert "requests" in ev and "do not require" in ev, ev
+    assert "Require review from Code Owners" in ev, ev
+
+
+def test_codeowners_with_no_rules_and_no_classic_protection_fails(tmp_path):
+    """A 404 "Branch not protected" from the classic endpoint is an ANSWER
+    (there is no classic protection), not a failure to read — so an empty
+    ruleset answer plus that 404 is a measured "nothing requires it"."""
+    f, _ = _owner_review_fact(tmp_path, [], _NOT_PROTECTED_404)
+    assert f["outcome"] == "fail", f
+
+
+# What `gh_utils.run_gh_api` actually raises for an admin reading classic
+# protection on a branch that has none: `API call failed: ` plus gh's stderr
+# only, the reason BEFORE the status (checked against a live repository).
+_REAL_GH_NOT_PROTECTED_404 = RuntimeError(
+    "API call failed: gh: Branch not protected (HTTP 404)\n")
+
+
+def test_the_real_gh_not_protected_404_is_an_answer():
+    assert cf._is_not_protected_404(_REAL_GH_NOT_PROTECTED_404)
+    assert not cf._is_not_protected_404(
+        RuntimeError("API call failed: gh: Not Found (HTTP 404)\n"))
+
+
+def test_a_ruleset_only_branch_read_by_an_admin_fails(tmp_path):
+    """The common ruleset-only repository, read with admin access: the
+    rulesets do not require owner review, and classic protection answers
+    gh's real "Branch not protected" 404. Both sources were read, so this is
+    a measured fail, not a coverage gap."""
+    f, _ = _owner_review_fact(tmp_path, _PR_RULE_NO_OWNER_REVIEW,
+                              _REAL_GH_NOT_PROTECTED_404)
+    assert f["outcome"] == "fail", f
+
+
+def test_codeowners_covered_without_a_repo_is_unmeasured(tmp_path):
+    f, calls = _owner_review_fact(tmp_path, _PR_RULE_OWNER_REVIEW,
+                                  _CLASSIC_OWNER_REVIEW, repo=None)
+    assert f["outcome"] == "unmeasured", f
+    assert "unmeasured" in f["evidence"], f
+    assert calls == [], calls
+
+
+def test_codeowners_ruleset_says_no_and_classic_403_is_unmeasured(tmp_path):
+    """Most readers of this fact do not administer the repository: classic
+    protection 403s for them. A ruleset that does not require owner review
+    then establishes nothing — classic protection might — so the fact is
+    neither a pass nor a fail."""
+    f, _ = _owner_review_fact(tmp_path, _PR_RULE_NO_OWNER_REVIEW, _ADMIN_403)
+    assert f["outcome"] == "unmeasured", f
+    ev = f["evidence"]
+    assert "its rulesets do not require it" in ev, ev
+    assert "classic branch protection: " in ev, ev
+    assert "only repository admins can read" in ev, ev
+
+
+_BARE_404 = RuntimeError(
+    'API call failed: {"message":"Not Found","status":"404"}'
+    "gh: Not Found (HTTP 404)")
+
+
+@pytest.mark.parametrize("classic", [_ADMIN_403, _BARE_404],
+                         ids=["classic-403", "classic-bare-404"])
+def test_an_unprotected_branch_settles_the_unreadable_classic_source(
+        tmp_path, classic):
+    """The common audit is of someone else's repository, where classic
+    protection answers 403 or a bare 404. The branch endpoint is public, and
+    `protected: false` means NO protection of either kind on the branch, so
+    a ruleset that does not require owner review is then the whole answer: a
+    measured fail, not a coverage gap."""
+    f, calls = _owner_review_fact(
+        tmp_path, _PR_RULE_NO_OWNER_REVIEW, classic,
+        branch={"name": "main", "protected": False})
+    assert f["outcome"] == "fail", f
+    assert "Require review from Code Owners" in f["evidence"], f
+    assert "repos/owner/repo/branches/main" in calls, calls
+
+
+def test_a_protected_branch_leaves_the_unreadable_classic_source_open(
+        tmp_path):
+    """`protected: true` is set by a ruleset as well as by classic protection,
+    so it cannot say which — the classic source stays unknown."""
+    f, _ = _owner_review_fact(
+        tmp_path, _PR_RULE_NO_OWNER_REVIEW, _BARE_404,
+        branch={"name": "main", "protected": True})
+    assert f["outcome"] == "unmeasured", f
+    assert "`protected: true`" in f["evidence"], f
+
+
+def test_an_unreadable_branch_endpoint_stays_unmeasured(tmp_path):
+    f, _ = _owner_review_fact(
+        tmp_path, _PR_RULE_NO_OWNER_REVIEW, _ADMIN_403,
+        branch=RuntimeError("HTTP 502"))
+    assert f["outcome"] == "unmeasured", f
+
+
+def test_an_unprotected_branch_does_not_rescue_unreadable_rulesets(tmp_path):
+    """The branch fallback stands in for CLASSIC protection only. With the
+    rulesets themselves unread there is still no answer."""
+    f, calls = _owner_review_fact(
+        tmp_path, RuntimeError("HTTP 500"), _ADMIN_403,
+        branch={"name": "main", "protected": False})
+    assert f["outcome"] == "unmeasured", f
+    assert "repos/owner/repo/branches/main" not in calls, calls
+
+
+def test_codeowners_ruleset_unreadable_is_unmeasured_not_a_fail(tmp_path):
+    f, _ = _owner_review_fact(tmp_path, RuntimeError("HTTP 500"),
+                              _CLASSIC_NO_OWNER_REVIEW)
+    assert f["outcome"] == "unmeasured", f
+    ev = f["evidence"]
+    assert "classic branch protection does not require it" in ev, ev
+    assert "rulesets: " in ev, ev
+
+
+def test_a_branch_body_without_the_protected_key_settles_nothing(tmp_path):
+    """Only an explicit `protected: false` is a readable "no protection"; an
+    absent key is not an answer."""
+    f, _ = _owner_review_fact(tmp_path, _PR_RULE_NO_OWNER_REVIEW, _ADMIN_403,
+                              branch={"name": "main"})
+    assert f["outcome"] == "unmeasured", f
+
+
+def test_no_authenticated_gh_is_unmeasured_and_says_so():
+    class _NoGh:
+        @staticmethod
+        def check_prereqs():
+            return False
+
+        @staticmethod
+        def run_gh_api(path, **kw):
+            raise AssertionError(f"no call expected, got {path}")
+
+    with mock.patch.object(cf, "_gh_utils", lambda: _NoGh):
+        required, detail = cf._code_owner_review_via_gh("owner/repo")
+    assert required is None, detail
+    assert "gh auth login" in detail, detail
+
+
+def test_a_fetcher_that_raises_is_unmeasured_not_a_crash(tmp_path):
+    root, files = _repo(tmp_path, {"ci.yml": _SAFE_WF},
+                        codeowners="/.github/workflows/ @sec-team\n")
+
+    def boom(repo):
+        raise RuntimeError("socket closed")
+
+    out = cf.compute_config_facts(
+        root, files, [], repo="owner/repo",
+        required_contexts_fetcher=lambda r: ([], "branch `main`"),
+        fork_approval_fetcher=lambda r: ("first_time_contributors", "x"),
+        codeowner_review_fetcher=boom)
+    f = _outcome(out, _CO_FACT)
+    assert f["outcome"] == "unmeasured", f
+    assert "socket closed" in f["evidence"], f
+
+
+@pytest.mark.parametrize("branch,segment", [
+    ("release#2026", "release%232026"),
+    ("v1?beta", "v1%3Fbeta"),
+    ("release/2.x", "release/2.x"),
+], ids=["hash", "question-mark", "slash-kept"])
+def test_the_default_branch_is_escaped_in_every_endpoint_path(branch, segment):
+    """A branch name is a path value: `#` or `?` left raw ends the path, so
+    the request would address a different branch (or none) and the fact
+    would read the wrong rules. Every endpoint this fact calls must carry the
+    escaped name; `/` stays as is, as GitHub's branch paths expect."""
+    calls: list[str] = []
+
+    class _Gh:
+        @staticmethod
+        def check_prereqs():
+            return True
+
+        @staticmethod
+        def run_gh_api(path, **kw):
+            calls.append(path)
+            if path == "repos/owner/repo":
+                return json.dumps({"default_branch": branch})
+            if path == f"repos/owner/repo/rules/branches/{segment}":
+                return json.dumps(_PR_RULE_NO_OWNER_REVIEW)
+            if path == f"repos/owner/repo/branches/{segment}/protection":
+                raise _ADMIN_403
+            if path == f"repos/owner/repo/branches/{segment}":
+                return json.dumps({"name": branch, "protected": False})
+            raise AssertionError(f"unexpected endpoint {path}")
+
+    with mock.patch.object(cf, "_gh_utils", lambda: _Gh):
+        required, detail = cf._code_owner_review_via_gh("owner/repo")
+    assert required is False, (required, detail)
+    assert f"`{branch}`" in detail, detail
+    assert calls[1:] == [
+        f"repos/owner/repo/rules/branches/{segment}",
+        f"repos/owner/repo/branches/{segment}/protection",
+        f"repos/owner/repo/branches/{segment}",
+    ], calls
+
+
+def test_no_codeowners_fails_without_any_api_call(tmp_path):
+    """No CODEOWNERS file is decided by the files alone, exactly as before:
+    a fail, and not one API round-trip spent on it."""
+    f, calls = _owner_review_fact(tmp_path, _PR_RULE_OWNER_REVIEW,
+                                  _CLASSIC_OWNER_REVIEW, codeowners=None)
+    assert f["outcome"] == "fail", f
+    assert calls == [], calls
 
 
 # --- F4: the sharpened trigger fact -----------------------------------
@@ -664,33 +1054,45 @@ def test_persisted_credentials_pass_on_payloadless_notification_triggers(tmp_pat
 def test_unscannable_workflow_forces_workflow_facts_to_unmeasured(tmp_path):
     """A universal claim over every workflow cannot be asserted when one could
     not be read — the unreadable one could be the failure. Every workflow-
-    scoped fact goes UNMEASURED with the gap named; CODEOWNERS (repo-file
-    based) still resolves."""
+    scoped fact goes UNMEASURED with the gap named; CODEOWNERS (repo file plus
+    merge rules) still resolves."""
     root, files = _repo(tmp_path, {"ci.yml": _SAFE_WF})
     gap = [{"workflow_file": ".github/workflows/broken.yml",
             "reason": "yaml parse error"}]
-    out = cf.compute_config_facts(root, files, gap)
+    out = cf.compute_config_facts(root, files, gap, repo="owner/repo",
+                                  codeowner_review_fetcher=_CO_ENFORCED,
+                                  fork_approval_fetcher=lambda r: (
+                                      None, "not read in this test"))
     for f in out["facts"]:
         if f["fact_id"] == "sec.codeowners.workflows":
             assert f["outcome"] == "pass"
         elif f["fact_id"] == "sec.fork-approval.effective":
             # Reads a repository SETTING, not workflow YAML — an unparsable
             # workflow says nothing about it. Unmeasured here only because
-            # this call passes no repo.
+            # its recorded answer is unreadable.
             assert f["outcome"] == "unmeasured"
+            assert "broken.yml" not in f["evidence"]
+        elif f["fact_id"] == "sec.deps.update-cooldown":
+            # Reads update-tool configs, not workflow YAML; this repo has none.
+            assert f["outcome"] == "not_applicable"
+        elif f["fact_id"].startswith("sec.environments.") or \
+                f["fact_id"] == "sec.secrets.environment-scoped":
+            # Read from environment settings over the API, not workflow
+            # YAML; the recorded environment passes both.
+            assert f["outcome"] == "pass", f
         else:
             assert f["outcome"] == "unmeasured", (
                 f"{f['fact_id']} resolved despite an unscanned workflow — "
                 "that is a silent pass over a coverage hole"
             )
             assert "broken.yml" in f["evidence"]
-    assert out["scored_count"] == 1
-    assert out["applicable_count"] == 9
+    assert out["scored_count"] == 4
+    assert out["applicable_count"] == 12
     assert "COVERAGE GAP" in out["caveat"]
     # The ratio must be over RESOLVED facts only. If unmeasured facts leaked
     # into the numerator, 5 unmeasured + 1 pass over scored=1 would read 600 —
     # so pin the value, not just the counts.
-    assert out["passed"] == 1
+    assert out["passed"] == 4
     assert out["score"] == pytest.approx(100.0)
 
 
@@ -714,11 +1116,12 @@ def test_score_is_the_registered_ratio_with_no_weights(tmp_path):
                    "    steps: [{run: make}]\n"})
     out = cf.compute_config_facts(
         root, files, [], repo="owner/repo",
+        codeowner_review_fetcher=_CO_ENFORCED,
         required_contexts_fetcher=lambda repo: ([], "branch `main`"),
         fork_approval_fetcher=lambda repo: ("first_time_contributors", "x"))
-    # bad.yml fails exactly one fact (permissions-declares); 8/9 pass.
-    assert out["passed"] == 8 and out["scored_count"] == 9
-    assert out["score"] == pytest.approx(round(100 * 8 / 9, 1))
+    # bad.yml fails exactly one fact (permissions-declares); 11/12 pass.
+    assert out["passed"] == 11 and out["scored_count"] == 12
+    assert out["score"] == pytest.approx(round(100 * 11 / 12, 1))
     assert out["registered"]
     assert "no weights" in out["constants"]["rule"]
 
@@ -834,7 +1237,7 @@ def test_codeowners_directory_form_covers_workflows(tmp_path):
     covers workflows — its absence graded correct repos down."""
     root, files = _repo(tmp_path, {"ci.yml": _SAFE_WF},
                         codeowners=".github/ @sec-team\n")
-    assert _outcome(cf.compute_config_facts(root, files, []),
+    assert _outcome(_co_facts(root, files),
                     "sec.codeowners.workflows")["outcome"] == "pass"
 
 
@@ -978,7 +1381,7 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - run: echo "assert the suite that should have run passed"
+      - run: test "${{ !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && !contains(needs.*.result, 'skipped') }}" = true
 """
 
 
@@ -992,7 +1395,8 @@ def _facts_with(tmp_path, workflows, contexts, **kw):
     root, files = _repo(tmp_path, workflows)
     return cf.compute_config_facts(
         root, files, kw.pop("scan_incomplete", []),
-        repo="owner/repo", required_contexts_fetcher=_fetcher(contexts),
+        repo="owner/repo",
+        codeowner_review_fetcher=_CO_ENFORCED, required_contexts_fetcher=_fetcher(contexts),
         fork_approval_fetcher=lambda repo: ("all_external_contributors", "x"),
         **kw)
 
@@ -1013,7 +1417,9 @@ def test_required_check_produced_only_by_a_conditional_job_fails(tmp_path):
 
 def test_the_always_running_verdict_job_passes(tmp_path):
     """The #49 fix shape: two mutually-exclusive suite jobs, and one
-    always-running job that carries the required check name."""
+    always-running job with a strict result assertion carrying the required check name.
+    This checks gate safety; intentional mutually exclusive skips need a
+    separate explicit selection assertion."""
     f = _outcome(_facts_with(tmp_path, {"ci.yml": _VERDICT_PATTERN}, ["test"]),
                  _FACT)
     assert f["outcome"] == "pass", f["evidence"]
@@ -1114,6 +1520,7 @@ def test_an_api_failure_is_unmeasured_with_the_reason(tmp_path):
     root, files = _repo(tmp_path, {"ci.yml": _CONDITIONAL_ONLY})
     out = cf.compute_config_facts(
         root, files, [], repo="owner/repo",
+        codeowner_review_fetcher=_CO_ENFORCED,
         required_contexts_fetcher=failing,
         fork_approval_fetcher=lambda repo: ("all_external_contributors", "x"))
     f = _outcome(out, _FACT)
@@ -1132,10 +1539,10 @@ def test_a_scan_gap_forces_the_fact_unmeasured(tmp_path):
     assert _outcome(out, _FACT)["outcome"] == "unmeasured"
 
 
-def test_the_fact_table_carries_both_api_gated_facts(tmp_path):
+def test_the_fact_table_carries_every_api_gated_fact(tmp_path):
     out = _facts_with(tmp_path, {"ci.yml": _VERDICT_PATTERN}, ["test"])
-    assert out["applicable_count"] == 9
-    assert out["scored_count"] == 9
+    assert out["applicable_count"] == 12
+    assert out["scored_count"] == 12
 
 
 # --- F8: sec.fork-approval.effective -----------------------------------------
@@ -1162,6 +1569,7 @@ def _fork_facts(tmp_path, policy, detail="repository Actions settings"):
     root, files = _repo(tmp_path, {"ci.yml": _SAFE_WF})
     return cf.compute_config_facts(
         root, files, [], repo="owner/repo",
+        codeowner_review_fetcher=_CO_ENFORCED,
         required_contexts_fetcher=lambda repo: ([], "branch `main`"),
         fork_approval_fetcher=lambda repo: (policy, detail))
 
@@ -1201,6 +1609,7 @@ def test_fork_approval_api_failure_is_unmeasured_with_the_reason(tmp_path):
     root, files = _repo(tmp_path, {"ci.yml": _SAFE_WF})
     out = cf.compute_config_facts(
         root, files, [], repo="owner/repo",
+        codeowner_review_fetcher=_CO_ENFORCED,
         fork_approval_fetcher=lambda repo: (None, "gh is not authenticated"))
     f = _outcome(out, _FORK_FACT)
     assert f["outcome"] == "unmeasured"
@@ -1213,14 +1622,17 @@ def test_a_scan_gap_does_not_unmeasure_the_fork_approval_fact(tmp_path):
     root, files = _repo(tmp_path, {"ci.yml": _SAFE_WF})
     out = cf.compute_config_facts(
         root, files, [{"workflow_file": "broken.yml"}], repo="owner/repo",
+        codeowner_review_fetcher=_CO_ENFORCED,
         fork_approval_fetcher=lambda repo: ("all_external_contributors", "x"))
     assert _outcome(out, _FORK_FACT)["outcome"] == "pass"
 
 
-def test_the_fact_table_carries_nine_facts(tmp_path):
+def test_the_fact_table_carries_twelve_applicable_facts(tmp_path):
+    # Thirteen facts; the update-cooldown fact does not apply (no update
+    # tool).
     out = _fork_facts(tmp_path, "all_external_contributors")
-    assert out["applicable_count"] == 9
-    assert out["scored_count"] == 9
+    assert out["applicable_count"] == 12
+    assert out["scored_count"] == 12
 
 
 # ---------------------------------------------------------------------------
@@ -1510,7 +1922,8 @@ def test_a_workflow_scan_gap_costs_no_api_calls_for_the_required_checks_fact(
     out = cf.compute_config_facts(
         root, files,
         [{"workflow_file": "broken.yml"}],
-        repo="owner/repo", required_contexts_fetcher=fetch,
+        repo="owner/repo",
+        codeowner_review_fetcher=_CO_ENFORCED, required_contexts_fetcher=fetch,
         fork_approval_fetcher=lambda repo: ("all_external_contributors", "x"))
     assert _outcome(out, _FACT)["outcome"] == "unmeasured"
     assert calls == [], f"branch protection was read for a discarded verdict: {calls}"
@@ -1761,8 +2174,7 @@ def test_a_bare_needs_chain_is_not_an_always_running_producer(tmp_path):
     needs fails — and a skipped required check is exactly what GitHub reports
     as passed. Calling it "runs whatever else happens" describes the opposite
     of what it does. The predicate is the one the fix recipe names: the
-    producer itself carries `always()` / `!cancelled()` / `success() ||
-    failure()`."""
+    producer itself carries `always()`."""
     body = """\
 name: ci
 on: [pull_request]
@@ -2016,6 +2428,7 @@ def test_a_branch_protection_fetcher_that_raises_becomes_one_unmeasured_row(
     root, files = _repo(tmp_path, {"ci.yml": _CONDITIONAL_ONLY})
     out = cf.compute_config_facts(
         root, files, [], repo="owner/repo",
+        codeowner_review_fetcher=_CO_ENFORCED,
         required_contexts_fetcher=exploding,
         fork_approval_fetcher=lambda repo: ("all_external_contributors", "x"))
     f = _outcome(out, _FACT)
@@ -2023,7 +2436,7 @@ def test_a_branch_protection_fetcher_that_raises_becomes_one_unmeasured_row(
     assert "gh subprocess died" in f["evidence"], f["evidence"]
     assert _FACT in out["unmeasured"]
     # The rest of the table still resolved — the failure is contained.
-    assert out["scored_count"] == 8 and out["applicable_count"] == 9
+    assert out["scored_count"] == 11 and out["applicable_count"] == 12
 
 
 def test_a_fork_approval_fetcher_that_raises_becomes_one_unmeasured_row(
@@ -2035,13 +2448,14 @@ def test_a_fork_approval_fetcher_that_raises_becomes_one_unmeasured_row(
     root, files = _repo(tmp_path, {"ci.yml": _SAFE_WF})
     out = cf.compute_config_facts(
         root, files, [], repo="owner/repo",
+        codeowner_review_fetcher=_CO_ENFORCED,
         required_contexts_fetcher=lambda repo: ([], "branch `main`"),
         fork_approval_fetcher=exploding)
     f = _outcome(out, _FORK_FACT)
     assert f["outcome"] == "unmeasured", f
     assert "gh subprocess died" in f["evidence"], f["evidence"]
     assert _FORK_FACT in out["unmeasured"]
-    assert out["scored_count"] == 8 and out["applicable_count"] == 9
+    assert out["scored_count"] == 11 and out["applicable_count"] == 12
 
 
 # ---------------------------------------------------------------------------
@@ -3926,7 +4340,7 @@ def test_success_or_failure_with_needs_is_skippable(tmp_path):
     GitHub skips the verdict job too — and a skipped required check is exactly
     what it reports as passed. Treating it as never-skipping certified the one
     shape this fact recommends, so the recommended fix was itself bypassable.
-    `always()` and `!cancelled()` both still run when a dependency skips."""
+    `always()` still runs when a dependency skips."""
     body = """\
 name: ci
 on: [pull_request]
@@ -3949,7 +4363,7 @@ jobs:
     assert f["outcome"] == "fail", f["evidence"]
 
 
-@pytest.mark.parametrize("cond", ["always()", "${{ always() }}", "'!cancelled()'"])
+@pytest.mark.parametrize("cond", ["always()", "${{ always() }}"])
 def test_the_recommended_verdict_conditions_still_certify(tmp_path, cond):
     """The control: the conditions the fix recipe actually recommends do run
     when a dependency is skipped, so the verdict job still reports."""
@@ -3969,11 +4383,41 @@ jobs:
     if: {cond}
     runs-on: ubuntu-latest
     steps:
-      - run: echo verdict
+      - run: test "${{{{ needs.suite.result }}}}" = success
 """
     out = _facts_with(tmp_path / cond.strip("'${} ()!")[:10], {"ci.yml": body},
                       ["test"])
     assert _outcome(out, _FACT)["outcome"] == "pass", _outcome(out, _FACT)
+
+
+@pytest.mark.parametrize("cond", ["'!cancelled()'", "${{ !cancelled() }}"])
+def test_a_not_cancelled_verdict_is_skipped_by_a_cancelled_run(tmp_path, cond):
+    """`!cancelled()` is not `always()` on a job with `needs:`: when the run is
+    cancelled (by hand, or by a newer push under a concurrency group), the
+    verdict is skipped, and GitHub reports a skipped required check as passed.
+    Only `always()` keeps the verdict reporting in every run state."""
+    body = f"""\
+name: ci
+on: [pull_request]
+permissions:
+  contents: read
+jobs:
+  suite:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest -v
+  test:
+    needs: [suite]
+    if: {cond}
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{{{ needs.suite.result }}}}" = success
+"""
+    out = _facts_with(tmp_path / "nc", {"ci.yml": body}, ["test"])
+    f = _outcome(out, _FACT)
+    assert f["outcome"] == "fail", f
+    assert "cancelled" in f["evidence"], f["evidence"]
 
 
 def test_a_matrix_job_does_not_produce_the_bare_context(tmp_path):
@@ -4072,7 +4516,7 @@ jobs:
 def test_a_constant_condition_does_not_certify_a_job_with_needs(tmp_path, cond):
     """A constant `if:` does not make a job unskippable once it has `needs:`.
     GitHub skips a dependent when a dependency skips unless the condition is
-    `always()` or `!cancelled()`; `if: true` is neither. Certifying it was the
+    `always()`; `if: true` is not. Certifying it was the
     same false green as `success() || failure()`, one condition over — and the
     check it certified can be satisfied without the suite running."""
     body = f"""\
@@ -4171,7 +4615,7 @@ def test_a_path_filtered_push_cannot_certify_even_over_every_branch(tmp_path):
     "    branches: ['**']\n    paths-ignore: ['docs/**']\n",
 ])
 def test_a_path_filtered_push_still_counts_against_the_check(tmp_path, filters):
-    """The other half of UNKNOWN, and the F13 trap: unable-to-certify must not
+    """The other half of UNKNOWN, and review finding 13's trap: unable-to-certify must not
     become unable-to-run. A SKIPPABLE job in such a workflow still counts
     against the required check, so its bypass is still found."""
     body = f"""\
@@ -4216,7 +4660,7 @@ jobs:
 
 
 def test_a_path_filtered_push_alone_is_not_a_false_red(tmp_path):
-    """And the F13 direction: an ALWAYS-running job in a path-filtered push,
+    """And review finding 13's direction: an ALWAYS-running job in a path-filtered push,
     as the only producer, is not evidence of a bypass — it is simply not
     knowable whether it reports. Not judged, not failed."""
     f = _outcome(_facts_with(tmp_path, {"build.yml": _PATHS_PUSH_PRODUCER},
@@ -4398,6 +4842,7 @@ def test_a_bypass_found_on_a_partially_read_protection_discloses_the_gap(
     root, files = _repo(tmp_path, {"ci.yml": _CONDITIONAL_ONLY})
     f = _outcome(cf.compute_config_facts(
         root, files, [], repo="owner/repo",
+        codeowner_review_fetcher=_CO_ENFORCED,
         required_contexts_fetcher=_partial_fetcher(["test"]),
         fork_approval_fetcher=lambda repo: ("all_external_contributors", "x")),
         _FACT)
@@ -4944,9 +5389,12 @@ def test_not_applicable_leaves_the_applicable_count(tmp_path):
     in as a named coverage gap."""
     root, files = _repo(tmp_path, {"ci.yml": _wf("      - run: echo hello\n")})
     out = cf.compute_config_facts(root, files, [])
-    # Eight other facts: six measurable offline, two API-gated and unmeasured.
-    assert out["applicable_count"] == 8
-    assert out["scored_count"] == 6
+    # Twelve other facts: five measurable offline, six API-gated and
+    # unmeasured (the covering CODEOWNERS fixture cannot be confirmed enforced
+    # without a repository), and the update-cooldown fact, also n/a here (no
+    # update tool).
+    assert out["applicable_count"] == 11
+    assert out["scored_count"] == 5
 
 
 def test_a_scan_gap_unmeasures_the_fatal_fact(tmp_path):
@@ -5011,3 +5459,368 @@ def test_a_swallow_inside_a_loop_body_is_still_a_swallow(tmp_path):
     f = _fatal(tmp_path, {"ci.yml": _wf(
         "      - run: for m in a b; do pytest -q; done || true\n")})
     assert f["outcome"] == "fail", f["evidence"]
+
+
+# --- F10: dependency update cooldown ----------------------------------------
+
+_COOLDOWN = "sec.deps.update-cooldown"
+
+
+def _cooldown(tmp_path, files: dict[str, str]):
+    """Run the fact table over a repo with one clean workflow plus ``files``
+    (repo-relative path -> body); return the cooldown fact and the block."""
+    root, wfs = _repo(tmp_path, {"ci.yml": _SAFE_WF})
+    for rel, body in files.items():
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(body)
+    out = cf.compute_config_facts(root, wfs, [])
+    return _outcome(out, _COOLDOWN), out
+
+
+def _dependabot(*entries: str) -> dict[str, str]:
+    return {".github/dependabot.yml": "version: 2\nupdates:\n" + "".join(entries)}
+
+
+def _entry(eco: str, directory: str = "/", cooldown: str = "") -> str:
+    return (f"  - package-ecosystem: {eco}\n"
+            f"    directory: \"{directory}\"\n"
+            "    schedule:\n      interval: weekly\n" + cooldown)
+
+
+def test_cooldown_is_not_applicable_without_an_update_tool(tmp_path):
+    f, out = _cooldown(tmp_path, {})
+    assert f["outcome"] == "not_applicable", f["evidence"]
+    assert _COOLDOWN in out["not_applicable"]
+    assert _COOLDOWN not in out["unmeasured"]
+
+
+def test_a_dependabot_file_with_no_updates_is_not_a_version_update_config(tmp_path):
+    f, _ = _cooldown(tmp_path, {".github/dependabot.yml": "version: 2\n"})
+    assert f["outcome"] == "not_applicable", f["evidence"]
+
+
+def test_cooldown_passes_when_every_dependabot_entry_waits_three_days(tmp_path):
+    f, _ = _cooldown(tmp_path, _dependabot(
+        _entry("npm", cooldown="    cooldown:\n      default-days: 7\n"),
+        _entry("github-actions",
+               cooldown="    cooldown:\n      default-days: 3\n")))
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_a_dependabot_entry_without_cooldown_is_judged_at_the_platform_default(
+        tmp_path):
+    """Since 2026-07-14 Dependabot waits three days on github.com when an entry
+    sets no `cooldown`. That meets the threshold, so the entry passes — but the
+    evidence names it as relying on the platform default rather than claiming
+    the repository configured one."""
+    f, _ = _cooldown(tmp_path, _dependabot(
+        _entry("npm", cooldown="    cooldown:\n      default-days: 7\n"),
+        _entry("pip", "/docs")))
+    assert f["outcome"] == "pass", f["evidence"]
+    assert "pip /docs" in f["evidence"]
+    assert "platform default" in f["evidence"]
+
+
+def test_a_one_day_dependabot_cooldown_fails_naming_the_entry(tmp_path):
+    f, _ = _cooldown(tmp_path, _dependabot(
+        _entry("npm", cooldown="    cooldown:\n      default-days: 7\n"),
+        _entry("pip", "/docs", "    cooldown:\n      default-days: 1\n")))
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "pip /docs" in f["evidence"]
+    assert "npm /" not in f["evidence"]
+    assert "cooldown: { default-days: 7 }" in f["evidence"]
+
+
+def test_a_zero_day_cooldown_opts_out_and_fails(tmp_path):
+    f, _ = _cooldown(tmp_path, _dependabot(
+        _entry("npm", cooldown="    cooldown:\n      default-days: 0\n")))
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_semver_only_cooldown_keys_each_need_three_days(tmp_path):
+    ok, _ = _cooldown(tmp_path / "a", _dependabot(_entry(
+        "npm", cooldown="    cooldown:\n      semver-major-days: 30\n"
+                        "      semver-minor-days: 7\n"
+                        "      semver-patch-days: 3\n")))
+    assert ok["outcome"] == "pass", ok["evidence"]
+    assert "semver" in ok["evidence"]
+    bad, _ = _cooldown(tmp_path / "b", _dependabot(_entry(
+        "npm", cooldown="    cooldown:\n      semver-major-days: 30\n"
+                        "      semver-patch-days: 1\n")))
+    assert bad["outcome"] == "fail", bad["evidence"]
+    assert "semver-patch-days" in bad["evidence"]
+
+
+def test_a_short_semver_key_fails_even_beside_a_long_default(tmp_path):
+    f, _ = _cooldown(tmp_path, _dependabot(_entry(
+        "npm", cooldown="    cooldown:\n      default-days: 7\n"
+                        "      semver-patch-days: 1\n")))
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_the_fix_for_a_short_semver_key_names_that_key(tmp_path):
+    """`cooldown: { default-days: 7 }` alone leaves a short semver key in
+    place, which still fails; the fix must tell the user to raise it too."""
+    f, _ = _cooldown(tmp_path, _dependabot(_entry(
+        "npm", cooldown="    cooldown:\n      default-days: 7\n"
+                        "      semver-patch-days: 1\n")))
+    assert f["outcome"] == "fail", f["evidence"]
+    fix = f["evidence"].split(" — ", 1)[1]
+    assert "semver-" in fix, fix
+
+
+def test_renovate_one_week_passes(tmp_path):
+    f, _ = _cooldown(tmp_path, {"renovate.json":
+                                '{"minimumReleaseAge": "1 week"}'})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_renovate_hours_are_converted(tmp_path):
+    f, _ = _cooldown(tmp_path, {".github/renovate.json":
+                                '{"minimumReleaseAge": "72 hours"}'})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_renovate_one_day_fails(tmp_path):
+    f, _ = _cooldown(tmp_path, {"renovate.json":
+                                '{"minimumReleaseAge": "1 day"}'})
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "renovate.json" in f["evidence"]
+
+
+def test_renovate_without_minimum_release_age_fails(tmp_path):
+    f, _ = _cooldown(tmp_path, {"renovate.json":
+                                '{"extends": ["config:recommended"]}'})
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "minimumReleaseAge" in f["evidence"]
+
+
+def test_an_unreadable_renovate_age_is_unmeasured(tmp_path):
+    f, _ = _cooldown(tmp_path, {"renovate.json":
+                                '{"minimumReleaseAge": "a fortnight"}'})
+    assert f["outcome"] == "unmeasured", f["evidence"]
+
+
+def test_renovate_in_package_json_is_read(tmp_path):
+    f, _ = _cooldown(tmp_path, {"package.json": json.dumps(
+        {"name": "x", "renovate": {"minimumReleaseAge": "3 days"}})})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_package_json_without_renovate_key_is_not_a_renovate_config(tmp_path):
+    f, _ = _cooldown(tmp_path, {"package.json": '{"name": "x"}'})
+    assert f["outcome"] == "not_applicable", f["evidence"]
+
+
+def test_both_tools_one_failing_fails(tmp_path):
+    files = _dependabot(_entry(
+        "npm", cooldown="    cooldown:\n      default-days: 7\n"))
+    files["renovate.json"] = '{"minimumReleaseAge": "1 day"}'
+    f, _ = _cooldown(tmp_path, files)
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "renovate.json" in f["evidence"]
+
+
+def test_an_unparsable_json5_renovate_config_is_unmeasured(tmp_path):
+    f, out = _cooldown(tmp_path, {"renovate.json5":
+                                  "{\n  // a comment\n"
+                                  "  minimumReleaseAge: '7 days',\n}\n"})
+    assert f["outcome"] == "unmeasured", f["evidence"]
+    assert "renovate.json5" in f["evidence"]
+    assert _COOLDOWN in out["unmeasured"]
+
+
+def test_an_unparsable_dependabot_file_is_unmeasured(tmp_path):
+    f, _ = _cooldown(tmp_path, {".github/dependabot.yml":
+                                "updates: [\n  - bad: : :\n"})
+    assert f["outcome"] == "unmeasured", f["evidence"]
+
+
+def test_the_cooldown_fact_says_security_updates_are_not_delayed(tmp_path):
+    f, _ = _cooldown(tmp_path, {})
+    assert "security updates" in f["fact"]
+    assert "not delayed" in f["fact"]
+
+
+def test_the_cooldown_threshold_is_one_named_constant():
+    assert cf._COOLDOWN_MIN_DAYS == 3
+
+
+# --- F10 review fixes: each of these was red on the first version ------------
+
+def test_a_non_list_package_rules_does_not_crash_the_fact_table(tmp_path):
+    """A malformed `packageRules` must cost this one fact, not raise out of
+    the fact table and blank every hygiene row."""
+    f, out = _cooldown(tmp_path, {"renovate.json": '{"packageRules": 5}'})
+    assert f["outcome"] == "fail", f["evidence"]
+    assert len(out["facts"]) == 13
+
+
+def test_semver_keys_are_ignored_where_dependabot_ignores_them(tmp_path):
+    """GitHub documents the semver-*-days keys as applying only to package
+    managers that support SemVer; github-actions, docker and terraform use
+    `default-days`, so a short semver key there delays nothing less."""
+    f, _ = _cooldown(tmp_path, _dependabot(_entry(
+        "github-actions", cooldown="    cooldown:\n      default-days: 7\n"
+                                   "      semver-patch-days: 1\n")))
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_an_empty_cooldown_is_named_as_relying_on_the_platform_default(
+        tmp_path):
+    f, _ = _cooldown(tmp_path, _dependabot(_entry(
+        "npm", cooldown="    cooldown: {}\n")))
+    assert f["outcome"] == "pass", f["evidence"]
+    assert "platform default" in f["evidence"]
+
+
+def test_the_platform_default_evidence_names_where_it_applies(tmp_path):
+    f, _ = _cooldown(tmp_path, _dependabot(_entry("npm")))
+    assert "GHES" in f["evidence"], f["evidence"]
+
+
+@pytest.mark.parametrize("age", ["1M", "1 month", "2 months"])
+def test_renovate_months_are_read_as_months(tmp_path, age):
+    """Renovate reads `M` and `month(s)` as 30 days; `m` is minutes."""
+    f, _ = _cooldown(tmp_path, {"renovate.json":
+                                json.dumps({"minimumReleaseAge": age})})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_renovate_lower_case_m_is_still_minutes(tmp_path):
+    f, _ = _cooldown(tmp_path, {"renovate.json":
+                                '{"minimumReleaseAge": "4320m"}'})
+    assert f["outcome"] == "pass", f["evidence"]
+    f, _ = _cooldown(tmp_path / "b", {"renovate.json":
+                                      '{"minimumReleaseAge": "60m"}'})
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_a_missing_age_with_presets_says_presets_are_not_followed(tmp_path):
+    f, _ = _cooldown(tmp_path, {"renovate.json":
+                                '{"extends": ["config:best-practices"]}'})
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "extends" in f["evidence"], f["evidence"]
+
+
+def test_an_unparsable_renovate_config_says_what_to_do(tmp_path):
+    f, _ = _cooldown(tmp_path, {"renovate.json5":
+                                "{\n  // a comment\n"
+                                "  minimumReleaseAge: '7 days',\n}\n"})
+    assert "by hand" in f["evidence"], f["evidence"]
+
+
+def test_the_fact_says_renovate_security_updates_are_not_delayed(tmp_path):
+    f, _ = _cooldown(tmp_path, {})
+    tail = f["fact"].split("security updates", 1)[1]
+    assert "Renovate" in tail, f["fact"]
+
+
+# --- F10 edges the first version left untested (coverage, not fixes) --------
+
+@pytest.mark.parametrize("age", ["71 hours", "2 days", "2.9 days"])
+def test_renovate_just_under_three_days_fails(tmp_path, age):
+    f, _ = _cooldown(tmp_path, {"renovate.json":
+                                json.dumps({"minimumReleaseAge": age})})
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_a_two_day_dependabot_cooldown_fails(tmp_path):
+    f, _ = _cooldown(tmp_path, _dependabot(_entry(
+        "npm", cooldown="    cooldown:\n      default-days: 2\n")))
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_renovate_reads_the_first_config_in_its_search_order(tmp_path):
+    f, _ = _cooldown(tmp_path / "a", {
+        "renovate.json": '{"minimumReleaseAge": "1 day"}',
+        ".github/renovate.json": '{"minimumReleaseAge": "7 days"}'})
+    assert f["outcome"] == "fail", f["evidence"]
+    f, _ = _cooldown(tmp_path / "b", {
+        ".github/renovate.json": '{"minimumReleaseAge": "7 days"}',
+        "package.json": json.dumps({"renovate": {"minimumReleaseAge": "1 day"}})})
+    assert f["outcome"] == "pass", f["evidence"]
+
+
+def test_dependabot_yaml_extension_is_read(tmp_path):
+    f, _ = _cooldown(tmp_path, {".github/dependabot.yaml":
+                                "version: 2\nupdates:\n" + _entry(
+                                    "npm", cooldown="    cooldown:\n"
+                                                    "      default-days: 1\n")})
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_an_age_set_only_in_package_rules_does_not_pass(tmp_path):
+    f, _ = _cooldown(tmp_path, {"renovate.json": json.dumps(
+        {"packageRules": [{"matchPackageNames": ["*"],
+                           "minimumReleaseAge": "7 days"}]})})
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "packageRules" in f["evidence"]
+
+
+def test_a_short_entry_outranks_an_unreadable_one(tmp_path):
+    f, _ = _cooldown(tmp_path, _dependabot(
+        _entry("npm", cooldown="    cooldown:\n      default-days: 1\n"),
+        _entry("pip", cooldown="    cooldown:\n      default-days: '7'\n")))
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_a_boolean_cooldown_value_is_unreadable_not_one_day(tmp_path):
+    f, _ = _cooldown(tmp_path, _dependabot(_entry(
+        "npm", cooldown="    cooldown:\n      default-days: true\n")))
+    assert f["outcome"] == "unmeasured", f["evidence"]
+
+
+# --- F10 exemptions: a total bypass fails, a partial one is named ------------
+
+def test_a_dependabot_exclude_of_everything_fails(tmp_path):
+    f, _ = _cooldown(tmp_path, _dependabot(_entry(
+        "npm", cooldown="    cooldown:\n      default-days: 7\n"
+                        "      exclude: ['*']\n")))
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "exclude" in f["evidence"]
+
+
+def test_a_dependabot_exclude_of_everything_with_no_days_still_fails(tmp_path):
+    f, _ = _cooldown(tmp_path, _dependabot(_entry(
+        "npm", cooldown="    cooldown:\n      exclude: ['*']\n")))
+    assert f["outcome"] == "fail", f["evidence"]
+
+
+def test_a_narrow_dependabot_exclude_passes_and_is_named(tmp_path):
+    f, _ = _cooldown(tmp_path, _dependabot(_entry(
+        "npm", cooldown="    cooldown:\n      default-days: 7\n"
+                        "      exclude: ['@acme/*']\n")))
+    assert f["outcome"] == "pass", f["evidence"]
+    assert "@acme/*" in f["evidence"]
+
+
+@pytest.mark.parametrize("rule", [
+    {"minimumReleaseAge": "0 days"},
+    {"matchPackageNames": ["*"], "minimumReleaseAge": "1 day"},
+    {"matchPackageNames": ["/.*/"], "minimumReleaseAge": "2 days"},
+])
+def test_a_renovate_rule_lowering_every_package_fails(tmp_path, rule):
+    f, _ = _cooldown(tmp_path, {"renovate.json": json.dumps(
+        {"minimumReleaseAge": "7 days", "packageRules": [rule]})})
+    assert f["outcome"] == "fail", f["evidence"]
+    assert "packageRules" in f["evidence"]
+
+
+def test_a_narrow_renovate_rule_lowering_some_packages_passes_and_is_named(
+        tmp_path):
+    f, _ = _cooldown(tmp_path, {"renovate.json": json.dumps(
+        {"minimumReleaseAge": "7 days",
+         "packageRules": [{"matchPackageNames": ["@acme/**"],
+                           "minimumReleaseAge": "0 days"}]})})
+    assert f["outcome"] == "pass", f["evidence"]
+    assert "@acme/**" in f["evidence"]
+
+
+def test_a_renovate_rule_keeping_three_days_is_not_an_exemption(tmp_path):
+    f, _ = _cooldown(tmp_path, {"renovate.json": json.dumps(
+        {"minimumReleaseAge": "7 days",
+         "packageRules": [{"minimumReleaseAge": "3 days"}]})})
+    assert f["outcome"] == "pass", f["evidence"]
+    assert "exempt" not in f["evidence"]

@@ -58,7 +58,11 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # The name must equal the replayed `steps[].name` in the jobs fixtures
+      # ("Checkout"); the unnamed form folds to the same identity in production,
+      # so this is fixture consistency, not a detector fix.
+      - name: Checkout
+        uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20

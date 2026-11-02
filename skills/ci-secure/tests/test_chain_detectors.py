@@ -81,6 +81,93 @@ def test_fires_on_workflow_run_head_and_local_action(tmp_path):
     assert len(hits) == 1
 
 
+def test_fires_on_a_self_repository_action_after_a_head_checkout(tmp_path):
+    # `uses: $/path` (GitHub's self-repository prefix, 2026-07-30) loads the
+    # action's definition from the commit the WORKFLOW runs at (the base
+    # repository's here), but the action's own `run:` steps execute in the
+    # job's working directory, where the fork's tree sits after the checkout.
+    # Same over-approximation as a `run:` step; mirror of the `./` test above.
+    hits = _hits(tmp_path, """\
+        on:
+          workflow_run:
+            workflows: [CI]
+            types: [completed]
+        jobs:
+          publish:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@v4
+                with:
+                  ref: ${{ github.event.workflow_run.head_sha }}
+              - uses: $/.github/actions/build
+    """)
+    assert len(hits) == 1
+    assert "`$/` action" in hits[0].evidence
+    assert "fork's checked-out tree" in hits[0].evidence
+
+
+def test_fires_on_pull_request_target_head_and_self_repository_action(tmp_path):
+    hits = _hits(tmp_path, """\
+        on: pull_request_target
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@v4
+                with:
+                  ref: ${{ github.event.pull_request.head.sha }}
+              - uses: $/.github/actions/build
+    """)
+    assert len(hits) == 1
+
+
+def test_self_repository_evidence_claims_only_what_is_known(tmp_path):
+    # Where the definition loads from depends on the trigger (the merge ref,
+    # fork-controlled, on pull_request_review), and only a composite action
+    # has steps of its own; the evidence must not assert either beyond that.
+    hits = _hits(tmp_path, """\
+        on: pull_request_review
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@v4
+                with:
+                  ref: ${{ github.event.pull_request.head.sha }}
+              - uses: $/.github/actions/build
+    """)
+    assert len(hits) == 1
+    ev = hits[0].evidence
+    assert ("a `$/` action: it runs in the working directory, which now holds "
+            "the fork's checked-out tree; its definition comes from the running "
+            "commit, which on `pull_request_target`/`workflow_run` is the base "
+            "repository's") in ev, ev
+    assert "its own steps" not in ev, ev
+
+
+def test_silent_on_a_self_repository_action_before_the_head_checkout(tmp_path):
+    # Order still decides for `$/`: written (and run) before the head
+    # checkout, the action's steps see the base tree, not the fork's.
+    hits = _hits(tmp_path, """\
+        on: pull_request_target
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: $/.github/actions/build
+              - uses: actions/checkout@v4
+                with:
+                  ref: ${{ github.event.pull_request.head.sha }}
+    """)
+    assert hits == []
+
+
+def test_evidence_plain_for_a_run_step_after_a_head_checkout(tmp_path):
+    # The `$/` explanation is appended only when a `$/` step is the execution.
+    hits = _hits(tmp_path, VULNERABLE)
+    assert "`$/`" not in hits[0].evidence
+
+
 def test_fires_on_refs_pull_merge_ref(tmp_path):
     hits = _hits(tmp_path, """\
         on: pull_request_target
@@ -189,6 +276,19 @@ def test_collect_sha_pins_finds_only_forty_hex_remote_pins(tmp_path):
         ("evil/fork-action", "aaaa"),
         ("actions/checkout", "8ade"),
     ]
+
+
+def test_collect_sha_pins_never_reads_a_self_repository_ref_as_a_pin(tmp_path):
+    # GitHub rejects `@ref` on a `$/` reference, but the fixture carries a
+    # 40-hex suffix anyway so this guards the pin regexes: if either is ever
+    # widened to admit a `$` first segment, `$/...` would read as a pinned
+    # remote action and be sent to the impostor-commit check.
+    _wf(tmp_path, "ci.yml", PINNED.replace(
+        "- uses: ./local/action",
+        "- uses: $/.github/actions/local@" + "b" * 40))
+    pins = scan._collect_sha_pins(tmp_path, scan.all_workflow_files(tmp_path))
+    assert all(not repo.startswith("$") for _, _, repo, _ in pins), pins
+    assert len(pins) == 3, pins
 
 
 NOT_REALLY_PINS = """\
@@ -2599,7 +2699,7 @@ def test_p1424_workflow_level_default_working_directory_separates_them(tmp_path)
 
 
 # ---------------------------------------------------------------------------
-# The `repo` plumbing: scan(..., repo=...) -> the two API-gated config facts.
+# The `repo` plumbing: scan(..., repo=...) -> the API-gated config facts.
 #
 # Nothing exercised this. Deleting `repo=repo` from the call `scan()` makes
 # into `compute_config_facts` left the whole suite green — both facts would
@@ -2608,8 +2708,12 @@ def test_p1424_workflow_level_default_working_directory_separates_them(tmp_path)
 # ---------------------------------------------------------------------------
 
 def test_scan_passes_the_repo_through_to_the_api_gated_facts(tmp_path):
-    """End to end at the scan boundary, with the two fetchers stubbed at module
-    level — the seam a production run actually goes through."""
+    """End to end at the scan boundary, with the three fetchers stubbed at
+    module level — the seam a production run actually goes through. The
+    CODEOWNERS fact reaches its fetcher only once a rule covers workflows, so
+    the fixture carries one."""
+    (tmp_path / ".github").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".github" / "CODEOWNERS").write_text(".github/ @sec-team\n")
     _wf(tmp_path, "ci.yml", """\
         name: ci
         on: pull_request
@@ -2638,15 +2742,46 @@ def test_scan_passes_the_repo_through_to_the_api_gated_facts(tmp_path):
         seen.append(repo)
         return "first_time_contributors", "the repository's Actions settings"
 
+    def _owner_review(repo):
+        seen.append(repo)
+        return False, "branch `main`"
+
+    class _EnvGh:
+        """One environment that requires a reviewer and blocks self-review;
+        no readable secret."""
+
+        @staticmethod
+        def run_gh_api(path, **kw):
+            if path.endswith("/environments?per_page=100"):
+                return json.dumps({"environments": [{
+                    "name": "prod", "deployment_branch_policy": None,
+                    "can_admins_bypass": False, "protection_rules": [{
+                        "type": "required_reviewers",
+                        "prevent_self_review": True,
+                        "reviewers": [{"type": "Team"}]}]}]})
+            if path.endswith("secrets?per_page=100"):
+                return json.dumps({"secrets": []})
+            raise AssertionError(f"unexpected endpoint {path}")
+
+    def _push_access(repo):
+        seen.append(repo)
+        return cf._GhPushAccess(_EnvGh, repo), "recorded"
+
     with mock.patch.object(cf, "_required_contexts_via_gh", _contexts), \
-         mock.patch.object(cf, "_fork_approval_via_gh", _approval):
+         mock.patch.object(cf, "_fork_approval_via_gh", _approval), \
+         mock.patch.object(cf, "_code_owner_review_via_gh", _owner_review), \
+         mock.patch.object(cf, "_push_access_via_gh", _push_access):
         result = scan.scan(catalog, tmp_path, repo="owner/name")
 
-    # The repository reached BOTH fetchers — the plumbing under test.
-    assert seen == ["owner/name", "owner/name"], seen
+    # The repository reached EVERY fetcher — the plumbing under test.
+    assert seen == ["owner/name"] * 4, seen
     facts = {f["fact_id"]: f for f in result["security_score"]["facts"]}
     assert facts["sec.required-checks.skippable"]["outcome"] == "fail"
     assert facts["sec.fork-approval.effective"]["outcome"] == "pass"
+    assert facts["sec.codeowners.workflows"]["outcome"] == "fail"
+    assert facts["sec.environments.branch-restricted"]["outcome"] == "pass"
+    assert facts["sec.environments.approval-holds"]["outcome"] == "pass"
+    assert facts["sec.secrets.environment-scoped"]["outcome"] == "pass"
     assert result["security_score"]["unmeasured"] == []
 
 
@@ -2669,8 +2804,11 @@ def test_scan_without_a_repo_leaves_both_api_facts_unmeasured(tmp_path):
     result = scan.scan(catalog, tmp_path)
     score = result["security_score"]
     assert set(score["unmeasured"]) == {
-        "sec.required-checks.skippable", "sec.fork-approval.effective"}
-    assert score["scored_count"] == score["applicable_count"] - 2
+        "sec.required-checks.skippable", "sec.fork-approval.effective",
+        "sec.environments.branch-restricted",
+        "sec.environments.approval-holds",
+        "sec.secrets.environment-scoped"}
+    assert score["scored_count"] == score["applicable_count"] - 5
 
 
 # ---------------------------------------------------------------------------

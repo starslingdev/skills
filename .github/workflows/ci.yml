@@ -1,7 +1,8 @@
 name: CI
 
-# Runs the full test suite (`pytest -v`) on every push to main and every pull request — the same
-# suite a developer runs locally must pass before code can merge.
+# Runs the full test suite on every push to main and every pull request. Four pytest
+# workers share the work; every test still runs and any failure fails the suite.
+# Locally, `pytest -v` runs the same suite sequentially for easier debugging.
 #
 # The suite runs as two mutually exclusive jobs: self-hosted for pushes and same-repo PRs
 # (this repo dogfoods StarSling runners), GitHub-hosted for fork PRs (untrusted code never
@@ -42,7 +43,7 @@ jobs:
     # GitHub-hosted runners via test-fork below.
     runs-on: starsling-ubuntu-24.04
     # Without this, a dead runner pool leaves the job queued (self-hosted jobs wait up to 24h)
-    # and the required `test` check pending with no signal. The suite itself takes ~1.5 min.
+    # and the required `test` check pending with no signal. The suite runtime is measured by pytest.
     timeout-minutes: 30
     if: >-
       github.event_name == 'push' ||
@@ -72,10 +73,10 @@ jobs:
           node-version: "20"
 
       - name: Install test dependencies
-        run: pip install pytest pyyaml
+        run: pip install -e ".[dev]"
 
       - name: Run tests
-        run: pytest -v
+        run: pytest -v -n 4 --dist worksteal
 
   test-fork:
     name: test (fork)
@@ -110,10 +111,10 @@ jobs:
           node-version: "20"
 
       - name: Install test dependencies
-        run: pip install pytest pyyaml
+        run: pip install -e ".[dev]"
 
       - name: Run tests
-        run: pytest -v
+        run: pytest -v -n 4 --dist worksteal
 
   # ONE check name carries the verdict for fork and non-fork alike. The two suite jobs are
   # mutually exclusive, so a branch protection rule naming either of them directly is

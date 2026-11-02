@@ -1,0 +1,76 @@
+{
+  "total_count": 1,
+  "jobs": [
+    {
+      "id": 9005,
+      "run_id": 5005,
+      "name": "test",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-06-25T07:00:00Z",
+      "completed_at": "2026-06-25T07:04:47Z",
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "html_url": "https://github.com/synthetic/repo/actions/runs/5005/job/9005",
+      "steps": [
+        {
+          "name": "Set up job",
+          "number": 1,
+          "started_at": "2026-06-25T07:00:00Z",
+          "completed_at": "2026-06-25T07:00:02Z",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Checkout",
+          "number": 2,
+          "started_at": "2026-06-25T07:00:02Z",
+          "completed_at": "2026-06-25T07:01:37Z",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Setup Node.js",
+          "number": 3,
+          "started_at": "2026-06-25T07:01:37Z",
+          "completed_at": "2026-06-25T07:01:45Z",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Install dependencies",
+          "number": 4,
+          "started_at": "2026-06-25T07:01:45Z",
+          "completed_at": "2026-06-25T07:02:25Z",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run tests",
+          "number": 5,
+          "started_at": "2026-06-25T07:02:25Z",
+          "completed_at": "2026-06-25T07:04:45Z",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Post Checkout",
+          "number": 6,
+          "started_at": "2026-06-25T07:04:45Z",
+          "completed_at": "2026-06-25T07:04:46Z",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Complete job",
+          "number": 7,
+          "started_at": "2026-06-25T07:04:46Z",
+          "completed_at": "2026-06-25T07:04:47Z",
+          "status": "completed",
+          "conclusion": "success"
+        }
+      ]
+    }
+  ]
+}

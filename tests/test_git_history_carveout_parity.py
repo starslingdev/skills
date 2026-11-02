@@ -50,6 +50,19 @@ def sides():
     return speed, score
 
 
+@pytest.fixture(autouse=True)
+def _restore_local_action_index(request):
+    """Several tests set ci-speedup's module-level local-action index; put it
+    back afterwards so no test's verdict depends on the order tests ran in."""
+    if "sides" not in request.fixturenames:
+        yield
+        return
+    speed = request.getfixturevalue("sides")[0]
+    saved = getattr(speed, "_GIT_HISTORY_LOCAL_ACTIONS", None)
+    yield
+    speed._GIT_HISTORY_LOCAL_ACTIONS = saved
+
+
 # Where a `$` or a `HEAD` SITS on the command line decides whether it says
 # anything about history, and these rows pin that by VERDICT, not only by
 # agreement between the two engines. They carry expected values because the
@@ -139,7 +152,8 @@ def test_operand_position_rows_get_the_verdict_they_are_pinned_to(sides):
 
 def test_the_copied_patterns_are_character_identical(sides):
     speed, score = sides
-    for name in ("_GIT_HISTORY_RE", "_HISTORY_JOB_NAME_RE", "_LINE_CONTINUATION_RE"):
+    for name in ("_GIT_HISTORY_RE", "_HISTORY_JOB_NAME_RE", "_LINE_CONTINUATION_RE",
+                 "_NESTED_LOCAL_USES_RE"):
         a, b = getattr(speed, name), getattr(score, name)
         assert a.pattern == b.pattern, f"{name} pattern text diverged"
         assert a.flags == b.flags, f"{name} flags diverged"
@@ -177,6 +191,75 @@ def test_job_needs_git_history_agrees_on_every_battery_row(sides):
         f"{mismatches!r} — re-sync ci-score's copy with ci-speedup's scanner")
 
 
+# GitHub Actions `parallel:` groups (2026-06-25). Both engines walk into them
+# (ci-score since #120, ci-speedup since #122), so a history op inside a
+# documented group — a `parallel:` LIST — must read the same on both sides.
+#
+# One shape still differs, and it is pinned rather than hidden: a `parallel:`
+# value that is a single step MAPPING instead of a list. GitHub documents only
+# the list form. ci-score reads the mapping defensively as a list of one and
+# sees the history op; ci-speedup counts the group MALFORMED (`not_a_list`),
+# reads nothing inside it, and holds its shallow-checkout pattern back on
+# that job (`job_has_an_unreadable_parallel_group`, along with every other
+# absence-based pattern, and files the job as a coverage gap), so it never
+# recommends shallowing it either — the two engines disagree on the
+# predicate but agree that the job must not be shallowed; what the user sees
+# differs (an exempted pass there, a coverage gap here). Whether ci-speedup
+# should read the mapping too is
+# an open product decision; until it is made, the row below is a STRICT
+# xfail: the day ci-speedup reads it, this test goes red and the marker is
+# deleted. The other rows (a history op after a control step, an unreadable
+# group) must agree already, pinned by `test_parallel_rows_that_already_agree`.
+_PARALLEL_HISTORY_ROWS = [
+    ("parallel-history", {"steps": [
+        {"uses": "actions/checkout@v4", "with": {"fetch-depth": 0}},
+        {"parallel": [{"run": "git log --oneline"}, {"run": "true"}]}]}),
+]
+_PARALLEL_SINGLE_MAPPING_ROW = (
+    "parallel-single-mapping", {"steps": [{"parallel": {"run": "git log"}}]})
+_PARALLEL_AGREEING_ROWS = [
+    # A control step must not end the read: the history op after it counts.
+    ("parallel-wait-all", {"steps": [
+        {"parallel": [{"run": "npm test"}]}, {"wait-all": None}, {"run": "git log"}]}),
+    ("parallel-unreadable", {"steps": [{"parallel": "git log"}]}),
+]
+
+
+def test_parallel_rows_that_already_agree(sides):
+    speed, score = sides
+    speed._GIT_HISTORY_LOCAL_ACTIONS = set()
+    for name, job in _PARALLEL_AGREEING_ROWS:
+        assert speed._job_needs_git_history(job, name) == \
+            score._job_needs_git_history(job, name), name
+    name, job = _PARALLEL_AGREEING_ROWS[0]
+    assert score._job_needs_git_history(job, name) is True
+    # ci-score's side of the two tests below is pinned OUTSIDE them, so a
+    # disagreement can only be explained by ci-speedup's read.
+    for name, job in _PARALLEL_HISTORY_ROWS + [_PARALLEL_SINGLE_MAPPING_ROW]:
+        assert score._job_needs_git_history(job, name) is True, name
+
+
+def test_job_needs_git_history_agrees_inside_parallel_groups(sides):
+    speed, score = sides
+    speed._GIT_HISTORY_LOCAL_ACTIONS = set()
+    for name, job in _PARALLEL_HISTORY_ROWS:
+        assert speed._job_needs_git_history(job, name) is True, (
+            f"{name}: ci-speedup would recommend shallowing a job whose "
+            "`parallel:` group walks git history")
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "a `parallel:` value that is one step mapping (undocumented shape): "
+    "ci-score reads it as a list of one; ci-speedup counts it malformed and "
+    "holds its shallow-checkout pattern back on the job instead. Open product "
+    "decision; delete this marker when ci-speedup reads the mapping."))
+def test_job_needs_git_history_agrees_on_a_single_mapping_group(sides):
+    speed, score = sides
+    speed._GIT_HISTORY_LOCAL_ACTIONS = set()
+    name, job = _PARALLEL_SINGLE_MAPPING_ROW
+    assert speed._job_needs_git_history(job, name) is True, name
+
+
 def test_local_composite_action_indexing_agrees(sides, tmp_path: Path):
     """A history op hidden inside a local composite action, and the fail-CLOSED
     branch for an action file that cannot be read: both engines must treat the
@@ -195,15 +278,20 @@ def test_local_composite_action_indexing_agrees(sides, tmp_path: Path):
         "a": {"steps": [{"uses": "./.github/actions/changed"}]},
         "b": {"steps": [{"uses": "./.github/actions/plain"}]},
         "c": {"steps": [{"uses": "./.github/actions/missing"}]},   # unreadable → fail closed
+        # The self-repository prefix (GitHub, 2026-07-30) names the same files.
+        "d": {"steps": [{"uses": "$/.github/actions/changed"}]},
+        "e": {"steps": [{"uses": "$/.github/actions/plain"}]},
+        "f": {"steps": [{"uses": "$/.github/actions/missing"}]},
     }}
     parsed = [(".github/workflows/ci.yml", doc, "")]
 
     speed_idx = speed._index_local_git_actions(tmp_path, parsed)
     score_idx = score._index_local_git_actions(tmp_path, parsed)
     assert speed_idx == score_idx, "the local composite-action index diverged"
-    assert "./.github/actions/changed" in score_idx
-    assert "./.github/actions/missing" in score_idx   # fail closed
-    assert "./.github/actions/plain" not in score_idx
+    for prefix in ("./", "$/"):
+        assert f"{prefix}.github/actions/changed" in score_idx
+        assert f"{prefix}.github/actions/missing" in score_idx   # fail closed
+        assert f"{prefix}.github/actions/plain" not in score_idx
 
     speed._GIT_HISTORY_LOCAL_ACTIONS = speed_idx
     for jid, job in doc["jobs"].items():
@@ -219,3 +307,219 @@ def test_the_copy_stays_a_copy_and_never_becomes_an_import():
         if stripped.startswith(("import ", "from ")):
             assert "ci_speedup" not in stripped and "ci-speedup" not in stripped and \
                 "scan" not in stripped, stripped
+
+
+# GitHub Actions parallel steps: a history op (or a local action that runs one)
+# written as a child of a `- parallel:` group is still a history op. A flat read
+# of `steps:` saw the group as one step with no `run:`/`uses:` and missed it, so
+# the job's `fetch-depth: 0` read as removable. Each engine reads steps through
+# its own walker; these rows pin the verdict, and the agreement test pins the two
+# engines to each other.
+_PARALLEL_JOB_BATTERY = [
+    ("par-run", {"steps": [{"parallel": [{"run": "npm test"},
+                                           {"run": "git log --oneline"}]}]}),
+    ("par-uses", {"steps": [{"parallel": [{"uses": "tj-actions/changed-files@v45"}]}]}),
+    ("par-nested", {"steps": [{"parallel": [{"parallel": [
+        {"run": "git describe --tags"}]}]}]}),
+    # A control step inside the group, then the history op beside it: only a
+    # walker that descends the group and steps past `wait-all:` reaches it (a
+    # flat read sees one step with neither `run:` nor `uses:`).
+    ("par-wait", {"steps": [{"parallel": [{"wait-all": None},
+                                          {"run": "git diff origin/main...HEAD"}]}]}),
+    # `parallel:` beside `run:` / `uses:` on one step: GitHub rejects it, the
+    # walker reads the children anyway, so the history op inside still counts.
+    ("par-on-run", {"steps": [{"run": "npm test",
+                               "parallel": [{"run": "git log --oneline"}]}]}),
+    ("par-on-uses", {"steps": [{"uses": "actions/setup-node@v4",
+                                "parallel": [{"run": "git describe --tags"}]}]}),
+]
+
+
+def test_a_history_op_inside_a_parallel_group_needs_history(sides):
+    speed, _score = sides
+    speed._GIT_HISTORY_LOCAL_ACTIONS = set()
+    wrong = [name for name, job in _PARALLEL_JOB_BATTERY
+             if speed._job_needs_git_history(job, name) is not True]
+    assert not wrong, f"ci-speedup missed a history op inside a parallel group: {wrong!r}"
+
+
+def test_parallel_group_rows_agree_across_the_two_engines(sides):
+    speed, score = sides
+    speed._GIT_HISTORY_LOCAL_ACTIONS = set()
+    mismatches = [name for name, job in _PARALLEL_JOB_BATTERY
+                  if speed._job_needs_git_history(job, name)
+                  != score._job_needs_git_history(job, name)]
+    assert not mismatches, mismatches
+
+
+# The two walks record what they read under different shapes, by design:
+# ci-score keeps one record per unreadable or skipped entry (`invalid`,
+# `malformed`, `skipped` lists and `skipped_children`), ci-speedup keeps the
+# files, jobs and reasons involved (`invalid_files`, `invalid_jobs`,
+# `malformed_files`, `malformed_jobs`, `malformed_reasons`). The COUNTERS are
+# the shared vocabulary, and a reader of either findings document must find
+# them under one name and one type. The shared contract is the NAME and the
+# TYPE only: on one input the counts differ (a single-mapping group is
+# `invalid` in ci-score and `malformed` in ci-speedup, whose `groups` also
+# counts malformed ones), so never compare the two stamps' values.
+_SHARED_WALK_COUNTERS = frozenset({
+    "groups", "steps_in_groups", "control_steps",
+    "invalid_groups", "malformed_groups"})
+
+
+def test_both_engines_record_the_shared_walk_counters(sides):
+    speed, score = sides
+    speed_keys = set(speed.parallel_steps_stats([]))
+    score_keys = set(score._new_step_stats())
+    assert not _SHARED_WALK_COUNTERS - speed_keys, (
+        f"ci-speedup's parallel_steps lacks shared counters: "
+        f"{sorted(_SHARED_WALK_COUNTERS - speed_keys)}")
+    assert not _SHARED_WALK_COUNTERS - score_keys, (
+        f"ci-score's parallel_steps lacks shared counters: "
+        f"{sorted(_SHARED_WALK_COUNTERS - score_keys)}")
+    # A counter named on one side must be a counter on the other too, not a
+    # list under the same name.
+    for key in _SHARED_WALK_COUNTERS:
+        assert type(speed.parallel_steps_stats([])[key]) is type(
+            score._new_step_stats()[key]), key
+
+
+def test_a_local_action_inside_a_parallel_group_is_indexed(sides, tmp_path: Path):
+    speed, _score = sides
+    act = tmp_path / ".github" / "actions" / "changed"
+    act.mkdir(parents=True)
+    act.joinpath("action.yml").write_text(
+        "runs:\n  using: composite\n  steps:\n    - run: git diff origin/main...HEAD\n"
+        "      shell: bash\n")
+    job = {"steps": [{"parallel": [{"uses": "./.github/actions/changed"},
+                                   {"run": "npm test"}]}]}
+    parsed = [(".github/workflows/ci.yml", {"jobs": {"a": job}}, "")]
+    idx = speed._index_local_git_actions(tmp_path, parsed)
+    assert "./.github/actions/changed" in idx
+    speed._GIT_HISTORY_LOCAL_ACTIONS = idx
+    assert speed._job_needs_git_history(job, "a") is True
+
+
+def _composite(tmp_path: Path, name: str, *steps: str) -> None:
+    d = tmp_path / ".github" / "actions" / name
+    d.mkdir(parents=True)
+    d.joinpath("action.yml").write_text(
+        "runs:\n  using: composite\n  steps:\n" + "".join(steps))
+
+
+def _nested_tree(tmp_path: Path) -> None:
+    # outer → inner, and only inner runs the history command
+    _composite(tmp_path, "outer", "    - uses: ./.github/actions/inner\n")
+    _composite(tmp_path, "inner",
+               "    - run: git log --oneline\n      shell: bash\n")
+    # dangling → a local action that does not exist (fail closed)
+    _composite(tmp_path, "dangling", "    - uses: ./.github/actions/missing\n")
+    # a two-action cycle with no history command anywhere
+    _composite(tmp_path, "ping", "    - uses: ./.github/actions/pong\n",
+               "    - run: npm ci\n      shell: bash\n")
+    _composite(tmp_path, "pong", "    - uses: $/.github/actions/ping\n")
+    # a `$/` outer whose `./` inner runs the history command
+    _composite(tmp_path, "self-outer", "    - uses: './.github/actions/inner'\n")
+    # a `./` outer whose `$/` inner runs the history command
+    _composite(tmp_path, "outer-self", "    - uses: $/.github/actions/inner\n")
+    # a `./` outer whose `$/` inner cannot be read (fail closed)
+    _composite(tmp_path, "self-dangling", "    - uses: $/.github/actions/missing\n")
+    # a quoted `"uses":` key (flow-style YAML) naming a history-running inner
+    _composite(tmp_path, "quoted-key", '    - "uses": "$/.github/actions/inner"\n')
+    # nested refs that resolve OUTSIDE the repository root: unproven, fail closed
+    _composite(tmp_path, "escapes-up", "    - uses: $/../outside\n")
+    _composite(tmp_path, "escapes-abs",
+               f"    - uses: $/{(tmp_path.parent / 'outside').as_posix()}\n")
+    # an embedded NUL in a nested ref cannot be opened: fail closed, never crash
+    _composite(tmp_path, "nul-ref", "    - uses: ./.github/actions/in\x00ner\n")
+
+
+# (outer ref a workflow step names, must the history index hold it?)
+_NESTED_ROWS = [
+    ("./.github/actions/outer", True),         # history op one reference deep
+    ("./.github/actions/dangling", True),      # unreadable nested ref: fail closed
+    ("./.github/actions/ping", False),         # history-free cycle terminates
+    ("$/.github/actions/self-outer", True),    # `$/` outer, `./` inner
+    ("./.github/actions/outer-self", True),    # `./` outer, `$/` inner
+    ("./.github/actions/self-dangling", True), # unreadable `$/` inner: fail closed
+    ("./.github/actions/quoted-key", True),    # quoted `"uses":` key is followed
+    ("./.github/actions/escapes-up", True),    # `$/../x` leaves the root: fail closed
+    ("./.github/actions/escapes-abs", True),   # `$//abs` leaves the root: fail closed
+    ("./.github/actions/nul-ref", True),       # unopenable ref: fail closed
+]
+
+
+@pytest.mark.parametrize("ref,expected", _NESTED_ROWS,
+                         ids=["nested-history", "nested-unreadable",
+                              "cycle-no-history", "self-prefix-outer",
+                              "self-prefix-inner", "self-prefix-inner-unreadable",
+                              "quoted-uses-key", "escapes-root-up",
+                              "escapes-root-absolute", "nul-in-ref"])
+def test_nested_local_references_are_followed(sides, tmp_path: Path, ref, expected):
+    """A composite action that delegates to ANOTHER local action: the history
+    op (or the unreadable file) can sit one reference deeper than the action
+    the workflow step names. Both engines must follow the chain, fail closed on
+    an unreadable link, and terminate on a cycle."""
+    speed, score = sides
+    tmp_path = tmp_path / "repo"
+    # A clean action outside the repository root, so an escaping ref that is
+    # followed reads as clean (fail open) instead of failing closed.
+    outside = tmp_path.parent / "outside"
+    outside.mkdir(parents=True)
+    outside.joinpath("action.yml").write_text(
+        "runs:\n  using: composite\n  steps:\n    - run: npm ci\n      shell: bash\n")
+    _nested_tree(tmp_path)
+    job = {"steps": [{"uses": ref}]}
+    parsed = [(".github/workflows/ci.yml",
+               {"on": {"pull_request": None}, "jobs": {"j": job}}, "")]
+
+    speed_idx = speed._index_local_git_actions(tmp_path, parsed)
+    score_idx = score._index_local_git_actions(tmp_path, parsed)
+    assert (ref in speed_idx) is expected, f"ci-speedup: {ref} indexed={ref in speed_idx}"
+    assert (ref in score_idx) is expected, f"ci-score: {ref} indexed={ref in score_idx}"
+    assert speed_idx == score_idx, "the nested local-action index diverged"
+
+    speed._GIT_HISTORY_LOCAL_ACTIONS = speed_idx
+    assert speed._job_needs_git_history(job, "j") is expected
+    assert score._job_needs_git_history(job, "j", score_idx) is expected
+
+
+def _clean_chain(tmp_path: Path, references: int) -> list:
+    """`link0` reaches `link<references>` through that many nested local
+    references; no link runs a history op."""
+    n = references + 1
+    for i in range(n):
+        _composite(tmp_path, f"link{i}", f"    - uses: ./.github/actions/link{i + 1}\n"
+                   if i + 1 < n else "    - run: npm ci\n      shell: bash\n")
+    return [(".github/workflows/ci.yml",
+             {"jobs": {"j": {"steps": [{"uses": "./.github/actions/link0"}]}}}, "")]
+
+
+@pytest.mark.parametrize("extra,flagged", [(0, False), (1, True)],
+                         ids=["at-the-cap-read", "one-past-the-cap-fails-closed"])
+def test_the_depth_cap_boundary(sides, tmp_path: Path, extra, flagged):
+    """A clean chain exactly `_MAX_LOCAL_ACTION_DEPTH` references deep is read
+    to its end and proven clean; one reference deeper is unproven and fails
+    closed. Both engines, same boundary."""
+    speed, score = sides
+    assert speed._MAX_LOCAL_ACTION_DEPTH == score._MAX_LOCAL_ACTION_DEPTH == 16
+    parsed = _clean_chain(tmp_path, speed._MAX_LOCAL_ACTION_DEPTH + extra)
+    for engine in sides:
+        assert ("./.github/actions/link0" in engine._index_local_git_actions(
+            tmp_path, parsed)) is flagged, engine.__name__
+
+
+def test_a_chain_past_the_depth_cap_fails_closed(sides, tmp_path: Path):
+    """A history-free chain longer than the cap is unproven past the cap, so
+    both engines keep the outer ref in the index rather than call it clean."""
+    speed, score = sides
+    assert speed._MAX_LOCAL_ACTION_DEPTH == score._MAX_LOCAL_ACTION_DEPTH
+    n = speed._MAX_LOCAL_ACTION_DEPTH + 2
+    for i in range(n):
+        _composite(tmp_path, f"link{i}", f"    - uses: ./.github/actions/link{i + 1}\n"
+                   if i + 1 < n else "    - run: npm ci\n      shell: bash\n")
+    parsed = [(".github/workflows/ci.yml",
+               {"jobs": {"j": {"steps": [{"uses": "./.github/actions/link0"}]}}}, "")]
+    for engine in sides:
+        assert "./.github/actions/link0" in engine._index_local_git_actions(
+            tmp_path, parsed), engine.__name__

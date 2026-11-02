@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """ci-speedup static scanner.
 
-Parses the catalog at `references/optimization-patterns.md`, applies each
+Parses the catalog at `references/patterns/` (one file per pattern), applies each
 declared static detector against every workflow YAML in the target repo's
 `.github/workflows/`, and emits a JSON document describing the matches. The
 data-driven patterns (METADATA `class: data-driven`, `detector: manual`)
@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import re
 import sys
@@ -37,6 +38,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+logger = logging.getLogger("scan")
+
 try:
     import yaml
 except ImportError:  # pragma: no cover — surfaced loudly if missing
@@ -44,6 +47,21 @@ except ImportError:  # pragma: no cover — surfaced loudly if missing
           "`python3 -m pip install pyyaml` (or `pip install pyyaml`)",
           file=sys.stderr)
     sys.exit(1)
+
+# The ONE reader for a job's `steps:` list (descends `parallel:` groups, skips
+# `wait:`/`wait-all:`/`cancel:` control steps). This directory goes first on
+# sys.path so `workflow_steps` imports even when scan.py is itself loaded by
+# file path (the repo-root parity test).
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+from workflow_steps import (  # noqa: E402
+    effective_if,
+    job_leaf_steps,
+    job_walk,
+    MALFORMED_KINDS,
+    parallel_steps_stats,
+    parallel_steps_used,
+)
 
 
 # =============================================================================
@@ -89,7 +107,79 @@ def _slug_anchor(opt_id: str, title: str) -> str:
     return re.sub(r"\s", "-", raw)
 
 
+# The catalog's source form: one file per pattern under `references/patterns/`
+# (`opt<N>-<slug>.md`: YAML frontmatter, then `# OPT<N> — Title` and the body),
+# listed in `INDEX.md`, whose order is the catalog order. The single file
+# `references/optimization-patterns.md` is compiled from them
+# (maintainers/ci-speedup/scripts/build_catalog.py) and still parses here.
+_PATTERN_H1_RE = re.compile(r"^# (OPT\d+) — (.+?)$", re.M)
+_FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.S)
+_INDEX_LINE_RE = re.compile(r"^- (OPT\d+) — ", re.M)
+# Frontmatter keys that describe the source file, not the pattern's METADATA.
+PATTERN_FILE_KEYS = ("category", "status", "aliases", "alias_note")
+
+
+def parse_pattern_file(path: Path) -> tuple[dict, str, str, str]:
+    """(frontmatter, opt_id, title, body after the H1 line) of one pattern file.
+    Raises ValueError on a file without frontmatter or an `# OPT<n> — ` title."""
+    text = path.read_text(encoding="utf-8")
+    fm = _FRONTMATTER_RE.match(text)
+    if not fm:
+        raise ValueError(f"{path}: no YAML frontmatter")
+    meta = yaml.safe_load(fm.group(1))
+    if not isinstance(meta, dict):
+        raise ValueError(f"{path}: frontmatter is not a mapping")
+    rest = text[fm.end():]
+    h1 = _PATTERN_H1_RE.search(rest)
+    if not h1 or rest[:h1.start()].strip():
+        raise ValueError(f"{path}: the first line after the frontmatter is not `# OPT<n> — Title`")
+    return meta, h1.group(1), h1.group(2).strip(), rest[h1.end():]
+
+
+def pattern_files(directory: Path) -> list[Path]:
+    """The pattern files of `directory` in catalog order: INDEX.md's order, then
+    any `opt<N>-*.md` file INDEX.md does not list, by number (never dropped;
+    the build's check fails on it). Other names are not patterns."""
+    index = directory / "INDEX.md"
+    ids = _INDEX_LINE_RE.findall(index.read_text(encoding="utf-8")) if index.is_file() else []
+    listed = [p for i in ids for p in sorted(directory.glob(f"{i.lower()}-*.md"))[:1]]
+    listed = list(dict.fromkeys(listed))
+    rest = sorted((p for p in directory.glob("opt*.md")
+                   if p not in listed and re.match(r"opt\d+-", p.name)),
+                  key=lambda p: int(re.match(r"opt(\d+)", p.name).group(1)))
+    return listed + rest
+
+
+def _entry(opt_id: str, title: str, meta: dict) -> CatalogEntry:
+    return CatalogEntry(
+        pattern=meta.get("pattern", opt_id),
+        impact=meta.get("impact", "MEDIUM").upper(),
+        finding_class=meta.get("class", "static"),
+        detector=meta.get("detector", "manual"),
+        affected_files=meta.get("affected_files", ""),
+        fix_strategy=meta.get("fix_strategy", ""),
+        title_template=meta.get("title_template", title),
+        anchor=_slug_anchor(opt_id, title),
+        match=meta.get("match", ""),
+        yaml_path=meta.get("yaml_path", ""),
+        yaml_value=meta.get("yaml_value", ""),
+        wf_name_filter=meta.get("wf_name_filter", ""),
+        wf_name_exclude=meta.get("wf_name_exclude", ""),
+    )
+
+
 def load_catalog(path: Path) -> list[CatalogEntry]:
+    """The catalog entries, from `references/patterns/` (a directory) or from
+    the compiled single file (the original parser, kept for `--catalog` callers
+    and the build's equality check). Both yield the same entries."""
+    if path.is_dir():
+        entries = []
+        for p in pattern_files(path):
+            fm, opt_id, title, _ = parse_pattern_file(p)
+            meta = {k: str(v) for k, v in fm.items()
+                    if k not in PATTERN_FILE_KEYS and v is not None}
+            entries.append(_entry(opt_id, title, meta))
+        return entries
     text = path.read_text(encoding="utf-8")
     entries: list[CatalogEntry] = []
     heads = list(_HEADING_RE.finditer(text))
@@ -107,21 +197,7 @@ def load_catalog(path: Path) -> list[CatalogEntry]:
                 for line in m.group(1).splitlines() if ":" in line
             )
         )
-        entries.append(CatalogEntry(
-            pattern=meta.get("pattern", opt_id),
-            impact=meta.get("impact", "MEDIUM").upper(),
-            finding_class=meta.get("class", "static"),
-            detector=meta.get("detector", "manual"),
-            affected_files=meta.get("affected_files", ""),
-            fix_strategy=meta.get("fix_strategy", ""),
-            title_template=meta.get("title_template", title),
-            anchor=_slug_anchor(opt_id, title),
-            match=meta.get("match", ""),
-            yaml_path=meta.get("yaml_path", ""),
-            yaml_value=meta.get("yaml_value", ""),
-            wf_name_filter=meta.get("wf_name_filter", ""),
-            wf_name_exclude=meta.get("wf_name_exclude", ""),
-        ))
+        entries.append(_entry(opt_id, title, meta))
     return entries
 
 
@@ -179,7 +255,8 @@ def _block_lines(raw: str, start_line: int, max_lines: int = 12) -> str:
 # Hits. Detectors return [] when the pattern does not fire on this file.
 #
 # Adding a new pattern is a two-step move:
-#   1. Author the catalog entry in references/optimization-patterns.md.
+#   1. Author references/patterns/opt<N>-<slug>.md + its INDEX.md line, then run
+#      maintainers/ci-speedup/scripts/build_catalog.py.
 #   2. Add a handler keyed by OPT-id below.
 #
 # A pattern declared in the catalog but missing a handler is logged once and
@@ -365,13 +442,27 @@ _GIT_HISTORY_RE = re.compile(
 _HISTORY_JOB_NAME_RE = re.compile(
     r"changeset|changelog|release|version|snapshot|publish", re.I)
 
-# Local composite actions (`uses: ./.github/actions/foo`) whose action.yml runs a
-# git-history op. A job that invokes one needs `fetch-depth: 0` even though no
-# git op appears in the WORKFLOW yaml — the op is hidden in the action (mastra's
-# `./.github/actions/turbo-changed` runs `git checkout origin/main`). Populated
-# once per scan() from the referenced action files; consulted by
+# Local composite actions (`uses: ./.github/actions/foo` or the self-repository
+# `uses: $/.github/actions/foo`) whose action.yml runs a git-history op, directly
+# or through a nested local reference. A job that invokes one needs
+# `fetch-depth: 0` even though no git op appears in the WORKFLOW yaml — the op
+# is hidden in the action (mastra's `./.github/actions/turbo-changed` runs
+# `git checkout origin/main`). An action that cannot be read, or a chain deeper
+# than `_MAX_LOCAL_ACTION_DEPTH`, is included too (fail closed). Populated once
+# per scan() from the referenced action files; consulted by
 # `_job_needs_git_history` so OPT28 never recommends shallowing such a job.
 _GIT_HISTORY_LOCAL_ACTIONS: set[str] = set()
+
+# A `uses:` naming THIS repository: `./path`, or the self-repository prefix
+# `$/path` GitHub shipped 2026-07-30 (same commit, same files, no checkout
+# needed). Both resolve to `<repo root>/path`, so `ref[2:]` strips either.
+_LOCAL_USES_PREFIXES = ("./", "$/")
+
+
+def _is_local_uses(uses: str) -> bool:
+    """True for a `uses:` that names an action or reusable workflow in this
+    repository (`./…` or the self-repository `$/…`)."""
+    return uses.startswith(_LOCAL_USES_PREFIXES)
 
 
 # A `run:` block routinely breaks ONE shell command across several lines with a
@@ -388,9 +479,76 @@ def _has_git_history_op(text: str) -> bool:
     return bool(_GIT_HISTORY_RE.search(_LINE_CONTINUATION_RE.sub(" ", text)))
 
 
+# A local `uses:` reference written inside an action or reusable-workflow file
+# (`./…` or the self-repository `$/…`), quoted or bare.
+_NESTED_LOCAL_USES_RE = re.compile(r"['\"]?uses['\"]?:\s*['\"]?((?:\./|\$/)[^\s'\"#]+)")
+# How many local references deep the history read follows a chain before it
+# gives up. Past the cap the chain is unproven, so it fails CLOSED.
+_MAX_LOCAL_ACTION_DEPTH = 16
+
+
+def _local_ref_path(root: Path, ref: str) -> "Path | None":
+    """`<root>/<ref[2:]>` for a local ref (`./…` or `$/…`), or None when that
+    path resolves outside the repository root (including symlinks): a file there
+    is not this repository's, so the caller fails CLOSED on it."""
+    base = root / ref[2:]  # strip leading "./" or "$/"
+    try:
+        root_n = os.path.realpath(root)
+        base_n = os.path.realpath(base)
+        if os.path.commonpath([root_n, base_n]) != root_n:
+            return None
+    except ValueError:
+        return None
+    return base
+
+
+def _read_local_history_file(root: Path, ref: str) -> "str | None":
+    """Text of the file a local ref names: `<root>/<ref[2:]>` itself when it is
+    a `.yml`/`.yaml` (a reusable workflow), else that directory's `action.yml`
+    or `action.yaml`. None when no candidate file is readable, or when the
+    ref resolves outside the repository root."""
+    base = _local_ref_path(root, ref)
+    if base is None:
+        return None
+    candidates = [base] if base.suffix in (".yml", ".yaml") else [
+        base / "action.yml", base / "action.yaml"]
+    for cand in candidates:
+        try:
+            return cand.read_text(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):   # ValueError: an embedded NUL byte
+            continue
+    return None
+
+
+def _local_action_needs_history(root: Path, ref: str) -> bool:
+    """True when the local action `ref` names, or any local action or reusable
+    workflow it reaches through nested `uses:` references, runs a git-history
+    op. A composite action routinely delegates to another local action, and the
+    inner one can be the step that walks history. Any link that cannot be read
+    (or a chain deeper than `_MAX_LOCAL_ACTION_DEPTH`) fails CLOSED: it cannot
+    be PROVEN history-free. A cycle terminates on the visited set."""
+    seen: set[str] = set()
+    queue: list[tuple[str, int]] = [(ref, 0)]
+    while queue:
+        cur, depth = queue.pop()
+        if cur in seen:
+            continue
+        seen.add(cur)
+        if depth > _MAX_LOCAL_ACTION_DEPTH:
+            return True
+        text = _read_local_history_file(root, cur)
+        if text is None or _has_git_history_op(text):
+            return True
+        queue += [(m.split("@")[0].strip(), depth + 1)
+                  for m in _NESTED_LOCAL_USES_RE.findall(text)]
+    return False
+
+
 def _index_local_git_actions(root: Path, parsed: list[tuple[str, dict, str]]) -> set[str]:
-    """Return the set of local `uses:` refs (e.g. `./.github/actions/turbo-changed`)
-    whose composite-action file performs a git-history op."""
+    """Return the set of local `uses:` refs (e.g. `./.github/actions/turbo-changed`,
+    or the self-repository `$/.github/actions/turbo-changed`) whose
+    composite-action file performs a git-history op, directly or through a
+    nested local reference (`_local_action_needs_history`)."""
     refs: set[str] = set()
     for _rel, doc, _raw in parsed:
         for job in _jobs_from_doc(doc).values():
@@ -398,30 +556,11 @@ def _index_local_git_actions(root: Path, parsed: list[tuple[str, dict, str]]) ->
                 continue
             for s in _steps(job):
                 u = _uses(s).split("@")[0].strip()
-                if u.startswith("./"):
+                if _is_local_uses(u):
                     refs.add(u)
-    out: set[str] = set()
-    for ref in refs:
-        rel = ref[2:]  # strip leading "./"
-        base = root / rel
-        candidates = [base] if base.suffix in (".yml", ".yaml") else [
-            base / "action.yml", base / "action.yaml"]
-        for cand in candidates:
-            try:
-                text = cand.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                continue
-            if _has_git_history_op(text):
-                out.add(ref)
-            break
-        else:
-            # No candidate file was readable — we can't PROVE the action is
-            # history-free. Fail CLOSED: assume it may run a git-history op so
-            # OPT28 never recommends shallowing a job that invokes it (the same
-            # conservative stance as the changeset/release name fallback). The
-            # cost is at most a missed OPT28 finding, never a breaking fix.
-            out.add(ref)
-    return out
+    # Fail CLOSED on anything unproven (see `_local_action_needs_history`):
+    # the cost is at most a missed finding, never advice that breaks a job.
+    return {ref for ref in refs if _local_action_needs_history(root, ref)}
 
 
 def _job_needs_git_history(job: dict, job_name: str = "") -> bool:
@@ -430,7 +569,8 @@ def _job_needs_git_history(job: dict, job_name: str = "") -> bool:
     if _has_git_history_op(blob) or _has_git_history_op(uses_blob):
         return True
     # A local composite action the job invokes may run the git op internally
-    # (the workflow yaml shows only `uses: ./…`). Consult the per-scan index.
+    # (the workflow yaml shows only `uses: ./…` or `uses: $/…`). Consult the
+    # per-scan index.
     if _GIT_HISTORY_LOCAL_ACTIONS:
         for s in _steps(job):
             if _uses(s).split("@")[0].strip() in _GIT_HISTORY_LOCAL_ACTIONS:
@@ -546,9 +686,7 @@ def _detect_opt28(doc: dict, raw: str) -> list[Hit]:
         if _job_needs_git_history(job, job_name):
             continue  # depth:0 is load-bearing here — removing it breaks the job
         checkout_index = 0  # Track which checkout step this is (1-based)
-        for step in (job.get("steps") or []):
-            if not isinstance(step, dict):
-                continue
+        for step in _steps(job):
             uses = str(step.get("uses") or "")
             if not uses.startswith("actions/checkout"):
                 continue
@@ -599,13 +737,14 @@ def _detect_opt28(doc: dict, raw: str) -> list[Hit]:
 # objects that are ALREADY local, so it downloads nothing and flagging it would
 # assert a network payload we never established.
 _LFS_RUN_RE = re.compile(r"git\s+lfs\s+(pull|fetch)\b", re.I)
-_LOCAL_USES_RE = re.compile(r"uses:\s*['\"]?(\./[^\s'\"#]+)")
+_LOCAL_USES_RE = re.compile(r"['\"]?uses['\"]?:\s*['\"]?((?:\./|\$/)[^\s'\"#]+)")
 
 # Populated once per scan() from the repo root (see the scan() wiring below).
 _SUBMODULE_PATHS: list[str] = []
 _LFS_PATH_HINTS: list[str] = []
-# Local `uses: ./…` ref → its action file text (plus the text of every local
-# action it transitively invokes), or None when any link is unreadable.
+# Local `uses: ./…` / `uses: $/…` ref → its action file text (plus the text of
+# every local action it transitively invokes), or None when any link is
+# unreadable.
 _LOCAL_ACTION_TEXT: dict[str, "str | None"] = {}
 
 
@@ -664,22 +803,27 @@ def _parse_lfs_attributes(text: str) -> list[str]:
 
 
 def _read_local_action(root: Path, ref: str) -> "str | None":
-    """The action file's text for a local `uses: ./…` ref, or None when no
-    candidate file is readable."""
-    base = root / ref[2:]
+    """The action file's text for a local `uses: ./…` (or self-repository
+    `uses: $/…`) ref, or None when no candidate file is readable or the ref
+    resolves outside the repository root."""
+    base = _local_ref_path(root, ref)
+    if base is None:
+        return None
     candidates = [base] if base.suffix in (".yml", ".yaml") else [
         base / "action.yml", base / "action.yaml"]
     for cand in candidates:
         try:
+            if _local_ref_path(root, "./" + os.path.relpath(cand, root)) is None:
+                continue
             return cand.read_text(encoding="utf-8", errors="replace")
-        except OSError:
+        except (OSError, ValueError):   # ValueError: an embedded NUL byte
             continue
     return None
 
 
 def _index_local_action_text(root: Path,
                              parsed: list[tuple[str, dict, str]]) -> dict[str, "str | None"]:
-    """Local `uses: ./…` ref → its action text CONCATENATED with the text of
+    """Local `uses: ./…` / `uses: $/…` ref → its action text CONCATENATED with the text of
     every local action it transitively invokes; None when any link in that chain
     is unreadable. A composite action routinely delegates to another local
     action, and that inner one can be the step that reads the payload — reading
@@ -693,7 +837,7 @@ def _index_local_action_text(root: Path,
                 continue
             for s in _steps(job):
                 u = _uses(s).split("@")[0].strip()
-                if u.startswith("./"):
+                if _is_local_uses(u):
                     refs.add(u)
     out: dict[str, "str | None"] = {}
     for ref in refs:
@@ -733,11 +877,13 @@ def _job_payload_blob(job: dict) -> "str | None":
         vals = job.get(block)
         if vals is not None:
             parts.append(_yaml_text(vals))
-    for s in _steps(job):
+    for s, s_if in _steps_with_if(job):
         parts.append(_run(s))
         parts.append(str(s.get("working-directory") or ""))
         parts.append(str(s.get("name") or ""))
-        parts.append(str(s.get("if") or ""))
+        # The step's own `if:` AND its enclosing groups' (`effective_if`), so a
+        # path named only in a group-level gate is searched too.
+        parts.append(str(s_if or ""))
         uses = _uses(s)
         parts.append(uses)
         for block in ("with", "env"):
@@ -745,7 +891,7 @@ def _job_payload_blob(job: dict) -> "str | None":
             if isinstance(vals, dict):
                 parts += [str(v) for v in vals.values()]
         ref = uses.split("@")[0].strip()
-        if ref.startswith("./"):
+        if _is_local_uses(ref):
             text = _LOCAL_ACTION_TEXT.get(ref)
             if text is None:
                 return None     # unreadable local action — can't prove it unread
@@ -1231,7 +1377,7 @@ def _detect_opt17(doc: dict, raw: str) -> list[Hit]:
         # Job-level docker context: has `services:` block OR any step starts a
         # container OR runs docker compose / docker run.
         job_has_services = isinstance(job.get("services"), dict) and job.get("services")
-        steps = [s for s in (job.get("steps") or []) if isinstance(s, dict)]
+        steps = _steps(job)
         run_blobs = " ".join(
             s.get("run") for s in steps if isinstance(s.get("run"), str)
         )
@@ -1378,7 +1524,17 @@ def _on_schedules(on: Any) -> list[dict]:
 # =============================================================================
 
 def _steps(job: dict) -> list[dict]:
-    return [s for s in (job.get("steps") or []) if isinstance(s, dict)]
+    # Leaf steps in declaration order, children of `parallel:` groups included.
+    return job_leaf_steps(job)
+
+
+def _steps_with_if(job: dict) -> list[tuple[dict, str | None]]:
+    """Leaf steps paired with the condition each runs under: its own `if:`
+    AND any enclosing `parallel:` group's `if:` (an assumption — GitHub
+    documents no group-level `if:`; see `workflow_steps`). A hygiene rule that
+    asks "is this step unconditional?" reads this, never `step.get("if")`
+    alone. The parsed YAML is not mutated."""
+    return [(leaf.step, effective_if(leaf)) for leaf in job_walk(job).leaves]
 
 
 def _uses(step: dict) -> str:
@@ -1478,12 +1634,19 @@ def _detect_opt2(doc: dict, raw: str) -> list[Hit]:
     for job_name, job in _jobs_from_doc(doc).items():
         if not isinstance(job, dict):
             continue
-        steps = _steps(job)
-        install_idx = next(
-            (i for i, s in enumerate(steps) if _PW_INSTALL_RE.search(_run(s))), None)
-        if install_idx is None:
+        leaves = job_walk(job).leaves
+        install = next((lf for lf in leaves if _PW_INSTALL_RE.search(_run(lf.step))), None)
+        if install is None:
             continue
-        if any("actions/cache" in _uses(s) for s in steps[:install_idx]):
+        # The claim is "no preceding cache", so it fails CLOSED: any cache
+        # declared before the install counts, `background: true` included (it is
+        # usually awaited by a `wait:` / `wait-all:` before the install, and the
+        # YAML cannot show otherwise). Only a sibling in the install's own
+        # `parallel:` group is excluded: those two run at the same time, so the
+        # restore cannot have happened first. A cache in an EARLIER group counts.
+        if any("actions/cache" in _uses(lf.step)
+               and not (install.group is not None and lf.group == install.group)
+               for lf in leaves[:install.index]):
             continue  # cached already
         hits.append(Hit(
             line=_line_of_in_job(raw, job_name, "playwright install"),
@@ -1508,7 +1671,8 @@ def _detect_opt5(doc: dict, raw: str) -> list[Hit]:
     for job_name, job in _jobs_from_doc(doc).items():
         if not isinstance(job, dict):
             continue
-        steps = _steps(job)
+        leaves = job_walk(job).leaves
+        steps = [lf.step for lf in leaves]
         pnpm_setup_idx = node_setup_idx = cache_idx = None
         node_cache_val = ""
         pnpm_setup_cache = False  # pnpm/action-setup with `cache: true`
@@ -1535,8 +1699,16 @@ def _detect_opt5(doc: dict, raw: str) -> list[Hit]:
         reasons: list[str] = []
         if (node_setup_idx is not None and pnpm_setup_idx is not None
                 and node_setup_idx < pnpm_setup_idx):
-            reasons.append("`actions/setup-node` runs before `pnpm/action-setup` "
-                           "(store path unavailable for the cache key)")
+            g = leaves[node_setup_idx].group
+            if g is not None and leaves[pnpm_setup_idx].group == g:
+                # Siblings in one `parallel:` group start together: neither runs
+                # first, so pnpm is still not set up when setup-node reads it.
+                reasons.append("`actions/setup-node` and `pnpm/action-setup` run side "
+                               "by side in one `parallel:` group (store path "
+                               "unavailable for the cache key)")
+            else:
+                reasons.append("`actions/setup-node` runs before `pnpm/action-setup` "
+                               "(store path unavailable for the cache key)")
         if (node_setup_idx is not None and node_cache_val.lower() != "pnpm"
                 and cache_idx is None):
             reasons.append("`actions/setup-node` has no `cache: 'pnpm'` and no "
@@ -1603,6 +1775,190 @@ def _detect_opt9(doc: dict, raw: str) -> list[Hit]:
     return hits
 
 
+# ---- Job exclusivity (shared by the cross-job duplicate detectors) -----------
+#
+# Two jobs whose job-level `if:` conditions can never both be true never co-run
+# (e.g. a same-repo `test-self` and a fork-only `test-fork`): exactly one runs
+# per workflow run, so they are not a duplicated-work pair. The check is
+# CONSERVATIVE — it understands only `==` / `!=` comparisons between context
+# paths and string literals, combined with `&&` / `||` / parentheses. Anything
+# else (a function call, `!`, a bare truthy operand, a missing `if:`) means
+# "cannot prove exclusive", so a real duplicate keeps firing.
+
+_IF_TOKEN_RE = re.compile(
+    r"\s*(?:(?P<op>&&|\|\||==|!=|\(|\))"
+    r"|(?P<str>'(?:[^']|'')*')"
+    r"|(?P<path>[A-Za-z_][\w-]*(?:\.[A-Za-z_][\w-]*|\[\d+\])*))")
+_IF_DNF_CAP = 64
+# Only contexts whose value is the same for every job in a run can prove two
+# jobs disjoint. `needs.*` resolves per job (a job that does not directly need
+# `build` sees null), `github.job` is each job's own id, and `matrix` /
+# `strategy` / `steps` / `env` are per job or unavailable at job level.
+_IF_RUN_WIDE_ROOTS = ("github", "inputs", "vars")
+_IF_PER_JOB_GITHUB = ("github.job", "github.action")
+
+
+def _if_path_is_run_wide(path: str) -> bool:
+    root = re.split(r"[.\[]", path, maxsplit=1)[0]
+    if root not in _IF_RUN_WIDE_ROOTS:
+        return False
+    return not any(path == p or path.startswith(p) for p in _IF_PER_JOB_GITHUB)
+
+
+def _if_literal_may_be_number(lit: str) -> bool:
+    """Actions coerces mismatched operand types to numbers, so a numeric (or
+    null / boolean) context value equals every literal that reads as the same
+    number: `'1'` and `'1.0'`, or `''` and `'0'` (both 0). Err wide: anything
+    Python reads as a number, plus empty / whitespace-only."""
+    t = lit.strip()
+    if not t:
+        return True
+    try:
+        float(t)
+        return True
+    except ValueError:
+        pass
+    try:
+        int(t, 0)
+        return True
+    except ValueError:
+        return False
+
+
+class _IfUnparsed(Exception):
+    pass
+
+
+def _if_dnf(expr: object) -> list[frozenset] | None:
+    """The job condition as a disjunction of conjunctions of comparison atoms
+    `(op, (lhs, rhs))` with operands lower-cased (Actions compares strings and
+    context names case-insensitively), or None when the shape is outside the
+    conservative grammar above."""
+    if not isinstance(expr, str):
+        return None
+    s = expr.strip()
+    # Actions uses .NET OrdinalIgnoreCase, not Python Unicode lower(): e.g.
+    # Greek sigma and final sigma compare equal there but lower differently.
+    # Only ASCII folding is shared, so leave other conditions unproven.
+    if not s.isascii():
+        return None
+    m = re.fullmatch(r"\$\{\{(.*)\}\}", s, re.S)
+    if m:
+        s = m.group(1).strip()
+    toks: list[tuple[str, str]] = []
+    pos = 0
+    while pos < len(s):
+        if s[pos:].strip() == "":
+            break
+        t = _IF_TOKEN_RE.match(s, pos)
+        if not t or t.end() == pos:
+            return None
+        kind = t.lastgroup or ""
+        toks.append((kind, t.group(kind)))
+        pos = t.end()
+    i = 0
+
+    def peek() -> tuple[str, str]:
+        return toks[i] if i < len(toks) else ("", "")
+
+    def take() -> tuple[str, str]:
+        nonlocal i
+        if i >= len(toks):
+            raise _IfUnparsed
+        i += 1
+        return toks[i - 1]
+
+    def operand() -> tuple[str, str]:
+        kind, val = take()
+        if kind == "path":
+            if peek() == ("op", "("):
+                raise _IfUnparsed  # a function call
+            if not _if_path_is_run_wide(val.lower()):
+                raise _IfUnparsed  # same text, possibly a different value per job
+            return ("path", val.lower())
+        if kind == "str":
+            return ("str", val[1:-1].replace("''", "'").lower())
+        raise _IfUnparsed
+
+    def prim() -> list[frozenset]:
+        if peek() == ("op", "("):
+            take()
+            out = disj()
+            if take() != ("op", ")"):
+                raise _IfUnparsed
+            return out
+        lhs = operand()
+        kind, op = take()
+        if kind != "op" or op not in ("==", "!="):
+            raise _IfUnparsed
+        rhs = operand()
+        if lhs[0] == rhs[0] == "str":
+            raise _IfUnparsed
+        return [frozenset({(op, tuple(sorted((lhs, rhs))))})]
+
+    def conj() -> list[frozenset]:
+        out = prim()
+        while peek() == ("op", "&&"):
+            take()
+            right = prim()
+            out = [a | b for a in out for b in right]
+            if len(out) > _IF_DNF_CAP:
+                raise _IfUnparsed
+        return out
+
+    def disj() -> list[frozenset]:
+        out = conj()
+        while peek() == ("op", "||"):
+            take()
+            out = out + conj()
+            if len(out) > _IF_DNF_CAP:
+                raise _IfUnparsed
+        return out
+
+    try:
+        dnf = disj()
+    except (_IfUnparsed, RecursionError):  # pathological nesting = cannot prove
+        return None
+    return dnf if i == len(toks) and dnf else None
+
+
+def _atoms_contradict(a: tuple, b: tuple) -> bool:
+    """`x == y` vs `x != y`, or `x == 'p'` vs `x == 'q'` with p != q."""
+    (op_a, ops_a), (op_b, ops_b) = a, b
+    if ops_a == ops_b and op_a != op_b:
+        return True
+    if op_a == op_b == "==":
+        lit_a = [o for o in ops_a if o[0] == "str"]
+        lit_b = [o for o in ops_b if o[0] == "str"]
+        path_a = [o for o in ops_a if o[0] == "path"]
+        path_b = [o for o in ops_b if o[0] == "path"]
+        return (len(lit_a) == len(lit_b) == 1 and path_a == path_b
+                and lit_a[0] != lit_b[0]
+                and not (_if_literal_may_be_number(lit_a[0][1])
+                         and _if_literal_may_be_number(lit_b[0][1])))
+    return False
+
+
+def _jobs_mutually_exclusive(job_a: dict, job_b: dict) -> bool:
+    """True only when the two jobs' `if:` conditions are PROVABLY disjoint:
+    every way A can be true contradicts every way B can be true."""
+    da = _if_dnf(job_a.get("if") if isinstance(job_a, dict) else None)
+    db = _if_dnf(job_b.get("if") if isinstance(job_b, dict) else None)
+    if not da or not db:
+        return False
+    return all(any(_atoms_contradict(x, y) for x in ca for y in cb)
+               for ca in da for cb in db)
+
+
+def _co_running(jobs: dict, names: list[str]) -> list[str]:
+    """The subset of `names` that can run alongside at least one other job in
+    `names` — a job exclusive with every other one is never a duplicate copy."""
+    return [n for n in names
+            if any(m != n and not _jobs_mutually_exclusive(jobs.get(n) or {},
+                                                           jobs.get(m) or {})
+                   for m in names)]
+
+
 # ---- OPT14 — Repeated Checkout/Setup Without Artifact Handoff ----------------
 
 _INSTALL_RE = re.compile(
@@ -1635,6 +1991,8 @@ def _detect_opt14(doc: dict, raw: str) -> list[Hit]:
         if has_checkout and has_install:
             setup_jobs.append(job_name)
     has_handoff = has_upload and has_download
+    # Jobs that never co-run (provably exclusive `if:`) are not repeated work.
+    setup_jobs = _co_running(_jobs_from_doc(doc), setup_jobs)
     if len(setup_jobs) >= 2 and not has_handoff:
         return [Hit(
             line=1,
@@ -1753,12 +2111,191 @@ def _detect_opt18(doc: dict, raw: str) -> list[Hit]:
 
 # ---- OPT21 — Unnecessary `needs:` Dependencies -------------------------------
 
+# Check-only gate vocabulary. A job that `needs:` ONLY check-only gates (a lint /
+# pre-commit / format / type-check / lockfile-check job) is a deliberate cheap
+# gate: the expensive job never starts when the cheap check fails, so OPT21 does
+# not flag it. The test is static and fails closed: a needed job is a gate only
+# when every step is recognised setup or a recognised check, at least one
+# unconditional step is a check, no check is defused (`|| true`), nothing
+# builds / tests / deploys / publishes, every step could be read, and the job
+# has no outputs, services, container, environment, reusable `uses:` or
+# continue-on-error. Anything unrecognised keeps the finding.
+
+# Setup actions: checkout, any `setup-*` action, pnpm-style `action-setup`, cache.
+_OPT21_SETUP_USES_RE = re.compile(
+    r"^(?:actions/checkout|actions/cache(?:/restore)?|[\w-][\w.-]*/setup-[\w.-]+|"
+    r"[\w-][\w.-]*/action-setup)(?:@|$)", re.I)
+# Setup shell lines: dependency installs, fetches, step-output/env plumbing.
+_OPT21_SETUP_LINE_RE = re.compile(
+    r"^(?:(?:python3?\s+-m\s+)?pip3?\s+install\b|npm\s+(?:ci|install)\b|"
+    r"pnpm\s+install\b|yarn(?:\s+install)?\b(?!\s+\w)|bun\s+install\b|"
+    r"uv\s+(?:sync|pip\s+install)\b|poetry\s+install\b|bundle\s+install\b|"
+    r"go\s+mod\s+download\b|git\s+fetch\b|corepack\s+enable\b|"
+    r"pre-commit\s+install\b|"
+    r"echo\s.*>>\s*\"?\$\{?GITHUB_(?:OUTPUT|ENV|PATH)\b)", re.I)
+# Check shell lines: linters, formatters in check mode, type checkers,
+# lockfile checks. An optional runner prefix (`uv run`, `npx`, ...) is allowed.
+_OPT21_CHECK_LINE_RE = re.compile(
+    r"^(?:(?:uv\s+run|poetry\s+run|pipx\s+run|npx|pnpm\s+exec|yarn\s+exec|"
+    r"bunx|python3?\s+-m)\s+(?:-{1,2}\w[\w-]*(?:=\S+|\s+[^-\s]\S*)?\s+)*)?"
+    r"(?:pre-commit\s+run|prek\s+run|"
+    r"uv\s+lock\s+--(?:check|locked)|poetry\s+(?:check|lock\s+--check)|"
+    r"(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:lint|format[:-]check|fmt[:-]check|"
+    r"check[:-]format|typecheck|type-check|check[:-]types|lint:\S+)(?![\w:.-])|"
+    r"\S*scripts/lint(?![\w-])|"
+    r"make\s+(?:lint|check-format|format-check|fmt-check)(?![\w:.-])|"
+    r"eslint|ruff\s+(?:check|format\s+--check)|flake8|pylint|black\s+--check|"
+    r"isort\s+(?:--check|-c)|prettier\s+(?:--check|-c)|mypy|pyright|"
+    r"tsc\s+--noEmit|actionlint|shellcheck|yamllint|markdownlint\S*|"
+    r"golangci-lint|gofmt\s+-l|cargo\s+fmt\b.*--check|cargo\s+clippy|"
+    r"stylelint|biome\s+(?:check|lint|ci)|codespell|typos|"
+    r"git\s+diff\s+--exit-code)\b", re.I)
+# A step NAMED as a check ("Verify ...", "Check ...", "Lint ...") also counts
+# as a check when its body is a bespoke inline check (openai-python's
+# provenance check): every line is a recognised check or setup line, an inline
+# interpreter script (`python -c`, `node -e`), a shell test, an assignment, a
+# read-only git command, or `git show <file> | python -`. The name never
+# vouches for anything else: `mvn verify` or `./run_tests.sh` under a "Verify"
+# name keeps the finding.
+_OPT21_CHECK_NAME_RE = re.compile(
+    r"^(?:check(?!\s*-?\s*out)|verify|validate|lint|ensure|require|assert|audit)\b",
+    re.I)
+_OPT21_INLINE_SCRIPT_RE = re.compile(
+    r"^(?:(?:uv\s+run|poetry\s+run|pipx\s+run)\s+(?:-{1,2}\w[\w-]*(?:=\S+|\s+[^-\s]\S*)?\s+)*)?"
+    r"(?:python3?|node|ruby|perl)\s+(?:-\w+\s+)*-[ce]\s", re.I)
+_OPT21_SHELL_CHECK_RE = re.compile(
+    r"^(?:\[\[?\s.*\]\]?|test\s.*|"
+    r"[A-Za-z_]\w*=(?:\"?\$\(git\s+(?:remote|rev-parse|show|diff)\b[^`$]*\)\"?|[^$`|&;]*)|"
+    r"git\s+(?:remote|rev-parse|diff|status|ls-files)\b[^|]*|"
+    r"git\s+show\s+\S+\s*\|\s*python3?(?:\s+-\w+)*\s+-)$")
+# `|| exit 1` keeps a failing check failing; it is stripped before matching.
+_OPT21_EXIT_NONZERO_RE = re.compile(r"\s*\|\|\s*exit\s+[1-9]\d*\s*$")
+# A check that cannot fail gates nothing: `|| true`, `|| :`, `|| exit 0`.
+_OPT21_CANNOT_FAIL_RE = re.compile(r"\|\|\s*(?:true\b|:(?!\S)|exit\s+0\b)")
+# Anything that builds, tests, deploys or publishes disqualifies the job as a
+# gate, even inside a step whose name says "check".
+_OPT21_NOT_A_GATE_RE = re.compile(
+    r"\b(?:pytest|jest|vitest|mocha|playwright|cypress|tox|nox|"
+    r"(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:test|build|e2e|deploy|publish|release)|"
+    r"(?:cargo|go|dotnet|mvn|gradle|bazel|make)\s+(?:test|build|install|publish|"
+    r"deploy|run|package)|gradlew|mvnw|python3?\s+-m\s+build|"
+    r"docker\s+(?:build|push|compose)|buildx|twine|gh\s+release|kubectl|helm|"
+    r"terraform\s+apply|serverless|vercel|netlify|wrangler|deploy|publish|"
+    r"scripts/(?:build|test|deploy|release|publish))\b", re.I)
+# A dependent that runs whatever the gate's result (`always()`, `failure()`,
+# `cancelled()` in its `if:`) is not gated by it: the edge is pure ordering.
+# Negated forms (`!cancelled()`, `!failure()`) match too and keep the finding:
+# failing closed costs a finding, never a wrong silence.
+_OPT21_RUNS_REGARDLESS_RE = re.compile(r"\b(?:always|failure|cancelled)\s*\(", re.I)
+
+
+def _opt21_run_lines(run: str) -> list[str]:
+    """The command lines of a `run:` body, comments, blanks and `set -x` /
+    `set +e`-style lines dropped, `&&`- and `;`-separated commands split."""
+    out: list[str] = []
+    for ln in run.splitlines():
+        for part in re.split(r"&&|;", ln):
+            part = part.strip()
+            if part and not part.startswith("#") and not re.match(r"set\s+[-+]", part):
+                out.append(part)
+    return out
+
+
+def _opt21_step_kind(step: dict) -> str:
+    """'setup', 'check', or 'other' (unclassifiable: fail closed)."""
+    if step.get("continue-on-error") not in (None, False):
+        return "other"
+    uses = _uses(step)
+    run = _run(step)
+    if uses and not run:
+        return "setup" if _OPT21_SETUP_USES_RE.match(uses) else "other"
+    if not run or uses:
+        return "other"
+    if "shell" in step:
+        return "other"
+    if (_OPT21_NOT_A_GATE_RE.search(run) or _OPT21_CANNOT_FAIL_RE.search(run)
+            or "--exit-zero" in run):
+        return "other"
+    if (_OPT21_CHECK_NAME_RE.match(str(step.get("name") or "").strip())
+            and _opt21_is_scripted_check(run)):
+        return "check"
+    lines = _opt21_run_lines(run)
+    if not lines:
+        return "other"
+    kinds = []
+    for ln in lines:
+        if "|" in ln:
+            return "other"
+        if _OPT21_CHECK_LINE_RE.match(ln):
+            kinds.append("check")
+        elif _OPT21_SETUP_LINE_RE.match(ln):
+            kinds.append("setup")
+        else:
+            return "other"
+    return "check" if "check" in kinds else "setup"
+
+
+def _opt21_is_scripted_check(run: str) -> bool:
+    """True when every line of a check-named step's body is a form the name
+    may vouch for (see `_OPT21_CHECK_NAME_RE`). An inline script line is taken
+    whole: its `;` separate Python statements, not shell commands."""
+    lines = [ln.strip() for ln in run.splitlines()]
+    lines = [ln for ln in lines
+             if ln and not ln.startswith("#") and not re.match(r"set\s+[-+]", ln)]
+    if not lines:
+        return False
+    for ln in lines:
+        if _OPT21_INLINE_SCRIPT_RE.match(ln):
+            continue
+        for part in _opt21_run_lines(_OPT21_EXIT_NONZERO_RE.sub("", ln)):
+            if not (_OPT21_CHECK_LINE_RE.match(part) or _OPT21_SETUP_LINE_RE.match(part)
+                    or _OPT21_SHELL_CHECK_RE.match(part)):
+                return False
+    return True
+
+
+def _opt21_is_check_only_gate(job: Any) -> bool:
+    """True when `job` is a check-only gate (see the vocabulary above)."""
+    if not isinstance(job, dict):
+        return False
+    # A gate that itself `needs:` another job passes that job's time on to its
+    # dependents, so it is not cheap; `defaults` can swap every step's shell.
+    if any(k in job for k in ("outputs", "services", "container", "environment",
+                              "uses", "needs", "defaults")):
+        return False
+    if job.get("continue-on-error") not in (None, False):
+        return False
+    # A step the walker could not read (a bare string, a malformed `parallel:`
+    # group) may be anything: fail closed.
+    raw = job.get("steps")
+    if not isinstance(raw, list) or any(
+            not isinstance(s, dict) or "wait" in s or "cancel" in s for s in raw):
+        return False
+    if job_walk(job).malformed_groups:
+        return False
+    kinds = []
+    for step, cond in _steps_with_if(job):
+        kind = _opt21_step_kind(step)
+        # A conditional check may not run on the PR at hand: it cannot be the
+        # check that makes the job a gate.
+        kinds.append("setup" if kind == "check" and cond else kind)
+    return "other" not in kinds and "check" in kinds
+
+
 def _detect_opt21(doc: dict, raw: str) -> list[Hit]:
     """A job declares `needs:` but references no `needs.*.outputs` and downloads
     no artifact from the dependency (catalog OPT21 heuristic). Caveat in the
-    evidence: a pure-ordering gate (e.g. lint-before-deploy) is legitimate."""
+    evidence: a gate the classifier cannot recognise may still be legitimate.
+    A job whose every dependency is a check-only gate (lint, pre-commit,
+    format, type or lockfile check) is not flagged: that wait is a deliberate
+    cheap gate, unless the job's own `if:` runs it whatever the gate's result
+    (`always()`, `failure()`, `cancelled()`), which leaves pure ordering and is
+    still flagged. Not flagged means not credited either; there is no held-back
+    record, since this is a verdict about the workflow, not a gap in reading
+    it. Each such verdict is logged at DEBUG (`STARSLING_LOG_LEVEL`)."""
     hits: list[Hit] = []
-    for job_name, job in _jobs_from_doc(doc).items():
+    jobs = _jobs_from_doc(doc)
+    for job_name, job in jobs.items():
         if not isinstance(job, dict):
             continue
         needs = job.get("needs")
@@ -1785,7 +2322,13 @@ def _detect_opt21(doc: dict, raw: str) -> list[Hit]:
             r"needs\.[\w-]+|needs\[\s*['\"][\w.-]+['\"]\s*\]|"
             r"(?:to|from)JSON\(\s*needs\s*\)|alls-green", job_text))
         downloads = any("download-artifact" in _uses(s) for s in _steps(job))
-        if not uses_outputs and not downloads:
+        cheap_gate = (
+            not _OPT21_RUNS_REGARDLESS_RE.search(str(job.get("if") or ""))
+            and all(_opt21_is_check_only_gate(jobs.get(str(n))) for n in needs))
+        if cheap_gate and not uses_outputs and not downloads:
+            logger.debug("OPT21 not flagged: job %s needs only check-only gates %s",
+                         job_name, needs)
+        if not uses_outputs and not downloads and not cheap_gate:
             hits.append(Hit(
                 # Anchor on THIS job's own `needs:`, not the file-global first
                 # match — a multi-job workflow has many `needs:` lines and the
@@ -1841,8 +2384,8 @@ def _detect_opt29(doc: dict, raw: str) -> list[Hit]:
         if not isinstance(job, dict) or "if" in job:
             continue
         step_skips = any(
-            isinstance(s.get("if"), str) and _MERGE_GROUP_REF_RE.search(s.get("if"))
-            for s in _steps(job))
+            cond is not None and _MERGE_GROUP_REF_RE.search(cond)
+            for _s, cond in _steps_with_if(job))
         if step_skips:
             hits.append(Hit(
                 # Anchor on the job's OWN header, not the file-global first
@@ -1887,29 +2430,29 @@ def _detect_opt31(doc: dict, raw: str) -> list[Hit]:
     for job_name, job in _jobs_from_doc(doc).items():
         if not isinstance(job, dict):
             continue
-        steps = _steps(job)
-        for i, s in enumerate(steps):
-            if "if" in s:
-                continue
+        steps = _steps_with_if(job)
+        for i, (s, s_if) in enumerate(steps):
+            if "if" in s or s_if is not None:
+                continue  # gated, on the step or on its enclosing group
             run = _run(s)
             if not _OPT31_INSTALL_RE.search(run):
                 continue
             tokens = _opt31_tokens(run)
             if not tokens:
                 continue
-            consumer = next(
-                (c for c in steps[i + 1:]
-                 if isinstance(c.get("if"), str) and _OPT31_GATE_RE.search(c.get("if"))
+            consumer_if = next(
+                (c_if for c, c_if in steps[i + 1:]
+                 if c_if is not None and _OPT31_GATE_RE.search(c_if)
                  and any(tok in _run(c).lower() for tok in tokens)),
                 None)
-            if consumer is not None:
+            if consumer_if is not None:
                 first = (run.splitlines() or [""])[0].strip()
                 hits.append(Hit(
                     line=_line_of_in_job(raw, job_name, first),
                     affected_jobs=[job_name],
                     evidence=(f"job `{job_name}` runs an unconditional install "
                               f"step (`{first[:60]}`) whose only consumer is a "
-                              f"later step gated on `{consumer.get('if')[:50]}` — "
+                              f"later step gated on `{consumer_if[:50]}` — "
                               f"the install runs even when the consumer is skipped"),
                     match_text=job_name,
                 ))
@@ -2139,13 +2682,21 @@ def _detect_opt12(doc: dict, raw: str) -> list[Hit]:
     for name, job in _jobs_from_doc(doc).items():
         if not isinstance(job, dict):
             continue
-        steps = _steps(job)[:4]
+        # The preamble ends at the first `parallel:` group: a composite action
+        # cannot hold one, so a "shared preamble" reaching into a group is not
+        # extractable as written (and a flat read never counted its children).
+        leaves = job_walk(job).leaves
+        flat = next((i for i, lf in enumerate(leaves) if lf.in_parallel_group),
+                    len(leaves))
+        steps = [lf.step for lf in leaves[:flat]][:4]
         if len(steps) < 2:
             continue
         sig = tuple(_step_sig(s) for s in steps)
         by_sig.setdefault(sig, []).append(name)
+    all_jobs = _jobs_from_doc(doc)
     hits: list[Hit] = []
     for sig, names in by_sig.items():
+        names = _co_running(all_jobs, names)  # exclusive jobs never co-run
         if len(names) < 2 or not any(_SETUP_SIG_RE.search(s) for s in sig):
             continue
         hits.append(Hit(
@@ -2156,6 +2707,18 @@ def _detect_opt12(doc: dict, raw: str) -> list[Hit]:
             match_text="(workflow)",
         ))
     return hits
+
+
+def _opt12_first_step_in_a_group(doc: dict) -> list[str]:
+    """The jobs OPT12 cannot read a preamble from because their FIRST step is
+    inside a `parallel:` group (a composite action cannot hold one). Listed
+    under the stamp's `held_back`, so the job is not silently skipped."""
+    out: list[str] = []
+    for name, job in _jobs_from_doc(doc).items():
+        leaves = job_walk(job).leaves if isinstance(job, dict) else []
+        if leaves and leaves[0].in_parallel_group:
+            out.append(str(name))
+    return out
 
 
 # ---- OPT6 — Cache Key Entropy Too High or Unstable ---------------------------
@@ -2201,6 +2764,41 @@ def _detect_opt6(doc: dict, raw: str) -> list[Hit]:
 
 # Dispatch table — OPT-id → detector function. Patterns declared in the catalog
 # but missing here are logged at scan time and skipped (no fabrication).
+# Detectors whose claim rests on a step being ABSENT from the job ("no cache
+# precedes the install", "no step reads the history", "no step uses the
+# payload"). A job with a malformed `parallel:` group has steps that were never
+# read, so absence cannot be known there: these patterns' findings for that job
+# are held back, and the job's scan_incomplete record names them with the
+# reason below. Presence-based and job-config patterns (a duplicate build, a
+# missing concurrency group) stay true whatever the unread group holds.
+_ABSENCE_STEP_PATTERNS: frozenset[str] = frozenset({
+    "OPT1", "OPT2", "OPT5", "OPT14", "OPT21", "OPT28", "OPT29", "OPT31",
+    "OPT39", "OPT76"})
+UNREADABLE_GROUP_HELD_BACK_REASON = "job_has_an_unreadable_parallel_group"
+
+
+def _hold_back_unreadable(pattern: str, hits: list[Hit], rel: str,
+                          unreadable_jobs: dict[tuple[str, str], dict[str, Any]]
+                          ) -> list[Hit]:
+    """Drop the hits naming a job whose `parallel:` group could not be read,
+    recording each on that job's scan_incomplete record (never silent)."""
+    kept: list[Hit] = []
+    for hit in hits:
+        recs = [unreadable_jobs[(rel, j)] for j in hit.affected_jobs
+                if (rel, j) in unreadable_jobs]
+        if not recs:
+            kept.append(hit)
+            continue
+        for rec in recs:
+            held = rec.setdefault("held_back", [])
+            if pattern not in held:
+                held.append(pattern)
+                rec["reason"] = rec["reason"].split("; held back:")[0] + (
+                    f"; held back: {', '.join(held)} "
+                    f"({UNREADABLE_GROUP_HELD_BACK_REASON})")
+    return kept
+
+
 _DETECTORS: dict[str, Any] = {
     "OPT1": _detect_opt1,
     "OPT6": _detect_opt6,
@@ -2806,18 +3404,33 @@ def _unfollowable_config_bases(text: str) -> list[str]:
     return out
 
 
-def _vitest_config_files(root: Path) -> "tuple[list[Path], bool, list[Path]]":
+def _vitest_config_files(root: Path, is_config: "Any" = None,
+                         also: "Any" = None, also_found: "list[Path] | None" = None,
+                         unlisted: "list[Path] | None" = None,
+                         ) -> "tuple[list[Path], bool, list[Path]]":
     """Config candidates at the repo root plus a bounded walk beneath it, as
     ``(configs, truncated, manifests)`` — ``manifests`` being the `package.json`
     files in the directories the walk visited (their scripts can carry the CLI
     opt-out).
 
+    ``is_config`` picks which file names count as config (default: the vitest
+    names). OPT82 reuses the same bounded walk for ESLint configs; its consumer
+    holds a lint job back when ``truncated`` is set and nothing the walk
+    recorded sits at or below the job's directory (``eslint_config_walk_incomplete``),
+    because a nearer config there may exist. A truncated walk that DID reach the
+    directory is not held back: ESLint's lookup goes upward from it.
+
     ``truncated`` is True when the walk stopped with ground that could PLAUSIBLY
-    HOLD A CONFIG still unvisited. That matters because the consumer's claim is
-    "no `isolate: false` ANYWHERE", which a partial walk cannot establish: the
+    HOLD A CONFIG still unvisited. That matters because the vitest consumer's
+    claim is "no `isolate: false` ANYWHERE", which a partial walk cannot establish: the
     opt-out may sit in a config the walk never reached. "Walk exhausted" and "no
     config exists" therefore reach the SAME withheld outcome, for different
     reasons, so both are reported.
+
+    ``also`` / ``also_found``: a second file-name predicate, whose matches the
+    same walk appends to ``also_found`` (OPT84 collects Prettier configs this
+    way, so a config with no `package.json` beside it is still seen). They do
+    not count toward the config cap.
 
     The "plausibly" is load-bearing, and is why an unvisited directory is only
     counted when it is a package root (a `package.json` in it) or holds one
@@ -2854,7 +3467,11 @@ def _vitest_config_files(root: Path) -> "tuple[list[Path], bool, list[Path]]":
             entries = sorted(base.iterdir())
         except OSError:
             # An unreadable DIRECTORY is unvisited ground, not a clean miss.
+            # Recorded for callers that must name it (OPT84 marks it as a
+            # place whose Prettier configs could not be read).
             truncated = True
+            if unlisted is not None:
+                unlisted.append(base)
             continue
         for entry in entries:
             try:
@@ -2864,6 +3481,8 @@ def _vitest_config_files(root: Path) -> "tuple[list[Path], bool, list[Path]]":
                 # Listable but not stat-able (e.g. a `r--` directory): unvisited
                 # ground, never a crash of the whole scan.
                 truncated = True
+                if unlisted is not None:
+                    unlisted.append(entry)
                 continue
             if is_dir:
                 if entry.name in _VITEST_SKIP_DIRS or (
@@ -2887,7 +3506,9 @@ def _vitest_config_files(root: Path) -> "tuple[list[Path], bool, list[Path]]":
                     truncated = truncated or _may_hold_config(entry)
             elif entry.name == "package.json":
                 manifests.append(entry)
-            elif _is_vitest_config_name(entry.name):
+            elif also is not None and also_found is not None and also(entry.name):
+                also_found.append(entry)
+            elif (is_config or _is_vitest_config_name)(entry.name):
                 found.append(entry)
                 if len(found) >= _VITEST_CONFIG_MAX_FILES:
                     # A cap hit says there is more of exactly the thing we are
@@ -3131,6 +3752,1152 @@ def _read_test_runner_isolation_unguarded(root: Path) -> dict[str, Any]:
     )
     block["verdict"] = _isolation_verdict(block)
     return block
+
+
+# --- Type-aware ESLint (OPT82 corroboration, not a finding) -----------------
+# OPT82 ("lint builds the whole type graph") is decided in `collect_runs.py`,
+# where a lint job's measured timings are in hand. Whether that job's ESLint
+# builds a TypeScript program at all is a CONFIG fact, and this reader supplies
+# it and only it: what each ESLint config in the tree says about type-aware
+# parsing, which type-aware rules it turns on, and the package scripts a
+# workflow's `npm run lint` resolves through. It never decides a finding.
+#
+# Read as TEXT, never evaluated. A literal is read; anything else — an
+# identifier, an env var, a ternary, a spread inside `parserOptions` — is
+# UNRESOLVED and the consumer withholds (fail closed), because "type-aware
+# parsing is on" is the finding's whole premise and an expression is not
+# evidence of it. Comments are blanked first, so a commented-out
+# `project: true` is not read as on.
+_TAL_RULES_PATH = (Path(__file__).resolve().parents[1] / "references"
+                   / "type-aware-lint-rules.tsv")
+_TAL_RULES_CACHE: "dict[str, dict[str, Any]] | None" = None
+_ESLINT_FLAT_NAMES = frozenset(f"eslint.config.{e}"
+                               for e in ("js", "mjs", "cjs", "ts", "mts", "cts"))
+_ESLINT_RC_NAMES = frozenset({".eslintrc", ".eslintrc.js", ".eslintrc.cjs",
+                              ".eslintrc.json", ".eslintrc.yaml", ".eslintrc.yml"})
+# Relative imports a config pulls in (a local plugin and its rule files) are
+# followed up to this many files to find CUSTOM type-aware rules.
+_TAL_MAX_FOLLOW = 40
+# A custom rule is type-aware when its source asks the parser for type
+# information. These are the two documented entry points.
+_TAL_TYPED_RULE_SOURCE_RE = re.compile(r"\bgetParserServices\b|\bgetTypeChecker\b")
+# `parserOptions` as an object key (`parserOptions: {`) or a variable
+# (`const parserOptions = {`).
+_TAL_PARSER_OPTIONS_RE = re.compile(r"""(?<![\w$.])(["']?)parserOptions\1\s*[:=]\s*""")
+_TAL_PROJECT_KEY_RE = re.compile(
+    r"""(?<![\w$.-])(["']?)(projectService|project)\1\s*:\s*""")
+_TAL_PROJECT_SHORTHAND_RE = re.compile(r"[{,]\s*(projectService|project)\s*(?=[,}])")
+# A rule entry: a quoted `<namespace>/<rule>` key and its value.
+_TAL_RULE_KEY_RE = re.compile(r"""(["'])(@?[\w.-]+/[\w./-]+)\1\s*:\s*""")
+# Type-checked presets. camelCase (flat `tseslint.configs.recommendedTypeChecked`)
+# and kebab (`plugin:@typescript-eslint/strict-type-checked`, legacy
+# `recommended-requiring-type-checking`). `disableTypeChecked` /
+# `disable-type-checked` turns type information OFF and never matches: the
+# capture group admits only recommended / strict / stylistic.
+# A preset counts only where it is REFERENCED as a config: a member of a
+# `configs` object (`configs.x`, `configs?.x`, `configs['x']`), a spread of a
+# destructured preset (`...x`), or a `<plugin>/<preset>` string
+# (`plugin:@typescript-eslint/x`, flat `extends: ['ts/x']`). The bare name in
+# an unrelated string (`const s = 'recommendedTypeChecked'`) is not a preset.
+_TAL_PRESET_REF = (r"(?:\bconfigs\s*\??\.\s*|\bconfigs\s*\[\s*['\"]|\.\.\.\s*"
+                   r"|['\"](?:plugin:)?@?[\w.-]+/)")
+_TAL_PRESET_CAMEL_RE = re.compile(
+    _TAL_PRESET_REF + r"(recommended|strict|stylistic)TypeChecked(?:Only)?(?![\w$])")
+_TAL_PRESET_KEBAB_RE = re.compile(
+    _TAL_PRESET_REF + r"(recommended|strict|stylistic)-type-checked(?:-only)?(?![\w-])")
+_TAL_PRESET_LEGACY_RE = re.compile(
+    _TAL_PRESET_REF + r"recommended-requiring-type-checking(?![\w-])")
+# typescript-eslint's `all` preset. `configs.all` is ALSO ESLint's own
+# (`js.configs.all`, no type information), so the member form counts only on
+# an object bound to typescript-eslint: an import / require of
+# `typescript-eslint` or `@typescript-eslint/eslint-plugin`, or one of the
+# conventional names for it when the binding is not in this file.
+_TAL_TSESLINT_BINDING_RE = re.compile(
+    r"""(?:\bimport\s+(?:\*\s+as\s+)?([\w$]+)\s+from\s*|"""
+    r"""\b(?:const|let|var)\s+([\w$]+)\s*=\s*require\s*\(\s*)"""
+    r"""["'](?:typescript-eslint|@typescript-eslint/eslint-plugin)["']""")
+_TAL_TSESLINT_DEFAULT_NAMES = ("tseslint", "typescriptEslint", "tsEslint",
+                               "tsPlugin", "typescriptEslintPlugin")
+_TAL_PRESET_ALL_LEGACY_RE = re.compile(r"plugin:@typescript-eslint/all(?![\w-])")
+# `import { configs } from 'typescript-eslint'` (or `configs as tsConfigs`):
+# the named `configs` export, used bare as `configs.all`.
+_TAL_TSESLINT_NAMED_IMPORT_RE = re.compile(
+    r"""\bimport\s+(?:[\w$]+\s*,\s*)?\{([^}]*)\}\s*from\s*"""
+    r"""["'](?:typescript-eslint|@typescript-eslint/eslint-plugin)["']""")
+
+
+def _tal_all_preset_match(text: str) -> "re.Match[str] | None":
+    names = {a or b for a, b in _TAL_TSESLINT_BINDING_RE.findall(text)}
+    names |= set(_TAL_TSESLINT_DEFAULT_NAMES)
+    member = re.compile(
+        r"(?:(?<=\.\.\.)|(?<![\w$.]))(?:" + "|".join(re.escape(n) for n in sorted(names))
+        + r")\s*\??\.\s*configs\s*\??\.\s*all(?![\w$])")
+    found = member.search(text) or _TAL_PRESET_ALL_LEGACY_RE.search(text)
+    if found:
+        return found
+    cfg_names = set()
+    for clause in _TAL_TSESLINT_NAMED_IMPORT_RE.findall(text):
+        for part in clause.split(","):
+            m = re.fullmatch(r"\s*configs(?:\s+as\s+([\w$]+))?\s*", part)
+            if m:
+                cfg_names.add(m.group(1) or "configs")
+    if not cfg_names:
+        return None
+    bare = re.compile(
+        r"(?:(?<=\.\.\.)|(?<![\w$.]))(?:" + "|".join(re.escape(n) for n in sorted(cfg_names))
+        + r")\s*\??\.\s*all(?![\w$])")
+    return bare.search(text)
+
+
+def _load_type_aware_rules() -> "dict[str, dict[str, Any]]":
+    """The committed type-aware rule list (references/type-aware-lint-rules.tsv):
+    rule -> {syntax_only_equivalent, presets}."""
+    global _TAL_RULES_CACHE
+    if _TAL_RULES_CACHE is None:
+        out: dict[str, dict[str, Any]] = {}
+        for line in _TAL_RULES_PATH.read_text(encoding="utf-8").splitlines():
+            if not line.strip() or line.startswith("#"):
+                continue
+            rule, base, presets = line.split("\t")
+            if rule in out:
+                # A duplicate row would silently overwrite the first; fail
+                # closed (the reader's guard turns this into a withheld block).
+                raise ValueError(f"duplicate rule row in {_TAL_RULES_PATH.name}: {rule}")
+            out[rule] = {"syntax_only_equivalent": None if base == "-" else base,
+                         "presets": [] if presets == "-" else presets.split(",")}
+        _TAL_RULES_CACHE = out
+    return _TAL_RULES_CACHE
+
+
+def _is_eslint_config_name(name: str) -> bool:
+    return name in _ESLINT_FLAT_NAMES or name in _ESLINT_RC_NAMES
+
+
+def _tal_strip_js_comments(text: str) -> str:
+    """`//` and `/* */` comments blanked to spaces (newlines kept, so line
+    numbers survive); string contents are left alone."""
+    out = list(text)
+    i, n, quote = 0, len(text), ""
+    while i < n:
+        c = text[i]
+        if quote:
+            if c == "\\":
+                i += 2
+                continue
+            if c == quote:
+                quote = ""
+            i += 1
+            continue
+        if c in "'\"`":
+            quote = c
+        elif text.startswith("//", i):
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            for k in range(i, j):
+                out[k] = " "
+            i = j
+            continue
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            for k in range(i, j):
+                if out[k] != "\n":
+                    out[k] = " "
+            i = j
+            continue
+        i += 1
+    return "".join(out)
+
+
+def _tal_balanced(text: str, start: int) -> str:
+    """The `{...}` / `[...]` literal opening at `start` (string-aware)."""
+    pairs = {"{": "}", "[": "]"}
+    stack: list[str] = []
+    quote = ""
+    i = start
+    while i < len(text):
+        c = text[i]
+        if quote:
+            if c == "\\":
+                i += 2
+                continue
+            if c == quote:
+                quote = ""
+        elif c in "'\"`":
+            quote = c
+        elif c in pairs:
+            stack.append(pairs[c])
+        elif stack and c == stack[-1]:
+            stack.pop()
+            if not stack:
+                return text[start:i + 1]
+        i += 1
+    return text[start:]
+
+
+_TAL_LITERAL_END_RE = re.compile(r"\s*(?:[,}\]\n]|$)")
+
+
+def _tal_value(text: str, pos: int) -> "tuple[str, str]":
+    """Classify the JS value starting at `pos`: ("true" | "false" | "string" |
+    "array_of_strings" | "object" | "other", its source text)."""
+    m = re.match(r"\s*", text[pos:])
+    pos += m.end() if m else 0
+    rest = text[pos:]
+    for word in ("true", "false"):
+        if rest.startswith(word) and _TAL_LITERAL_END_RE.match(rest, len(word)) \
+                and not re.match(r"[\w$]", rest[len(word):len(word) + 1]):
+            return word, word
+    if rest[:1] in ("'", '"'):
+        end = rest.find(rest[0], 1)
+        if end > 0 and _TAL_LITERAL_END_RE.match(rest, end + 1):
+            return "string", rest[:end + 1]
+        return "other", rest.split("\n", 1)[0].strip()
+    if rest[:1] == "[":
+        lit = _tal_balanced(text, pos)
+        inner = lit[1:-1].strip()
+        if inner and re.fullmatch(r"""(\s*(['"])[^'"\n]*\2\s*,?)+""", inner):
+            return "array_of_strings", lit
+        return "other", lit.split("\n", 1)[0]
+    if rest[:1] == "{":
+        return "object", _tal_balanced(text, pos)
+    return "other", rest.split("\n", 1)[0].strip().rstrip(",")
+
+
+_TAL_SEVERITY = {"off": "off", "0": "off", "warn": "on", "error": "on",
+                 "1": "on", "2": "on"}
+
+
+def _tal_rule_state_js(text: str, pos: int) -> str:
+    """'on' | 'off' | 'unresolved' for the rule value starting at `pos`."""
+    m = re.match(r"""\s*(?:\[\s*)?(?:(['"])(\w+)\1|(\d))(?=\s*[,\]}\n])""", text[pos:])
+    if not m:
+        return "unresolved"
+    return _TAL_SEVERITY.get((m.group(2) or m.group(3) or "").lower(), "unresolved")
+
+
+def _tal_rule_state_obj(value: Any) -> str:
+    if isinstance(value, list):
+        value = value[0] if value else None
+    if isinstance(value, bool):
+        return "unresolved"
+    return _TAL_SEVERITY.get(str(value).lower(), "unresolved") \
+        if isinstance(value, (str, int)) else "unresolved"
+
+
+def _tal_presets_in(text: str) -> list[str]:
+    found = {m.group(1) for m in _TAL_PRESET_CAMEL_RE.finditer(text)}
+    found |= {m.group(1) for m in _TAL_PRESET_KEBAB_RE.finditer(text)}
+    if _TAL_PRESET_LEGACY_RE.search(text):
+        found.add("recommended")
+    if _tal_all_preset_match(text):
+        found.add("all")
+    return sorted(found)
+
+
+# A shareable config package this read does not follow. Known public configs
+# that never turn type-aware parsing on are allowlisted so they stay a verdict.
+_TAL_SHARED_ALLOWLIST = frozenset({
+    "prettier", "eslint-config-prettier", "next", "eslint-config-next",
+    "next/core-web-vitals", "next/typescript", "eslint-config-next/core-web-vitals",
+    "eslint-config-next/typescript"})
+# An imported package that IS a shareable ESLint config by its name: the
+# `eslint-config-*` convention, or a scoped package with `eslint` in its path
+# (`@acme/eslint-config`, `@repo/config/eslint`) that is not ESLint itself, a
+# plugin, or typescript-eslint.
+_TAL_SHARED_IMPORT_RE = re.compile(
+    r"^(?:eslint-config(?:-[\w.-]+)?|@(?!eslint/|typescript-eslint/)[\w.-]+/"
+    r"(?![\w./-]*eslint-plugin)[\w./-]*\beslint\b[\w./-]*)(?:/[\w./-]*)?$")
+_TAL_IMPORT_ONLY_RE = re.compile(
+    r"""(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+|\brequire\s*\(\s*)(["'])([^"'\n]+)\1""")
+_TAL_EXTENDS_RE = re.compile(r"""(?<![\w$.])(["']?)extends\1\s*:\s*""")
+_TAL_ROOT_TRUE_RE = re.compile(r"""(?<![\w$.])(["']?)root\1\s*:\s*true(?![\w$])""")
+
+
+def _tal_is_relative(spec: str) -> bool:
+    return spec.startswith("./") or spec.startswith("../")
+
+
+def _tal_shared_from_extends(specs: "list[str]") -> list[str]:
+    """Legacy `extends` entries naming a shareable config package: anything
+    that is not `eslint:*`, `plugin:*`, a path, or allowlisted."""
+    return [s for s in specs
+            if s and not s.startswith(("eslint:", "plugin:", ".", "/"))
+            and s not in _TAL_SHARED_ALLOWLIST]
+
+
+_TAL_DISABLE_TYPE_CHECKED_RE = re.compile(
+    r"""\bconfigs\s*\??\.\s*disableTypeChecked(?![\w$])"""
+    r"""|["'](?:plugin:)?@?[\w.-]+/disable-type-checked["']""")
+_TAL_FILES_KEY_RE = re.compile(r"""(?<![\w$.])(["']?)files\1\s*:""")
+
+
+def _tal_objects(text: str) -> "list[tuple[int, int]]":
+    """Every `{...}` literal in `text` as (start, end) offsets (string-aware)."""
+    out: list[tuple[int, int]] = []
+    stack: list[int] = []
+    quote = ""
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if quote:
+            if c == "\\":
+                i += 2
+                continue
+            if c == quote:
+                quote = ""
+        elif c in "'\"`":
+            quote = c
+        elif c == "{":
+            stack.append(i)
+        elif c == "}" and stack:
+            out.append((stack.pop(), i))
+        i += 1
+    return out
+
+
+def _tal_scoped(text: str, objs: "list[tuple[int, int]]", pos: int) -> bool:
+    """True when `pos` sits inside a config object that has its OWN `files:`
+    key: the setting there applies to some files only."""
+    for s, e in objs:
+        if not (s < pos < e):
+            continue
+        for m in _TAL_FILES_KEY_RE.finditer(text, s + 1, e):
+            if not any(s < cs < m.start() < ce for cs, ce in objs):
+                return True
+    return False
+
+
+def _tal_read_js(text: str, name: str, flat: bool = True) -> dict[str, Any]:
+    """One JS/TS config (flat `eslint.config.*` or a JS `.eslintrc`), as text."""
+    code = _tal_strip_js_comments(text)
+    evidence: list[str] = []
+    unresolved: list[str] = []
+    explicit: dict[str, set[str]] = {}
+    sets_off = False
+    extends: list[str] = []
+    for m in _TAL_EXTENDS_RE.finditer(code):
+        kind, lit = _tal_value(code, m.end())
+        if kind in ("string", "array_of_strings"):
+            extends += re.findall(r"""["']([^"'\n]+)["']""", lit)
+        elif kind == "other" and lit[:1] == "[":
+            # a mixed array (`['./base.js', require.resolve('x')]`): its literals
+            extends += re.findall(r"""["']([^"'\n]+)["']""",
+                                  _tal_balanced(code, code.index(lit, m.end())))
+    imports = [m.group(2).strip() for m in _TAL_IMPORT_ONLY_RE.finditer(code)]
+    shared = [s for s in imports if not _tal_is_relative(s)
+              and _TAL_SHARED_IMPORT_RE.match(s) and s not in _TAL_SHARED_ALLOWLIST]
+    if not flat:
+        shared += _tal_shared_from_extends(extends)
+
+    def _line(pos: int) -> str:
+        ln, src = _vitest_line_at(code, pos)
+        return f"{name}:{ln}: {src[:160]}"
+
+    for m in _TAL_PARSER_OPTIONS_RE.finditer(code):
+        kind, lit = _tal_value(code, m.end())
+        if kind != "object":
+            unresolved.append(_line(m.start()))
+            continue
+        if re.search(r"\.\.\.", lit):
+            unresolved.append(_line(m.start()))       # a spread can override anything
+        base = code.index(lit, m.end())
+        for k in _TAL_PROJECT_KEY_RE.finditer(lit):
+            vkind, _src = _tal_value(lit, k.end())
+            at = base + k.start()
+            if vkind in ("true", "string", "array_of_strings") or (
+                    vkind == "object" and k.group(2) == "projectService"):
+                evidence.append(_line(at))
+            elif vkind == "false" or (vkind == "other" and re.fullmatch(
+                    r"(?:null|undefined)\s*[,}\]]?", _src.strip())):
+                sets_off = True       # `false` / `null` / `undefined`: documented OFF
+                continue
+            else:
+                unresolved.append(_line(at))
+        for k in _TAL_PROJECT_SHORTHAND_RE.finditer(lit):
+            unresolved.append(_line(base + k.start()))
+    presets = _tal_presets_in(code)
+    for p in presets:
+        hit = (_tal_all_preset_match(code) if p == "all" else
+               (_TAL_PRESET_CAMEL_RE.search(code) or _TAL_PRESET_KEBAB_RE.search(code)
+                or _TAL_PRESET_LEGACY_RE.search(code)))
+        if hit:
+            evidence.append(_line(hit.start()))
+    objs = _tal_objects(code)
+    # `disableTypeChecked` turns type information back OFF. Scoped to some
+    # files (`{ files: ['**/*.js'], ... }`, the documented use) the rest stays
+    # on; unscoped, the outcome depends on config ORDER this read does not
+    # model, so it is unresolved rather than read as on.
+    if evidence:
+        for m in _TAL_DISABLE_TYPE_CHECKED_RE.finditer(code):
+            if not _tal_scoped(code, objs, m.start()):
+                unresolved.append(_line(m.start()))
+    for m in _TAL_RULE_KEY_RE.finditer(code):
+        state = _tal_rule_state_js(code, m.end())
+        if state == "off" and _tal_scoped(code, objs, m.start()):
+            state = "off_scoped"
+        explicit.setdefault(m.group(2), set()).add(state)
+    return {"evidence": sorted(set(evidence)), "unresolved": sorted(set(unresolved)),
+            "presets": presets, "explicit": explicit, "sets_off": sets_off,
+            "root": bool(_TAL_ROOT_TRUE_RE.search(code)),
+            "extends": [e for e in extends if _tal_is_relative(e)],
+            "shared": sorted(set(shared))}
+
+
+def _tal_read_obj(obj: Any, name: str) -> dict[str, Any]:
+    """One structured config (`.eslintrc.json/.yaml`, `package.json#eslintConfig`):
+    the top level and every `overrides[]` entry."""
+    evidence: list[str] = []
+    unresolved: list[str] = []
+    presets: set[str] = set()
+    explicit: dict[str, set[str]] = {}
+    sets_off = False
+    disable_unscoped = False
+    extends: list[str] = []
+    blocks = [obj] if isinstance(obj, dict) else []
+    if isinstance(obj, dict) and isinstance(obj.get("overrides"), list):
+        blocks += [o for o in obj["overrides"] if isinstance(o, dict)]
+    for b in blocks:
+        po = b.get("parserOptions")
+        if po is not None and not isinstance(po, dict):
+            unresolved.append(f"{name}: parserOptions is not a mapping")
+        for key in ("project", "projectService"):
+            if not isinstance(po, dict) or key not in po:
+                continue
+            v = po.get(key)
+            if v is None or v is False:
+                sets_off = True       # `false` / `null`: documented OFF
+                continue
+            if v is True or (isinstance(v, str) and v) or (
+                    isinstance(v, list) and v and all(isinstance(x, str) and x for x in v)) or (
+                    key == "projectService" and isinstance(v, dict)):
+                evidence.append(f"{name}: parserOptions.{key}: {json.dumps(v)[:120]}")
+            else:
+                unresolved.append(f"{name}: parserOptions.{key}: {json.dumps(v)[:120]}")
+        ext = b.get("extends")
+        for e in ([ext] if isinstance(ext, str) else ext if isinstance(ext, list) else []):
+            extends.append(str(e))
+            got = _tal_presets_in(json.dumps(str(e)))
+            if got:
+                presets |= set(got)
+                evidence.append(f"{name}: extends {e}")
+        scoped = b is not obj           # every `overrides[]` entry has `files`
+        for e in ([ext] if isinstance(ext, str) else ext if isinstance(ext, list) else []):
+            if not scoped and _TAL_DISABLE_TYPE_CHECKED_RE.search(json.dumps(str(e))):
+                disable_unscoped = True
+        rules = b.get("rules")
+        if isinstance(rules, dict):
+            for r, v in rules.items():
+                if "/" in str(r):
+                    state = _tal_rule_state_obj(v)
+                    if state == "off" and scoped:
+                        state = "off_scoped"
+                    explicit.setdefault(str(r), set()).add(state)
+    if disable_unscoped and evidence:
+        unresolved.append(f"{name}: extends disable-type-checked for every file")
+    return {"evidence": sorted(set(evidence)), "unresolved": sorted(set(unresolved)),
+            "presets": sorted(presets), "explicit": explicit, "sets_off": sets_off,
+            "root": bool(isinstance(obj, dict) and obj.get("root") is True),
+            "extends": [e for e in extends if _tal_is_relative(e)],
+            "shared": sorted(set(_tal_shared_from_extends(extends)))}
+
+
+def _tal_parse_obj_text(text: str) -> Any:
+    """A structured config's text (JSON, JSONC with comments or trailing
+    commas, or YAML) as an object, or None."""
+    stripped = _tal_strip_js_comments(text)
+    for cand in (stripped, re.sub(r",(\s*[}\]])", r"\1", stripped)):
+        try:
+            return json.loads(cand)
+        except ValueError:
+            continue
+    try:
+        return yaml.safe_load(text)
+    except yaml.YAMLError:
+        return None
+
+
+def _tal_is_obj_config(name: str) -> bool:
+    return name.endswith((".json", ".yaml", ".yml")) or name == ".eslintrc"
+
+
+def _tal_read_any(path: Path, text: str, name: str, flat: bool
+                  ) -> "dict[str, Any] | None":
+    """One config-shaped file, structured or JS, or None when unreadable."""
+    if _tal_is_obj_config(path.name):
+        obj = _tal_parse_obj_text(text)
+        return _tal_read_obj(obj, name) if isinstance(obj, dict) else None
+    return _tal_read_js(text, name, flat=flat)
+
+
+_TAL_IMPORT_BINDING_RE = re.compile(
+    r"""(?:\bimport\s+([\w$]+)\s*(?:,\s*\{[^}]*\})?\s+from\s*"""
+    r"""|\bimport\s+\*\s+as\s+([\w$]+)\s+from\s*"""
+    r"""|\b(?:const|let|var)\s+([\w$]+)\s*=\s*require\s*\(\s*)(["'])([^"'\n]+)\4""")
+_TAL_PLUGINS_RE = re.compile(r"""(?<![\w$.])(["']?)plugins\1\s*:\s*(?=\{)""")
+_TAL_PLUGIN_ENTRY_RE = re.compile(
+    r"""(["']?)([\w@./-]+)\1\s*:\s*([\w$]+)(?=\s*[,}])|(?<=[{,])\s*([\w$]+)\s*(?=[,}])""")
+
+
+class _TalCustomRules:
+    """Which `<namespace>/<rule>` keys are PROVEN to be custom type-aware rules.
+
+    A followed file whose code asks for type information is a typed rule
+    SOURCE. A rule key is proven typed only when (1) the plugin module that
+    imports that source maps the rule's short name to the imported binding
+    (`'no-foo': noFoo`), and (2) the config binds that plugin module under the
+    rule's namespace (`plugins: { local }` with `import local from './...'`).
+    A file-name match alone, or a mapping under an unbound namespace, is
+    UNPROVEN: the rule is reported unresolved, never named."""
+
+    def __init__(self) -> None:
+        self.typed: list[tuple[Path, str, str, str]] = []   # path, stem, source, code
+        self.importers: dict[Path, list[tuple[Path, "str | None", str]]] = {}
+        self.ns_paths: dict[str, Path] = {}
+
+    def lookup(self, ns: str, short: str) -> "tuple[str, str] | str | None":
+        key_re = re.compile(r"(?<![\w$-])(['\"]?)" + re.escape(short) + r"\1\s*:")
+        unproven = False
+        for path, stem, source, code in self.typed:
+            for imp, binding, imp_code in self.importers.get(path, []):
+                if binding and re.search(
+                        r"(?<![\w$-])(['\"]?)" + re.escape(short) + r"\1\s*:\s*"
+                        + re.escape(binding) + r"(?![\w$])", imp_code):
+                    if self.ns_paths.get(ns) == imp:
+                        return "typed", source
+                    unproven = True
+            if stem == short or key_re.search(code):
+                unproven = True
+        return "unproven" if unproven else None
+
+
+def _tal_follow(path: Path, text: str, root: Path, rel: "Any", flat: bool,
+                first_specs: "list[str]"
+                ) -> "tuple[_TalCustomRules, list[str], list[dict[str, Any]]]":
+    """Follow the config's RELATIVE imports and relative `extends` (bounded).
+
+    Returns the custom-rule evidence (`_TalCustomRules`: every followed file
+    whose code asks for type information, who imports it under which binding,
+    and which plugin namespace each config binds to which local module), the
+    specifiers that could not be followed, and the READ of every other followed
+    file: a local base config (`import base from './base.mjs'; export default
+    [...base]`, `extends: ['./eslint/base.js']`) carries parserOptions, presets
+    and rules that apply to this config exactly as if they were written in it."""
+    custom = _TalCustomRules()
+    typed_paths: list[tuple[Path, str]] = []
+    texts: dict[Path, str] = {}
+    unresolved: list[str] = []
+    reads: list[dict[str, Any]] = []
+    start = path.resolve()
+    queue: list[tuple[Path, str, list[str]]] = [(start, text, list(first_specs))]
+    seen = {start}
+    followed = 0
+    while queue:
+        cur, cur_text, specs = queue.pop(0)
+        code = "" if _tal_is_obj_config(cur.name) else _tal_strip_js_comments(cur_text)
+        texts[cur] = code
+        if cur != start:
+            if _TAL_TYPED_RULE_SOURCE_RE.search(code):
+                typed_paths.append((cur, rel(cur)))
+            else:
+                r = _tal_read_any(cur, cur_text, rel(cur), flat)
+                if r is None:
+                    unresolved.append(f"{rel(cur)} (unreadable)")
+                else:
+                    reads.append(r)
+                    specs = specs + r["extends"]
+        bindings: dict[str, str] = {}
+        for m in _TAL_IMPORT_BINDING_RE.finditer(code):
+            bindings.setdefault(m.group(5).strip(), m.group(1) or m.group(2) or m.group(3))
+        local_paths: dict[str, Path] = {}
+        all_specs = [m.group(2).strip() for m in _VITEST_IMPORT_SPEC_RE.finditer(code)]
+        for spec in all_specs + specs:
+            if not _tal_is_relative(spec):
+                continue
+            target = _resolve_local_import(cur, spec, root)
+            if target is None:
+                unresolved.append(f"{rel(cur)}: {spec}")
+                continue
+            binding = bindings.get(spec)
+            if binding:
+                local_paths[binding] = target
+            if (cur, binding, code) not in custom.importers.setdefault(target, []):
+                custom.importers[target].append((cur, binding, code))
+            if target in seen:
+                continue
+            seen.add(target)
+            followed += 1
+            if followed > _TAL_MAX_FOLLOW:
+                unresolved.append(f"{rel(cur)}: {spec} (follow cap)")
+                continue
+            try:
+                t = _read_config_text(target)
+            except OSError:
+                t = None
+            if t is None:
+                unresolved.append(f"{rel(cur)}: {spec} (unreadable)")
+                continue
+            queue.append((target, t, []))
+        # `plugins: { local }` / `plugins: { 'local': plugin }`: namespace -> module
+        for m in _TAL_PLUGINS_RE.finditer(code):
+            lit = _tal_balanced(code, m.end())
+            for e in _TAL_PLUGIN_ENTRY_RE.finditer(lit):
+                ns, binding = (e.group(2), e.group(3)) if e.group(3) else (e.group(4), e.group(4))
+                if ns and binding in local_paths:
+                    custom.ns_paths.setdefault(ns, local_paths[binding])
+    for p, source in typed_paths:
+        stem = p.name.split(".")[0]
+        if stem == "index":
+            stem = p.parent.name
+        custom.typed.append((p, stem, source, texts.get(p, "")))
+    return custom, unresolved, reads
+
+
+def _tal_merge(read: dict[str, Any], others: "list[dict[str, Any]]") -> dict[str, Any]:
+    """A config's own read plus the reads of the local files it pulls in."""
+    out = {"evidence": list(read["evidence"]), "unresolved": list(read["unresolved"]),
+           "presets": sorted(set(read["presets"]).union(
+               *(o["presets"] for o in others))),
+           "explicit": {k: set(v) for k, v in read["explicit"].items()},
+           "sets_off": read.get("sets_off", False)
+           or any(o.get("sets_off") for o in others),
+           "root": read.get("root", False),
+           "shared": sorted(set(read.get("shared") or []).union(
+               *(o.get("shared") or [] for o in others)))}
+    for o in others:
+        out["evidence"] += o["evidence"]
+        out["unresolved"] += o["unresolved"]
+        for k, v in o["explicit"].items():
+            out["explicit"].setdefault(k, set()).update(v)
+    out["evidence"] = sorted(set(out["evidence"]))
+    out["unresolved"] = sorted(set(out["unresolved"]))
+    return out
+
+
+def _tal_block(**overrides: Any) -> dict[str, Any]:
+    """The ONE definition of the `type_aware_lint` block's shape. Defaults are
+    fail-closed: nothing read, walk incomplete."""
+    block: dict[str, Any] = {
+        "configs": [],
+        "unreadable": [],
+        "truncated": True,
+        "package_scripts": {},
+        "package_scripts_unreadable": [],
+        # {package dir: the `eslint` version spec its package.json declares}.
+        # The consumer reads the major: ESLint 10 looks a flat config up from
+        # each linted file, ESLint 9 from the working directory.
+        "eslint_versions": {},
+        "rules_source": "references/type-aware-lint-rules.tsv",
+        "error": None,
+        # OPT84 (tool swap) reads every key from here down (`tool_versions`,
+        # `config_files`, `eslint_config_facts`, `pnpm_catalogs`,
+        # `pnpm_catalogs_unreadable`, `prettier_plugins`,
+        # `prettier_plugin_files`, `prettier_config_unreadable`), plus
+        # `package_scripts` and `configs` above. {package dir: {package:
+        # version spec}} for the `_TAL_TOOL_PACKAGES` its package.json declares
+        # (dependencies + devDependencies, string specs only); a dir that
+        # declares none of them is absent.
+        "tool_versions": {},
+        # {package dir: sorted names of the formatter / compiler / framework
+        # config files beside its package.json (`_TAL_CONFIG_FILE_RE`)}.
+        "config_files": {},
+        # {ESLint config path: {"plugins", "local_rules", "exhaustive_deps"}}:
+        # what the config's own text names, never evaluated. OPT84 decides
+        # whether an oxlint swap is a plain swap or a dual-run from these.
+        "eslint_config_facts": {},
+        # {catalog name: {package: version spec}} from the root
+        # `pnpm-workspace.yaml`: its `catalog:` map is "default", each
+        # `catalogs:<name>:` map is <name>. OPT84 resolves a `catalog:` /
+        # `catalog:<name>` version through it; absent or unreadable = {}.
+        "pnpm_catalogs": {},
+        # True when the root `pnpm-workspace.yaml` exists but could not be read
+        # or parsed (or a catalog in it is not a mapping): its `{}` above then
+        # means "unknown", not "no catalogs". Not added to `unreadable`, which
+        # lists ESLint configs only (OPT82 resolves configs through it).
+        "pnpm_catalogs_unreadable": False,
+        # {package dir: sorted Prettier plugin packages its package.json
+        # declares (dependencies + devDependencies): `prettier-plugin-*`,
+        # `@scope/prettier-plugin`, `@scope/prettier-plugin-*`}; a dir that
+        # declares none is absent. The three `prettier_*` maps also key a
+        # directory holding a Prettier config and no package.json read (the
+        # walk collects the configs themselves), and `prettier_config_unreadable`
+        # names a package folder that could not be listed.
+        "prettier_plugins": {},
+        # {package dir: {plugin: the repo-relative file that names it}} for a
+        # plugin `prettier_plugins` lists ONLY because a Prettier config names
+        # it (`.prettierrc`, `.prettierrc.json|json5|yaml|yml`, or the
+        # `"prettier"` key of package.json); a dependency names package.json.
+        "prettier_plugin_files": {},
+        # {package dir: [repo-relative Prettier config files this read does not
+        # open]}: a JS / TS config (`.prettierrc.js|cjs|mjs|ts|...`,
+        # `prettier.config.*`), a TOML one, one that does not parse, or a
+        # package.json `"prettier"` key naming a shared config. Any of them may
+        # load plugins, so OPT84 reads the dir as "plugins unknown".
+        "prettier_config_unreadable": {},
+    }
+    unknown = set(overrides) - set(block)
+    if unknown:
+        raise KeyError(f"_tal_block: not a type_aware_lint key: {sorted(unknown)}")
+    block.update(overrides)
+    return block
+
+
+def _tal_pnpm_catalogs(root: Path) -> dict[str, dict[str, str]]:
+    """The root `pnpm-workspace.yaml`'s catalogs; {} when there is none or it
+    cannot be read (a catalog reference then stays unreadable downstream)."""
+    return _tal_pnpm_catalogs_read(root)[0]
+
+
+def _tal_pnpm_catalogs_read(root: Path) -> "tuple[dict[str, dict[str, str]], bool]":
+    """The catalogs and whether the file was UNREADABLE: present but not
+    readable as text, not YAML, not a mapping at the top, or holding a catalog
+    that is not a mapping. An absent file, or an empty one, is readable."""
+    path = root / "pnpm-workspace.yaml"
+    if not path.exists():
+        return {}, False
+    try:
+        text = _read_config_text(path)
+    except OSError:
+        return {}, True
+    if text is None:
+        return {}, True
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return {}, True
+    if data is None:
+        return {}, False
+    if not isinstance(data, dict):
+        return {}, True
+
+    def _specs(m: Any) -> "dict[str, str] | None":
+        if not isinstance(m, dict):
+            return None
+        return {str(k): str(v) for k, v in m.items()
+                if isinstance(v, (str, int, float)) and not isinstance(v, bool)}
+
+    bad = False
+    out: dict[str, dict[str, str]] = {}
+    named = data.get("catalogs")
+    if isinstance(named, dict):
+        for n, m in named.items():
+            specs = _specs(m)
+            if specs is not None:
+                out[str(n)] = specs
+            elif m is not None:
+                bad = True
+    elif named is not None:
+        bad = True
+    default = _specs(data.get("catalog"))
+    if default is not None:
+        out["default"] = {**out.get("default", {}), **default}
+    elif data.get("catalog") is not None:
+        bad = True
+    return out, bad
+
+
+# The packages whose declared versions OPT84 reads: the tools it can swap, the
+# targets that mean "already swapped", and the recipe-only rows' tools.
+_TAL_TOOL_PACKAGES = ("typescript", "prettier", "oxfmt", "oxlint", "eslint",
+                      "@babel/core", "@swc/core", "webpack", "next")
+_TAL_PRETTIER_PLUGIN_RE = re.compile(
+    r"^(?:prettier-plugin-[\w.-]+|@[\w.-]+/prettier-plugin(?:-[\w.-]+)?)$")
+_TAL_CONFIG_FILE_RE = re.compile(
+    r"^(\.prettierrc.*|prettier\.config\..+|babel\.config\..+|\.babelrc.*"
+    r"|next\.config\..+)$")
+# An ESLint plugin named in a config's text: `eslint-plugin-x`,
+# `@scope/eslint-plugin(-x)`, or a string in a legacy `plugins: [...]` list.
+_TAL_PLUGIN_PKG_RE = re.compile(r"(?:@([\w.-]+)/)?eslint-plugin(?:-([\w.-]+))?")
+_TAL_PLUGINS_LIST_RE = re.compile(r"""["']?plugins["']?\s*:\s*\[([^\]]*)\]""")
+_TAL_QUOTED_RE = re.compile(r"""["']([^"']+)["']""")
+# A rule defined in the repo itself: a local-rules plugin, a rules directory, a
+# relative import of a rules / plugin module, or an inline rule (`create(context`).
+_TAL_LOCAL_RULES_RE = re.compile(
+    r"eslint-plugin-local|local-rules|rulesdir|rulesDirectory"
+    r"""|(?:from\s+|require\(\s*)["']\.{1,2}/[^"']*(?:rule|plugin)[^"']*["']"""
+    r"|\bcreate\s*\(\s*context\b")
+
+
+# A legacy `extends` entry that loads a plugin's preset: `plugin:<name>/<cfg>`.
+_TAL_PLUGIN_EXTENDS_RE = re.compile(r"""["'](plugin:[^"'\s]+)["']""")
+# The `react-hooks` presets that turn `react-hooks/exhaustive-deps` on
+# (`recommended`, `recommended-latest`, `recommended-legacy`).
+_TAL_HOOKS_PRESET_PREFIX = "plugin:react-hooks/recommended"
+
+
+def _tal_plugin_short(name: str) -> str:
+    """A plugin name in the shape the flat-config read records: the package
+    `eslint-plugin-x` is `x`, `@scope/eslint-plugin(-x)` is `@scope(/x)`, and a
+    short name (`react`, `@typescript-eslint`) stays as written."""
+    name = name.strip()
+    m = _TAL_PLUGIN_PKG_RE.fullmatch(name)
+    if m:
+        scope, short = m.group(1), m.group(2)
+        return (f"@{scope}" + (f"/{short}" if short else "")) if scope else (short or "")
+    return name
+
+
+def _tal_plugin_from_extends(spec: str) -> "str | None":
+    """The plugin a legacy `extends: plugin:...` entry loads, or None for any
+    other entry: `plugin:react/recommended` is `react`, `plugin:@scope/cfg` is
+    `@scope`, `plugin:@scope/name/cfg` is `@scope/name`."""
+    if not spec.startswith("plugin:"):
+        return None
+    parts = spec[len("plugin:"):].split("/")
+    if parts[0].startswith("@"):
+        name = "/".join(parts[:2]) if len(parts) >= 3 else parts[0]
+    else:
+        name = parts[0]
+    return _tal_plugin_short(name) or None
+
+
+def _tal_obj_plugin_specs(obj: Any) -> "tuple[list[str], list[str]]":
+    """A structured config's `plugins` and `extends` entries, top level and
+    every `overrides[]` entry, as parsed (a YAML block list, an unquoted flow
+    list and a JSON array read the same)."""
+    blocks = [obj] if isinstance(obj, dict) else []
+    if isinstance(obj, dict) and isinstance(obj.get("overrides"), list):
+        blocks += [o for o in obj["overrides"] if isinstance(o, dict)]
+    plugins: list[str] = []
+    extends: list[str] = []
+    for b in blocks:
+        pl = b.get("plugins")
+        pl = [pl] if isinstance(pl, str) else list(pl) if isinstance(pl, dict) else pl
+        if isinstance(pl, list):
+            plugins += [str(x) for x in pl if isinstance(x, str)]
+        ext = b.get("extends")
+        ext = [ext] if isinstance(ext, str) else ext
+        if isinstance(ext, list):
+            extends += [x for x in ext if isinstance(x, str)]
+    return plugins, extends
+
+
+def _tal_fit_facts(text: str, obj: Any = None) -> dict[str, Any]:
+    """What an ESLint config names, for OPT84's swap fit: the plugins it loads
+    (a `plugins` entry, an `eslint-plugin-*` package, or a `plugin:<name>/...`
+    preset in `extends`), whether it defines rules locally, and whether it sets
+    `react-hooks/exhaustive-deps` (named, or through a `react-hooks` preset).
+    Never evaluated. `obj` is the parsed object of a structured config
+    (`.eslintrc`, `.eslintrc.json/.yml/.yaml`, `package.json#eslintConfig`):
+    its `plugins` and `extends` are read from it; a JS config's from its text."""
+    plugins: set[str] = set()
+    for scope, name in _TAL_PLUGIN_PKG_RE.findall(text):
+        plugins.add((f"@{scope}" + (f"/{name}" if name else "")) if scope else name)
+    if isinstance(obj, dict):
+        listed, extends = _tal_obj_plugin_specs(obj)
+        plugins.update(_tal_plugin_short(p) for p in listed)
+    else:
+        for body in _TAL_PLUGINS_LIST_RE.findall(text):
+            plugins.update(_TAL_QUOTED_RE.findall(body))
+        extends = _TAL_PLUGIN_EXTENDS_RE.findall(text)
+    for e in extends:
+        p = _tal_plugin_from_extends(e)
+        if p:
+            plugins.add(p)
+    plugins.discard("")
+    return {"plugins": sorted(plugins),
+            "local_rules": bool(_TAL_LOCAL_RULES_RE.search(text)),
+            "exhaustive_deps": "react-hooks/exhaustive-deps" in text
+            or any(e.startswith(_TAL_HOOKS_PRESET_PREFIX) for e in extends)}
+
+
+# Prettier configs this read parses as data (JSON, then YAML; `.prettierrc` may
+# be either, and tab-indented JSON is not YAML). Any other `.prettierrc*` / `prettier.config.*`
+# (JS, TS, TOML) is recorded as not opened.
+_TAL_PRETTIER_DATA_CONFIGS = (".prettierrc", ".prettierrc.json", ".prettierrc.json5",
+                              ".prettierrc.yaml", ".prettierrc.yml")
+
+
+def _tal_is_prettier_config_name(name: str) -> bool:
+    """A Prettier config file name (`.prettierrc*`, `prettier.config.*`)."""
+    return name.startswith(".prettierrc") or name.startswith("prettier.config.")
+
+
+def _tal_unlisted_folder(rel_dir: str) -> str:
+    """The `prettier_config_unreadable` entry for a package folder that could
+    not be listed: any Prettier config in it is unknown."""
+    return f"{rel_dir or '.'}/ (folder could not be listed)"
+
+
+def _tal_prettier_config_plugins(folder: Path, rel_dir: str, present: list[str],
+                                 pkg: dict[str, Any],
+                                 ) -> "tuple[dict[str, str], list[str]]":
+    """({plugin: repo-relative file naming it}, [repo-relative Prettier configs
+    not opened]) for one package directory: the `plugins` of its data-shaped
+    Prettier configs and of its package.json `"prettier"` key. Never evaluated."""
+    def _rel(name: str) -> str:
+        return f"{rel_dir}/{name}" if rel_dir else name
+
+    found: dict[str, str] = {}
+    unread: list[str] = []
+
+    def _take(obj: Any, where: str) -> None:
+        if not isinstance(obj, dict):
+            unread.append(where)            # a shared-config string, or not a map
+            return
+        pl = obj.get("plugins")
+        pl = [pl] if isinstance(pl, str) else pl
+        if pl is None:
+            return
+        if not isinstance(pl, list):
+            unread.append(where)
+            return
+        for p in pl:
+            if isinstance(p, str) and p.strip():
+                found.setdefault(p.strip(), where)
+
+    if "prettier" in pkg:
+        _take(pkg["prettier"], _rel("package.json"))
+    for name in present:
+        if not _tal_is_prettier_config_name(name):
+            continue
+        if name not in _TAL_PRETTIER_DATA_CONFIGS:
+            unread.append(_rel(name))
+            continue
+        try:
+            text = _read_config_text(folder / name)
+        except OSError:
+            text = None
+        if text is None:
+            unread.append(_rel(name))
+            continue
+        # JSON first, then YAML: a JSON config indented with tabs (legal JSON)
+        # is refused by YAML, which forbids tab indentation. Only a file that
+        # parses as neither is unread.
+        try:
+            obj = json.loads(text)
+        except ValueError:
+            try:
+                obj = yaml.safe_load(text)
+            except yaml.YAMLError:
+                unread.append(_rel(name))
+                continue
+        if obj is None:
+            continue                        # an empty config sets nothing
+        _take(obj, _rel(name))
+    return found, sorted(set(unread))
+
+
+def _read_type_aware_lint(root: Path) -> dict[str, Any]:
+    """Read the repo's ESLint config(s) for OPT82, and the manifest and
+    formatter facts OPT84 reads. Never raises: a crashed reader yields a block
+    both consumers withhold on, and says so."""
+    try:
+        return _read_type_aware_lint_unguarded(root)
+    except Exception as e:  # noqa: BLE001 — fail closed, never take the scan down
+        print(f"ci-speedup: the ESLint config reader failed ({type(e).__name__}: "
+              f"{e}); the type-aware lint check (OPT82) and the tool-swap check "
+              "(OPT84) will be WITHHELD for this repo — this is a scanner "
+              "failure, not a fact about the repo.",
+              file=sys.stderr)
+        return _tal_block(error=type(e).__name__)
+
+
+def _read_type_aware_lint_unguarded(root: Path) -> dict[str, Any]:
+    root = root.resolve()
+    rules_catalog = _load_type_aware_rules()
+    # Prettier configs are collected by the same walk (same depth, skip rules
+    # and `truncated`), keyed by their own directory: a `.prettierrc` with no
+    # package.json beside it (a root config over `web/package.json`, or a
+    # config-only `docs/`) applies all the same.
+    prettier_paths: list[Path] = []
+    unlisted_dirs: list[Path] = []
+    paths, truncated, manifests = _vitest_config_files(
+        root, _is_eslint_config_name, also=_tal_is_prettier_config_name,
+        also_found=prettier_paths, unlisted=unlisted_dirs)
+
+    def _rel(path: Path) -> str:
+        try:
+            return path.relative_to(root).as_posix()
+        except ValueError:                                  # pragma: no cover
+            return path.name
+
+    def _dir(rel: str) -> str:
+        return rel.rsplit("/", 1)[0] if "/" in rel else ""
+
+    configs: list[dict[str, Any]] = []
+    unreadable: list[str] = []
+    scripts: dict[str, dict[str, str]] = {}
+    scripts_unreadable: list[str] = []
+    eslint_versions: dict[str, str] = {}
+    tool_versions: dict[str, dict[str, str]] = {}
+    config_files: dict[str, list[str]] = {}
+    fit_facts: dict[str, dict[str, Any]] = {}
+    prettier_plugins: dict[str, list[str]] = {}
+    prettier_plugin_files: dict[str, dict[str, str]] = {}
+    prettier_config_unreadable: dict[str, list[str]] = {}
+    # A folder the walk could not list (or stat) is ground whose Prettier
+    # configs were never read: named, not silently absent, so the Prettier fit
+    # runs both tools rather than calling the swap a drop-in.
+    for _ud in unlisted_dirs:
+        try:
+            _urel = _ud.resolve().relative_to(root.resolve()).as_posix()
+        except ValueError:
+            _urel = _ud.name
+        _urel = "" if _urel == "." else _urel
+        prettier_config_unreadable.setdefault(_urel, [])
+        _mark = _tal_unlisted_folder(_urel)
+        if _mark not in prettier_config_unreadable[_urel]:
+            prettier_config_unreadable[_urel].append(_mark)
+    prettier_read_dirs: set[str] = set()
+
+    def _finish(rel: str, fmt: str, read: dict[str, Any],
+                typed: "_TalCustomRules", imp_unresolved: list[str]) -> None:
+        expanded: set[str] = set()
+        for p in read["presets"]:
+            expanded |= {r for r, meta in rules_catalog.items()
+                         if p == "all" or p in meta["presets"]}
+        rules: set[str] = set()
+        rule_unresolved: list[str] = []
+        custom: list[dict[str, str]] = []
+        for r, states in read["explicit"].items():
+            ns, _sep, short = r.rpartition("/")
+            is_ts = r in rules_catalog
+            proof = (None if r.startswith("@typescript-eslint/") or is_ts
+                     else typed.lookup(ns, short))
+            if not (is_ts or proof):
+                continue
+            # Set sets are unordered: "on" and an UNSCOPED "off" for the same
+            # rule means the outcome depends on config order this read does
+            # not model. Never named; reported unresolved.
+            conflict = "on" in states and "off" in states
+            if "on" in states and not conflict and proof != "unproven":
+                rules.add(r)
+                if isinstance(proof, tuple):
+                    custom.append({"rule": r, "source": proof[1]})
+            elif "unresolved" in states or conflict or (
+                    "on" in states and proof == "unproven"):
+                rule_unresolved.append(r)
+        for r in expanded:
+            st = read["explicit"].get(r, set())
+            if "unresolved" in st or ("on" in st and "off" in st):
+                rule_unresolved.append(r)
+            elif r not in read["explicit"] or st - {"off"}:
+                rules.add(r)
+        type_aware = ("unresolved" if read["unresolved"]
+                      else "on" if read["evidence"] else "off")
+        configs.append({
+            "path": rel, "dir": _dir(rel), "format": fmt,
+            "type_aware": type_aware,
+            "type_aware_evidence": read["evidence"][:6],
+            "unresolved": read["unresolved"][:6],
+            "presets": read["presets"],
+            "rules": sorted(rules),
+            "rule_unresolved": sorted(set(rule_unresolved) - rules),
+            "custom_rules": sorted(custom, key=lambda c: c["rule"]),
+            "unresolved_imports": sorted(set(imp_unresolved))[:6],
+            # `project: false` / `null` set literally: a nearer legacy config
+            # that turns type-aware parsing OFF shadows an ancestor's ON.
+            "sets_off": bool(read.get("sets_off")),
+            # legacy `.eslintrc` `root: true`: the upward cascade stops here.
+            "root": bool(read.get("root")),
+            # shareable config packages this read does not follow.
+            "shared_configs": list(read.get("shared") or [])[:6],
+        })
+
+    for path in paths:
+        rel = _rel(path)
+        try:
+            text = _read_config_text(path)
+        except OSError:
+            text = None
+        if text is None:
+            unreadable.append(rel)
+            continue
+        flat = path.name.startswith("eslint.config.")
+        fit_facts[rel] = _tal_fit_facts(
+            text, _tal_parse_obj_text(text) if _tal_is_obj_config(path.name) else None)
+        read = _tal_read_any(path, text, rel, flat)
+        if read is None:
+            unreadable.append(rel)
+            continue
+        typed, imp_unresolved, base_reads = _tal_follow(
+            path, text, root, _rel, flat, read["extends"])
+        _finish(rel, "flat" if flat else "eslintrc", _tal_merge(read, base_reads),
+                typed, imp_unresolved)
+    for path in manifests:
+        rel = _rel(path)
+        try:
+            text = _read_config_text(path)
+            data = json.loads(text) if text is not None else None
+        except (OSError, ValueError):
+            data = None
+        if not isinstance(data, dict):
+            scripts_unreadable.append(_dir(rel))
+            continue
+        deps = {**(data.get("dependencies") if isinstance(data.get("dependencies"), dict)
+                   else {}),
+                **(data.get("devDependencies") if isinstance(data.get("devDependencies"),
+                                                             dict) else {})}
+        if isinstance(deps.get("eslint"), str):
+            eslint_versions[_dir(rel)] = deps["eslint"]
+        tv = {k: deps[k] for k in _TAL_TOOL_PACKAGES if isinstance(deps.get(k), str)}
+        if tv:
+            tool_versions[_dir(rel)] = tv
+        pp = sorted(k for k in deps if _TAL_PRETTIER_PLUGIN_RE.match(str(k)))
+        prettier_read_dirs.add(_dir(rel))
+        try:
+            present = sorted(n for n in os.listdir(path.parent)
+                             if _TAL_CONFIG_FILE_RE.match(n))
+        except OSError:
+            # A folder that cannot be listed may hold a Prettier config: its
+            # plugins are unknown, never "none".
+            present = []
+            prettier_config_unreadable[_dir(rel)] = [_tal_unlisted_folder(_dir(rel))]
+        if present:
+            config_files[_dir(rel)] = present
+        cfg_plugins, cfg_unread = _tal_prettier_config_plugins(
+            path.parent, _dir(rel), present, data)
+        from_cfg = {n: f for n, f in cfg_plugins.items() if n not in pp}
+        if pp or from_cfg:
+            prettier_plugins[_dir(rel)] = sorted({*pp, *from_cfg})
+        if from_cfg:
+            prettier_plugin_files[_dir(rel)] = from_cfg
+        if cfg_unread:
+            prettier_config_unreadable[_dir(rel)] = sorted(
+                {*prettier_config_unreadable.get(_dir(rel), []), *cfg_unread})
+        sc = data.get("scripts")
+        scripts[_dir(rel)] = ({str(k): str(v) for k, v in sc.items()
+                               if isinstance(v, str)} if isinstance(sc, dict) else {})
+        if isinstance(data.get("eslintConfig"), dict):
+            fit_facts[rel] = _tal_fit_facts(json.dumps(data["eslintConfig"]),
+                                            data["eslintConfig"])
+            _finish(rel, "package.json", _tal_read_obj(data["eslintConfig"], rel),
+                    _TalCustomRules(), [])
+    # Prettier configs in a directory whose package.json was not read (none
+    # there, or one that could not be read): read the same way, keyed by the
+    # config's own directory, so the Prettier fit's upward and downward walks
+    # see them.
+    config_only: dict[str, list[str]] = {}
+    for path in prettier_paths:
+        d = _dir(_rel(path))
+        if d not in prettier_read_dirs:
+            config_only.setdefault(d, []).append(path.name)
+    for d, names in sorted(config_only.items()):
+        cfg_plugins, cfg_unread = _tal_prettier_config_plugins(
+            root / d if d else root, d, sorted(names), {})
+        if cfg_plugins:
+            prettier_plugins[d] = sorted(cfg_plugins)
+            prettier_plugin_files[d] = dict(cfg_plugins)
+        if cfg_unread:
+            prettier_config_unreadable[d] = cfg_unread
+    catalogs, catalogs_unreadable = _tal_pnpm_catalogs_read(root)
+    return _tal_block(
+        configs=sorted(configs, key=lambda c: c["path"]),
+        unreadable=sorted(unreadable),
+        truncated=truncated,
+        package_scripts=scripts,
+        package_scripts_unreadable=sorted(scripts_unreadable),
+        eslint_versions=eslint_versions,
+        tool_versions=tool_versions,
+        config_files=config_files,
+        eslint_config_facts=fit_facts,
+        pnpm_catalogs=catalogs,
+        pnpm_catalogs_unreadable=catalogs_unreadable,
+        prettier_plugins=prettier_plugins,
+        prettier_plugin_files=prettier_plugin_files,
+        prettier_config_unreadable=prettier_config_unreadable,
+    )
 
 
 def _detect_turbo(root: Path, ci_turbo_tasks: set[str] | None = None):
@@ -3438,7 +5205,8 @@ def _build_workflow_call_graph(
 ) -> dict[str, list[str]]:
     """Map each workflow that INVOKES a reusable workflow to the children it
     calls. A reusable workflow is invoked at the JOB level via
-    `uses: ./.github/workflows/X.yml` (not at the step level). A `workflow_call`
+    `uses: ./.github/workflows/X.yml` or the self-repository
+    `uses: $/.github/workflows/X.yml` (not at the step level). A `workflow_call`
     child has no PR/push trigger of its own — it runs whenever its caller does —
     so downstream sizing CAN attribute the child's run frequency and check-runs
     to the caller (else a reusable test suite invoked on every PR looks
@@ -3454,7 +5222,7 @@ def _build_workflow_call_graph(
             uses = job.get("uses")
             if isinstance(uses, str):
                 ref = uses.split("@", 1)[0].strip()
-                if ref.startswith("./"):
+                if _is_local_uses(ref):
                     ref = ref[2:]
                 if ref.startswith(".github/workflows/") and ref.endswith((".yml", ".yaml")):
                     children.append(ref)
@@ -3594,6 +5362,178 @@ def _build_workflow_job_graph(
     return graph
 
 
+# A commit-status call: a `repos/<owner>/<repo>/statuses/<sha>` call (gh api, curl,
+# octokit.request, a Python f-string — the trailing `/` before the sha keeps the
+# `commits/<sha>/statuses` LIST read out), an Octokit / PyGithub / go-github
+# create-status call, or a known status-publishing marketplace action. The HTTP
+# method is NOT checked, so a GET on `repos/.../statuses/<sha>` also counts: an
+# over-match only leaves the required gate unresolved, never claims gating.
+_STATUS_POST_RE = re.compile(
+    r"repos/(?:\$\{\{[^}]*\}\}|[^\s'\"`])*?/statuses/"
+    r"|\bcreate_?(?:commit_?)?status\s*\("
+    r"|\bcreateCommitStatus\b|\bCreateStatus\s*\("
+    r"|\buses:\s*['\"]?(?:Sibz/github-status-action|ouzi-dev/commit-status-updater"
+    r"|myrotvorets/set-commit-status-action|guibranco/github-status-action-v2)@",
+    re.IGNORECASE)
+# A repo-relative script path a workflow runs (`node .github/scripts/agg.mjs`,
+# `python ./ci/status.py`, `require('./.github/scripts/x.js')`).
+_LOCAL_SCRIPT_REF_RE = re.compile(
+    r"(?<![\w./$-])(?:\./)?((?:[\w.-]+/)*[\w.-]+\.(?:js|mjs|cjs|ts|mts|cts|py|sh|bash|rb))\b")
+# A script a composite action runs from its OWN directory
+# (`node ${{ github.action_path }}/scripts/x.mjs`, `"$GITHUB_ACTION_PATH/x.py"`).
+_ACTION_PATH_SCRIPT_REF_RE = re.compile(
+    r"(?:\$\{\{\s*github\.action_path\s*\}\}|\$\{?GITHUB_ACTION_PATH\}?)/"
+    r"((?:[\w.-]+/)*[\w.-]+\.(?:js|mjs|cjs|ts|mts|cts|py|sh|bash|rb))\b")
+# The context a status call POSTS, written as a literal: `context: 'All CI'`,
+# `"context": "All CI"`, `context="All CI"` (a Python kwarg), `-f context='All CI'` /
+# `-f context=CI` (gh api), `-f "context=All CI"`, an unquoted YAML action input
+# (`context: All CI`), or go-github's `Context: github.String("All CI")`.
+_STATUS_CONTEXT_LITERAL_RES = (
+    re.compile(r"\bcontext['\"]?\s*[:=]\s*(['\"`])([^'\"`\n]{1,200})\1", re.IGNORECASE),
+    re.compile(r"['\"]context=([^'\"\n]{1,200})['\"]", re.IGNORECASE),
+    re.compile(r"(?<![\w.'\"])context=([^\s'\"`\\;&|)]{1,200})", re.IGNORECASE),
+    re.compile(r"^[ \t]*context:[ \t]*([^\s'\"`#{\[|>(][^#\n(){}]{0,199}?)[ \t]*$",
+               re.MULTILINE),
+    re.compile(r"\bContext:\s*github\.\w+\(\s*\"([^\"\n]{1,200})\""),
+)
+# A context set from something that is not a literal (`context: ctx`,
+# `context: CONTEXT }`, `context: `CI / ${x}``), or an action whose context input is
+# not called `context` (ouzi-dev/commit-status-updater's `name:`). The posted name
+# can't be read, so the publisher's string literals are kept to match against.
+_STATUS_CONTEXT_DYNAMIC_RE = re.compile(
+    r"\bcontext['\"]?\s*(?::\s*[A-Za-z_][\w.\[\]]*\s*(?:[,})]|$)"
+    r"|=\s*[A-Za-z_][\w.\[\]]*\s*[,})]|[:=]\s*`[^`\n]*\$\{)"
+    r"|ouzi-dev/commit-status-updater@",
+    re.IGNORECASE | re.MULTILINE)
+# String literals (quoted, or a YAML scalar value) a dynamic publisher's sources hold.
+_STRING_LITERAL_RE = re.compile(r"(['\"`])([^'\"`\n\\]{1,200})\1")
+_YAML_SCALAR_RE = re.compile(
+    r"^[ \t]*(?:-[ \t]+)?[\w.-]+:[ \t]+([^\s'\"`#{\[|>&*!][^#\n]{0,199}?)[ \t]*$", re.MULTILINE)
+_STATUS_SOURCE_MAX_CHARS = 256_000
+_MAX_STATUS_SOURCES = 64
+
+
+def _status_contexts(texts: list[str]) -> "tuple[list[str], list[str] | None]":
+    """(the literal contexts the sources post, or the string literals to match when
+    some context is not a literal — else None). Literals carrying `$` are a shell or
+    expression interpolation, not a name, and count as dynamic. No literal at all
+    (`create_status(state, url, desc, ctx)` positionally) also counts as dynamic."""
+    contexts: set[str] = set()
+    dynamic = False
+    for t in texts:
+        for rx in _STATUS_CONTEXT_LITERAL_RES:
+            for m in rx.finditer(t):
+                val = m.group(m.lastindex or 1).strip()
+                if "$" in val:
+                    dynamic = True
+                elif val:
+                    contexts.add(val)
+        if _STATUS_CONTEXT_DYNAMIC_RE.search(t):
+            dynamic = True
+    if contexts and not dynamic:
+        return sorted(contexts), None
+    names: set[str] = set(contexts)
+    total = 0
+    for t in texts:
+        for v in ([m.group(2) for m in _STRING_LITERAL_RE.finditer(t)]
+                  + [m.group(1) for m in _YAML_SCALAR_RE.finditer(t)]):
+            v = v.strip()
+            if not v or "${" in v or v in names:
+                continue
+            total += len(v)
+            if total > _STATUS_SOURCE_MAX_CHARS:
+                break
+            names.add(v)
+    return sorted(contexts), sorted(names)
+
+
+def _local_action_dirs(root: Path, ref: str, text: str) -> list[Path]:
+    """The directories a local action's relative entrypoints resolve against: the
+    action's own directory (a node action's `main:` / `pre:` / `post:` and a
+    composite step's `github.action_path` scripts live there), plus that of every
+    local action its text delegates to. A reusable workflow (`.yml` ref) has none:
+    its `run:` steps start in the workspace, i.e. the repository root."""
+    dirs: list[Path] = []
+    for r in [ref] + _NESTED_LOCAL_USES_RE.findall(text):
+        base = _local_ref_path(root, r.split("@")[0].strip())
+        if base is not None and base.suffix not in (".yml", ".yaml") and base not in dirs:
+            dirs.append(base)
+    return dirs
+
+
+def _build_workflow_status_publishers(
+    root: Path, parsed: list[tuple[str, dict, str]],
+) -> dict[str, dict[str, Any]]:
+    """Workflows that POST commit statuses themselves (issue #119), as
+    `{workflow_file: {"sources": [path, ...], "contexts": [name, ...],
+    "names": [literal, ...]}}` (`names` only when some posted context is not a
+    literal).
+
+    A required check that names no job is not proof of an external gate: an in-repo
+    "aggregate" job can watch the test jobs and post one required status (`All CI`)
+    through the statuses API, with no `needs:` edge to them. collect_runs reads this
+    to tell that case from a real outside gate (a CLA bot or security app). A
+    workflow counts when its own YAML, a local action it uses, or a repo-local
+    script it runs (followed transitively, bounded) posts a status (a local action's
+    own entrypoints, `main:` / `pre:` / `post:` and `github.action_path` scripts,
+    are resolved from the action's directory first). `contexts` are the literal
+    context values those sources post. A name that merely appears in a publisher
+    (its title, a comment, the checks an aggregator waits on) is NOT one: counting
+    it would un-scope a correctly scoped gate. Only when a context is built at run
+    time is `names` kept, the sources' string literals (capped in total), as the
+    looser fallback. Only status-posting workflows are recorded (so the map is
+    empty on most repos), and no raw source text is stored. Which jobs the
+    publisher waits on is NOT traced."""
+    out: dict[str, dict[str, Any]] = {}
+    for rel, doc, raw in parsed:
+        # (label, text, action dirs its entrypoints resolve against, dirs its plain
+        # relative refs resolve against before the root: a script's own folder)
+        sources: list[tuple[str, str, list[Path], list[Path]]] = [(rel, raw, [], [])]
+        for job in _jobs_from_doc(doc).values():
+            if not isinstance(job, dict):
+                continue
+            for s in _steps(job):
+                u = _uses(s).split("@")[0].strip()
+                if _is_local_uses(u):
+                    text = _LOCAL_ACTION_TEXT.get(u)
+                    if text is None:
+                        text = _read_local_action(root, u)
+                    if text:
+                        sources.append((u, text, _local_action_dirs(root, u, text), []))
+        seen = {rel}
+        i = 0
+        # Follow script references transitively (an entry script importing the helper
+        # that posts), bounded so a large tree can't make this unbounded.
+        while i < len(sources) and len(sources) < _MAX_STATUS_SOURCES:
+            _src, text, action_dirs, rel_dirs = sources[i]
+            i += 1
+            cands = [(d, ref) for ref in _ACTION_PATH_SCRIPT_REF_RE.findall(text)
+                     for d in action_dirs]
+            cands += [(d, ref) for ref in _LOCAL_SCRIPT_REF_RE.findall(text)
+                      for d in action_dirs + rel_dirs + [root]]
+            for base, ref in cands:
+                try:
+                    label = os.path.relpath(os.path.normpath(base / ref), root)
+                    path = _local_ref_path(root, "./" + label)
+                    if label in seen or path is None or not path.is_file():
+                        continue
+                    seen.add(label)
+                    sources.append((label.replace(os.sep, "/"),
+                                    path.read_text(encoding="utf-8", errors="replace"),
+                                    [], [path.parent]))
+                except (OSError, ValueError):
+                    continue
+        if not any(_STATUS_POST_RE.search(t) for _s, t, _a, _r in sources):
+            continue
+        contexts, names = _status_contexts([t for _s, t, _a, _r in sources])
+        entry: dict[str, Any] = {"sources": [s for s, _t, _a, _r in sources],
+                                 "contexts": contexts}
+        if names is not None:
+            entry["names"] = names
+        out[rel] = entry
+    return out
+
+
 def _reconcile_opt1_opt2(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """OPT1 (Unnecessary Tool Install — *remove* the `playwright install`) and OPT2
     (Uncached Large Downloads — *cache* the SAME install) both fire on a job that
@@ -3638,15 +5578,11 @@ def _wf_jobs(doc: dict) -> dict[str, dict]:
     return {str(k): v for k, v in jobs.items() if isinstance(v, dict)} if isinstance(jobs, dict) else {}
 
 
-def _job_steps(job: dict) -> list[dict]:
-    return [s for s in (job.get("steps") or []) if isinstance(s, dict)]
-
-
 def _step_uses(step: dict) -> tuple[str, str] | None:
-    """(action, ref) for a remote `uses:`; None for local (./) / docker:// /
-    run steps."""
+    """(action, ref) for a remote `uses:`; None for local (`./`, `$/`) /
+    docker:// / run steps."""
     uses = step.get("uses")
-    if not isinstance(uses, str) or uses.startswith("./") or uses.startswith("docker://"):
+    if not isinstance(uses, str) or _is_local_uses(uses) or uses.startswith("docker://"):
         return None
     action, _, ref = uses.partition("@")
     return (action, ref) if action else None
@@ -3732,7 +5668,14 @@ def scan(root: Path, catalog_path: Path) -> dict[str, Any]:
     # OPT78 (vitest per-file isolation) is not routed here either: it is emitted
     # by a drill-time log leaf in blocking_path.py, gated on this scan's
     # `test_runner_isolation` block.
-    structural_detected = {"OPT70", "OPT71", "OPT72", "OPT73", "OPT75"}
+    # OPT83 (independent steps on a pole) is routed by collect_runs from each
+    # drilled pole's step decomposition plus the workflow YAML. OPT84 (a slow
+    # pole step runs a tool with a native drop-in) is routed the same way, from
+    # the pole's step decomposition plus the workflow YAML and package scripts.
+    # OPT85 (tests run in many processes) and OPT87 (tests wait on a slow
+    # dependency they do not verify) are catalogued with no router yet, like OPT74.
+    structural_detected = {"OPT70", "OPT71", "OPT72", "OPT73", "OPT75", "OPT83",
+                           "OPT84"}
     structural_without_detector = sorted(
         c.pattern for c in catalog
         if c.finding_class == "structural" and c.pattern not in structural_detected)
@@ -3759,6 +5702,26 @@ def scan(root: Path, catalog_path: Path) -> dict[str, Any]:
             scan_incomplete.append({"path": rel, "reason": "top-level is not a mapping"})
             continue
         parsed.append((rel, doc, raw))
+
+    # What the step walker read inside GitHub Actions `parallel:` groups, and
+    # the control steps it skipped. A malformed group (`MALFORMED_KINDS`: not a
+    # list, contains itself, nested too deep, too many steps to read, or holding
+    # an item that is not a step) could not be read, so its file is a coverage
+    # gap, never clean, with the kind named. An INVALID group (`parallel:`
+    # beside `run:`/`uses:` on one step, which GitHub rejects) WAS read, so it is
+    # not a gap: the stamp names it and the Data sources row renders it.
+    parallel_stats = parallel_steps_stats((rel, doc) for rel, doc, _raw in parsed)
+    # (file, job key) → its scan_incomplete record, so a finding held back for
+    # that job (see _ABSENCE_STEP_PATTERNS) is named on the job's own record.
+    unreadable_jobs: dict[tuple[str, str], dict[str, Any]] = {}
+    for mj in parallel_stats["malformed_jobs"]:
+        kinds = "; ".join(MALFORMED_KINDS.get(k, k) for k in mj.get("reasons") or [])
+        rec = {
+            "path": mj["path"],
+            "reason": (f"job `{mj['job']}`: {mj['count']} `parallel:` group(s) not "
+                       f"read ({kinds}), so the steps inside were not read")}
+        scan_incomplete.append(rec)
+        unreadable_jobs[(mj["path"], mj["job"])] = rec
 
     findings: list[dict[str, Any]] = []
     finding_idx = 0
@@ -3808,6 +5771,8 @@ def scan(root: Path, catalog_path: Path) -> dict[str, Any]:
                     hits = list(_declarative_hits(entry, doc, raw))
             else:
                 continue
+            if unreadable_jobs and entry.pattern in _ABSENCE_STEP_PATTERNS:
+                hits = _hold_back_unreadable(entry.pattern, hits, rel, unreadable_jobs)
             for hit in hits:
                 finding_idx += 1
                 f = _emit(entry, hit, rel, finding_idx)
@@ -3856,7 +5821,22 @@ def scan(root: Path, catalog_path: Path) -> dict[str, Any]:
     # install seconds / runner-minutes are credited once, not double-counted.
     findings = _reconcile_opt1_opt2(findings)
 
+    # Candidates a detector could not read because of the syntax, with the
+    # reason (stamped with the rest of `parallel_steps`, only when used).
+    held_back = [{"pattern": "OPT12", "path": rel, "job": job,
+                  "reason": "first_step_inside_a_parallel_group"}
+                 for rel, doc, _raw in parsed for job in _opt12_first_step_in_a_group(doc)]
+    if held_back:
+        parallel_stats["held_back"] = held_back
+    extra: dict[str, Any] = {}
+    if parallel_steps_used(parallel_stats):
+        # Stamped only when the syntax is used, so every other findings
+        # document is byte-identical to before. Rendered as the "Parallel steps"
+        # row of the report's Data sources table.
+        extra["parallel_steps"] = parallel_stats
+
     return {
+        **extra,
         "findings": findings,
         "scanned_workflows": len(files),
         "scan_incomplete": scan_incomplete,
@@ -3878,16 +5858,31 @@ def scan(root: Path, catalog_path: Path) -> dict[str, Any]:
         # collect_runs to scope the critical-path pole to merge-blocking (required-
         # reachable) work. Repo-agnostic; harmless if unconsumed.
         "workflow_job_graph": _build_workflow_job_graph(parsed),
+        # Workflows that post commit statuses themselves (an in-repo aggregate
+        # status), so collect_runs never mistakes such a required context for an
+        # external gate just because it names no job (issue #119).
+        "workflow_status_publishers": _build_workflow_status_publishers(root, parsed),
+        # Each workflow's own top-level `name:` (absent when it declares none).
+        # A required check context `<workflow> / <job>` names THIS workflow's
+        # job only when the prefix is this name (or, unnamed, its file path).
+        "workflow_names": {rel: " ".join(doc["name"].split()) for rel, doc, _raw in parsed
+                           if isinstance(doc, dict) and isinstance(doc.get("name"), str)
+                           and doc["name"].strip()},
         # What the repo's vitest config says about per-file isolation. NOT a
         # finding — the corroborating config fact the drill-time OPT78 leaf
         # (`blocking_path`'s `vitest-isolate-pool`) must read before it can
         # claim the repo is still paying for per-file isolation.
         "test_runner_isolation": _read_test_runner_isolation(root),
+        # What the repo's ESLint config(s) say about TYPE-AWARE parsing and
+        # which type-aware rules are on, plus the package scripts a workflow's
+        # `npm run lint` resolves through. NOT a finding — the config fact the
+        # data-pass OPT82 detector joins to a slow lint job.
+        "type_aware_lint": _read_type_aware_lint(root),
         "catalog_patterns_total": len(catalog),
         "catalog_patterns_with_detector": len(static_entries) - len(unmatched_patterns),
         "catalog_patterns_without_detector": sorted(unmatched_patterns),
         # Structural catalog entries with no critical-path router (currently
-        # OPT74, and OPT78, which a drill-time log leaf routes instead). Reported so a catalogued-but-undetected structural pattern is
+        # OPT74, OPT85, OPT87, and OPT78, which a drill-time log leaf routes instead). Reported so a catalogued-but-undetected structural pattern is
         # honest about its coverage instead of silently never appearing.
         "catalog_structural_patterns_without_detector": structural_without_detector,
     }
@@ -3903,14 +5898,15 @@ def main(argv: list[str] | None = None) -> int:
                    help="Path to the target repo's root (contains .github/workflows/).")
     p.add_argument("--out", type=Path, default=None)
     p.add_argument("--catalog", type=Path, default=None,
-                   help="Path to optimization-patterns.md (default: bundled).")
+                   help="Catalog: the references/patterns/ directory or the compiled "
+                        "optimization-patterns.md (default: bundled references/patterns/).")
     p.add_argument("--skill-commit-sha", default=None)
     p.add_argument("--commit-sha", default=None)
     p.add_argument("--repo", default=None)
     args = p.parse_args(argv)
 
     catalog = args.catalog or (Path(__file__).resolve().parents[1]
-                               / "references" / "optimization-patterns.md")
+                               / "references" / "patterns")
     t0 = time.time()
     try:
         result = scan(args.root, catalog)
@@ -3938,4 +5934,6 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    from log_level import configure_logging  # STARSLING_LOG_LEVEL opt-in
+    configure_logging()
     sys.exit(main())

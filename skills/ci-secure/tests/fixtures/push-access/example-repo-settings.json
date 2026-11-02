@@ -1,0 +1,82 @@
+{
+  "_note": "Synthetic. An invented public repository, read with a non-member token, built to reach every verdict path: 12 environments (unrestricted ones with and without admin bypass, three with reviewers that allow self-review, one custom `ship-*` policy matching an existing unprotected branch, GitHub-managed `github-pages` and `copilot`), rulesets served without bypass lists, unreadable secret lists. Keys are the exact endpoint paths the engine requests; values are gh's stdout, or its stderr on failure.",
+  "repo": "example-org/example-repo",
+  "responses": {
+    "graphql": {
+      "status": "ok",
+      "stdout": "{\"data\": {\"repository\": {\"viewerPermission\": \"READ\", \"branchProtectionRules\": {\"totalCount\": 0, \"nodes\": []}}}}"
+    },
+    "repos/example-org/example-repo": {
+      "status": "ok",
+      "stdout": "{\"full_name\": \"example-org/example-repo\", \"default_branch\": \"trunk\", \"private\": false, \"visibility\": \"public\", \"permissions\": {\"admin\": false, \"maintain\": false, \"push\": false, \"triage\": false, \"pull\": true}}"
+    },
+    "repos/example-org/example-repo/actions/organization-secrets?per_page=100": {
+      "status": "error",
+      "stderr": "gh: You must have repository read permissions or have the repository secrets fine-grained permission. (HTTP 403)"
+    },
+    "repos/example-org/example-repo/actions/secrets?per_page=100": {
+      "status": "error",
+      "stderr": "gh: You must have repository read permissions or have the repository secrets fine-grained permission. (HTTP 403)"
+    },
+    "repos/example-org/example-repo/branches/trunk": {
+      "status": "ok",
+      "stdout": "{\"name\": \"trunk\", \"protected\": true, \"protection\": {\"enabled\": true}}"
+    },
+    "repos/example-org/example-repo/branches?protected=true&per_page=100": {
+      "status": "ok",
+      "stdout": "[{\"name\": \"trunk\", \"protected\": true}, {\"name\": \"lts/3\", \"protected\": true}, {\"name\": \"lts/4\", \"protected\": true}, {\"name\": \"ship-android\", \"protected\": true}]"
+    },
+    "repos/example-org/example-repo/environments/copilot/secrets?per_page=100": {
+      "status": "error",
+      "stderr": "gh: Must have admin rights to Repository. (HTTP 403)"
+    },
+    "repos/example-org/example-repo/environments/github-pages/deployment-branch-policies?per_page=100": {
+      "status": "ok",
+      "stdout": "{\"total_count\": 1, \"branch_policies\": [{\"id\": 7, \"name\": \"trunk\", \"type\": \"branch\"}]}"
+    },
+    "repos/example-org/example-repo/environments/github-pages/secrets?per_page=100": {
+      "status": "error",
+      "stderr": "gh: Must have admin rights to Repository. (HTTP 403)"
+    },
+    "repos/example-org/example-repo/environments/mobile-beta/deployment-branch-policies?per_page=100": {
+      "status": "ok",
+      "stdout": "{\"total_count\": 2, \"branch_policies\": [{\"id\": 8, \"name\": \"ship-*\", \"type\": \"branch\"}, {\"id\": 9, \"name\": \"trunk\", \"type\": \"branch\"}]}"
+    },
+    "repos/example-org/example-repo/environments?per_page=100": {
+      "status": "ok",
+      "stdout": "{\"total_count\": 12, \"environments\": [{\"name\": \"nightly\", \"can_admins_bypass\": false, \"protection_rules\": [], \"deployment_branch_policy\": null}, {\"name\": \"github-pages\", \"can_admins_bypass\": false, \"protection_rules\": [{\"id\": 41, \"type\": \"branch_policy\"}], \"deployment_branch_policy\": {\"protected_branches\": false, \"custom_branch_policies\": true}}, {\"name\": \"qa-east\", \"can_admins_bypass\": true, \"protection_rules\": [], \"deployment_branch_policy\": null}, {\"name\": \"artifact-signing\", \"can_admins_bypass\": true, \"protection_rules\": [{\"id\": 42, \"type\": \"branch_policy\"}, {\"id\": 43, \"type\": \"required_reviewers\", \"prevent_self_review\": false, \"reviewers\": [{\"type\": \"User\", \"reviewer\": {\"login\": \"approver-a\"}}, {\"type\": \"User\", \"reviewer\": {\"login\": \"approver-b\"}}, {\"type\": \"User\", \"reviewer\": {\"login\": \"approver-c\"}}]}], \"deployment_branch_policy\": {\"protected_branches\": true, \"custom_branch_policies\": false}}, {\"name\": \"demo\", \"can_admins_bypass\": false, \"protection_rules\": [], \"deployment_branch_policy\": null}, {\"name\": \"copilot\", \"can_admins_bypass\": true, \"protection_rules\": [], \"deployment_branch_policy\": null}, {\"name\": \"mobile-beta\", \"can_admins_bypass\": true, \"protection_rules\": [{\"id\": 44, \"type\": \"branch_policy\"}], \"deployment_branch_policy\": {\"protected_branches\": false, \"custom_branch_policies\": true}}, {\"name\": \"load-test\", \"can_admins_bypass\": false, \"protection_rules\": [], \"deployment_branch_policy\": null}, {\"name\": \"release-train\", \"can_admins_bypass\": false, \"protection_rules\": [{\"id\": 45, \"type\": \"required_reviewers\", \"prevent_self_review\": false, \"reviewers\": [{\"type\": \"User\", \"reviewer\": {\"login\": \"approver-a\"}}, {\"type\": \"User\", \"reviewer\": {\"login\": \"approver-b\"}}, {\"type\": \"User\", \"reviewer\": {\"login\": \"approver-c\"}}, {\"type\": \"User\", \"reviewer\": {\"login\": \"approver-d\"}}]}], \"deployment_branch_policy\": null}, {\"name\": \"sandbox\", \"can_admins_bypass\": true, \"protection_rules\": [], \"deployment_branch_policy\": null}, {\"name\": \"canary\", \"can_admins_bypass\": true, \"protection_rules\": [{\"id\": 46, \"type\": \"branch_policy\"}, {\"id\": 47, \"type\": \"required_reviewers\", \"prevent_self_review\": false, \"reviewers\": [{\"type\": \"User\", \"reviewer\": {\"login\": \"approver-a\"}}, {\"type\": \"User\", \"reviewer\": {\"login\": \"approver-b\"}}, {\"type\": \"User\", \"reviewer\": {\"login\": \"approver-c\"}}, {\"type\": \"User\", \"reviewer\": {\"login\": \"approver-d\"}}, {\"type\": \"User\", \"reviewer\": {\"login\": \"approver-e\"}}, {\"type\": \"User\", \"reviewer\": {\"login\": \"approver-f\"}}]}], \"deployment_branch_policy\": {\"protected_branches\": false, \"custom_branch_policies\": true}}, {\"name\": \"qa-west\", \"can_admins_bypass\": false, \"protection_rules\": [], \"deployment_branch_policy\": null}]}"
+    },
+    "repos/example-org/example-repo/git/matching-refs/heads/ship-": {
+      "status": "ok",
+      "stdout": "[{\"ref\": \"refs/heads/ship-/tablet\"}, {\"ref\": \"refs/heads/ship-android\"}, {\"ref\": \"refs/heads/ship-ios\"}]"
+    },
+    "repos/example-org/example-repo/rulesets/311?includes_parents=true": {
+      "status": "ok",
+      "stdout": "{\"id\": 311, \"name\": \"trunk-review\", \"target\": \"branch\", \"enforcement\": \"active\", \"source_type\": \"Repository\", \"source\": \"example-org/example-repo\", \"current_user_can_bypass\": \"never\", \"conditions\": {\"ref_name\": {\"include\": [\"~DEFAULT_BRANCH\"], \"exclude\": []}}, \"rules\": [{\"type\": \"pull_request\", \"parameters\": {\"required_approving_review_count\": 2, \"dismiss_stale_reviews_on_push\": true}}, {\"type\": \"non_fast_forward\"}]}"
+    },
+    "repos/example-org/example-repo/rulesets/318?includes_parents=true": {
+      "status": "ok",
+      "stdout": "{\"id\": 318, \"name\": \"legacy-trunk-checks\", \"target\": \"branch\", \"enforcement\": \"disabled\", \"source_type\": \"Repository\", \"source\": \"example-org/example-repo\", \"current_user_can_bypass\": \"never\", \"conditions\": {\"ref_name\": {\"include\": [\"refs/heads/trunk\"], \"exclude\": []}}, \"rules\": [{\"type\": \"required_status_checks\"}]}"
+    },
+    "repos/example-org/example-repo/rulesets/322?includes_parents=true": {
+      "status": "ok",
+      "stdout": "{\"id\": 322, \"name\": \"version-tags\", \"target\": \"tag\", \"enforcement\": \"active\", \"source_type\": \"Repository\", \"source\": \"example-org/example-repo\", \"current_user_can_bypass\": \"never\", \"conditions\": {\"ref_name\": {\"include\": [\"refs/tags/v*\"], \"exclude\": [\"refs/tags/v0*\"]}}, \"rules\": [{\"type\": \"creation\"}, {\"type\": \"deletion\"}]}"
+    },
+    "repos/example-org/example-repo/rulesets/327?includes_parents=true": {
+      "status": "ok",
+      "stdout": "{\"id\": 327, \"name\": \"hotfix-lane\", \"target\": \"branch\", \"enforcement\": \"active\", \"source_type\": \"Repository\", \"source\": \"example-org/example-repo\", \"current_user_can_bypass\": \"never\", \"conditions\": {\"ref_name\": {\"include\": [\"refs/heads/hotfix/**/*\"], \"exclude\": []}}, \"rules\": [{\"type\": \"update\"}, {\"type\": \"non_fast_forward\"}]}"
+    },
+    "repos/example-org/example-repo/rulesets/340?includes_parents=true": {
+      "status": "ok",
+      "stdout": "{\"id\": 340, \"name\": \"archived-tag-freeze\", \"target\": \"tag\", \"enforcement\": \"active\", \"source_type\": \"Repository\", \"source\": \"example-org/example-repo\", \"current_user_can_bypass\": \"never\", \"conditions\": {\"ref_name\": {\"include\": [\"~ALL\"], \"exclude\": [\"refs/tags/nightly-*\"]}}, \"rules\": [{\"type\": \"update\"}, {\"type\": \"deletion\"}]}"
+    },
+    "repos/example-org/example-repo/rulesets/352?includes_parents=true": {
+      "status": "ok",
+      "stdout": "{\"id\": 352, \"name\": \"trunk-history\", \"target\": \"branch\", \"enforcement\": \"active\", \"source_type\": \"Repository\", \"source\": \"example-org/example-repo\", \"current_user_can_bypass\": \"never\", \"conditions\": {\"ref_name\": {\"include\": [\"refs/heads/trunk\"], \"exclude\": []}}, \"rules\": [{\"type\": \"deletion\"}, {\"type\": \"creation\"}]}"
+    },
+    "repos/example-org/example-repo/rulesets?includes_parents=true&per_page=100": {
+      "status": "ok",
+      "stdout": "[{\"id\": 311, \"name\": \"trunk-review\", \"target\": \"branch\", \"enforcement\": \"active\", \"source_type\": \"Repository\"}, {\"id\": 318, \"name\": \"legacy-trunk-checks\", \"target\": \"branch\", \"enforcement\": \"disabled\", \"source_type\": \"Repository\"}, {\"id\": 322, \"name\": \"version-tags\", \"target\": \"tag\", \"enforcement\": \"active\", \"source_type\": \"Repository\"}, {\"id\": 327, \"name\": \"hotfix-lane\", \"target\": \"branch\", \"enforcement\": \"active\", \"source_type\": \"Repository\"}, {\"id\": 340, \"name\": \"archived-tag-freeze\", \"target\": \"tag\", \"enforcement\": \"active\", \"source_type\": \"Repository\"}, {\"id\": 352, \"name\": \"trunk-history\", \"target\": \"branch\", \"enforcement\": \"active\", \"source_type\": \"Repository\"}]"
+    }
+  }
+}

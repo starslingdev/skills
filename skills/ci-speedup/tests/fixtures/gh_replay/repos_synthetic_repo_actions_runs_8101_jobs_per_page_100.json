@@ -1,0 +1,170 @@
+{
+ "total_count": 3,
+ "jobs": [
+  {
+   "id": 81011,
+   "run_id": 8101,
+   "name": "alpha",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-06-27T01:00:00Z",
+   "completed_at": "2026-06-27T01:01:50Z",
+   "labels": [
+    "ubuntu-latest"
+   ],
+   "html_url": "https://github.com/synthetic/repo/actions/runs/8101/job/81011",
+   "steps": [
+    {
+     "name": "Set up job",
+     "number": 1,
+     "started_at": "2026-06-27T01:00:00Z",
+     "completed_at": "2026-06-27T01:00:02Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/checkout@v4",
+     "number": 2,
+     "started_at": "2026-06-27T01:00:02Z",
+     "completed_at": "2026-06-27T01:00:20Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/setup-node@v4",
+     "number": 3,
+     "started_at": "2026-06-27T01:00:20Z",
+     "completed_at": "2026-06-27T01:00:40Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run npm ci",
+     "number": 4,
+     "started_at": "2026-06-27T01:00:40Z",
+     "completed_at": "2026-06-27T01:01:40Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run npm run alpha",
+     "number": 5,
+     "started_at": "2026-06-27T01:01:40Z",
+     "completed_at": "2026-06-27T01:01:50Z",
+     "status": "completed",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 81012,
+   "run_id": 8101,
+   "name": "beta",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-06-27T01:00:00Z",
+   "completed_at": "2026-06-27T01:01:50Z",
+   "labels": [
+    "ubuntu-latest"
+   ],
+   "html_url": "https://github.com/synthetic/repo/actions/runs/8101/job/81012",
+   "steps": [
+    {
+     "name": "Set up job",
+     "number": 1,
+     "started_at": "2026-06-27T01:00:00Z",
+     "completed_at": "2026-06-27T01:00:02Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/checkout@v4",
+     "number": 2,
+     "started_at": "2026-06-27T01:00:02Z",
+     "completed_at": "2026-06-27T01:00:20Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/setup-node@v4",
+     "number": 3,
+     "started_at": "2026-06-27T01:00:20Z",
+     "completed_at": "2026-06-27T01:00:40Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run npm ci",
+     "number": 4,
+     "started_at": "2026-06-27T01:00:40Z",
+     "completed_at": "2026-06-27T01:01:40Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run npm run beta",
+     "number": 5,
+     "started_at": "2026-06-27T01:01:40Z",
+     "completed_at": "2026-06-27T01:01:50Z",
+     "status": "completed",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 81013,
+   "run_id": 8101,
+   "name": "gamma",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-06-27T01:00:00Z",
+   "completed_at": "2026-06-27T01:01:50Z",
+   "labels": [
+    "ubuntu-latest"
+   ],
+   "html_url": "https://github.com/synthetic/repo/actions/runs/8101/job/81013",
+   "steps": [
+    {
+     "name": "Set up job",
+     "number": 1,
+     "started_at": "2026-06-27T01:00:00Z",
+     "completed_at": "2026-06-27T01:00:02Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/checkout@v4",
+     "number": 2,
+     "started_at": "2026-06-27T01:00:02Z",
+     "completed_at": "2026-06-27T01:00:12Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run actions/setup-node@v4",
+     "number": 3,
+     "started_at": "2026-06-27T01:00:12Z",
+     "completed_at": "2026-06-27T01:00:24Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run npm ci",
+     "number": 4,
+     "started_at": "2026-06-27T01:00:24Z",
+     "completed_at": "2026-06-27T01:01:00Z",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Run npm run gamma",
+     "number": 5,
+     "started_at": "2026-06-27T01:01:00Z",
+     "completed_at": "2026-06-27T01:01:50Z",
+     "status": "completed",
+     "conclusion": "success"
+    }
+   ]
+  }
+ ]
+}

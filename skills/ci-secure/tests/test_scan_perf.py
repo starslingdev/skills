@@ -104,7 +104,7 @@ def test_scan_json_emits_timings(tmp_path) -> None:
         pytest.skip("PyYAML not installed in the test runner")
     result = subprocess.run(
         [sys.executable, str(_SKILL_DIR / "scripts" / "scan.py"),
-         "--root", str(_SKILL_DIR / "evals" / "files" / "many-findings")],
+         "--root", str(_SKILL_DIR / "evals" / "fixtures" / "many-findings")],
         capture_output=True, text=True, check=True, timeout=60,
     )
     timings = json.loads(result.stdout).get("timings")

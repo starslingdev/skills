@@ -1,0 +1,287 @@
+{
+ "_provenance": "curl/curl ci-speedup findings.json before the skipped-step fix: finding f148 (OPT73) and its workflow timing, trimmed. The test-linter step was skipped and its year-1 started_at was read as a duration.",
+ "findings": [
+  {
+   "id": "f148",
+   "pattern": "OPT73",
+   "pattern_class": "structural",
+   "severity": "HIGH",
+   "title": "Shared step recurs across the cluster — fix once, lower the floor",
+   "workflow_file": ".github/workflows/linux.yml",
+   "line": 0,
+   "affected_jobs": [
+    "CM clang-tidy",
+    "CM openssl libssh2 sync-resolver valgrind 2 +analyzer",
+    "CM rustls valgrind 1",
+    "CM rustls valgrind 2",
+    "AM curl_global_init_mem debug valgrind 1",
+    "AM curl_global_init_mem debug valgrind 2",
+    "CM openssl -O3 libssh valgrind 1",
+    "CM openssl libssh2 sync-resolver valgrind 1",
+    "AM wolfssl-opensslextra valgrind 1",
+    "CM openssl -O3 libssh valgrind 2",
+    "AM wolfssl-opensslextra valgrind 2",
+    "CM mbedtls gss valgrind 2",
+    "CM mbedtls gss valgrind 1",
+    "CM libressl krb5 valgrind 1",
+    "CM libressl krb5 valgrind 2",
+    "CM openssl torture 2"
+   ],
+   "workflow_activity": {
+    "runs_30d": 1519,
+    "last_run": "2026-10-10T00:29:00Z",
+    "dormant": false
+   },
+   "evidence": "the `test-linter` step is 33% of the slowest cluster job `CM clang-tidy` (191781501311s) and recurs across 16 concurrent jobs of `.github/workflows/linux.yml` (~63927165541–63927167070s per job) — a cluster-floor lever",
+   "measured_signal": "the `test-linter` step is 33% of the slowest cluster job `CM clang-tidy` (191781501311s) and recurs across 16 concurrent jobs of `.github/workflows/linux.yml` (~63927165541–63927167070s per job) — a cluster-floor lever",
+   "fix_strategy": "shared-substep-floor",
+   "fix_recipe_anchor": "opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever",
+   "wall_clock_p50_s": 0.0,
+   "runner_min_saving": 145186.1,
+   "tier": 2,
+   "realization": "none",
+   "size_note": "cluster-floor lever — saving credited across all 16 jobs running the shared `test` step (~25,894,763,851,090 runner-min/mo); population-weighted measured floor — the merge gate is bimodal, so the critical path differs by PR; this check is the pole on ~0/20 PR populations (sampled PRs that ran a gated check), giving an expected Δ 0s of the 63927165531s raw saving; clamped to the affected jobs' MEASURED monthly billable compute (145186 min/mo from the cost spine) — a fix cannot save more minutes than the jobs consume",
+   "structural": true,
+   "risk": "LOW",
+   "guardrail": "make each parallel copy cheap (shared warm cache / prebuilt base image) — do NOT consolidate into one upstream job the others needs: (that adds a serial gate, OPT14/wall-clock-negative); verify the cache key captures the step's real inputs so a hit never serves stale artifacts",
+   "rollout": "ship the shared cache, measure the cluster FLOOR (second-tallest job p50) before/after across 5 PRs — the win shows only when the whole cluster comes down",
+   "failure_mode": "low — caching a shared setup step changes no test/build semantics; escalates only if the shared step is a build whose cache could serve stale outputs",
+   "measured_evidence": {
+    "summary": "The **`test-linter`** (`test`) step is the root-cause cost in 16 concurrent critical-path jobs of `.github/workflows/linux.yml` — **33% of the slowest job** (`CM clang-tidy`, 191781501311s). The SAME step runs in each, so optimizing it once lowers all of them at the same time (shared floor ~63927165541s, the cheapest job's cost).",
+    "table": {
+     "headers": [
+      "Cluster job",
+      "Job p50",
+      "`test-linter` p50",
+      "Share of job"
+     ],
+     "rows": [
+      [
+       "`CM clang-tidy`",
+       "191781501311s",
+       "63927167070s",
+       "33%"
+      ],
+      [
+       "`CM openssl libssh2 sync-resolver valgrind 2 +analyzer`",
+       "191781497120s",
+       "63927165598s",
+       "33%"
+      ],
+      [
+       "`CM rustls valgrind 1`",
+       "191781497106s",
+       "63927165562s",
+       "33%"
+      ],
+      [
+       "`CM rustls valgrind 2`",
+       "191781497048s",
+       "63927165549s",
+       "33%"
+      ],
+      [
+       "`AM curl_global_init_mem debug valgrind 1`",
+       "191781497042s",
+       "63927165586s",
+       "33%"
+      ],
+      [
+       "`AM curl_global_init_mem debug valgrind 2`",
+       "191781497032s",
+       "63927165590s",
+       "33%"
+      ],
+      [
+       "`CM openssl -O3 libssh valgrind 1`",
+       "191781497007s",
+       "63927165573s",
+       "33%"
+      ],
+      [
+       "`CM openssl libssh2 sync-resolver valgrind 1`",
+       "191781497000s",
+       "63927165551s",
+       "33%"
+      ],
+      [
+       "`AM wolfssl-opensslextra valgrind 1`",
+       "191781496963s",
+       "63927165568s",
+       "33%"
+      ],
+      [
+       "`CM openssl -O3 libssh valgrind 2`",
+       "191781496960s",
+       "63927165567s",
+       "33%"
+      ],
+      [
+       "`AM wolfssl-opensslextra valgrind 2`",
+       "191781496919s",
+       "63927165554s",
+       "33%"
+      ],
+      [
+       "`CM mbedtls gss valgrind 2`",
+       "191781496913s",
+       "63927165545s",
+       "33%"
+      ],
+      [
+       "`CM mbedtls gss valgrind 1`",
+       "191781496912s",
+       "63927165545s",
+       "33%"
+      ],
+      [
+       "`CM libressl krb5 valgrind 1`",
+       "191781496911s",
+       "63927165544s",
+       "33%"
+      ],
+      [
+       "`CM libressl krb5 valgrind 2`",
+       "191781496900s",
+       "63927165542s",
+       "33%"
+      ],
+      [
+       "`CM openssl torture 2`",
+       "191781496891s",
+       "63927165541s",
+       "33%"
+      ]
+     ]
+    },
+    "note": "Cluster-floor lever: shaving any one pole stops at the floor, but the same step shared across concurrent jobs lowers all of them together. Credit spans every job that runs it.",
+    "waterfall": {
+     "job": "CM clang-tidy",
+     "job_p50_s": 191781501311.0,
+     "shared_step": "test-linter",
+     "steps": [
+      {
+       "step": "test-linter",
+       "category": "test",
+       "p50_s": 63927167070.0,
+       "shared": true
+      },
+      {
+       "step": "single-use function check",
+       "category": "other",
+       "p50_s": 63927166981.0,
+       "shared": false
+      },
+      {
+       "step": "randcurl",
+       "category": "other",
+       "p50_s": 63927166981.0,
+       "shared": false
+      },
+      {
+       "step": "build",
+       "category": "build",
+       "p50_s": 123.0,
+       "shared": false
+      },
+      {
+       "step": "build tests",
+       "category": "test",
+       "p50_s": 93.0,
+       "shared": false
+      },
+      {
+       "step": "install prereqs",
+       "category": "install",
+       "p50_s": 27.0,
+       "shared": false
+      },
+      {
+       "step": "configure",
+       "category": "setup",
+       "p50_s": 17.0,
+       "shared": false
+      },
+      {
+       "step": "build examples",
+       "category": "build",
+       "p50_s": 6.0,
+       "shared": false
+      }
+     ]
+    }
+   },
+   "cluster_floor_lever": true,
+   "cluster_legs_concurrent": true,
+   "wall_clock_uncapped_p50_s": 63927165531.0,
+   "wall_clock_derivation": [
+    {
+     "bound": "measured-critical-path",
+     "from_s": 63927165531.0,
+     "to_s": 0.0,
+     "reason": "population-weighted measured floor — the merge gate is bimodal, so the critical path differs by PR; this check is the pole on ~0/20 PR populations (sampled PRs that ran a gated check), giving an expected Δ 0s of the 63927165531s raw saving"
+    }
+   ],
+   "workflow_run_share": 0.972,
+   "workflow_runs_30d": 1519,
+   "pr_critical_path_s": 538.0,
+   "pr_critical_path_check": "mingw, CM ucrt-x86_64 schannel U torture 1",
+   "runner_min_basis": "measured_spine_clamped"
+  }
+ ],
+ "per_workflow_timing": {
+  ".github/workflows/linux.yml": {
+   "job_p50": {
+    "CM boringssl": 136.0,
+    "AM mbedtls clang": 217.0,
+    "AM libressl clang": 121.0,
+    "AM wolfssl-all": 108.0,
+    "CM mbedtls-prev": 173.0,
+    "CM mbedtls-pkg MultiSSL !pc": 37.0,
+    "CM openssl libssh2 sync-resolver valgrind 2 +analyzer": 365.0,
+    "AM wolfssl-opensslextra valgrind 1": 277.0,
+    "CM mbedtls gss valgrind 2": 293.0,
+    "CM rustls valgrind 2": 414.0,
+    "CM openssl clang krb5 LTO": 114.0,
+    "AM awslc": 257.0,
+    "AM openssl arm C89": 167.0,
+    "AM rustls": 129.0,
+    "AM curl_global_init_mem debug valgrind 2": 301.0,
+    "CM awslc": 128.0,
+    "CM libressl krb5 valgrind 2": 285.0,
+    "CM mbedtls gss valgrind 1": 284.0,
+    "CM rustls valgrind 1": 429.0,
+    "CM openssl -O3 libssh valgrind 1": 341.0,
+    "CM openssl -O3 libssh valgrind 2": 312.0,
+    "CM thread-sanitizer": 248.0,
+    "AM curl_global_init_mem debug valgrind 1": 324.0,
+    "CM openssl libssh2 sync-resolver valgrind 1": 357.0,
+    "AM Slackware GnuTLS gssapi gcc": 199.0,
+    "AM wolfssl-opensslextra valgrind 2": 274.0,
+    "CM address-sanitizer H3 c-ares": 247.0,
+    "AM openssl clang krb5 openldap static": 136.0,
+    "AM libressl krb5": 166.0,
+    "AM openssl default": 198.0,
+    "CM address-sanitizer": 235.0,
+    "CM libressl krb5 valgrind 1": 294.0,
+    "AM duphandle": 103.0,
+    "CM libressl Fil-C": 231.0,
+    "CM openssl torture 2": 277.0,
+    "AM openssl https-only": 102.0,
+    "AM Alpine MUSL https-rr c-ares": 154.0,
+    "AM openssl i686": 149.0,
+    "CM clang-tidy H3 c-ares !examples": 238.0,
+    "AM !ssl !http !smtp !imap": 92.0,
+    "AM event-based": 125.0,
+    "AM openssl intel C89": 203.0,
+    "CM clang-tidy": 277.0,
+    "AM IntelC openssl": 240.0,
+    "AM memory-sanitizer": 169.0,
+    "CM openssl torture 1": 239.0,
+    "AM openssl !ipv6 !--libcurl !--digest-auth": 125.0,
+    "AM Alpine MUSL https-rr": 158.0
+   },
+   "job_bimodal": {}
+  }
+ }
+}

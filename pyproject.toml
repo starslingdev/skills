@@ -8,6 +8,8 @@ dependencies = []
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
+    # CI distributes the complete suite across four worker processes.
+    "pytest-xdist>=3.5,<4",
     # The suite HARD-requires PyYAML: several ci-score tests exec
     # `skills/ci-score/scripts/collect_config.py` by file path at module scope, and
     # that script `sys.exit(1)`s when yaml is missing — a SystemExit during pytest's
@@ -32,5 +34,5 @@ build-backend = "setuptools.build_meta"
 py-modules = []
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "skills/ci-speedup/tests", "maintainers/ci-speedup/tests", "skills/ci-score/tests", "skills/ci-secure/tests", "skills/sling/tests", "maintainers/ci-secure/tests", "maintainers/skills-registry-security/tests"]
+testpaths = ["tests", "skills/ci-speedup/tests", "maintainers/ci-speedup/tests", "skills/ci-score/tests", "skills/ci-secure/tests", "skills/sling/tests", "maintainers/skills-registry-security/tests", "maintainers/tests"]
 pythonpath = [".", "skills/ci-speedup/scripts", "maintainers/ci-speedup/scripts", "skills/ci-score/scripts", "skills/ci-secure/scripts", "maintainers/skills-registry-security/scripts"]

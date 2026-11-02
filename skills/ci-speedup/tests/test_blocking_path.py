@@ -2870,13 +2870,24 @@ def test_withheld_setup_and_checkout_candidates_reach_the_data_sources_table():
     r77 = _withheld_row(foot, "repeated-setup: held back")
     r80 = _withheld_row(foot, "checkout stall: held back")
     assert r77 and r80, foot
+    # More than one gate contributed on each row, so the commonest gate's
+    # reason is hedged rather than asserted of every group the row names.
     assert ("3 candidate job group(s) held back (a + b + c in ci.yml, "
-            "d + e + f in ci.yml, x + y + z in b.yml): "
+            "d + e + f in ci.yml, x + y + z in b.yml): " + bp._WITHHELD_MODAL_LEAD
             + bp._OPT77_WITHHOLD_PHRASES["needs_graph_undecidable"] + ".") in r77, r77
-    # A tie goes to the alphabetically first gate - the verifier's rule too.
-    assert ("2 candidate checkout(s) held back (build, e2e): "
+    # A tie goes to the alphabetically first gate - the verifier's rule too -
+    # and is hedged as a tie, because on an exact split there is no commonest
+    # reason for "most commonly" to be about.
+    assert ("2 candidate checkout(s) held back (build, e2e): " + bp._WITHHELD_TIED_LEAD
             + bp._OPT80_WITHHOLD_PHRASES["log_carries_no_progress_vocabulary"]
             + ".") in r80, r80
+    # Both assertions above build their expectation out of the very table they
+    # are checking, so they hold whatever it says. The hedge itself is the
+    # behaviour, so it is pinned as literal text: absent progress output in a
+    # log is an OBSERVATION, and naming the switch as its cause is the claim
+    # this reason must not make.
+    assert ("the slow runs' logs show no fetch progress lines (most likely "
+            "because progress output is switched off)") in r80, r80
     for raw in ("needs_graph_undecidable", "log_carries_no_progress_vocabulary",
                 "top reason", "measured but"):
         assert raw not in r77 + r80, (raw, r77, r80)
@@ -2906,7 +2917,9 @@ def test_withheld_row_qualifies_shared_job_names_caps_the_list_and_escapes():
         {"workflow_file": "ci.yml", "job": "a|b`c\nd", "gate": gate}]
     row = _withheld_row(_withheld_foot(doc), "checkout stall: held back")
     assert row.count("|") - row.count("\\|") == 4, row
-    assert "`" not in row and "\n" not in row, row
+    # every backtick escaped, so none can open a code span across the cell
+    assert "\n" not in row, row
+    assert re.sub(r"\\`", "", row).count("`") == 0, row
 
 
 def test_withheld_row_never_prints_an_unmapped_gate_code():
@@ -2918,11 +2931,82 @@ def test_withheld_row_never_prints_an_unmapped_gate_code():
     assert row and "brand_new_gate_code" not in row, row
 
 
+def _reason_accumulators(fn):
+    """The local names OPT80 accumulates its no-proof reasons in, DERIVED from
+    the function rather than listed here.
+
+    They used to be listed (`("reasons", "open_reasons")`), which is the same
+    defect one level up from the one the derivation fixed: a hardcoded name is
+    a name the guard cannot notice being renamed, and the scan would then read
+    zero gates out of an accumulator while still reporting the ones it found.
+
+    Derivation: a list-valued local is an accumulator when the function
+    iterates over it and hands the loop variable to a gate sink — `_no`'s gate
+    argument, or `_unresolved`'s (`for gate in sorted(set(reasons)) or [...]`
+    gives `reasons`) — and so is any list-valued local built out of one
+    (`open_reasons = [g for g in (reasons or [...]) ...]`).
+    """
+    import ast
+    list_valued = set()
+    for n in ast.walk(fn):
+        if (isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name)
+                and isinstance(n.value, (ast.List, ast.ListComp))):
+            list_valued.add(n.target.id)
+        elif isinstance(n, ast.Assign) and isinstance(n.value, (ast.List, ast.ListComp)):
+            list_valued |= {t.id for t in n.targets if isinstance(t, ast.Name)}
+        elif isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name):
+            list_valued.add(n.target.id)
+
+    def _names(node):
+        return {c.id for c in ast.walk(node) if isinstance(c, ast.Name)}
+
+    def _gate_sink_for(target):
+        """True when this `for` body hands its loop variable to a gate sink —
+        `_no`'s gate argument or `_unresolved`'s."""
+        for n in ast.walk(target):
+            if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)):
+                continue
+            if n.func.id == "_no" and n.args and target_name in _names(n.args[0]):
+                return True
+            if (n.func.id == "_unresolved" and len(n.args) > 1
+                    and target_name in _names(n.args[1])):
+                return True
+        return False
+
+    acc = set()
+    for n in ast.walk(fn):
+        if isinstance(n, ast.For) and isinstance(n.target, ast.Name):
+            target_name = n.target.id
+            if any(_gate_sink_for(b) for b in n.body):
+                acc |= _names(n.iter) & list_valued
+    # …and anything built OUT of an accumulator is one too: the open reasons
+    # are filtered out of the collected ones and then handed on.
+    for _ in range(10):
+        grown = set(acc)
+        for n in ast.walk(fn):
+            if isinstance(n, (ast.Assign, ast.AugAssign)):
+                targets = (n.targets if isinstance(n, ast.Assign) else [n.target])
+                if _names(n.value) & acc:
+                    grown |= {t.id for t in targets
+                              if isinstance(t, ast.Name) and t.id in list_valued}
+        if grown == acc:
+            break
+        acc = grown
+    return acc
+
+
 def _withhold_gates_recordable_in_the_collector():
     """Every gate the collector can write into a withheld-candidates list, read
-    from the detectors' own source: the literals handed to `_drop_group` /
-    `_unresolved`, the no-proof reasons OPT80 collects, and the names the
-    independence check returns. A gate added there without a phrase fails here."""
+    from the detectors' own source. FOUR sources, which is what the scan reads:
+    the literals handed to `_drop_group` / `_unresolved`, the names the
+    independence check returns, the names `_opt80_stall_in_log` returns, and
+    the no-proof reasons OPT80 collects (by `.append`, `.extend`, `+=` or an
+    assignment's fallback default). A gate added to any of them without a
+    phrase fails here.
+
+    Nothing in this scan is hardcoded — including the names of the reason
+    accumulators, which `_reason_accumulators` derives from the function (see
+    there for why listing them was the same defect one level up)."""
     import ast
     tree = ast.parse((_SCRIPTS / "collect_runs.py").read_text(encoding="utf-8"))
     fns = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
@@ -2946,12 +3030,25 @@ def _withhold_gates_recordable_in_the_collector():
     d80 = fns["_detect_opt80_checkout_tail_stall"]
     for c in calls(d80, "_unresolved"):
         found80 |= lits(c.args[1]) if len(c.args) > 1 else set()
-    for c in calls(d80, "append"):
-        if isinstance(c.func.value, ast.Name) and c.func.value.id in (
-                "reasons", "open_reasons"):
-            found80 |= lits(c)
-    found80 |= lits(ast.parse("x=['tail_run_past_the_log_probe_budget',"
-                              "'no_tail_run_log_was_probed']"))
+    accumulators = _reason_accumulators(d80)
+    assert accumulators, "no reason accumulator derived from the OPT80 detector"
+
+    # Every way the derived accumulators are written to, not just `.append`.
+    def _writes_a_reason_list(node):
+        if isinstance(node, (ast.Assign, ast.AugAssign)):
+            targets = (node.targets if isinstance(node, ast.Assign)
+                       else [node.target])
+            return any(isinstance(t, ast.Name) and t.id in accumulators
+                       for t in targets)
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr in ("append", "extend", "insert")):
+            return (isinstance(node.func.value, ast.Name)
+                    and node.func.value.id in accumulators)
+        return False
+
+    for n in ast.walk(d80):
+        if _writes_a_reason_list(n):
+            found80 |= lits(n)
     for n in ast.walk(fns["_opt80_stall_in_log"]):
         if isinstance(n, ast.Return) and isinstance(n.value, ast.Tuple):
             found80 |= lits(n.value)
@@ -2966,16 +3063,465 @@ def test_every_recordable_withhold_gate_has_a_plain_english_phrase():
             "no_job_outside_the_group_runs_often_enough_to_measure_against"} <= g77, g77
     assert {"tail_run_log_unavailable", "fewer_than_the_minimum_tail_runs",
             "tail_run_past_the_log_probe_budget"} <= g80, g80
+    # …and enough of them that an accumulator whose name the scan failed to
+    # derive cannot pass unnoticed: every non-verdict phrase must have been read
+    # back out of the source.
+    assert len(g80) >= len(bp._OPT80_WITHHOLD_PHRASES), (
+        "the scan read fewer OPT80 gates than there are phrases - an "
+        "accumulator the derivation missed", sorted(g80))
     assert g77 - set(bp._OPT77_WITHHOLD_PHRASES) == set(), (
         "OPT77 withhold gate with no phrase", g77 - set(bp._OPT77_WITHHOLD_PHRASES))
     assert g80 - set(bp._OPT80_WITHHOLD_PHRASES) == set(), (
         "OPT80 withhold gate with no phrase", g80 - set(bp._OPT80_WITHHOLD_PHRASES))
+    # …and the reverse: a phrase for a gate no collector path can record is
+    # dead text that reads like coverage. Nothing is allowlisted today; an
+    # entry here must name the path the scan cannot see.
+    assert set(bp._OPT77_WITHHOLD_PHRASES) - g77 == set(), (
+        "OPT77 phrase for a gate nothing records",
+        sorted(set(bp._OPT77_WITHHOLD_PHRASES) - g77))
+    assert set(bp._OPT80_WITHHOLD_PHRASES) - g80 == set(), (
+        "OPT80 phrase for a gate nothing records",
+        sorted(set(bp._OPT80_WITHHOLD_PHRASES) - g80))
     # a verdict is never withheld, so a phrase for one is dead text
     assert not set(bp._OPT77_WITHHOLD_PHRASES) & set(cr._OPT77_VERDICT_GATES)
     assert not set(bp._OPT80_WITHHOLD_PHRASES) & set(cr._OPT80_VERDICT_GATES)
     for phrase in (*bp._OPT77_WITHHOLD_PHRASES.values(),
                    *bp._OPT80_WITHHOLD_PHRASES.values()):
         assert phrase and "_" not in phrase and "$" not in phrase, phrase
+
+
+def test_opt81_every_recordable_withhold_gate_has_a_plain_english_phrase():
+    """OPT81's two detectors list a candidate only through `_no(gate, job)` —
+    a gate passed WITH a job name. Read every such call off both detectors'
+    source: each non-verdict gate needs a phrase, and every phrase must be a
+    gate something can record."""
+    import ast
+    tree = ast.parse((_SCRIPTS / "collect_runs.py").read_text(encoding="utf-8"))
+    fns = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    found: set[str] = set()
+    for fname in ("_detect_opt81_measured_runner_gap",
+                  "_detect_opt81_runner_size_advisory"):
+        for c in ast.walk(fns[fname]):
+            if (isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+                    and c.func.id == "_no" and len(c.args) >= 2
+                    and isinstance(c.args[0], ast.Constant)):
+                found.add(c.args[0].value)
+    found -= set(cr._OPT81_VERDICT_GATES)
+    assert {"step_lists_differ", "fewer_than_min_samples_on_two_labels",
+            "runner_label_not_classifiable_by_size"} <= found, found
+    assert found == set(bp._OPT81_WITHHOLD_PHRASES), (
+        sorted(found ^ set(bp._OPT81_WITHHOLD_PHRASES)))
+    assert not set(bp._OPT81_WITHHOLD_PHRASES) & set(cr._OPT81_VERDICT_GATES)
+    for phrase in bp._OPT81_WITHHOLD_PHRASES.values():
+        assert phrase and "_" not in phrase and "$" not in phrase, phrase
+
+
+def test_opt81_held_back_row_renders_in_plain_english():
+    rows = [{"workflow_file": ".github/workflows/ci.yml", "job": "bench",
+             "gate": "step_lists_differ", "half": "A1"}]
+    line = bp._withheld_candidates_line(
+        {bp._OPT81_WITHHELD_DOC_KEY: rows}, bp._OPT81_WITHHELD_DOC_KEY,
+        "candidate job(s)")
+    assert line == ("1 candidate job(s) held back (bench): the job did not run the "
+                    "same steps on both runner labels, so it is not the same job on "
+                    "both."), line
+    assert any(r.doc_key == bp._OPT81_WITHHELD_DOC_KEY for r in bp._WITHHELD_ROWS)
+
+
+def test_opt81_pole_join_agrees_with_the_data_driven_join_on_a_sibling_matrix_leg():
+    """A credited OPT81 finding on a SIBLING leg of the pole's matrix (same base,
+    different params) does not render at this pole (`_opt81_for_pole` matches only
+    the exact job or its unexpanded base), so the data-driven join must not claim
+    it either: otherwise `_dd_where` points the reader to an OPT81 card "below this
+    pole's prompt" that renders in the unrouted section instead."""
+    wf = ".github/workflows/bench.yml"
+    pole = {"check": "bench (ubuntu-latest)", "job": "bench (ubuntu-latest)",
+            "workflow_file": wf}
+    sibling = {"pattern": "OPT81", "workflow_file": wf, "wall_clock_p50_s": 60.0,
+               "affected_jobs": ["bench (ubuntu-24.04)"],
+               "faster_runner": {"half": "A1"}}
+    assert bp._saves_wall_clock(sibling)
+    assert bp._opt81_for_pole(pole, [sibling]) == []
+    assert bp._data_driven_for_pole(pole, [sibling]) == []
+    # The exact leg and the unexpanded base still join both ways.
+    for job in ("bench (ubuntu-latest)", "bench"):
+        own = dict(sibling, affected_jobs=[job])
+        assert bp._opt81_for_pole(pole, [own]) == [own]
+        assert bp._data_driven_for_pole(pole, [own]) == [own]
+    # A non-OPT81 credited finding keeps the same-matrix sibling fold.
+    other = dict(sibling, pattern="OPT24")
+    other.pop("faster_runner")
+    assert bp._data_driven_for_pole(pole, [other]) == [other]
+
+
+def _opt82_gates_recorded_in_the_detector():
+    """Every gate literal OPT82's detector hands to its `_no(...)` recorder,
+    read from the detector's own source."""
+    import ast
+    tree = ast.parse((_SCRIPTS / "collect_runs.py").read_text(encoding="utf-8"))
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+              and n.name == "_detect_opt82_type_aware_lint")
+    return {c.args[0].value for c in ast.walk(fn)
+            if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+            and c.func.id == "_no" and c.args and isinstance(c.args[0], ast.Constant)
+            and isinstance(c.args[0].value, str)}
+
+
+def test_every_opt82_gate_the_detector_records_is_classified_and_phrased():
+    """A gate added to the OPT82 detector must be a verdict, a workflow-level
+    count, or a held-back gate WITH a phrase; and every phrase must belong to a
+    gate the detector can record."""
+    g = _opt82_gates_recorded_in_the_detector()
+    assert {"type_aware_parsing_off", "lint_script_unresolvable",
+            "no_enumerable_type_aware_rule"} <= g, g        # the scan reads the detector
+    verdict, held = set(cr._OPT82_VERDICT_GATES), set(cr._OPT82_HELD_BACK_GATES)
+    workflow = set(cr._OPT82_WORKFLOW_GATES)
+    assert not (verdict & held) and not (verdict & workflow) and not (held & workflow)
+    assert g - verdict - held - workflow == set(), (
+        "OPT82 gate in no class", sorted(g - verdict - held - workflow))
+    held_recorded = g - verdict - workflow
+    assert held_recorded - set(bp._OPT82_WITHHOLD_PHRASES) == set(), (
+        "OPT82 held-back gate with no phrase",
+        sorted(held_recorded - set(bp._OPT82_WITHHOLD_PHRASES)))
+    assert set(bp._OPT82_WITHHOLD_PHRASES) - held_recorded == set(), (
+        "OPT82 phrase for a gate nothing records",
+        sorted(set(bp._OPT82_WITHHOLD_PHRASES) - held_recorded))
+
+
+def _opt80_tail_render_doc(**kw):
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import test_verify_report_self as vs  # noqa: E402
+
+    doc = vs._opt80_tail_doc(**kw)
+    vs._ensure_tier2_source_rows(doc)
+    return doc
+
+
+def test_opt80_tail_line_never_moves_the_headline_or_bottom_line():
+    """The tail line is a separate axis. Rendering the same findings with and
+    without `tail_axis` must leave everything above the Contents (title,
+    provenance table, Bottom line) byte-identical, and the line must sit inside
+    the pole section only."""
+    doc = _opt80_tail_render_doc()
+    with_tail = bp.render(doc)
+    plain = json.loads(json.dumps(doc))
+    del plain["findings"][0]["checkout_stall"]["tail_axis"]
+    without = bp.render(plain)
+    head = lambda r: r.split("## 📋 Contents", 1)[0]  # noqa: E731
+    assert head(with_tail) == head(without)
+    assert "longer on checkout" not in head(with_tail)
+    assert "<!-- opt80-tail:" not in without
+    assert with_tail.count("<!-- opt80-tail:f-promoted -->") == 1
+    tier2 = with_tail.split("## Runner-minute reductions", 1)[-1]
+    assert "<!-- opt80-tail:" not in tier2
+
+
+def test_opt80_tail_line_states_the_stamped_numbers_as_a_tail_not_a_p50():
+    doc = _opt80_tail_render_doc()
+    lines = bp._opt80_tail_block(doc["findings"], "https://catalog")
+    assert lines[0] == "<!-- opt80-tail:f-promoted -->"
+    assert ("one run in 5 spends about 110s longer on checkout, and that run's log shows the fetch stalling"
+            in lines[1]), lines[1]
+    assert "never added to any total" in lines[1]
+    assert "**~" not in lines[1] and "min/mo" not in lines[1]
+    # The collector's own phrase is the same sentence the renderer prints.
+    axis = doc["findings"][0]["checkout_stall"]["tail_axis"]
+    assert cr._opt80_tail_phrase(axis) in lines[1]
+    # A finding with no tail axis renders nothing, at a pole or off it.
+    del doc["findings"][0]["checkout_stall"]["tail_axis"]
+    assert bp._opt80_tail_for({"check": "build", "job": "build",
+                               "workflow_file": ".github/workflows/ci.yml"},
+                              doc["findings"]) == []
+    assert bp._opt80_off_pole_tail_block(doc["findings"], "u") == []
+
+
+def test_opt80_tail_line_states_every_number_in_its_own_slot():
+    """The rendered line carries more than the two numbers the verifier
+    re-derives: the job and workflow it is on, how many sampled runs proved a
+    stall, and the tail vs typical checkout. Each must sit in its own slot - a
+    swap reads as a different (wrong) claim with the same digits."""
+    doc = _opt80_tail_render_doc()
+    line = bp._opt80_tail_block(doc["findings"], "https://catalog")[1]
+    assert "on `build` in `ci.yml`, one run in 5" in line, line
+    assert "2 of 10 sampled runs had a slow checkout" in line, line
+    assert "The 2 proven runs' median checkout is 120s against a typical 10s" in line, line
+    assert "this job" not in line, line
+
+
+def test_opt80_tail_line_off_a_drilled_pole_never_moves_the_headline():
+    """The off-pole case of the headline-identity rule: the stalling job is not
+    a drilled pole, so its line renders in its own block - and the headline and
+    Bottom line stay byte-identical with and without the tail axis."""
+    doc = _opt80_tail_render_doc(pole_check="deploy", pole_job="deploy")
+    with_tail = bp.render(doc)
+    plain = json.loads(json.dumps(doc))
+    del plain["findings"][0]["checkout_stall"]["tail_axis"]
+    without = bp.render(plain)
+    head = lambda r: r.split("## 📋 Contents", 1)[0]  # noqa: E731
+    assert head(with_tail) == head(without)
+    bottom = lambda r: [ln for ln in r.splitlines() if "Bottom line" in ln]  # noqa: E731
+    assert bottom(with_tail) and bottom(with_tail) == bottom(without)
+    assert "the fetch stalling" not in head(with_tail)
+    assert with_tail.count("<!-- opt80-tail:f-promoted -->") == 1
+    assert "Checkout stall tails on a workflow's slowest job" in with_tail
+    assert "<!-- opt80-tail:" not in without
+
+
+def test_opt80_tail_line_renders_in_a_static_only_report():
+    """No pole is measured, so the static-only body is the only place the tail
+    line can reach the reader; it renders there once, in the off-pole block."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import test_verify_report_self as vs  # noqa: E402
+
+    f = vs._opt80_verifier_finding()
+    f["checkout_stall"]["tail_axis"] = dict(vs._OPT80_TAIL_AXIS)
+    doc = {"repo": "o/r", "findings": [f], "pr_critical_path": {"poles": []},
+           "data_sources": {}}
+    static = bp._render_static_only(doc)
+    assert static.count("<!-- opt80-tail:f1 -->") == 1, static
+    assert "one run in 5 spends about 110s longer on checkout, and that run's log shows the fetch stalling" in static
+
+def test_opt80_off_pole_tail_renders_in_its_own_section_in_both_renders():
+    """A tail on a job that is not a drilled pole gets its own `##` section -
+    never the tail of the last Runner saving card - placed before Also noticed
+    and Data sources, in the full render (with a Contents entry) and in the
+    static-only render (which has no Contents)."""
+    marker = "<!-- opt80-tail:f-promoted -->"
+    for static in (False, True):
+        doc = _opt80_tail_render_doc(pole_check="other", pole_job="other")
+        if static:
+            doc["pr_critical_path"]["poles"] = []
+        md = bp.render(doc)
+        assert md.count(marker) == 1, static
+        head_i = md.find("## ⏱️ Checkout stall tails")
+        assert head_i != -1, (static, md[-3000:])
+        enclosing = re.findall(r"(?m)^## .*$", md[:md.index(marker)])[-1]
+        assert "Checkout stall tails" in enclosing, (static, enclosing)
+        assert '<a id="checkout-stall-tails"></a>' in md
+        for later in ("## 🧹 Also noticed", "## 🗄️ Data sources"):
+            if later in md:
+                assert md.index(later) > head_i, (static, later)
+        if not static:
+            toc = md.split("## 📋 Contents", 1)[1].split("\n## ", 1)[0]
+            assert "(#checkout-stall-tails)" in toc, toc
+
+
+def _opt79_and_opt80_off_pole_doc():
+    """A job that is not a drilled pole carrying both an OPT80 tail and an
+    OPT79 pole cache, so the tails section renders right before the cache
+    block."""
+    doc = _opt80_tail_render_doc(pole_check="other", pole_job="other")
+    tail = doc["findings"][0]
+    job = tail["affected_jobs"][0]
+    f79 = _opt79_pole_finding(workflow_file=tail["workflow_file"],
+                              affected_jobs=[job], wall_clock_p50_s=45.0, id="f79")
+    f79["cache_net_negative"]["job"] = job
+    doc["findings"].append(f79)
+    return doc
+
+
+def test_opt79_off_pole_block_has_its_own_section_never_the_tails_one():
+    """The off-pole cache block opens with a bold line, not a heading, so after
+    the checkout stall tails section it read as part of that section. It gets
+    its own `##` heading and anchor (and a Contents entry on the full render),
+    in both renders."""
+    marker = "<!-- opt79-pole:f79 -->"
+    for static in (False, True):
+        doc = _opt79_and_opt80_off_pole_doc()
+        if static:
+            doc["pr_critical_path"]["poles"] = []
+        md = bp.render(doc)
+        assert md.count(marker) == 1 and "<!-- opt80-tail:" in md, static
+        assert md.index("<!-- opt80-tail:") < md.index(marker), static
+        enclosing = re.findall(r"(?m)^## .*$", md[:md.index(marker)])[-1]
+        assert enclosing == "## 💾 Measured cache cost on a workflow's slowest job", \
+            (static, enclosing)
+        assert f'<a id="{bp._OPT79_OFF_POLE_ANCHOR}"></a>' in md, static
+        if not static:
+            toc = md.split("## 📋 Contents", 1)[1].split("\n## ", 1)[0]
+            assert f"(#{bp._OPT79_OFF_POLE_ANCHOR})" in toc, toc
+            order = [toc.find(s) for s in ("(#checkout-stall-tails)",
+                                           f"(#{bp._OPT79_OFF_POLE_ANCHOR})",
+                                           "**🧹 Also noticed**") if s in toc]
+            assert len(order) >= 2 and order == sorted(order), toc
+
+
+def test_verifier_fails_an_opt79_off_pole_block_under_another_section():
+    """The placement rule: a pole-cache marker sits under a long pole or under
+    its own off-pole heading - never under the tails heading or a runner-minute
+    card."""
+    vr = _load_vr()
+    f = _opt79_pole_finding()
+    own = "\n".join(bp._opt79_off_pole_block([f], "https://x/c.md"))
+    assert vr._VR_OPT79_OFF_POLE_HEADING in own.splitlines()   # one heading, two copies
+    at_pole = ("## 🟠 Long pole 1: `ci.yml` ▸ `build` - 5m 00s\n\n"
+               + "\n".join(bp._opt79_pole_block([f], "https://x/c.md")))
+    for good in (own, at_pole):
+        assert vr._opt79_pole_findings_rendered(good, [f]) == [], good
+    # The pre-fix shape: the bold-line block straight after another section.
+    for heading in ("## ⏱️ Checkout stall tails on a workflow's slowest job",
+                    "## 💸 Runner-minute reductions"):
+        bad = (f"{heading}\n\nsome body\n\n---\n\n"
+               "**💾 Measured cache cost on a workflow's slowest job** - text.\n\n"
+               + "\n".join(bp._opt79_pole_block([f], "https://x/c.md")))
+        problems = vr._opt79_pole_findings_rendered(bad, [f])
+        assert any("not under its own long pole or its own" in p for p in problems), \
+            (heading, problems)
+
+
+def test_verifier_fails_an_opt79_block_under_another_jobs_long_pole():
+    """"Under a long pole" means under ITS long pole: the pre-fix heading-less
+    block straight after a different job's pole section read as part of that
+    pole. A header check carrying the workflow prefix (`CI / build`) is the
+    same job."""
+    vr = _load_vr()
+    f = _opt79_pole_finding()
+    blk = "\n".join(bp._opt79_pole_block([f], "https://x/c.md"))
+    for check, ok in (("`build`", True), ("`CI / build`", True),
+                      ("`build (ubuntu, 3.12)`", True), ("`other`", False)):
+        md = f"## 🔴 Long pole 1: `ci.yml` ▸ {check} - 5m 00s\n\nbody\n\n{blk}"
+        problems = vr._opt79_pole_findings_rendered(md, [f])
+        placed = not any("not under" in p for p in problems)
+        assert placed is ok, (check, problems)
+
+
+def test_opt79_off_pole_intro_matches_the_render():
+    """Like the tails section: "not shown at a long pole above" only when poles
+    were drilled; a static-only report drills none."""
+    f = _opt79_pole_finding()
+    drilled = "\n".join(bp._opt79_off_pole_block([f], "u"))
+    static = "\n".join(bp._opt79_off_pole_block([f], "u", drilled=False))
+    assert "not shown at a long pole above" in drilled
+    assert "long pole above" not in static and "drilled no long pole" in static
+    doc = _opt79_and_opt80_off_pole_doc()
+    doc["pr_critical_path"]["poles"] = []
+    md = bp.render(doc)
+    assert "not shown at a long pole above" not in md
+
+
+def test_verifier_fails_a_contents_link_to_an_off_pole_section_that_is_missing():
+    """The two off-pole sections' Contents links must land on their anchors."""
+    vr = _load_vr()
+    md = bp.render(_opt79_and_opt80_off_pole_doc())
+    assert vr.check_pole_anchors_resolve(md).ok
+    for anchor in ("checkout-stall-tails", bp._OPT79_OFF_POLE_ANCHOR):
+        bad = md.replace(f'<a id="{anchor}"></a>', "")
+        c = vr.check_pole_anchors_resolve(bad)
+        assert not c.ok and anchor in c.detail, (anchor, c.detail)
+
+
+def test_opt80_off_pole_tail_heading_matches_the_render():
+    """The off-pole block says "not one of the long poles drilled above" only
+    when poles were drilled; a static-only report drills none."""
+    doc = _opt80_tail_render_doc()
+    drilled = bp._opt80_off_pole_tail_block(doc["findings"], "u")
+    static = bp._opt80_off_pole_tail_block(doc["findings"], "u", drilled=False)
+    assert "drilled above" in "\n".join(drilled)
+    assert "drilled above" not in "\n".join(static)
+    assert "no long pole" in "\n".join(static), static
+    assert "<!-- opt80-tail:f-promoted -->" in static
+
+
+def test_opt80_tail_count_sentence_names_slow_runs_logs_read_and_proofs():
+    """The count sentence states what N stands on: how many sampled runs were
+    slow, how many of their logs were read, how many of those show the stall,
+    and that the slow runs whose logs were not read are counted in N."""
+    doc = _opt80_tail_render_doc()
+    axis = doc["findings"][0]["checkout_stall"]["tail_axis"]
+    axis.update(sampled_runs=30, slow_runs=10, logs_read=4, tail_runs=3,
+                logs_clean=1, logs_unreadable=0, counted_runs=9, one_in_n=3)
+    line = bp._opt80_tail_block(doc["findings"], "https://catalog")[1]
+    assert "10 of 30 sampled runs had a slow checkout" in line, line
+    assert ("logs were read for 4 of those: 3 show the fetch standing still, "
+            "0 unreadable, 1 clean") in line, line
+    assert "the 1 clean log is left out" in line, line
+    assert "the 6 slow runs whose logs were not read" in line, line
+    assert "sampled runs have a checkout log" not in line, line
+
+
+def test_opt80_tail_count_sentence_states_unreadable_logs_separately():
+    """A fetched log that could not be read (gone, unparseable, or a stall
+    dropped as credential-shaped) is not a clean fetch: the sentence names it
+    apart from the clean ones and counts its slow run in N."""
+    doc = _opt80_tail_render_doc()
+    axis = doc["findings"][0]["checkout_stall"]["tail_axis"]
+    axis.update(sampled_runs=30, slow_runs=10, logs_read=4, tail_runs=2,
+                logs_clean=1, logs_unreadable=1, counted_runs=9, one_in_n=3)
+    line = bp._opt80_tail_block(doc["findings"], "https://catalog")[1]
+    assert ("logs were read for 4 of those: 2 show the fetch standing still, "
+            "1 unreadable, 1 clean") in line, line
+    assert ("N counts the 2 proven runs, the 1 slow run whose log could not be "
+            "read and the 6 slow runs whose logs were not read") in line, line
+    assert "the 1 clean log is left out" in line, line
+    assert "read log that does not" not in line, line
+
+
+def _opt80_tail_finding(fid="f-promoted", job="build",
+                        wf=".github/workflows/ci.yml"):
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import test_verify_report_self as vs  # noqa: E402
+
+    f = vs._opt80_verifier_finding(id=fid, affected_jobs=[job], workflow_file=wf)
+    f["checkout_stall"]["tail_axis"] = dict(vs._OPT80_TAIL_AXIS)
+    return f
+
+
+def test_opt80_tail_never_joins_a_pole_in_another_workflow_file():
+    """GitHub gives same-named jobs in different workflows the same check
+    name, so `build` in other.yml must not ride a `ci.yml` pole named `build`."""
+    pole = {"check": "build", "job": "build", "workflow_file": ".github/workflows/ci.yml"}
+    assert len(bp._opt80_tail_for(pole, [_opt80_tail_finding()])) == 1
+    other = _opt80_tail_finding(wf=".github/workflows/other.yml")
+    assert bp._opt80_tail_for(pole, [other]) == []
+
+
+def test_opt80_tail_joins_on_the_poles_stamped_job_over_the_check_name():
+    """A workflow NAME can hold ` / ` (`CI / main`): the prefix strip of check
+    `CI / main / build` gives `main / build`. The pole's stamped job, `build`,
+    is the job, and the tail joins on it."""
+    pole = {"check": "CI / main / build", "job": "build",
+            "workflow_file": ".github/workflows/ci.yml"}
+    assert len(bp._opt80_tail_for(pole, [_opt80_tail_finding()])) == 1
+
+
+def test_opt80_static_only_report_tail_heading_does_not_say_drilled_above():
+    """The static-only render drills no pole, so its tails section must not
+    point at "the long poles drilled above"."""
+    doc = {"repo": "o/r", "findings": [_opt80_tail_finding()],
+           "pr_critical_path": {"poles": []}, "data_sources": {}}
+    static = bp._render_static_only(doc)
+    assert "<!-- opt80-tail:f-promoted -->" in static
+    assert "drilled above" not in static, static
+    assert "drilled no long pole" in static, static
+
+
+def _opt80_toc_doc(tails):
+    doc = _opt80_tail_render_doc(pole_check="other", pole_job="other")
+    for i in range(1, tails):
+        g = json.loads(json.dumps(doc["findings"][0]))
+        g.update(id=f"f-tail-{i}", affected_jobs=[f"lint{i}"], line=40 + i)
+        g["checkout_stall"]["job"] = f"lint{i}"
+        doc["findings"].append(g)
+    doc["findings"].append({"id": "f-hyg", "pattern": "OPT5",
+                            "title": "pnpm Store Not Cached", "severity": "MEDIUM",
+                            "runner_min_saving": 68.0,
+                            "workflow_file": ".github/workflows/ci.yml", "line": 20})
+    return doc
+
+
+def test_opt80_tails_contents_entry_counts_jobs_and_sits_before_also_noticed():
+    """The Contents pointer to the tails section is spliced in after the poles
+    render: it must land inside the Contents, directly ahead of the Also
+    noticed pointer, and count the tail lines with the right plural."""
+    for tails, phrase in ((1, "1 job whose"), (2, "2 jobs whose")):
+        md = bp.render(_opt80_toc_doc(tails))
+        assert md.count("<!-- opt80-tail:") == tails, tails
+        toc = md.split("## 📋 Contents", 1)[1].split("\n## ", 1)[0].split("\n")
+        entry = next(i for i, ln in enumerate(toc)
+                     if ln.startswith("**⏱️ Checkout stall tails**"))
+        assert phrase in toc[entry], (tails, toc[entry])
+        assert toc[entry + 1] == "", toc
+        assert toc[entry + 2].startswith("**🧹 Also noticed**"), toc
 
 
 def test_second_pole_role_names_the_real_slowest_concurrent_check_above_it():
@@ -7341,6 +7887,25 @@ def _pole_section(md: str, check: str) -> str:
     return md[i:j if j != -1 else len(md)]
 
 
+def test_opt80_tail_on_an_aggregation_gate_pole_renders_in_that_pole():
+    """An aggregation-gate pole renders its upstream story and stops early. Its
+    OPT80 tail line must still render IN that pole: falling through to the
+    off-pole tails section would place it under a heading that says its job is
+    "not one of the long poles drilled above" - which it is."""
+    tail = _opt80_tail_render_doc()["findings"][0]
+    tail = json.loads(json.dumps(tail))
+    tail.update(workflow_file=_AGG_DEPLOY, affected_jobs=["gate"])
+    tail["checkout_stall"]["job"] = "gate"
+    doc = _agg_gate_doc()
+    doc["findings"] = [tail]
+    md = bp.render(doc, {}, {}, {}, "2026-07-28T00:00:00Z", {})
+    sec = _pole_section(md, "thank you, build")
+    assert "**Aggregation gate" in sec
+    assert f"<!-- opt80-tail:{tail['id']} -->" in sec, sec
+    assert md.count(f"<!-- opt80-tail:{tail['id']} -->") == 1
+    assert "not one of the long poles drilled above" not in md
+
+
 def test_aggregation_gate_pole_tells_the_upstream_story_not_a_prompt():
     # The whole fix (issue #1): the `needs:`-everything 3s sink renders the honest role line,
     # names its slowest MEASURED upstream member, points the reader there — and carries NO
@@ -7389,22 +7954,22 @@ def test_aggregation_gate_near_miss_renders_byte_identically(monkeypatch):
     assert "🤖 Prompt for your coding agent" in after
 
 
-def test_aggregation_gate_yields_to_the_chain_member_framing(monkeypatch):
-    # A sink that IS a modal-chain member keeps the chain-stage rendering (`thank you, next`
-    # as stage 3/3): the chain model already frames it as serialized, and double-framing it
-    # would contradict that. Pinned byte-for-byte against detection-disabled rendering.
+def test_aggregation_gate_that_ends_a_chain_keeps_its_stage_and_prescribes_nothing():
+    # A sink that IS a modal-chain member (only ever the LAST stage: a sink is terminal)
+    # renders as the aggregation gate, with its chain stage kept in the role line. The
+    # chain-stage-only rendering drilled the verdict's own step and handed over an "optimize
+    # this step" prompt for a job that runs no work (starslingdev/skills' 3s `test` verdict
+    # ending the `test (self-hosted)` → `test` chain).
     doc = _agg_gate_doc()
     doc["pr_critical_path"]["chain_summary"] = {
         "modal_chain": ["build", "stable - x86_64-linux", "thank you, build"],
         "chain_p50_s": 598.0}
-    after = _pole_section(bp.render(doc, {}, {}, {}, "2026-07-28T00:00:00Z", {}),
-                          "thank you, build")
-    monkeypatch.setattr(bp, "_agg_gate_shape", lambda *a, **k: None)
-    before = _pole_section(bp.render(doc, {}, {}, {}, "2026-07-28T00:00:00Z", {}),
-                           "thank you, build")
-    assert after == before
-    assert "Stage 3/3 of the" in after and "gate chain" in after
-    assert "**Aggregation gate" not in after
+    sec = _pole_section(bp.render(doc, {}, {}, {}, "2026-07-28T00:00:00Z", {}),
+                        "thank you, build")
+    assert "**Aggregation gate" in sec
+    assert "stage 3/3 of the" in sec and "gate chain" in sec
+    assert "**➡️ Where the wait actually is:**" in sec
+    assert "🤖 Prompt for your coding agent" not in sec
 
 
 def test_agg_gate_shape_structural_conditions():
@@ -7813,15 +8378,15 @@ def test_data_sources_cache_probe_row_states_what_the_budget_cut():
 
 
 def test_uncredited_pole_cache_is_reported_even_though_it_is_not_sized():
-    """The most valuable instance of a net-negative cache is the one on the
-    workflow's SLOWEST job, because there the waste is on the merge wait rather
-    than only on the bill. This version cannot size that saving, and the old
-    behaviour was to skip the job in the candidate selector — so its logs were
-    never fetched, its cache was never classified, and the report was
-    byte-identical to one for a repository with no such cache.
+    """A net-negative cache on the slowest job of a workflow no pull request
+    runs cannot be priced in this version. The old behaviour skipped such jobs
+    in the candidate selector, so the report was byte-identical to one for a
+    repository with no such cache.
 
-    It is measured like any other now and stated with NO number: the reader
-    learns the cache exists and that the saving is not credited here."""
+    It is measured like any other and stated with NO number: the reader
+    learns the cache exists and that the saving is not credited here. (The
+    long pole of a PR workflow is a credited wall-clock finding instead, and a
+    job shorter than its workflow's long pole is credited runner-minutes.)"""
     doc = _doc_one_pole()
     doc["opt79_uncredited_pole_caches"] = [{
         "kind": "opt79_uncredited_pole_cache",
@@ -7834,19 +8399,22 @@ def test_uncredited_pole_cache_is_reported_even_though_it_is_not_sized():
         "hit_path_p50_s": 31.0, "miss_path_p50_s": 12.0,
         "job_p50_s": 600.0, "floor_p50_s": 300.0,
         "long_pole_job": "build", "long_pole_p50_s": 600.0,
-        "on_critical_path": True,
+        "workflow_gates_pull_requests": False,
+        "on_critical_path": False,
     }]
     lines = bp._opt79_uncredited_block(doc)
     md = "\n".join(lines)
     assert "build" in md
     assert "19s" in md                      # the measured excess, per hit
     assert "5 hit" in md and "4 miss" in md  # the sample it came from
-    assert "this workflow's slowest job" in md
-    assert "merge wait" in md
+    assert "does not run on pull requests" in md
+    # the retired wording: a job between the floor and the pole is credited now
+    assert "second-slowest" not in md
+    assert "merge wait" not in md
     assert "not credited" in md
     # It must NOT read as a sized saving: no runner-minutes, no wall-clock claim.
     assert "min/mo" not in md
-    assert "runner-min" not in md
+    assert "runner-min/mo" not in md     # "runner-minutes only" is a statement, not a size
 
     # Nothing measured -> nothing said.
     assert bp._opt79_uncredited_block(_doc_one_pole()) == []
@@ -7870,11 +8438,220 @@ def test_uncredited_pole_cache_reaches_the_rendered_report():
         "hit_path_p50_s": 31.0, "miss_path_p50_s": 12.0,
         "job_p50_s": 600.0, "floor_p50_s": 300.0,
         "long_pole_job": "build", "long_pole_p50_s": 600.0,
-        "on_critical_path": True,
+        "workflow_gates_pull_requests": False,
+        "on_critical_path": False,
     }]
     md = bp.render(doc, "o/r")
     assert "not credited" in md
     assert "`build`" in md
+
+
+def test_uncredited_block_never_claims_the_merge_wait():
+    """The merge-wait sentence is gone from the uncredited block: the long pole
+    of a pull-request workflow is a credited wall-clock finding rendered at its
+    pole. A row stamped `on_critical_path: True` (which `verify_report` fails)
+    still renders without that claim rather than repeating it."""
+    md = "\n".join(bp._opt79_uncredited_block({
+        "opt79_uncredited_pole_caches": [
+            _uncredited_row(on_critical_path=True,
+                            workflow_gates_pull_requests=True)]}))
+    assert "merge wait" not in md, md
+    assert "this workflow's slowest job" not in md, md
+    assert "not credited" in md, md
+
+
+def _opt79_pole_finding(**kw):
+    f = {
+        "id": "f7", "pattern": "OPT79",
+        "title": "A Cache That Costs More Than It Saves",
+        "workflow_file": ".github/workflows/ci.yml", "affected_jobs": ["build"],
+        "evidence": "On `build` the hit path is 21s SLOWER.",
+        "wall_clock_p50_s": 18.0, "runner_min_saving": None,
+        "sizing_basis": "measured", "risk": "LOW",
+        "guardrail": "Re-key or narrow the cache first.",
+        "rollout": "Re-measure the hit-vs-miss block.",
+        "fix_recipe_anchor": "opt79--a-cache-that-costs-more-than-it-saves",
+        "cache_net_negative": {"kind": "opt79_pole_net_negative_cache",
+                               "job": "build", "hits": 4, "misses": 4,
+                               "ambiguous_runs": 0, "hit_share": 0.5},
+    }
+    f.update(kw)
+    return f
+
+
+def test_opt79_pole_finding_renders_at_its_pole_with_its_merge_wait():
+    """The pole-cache finding's credited figure is capped at the headroom to the
+    next-tallest job, routinely under the 30s long-pole floor — as a pole-job
+    row with no bill saving the appendix would drop it as valueless. It renders
+    AT the pole instead, with its id, title and seconds, and no minutes."""
+    pole = {"check": "build", "job": "build",
+            "workflow_file": ".github/workflows/ci.yml"}
+    f = _opt79_pole_finding()
+    assert bp._opt79_pole_for(pole, [f]) == [f]
+    other_wf = dict(pole, workflow_file=".github/workflows/release.yml")
+    assert bp._opt79_pole_for(other_wf, [f]) == []
+    # a below-the-floor OPT79 is the Tier-2 arm, not this block
+    credited = _opt79_pole_finding(cache_net_negative={
+        "kind": "opt79_net_negative_cache", "job": "build"})
+    assert bp._opt79_pole_for(pole, [credited]) == []
+    md = "\n".join(bp._opt79_pole_block([f], "https://x/catalog.md"))
+    assert md.startswith("<!-- opt79-pole:f7 -->"), md
+    head = md.split("\n")[1]
+    assert "A Cache That Costs More Than It Saves" in head and "`f7`" in head
+    assert ("up to **18s** off the merge wait on the 50% of sampled runs where the "
+            "cache hit (4 of 8 runs read)") in head, head
+    assert "min/mo" not in md
+    assert "#opt79--a-cache-that-costs-more-than-it-saves" in md
+
+
+def test_opt79_pole_finding_joins_its_pole_across_a_matrix_name():
+    """A matrix leg like `test (1)` must still join the pole-cache finding on its
+    job; an exact-name join drops the block off its pole."""
+    wf = ".github/workflows/ci.yml"
+    for pole_job, finding_job in (
+            ("test (1)", "test"),         # the drilled pole is one matrix leg
+            ("test", "test (1)"),         # the finding names the leg, the pole the base
+            ("test (2)", "test (1)")):    # two legs of the same matrix
+        pole = {"check": pole_job, "job": pole_job, "workflow_file": wf}
+        f = _opt79_pole_finding(
+            affected_jobs=[finding_job],
+            cache_net_negative={"kind": "opt79_pole_net_negative_cache",
+                                "job": finding_job})
+        assert bp._opt79_pole_for(pole, [f]) == [f], (pole_job, finding_job)
+        lint = dict(pole, check="lint", job="lint")
+        assert bp._opt79_pole_for(lint, [f]) == [], (pole_job, finding_job)
+
+
+def test_opt79_pole_finding_off_the_drilled_poles_still_renders_its_block():
+    """The engine credits the long pole of EVERY pull-request workflow, but only
+    the drilled poles render a pole section. A pole-cache finding on another
+    workflow's slowest job fell through to the appendix as a plain row with no
+    `<!-- opt79-pole:<id> -->` marker, so `verify_report` (which requires
+    exactly one block per pole-cache finding) failed the report, and a sub-30s
+    figure read "no bill saving" instead of its merge-wait seconds."""
+    vr = _load_verify_report()
+    f = _opt79_pole_finding()                     # ci.yml / build, not a drilled pole
+    doc = _doc_one_pole()
+    doc["findings"] = [f]
+    md = bp.render(doc, {"pipeline": _IMPORT_BOUND_LOG}, {},
+                   {"pipeline": "https://github.com/o/r/actions/runs/123"},
+                   "2026-06-08")
+    assert vr._opt79_pole_findings_rendered(md, [f]) == [], md
+    assert ("up to **18s** off the merge wait on the 50% of sampled runs where the "
+            "cache hit (4 of 8 runs read)") in md, md
+    assert not [ln for ln in md.splitlines()
+                if "OPT79" in ln and "no bill saving" in ln], md
+    # ...and in the static-only report, where no pole is drilled at all.
+    static = {"repo": "o/r", "findings": [_opt79_pole_finding()],
+              "pr_critical_path": {"poles": []}, "data_sources": {}}
+    md2 = bp.render(static, "o/r")
+    assert vr._opt79_pole_findings_rendered(md2, static["findings"]) == [], md2
+
+
+def _opt79_on_tests_web(wc: float):
+    return _opt79_pole_finding(
+        workflow_file=".github/workflows/pipeline.yml",
+        affected_jobs=["tests-web"], wall_clock_p50_s=wc,
+        cache_net_negative={"kind": "opt79_pole_net_negative_cache",
+                            "job": "tests-web"})
+
+
+def test_opt79_pole_finding_is_named_at_its_pole_not_sent_to_the_appendix():
+    """A pole-cache finding renders AT its pole. At 30s or more it also joined
+    the data-driven track, so the pole's waterfall and its agent prompt sent the
+    reader to "the **Also noticed** section below", where it is not.
+
+    It counts as catalog COVER for the pole only under the same magnitude rule
+    every other non-log match uses (`_saves_wall_clock`, the 30s long-pole
+    floor). An 18s cache cost on a 255s pole does not explain the pole: with an
+    unrecognized log the pole stays a coverage gap (waterfall + NO CATALOG
+    PATTERN MATCHED), and the OPT79 block still renders once beside it."""
+    for wc in (45.0, 18.0):
+        doc = _doc_one_pole()
+        doc["findings"] = [_opt79_on_tests_web(wc)]
+        md = bp.render(doc, {"pipeline": "nothing any detector knows\n"}, {},
+                       {"pipeline": "https://github.com/o/r/actions/runs/123"},
+                       "2026-06-08")
+        assert md.count("<!-- opt79-pole:f7 -->") == 1, md
+        assert "**Also noticed** section" not in md, (wc, md)
+        prompt = md.split("Prompt for your coding agent", 1)[1]
+        assert "OPT79" in prompt, (wc, md)
+        if wc >= 30:
+            assert "NO CATALOG PATTERN MATCHED" not in md, (wc, md)
+            assert "coverage gap" not in md, (wc, md)
+            assert "MEASURED CACHE PATTERN MATCHED" in prompt, md
+        else:
+            assert "NO CATALOG PATTERN MATCHED" in prompt, md
+            assert "coverage gap" in md, md
+            # the small cache cost is mentioned, never as the pole's explanation
+            assert "MEASURED CACHE PATTERN MATCHED" not in prompt, md
+            assert "(OPT79, a cache that costs more than it saves) matched this" \
+                not in md, md
+
+
+def test_opt79_pole_block_renders_inside_its_own_pole_section():
+    """With two drilled poles, the pole-cache block sits in ITS pole's section -
+    after that pole's anchor and before the next pole's - not merely once
+    somewhere in the report (the off-pole fallback would also render it once)."""
+    doc = _doc_one_pole()
+    doc["pr_critical_path"]["poles"].append({
+        "check": "lint", "p50_s": 200.0, "workflow_file": ".github/workflows/lint.yml",
+        "job": "lint", "dominant_step": "eslint", "dominant_p50_s": 150.0,
+        "steps": [{"step": "eslint", "category": "lint", "p50_s": 150.0}]})
+    doc["findings"] = [_opt79_on_tests_web(18.0)]
+    md = bp.render(doc, {"pipeline": _IMPORT_BOUND_LOG}, {},
+                   {"pipeline": "https://github.com/o/r/actions/runs/123"},
+                   "2026-06-08")
+    assert md.count("<!-- opt79-pole:f7 -->") == 1, md
+    here = md.index("<!-- opt79-pole:f7 -->")
+    own, nxt = md.index('<a id="pole-1"></a>'), md.index('<a id="pole-2"></a>')
+    assert "`tests-web`" in md[own:nxt].split("\n", 3)[2], md[own:nxt][:300]
+    assert own < here < nxt, (own, here, nxt)
+    assert "Measured cache cost on a workflow's slowest job" not in md
+
+
+def test_opt79_pole_cache_at_the_floor_suppresses_the_llm_gap_fill():
+    """A pole-cache finding of 30s or more on the pole is a catalog match for it,
+    so a supplied LLM gap-fill analysis must not render; under 30s the pole is
+    still a coverage gap and the analysis does render."""
+    analysis = {"cause": "The `run tests` step is slow for a reason the log shows.",
+                "breakdown": [["tests", "~90s"]], "evidence": ["Ran 900 tests"],
+                "prompt": "REPO: o/r\nInvestigate the test step."}
+    for wc, gap_fill in ((45.0, False), (30.0, False), (18.0, True)):
+        doc = _doc_one_pole()
+        doc["findings"] = [_opt79_on_tests_web(wc)]
+        md = bp.render(doc, {"pipeline": "nothing any detector knows\n"}, {},
+                       {"pipeline": "https://github.com/o/r/actions/runs/123"},
+                       "2026-06-08", analyses={"pipeline": analysis})
+        assert ("LLM root-cause analysis" in md) is gap_fill, (wc, md)
+        assert md.count("<!-- opt79-pole:f7 -->") == 1, (wc, md)
+
+
+def test_gap_poles_counts_an_opt79_pole_cache_as_cover_only_at_the_floor():
+    """`_gap_poles` feeds the maintainer gap-capture / detector-draft loop. A
+    drilled pole with an unrecognized log and a >=30s OPT79 pole-cache finding is
+    covered; an 8s one does not explain the pole, so it is still a gap."""
+    for wc, is_gap in ((45.0, False), (8.0, True)):
+        doc = _doc_one_pole()
+        doc["findings"] = [_opt79_on_tests_web(wc)]
+        gaps = bp._gap_poles(doc, {"pipeline": _NO_MATCH_LOG})
+        assert bool(gaps) is is_gap, (wc, gaps)
+
+
+def test_opt79_pole_block_says_why_the_cross_checks_lowered_the_figure():
+    """When the generic cascade shrinks the pole finding, its headline drops
+    (e.g. to 8s) while the evidence still states the pre-cascade 20s. The block
+    printed no reason, so the two numbers contradicted each other with nothing
+    to reconcile them."""
+    f = _opt79_pole_finding(
+        wall_clock_p50_s=8.0, wall_clock_uncapped_p50_s=20.0,
+        wall_clock_derivation=[{
+            "bound": "measured-critical-path", "from_s": 20.0, "to_s": 8.0,
+            "reason": "floored by the slowest concurrent check `lint`"}])
+    md = "\n".join(bp._opt79_pole_block([f], "https://x/catalog.md"))
+    assert "up to **8s** off the merge wait" in md
+    assert "floored by the slowest concurrent check `lint`" in md, md
+    assert "20s" in md, md
 
 
 def test_uncredited_pole_cache_survives_a_report_with_nothing_else_in_it():
@@ -7930,6 +8707,41 @@ def test_static_only_keeps_the_withheld_cache_disclosure():
     assert static, "the static-only body must not be empty with a withheld cache"
     md = bp.render(doc, "o/r")
     assert "held back" in md, md
+
+
+def test_tier2_cert_summary_names_the_below_long_pole_proof():
+    """OPT79's second runner-minute proof renders as its own token, with the
+    slowest job's lead as the margin and the certificate's `ref` naming that
+    job - never as `below_cluster_floor`, whose margin means something else."""
+    f = {"tier2_neutrality": {
+        "proof": "below_long_pole", "margin_s": 60.0,
+        "ref": ("per_workflow_timing[wf]: `integration` at 180.0s is 60.0s below "
+                "the workflow long pole `e2e` at 240.0s")}}
+    msg = bp._tier2_cert_summary(f)
+    assert msg.startswith("`below_long_pole` with 1m 00s margin"), msg
+    # only "cannot lengthen" is provable: the slowest job can be off the merge
+    # gate (or the workflow can gate no PR), and a shorter job in a `needs:`
+    # chain DOES move the gate when it shrinks
+    assert "shrinking it cannot make the workflow take longer" in msg, msg
+    assert "sets the merge gate" not in msg, msg
+    assert "`e2e` at 240.0s" in msg, msg
+    assert "below_cluster_floor" not in msg, msg
+
+
+def test_uncredited_co_pole_is_not_called_the_slowest_job():
+    """A job TIED with the long pole of a pull-request workflow is stamped
+    `pole_tied_with_next_job`; its line says it is tied for the slowest job
+    rather than claiming to be the one the run named."""
+    md = "\n".join(bp._opt79_uncredited_block({
+        "opt79_uncredited_pole_caches": [_uncredited_row(
+            job="unit", long_pole_job="e2e", job_p50_s=660.0,
+            long_pole_p50_s=660.0, floor_p50_s=660.0,
+            workflow_gates_pull_requests=True,
+            uncredited_reason="pole_tied_with_next_job")]}))
+    assert "`unit` is tied with `e2e`, this workflow's slowest job (660s), so " \
+        "neither job alone sets the merge wait" in md, md
+    assert "tied for this workflow's slowest job, but it is tied" not in md, md
+    assert "not credited" in md, md
 
 
 def _uncredited_row(**kw):
@@ -7999,7 +8811,10 @@ def test_withheld_cache_candidates_reach_the_data_sources_table():
          "gate": "fewer_than_min_miss_runs_classified"}]
     foot = "\n".join(bp._data_sources_footer(doc, "o/r"))
     assert "| cache hit/miss verdicts |" in foot, foot
-    assert ("3 candidate cache(s) held back (e2e, unit, x): too few sampled runs missed the cache to compare "
+    # Two gates contributed, so the commonest gate's reason is hedged: it is
+    # true of two of the three named jobs, not of all of them.
+    assert ("3 candidate cache(s) held back (e2e, unit, x): most commonly, too "
+            "few sampled runs missed the cache to compare "
             "a miss against a hit.") in foot, foot
     assert "fewer_than_min" not in foot and "_runs_classified" not in foot, foot
     # nothing withheld -> no row
@@ -8054,7 +8869,9 @@ def test_held_back_line_escapes_repo_controlled_job_names():
     cells = [c for c in line.replace("\\|", "").split("|") if c.strip()]
     assert len(cells) == 3, line            # source, coverage, feeds: the pipe did not split
     assert "`x`" not in line and "\n" not in line, line
-    assert "a\\|b 'x' c" in line, line
+    # the name survives intact, escaped rather than substituted: two jobs whose
+    # names differ only in their punctuation stay two names in the row
+    assert "a\\|b \\`x\\` c" in line, line
 
 
 def test_held_back_line_merges_early_and_late_gates_and_keeps_the_tie_rule():
@@ -8064,3 +8881,573 @@ def test_held_back_line_merges_early_and_late_gates_and_keeps_the_tie_rule():
          "gate": "job_declares_more_than_one_cache_restore_step"}])
     # tie: alphabetically first gate wins, exactly as before
     assert "restores more than one cache" in line, line
+
+
+def test_held_back_reason_is_hedged_when_more_than_one_gate_contributed():
+    """The count and the named jobs cover EVERY held-back candidate, but the
+    reason is only the commonest gate's. Printed flat, the sentence asserted
+    that reason of every job it named — "7 held back (…): the job restores more
+    than one cache" while two of the seven were held back for something else,
+    with nothing in the row letting the reader see it. A second gate now makes
+    the reason explicitly modal; one gate leaves it unhedged."""
+    rows = ([{"workflow_file": "ci.yml", "job": f"many{i}",
+              "gate": "no_install_step_after_the_cache_step"} for i in range(5)]
+            + [{"workflow_file": "ci.yml", "job": f"few{i}",
+                "gate": "job_declares_more_than_one_cache_restore_step"}
+               for i in range(2)])
+    line = _held_back_cell(rows)
+    assert "7 candidate cache(s) held back" in line, line
+    # the modal gate's reason, and it does NOT claim to hold of all seven
+    assert ("): most commonly, " + bp._OPT79_HELD_BACK_REASONS[
+        "no_install_step_after_the_cache_step"] + ".") in line, line
+    # the minority gate's own reason is not asserted of anyone
+    assert "restores more than one cache" not in line, line
+    # …and one gate for every candidate stays unhedged: there is nothing to hedge.
+    only = _held_back_cell(
+        [{"workflow_file": "ci.yml", "job": f"j{i}",
+          "gate": "no_install_step_after_the_cache_step"} for i in range(3)])
+    assert ("): " + bp._OPT79_HELD_BACK_REASONS[
+        "no_install_step_after_the_cache_step"] + ".") in only, only
+    assert "most commonly" not in only, only
+
+
+def test_held_back_job_names_cannot_split_the_row_or_become_a_link():
+    """Job names are repo-controlled and land in a markdown table cell.
+
+    `a\\|b` was escaped to `a\\\\|b` — GFM reads that as an escaped BACKSLASH
+    followed by a live cell separator, so the row grew a column and the
+    self-check's own cell regex read only the fragment before the split. And a
+    job named `[click](http://example.test)` rendered as a working link inside
+    the audit's own Data sources table."""
+    def _gfm_cells(row: str) -> int:
+        """Count the row's cells the way GFM does: a backslash escapes exactly
+        the character after it, so a `|` ends a cell unless an ODD run of
+        backslashes precedes it. Counting with a `(?<!\\)\\|` lookbehind has
+        precisely the blind spot this test exists to catch — it declines to
+        split `a\\\\|b`, which GFM reads as an escaped backslash followed by a
+        LIVE separator, so the broken escaper would score three cells here."""
+        cells, buf, i = [], [], 0
+        while i < len(row):
+            if row[i] == "\\" and i + 1 < len(row):
+                buf.append(row[i:i + 2])
+                i += 2
+            elif row[i] == "|":
+                cells.append("".join(buf))
+                buf = []
+                i += 1
+            else:
+                buf.append(row[i])
+                i += 1
+        cells.append("".join(buf))
+        return len([c for c in cells if c.strip()])
+
+    line = _held_back_cell([
+        {"workflow_file": "ci.yml", "job": "a\\|b", "gate": "no_monthly_volume"}])
+    # exactly three cells: the row did not grow a column
+    assert _gfm_cells(line) == 3, line
+    # `\` escaped first, THEN `|`: `a\|b` -> `a\\\|b`, never `a\\|b`
+    assert "a\\\\\\|b" in line, line
+
+    line = _held_back_cell([
+        {"workflow_file": "ci.yml", "job": "[click](http://example.test)",
+         "gate": "no_monthly_volume"}])
+    assert "[click](http://example.test)" not in line, line
+    assert "\\[click\\]\\(http://example.test\\)" in line, line
+    assert len([c for c in re.split(r"(?<!\\)\|", line) if c.strip()]) == 3, line
+
+    # The row exists to say WHICH candidates were held back, so two different
+    # jobs must not arrive as one name. Backticks and asterisks used to be
+    # swapped for an apostrophe, which collapsed `a*b`, "a`b" and `a'b` into a
+    # single rendered string; both are ordinary GFM backslash escapes, so the
+    # name survives instead.
+    def _cell_of(job):
+        return _held_back_cell([{"workflow_file": "ci.yml", "job": job,
+                                 "gate": "no_monthly_volume"}])
+
+    rendered = {_cell_of(j) for j in ("a*b", "a`b", "a'b")}
+    assert len(rendered) == 3, rendered
+    assert "a\\*b" in _cell_of("a*b"), _cell_of("a*b")
+    assert "a\\`b" in _cell_of("a`b"), _cell_of("a`b")
+    # …and neither can still open a code span or an emphasis run
+    assert _gfm_cells(_cell_of("a`b`c")) == 3, _cell_of("a`b`c")
+
+    # an emphasis run a name would otherwise open across the rest of the cell
+    line = _held_back_cell([
+        {"workflow_file": "ci.yml", "job": "snake_case_job_name",
+         "gate": "no_monthly_volume"}])
+    assert "snake\\_case\\_job\\_name" in line, line
+
+    # `<https://example.test>` is a GFM autolink and renders as a working link
+    # exactly like the `[click](...)` form above; a raw `<img …>` / `<details>`
+    # is live HTML inside the cell. Angle brackets are the same harm, so they
+    # are neutralised the same way.
+    line = _held_back_cell([
+        {"workflow_file": "ci.yml", "job": "<https://example.test>",
+         "gate": "no_monthly_volume"}])
+    assert "<https://example.test>" not in line, line
+    assert "\\<https://example.test\\>" in line, line
+    line = _held_back_cell([
+        {"workflow_file": "ci.yml", "job": "<details open>build</details>",
+         "gate": "no_monthly_volume"}])
+    assert "<details open>" not in line, line
+
+
+def test_no_collector_path_can_record_a_held_back_entry_with_no_job():
+    """The renderer carries `(unnamed job)` / "a group" fallbacks and the
+    self-check hard-REJECTS an entry that names no job, so the two would
+    disagree if any real detector path could produce one. Read off the
+    collector: every site that adds to a withheld-candidate list is an append
+    of a dict literal whose name field is bound to a non-empty expression, and
+    OPT79's pre-probe site — the only one whose name is not structurally
+    non-empty — appends under a condition that tests it.
+
+    The scan used to match `withheld_candidates.append(<Name>)` only, so an
+    `extend`, an `insert`, a `+=` or a row built one line earlier escaped it
+    entirely — and `len(sites) == 4` still passed, because a site the scan
+    cannot see is not a site it counts. It now matches every way the list can
+    be written to, and asserts each one is the recognised shape. The OPT79
+    guard is located by walking that function's conditions rather than by
+    grepping the whole file for the text of the test, which matched wherever
+    it happened to live."""
+    import ast
+    import collect_runs as _cr
+    src = (_SCRIPTS / "collect_runs.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+
+    def _is_target(node):
+        return isinstance(node, ast.Name) and node.id == "withheld_candidates"
+
+    writes = []
+    for n in ast.walk(tree):
+        if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                and _is_target(n.func.value)):
+            writes.append((n.func.attr, n))
+        elif isinstance(n, ast.AugAssign) and _is_target(n.target):
+            writes.append(("+=", n))
+        elif (isinstance(n, ast.Assign)
+              and any(_is_target(t) for t in n.targets)):
+            writes.append(("=", n))
+    # 77, 79 pre-probe, 79 post-probe, 80, 81 A1, 81 A2, 82, 83 and 84 (82, 83
+    # and 84 guarded by `and job` in their `_no` helpers) — and every one of them
+    # an `append(<dict literal>)`, never an `extend`, an `insert` or a `+=`.
+    assert len(writes) == 9, [(k, ast.dump(n)[:60]) for k, n in writes]
+    for kind, n in writes:
+        assert kind == "append", (kind, ast.dump(n)[:80])
+        d = n.args[0]
+        assert isinstance(d, ast.Dict), ast.dump(n)[:120]
+        named = {k.value: v for k, v in zip(d.keys, d.values)
+                 if isinstance(k, ast.Constant)}
+        key = "job" if "job" in named else "jobs"
+        assert key in named, sorted(named)
+        # the name is BOUND to something, not a literal blank or None
+        value = named[key]
+        assert not (isinstance(value, ast.Constant)
+                    and not str(value.value or "").strip()), ast.dump(value)
+
+    # OPT79's pre-probe site is the only one whose name is not structurally
+    # non-empty. Its guard is located STRUCTURALLY: the conditions that
+    # actually govern that append, not a substring anywhere in the file.
+    def _guards_of(root, needle):
+        """Every `if` test that encloses `needle` inside `root`."""
+        found = []
+
+        def walk(node, tests):
+            for child in ast.iter_child_nodes(node):
+                if child is needle:
+                    found.extend(tests)
+                if isinstance(child, ast.If):
+                    for b in child.body:
+                        walk(b, tests + [child.test])
+                    for b in child.orelse:
+                        walk(b, tests)
+                else:
+                    walk(child, tests)
+
+        walk(root, [])
+        return found
+
+    fns = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    pre_probe = [n for _k, n in writes
+                 if any(isinstance(c, ast.Subscript)
+                        and isinstance(c.value, ast.Name) and c.value.id == "ctx"
+                        for c in ast.walk(n))]
+    assert len(pre_probe) == 1, len(pre_probe)
+    guards = _guards_of(fns["_opt79_candidates"], pre_probe[0])
+    assert guards, "OPT79's pre-probe append is not inside any condition"
+    guarded = any(
+        isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+        and c.func.attr == "get" and isinstance(c.func.value, ast.Name)
+        and c.func.value.id == "ctx"
+        and c.args and isinstance(c.args[0], ast.Constant)
+        and c.args[0].value == "job"
+        for t in guards for c in ast.walk(t))
+    assert guarded, [ast.dump(t)[:120] for t in guards]
+
+    # …and the renderer still renders something legible if one ever appeared —
+    # escaped like any other name, so it reads "(unnamed job)" on the page.
+    line = _held_back_cell([{"workflow_file": "ci.yml", "job": "",
+                             "gate": "no_monthly_volume"}])
+    assert "\\(unnamed job\\)" in line, line
+    assert _cr is not None
+
+
+def test_a_tied_held_back_reason_says_equally_often_not_most_commonly():
+    """"most commonly" is a claim about which reason dominates, and on an exact
+    split there is no such reason — the sentence asserts something false about
+    the very tie it is standing on. The tie gets its own wording; which of the
+    tied reasons is shown is still the alphabetically first."""
+    rows = [{"workflow_file": "ci.yml", "job": "a",
+             "gate": "tail_run_log_unavailable"},
+            {"workflow_file": "ci.yml", "job": "b",
+             "gate": "no_tail_run_log_was_probed"}]
+    line = bp._withheld_candidates_line(
+        {"opt80_withheld_candidates": rows}, "opt80_withheld_candidates",
+        "candidate checkout(s)")
+    assert bp._WITHHELD_TIED_LEAD in line, line
+    assert bp._WITHHELD_MODAL_LEAD not in line, line
+    # …and an actual majority still reads "most commonly".
+    rows.append({"workflow_file": "ci.yml", "job": "c",
+                 "gate": "tail_run_log_unavailable"})
+    line = bp._withheld_candidates_line(
+        {"opt80_withheld_candidates": rows}, "opt80_withheld_candidates",
+        "candidate checkout(s)")
+    assert bp._WITHHELD_MODAL_LEAD in line, line
+    assert bp._WITHHELD_TIED_LEAD not in line, line
+
+
+def test_the_held_back_count_counts_what_the_row_actually_names():
+    """The count was the number of recorded rows while the names and the "and
+    K more" overflow were the number of DISTINCT entries. Two rows for one job
+    — the same candidate held back at two gates — printed "2 candidate
+    checkout(s) held back (build)", a sentence that disagrees with itself."""
+    rows = [{"workflow_file": "ci.yml", "job": "build",
+             "gate": "tail_run_log_unavailable"},
+            {"workflow_file": "ci.yml", "job": "build",
+             "gate": "no_tail_run_log_was_probed"}]
+    line = bp._withheld_candidates_line(
+        {"opt80_withheld_candidates": rows}, "opt80_withheld_candidates",
+        "candidate checkout(s)")
+    assert line.startswith("1 candidate checkout(s) held back (build): "), line
+
+
+def test_a_registered_pattern_with_no_phrase_table_still_renders_a_report():
+    """`_WITHHELD_PHRASES_BY_KEY[key]` was a bare subscript: a pattern
+    registered in `_WITHHELD_ROWS` whose gate -> phrase table had not been
+    registered too raised a KeyError and took the WHOLE report with it. The
+    renderer's contract is that it always produces a report, even from a
+    document a bug has malformed - so this degrades to the unmapped wording
+    and leaves `verify_report` to fail the run."""
+    line = bp._withheld_candidates_line(
+        {"optzz_withheld_candidates": [
+            {"workflow_file": "ci.yml", "job": "unit", "gate": "some_gate"}]},
+        "optzz_withheld_candidates", "candidate thing(s)")
+    assert line == (f"1 candidate thing(s) held back (unit): "
+                    f"{bp._WITHHELD_UNMAPPED_PHRASE}."), line
+
+
+def test_a_group_shaped_pattern_renders_its_jobs_because_the_shape_is_registered():
+    """Whether an entry names one job or a whole group was decided by
+    comparing the doc key against OPT77's, in the renderer AND in
+    `verify_report`. A fourth group-shaped pattern would therefore have
+    rendered `(unnamed job)` for every candidate - in both twins alike, so
+    they agreed and the suite stayed green. The shape is part of the
+    registration now."""
+    key = "optzz_withheld_candidates"
+    old_rows = bp._WITHHELD_ROWS
+    old_shape = dict(bp._WITHHELD_SHAPE_BY_KEY)
+    try:
+        bp._WITHHELD_ROWS = old_rows + (bp.WithheldRow(
+            key, "mystery: held back", "candidate group(s)",
+            "Why a thing produced no finding", "group"),)
+        bp._WITHHELD_SHAPE_BY_KEY[key] = "group"
+        entries = bp._withheld_entries(
+            [{"workflow_file": ".github/workflows/ci.yml",
+              "jobs": ["lint", "test"], "gate": "g"}], key)
+    finally:
+        bp._WITHHELD_ROWS = old_rows
+        bp._WITHHELD_SHAPE_BY_KEY.clear()
+        bp._WITHHELD_SHAPE_BY_KEY.update(old_shape)
+    assert entries == ["lint + test in ci.yml"], entries
+
+
+def test_a_group_entry_with_a_blank_member_name_renders_a_visible_marker():
+    """The job-shaped path has always had a `(unnamed job)` fallback; the
+    group-shaped one had none, so a blank member rendered as nothing at all
+    and the entry read " in ci.yml"."""
+    entries = bp._withheld_entries(
+        [{"workflow_file": "ci.yml", "jobs": ["  "], "gate": "g"}],
+        bp._OPT77_WITHHELD_DOC_KEY)
+    assert entries == ["\\(unnamed job\\) in ci.yml"], entries
+
+
+def test_a_gate_with_no_phrase_renders_a_reason_never_its_code():
+    """A gate the phrase tables do not cover is a collector bug the self-check
+    fails on — but until the report is verified the row still renders, and what
+    it renders must read as a reason rather than leak the internal gate name.
+    Pinned at the RENDER level: the constant alone could be rewritten to
+    anything (including a code) with nothing going red."""
+    line = _held_back_cell([{"workflow_file": "ci.yml", "job": "unit",
+                             "gate": "a_gate_no_table_covers"}])
+    assert "a_gate_no_table_covers" not in line, line
+    assert bp._WITHHELD_UNMAPPED_PHRASE in line, line
+    # it has to be prose, not a placeholder or a token
+    assert bp._WITHHELD_UNMAPPED_PHRASE == (
+        "a reason this report has no plain-English wording for")
+    assert "_" not in bp._WITHHELD_UNMAPPED_PHRASE
+
+
+def test_every_held_back_row_keeps_the_static_only_body_alive():
+    """A repository with nothing else to report but one held-back candidate
+    must still render a body, or the Data sources footer — the only place the
+    candidate is disclosed — goes with it and "could not tell" reads as
+    "nothing found". Pinned for EVERY registered pattern, not just OPT79: a row
+    added without this is silent on exactly the repositories it exists for."""
+    for key, label, _noun, _feeds, _shape in bp._WITHHELD_ROWS:
+        entry = {"workflow_file": ".github/workflows/nightly.yml",
+                 "gate": "no_monthly_volume"}
+        if key == "opt77_withheld_candidates":
+            entry.update(group="ubuntu-latest/a+b+c", jobs=["a", "b", "c"],
+                         gate="needs_graph_undecidable")
+        else:
+            entry["job"] = "build"
+            if key == "opt80_withheld_candidates":
+                entry["gate"] = "no_tail_run_log_was_probed"
+        doc = {"repo": "o/r", "findings": [], "pr_critical_path": {"poles": []},
+               "data_sources": {}, key: [entry]}
+        assert bp._render_static_only(doc), key
+        md = bp.render(doc, "o/r")
+        assert "held back" in md, (key, md)
+        assert _withheld_row(md, label), (key, md)
+
+
+def test_opt82_held_back_row_names_the_lint_job_and_its_plain_reason():
+    """OPT82 (type-aware lint) joins the shared held-back registry: a slow lint
+    job whose ESLint config could not be decided is named with a plain-English
+    reason, never a gate code."""
+    rows = [{"workflow_file": ".github/workflows/lint.yml", "job": "eslint",
+             "gate": "type_aware_setting_unresolvable"}]
+    line = bp._withheld_candidates_line(
+        {bp._OPT82_WITHHELD_DOC_KEY: rows}, bp._OPT82_WITHHELD_DOC_KEY,
+        "candidate lint job(s)")
+    assert line == ("1 candidate lint job(s) held back (eslint): "
+                    + bp._OPT82_WITHHOLD_PHRASES["type_aware_setting_unresolvable"]
+                    + "."), line
+    md = bp.render({"repo": "o/r", "findings": [], "pr_critical_path": {"poles": []},
+                    "data_sources": {}, bp._OPT82_WITHHELD_DOC_KEY: rows}, "o/r")
+    assert _withheld_row(md, "type-aware lint: held back"), md
+
+
+def test_opt82_card_uses_its_own_prompt_never_the_generic_bill_line():
+    f = {"id": "f1", "pattern": "OPT82", "severity": "MEDIUM",
+         "title": "Lint Builds the Whole Type Graph",
+         "workflow_file": ".github/workflows/lint.yml", "affected_jobs": ["eslint"],
+         "evidence": "`eslint` runs ESLint with type-aware parsing on.",
+         "fix_recipe_anchor": "opt82--lint-builds-the-whole-type-graph",
+         "wall_clock_p50_s": 0.0, "runner_min_saving": None,
+         "type_aware_lint": {"kind": "opt82_type_aware_lint", "ceiling_s": 78.0,
+                             "ceiling_basis": "lint_step", "configs": ["eslint.config.mjs"],
+                             "rules": [{"rule": "@typescript-eslint/no-floating-promises"}],
+                             "benchmark_commands": {"as_ci_runs_it": "(time npx eslint .)",
+                                                    "without_type_information": "(time x)"}}}
+    lines, n, _ = bp._also_noticed_block([f], "https://example.invalid/c.md")
+    card = "\n".join(lines)
+    assert n == 1 and "uncredited, benchmark first" in card
+    assert bp._OPT82_LEDGER_SENTENCE in card and "SIZING: uncredited." in card
+    assert "runner-min/mo" not in card and "no bill saving" not in card
+
+
+# --------------------------------------------------------------------------- #
+# A pole job that runs steps in a `parallel:` group: the step-level drill must
+# not claim the steps run in sequence, sum to the job, or that time cut from any
+# step comes 1:1 off the job. Keyed on `doc["parallel_steps"]["jobs_with_groups"]`.
+# --------------------------------------------------------------------------- #
+
+_SEQ_PHRASES = ("one after another", "straight off the job's wall-clock",
+                "they run in sequence and roughly add up to the job")
+
+
+def _with_groups(doc: dict, path: str, job: str, sequential: list | None = None) -> dict:
+    doc = dict(doc)
+    doc["parallel_steps"] = {"groups": 1, "steps_in_groups": 2, "control_steps": 0,
+                             "malformed_groups": 0, "malformed_files": [],
+                             "malformed_jobs": [],
+                             "jobs_with_groups": [{"path": path, "job": job}],
+                             "sequential_jobs": list(sequential or [])}
+    return doc
+
+
+_PL = ".github/workflows/pipeline.yml"
+
+
+def _ps_doc(**stamp) -> dict:
+    base = {"groups": 1, "steps_in_groups": 1, "control_steps": 0,
+            "jobs_with_groups": [], "jobs_with_background": [], "sequential_jobs": []}
+    base.update(stamp)
+    return {"parallel_steps": base}
+
+
+def test_pole_overlap_join_matches_display_names_matrix_legs_templates_and_callees():
+    """T1/S3: the pole's check or job is joined to the stamp by job key, display
+    name, matrix leg, a `${{ }}`-templated name, and a reusable-workflow callee's
+    trailing ` / <job>` segment."""
+    cases = [
+        ({"job": "test", "name": "Unit tests"}, {"check": "Unit tests"}),
+        ({"job": "test"}, {"check": "test (ubuntu-latest, 3.12)"}),
+        ({"job": "test", "name": "Test ${{ matrix.os }}"}, {"check": "Test ubuntu-latest"}),
+        ({"job": "build"}, {"check": "caller / build"}),
+    ]
+    for row, pole in cases:
+        doc = _ps_doc(jobs_with_groups=[dict(row, path=_PL)])
+        assert bp._pole_steps_overlap(dict(pole, workflow_file=_PL), doc) == "group", (row, pole)
+
+
+def test_pole_overlap_join_fails_closed_when_the_job_cannot_be_matched():
+    """S3: a workflow that holds a group, and a pole matching neither the
+    grouped jobs nor the jobs recorded as sequential, is worded as uncertain,
+    never "one after another". A recorded sequential job keeps its wording."""
+    doc = _ps_doc(jobs_with_groups=[{"path": _PL, "job": "lint"}],
+                  sequential_jobs=[{"path": _PL, "job": "tests-web"}])
+    assert bp._pole_steps_overlap({"check": "tests-web", "workflow_file": _PL}, doc) is None
+    assert bp._pole_steps_overlap({"check": "Tests ${{ x }}", "workflow_file": _PL},
+                                  doc) == "maybe"
+    assert bp._pole_steps_overlap({"check": "e2e", "workflow_file": _PL}, doc) == "maybe"
+    # another workflow's group says nothing about this pole
+    assert bp._pole_steps_overlap(
+        {"check": "e2e", "workflow_file": ".github/workflows/other.yml"}, doc) is None
+
+
+def test_pole_overlap_join_with_no_workflow_file_is_wording_only():
+    """Item 6: a pole with no known workflow file cannot be pinned to a YAML
+    job, so a name match only hedges the wording ("maybe"), never asserts it."""
+    doc = _ps_doc(jobs_with_groups=[{"path": _PL, "job": "test"}])
+    assert bp._pole_steps_overlap({"check": "test", "workflow_file": ""}, doc) == "maybe"
+    assert bp._pole_steps_overlap({"check": "lint", "workflow_file": ""}, doc) is None
+
+
+def test_pole_overlap_join_reads_background_only_jobs():
+    doc = _ps_doc(groups=0, steps_in_groups=0, background_steps=1,
+                  jobs_with_background=[{"path": _PL, "job": "it"}])
+    assert bp._pole_steps_overlap({"check": "it", "workflow_file": _PL}, doc) == "background"
+
+
+def test_pole_with_only_background_steps_drops_the_sequential_claim():
+    doc = _doc_one_pole()
+    doc["parallel_steps"] = {"groups": 0, "steps_in_groups": 0, "control_steps": 0,
+                             "background_steps": 1, "jobs_with_groups": [],
+                             "jobs_with_background": [{"path": _PL, "job": "tests-web"}],
+                             "sequential_jobs": []}
+    md = bp.render(doc, {"pipeline": _IMPORT_BOUND_LOG}, {}, {},
+                   "2026-06-08", {"pipeline": _TIMELINE})
+    for ph in _SEQ_PHRASES:
+        assert ph not in md, ph
+    assert "runs some steps in the background" in md, md
+
+
+def test_unmatched_pole_in_a_grouped_workflow_is_worded_as_uncertain():
+    doc = _with_groups(_doc_one_pole(), _PL, "lint")
+    md = bp.render(doc, {"pipeline": _IMPORT_BOUND_LOG}, {}, {},
+                   "2026-06-08", {"pipeline": _TIMELINE})
+    for ph in _SEQ_PHRASES:
+        assert ph not in md, ph
+    assert "may overlap" in md, md
+
+
+def test_pole_with_parallel_steps_timeline_drops_the_sequential_claim():
+    doc = _with_groups(_doc_one_pole(), ".github/workflows/pipeline.yml", "tests-web")
+    md = bp.render(doc, {"pipeline": _IMPORT_BOUND_LOG}, {}, {},
+                   "2026-06-08", {"pipeline": _TIMELINE})
+    for ph in _SEQ_PHRASES:
+        assert ph not in md, ph
+    assert "side by side in a `parallel:` group" in md, md
+    assert "only if it is on the slowest branch" in md
+
+
+def test_pole_with_parallel_steps_p50_bars_drop_the_sum_claim():
+    doc = _with_groups(_doc_one_pole(), ".github/workflows/pipeline.yml", "tests-web")
+    md = bp.render(doc, {}, {}, {}, "2026-06-08")
+    for ph in _SEQ_PHRASES:
+        assert ph not in md, ph
+    assert "side by side in a `parallel:` group" in md, md
+
+
+def test_long_pole_map_lead_drops_the_sequential_claim_for_a_grouped_job():
+    doc = _with_groups(_collision_doc(), ".github/workflows/ci.yml", "test")
+    md = bp.render(doc, {}, {}, {"ci": _COLLISION_TIMELINE["run_url"]},
+                   "2026-07-19T00:00:00Z", {"ci": _COLLISION_TIMELINE})
+    seg = _map_section(md)
+    assert "steps run one after another" not in seg, seg
+    assert "▼ Level 2 - inside test, some steps run side by side:" in seg, seg
+    for ph in _SEQ_PHRASES:
+        assert ph not in md, ph
+
+
+def test_grouped_job_elsewhere_leaves_the_pole_text_byte_identical():
+    """A `parallel:` group in a DIFFERENT workflow (or a different job) is not
+    this pole's: its drill text is byte-identical to a doc with no stamp, apart
+    from the Data sources row the stamp itself adds."""
+    import re as _re
+
+    def _strip(s):
+        # the Data sources row the stamp adds, and the per-render prompt nonce
+        s = _re.sub(r"CONTENT \[[0-9a-f]{8}\]", "CONTENT [nonce]", s)
+        return "\n".join(ln for ln in s.splitlines() if "Parallel steps" not in ln)
+
+    base = bp.render(_doc_one_pole(), {"pipeline": _IMPORT_BOUND_LOG}, {}, {},
+                     "2026-06-08", {"pipeline": _TIMELINE})
+    for path, job in ((".github/workflows/other.yml", "tests-web"),
+                      (".github/workflows/pipeline.yml", "lint")):
+        # The pole's own job is recorded as running in sequence (the scan lists
+        # every other job of a file that holds a group).
+        md = bp.render(_with_groups(_doc_one_pole(), path, job,
+                                    [{"path": path, "job": "tests-web"}]),
+                       {"pipeline": _IMPORT_BOUND_LOG}, {}, {},
+                       "2026-06-08", {"pipeline": _TIMELINE})
+        assert _strip(md) == _strip(base), (path, job)
+        assert "comes straight off the job's wall-clock" in md
+
+
+def test_opt83_card_renders_at_its_pole_and_never_in_also_noticed():
+    """OPT83 is uncredited and routed from a pole: excluded from the hygiene
+    appendix whatever it carries, and joined only to its own pole's job."""
+    f = {"id": "f7", "pattern": "OPT83", "title": "t", "risk": "MEDIUM",
+         "workflow_file": ".github/workflows/q.yml", "affected_jobs": ["q"],
+         "wall_clock_p50_s": None, "runner_min_saving": None,
+         "independent_steps": {"job": "q", "yaml_job": "q", "ceiling_s": 50.0,
+                               "steps": [{"step": "A", "p50_s": 30.0},
+                                         {"step": "B", "p50_s": 25.0},
+                                         {"step": "C", "p50_s": 25.0}]}}
+    lines, n, _wc = bp._also_noticed_block([f], "https://x/c.md")
+    assert (lines, n) == ([], 0)
+    pole = {"check": "q", "job": "q", "workflow_file": ".github/workflows/q.yml"}
+    assert bp._opt83_for_pole(pole, [f]) == [f]
+    assert bp._opt83_for_pole({**pole, "job": "r"}, [f]) == []
+    card = "\n".join(bp._opt83_card(f, "https://x/c.md"))
+    assert card.startswith('<a id="opt83-f7"></a>') and "up to 50s sooner" in card
+
+
+def test_the_drill_fallbacks_never_mark_a_control_step_as_dominant():
+    """D3: `_dom_index` (an aggregate dominant label that names no single step)
+    and `_dom_lead_idx` (no step of the dominant category in the top rows) fall
+    back to "the longest step" / row 0. A `wait-all` step only waits, so the
+    fallback skips control steps exactly as the collector's crown does."""
+    steps = [{"name": "wait-all", "dur_s": 300}, {"name": "Checkout", "dur_s": 5}]
+    assert bp._dom_index(steps, "Build + 2 more build steps") == 1
+    rows = [{"step": "wait-all", "category": "other", "p50_s": 300},
+            {"step": "Run tests", "category": "test", "p50_s": 60}]
+    assert bp._dom_lead_idx(rows, "build") == 1
+    assert bp._dom_lead_idx(rows, "") == 1
+    assert bp._dom_index([{"name": "wait", "dur_s": 9}], "x") == -1
+
+
+def test_coverage_banner_counts_files_not_records():
+    """S9: two gap records for one file (two jobs with unreadable groups) are
+    one file that could not be fully scanned, not two."""
+    lines = bp._coverage_gap_banner([
+        {"path": ".github/workflows/ci.yml", "reason": "job `a`: x"},
+        {"path": ".github/workflows/ci.yml", "reason": "job `b`: y"}])
+    assert "Incomplete coverage - 1 workflow file(s)" in lines[1], lines
+
+
+def test_control_step_pattern_is_identical_in_collector_and_renderer():
+    assert cr._CONTROL_STEP_NAME_RE.pattern == bp._CONTROL_STEP_NAME_RE.pattern
+    assert cr._CONTROL_STEP_NAME_RE.flags == bp._CONTROL_STEP_NAME_RE.flags

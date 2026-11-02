@@ -7,7 +7,7 @@
 
 ---
 
-ci-secure computes nine deterministic, pass/fail configuration facts as
+ci-secure computes thirteen deterministic, pass/fail configuration facts as
 MACHINE-ONLY inputs for a future blended score (the ci-advisor door, not yet
 public). They are aggregated `100 × passed / scored` with no weights and no
 partial credit (registered 2026-08-03) — but **that aggregate is never a number
@@ -18,12 +18,22 @@ vector detectors are lexical rather than confirmed exploit proofs, and a public
 number must not grade a stranger's repo down on an unconfirmed match.
 
 **The denominator is token-dependent, so the aggregate is not comparable
-across scans run under different auth.** Two of the nine facts read the GitHub
-API. In a repository where every fact applies, a scan with no repository or no
-token measures seven of nine and scores `100 × passed / 7`; the same repository
-scanned with a token scores over nine. A fact that does not apply to the
-repository at all leaves the denominator on top of that (see below), so both
-numbers drop by one in a repository whose workflows run no suite.
+across scans run under different auth.** Up to six of the thirteen facts read
+the GitHub API (the CODEOWNERS fact only once a CODEOWNERS rule covers the
+workflows). In a repository where every fact applies and that rule exists, a
+scan with no repository or no token measures seven of thirteen and scores
+`100 × passed / 7`; the same repository scanned with a token that can read
+every source scores over thirteen. Between the two sits the ordinary
+reader's token: the two environment facts are measured from environment
+settings, but any verdict that rests on classic branch protection rules or a
+ruleset's bypass list (both admin-only) stays unmeasured, and so does the
+environment-scoped secrets fact whenever the secret lists answer 403. A
+fact that does not apply to the repository at all leaves the denominator on
+top of that (see below), so the number drops by one for each such fact — in
+a repository whose workflows run no suite or that configures no dependency
+update tool (both scans), and, for the two environment facts, in one with no
+environments or no required reviewers (the token scan only: without a token
+those two are unmeasured, never not applicable).
 The unmeasured ids are named in the block's `unmeasured` list and the caveat, so
 a consumer — ci-advisor above all — can tell the two apart, but only if it
 checks: comparing the raw numbers across differently-authenticated scans
@@ -31,7 +41,7 @@ compares different measurements.
 
 **The aggregate is machine-only.** ci-secure's own report and close render
 these facts as a pass/fail table and **no number** by design: a hygiene
-aggregate labelled "Security score" overclaims what nine config observations
+aggregate labelled "Security score" overclaims what thirteen config observations
 can say, and printed beside a ten-vector scan it read as a contradiction. The
 `security_score` block in the findings JSON keeps its shape — same keys, same `fact_id`s, same outcomes, same aggregate; only prose the
 report prints was reworded so it stops naming a score the reader never sees.
@@ -39,9 +49,10 @@ Consumers bind to the ids, not to the sentences. ci-advisor blends from that
 block, and quantification belongs there, where the blend context carries the
 denominators.
 
-A fact that cannot be measured — an unscannable workflow file, or, for the two
-API-gated facts, no repository and no token — is **unmeasured, never a silent
-pass**: it scores nothing, stays in the applicable count as a
+A fact that cannot be measured — an unscannable workflow file; for the six
+API-gated facts, no repository and no token; or, for
+`sec.deps.update-cooldown`, an update config this scan cannot parse — is
+**unmeasured, never a silent pass**: it scores nothing, stays in the applicable count as a
 named coverage gap, and the block says so.
 
 A fact that **does not apply** is a different state and is treated differently.
@@ -51,9 +62,13 @@ not-applicable fact scores nothing and leaves the applicable count entirely —
 the same treatment ci-score gives a check it rules not applicable — while its
 row still renders, because a row that quietly vanishes reads as a pass. Its id
 is listed in the block's `not_applicable` list, separate from `unmeasured`, so
-a consumer never has to guess which of the two it is looking at. Only
-`sec.gate.test-failure-fatal` can reach that state today, and only in a
-repository whose workflows run no test or lint suite at all.
+a consumer never has to guess which of the two it is looking at. Four facts
+can reach that state today: `sec.gate.test-failure-fatal`, only in a
+repository whose workflows run no test or lint suite at all;
+`sec.deps.update-cooldown`, only in a repository that configures neither
+Dependabot version updates nor Renovate; `sec.environments.branch-restricted`,
+only in a repository with no environments; and `sec.environments.approval-holds`, only when no
+environment requires a reviewer.
 
 ## The disjointness census
 
@@ -68,13 +83,17 @@ instead of shipping.
 | --- | --- | --- |
 | `sec.permissions.workflow-declares` | `ci.security.scoped-id-token` | Adding a `permissions:` block is a different edit from relocating an `id-token: write` grant. A workflow can declare permissions and still fail scoped-id-token, and vice versa. |
 | `sec.permissions.write-scoped` | `ci.security.scoped-id-token` | **Disjoint by construction:** `id-token` is excluded from this fact's scope set, so the one edit scoped-id-token asks for (move `id-token: write` to a job) cannot change this fact. `write-all` fails here on its own; unwinding it into per-job grants is not the id-token relocation. |
-| `sec.codeowners.workflows` | — none | CODEOWNERS is not workflow YAML; no ci-score check reads it. |
+| `sec.codeowners.workflows` | — none | CODEOWNERS is not workflow YAML, and the branch rule that enforces it (require review from Code Owners) is read over the API, not from YAML; no ci-score check reads either. API-gated once a rule covers workflows. |
 | `sec.trigger.fork-code-uncleared` | `ci.trigger.*` (concurrency, cancel, path-filter) | Those checks read `concurrency:` and `paths:` blocks; this fact reads the trigger list plus checkout `ref:`/`repository:` values. No shared YAML key. Also tiered against ci-secure's own P14.9 finding: a bare untrusted trigger passes (the true-of-84% defect, deliberately removed), trigger + attacker-head checkout fails this FACT, and only the full trigger + checkout + execution chain is the P14.9 finding — so the fact and the finding cannot fire on the same edit either. |
 | `sec.secrets.no-blanket-inherit` | — none | No ci-score check reads `secrets:` on reusable-workflow calls. |
 | `sec.required-checks.skippable` | — none | Branch protection is not workflow YAML; no ci-score check reads the API. The workflow-side edit this fact asks for (add an always-running verdict job that `needs:` the conditional ones) touches no key any ci-score check reads. |
 | `sec.fork-approval.effective` | — none | A repository Actions setting, not workflow YAML at all; no ci-score check reads it, and no YAML edit can move it. |
 | `sec.gate.test-failure-fatal` | `ci.parallel.test-sharding` | Both look at the jobs that run the suite, and neither edit moves the other: sharding is a `strategy.matrix` on the job, this fact is the `run:` line's exit code and the step's `continue-on-error`. A sharded suite can still swallow every shard's failure, and an unsharded one can be perfectly fatal. Also bounded against the OTHER engine: `continue-on-error` on an upload, report, or notification step is a speed and reliability question that ci-speedup owns, and it does not reach this fact, because only a step whose own `run:` command the allowlist recognises as a suite is in scope — a `uses:` upload action has no `run:` line at all. Residual, disclosed: a reporting step whose command *does* match the allowlist is in scope here too, as is a suite step carrying `continue-on-error: true` that has been red for every run (ci-speedup's OPT68); the bound is on the command, not on the step's stated purpose. |
 | `sec.checkout.credentials-scoped` | `ci.checkout.shallow-clone` | Both read checkout steps, but different keys: `fetch-depth` there, `persist-credentials` here — two `with:` entries, two edits. This fact also applies only on untrusted-trigger workflows (excluding the payload-less `fork`/`watch` notification events); shallow-clone applies on PR-gating ones. |
+| `sec.environments.branch-restricted` | — none | Deployment environment settings, rulesets and classic branch protection are read over the API, not from workflow YAML; ci-score reads no environment, ruleset or secret API, and no YAML edit moves this fact (an `environment:` key in a workflow is not what it reads). |
+| `sec.environments.approval-holds` | — none | An environment's required-reviewer setting, read over the API; no ci-score check reads it and no YAML edit can move it. |
+| `sec.secrets.environment-scoped` | — none | The repository and organisation secret lists are read over the API; ci-score reads no secret API, and no workflow YAML edit moves this fact (moving a secret into an environment is a settings change). |
+| `sec.deps.update-cooldown` | — none | Dependabot and Renovate config files are not workflow YAML, and no ci-score check reads `dependabot.yml`, a Renovate config, `cooldown`, or `minimumReleaseAge` (ci-score's registry and methodology were searched for all four). The nearest neighbour, `ci.security.pinned-action-shas`, reads `uses:` refs in workflow files; adding a cooldown cannot move it, and pinning an action cannot move this. |
 
 **Residual correlation, disclosed:** a repo with careless
 workflow hygiene will tend to fail checks in both tools — that is the
@@ -94,8 +113,23 @@ two moved numbers.
   the jobs that need them; `permissions: write-all` fails.
 - **`sec.codeowners.workflows`** — a CODEOWNERS entry covers
   `.github/workflows/` (`.github/workflows/`, `.github/**`, or a bare `*`
-  global owner; an extension rule like `*.go` does not cover it). Without one,
-  workflow changes merge with the same approvals as any other change.
+  global owner; an extension rule like `*.go` does not cover it) AND the
+  default branch enforces it. Without a covering entry, workflow changes merge
+  with the same approvals as any other change — a fail decided from the files
+  alone, with no API call. With one, CODEOWNERS only REQUESTS an owner's
+  review: it binds only when the branch requires review from Code Owners, in a
+  ruleset's pull request rule (organisation rulesets included) or in classic
+  branch protection. Either source requiring it passes; both readable and
+  neither requiring it fails, because any approver can then merge a workflow
+  change. **To fix that fail**: turn on "Require review from Code Owners" in
+  the branch's ruleset or branch protection. API-gated once covered: with no
+  repository or no token, or when the answer cannot be completed (classic
+  protection is admin-only, so a ruleset that does not require it plus an
+  unreadable classic endpoint establishes nothing), the fact is unmeasured and
+  says why. Two answers settle classic protection without admin access: a 404
+  "Branch not protected" from its endpoint, and `protected: false` on the
+  public branch endpoint (that flag is set by rulesets as well as classic
+  protection, so `false` means neither exists; `true` settles nothing).
 - **`sec.trigger.fork-code-uncleared`** — no workflow with an untrusted-event
   trigger (`pull_request_target`, `workflow_run`, `issue_comment`, …) checks
   out the attacker's head ref. Bare untrusted triggers pass.
@@ -103,7 +137,9 @@ two moved numbers.
   `secrets: inherit`; secrets are passed by name so a called workflow's blast
   radius is visible in the caller.
 - **`sec.required-checks.skippable`** — every status check the default branch
-  REQUIRES is produced by a job that always runs. GitHub counts a skipped
+  REQUIRES has a producer that always runs and, for a verdict aggregator,
+  rejects upstream failure and invalid skip decisions within the supported
+  assertion language. GitHub counts a skipped
   required check as a pass, so a check only a conditional job reports can be
   satisfied by never running it. The pass shape is the always-running verdict
   job that `needs:` the conditional suites and asserts their results. Required
@@ -120,7 +156,7 @@ two moved numbers.
   same reason. Whether a workflow's jobs can report on a pull request at all is
   three-valued, and each value is treated differently. A `pull_request`
   workflow, a plain `push`, or a push over every branch (`branches: ['**']`)
-  CAN report, so an always-running job there certifies the check. A push
+  CAN report; an always-running producer with a proved verdict can certify the check. A push
   restricted to TAGS provably cannot — no pull-request branch push matches it —
   so a same-named job in a tag-only release workflow is not a producer at all.
   A matrix job's contexts come from the combinations the matrix can actually
@@ -172,9 +208,14 @@ two moved numbers.
   branch — the branch whose protection is being read — so every pull request
   this fact gates is inside that filter anyway.)
   **To fix a fail**: add one job that carries the required check's name, runs
-  `if: always()` (or `!cancelled()`), `needs:` the
-  conditional suites, and fails unless the suite that should have run passed —
-  then point branch protection at that job's name instead of the suites'.
+  `if: always()` (not `!cancelled()`: a cancelled run skips that job, and a
+  skipped required check reads as passed), `needs:` the
+  conditional suites (and the detector that decides them), and fails unless the
+  detector succeeded and each suite either passed or was skipped on a valid
+  "unchanged" decision — then point branch protection at that job's name
+  instead of the suites'. The assertion forms the check can read are listed
+  under [Required-verdict coverage](#required-verdict-coverage-2026-10-26);
+  anything else leaves the check unmeasured.
   `success() || failure()` is deliberately NOT accepted on a job with
   `needs:`. It reads like `always()` and is not: when a dependency is SKIPPED
   neither predicate holds, so GitHub skips the verdict job too — and a skipped
@@ -312,3 +353,301 @@ two moved numbers.
   job — and if the intent was to see the failure without blocking, keep the
   reporting and re-raise the status (`… || { echo "suite failed"; exit 1; }`,
   or capture `$?` under `set +e` and `exit` it at the end).
+- **`sec.deps.update-cooldown`** — every configured dependency update tool
+  waits at least **3 days** after a release is published before proposing it.
+  This is the prevention half of P14.25: a hijacked maintainer account or a
+  typosquat usually ships a malicious version that is reported and pulled
+  within days, so a tool that waits rarely hands that version to the CI
+  install that runs its lifecycle scripts. Three days is the threshold — long
+  enough that most malicious releases are gone first, short enough to be
+  uncontroversial — and it lives in one named constant.
+
+  - **Dependabot** (`.github/dependabot.yml` or `.yaml` with an `updates:`
+    list): every entry is judged. An entry's `cooldown.default-days` must be
+    3 or more, and so must every `semver-major-days` / `semver-minor-days` /
+    `semver-patch-days` it sets — a long default beside a one-day patch window
+    still lets patch releases through in a day. GitHub documents the semver
+    keys as applying only to package managers that support SemVer, and names
+    `docker`, `github-actions` and `terraform` as not; on those only
+    `default-days` is judged. An entry that sets only the
+    semver keys passes when each one present is 3 or more, and the evidence
+    says so (unlisted classes fall back to the default). An entry with **no**
+    `cooldown` (or one that sets no day keys) is judged at Dependabot's own default: since July 14 2026
+    Dependabot waits three days on github.com with no configuration (GitHub
+    Enterprise Server from 3.23), which meets the threshold, so the entry
+    passes and the evidence names it as relying on that default rather than
+    claiming the repository set one. An entry whose `cooldown.exclude`
+    lists `*` lets every package skip the wait and **fails**; a narrower
+    `exclude` passes and the evidence names the exempted packages. `include`
+    lists are not judged.
+  - **Renovate** (the first of `renovate.json`, `renovate.jsonc`,
+    `renovate.json5`, the same three under `.github/`, `.renovaterc`,
+    `.renovaterc.json`, `.renovaterc.jsonc`, `.renovaterc.json5`, or a
+    `renovate` key in `package.json` — Renovate's own search order): a
+    top-level `minimumReleaseAge` of 3 days or more (`"3 days"`, `"1 week"`,
+    `"72 hours"`, `"1 month"`; Renovate reads `M` as months and `m` as
+    minutes). A value set only inside `packageRules` covers only the packages
+    those rules match and does not pass; neither does a preset in `extends`
+    this scan cannot see into, and the fail says so when `extends` is set.
+    A `packageRules` entry that lowers `minimumReleaseAge` below 3 days (or
+    sets it to `null`) for **every** package — no `match*` / `exclude*`
+    filter, or only match-all ones such as `"*"` or `"/.*/"` — undoes the
+    top-level wait and **fails**. A rule that lowers it for a filtered set of
+    packages (your own scope, say) passes, and the evidence names it.
+
+  Both tools configured: both must pass. Neither configured: **not
+  applicable**, the same treatment `sec.gate.test-failure-fatal` gets — a
+  repository with no update tool has nothing here to delay. A config this scan
+  cannot read — a Dependabot file the YAML loader rejects, a Renovate config
+  that is not plain JSON (comments, trailing commas), or an age it cannot
+  convert to days — is **unmeasured**, never a pass and never a fail; the row
+  says to check the value by hand.
+
+  **Security updates are not delayed.** GitHub documents that a Dependabot
+  cooldown applies to version updates only, and Renovate documents that
+  security updates bypass `minimumReleaseAge`; a fix for a known
+  vulnerability still opens immediately. **To fix a fail**: `cooldown: { default-days: 7 }`
+  on each Dependabot `updates` entry named, raising (or removing) any
+  `semver-*-days` key under 3 on that entry and keeping its other `cooldown`
+  keys, or `"minimumReleaseAge": "7 days"` at the top level of the Renovate
+  config.
+- **`sec.environments.branch-restricted`** — every deployment environment
+  either accepts only refs a leaked non-admin push credential can neither
+  create nor move ("closed"), or requires at least one reviewer. A credential that can
+  push workflow files can otherwise create a throwaway branch, add a
+  workflow that binds to the environment, read its secrets and delete the
+  branch; nothing of it reaches the scanned checkout, and protecting
+  workflow files on the default branch does not stop it. **Every
+  environment is in scope**, secrets or not: a cloud role that trusts the
+  environment's name over OIDC makes the name itself the credential. The
+  GitHub-managed `github-pages` and `copilot` are in scope only when they
+  hold a secret, and are listed as "can't tell" (never passed or failed)
+  when their secrets cannot be read.
+
+  A pattern is **closed** when every ref it can match is covered by an
+  active ruleset (organisation rulesets included; `evaluate` and
+  `disabled` count for nothing) or a classic rule that blocks creating it
+  AND blocks pushing to it, with nobody short of an admin on the bypass
+  list. A pull request rule blocks pushing only when it needs at least one
+  approval AND that approval is dismissed or re-asked after a new push
+  (otherwise a credential pushes a workflow onto an already-approved pull
+  request and merges it); one that does not say is unmeasured. GitHub
+  applies one classic rule to a branch, never a combination: a rule naming
+  it exactly outranks every wildcard, and among wildcards the oldest wins.
+  So an exact-name rule that leaves an accepted branch open opens the
+  pattern, and two wildcard rules that disagree over it leave it
+  unmeasured (their order is not read). An exact name that already exists needs pushes blocked plus
+  deletion or creation blocked (otherwise it can be deleted and pushed
+  again); one that does not exist yet needs creation blocked. A branch
+  matching an accepted wildcard that already exists with no protection
+  proves the pattern open on its own. Tag patterns need a closed tag
+  ruleset. **"Protected branches only" is decided by classic branch
+  protection rules alone** (measured 2026-10-24: a ruleset-protected branch
+  is not admitted). With no classic rule in the repository at all, GitHub
+  lets every branch and tag deploy to such an environment, which fails like
+  no restriction; with at least one, each classic pattern must block
+  creation and pushes.
+
+  A repository with **no environments** is not applicable here, whatever
+  its secrets are. Readable repository and organisation secrets are
+  `sec.secrets.environment-scoped`'s question, and failing both checks on
+  one setup would bill one gap twice.
+
+  API-gated, with F7's contract: no repository or no token is unmeasured;
+  an unreadable source makes only the verdicts that depend on it
+  unmeasured, while an environment that accepts any branch still fails; no
+  retries. Classic branch protection rules and ruleset bypass lists are
+  readable only by an admin (anyone else is answered with an empty classic
+  list, which is never read as "none"), so on a reader's token a
+  "protected branches only" environment, or one closed only by a ruleset,
+  is unmeasured. **To fix a fail**: set the environment to "Selected
+  branches and tags" naming exact protected branches whose rules block
+  creating and pushing, or "Protected branches only" with a classic
+  branch protection rule on every protected pattern that turns on
+  "Restrict who can push to matching branches" (nobody listed) and
+  "Restrict pushes that create matching branches" (rulesets do not count
+  for that option), or add a required reviewer.
+- **`sec.environments.approval-holds`** — every environment that has
+  required reviewers also has "Prevent self-review" on. Otherwise a leaked
+  reviewer's credential starts a run and approves it itself. One bad
+  setting costs one check: reviewers satisfy the branch fact above, and
+  only this fact fails on self-review. "Admins can bypass" is shown as an
+  information line, never part of either verdict, because only an admin
+  credential can use it. Not applicable when no environment has reviewers.
+  A GitHub-managed environment whose secrets cannot be read and that allows
+  self-review keeps this fact from passing (unmeasured), as it does the
+  branch fact.
+  **To fix a fail**: turn on "Prevent self-review" in each named
+  environment's required-reviewers rule.
+- **`sec.secrets.environment-scoped`** — no repository- or
+  organisation-level Actions secret is readable by this repository: every
+  secret it uses lives in an environment. Any secret outside one is
+  readable from any branch a push credential creates, however well the
+  environments are locked. **Passes** when neither list holds a secret,
+  including a repository with no secrets at all. **Fails** when either
+  does; the evidence names each one, repository and organisation
+  separately, with a short deterministic hint (`PRIVATE_KEY`, `APP_ID`,
+  `PYPI`, `NPM_TOKEN`, …) putting the likely high-value ones first — a
+  sort order, not a severity. **Unmeasured** when a list cannot be read
+  (recorded: both answer a non-collaborator 403, and GitHub's message asks
+  for repository read access or the secrets fine-grained permission; an
+  entry with no name counts as unread too),
+  never a pass; when
+  one list is unreadable and the other already holds a secret, the fail
+  stands, because nothing in the unread list can undo it, and the
+  evidence says the list may be incomplete. Scored knowing it fails many
+  repositories: it is the one setting
+  that decides whether locking environments protects anything. **To fix a
+  fail**: pick or create an environment that passes
+  `sec.environments.branch-restricted`, re-enter each named secret's value
+  there (GitHub never shows a stored value, so this step is the user's),
+  point the jobs that use it at that environment, then delete the
+  repository or organisation copy. What that can break: a job on a pull
+  request, or on a branch the environment does not accept, can no longer
+  read the secret; give it an environment with a required reviewer or stop
+  it needing the secret. For an organisation secret, narrowing
+  its repository access to the repositories that need it is the
+  alternative. The names (never values) also render under the row as the
+  secret list. The report states, every run in which this layer completes,
+  that a pushed workflow can
+  ask for its own write-scoped token and an OIDC login token, and that a
+  credential which cannot push workflow files, but can change code the
+  repository's own workflows run, is not checked yet. Credentials that
+  can push workflow files are cited from GitHub's docs, among others: the `workflow`
+  scope for classic tokens and OAuth apps
+  (https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps),
+  the "Workflows" permission for GitHub Apps
+  (https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/choosing-permissions-for-a-github-app)
+  and for fine-grained tokens
+  (https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens).
+
+
+### Required-verdict coverage (2026-10-26)
+
+F7 keeps its API gate and fact ID. Producer execution alone is no longer
+sufficient for an aggregator. A supported counterexample where detection fails
+or is cancelled, suites skip and the verdict succeeds fails the fact. Listing
+a detector in `needs:` without checking its result does not close the hole.
+
+The bounded analyzer supports literal dependency graphs, result comparisons,
+`contains(needs.*.result, ...)`, boolean expressions, scalar env/exit-code
+propagation, and ordinary multi-line bash/sh scripts run with errexit: `set`
+with `-e`/`-u`/`-x`/`-o pipefail` (pipefail in bash only), `echo` lines,
+`true`/`false`, `exit 0`/`exit 1` (or a variable holding one), standalone
+`test`/`[`/`[[` checks, and flat `if CONDITION; then ... fi` blocks whose body
+is echo lines and an exit. A condition is one or more `[ ... ]`, `test` or
+`[[ ... ]]` checks joined by a single kind of `&&` or `||`; a check compares a
+quoted variable or literal with `=`/`!=` (`==` in bash), and `[[ ]]` can also
+validate a quoted value against the exact `^(true|false)$` expression
+(optionally negated). Variables remain data: quotes or newlines in their
+values are not evaluated as commands. `else`/`elif`, nesting, loops, pipes,
+redirections, command substitution, unquoted variables and patterns are
+unmeasured. A `run:` step without `shell:` is read as bash only on a
+GitHub-hosted `ubuntu-*` or `macos-*` label without a job `container:`; on
+any other runner set `shell: bash` on the step. Workflow `env:` entries named
+`GITHUB_*` or `RUNNER_*` are ignored, because the runner sets those itself,
+and an array interpolated into a script (it renders as `Array`) is
+unmeasured.
+Strict suite-success assertions reject skipped suites. An intentional skip
+requires successful detection and an explicit valid boolean output; a literal
+false output written before failure is not a valid no-op, and a computed
+output a failed detector may have written is unproved, so the fact withholds
+rather than pass. It walks ancestors. An intermediate job whose `if:` names a
+status function (`success()`, `always()`, `cancelled()`, `failure()`, in any
+letter case) can run after an ancestor failed, so its condition is evaluated
+(`cancelled()` reports whether the whole run was cancelled, not a dependency
+result: a dependency that timed out is `cancelled` while `cancelled()` stays
+false, and a cancelled run is evaluated as its own scenario)
+and, when it runs after a non-success dependency, its own steps decide its
+result: a gate that reports success over a failed detector and a skipped suite
+fails the fact, and a gate whose steps are unresolved is unmeasured. A
+reusable-workflow caller or a matrix job producing a referenced output can
+reproduce a failure (for example, a caller skipped because detection failed)
+but never certifies a pass. Scalar `github.*` values in job conditions and the
+verdict are evaluated for every literal those conditions compare against, so
+suites routed by event (`github.event_name == 'push'` and its negation, or a
+head-repository match and its negation) are judged on both branches, and a
+skip decided by the event alone is a valid skip. Any other condition that
+cannot be evaluated is explored both ways: a bypass that holds on every branch
+fails the fact even when an unrelated job's condition is unresolved, while a
+bypass that depends on how that condition resolves is unmeasured. Cycles and
+traversal/enumeration limits withhold.
+Under `shell: sh`, `test`/`[` with `==` is not POSIX (dash rejects it) and is
+unmeasured. Unknown shell
+control flow, jq pipelines, scripts and action implementations are unmeasured.
+Two complete bash commands are supported exceptions: `jq -e` (or
+`--exit-status`) with either `all(.[]; .result == "success")` or
+`all(.result == "success")`, reading the complete `toJSON(needs)` value via
+`<<<`. The input must be a single-quoted expression or a quoted environment
+variable containing exactly that expression. Inline JSON holds when a dependency
+declares outputs, whose quotes are not safe to interpolate into shell source.
+No extra commands, alternate
+filters, partial JSON, omitted exit-status option or shell environment
+replacement is accepted. Exported Bash functions and case variants of shell-control
+environment names also withhold the proof. A single strict jq or reviewed-action step can prove
+large dependency sets without exponential enumeration; every dependency must
+succeed, and conditional upstream steps still withhold execution proof,
+including steps inside `parallel:` groups, conditional groups and steps that may
+run in the background. An upstream step with `continue-on-error` set to
+anything other than literal boolean or case-insensitive string `false` also
+withholds a pass: its job can succeed without that step passing. The same
+rule covers parallel groups and their nested steps. These execution gaps do
+not discard literal declared outputs that can still prove a concrete failure.
+The reviewed `re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35`
+revision is supported with `jobs: ${{ toJSON(needs) }}` and literal JSON or
+comma-separated allowed lists. Its default requires success; `allowed-skips`
+also accepts skipped results, while `allowed-failures` accepts cancellation
+as well as failure and skipping. Those allowances still undergo the ancestor
+and invalid-decision checks. Overridden execution environments, unknown inputs
+and other revisions are unmeasured. Tags are resolved through the API and
+accepted only when they point to the reviewed commit, with at most sixteen
+unique resolutions per fact evaluation. An unreadable or different commit
+withholds the proof. An action name alone is not proof. The
+contract was checked against that revision's
+[entry point](https://github.com/re-actors/alls-green/blob/b5b5b37504aa4183270bd3d855c52a67f212be35/action.yml),
+[input and exit handling](https://github.com/re-actors/alls-green/blob/b5b5b37504aa4183270bd3d855c52a67f212be35/src/normalize_needed_jobs_status.py),
+and [result rules](https://github.com/re-actors/alls-green/blob/b5b5b37504aa4183270bd3d855c52a67f212be35/src/job_outcome.py).
+
+Ordinary producers with a supported, unconditional test invocation retain the
+producer-execution check. The exemption supports a single-line `pytest` or
+`python`/`python3 -m pytest`, `go test`, `cargo test`, and `npm`/`pnpm`/`yarn`
+`test` or `run test`, with test paths, packages or node ids and each runner's
+listed execution flags (for example `-k`/`-m`/`-n`/`-x` for pytest, `-race`/
+`-count`/`-timeout` for Go, `--workspace`/`-p`/`--all-features` for Cargo,
+paths and `--coverage`/`--ci` after `--` for the Node runners; Cargo's
+positional name filter and other Node pass-through flags can select nothing
+and still exit 0, so they are not exempt, as are `go test -count=0` and a
+pytest `@file` argument; a job whose earlier `run:` writes `$GITHUB_ENV` or
+`$GITHUB_PATH` gets no exemption). It requires fatal job and step
+results, a stock shell, and no environment overrides. Help, version,
+collection and listing modes, compile-only and test-filter flags that can
+select nothing (`-run`, `--no-run`, `--if-present`), negation, shell operators
+such as `|| true` or `;`, expansions and unresolved wrappers do not establish
+that tests execute. F9 still independently
+checks swallowed suite failures.
+Assertions must execute and propagate failure. Echoing a status is not an
+assertion; a disabled assertion cannot gate the verdict.
+
+This strengthens score meaning without adding a fact. The machine
+aggregate remains `100 × passed / scored`: pass→fail lowers the score and
+pass→unmeasured changes the denominator. Compare historical runs using their
+engine revision and coverage, not the number alone. Unknown assertions are
+reported as coverage gaps, not passes or guessed failures.
+
+For a detector whose `changed` output is explicitly `true` or `false`, a
+supported verdict can require both a successful detector and the expected
+suite result. The detector and suite jobs must also be present in the workflow:
+
+```yaml
+verdict:
+  needs: [changes, suite]
+  if: always()
+  runs-on: ubuntu-latest
+  steps:
+    - env:
+        OK: >-
+          ${{ needs.changes.result == 'success' &&
+              ((needs.changes.outputs.changed == 'true' && needs.suite.result == 'success') ||
+               (needs.changes.outputs.changed == 'false' && needs.suite.result == 'skipped')) }}
+      run: test "$OK" = true
+```

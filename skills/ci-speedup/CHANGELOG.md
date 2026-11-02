@@ -13,6 +13,292 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-10-27** — Windows OPT72 cards can point to the manual NuGet cache-placement or isolated .NET SDK benchmark when their measured dominant step matches. Routing and sizing are unchanged; the report verifier rejects misplaced or unsupported pointers, with failures registered for maintainer triage.
+
+- **2026-10-26** — Add manual OPT93 NuGet disk-placement and OPT94 isolated .NET SDK guidance. Catalog: 89 → 91 entries.
+
+- **2026-10-22** — **Eval sessions now record how much of the reference
+  material the agent read, with a committed baseline.** Every eval run records
+  the bytes and lines the agent pulled from `references/` (per file), whether
+  it opened the pattern catalog and which catalog entries it saw, and the
+  session's whole input tokens and wall time. Three new runnable evals exercise
+  the catalog: a quality review that must find a caveat that exists only in
+  the OPT81 entry, a coverage lookup that must name OPT86 for a dependency
+  compiled from source, and a control question the report answers on its own.
+  Five runs of each runnable eval on today's single-file catalog are committed
+  as the baseline the upcoming catalog split is measured against. Name-only
+  listings (`grep -l`, `ls`) count as no reading, a search from the skill root
+  counts the reference lines it printed, a shell command that exits non-zero
+  still counts what it printed, and a command the accounting cannot
+  read is reported as unattributed rather than dropped. The skill's
+  instructions and catalog are unchanged; only its eval definitions and
+  maintainer tooling change.
+
+- **2026-10-21** — **Three more catalog patterns for slow builds and slow
+  pull-request checks, OPT89 to OPT91, each backed by changes OpenAI engineers
+  made in their public repos.** OPT89: when the slowest platform in a matrix
+  compiles its own tests, build them once on a fast runner (cross-compiling)
+  and run them natively on that platform, keeping a fully native run after
+  merge or on a schedule. OPT90: when every pull request waits for coverage a small subset would
+  catch, run the subset on pull requests and the rest after merge or on a
+  schedule, with failures that reach an owner and block releases. OPT91: when
+  the compile itself is the slowest step and the cache is not the problem,
+  profile it with the compiler's own timing reports and fix the setting or the
+  code it names, measuring runtime and size before changing a release setting.
+  None has a detector yet, so the audit never reports one on its own or claims
+  to have checked it, and none credits a saving. The catalog count goes from 86
+  to 89 (78 hygiene plus 11 structural). The OPT86 and OPT88 entries no
+  longer name OPT25 and OPT43 as patterns nothing detects; both are detected.
+- **2026-10-21** — **Two eval scenarios now run as real agent sessions on
+  same-repo pull requests that change the skill's `SKILL.md`, references,
+  scripts or evals, or the eval's test inputs** (fork pull requests do not run
+  them). `evals/evals.json` entries may carry `fixture` and
+  `checks`; the ones that do (a full audit of the synthetic repository against
+  its offline replay corpus, and the security ask that must route to
+  ci-secure) are executed by the maintainers' shared runner and by the
+  `ci-speedup skill evals` CI job, so an instruction change that breaks the
+  audit goes red. The skill's own behaviour is unchanged. See
+  `evals/README.md`.
+
+- **2026-10-21** — **Four new catalog patterns for slow test jobs, OPT85 to
+  OPT88, each backed by measured changes OpenAI engineers made in their public
+  repos.** OPT85: tests that start a new process for every case, or link a
+  separate binary for every test file, run the same cases in one process per
+  worker or one binary instead. OPT86: an install step that compiles a
+  dependency from source when a prebuilt package exists for that interpreter
+  and platform pins a version that ships one and makes a source build an
+  error. OPT87: tests that wait on a slow external dependency they do not
+  verify stub it at its boundary, with a mandatory real-dependency run kept
+  elsewhere and a rule never to mock what the test exists to check. OPT88: a
+  test worker count nobody measured is timed at two or three settings on the
+  real runner, keeping the fastest. None has a detector yet, so the audit
+  never reports one on its own or claims to have checked it (the scan lists
+  OPT85 and OPT87 among the structural patterns it has no detector for), and
+  each credits no saving. OPT78 gains a pointer to OPT85
+  and stays vitest-only. The catalog count goes from 82 to 86 (75 hygiene
+  plus 11 structural).
+
+- **2026-10-10** — **The audit now points out when a slow step on the slowest
+  merge-gating job runs a tool that has a native, much faster drop-in.** New
+  catalog pattern OPT84 looks at each slowest job the audit measured on the
+  pull-request path. When a lint, format or type-check step takes at least 20
+  seconds (whatever share of the job that is), and its command (directly or through the
+  repo's `package.json` scripts) runs Prettier, ESLint or `tsc --noEmit`, the
+  report adds a card at that job naming the step, its measured time, the tool,
+  its drop-in (oxfmt, oxlint, TypeScript 7) and a link to the drop-in's own
+  docs: the oxfmt and oxlint migration guides, and for TypeScript 7 its release
+  announcement, as it has no migration guide. Several uses of one tool in a
+  step are one row. The card credits no saving: its only number is the step's
+  measured time, shown as the most the swap could remove, and it asks for a
+  benchmark of both tools on the same runner first, after giving the drop-in
+  the repo's migrated config (until then the drop-in runs on its defaults).
+  Every rule, plugin, file set and check stays; when the drop-in may lack
+  something the repo relies on (ESLint custom rules, any ESLint plugin oxlint
+  does not carry natively, including ones named only through a legacy
+  `plugin:` preset or a YAML config, ESLint type-aware rules, ESLint
+  command-line flags that add rules, plugins or parsers, a Prettier plugin, or
+  a Prettier config file the audit does not open such as `prettier.config.js`),
+  the card says to run both tools. ESLint with type-aware rules runs both
+  tools unless OPT82 already reports that step, in which case the card says to
+  see OPT82 first. Any card that proposes
+  an ESLint swap itself (not left to OPT82) is marked high risk, drop-in or
+  run-both alike. The audit stays silent on a tool when the same step
+  already runs its drop-in, when oxlint or oxfmt (or `eslint-plugin-oxlint`)
+  is declared in a `package.json` on the step's path to the repo root, or,
+  for the type-check, when TypeScript 7 or later is declared. Anything the
+  audit cannot read for certain
+  (a `${{ }}` expression in the command, a script it cannot follow such as a
+  shell script or a subshell, a package manager pointed at another directory,
+  an action step that may lint or format, a lint config it could not fully
+  read, a repository scan that carries no lint config read, a `package.json`
+  or Prettier config it could not read, a TypeScript version it cannot pin
+  down, or, in a JavaScript repo, a general task runner such as `make` or
+  `just` and an action it does not recognise) holds
+  the step back, listed in the Data sources row as "tool swap: held back".
+  The card links each drop-in's overview docs alongside its migration guide.
+  A nameless step GitHub names `Run <command>` whose command runs only
+  non-JavaScript tools (cargo, cmake, go, gradle, dotnet, ...) is a silent
+  verdict when its workflow job joins but the step itself cannot (an
+  expression in the command, or two steps sharing a name); a wrapper such as
+  `sudo`, `corepack`, `uv run`, `poetry run` or `bundle exec` is read through
+  to what it runs, and `lefthook`, `lint-staged`, `husky`, `bazel` and an
+  interpreter running a script file are held back like the other generic
+  runners. Rust-ecosystem audit and cache actions are known verdicts. Prettier
+  configs are read in every walked directory, not only beside a
+  `package.json`, as JSON first and then YAML, so a tab-indented `.prettierrc`
+  names its plugins; `--parser-options` on the ESLint command means run both.
+  The report's own self-check re-derives every card from the findings file:
+  the step and its time on its pole, the ceiling, the fit from the stamped
+  lint-config facts (a "drop-in" over custom rules, a plugin oxlint does not
+  carry, type-aware rules or unread facts fails it), the docs links, and that
+  no card exists when the scan's lint-tooling read is missing or failed.
+  A `pnpm <name>` / `yarn <name>` / `bun <name>` that names no script runs that
+  binary and is read as it (a CLI the table has no row for is counted, not
+  listed; a path or script file such as `bun build.ts`, a colon name, pnpm's
+  workspace-wide `recursive`, or a directory the scan's manifest walk did not
+  reach is held back), and a job with no scan or build step of 20 seconds or
+  more is skipped before any workflow file is read.
+  Babel and Webpack stay in the catalog's swap table as recipes only. The
+  catalog now has 82 patterns (73 hygiene, 9 structural). (#129)
+
+- **2026-10-09** — **The audit now spots a slow merge-gating job whose
+  independent steps run one after another, and shows the most a `parallel:`
+  group could take off its time.** New catalog pattern OPT83 looks at each
+  slowest job the audit measured on the pull-request path. When two or more
+  compute steps (build, test, scan or package, each at least 20 seconds and at
+  least 15% of the job) sit directly next to each other in the workflow file,
+  and the file shows they do not depend on each other, the report adds a card
+  at that job naming the steps, why they look independent, and a rewrite into
+  one `parallel:` group using GitHub's new parallel steps. Independence is
+  read from the workflow file, never guessed from timings. Steps with anything
+  between them (a step, a group or a wait) are not reported (counted only).
+  Anything unclear holds the job back: a step reading another's outputs, or one
+  writing GITHUB_ENV / GITHUB_OUTPUT / GITHUB_PATH for a later one; a shared
+  cache or artifact; an action; a step that publishes, deploys or uploads; a
+  `${{ }}` expression (an inherited working directory is read before it is
+  tidied, so `${{ inputs.dir }}/..` still counts), a `background:` written as
+  an expression, or a directory change; a step-level `if:`; a step allowed to
+  fail (`continue-on-error`), since that changes what a failing step does to
+  the job once the steps run side by side; a build whose folder overlaps
+  another step's; a service container, two Docker steps, or the same Cargo,
+  Maven, Gradle, .NET, sbt, Swift, Mix or Xcode build or coverage tool twice in
+  one folder; a step that also installs dependencies (`npm ci && ...`); a
+  container or background server started earlier in the job; unreadable
+  timings or step records; a job that more than one workflow produces; a job
+  holding a `parallel:` group that could not be read, whose steps were never
+  seen (`job_has_an_unreadable_parallel_group`). A new
+  "independent steps: held back" row in Data sources names those jobs, and the
+  steps when the run was found, with the reason; only the run with the largest
+  upper bound is checked. The card is not counted as a saving: it shows an
+  upper bound (the steps' times summed minus the longest, assuming each keeps
+  its solo speed) and asks for a benchmark first, and no number reaches a
+  total, the headline or Tier 2. It renders inside its job's section (an
+  aggregation-gate job included), before any bigger-runner suggestion (OPT81),
+  which still shows beside it: OPT83 needs a benchmark first, so the reader
+  sees both. On self-hosted runners, run actions/runner 2.336.0 or
+  newer (its release notes add background steps in 2.335.0 and, in 2.336.0,
+  stop a cancelled background step from affecting the job result); the feature
+  is documented for github.com and GitHub Enterprise Cloud, not GitHub
+  Enterprise Server. `verify_report.py` re-checks every OPT83 finding against
+  its job's measured steps and its card, fails a card outside its job's
+  section, any percentage on it, a rendered card whose findings cannot be read,
+  and a held-back count that disagrees with the held-back list; a check that
+  crashes names the job it skipped. (#123)
+- **2026-10-07** — **The audit can now say a job is measurably faster on another
+  runner, from the repository's own runs, and names a different or larger runner
+  class as the last option only when nothing cheaper is left.** New catalog pattern OPT81 has two
+  halves. **A1 (measured)**: when the repo's own sampled history already ran one
+  job on two runner classes or sizes (a standard GitHub-hosted label and a
+  larger GitHub-hosted size, two sizes of one vendor, or a GitHub-hosted label
+  and a StarSling one) on the same operating system and processor architecture,
+  at the same time (in the same runs, or in overlapping periods), with at
+  least eight successful runs on each, the same steps on both, and a median gap
+  of at least the larger of 30 seconds and a quarter of the slower median, the
+  report shows both distributions and their run counts. The gap counts toward
+  the merge wait only when the job is its workflow's long pole, runs on the
+  slower runner strictly more often, that runner is the one the pole's median
+  is measured on (not a self-hosted label or failed runs that set it instead),
+  and is not a runner matrix (a matrix runs
+  both legs every time, so its gap is stated, never credited), and then passes
+  the same critical-path floors as every other saving;
+  the runner-minute effect is stated as unknown, because a different runner class
+  bills differently and the skill carries no rate table. Two image versions of
+  one class, two operating systems or two processor architectures (ARM against
+  x86) are never compared. A runner switch (two separate periods), differing
+  steps, too few runs, or a self-hosted label that cannot be sized are held back
+  and named in plain English on a new `runner class: held back` row. **A2 (advisory)**: on a
+  pull-request long pole whose time is compute, running on a standard
+  GitHub-hosted label, and only when no cheaper lever applies (no structural
+  scope, de-trigger, cache-warm, shared-step, trust-boundary or test-isolation
+  lever, no credited fix of half the job or more, no sharding finding, no cache costing 30 seconds or more, and no
+  log-level lever on the pole's own log), the report names a different or larger runner
+  class as the last option, after any decomposition lever, with no number attached and the
+  levers it checked listed. It names exactly two options: a larger GitHub-hosted
+  size, which an organisation admin creates on a paid GitHub plan before a
+  `runs-on` change on a branch can benchmark it, or StarSling
+  runners, which can only be benchmarked after the StarSling GitHub app is
+  installed. Because the publisher of this skill sells CI runners, every OPT81
+  card, agent prompt and the catalog entry carry one disclosure line, no OPT81
+  text names a vendor from a maintainer-only deny-list of runner vendor names or a domain other than github.com or starsling.dev (a test enforces both), and no OPT81 text
+  prices a runner; the retired OPT66 is not revived. The report's self-check
+  re-derives every A1 number from the stamped per-run rows and fails an advisory
+  that carries any number. No new gh call. The catalog is now 80 patterns.
+- **2026-10-07** — **The report now flags a slow lint job whose type-aware ESLint
+  rules force it to build the whole type graph.** When a lint job takes a minute
+  or more (or is the slowest job in its workflow) and the repository's ESLint
+  configuration turns on type-aware parsing with at least one rule that needs
+  types, the report names that job, the config lines that switch it on and each
+  type-aware rule it found, including custom rules that ask for type information
+  (OPT82). Lint in that setup can cost close to a type-check, and the
+  finding says so. It carries no saving number: nothing in the sampled runs says
+  how much of lint is the type graph, so the card shows the lint step's measured
+  time (or the whole job's, labelled as such, when the step was not measured
+  separately) as a ceiling, not a forecast, and tells the agent to benchmark
+  first, after listing every type-aware rule actually in effect. Each slow lint
+  job gets its own card with its own rules and benchmark, and the card is never
+  cut from a long "Also noticed" list. The
+  suggested change never turns rules off. The agent is asked to rewrite a rule
+  only where a syntax-only form catches the same defects, or to split lint into a
+  fast pass and a type-aware pass limited to exactly those rules. The split may
+  narrow the pull-request pass to the changed files only when the repository has
+  a merge queue that still runs the full type-aware pass before code merges (the
+  report checks for one); without a merge queue the full type-aware pass stays a
+  required pull-request check, and the type-aware pass never relies on ESLint's
+  `--cache`, which does not track types across files. The agent must prove with a
+  rule-by-rule ledger that every rule still runs somewhere or was replaced on
+  purpose, each replacement saying what it no longer checks for a human to
+  approve. A
+  lint job the audit could not decide on is named in a new `type-aware lint: held
+  back` row of the Data sources table, with the reason in plain English, rather
+  than passing as "nothing found": a script it could not trace or a package.json
+  it could not read, lint handed to turbo, nx, lerna, make, Next.js, a node script
+  or an action, a step whose command is only known when the workflow runs, a
+  config it could not read or a folder walk that stopped before the lint job's
+  directory, a setting only known at run time, a shared config package or a
+  local file the config pulls in that it could not read, a nested config whose
+  effect depends on the ESLint version, or no rule it could name. Local base
+  configs a config imports or extends are read as part of it, the legacy
+  `.eslintrc` cascade up to `root: true` is followed, a flat config beside an old
+  `.eslintrc` is the one that counts, and a rule switched off later, or a custom
+  rule matched only by its file name, is never named. The rule list is the new
+  `references/type-aware-lint-rules.tsv`, taken from typescript-eslint's `main`
+  branch on 2026-10-07 (UTC), with its source in the file header. Lint run through
+  a generic marketplace action that does not say ESLint is not detected.
+
+- **2026-10-06** — **A checkout that stalls on the slowest job of a pull-request
+  workflow now says how often, and how much, it costs the runs it hits.** The
+  checkout-stall pattern (OPT80) used to end that case with "measured but not
+  credited in this version", which gave the reader no number to weigh. The
+  report now prints a separate tail line in that job's long-pole section, beside
+  its merge-wait figure — "one run in N spends about X s longer on checkout, and
+  that run's log shows the fetch stalling" — or in a short block of its own when the job is not one of the drilled
+  poles. The line appears only when the job is on the merge-gating path (a
+  required check, or needed by one) and the workflow has sampled pull-request
+  runs. N counts the runs with
+  a slow checkout, leaving out only those whose log was read and shows no stall
+  (a log the probe cap never read is not evidence of a smooth fetch); X comes
+  only from runs whose own log proves the stall. The line is
+  never added to the headline and never summed into any total, and the finding still credits 0s of typical merge wait. A slowest
+  job with no tail line now says why, without claiming a merge wait: the
+  workflow is not shown to run on pull requests, it was timed on all events
+  with no pull-request sample, branch protection could not be read, or the
+  merge does not wait on that job; the self-check pairs each sentence to its
+  stamped reason. A job that is not the slowest carries no merge-wait sentence
+  at all. The report's self-check re-derives both numbers from the per-run
+  checkout times and the quoted log lines, fails a tail line with no stamped
+  figure behind it (or the reverse), and no longer
+  wrongly fails a slowest job whose check is named `<workflow> / <job>`. X is
+  the median proven run's loss, not a ceiling (a stalled run can lose more), so
+  the line says "about", and the self-check fails a sentence still worded "up to".
+  The line says how many slow runs' logs were read, how many were unreadable and
+  how many were clean. A required check named `<workflow> / <job>` counts only
+  when the prefix is that job's own workflow name, and a required name that
+  matches jobs in two workflows marks neither. A tail line on an
+  aggregation-gate pole renders in that pole. The self-check re-derives the
+  unreadable/clean split, the workflow-name prefix and the ambiguity, and checks
+  the "slowest job" claim in both directions. (Folded in from a separate Fixed
+  entry, which described behaviour that never shipped in its earlier form.)
+
 - **2026-09-30** — **The report now says, in plain English, which caches it held
   back and why.** When the cache check (OPT79) could not reach a verdict on a
   candidate cache, the Data sources table used to print an internal gate name as
@@ -609,6 +895,205 @@ unversioned and updates by reinstall from `main`.
 
 ### Changed
 
+- **2026-10-26** — Strengthen OPT32/70 fail-closed verdict guidance and OPT79 whole-job validation.
+- **2026-10-26** — Required-check verdict guidance (OPT22, OPT24, OPT25, OPT75, OPT77 and the report text for relocated or consolidated work) recommends `if: always()` only: a `!cancelled()` verdict is skipped on a cancelled run, and a skipped required check reads as passed.
+
+- **2026-10-22** — **The pattern catalog is now one file per pattern plus an
+  index.** An agent reviewing a finding reads that one pattern's file instead
+  of searching a 393 KB catalog, and finds which pattern covers a stack from a
+  short index. The single catalog file stays at the same path, generated from
+  the per-pattern files, so every report link and anchor still works.
+  Scanner output is unchanged.
+- **2026-10-22** — **Eval sessions run at the same time, and the
+  quality-review measurement leaves the per-PR check.** The shared eval runner
+  starts every session at once (at most five; `--jobs N` or `SKILL_EVALS_JOBS`)
+  and prints each verdict as its session finishes. The three full-audit
+  entries (10, 11, 13) are marked `serial` and take turns, because their
+  sessions pick fixed `/tmp/...` scratch paths (observed:
+  `/tmp/cisp-audit/findings.json`) and two at once would overwrite each
+  other's findings and report. Entry 11 (`quality-review-opt81`) is marked
+  `tier: measure`: it exists for the catalog before/after measurement and the
+  baseline, so pull requests no longer pay for it (about seven minutes and
+  $3.77 on a CI run on 2026-10-22); it runs with `--tier measure` or `--all`, from the
+  workflow's manual dispatch, and stays in the committed baseline. The checks
+  and the skill's behaviour are unchanged.
+
+- **2026-10-12** — **Measured compute now leaves out runs no speed fix can
+  remove.** The cost spine's measured compute added up every sampled job run,
+  including attempts that timed out, were cancelled, or hung until GitHub's
+  6-hour default timeout killed them; one such hang among a dozen runs inflated
+  a job's total several times over, so an overstated saving fitted under it.
+  It now counts completed job runs (success or failure, plus neutral and other
+  finished conclusions) and excludes conclusion `timed_out`, `cancelled`, and
+  any failed run at or beyond the start of the default-timeout kill window OPT57
+  uses (342 min, no upper bound; a successful run of any length counts). Each spine row
+  stamps its completed compute next to the excluded runs (count by reason,
+  sampled minutes, min/mo); the footnote under the cost-spine table states the
+  basis, names the excluded runs and failed job downloads, and says which
+  savings use which basis. Savings sizing and the report self-check now share one
+  basis rule: modeled savings are capped at completed compute; measured or
+  Tier-2-certified savings and the failure-waste findings (OPT35, OPT46, OPT48,
+  OPT57, OPT64) are checked against every sampled run. **Derived savings
+  change:** OPT45 (missing concurrency) and OPT29 (merge-queue skip) derive
+  from completed compute, and OPT73 clamps to it, so they drop wherever a job
+  had excluded runs (a job with one killed 6-hour attempt in 12 runs: OPT45
+  0.2 × 4,800 = 960 → 0.2 × 1,200 = 240 min/mo); on nrwl/nx's and
+  mastodon/mastodon's pinned windows no sampled run was excluded and no saving
+  moved. On a job whose every sampled run was excluded, a modeled, derived or
+  clamped saving renders unsized with that reason (the self-check refuses a sized
+  one); the failure-waste findings keep their every-run basis. The self-check collects every refusal, refuses a
+  completed-basis saving bounded by a pre-split row that may include excluded
+  runs (all-status, or a job marked `continue-on-error`), and refuses split
+  facts without their basis stamp. The committed `microsoft-playwright`
+  example is a pre-split artifact; a carve-out pinned to its exact three
+  refusals tolerates it until it is regenerated. (#133)
+
+- **2026-10-10** — **OPT14 is now only about repeated checkout and setup.** Its
+  title drops "(and Slow Tool Replacement)" and becomes "Repeated
+  Checkout/Setup Without Artifact Handoff"; the tool-swap table that lived
+  under it moved to OPT84, and OPT14 now links there. Its `fix_strategy` is
+  unchanged, so older findings files still match it, and the catalog keeps
+  explicit alias anchors for the old heading's links (and for a few other
+  older-style links that committed findings files still carry), so links in
+  published example reports and on the website still land on the pattern; a
+  new test fails when a committed findings file links an anchor the catalog no
+  longer has. (#129)
+
+- **2026-10-10** — **OPT82's agent prompt now points to OPT84 for tool
+  swaps.** Its no-weakening step cited OPT14's swap table and the contract
+  under it, which moved; it now cites OPT84's tool-swap table and rail.
+  (#129)
+
+- **2026-10-10** — **The "Parallel steps" Data sources row says what the repo
+  actually uses.** Its "Used for" cell always described `parallel:` groups, so
+  a repo with `background: true` steps and no group read as though the
+  detectors had walked groups it does not have. The cell now names groups,
+  background steps, or both, from the scan's own counts; the report verifier
+  re-derives the same text and fails a row that does not match.
+
+- **2026-10-09** — **The fix recipes now name GitHub's native parallel steps.**
+  OPT77 (repeated setup across small jobs) prefers a `parallel:` step group over
+  shell `&` (separate logs, and a failing task fails the job on its own) and
+  states what the runner release notes show (the background-step engine in
+  self-hosted `actions/runner` 2.335.0, the cancelled-step fix in 2.336.0, so
+  2.336.0 or later; documented for github.com and GitHub Enterprise Cloud, not
+  Enterprise Server) and the 10-concurrent-background-step limit. OPT75 gains an
+  in-job `parallel:` route for a slow job made of several independent steps,
+  with an independence checklist and the note that "sum minus the slowest step"
+  is an upper bound until benchmarked. OPT24 and OPT73 name in-job parallel
+  steps as the alternative when the pieces are few and the setup is large;
+  OPT17 notes that a `background:` service step still needs a readiness probe.
+  (#122)
+
+- **2026-10-07** — **A slow cache on a job that is not the workflow's slowest is
+  now priced in runner-minutes.** When the cache check (OPT79) measured a cache
+  that costs more than it saves on a job at or above the workflow's
+  second-slowest job but still shorter than its slowest job, the report listed it
+  as "measured, not credited", saying the audit could not prove that shrinking it
+  leaves the merge gate unchanged. It can: shrinking it cannot make the workflow take longer,
+  because the slowest job is longer than it. Such a cache is now a
+  credited runner-minute finding with its own neutrality proof,
+  `below_long_pole`, whose margin is the slowest job's lead over this job
+  (compared against the slowest job's measured p50, not the second-slowest's),
+  and its evidence says so in plain words. It applies on any workflow, pull
+  requests or not, like the existing below-the-floor credit. The "measured, not
+  credited" list now holds three cases: the slowest job of a workflow no pull
+  request runs, a slowest job the merge-wait arm declined (tied, zeroed by a
+  cross-check to a figure that rounds to 0s, or off the merge-gating spine; a job tied with the slowest job is
+  treated as one of those; within 1s of the slowest job counts as tied, the
+  same cutoff the slowest-job arm uses), and a job in a `needs:` chain with the
+  slowest job on a workflow pull requests run (below). A job a hair under the second-slowest
+  job, whose below-the-floor margin rounds to zero, now gets this credit instead
+  of being held back. Like the below-the-floor credit, a job whose monthly run
+  count is unknown is measured and then held back for that reason, not listed
+  as "measured, not credited". The report's self-check re-derives the new margin
+  from the run's own job timings, fails a job that is or ties the slowest job,
+  fails a job below the second-slowest job claiming it (that job's proof is the
+  below-the-floor one, and the check keeps the two certificates apart),
+  fails any other pattern claiming the token, and fails a "not credited" row
+  that should have been this finding. It also fails any "not credited" row on a
+  workflow pull requests run that names no reason, whatever the headroom; and a
+  job whose workflow has no slowest job recorded is no longer listed there on a
+  pull-request workflow (it is only counted in the run's withheld-gate tally),
+  since no reason fits it. A slowest job's merge-wait finding now
+  says the bill section needs proof the job is shorter than the slowest job,
+  rather than naming the second-slowest job. A job that runs in a
+  `needs:` chain with the slowest job, before or after it, is excluded from
+  this credit on a workflow pull requests wait on: the wait is then the
+  chain's times added together, so shrinking it may shorten the merge wait. It is listed
+  "measured, not credited" with that reason (the line says "may shorten", never
+  "shortens", because another chain or an off-spine slowest job can be the real
+  gate). When the workflow's job graph cannot resolve the job or the slowest job
+  on a pull-request workflow, the cache is held back under its own counted,
+  plain-English reason rather than credited on a chain the audit could not see.
+  The self-check re-derives the chain from the job graph, applies the chain rule
+  only where pull requests wait on the workflow, matches rendered long poles by
+  workflow file and job name, and waives its "also rendered as a Long pole"
+  check for this credit only when the graph proves the job is not chained to the
+  slowest job. The self-check also fails a "not credited" row that is not the
+  slowest job (a chained job, or a job tied with the slowest one) when its line
+  tells it it is the slowest job, and its chain check fails closed: when the
+  workflow's recorded job graph cannot resolve the job or the slowest job, a
+  "not credited" chain row is reported as a problem, never skipped. Both
+  runner-minute credits now say
+  only what they prove, that making the job faster cannot make the workflow take
+  longer; the below-the-floor note no longer says "no merge-gate time changes",
+  which was false for a job in a `needs:` chain and meaningless on a workflow no
+  pull request runs.
+
+- **2026-10-06** — **A cache that costs more than it saves on a workflow's slowest
+  job now gets a merge-wait number.** Until now, when the cache check (OPT79)
+  measured a slow cache on the slowest job of a workflow that runs on pull
+  requests — the one place its extra time sits on the merge wait — the report
+  listed it as "measured, not credited" with no number. It is now a finding in
+  that job's long-pole section (or, when the job is not one of the drilled long
+  poles, in its own short block before "Also noticed", never as an appendix
+  row): the measured extra time per cache hit, capped at
+  the gap between its duration and the workflow's next-tallest job's (a
+  cap that is conservative when the next-tallest job runs alongside the
+  slowest one or directly after it; it compares job durations and does not
+  model a longer `needs:` chain of shorter jobs, which a chain-aware cap in a
+  follow-up would), with both jobs and their times
+  named in the evidence ("`prep` is this workflow's slowest job at 120s and its
+  next-tallest job, `verify`, runs 100s; the audit caps the saving at that 20s
+  gap, so up to 20s of the excess comes off the merge wait on the 50% of sampled
+  runs where the cache hit (3 of 6 runs read)"), the figure being per cache hit
+  so the measured hit rate is stated beside it in the evidence and the block
+  header and checked by the report's self-check against the stamped share. The wording holds
+  whether the next job runs alongside the slowest one or after it through
+  `needs:`; it never says that job finishes at a time or sets the merge wait.
+  The usual cross-check bounds can lower it further, and the block then prints
+  each step and its reason. Unless a leaf, structural or data-driven match
+  fired first, and when its figure clears the 30s long-pole floor, the pole's
+  waterfall and agent prompt name OPT79 and point at its block, rather than
+  calling the pole a coverage gap (a figure under 30s, such as a 20s one, still
+  renders its block but leaves the pole a coverage gap).
+  Runner-minutes are deliberately not stated on it: the runner-minute section
+  needs a neutrality proof (the job sits below the second-slowest job, or below
+  the slowest job), which the slowest job cannot have. (Superseded for the
+  other jobs by the entry above: a job shorter than the slowest job is now a
+  credited runner-minute finding, and the "not credited" line now covers the
+  slowest job of a workflow no pull request runs or a job tied with it, a
+  slowest job declined or demoted as listed below, and a job in a `needs:`
+  chain with the slowest job on a pull-request workflow.) A slowest job is kept on that line, with the reason
+  stated, when it is tied with the next-tallest job (under 1s apart), when the
+  cross-checks find no merge wait it can shorten, when the pull request can merge
+  without that workflow, or when the workflow's sampled runs include no pull
+  request. The report's self-check re-derives the capped number from the stamped measurements, rejects
+  any OPT79 finding that claims wall-clock under a runner-minute certificate
+  (`below_cluster_floor` or `below_long_pole`),
+  checks that the job it names as the cap is the tallest other job the run
+  measured, and fails an uncredited line that claims the merge wait. A figure the cross-checks leave under half a second is demoted too, so no
+  credited line ever prints "0s"; a demoted row carries the cross-check steps
+  that zeroed it, and the self-check re-derives them, and checks an off-spine
+  row against the checks the merge actually dropped. A workflow that declares
+  pull requests but had none in the sample is told so, instead of being called
+  a workflow that does not run on pull requests. The self-check also pairs the
+  gap and the excess the sentence states ("that 10s gap", "the 19s excess") and
+  the note's gap, durations and next-tallest job with the stamped sizing, and
+  fails a "slowest job, but ..." line on a job the run did not measure as that
+  workflow's slowest.
+
 - **2026-09-30** — **Five fix moves the catalog only half-covered are now in the
   advice.** OPT28 gains "delete the checkout step if no step reads a file" and
   the sparse / blobless checkout option (`filter: blob:none`, `sparse-checkout:`)
@@ -703,6 +1188,481 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-10-29** — Job-exclusivity proofs only fold ASCII conditions; Unicode literals whose Actions comparison differs from Python lowercasing no longer hide duplicated setup (PR #171).
+
+- **2026-10-29** — OPT14 (repeated checkout/setup without artifact handoff)
+  and OPT12 (duplicated setup across jobs) no longer treat mutually exclusive
+  jobs as duplicated work. A same-repo / fork split (one job runs on push or a
+  same-repo PR, the other only on a fork PR) runs exactly one job per run, yet
+  was reported as two co-running setup copies and credited runner-minutes for
+  a handoff that could never save anything. Jobs whose `if:` conditions are
+  provably disjoint (opposite `==` / `!=` on the same operands, or `==` to
+  different literals, combined with `&&` / `||`) are dropped from the pair;
+  any condition outside that grammar is treated as co-running, so real
+  duplicates still fire. Only run-wide contexts (`github`, `inputs`, `vars`)
+  count as proof — `needs.*` and `github.job` can differ per job — and two
+  literals that both read as numbers (`'1'` / `'1.0'`, `''` / `'0'`) are not
+  proof, since Actions compares a numeric or null value as a number.
+
+- **2026-10-29** — OPT43 attributes sibling overlap only during the measured
+  job's runnable-to-start queue interval, excluding upstream execution. Ambiguous
+  display names and matrix templates are excluded instead of choosing an
+  arbitrary dependency graph node and inventing queue time (#167).
+
+- **2026-10-29** — **Excessive Queue Time (OPT43) no longer reports an
+  upstream job's run time as queue.** A `needs:`-gated job is now measured
+  from when its last needed upstream job completed, not from when the run was
+  triggered, so a verdict job that starts seconds after a 4.5-minute test job
+  shows ~0 queue instead of a "P90 queue 334s" finding that double-counted the
+  test job's own long-pole fix. Real runner-pool queueing after the upstream
+  finishes is still flagged. A gated sample whose upstream completion isn't in
+  the sampled run, or a job that matches no job in the workflow, is excluded
+  rather than credited; skipped jobs are no longer measured. Inside a reusable
+  workflow call only the first child job to start is measured, since the other
+  children may wait on a sibling. A workflow with no scanned job graph skips
+  this check and says so, instead of timing every job from the trigger. A
+  matrix job named only by a placeholder (`name: ${{ matrix.os }}`) is still
+  matched to its job, so its real queue, and the queue of jobs that wait on
+  it, is still reported.
+
+- **2026-10-29** — Preserve measured OPT70/OPT72 findings on short terminal build jobs; the aggregation-gate filter now honors the renderer's specific-build-lever exemption (#170).
+
+- **2026-10-29** — A required verdict job that only `needs:` the real suite
+  (e.g. a ~3s `test` gate reading `needs.*.result`) is no longer reported as an
+  addressable long pole. It renders as an aggregation gate pointing at its
+  slowest upstream (kept as a chain stage when it ends a `needs:` chain), the
+  suite it waits on is ranked Long pole 1, no "speed up the dominant step"
+  (OPT75) lever is routed to it, and the data-pass summary lists it under
+  "Aggregation gates" instead of "Addressable long poles" (unless, as in the
+  report, a specific structural lever keeps it fixable; with no drill logs the
+  suite keeps its own name rather than folding into the gate's). Structural cards
+  now render only under the pole they name: two measured checks such as `test`
+  and `test (self-hosted)` are no longer folded together as a matrix base and
+  its leg. The Bottom line no longer calls a check "slower" than a `needs:`
+  chain it is faster than.
+
+- **2026-10-28** — Repo-published required statuses are named in the agent
+  summary, and an independent unresolved-gate reason stays visible beside the
+  report headline when sampling footnote metadata is absent. Status-source
+  reads reject symlinks outside the checkout; context extraction no longer
+  retries overlapping indentation matches on long whitespace. The report
+  self-check accepts an unknown merge-gating result when the same required
+  check name belongs to multiple workflows. Windows setup cards also recognize
+  common .NET SDK setup names without adding savings credit or changing totals.
+
+- **2026-10-27** — **A required status that the repo publishes itself is no
+  longer treated as an outside gate (#119).** When branch protection requires
+  one commit status (say `All CI`) that a workflow in the repo posts after
+  watching the test jobs, that status names no job and has no `needs:` edge to
+  the tests. The report used to read that mismatch as proof of an external
+  gate, say no file-backed required gate exists, and frame the real test jobs
+  as gating zero merges. The scan now records which workflows post commit
+  statuses (through the statuses API, `createCommitStatus`, or a known status
+  action, in the workflow, a local action, or a repo-local script it runs; a
+  local action's own entrypoint, such as its `main:` script or a script its
+  composite steps run from the action's folder, is looked up in that folder, and
+  a script's own imports are followed). A required context one of them posts is
+  never counted external: the gate
+  stays an unresolved best guess, the spine is not narrowed, no check is called
+  non-required on its account, the checkout-stall finding (OPT80) no longer says
+  the merge does not wait on a job, and the report names the status. Which jobs the
+  publisher waits on is not traced. A name that only appears in such a
+  workflow, such as its title or the list of checks an aggregator waits on, does
+  not count, so a CLA bot or a deploy app's status still classifies as external.
+
+- **2026-10-21** — **The "unnecessary `needs:`" finding (OPT21) no longer
+  tells a team to remove a deliberate gate, or credits a saving for it.** A job
+  that waits on a cheap check job (lint, pre-commit, a format or type check, a
+  lockfile check) is waiting on purpose: the gate stops expensive jobs from
+  starting when the check fails. OPT21 now stays silent when every job a job
+  waits on is such a check-only gate, unless the waiting job runs whatever the
+  gate's result; anything it cannot classify is still flagged as before. A
+  step named like a check ("Verify", "Check") counts only when its body is a
+  recognised check or a short inline script, never a test or build run such
+  as `mvn verify` or `make check`; a check that cannot fail (`|| true`), one
+  that runs only under an `if:`, and a job with steps the scanner could not
+  read never make a gate. Nor does a lint piped or chained into other work,
+  `--exit-zero`, a hyphenated script such as `scripts/lint-and-test.sh`, a
+  local composite action, a custom shell, or a gate that itself waits on
+  another job. Each wait left unflagged is named in the DEBUG log
+  (`STARSLING_LOG_LEVEL=DEBUG`). On OpenAI's real workflows this removes 1 false finding
+  in openai/whisper and 8 in openai/openai-python. The pattern's entry now
+  explains when a `needs:` edge is the right call, and that a gate should stay
+  short because it adds its full duration to every pull request's wait.
+
+- **2026-10-18** - **OPT38 no longer calls a pull-request `edited` or `labeled`
+  trigger safe to remove just because the workflow has no `if:` guard on it.**
+  The entry rated removal "Risk: LOW" on the grounds that any real use of those
+  events would already be guarded. Two cases need the event with no guard: an
+  action or script that reads the PR title, description or labels internally (a
+  PR-title validator such as `amannn/action-semantic-pull-request`), where
+  dropping `edited` leaves a corrected title failing on a stale result; and a
+  base-branch change, which also fires `edited`, where dropping it leaves a
+  retargeted PR green against its old base. The detection steps now have the
+  agent inspect the workflow's `uses:` targets and scripts for those
+  dependencies first and keep every event they need, and the risk line says
+  removal is safe once that inspection finds none.
+- **2026-10-12** — **The report self-check no longer rejects a correct report
+  when a dropped check shares its name with a critical-path job in another
+  workflow** (#132). On mastodon/mastodon a non-required `test` job in one
+  workflow is left off the critical path, while a different workflow's `test`
+  matrix (whose legs include the slowest check on the critical path) is
+  correctly called out as on the critical path. The self-check compared bare
+  names and failed the report, so the audit withheld the "just save the
+  report" option from a correct report. It now excuses a same-named mention
+  only in a workflow whose measured runs show that name is a matrix of
+  differently named jobs; every other mention, including the headline and a
+  workflow the measurements don't cover, is still compared by name. The
+  report text itself is unchanged.
+- **2026-10-12** — **A missing-timeout finding (OPT57) no longer credits time a
+  job spent waiting as runner minutes it could save.** Without
+  `timeout-minutes`, GitHub stops a job at 360 minutes, so only a failed job
+  that ran for about that long is burn an explicit timeout could cut. The
+  detector counted any failed job at least that long, including one that sat
+  for 30 days waiting on a deployment approval before expiring. On nrwl/nx this
+  credited about 64,000 runner-min/mo to a `publish` job whose measured compute
+  is about 780 min/mo, and the report's check that no saving exceeds its jobs'
+  measured compute refused the report. A failed sample now counts only when it
+  ended within 15 minutes after the 360-minute kill; the report verifier
+  rejects a finding that credits a longer one. (#131)
+- **2026-10-12** — **The report's self-check no longer rejects a correct
+  headline when a smaller, demoted cluster fix sits beneath it** (#130). The
+  two Bottom-line crown checks counted any headline win at least as large as a
+  cluster lever's own saving as that cluster's crown. So a chain headroom that
+  correctly led (~15m 31s on mastra-ai/mastra) was blamed on a 58s cluster the
+  renderer had already kept out of the headline because its jobs are off the
+  merge-gating path, and the report failed verification. A cluster now counts
+  as leading only when the headline sentence names it (its workflow and its
+  OPT73 entry) and does not bury it, so a different lever whose number happens
+  to sit within 2s of the cluster's no longer reads as the cluster's crown. A
+  real off-path or minority-workflow crown still fails, including one whose
+  number is wrong. The renderer is unchanged.
+- **2026-10-10** — **`STARSLING_LOG_LEVEL=DEBUG` now prints the debug trace.**
+  The variable was documented as the opt-in for the scripts' diagnostic output,
+  but no script read it, so every debug line was unreachable and stderr stayed
+  empty. Each program the skill runs (`run.py`, `scan.py`, `collect_runs.py`,
+  `blocking_path.py`, `summary.py`, `record_timing.py`) now sets its log level
+  from the variable through one shared helper (`scripts/log_level.py`). Level
+  names are read in any case; `WARN` and `FATAL` are accepted as aliases and
+  `NOTSET` shows everything. Unset means WARNING, as before; a name that is not
+  a log level also means WARNING, with one line per program saying the value
+  was ignored (a `run.py` audit starts three programs, so three lines). What is
+  logged is unchanged: endpoints, sizes and pattern / workflow names, not gh
+  response bodies, except that a failed gh call's DEBUG line prints up to the
+  first 200 characters of gh's own error text and an unparsable workflow file's
+  DEBUG line prints the YAML parser's error, which can quote the file. Warnings
+  that already printed now carry a `WARNING <module>:` prefix (the collector's
+  read `WARNING collect_runs:`), except the `CI_SPEEDUP_FETCH_CONCURRENCY`
+  warning, which fires while the collector module is still loading, before
+  logging is configured, and prints bare as before. `summary.py` and
+  `record_timing.py` still start under `python -P` (PYTHONSAFEPATH).
+
+- **2026-10-10** — **Actions and reusable workflows referenced with GitHub's
+  self-repository prefix (`uses: $/path`, shipped 2026-07-30) are read as the
+  local files they are.** Every local-action read matched only `./`, so a
+  `$/` reference was never opened: a git-history command inside a `$/`
+  composite action did not protect the job's `fetch-depth: 0` from the
+  shallow-checkout recommendation, the submodule / LFS payload check never
+  searched a `$/` composite's body, the checkout-stall pattern missed a
+  checkout (or an already-applied retry) behind a `$/` composite, a `$/`
+  action named lint was not recognised as delegated lint, and a reusable
+  workflow called as `$/.github/workflows/x.yml` was missing from the call
+  graph. `$/x` now resolves to `<repo root>/x` everywhere `./x` does,
+  including references nested inside composite actions. The git-history
+  read behind the shallow-checkout pattern (OPT28) follows those nested
+  references too: a composite action that calls another local action
+  running `git diff origin/main...HEAD` no longer leaves `fetch-depth: 0`
+  looking removable, and an unreadable nested reference fails closed.
+  Nested references written with a quoted `"uses":` key are followed too,
+  and a nested reference that resolves outside the repository root
+  (`$/../x`, `$//abs`) or cannot be opened at all fails closed in every
+  local-action read instead of reading as clean or stopping the scan.
+
+- **2026-10-10** — **A report is no longer refused because a modeled saving
+  was checked against the wrong job.** On curl/curl the final check blocked
+  the whole audit: a duplicate-command finding (OPT16, a flat estimate of about
+  10 s per run over 1,463 runs, 243.8 min/mo) on `http3-linux.yml`'s `linux`
+  job was compared with 155.5 min/mo that actually belongs to
+  `configure-vs-cmake.yml`'s unrelated `Linux` job. The `linux` job is named in
+  the workflow file by a `${{ }}` template, so its measured rows carry the
+  rendered names (`AM awslc`, `CM openssl`, ...) and its key matched nothing in
+  its own workflow; the fallback that looks for the same job name in any
+  workflow (meant for reusable-workflow callers) then picked up the namesake.
+  Both the sizing door and the final check now treat a templated job that
+  misses its own workflow's rows as unmeasured (a disclosed coverage gap), never
+  as a namesake from another file. Separately, a modeled estimate on the
+  `not_spine_derivable` list (the `direct`, `runner-min-only` and
+  `parallel-rebalance` sizing models, plus the step-decomposition levers
+  OPT70-72/74/75) is now capped at its affected jobs' measured monthly billable
+  compute when the estimate exceeds it: the figure drops to the measured
+  compute, the basis reads `measured_spine_clamped`, and the finding's size note
+  states the original estimate and the cap. The cap only lowers a figure on the
+  whole truth: every affected job must be found in its own workflow's cost data
+  (by job key, or by the `name:` the workflow file gives it). A same-named job
+  in another workflow, or only some of the affected jobs, leaves the estimate
+  as is, since either would cut a correct saving. When every affected job is
+  found but those rows measure no billable compute in the sample (0 min/mo, or
+  a sum that rounds to 0), that is a real bound: the estimate clamps to 0.0
+  under the same `measured_spine_clamped` basis, the size note says the jobs
+  measured no billable compute, and the finding renders as "no bill saving"
+  rather than failing the final check against the zero bound. A measured figure, or one
+  carrying a wall-clock-neutral certificate (OPT57, OPT65, OPT77, OPT79, OPT80
+  and the other measured detectors), is never capped: the final check
+  re-derives those from their own measurements and would refuse a lowered one.
+  Before, only OPT73 was capped, so a flat estimate on a small job could fail
+  the final check and block the report. On curl the cap never fires: the
+  templated-name rule above is what resolves OPT16, as a coverage gap. Re-checked
+  on the saved curl data: the final check passes (7 savings within measured
+  compute, 4 disclosed coverage gaps) and no curl figure changes. Surfaces:
+  `scripts/collect_runs.py`,
+  `tests/verify_report.py`, ARCHITECTURE §5.1.
+
+- **2026-10-10** — **A step GitHub skipped no longer reads as a step that ran
+  for two thousand years.** The jobs API reports a skipped step (for example a
+  `background: true` step whose `if:` was false) with a start time of year 1
+  and a real end time. Read naively, that is a 63.9-billion-second step: on
+  curl/curl it produced a HIGH "shared step recurs across the cluster" finding
+  worth 145,186 runner-min/mo for a `test-linter` step that never ran in the
+  job it was charged to. Every place the audit reads step timings now applies
+  one rule: a skipped step contributes no time; a step whose start falls in
+  1970 or earlier (the year-1 placeholder included), more than 1s before its
+  own job, or after its job ended contributes no time; a step whose timestamps
+  are reversed or do not parse contributes no time; a step's end is clamped to
+  its job's end, so no step outlasts the job that contains it; and a timestamp
+  with no timezone is read as UTC rather than failing beside one that has one.
+  The 1s allowance rests on a census of 3,208 real steps across 176 sampled job
+  runs in curl, playwright, flask and mastra: in that sample none started
+  before its job, none ended after it, and every year-1 start was on a skipped
+  step. A step that starts in its job's last second and ends more than 1s past
+  it has no time left inside the job once its end is cut back, so it counts as
+  no usable time (and OPT79 withholds it) rather than as a 0s step.
+  Nothing is dropped silently any more. Each dropped step, and each step whose
+  end is cut back to its job's end by more than 1s, is logged at DEBUG (job,
+  step and reason; never a response body). A pole's step breakdown records how
+  many skipped or untimeable declared steps it left out or timed from fewer
+  runs: those GitHub skipped on every sampled run they appeared in
+  (`skipped_steps`), those never measured with no usable time in some run
+  (`unmeasured_steps`; a step skipped in one run and untimeable in another
+  counts here, not as skipped), those timed in some sampled runs and skipped
+  or untimeable in others they appeared in, whose figure comes from the runs
+  that timed them (`partially_measured_steps`; a step missing from some runs'
+  step lists is not counted), and those timed only up to the job's end
+  (`trimmed_steps`), each stamped only when non-zero. A step that measured 0s
+  in every run it ran in took no time and is in no count. The pole's step list
+  in the report says so in one line (for example "2 declared step(s) skipped
+  on every sampled run and 1 with no usable time are not timed here; 1 step(s)
+  were timed in some sampled runs and skipped or untimeable in others"). A job
+  whose every step was dropped now says "No step could be measured: N skipped,
+  M with no usable time" instead of quietly having no step breakdown, and the
+  coverage-gap, LLM-analysis and catalog pointers, the `--log` hint and any
+  log drill still follow that line. In that log drill, a level that splits the
+  step's time by each phase's share of summed worker time (the vitest coverage
+  compile/test split) shows the shares without seconds, under a header saying
+  the step's own time is unknown, instead of printing the summed worker
+  seconds as if they were the step's time.
+  The per-run step timeline the report draws keeps a
+  skipped step in its place at 0s and drops one with no usable time. A
+  repeated-setup (OPT77) finding no longer names a setup step that had no time
+  in every sampled run while adding 0s for it. The cross-run check on a pole's
+  dominant step counts a run where that step was skipped as 0s (it did not
+  run), leaves out another run whose step has no usable in-window time, and
+  keeps the drilled run itself, with no value, rather than omitting it.
+  A slow-checkout (OPT80) occurrence whose checkout was skipped, started at a
+  placeholder or ran outside its job is withheld as
+  `checkout_step_skipped_or_out_of_window`; one whose timestamps are reversed
+  or do not parse stays `checkout_step_duration_unparseable`.
+  In the cache-costs-more-than-it-saves check (OPT79), a cache, install or
+  post-save step that GitHub did not report as skipped but whose start falls
+  in 1970 or earlier, or outside its job, previously read as its raw duration
+  (for a year-0001 start, about 63.9 billion seconds, which on the hit side
+  manufactured an excess); it is now withheld as `step_has_no_in_window_time`.
+  A cache step with reversed timestamps is withheld as
+  `step_timestamps_unparseable_in_this_occurrence`. A step GitHub reports as
+  skipped with parseable timestamps now counts as 0s. When runs set aside for
+  step times that did not measure are what leave too few hits or misses, the
+  withhold says so (`population_truncated_by_unmeasurable_step_times`) rather
+  than blaming the logs, and every OPT79 finding and uncredited row stamps the
+  runs it set aside per reason (`excluded_runs_by_gate`).
+  Each job's longest sampled run is stamped (`per_workflow_timing[wf].job_max`).
+  The report checker gains checks that fail (never skip) when a finding cites,
+  or the engine stamps, a step longer than its job's longest sampled run, or
+  longer than any GitHub Actions job may run (5 days); a drilled-run timeline
+  step is held to that one run's length, and a timeline with no run length or
+  a step with no numeric duration fails. A step that runs on only some runs
+  may correctly be longer than the job's median, so the median is never the
+  bound. Their passing detail now counts the figures held to a job's longest
+  run apart from those held only to the 5-day ceiling (no longest run
+  stamped), rather than calling every figure "inside its job's window". A
+  declared drilled-run timeline is never passed over silently: a separate
+  check fails when, with its bundle directory present (the stamped `logs_dir`
+  or the `<findings>.data/` sibling), a timeline file is missing, unreadable,
+  not JSON or the wrong shape, naming the pole, the run and every path tried;
+  with no bundle directory anywhere (a findings-only artifact such as a
+  committed example), the figure check still passes on the pole figures it
+  did check and says how many timelines went unchecked. A further check
+  re-derives each pole's omitted-steps line from its stamp and says how many
+  pole sections it could not judge (a key two poles share, or an aggregation
+  gate); the bare-pole check accepts a pole whose every step was dropped when
+  its section says so.
+
+- **2026-10-09** — **Steps written inside a GitHub Actions `parallel:` group are
+  no longer invisible to the audit.** Since 2026-06-25 a step may be a
+  `- parallel:` group holding a list of ordinary steps, a step may carry
+  `background: true`, and `wait:`, `wait-all:` and `cancel:` steps run nothing.
+  Every static reader treated a job's steps as a flat list, so a duplicate
+  build, an uncached install, a `fetch-depth: 0` checkout, a lint command, a
+  cache step or the git-history command that makes `fetch-depth: 0` necessary
+  went unread whenever it sat inside a group. (#122)
+  - One shared step walker (`scripts/workflow_steps.py`) now feeds every static
+    detector and every YAML step read in the collector (OPT16, OPT2, OPT5,
+    OPT28 and the other per-job detectors; OPT77's setup comparison, OPT79's
+    cache block, OPT80's checkout, OPT82's lint step, the OPT24 shard check).
+    A group-level `if:` is read as gating its steps (an assumption: GitHub does
+    not document it), including where OPT76 searches for a payload path.
+  - A group that cannot be read (its value is not a list, it contains itself
+    through a YAML alias, it is nested more than 64 deep, an item in it is not a
+    step, or a YAML alias fan-out would expand past 10,000 steps) is named with
+    its kind as incomplete coverage, and the scan no longer hangs or stops on
+    one. For that job, every finding that rests on a step being absent (OPT1,
+    OPT2, OPT5, OPT14, OPT21, OPT28, OPT29, OPT31, OPT39, OPT76) is held back
+    and listed as `job_has_an_unreadable_parallel_group`; OPT79 and OPT80 give
+    the same reason instead of "no steps" or "no checkout".
+  - A step that has `parallel:` plus `run:` / `uses:` (GitHub rejects it) is
+    still read, its command and its children, and is named in the Parallel
+    steps row rather than as incomplete coverage. The incomplete-coverage
+    banner now counts files, not records.
+  - Order-aware checks use the overlap. OPT2 fails closed: any cache declared
+    before the install counts, a background one included; only a cache running
+    beside the install in its own group does not. OPT5 says two setup actions
+    in one group run side by side. OPT12's shared preamble stops at the first
+    group, and a job whose first step is in a group is listed with
+    `first_step_inside_a_parallel_group`. OPT79 holds back a cache whose
+    restore or install runs in a group or in the background, naming the
+    overlap before any install-shape reason, and no longer reads `package.json`
+    through a checkout that may still be running beside the setup step.
+  - A saving priced from step times that overlap is held back, not claimed:
+    when the step OPT24 (sharding) or the long-pole lever (OPT70/72/75) is
+    priced from runs in a group or in the background, the lever is listed in a
+    new "parallel steps: held back" Data sources row
+    (`dominant_step_runs_inside_a_parallel_group`) and the pole keeps the
+    generic dominant-step hand-off.
+  - The pole drill never says a job's steps run one after another when the
+    job runs a group or a background step (matched by job key, display name,
+    matrix leg, a `${{ }}`-templated name or a reusable-workflow callee), and
+    says they "may" overlap when the pole's workflow uses the syntax but the
+    job cannot be matched.
+  - A control step is never crowned a slow job's dominant step, in the
+    collector or in the renderer's fallbacks: `wait`, `wait-all`, `cancel` and
+    "Wait for all background steps…" (names assumed for the run data,
+    unverified until a live probe), and any control step the author named in
+    the YAML. A work step that merely starts "Wait for" stays eligible.
+  - A repo that uses the syntax gets a "Parallel steps" row in Data sources:
+    steps read inside groups, the groups seen, background and control steps,
+    each malformed group's kind and files, and any invalid group.
+    `verify_report` re-derives the whole row, fails a row with no stamp, and
+    fails a pole drill that calls an overlapping job sequential. A repo that
+    does not use the syntax gets a byte-identical scan output; the rendered
+    report can still differ where a step is literally named `wait`, `wait-all`
+    or `cancel` (it is no longer picked as the dominant step) or where one
+    workflow file carried several coverage-gap records.
+  - **Not changed yet:** how the run timing records overlapping steps is
+    undocumented, so the per-step decomposition still adds step times as if
+    they ran one after another; that needs a live probe first. OPT77's setup
+    comparison can still overstate a saving whose setup steps overlap.
+
+- **2026-10-07** — **A slow lint job flagged by OPT82 no longer reads as a
+  coverage gap, and a cache cost off the long poles no longer lands inside the
+  checkout stall section (#118).** When the slow lint job (OPT82) is itself one
+  of the drilled long poles, that pole used to say "no catalog pattern matched"
+  and call itself a coverage gap, and the maintainer loop was asked to draft a
+  new detector for it. When the pole's slowest step is the lint step the
+  finding names, the lint finding now counts as the pole's match at any size
+  (it carries no saving by design), and the pole's breakdown and agent prompt
+  point at its card in "Also noticed". A pole whose slowest step is something
+  else (a test run beside a short lint step) stays a coverage gap, because the
+  lint finding says nothing about that step. Separately, the block listing a
+  cache that costs more than it saves on a job that is not a drilled pole had
+  no heading of its own, so after the checkout stall tails section it read as
+  part of that section; it now has its own section and a Contents entry, and
+  in a report that drilled no pole its intro no longer points at "a long pole
+  above". The report's self-check fails either shape, and also fails a
+  Contents link to either off-pole section that lands on no anchor.
+
+- **2026-09-30** — **A held-back row can no longer break its own table, link
+  out of the report, or overstate its reason (#112).** Job names are controlled
+  by the audited repository and land in a markdown table cell. A backslash was
+  not escaped before the cell separator, so a job named `a\|b` split its row
+  into an extra column and the report's own self-check then read only the
+  fragment before the split; brackets and parentheses were not neutralised at
+  all, so a job named `[click](http://example.test)` rendered as a working link
+  inside the audit's own table, and angle brackets were not neutralised either,
+  so a name written as an HTML tag could make the report load a remote image
+  the moment a reader opened it. Fourteen characters in the name are now
+  backslash-escaped — `\` `|` `[` `]` `(` `)` `_` `<` `>` `` ` `` `*` `&`
+  `~` — rather than, as this entry previously claimed, every character
+  markdown treats as special. Backticks and asterisks used to be swapped for
+  an apostrophe instead, which rendered three different job names as the same
+  string in a row whose whole purpose is saying which candidates were held
+  back; they are escaped now too, so the name arrives intact. Ampersands and
+  tildes are escaped for the same reason: left alone, a job called `A&amp;B`
+  renders as `A&B`, and two jobs become one name on the page. One case stays
+  out of reach and is written down as such: a job named as a bare web address
+  becomes a link with no punctuation to escape.
+  The row's count and job list cover every held-back candidate while its reason
+  is only the most common one, so the reason now says "most commonly" whenever
+  more than one reason contributed instead of asserting one cause of every job
+  it names — and "equally often" when two reasons are tied, where there is no
+  most common one and saying there is would be false. The count is of the
+  candidates the row actually names: counted over raw records it could say
+  "2 held back" beside a single name. One checkout reason asserted a cause the evidence does not
+  establish ("progress output is switched off") and is hedged like its
+  siblings. The guard that stops a reason shipping as an internal code now
+  recognises every way the checkout detector records one, so two reasons it
+  previously could not see are no longer listed by hand inside the guard
+  itself.
+  A held-back row can also no longer take the whole report down with it: a
+  pattern registered without its plain-English wording raised an error that
+  stopped the report being produced at all, where the point of that wording is
+  to keep a report readable when something is wrong. A group of jobs held back
+  with a blank name now shows a visible marker rather than nothing. Whether a
+  held-back entry names one job or a whole group is part of what a pattern
+  registers, instead of being worked out by comparing it against the one
+  group-shaped pattern that exists today — a second group-shaped pattern would
+  have had every candidate rendered as "(unnamed job)", in the report and in
+  the report's own self-check alike, so the two would have agreed. The
+  self-check now also reads the row's third column, which says what the row is
+  about and which nothing checked.
+- **2026-09-30** — **A workflow whose jobs all share one setup no longer loses
+  its saving in silence (#112).** The repeated-setup pattern (OPT77) sizes what
+  collapsing small jobs that each re-pay the same setup would save on the bill.
+  When every job in the workflow was in the group it used a separate rule that
+  was wrong twice: it decided "nothing outside this group" from the sampled
+  runs, so a workflow declaring a job that never ran in the sampled window — a
+  main-gated release job, a job behind a condition — was misclassified and
+  dropped without a word; and it assumed collapsing could only lengthen the
+  wait, which is a wall-clock argument applied to a bill-only saving. The group
+  is now judged against the wait it sets today — **how long its slowest member
+  was measured to take**, which is what the workflow makes a pull request wait
+  for, since the members run in parallel. Collapsing a whole workflow can
+  never shorten that wait, so the saving is reported when it is free — when
+  the collapsed job would take exactly as long as the slowest job does
+  today — and otherwise the report says what the collapse would cost the merge
+  wait, instead of saying nothing at all. In practice the second case is the
+  common one, and saying so is the point of the change. "Every job in the
+  workflow" is read from what the workflow declares, and needs one declared job
+  per member. That wait is a measured duration rather than a job's typical
+  setup added to its typical task: assembling the wait out of parts could
+  describe three jobs each measuring 400s as taking 90s today, in the report's
+  own words. The report's self-check works the
+  wait out from the measurements itself, and the part-based sum survives only
+  as a consistency test on them. The self-check also reads what the workflow
+  declares from a record written when the workflow file is read, rather than
+  from the pattern's own copy of it, so the claim "this is every job in the
+  workflow" is checked against a second source; it no longer rejects a saving
+  because the two sides rounded a tenth of a second differently; and a saving
+  measured against another job can no longer also carry the whole-workflow
+  wait. A workflow file that could not be read disables three patterns, and now
+  says so in the report instead of reading as "checked, nothing found".
 - **2026-09-30** — **The repeated-setup (OPT77) and stalled-checkout (OPT80)
   patterns now say when they measured something and could not decide it.** Both
   kept a private tally of why they held candidates back, but nothing showed it,
@@ -718,14 +1678,13 @@ unversioned and updates by reinstall from `main`.
   cause, never an internal code. This is the same held-back disclosure the cache
   check (OPT79) already gave: all three patterns now share one mechanism — one
   row builder, one job list, one self-check — so a fourth pattern discloses a
-  held-back candidate by registering its reasons, not by growing a fourth copy. Only undecided candidates count; a candidate
-  that was decided (the jobs depend on each other, the logs show a smooth fetch)
-  does not. A slow checkout whose logs were not all read, because only the newest
-  four are fetched, counts as undecided when the unread runs could still have
-  proven a stall. A group of small jobs that is the whole workflow, with no other
-  job to compare against, is now treated as decided (merging them in parallel
-  can only keep or lengthen the wait) instead of held back; the case where other
-  jobs exist but none ran often enough to compare against stays held back. The
+  held-back candidate by registering its reasons, not by growing a fourth copy.
+  Only undecided candidates count; a candidate that was decided (the jobs depend
+  on each other, the logs show a smooth fetch) does not. A slow checkout whose
+  logs were not all read, because only the newest four are fetched, counts as
+  undecided when the unread runs could still have proven a stall. A group of
+  small jobs where other jobs exist but none ran often enough to compare against
+  stays held back. The
   report's self-check re-derives each whole line (count, jobs, reason) from the
   findings and fails a report that omits one, misstates any part, prints a code
   in place of the reason, or carries one with nothing behind it; a gate with no

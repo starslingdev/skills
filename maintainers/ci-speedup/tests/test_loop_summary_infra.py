@@ -128,7 +128,7 @@ def test_gap_to_catalog_prompt_skill_paths_exist():
     # after the relocate these must still point at real files under skills/ci-speedup/.
     body = _GAP_PROMPT.read_text(encoding="utf-8")
     for rooted in ("skills/ci-speedup/scripts/blocking_path.py",
-                   "skills/ci-speedup/references/optimization-patterns.md",
+                   "skills/ci-speedup/references/patterns/INDEX.md",
                    "skills/ci-speedup/tests/test_blocking_path.py"):
         assert rooted in body, f"gap-to-catalog-prompt.md no longer references {rooted}"
         assert (_REPO_ROOT / rooted).exists(), f"gap-to-catalog-prompt.md path missing on disk: {rooted}"

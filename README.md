@@ -66,7 +66,7 @@ merge-gating critical path, and the axis findings rank on, because it is what
 engineers feel) and **runner-minutes** (the bill). The numbers come from real
 runs: per-job P50/P95 sampled over the `gh` API, with the critical path
 re-derived from your actual job graph, then matched against a
-[catalog](skills/ci-speedup/references/optimization-patterns.md) of 70+ patterns.
+[catalog](skills/ci-speedup/references/optimization-patterns.md) of 80+ patterns.
 
 **It diagnoses; it does not prescribe.** A generic tool can't tell deliberate
 from wasteful, so each finding ships a ready-to-paste prompt handing the root
@@ -80,7 +80,7 @@ Example reports from real runs:
 **Read the skill:** [SKILL.md](skills/ci-speedup/SKILL.md) — what it does, step by step ·
 [ARCHITECTURE.md](skills/ci-speedup/ARCHITECTURE.md) — how the pipeline fits together ·
 [CHANGELOG.md](skills/ci-speedup/CHANGELOG.md)
-**The catalog and the methods:** [optimization-patterns.md](skills/ci-speedup/references/optimization-patterns.md) — all 70+ patterns ·
+**The catalog and the methods:** [optimization-patterns.md](skills/ci-speedup/references/optimization-patterns.md) — all 80+ patterns ·
 [wall-clock-methodology.md](skills/ci-speedup/references/wall-clock-methodology.md) — how the merge-gating critical path is derived ·
 [savings-methodology.md](skills/ci-speedup/references/savings-methodology.md) — how every number is sized
 **Everything else:** [`skills/ci-speedup/`](skills/ci-speedup/) · Learn more: [starsling.dev/ci-speedup](https://starsling.dev/ci-speedup)
@@ -223,11 +223,11 @@ ask *"why did this job fail?"*
 
 The skill is named after the CLI it drives. The other three skills read your
 workflow files; this one reads your **live CI**, through
-[`sling`](https://docs.starsling.dev/sling-cli), StarSling's read-only CLI: why a job failed (classified server-side, no LLM in the loop),
+[`sling`](https://docs.starsling.dev/sling-cli), StarSling's CLI, read-only against your CI: why a job failed (classified server-side, no LLM in the loop),
 where a run's wall-clock actually went, only the log lines that matter, and
 what your runner minutes cost, broken down by repo, workflow, or label.
 
-**The routing is the point.** `sling` is read-only, so an agent that only
+**The routing is the point.** `sling` changes nothing on GitHub, so an agent that only
 knows `sling` will invent a `sling rerun` that does not exist, and an agent
 that only knows `gh` will download a whole transcript to grep it. The skill
 carries the table that decides which tool answers which ask — reads about a

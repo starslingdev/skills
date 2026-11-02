@@ -239,7 +239,7 @@ def test_pipeline_scan_render_verify_passes(tmp_path: Path) -> None:
                     "cannot stamp the `skill commit` this pipeline verifies")
     scan = _SKILL_DIR / "scripts" / "scan.py"
     report_py = _SKILL_DIR / "scripts" / "report.py"
-    fixture = _SKILL_DIR / "evals" / "files" / "many-findings"
+    fixture = _SKILL_DIR / "evals" / "fixtures" / "many-findings"
     findings = tmp_path / "findings.json"
     # report.py dates the header from the scan's UTC timestamp, so the filename
     # date must also be UTC — a hardcoded or local date disagrees with the

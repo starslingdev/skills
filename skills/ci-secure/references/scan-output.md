@@ -75,10 +75,59 @@ The one non-scripted field. Written once per pattern group and merged onto
   its `Coverage:` line rather than recomputing one.
 - `suppressed_findings` — matches the engine deliberately withheld, with the
   reason each was withheld. Not a coverage gap, but not nothing either.
+- `parallel_steps` — `steps_scanned` (steps read inside GitHub Actions
+  `parallel:` groups), `control_steps` (`wait:` / `wait-all:` / `cancel:`,
+  which hold no code), `background_steps` (top-level steps written with any
+  `background:` value but a literal `false`; a child of a `parallel:` group
+  is counted in `steps_scanned` only, background or not) and the
+  `workflows` holding at least one of those counted steps. The key is
+  always present (all zeros for a repository without the syntax).
+  Informational, never a coverage gap: the leaf steps counted were scanned
+  like any other; control steps hold no code. A `parallel:` group or
+  background step the walker cannot fully read as written lands in
+  `coverage_notes` instead, tagged `scope: "parallel-group"`: a group
+  whose value is not a list, nested past the depth cap, carrying `run:` /
+  `uses:` beside `parallel:`, holding an entry that is not a step, carrying
+  a key the scan does not model (anything but `parallel:`, `if:`, `name:`,
+  `id:`, `continue-on-error:`, `background:`), re-entering itself through a
+  YAML alias, or past the walk's entry budget; a `background:` value chosen
+  at run time; or a job whose concurrent steps' source lines could not be
+  found. Its file is not listed in `workflows` unless it also holds counted
+  steps. Parallel steps are a github.com / GitHub Enterprise Cloud feature;
+  the scan reads the syntax wherever it appears.
 - `security_score` — present in the JSON and **never rendered**. Phase 3
   forbids a score, ratio or `N/100` anywhere the user sees. It is listed here
   so it is recognized as out of bounds rather than mistaken for a summary
-  worth surfacing.
+  worth surfacing. Its `facts` rows ARE rendered (the hygiene table), and
+  so is one unscored key inside it, `security_score.push_access`, which the
+  report shows under "If a push credential leaks":
+  - `status` — `measured` / `unmeasured` (the environment list could not
+    be read) / `not_checked` (no repository, no token, or the settings or
+    verdicts could not be computed at all), with `reason`; in the shape a
+    crashed facts layer leaves, `token_note` is absent.
+  - `environments` — one object per environment: `name`, `managed`
+    (GitHub-managed `github-pages` / `copilot`), `branch_check` and
+    `branch_check_why` (`pass` / `fail` / `unmeasured`, or `info` for a
+    managed environment that is not judged), `approval_check` and
+    `approval_check_why` (`pass` / `fail` / `not_applicable` / `info`),
+    `reviewers` (count), `has_rules` (a branch
+    policy or required reviewers exist) and `admins_can_bypass`
+    (information only, never part of a verdict; the report notes it only
+    where `has_rules` is true, on an environment that is not GitHub-managed).
+  - `inventory` — the secret list behind the
+    `sec.secrets.environment-scoped` row: `status` (`measured` /
+    `partial` / `unmeasured` / `not_checked`), `repo_secrets` and
+    `org_secrets` (lists of secret NAMES, or `null` when that list could
+    not be read — `null` is never "none"), `high_value` (a sort hint, not
+    a severity) and `reason`.
+  - `tier1_gap` and `credential_note` — the two sentences every run
+    states when this layer completes (empty when it crashed): what is not
+    checked yet, and the OIDC exposure.
+  - `token_note` — one sentence linking GitHub's docs on which
+    credentials can add or change workflow files.
+  The three facts themselves are `sec.environments.branch-restricted`,
+  `sec.environments.approval-holds` and `sec.secrets.environment-scoped`
+  in `facts`, like any other.
 - `timings` — script-owned spans. As `run.py --out` writes them at Phase 2:
   `run_start_epoch`, `activity_enrich_s`, `scan_total_s`, `scripted_end_epoch`,
   `scripted_total_s`. **`total_run_s` is NOT there yet** — `report.py` computes

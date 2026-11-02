@@ -1,0 +1,327 @@
+[
+  {
+    "id": 12,
+    "name": "gap-fill-coverage-lookup",
+    "run": 1,
+    "passed": true,
+    "tool_calls": 3,
+    "input_tokens": 141481,
+    "output_tokens": 1602,
+    "duration_ms": 23930,
+    "cost_usd": 0.24075359999999998,
+    "reading": {
+      "reference_bytes": 16927,
+      "reference_lines": 167,
+      "catalog_opened": true,
+      "catalog_entries_read": [
+        "OPT86"
+      ],
+      "unattributed_calls": 0,
+      "reference_files": [
+        {
+          "path": "patterns/INDEX.md",
+          "bytes": 10707,
+          "lines": 117,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt86-use-prebuilt-dependency-packages.md",
+          "bytes": 3110,
+          "lines": 25,
+          "calls": 1
+        },
+        {
+          "path": "gap-fill.md",
+          "bytes": 3110,
+          "lines": 25,
+          "calls": 1
+        }
+      ],
+      "session": {
+        "wall_s": 24.6,
+        "input_tokens": 141481,
+        "output_tokens": 1602,
+        "result_events": 1,
+        "subagents": 0
+      }
+    },
+    "checks": [
+      {
+        "name": "ci-speedup-skill-invoked",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "names-opt86",
+        "passed": true,
+        "detail": "found"
+      },
+      {
+        "name": "read-some-reference-material",
+        "passed": true,
+        "detail": "reference_bytes=16927"
+      }
+    ],
+    "unscored": "expected_output"
+  },
+  {
+    "id": 12,
+    "name": "gap-fill-coverage-lookup",
+    "run": 2,
+    "passed": true,
+    "tool_calls": 3,
+    "input_tokens": 133641,
+    "output_tokens": 1786,
+    "duration_ms": 23481,
+    "cost_usd": 0.22628520000000002,
+    "reading": {
+      "reference_bytes": 9686,
+      "reference_lines": 96,
+      "catalog_opened": true,
+      "catalog_entries_read": [
+        "OPT86"
+      ],
+      "unattributed_calls": 0,
+      "reference_files": [
+        {
+          "path": "gap-fill.md",
+          "bytes": 4843,
+          "lines": 48,
+          "calls": 2
+        },
+        {
+          "path": "patterns/opt86-use-prebuilt-dependency-packages.md",
+          "bytes": 4261,
+          "lines": 40,
+          "calls": 1
+        },
+        {
+          "path": "patterns/INDEX.md",
+          "bytes": 582,
+          "lines": 8,
+          "calls": 1
+        }
+      ],
+      "session": {
+        "wall_s": 24.2,
+        "input_tokens": 133641,
+        "output_tokens": 1786,
+        "result_events": 1,
+        "subagents": 0
+      }
+    },
+    "checks": [
+      {
+        "name": "ci-speedup-skill-invoked",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "names-opt86",
+        "passed": true,
+        "detail": "found"
+      },
+      {
+        "name": "read-some-reference-material",
+        "passed": true,
+        "detail": "reference_bytes=9686"
+      }
+    ],
+    "unscored": "expected_output"
+  },
+  {
+    "id": 12,
+    "name": "gap-fill-coverage-lookup",
+    "run": 3,
+    "passed": true,
+    "tool_calls": 3,
+    "input_tokens": 142106,
+    "output_tokens": 1687,
+    "duration_ms": 18609,
+    "cost_usd": 0.2438986,
+    "reading": {
+      "reference_bytes": 17410,
+      "reference_lines": 176,
+      "catalog_opened": true,
+      "catalog_entries_read": [
+        "OPT86"
+      ],
+      "unattributed_calls": 0,
+      "reference_files": [
+        {
+          "path": "patterns/opt86-use-prebuilt-dependency-packages.md",
+          "bytes": 6220,
+          "lines": 50,
+          "calls": 1
+        },
+        {
+          "path": "gap-fill.md",
+          "bytes": 5595,
+          "lines": 63,
+          "calls": 1
+        },
+        {
+          "path": "patterns/INDEX.md",
+          "bytes": 5595,
+          "lines": 63,
+          "calls": 1
+        }
+      ],
+      "session": {
+        "wall_s": 19.2,
+        "input_tokens": 142106,
+        "output_tokens": 1687,
+        "result_events": 1,
+        "subagents": 0
+      }
+    },
+    "checks": [
+      {
+        "name": "ci-speedup-skill-invoked",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "names-opt86",
+        "passed": true,
+        "detail": "found"
+      },
+      {
+        "name": "read-some-reference-material",
+        "passed": true,
+        "detail": "reference_bytes=17410"
+      }
+    ],
+    "unscored": "expected_output"
+  },
+  {
+    "id": 12,
+    "name": "gap-fill-coverage-lookup",
+    "run": 4,
+    "passed": true,
+    "tool_calls": 3,
+    "input_tokens": 142313,
+    "output_tokens": 1635,
+    "duration_ms": 23084,
+    "cost_usd": 0.2457572,
+    "reading": {
+      "reference_bytes": 19054,
+      "reference_lines": 200,
+      "catalog_opened": true,
+      "catalog_entries_read": [
+        "OPT86"
+      ],
+      "unattributed_calls": 0,
+      "reference_files": [
+        {
+          "path": "gap-fill.md",
+          "bytes": 9527,
+          "lines": 100,
+          "calls": 2
+        },
+        {
+          "path": "patterns/INDEX.md",
+          "bytes": 5278,
+          "lines": 57,
+          "calls": 1
+        },
+        {
+          "path": "patterns/opt86-use-prebuilt-dependency-packages.md",
+          "bytes": 4249,
+          "lines": 43,
+          "calls": 1
+        }
+      ],
+      "session": {
+        "wall_s": 23.7,
+        "input_tokens": 142313,
+        "output_tokens": 1635,
+        "result_events": 1,
+        "subagents": 0
+      }
+    },
+    "checks": [
+      {
+        "name": "ci-speedup-skill-invoked",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "names-opt86",
+        "passed": true,
+        "detail": "found"
+      },
+      {
+        "name": "read-some-reference-material",
+        "passed": true,
+        "detail": "reference_bytes=19054"
+      }
+    ],
+    "unscored": "expected_output"
+  },
+  {
+    "id": 12,
+    "name": "gap-fill-coverage-lookup",
+    "run": 5,
+    "passed": true,
+    "tool_calls": 3,
+    "input_tokens": 142430,
+    "output_tokens": 1791,
+    "duration_ms": 25651,
+    "cost_usd": 0.2467106,
+    "reading": {
+      "reference_bytes": 17820,
+      "reference_lines": 178,
+      "catalog_opened": true,
+      "catalog_entries_read": [
+        "OPT86"
+      ],
+      "unattributed_calls": 0,
+      "reference_files": [
+        {
+          "path": "patterns/opt86-use-prebuilt-dependency-packages.md",
+          "bytes": 6220,
+          "lines": 50,
+          "calls": 1
+        },
+        {
+          "path": "gap-fill.md",
+          "bytes": 5800,
+          "lines": 64,
+          "calls": 1
+        },
+        {
+          "path": "patterns/INDEX.md",
+          "bytes": 5800,
+          "lines": 64,
+          "calls": 1
+        }
+      ],
+      "session": {
+        "wall_s": 26.3,
+        "input_tokens": 142430,
+        "output_tokens": 1791,
+        "result_events": 1,
+        "subagents": 0
+      }
+    },
+    "checks": [
+      {
+        "name": "ci-speedup-skill-invoked",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "names-opt86",
+        "passed": true,
+        "detail": "found"
+      },
+      {
+        "name": "read-some-reference-material",
+        "passed": true,
+        "detail": "reference_bytes=17820"
+      }
+    ],
+    "unscored": "expected_output"
+  }
+]

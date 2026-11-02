@@ -174,10 +174,17 @@ def _render_keys(logs: list[dict[str, Any]]) -> list[str]:
     return _dedup([cands[0] if cands else f"pole{i}" for i, cands in enumerate(cand_sets)])
 
 
-def _collapse_poles(poles: list[dict[str, Any]]) -> list[tuple[Any, str, Any]]:
+def _collapse_poles(poles: list[dict[str, Any]],
+                    own_checks: set[tuple[str, str]] | None = None
+                    ) -> list[tuple[Any, str, Any]]:
     """Collapse matrix siblings (same base check + workflow, differing only in matrix
     params like `(pg12)` / `(pg15)`) into one (check, workflow, max-P50) row — the
-    fallback when no drill bundle is present. Preserves first-seen order."""
+    fallback when no drill bundle is present. Preserves first-seen order.
+
+    `own_checks` holds (check, workflow basename) pairs measured as check-runs of their
+    own. A pole whose base is one of them is a DISTINCT check that merely looks like
+    `<base> (<params>)` (`test (self-hosted)` beside the `test` verdict job), never a leg
+    of that base — a real matrix base is not a check-run — so it keeps its own name."""
     groups: dict[tuple[str, str], list[Any]] = {}
     order: list[tuple[str, str]] = []
     label: dict[tuple[str, str], tuple[Any, str]] = {}
@@ -185,6 +192,8 @@ def _collapse_poles(poles: list[dict[str, Any]]) -> list[tuple[Any, str, Any]]:
         check = str(p.get("check") or "")
         wf = Path(str(p.get("workflow_file") or "")).name
         base = check.split(" (")[0]
+        if base != check and (base, wf) in (own_checks or set()):
+            base = check
         gkey = (base, wf)
         if gkey not in groups:
             groups[gkey], order = [], order + [gkey]
@@ -550,6 +559,15 @@ def build_summary(doc: dict[str, Any], findings_path: str = "FINDINGS.json",
                    "Ranking falls back to the slowest checks across sampled PRs.")
     out.append("")
 
+    repo_pub = cp.get("required_checks_repo_published") or []
+    if repo_pub and not cp.get("unresolved_reason"):
+        out.append("Required status posted by this repo's own workflow: "
+                   + ", ".join(repo_pub) + "; which checks it waits on is not traced.")
+    if cp.get("provenance") == "unresolved" and cp.get("unresolved_reason"):
+        out.append("Merge gate unresolved: " + str(cp["unresolved_reason"]))
+    if repo_pub or cp.get("unresolved_reason"):
+        out.append("")
+
     # PR-FLOOR fallback: no required check resolved to a workflow file (the required
     # suite is external/managed, or no sampled PR carried it). The spine below is the
     # measured PR-floor, NOT the branch-protection gate. State it once so the agent
@@ -619,6 +637,29 @@ def build_summary(doc: dict[str, Any], findings_path: str = "FINDINGS.json",
     # drill bundle (already matrix-collapsed: one entry per drilled pole); fall back
     # to the file-backed critical-path poles collapsed by base check name, so matrix
     # siblings (tests-web (pg12) / (pg15) / …) read as ONE pole, not five.
+    # An aggregation (verdict) gate is NOT addressable: its wait is its `needs:` upstream.
+    # Same structural test the renderer applies, with the renderer's exemption: a sink
+    # carrying a SPECIFIC structural lever (anything but the generic OPT75) keeps its drill
+    # in the report, so it stays addressable here too. (The renderer's other exemption, a
+    # matched log-detector leaf, needs the parsed logs this data-pass digest never reads.)
+    from blocking_path import _agg_gate_shape, _check_name, _structural_for_pole
+    graph = doc.get("workflow_job_graph")
+    cp_checks = cp.get("checks") or []
+    all_findings = list(doc.get("findings") or [])
+
+    def _pole_key(p: dict[str, Any]) -> tuple[str, str]:
+        return (str(p.get("check")), Path(str(p.get("workflow_file") or "")).name)
+
+    agg_gates: dict[tuple[str, str], str] = {}
+    for p in poles:
+        if any(str(f.get("pattern", "")) != "OPT75"
+               for f in _structural_for_pole(p, all_findings, cp_checks)):
+            continue
+        shape = _agg_gate_shape(p, graph, cp_checks)
+        if shape:
+            agg_gates[_pole_key(p)] = _check_name(shape["slowest"])
+    # Gates leave BEFORE the fallback's matrix collapse: folding `test (self-hosted)` into a
+    # `test` row first and then dropping that row as the gate would hide the suite.
     logs = (doc.get("data_bundle") or {}).get("logs") or []
     if logs:
         # The bundle entry's `duration_s` is the nearest-P50 *representative run's*
@@ -629,12 +670,21 @@ def build_summary(doc: dict[str, Any], findings_path: str = "FINDINGS.json",
         drilled = [(e.get("check"), Path(str(e.get("workflow_file") or "")).name,
                     p50_by_check.get(str(e.get("check")), e.get("duration_s")))
                    for e in logs]
+        drilled = [d for d in drilled if (str(d[0]), d[1]) not in agg_gates]
     else:
-        drilled = _collapse_poles([p for p in poles if p.get("workflow_file")])
+        filed = [p for p in poles if p.get("workflow_file")]
+        drilled = _collapse_poles([p for p in filed if _pole_key(p) not in agg_gates],
+                                  own_checks={_pole_key(p) for p in filed})
     out.append(f"Addressable long poles — the fixable critical path ({len(drilled)}):")
     for check, wf, p50 in drilled:
         out.append(f"  • {check}  [{wf or '—'}]  P50 {_clock(p50)}")
     out.append("")
+    if agg_gates:
+        out.append("Aggregation gates — not addressable; each waits on its slowest `needs:` "
+                   f"upstream ({len(agg_gates)}):")
+        for (check, wf), upstream in agg_gates.items():
+            out.append(f"  • {check}  [{wf or '—'}]  → waits on {upstream}")
+        out.append("")
 
     # Structural root causes deduped to distinct patterns (the catalog routes one per
     # matrix leg, so the raw list repeats); one representative title each.
@@ -698,4 +748,10 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # This directory first, so the sibling import below resolves even under
+    # PYTHONSAFEPATH / `python -P` (the script's directory is not on sys.path).
+    if str(Path(__file__).resolve().parent) not in sys.path:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from log_level import configure_logging  # STARSLING_LOG_LEVEL opt-in
+    configure_logging()
     sys.exit(main())

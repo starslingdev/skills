@@ -1513,6 +1513,37 @@ def test_poles_complete_exempts_a_bare_push_floor_pole(tmp_path: Path):
     assert _tag_for(bare, _POLES, tmp_path, findings=case1_bare) == "FAIL"
 
 
+def test_poles_complete_exempts_a_pole_whose_every_step_was_dropped(tmp_path: Path):
+    """A pole stamped `no_step_measured_in_sample` has no step to break down: its body
+    says so ("No step could be measured: …") and its prompt carries the no-breakdown
+    line. That is an honest pole, not a stunted drill; the same body without its
+    stamp, or the stamp without the line, still FAILs."""
+    note = "No step could be measured: 2 skipped, 1 with no usable time."
+    body = (
+        "# demo - why is CI slow on a PR?\n\n"
+        "> **Bottom line.** A typical PR waits **51m 30s** for all checks to finish; trace below.\n\n"
+        '<a id="pole-1"></a>\n\n## Long pole 1: `ci.yml` ▸ test - 51m 30s\n\n'
+        f"```text\n{note}\n\n(captured this job's log but matched no known root-cause "
+        "pattern — no drill-down available; this is a coverage gap, not a clean job. The "
+        "detector set may need extending for this stack.)\n```\n\n"
+        "```text\nWHERE THE TIME GOES\n- No per-step breakdown was captured for this job; "
+        "profile its slowest step in the repo.\n```\n\n"
+        "#### 🤖 Prompt for your coding agent\n\n```text\ninvestigate it.\n```\n\n"
+        "## 🗄️ Data sources\n\n| Source | Coverage | Used for |\n| --- | --- | --- |\n"
+        "| ci-speedup static scan (skill commit `0000000`) | all | scan |\n")
+    def doc(**stamp) -> dict:
+        return {"pr_critical_path": {"poles": [dict(
+            {"check": "test", "workflow_file": ".github/workflows/ci.yml",
+             "p50_s": 3090.0}, **stamp)]},
+            "per_workflow_timing": {".github/workflows/ci.yml": {
+                "event_scope": "pull_request", "long_pole_job": "test"}}}
+    dropped = doc(step_decomposition_reason="no_step_measured_in_sample",
+                  skipped_steps=2, unmeasured_steps=1)
+    assert _tag_for(body, _POLES, tmp_path, findings=dropped) == "PASS"
+    assert _tag_for(body, _POLES, tmp_path, findings=doc()) == "FAIL"
+    assert _tag_for(body.replace(note, ""), _POLES, tmp_path, findings=dropped) == "FAIL"
+
+
 def test_poles_complete_fails_on_a_pole_with_a_prompt_but_no_drill(tmp_path: Path):
     # The bitmovin hole: a pole that HANDS OFF a prompt but whose body carries the renderer's
     # own "No per-step breakdown was captured" admission (no captured timeline AND no sampled
@@ -1970,6 +2001,102 @@ def test_off_spine_check_passes_when_appendix_on_path_names_only_kept_checks(tmp
     mono = {"pr_critical_path": {"dropped_non_required_checks": ["@a/pkg build"]}}
     build_note = _APPENDIX_ON_PATH.replace("Run integration tests", "build")
     assert _tag_for(_good() + build_note, _OFFSPINE, tmp_path, findings=mono) == "PASS"
+
+
+# --- mastodon/mastodon: a dropped check that shares its NAME with a gating matrix family -------
+# The dropped non-required `test` is `test-js.yml`'s single job; `test-ruby.yml`'s `test` job is a
+# matrix family whose legs (`test (3.4)` - the critical path - `test (3.3)`, `test (.ruby-version)`)
+# all sit ON the spine. An OPT24 on that family is correctly framed on-path. The name-only compare
+# read the family's bare `test` as the dropped `test-js.yml` check and FAILed a true report.
+# `per_workflow_timing` PROVES `test-ruby.yml` runs `test` only as differently named legs, so a
+# `test` framed there is the family (a homonym); every other framing still compares by name.
+def _mastodon_dropped_test_findings() -> dict:
+    return {
+        "pr_critical_path": {"dropped_non_required_checks": ["test", "test (14-alpine)"]},
+        "per_workflow_timing": {
+            ".github/workflows/test-js.yml": {"job_p50": {"test": 180.0}},
+            ".github/workflows/test-migrations.yml": {"job_p50": {"test (14-alpine)": 300.0}},
+            ".github/workflows/test-ruby.yml": {"job_p50": {
+                "test (3.4)": 759.0, "test (3.3)": 738.0, "test (.ruby-version)": 668.0}},
+        },
+    }
+
+
+def _family_on_path_note(wf: str) -> str:
+    return _APPENDIX_ON_PATH.replace(
+        "`sdk-pr.yml` (Run integration tests), `test-sdk.yml` (Run integration tests)",
+        f"`{wf}` (test)")
+
+
+def test_off_spine_check_passes_when_on_path_family_only_shares_a_dropped_checks_name(
+        tmp_path: Path):
+    vr = _load_verify_report()
+    fp = tmp_path / "findings.json"
+    fp.write_text(json.dumps(_mastodon_dropped_test_findings()), encoding="utf-8")
+    c = vr.check_dropped_check_not_framed_on_path(
+        _good() + _family_on_path_note("test-ruby.yml"), fp)
+    assert c.ok and not c.skipped, (
+        "a gating `test-ruby.yml` matrix family framed on-path must not be confused with the "
+        f"dropped `test-js.yml` check of the same name; verifier said: {c.detail}")
+
+
+def test_off_spine_check_still_fails_when_the_dropped_checks_own_workflow_is_framed(
+        tmp_path: Path):
+    findings = _mastodon_dropped_test_findings()
+    assert _tag_for(_good() + _family_on_path_note("test-js.yml"), _OFFSPINE, tmp_path,
+                    findings=findings) == "FAIL"
+    # A `wf:line` Where segment resolves to the same workflow.
+    assert _tag_for(_good() + _family_on_path_note("test-js.yml:32"), _OFFSPINE, tmp_path,
+                    findings=findings) == "FAIL"
+    # A pole header in the owning workflow is still a contradiction too.
+    header = ('\n<a id="pole-2"></a>\n\n## Long pole 2: `test-js.yml` ▸ test - 3m 00s\n\n'
+              '```text\nWhere the job goes.\n```\n')
+    assert _tag_for(_good() + header, _OFFSPINE, tmp_path, findings=findings) == "FAIL"
+
+
+def test_off_spine_check_still_fails_when_an_on_path_note_without_a_where_line_names_the_owner(
+        tmp_path: Path):
+    # An on-path note whose `**Where:**` label drifted away still carries its `wf` (job)
+    # segments; they are parsed from the whole block (as `_on_path_appendix_jobs` does), so the
+    # dropped check framed in its OWN workflow is still a contradiction, never a silent pass.
+    no_where = _family_on_path_note("test-js.yml").replace(
+        "**Where:** `test-js.yml` (test)", "Sites: `test-js.yml` (test), `ci.yml` (lint)")
+    assert "**Where:**" not in no_where
+    assert _tag_for(_good() + no_where, _OFFSPINE, tmp_path,
+                    findings=_mastodon_dropped_test_findings()) == "FAIL"
+
+
+def test_off_spine_check_fails_when_the_framed_workflow_is_merely_absent_from_the_timing(
+        tmp_path: Path):
+    # Only `deploy.yml` measured a `deploy`, but an on-path note frames `deploy` in `ci.yml`,
+    # whose timing row (event-scoped, unsampled or renamed) is missing. Nothing shows `ci.yml`'s
+    # `deploy` is a different check, so it is NOT excused: only a workflow measured to run that
+    # name as a matrix of differently named legs (the mastodon shape) is a homonym.
+    findings = {"pr_critical_path": {"dropped_non_required_checks": ["deploy"]},
+                "per_workflow_timing": {".github/workflows/deploy.yml":
+                                        {"job_p50": {"deploy": 120.0}}}}
+    assert _tag_for(_good() + _family_on_path_note("ci.yml:40").replace("(test)", "(deploy)"),
+                    _OFFSPINE, tmp_path, findings=findings) == "FAIL"
+    # A Where segment whose workflow rendered empty is never excused either.
+    assert _tag_for(_good() + _family_on_path_note(":40"), _OFFSPINE, tmp_path,
+                    findings=_mastodon_dropped_test_findings()) == "FAIL"
+
+
+def test_off_spine_check_headline_stays_name_level_when_the_dropped_checks_owner_is_known(
+        tmp_path: Path):
+    # The headline names no workflow, so a dropped `test` named the headline "slowest" is a
+    # contradiction even when a same-named matrix family is measured elsewhere.
+    assert _tag_for(_good() + _headline("test"), _OFFSPINE, tmp_path,
+                    findings=_mastodon_dropped_test_findings()) == "FAIL"
+
+
+def test_off_spine_check_stays_name_strict_when_the_dropped_checks_workflow_is_unknown(
+        tmp_path: Path):
+    # No `per_workflow_timing` row ran the dropped `test`, so its owner can't be resolved and the
+    # comparison falls back to the bare name (a missed contradiction is the worse direction).
+    findings = {"pr_critical_path": {"dropped_non_required_checks": ["test"]}}
+    assert _tag_for(_good() + _family_on_path_note("test-ruby.yml"), _OFFSPINE, tmp_path,
+                    findings=findings) == "FAIL"
 
 
 # --- the SAME cross-seam property, extended to the typical/rare (presence-demotion) class ---
@@ -6980,6 +7107,44 @@ def test_tier2_post_completion_opt57_rederives_timeout_recommendation(tmp_path: 
     assert "recommended_timeout_minutes" in chk.detail
 
 
+@pytest.mark.parametrize("duration_s", [
+    2592001.0,   # nrwl/nx: a 30-day deployment-approval expiry
+    22501.0,     # one second past the 360 min default + 15 min grace ceiling
+])
+def test_tier2_post_completion_opt57_rejects_sample_beyond_default_timeout_kill(
+        tmp_path: Path, duration_s: float):
+    # A failed duration past the default-timeout kill band is not runner time a
+    # timeout could cut, so a finding that credits it must not re-derive as valid,
+    # even when every stamped number is internally consistent.
+    vr = _load_verify_report()
+    doc = _tier2_doc_for_verify()
+    f = _tier2_promoted_finding("f-opt57", 216000.0, proof="post_completion_waste_opt57")
+    burn = f["timeout_default_burn"]
+    waste_s = duration_s - 1800.0  # the fixture's recommended 30 min timeout
+    burn_min = round(waste_s / 60.0, 1)
+    burn["samples"][0]["duration_s"] = duration_s
+    burn["samples"][0]["waste_s"] = waste_s
+    burn["sampled_timeout_burn_min"] = burn_min
+    burn["runner_min_saving"] = burn_min * 5
+    f["runner_min_saving"] = burn_min * 5
+    doc["findings"] = [f]
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert not chk.ok
+    assert "beyond the default-timeout kill" in chk.detail
+
+
+def test_opt57_verifier_kill_band_stays_coupled_to_the_engine():
+    # The verifier re-derives OPT57 with its own copy of the band; a grace or floor
+    # retuned on one side only would make it reject valid reports or accept credit
+    # the engine no longer gives.
+    vr = _load_verify_report()
+    sys.path.insert(0, str(_SKILL_DIR / "scripts"))
+    import collect_runs as cr  # noqa: E402
+    assert vr._VR_OPT57_NEAR_DEFAULT_TIMEOUT_S == cr._OPT57_NEAR_DEFAULT_TIMEOUT_S == 20520.0
+    assert vr._VR_OPT57_DEFAULT_KILL_CEILING_S == cr._OPT57_DEFAULT_KILL_CEILING_S == 22500.0
+
+
 def test_tier2_post_completion_opt57_accepts_full_precision_p99_boundary(tmp_path: Path):
     vr = _load_verify_report()
     doc = _tier2_doc_for_verify()
@@ -8483,6 +8648,262 @@ def test_opt77_certificate_rederives_margin_and_saving():
     assert margin == 510.0
 
 
+def _opt77_whole_workflow_finding(**over):
+    """The same finding, stamped as a group that is every declared job."""
+    f = _opt77_finding(**over)
+    sc = f["setup_consolidation"]
+    sc["group_is_the_whole_workflow"] = True
+    sc["workflow_declared_job_keys"] = ["audit", "lint", "typecheck"]
+    sc["credited_job_keys"] = ["audit", "lint", "typecheck"]
+    sc["gate_today_p50_s"] = 90.0
+    sc["remaining_tallest_job"] = None
+    sc["remaining_tallest_p50_s"] = None
+    sc["remaining_eligible_jobs"] = []
+    return f
+
+
+# No job outside the group, and each member measured at exactly its setup +
+# useful work, so today's gate is 90s and the 90s projection is free.
+_OPT77_WHOLE_DATA = {"per_workflow_timing": {".github/workflows/ci.yml": {
+    "floor_p50": 90.0,
+    "job_p50": {"audit": 90.0, "lint": 90.0, "typecheck": 90.0},
+}}}
+
+
+def test_opt77_whole_workflow_certificate_is_rederived_never_trusted():
+    """The whole-workflow arm decides whether a real audit goes red, and it is
+    the only OPT77 path that credits a finding with no wall-clock headroom at
+    all. Every claim it rests on is re-derived here, and each one tampered with
+    in turn, so the arm cannot decay into a rubber stamp."""
+    vr = _load_verify_report()
+    margin, problems = vr._opt77_consolidation_rederived(
+        _opt77_whole_workflow_finding(), _OPT77_WHOLE_DATA)
+    assert problems == [], problems
+    assert margin == 0.0
+
+    # A job the workflow declares that is not a credited member: the group is
+    # not the whole workflow, whatever the finding stamped.
+    f = _opt77_whole_workflow_finding()
+    f["setup_consolidation"]["workflow_declared_job_keys"] = [
+        "audit", "lint", "release", "typecheck"]
+    _m, problems = vr._opt77_consolidation_rederived(f, _OPT77_WHOLE_DATA)
+    assert any("release" in p for p in problems), problems
+
+    # …and the sampled axis is checked too, not just the declared one.
+    data = copy.deepcopy(_OPT77_WHOLE_DATA)
+    data["per_workflow_timing"][".github/workflows/ci.yml"]["job_p50"]["test"] = 600.0
+    _m, problems = vr._opt77_consolidation_rederived(
+        _opt77_whole_workflow_finding(), data)
+    assert any("test" in p for p in problems), problems
+
+    # Without the declared keys the claim cannot be re-derived at all, so it is
+    # refused rather than taken on trust.
+    f = _opt77_whole_workflow_finding()
+    f["setup_consolidation"]["workflow_declared_job_keys"] = []
+    _m, problems = vr._opt77_consolidation_rederived(f, _OPT77_WHOLE_DATA)
+    assert any("no declared job keys" in p for p in problems), problems
+
+    # A stamped gate that is not the one the data yields.
+    f = _opt77_whole_workflow_finding()
+    f["setup_consolidation"]["gate_today_p50_s"] = 400.0
+    _m, problems = vr._opt77_consolidation_rederived(f, _OPT77_WHOLE_DATA)
+    assert any("gate_today_p50_s" in p for p in problems), problems
+
+    # A remaining tallest job named in a group that has nothing outside it.
+    f = _opt77_whole_workflow_finding()
+    f["setup_consolidation"]["remaining_tallest_job"] = "test"
+    _m, problems = vr._opt77_consolidation_rederived(f, _OPT77_WHOLE_DATA)
+    assert any("remaining tallest job" in p for p in problems), problems
+
+    # …and its p50, which was checked on the name alone.
+    f = _opt77_whole_workflow_finding()
+    f["setup_consolidation"]["remaining_tallest_p50_s"] = 600.0
+    _m, problems = vr._opt77_consolidation_rederived(f, _OPT77_WHOLE_DATA)
+    assert any("remaining tallest p50" in p for p in problems), problems
+
+    # A finding stamped as FIRED whose projection is above today's gate: the
+    # longest setup and the longest task sit on different members, so
+    # consolidating would lengthen the merge and nothing may be credited.
+    f = _opt77_whole_workflow_finding()
+    f["setup_consolidation"]["per_job"] = {
+        "lint": {"setup_p50_s": 100.0, "useful_work_p50_s": 10.0,
+                 "setup_steps": ["set up job", "actions/checkout"]},
+        "typecheck": {"setup_p50_s": 100.0, "useful_work_p50_s": 10.0,
+                      "setup_steps": ["set up job", "actions/checkout"]},
+        "audit": {"setup_p50_s": 60.0, "useful_work_p50_s": 50.0,
+                  "setup_steps": ["set up job", "actions/checkout"]},
+    }
+    f["setup_consolidation"]["projected_consolidated_p50_s"] = 150.0
+    f["setup_consolidation"]["gate_today_p50_s"] = 110.0
+    data = copy.deepcopy(_OPT77_WHOLE_DATA)
+    data["per_workflow_timing"][".github/workflows/ci.yml"]["job_p50"] = {
+        "audit": 110.0, "lint": 110.0, "typecheck": 110.0}
+    margin, problems = vr._opt77_consolidation_rederived(f, data)
+    assert margin is None, margin
+    assert any("ABOVE" in p for p in problems), problems
+
+
+def test_opt77_whole_workflow_gate_is_the_slowest_members_measured_duration():
+    """Today's gate for a whole-workflow group is the slowest member's measured
+    p50 — the members run concurrently, so that is what a pull request waits
+    for. The arm re-derives it from `job_p50`, which the detector does not
+    write, so an overstated gate is caught rather than reproduced."""
+    vr = _load_verify_report()
+    # Each member measured 70s while the projection is 90s: not free.
+    data = copy.deepcopy(_OPT77_WHOLE_DATA)
+    data["per_workflow_timing"][".github/workflows/ci.yml"]["job_p50"] = {
+        "audit": 70.0, "lint": 70.0, "typecheck": 70.0}
+    f = _opt77_whole_workflow_finding()
+    f["setup_consolidation"]["gate_today_p50_s"] = 70.0
+    margin, problems = vr._opt77_consolidation_rederived(f, data)
+    assert margin is None, margin
+    assert any("ABOVE" in p for p in problems), problems
+    # …and a finding that stamps a gate the measurement does not yield is
+    # rejected on the stamp.
+    _m, problems = vr._opt77_consolidation_rederived(
+        _opt77_whole_workflow_finding(), data)
+    assert any("gate_today_p50_s" in p for p in problems), problems
+    # Three members each measuring 400s: the 90s projection cannot lengthen a
+    # 400s wait, so the saving is free and the margin is the whole difference.
+    data = copy.deepcopy(_OPT77_WHOLE_DATA)
+    data["per_workflow_timing"][".github/workflows/ci.yml"]["job_p50"] = {
+        "audit": 400.0, "lint": 400.0, "typecheck": 400.0}
+    f = _opt77_whole_workflow_finding()
+    f["setup_consolidation"]["gate_today_p50_s"] = 400.0
+    margin, problems = vr._opt77_consolidation_rederived(f, data)
+    assert problems == [], problems
+    assert margin == 310.0
+
+
+def test_opt77_whole_workflow_gate_carries_the_same_tolerance_as_its_siblings():
+    """The detector projects the consolidated job from UNROUNDED medians; the
+    self-check re-derives it from the components as stamped, rounded to one
+    decimal. The two can land a tenth apart, and this was the only comparison
+    in the arm made exactly — so a consolidation measured as free was rejected
+    with "projected consolidated job 60.0 is ABOVE the 59.9 gate", which reads
+    as the audit refusing its own measurement. Same 0.11 tolerance as every
+    other comparison here.
+
+    Setups of 49.96s and tasks of 9.96s: the detector projects 59.9s against a
+    59.9s gate and fires; the stamped components round to 50.0 and 10.0, so
+    re-derivation yields 60.0."""
+    vr = _load_verify_report()
+    data = copy.deepcopy(_OPT77_WHOLE_DATA)
+    data["per_workflow_timing"][".github/workflows/ci.yml"]["job_p50"] = {
+        "audit": 59.93, "lint": 59.93, "typecheck": 59.93}
+    f = _opt77_whole_workflow_finding()
+    sc = f["setup_consolidation"]
+    sc["per_job"] = {n: {"setup_p50_s": 50.0, "useful_work_p50_s": 10.0,
+                         "setup_steps": ["set up job", "actions/checkout"]}
+                     for n in ("audit", "lint", "typecheck")}
+    sc["setup_p50_s"] = 50.0
+    sc["sampled_saved_s"] = 200.0
+    sc["runner_min_saving"] = f["runner_min_saving"] = 166.7
+    sc["projected_consolidated_p50_s"] = 59.9
+    sc["gate_today_p50_s"] = 59.9
+    margin, problems = vr._opt77_consolidation_rederived(f, data)
+    assert problems == [], problems
+    assert margin == -0.1
+    # …and a projection genuinely above the gate is still refused.
+    data["per_workflow_timing"][".github/workflows/ci.yml"]["job_p50"] = {
+        "audit": 50.0, "lint": 50.0, "typecheck": 50.0}
+    sc["gate_today_p50_s"] = 50.0
+    margin, problems = vr._opt77_consolidation_rederived(f, data)
+    assert margin is None and any("ABOVE" in p for p in problems), problems
+
+
+def test_opt77_whole_workflow_per_job_must_name_the_members_not_merely_count_them():
+    """`len(per_job) != len(member)` is a cardinality check: a stamp with the
+    right number of entries under a renamed key passed, so the renamed member
+    was never looked up in `job_p50` at all and the gate was re-derived from
+    the wrong set. A missing measurement is refused outright — assembling a
+    gate out of step components is the overstatement this arm exists to
+    refuse — and a component stamped as absent is not read as zero."""
+    vr = _load_verify_report()
+    # An EXTRA entry keeps the member set covered, so every per-member check
+    # upstream passes and only the identity of the key set catches it.
+    f = _opt77_whole_workflow_finding()
+    f["setup_consolidation"]["per_job"]["docs"] = {
+        "setup_p50_s": 80.0, "useful_work_p50_s": 10.0,
+        "setup_steps": ["set up job", "actions/checkout"]}
+    margin, problems = vr._opt77_consolidation_rederived(f, _OPT77_WHOLE_DATA)
+    assert margin is None
+    assert any("not the credited members" in p for p in problems), problems
+    # …and a renamed member is refused rather than quietly re-derived from the
+    # entries that happen to be there.
+    f = _opt77_whole_workflow_finding()
+    f["setup_consolidation"]["per_job"]["lint-renamed"] = (
+        f["setup_consolidation"]["per_job"].pop("lint"))
+    margin, problems = vr._opt77_consolidation_rederived(f, _OPT77_WHOLE_DATA)
+    assert margin is None and any("lint" in p for p in problems), problems
+    # A member with no measured p50 is a malformed stamp, not a licence to
+    # fall back to its step components.
+    data = copy.deepcopy(_OPT77_WHOLE_DATA)
+    data["per_workflow_timing"][".github/workflows/ci.yml"]["job_p50"]["lint"] = 0.0
+    margin, problems = vr._opt77_consolidation_rederived(
+        _opt77_whole_workflow_finding(), data)
+    assert margin is None
+    assert any("no measured job_p50" in p for p in problems), problems
+    # Absent is not zero: a component that is missing or non-numeric reddens
+    # rather than sizing the gate's coherence check at nothing.
+    for bad in (None, "eighty"):
+        f = _opt77_whole_workflow_finding()
+        f["setup_consolidation"]["per_job"]["lint"]["setup_p50_s"] = bad
+        margin, problems = vr._opt77_consolidation_rederived(
+            f, _OPT77_WHOLE_DATA)
+        assert margin is None
+        assert any("missing setup/useful-work p50" in p
+                   for p in problems), (bad, problems)
+
+
+def test_opt77_the_ordinary_arm_may_not_stamp_a_gate_the_group_sets_itself():
+    """The two stamp shapes were enforced on one arm only: a finding measured
+    against the tallest REMAINING job could also carry `gate_today_p50_s`, and
+    nothing read it. The tag itself is read as an identity, so a stamped
+    string "false" can no longer select the whole-workflow arm."""
+    vr = _load_verify_report()
+    data = {"per_workflow_timing": {".github/workflows/ci.yml": {
+        "floor_p50": 90.0,
+        "job_p50": {"audit": 90.0, "lint": 90.0, "typecheck": 90.0,
+                    "test": 600.0}}}}
+    f = _opt77_finding()
+    f["setup_consolidation"]["group_is_the_whole_workflow"] = False
+    f["setup_consolidation"]["credited_job_keys"] = ["audit", "lint", "typecheck"]
+    margin, problems = vr._opt77_consolidation_rederived(f, data)
+    assert problems == [] and margin == 510.0, (margin, problems)
+    # the ordinary shape may not carry the whole-workflow gate
+    f["setup_consolidation"]["gate_today_p50_s"] = 90.0
+    _m, problems = vr._opt77_consolidation_rederived(f, data)
+    assert any("gate_today_p50_s" in p for p in problems), problems
+    # a non-boolean tag is named, and never selects the whole-workflow arm
+    f = _opt77_finding()
+    f["setup_consolidation"]["group_is_the_whole_workflow"] = "false"
+    _m, problems = vr._opt77_consolidation_rederived(f, data)
+    assert any("is not true or false" in p for p in problems), problems
+    assert not any("no job outside" in p for p in problems), problems
+
+
+def test_opt77_declared_job_keys_are_checked_against_the_per_workflow_record():
+    """The whole-workflow claim rests entirely on "these are every job the
+    workflow declares" — and the arm checked OPT77's stamp of that against
+    OPT77's own reading of the same file, which proves nothing. The declared
+    keys are now written per workflow by the YAML reader, before any detector
+    runs, and a stamp that under-enumerates them reddens."""
+    vr = _load_verify_report()
+    data = copy.deepcopy(_OPT77_WHOLE_DATA)
+    crit = data["per_workflow_timing"][".github/workflows/ci.yml"]
+    crit["declared_job_keys"] = ["audit", "lint", "typecheck"]
+    margin, problems = vr._opt77_consolidation_rederived(
+        _opt77_whole_workflow_finding(), data)
+    assert problems == [] and margin == 0.0, problems
+    # The workflow really declares a fourth job the finding does not stamp.
+    crit["declared_job_keys"] = ["audit", "lint", "release", "typecheck"]
+    _m, problems = vr._opt77_consolidation_rederived(
+        _opt77_whole_workflow_finding(), data)
+    assert any("this workflow declares" in p for p in problems), problems
+    assert any("release" in p for p in problems), problems
+
+
 def test_opt77_certificate_fails_on_tampered_numbers():
     vr = _load_verify_report()
     # An inflated credited saving is caught by the re-derivation.
@@ -8841,22 +9262,27 @@ def test_withheld_cache_candidates_must_be_disclosed(tmp_path):
     silent = "## 🗄️ Data sources\n\n| Source | Coverage | Feeds |\n"
     chk = vr.check_coverage_disclosed(silent, path)
     assert not chk.ok and "held back" in chk.detail, chk
-    row = ("| cache hit/miss verdicts | {} | Why a probed cache produced "
-           "no finding |\n")
+    row = "| cache hit/miss verdicts | {} | " + _CACHE_FEEDS + " |\n"
+    # Two gates contributed, so the reason is hedged — it holds for two of the
+    # three jobs the row names, not for all three.
     honest = silent + row.format(
-        "3 candidate cache(s) held back (build, e2e, unit): too few sampled "
-        "runs missed the cache to compare a miss against a hit.")
+        "3 candidate cache(s) held back (build, e2e, unit): most commonly, too "
+        "few sampled runs missed the cache to compare a miss against a hit.")
     chk = vr.check_coverage_disclosed(honest, path)
     assert chk.ok, chk
-    # wrong count, wrong reason, wrong job list, a leaked gate name: none is a disclosure
+    # wrong count, wrong reason, wrong job list, a leaked gate name, and the
+    # UNHEDGED reason (which asserts one gate's cause of all three jobs): none
+    # is a disclosure
     wrong = (
-        "2 candidate cache(s) held back (build, e2e): too few "
+        "2 candidate cache(s) held back (build, e2e): most commonly, too few "
         "sampled runs missed the cache to compare a miss against a hit.",
-        "3 candidate cache(s) held back (build, e2e, unit): too "
+        "3 candidate cache(s) held back (build, e2e, unit): most commonly, too "
         "many of the sampled runs' logs could not be read to tell how often the "
         "cache hits.",
-        "3 candidate cache(s) held back (build, e2e, other): too "
+        "3 candidate cache(s) held back (build, e2e, other): most commonly, too "
         "few sampled runs missed the cache to compare a miss against a hit.",
+        "3 candidate cache(s) held back (build, e2e, unit): too few sampled "
+        "runs missed the cache to compare a miss against a hit.",
         "3 candidate cache(s) held back (build, e2e, unit): "
         "`fewer_than_min_miss_runs_classified`.",
         "3 candidate cache(s) probed but withheld; top reason: "
@@ -8917,6 +9343,9 @@ def _opt80_verifier_finding(**over):
             "min_gap_s": 20.0, "min_proven_tail_runs": 2,
             "proven_tail_runs": proven,
             "logs_fetched": 2, "log_probe_max": 4,
+            "log_probed_job_ids": [r["job_id"] for r in per_run if r["tail"]],
+            "log_probe_outcomes": [{"job_id": r["job_id"], "outcome": "proven"}
+                                   for r in per_run if r["tail"]],
             "tail_excess_s": 22.0, "tail_run_longest_pause_s": 40.0,
             "on_critical_path": True,
             "monthly_volume": 100, "effective_monthly_volume": 100.0,
@@ -9215,6 +9644,1140 @@ def _opt80_pole_doc():
     return doc
 
 
+# ── OPT80's tail axis: "one run in N spends about X s longer on checkout" ──
+# Every number in the line is re-derived from the per-run checkout durations and
+# the per-run stall proofs; the stamped block is compared, never trusted.
+
+_OPT80_TAIL_AXIS = {"sampled_runs": 10, "slow_runs": 2, "logs_read": 2,
+                    "tail_runs": 2, "logs_clean": 0, "logs_unreadable": 0,
+                    "counted_runs": 2, "one_in_n": 5,
+                    "typical_checkout_p50_s": 10.0, "tail_checkout_p50_s": 120.0,
+                    "tail_loss_s": 110.0, "on_critical_path": True,
+                    "merge_gating": {"basis": "required",
+                                     "required_check": "CI / build",
+                                     "required_job": "build", "job_key": "build"}}
+
+
+def _opt80_tail_eligibility(doc, *, event_scope="pull_request", declared=True,
+                            long_pole="build"):
+    """Stamp what the collector requires before it states a tail line: the
+    workflow declares a pull-request trigger, was TIMED on pull-request runs
+    (`event_scope`), and the finding's job is its slowest job."""
+    wf = doc["findings"][0]["workflow_file"]
+    events = ["pull_request"] if event_scope != "all-events" else ["push"]
+    doc.setdefault("per_workflow_timing", {})[wf] = {
+        "event_scope": event_scope, "events": events,
+        "long_pole_job": long_pole, "long_pole_p50": 121.0,
+        "job_p50": {long_pole: 121.0}}
+    doc["declared_pr_workflows"] = [wf] if declared else []
+    doc["required_checks"] = ["CI / build"]
+    doc["required_checks_complete"] = True
+    doc.setdefault("workflow_names", {})[wf] = "CI"
+    doc.setdefault("workflow_job_graph", {})[wf] = {
+        "build": {"name": "build", "needs": [], "reusable": False, "matrix": False},
+        "bench": {"name": "bench", "needs": [], "reusable": False, "matrix": False}}
+    return doc
+
+
+def _opt80_tail_doc(pole_check="build", pole_job="build"):
+    doc = _opt80_pole_doc()
+    doc["findings"][0]["checkout_stall"]["tail_axis"] = dict(_OPT80_TAIL_AXIS)
+    _opt80_tail_eligibility(doc)
+    pcp = doc["pr_critical_path"]
+    pcp["critical_path_check"] = pole_check
+    pcp["checks"][0]["name"] = pole_check
+    pcp["poles"][0].update(check=pole_check, job=pole_job)
+    return doc
+
+
+def test_opt80_tail_axis_rederives_from_the_real_detector_output():
+    vr = _load_verify_report()
+    sys.path.insert(0, str(_SKILL_DIR / "tests"))
+    import test_tier2_wave1_detectors as t  # noqa: E402
+
+    f = t._opt80_pr(is_pr=True)[0]
+    assert f["checkout_stall"]["tail_axis"]["one_in_n"] == 5
+    assert vr._opt80_tail_axis_rederived(f) == []
+    for key, bad in (("one_in_n", 4), ("tail_loss_s", 200.0), ("tail_runs", 3),
+                     ("sampled_runs", 9), ("tail_checkout_p50_s", 60.0),
+                     ("typical_checkout_p50_s", 1.0)):
+        g = copy.deepcopy(f)
+        g["checkout_stall"]["tail_axis"][key] = bad
+        assert any(f"tail_axis.{key}" in p for p in vr._opt80_tail_axis_rederived(g)), key
+
+
+def test_opt80_tail_axis_counts_slow_runs_and_checks_proofs_against_logs_fetched():
+    """N re-derives from the measured slow runs (proven, plus slow runs whose
+    log was never read), and every proof must be one of the logs the collector
+    says it fetched - a proof for a run outside the probe is not a log that was
+    read. Fed the REAL detector's output for a probe capped at 4 of 10."""
+    vr = _load_verify_report()
+    sys.path.insert(0, str(_SKILL_DIR / "tests"))
+    import test_tier2_wave1_detectors as t  # noqa: E402
+
+    f = t._opt80_capped_probe()[0]
+    cs = f["checkout_stall"]
+    assert cs["tail_axis"]["one_in_n"] == 3
+    assert vr._opt80_tail_axis_rederived(f) == []
+    for key, bad in (("one_in_n", 8), ("slow_runs", 4), ("logs_read", 10),
+                     ("counted_runs", 4)):
+        g = copy.deepcopy(f)
+        g["checkout_stall"]["tail_axis"][key] = bad
+        assert any(f"tail_axis.{key}" in p for p in vr._opt80_tail_axis_rederived(g)), key
+    # A proof for a run whose log was not in the fetched set.
+    g = copy.deepcopy(f)
+    unread = next(i for i in g["checkout_stall"]["tail_run_job_ids"]
+                  if i not in g["checkout_stall"]["log_probed_job_ids"])
+    g["checkout_stall"]["proven_tail_runs"][0]["job_id"] = unread
+    assert any("fetched" in p for p in vr._opt80_tail_axis_rederived(g))
+    # A fetched-log list that is not the slow runs, or disagrees with the count.
+    g = copy.deepcopy(f)
+    g["checkout_stall"]["log_probed_job_ids"][0] = 8001  # a typical 10s run
+    assert any("fetched" in p for p in vr._opt80_tail_axis_rederived(g))
+    g = copy.deepcopy(f)
+    g["checkout_stall"]["log_probed_job_ids"].pop()
+    assert any("fetched" in p for p in vr._opt80_tail_axis_rederived(g))
+    g = copy.deepcopy(f)
+    del g["checkout_stall"]["log_probed_job_ids"]
+    assert any("fetched" in p for p in vr._opt80_tail_axis_rederived(g))
+
+
+def test_opt80_tail_axis_rederives_n_from_the_per_log_outcomes():
+    """N leaves out only the fetched logs that were READ and CLEAN. A log that
+    was unavailable, or whose proven stall was dropped as credential-shaped,
+    showed nothing, so its slow run stays in N. The verifier re-derives that
+    split from the stamped `log_probe_outcomes`: a verifier that subtracted
+    every non-proven fetched log (L - k) would refuse the real output here."""
+    vr = _load_verify_report()
+    sys.path.insert(0, str(_SKILL_DIR / "tests"))
+    import test_tier2_wave1_detectors as t  # noqa: E402
+
+    for odd in (None, t._OPT80_SMOOTH_LOG):
+        cs, odd_id = t._opt80_three_slow_one_odd(odd)
+        f = {"pattern": "OPT80", "wall_clock_p50_s": 0.0, "checkout_stall": cs}
+        assert vr._opt80_tail_axis_rederived(f) == [], odd
+    cs, odd_id = t._opt80_three_slow_one_odd(None)
+    f = {"pattern": "OPT80", "wall_clock_p50_s": 0.0, "checkout_stall": cs}
+    assert cs["tail_axis"]["counted_runs"] == 3
+    # The old subtraction, stamped: refused.
+    g = copy.deepcopy(f)
+    g["checkout_stall"]["tail_axis"].update(counted_runs=2, one_in_n=5,
+                                            logs_unreadable=0, logs_clean=1)
+    probs = vr._opt80_tail_axis_rederived(g)
+    assert any("tail_axis.counted_runs" in p for p in probs), probs
+    assert any("tail_axis.logs_clean" in p for p in probs), probs
+    # An unavailable log relabelled clean: the outcome is not what the log showed
+    # ... and the axis no longer re-derives either way it is stamped.
+    g = copy.deepcopy(f)
+    for o in g["checkout_stall"]["log_probe_outcomes"]:
+        if o["job_id"] == odd_id:
+            o["outcome"] = "tail_without_log_gap"
+    assert vr._opt80_tail_axis_rederived(g), g
+    # Outcomes missing, naming a run outside the fetched logs, an unknown
+    # outcome, or a `proven` outcome with no proof: all refused.
+    g = copy.deepcopy(f)
+    del g["checkout_stall"]["log_probe_outcomes"]
+    assert any("log_probe_outcomes" in p for p in vr._opt80_tail_axis_rederived(g))
+    g = copy.deepcopy(f)
+    g["checkout_stall"]["log_probe_outcomes"][0]["job_id"] = 8001
+    assert any("log_probe_outcomes" in p for p in vr._opt80_tail_axis_rederived(g))
+    g = copy.deepcopy(f)
+    g["checkout_stall"]["log_probe_outcomes"][0]["outcome"] = "looked_fine"
+    assert any("log_probe_outcomes" in p for p in vr._opt80_tail_axis_rederived(g))
+    g = copy.deepcopy(f)
+    for o in g["checkout_stall"]["log_probe_outcomes"]:
+        if o["job_id"] == odd_id:
+            o["outcome"] = "proven"
+    assert any("log_probe_outcomes" in p for p in vr._opt80_tail_axis_rederived(g))
+
+
+def test_opt80_clean_log_outcomes_stay_coupled_to_the_engine():
+    vr = _load_verify_report()
+    sys.path.insert(0, str(_SKILL_DIR / "scripts"))
+    import collect_runs as cr  # noqa: E402
+    assert vr._VR_OPT80_CLEAN_LOG_OUTCOMES == cr._OPT80_CLEAN_LOG_OUTCOMES
+    assert cr._OPT80_CLEAN_LOG_OUTCOMES <= cr._OPT80_VERDICT_GATES
+
+
+def test_opt80_tail_axis_is_refused_off_the_critical_path_and_as_a_p50():
+    vr = _load_verify_report()
+    f = _opt80_verifier_finding()
+    f["checkout_stall"]["tail_axis"] = dict(_OPT80_TAIL_AXIS)
+    assert vr._opt80_tail_axis_rederived(f) == []
+    f["checkout_stall"]["on_critical_path"] = False
+    assert any("on_critical_path" in p for p in vr._opt80_tail_axis_rederived(f))
+    f["checkout_stall"]["on_critical_path"] = True
+    f["wall_clock_p50_s"] = 110.0
+    assert any("wall_clock_p50_s" in p for p in vr._opt80_tail_axis_rederived(f))
+
+
+def test_opt80_tail_axis_counts_only_tail_runs_whose_log_proves_a_stall():
+    """A proof whose quoted lines show the transfer ADVANCING is no stall, so
+    that run drops out of N: one proven run of ten re-derives to one in ten."""
+    vr = _load_verify_report()
+    f = _opt80_verifier_finding()
+    f["checkout_stall"]["tail_axis"] = dict(_OPT80_TAIL_AXIS)
+    f["checkout_stall"]["proven_tail_runs"][1]["after"]["line"] = (
+        "Receiving objects:  60% (72000/120000)")
+    probs = vr._opt80_tail_axis_rederived(f)
+    assert any("tail_axis.tail_runs" in p and "1" in p for p in probs), probs
+    assert any("tail_axis.one_in_n" in p and "10" in p for p in probs), probs
+
+
+# ── OPT80's slowest job WITHOUT a tail line ──
+# The finding stamps `tail_axis_withheld_reason` and renders that reason's own
+# sentence. The self-check pairs the two, re-derives the reason from the
+# stamped facts, and fails any merge-wait claim on a finding with no tail axis.
+
+_OPT80_WITHHELD_CHECK = "OPT80 slowest-job sentence pairs with its withheld reason"
+_OPT80_LEGACY_POLE_SENTENCE = (
+    "`build` is this workflow's slowest job; the stall's effect on the merge wait "
+    "is measured (longest pause 40s) but not credited in this version.")
+
+
+def _opt80_withheld_doc(reason, sentence_reason=None, evidence_tail=None):
+    """An on-pole OPT80 finding with no tail axis, its stamped facts set the way
+    the collector would have seen them for `reason`."""
+    sys.path.insert(0, str(_SKILL_DIR / "tests"))
+    import test_tier2_wave1_detectors as t  # noqa: E402
+
+    doc = _opt80_pole_doc()
+    _opt80_tail_eligibility(
+        doc, event_scope="all-events" if reason == "all_events_timing" else "pull_request",
+        declared=reason != "not_on_pull_requests")
+    if reason == "merge_gating_unknown":
+        doc["required_checks_complete"] = False
+    if reason == "not_merge_gating":
+        doc["required_checks"] = ["CI / bench"]
+    f = doc["findings"][0]
+    f["checkout_stall"]["tail_axis_withheld_reason"] = reason
+    tail = (evidence_tail if evidence_tail is not None
+            else t._OPT80_WITHHELD_POLE_CASES[sentence_reason or reason][2])
+    f["evidence"] = f["evidence"] + ". " + tail
+    return doc
+
+
+def _opt80_withheld_check(tmp_path: Path, doc):
+    vr = _load_verify_report()
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    checks = {c.name: c for c in vr.run_checks(report, report_path, findings_path,
+                                               skill_repo=None)}
+    assert _OPT80_WITHHELD_CHECK in checks, sorted(checks)
+    return checks[_OPT80_WITHHELD_CHECK]
+
+
+def test_opt80_withheld_tail_sentences_are_the_collectors_own():
+    """Coupling: the verifier's copy of the withheld-reason sentences equals the
+    collector's table, key for key and byte for byte."""
+    vr = _load_verify_report()
+    sys.path.insert(0, str(_SKILL_DIR / "tests"))
+    import test_tier2_wave1_detectors as t  # noqa: E402
+    assert vr._VR_OPT80_TAIL_WITHHELD_SENTENCES == t.cr._OPT80_TAIL_WITHHELD_SENTENCES
+
+
+@pytest.mark.parametrize("reason", ["not_on_pull_requests", "all_events_timing",
+                                    "merge_gating_unknown", "not_merge_gating"])
+def test_opt80_withheld_tail_sentence_pairs_with_its_reason(tmp_path: Path, reason):
+    chk = _opt80_withheld_check(tmp_path, _opt80_withheld_doc(reason))
+    assert chk.ok, chk.detail
+
+
+@pytest.mark.parametrize("reason", ["not_on_pull_requests", "all_events_timing",
+                                    "merge_gating_unknown", "not_merge_gating"])
+def test_opt80_merge_wait_claim_without_a_tail_axis_is_caught(tmp_path: Path, reason):
+    """MUTATION: the pre-fix sentence ("the stall's effect on the merge wait is
+    measured ... but not credited") on a job the merge is not shown to wait on.
+    With gating unknown or not this job, that claim is false and must red."""
+    chk = _opt80_withheld_check(
+        tmp_path, _opt80_withheld_doc(reason, evidence_tail=_OPT80_LEGACY_POLE_SENTENCE))
+    assert not chk.ok
+    assert "merge wait" in chk.detail, chk.detail
+
+
+def test_opt80_withheld_reason_must_match_its_sentence_and_the_facts(tmp_path: Path):
+    # The sentence of another reason: a mismatch.
+    chk = _opt80_withheld_check(
+        tmp_path, _opt80_withheld_doc("merge_gating_unknown",
+                                      sentence_reason="not_merge_gating"))
+    assert not chk.ok and "merge_gating_unknown" in chk.detail, chk.detail
+    # "Branch protection could not be read" on a complete, readable required set.
+    doc = _opt80_withheld_doc("merge_gating_unknown")
+    doc["required_checks_complete"] = True
+    chk = _opt80_withheld_check(tmp_path, doc)
+    assert not chk.ok and "not_merge_gating" in chk.detail, chk.detail
+    # The slowest-job sentence with no stamped reason at all.
+    doc = _opt80_withheld_doc("not_merge_gating")
+    del doc["findings"][0]["checkout_stall"]["tail_axis_withheld_reason"]
+    chk = _opt80_withheld_check(tmp_path, doc)
+    assert not chk.ok, chk.detail
+    # A reason stamped next to a tail axis.
+    doc = _opt80_tail_doc()
+    doc["findings"][0]["checkout_stall"]["tail_axis_withheld_reason"] = "not_merge_gating"
+    chk = _opt80_withheld_check(tmp_path, doc)
+    assert not chk.ok, chk.detail
+
+
+def test_opt80_tail_line_renders_at_the_pole_and_pairs_with_its_block(tmp_path: Path):
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc()
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    line = "one run in 5 spends about 110s longer on checkout, and that run's log shows the fetch stalling"
+    pole = report.split("Long pole 1", 1)[1].split("\n## ", 1)[0]
+    assert "<!-- opt80-tail:f-promoted -->" in pole and line in pole, pole[:1500]
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+    assert vr.check_tier2_neutrality_derived(report, findings_path, report_path).ok
+    # A rendered line with no stamped block fails…
+    plain = copy.deepcopy(doc)
+    del plain["findings"][0]["checkout_stall"]["tail_axis"]
+    findings_path.write_text(json.dumps(plain), encoding="utf-8")
+    assert not vr.check_opt80_tail_lines(report, findings_path).ok
+    # …and so does a stamped block with no rendered line.
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+    stripped = report.replace("<!-- opt80-tail:f-promoted -->", "")
+    chk = vr.check_opt80_tail_lines(stripped, findings_path)
+    assert not chk.ok and "rendered 0 time(s), not once" in chk.detail, chk
+    # A marker rendered twice is not "once" either.
+    marker = "<!-- opt80-tail:f-promoted -->"
+    head, tail = report.split(marker, 1)
+    marked_line = tail.lstrip("\n").split("\n", 1)[0]
+    twice = report + "\n" + marker + "\n" + marked_line + "\n"
+    chk = vr.check_opt80_tail_lines(twice, findings_path)
+    assert not chk.ok and "rendered 2 time(s)" in chk.detail, chk
+    # The sentence must sit on the line right after the marker: stating it
+    # elsewhere in the report does not pair it. The sentence is lifted from the
+    # rendered line itself, so this case tracks whatever wording the renderer uses.
+    start = marked_line.index("one run in ")
+    end = marked_line.index("the fetch stalling", start) + len("the fetch stalling")
+    sentence = marked_line[start:end]
+    moved = (head + marker + "\n" + tail.lstrip("\n").replace(
+        marked_line, "> a checkout line that states no tail figure", 1)
+        + "\n" + sentence + "\n")
+    assert sentence in moved and moved.count(marker) == 1
+    chk = vr.check_opt80_tail_lines(moved, findings_path)
+    assert not chk.ok and "the line after its marker" in chk.detail, chk
+    # A tail sentence anywhere whose numbers the block does not re-derive fails.
+    stray = report + "\none run in 2 spends about 999s longer on checkout, and that run's log shows the fetch stalling\n"
+    assert not vr.check_opt80_tail_lines(stray, findings_path).ok
+    # X is the MEDIAN proven run's loss, not an upper bound (a proven run can
+    # lose more), so the legacy "loses up to" wording fails even when its
+    # numbers re-derive: a stale sentence cannot slip past the scan.
+    legacy = report.replace(
+        "spends about 110s longer on checkout, and that run's log shows the fetch stalling",
+        "loses up to 110s on checkout to a stalled fetch")
+    assert "loses up to 110s" in legacy
+    chk = vr.check_opt80_tail_lines(legacy, findings_path)
+    assert not chk.ok and "up to" in chk.detail, chk
+
+
+def test_opt80_tail_line_placement_is_its_own_pole_or_the_tails_section(tmp_path: Path):
+    """One placement rule: a tail marker sits inside its own job's Long pole
+    section or the dedicated `## ⏱️ Checkout stall tails` section, never above
+    the Contents, in a Runner saving card or in another job's pole; and the
+    tail sentence appears exactly once, on its marked line."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc(pole_check="other", pole_job="other")
+    report, _report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    marker = "<!-- opt80-tail:f-promoted -->"
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+    i = report.index(marker)
+    line = report[i:].split("\n", 2)[1]
+    block = f"{marker}\n{line}\n"
+    assert block in report
+    rest = report.replace(block, "", 1)
+
+    def after_heading(text, heading):
+        j = text.index(heading)
+        k = text.index("\n", j) + 1
+        return text[:k] + "\n" + block + "\n" + text[k:]
+
+    assert "## 🟢 Runner saving" in rest and "Long pole 1" in rest
+    cases = {
+        "above Contents": rest.replace("## 📋 Contents", block + "\n## 📋 Contents", 1),
+        "another job's pole": after_heading(rest, "Long pole 1"),
+        "a Runner saving card": after_heading(rest, "## 🟢 Runner saving"),
+        "a second unmarked copy": report + "\n" + line + "\n",
+    }
+    for what, bad in cases.items():
+        chk = vr.check_opt80_tail_lines(bad, findings_path)
+        assert not chk.ok, (what, chk)
+    # The off-pole exemption in the neutrality check reads the same rule.
+    f = json.loads(findings_path.read_text(encoding="utf-8"))["findings"][0]
+    assert vr._vr_opt80_tail_rendered_off_pole(f, report)
+    assert not vr._vr_opt80_tail_rendered_off_pole(f, cases["a Runner saving card"])
+
+
+def test_opt80_stray_tail_scan_tolerates_spacing_and_wording_variants(tmp_path: Path):
+    """The stray-sentence scan keys on the core "one run in N ... X s ...
+    checkout" shape, not the exact canonical suffix: a spaced unit, a sentence
+    that ends early, or another verb must not slip past it."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc()
+    report, _report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+    for stray in (
+            "one run in 2 loses 80 s on checkout",
+            "one run in 2 loses up to 80s on checkout.",
+            "one run in 2 spends about 80 s longer on checkout, and that run's "
+            "log shows the fetch stalling",
+            # Even the RIGHT numbers in a non-canonical wording are refused.
+            "one run in 5 loses about 110 s on checkout"):
+        chk = vr.check_opt80_tail_lines(report + "\n" + stray + "\n", findings_path)
+        assert not chk.ok, (stray, chk)
+
+
+def test_opt80_tail_line_is_refused_in_the_headline_or_runner_minute_section(
+        tmp_path: Path):
+    """The tail is never headlined or summed: a CORRECT tail sentence (or a
+    marker) above `## 📋 Contents` - the title, provenance table and Bottom
+    line - or inside the runner-minute section fails the check, even though its
+    numbers re-derive."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc()
+    report, _report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+    good = "one run in 5 spends about 110s longer on checkout, and that run's log shows the fetch stalling"
+    legacy = "one run in 5 loses up to 110s on checkout to a stalled fetch"
+    assert "> **Bottom line.**" in report
+    for text in (good, legacy, "<!-- opt80-tail:f-promoted -->"):
+        headlined = report.replace("> **Bottom line.**",
+                                   f"> **Bottom line.** {text}.", 1)
+        chk = vr.check_opt80_tail_lines(headlined, findings_path)
+        assert not chk.ok and "headline" in chk.detail, (text, chk)
+    if "## Runner-minute reductions" in report:
+        tier2 = report.replace("## Runner-minute reductions",
+                               f"## Runner-minute reductions\n\n{good}.\n\n##"
+                               " Runner-minute reductions", 1)
+        chk = vr.check_opt80_tail_lines(tier2, findings_path)
+        assert not chk.ok and "runner-minute" in chk.detail, chk
+
+
+def test_opt80_tail_line_is_refused_off_the_pull_request_merge_wait(tmp_path: Path):
+    """The verifier holds a stamped tail axis to the collector's own gate: the
+    workflow declares a pull-request trigger, its timing came from sampled
+    pull-request runs, and the job is that workflow's slowest. A tail axis on a
+    push-only `smoke`-style job (timed on push, declared push-only) with
+    `on_critical_path: true` renders off-pole and used to pass; each missing
+    condition on its own must fail the check too."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc(pole_check="deploy", pole_job="deploy")
+    _report, _rp, findings_path = _tier2_artifacts(tmp_path, doc)
+    report = _report
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+    for kw, why in (({"event_scope": "all-events", "declared": False}, "push-only"),
+                    ({"event_scope": "all-events"}, "pull request"),
+                    ({"declared": False}, "pull request"),
+                    ({"long_pole": "deploy"}, "slowest job")):
+        bad = _opt80_tail_eligibility(copy.deepcopy(doc), **kw)
+        findings_path.write_text(json.dumps(bad), encoding="utf-8")
+        chk = vr.check_opt80_tail_lines(report, findings_path)
+        assert not chk.ok, (kw, chk)
+    # Fail closed: a tail axis with no per-workflow timing at all is not earned.
+    bare = copy.deepcopy(doc)
+    del bare["per_workflow_timing"]
+    findings_path.write_text(json.dumps(bare), encoding="utf-8")
+    assert not vr.check_opt80_tail_lines(report, findings_path).ok
+
+
+def test_opt80_tail_line_is_refused_on_a_job_no_merge_waits_on(tmp_path: Path):
+    """A workflow's slowest job is not necessarily merge-gating: a slow,
+    non-required benchmark job beside a required fast `test`. The tail axis must
+    name the required check its job is (or is needed by), and the verifier
+    re-derives that from the stamped required set and the job graph."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc()
+    report, _rp, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+
+    def _fails(mutate):
+        bad = copy.deepcopy(doc)
+        mutate(bad)
+        findings_path.write_text(json.dumps(bad), encoding="utf-8")
+        chk = vr.check_opt80_tail_lines(report, findings_path)
+        assert not chk.ok, chk
+        return chk
+
+    axis = lambda d: d["findings"][0]["checkout_stall"]["tail_axis"]  # noqa: E731
+    # The job is not required (the required set names another check) ...
+    _fails(lambda d: d.__setitem__("required_checks", ["CI / bench"]))
+    # ... the required read was partial, or absent ...
+    _fails(lambda d: d.__setitem__("required_checks_complete", False))
+    _fails(lambda d: d.__setitem__("required_checks", None))
+    # ... the axis carries no merge-gating evidence at all ...
+    _fails(lambda d: axis(d).pop("merge_gating"))
+    # ... or claims the job is needed by a required job that does not need it.
+    def _claims_needed(d):
+        d["required_checks"] = ["CI / bench"]
+        axis(d)["merge_gating"] = {"basis": "needed_by_required",
+                                   "required_check": "CI / bench",
+                                   "required_job": "bench", "job_key": "build"}
+    _fails(_claims_needed)
+    # A real `needs:` edge from the required job makes the same claim true.
+    def _really_needed(d):
+        _claims_needed(d)
+        d["workflow_job_graph"][d["findings"][0]["workflow_file"]]["bench"][
+            "needs"] = ["build"]
+    good = copy.deepcopy(doc)
+    _really_needed(good)
+    findings_path.write_text(json.dumps(good), encoding="utf-8")
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+
+
+def test_opt80_merge_gating_rederives_the_workflow_prefix_and_refuses_ambiguity(
+        tmp_path: Path):
+    """The verifier's copy of the merge-gating predicate strips only THIS
+    workflow's own `name:` prefix (`workflow_names`), and refuses a required
+    context that literally names a job in more than one place - GitHub cannot
+    tell those check-runs apart, so the merge wait is unknown."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc()
+    report, _rp, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+    wf = doc["findings"][0]["workflow_file"]
+
+    def _check(mutate):
+        bad = copy.deepcopy(doc)
+        mutate(bad)
+        findings_path.write_text(json.dumps(bad), encoding="utf-8")
+        return vr.check_opt80_tail_lines(report, findings_path)
+
+    def _foreign_prefix(d):
+        d["required_checks"] = ["deploy / build"]
+        d["findings"][0]["checkout_stall"]["tail_axis"]["merge_gating"][
+            "required_check"] = "deploy / build"
+    chk = _check(_foreign_prefix)
+    assert not chk.ok and "is not job" in str(chk.detail), chk
+
+    def _ambiguous(d):
+        d["required_checks"] = ["build"]
+        d["findings"][0]["checkout_stall"]["tail_axis"]["merge_gating"][
+            "required_check"] = "build"
+        d["workflow_job_graph"][".github/workflows/other.yml"] = {
+            "build": {"name": "build", "needs": [], "reusable": False,
+                      "matrix": False}}
+    chk = _check(_ambiguous)
+    assert not chk.ok and "ambiguous" in str(chk.detail), chk
+
+    def _unambiguous(d):
+        d["required_checks"] = ["build"]
+        d["findings"][0]["checkout_stall"]["tail_axis"]["merge_gating"][
+            "required_check"] = "build"
+    assert _check(_unambiguous).ok
+    # Unnamed workflow: GitHub's prefix is its file path.
+    def _unnamed(d):
+        d["workflow_names"] = {}
+        d["required_checks"] = [f"{wf} / build"]
+        d["findings"][0]["checkout_stall"]["tail_axis"]["merge_gating"][
+            "required_check"] = f"{wf} / build"
+    assert _check(_unnamed).ok
+
+
+def test_opt80_on_critical_path_matches_a_workflow_prefixed_pole_check(tmp_path: Path):
+    """A plain job's check-run is named `<workflow> / <job>`. The pole header
+    then says `CI / build` while the finding names `build`; the cross-check that
+    on_critical_path agrees with the rendered poles must see that as the same
+    job, or every real on-pole checkout stall fails its own report."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc(pole_check="CI / build", pole_job="build")
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert "CI / build" in report
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert chk.ok, chk
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+
+
+def test_opt80_off_critical_path_job_may_still_be_a_drilled_pole(tmp_path: Path):
+    """The collector sets on_critical_path only for the job that is its
+    workflow's SLOWEST. A drilled Long pole is often not that job (a chain pole
+    such as `prep -> verify`), so a False claim on a job rendered as a pole is
+    no contradiction and must not fail the report."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc(pole_check="CI / build", pole_job="build")
+    del doc["findings"][0]["checkout_stall"]["tail_axis"]
+    doc["findings"][0]["checkout_stall"]["on_critical_path"] = False
+    # A chain pole: the workflow's slowest job is another one.
+    doc["per_workflow_timing"] = _opt80_pwt("prep")
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert "CI / build" in report
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert chk.ok, chk
+
+
+def test_opt80_on_critical_path_is_rederived_both_ways_from_the_slowest_job(
+        tmp_path: Path):
+    """on_critical_path is the collector's "this job is its workflow's slowest
+    job" (`per_workflow_timing[wf].long_pole_job`), re-derived both ways
+    whatever the rendered poles show: a stale False on the slowest job fails,
+    and so does a True on a job that is not the slowest."""
+    vr = _load_verify_report()
+    for claimed, slowest in ((False, "build"), (True, "deploy")):
+        doc = _opt80_tail_doc(pole_check="CI / build", pole_job="build")
+        del doc["findings"][0]["checkout_stall"]["tail_axis"]
+        doc["findings"][0]["checkout_stall"]["on_critical_path"] = claimed
+        doc["per_workflow_timing"] = _opt80_pwt(slowest)
+        sub = tmp_path / f"{claimed}-{slowest}"
+        sub.mkdir()
+        report, report_path, findings_path = _tier2_artifacts(sub, doc)
+        chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+        assert not chk.ok and "slowest job" in str(chk.detail), (claimed, chk)
+
+
+def test_opt80_pole_match_uses_the_poles_own_job_not_the_last_segment(tmp_path: Path):
+    """A reusable-workflow call renders as `CI / e2e / build`; its job is
+    `e2e / build`, not the caller file's plain `build`. A finding on plain
+    `build` that claims to be on the critical path is not on that pole."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc(pole_check="CI / e2e / build", pole_job="e2e / build")
+    del doc["findings"][0]["checkout_stall"]["tail_axis"]
+    assert doc["findings"][0]["affected_jobs"] == ["build"]
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert "CI / e2e / build" in report
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert not chk.ok and "not rendered as a Long pole" in str(chk.detail), chk
+
+
+def test_opt80_unmapped_pole_strips_only_the_workflow_name_prefix():
+    """With no stamped pole entry to resolve a header's job, the verifier falls
+    back to the check-run name. GitHub names a check-run `<workflow name> /
+    <job>`: the prefix is the FIRST segment. A reusable-workflow job
+    `call-a / build` renders as `CI / call-a / build` and is on that pole; a
+    plain `build` is not on `CI / call-b / build`."""
+    vr = _load_verify_report()
+
+    def report(check):
+        return f"# r\n\n## 🔴 Long pole 1: `ci.yml` ▸ `{check}` - 5m 00s\n\nbody\n"
+
+    def finding(job):
+        return {"workflow_file": ".github/workflows/ci.yml", "affected_jobs": [job]}
+
+    on = vr._vr_opt80_job_rendered_as_pole
+    assert on(finding("call-a / build"), report("CI / call-a / build"), {})
+    assert not on(finding("build"), report("CI / call-b / build"), {})
+    assert on(finding("build"), report("CI / build"), {})
+    assert on(finding("build"), report("build"), {})
+    # Another workflow file's header never matches.
+    assert not on({"workflow_file": ".github/workflows/other.yml",
+                   "affected_jobs": ["build"]}, report("CI / build"), {})
+
+
+def _opt80_pwt(long_pole_job, events=("pull_request",)):
+    return {".github/workflows/ci.yml": {"long_pole_job": long_pole_job,
+                                         "long_pole_p50": 300.0,
+                                         "events": list(events),
+                                         "event_scope": next(
+                                             (e for e in events if e in (
+                                                 "pull_request", "merge_group",
+                                                 "pull_request_target")),
+                                             "all-events")}}
+
+
+def test_opt80_off_pole_exemption_rederives_the_workflows_slowest_job(tmp_path: Path):
+    """The off-pole tail exemption excuses an on_critical_path job with no pole
+    header. on_critical_path means "this workflow's slowest job", so the
+    exemption holds only when `per_workflow_timing[wf].long_pole_job` IS the
+    finding's job; a bare claim (no timing, or another job is slowest) fails."""
+    vr = _load_verify_report()
+    for pwt in (None, _opt80_pwt("deploy")):
+        doc = _opt80_tail_doc(pole_check="deploy", pole_job="deploy")
+        if pwt is not None:
+            doc["per_workflow_timing"] = pwt
+        else:
+            doc.pop("per_workflow_timing", None)
+        report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+        assert report.count("<!-- opt80-tail:f-promoted -->") == 1
+        chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+        assert not chk.ok and "slowest job" in str(chk.detail), (pwt, chk)
+    doc = _opt80_tail_doc(pole_check="deploy", pole_job="deploy")
+    doc["per_workflow_timing"] = _opt80_pwt("build")
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert chk.ok, chk
+
+
+def test_opt80_slowest_job_of_a_workflow_with_no_rendered_pole_is_no_contradiction(
+        tmp_path: Path):
+    """The collector stamps on_critical_path=True on a workflow's slowest job
+    whether or not that workflow runs on pull requests. A push-only nightly's
+    slowest job can never be a rendered pole, and a pull-request workflow
+    ranked below the drilled poles has none either; neither is a
+    contradiction. Only a workflow that HAS a rendered pole elsewhere is."""
+    vr = _load_verify_report()
+    for events in (("push", "schedule"), ("pull_request",)):
+        doc = _opt80_tail_doc(pole_check="CI / build", pole_job="build")
+        f = doc["findings"][0]
+        del f["checkout_stall"]["tail_axis"]
+        f["workflow_file"] = ".github/workflows/nightly.yml"
+        doc["per_workflow_timing"] = {".github/workflows/nightly.yml": {
+            "long_pole_job": "build", "long_pole_p50": 300.0, "events": list(events)}}
+        sub = tmp_path / events[0]
+        sub.mkdir()
+        report, report_path, findings_path = _tier2_artifacts(sub, doc)
+        chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+        assert chk.ok, (events, chk)
+
+
+def test_opt80_tail_joins_a_pole_on_its_exact_job_like_the_verifier():
+    """OPT80's affected job is ONE exact runtime name. The renderer joins the
+    tail line to a pole on the pole's stamped job exactly (else the check with
+    only the workflow-name prefix stripped), the way the verifier does: a
+    sibling matrix leg or a sibling compound name is a different job."""
+    bp = _load_blocking_path()
+
+    def f(job):
+        g = _opt80_verifier_finding(affected_jobs=[job])
+        g["checkout_stall"]["tail_axis"] = dict(_OPT80_TAIL_AXIS)
+        return g
+
+    def pole(check, job=None):
+        p = {"check": check, "workflow_file": ".github/workflows/ci.yml"}
+        if job is not None:
+            p["job"] = job
+        return p
+
+    tail_for = bp._opt80_tail_for
+    assert tail_for(pole("test (2)", "test (2)"), [f("test (1)")]) == []
+    assert tail_for(pole("test", "test"), [f("test (1)")]) == []
+    assert tail_for(pole("drizzle-adapter Integration Test",
+                         "drizzle-adapter Integration Test"),
+                    [f("prisma-adapter Integration Test")]) == []
+    assert len(tail_for(pole("test (2)", "test (2)"), [f("test (2)")])) == 1
+    assert len(tail_for(pole("CI / build"), [f("build")])) == 1
+    assert len(tail_for(pole("CI / call-a / build"), [f("call-a / build")])) == 1
+    assert tail_for(pole("CI / call-b / build"), [f("build")]) == []
+
+
+def test_opt80_tail_line_off_a_drilled_pole_renders_in_its_own_block(tmp_path: Path):
+    """The slowest job of a pull-request workflow that is not drilled: its tail
+    line renders once, outside every pole section, and that (only that) excuses
+    an on_critical_path job with no pole header."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc(pole_check="deploy", pole_job="deploy")
+    doc["per_workflow_timing"] = _opt80_pwt("build")
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert report.count("<!-- opt80-tail:f-promoted -->") == 1
+    assert "Checkout stall tails on a workflow's slowest job" in report
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+    assert vr.check_tier2_neutrality_derived(report, findings_path, report_path).ok
+    # The exemption is earned by the STAMPED axis, not by a marker on the page:
+    # the same report against findings with no tail axis fails the pole rule.
+    plain = json.loads(findings_path.read_text(encoding="utf-8"))
+    del plain["findings"][0]["checkout_stall"]["tail_axis"]
+    findings_path.write_text(json.dumps(plain), encoding="utf-8")
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert not chk.ok and "not rendered as a Long pole" in str(chk.detail), chk
+    # Without the tail axis the exemption does not apply: the old rule stands.
+    del doc["findings"][0]["checkout_stall"]["tail_axis"]
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert not chk.ok and "not rendered as a Long pole" in str(chk.detail), chk
+
+
+def test_opt80_tail_marker_inside_a_pole_section_is_not_off_pole(tmp_path: Path):
+    """The off-pole exemption is earned by WHERE the marker sits, not by the
+    marker existing: a tail line rendered inside a Long pole section is not the
+    off-pole tail block, so a slowest job that is not that pole stays refused."""
+    vr = _load_verify_report()
+    # On-pole render: the marker sits inside `build`'s Long pole section.
+    doc = _opt80_tail_doc()
+    report, _rp, _fp = _tier2_artifacts(tmp_path, doc)
+    marker = "<!-- opt80-tail:f-promoted -->"
+    assert marker in report.split("Long pole 1", 1)[1]
+    f = doc["findings"][0]
+    assert vr._vr_opt80_tail_rendered_off_pole(f, report) is False
+    # Off-pole render: the same helper says True, and the check accepts it.
+    doc = _opt80_tail_doc(pole_check="deploy", pole_job="deploy")
+    doc["per_workflow_timing"] = _opt80_pwt("build")
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    f = doc["findings"][0]
+    assert vr._vr_opt80_tail_rendered_off_pole(f, report) is True
+    assert vr.check_tier2_neutrality_derived(report, findings_path, report_path).ok
+    # Move that marked line into the `deploy` pole section: it is no longer
+    # off-pole, so the `build` job (not a rendered pole) loses the exemption.
+    head, tail = report.split(marker, 1)
+    marked_line = tail.lstrip("\n").split("\n", 1)[0]
+    moved = report.replace(marker + "\n" + marked_line, "", 1)
+    assert marker not in moved
+    pole_hdr = "**The slowest check a typical PR waits on.**"
+    assert moved.count(pole_hdr) == 1
+    moved = moved.replace(pole_hdr, pole_hdr + "\n\n" + marker + "\n" + marked_line, 1)
+    assert moved.count(marker) == 1
+    assert marker in moved.split("Long pole 1", 1)[1].split("\n## ", 1)[0]
+    assert vr._vr_opt80_tail_rendered_off_pole(f, moved) is False
+    report_path.write_text(moved, encoding="utf-8")
+    chk = vr.check_tier2_neutrality_derived(moved, findings_path, report_path)
+    assert not chk.ok and "not rendered as a Long pole" in str(chk.detail), chk
+
+
+def test_opt80_tail_axis_rederives_the_median_of_a_skewed_proven_tail():
+    """Real detector output with three proven tail runs at 95s / 110s / 200s:
+    the verifier re-derives the tail median, 110s, and agrees with the stamp. A
+    verifier (or collector) that took the mean, 135s, disagrees with the other."""
+    vr = _load_verify_report()
+    sys.path.insert(0, str(_SKILL_DIR / "tests"))
+    import test_tier2_wave1_detectors as t  # noqa: E402
+
+    f = t._opt80_pr(is_pr=True, durations=[10.0] * 7 + [95.0, 110.0, 200.0])[0]
+    want, why = vr._vr_opt80_tail_axis_expected(f["checkout_stall"])
+    assert want is not None, why
+    assert want["tail_runs"] == 3 and want["tail_checkout_p50_s"] == 110.0, want
+    assert vr._opt80_tail_axis_rederived(f) == []
+
+
+def test_opt80_one_in_n_rounds_half_to_even_in_both_collector_and_verifier():
+    """7 sampled / 2 proven = 3.5 -> 4 and 5 / 2 = 2.5 -> 2 (Python's
+    round-half-to-even). Floor says 3 for the first; ceil says 3 for the second.
+    The collector and the verifier must state the same N for both."""
+    vr = _load_verify_report()
+    sys.path.insert(0, str(_SKILL_DIR / "scripts"))
+    import collect_runs as cr  # noqa: E402
+
+    for n, want_n in ((7, 4), (5, 2)):
+        f = _opt80_verifier_finding()
+        cs = f["checkout_stall"]
+        proofs = cs["proven_tail_runs"][:2]
+        quiet = [{"job_id": 7000 + i, "run_url": f"https://x/runs/{7000 + i}",
+                  "checkout_s": 10.0, "tail": False} for i in range(n - 2)]
+        tail = [r for r in cs["per_run_checkout_s"] if r["tail"]]
+        cs["per_run_checkout_s"] = quiet + tail
+        cs["proven_tail_runs"] = proofs
+        got, why = vr._vr_opt80_tail_axis_expected(cs)
+        assert got is not None, why
+        assert got["one_in_n"] == want_n, (n, got)
+        coll = cr._opt80_tail_axis(cs["per_run_checkout_s"], proofs, got["typical_checkout_p50_s"])
+        assert coll["one_in_n"] == got["one_in_n"] == want_n, (n, coll, got)
+
+
+def _opt80_tail_expected_after(mutate):
+    vr = _load_verify_report()
+    f = _opt80_verifier_finding()
+    mutate(f["checkout_stall"])
+    want, _why = vr._vr_opt80_tail_axis_expected(f["checkout_stall"])
+    return want
+
+
+def test_opt80_tail_axis_drops_a_proof_whose_pause_is_below_the_minimum_gap():
+    def short_gap(cs):
+        cs["proven_tail_runs"][1]["after"]["ts"] = "2026-06-01T00:00:24Z"  # 10s < 20s
+    want = _opt80_tail_expected_after(short_gap)
+    assert want["tail_runs"] == 1 and want["one_in_n"] == 10, want
+
+
+def test_opt80_tail_axis_drops_a_proof_held_at_one_hundred_percent():
+    def done(cs):
+        for side in ("before", "after"):
+            cs["proven_tail_runs"][1][side]["line"] = (
+                "Receiving objects: 100% (120000/120000)")
+    want = _opt80_tail_expected_after(done)
+    assert want["tail_runs"] == 1 and want["one_in_n"] == 10, want
+
+
+def test_opt80_tail_axis_drops_a_proof_whose_run_is_below_the_tail_threshold():
+    """A proof attached to a run whose measured checkout (30s) is under the 40s
+    tail threshold is not a tail run, however its quoted lines read."""
+    # Logs are fetched for slow runs only, so a proof on a run under the
+    # threshold is either a fetched log of a run that was not slow, or a proof
+    # outside the fetched logs. Both refuse the axis rather than count it.
+    vr = _load_verify_report()
+    for unlist in (False, True):
+        f = _opt80_verifier_finding()
+        cs = f["checkout_stall"]
+        jid = cs["proven_tail_runs"][1]["job_id"]
+        for r in cs["per_run_checkout_s"]:
+            if r["job_id"] == jid:
+                r["checkout_s"] = 30.0
+        if unlist:
+            cs["log_probed_job_ids"].remove(jid)
+            cs["logs_fetched"] = 1
+        want, why = vr._vr_opt80_tail_axis_expected(cs)
+        assert want is None and any("fetched" in w for w in why), (unlist, why)
+
+
+def test_opt80_tail_axis_counts_a_job_proven_twice_once():
+    def dup(cs):
+        cs["proven_tail_runs"].append(copy.deepcopy(cs["proven_tail_runs"][1]))
+    want = _opt80_tail_expected_after(dup)
+    assert want["tail_runs"] == 2 and want["one_in_n"] == 5, want
+
+
+def test_opt80_tail_line_marker_must_be_followed_by_its_own_sentence(tmp_path: Path):
+    """The marker pairs with the line right after it. A marker followed by some
+    other line, with the true sentence moved elsewhere, is not a pairing."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc()
+    report, _rp, findings_path = _tier2_artifacts(tmp_path, doc)
+    marker = "<!-- opt80-tail:f-promoted -->"
+    i = report.index(marker)
+    end = report.index("\n\n", i)
+    block = report[i:end]
+    line = block.split("\n", 1)[1]
+    moved = report.replace(block, marker + "\n> something else\n\n" + line, 1)
+    chk = vr.check_opt80_tail_lines(moved, findings_path)
+    assert not chk.ok and "line after its marker" in str(chk.detail), chk
+
+
+def test_opt80_tail_line_rendered_twice_for_one_block_fails(tmp_path: Path):
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc()
+    report, _rp, findings_path = _tier2_artifacts(tmp_path, doc)
+    marker = "<!-- opt80-tail:f-promoted -->"
+    i = report.index(marker)
+    end = report.index("\n\n", i)
+    twice = report[:end] + "\n\n" + report[i:end] + report[end:]
+    chk = vr.check_opt80_tail_lines(twice, findings_path)
+    assert not chk.ok and "rendered 2 time(s)" in str(chk.detail), chk
+
+
+def test_opt80_tail_marker_for_an_id_with_no_tail_axis_fails_beside_real_tails(
+        tmp_path: Path):
+    """Another finding's tail line is real and paired; a marker for an id that
+    stamps no tail axis must still fail, even when its sentence's numbers happen
+    to match the real one."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc()
+    report, _rp, findings_path = _tier2_artifacts(tmp_path, doc)
+    ghost = ("\n<!-- opt80-tail:f-ghost -->\n> one run in 5 loses up to 110s on "
+             "checkout to a stalled fetch.\n")
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+    chk = vr.check_opt80_tail_lines(report + ghost, findings_path)
+    assert not chk.ok and "f-ghost" in str(chk.detail), chk
+
+
+def _opt80_with_also_noticed(doc):
+    """Add one residual hygiene finding so the report renders an Also noticed
+    section (and its Contents pointer) beside the tail line."""
+    doc["findings"].append({"id": "f-hyg", "pattern": "OPT5",
+                            "title": "pnpm Store Not Cached", "severity": "MEDIUM",
+                            "runner_min_saving": 68.0,
+                            "workflow_file": ".github/workflows/ci.yml", "line": 20})
+    return doc
+
+
+def test_opt80_tail_marker_under_contents_also_noticed_or_data_sources_fails(
+        tmp_path: Path):
+    """The placement rule names two homes: the finding's own Long pole section
+    and the Checkout stall tails section. Any OTHER `##` section - the Contents,
+    Also noticed, Data sources - is not one of them, even though none of those
+    is the headline or a runner-minute card."""
+    vr = _load_verify_report()
+    doc = _opt80_with_also_noticed(_opt80_tail_doc(pole_check="other", pole_job="other"))
+    report, _rp, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+    marker = "<!-- opt80-tail:f-promoted -->"
+    i = report.index(marker)
+    block = f"{marker}\n{report[i:].split(chr(10), 2)[1]}\n"
+    rest = report.replace(block, "", 1)
+    for heading in ("## 📋 Contents", "## 🧹 Also noticed", "## 🗄️ Data sources"):
+        assert heading in rest, heading
+        j = rest.index(heading)
+        k = rest.index("\n", j) + 1
+        moved = rest[:k] + "\n" + block + "\n" + rest[k:]
+        chk = vr.check_opt80_tail_lines(moved, findings_path)
+        assert not chk.ok and "section" in chk.detail, (heading, chk)
+
+
+def test_opt80_stray_tail_scan_is_case_insensitive(tmp_path: Path):
+    """A tail sentence that opens a sentence ("One run in 2 ...") is the same
+    claim; the scan must not let it through on its capital letter."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc()
+    report, _rp, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+    stray = ("One run in 2 spends about 80s longer on checkout, and that run's "
+             "log shows the fetch stalling.")
+    chk = vr.check_opt80_tail_lines(report + "\n" + stray + "\n", findings_path)
+    assert not chk.ok and "One run in 2" in chk.detail, chk
+
+
+def test_opt80_tail_numbers_in_the_findings_own_card_must_rederive(tmp_path: Path):
+    """The finding's own Runner saving card may carry the tail sentence (its
+    evidence prose), but only with numbers a stamped axis re-derives: the card
+    is an allowed PLACE, never an exemption from the numbers."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc(pole_check="other", pole_job="other")
+    report, _rp, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert vr.check_opt80_tail_lines(report, findings_path).ok
+    anchor = "**The largest merge-safe runner-minute saving measured on this repo.**"
+    assert anchor in report
+    good = ("one run in 5 spends about 110s longer on checkout, and that run's log "
+            "shows the fetch stalling")
+    ok = report.replace(anchor, f"{anchor}\n\n{good}.", 1)
+    assert vr.check_opt80_tail_lines(ok, findings_path).ok
+    wrong = report.replace(anchor, f"{anchor}\n\n{good.replace('110s', '999s')}.", 1)
+    chk = vr.check_opt80_tail_lines(wrong, findings_path)
+    assert not chk.ok and "no stamped tail axis re-derives" in chk.detail, chk
+
+
+def test_opt80_tail_axis_refuses_duplicate_fetched_log_ids():
+    """A fetched log is one distinct slow run: listing the same id twice
+    inflates `logs_read` and so moves N."""
+    vr = _load_verify_report()
+    f = _opt80_verifier_finding()
+    f["checkout_stall"]["tail_axis"] = dict(_OPT80_TAIL_AXIS)
+    assert vr._opt80_tail_axis_rederived(f) == []
+    cs = f["checkout_stall"]
+    cs["log_probed_job_ids"] = cs["log_probed_job_ids"] + cs["log_probed_job_ids"][-1:]
+    cs["logs_fetched"] = len(cs["log_probed_job_ids"])
+    probs = vr._opt80_tail_axis_rederived(f)
+    assert any("not distinct" in p for p in probs), probs
+
+
+def test_opt80_tail_axis_refuses_a_logs_fetched_count_that_disagrees_alone():
+    """`logs_fetched` must equal the fetched-log ids, checked on its own: the
+    ids, proofs and axis numbers all still agree here."""
+    vr = _load_verify_report()
+    f = _opt80_verifier_finding()
+    f["checkout_stall"]["tail_axis"] = dict(_OPT80_TAIL_AXIS)
+    assert vr._opt80_tail_axis_rederived(f) == []
+    f["checkout_stall"]["logs_fetched"] = 3
+    probs = vr._opt80_tail_axis_rederived(f)
+    assert any(p.startswith("logs_fetched 3 != the 2") for p in probs), probs
+
+
+def test_opt80_tail_axis_refuses_its_own_on_critical_path_tampered_alone():
+    """The axis carries its own `on_critical_path`; a False there is refused
+    even when the finding's stamp still says True."""
+    vr = _load_verify_report()
+    f = _opt80_verifier_finding()
+    f["checkout_stall"]["tail_axis"] = dict(_OPT80_TAIL_AXIS, on_critical_path=False)
+    assert f["checkout_stall"]["on_critical_path"] is True
+    probs = vr._opt80_tail_axis_rederived(f)
+    assert any("on_critical_path" in p for p in probs), probs
+
+
+def test_opt80_merge_gating_basis_label_rederives():
+    """`basis` says whether the job IS the required job or is needed by it;
+    a job that is the required job labelled `needed_by_required` is refused."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc()
+    f = doc["findings"][0]
+    assert vr._vr_opt80_merge_gating_problems(f, doc) == []
+    f["checkout_stall"]["tail_axis"]["merge_gating"] = dict(
+        _OPT80_TAIL_AXIS["merge_gating"], basis="needed_by_required")
+    probs = vr._vr_opt80_merge_gating_problems(f, doc)
+    assert any("basis" in p for p in probs), probs
+
+
+def test_opt80_pole_is_own_reads_the_mapped_job_of_its_own_workflow_only():
+    """A workflow NAME can itself hold ` / ` (`CI / main`), so the fallback
+    prefix strip of `CI / main / build` gives `main / build`, not `build`. The
+    stamped pole entry is what resolves it - and only an entry of the SAME
+    workflow file: another file's entry for the same check name never maps."""
+    vr = _load_verify_report()
+    f = {"workflow_file": ".github/workflows/ci.yml", "affected_jobs": ["build"]}
+    check = "CI / main / build"
+
+    def data(wf):
+        return {"pr_critical_path": {"poles": [
+            {"check": check, "job": "build", "workflow_file": wf}]}}
+
+    assert vr._vr_opt80_pole_is_own(f, "ci.yml", check, data(".github/workflows/ci.yml"))
+    assert not vr._vr_opt80_pole_is_own(f, "ci.yml", check, {})
+    assert not vr._vr_opt80_pole_is_own(
+        f, "ci.yml", check, data(".github/workflows/other.yml"))
+
+
+def _opt80_node(name, matrix=False, reusable=False):
+    return {"name": name, "needs": [], "matrix": matrix, "reusable": reusable}
+
+
+# (required check, YAML key, job-graph node, this workflow's name prefixes, names it?)
+_OPT80_CHECK_NAMES_JOB_CASES = [
+    ("build", "build", _opt80_node("build"), {"CI"}, True),
+    # Only THIS workflow's own name prefix is stripped.
+    ("CI / build", "build", _opt80_node("build"), {"CI"}, True),
+    ("Other / build", "build", _opt80_node("build"), {"CI"}, False),
+    ("CI / build", "build", _opt80_node("build"), set(), False),
+    # The YAML key names the job even when its display name differs.
+    ("build", "build", _opt80_node("Build & Test"), {"CI"}, True),
+    ("Build & Test", "build", _opt80_node("Build & Test"), {"CI"}, True),
+    ("Build & Lint", "build", _opt80_node("Build & Test"), {"CI"}, False),
+    # A `${{ ... }}` template is a wildcard.
+    ("test (ubuntu)", "test", _opt80_node("test (${{ matrix.os }})", matrix=True),
+     {"CI"}, True),
+    ("lint (ubuntu)", "test", _opt80_node("test (${{ matrix.os }})", matrix=True),
+     {"CI"}, False),
+    # A matrix job's check carries an appended ` (<leg>)`; a plain job's does not.
+    ("test (ubuntu, 3.12)", "test", _opt80_node("test", matrix=True), {"CI"}, True),
+    ("CI / test (ubuntu)", "test", _opt80_node("test", matrix=True), {"CI"}, True),
+    ("test (ubuntu)", "test", _opt80_node("test"), {"CI"}, False),
+    # A reusable caller's children are `<caller> / <child>`.
+    ("call / build", "call", _opt80_node("call", reusable=True), {"CI"}, True),
+    ("CI / call / build", "call", _opt80_node("call", reusable=True), {"CI"}, True),
+    ("call / build", "call", _opt80_node("call"), {"CI"}, False),
+    # Whitespace runs are one space on both sides.
+    ("Build and  Test", "build", _opt80_node("Build  and\n Test"), {"CI"}, True),
+]
+
+
+def test_opt80_check_names_job_copies_agree_on_every_branch():
+    """The verifier re-derives merge gating with its OWN copy of the
+    collector's literal check-name predicate. Fed the same inputs, both copies
+    give the same answer on every branch - this workflow's prefix only, the
+    YAML key, a template wildcard, a matrix leg, a reusable child, whitespace -
+    and each branch has a case that only it decides."""
+    vr = _load_verify_report()
+    sys.path.insert(0, str(_SKILL_DIR / "scripts"))
+    import collect_runs as cr  # noqa: E402
+
+    for check, key, node, prefixes, want in _OPT80_CHECK_NAMES_JOB_CASES:
+        got_cr = cr._opt80_check_names_job(check, key, dict(node), set(prefixes))
+        got_vr = vr._vr_opt80_check_names_job(check, key, dict(node), set(prefixes))
+        assert (got_cr, got_vr) == (want, want), (check, key, node, prefixes)
+    # The prefix set: the workflow's own `name:`, else its path or basename.
+    path = ".github/workflows/ci.yml"
+    for names, want in (({path: "CI"}, {"CI"}), ({}, {path, "ci.yml"})):
+        assert cr._opt80_workflow_prefixes(path, names) == want, names
+        assert vr._vr_opt80_workflow_prefixes(path, names) == want, names
+
+
+def test_opt80_merge_gating_refuses_a_required_check_that_is_not_the_required_job():
+    """`required_check` must BE `required_job`'s check-run: a required `bench`
+    stamped as the evidence for job `build` is refused."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc()
+    f = doc["findings"][0]
+    assert vr._vr_opt80_merge_gating_problems(f, doc) == []
+    doc["required_checks"] = list(doc["required_checks"]) + ["bench"]
+    f["checkout_stall"]["tail_axis"]["merge_gating"] = dict(
+        _OPT80_TAIL_AXIS["merge_gating"], required_check="bench")
+    probs = vr._vr_opt80_merge_gating_problems(f, doc)
+    assert any("is not job 'build'" in p for p in probs), probs
+
+
+def test_opt80_merge_gating_refuses_evidence_naming_a_different_job():
+    """The evidence's `job_key` must be the finding's own job: gating evidence
+    for `build` does not put a stall on `bench` on the merge wait."""
+    vr = _load_verify_report()
+    doc = _opt80_tail_doc()
+    f = doc["findings"][0]
+    assert vr._vr_opt80_merge_gating_problems(f, doc) == []
+    f["checkout_stall"]["job"] = "bench"
+    probs = vr._vr_opt80_merge_gating_problems(f, doc)
+    assert any("is not the finding's job 'bench'" in p for p in probs), probs
+
+
+def test_opt80_log_probe_outcomes_each_gate_names_its_own_fault():
+    """Each guard on `log_probe_outcomes` refuses its own fault by name: a
+    missing list, a list that is not exactly the fetched logs, and an outcome
+    that is neither proven, clean nor unreadable. A later guard catching the
+    same tamper under another reason is not this guard holding."""
+    vr = _load_verify_report()
+    f = _opt80_verifier_finding()
+    f["checkout_stall"]["tail_axis"] = dict(_OPT80_TAIL_AXIS)
+    assert vr._opt80_tail_axis_rederived(f) == []
+
+    def probs(mutate):
+        g = copy.deepcopy(f)
+        mutate(g["checkout_stall"])
+        return vr._opt80_tail_axis_rederived(g)
+
+    got = probs(lambda cs: cs.update(log_probe_outcomes="proven"))
+    assert any("log_probe_outcomes is missing" in p for p in got), got
+    got = probs(lambda cs: cs["log_probe_outcomes"][0].update(job_id=8001))
+    assert any("do not name exactly the log_probed_job_ids" in p for p in got), got
+    got = probs(lambda cs: cs["log_probe_outcomes"][0].update(outcome="looked_fine"))
+    assert any("neither proven, clean nor unreadable" in p for p in got), got
+
+
 def test_tier2_accepts_a_checkout_stall_on_the_rendered_long_pole(tmp_path: Path):
     """The pole rule is a PROXY for "the credited work is not on the merge gate".
     `checkout_tail_excess` carries the thing the proxy stands in for: mean - p50
@@ -9223,10 +10786,112 @@ def test_tier2_accepts_a_checkout_stall_on_the_rendered_long_pole(tmp_path: Path
     pattern's most valuable case to satisfy an inference a measurement replaced."""
     vr = _load_verify_report()
     doc = _opt80_pole_doc()
+    doc["per_workflow_timing"] = _opt80_pwt("build")
     report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
     assert "Long pole" in report and "build" in report, report[:400]
     chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
     assert chk.ok and not chk.skipped, chk
+
+
+def test_tier2_accepts_a_whole_workflow_consolidation_on_the_rendered_long_pole(
+        tmp_path: Path):
+    """The pole rule is a PROXY for "the credited work is not on the merge
+    gate". An OPT77 group that is the whole workflow contains EVERY job the
+    workflow declares, so on a small repository its tallest member is very
+    often the rendered pole — and the proxy would reject a finding whose
+    wall-clock neutrality the arm below re-derives from measurement: the
+    collapsed job must not outlast the slowest member, pole or not. Exempted
+    on OPT80's argument, and on that argument only."""
+    vr = _load_verify_report()
+    doc = _opt80_pole_doc()
+    f = doc["findings"][0]
+    f["pattern"] = "OPT77"
+    f.pop("checkout_stall", None)
+    f["affected_jobs"] = ["build"]
+    f["tier2_neutrality"] = {"proof": "below_cluster_floor", "margin_s": 0.0}
+    f["setup_consolidation"] = {"group_is_the_whole_workflow": True}
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert "Long pole" in report and "build" in report, report[:400]
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert "Long pole" not in str(chk.detail), chk
+    # …and the exemption is the whole-workflow shape, not OPT77 in general: a
+    # group measured against a job OUTSIDE it has no such re-derivation of the
+    # pole, so the proxy still applies.
+    f["setup_consolidation"] = {"group_is_the_whole_workflow": False}
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert not chk.ok and "Long pole" in str(chk.detail), chk
+
+
+def test_tier2_rejects_a_below_long_pole_cache_on_a_rendered_secondary_pole(
+        tmp_path: Path):
+    """The pole rule is a PROXY for "the credited work is not on the merge
+    gate", and for OPT79's `below_long_pole` it is the proxy that catches the
+    case the margin cannot: a job in a `needs:` chain with the long pole. The
+    margin compares single-job p50s, but a chained job's merge wait is the
+    chain's SUM, so shrinking it does cut the merge wait. On this skill's own
+    e2e corpus that job (`chained.yml`'s `verify`, which needs `prep`) is
+    rendered as a Long pole. So the token buys NO exemption: a below-long-pole
+    finding on a rendered pole fails, like any other Tier-2 proof."""
+    vr = _load_verify_report()
+    doc = _opt80_pole_doc()
+    f = doc["findings"][0]
+    f["pattern"] = "OPT79"
+    f.pop("checkout_stall", None)
+    f["affected_jobs"] = ["build"]
+    f["tier2_neutrality"] = {"proof": "below_long_pole", "margin_s": 10.0}
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert "Long pole" in report and "build" in report, report[:400]
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert not chk.ok and "Long pole" in str(chk.detail), chk
+    # ...and the below-the-floor token on a rendered pole fails the same way.
+    f["tier2_neutrality"] = {"proof": "below_cluster_floor", "margin_s": 10.0}
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert not chk.ok and "Long pole" in str(chk.detail), chk
+
+
+def test_tier2_below_long_pole_on_an_unchained_secondary_pole_skips_the_pole_proxy(
+        tmp_path: Path):
+    """A drilled SECONDARY pole (rendered as Long pole N, but not the workflow's
+    slowest job) that `workflow_job_graph` proves is in no `needs:` chain with
+    the long pole is exactly the job the collector credits `below_long_pole`:
+    the arm re-derives what the proxy stands in for, so the proxy must not red
+    it. With the chain present (on a pull-request workflow) it still fails. And
+    the proxy compares poles per WORKFLOW: a same-named job in another workflow
+    is not the rendered pole."""
+    vr = _load_verify_report()
+    doc = _opt80_pole_doc()
+    f = doc["findings"][0]
+    f["pattern"] = "OPT79"
+    f.pop("checkout_stall", None)
+    f["affected_jobs"] = ["build"]
+    f["tier2_neutrality"] = {"proof": "below_long_pole", "margin_s": 10.0}
+    wf = str(f["workflow_file"])
+    doc.setdefault("per_workflow_timing", {}).setdefault(wf, {})["long_pole_job"] = "test"
+    doc["workflow_job_graph"] = {wf: {"build": {"name": "build", "needs": []},
+                                      "test": {"name": "test", "needs": []}}}
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    assert "Long pole" in report and "build" in report, report[:400]
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert "also rendered as a Long pole" not in str(chk.detail), chk
+    # chained to the long pole on a pull-request workflow: the proxy still fails
+    doc["workflow_job_graph"][wf]["test"]["needs"] = ["build"]
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert not chk.ok and "also rendered as a Long pole" in str(chk.detail), chk
+    # no graph: the relation is unproved, so the proxy applies
+    doc.pop("workflow_job_graph")
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert not chk.ok and "also rendered as a Long pole" in str(chk.detail), chk
+    # a same-named job in ANOTHER workflow is not the rendered pole
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    other = copy.deepcopy(doc)
+    other["findings"][0]["workflow_file"] = ".github/workflows/nightly.yml"
+    findings_path.write_text(json.dumps(other, indent=2) + "\n", encoding="utf-8")
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert "also rendered as a Long pole" not in str(chk.detail), chk
 
 
 def test_tier2_still_rejects_a_non_checkout_stall_finding_on_the_rendered_long_pole(
@@ -9264,14 +10929,24 @@ def test_checkout_tail_excess_token_is_refused_from_a_non_opt80_pattern(
 def test_tier2_rederives_on_critical_path_against_the_rendered_poles(tmp_path: Path):
     """`on_critical_path` is what the evidence's "this workflow's slowest job"
     sentence is rendered from, and it is the exact fact the exemption turns the
-    blanket check off for. It was a bare assertion."""
+    blanket check off for. It was a bare assertion. A True claim on a job that
+    is no rendered pole fails; a False claim on a rendered pole does not (the
+    collector's flag means "this workflow's slowest job", and a drilled pole is
+    often not that job)."""
     vr = _load_verify_report()
+    doc = _opt80_pole_doc()
+    doc["pr_critical_path"]["poles"][0].update(check="deploy", job="deploy")
+    doc["pr_critical_path"]["critical_path_check"] = "deploy"
+    doc["pr_critical_path"]["checks"][0]["name"] = "deploy"
+    report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
+    chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
+    assert not chk.ok, chk
+    assert "on_critical_path=True but the job is not rendered" in str(chk.detail), chk
     doc = _opt80_pole_doc()
     doc["findings"][0]["checkout_stall"]["on_critical_path"] = False
     report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
     chk = vr.check_tier2_neutrality_derived(report, findings_path, report_path)
-    assert not chk.ok, chk
-    assert "on_critical_path" in str(chk.detail), chk
+    assert chk.ok, chk
 
 
 def test_tier2_still_rejects_a_non_zero_wall_clock_on_that_same_finding(tmp_path: Path):
@@ -9301,12 +10976,48 @@ def test_held_back_verifier_rederives_escaped_job_names(tmp_path):
     vr = _load_verify_report()
     rows = [{"workflow_file": "ci.yml", "job": "a|b `x`\nc", "gate": "no_monthly_volume"}]
     path = _withheld_doc(tmp_path, rows)
-    cell = ("1 candidate cache(s) held back (a\\|b 'x' c): the job's monthly run "
+    cell = ("1 candidate cache(s) held back (a\\|b \\`x\\` c): the job's monthly run "
             "count was unknown, so its saving could not be sized.")
     report = ("## 🗄️ Data sources\n\n| Source | Coverage | Feeds |\n"
-              f"| cache hit/miss verdicts | {cell} | x |\n")
+              f"| cache hit/miss verdicts | {cell} | " + _CACHE_FEEDS + " |\n")
     chk = vr.check_coverage_disclosed(report, path)
     assert chk.ok, chk
+
+
+def test_held_back_verifier_rederives_every_hostile_name_both_ways(tmp_path):
+    """The two escapers are pinned byte-identical to each other, which is one
+    implementation checked twice: dropping a character from BOTH tuples in
+    lockstep left this file's suite green for ten of the eleven it covered,
+    because nothing here drove a hostile name through the public check.
+
+    So, per name: the correctly-escaped cell must PASS `check_coverage_disclosed`,
+    and the RAW unescaped cell must FAIL it. The second half is what makes a
+    dropped escape visible — if the character is not escaped, the two cells are
+    the same string and the pair cannot both hold."""
+    import blocking_path as bp
+    vr = _load_verify_report()
+    # The list, enumerated. Pinned HERE as well as renderer-to-verifier,
+    # because the two tuples are pinned to each OTHER: dropping a character
+    # from both in lockstep kept them equal and left everything green.
+    assert bp._WITHHELD_CELL_ESCAPES == (
+        "\\", "|", "[", "]", "(", ")", "_", "<", ">", "`", "*", "&", "~")
+    for ch in bp._WITHHELD_CELL_ESCAPES:
+        assert bp._withheld_cell_text(f"a{ch}b") == f"a\\{ch}b", ch
+    head = "## 🗄️ Data sources\n\n| Source | Coverage | Used for |\n"
+    tail = ("the job's monthly run count was unknown, so its saving could not "
+            "be sized.")
+    for name in _HOSTILE_JOB_NAMES:
+        rows = [{"workflow_file": "ci.yml", "job": name,
+                 "gate": "no_monthly_volume"}]
+        path = _withheld_doc(tmp_path, rows)
+        escaped = vr._vr_withheld_cell_text(name)
+        row = (head + f"| cache hit/miss verdicts | 1 candidate cache(s) held "
+               f"back ({{}}): {tail} | " + _CACHE_FEEDS + " |\n")
+        assert vr.check_coverage_disclosed(row.format(escaped), path).ok, name
+        raw = re.sub(r"\s+", " ", name).strip()
+        if raw == escaped:
+            continue   # nothing in this name needs escaping
+        assert not vr.check_coverage_disclosed(row.format(raw), path).ok, name
 
 
 def test_held_back_verifier_rederives_the_five_job_cap_and_shared_names(tmp_path):
@@ -9323,7 +11034,7 @@ def test_held_back_verifier_rederives_the_five_job_cap_and_shared_names(tmp_path
 
     def cell(jobs):
         return (head + f"| cache hit/miss verdicts | 7 candidate cache(s) held "
-                f"back ({jobs}): {tail} | x |\n")
+                f"back ({jobs}): {tail} | " + _CACHE_FEEDS + " |\n")
     honest = "a, b, c, ci.yml / build, d, and 2 more"
     assert vr.check_coverage_disclosed(cell(honest), path).ok
     for wrong in ("a, b, c, ci.yml / build, and 3 more",
@@ -9373,14 +11084,88 @@ _WITHHELD_77_80_CASES = (
 )
 
 
+_CACHE_FEEDS = "Why a candidate cache produced no finding and no uncredited line"
+_CHECKOUT_FEEDS = "Why a checkout with a slow tail produced no finding"
+# Repo-controlled job names that are hostile to a markdown table cell, one per
+# character the escaper covers plus the shapes that combine them. Shared by the
+# byte-equality coupling test and the end-to-end round trip below.
+_HOSTILE_JOB_NAMES = (
+    "a|b", "a\\|b", "a\\b", "[click](http://example.test)",
+    "snake_case_name", "a`b`c", "*em*", "tab\there",
+    "line\nbreak", "  padded  ", "()[]_|\\",
+    "job (linux) [3.11]", "a**b**c", "x|y|z", "\\\\",
+    "<details>", "<https://example.test>", "A&B", "A&amp;B", "~~gone~~",
+)
+_FEEDS_BY_KEY = {
+    "opt77_withheld_candidates":
+        "Why a group of small jobs sharing one setup produced no finding",
+    "opt79_withheld_candidates": _CACHE_FEEDS,
+    "opt80_withheld_candidates": _CHECKOUT_FEEDS,
+    "opt81_withheld_candidates":
+        "Why a job that ran on more than one runner label, or a long pole "
+        "whose step timings could not be read, produced no runner-class finding",
+    "opt82_withheld_candidates":
+        "Why a slow lint job with type-aware ESLint produced no finding",
+    "opt83_withheld_candidates":
+        "Why a long pole whose compute steps run one after another produced "
+        "no parallel-steps finding",
+    "opt84_withheld_candidates":
+        "Why a slow step on a long pole that may run a tool with a native "
+        "drop-in produced no tool-swap finding",
+    "parallel_steps_withheld_candidates":
+        "Why a lever priced from step times on a job that runs steps side by "
+        "side claims no saving",
+}
+
+
+def test_opt81_held_back_row_the_renderer_writes_passes_the_verifier(tmp_path):
+    """OPT81's held-back row through the shared registry: the renderer's own
+    row satisfies the self-check, and dropping it or swapping in the gate
+    name reddens it."""
+    import json as _json
+    import blocking_path as bp
+    vr = _load_verify_report()
+    rows = [{"workflow_file": ".github/workflows/ci.yml", "job": "bench",
+             "gate": "step_lists_differ", "half": "A1"}]
+    doc = {bp._OPT81_WITHHELD_DOC_KEY: rows}
+    path = tmp_path / "f.json"
+    path.write_text(_json.dumps(doc), encoding="utf-8")
+    line = bp._withheld_candidates_line(doc, bp._OPT81_WITHHELD_DOC_KEY,
+                                        "candidate job(s)")
+    head = "## 🗄️ Data sources\n\n| Source | Coverage | Used for |\n"
+    feeds = _FEEDS_BY_KEY["opt81_withheld_candidates"]
+    good = head + f"| runner class: held back | {line} | {feeds} |\n"
+    assert vr.check_coverage_disclosed(good, path).ok
+    assert not vr.check_coverage_disclosed(head, path).ok
+    coded = good.replace(vr._VR_OPT81_WITHHOLD_PHRASES["step_lists_differ"],
+                         "step_lists_differ")
+    assert not vr.check_coverage_disclosed(coded, path).ok
+
+
+def test_opt81_check_skips_cleanly_with_no_findings_and_fails_an_orphan_card(tmp_path):
+    import json as _json
+    vr = _load_verify_report()
+    path = tmp_path / "f.json"
+    path.write_text(_json.dumps({"findings": []}), encoding="utf-8")
+    assert vr.check_opt81_runner_comparison_rederived("# r\n", path).ok
+    orphan = '# r\n\n<a id="opt81-f1"></a>\n\ncard\n'
+    chk = vr.check_opt81_runner_comparison_rederived(orphan, path)
+    assert not chk.ok and "no OPT81 finding" in chk.detail, chk
+
+
 def _withheld_phrase(vr, key, gate):
     table = (vr._VR_OPT77_WITHHOLD_PHRASES if key.startswith("opt77")
              else vr._VR_OPT80_WITHHOLD_PHRASES)
     return table[gate]
 
 
-def _withheld_cell(vr, key, noun, n, jobs, gate):
-    return f"{n} {noun} held back ({jobs}): {_withheld_phrase(vr, key, gate)}."
+def _withheld_cell(vr, key, noun, n, jobs, gate, multi=True):
+    """The expected Coverage cell. `multi` mirrors the renderer's rule: the
+    commonest gate's reason is hedged whenever a second gate also held
+    candidates back, because the count and the job list cover every row while
+    the reason covers only some of them."""
+    lead = vr._VR_WITHHELD_MODAL_LEAD if multi else ""
+    return f"{n} {noun} held back ({jobs}): {lead}{_withheld_phrase(vr, key, gate)}."
 
 
 def test_withheld_setup_and_checkout_candidates_must_be_disclosed(tmp_path):
@@ -9390,7 +11175,7 @@ def test_withheld_setup_and_checkout_candidates_must_be_disclosed(tmp_path):
         path = _withheld_77_80_doc(tmp_path, key, rows)
         chk = vr.check_coverage_disclosed(silent, path)
         assert not chk.ok and "held back" in chk.detail, (key, chk)
-        row = f"| {label} | {{}} | Why a candidate produced no finding |\n"
+        row = f"| {label} | {{}} | {_FEEDS_BY_KEY[key]} |\n"
         honest = silent + row.format(_withheld_cell(vr, key, noun, 3, jobs, top))
         chk = vr.check_coverage_disclosed(honest, path)
         assert chk.ok, (key, chk)
@@ -9486,17 +11271,74 @@ def test_withheld_gate_without_a_phrase_fails_the_self_check_closed(tmp_path):
                     and "no plain-English phrase" in chk.detail), (key, chk)
 
 
+def test_held_back_row_must_carry_the_used_for_cell_the_pattern_registered(tmp_path):
+    """The "Used for" column was pinned renderer-to-verifier and read by
+    neither: rewriting it in lockstep on both sides survived, because this
+    file bound the field and never compared it to the report. It is the column
+    that tells a reader what the row is about."""
+    vr = _load_verify_report()
+    silent = "## 🗄️ Data sources\n\n| Source | Coverage | Used for |\n"
+    feeds_by_key = {r.doc_key: r.feeds for r in vr._VR_WITHHELD_ROWS}
+    assert feeds_by_key == _FEEDS_BY_KEY
+    for key, label, noun, rows, jobs, top, _other in _WITHHELD_77_80_CASES:
+        path = _withheld_77_80_doc(tmp_path, key, rows)
+        cell = _withheld_cell(vr, key, noun, 3, jobs, top)
+        good = vr.check_coverage_disclosed(
+            silent + f"| {label} | {cell} | {feeds_by_key[key]} |\n", path)
+        assert good.ok, (key, good)
+        bad = vr.check_coverage_disclosed(
+            silent + f"| {label} | {cell} | Why a thing happened |\n", path)
+        assert not bad.ok and "used for" in bad.detail, (key, bad)
+
+
 def test_withhold_phrase_tables_match_the_renderer_and_the_collector():
     """The verifier carries its own copy (it is an independent re-derivation);
-    a drift between the copies is the thing this pins."""
+    a drift between the copies is the thing this pins.
+
+    Pinned by WALKING the registry, never by hand-written per-pattern lines: a
+    fourth pattern that registers a doc key gets its phrase table compared on
+    the day it is added, instead of contributing a key nobody checks the
+    contents of."""
     import blocking_path as bp
     vr = _load_verify_report()
-    assert vr._VR_OPT77_WITHHOLD_PHRASES == bp._OPT77_WITHHOLD_PHRASES
-    assert vr._VR_OPT80_WITHHOLD_PHRASES == bp._OPT80_WITHHOLD_PHRASES
-    # one registry, all three patterns: same keys, same labels, same nouns
-    assert ([r[:3] for r in vr._VR_WITHHELD_ROWS]
-            == [r[:3] for r in bp._WITHHELD_ROWS])
-    assert set(vr._VR_WITHHELD_PHRASES_BY_KEY) == set(bp._WITHHELD_PHRASES_BY_KEY)
+    # Every field of every row, including the "Used for" cell. Sliced to three,
+    # that cell could be rewritten with the whole suite staying green.
+    assert list(vr._VR_WITHHELD_ROWS) == list(bp._WITHHELD_ROWS)
+    # The shapes are a typed set on both registries (`Literal`), and every
+    # registered row's shape is one of them: a fourth spelling cannot be
+    # registered and dispatched on as some other shape.
+    import typing
+    shapes = set(typing.get_args(typing.get_type_hints(bp.WithheldRow)["entry_shape"]))
+    assert shapes == {"job", "group", "step"}, shapes
+    assert set(typing.get_args(
+        typing.get_type_hints(vr._VrWithheldRow)["entry_shape"])) == shapes
+    for row in bp._WITHHELD_ROWS:
+        assert row.feeds.strip(), f"{row.doc_key} registers an empty 'Used for' cell"
+        assert row.entry_shape in shapes, row
+    # the shape maps both twins dispatch on are derived from the registry, so a
+    # pattern cannot be registered with one shape and rendered with another
+    assert (bp._WITHHELD_SHAPE_BY_KEY == vr._VR_WITHHELD_SHAPE_BY_KEY
+            == {r.doc_key: r.entry_shape for r in bp._WITHHELD_ROWS})
+    # Same registered patterns, and — for each — the same gate→phrase table
+    # CONTENTS, not merely the same key.
+    assert (set(vr._VR_WITHHELD_PHRASES_BY_KEY)
+            == set(bp._WITHHELD_PHRASES_BY_KEY)
+            == {r.doc_key for r in bp._WITHHELD_ROWS})
+    for key, table in bp._WITHHELD_PHRASES_BY_KEY.items():
+        assert vr._VR_WITHHELD_PHRASES_BY_KEY[key] == table, key
+    # The two shared constants the line's shape depends on…
+    assert vr._VR_WITHHELD_JOBS_SHOWN == bp._WITHHELD_JOBS_SHOWN
+    assert vr._VR_WITHHELD_MODAL_LEAD == bp._WITHHELD_MODAL_LEAD
+    assert vr._VR_WITHHELD_TIED_LEAD == bp._WITHHELD_TIED_LEAD
+    assert vr._VR_WITHHELD_CELL_ESCAPES == bp._WITHHELD_CELL_ESCAPES
+    # `\` must be escaped BEFORE `|`, or `a\|b` becomes an escaped backslash
+    # plus a live cell separator and the row silently grows a column.
+    escapes = list(bp._WITHHELD_CELL_ESCAPES)
+    assert escapes[0] == "\\" and "|" in escapes[1:]
+    # …and the two escapers, which must agree on every byte, not just in spirit.
+    for hostile in _HOSTILE_JOB_NAMES:
+        assert vr._vr_withheld_cell_text(hostile) == bp._withheld_cell_text(hostile), (
+            hostile)
 
 
 def test_withheld_setup_and_checkout_lists_that_are_malformed_fail(tmp_path):
@@ -9524,8 +11366,11 @@ def test_withheld_setup_and_checkout_tie_goes_to_the_alphabetically_first_gate(t
     rows = [{"workflow_file": "ci.yml", "job": "a", "gate": _G80_A},
             {"workflow_file": "ci.yml", "job": "b", "gate": _G80_B}]
     path = _withheld_77_80_doc(tmp_path, "opt80_withheld_candidates", rows)
-    row = "| checkout stall: held back | {} | x |\n"
-    cell = "2 candidate checkout(s) held back (a, b): {}."
+    row = "| checkout stall: held back | {} | " + _CHECKOUT_FEEDS + " |\n"
+    # Two gates, one candidate each: an exact tie, which has no commonest
+    # reason to report, so it is hedged as a tie rather than as a majority.
+    cell = ("2 candidate checkout(s) held back (a, b): "
+            + vr._VR_WITHHELD_TIED_LEAD + "{}.")
     assert vr.check_coverage_disclosed(
         silent + row.format(cell.format(vr._VR_OPT80_WITHHOLD_PHRASES[_G80_B])), path).ok
     assert not vr.check_coverage_disclosed(
@@ -9563,3 +11408,741 @@ def test_withheld_setup_and_checkout_rows_fail_on_an_unreadable_findings_file(tm
     p.write_text("{not json", encoding="utf-8")
     chk = vr._withheld_disclosure_violation("## 🗄️ Data sources\n", p)
     assert chk[0] and "unreadable" in chk[0], chk
+
+
+def test_opt82_held_back_lint_job_must_be_disclosed_and_rederived(tmp_path):
+    """OPT82 (type-aware lint) joins the shared held-back registry: a slow lint
+    job whose ESLint config could not be decided must reach the Data sources
+    table, re-derived in full, or "could not tell" reads as clean."""
+    vr = _load_verify_report()
+    key = "opt82_withheld_candidates"
+    gate = "type_aware_setting_unresolvable"
+    path = tmp_path / "findings.json"
+    path.write_text(json.dumps({key: [
+        {"workflow_file": ".github/workflows/lint.yml", "job": "eslint",
+         "gate": gate}]}), encoding="utf-8")
+    silent = "## 🗄️ Data sources\n\n| Source | Coverage | Used for |\n"
+    chk = vr.check_coverage_disclosed(silent, path)
+    assert not chk.ok and "held back" in chk.detail, chk
+    feeds = "Why a slow lint job with type-aware ESLint produced no finding"
+    cell = (f"1 candidate lint job(s) held back (eslint): "
+            f"{vr._VR_OPT82_WITHHOLD_PHRASES[gate]}.")
+    honest = silent + f"| type-aware lint: held back | {cell} | {feeds} |\n"
+    assert vr.check_coverage_disclosed(honest, path).ok
+    # the raw gate code is never a reason
+    coded = silent + (f"| type-aware lint: held back | 1 candidate lint job(s) held "
+                      f"back (eslint): {gate}. | {feeds} |\n")
+    assert not vr.check_coverage_disclosed(coded, path).ok
+
+
+def test_opt82_check_is_registered_and_skips_cleanly_without_findings():
+    vr = _load_verify_report()
+    names = {c.name for c in vr.run_checks("# x\n", None, None, skill_repo=None)}
+    assert ("type-aware lint findings are uncredited, name their rules and carry "
+            "the ledger") in names
+    bp = _load_blocking_path()
+    assert vr._VR_OPT82_LEDGER_SENTENCE == bp._OPT82_LEDGER_SENTENCE
+    assert vr._VR_OPT82_WITHHOLD_PHRASES == bp._OPT82_WITHHOLD_PHRASES
+
+
+# ---- parallel steps: the Data sources row the scan's stamp requires ----
+
+_PARALLEL_STAMP = {"groups": 2, "steps_in_groups": 5, "control_steps": 1,
+                   "malformed_groups": 1, "malformed_files": [".github/workflows/ci.yml"],
+                   "malformed_jobs": [{"path": ".github/workflows/ci.yml", "job": "build",
+                                       "count": 1}]}
+
+
+def test_parallel_steps_row_is_rendered_and_required(tmp_path):
+    """The scan stamps `parallel_steps` only when the repo uses the syntax. The
+    Data sources table then carries a "Parallel steps" row, and the verifier
+    fails a report that drops it or under-states a malformed group."""
+    vr = _load_verify_report()
+    bp = _load_blocking_path()
+    doc = {"parallel_steps": dict(_PARALLEL_STAMP), "data_sources": {}}
+    footer = "\n".join(bp._data_sources_footer(doc, "o/r"))
+    row = next(ln for ln in footer.splitlines() if ln.startswith("| Parallel steps |"))
+    assert "5 step(s) inside `parallel:` groups read (2 `parallel:` group(s) seen)" in row
+    assert "**1 malformed `parallel:` group(s) not read**" in row
+    assert "`.github/workflows/ci.yml`" in row
+    fp = tmp_path / "findings.json"
+    fp.write_text(json.dumps(doc), encoding="utf-8")
+    assert vr._parallel_steps_violation(footer, fp)[0] is None
+    without = "\n".join(ln for ln in footer.splitlines()
+                        if not ln.startswith("| Parallel steps |"))
+    assert "no Parallel steps row" in (vr._parallel_steps_violation(without, fp)[0] or "")
+    hidden = footer.replace("**1 malformed `parallel:` group(s) not read**", "")
+    assert vr._parallel_steps_violation(hidden, fp)[0], "a hidden malformed group must fail"
+
+
+def test_parallel_steps_violation_is_wired_into_coverage_and_needs_control_clause(tmp_path):
+    """Guard integrity: dropping the row must fail the PUBLIC check (not only the
+    helper), and a row that hides the control-step clause must fail too."""
+    vr = _load_verify_report()
+    bp = _load_blocking_path()
+    doc = {"parallel_steps": dict(_PARALLEL_STAMP), "data_sources": {}}
+    footer = "\n".join(bp._data_sources_footer(doc, "o/r"))
+    fp = tmp_path / "findings.json"
+    fp.write_text(json.dumps(doc), encoding="utf-8")
+    report = "## 🗄️ Data sources\n" + footer
+    without = "\n".join(ln for ln in report.splitlines()
+                        if not ln.startswith("| Parallel steps |"))
+    chk = vr.check_coverage_disclosed(without, fp)
+    assert not chk.ok and "Parallel steps" in chk.detail, chk
+    clause = "1 `wait`/`wait-all`/`cancel` control step(s)"
+    assert clause in footer, footer
+    assert vr._parallel_steps_violation(footer.replace(clause, ""), fp)[0]
+
+
+def test_quiet_repo_with_parallel_steps_still_renders_the_required_row(tmp_path):
+    """Valid `parallel:` groups, no findings, no measured jobs: the scan stamps
+    `parallel_steps`, and the verifier requires its Data sources row. The
+    static-only body did not count that disclosure, returned "", and `render`
+    fell back to the one-line no-timing note with no footer, so the report
+    failed its own verifier."""
+    vr = _load_verify_report()
+    bp = _load_blocking_path()
+    doc = {"repo": "o/r", "findings": [], "data_sources": {},
+           "pr_critical_path": {"poles": []},
+           "parallel_steps": {"groups": 1, "steps_in_groups": 2, "control_steps": 1,
+                              "malformed_groups": 0, "malformed_files": [],
+                              "malformed_jobs": []}}
+    fp = tmp_path / "findings.json"
+    fp.write_text(json.dumps(doc), encoding="utf-8")
+    md = bp.render(doc, {}, {}, {}, "2026-10-09")
+    assert "| Parallel steps |" in md, md
+    chk = vr.check_coverage_disclosed(md, fp)
+    assert chk.ok, chk
+    # control: the same quiet repo WITHOUT the stamp keeps the one-line note
+    bare = {k: v for k, v in doc.items() if k != "parallel_steps"}
+    assert "| Parallel steps |" not in bp.render(bare, {}, {}, {}, "2026-10-09")
+
+
+def test_no_parallel_steps_row_without_the_stamp(tmp_path):
+    vr = _load_verify_report()
+    bp = _load_blocking_path()
+    footer = "\n".join(bp._data_sources_footer({"data_sources": {}}, "o/r"))
+    assert "| Parallel steps |" not in footer
+    fp = tmp_path / "findings.json"
+    fp.write_text(json.dumps({"data_sources": {}}), encoding="utf-8")
+    assert vr._parallel_steps_violation(footer, fp) == (None, "")
+
+
+
+def test_opt83_check_is_registered_and_mirrors_the_renderer():
+    """The OPT83 check runs in the verifier's check list, and its copies of the
+    renderer's card strings and held-back phrases are the renderer's own."""
+    import inspect as _inspect
+    vr = _load_verify_report()
+    bp = _load_blocking_path()
+    assert "check_opt83_parallel_steps(report, findings_path)," in _inspect.getsource(vr)
+    assert vr._VR_OPT83_WITHHOLD_PHRASES == bp._OPT83_WITHHOLD_PHRASES
+    assert vr._VR_OPT83_SIZING_LABEL == bp._OPT83_SIZING_LABEL
+    assert vr._VR_OPT83_RAIL == bp._OPT83_RAIL
+    assert vr._VR_OPT83_RUNNER_CAVEAT == bp._OPT83_RUNNER_CAVEAT
+
+
+_FULL_STAMP = {"groups": 4, "steps_in_groups": 2, "control_steps": 1,
+               "background_steps": 1,
+               "malformed_groups": 1, "malformed_reasons": ["contains_itself"],
+               "malformed_files": [".github/workflows/a.yml"],
+               "malformed_jobs": [{"path": ".github/workflows/a.yml", "job": "x",
+                                   "count": 1, "reasons": ["contains_itself"]}],
+               "invalid_groups": 1, "invalid_files": [".github/workflows/b.yml"],
+               "invalid_jobs": [{"path": ".github/workflows/b.yml", "job": "y", "count": 1}],
+               "jobs_with_groups": [{"path": ".github/workflows/a.yml", "job": "x"}],
+               "jobs_with_background": [], "sequential_jobs": []}
+
+
+def _row_and_path(tmp_path, stamp):
+    bp = _load_blocking_path()
+    doc = {"parallel_steps": dict(stamp), "data_sources": {}}
+    footer = "\n".join(bp._data_sources_footer(doc, "o/r"))
+    fp = tmp_path / "findings.json"
+    fp.write_text(json.dumps(doc), encoding="utf-8")
+    return footer, fp
+
+
+def test_parallel_steps_row_is_compared_whole_not_by_substring(tmp_path):
+    """S10: "12 step(s)" contains "2 step(s)", so a substring check passed a
+    wrong count. The whole row is re-derived; a changed count, a dropped
+    malformed file or kind, or a dropped invalid group each fail."""
+    vr = _load_verify_report()
+    footer, fp = _row_and_path(tmp_path, _FULL_STAMP)
+    assert vr._parallel_steps_violation(footer, fp)[0] is None, footer
+    for old, new in (("| 2 step(s)", "| 12 step(s)"),
+                     (" in `.github/workflows/a.yml`", ""),
+                     ("the list contains itself", "the value is not a list of steps"),
+                     (" · **1 invalid `parallel:` group(s)**", " · ")):
+        assert old in footer, old
+        bad = footer.replace(old, new)
+        assert vr._parallel_steps_violation(bad, fp)[0], (old, new)
+
+
+def test_a_parallel_steps_row_with_no_stamp_fails(tmp_path):
+    vr = _load_verify_report()
+    footer, _fp = _row_and_path(tmp_path, _FULL_STAMP)
+    bare = tmp_path / "bare.json"
+    bare.write_text(json.dumps({"data_sources": {}}), encoding="utf-8")
+    assert "no `parallel_steps` stamp" in (vr._parallel_steps_violation(footer, bare)[0] or "")
+
+
+def test_a_pole_the_stamp_names_as_overlapping_must_not_read_as_sequential(tmp_path):
+    vr = _load_verify_report()
+    footer, fp = _row_and_path(tmp_path, _FULL_STAMP)
+    pole = ("## 🟠 Long pole 1: `a.yml` ▸ `x` - 4m 15s\n\n"
+            "Level 2 - inside that one job, its steps run **one after another** ...\n")
+    assert "one after another" in (vr._parallel_steps_violation(pole + footer, fp)[0] or "")
+    other = pole.replace("▸ `x`", "▸ `z`")
+    assert vr._parallel_steps_violation(other + footer, fp)[0] is None
+    # a check-run label carrying its workflow's name is the same job
+    named = pole.replace("▸ `x`", "▸ `CI / x`")
+    assert "one after another" in (vr._parallel_steps_violation(named + footer, fp)[0] or "")
+
+
+def test_parallel_steps_row_twin_matches_the_walker(tmp_path):
+    vr = _load_verify_report()
+    sys.path.insert(0, str(_SCRIPTS))
+    import workflow_steps as ws
+    assert vr._VR_MALFORMED_KINDS == ws.MALFORMED_KINDS
+    many = dict(_FULL_STAMP, malformed_files=[f"w{i}.yml" for i in range(5)],
+                malformed_reasons=["not_a_list", "too_many_steps"])
+    for stamp in (_FULL_STAMP, many, _PARALLEL_STAMP,
+                  {"groups": 0, "steps_in_groups": 0, "background_steps": 2}):
+        assert vr._vr_parallel_steps_cell(stamp) == ws.parallel_steps_disclosure(stamp)
+
+
+# The "Used for" cell names what the repo actually uses: a repo with
+# `background: true` steps and no `parallel:` group must not read as though the
+# detectors walked groups it does not have.
+_GROUPS_FEEDS = ("Static detectors read each step inside a `parallel:` group "
+                 "as its own step")
+_BACKGROUND_FEEDS = ("Static detectors read `background: true` steps, which run "
+                     "beside the steps after them, as ordinary steps")
+_BOTH_FEEDS = ("Static detectors read each step inside a `parallel:` group as its "
+               "own step; `background: true` steps, which run beside the steps "
+               "after them, are read as ordinary steps")
+_BACKGROUND_ONLY_STAMP = {"groups": 0, "steps_in_groups": 0, "background_steps": 3,
+                          "control_steps": 1}
+
+
+@pytest.mark.parametrize("stamp,feeds", [
+    (_BACKGROUND_ONLY_STAMP, _BACKGROUND_FEEDS),
+    (_PARALLEL_STAMP, _GROUPS_FEEDS),
+    (_FULL_STAMP, _BOTH_FEEDS),
+])
+def test_parallel_steps_used_for_names_what_was_read(tmp_path, stamp, feeds):
+    vr = _load_verify_report()
+    footer, fp = _row_and_path(tmp_path, stamp)
+    row = next(ln for ln in footer.splitlines() if ln.startswith("| Parallel steps |"))
+    assert row.endswith(f"| {feeds} |"), row
+    assert vr._parallel_steps_violation(footer, fp)[0] is None, footer
+    # the verifier compares the whole row: another stamp's Used-for text fails
+    for other in {_GROUPS_FEEDS, _BACKGROUND_FEEDS, _BOTH_FEEDS} - {feeds}:
+        bad = footer.replace(f"| {feeds} |", f"| {other} |")
+        assert vr._parallel_steps_violation(bad, fp)[0], other
+
+
+def test_parallel_steps_used_for_twin_matches_the_walker():
+    vr = _load_verify_report()
+    sys.path.insert(0, str(_SCRIPTS))
+    import workflow_steps as ws
+    for stamp in (_FULL_STAMP, _PARALLEL_STAMP, _BACKGROUND_ONLY_STAMP,
+                  {"groups": 0, "steps_in_groups": 0, "control_steps": 2},
+                  {"groups": 1, "steps_in_groups": 0, "malformed_groups": 1}):
+        assert vr._vr_parallel_steps_feeds(stamp) == ws.parallel_steps_used_for(stamp)
+
+
+# --------------------------------------------------------------------------- #
+# Step durations stay inside their job (curl/curl, run 38018162993): a skipped
+# step carries `started_at: 0001-01-01T00:00:00Z`, and reading it naively cited a
+# ~63.9-billion-second `test-linter` step in a HIGH OPT73 finding.
+# --------------------------------------------------------------------------- #
+
+_STEP_CITE = "no finding cites a step longer than its job's measured window"
+_STEP_STAMP = "no stamped step decomposition outlasts its job"
+_SENTINEL_S = 63927167070.0
+_LINUX = ".github/workflows/linux.yml"
+
+
+def _step_window_doc(*findings: dict, **extra) -> dict:
+    doc = {"pr_critical_path": {},
+           "per_workflow_timing": {_LINUX: {
+               "job_p50": {"CM clang-tidy": 277.0, "CM openssl torture 2": 277.0},
+               "job_max": {"CM clang-tidy": 290.0, "CM openssl torture 2": 290.0},
+               "job_bimodal": {}}},
+           "findings": list(findings)}
+    doc.update(extra)
+    return doc
+
+
+def _opt73(step_s: float, job_s: float | None = None, job: str = "CM clang-tidy",
+           table_step_s: float | None = None) -> dict:
+    job_s = job_s if job_s is not None else step_s + 200.0
+    tstep = table_step_s if table_step_s is not None else step_s
+    return {"id": "f148", "pattern": "OPT73", "workflow_file": _LINUX,
+            "affected_jobs": [job],
+            "measured_evidence": {
+                "summary": "...",
+                "table": {"headers": ["Cluster job", "Job p50", "`test-linter` p50",
+                                      "Share of job"],
+                          "rows": [[f"`{job}`", f"{job_s:.0f}s", f"{tstep:.0f}s", "33%"]]},
+                "waterfall": {"job": job, "job_p50_s": job_s, "shared_step": "test-linter",
+                              "steps": [{"step": "test-linter", "category": "test",
+                                         "p50_s": step_s, "shared": True},
+                                        {"step": "build", "category": "build",
+                                         "p50_s": 121.0, "shared": False}]}}}
+
+
+def test_step_cited_beyond_its_job_window_fails(tmp_path: Path):
+    rep = _good()
+    # FAIL: the curl shape, a year-1 sentinel step cited in the waterfall + table.
+    assert _tag_for(rep, _STEP_CITE, tmp_path,
+                    findings=_step_window_doc(_opt73(_SENTINEL_S))) == "FAIL"
+    # FAIL: an ordinary-looking step that still outlasts the job's longest sampled run.
+    assert _tag_for(rep, _STEP_CITE, tmp_path,
+                    findings=_step_window_doc(_opt73(400.0, job_s=500.0))) == "FAIL"
+    # FAIL: only the evidence table carries the bogus figure.
+    assert _tag_for(rep, _STEP_CITE, tmp_path, findings=_step_window_doc(
+        _opt73(60.0, job_s=250.0, table_step_s=_SENTINEL_S))) == "FAIL"
+    # FAIL: a job with no measured window still cannot cite a step longer than
+    # any GitHub job may run.
+    assert _tag_for(rep, _STEP_CITE, tmp_path, findings=_step_window_doc(
+        _opt73(_SENTINEL_S, job="unmeasured job"))) == "FAIL"
+    # PASS: in-window figures.
+    assert _tag_for(rep, _STEP_CITE, tmp_path,
+                    findings=_step_window_doc(_opt73(60.0, job_s=250.0))) == "PASS"
+    # PASS: a step longer than the job's 277s p50 but inside its 290s longest sampled
+    # run (a step that runs only on some runs has its p50 over those runs alone).
+    assert _tag_for(rep, _STEP_CITE, tmp_path, findings=_step_window_doc(
+        _opt73(285.0, job_s=300.0))) == "PASS"
+    # A structural decomposition's dominant figure: one step is bounded by the job's
+    # window, a `+ N more <cat> steps` category aggregate (a sum of step medians, as on
+    # pallets/flask `PyPy`) only by the absolute job limit.
+    def decomp(dom: str, p50: float) -> dict:
+        return {"id": "f7", "pattern": "OPT75", "workflow_file": _LINUX,
+                "affected_jobs": ["CM clang-tidy"],
+                "decomposition": {"dominant_step": dom, "dominant_p50_s": p50}}
+    assert _tag_for(rep, _STEP_CITE, tmp_path, findings=_step_window_doc(
+        decomp("run tests", 300.0))) == "FAIL"
+    assert _tag_for(rep, _STEP_CITE, tmp_path, findings=_step_window_doc(
+        decomp("run tests + 1 more test step", 300.0))) == "PASS"
+    assert _tag_for(rep, _STEP_CITE, tmp_path, findings=_step_window_doc(
+        decomp("run tests + 1 more test step", _SENTINEL_S))) == "FAIL"
+    # SKIP: no finding cites a step.
+    assert _tag_for(rep, _STEP_CITE, tmp_path, findings=_step_window_doc(
+        {"id": "f1", "pattern": "OPT12", "workflow_file": _LINUX})) == "SKIP"
+
+
+def test_stamped_decomposition_step_beyond_its_job_fails(tmp_path: Path):
+    rep = _good()
+
+    def pole(step_s: float) -> dict:
+        return {"poles": [{"check": "CM clang-tidy", "workflow_file": _LINUX,
+                           "job": "CM clang-tidy", "p50_s": 277.0,
+                           "steps": [{"step": "test-linter", "category": "test",
+                                      "p50_s": step_s},
+                                     {"step": "build", "category": "build",
+                                      "p50_s": 121.0}]}]}
+
+    assert _tag_for(rep, _STEP_STAMP, tmp_path, findings=_step_window_doc(
+        pr_critical_path=pole(_SENTINEL_S))) == "FAIL"
+    assert _tag_for(rep, _STEP_STAMP, tmp_path, findings=_step_window_doc(
+        pr_critical_path=pole(120.0))) == "PASS"
+
+    # The drilled run's per-step timeline (`data_bundle.logs[].steps_file`).
+    data = tmp_path / "findings.data"
+    data.mkdir()
+
+    def timeline(dur_s: float) -> dict:
+        (data / "t.steps.json").write_text(json.dumps({
+            "job": "CM clang-tidy", "job_dur_s": 209.0,
+            "steps": [{"name": "build", "number": 38, "start_s": 57.0, "dur_s": 121.0},
+                      {"name": "test-linter", "number": 44, "start_s": 0.0,
+                       "dur_s": dur_s}]}), encoding="utf-8")
+        return {"logs_dir": str(data),
+                "logs": [{"job": "CM clang-tidy", "check": "CM clang-tidy",
+                          "workflow_file": _LINUX, "steps_file": "t.steps.json"}]}
+
+    assert _tag_for(rep, _STEP_STAMP, tmp_path, findings=_step_window_doc(
+        data_bundle=timeline(_SENTINEL_S))) == "FAIL"
+    assert _tag_for(rep, _STEP_STAMP, tmp_path, findings=_step_window_doc(
+        data_bundle=timeline(30.0))) == "PASS"
+    assert _tag_for(rep, _STEP_STAMP, tmp_path,
+                    findings=_step_window_doc()) == "SKIP"
+
+
+def test_stamped_step_overrun_inside_the_absolute_bound_fails(tmp_path: Path):
+    """Overruns the 5-day absolute bound alone would let through: a pole step longer
+    than its job's longest sampled run, and a drilled-run timeline step that outlasts,
+    or ends after, that one run."""
+    def pole(step_s: float) -> dict:
+        return {"poles": [{"check": "CM clang-tidy", "workflow_file": _LINUX,
+                           "job": "CM clang-tidy", "p50_s": 277.0,
+                           "steps": [{"step": "test-linter", "category": "test",
+                                      "p50_s": step_s}]}]}
+
+    check = _run_stamp_check(tmp_path, _step_window_doc(pr_critical_path=pole(400.0)))
+    assert not check.ok and not check.skipped, check
+    assert "outlasts the job's longest sampled run (290s)" in check.detail, check
+    check = _run_stamp_check(tmp_path, _step_window_doc(pr_critical_path=pole(290.5)))
+    assert check.ok and not check.skipped, check
+
+    data = tmp_path / "findings.data"
+    data.mkdir()
+
+    def timeline(start_s: float, dur_s: float) -> dict:
+        (data / "t.steps.json").write_text(json.dumps({
+            "job": "CM clang-tidy", "job_dur_s": 209.0,
+            "steps": [{"name": "test-linter", "number": 44, "start_s": start_s,
+                       "dur_s": dur_s}]}), encoding="utf-8")
+        return {"logs_dir": str(data),
+                "logs": [{"job": "CM clang-tidy", "check": "CM clang-tidy",
+                          "workflow_file": _LINUX, "steps_file": "t.steps.json"}]}
+
+    # A step longer than its run.
+    check = _run_stamp_check(tmp_path, _step_window_doc(data_bundle=timeline(0.0, 250.0)))
+    assert not check.ok and not check.skipped, check
+    assert "outlasts the job's longest sampled run (209s)" in check.detail, check
+    # A step that fits inside its run's length but ends after the run did.
+    check = _run_stamp_check(tmp_path, _step_window_doc(data_bundle=timeline(200.0, 30.0)))
+    assert not check.ok and not check.skipped, check
+    assert "it ends at 230s, after the job's 209s run" in check.detail, check
+    check = _run_stamp_check(tmp_path, _step_window_doc(data_bundle=timeline(170.0, 30.0)))
+    assert check.ok and not check.skipped, check
+
+
+def test_step_citation_without_a_stamped_window_passes(tmp_path: Path):
+    """Findings written before `job_max` was stamped carry no per-job window. Their
+    in-range step figures PASS: a missing window is unknown, never a 0s bound."""
+    doc = _step_window_doc(_opt73(60.0, job_s=250.0))
+    del doc["per_workflow_timing"][_LINUX]["job_max"]
+    fp = tmp_path / "findings.json"
+    fp.write_text(json.dumps(doc), encoding="utf-8")
+    check = _load_verify_report().check_step_cited_within_job_window(fp)
+    assert check.ok and not check.skipped, check
+    # A pole step under a missing window is bounded by the absolute job limit only.
+    doc["pr_critical_path"] = {"poles": [{"check": "CM clang-tidy", "workflow_file": _LINUX,
+                                          "job": "CM clang-tidy", "p50_s": 277.0,
+                                          "steps": [{"step": "build", "category": "build",
+                                                     "p50_s": 400.0}]}]}
+    check = _run_stamp_check(tmp_path, doc)
+    assert check.ok and not check.skipped, check
+
+
+def _declared_timeline_doc(logs_dir: str) -> dict:
+    return _step_window_doc(
+        pr_critical_path={"poles": [{"check": "CM clang-tidy", "workflow_file": _LINUX,
+                                     "job": "CM clang-tidy", "p50_s": 277.0,
+                                     "steps": [{"step": "build", "category": "build",
+                                                "p50_s": 121.0}]}]},
+        data_bundle={"logs_dir": logs_dir,
+                     "logs": [{"job": "CM clang-tidy", "check": "CM clang-tidy",
+                               "workflow_file": _LINUX, "run_id": 38018162993,
+                               "steps_file": "t.steps.json"}]})
+
+
+def _run_stamp_check(tmp_path: Path, doc: dict):
+    fp = tmp_path / "findings.json"
+    fp.write_text(json.dumps(doc), encoding="utf-8")
+    return _load_verify_report().check_stamped_decomposition_within_job(fp)
+
+
+def _run_readable_check(tmp_path: Path, doc: dict):
+    fp = tmp_path / "findings.json"
+    fp.write_text(json.dumps(doc), encoding="utf-8")
+    return _load_verify_report().check_declared_timelines_readable(fp)
+
+
+def test_declared_timeline_missing_from_a_present_bundle_fails(tmp_path: Path):
+    """A declared `steps_file` the bundle should hold but does not is a FAIL naming the
+    pole and every path tried, never a silent pass over the poles alone. It is a FAIL
+    of its own check (a bundle-copy problem), not of the figure check."""
+    (tmp_path / "findings.data").mkdir()
+    doc = _declared_timeline_doc(str(tmp_path / "gone"))
+    check = _run_readable_check(tmp_path, doc)
+    assert not check.ok and not check.skipped, check
+    assert "CM clang-tidy" in check.detail and "38018162993" in check.detail
+    assert str(tmp_path / "findings.data" / "t.steps.json") in check.detail
+    assert str(tmp_path / "gone" / "t.steps.json") in check.detail
+    stamp = _run_stamp_check(tmp_path, doc)
+    assert stamp.ok and not stamp.skipped, stamp
+    assert "1 declared timeline(s) could not be read" in stamp.detail, stamp
+
+
+def test_declared_timeline_unreadable_or_wrong_shape_fails(tmp_path: Path):
+    data = tmp_path / "findings.data"
+    data.mkdir()
+    for body in ("{not json", "[1, 2]", '{"job": "x", "steps": 3}'):
+        (data / "t.steps.json").write_text(body, encoding="utf-8")
+        check = _run_readable_check(tmp_path, _declared_timeline_doc(str(data)))
+        assert not check.ok and not check.skipped, (body, check)
+        assert "t.steps.json" in check.detail, (body, check)
+        stamp = _run_stamp_check(tmp_path, _declared_timeline_doc(str(data)))
+        assert stamp.ok, (body, stamp)
+
+
+def test_declared_timelines_readable_passes_and_skips(tmp_path: Path):
+    check = _run_readable_check(tmp_path, _step_window_doc())
+    assert check.ok and check.skipped, check
+    check = _run_readable_check(tmp_path, _declared_timeline_doc("/nonexistent/x.data"))
+    assert check.ok and check.skipped, check
+    assert "bundle is not present" in check.detail, check
+    data = tmp_path / "findings.data"
+    data.mkdir()
+    (data / "t.steps.json").write_text(json.dumps(
+        {"job": "CM clang-tidy", "job_dur_s": 209.0, "steps": []}), encoding="utf-8")
+    check = _run_readable_check(tmp_path, _declared_timeline_doc(str(data)))
+    assert check.ok and not check.skipped, check
+    assert "1 declared timeline(s) read" in check.detail, check
+
+
+def test_declared_timeline_with_no_bundle_still_passes_on_the_pole_figures(tmp_path: Path):
+    """A findings-only artifact (a committed example: `logs_dir` is a temp path from
+    another machine, no `<findings>.data/` sibling) cannot check its timelines, but its
+    pole figures WERE checked: a PASS that says how many timelines went unchecked."""
+    check = _run_stamp_check(tmp_path, _declared_timeline_doc("/nonexistent/x.data"))
+    assert check.ok and not check.skipped, check
+    assert "1 declared timeline(s) not checked (bundle not present" in check.detail, check
+    assert "1 step figure(s) inside their job's longest run" in check.detail, check
+    # A pole that overruns its job still FAILs without the bundle.
+    doc = _declared_timeline_doc("/nonexistent/x.data")
+    doc["pr_critical_path"]["poles"][0]["steps"][0]["p50_s"] = _SENTINEL_S
+    check = _run_stamp_check(tmp_path, doc)
+    assert not check.ok and not check.skipped, check
+    # Nothing at all checked (no pole figures, timelines unreachable): a SKIP.
+    doc = _declared_timeline_doc("/nonexistent/x.data")
+    doc["pr_critical_path"]["poles"][0]["steps"] = []
+    check = _run_stamp_check(tmp_path, doc)
+    assert check.ok and check.skipped, check
+    assert "1 declared timeline(s) not checked" in check.detail, check
+
+
+def test_declared_timelines_read_but_all_empty_say_so(tmp_path: Path):
+    data = tmp_path / "findings.data"
+    data.mkdir()
+    (data / "t.steps.json").write_text(json.dumps(
+        {"job": "CM clang-tidy", "job_dur_s": 209.0, "steps": []}), encoding="utf-8")
+    doc = _declared_timeline_doc(str(data))
+    doc["pr_critical_path"]["poles"][0]["steps"] = []
+    check = _run_stamp_check(tmp_path, doc)
+    assert check.ok and check.skipped, check
+    assert "1 declared timeline(s) read, all empty" in check.detail, check
+
+
+def _timeline_bundle(tmp_path: Path, body: dict) -> dict:
+    data = tmp_path / "findings.data"
+    data.mkdir(exist_ok=True)
+    (data / "t.steps.json").write_text(json.dumps(body), encoding="utf-8")
+    return _declared_timeline_doc(str(data))
+
+
+def test_timeline_with_no_job_duration_fails_naming_it(tmp_path: Path):
+    """A drilled-run timeline with no `job_dur_s` cannot bound its steps by their run.
+    That is a FAIL naming the missing field, never a crash or a silent pass."""
+    for steps in ([{"name": "build", "start_s": 0.0, "dur_s": 121.0}],
+                  [{"name": "late", "start_s": _SENTINEL_S, "dur_s": 10.0}]):
+        doc = _timeline_bundle(tmp_path, {"job": "CM clang-tidy", "steps": steps})
+        check = _run_stamp_check(tmp_path, doc)
+        assert not check.ok and not check.skipped, check
+        assert "`job_dur_s`" in check.detail, check
+
+
+def test_timeline_step_with_a_malformed_duration_fails(tmp_path: Path):
+    for bad in ({"name": "build", "start_s": 0.0},
+                {"name": "build", "start_s": 0.0, "dur_s": "abc"}):
+        doc = _timeline_bundle(tmp_path, {"job": "CM clang-tidy", "job_dur_s": 209.0,
+                                          "steps": [bad]})
+        check = _run_stamp_check(tmp_path, doc)
+        assert not check.ok and not check.skipped, (bad, check)
+        assert "1 malformed timeline step(s)" in check.detail, (bad, check)
+
+
+def test_step_window_pass_details_separate_window_from_ceiling(tmp_path: Path):
+    """A PASS says how many figures were held to a stamped job window and how many only
+    to the 5-day ceiling; "all inside their job's measured window" over figures that had
+    no window was a claim the check never tested."""
+    vr = _load_verify_report()
+    fp = tmp_path / "findings.json"
+    doc = _step_window_doc(_opt73(60.0, job_s=250.0))
+    fp.write_text(json.dumps(doc), encoding="utf-8")
+    check = vr.check_step_cited_within_job_window(fp)
+    assert check.ok and not check.skipped, check
+    assert check.detail.startswith(
+        "3 step figure(s) inside their job's longest run; 0 held only to the 5-day "
+        "ceiling (no stamped job window)"), check.detail
+    del doc["per_workflow_timing"][_LINUX]["job_max"]
+    fp.write_text(json.dumps(doc), encoding="utf-8")
+    check = vr.check_step_cited_within_job_window(fp)
+    assert check.ok and not check.skipped, check
+    assert "0 step figure(s) inside their job's longest run; 3 held only to the 5-day " \
+           "ceiling (no stamped job window)" in check.detail, check.detail
+    assert "all inside" not in check.detail, check.detail
+    doc["pr_critical_path"] = {"poles": [{"check": "CM clang-tidy", "workflow_file": _LINUX,
+                                          "job": "CM clang-tidy", "p50_s": 277.0,
+                                          "steps": [{"step": "build", "category": "build",
+                                                     "p50_s": 121.0}]}]}
+    check = _run_stamp_check(tmp_path, doc)
+    assert check.ok and not check.skipped, check
+    assert "0 step figure(s) inside their job's longest run; 1 held only to the 5-day " \
+           "ceiling (no stamped job window)" in check.detail, check.detail
+
+
+# --- the omitted-steps line on a pole's step list ------------------------------
+
+_OMITTED = "a pole's step list says how many skipped or untimeable steps it leaves out"
+
+
+def _omitted_report(note: str | None) -> str:
+    body = ["## 🔴 Long pole 1: `ci.yml` ▸ `test` - 2m 00s", "", "```text",
+            "Where the job's ~2m 00s goes - every step, slowest first:", ""]
+    if note is not None:
+        body += ["", note]
+    return "\n".join(body + ["```", ""])
+
+
+def _omitted_doc(**counts) -> dict:
+    return {"pr_critical_path": {"poles": [dict(
+        {"check": "test", "job": "test", "workflow_file": ".github/workflows/ci.yml",
+         "p50_s": 120.0}, **counts)]}}
+
+
+def _run_omitted_check(tmp_path: Path, note: str | None, doc: dict):
+    fp = tmp_path / "findings.json"
+    fp.write_text(json.dumps(doc), encoding="utf-8")
+    return _load_verify_report().check_pole_omitted_steps_line(_omitted_report(note), fp)
+
+
+def test_pole_omitted_steps_line_must_match_its_stamp(tmp_path: Path):
+    good = ("(2 declared step(s) skipped on every sampled run and 1 with no usable time "
+            "are not timed here)")
+    doc = _omitted_doc(skipped_steps=2, unmeasured_steps=1)
+    check = _run_omitted_check(tmp_path, good, doc)
+    assert check.ok and not check.skipped, check
+    # Missing line, wrong numbers, a line with no stamp behind it: each FAILs.
+    assert not _run_omitted_check(tmp_path, None, doc).ok
+    assert not _run_omitted_check(tmp_path, good.replace("2 declared", "3 declared"), doc).ok
+    assert not _run_omitted_check(tmp_path, good, _omitted_doc()).ok
+    none = ("No step could be measured: 2 skipped, 1 with no usable time.")
+    doc = _omitted_doc(step_decomposition_reason="no_step_measured_in_sample",
+                       skipped_steps=2, unmeasured_steps=1)
+    assert _run_omitted_check(tmp_path, none, doc).ok
+    assert not _run_omitted_check(tmp_path, good, doc).ok
+    # No pole stamps a count and none renders a line: a SKIP.
+    check = _run_omitted_check(tmp_path, None, _omitted_doc())
+    assert check.ok and check.skipped, check
+
+
+def test_pole_omitted_steps_line_names_steps_timed_in_only_some_runs(tmp_path: Path):
+    """A stamp with `partially_measured_steps` needs its clause in the line; a report
+    that leaves it out FAILs."""
+    doc = _omitted_doc(skipped_steps=2, partially_measured_steps=1)
+    plain = "(2 declared step(s) skipped on every sampled run are not timed here)"
+    full = plain[:-1] + ("; 1 step(s) were timed in some sampled runs and skipped or "
+                         "untimeable in others)")
+    assert _run_omitted_check(tmp_path, full, doc).ok
+    assert not _run_omitted_check(tmp_path, plain, doc).ok
+    only = "(1 step(s) were timed in some sampled runs and skipped or untimeable in others)"
+    assert _run_omitted_check(tmp_path, only, _omitted_doc(partially_measured_steps=1)).ok
+    assert not _run_omitted_check(tmp_path, None, _omitted_doc(partially_measured_steps=1)).ok
+
+
+def test_pole_omitted_steps_line_says_how_many_sections_it_did_not_judge(tmp_path: Path):
+    """Two poles sharing one (workflow, check) key, or an aggregation-gate section,
+    are not judged; the detail says how many, never a silent pass."""
+    doc = _omitted_doc(skipped_steps=2)
+    doc["pr_critical_path"]["poles"].append(dict(doc["pr_critical_path"]["poles"][0]))
+    check = _run_omitted_check(tmp_path, None, doc)
+    assert check.ok and "1 section(s) not judged (shared key / aggregation gate)" \
+        in check.detail, check.detail
+
+
+def test_omitted_steps_line_twin_matches_the_renderer():
+    bp, vr = _load_blocking_path(), _load_verify_report()
+    import itertools
+    for sk, un, tr, pm, reason in itertools.product(
+            (0, 1, 3), (0, 2), (0, 1), (0, 1), (None, "no_step_measured_in_sample")):
+        pole = {"skipped_steps": sk, "unmeasured_steps": un, "trimmed_steps": tr,
+                "partially_measured_steps": pm}
+        if reason:
+            pole["step_decomposition_reason"] = reason
+        assert bp._omitted_steps_note(pole) == vr._vr_omitted_steps_note(pole), pole
+    for junk in ({"skipped_steps": True}, {"skipped_steps": "2"}, {"skipped_steps": -1}):
+        assert bp._omitted_steps_note(junk) == vr._vr_omitted_steps_note(junk), junk
+
+
+def _conditional_step_runs() -> list[list[dict]]:
+    """Ten sampled runs of one job: a 280s `run tests` step runs in two of them and is
+    `skipped` in the other eight, so the job's p50 is 16s while the step's own p50 (over
+    the runs it ran in) is 280s. Two slow runs in ten is below the bimodal split's floor,
+    so no slow-mode window rescues the step."""
+    base = datetime(2026, 10, 1, tzinfo=timezone.utc)
+
+    def ts(day: int, s: int) -> str:
+        return (base + timedelta(days=day, seconds=s)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def job(i: int, runs_tests: bool) -> dict:
+        steps = [{"name": "Set up job", "number": 1, "conclusion": "success",
+                  "started_at": ts(i, 0), "completed_at": ts(i, 2)},
+                 {"name": "Run actions/checkout@v4", "number": 2, "conclusion": "success",
+                  "started_at": ts(i, 2), "completed_at": ts(i, 5)},
+                 {"name": "detect changes", "number": 3, "conclusion": "success",
+                  "started_at": ts(i, 5), "completed_at": ts(i, 15)}]
+        end = 295 if runs_tests else 15
+        steps.append({"name": "run tests", "number": 4,
+                      "conclusion": "success" if runs_tests else "skipped",
+                      "started_at": ts(i, 15), "completed_at": ts(i, end)})
+        steps.append({"name": "Complete job", "number": 5, "conclusion": "success",
+                      "started_at": ts(i, end), "completed_at": ts(i, end + 1)})
+        return {"id": 100 + i, "name": "test", "conclusion": "success",
+                "status": "completed", "labels": ["ubuntu-latest"],
+                "started_at": ts(i, 0), "completed_at": ts(i, end + 1), "steps": steps}
+
+    return [[job(i, i in (3, 7))] for i in range(10)]
+
+
+def test_conditional_step_longer_than_the_job_median_is_not_a_failure(tmp_path: Path):
+    """A step that runs in 2 of 10 sampled runs is longer than the job's all-runs
+    median, and that is a correct report. The bound for one step is the job's LONGEST
+    sampled run (`per_workflow_timing[wf].job_max`), stamped by the same engine pass
+    that measured the step."""
+    cr, vr = _load_collect_runs(), _load_verify_report()
+    runs = _conditional_step_runs()
+    crit = cr._critical_path(runs)
+    decomp = cr._decompose_job_steps([r[0] for r in runs],
+                                     bimodal=crit["job_bimodal"].get("test"))
+    assert crit["job_p50"]["test"] == 16.0 and not crit["job_bimodal"]
+    # The bound the checks read: the job's longest sampled run (the two 296s runs
+    # that ran `run tests`), stamped for every job and never below its p50.
+    assert crit["job_max"]["test"] == 296.0, crit["job_max"]
+    assert set(crit["job_max"]) == set(crit["job_p50"]), crit["job_max"]
+    for job_name, p50 in crit["job_p50"].items():
+        assert crit["job_max"][job_name] >= p50, (job_name, crit["job_max"], p50)
+    assert ("run tests", "test", 280.0) in decomp["steps"]
+    steps = [{"step": n, "category": c, "p50_s": p} for n, c, p in decomp["steps"]]
+    doc = {"per_workflow_timing": {"ci.yml": crit},
+           "pr_critical_path": {"poles": [{"check": "test", "workflow_file": "ci.yml",
+                                           "job": "test", "p50_s": crit["job_p50"]["test"],
+                                           "steps": steps}]},
+           "findings": [{"id": "f1", "pattern": "OPT75", "workflow_file": "ci.yml",
+                         "affected_jobs": ["test"],
+                         "measured_evidence": {"waterfall": {"job": "test", "steps": steps}},
+                         "decomposition": {"dominant_step": "run tests",
+                                           "dominant_p50_s": 280.0}}]}
+    fp = tmp_path / "findings.json"
+    fp.write_text(json.dumps(doc), encoding="utf-8")
+    for check in (vr.check_stamped_decomposition_within_job(fp),
+                  vr.check_step_cited_within_job_window(fp)):
+        assert check.ok and not check.skipped, check
+
+
+def test_curl_skipped_step_sentinel_still_fails():
+    """The pre-fix curl/curl findings (finding f148, OPT73, a skipped `test-linter`
+    step's year-1 `started_at` read as a 63.9-billion-second step) still FAIL: a job
+    with no stamped longest run is bounded by the longest a GitHub Actions job may run."""
+    vr = _load_verify_report()
+    fp = _SKILL_DIR / "tests" / "fixtures" / "curl_skipped_step_sentinel_findings.json"
+    check = vr.check_step_cited_within_job_window(fp)
+    assert not check.ok and not check.skipped, check
+    assert "test-linter" in check.detail
+    assert "longer than any GitHub Actions job may run" in check.detail

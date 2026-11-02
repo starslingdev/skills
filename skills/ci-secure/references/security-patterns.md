@@ -179,7 +179,7 @@ correlation: untrusted-checkout-executes
 **attacker's code** (`actions/checkout` with `ref:` pointing at the PR head —
 `github.event.pull_request.head.sha`, `github.head_ref`,
 `github.event.workflow_run.head_*`), and then **executes in that tree** (a
-`run:` step or a local `./action`). These triggers run in the BASE repo's
+`run:` step or a local `./` or `$/` action). These triggers run in the BASE repo's
 context — write `GITHUB_TOKEN`, repo secrets — so the attacker's code runs
 with your credentials. This is the "pwn request" class: the single most
 exploited GitHub Actions mistake in public incident history.
@@ -193,9 +193,17 @@ credentials.
 **Anti-pattern**: the three-condition chain in ONE job — (1) an
 untrusted-event trigger with elevated context, (2) `actions/checkout` whose
 `ref:`/`repository:` resolves to attacker-controlled head code, (3) any
-subsequent step that executes from the working tree (`run:` or `uses: ./…`).
-Each condition alone can be legitimate; together they hand the runner to the
-fork.
+subsequent step that executes from the working tree (`run:`, `uses: ./…`,
+or `uses: $/…`). Each condition alone can be legitimate; together they hand
+the runner to the fork. A self-repository action (`uses: $/…`, GitHub
+2026-07-30) counts as condition (3) just like a `./` action: its definition
+loads from the commit the workflow runs at, which on `pull_request_target` and
+`workflow_run` is the base repository's, but the action runs in the job's
+working directory, where the fork's tree sits after the checkout, and a
+composite's own `run:` steps execute there. That is the same
+over-approximation the check makes for an inline `run:` step; where the
+definition loads from does not change what it runs on. The finding's
+evidence says so when a `$/` action is the step that executes.
 
 **Detection**: deterministic three-way correlation, per job. Condition (3) is
 a deliberate over-approximation stated honestly: a post-checkout `run:` step
@@ -737,6 +745,8 @@ Where the repo pins the manager in `package.json`'s `packageManager` field, the 
 Verify each flag against the manager you actually run: `--ignore-scripts` is the spelling for npm, pnpm and Yarn Classic; Yarn Berry uses the `enableScripts` setting (`.yarnrc.yml` or `YARN_ENABLE_SCRIPTS`); npm v12+ already defaults to off and re-enables per package through its approval list rather than a flag.
 
 **The honest tradeoff**: some dependencies genuinely build at install time — `node-gyp` native modules, Playwright browser downloads, `husky` — and those builds stop happening. Two ways out, both same-day: re-enable scripts for the specific packages that need them (npm v12's approval entries; pnpm's `onlyBuiltDependencies`), or split the install — run the script-bearing install in a job that carries **no** secrets and no write scope, cache or upload the result, and let the privileged job consume it. Blanket `--ignore-scripts` on a build that needs a native module will fail loudly at the next step, not silently.
+
+**Prevention upstream of the job: an update cooldown.** The cheapest way to keep a hijacked or typosquatted release out of this install is never to propose it while it is fresh — most are reported and pulled within days. Dependabot's `cooldown:` (`default-days`, plus optional per-semver-class days) and Renovate's `minimumReleaseAge` hold a new version back for a set time; Dependabot security updates are not delayed by it. The config hygiene check `sec.deps.update-cooldown` ([security-facts.md](security-facts.md#what-each-fact-asks-exactly)) verifies that every configured update tool waits at least 3 days. It narrows the window this vector depends on; it does not close it, so the fix recipe below still applies to the privileged job.
 
 **Sources**: GitHub, ["Disrupting supply chain attacks on npm and GitHub Actions"](https://github.blog/security/supply-chain-security/disrupting-supply-chain-attacks-on-npm-and-github-actions/) (July 28 2026); npm v12 defaults (GitHub Changelog, June 9 2026; shipped July 8 2026).
 

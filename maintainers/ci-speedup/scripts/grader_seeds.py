@@ -56,8 +56,8 @@ EXCLUDE = "exclude"       # run/harness artifact → never a skill bug
 # The committed, reviewable TRIAGE ALLOWLIST. Keyed by the live `verify_report.Check.name` string
 # (what `run_checks` actually yields) so the classification can be applied at runtime and the
 # "every check is classified" invariant is directly testable; the originating `check_*` function
-# name is in the trailing comment for cross-reference with spec §2-A. 62 AUTO_SEED / 1 EXCLUDE /
-# 2 TRIAGE — a new `verify_report` check makes `test_every_check_is_classified` go red until it's
+# name is in the trailing comment for cross-reference with spec §2-A. 73 AUTO_SEED / 1 EXCLUDE /
+# 3 TRIAGE — a new `verify_report` check makes `test_every_check_is_classified` go red until it's
 # classified here (so no check is ever left undisposed).
 TRIAGE_ALLOWLIST = {
     "primary section present (Long poles)": AUTO_SEED,                                              # check_primary_section_present
@@ -72,6 +72,7 @@ TRIAGE_ALLOWLIST = {
     "report uses ASCII hyphens only (no em/en/figure/bar/minus dash)": AUTO_SEED,                   # check_no_typographic_dashes
     "code fences are balanced (no stray ``` breaking out of a fence)": AUTO_SEED,                   # check_fences_balanced
     "every rendered finding pattern exists in the findings JSON": AUTO_SEED,                        # check_rendered_patterns_exist
+    "Windows setup benchmark pointers match their measured OPT72 card": AUTO_SEED,
     "every data-driven finding carries a measured signal (no unsupported claims)": AUTO_SEED,       # check_data_driven_have_signal
     "report drills every gating pole, each with a hand-off prompt": AUTO_SEED,                      # check_speed_poles_complete
     "aggregation-gate poles tell the upstream story, never an optimize-this prompt": AUTO_SEED,    # check_aggregation_gate_poles_never_prescribe
@@ -93,6 +94,10 @@ TRIAGE_ALLOWLIST = {
     "Bottom-line crowned cluster lever is on the merge-gating spine (not off-spine)": AUTO_SEED,  # check_headline_cluster_lever_on_spine (issue #114)
     "headline leads with the observed wall when the chain sum diverges from the makespan": AUTO_SEED,  # check_headline_wait_is_divergence_correct (issue #115)
     "every file-backed structural lever carries a measured dominant step (no name-inferred OPT75)": AUTO_SEED,  # check_structural_pole_has_measured_step
+    "no finding cites a step longer than its job's measured window": AUTO_SEED,                  # check_step_cited_within_job_window
+    "no stamped step decomposition outlasts its job": AUTO_SEED,                                 # check_stamped_decomposition_within_job
+    "a pole's step list says how many skipped or untimeable steps it leaves out": AUTO_SEED,                  # check_pole_omitted_steps_line
+    "declared drilled-run timelines are readable": TRIAGE,                                        # check_declared_timelines_readable (a bundle-copy / harness fault, not a skill bug)
     "no payload-bearing step is binned as `build` (redundant-work inflation → OPT72 misroute)": AUTO_SEED,  # check_structural_step_category_not_payload_binned_as_build
     "crowned detector leaf agrees with the pole's dominant measured category (no off-category ceiling)": AUTO_SEED,  # check_detector_leaf_agrees_with_dominant_category (issue #16)
     "pole addressable ceiling within the co-occurrence floor": AUTO_SEED,                            # check_pole_ceiling_within_cooccurrence
@@ -112,6 +117,13 @@ TRIAGE_ALLOWLIST = {
     "Tier-2 R-rows carry re-derived wall-clock-neutral certificates": AUTO_SEED,                  # check_tier2_neutrality_derived
     "Tier-2 R-rows use measured sizing basis": AUTO_SEED,                                        # check_tier2_measured_basis
     "uncredited net-negative caches re-derive from their own runs": AUTO_SEED,                   # check_opt79_uncredited_rows_rederived
+    "type-aware lint findings are uncredited, name their rules and carry the ledger": AUTO_SEED,  # check_opt82_type_aware_lint_uncredited
+    "parallel-step findings re-derive from the pole, stay uncredited and pair with their card": AUTO_SEED,  # check_opt83_parallel_steps
+    "tool-swap findings re-derive from the pole, stay uncredited and pair with their card": AUTO_SEED,  # check_opt84_tool_swap
+    "OPT79 findings re-derive by their arm, and pole caches render": AUTO_SEED,                  # check_opt79_findings_rederived
+    "OPT80 tail lines re-derive and pair with their stamped blocks": AUTO_SEED,                  # check_opt80_tail_lines
+    "OPT80 slowest-job sentence pairs with its withheld reason": AUTO_SEED,                      # check_opt80_tail_withheld_reasons
+    "OPT81 runner-class comparisons re-derive and carry the publisher disclosure": AUTO_SEED,  # check_opt81_runner_comparison_rederived
     "Tier-2 section-lead totals match de-overlapped findings": AUTO_SEED,                         # check_tier2_total_deoverlapped
     "no claim or prose cites the closing-down /timing endpoints": AUTO_SEED,                     # check_no_timing_endpoint_citation
     "Tier-2 claims carry the jobs-API derivation-basis field": AUTO_SEED,                        # check_tier2_claims_derivation_basis
@@ -168,6 +180,7 @@ CHECK_CLASS = {
     "report uses ASCII hyphens only (no em/en/figure/bar/minus dash)": "other",           # pure formatting, no semantic root-cause fits
     "code fences are balanced (no stray ``` breaking out of a fence)": "other",           # structural corruption guard, no semantic root-cause fits
     "every rendered finding pattern exists in the findings JSON": "fabricated-or-unsupported-finding",  # rendered claim not backed by findings
+    "Windows setup benchmark pointers match their measured OPT72 card": "fabricated-or-unsupported-finding",
     "every data-driven finding carries a measured signal (no unsupported claims)": "estimated-not-measured",  # exact match
     "report drills every gating pole, each with a hand-off prompt": "missing-second-pole-or-finding",  # a required pole/finding is missing
     "aggregation-gate poles tell the upstream story, never an optimize-this prompt": "prescribed-a-fix",  # an "optimize this step" prompt over a `needs:`-only success sink that runs no work
@@ -189,6 +202,9 @@ CHECK_CLASS = {
     "Bottom-line crowned cluster lever is on the merge-gating spine (not off-spine)": "mis-ranked-lever",  # issue #114: an off-spine cluster (its jobs dropped from the required-scoped spine, but its workflow hosts a required check) crowns the typical-PR headline over the real gating levers — a gating-path ranking error
     "headline leads with the observed wall when the chain sum diverges from the makespan": "mis-ranked-lever",  # issue #115: the chain-sum leads the "typical PR waits" headline while the measured makespan wall is materially bigger (queue gaps) — the wrong measured figure crowns the wait
     "every file-backed structural lever carries a measured dominant step (no name-inferred OPT75)": "estimated-not-measured",  # a lever asserted without a measured step
+    "no finding cites a step longer than its job's measured window": "fabricated-or-unsupported-finding",  # a cited step figure its job's own sampled run times contradict (a skipped step's year-1 start read as a duration)
+    "no stamped step decomposition outlasts its job": "fabricated-or-unsupported-finding",  # a stamped step figure its job's own sampled run times contradict
+    "a pole's step list says how many skipped or untimeable steps it leaves out": "coverage-gap-dead-end",  # declared steps dropped from a pole's step list with no line saying so (an undisclosed gap)
     "no payload-bearing step is binned as `build` (redundant-work inflation → OPT72 misroute)": "mis-ranked-lever",  # a payload step mis-binned as build inflates redundant-ratio and routes the pole to the wrong pattern (OPT72 not OPT75)
     "crowned detector leaf agrees with the pole's dominant measured category (no off-category ceiling)": "fabricated-or-unsupported-finding",  # issue #16: a leaf crowning a MEASURED CAUSE the pole's own dominant-step data contradicts (lint fix on a test-dominant pole)
     "pole addressable ceiling within the co-occurrence floor": "estimated-not-measured",  # an overstated ceiling not grounded in measured co-occurrence
@@ -208,6 +224,13 @@ CHECK_CLASS = {
     "Tier-2 R-rows carry re-derived wall-clock-neutral certificates": "fabricated-or-unsupported-finding",  # a promoted row's proof is not backed by the data
     "Tier-2 R-rows use measured sizing basis": "estimated-not-measured",  # exact match: promoted bill rows must be measured, not modeled
     "uncredited net-negative caches re-derive from their own runs": "fabricated-or-unsupported-finding",  # a numberless cache row whose measurements the data does not support
+    "type-aware lint findings are uncredited, name their rules and carry the ledger": "fabricated-or-unsupported-finding",  # an uncredited lint finding carrying a number, naming no rule, or missing its ledger
+    "parallel-step findings re-derive from the pole, stay uncredited and pair with their card": "fabricated-or-unsupported-finding",  # a parallel-steps finding carrying a number, an un-re-derivable upper bound, or a card that claims more
+    "tool-swap findings re-derive from the pole, stay uncredited and pair with their card": "fabricated-or-unsupported-finding",  # a tool-swap finding carrying a number, a ceiling that is not the step's own p50, or a card that claims more
+    "OPT79 findings re-derive by their arm, and pole caches render": "fabricated-or-unsupported-finding",  # a merge-wait figure the measured excess and headroom do not support
+    "OPT80 tail lines re-derive and pair with their stamped blocks": "fabricated-or-unsupported-finding",  # a tail line whose N or X the per-run checkout rows and stall proofs do not re-derive, or that is misplaced, unpaired, in legacy wording, or on a job the collector's gate would not stamp
+    "OPT80 slowest-job sentence pairs with its withheld reason": "fabricated-or-unsupported-finding",  # a merge-wait claim, or a no-tail-line reason, the stamped facts do not support
+    "OPT81 runner-class comparisons re-derive and carry the publisher disclosure": "fabricated-or-unsupported-finding",  # a runner-class gap the stamped runs do not support, an advisory carrying a number, or a card without the publisher disclosure
     "Tier-2 section-lead totals match de-overlapped findings": "fabricated-or-unsupported-finding",  # rendered totals not backed by findings
     "no claim or prose cites the closing-down /timing endpoints": "fabricated-or-unsupported-finding",  # cites a data source the pipeline does not use
     "Tier-2 claims carry the jobs-API derivation-basis field": "fabricated-or-unsupported-finding",  # a Tier-2 claim without its machine-readable data-source field
@@ -224,6 +247,7 @@ CHECK_CLASS = {
     # TRIAGE — real-when-adjudicated defect shapes.
     "no ci-secure template leakage (security-domain framing in ci-speedup prose)": "unscrubbed-or-disclosure-risk",  # exact match
     "report's skill commit is HEAD or an ancestor of it (provenance)": "tooling-or-environment",  # branch/dirty-tree coupled — an environment issue
+    "declared drilled-run timelines are readable": "tooling-or-environment",  # a bundle copied without its timeline files — a harness issue, not a skill bug
 }
 # The consumer-divergence probe (locus-less, no verify_report Check.name) — a ranking mismatch
 # between the headline gate and the consumer's pole pick.

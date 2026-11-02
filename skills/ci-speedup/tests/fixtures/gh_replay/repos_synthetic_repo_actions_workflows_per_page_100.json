@@ -1,23 +1,59 @@
 {
-  "total_count": 3,
-  "workflows": [
-    {
-      "id": 1001,
-      "name": "CI",
-      "path": ".github/workflows/ci.yml",
-      "state": "active"
-    },
-    {
-      "id": 1002,
-      "name": "Unit matrix",
-      "path": ".github/workflows/build-matrix.yml",
-      "state": "active"
-    },
-    {
-      "id": 1003,
-      "name": "Chained",
-      "path": ".github/workflows/chained.yml",
-      "state": "active"
-    }
-  ]
+ "total_count": 9,
+ "workflows": [
+  {
+   "id": 1001,
+   "name": "CI",
+   "path": ".github/workflows/ci.yml",
+   "state": "active"
+  },
+  {
+   "id": 1002,
+   "name": "Unit matrix",
+   "path": ".github/workflows/build-matrix.yml",
+   "state": "active"
+  },
+  {
+   "id": 1003,
+   "name": "Chained",
+   "path": ".github/workflows/chained.yml",
+   "state": "active"
+  },
+  {
+   "id": 1004,
+   "name": "Checks",
+   "path": ".github/workflows/checks.yml",
+   "state": "active"
+  },
+  {
+   "id": 1005,
+   "name": "Gates",
+   "path": ".github/workflows/gates.yml",
+   "state": "active"
+  },
+  {
+   "id": 1006,
+   "name": "Lint",
+   "path": ".github/workflows/lint.yml",
+   "state": "active"
+  },
+  {
+   "id": 1007,
+   "name": "Bench",
+   "path": ".github/workflows/bench.yml",
+   "state": "active"
+  },
+  {
+   "id": 1008,
+   "name": "Quality",
+   "path": ".github/workflows/quality.yml",
+   "state": "active"
+  },
+  {
+   "id": 1009,
+   "name": "Style",
+   "path": ".github/workflows/style.yml",
+   "state": "active"
+  }
+ ]
 }

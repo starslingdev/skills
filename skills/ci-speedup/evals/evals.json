@@ -1,7 +1,7 @@
 {
   "skill_name": "ci-speedup",
-  "note": "ci-speedup is a live-data skill: the measured findings come from sampling a repo's real GitHub Actions run timings via `gh`, so these end-to-end evals require gh auth + network and target public repos. The committed worked examples under reports/ (better-auth, mastra, langfuse) are the recorded expected outputs, and tests/verify_report.py is their invariant gate. The pytest suite under tests/ (test_scan_detectors.py, test_blocking_path.py, test_structural_findings.py, test_collect_runs_sizing.py, test_committed_reports.py, ...) is the primary offline regression eval; these scenarios cover the user-visible end-to-end behaviour. These scenarios are manual/agent-run reference cases - no automated runner executes them; the pytest suite is the executable regression gate, and the no-skill baseline in `baseline` remains unrecorded.",
-  "baseline": "Model-progress (deprecation) signal — these evals should periodically be run WITHOUT the skill loaded to check whether the base model has caught up (a no-skill baseline that now passes means the skill may be redundant). For ci-speedup this risk is low: the value is capability uplift the model cannot reproduce unaided — deterministic gh run-history sampling, the measured wall-clock critical-path/cluster-floor model, and the 78-pattern detector catalog. Baseline status: NOT yet recorded against a no-skill run; re-check when adopting a new base model.",
+  "note": "ci-speedup is a live-data skill: the measured findings come from sampling a repo's real GitHub Actions run timings via `gh`, so these end-to-end evals require gh auth + network and target public repos. The committed worked examples under reports/ (better-auth, mastra, langfuse) are the recorded expected outputs, and tests/verify_report.py is their invariant gate. The pytest suite under tests/ (test_scan_detectors.py, test_blocking_path.py, test_structural_findings.py, test_collect_runs_sizing.py, test_committed_reports.py, ...) is the primary offline regression eval; these scenarios cover the user-visible end-to-end behaviour. Entries carrying `checks` (6, 10, 11, 12 and 13) run as real agent sessions against an offline replay of the synthetic repo via maintainers/scripts/run_skill_evals.py (see evals/README.md); the rest are manual reference cases, and the no-skill baseline in `baseline` remains unrecorded.",
+  "baseline": "Model-progress (deprecation) signal — these evals should periodically be run WITHOUT the skill loaded to check whether the base model has caught up (a no-skill baseline that now passes means the skill may be redundant). For ci-speedup this risk is low: the value is capability uplift the model cannot reproduce unaided — deterministic gh run-history sampling, the measured wall-clock critical-path/cluster-floor model, and the 91-pattern detector catalog. Baseline status: NOT yet recorded against a no-skill run; re-check when adopting a new base model.",
   "evals": [
     {
       "id": 1,
@@ -83,6 +83,34 @@
         "ci-speedup does not run its scan/collect/render pipeline for a security-posture request.",
         "The agent recognizes this as out of scope and points the user to the ci-secure skill.",
         "No wall-clock optimization report is produced for this prompt."
+      ],
+      "name": "security-ask-routes-to-ci-secure",
+      "fixture": "synthetic",
+      "plugins": [
+        "ci-secure"
+      ],
+      "max_turns": 60,
+      "checks": [
+        {
+          "name": "ci-secure-skill-invoked",
+          "type": "tool_used",
+          "pattern": "^Skill .*\"skill\": \"(?:[\\w-]+:)?ci-secure\"",
+          "min": 1
+        },
+        {
+          "name": "ci-speedup-skill-not-invoked",
+          "type": "tool_used",
+          "pattern": "^Skill .*\"skill\": \"(?:[\\w-]+:)?ci-speedup\"",
+          "min": 0,
+          "max": 0
+        },
+        {
+          "name": "ci-speedup-pipeline-not-run",
+          "type": "tool_used",
+          "pattern": "^Bash .*(?:collect_runs\\.py|ci-speedup/scripts/run\\.py|blocking_path\\.py)",
+          "min": 0,
+          "max": 0
+        }
       ]
     },
     {
@@ -110,6 +138,181 @@
         "The rail is an exception rule, not a blanket ban: a reduction the RCA itself named as the measured finding stays fixable.",
         "A downstream agent handed the prompt refuses a coverage-reducing edit and reports that it stopped, rather than delivering a faster pipeline that checks less.",
         "The rail does not add a second copy of the load-bearing `does NOT prescribe the fix` disclaimer, so verify_report's one-disclaimer-per-prompt invariant still holds."
+      ]
+    },
+    {
+      "id": 9,
+      "prompt": "Audit a pnpm monorepo whose slowest gating check is a 162s lint job; its step \"Run lint and format checks\" takes 52s and runs `pnpm lint`, which package.json resolves to `eslint . && prettier --check .`. Then audit a second repo whose format step already runs `oxfmt --check`.",
+      "expected_output": "On the first repo, the lint pole carries one OPT84 card (a slow step on the long pole runs a tool that has a native drop-in), inside the pole's section. It names the step, its measured 52s p50 (32% of the 162s job), the resolved command through package.json, and both tools: ESLint → oxlint (the card's fit reads `drop-in` only when the config was read in full and shows nothing oxlint lacks; `run both: …` with the stamped reasons when the config has custom local rules, a plugin oxlint does not carry natively or type-aware rules; `see OPT82 first` when OPT82 already reports the step; and risk HIGH on the card whenever it reports the ESLint row, drop-in or run both) and Prettier → oxfmt (`drop-in`, or `run both: …` when a Prettier plugin is declared), each with the target's migration docs and overview docs and the catalog's published range labelled as the catalog's, not the repo's. The only number for the repo is the 52s ceiling, stated as the most the swaps can remove, not a forecast, with a sentence that how it splits between the two tools is unknown until measured. No wall-clock or runner-minute saving is credited, and nothing reaches the headline, Tier 2, Also noticed or any total. On the second repo, OPT84 stays silent on Prettier: the step already runs the target.",
+      "note": "Regression eval for OPT84 (uncredited, routed from the drilled pole, like OPT83). Asserts the card's shape and the uncredited contract, not a specific repo's numbers; the lint pole is a synthetic shape (a live run on mastra is silent, because its packages already run oxlint and its root runs oxfmt), and mastodon's oxfmt format check is the real-repo shape behind the second repo's silence.",
+      "expectations": [
+        "Exactly one OPT84 card renders for the lint pole, in that pole's section, naming both ESLint → oxlint and Prettier → oxfmt.",
+        "The card's only repo-measured durations are the step's 52s p50 and the job's 162s, with the 52s presented as a ceiling, never as a saving; the finding carries `sizing_basis` uncredited and no `wall_clock_p50_s` or `runner_min_saving`.",
+        "Each tool row's fit uses the card's own words (`drop-in`, `run both: …` or `see OPT82 first`), never \"partial fit\" or \"mostly drop-in\".",
+        "The card links each target's own migration docs, says to benchmark both tools on the same commit and runner class before claiming a number, and carries the no-weakening rail (no rule, plugin, file set or check is dropped; dual-run when the target lacks one).",
+        "No OPT84 number is summed into the headline, Tier 2, Also noticed or any total.",
+        "On a repo whose format step already runs `oxfmt --check`, no OPT84 card mentions Prettier."
+      ]
+    },
+    {
+      "id": 10,
+      "name": "full-run-synthetic",
+      "serial": true,
+      "prompt": "Audit the CI of synthetic/repo for speed and cost. It's the git checkout in the current directory, and that's the repo I want audited.",
+      "expected_output": "ci-speedup passes its gh gate, runs the data pass (run.py) against the replayed history of the synthetic repo, renders the report, runs verify_report.py on it and sees every check pass, and closes on the measured result. The report drills `ci.yml` / `CI / test` as long pole 1. Nothing is committed or pushed.",
+      "fixture": "synthetic",
+      "note": "Runnable on the maintainer harness only: the `synthetic` fixture builds the offline e2e test's repository and replays its committed gh corpus, so the report's numbers are fixed.",
+      "expectations": [
+        "The ci-speedup skill is invoked and runs its data pass.",
+        "The report names `ci.yml` / `CI / test` as long pole 1.",
+        "verify_report.py passes on the rendered report.",
+        "The skill did not commit or push."
+      ],
+      "checks": [
+        {
+          "name": "ci-speedup-skill-invoked",
+          "type": "tool_used",
+          "pattern": "^Skill .*\"skill\": \"(?:[\\w-]+:)?ci-speedup\"",
+          "min": 1
+        },
+        {
+          "name": "data-pass-ran",
+          "type": "tool_used",
+          "pattern": "^Bash .*scripts/run\\.py",
+          "min": 1
+        },
+        {
+          "name": "report-drills-ci-test-as-long-pole-1",
+          "type": "files",
+          "pattern": "Long pole 1: `ci\\.yml` ▸ `CI / test`"
+        },
+        {
+          "name": "self-check-passed",
+          "type": "trace",
+          "pattern": "(?m)^✅ all checks passed"
+        },
+        {
+          "name": "nothing-committed-or-pushed",
+          "type": "tool_used",
+          "pattern": "^Bash .*(?:(?<![\\w.-])|(?<=\\\\[nt]))git(?:\\s+-\\S+(?:\\s+[^\\s-]\\S*)?)*\\s+(?:commit|push)(?![\\w-])",
+          "min": 0,
+          "max": 0
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "name": "quality-review-opt81",
+      "tier": "measure",
+      "serial": true,
+      "prompt": "Audit the CI of synthetic/repo for speed and cost. It's the git checkout in the current directory. Then, before I trust the report, run the skill's quality review on one finding only: the OPT81 runner-class comparison for `bench`. Check that card against its catalog entry, including the entry's fix recipe, and tell me any caveat the entry's fix recipe gives that the card's agent prompt leaves out. End your reply with one line `MISSING-FROM-CARD: <the caveat, or none>`.",
+      "expected_output": "The audit runs and renders the report, which carries an OPT81 A1 card for `bench` (ubuntu-latest vs ubuntu-latest-8-cores). The review reads the OPT81 catalog entry and names the caveat its A1 fix recipe carries and the card's prompt does not: runner labels other than the standard ones are often unavailable to fork pull requests, so moving the job to the faster label can leave fork PRs without a runner.",
+      "fixture": "synthetic",
+      "note": "Reading-sensitive and discriminating: the fork caveat exists only inside the OPT81 catalog entry under the skill, so a session that skips the entry lookup fails `names-the-catalog-only-fork-caveat`. Proven by running it once with the entry removed from the mounted copy (see evals/README.md).",
+      "expectations": [
+        "The audit runs and the report is written.",
+        "The agent reads the OPT81 entry of the pattern catalog.",
+        "The final line names the fork pull request caveat from the entry's A1 fix recipe."
+      ],
+      "checks": [
+        {
+          "name": "ci-speedup-skill-invoked",
+          "type": "tool_used",
+          "pattern": "^Skill .*\"skill\": \"(?:[\\w-]+:)?ci-speedup\"",
+          "min": 1
+        },
+        {
+          "name": "data-pass-ran",
+          "type": "tool_used",
+          "pattern": "^Bash .*scripts/run\\.py",
+          "min": 1
+        },
+        {
+          "name": "names-the-catalog-only-fork-caveat",
+          "type": "last_message",
+          "pattern": "(?i)MISSING-FROM-CARD:(?!\\s*none\\b)(?=[^\\n]*fork)(?=[^\\n]*(?:label|runner))(?=[^\\n]*(?:unavailable|not (?:be )?(?:available|offered)|n't (?:be )?(?:available|offered)|(?:n't|can ?not|unable to) (?:use|run|get|pick|select)|no access))"
+        },
+        {
+          "name": "read-some-reference-material",
+          "type": "reading",
+          "field": "reference_bytes",
+          "min": 1
+        },
+        {
+          "name": "read-the-opt81-catalog-entry",
+          "type": "reading",
+          "field": "catalog_entries_read",
+          "pattern": "^OPT81$",
+          "min": 1
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "name": "gap-fill-coverage-lookup",
+      "prompt": "I'm about to write a ci-speedup phase-4a gap-fill for a long pole of our repo, `tests.yml` > `test (3.14)`, which the report rendered with no drill-down. Its dominant step is `Install dependencies` (6m 51s of an 8m 37s job). The relevant part of that step's log:\n\n```\n2026-10-20T09:12:04.1180000Z Collecting numpy==2.1.3\n2026-10-20T09:12:04.9020000Z   Downloading numpy-2.1.3.tar.gz (20.2 MB)\n2026-10-20T09:12:07.3310000Z   Installing build dependencies: started\n2026-10-20T09:12:19.7740000Z Building wheels for collected packages: numpy\n2026-10-20T09:12:19.7750000Z   Building wheel for numpy (pyproject.toml): started\n2026-10-20T09:18:41.2260000Z   Building wheel for numpy (pyproject.toml): finished with status 'done'\n2026-10-20T09:18:41.3010000Z Successfully built numpy\n```\n\nThe 3.12 and 3.13 legs of the same matrix install in under 40s. Before I write the analysis, use the ci-speedup skill to check: does its pattern catalog already describe this cause? Look it up, don't guess. End your reply with one line `CATALOG-PATTERN: OPT<n>` or `CATALOG-PATTERN: none`.",
+      "expected_output": "The agent looks the stack up in the ci-speedup pattern catalog and finds OPT86 (CI compiles a dependency that ships prebuilt): a manual pattern no detector emits, whose heuristic is exactly a `Building wheel for <pkg>` span on one matrix leg. It answers `CATALOG-PATTERN: OPT86`.",
+      "note": "Reading-sensitive: the corpus has no coverage-gap pole, so this asks the coverage question a gap-fill must answer first. OPT86 is a manual pattern (no detector, no script names it beside a log shape), so the id is only found in the catalog. Reading is recorded, not capped: the bound is set from the committed baseline.",
+      "expectations": [
+        "The agent consults the pattern catalog rather than answering from memory.",
+        "The final line names OPT86."
+      ],
+      "max_turns": 40,
+      "checks": [
+        {
+          "name": "ci-speedup-skill-invoked",
+          "type": "tool_used",
+          "pattern": "^Skill .*\"skill\": \"(?:[\\w-]+:)?ci-speedup\"",
+          "min": 1
+        },
+        {
+          "name": "names-opt86",
+          "type": "last_message",
+          "pattern": "CATALOG-PATTERN:\\W*OPT86\\b"
+        },
+        {
+          "name": "read-some-reference-material",
+          "type": "reading",
+          "field": "reference_bytes",
+          "min": 1
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "name": "no-catalog-read-needed",
+      "serial": true,
+      "prompt": "Run a CI speed audit of synthetic/repo (the git checkout in the current directory) and tell me just two things: how long a typical pull request waits for its CI checks, and which check's job is the slowest. Just the numbers, I don't need fixes.",
+      "expected_output": "ci-speedup runs its data pass on the replayed history, renders and verifies the report, and answers with the measured headline: a typical PR waits 3m 40s, and `CI / test` is the slowest single job at a 3m 17s median. Nothing in the question needs the pattern catalog.",
+      "fixture": "synthetic",
+      "note": "Reading-sensitive control: whether the catalog is opened is recorded per run and deliberately NOT asserted; it was zero in every baseline run, so a non-zero value after the split is a regression to look at. Graded on the answer, not the report file: the runner only collects a report at a literal absolute path, and agents often write it under a shell variable.",
+      "expectations": [
+        "The audit runs its data pass.",
+        "The answer states the 3m 40s typical wait and names `CI / test` as the slowest job."
+      ],
+      "checks": [
+        {
+          "name": "ci-speedup-skill-invoked",
+          "type": "tool_used",
+          "pattern": "^Skill .*\"skill\": \"(?:[\\w-]+:)?ci-speedup\"",
+          "min": 1
+        },
+        {
+          "name": "data-pass-ran",
+          "type": "tool_used",
+          "pattern": "^Bash .*scripts/run\\.py",
+          "min": 1
+        },
+        {
+          "name": "states-the-measured-wait",
+          "type": "last_message",
+          "pattern": "3m ?40s"
+        },
+        {
+          "name": "names-the-slowest-job",
+          "type": "last_message",
+          "pattern": "CI / test[^\\n]{0,120}3m ?17s|3m ?17s[^\\n]{0,120}CI / test"
+        }
       ]
     }
   ]

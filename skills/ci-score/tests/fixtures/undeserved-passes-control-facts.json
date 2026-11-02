@@ -1,0 +1,184 @@
+{
+ "better-auth": {
+  "ci.build.change-scoped": {
+   "evidence": "CI builds/tests run unscoped (no --filter=...[base], affected/changed modes, or changed-files step)",
+   "files": [],
+   "state": "fail"
+  },
+  "ci.cache.build-cache": {
+   "evidence": "turbo detected; cache mechanism configured in 5 file(s)",
+   "files": [
+    ".github/workflows/ci.yml",
+    ".github/workflows/demo.yml",
+    ".github/workflows/e2e.yml"
+   ],
+   "state": "pass"
+  },
+  "ci.cache.dependency-cache": {
+   "evidence": "dependency caching configured in 6 workflow/action file(s)",
+   "files": [
+    ".github/workflows/ci.yml",
+    ".github/workflows/demo.yml",
+    ".github/workflows/e2e.yml"
+   ],
+   "state": "pass"
+  },
+  "ci.checkout.shallow-clone": {
+   "evidence": "fetch-depth: 0 on 4 PR-gating workflow(s), e.g. .github/workflows/ci.yml, .github/workflows/demo.yml, .github/workflows/e2e.yml",
+   "files": [
+    ".github/workflows/ci.yml",
+    ".github/workflows/demo.yml",
+    ".github/workflows/e2e.yml"
+   ],
+   "state": "fail"
+  },
+  "ci.hygiene.job-timeouts": {
+   "evidence": "timeout-minutes set in 2 workflow(s)",
+   "files": [
+    ".github/workflows/ci.yml",
+    ".github/workflows/e2e.yml"
+   ],
+   "state": "pass"
+  },
+  "ci.parallel.test-sharding": {
+   "evidence": "shard/matrix strategy on test job(s) in 2 workflow(s)",
+   "files": [
+    ".github/workflows/ci.yml",
+    ".github/workflows/e2e.yml"
+   ],
+   "state": "pass"
+  },
+  "ci.security.pinned-action-shas": {
+   "evidence": "77 of 77 remote action references SHA-pinned (workflow + local composite action files; passes at >=95%)",
+   "files": [],
+   "state": "pass"
+  },
+  "ci.security.scoped-id-token": {
+   "evidence": "id-token: write scoped at job level in 2 workflow(s)",
+   "files": [
+    ".github/workflows/claude.yml",
+    ".github/workflows/release.yml"
+   ],
+   "state": "pass"
+  },
+  "ci.trigger.cancel-superseded": {
+   "evidence": "concurrency + cancel-in-progress on 4 of 10 PR workflow(s)",
+   "files": [
+    ".github/workflows/ci.yml",
+    ".github/workflows/demo.yml",
+    ".github/workflows/e2e.yml"
+   ],
+   "state": "pass"
+  },
+  "ci.trigger.concurrency-groups": {
+   "evidence": "concurrency group declared on 5 of 10 PR workflow(s)",
+   "files": [
+    ".github/workflows/backport.yml",
+    ".github/workflows/ci.yml",
+    ".github/workflows/demo.yml"
+   ],
+   "state": "pass"
+  },
+  "ci.trigger.path-filter": {
+   "evidence": "paths filters on 1 of 10 PR workflow(s)",
+   "files": [
+    ".github/workflows/zizmor.yml"
+   ],
+   "state": "pass"
+  }
+ },
+ "mastra": {
+  "ci.build.change-scoped": {
+   "evidence": "change-scoped build/test mechanisms in 3 file(s)",
+   "files": [
+    ".github/workflows/prebuild.yml",
+    ".github/workflows/secrets.test-workspaces.yml",
+    ".github/workflows/test-suite.yml"
+   ],
+   "state": "pass"
+  },
+  "ci.cache.build-cache": {
+   "evidence": "turbo detected; cache mechanism configured in 11 file(s)",
+   "files": [
+    ".github/workflows/e2e-tests.yml",
+    ".github/workflows/lint.yml",
+    ".github/workflows/mastracode-e2e.yml"
+   ],
+   "state": "pass"
+  },
+  "ci.cache.dependency-cache": {
+   "evidence": "dependency caching configured in 4 workflow/action file(s)",
+   "files": [
+    ".github/workflows/mastracode-e2e.yml",
+    ".github/workflows/npm-publish.yml",
+    ".github/workflows/prebuild.yml"
+   ],
+   "state": "pass"
+  },
+  "ci.checkout.shallow-clone": {
+   "evidence": "9 job(s) in PR-triggered workflow(s) check out full history and are exempt: 9 walk(s) git history, so shallowing the checkout would break the job; no other PR-gating job takes full history",
+   "files": [],
+   "state": "pass"
+  },
+  "ci.hygiene.job-timeouts": {
+   "evidence": "timeout-minutes set in 13 workflow(s)",
+   "files": [
+    ".github/workflows/changed-test-gate-labeler.yml",
+    ".github/workflows/changed-test-gate.yml",
+    ".github/workflows/e2e-docs.yml"
+   ],
+   "state": "pass"
+  },
+  "ci.parallel.test-sharding": {
+   "evidence": "shard/matrix strategy on test job(s) in 6 workflow(s)",
+   "files": [
+    ".github/workflows/e2e-tests.yml",
+    ".github/workflows/secrets.test-workspaces.yml",
+    ".github/workflows/test-combined-stores.yml"
+   ],
+   "state": "pass"
+  },
+  "ci.security.pinned-action-shas": {
+   "evidence": "106 of 125 remote action references SHA-pinned (workflow + local composite action files; passes at >=95%)",
+   "files": [
+    ".github/workflows/renovate.yml",
+    ".github/workflows/trigger-cloud-tests.yml",
+    ".github/workflows/version-packages.yml"
+   ],
+   "state": "fail"
+  },
+  "ci.security.scoped-id-token": {
+   "evidence": "id-token: write scoped at job level in 1 workflow(s)",
+   "files": [
+    ".github/workflows/npm-publish.yml"
+   ],
+   "state": "pass"
+  },
+  "ci.trigger.cancel-superseded": {
+   "evidence": "concurrency + cancel-in-progress on 6 of 8 PR workflow(s)",
+   "files": [
+    ".github/workflows/changed-test-gate.yml",
+    ".github/workflows/e2e-docs.yml",
+    ".github/workflows/lint-docs.yml"
+   ],
+   "state": "pass"
+  },
+  "ci.trigger.concurrency-groups": {
+   "evidence": "concurrency group declared on 6 of 8 PR workflow(s)",
+   "files": [
+    ".github/workflows/changed-test-gate.yml",
+    ".github/workflows/e2e-docs.yml",
+    ".github/workflows/lint-docs.yml"
+   ],
+   "state": "pass"
+  },
+  "ci.trigger.path-filter": {
+   "evidence": "paths filters on 2 of 8 PR workflow(s)",
+   "files": [
+    ".github/workflows/e2e-docs.yml",
+    ".github/workflows/sync_renovate-changesets.yml"
+   ],
+   "state": "pass"
+  }
+ }
+}

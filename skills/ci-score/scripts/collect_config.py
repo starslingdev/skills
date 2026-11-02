@@ -2,14 +2,15 @@
 the CI Score, offline, from a local checkout only.
 
 Flow: verify the target is a git checkout → read + parse
-`.github/workflows/*.yml|yaml` → `_practice_facts(parsed, root)` (which itself
+`.github/workflows/*.yml|yaml` → `_practice_facts(parsed, root, parse_errors)` (which itself
 walks local composite actions and the repo-root build-tool config probes) →
 `compute_ci_score` → write `findings.json` carrying the `ci_score` stamp.
 
 LOCAL-CHECKOUT-ONLY (OD-L2, owner-decided): the scorer's input surface is
-three classes — workflow YAML, `.github/actions/**` composite actions, and
-repo-ROOT build-tool configs. A partial fetch (e.g. workflows-only via an API)
-silently turns failing checks `not_applicable` and INFLATES the grade, so this
+workflow YAML, `.github/actions/**` composite actions plus every local action
+any `uses:` names wherever it lives, the workflow lockfile
+(`.github/workflows/actions.lock`), and repo-ROOT build-tool configs. A
+partial fetch (e.g. workflows-only via an API) silently turns failing checks `not_applicable` and INFLATES the grade, so this
 collector refuses politely outside a full checkout rather than guessing. No
 network, ever: everything is read from the local tree; the offline contract
 cell runs this module with sockets booby-trapped.
@@ -76,6 +77,9 @@ def _load_sibling(mod_name: str, filename: str):
     return mod
 
 
+_workflow_yaml = _load_sibling("ci_score_workflow_yaml", "practice_facts.py")
+
+
 def _git(root: Path, *args: str) -> str | None:
     """One local git plumbing call; None on any failure (git absent, not a
     repo). Local-only — git never touches the network for these."""
@@ -130,7 +134,7 @@ def _provenance(root: Path) -> str | None:
     return f"{sha}-dirty" if dirty else sha
 
 
-def _read_workflows(root: Path) -> tuple[list[tuple[str, dict, str]], list[str], list[str]]:
+def _read_workflows(root: Path, reasons: dict[str, str] | None = None) -> tuple[list[tuple[str, dict, str]], list[str], list[str]]:
     """(parsed, workflow_files, parse_errors). `workflow_files` counts every
     on-disk workflow file (that count drives the no-workflows refusal
     honestly); `parsed` carries only the mapping-shaped docs the facts can
@@ -146,10 +150,12 @@ def _read_workflows(root: Path) -> tuple[list[tuple[str, dict, str]], list[str],
         rel = str(path.relative_to(root))
         try:
             raw = path.read_text(encoding="utf-8", errors="replace")
-            doc = yaml.safe_load(raw)
+            doc = _workflow_yaml._load_strict_yaml(raw, workflow=True)
         except (OSError, yaml.YAMLError) as exc:
             logger.debug("workflow parse failed: %s (%s)", rel, type(exc).__name__)
             errors.append(rel)
+            if reasons is not None and isinstance(exc, _workflow_yaml._DuplicateKeyError):
+                reasons[rel] = str(exc)
             continue
         if isinstance(doc, dict):
             parsed.append((rel, doc, raw))
@@ -221,11 +227,15 @@ def collect(root: Path, spec_path: Path = _DEFAULT_SPEC) -> tuple[dict[str, Any]
         return doc, 2
     doc["commit_sha"] = commit
 
-    parsed, workflow_files, parse_errors = _read_workflows(root)
+    parse_reasons: dict[str, str] = {}
+    parsed, workflow_files, parse_errors = _read_workflows(root, parse_reasons)
     doc["scanned_workflows"] = len(workflow_files)
     doc["workflow_files"] = workflow_files
     if parse_errors:
         doc["data_sources"]["workflow_parse_errors"] = parse_errors
+
+    if parse_reasons:
+        doc["data_sources"]["workflow_parse_error_reasons"] = parse_reasons
 
     if workflow_files and not parsed:
         # Files exist but NONE parsed: every practice fact would be computed
@@ -251,12 +261,56 @@ def collect(root: Path, spec_path: Path = _DEFAULT_SPEC) -> tuple[dict[str, Any]
     pf_mod = _load_sibling("ci_score_practice_facts", "practice_facts.py")
     cs_mod = _load_sibling("ci_score_ci_score", "ci_score.py")
 
-    doc["practice_facts"] = pf_mod._practice_facts(parsed, root)
-    if logger.isEnabledFor(logging.DEBUG):
-        states = {k: v.get("state") for k, v in doc["practice_facts"].items()}
-        logger.debug("practice facts: %s", states)
-
     try:
+        # The step walk runs INSIDE the scoring try: it is bounded (depth cap +
+        # step budget in practice_facts.py), but any RecursionError /
+        # MemoryError it could still raise must become an honest
+        # ci_score_error marker, never a traceback with no output.
+        doc["practice_facts"] = pf_mod._practice_facts(parsed, root, parse_errors, parse_reasons)
+        # Parallel steps (GitHub Actions `parallel:` groups and their wait/cancel
+        # control steps): every check reads the child steps through one walker;
+        # record what it read so the report header can disclose it — including a
+        # `parallel:` that could not be read, or one in a shape GitHub does not
+        # document. Recorded only when the repo has a `parallel:` key, readable
+        # or not: `wait:` / `cancel:` beside `background: true` steps (no group)
+        # changes no read — background steps are ordinary steps — so that
+        # document, like every other, is byte-identical to before.
+        walk = pf_mod._step_walk_stats(parsed, root)
+        if walk["groups"] or walk["malformed_groups"] or walk["invalid_groups"]:
+            doc["data_sources"]["parallel_steps"] = walk
+            logger.debug("parallel steps: %d group(s), %d child step(s), %d control "
+                         "step(s), %d undocumented, %d unreadable, %d non-step "
+                         "entr(ies)", walk["groups"], walk["steps_in_groups"],
+                         walk["control_steps"], walk["invalid_groups"],
+                         walk["malformed_groups"], walk["skipped_children"])
+        # Step lists that are not lists and composite actions that do not
+        # parse read as "no steps"; recorded by name exactly like
+        # workflow_parse_errors, and only when there are any.
+        bad_lists, composite_errors = pf_mod._unreadable_step_sources(parsed, root)
+        if bad_lists:
+            doc["data_sources"]["unreadable_step_lists"] = bad_lists
+        if composite_errors:
+            doc["data_sources"]["composite_parse_errors"] = composite_errors
+        # A setup action's default cache that could not be decided (an
+        # unusable package.json, a SHA pin the v5 and v6 rules disagree on):
+        # recorded the same way, and named in the caching fact's evidence.
+        # A cache switch set by an expression this scan could not resolve
+        # (not credited) is recorded beside them, by file.
+        # (An engine without the shared walk - the "no score can drop" base -
+        # records only the defaults.)
+        walk = getattr(pf_mod, "_cache_walk_inputs", None)
+        if walk is not None:
+            _hits, unresolved, unresolved_exprs = walk(parsed, root)
+        else:
+            unresolved, unresolved_exprs = pf_mod._unresolved_setup_defaults(parsed, root), []
+        if unresolved:
+            doc["data_sources"]["unresolved_setup_defaults"] = unresolved
+        if unresolved_exprs:
+            doc["data_sources"]["unresolved_cache_expressions"] = unresolved_exprs
+        if logger.isEnabledFor(logging.DEBUG):
+            states = {k: v.get("state") for k, v in doc["practice_facts"].items()}
+            logger.debug("practice facts: %s", states)
+
         spec = json.loads(spec_path.read_text(encoding="utf-8"))
         # OD-CS20: a repo whose workflows do NO project build or test (only
         # bots, releases, triage) is refused rather than given an absurd-but-
@@ -267,7 +321,7 @@ def collect(root: Path, spec_path: Path = _DEFAULT_SPEC) -> tuple[dict[str, Any]
         doc["automation_only"] = pf_mod._automation_only(parsed, root)
         logger.debug("automation_only=%s", doc["automation_only"])
         stamp = cs_mod.compute_ci_score(doc, spec)
-    except Exception as exc:  # scoring failure → marker, never a partial stamp
+    except Exception as exc:  # scoring failure (RecursionError, MemoryError included) → marker, never a partial stamp
         doc["data_sources"]["ci_score_error"] = f"{type(exc).__name__}: {exc}"
         logger.debug("scoring failed: %s", doc["data_sources"]["ci_score_error"])
         return doc, 3

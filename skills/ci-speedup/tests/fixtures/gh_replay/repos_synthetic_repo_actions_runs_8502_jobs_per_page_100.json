@@ -1,0 +1,52 @@
+{
+  "total_count": 1,
+  "jobs": [
+    {
+      "id": 8512,
+      "run_id": 8502,
+      "name": "style",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-06-25T11:00:00Z",
+      "completed_at": "2026-06-25T11:01:32Z",
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "html_url": "https://github.com/synthetic/repo/actions/runs/8502/job/8512",
+      "steps": [
+        {
+          "name": "Set up job",
+          "number": 1,
+          "started_at": "2026-06-25T11:00:00Z",
+          "completed_at": "2026-06-25T11:00:01Z",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Checkout",
+          "number": 2,
+          "started_at": "2026-06-25T11:00:01Z",
+          "completed_at": "2026-06-25T11:00:04Z",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run npm ci",
+          "number": 3,
+          "started_at": "2026-06-25T11:00:04Z",
+          "completed_at": "2026-06-25T11:00:40Z",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run lint and format checks",
+          "number": 4,
+          "started_at": "2026-06-25T11:00:40Z",
+          "completed_at": "2026-06-25T11:01:32Z",
+          "status": "completed",
+          "conclusion": "success"
+        }
+      ]
+    }
+  ]
+}

@@ -1,6 +1,48 @@
 {
-  "total_count": 3,
+  "total_count": 6,
   "workflow_runs": [
+    {
+      "id": 7006,
+      "event": "pull_request",
+      "head_sha": "0000000000000000000000000000000000aab3",
+      "head_branch": "chore/chain-3",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-06-25T15:00:00Z",
+      "updated_at": "2026-06-25T15:03:42Z",
+      "run_started_at": "2026-06-25T15:00:00Z",
+      "head_repository": {
+        "full_name": "synthetic/repo"
+      }
+    },
+    {
+      "id": 7005,
+      "event": "pull_request",
+      "head_sha": "0000000000000000000000000000000000aab2",
+      "head_branch": "chore/chain-2",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-06-25T14:00:00Z",
+      "updated_at": "2026-06-25T14:03:42Z",
+      "run_started_at": "2026-06-25T14:00:00Z",
+      "head_repository": {
+        "full_name": "synthetic/repo"
+      }
+    },
+    {
+      "id": 7004,
+      "event": "pull_request",
+      "head_sha": "0000000000000000000000000000000000aaaa",
+      "head_branch": "chore/chain-1",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-06-25T13:00:00Z",
+      "updated_at": "2026-06-25T13:03:42Z",
+      "run_started_at": "2026-06-25T13:00:00Z",
+      "head_repository": {
+        "full_name": "synthetic/repo"
+      }
+    },
     {
       "id": 7003,
       "event": "pull_request",

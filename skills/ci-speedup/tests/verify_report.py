@@ -42,10 +42,12 @@ import importlib.util
 import json
 import math
 import re
+import shlex
 import statistics
 import subprocess
 import sys
 from dataclasses import dataclass
+from typing import Callable, Literal, NamedTuple
 from pathlib import Path
 
 # Bounded exception to "this file never imports the renderer" (see the module
@@ -343,7 +345,8 @@ def check_pole_anchors_resolve(report: str) -> Check:
     an emitted `<a id=…>` anchor - a TOC / headline link that lands nowhere is a silent
     break (e.g. a queue-section pointer whose section didn't render)."""
     name = "every #pole-N / #also-noticed / #pre-start-wait / #runner-minute-reductions reference resolves to an anchor"
-    targets = r"pole-\d+|r-\d+|also-noticed|pre-start-wait|runner-minute-reductions"
+    targets = (r"pole-\d+|r-\d+|also-noticed|pre-start-wait|runner-minute-reductions"
+               r"|checkout-stall-tails|cache-cost-off-poles")
     refs = set(re.findall(rf"\]\(#({targets})\)", report))
     anchors = set(re.findall(rf'<a\s+id="({targets})"', report))
     missing = sorted(refs - anchors)
@@ -756,6 +759,9 @@ _VR_OPT79_WITHHELD_DOC_KEY = "opt79_withheld_candidates"
 # A recorded gate with no phrase FAILS the check: the report may never print a
 # raw gate name, and a fallback here would let it.
 _VR_OPT79_HELD_BACK_REASONS: dict[str, str] = {
+    "job_has_an_unreadable_parallel_group":
+        "some of the job's steps sit in a parallel step group that could not be "
+        "read, so whether a cache feeds an install could not be told",
     "cache_is_saved_by_a_separate_step":
         "the cache is saved by its own separate step, so one restore-and-save "
         "measurement can't cover it",
@@ -776,6 +782,17 @@ _VR_OPT79_HELD_BACK_REASONS: dict[str, str] = {
     "install_step_also_runs_non_install_commands":
         "the install step also runs other commands, so its time is not just "
         "the install",
+    "cache_and_install_run_in_the_same_parallel_group":
+        "the cache and the install run side by side in one parallel step "
+        "group, so the restore does not happen before the install",
+    "cache_restore_runs_in_a_parallel_group_or_background":
+        "the cache restore runs side by side with other steps (in a parallel "
+        "step group or in the background), so restore-then-install is not one "
+        "sequential block and its saving could not be priced",
+    "install_runs_in_a_parallel_group_or_background":
+        "the install runs side by side with other steps (in a parallel step "
+        "group or in the background), so its time does not simply follow the "
+        "cache restore and could not be priced",
     "no_install_step_after_the_cache_step":
         "no dependency install follows the cache, so the cache is not shown to "
         "speed anything up",
@@ -806,8 +823,14 @@ _VR_OPT79_HELD_BACK_REASONS: dict[str, str] = {
         "too many of the sampled runs' logs could not be read to tell how often "
         "the cache hits",
     "population_truncated_by_excluded_runs":
-        "too many of the sampled runs had logs that could not tell a cache hit "
-        "from a miss",
+        "too many sampled runs had to be set aside (unreadable cache line, "
+        "another runner, or step times that did not measure) to compare a hit "
+        "against a miss",
+    "population_truncated_by_unmeasurable_step_times":
+        "too many sampled runs had a cache, install or save step whose time did "
+        "not measure (a placeholder start, a start outside its job, timestamps "
+        "that did not parse, a step that never completed, or an install that "
+        "measured 0 s) to compare a hit against a miss",
     "fewer_than_min_hit_runs_classified":
         "too few sampled runs hit the cache to compare a hit against a miss",
     "fewer_than_min_miss_runs_classified":
@@ -820,6 +843,10 @@ _VR_OPT79_HELD_BACK_REASONS: dict[str, str] = {
     "neutrality_margin_not_positive":
         "the job is about as slow as its workflow's slowest jobs, so removing "
         "the cache could not be shown to leave the pull-request wait unchanged",
+    "needs_chain_with_the_long_pole_unresolved":
+        "the workflow file could not show whether this job waits on, or is "
+        "waited on by, its slowest job, so removing the cache could not be "
+        "shown to leave the pull-request wait unchanged",
 }
 
 
@@ -888,13 +915,72 @@ def _detectors_skipped_violation(report: str,
 # coupling test pins all three equal).
 _VR_OPT77_WITHHELD_DOC_KEY = "opt77_withheld_candidates"
 _VR_OPT80_WITHHELD_DOC_KEY = "opt80_withheld_candidates"
-# (doc key, Data sources row label, counted noun) — as blocking_path renders
-# them. ONE re-derivation serves all three patterns.
+_VR_OPT81_WITHHELD_DOC_KEY = "opt81_withheld_candidates"
+_VR_OPT82_WITHHELD_DOC_KEY = "opt82_withheld_candidates"
+_VR_OPT83_WITHHELD_DOC_KEY = "opt83_withheld_candidates"
+_VR_OPT84_WITHHELD_DOC_KEY = "opt84_withheld_candidates"
+_VR_PARALLEL_STEPS_WITHHELD_DOC_KEY = "parallel_steps_withheld_candidates"
+# (doc key, Data sources row label, counted noun, "Used for" cell) — as
+# blocking_path renders them. ONE re-derivation serves every registered pattern.
+# The fourth field is carried HERE, not just pinned: it is the column that tells
+# the reader what the row is about, and while the verifier held only three
+# fields it could be replaced with arbitrary text and the whole suite stayed
+# green.
+class _VrWithheldRow(NamedTuple):
+    """`blocking_path.WithheldRow`, in this file's own words. `entry_shape`
+    carries whether an entry names one job or a whole group, which both sides
+    used to decide by comparing the key against OPT77's — so a fourth
+    group-shaped pattern would have rendered `(unnamed job)` everywhere and
+    been re-derived the same wrong way here, agreeing and staying green."""
+
+    doc_key: str
+    label: str
+    noun: str
+    feeds: str
+    # The renderer's typed set, copied: "job", "group" or "step" (OPT84).
+    entry_shape: Literal["job", "group", "step"]
+
+
 _VR_WITHHELD_ROWS = (
-    (_VR_OPT79_WITHHELD_DOC_KEY, "cache hit/miss verdicts", "candidate cache(s)"),
-    (_VR_OPT77_WITHHELD_DOC_KEY, "repeated-setup: held back", "candidate job group(s)"),
-    (_VR_OPT80_WITHHELD_DOC_KEY, "checkout stall: held back", "candidate checkout(s)"),
+    _VrWithheldRow(_VR_OPT79_WITHHELD_DOC_KEY, "cache hit/miss verdicts",
+                   "candidate cache(s)",
+                   "Why a candidate cache produced no finding and no uncredited line",
+                   "job"),
+    _VrWithheldRow(_VR_OPT77_WITHHELD_DOC_KEY, "repeated-setup: held back",
+                   "candidate job group(s)",
+                   "Why a group of small jobs sharing one setup produced no finding",
+                   "group"),
+    _VrWithheldRow(_VR_OPT80_WITHHELD_DOC_KEY, "checkout stall: held back",
+                   "candidate checkout(s)",
+                   "Why a checkout with a slow tail produced no finding",
+                   "job"),
+    _VrWithheldRow(_VR_OPT81_WITHHELD_DOC_KEY, "runner class: held back",
+                   "candidate job(s)",
+                   "Why a job that ran on more than one runner label, or a long pole "
+                   "whose step timings could not be read, produced no runner-class "
+                   "finding",
+                   "job"),
+    _VrWithheldRow(_VR_OPT82_WITHHELD_DOC_KEY, "type-aware lint: held back",
+                   "candidate lint job(s)",
+                   "Why a slow lint job with type-aware ESLint produced no finding",
+                   "job"),
+    _VrWithheldRow(_VR_OPT83_WITHHELD_DOC_KEY, "independent steps: held back",
+                   "candidate long pole(s)",
+                   "Why a long pole whose compute steps run one after another produced "
+                   "no parallel-steps finding",
+                   "job"),
+    _VrWithheldRow(_VR_OPT84_WITHHELD_DOC_KEY, "tool swap: held back",
+                   "candidate long pole step(s)",
+                   "Why a slow step on a long pole that may run a tool with a native "
+                   "drop-in produced no tool-swap finding",
+                   "step"),
+    _VrWithheldRow(_VR_PARALLEL_STEPS_WITHHELD_DOC_KEY, "parallel steps: held back",
+                   "candidate lever(s)",
+                   "Why a lever priced from step times on a job that runs steps side by "
+                   "side claims no saving",
+                   "job"),
 )
+_VR_WITHHELD_SHAPE_BY_KEY = {r.doc_key: r.entry_shape for r in _VR_WITHHELD_ROWS}
 # The plain-English phrase for every WITHHOLD gate — this verifier's OWN copy of
 # `blocking_path`'s tables (it re-derives the line rather than importing the
 # renderer's answer; a coupling test pins the copies equal, and another pins them
@@ -909,9 +995,17 @@ _VR_OPT77_WITHHOLD_PHRASES = {
     "group_never_ran_complete_in_one_sampled_run":
         "the sampled runs never had every job in the group run together, so the "
         "saving could not be measured",
+    "collapsing_the_whole_workflow_would_lengthen_the_merge_gate":
+        "every job the workflow declares is in the group, so the group sets "
+        "the pull-request wait itself, and collapsing it into one job would "
+        "make that wait longer",
     "no_job_outside_the_group_runs_often_enough_to_measure_against":
         "other jobs exist, but none ran often enough in the sampled runs to show "
         "that merging these would not make the pipeline slower",
+    "a_job_the_workflow_file_does_not_declare_ran_with_the_group":
+        "every job the workflow file declares is in the group, but the sampled "
+        "runs also carried a job it does not declare, so what would be left "
+        "after merging could not be established",
 }
 _VR_OPT80_WITHHOLD_PHRASES = {
     "fewer_than_the_minimum_tail_runs":
@@ -932,9 +1026,11 @@ _VR_OPT80_WITHHOLD_PHRASES = {
     "progress_lines_all_outside_step_window":
         "the slow runs' logs show fetch progress only outside the checkout "
         "step's own time window",
+    # An observation, not a cause: a truncated log, a checkout that is not
+    # `actions/checkout`, or unrecognised wording produce the same absence.
     "log_carries_no_progress_vocabulary":
-        "the slow runs' logs show no fetch progress lines (progress output is "
-        "switched off)",
+        "the slow runs' logs show no fetch progress lines (most likely because "
+        "progress output is switched off)",
     "quoted_progress_line_is_credential_shaped":
         "the only log evidence looked like a credential and was discarded",
     "no_tail_run_log_was_probed":
@@ -943,20 +1039,249 @@ _VR_OPT80_WITHHOLD_PHRASES = {
         "there were more slow runs than the audit reads logs for, and the rest "
         "were never read",
 }
+_VR_OPT81_WITHHOLD_PHRASES = {
+    "runner_label_not_classifiable_by_size":
+        "a runner label could not be classified by size (a self-hosted or custom "
+        "label), so no runner-class comparison could be made",
+    "fewer_than_min_samples_on_two_labels":
+        "the job ran on more than one runner label, but not often enough on two "
+        "of them to compare their medians",
+    "more_than_two_qualifying_runner_labels":
+        "the job ran often enough on three or more runner labels, so there is no "
+        "single pair to compare",
+    "step_lists_differ":
+        "the job did not run the same steps on both runner labels, so it is not "
+        "the same job on both",
+    "not_interleaved":
+        "the two labels ran in different periods (a runner switch), so the gap "
+        "could come from code changes made in between, not the runner",
+    "a2_dominant_step_unresolved":
+        "the long pole's step timings could not be read, so whether its time is "
+        "compute could not be established",
+}
+_VR_OPT82_WITHHOLD_PHRASES = {
+    "lint_step_uses_runtime_expression":
+        "the lint step's command or working directory is only known when the "
+        "workflow runs",
+    "lint_delegated_to_unread_tool":
+        "the lint step hands lint to another tool or action (such as turbo, nx, "
+        "lerna, make, Next.js or a node script) whose own configuration this "
+        "audit did not read",
+    "package_json_unreadable":
+        "the package.json that defines the lint step's script could not be read",
+    "type_aware_lint_scan_missing":
+        "the repository scan behind this report carries no ESLint config read, "
+        "so whether lint builds the type graph is unknown",
+    "eslint_config_walk_incomplete":
+        "the audit stopped reading the repository's folders before the lint "
+        "job's directory, so a nearer ESLint config may have been missed",
+    "eslint_config_lookup_ambiguous":
+        "a nested ESLint config below the lint job's directory may apply, "
+        "depending on the ESLint version",
+    "shared_config_unfollowable":
+        "the lint config extends a package this audit did not read",
+    "config_import_unfollowed":
+        "the ESLint config imports a local file this audit could not read",
+    "type_aware_rule_without_parser_setting":
+        "the ESLint config turns on a type-aware rule but sets type-aware "
+        "parsing somewhere this audit did not read",
+    "lint_script_unresolvable":
+        "the lint step runs a package script this audit could not trace to the "
+        "command it runs",
+    "lint_step_cd_untraceable":
+        "the lint step changes directory (`cd`) to a place this audit could not "
+        "follow, so which ESLint config applies is unknown",
+    "type_aware_config_reader_failed":
+        "the ESLint config reader failed, so whether lint builds the type graph "
+        "is unknown",
+    "no_eslint_config_found":
+        "no ESLint config was found for the lint job's directory, so whether it "
+        "builds the type graph is unknown",
+    "eslint_config_unreadable":
+        "an ESLint config the lint job uses could not be read",
+    "type_aware_setting_unresolvable":
+        "the ESLint config sets type-aware parsing from a value only known when "
+        "it runs",
+    "rule_setting_unresolvable":
+        "the ESLint config sets a type-aware rule from a value only known when "
+        "it runs",
+    "no_enumerable_type_aware_rule":
+        "type-aware parsing is on, but no type-aware rule could be named from "
+        "the config",
+}
+_VR_OPT83_WITHHOLD_PHRASES = {
+    "pole_step_timings_unavailable":
+        "the long pole's per-step timings could not be read, so which steps "
+        "run one after another is unknown",
+    "workflow_yaml_unavailable":
+        "the long pole's workflow file could not be read, so whether its steps "
+        "depend on each other is unknown",
+    "pole_job_not_matched_in_yaml":
+        "the long pole could not be matched to one job in its workflow file",
+    "job_has_an_unreadable_parallel_group":
+        "some of the job's steps sit in a parallel step group that could not be "
+        "read, so whether the steps depend on each other could not be told",
+    "pole_step_entries_unreadable":
+        "the long pole's per-step records could not be read (a step with no "
+        "name or category, or one name twice), so which steps qualify is unknown",
+    "pole_workflow_ambiguous":
+        "the long pole's check is produced by more than one workflow file, so "
+        "which file's steps ran is unknown",
+    "measured_step_not_matched_in_yaml":
+        "a qualifying step could not be matched to exactly one step in the "
+        "workflow file, so the steps' order is unknown",
+    "background_is_an_expression":
+        "a step up to the last of them sets `background:` with an expression, so "
+        "whether it runs alongside them is only known when the workflow runs",
+    "step_uses_runtime_expression":
+        "a step's command, settings or working directory is only known when "
+        "the workflow runs",
+    "siblings_share_a_cache_or_artifact":
+        "two of the steps use the same cache or artifact",
+    "sibling_is_an_action":
+        "one of the steps is an action whose effects (files, environment, "
+        "outputs) this audit did not read",
+    "candidate_publishes_deploys_or_uploads":
+        "a step publishes, deploys or uploads, which relies on the steps beside "
+        "it having passed first",
+    "sibling_reads_another_siblings_output":
+        "one step reads another step's outputs, so they must run in order",
+    "sibling_writes_env_output_or_path":
+        "a step writes GITHUB_ENV, GITHUB_OUTPUT or GITHUB_PATH that a later step "
+        "could read",
+    "step_changes_directory":
+        "a step changes directory, so which files it touches could not be told",
+    "siblings_share_a_build_tree":
+        "a step builds into the same directory another step works in, so one "
+        "may read what the other writes",
+    "step_condition_depends_on_order":
+        "a step carries an `if:` condition, whose outcome can depend on the "
+        "steps before it",
+    "candidate_has_continue_on_error":
+        "a step is allowed to fail (`continue-on-error`), which changes what a "
+        "failing step does to the job once the steps run side by side",
+    "siblings_share_tool_state":
+        "the steps share a service container, the Docker daemon, or one tool's "
+        "output folder or coverage file, so they could collide",
+    "candidate_runs_an_install":
+        "a step installs dependencies, which the other steps read while it "
+        "writes them",
+    "job_starts_a_container_or_background_server":
+        "the job starts a container or a background server that the steps "
+        "would all use at once",
+}
+# OPT84's held-back gates (the renderer's `_OPT84_WITHHOLD_PHRASES`, copied).
+_VR_OPT84_WITHHOLD_PHRASES = {
+    "pole_workflow_ambiguous":
+        "the long pole's check is produced by more than one workflow file, so "
+        "which file's step ran is unknown",
+    "pole_step_entries_unreadable":
+        "the long pole's per-step records could not be read (a step with no "
+        "name or category, or one name twice), so which step is slow is unknown",
+    "pole_step_timings_unavailable":
+        "the long pole's per-step timings could not be read, so which step is "
+        "slow is unknown",
+    "workflow_yaml_unavailable":
+        "the long pole's workflow file could not be read, so what the slow step "
+        "runs is unknown",
+    "pole_job_not_matched_in_yaml":
+        "the pole's job could not be tied to one job in its workflow file (a job "
+        "produced through a reusable workflow call, or a matrix job whose name is "
+        "an expression, for example), so the step's command could not be read",
+    "measured_step_not_matched_in_yaml":
+        "the slow step could not be matched to exactly one step in the workflow "
+        "file, so what it runs is unknown",
+    "command_has_expression":
+        "the slow step's command, settings or working directory is only known "
+        "when the workflow runs",
+    "command_changes_directory":
+        "the slow step changes directory, so which project's tools it runs is "
+        "unknown",
+    "script_unresolvable":
+        "the slow step runs a script this audit could not follow to the tool it "
+        "calls",
+    "delegated_script_unresolved":
+        "the slow step hands off to a task runner whose target scripts this "
+        "audit could not resolve",
+    "package_json_unreadable":
+        "the package.json the slow step's scripts come from could not be read",
+    "candidate_is_an_action":
+        "the slow step is an action, and what it runs is inside the action",
+    "eslint_config_unreadable":
+        "the ESLint config the slow step uses could not be fully read, so "
+        "whether the faster linter covers its rules is unknown",
+    "typescript_version_unreadable":
+        "the TypeScript version could not be read, so whether the repo is "
+        "already on the native compiler is unknown",
+    "working_directory_unknown":
+        "the slow step's working directory could not be placed inside the "
+        "checkout, so which package.json applies is unknown",
+    "type_aware_lint_scan_missing":
+        "the scan that wrote this findings file recorded no lint-tooling read, so "
+        "the step's tools could not be checked",
+    "type_aware_config_reader_failed":
+        "the scan's lint-tooling reader failed, so the step's tools could not be "
+        "checked",
+}
+# The OPT84 held-back gates decided on a candidate STEP: an entry under one of
+# these names its step (`step`), and an entry under any other (a pole-level
+# gate, decided before a step is chosen) names none. Every held-back gate but
+# the pole-level ones.
+_VR_OPT84_POLE_LEVEL_GATES = frozenset({
+    "pole_workflow_ambiguous", "pole_step_entries_unreadable",
+    "pole_step_timings_unavailable", "workflow_yaml_unavailable",
+    "pole_job_not_matched_in_yaml", "type_aware_lint_scan_missing",
+    "type_aware_config_reader_failed",
+})
+_VR_OPT84_STEP_GATES = frozenset(_VR_OPT84_WITHHOLD_PHRASES) - _VR_OPT84_POLE_LEVEL_GATES
+# "step"-shaped rows, by doc key: the gates whose entries carry `step`.
+_VR_STEP_GATES_BY_KEY = {_VR_OPT84_WITHHELD_DOC_KEY: _VR_OPT84_STEP_GATES}
+_VR_PARALLEL_STEPS_WITHHOLD_PHRASES = {
+    "dominant_step_runs_inside_a_parallel_group":
+        "the job's slowest steps run side by side with other steps (in a "
+        "parallel step group or in the background), so their times overlap and "
+        "cutting one does not come straight off the job; no saving is claimed",
+}
 _VR_WITHHELD_PHRASES_BY_KEY = {
     _VR_OPT77_WITHHELD_DOC_KEY: _VR_OPT77_WITHHOLD_PHRASES,
+    _VR_PARALLEL_STEPS_WITHHELD_DOC_KEY: _VR_PARALLEL_STEPS_WITHHOLD_PHRASES,
     _VR_OPT79_WITHHELD_DOC_KEY: _VR_OPT79_HELD_BACK_REASONS,
     _VR_OPT80_WITHHELD_DOC_KEY: _VR_OPT80_WITHHOLD_PHRASES,
+    _VR_OPT81_WITHHELD_DOC_KEY: _VR_OPT81_WITHHOLD_PHRASES,
+    _VR_OPT82_WITHHELD_DOC_KEY: _VR_OPT82_WITHHOLD_PHRASES,
+    _VR_OPT83_WITHHELD_DOC_KEY: _VR_OPT83_WITHHOLD_PHRASES,
+    _VR_OPT84_WITHHELD_DOC_KEY: _VR_OPT84_WITHHOLD_PHRASES,
 }
 _VR_WITHHELD_JOBS_SHOWN = 5
+# Prefixed to the reason when more than one gate held candidates back, and the
+# tie's own lead for when the top two held back the same number.
+_VR_WITHHELD_MODAL_LEAD = "most commonly, "
+_VR_WITHHELD_TIED_LEAD = "equally often, "
+
+
+# The renderer's escape list, in the renderer's order. `\` MUST stay first:
+# escaping `|` first turns `a\|b` into `a\\|b`, which GFM reads as an escaped
+# backslash plus a LIVE cell separator. `<` and `>` are in the list because
+# `<https://example.test>` is a GFM autolink and a raw `<details>` is live
+# HTML. Backticks and `*` are escaped rather than swapped for an apostrophe,
+# which used to collapse three different names into one; `&` and `~` close the
+# same class, since `A&B` and `A&amp;B` render identically unescaped and
+# `~~x~~` is a strikethrough run. A coupling test pins this tuple and the
+# function below byte-identical to `blocking_path`'s.
+_VR_WITHHELD_CELL_ESCAPES = ("\\", "|", "[", "]", "(", ")", "_", "<", ">", "`",
+                             "*", "&", "~")
 
 
 def _vr_withheld_cell_text(text: object) -> str:
-    """The renderer's cell-safe transform of repo-controlled text (whitespace
-    collapsed, `|` escaped, backticks and emphasis markers swapped for an
-    apostrophe)."""
-    return (re.sub(r"\s+", " ", str(text)).strip()
-            .replace("`", "'").replace("*", "'").replace("|", "\\|"))
+    """The renderer's cell-safe transform of repo-controlled text: whitespace
+    collapsed, then each of `\\` `|` `[` `]` `(` `)` `_` `<` `>` `` ` `` `*`
+    `&` `~` backslash-escaped, `\\` first, so the name survives intact and
+    inert. The list is enumerated rather than called "every markdown-active
+    character", which was wider than it keeps."""
+    out = re.sub(r"\s+", " ", str(text)).strip()
+    for _ch in _VR_WITHHELD_CELL_ESCAPES:
+        out = out.replace(_ch, "\\" + _ch)
+    return out
 
 
 def _vr_withheld_entries(rows: list[dict], key: str) -> list[str]:
@@ -966,7 +1291,7 @@ def _vr_withheld_entries(rows: list[dict], key: str) -> list[str]:
     def _wf(r: dict) -> str:
         return str(r.get("workflow_file") or "").replace("\\", "/").rsplit("/", 1)[-1]
 
-    if key == _VR_OPT77_WITHHELD_DOC_KEY:
+    if _VR_WITHHELD_SHAPE_BY_KEY.get(key) == "group":
         return sorted({
             " + ".join(sorted(_vr_withheld_cell_text(j) for j in r["jobs"]))
             + (f" in {_vr_withheld_cell_text(_wf(r))}" if _wf(r) else "")
@@ -977,7 +1302,18 @@ def _vr_withheld_entries(rows: list[dict], key: str) -> list[str]:
     return sorted({
         (f"{_vr_withheld_cell_text(_wf(r))} / {_vr_withheld_cell_text(r['job'])}"
          if len(wfs_of[r["job"].strip()]) > 1 and _wf(r)
-         else _vr_withheld_cell_text(r["job"])) for r in rows})
+         else _vr_withheld_cell_text(r["job"]))
+        + (" (" + " + ".join(_vr_withheld_cell_text(x) for x in _vr_entry_steps(r, key))
+           + ")" if _vr_entry_steps(r, key) else "") for r in rows})
+
+
+def _vr_entry_steps(r: dict, key: str) -> list:
+    """The steps one entry names: OPT83's chosen run (`steps`), or, for a
+    "step"-shaped entry (OPT84), its one candidate step when it carries one."""
+    if (_VR_WITHHELD_SHAPE_BY_KEY.get(key) == "step" and isinstance(r.get("step"), str)
+            and r["step"].strip()):
+        return [r["step"]]
+    return r.get("steps") or []
 
 
 def _withheld_disclosure_violation(report: str, findings_path: Path | None
@@ -1000,7 +1336,12 @@ def _withheld_disclosure_violation(report: str, findings_path: Path | None
         return (f"the withheld-candidate rows could not be re-derived: findings JSON "
                 f"at {findings_path} is unreadable ({type(exc).__name__})"), ""
     note = ""
-    for key, label, noun in _VR_WITHHELD_ROWS:
+    # `feeds` (the "Used for" cell) is not re-derived from the run's data — it
+    # is fixed prose — but it IS carried here so the coupling test can pin all
+    # four fields against the renderer's registry. Held as three fields, it was
+    # the one part of a held-back row that could be rewritten with the whole
+    # suite staying green.
+    for key, label, noun, feeds, shape in _VR_WITHHELD_ROWS:
         raw = _as_dict(data).get(key)
         # The renderer quietly drops non-objects and names a gate-less entry
         # `unknown`; here either is a collector bug, not "nothing withheld".
@@ -1014,11 +1355,19 @@ def _withheld_disclosure_violation(report: str, findings_path: Path | None
         rows = list(raw or [])
         # The named jobs are part of the line, so an entry must carry them.
         for r in rows:
-            if key == _VR_OPT77_WITHHELD_DOC_KEY:
+            if shape == "group":
                 ok = (isinstance(r.get("jobs"), list) and bool(r["jobs"])
                       and all(isinstance(j, str) and j.strip() for j in r["jobs"]))
             else:
                 ok = isinstance(r.get("job"), str) and bool(r["job"].strip())
+                # Named steps, when an entry carries them, are part of the line.
+                if "steps" in r:
+                    ok = ok and (isinstance(r["steps"], list) and bool(r["steps"])
+                                 and all(isinstance(x, str) and x.strip()
+                                         for x in r["steps"]))
+                # …and so is the one step a "step"-shaped entry names.
+                if shape == "step" and "step" in r:
+                    ok = ok and isinstance(r["step"], str) and bool(r["step"].strip())
             if not ok:
                 return (f"{key} carries an entry that names no job - the withheld "
                         "row cannot be re-derived"), ""
@@ -1028,8 +1377,26 @@ def _withheld_disclosure_violation(report: str, findings_path: Path | None
                 return (f"{key} records gate {r['gate']!r}, which has no plain-English "
                         "phrase in verify_report - the withheld row cannot be "
                         "re-derived, and a code is never a reason"), ""
-        m = re.search(rf"^\|\s*{re.escape(label)}\s*\|\s*((?:\\\||[^|])+?)\s*\|",
-                      report, re.MULTILINE)
+            # A "step"-shaped entry names its step exactly when its gate was
+            # decided on one: a pole-level gate naming a step claims a step the
+            # audit never chose, and a step gate without one hides which.
+            if shape == "step":
+                has_step = isinstance(r.get("step"), str) and bool(r["step"].strip())
+                want_step = r["gate"] in _VR_STEP_GATES_BY_KEY.get(key, frozenset())
+                if has_step != want_step:
+                    return (f"{key} entry for job {r.get('job')!r} under gate "
+                            f"{r['gate']!r} {'names' if has_step else 'names no'} "
+                            f"step, but that gate is decided "
+                            f"{'on a candidate step' if want_step else 'on the pole'}"
+                            ), ""
+        # Both the Coverage cell AND the "Used for" cell. Held as a field
+        # nothing read, the third column could be rewritten to anything — in
+        # lockstep on both sides, since the renderer and this file are pinned
+        # to each other — with the whole suite staying green.
+        m = re.search(
+            rf"^\|\s*{re.escape(label)}\s*\|\s*((?:\\\||[^|])+?)\s*\|"
+            rf"\s*((?:\\\||[^|])*?)\s*\|",
+            report, re.MULTILINE)
         if not rows:
             if m:
                 return (f"Data sources row '{label}' declares candidates held back, "
@@ -1038,12 +1405,22 @@ def _withheld_disclosure_violation(report: str, findings_path: Path | None
         counts: dict[str, int] = {}
         for r in rows:
             counts[r["gate"]] = counts.get(r["gate"], 0) + 1
-        top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+        ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        top = ranked[0][0]
         entries = _vr_withheld_entries(rows, key)
         jobs = ", ".join(entries[:_VR_WITHHELD_JOBS_SHOWN])
         if len(entries) > _VR_WITHHELD_JOBS_SHOWN:
             jobs += f", and {len(entries) - _VR_WITHHELD_JOBS_SHOWN} more"
-        expected = f"{len(rows)} {noun} held back ({jobs}): {phrases[top]}."
+        # The reason is only the COMMONEST gate's, while the count and the named
+        # entries cover every candidate — so it is hedged whenever a second gate
+        # contributed, and hedged differently when the top two are tied, because
+        # "most commonly" is false of a tie. The renderer carries the same rule.
+        lead = ""
+        if len(ranked) > 1:
+            lead = (_VR_WITHHELD_TIED_LEAD if ranked[1][1] == ranked[0][1]
+                    else _VR_WITHHELD_MODAL_LEAD)
+        # Counted over distinct entries, like the names and the overflow.
+        expected = f"{len(entries)} {noun} held back ({jobs}): {lead}{phrases[top]}."
         if not m:
             return (f"{len(rows)} {noun} were held back ({key}) but the Data sources "
                     f"table has no '{label}' row - an undecided candidate reads as "
@@ -1052,8 +1429,143 @@ def _withheld_disclosure_violation(report: str, findings_path: Path | None
         if cell != _strip_render_artifacts(expected):
             return (f"Data sources '{label}' cell {cell!r} is not the re-derived "
                     f"line {expected!r}"), ""
+        used_for = _strip_render_artifacts(m.group(2) or "")
+        if used_for != _strip_render_artifacts(feeds):
+            return (f"Data sources '{label}' says it is used for {used_for!r}, "
+                    f"not {feeds!r} - the column that tells the reader what the "
+                    "row is about is not the one the pattern registered"), ""
         note += f"; {len(rows)} held-back {noun} disclosed"
     return None, note
+
+
+# The verifier's own copy of `workflow_steps.MALFORMED_KINDS` (a coupling test
+# pins them equal) and of the row's "Used for" cell.
+_VR_MALFORMED_KINDS = {
+    "not_a_list": "the value is not a list of steps",
+    "contains_itself": "the list contains itself",
+    "nested_too_deep": "nested more than 64 groups deep",
+    "too_many_steps": "more steps than the walk reads (a YAML alias fan-out)",
+    "non_mapping_step": "an item in it is not a step",
+}
+_VR_PARALLEL_STEPS_FEEDS = ("Static detectors read each step inside a `parallel:` group "
+                            "as its own step")
+_VR_BACKGROUND_STEPS_FEEDS = ("Static detectors read `background: true` steps, which "
+                              "run beside the steps after them, as ordinary steps")
+_VR_BOTH_STEPS_FEEDS = (_VR_PARALLEL_STEPS_FEEDS + "; `background: true` steps, which "
+                        "run beside the steps after them, are read as ordinary steps")
+
+
+def _vr_parallel_steps_feeds(stamp: Any) -> str:
+    """The row's "Used for" cell, re-derived from the stamp (twin of
+    `workflow_steps.parallel_steps_used_for`): groups, background steps, or both."""
+    stamp = stamp if isinstance(stamp, dict) else {}
+    if not int(stamp.get("background_steps") or 0):
+        return _VR_PARALLEL_STEPS_FEEDS
+    return _VR_BOTH_STEPS_FEEDS if int(stamp.get("groups") or 0) else \
+        _VR_BACKGROUND_STEPS_FEEDS
+# What the step drill says only of a job whose steps run one after another.
+_VR_SEQUENTIAL_STEP_PHRASES = ("run **one after another**", "run one after another",
+                               "they run in sequence and roughly add up",
+                               "Because they're sequential")
+
+
+def _vr_parallel_steps_used(stamp: Any) -> bool:
+    return isinstance(stamp, dict) and bool(
+        stamp.get("groups") or stamp.get("control_steps") or stamp.get("background_steps"))
+
+
+def _vr_files_cell(files: Any) -> str:
+    files = [f for f in (files or []) if isinstance(f, str)]
+    shown = ", ".join(f"`{f}`" for f in files[:3])
+    if len(files) > 3:
+        shown += f", and {len(files) - 3} more file(s)"
+    return shown
+
+
+def _vr_parallel_steps_cell(stamp: dict[str, Any]) -> str:
+    """The whole "Parallel steps" Coverage cell, re-derived from the stamp with
+    this file's own code (twin of `workflow_steps.parallel_steps_disclosure`)."""
+    parts = [f"{int(stamp.get('steps_in_groups') or 0)} step(s) inside `parallel:` "
+             f"groups read ({int(stamp.get('groups') or 0)} `parallel:` group(s) seen)"]
+    bg = int(stamp.get("background_steps") or 0)
+    if bg:
+        parts.append(f"{bg} `background: true` step(s) read (they run beside the "
+                     "steps after them)")
+    control = int(stamp.get("control_steps") or 0)
+    if control:
+        parts.append(f"{control} `wait`/`wait-all`/`cancel` control step(s) skipped "
+                     "(they run nothing)")
+    bad = int(stamp.get("malformed_groups") or 0)
+    if bad:
+        kinds = "; ".join(_VR_MALFORMED_KINDS.get(str(k), str(k))
+                          for k in (stamp.get("malformed_reasons") or [])) or \
+            "the value is not a readable list of steps"
+        files = _vr_files_cell(stamp.get("malformed_files"))
+        parts.append(f"**{bad} malformed `parallel:` group(s) not read** ({kinds})"
+                     f"{' in ' + files if files else ''}")
+    inv = int(stamp.get("invalid_groups") or 0)
+    if inv:
+        files = _vr_files_cell(stamp.get("invalid_files"))
+        parts.append(f"**{inv} invalid `parallel:` group(s)** (on a step that also "
+                     "has `run:` or `uses:`, which GitHub rejects; the steps inside "
+                     f"were read as the group's children){' in ' + files if files else ''}")
+    return " · ".join(parts)
+
+
+def _parallel_steps_violation(report: str, findings_path: Path | None
+                              ) -> tuple[str | None, str]:
+    """When the scan stamped `parallel_steps` (the repo uses GitHub Actions
+    `parallel:` groups, `background: true` steps, or `wait`/`wait-all`/`cancel`
+    control steps), the Data sources table must carry a "Parallel steps" row
+    whose WHOLE text is re-derived from the stamp: the steps read inside groups,
+    the groups seen, the background and control steps, each malformed group's
+    kind and files, and any invalid group. A row with no stamp behind it fails.
+
+    And a pole whose job the stamp names as running steps side by side (its
+    `workflow file ▸ check` heading equals a `jobs_with_groups` /
+    `jobs_with_background` row's file and job or name) must not say its steps
+    run one after another. This is an exact-name subset of the renderer's join
+    (which also folds matrix legs, templates and callees), so it never fails a
+    pole the renderer could not match. Standalone (no import of the renderer)."""
+    if not findings_path:
+        return None, ""
+    try:
+        data = json.loads(Path(findings_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None, ""  # unreadable findings are reported by the other re-derivations
+    stamp = data.get("parallel_steps") if isinstance(data, dict) else None
+    row = next((ln for ln in report.splitlines() if ln.startswith("| Parallel steps |")), None)
+    if not _vr_parallel_steps_used(stamp):
+        if row is not None:
+            return ("the Data sources table has a Parallel steps row but the findings "
+                    "carry no `parallel_steps` stamp"), ""
+        return None, ""
+    if row is None:
+        return ("findings carry a `parallel_steps` stamp but the Data sources table "
+                "has no Parallel steps row"), ""
+    want = (f"| Parallel steps | {_vr_parallel_steps_cell(stamp)} | "
+            f"{_vr_parallel_steps_feeds(stamp)} |")
+    if row.strip() != want:
+        return f"Parallel steps row is not the one the stamp derives: {row!r} != {want!r}", ""
+    over = [r for key in ("jobs_with_groups", "jobs_with_background")
+            for r in (stamp.get(key) or []) if isinstance(r, dict)]
+    headers = re.findall(r"^##\s+.*?(Long pole \d+:.*)$", report, re.MULTILINE)
+    for hdr, body in zip(headers, _pole_sections(report)):
+        m = re.search(r"Long pole \d+:\s*`([^`]+)`\s*▸\s*`([^`]+)`", hdr)
+        if not m:
+            continue
+        wf, label = m.group(1), m.group(2).strip().lower()
+        for r in over:
+            if _wf_base(str(r.get("path") or "")) != wf:
+                continue
+            names = {str(r.get(k) or "").strip().lower() for k in ("job", "name")} - {""}
+            # A check-run label may carry its workflow's name (`CI / test`).
+            if label in names or label.rsplit(" / ", 1)[-1] in names:
+                hit = next((ph for ph in _VR_SEQUENTIAL_STEP_PHRASES if ph in body), None)
+                if hit:
+                    return (f"{hdr.strip()}: the stamp says this job runs steps side by "
+                            f"side, but its drill says {hit!r}"), ""
+    return None, "; parallel-step read disclosed"
 
 
 def check_coverage_disclosed(report: str, findings_path: Path | None = None) -> Check:
@@ -1086,6 +1598,10 @@ def check_coverage_disclosed(report: str, findings_path: Path | None = None) -> 
     if withheld_violation:
         return Check(name, False, withheld_violation)
     skip_note += withheld_note
+    par_violation, par_note = _parallel_steps_violation(report, findings_path)
+    if par_violation:
+        return Check(name, False, par_violation)
+    skip_note += par_note
     if "Incomplete coverage" in report:
         banner = _section_quote(report, "Incomplete coverage")
         if "**" not in banner:
@@ -1536,6 +2052,66 @@ def check_skill_commit_provenance(report: str, skill_repo: Path | None) -> Check
         "report so it carries a `scripts tree` token)"))
 
 
+def check_windows_setup_guidance(report: str, findings_path: Path | None) -> Check:
+    """Independently validate manual pointers against their own structural card."""
+    name = "Windows setup benchmark pointers match their measured OPT72 card"
+    for glyph in _TYPOGRAPHIC_DASHES:
+        report = report.replace(glyph, "-")
+    marker = "- **Windows setup benchmark:**"
+    if findings_path is None:
+        return Check(name, marker not in report, "pointer requires findings JSON")
+    try:
+        data = json.loads(findings_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return Check(name, False, f"could not read findings JSON: {exc}")
+    findings = [f for f in _as_list(_as_dict(data).get("findings")) if isinstance(f, dict)]
+    blocks = re.findall(
+        r"\*\*📐 (?:Structural root-cause|Sibling matrix leg)[^\n]*\n"
+        r"(?:(?!\*\*📐 |\n##)[\s\S])*?- \*\*Catalog \(background \+ fix recipe\):\*\*[^\n]*",
+        report)
+    seen = 0
+    for block in blocks:
+        lines = [line for line in block.splitlines() if marker in line]
+        seen += len(lines)
+        if not lines:
+            continue
+        if len(lines) != 1:
+            return Check(name, False, "duplicate benchmark pointer")
+        line = lines[0]
+        matched = False
+        for f in findings:
+            title = _flatten_cell(str(f.get("title") or f.get("pattern") or ""))
+            for glyph in _TYPOGRAPHIC_DASHES:
+                title = title.replace(glyph, "-")
+            if f.get("pattern") != "OPT72" or f"OPT72 · {title}**" not in block.splitlines()[0]:
+                continue
+            samples = f.get("runner_labels")
+            if not isinstance(samples, list) or not samples:
+                continue
+            if any(not isinstance(labels, list) or not any(
+                    re.fullmatch(r"windows(?:-[a-z0-9.]+)*", str(label), re.I) for label in labels)
+                    or any(re.match(r"(?:ubuntu|macos|linux)(?:-|$)", str(label), re.I) for label in labels)
+                    for labels in samples):
+                continue
+            step = str(_as_dict(f.get("decomposition")).get("dominant_step") or "")
+            if re.search(r"setup-dotnet|dotnet\s+workload\s+install|install\s+\.net\s+workloads?|^(?:setup|set\s+up|install)\s+\.net(?:\s+\d+(?:\.\d+)*(?:\.x)?)?(?:\s+sdk)?\s*$", step, re.I):
+                target, anchor, label = ("OPT94", "opt94--the-net-sdk-can-reconcile-unrelated-machine-wide-workloads", "isolated .NET SDK setup")
+            elif re.search(r"(?:nuget|dotnet)\s+restore|restore\s+(?:nuget|\.net)(?:\s+packages)?", step, re.I):
+                target, anchor, label = ("OPT93", "opt93--nuget-restores-to-a-slower-disk-on-windows-runners", "NuGet cache placement")
+            else:
+                continue
+            url = block.split("- **Catalog (background + fix recipe):** ", 1)[1].strip().split("#", 1)[0]
+            expected = (f"{marker} [{target}]({url}#{anchor}) describes a manual benchmark "
+                        f"for {label}; no additional credit is assigned.")
+            if line == expected:
+                matched = True
+        if not matched:
+            return Check(name, False, "benchmark pointer lacks matching Windows .NET OPT72 evidence")
+    if seen != report.count(marker):
+        return Check(name, False, "benchmark pointer outside its structural card")
+    return Check(name, True, "benchmark pointers remain uncredited and evidence-matched")
+
+
 def check_rendered_patterns_exist(report: str, findings_path: Path | None) -> Check:
     """Every OPT-id rendered as a finding (the Also-noticed appendix) must be a real
     pattern in the findings JSON - the report never invents a finding. The
@@ -1778,6 +2354,25 @@ def _push_floor_pole_keys(findings_path: Path | None) -> set[tuple[str, str]]:
         if isinstance(p, dict) and p.get("pr_floor_push_fallback"):
             keys.add((_wf_base(str(p.get("workflow_file") or "")), _cmp_name(str(p.get("check") or ""))))
     return keys
+
+
+def _all_dropped_pole_keys(findings_path: Path | None) -> set[tuple[str, str]]:
+    """`(workflow-basename, _cmp_name(check))` for each `pr_critical_path.poles[*]` stamped
+    `step_decomposition_reason == "no_step_measured_in_sample"`: every declared step of
+    the job was dropped in the sample, so a "no per-step breakdown" body is the honest
+    state, not a stunted drill. The stunted-pole guard exempts such a pole only when its
+    section also carries the renderer's "No step could be measured:" line
+    (`_vr_omitted_steps_note`). Empty set when none / unreadable."""
+    if not findings_path:
+        return set()
+    try:
+        data = _as_dict(json.loads(findings_path.read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError):
+        return set()
+    return {(_wf_base(str(p.get("workflow_file") or "")), _cmp_name(str(p.get("check") or "")))
+            for p in _as_list(_as_dict(data.get("pr_critical_path")).get("poles"))
+            if isinstance(p, dict)
+            and p.get("step_decomposition_reason") == "no_step_measured_in_sample"}
 
 
 def _triaged_pole_offenders(findings_path: Path | None) -> list[str] | None:
@@ -2194,11 +2789,16 @@ def check_speed_poles_complete(report: str, findings_path: Path | None) -> Check
     # here while check_primary_section_present REQUIRES the spine would be an unsatisfiable gate (the
     # push-only-repo contradiction). Mapped findings→render by `(wf-base, _cmp_name(check))`; only the
     # NARROW push flag is exempt, so a case-1/1b structural pole that renders bare is still caught.
+    # A pole whose every step was dropped in the sample (stamped, AND its section says
+    # "No step could be measured:") is exempt for the same reason: no step to break down.
     _push_floor = _push_floor_pole_keys(findings_path)
+    _all_dropped = _all_dropped_pole_keys(findings_path)
     stunted = [f"`{wf}` ▸ {check}"
                for wf, check, body in _pole_header_sections(report)
                if _NO_PER_STEP_DRILL in body
-               and (_wf_base(wf), _cmp_name(check)) not in _push_floor]
+               and (_wf_base(wf), _cmp_name(check)) not in _push_floor
+               and not ((_wf_base(wf), _cmp_name(check)) in _all_dropped
+                        and "No step could be measured: " in body)]
     if stunted:
         return Check(name, False, f"long pole(s) {stunted} carry NO per-step breakdown - a "
                      "bare/stunted pole (a timeline with no drill, per SKILL.md 5a), not the "
@@ -2602,23 +3202,6 @@ def _strip_scope(s: str) -> str:
     return _fence_safe(re.sub(r"^@[^ /]+/", "", s)).replace("`", "'")
 
 
-def _on_path_framed_check_names(report: str) -> set[str]:
-    """The set of EXACT check NAMES the rendered report frames as ON the merge-gating critical
-    path in a single-name context — a Long-pole header (`## Long pole N: \\`wf\\` ▸ CHECK`, a
-    pole IS the critical path) and the headline "the slowest check a typical PR waits on" claim in
-    EITHER rendered form (name-first form 1 OR name-after form 2 — `_headline_slowest_label`). (The
-    appendix on-path note names jobs inside a CONCATENATED `**Where:**` line, so it can't join this
-    exact set cleanly — its job names are extracted by `_on_path_appendix_jobs`.) `_norm_check`-
-    normalized; the headline's `_clean_label`'d label is reconciled with the full stamp via
-    `_strip_scope` on the STAMP side, not here."""
-    names = {_cmp_name(check) for _wf, check, _body in _pole_header_sections(report)}
-    slowest = _headline_slowest_label(report)
-    if slowest:
-        names.add(_cmp_name(slowest))
-    names.discard("")
-    return names
-
-
 def _cmp_name(s: str) -> str:
     """The basis on which a dropped check and an on-path framing are compared for identity:
     scope-stripped (`_strip_scope`) THEN `_norm_check`. The `dropped_*` sets store the RAW
@@ -2630,8 +3213,10 @@ def _cmp_name(s: str) -> str:
     on a genuine monorepo where `@a/pkg build` is dropped while a DIFFERENT package's `@b/pkg build`
     is framed on-path (both → `pkg build`): for a CI regression net, erring toward CATCHING (a
     noisy block a human clears) over MISSING (a shipped contradiction) is the right bias; a precise
-    fix needs `(check, workflow_file)` identity from findings.json (future work — the gate is a
-    backstop to the scope-agnostic `off_spine` source fix, not the primary prevention)."""
+    fix needs `(check, workflow_file)` identity from findings.json (future work; the one
+    workflow-aware exception today is `_matrix_homonym_workflows`, a matrix family named like a
+    dropped check, in `check_dropped_check_not_framed_on_path` — the gate is a backstop to the
+    scope-agnostic `off_spine` source fix, not the primary prevention)."""
     return _norm_check(_strip_scope(str(s)))
 
 
@@ -2664,6 +3249,58 @@ def _on_path_appendix_jobs(report: str) -> tuple[set[str], list[str]]:
             fallback.append(_cmp_name(line))
     exact.discard("")
     return exact, fallback
+
+
+# The same `**Where:**` segment, capturing the workflow too: `\`wf[:line]\` (job)`.
+_WHERE_SITE_RE = re.compile(r"`([^`]+)`\s*\((.*?)\)(?=\s*,\s*(?:`|\+)|\s*$)")
+
+
+def _on_path_framed_sites(report: str) -> set[tuple[str, str]]:
+    """Every `(workflow basename, _cmp_name job/check)` the report frames ON the critical path
+    WITH a workflow attached: each Long-pole header's `\\`wf\\` ▸ CHECK` and each parsed segment
+    of an on-path appendix note's `**Where:**` line. The headline names no workflow, so it is not
+    here (the caller compares it by bare name). A block with no `**Where:**` line is scanned
+    whole, exactly as `_on_path_appendix_jobs` does, so the two never disagree on which segments
+    exist (a segment parsed there but not here would be a silent miss)."""
+    sites = {(_wf_base(wf), _cmp_name(ck)) for wf, ck, _b in _pole_header_sections(report)}
+    for block in report.split("<details>"):
+        if _ON_PATH_SENTENCE not in block:
+            continue
+        m = re.search(r"^\*\*Where:\*\*\s*(.+)$", block, re.MULTILINE)
+        line = m.group(1) if m else block
+        sites |= {(_wf_base(_strip_line_suffix(wf.strip())), _cmp_name(job))
+                  for wf, job in _WHERE_SITE_RE.findall(line)}
+    return {(w, j) for w, j in sites if j}
+
+
+def _matrix_homonym_workflows(data: dict) -> dict[str, set[str]]:
+    """`_cmp_name` name → the workflow basenames MEASURED to run that name only as a matrix of
+    differently named legs: their `per_workflow_timing[wf].job_p50` keys hold `NAME (…)` legs and
+    no bare `NAME`. In such a workflow a Where segment or header naming `NAME` is the matrix family
+    (job-level), never a check-run literally called `NAME`, so it cannot be a dropped `NAME` check:
+    mastodon/mastodon drops `test-js.yml`'s single `test` while `test-ruby.yml`'s `test` family
+    (`test (3.4)`, `test (3.3)`, `test (.ruby-version)`) sits on the critical path.
+
+    This is POSITIVE evidence of a homonym, deliberately not "the framed workflow is not one of the
+    dropped check's measured owners": a workflow can be missing from the timing (event-scoped
+    `job_p50`, an unsampled or triage-skipped workflow, a rename between eras, an empty rendered
+    workflow), and excusing on absence would let a real contradiction pass silently. Everything
+    not proven a homonym is compared by bare name, as before. Relies on matrix legs being measured
+    under their LEG names; a bare-base key in the same workflow removes the excuse (loud, safe)."""
+    legs: dict[str, set[str]] = {}
+    bare: dict[str, set[str]] = {}
+    pwt = _as_dict(data.get("per_workflow_timing"))
+    for wf, row in pwt.items():
+        base = _wf_base(str(wf))
+        for job in _as_dict(_as_dict(row).get("job_p50")):
+            nm = _cmp_name(job)
+            if not nm:
+                continue
+            bare.setdefault(nm, set()).add(base)
+            m = re.match(r"^(.+?)\s*\(.*\)$", nm)
+            if m:
+                legs.setdefault(m.group(1).strip(), set()).add(base)
+    return {nm: wfs - bare.get(nm, set()) for nm, wfs in legs.items() if wfs - bare.get(nm, set())}
 
 
 def _vr_gate_counts(cp: dict) -> tuple[dict, int]:
@@ -2828,9 +3465,10 @@ def check_dropped_check_not_framed_on_path(report: str, findings_path: Path | No
     PROPERTY over two sets read from the artifact + the rendered report (never a proxy of the
     renderer): the EXCLUDED set (the `dropped_*` footnote — present even in stampless bundles,
     which is why this keys on it and not `off_spine`) and the ON-PATH-FRAMED set built from EVERY
-    framing context — `_on_path_framed_check_names` (pole headers ∪ the headline "slowest" claim,
-    matched by EXACT name) ∪ `_on_path_appendix_jobs` (the appendix on-path notes' `**Where:**`
-    job names, matched EXACTLY, with a substring fallback only when a Where line won't parse). The
+    framing context — pole headers and the appendix on-path notes' `**Where:**` segments
+    (`_on_path_framed_sites`, each with its workflow), the headline "slowest" claim (by EXACT name),
+    and `_on_path_appendix_jobs` (Where job names, with a substring fallback only when a Where line
+    won't parse). The
     assertion is `EXCLUDED ∩ ON_PATH == ∅`. Because the on-path side is a SET assembled from every
     context, a contradiction shape not yet enumerated (a future on-path context) is caught by
     extending that set, not by adding a bespoke check — the class-wide guard, not a point-fix.
@@ -2849,7 +3487,9 @@ def check_dropped_check_not_framed_on_path(report: str, findings_path: Path | No
     collides with a different check; the appendix/header names a JOB, so it only trips when the
     job name equals the excluded check name (the encord shape) — the same-token cross-scope
     residual `_stamp_off_spine_findings` documents (job `build` vs dropped CHECK `@a/pkg build`)
-    is out of exact-name scope by design."""
+    is out of exact-name scope by design. A hard-dropped name framed in a workflow MEASURED to run
+    that name only as a matrix of differently named legs (`_matrix_homonym_workflows`) is a
+    homonym, not the dropped check, and is not flagged; no other framing is excused."""
     name = "no spine-dropped check is also framed on the merge-gating critical path"
     if not findings_path or _is_static_only(report):
         return Check(name, True, "no findings / static-only — no spine to contradict",
@@ -2869,15 +3509,28 @@ def check_dropped_check_not_framed_on_path(report: str, findings_path: Path | No
                      skipped=True)
     # On-path framing: an exact-name context (headers ∪ headline ∪ parsed appendix jobs) OR —
     # only when an appendix Where line wouldn't parse — a substring of that raw line.
-    framed = _on_path_framed_check_names(report)
     appendix_jobs, appendix_fallback = _on_path_appendix_jobs(report)
-    framed_all = framed | appendix_jobs
-    # HARD-DROPPED: contradiction in ANY framing context. RARE-DEMOTED: contradiction ONLY in the
+    # HARD-DROPPED: contradiction in ANY framing context, EXCEPT a header / Where segment in a
+    # workflow measured to run that name only as a matrix family of differently named legs
+    # (`_matrix_homonym_workflows`: mastodon `test-js.yml` `test` dropped vs `test-ruby.yml`'s
+    # on-path `test` family). Everything else, the workflow-less headline included, compares by
+    # bare name. RARE-DEMOTED: contradiction ONLY in the
     # appendix on-path note (a demoted Long-pole header carries its own opt-in framing — not a
-    # contradiction). The substring fallback stays appendix-scoped for both.
+    # contradiction), kept NAME-level because the renderer demotes the name across workflows.
+    # The substring fallback stays appendix-scoped for both.
+    homonyms = _matrix_homonym_workflows(_as_dict(data))
+    sites = _on_path_framed_sites(report)
+    _hl = _headline_slowest_label(report)
+    headline = _cmp_name(_hl) if _hl else ""
+
+    def _dropped_framed(d: str) -> bool:
+        excused = homonyms.get(d, set())
+        return (d == headline
+                or any(j == d and w not in excused for w, j in sites)
+                or any(d in w for w in appendix_fallback))
+
     contradictions = sorted(
-        {d for d in dropped
-         if d in framed_all or any(d in w for w in appendix_fallback)}
+        {d for d in dropped if _dropped_framed(d)}
         | {d for d in rare_demoted
            if d in appendix_jobs or any(d in w for w in appendix_fallback)})
     if contradictions:
@@ -3931,6 +4584,68 @@ def check_headline_basis_excludes_fileless(report: str, findings_path: Path | No
                  f"and disclosed as PR-lifetime status-gating latency{_deg}")
 
 
+def _job_name_is_templated(info: object) -> bool:
+    """A job declared under a `${{ }}`-templated `name:` that is not a reusable-workflow
+    caller: its spine rows carry the RENDERED name, never its key. MIRRORED by
+    `collect_runs._job_name_is_templated` (the sizing door); a coupling test pins the two."""
+    info = _as_dict(info)
+    return "${{" in str(info.get("name") or "") and not info.get("reusable")
+
+
+def _spine_job_identities(graph: dict, wf: str, job: str,
+                          base: Callable[[str], str]) -> list[str]:
+    """Job bases `job` may appear under in `wf`'s spine rows, literal first (so an already-
+    matching name keeps today's binding), then the graph-resolved counterpart identity
+    (YAML key -> declared `name:`, and display name -> key). `base` is the caller's join key.
+    Only valid WITHIN `wf` — the cross-workflow fallback must not use these aliases.
+    An AMBIGUOUS display name (two job keys in `wf` rendering to the same name) yields no
+    alias: the spine indexes by that one name, so aliasing a key onto it would bound the
+    finding by BOTH jobs' summed compute and inflate the ceiling. Ambiguity stays an honest
+    coverage gap. MIRRORED by `collect_runs._own_workflow_job_identities` (the sizing door's
+    cap); a coupling test pins the two."""
+    b = base(job)
+    out = [b] if b else []
+    jobs_in_wf = _as_dict(_as_dict(graph).get(wf))
+    names: dict[str, int] = {}
+    for jid, info in jobs_in_wf.items():
+        nm = base(_as_dict(info).get("name") or jid)
+        if nm:
+            names[nm] = names.get(nm, 0) + 1
+    for jid, info in jobs_in_wf.items():
+        nm = base(_as_dict(info).get("name") or jid)
+        if names.get(nm, 0) > 1:
+            continue  # collision: this display name identifies more than one job — no alias.
+        # key → its `name:` override, and display name → its key; both directions, one pass.
+        for alias in ((nm,) if base(jid) == b else ((base(jid),) if nm == b else ())):
+            if alias and alias not in out:
+                out.append(alias)
+    return out
+
+
+# Findings that measure failure waste ON PURPOSE (post-failure sibling compute, superseded /
+# cancelled runs, the failure rate, the default-timeout kill, rerun attempts) keep their own
+# basis: every sampled job run, since their saving can be the very timed-out, cancelled or killed
+# runs measured compute leaves out. EMBEDDED copy of `collect_runs._FAILURE_WASTE_PATTERNS`
+# (verify_report imports no engine module); a coupling test pins the two.
+_FAILURE_WASTE_PATTERNS = frozenset({"OPT35", "OPT46", "OPT48", "OPT57", "OPT64"})
+
+
+def _measured_compute_basis_for(f: dict) -> str:
+    """MIRROR of `collect_runs._measured_compute_basis_for`: THE one basis rule the sizing door
+    caps by and this guard bounds by (a coupling test pins the two). "all_runs" (every sampled job
+    run) for a failure-waste finding and for a figure the door never caps because it is re-derived
+    exactly from stamped evidence (`sizing_basis: measured`, or a Tier-2 certificate); "completed"
+    (completed job runs) for everything else."""
+    if str(f.get("pattern") or "") in _FAILURE_WASTE_PATTERNS:
+        return "all_runs"
+    if f.get("sizing_basis") == "measured":
+        return "all_runs"
+    cert = f.get("tier2_neutrality")
+    if isinstance(cert, dict) and cert:
+        return "all_runs"
+    return "completed"
+
+
 def check_saving_within_measured_compute(report: str, findings_path: Path | None) -> Check:
     """**Physical bound (c) — a runner-minute saving never exceeds the compute it cuts.** A finding's
     credited `runner_min_saving` (monthly billable minutes it claims to remove) can never exceed the
@@ -3952,7 +4667,23 @@ def check_saving_within_measured_compute(report: str, findings_path: Path | None
     L8). A per-finding coverage gap where at least one OTHER finding is bounded, and a partial gap
     where only some of a finding's jobs resolve, both surface in the detail (bounded on the resolved
     subset only — never silently presented as full coverage). Standalone; keys on
-    `runner_minute_spine.rows` + `findings[].runner_min_saving`/`affected_jobs`."""
+    `runner_minute_spine.rows` + `findings[].runner_min_saving`/`affected_jobs`.
+
+    WHICH COMPUTE (owner decision 2026-10-12). Each finding is bounded by the basis
+    `_measured_compute_basis_for` names, the same rule the sizing door caps by: completed job runs
+    (`completed_billable_equiv_min_per_month`: timed-out, cancelled and killed runs left out) for a
+    modeled or derived saving; every sampled run (`billable_equiv_min_per_month`) for a
+    failure-waste finding and for a measured or Tier-2-certified saving (re-derived exactly
+    elsewhere; the door never caps it). When every sampled run of a finding's jobs was excluded
+    there is no completed basis: a completed-basis saving there must render unsized (the door's
+    `_mark_all_runs_excluded`), and a sized one FAILS. The split is read only from a spine stamped `measured_compute_basis:
+    completed_job_runs_only`. A pre-split row counts its full figure when it was sampled from
+    successful runs (a latest-attempt `status_filter: success` row, or one stamping no status) and
+    its job is not marked `continue-on-error: true`; otherwise it MAY include excluded runs, and a
+    completed-basis saving bounded by it FAILS. KNOWN LIMITS: a continue-on-error job whose
+    `name:` is templated is not recognised; and this guard (like the spine contract) checks the
+    split's arithmetic, not its classification: an artifact carries no per-job conclusions. Every
+    refusal is collected, so one refused finding never hides another."""
     name = "each finding's runner-minute saving is within its jobs' measured compute"
     if not findings_path:
         return Check(name, True, "no findings path", skipped=True)
@@ -3988,43 +4719,45 @@ def check_saving_within_measured_compute(report: str, findings_path: Path | None
     graph = _as_dict(data.get("workflow_job_graph"))
 
     def _identities(wf: str, job: str) -> list[str]:
-        """Job bases `job` may appear under in `wf`'s spine rows, literal first (so an already-
-        matching name keeps today's binding), then the graph-resolved counterpart identity.
-        Only valid WITHIN `wf` — the cross-workflow fallback must not use these aliases.
-        An AMBIGUOUS display name (two job keys in `wf` rendering to the same name) yields no
-        alias: the spine indexes by that one name, so aliasing a key onto it would bound the
-        finding by BOTH jobs' summed compute and inflate the ceiling. Ambiguity stays an honest
-        coverage gap, same as the cross-workflow rule above."""
-        b = _base(job)
-        out = [b] if b else []
-        jobs_in_wf = _as_dict(graph.get(wf))
-        names: dict[str, int] = {}
-        for jid, info in jobs_in_wf.items():
-            nm = _base(_as_dict(info).get("name") or jid)
-            if nm:
-                names[nm] = names.get(nm, 0) + 1
-        for jid, info in jobs_in_wf.items():
-            nm = _base(_as_dict(info).get("name") or jid)
-            if names.get(nm, 0) > 1:
-                continue  # collision: this display name identifies more than one job — no alias.
-            # key → its `name:` override, and display name → its key; both directions, one pass.
-            for alias in ((nm,) if _base(jid) == b else ((_base(jid),) if nm == b else ())):
-                if alias and alias not in out:
-                    out.append(alias)
-        return out
+        # Same-workflow identities only (see `_spine_job_identities`).
+        return _spine_job_identities(graph, wf, job, _base)
 
+    def _templated_in_wf(wf: str, b: str) -> bool:
+        for jid, info in _as_dict(graph.get(wf)).items():
+            if _base(jid) == b and _job_name_is_templated(info):
+                return True
+        return False
+
+    split = spine.get("measured_compute_basis") == "completed_job_runs_only"
+    continue_on_error: set[tuple[str, str]] = set()
+    for gwf, gjobs in graph.items():
+        for jid, info in _as_dict(gjobs).items():
+            info = _as_dict(info)
+            if info.get("continue_on_error") is True:
+                continue_on_error.add((str(gwf), _base(jid)))
+                continue_on_error.add((str(gwf), _base(str(info.get("name") or jid))))
     compute: dict[tuple[str, str], float] = {}
+    compute_all: dict[tuple[str, str], float] = {}
+    unsplit: set[tuple[str, str]] = set()
     for r in rows:
         r = _as_dict(r)
         wf = str(r.get("workflow_file") or "")
         jb = _base(r.get("job_name") or "")
         bill = _num(r.get("billable_equiv_min_per_month")) or 0.0
+        completed = _num(r.get("completed_billable_equiv_min_per_month")) if split else None
+        if completed is None:
+            status = str(r.get("status_filter") or "").strip()
+            if split or (status and status != "success") or (wf, jb) in continue_on_error:
+                unsplit.add((wf, jb))
+            completed = bill
         if wf and jb:
-            compute[(wf, jb)] = compute.get((wf, jb), 0.0) + bill
+            compute[(wf, jb)] = compute.get((wf, jb), 0.0) + completed
+            compute_all[(wf, jb)] = compute_all.get((wf, jb), 0.0) + bill
 
     checked = 0
     uncovered: list[str] = []
     partial: list[str] = []
+    failures: list[str] = []
     for f in _as_list(data.get("findings")):
         f = _as_dict(f)
         saving = _num(f.get("runner_min_saving"))
@@ -4048,10 +4781,12 @@ def check_saving_within_measured_compute(report: str, findings_path: Path | None
         # `_whole_run_cancel_base_key` is at least as strict as this `_base` (it does no
         # scope-stripping), so the two gates tighten together and the door still bounds
         # to a subset of what this guard bounds.
+        every_run = _measured_compute_basis_for(f) == "all_runs"
         matched = 0
         distinct = 0
-        bound = 0.0
+        bound_c = bound_a = 0.0
         seen: set[str] = set()
+        mixed: list[str] = []
         for j in jobs:
             b = _base(j)
             if not b:
@@ -4069,16 +4804,49 @@ def check_saving_within_measured_compute(report: str, findings_path: Path | None
             distinct += 1
             if key:
                 matched += 1
-                bound += compute[key]
-            else:
+                bound_c += compute[key]
+                bound_a += compute_all[key]
+                if key in unsplit:
+                    mixed.append(j)
+            elif not _templated_in_wf(wf, b):
                 # Job base present under ANY workflow file (a reusable-workflow caller loses the wf).
+                # NOT for a job declared in `wf` under a `${{ }}`-templated `name:` (and not a
+                # reusable caller): its rows carry the RENDERED name, so a key miss is an
+                # unresolvable identity, not a lost wf — a literal namesake elsewhere is a
+                # different job (curl: http3-linux.yml `linux` bound configure-vs-cmake.yml's
+                # `Linux`, 155.5 min/mo, and false-FAILed). It stays an honest coverage gap.
                 # LITERAL base only — graph aliases are same-workflow evidence and must not widen
                 # this cross-workflow match (see `_identities`); a job with no row in its own
                 # workflow stays an honest coverage gap rather than binding a foreign namesake.
-                alt = [v for (w, jb), v in compute.items() if jb == b]
+                alt = [(compute_all[k] if every_run else v, k)
+                       for k, v in compute.items() if k[1] == b]
                 if alt:
                     matched += 1
-                    bound += max(alt)
+                    _best, best_key = max(alt)
+                    bound_c += compute[best_key]
+                    bound_a += compute_all[best_key]
+                    if best_key in unsplit:
+                        mixed.append(j)
+        if mixed and not every_run:
+            failures.append(
+                f"finding `{f.get('pattern', '?')}` is bounded by measured compute for {mixed} that "
+                "may include timed-out, cancelled or killed job runs (a pre-split cost-spine row "
+                "sampled from all run conclusions, or from a job marked continue-on-error) — "
+                "measured compute counts completed job runs; re-run the collector so each row "
+                "stamps `completed_billable_equiv_min_per_month`")
+            continue
+        all_excluded = (not every_run) and matched > 0 and bound_c <= 0 < bound_a
+        if all_excluded:
+            # Owner decision 2026-10-12, the engine's twin (`_mark_all_runs_excluded`): every
+            # sampled run of these jobs was excluded, so there is no completed basis and a
+            # completed-basis saving is never sized against the excluded minutes.
+            failures.append(
+                f"finding `{f.get('pattern', '?')}` credits {saving:g} min/mo of runner-time but "
+                f"every sampled run of its affected job(s) {jobs} was excluded from measured "
+                "compute (timed out, cancelled, or failed at or past the 6-hour default "
+                "timeout); a saving on those jobs must render unsized")
+            continue
+        bound = bound_a if every_run else bound_c
         if matched == 0:
             uncovered.append(f"{f.get('pattern', '?')}({', '.join(jobs[:2])})")
             continue
@@ -4090,11 +4858,16 @@ def check_saving_within_measured_compute(report: str, findings_path: Path | None
         # Directional upper bound + tolerance (L6): the spine's per-run mean is measured while the
         # finding's saving is a model over the same monthly volume, so allow small rounding slack.
         if saving > bound * 1.02 + 0.1:
-            return Check(name, False,
-                         f"finding `{f.get('pattern', '?')}` credits {saving:g} min/mo of runner-time "
-                         f"but its affected job(s) {jobs} measure only {round(bound, 1):g} min/mo of "
-                         "billable compute in the cost spine — a fix cannot save more minutes than "
-                         "the jobs consume (the saving model overstates the job's measured cost)")
+            what = ("billable compute across every sampled run" if every_run
+                    else "billable compute from completed job runs")
+            failures.append(
+                f"finding `{f.get('pattern', '?')}` credits {saving:g} min/mo of runner-time but its "
+                f"affected job(s) {jobs} measure only {round(bound, 1):g} min/mo of {what} in the "
+                "cost spine — a fix cannot save more minutes than the jobs consume (the saving "
+                "model overstates the job's measured cost)")
+    if failures:
+        more = f" (+{len(failures) - 6} more)" if len(failures) > 6 else ""
+        return Check(name, False, f"{len(failures)} refused: " + "; ".join(failures[:6]) + more)
     detail = f"{checked} credited saving(s) within measured compute"
     if partial:
         detail += (f"; {len(partial)} bounded on the resolved job subset only "
@@ -4560,6 +5333,129 @@ def _rendered_number_problem(label: str, got_cell: object, want: object, *,
     return None
 
 
+# Why a sampled job run is left out of measured compute. MIRROR of
+# `collect_runs._SPINE_UNFINISHED_REASONS`; a coupling test pins the two.
+_SPINE_UNFINISHED_REASONS = ("timed_out", "cancelled", "kill_window")
+
+
+def _spine_split_monthly(row_billable: float, completed_sampled: int,
+                         excluded_sampled: int) -> tuple[float, float]:
+    """MIRROR of `collect_runs._spine_split_monthly`: each half's share of the row's own
+    monthly billable figure, by its whole sampled minutes (one rounding shared with the row,
+    so the completed half never exceeds the row)."""
+    total = completed_sampled + excluded_sampled
+    if total <= 0:
+        return 0.0, 0.0
+    return (round(row_billable * completed_sampled / total, 3),
+            round(row_billable * excluded_sampled / total, 3))
+
+
+def _spine_row_completed_split(row: dict, occurrence_n: float, mean_billed: float,
+                               positive_n: float | None) -> dict:
+    """Re-derive one cost-spine row's completed / excluded split from its own sample. Each half
+    stamps its whole sampled billable minutes; together they must match the row's sample
+    (mean x occurrences, within the mean's 3-decimal rounding), each half takes its share of
+    the row's own monthly figure, and the excluded runs' reasons must add up. When no sampled
+    run has a zero span every run bills at least one minute, so each half's minutes must be at
+    least its run count. KNOWN LIMIT: this checks the split's arithmetic, not its
+    classification: an artifact carries no per-job conclusions, so which runs were timed out,
+    cancelled or killed is the engine's word."""
+    problems: list[str] = []
+    completed_n = row.get("completed_occurrence_count")
+    completed_sampled = row.get("completed_sampled_billable_min")
+    excluded_n = row.get("excluded_unfinished_occurrence_count")
+    excluded_sampled = row.get("excluded_unfinished_sampled_billable_min")
+    reasons = row.get("excluded_unfinished_by_reason")
+    ints = (completed_n, completed_sampled, excluded_n, excluded_sampled)
+    empty = {"completed_month": 0.0, "excluded_runs": 0, "excluded_sampled": 0,
+             "excluded_month": 0.0, "by_reason": {r: 0 for r in _SPINE_UNFINISHED_REASONS}}
+    if (not all(isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in ints)
+            or not isinstance(reasons, dict) or set(reasons) != set(_SPINE_UNFINISHED_REASONS)
+            or not all(isinstance(v, int) and not isinstance(v, bool) and v >= 0
+                       for v in reasons.values())):
+        return dict(empty, problems=[
+            "completed / excluded job-run split missing or not whole counts"])
+    if completed_n + excluded_n != occurrence_n:
+        problems.append("completed_occurrence_count + excluded_unfinished_occurrence_count "
+                        "does not equal sampled_job_occurrence_count")
+    if sum(reasons.values()) != excluded_n:
+        problems.append("excluded_unfinished_by_reason does not add up to "
+                        "excluded_unfinished_occurrence_count")
+    if abs(mean_billed * occurrence_n - (completed_sampled + excluded_sampled)) > (
+            0.0005 * occurrence_n + 1e-6):
+        problems.append("completed_sampled_billable_min + excluded_unfinished_sampled_billable_min "
+                        "does not match the row's sampled billable minutes")
+    if ((excluded_n == 0 and excluded_sampled != 0)
+            or (completed_n == 0 and completed_sampled != 0)):
+        problems.append("sampled billable minutes stamped on a half with no job runs")
+    if positive_n is not None and positive_n >= occurrence_n and (
+            completed_sampled < completed_n or excluded_sampled < excluded_n):
+        problems.append("a half bills fewer minutes than it has job runs, though every sampled "
+                        "run had a positive span (each bills at least one minute)")
+    row_billable = _num(row.get("billable_equiv_min_per_month")) or 0.0
+    completed_month, excluded_month = _spine_split_monthly(
+        row_billable, completed_sampled, excluded_sampled)
+    if not _close(row.get("completed_billable_equiv_min_per_month"), completed_month):
+        problems.append("completed_billable_equiv_min_per_month does not rederive (measured "
+                        "compute leaves out timed-out, cancelled and killed runs)")
+    if (_num(row.get("completed_billable_equiv_min_per_month")) or 0.0) > row_billable + 0.0005:
+        problems.append("completed_billable_equiv_min_per_month exceeds the row's "
+                        "billable_equiv_min_per_month")
+    if not _close(row.get("excluded_unfinished_billable_equiv_min_per_month"), excluded_month):
+        problems.append("excluded_unfinished_billable_equiv_min_per_month does not rederive")
+    return {"problems": problems, "completed_month": completed_month,
+            "excluded_runs": excluded_n, "excluded_sampled": excluded_sampled,
+            "excluded_month": excluded_month, "by_reason": dict(reasons)}
+
+
+def _measured_compute_footnote(spine: dict) -> str:
+    """MIRROR of `blocking_path._measured_compute_footnote` (verify_report imports no engine
+    module): the cost-spine basis line rebuilt from stamped facts only."""
+    if str(spine.get("measured_compute_basis") or "") != "completed_job_runs_only":
+        return ""
+    totals = _as_dict(spine.get("totals"))
+    excluded = _as_dict(spine.get("excluded_unfinished"))
+    reasons = _as_dict(excluded.get("by_reason"))
+    completed = _num(totals.get("completed_billable_equiv_min_per_month")) or 0.0
+    count = int(_num(excluded.get("job_run_count")) or 0)
+    failures = int(_num(_as_dict(spine.get("workflow_coverage")).get("job_fetch_failures"))
+                   or 0)
+    text = f"Measured compute counts completed job runs: {completed:.3f} min/mo."
+    if count > 0:
+        sampled = int(_num(excluded.get("sampled_billable_min")) or 0)
+        monthly = _num(excluded.get("billable_equiv_min_per_month")) or 0.0
+        one = count == 1
+        parts = [f"{int(_num(reasons.get(key)) or 0)} {label}" for key, label in (
+            ("timed_out", "timed out"), ("cancelled", "cancelled"),
+            ("kill_window", "failed at or past the 6-hour default timeout"))
+                 if int(_num(reasons.get(key)) or 0) > 0]
+        text += (f" {count} timed-out, cancelled or killed job run{'' if one else 's'} "
+                 f"({', '.join(parts)}; {sampled} sampled min, {monthly:.3f} min/mo) "
+                 f"{'is' if one else 'are'} excluded because no speed fix removes "
+                 f"{'it' if one else 'them'}; the cost-spine rows and Total still count "
+                 f"{'its' if one else 'their'} minutes.")
+    else:
+        text += " No timed-out, cancelled or killed job run was found in the sample."
+    if failures > 0:
+        text += (f" {failures} job download{'' if failures == 1 else 's'} failed, so the "
+                 f"runs in {'it' if failures == 1 else 'them'} were not checked.")
+    return text + (" Failed, neutral and other finished runs count. Modeled savings are "
+                   "capped at measured compute and derived savings are computed "
+                   "from it; measured savings and failure-waste findings are checked "
+                   "against every sampled run instead. Savings on jobs whose every sampled "
+                   "run was excluded are shown unsized.")
+
+
+def _spine_carries_split_facts(spine: dict) -> bool:
+    """Whether a cost spine carries any completed / excluded split fact (row or spine level)."""
+    if "excluded_unfinished" in spine or "completed_billable_equiv_min_per_month" in _as_dict(
+            spine.get("totals")):
+        return True
+    return any(isinstance(r, dict) and any(k.startswith(("completed_", "excluded_unfinished_"))
+                                           for k in r)
+               for r in _as_list(spine.get("rows")))
+
+
 def check_runner_minute_spine_contract(report: str, findings_path: Path | None) -> Check:
     name = "runner-minute cost spine source block is re-derivable"
     marker_count = len(_RUNNER_MINUTE_SPINE_MARKER_RE.findall(report or ""))
@@ -4655,6 +5551,21 @@ def check_runner_minute_spine_contract(report: str, findings_path: Path | None) 
     latest_attempt_row_count = 0
     prior_attempt_row_count = 0
     total_raw = total_billed = 0.0
+    # Measured compute = completed job runs (owner decision 2026-10-12). A spine stamping that
+    # basis must carry the completed / excluded split on EVERY row, re-derivable from the row's
+    # own sample. Split facts WITHOUT the stamp are refused (they would otherwise go unchecked
+    # here while the saving bound ignored them); a pre-split artifact (no stamp, no split facts)
+    # is bounded by `check_saving_within_measured_compute`'s legacy rule instead.
+    basis_stamp = spine.get("measured_compute_basis")
+    split_basis = basis_stamp is not None
+    if split_basis and basis_stamp != "completed_job_runs_only":
+        problems.append(f"measured_compute_basis={basis_stamp!r}")
+    if not split_basis and _spine_carries_split_facts(spine):
+        problems.append("completed / excluded split facts are present without "
+                        "measured_compute_basis — the split cannot be trusted unstamped")
+    total_completed = excluded_month = 0.0
+    excluded_runs = excluded_sampled = 0
+    excluded_reasons = {r: 0 for r in _SPINE_UNFINISHED_REASONS}
     for idx, raw_row in enumerate(rows, 1):
         row = _as_dict(raw_row)
         key = _runner_spine_key_from_row(row)
@@ -4737,6 +5648,15 @@ def check_runner_minute_spine_contract(report: str, findings_path: Path | None) 
             problems.append(f"row {idx}: raw_compute_runner_min_per_month does not rederive")
         if not _close(row.get("billable_equiv_min_per_month"), round(billed_min, 3)):
             problems.append(f"row {idx}: billable_equiv_min_per_month does not rederive")
+        if split_basis:
+            split = _spine_row_completed_split(row, occurrence_n, mean_billed, pos_occ)
+            problems.extend(f"row {idx}: {p}" for p in split["problems"])
+            total_completed += split["completed_month"]
+            excluded_runs += split["excluded_runs"]
+            excluded_sampled += split["excluded_sampled"]
+            excluded_month += split["excluded_month"]
+            for reason, n in split["by_reason"].items():
+                excluded_reasons[reason] += n
         total_raw += round(raw_min, 3)
         total_billed += round(billed_min, 3)
     if not _close(totals.get("row_count"), float(len(rows)), 0.0):
@@ -4747,6 +5667,28 @@ def check_runner_minute_spine_contract(report: str, findings_path: Path | None) 
         problems.append("totals.billable_equiv_min_per_month does not rederive")
     if str(totals.get("percentage_denominator") or "") != "all_rows_billable_equiv_min_per_month":
         problems.append("totals.percentage_denominator is not all-row billable minutes")
+    if split_basis:
+        if not _close(totals.get("completed_billable_equiv_min_per_month"),
+                      round(total_completed, 3)):
+            problems.append("totals.completed_billable_equiv_min_per_month does not rederive")
+        excluded = _as_dict(spine.get("excluded_unfinished"))
+        if (excluded.get("job_run_count") != excluded_runs
+                or excluded.get("sampled_billable_min") != excluded_sampled
+                or excluded.get("by_reason") != excluded_reasons
+                or not _close(excluded.get("billable_equiv_min_per_month"),
+                              round(excluded_month, 3))):
+            problems.append("excluded_unfinished does not rederive from the rows' excluded "
+                            "job runs")
+        if rendered and render_ready is True:
+            footnote = _measured_compute_footnote(spine)
+            marker = _RUNNER_MINUTE_SPINE_MARKER_RE.search(report or "")
+            section = report[marker.end():] if marker else ""
+            nxt = re.search(r"^##\s+", section, re.MULTILINE)
+            section = section[:nxt.start()] if nxt else section
+            if footnote not in section:
+                problems.append(
+                    "cost-spine footnote does not state the stamped measured-compute basis "
+                    f"(expected: {footnote!r})")
     if spine.get("latest_attempt_row_count") != latest_attempt_row_count:
         problems.append("latest_attempt_row_count does not match rows")
     if spine.get("prior_attempt_row_count") != prior_attempt_row_count:
@@ -5149,6 +6091,118 @@ def _below_floor_margin(f: dict, data: dict) -> float | None:
     return round(floor - own, 1)
 
 
+def _below_long_pole_margin(f: dict, data: dict) -> tuple[float | None, list[str]]:
+    """The `below_long_pole` margin re-derived from `per_workflow_timing`:
+    long_pole_p50 - job_p50, for a job that is NOT the workflow's long pole.
+
+    None (with the reason) when the run measured no long pole for the workflow,
+    when the credited job IS that long pole, or when it is not at least
+    `_VR_OPT79_POLE_MIN_HEADROOM_S` (1s) shorter than it after rounding: a job
+    within that tie cutoff of the slowest job is a co-pole, as slow as the job
+    that sets the merge gate, and the proof says the opposite."""
+    wf = str(f.get("workflow_file") or "")
+    crit = _as_dict(_as_dict(data.get("per_workflow_timing")).get(wf))
+    lp_job = str(crit.get("long_pole_job") or "")
+    lp = _num(crit.get("long_pole_p50"))
+    job_p50 = _as_dict(crit.get("job_p50"))
+    jobs = [str(j) for j in _as_list(f.get("affected_jobs")) if str(j)]
+    if not lp_job or lp is None or lp <= 0 or not jobs:
+        return None, [f"per_workflow_timing records no long pole for {wf!r}, so "
+                      "the below-the-long-pole margin cannot be re-derived"]
+    if lp_job in jobs:
+        return None, [f"`{lp_job}` IS the workflow's long pole: a below-the-long-pole "
+                      "proof cannot be claimed for the job that sets the merge gate"]
+    vals = [_strict_job_p50(j, job_p50) for j in jobs]
+    vals = [v for v in vals if v is not None and v > 0]
+    if not vals:
+        return None, ["per_workflow_timing records no p50 for the credited job"]
+    floor = _num(crit.get("floor_p50"))
+    # The collector's partition: the below-the-floor arm takes a job only when
+    # its floor margin is POSITIVE after rounding (both sides rounded to 0.1s as
+    # stamped); a job a hair under the floor (margin rounds to 0.0) falls through
+    # to this arm.
+    if (floor is not None and floor > 0
+            and round(round(floor, 1) - round(max(vals), 1), 1) > 0):
+        return None, [f"the credited job ({max(vals)}s) is below the workflow cluster "
+                      f"floor ({floor}s): its proof is below_cluster_floor, and the "
+                      "below_long_pole certificate would be false: the check keeps "
+                      "the two certificates apart"]
+    # The collector's rounding order: each p50 stamped to 0.1s, then subtracted.
+    margin = round(round(lp, 1) - round(max(vals), 1), 1)
+    if margin < _VR_OPT79_POLE_MIN_HEADROOM_S:
+        return None, [f"the credited job ({max(vals)}s) is not at least "
+                      f"{_VR_OPT79_POLE_MIN_HEADROOM_S}s shorter than the long pole "
+                      f"`{lp_job}` ({lp}s): a job within the tie cutoff of the slowest "
+                      "job is a co-pole and carries no below-the-long-pole proof"]
+    return margin, []
+
+
+def _tier2_below_long_pole_problems(f: dict, data: dict) -> list[str]:
+    """The Tier-2 arm for the `below_long_pole` token: OPT79's own (any other
+    pattern claiming it fails), re-derived by OPT79's full arm, with the margin
+    compared against long_pole_p50 - job_p50 from `per_workflow_timing`."""
+    pat = str(f.get("pattern") or "")
+    if pat != "OPT79":
+        return [f"{_VR_OPT79_PROOF_BELOW_LONG_POLE} is OPT79's certificate, claimed "
+                f"by {pat!r}"]
+    want, problems = _opt79_net_negative_cache_rederived(f, data)
+    got = _num(_as_dict(f.get("tier2_neutrality")).get("margin_s"))
+    if got is None or want is None or abs(got - want) > 0.11:
+        problems = problems + [f"below-long-pole margin {got!r} != re-derived {want!r}"]
+    # The margin compares single-job p50s; on a workflow a pull request waits
+    # on, a job in a `needs:` chain with the long pole adds to the merge wait
+    # instead, so the proof does not hold for it. Re-derived from
+    # `workflow_job_graph` when the run recorded one. The collector applies that
+    # exclusion only when the workflow gates pull requests (no PR waits on any
+    # other, so the chain shortens no merge wait); the same gate here reads the
+    # stamped `workflow_gates_pull_requests`, paired against the sampled events
+    # when the run recorded them. A finding without the stamp (pre-stamp
+    # artifact) is read as gating pull requests, so the check fails closed.
+    wf = str(f.get("workflow_file") or "")
+    crit = _as_dict(_as_dict(data.get("per_workflow_timing")).get(wf))
+    lp_job = str(crit.get("long_pole_job") or "")
+    stamped = _as_dict(f.get("cache_net_negative")).get("workflow_gates_pull_requests")
+    if isinstance(stamped, bool):
+        ev = _opt79_sampled_events_problem(data, wf, stamped)
+        if ev:
+            problems = problems + [ev]
+    gates_pr = stamped is not False
+    graph_recorded = bool(_as_dict(_as_dict(data.get("workflow_job_graph")).get(wf)))
+    for job in (str(j) for j in _as_list(f.get("affected_jobs")) if str(j)):
+        if not gates_pr:
+            break
+        chained = _vr_opt79_needs_chain(data, wf, job, lp_job)
+        if chained is None and graph_recorded:
+            # The collector holds such a job back: with the graph recorded but
+            # unable to resolve the job or the long pole, "in no chain" is
+            # unproved.
+            problems = problems + [
+                f"the recorded job graph for {wf!r} cannot resolve `{job}` or the "
+                f"long pole `{lp_job}`, so no `needs:` chain is unproved and "
+                f"{_VR_OPT79_PROOF_BELOW_LONG_POLE} cannot be credited"]
+        if chained:
+            problems = problems + [
+                f"`{job}` is in a `needs:` chain with the long pole `{lp_job}`: "
+                "shrinking it may shorten the merge wait, so it is not "
+                f"{_VR_OPT79_PROOF_BELOW_LONG_POLE}"]
+    return problems
+
+
+def _vr_opt79_below_long_pole_off_merge_gate(f: dict, data: dict) -> bool:
+    """True when a `below_long_pole` finding's jobs provably add nothing to the
+    merge wait through a `needs:` chain: the workflow gates no pull request
+    (stamped False), or `workflow_job_graph` resolves every job and proves it
+    in no chain with the long pole. Unresolved or chained -> False."""
+    if _as_dict(f.get("cache_net_negative")).get("workflow_gates_pull_requests") is False:
+        return True
+    wf = str(f.get("workflow_file") or "")
+    lp_job = str(_as_dict(_as_dict(data.get("per_workflow_timing")).get(wf))
+                 .get("long_pole_job") or "")
+    jobs = [str(j) for j in _as_list(f.get("affected_jobs")) if str(j)]
+    return bool(jobs) and all(
+        _vr_opt79_needs_chain(data, wf, j, lp_job) is False for j in jobs)
+
+
 def _rounding_waste_min(durations: list[float]) -> int:
     vals = [float(d) for d in durations if isinstance(d, (int, float)) and d > 0]
     if len(vals) < 2:
@@ -5159,6 +6213,10 @@ def _rounding_waste_min(durations: list[float]) -> int:
 
 _VR_OPT57_DEFAULT_TIMEOUT_MIN = 360.0
 _VR_OPT57_NEAR_DEFAULT_TIMEOUT_S = 0.95 * _VR_OPT57_DEFAULT_TIMEOUT_MIN * 60.0
+# Keep in sync with collect_runs._OPT57_DEFAULT_KILL_CEILING_S: a failed span
+# longer than the 360 min default plus kill/teardown grace was not runner time a
+# default-timeout kill produced (e.g. a 30-day environment-approval expiry).
+_VR_OPT57_DEFAULT_KILL_CEILING_S = (_VR_OPT57_DEFAULT_TIMEOUT_MIN + 15.0) * 60.0
 _VR_OPT57_MIN_TIMEOUT_S = 15.0 * 60.0
 _VR_OPT57_TIMEOUT_BUFFER_S = 10.0 * 60.0
 _VR_OPT57_TIMEOUT_MULTIPLIER = 1.5
@@ -5229,6 +6287,12 @@ def _opt57_timeout_rederived(f: dict) -> list[str]:
         dur = _num(sample.get("duration_s"))
         if dur is None or dur < _VR_OPT57_NEAR_DEFAULT_TIMEOUT_S:
             problems.append(f"sample {i}: duration {dur!r} below near-default threshold")
+            continue
+        if dur > _VR_OPT57_DEFAULT_KILL_CEILING_S:
+            problems.append(
+                f"sample {i}: duration {dur!r} is beyond the default-timeout kill "
+                f"ceiling {_VR_OPT57_DEFAULT_KILL_CEILING_S:g}s — not runner time an "
+                "explicit timeout could cut")
             continue
         waste = max(0.0, dur - rec_s)
         got_waste = _num(sample.get("waste_s"))
@@ -5470,6 +6534,126 @@ def _opt77_consolidation_rederived(f: dict, data: dict) -> tuple[float | None, l
         problems.append("missing job_p50")
         return None, problems
     member = {str(j) for j in jobs}
+    # A group that is every job the workflow DECLARES has no remaining job to be
+    # measured against. Its gate today is its own tallest member (the members
+    # run in parallel), so the margin is that gate minus the projected
+    # consolidated duration — and the claim "there is nothing outside this
+    # group" is checked on BOTH axes the detector used: the declared job keys it
+    # stamped must all be credited members, and the sampled `job_p50` must carry
+    # no job outside the group either. One axis alone is what the detector got
+    # wrong: the sample can be missing a declared job that simply never ran.
+    # Read as an identity, never truthily: a stamp of the STRING "false" (or 0,
+    # or None) decided which gate the finding was measured against, and "false"
+    # selected the whole-workflow arm.
+    tag = sc.get("group_is_the_whole_workflow")
+    if tag is not None and tag is not True and tag is not False:
+        problems.append(
+            f"group_is_the_whole_workflow {tag!r} is not true or false - a "
+            "stamp this arm cannot read decides which gate the finding was "
+            "measured against")
+    # The workflow's DECLARED job keys, read from the per-workflow record the
+    # YAML reader writes before any detector runs. Checking OPT77's stamp of
+    # them against OPT77's own reading of the same file proved nothing; this is
+    # a second source, so a stamp that under-enumerates the declared jobs (the
+    # whole basis of "there is nothing outside this group") reddens.
+    declared_record = [str(k) for k in _as_list(crit.get("declared_job_keys"))]
+    declared_stamp = [str(k) for k in _as_list(sc.get("workflow_declared_job_keys"))]
+    if declared_record and sorted(declared_stamp) != sorted(declared_record):
+        problems.append(
+            f"workflow_declared_job_keys {sorted(declared_stamp)!r} != the "
+            f"{sorted(declared_record)!r} this workflow declares")
+    if tag is True:
+        declared = declared_record or declared_stamp
+        credited_keys = {str(k) for k in _as_list(sc.get("credited_job_keys"))}
+        if not declared:
+            problems.append("group_is_the_whole_workflow with no declared job keys "
+                            "stamped - the claim cannot be re-derived")
+            return None, problems
+        outside_declared = sorted(set(declared) - credited_keys)
+        if outside_declared:
+            problems.append(
+                f"group_is_the_whole_workflow but the workflow also declares "
+                f"{outside_declared!r}, which are not credited members")
+        outside_sampled = sorted(k for k in all_p50 if str(k) not in member)
+        if outside_sampled:
+            problems.append(
+                f"group_is_the_whole_workflow but the sampled runs also carried "
+                f"{outside_sampled!r}")
+        # Today's gate is the slowest member's MEASURED p50 — the members run
+        # concurrently, so the longest of them is what a pull request waits for
+        # today. Re-derived here from `job_p50`, which the detector does not
+        # write, rather than by replaying its stamped step components.
+        per_job = _as_dict(sc.get("per_job"))
+        # Cardinality is not identity: a stamp with the right NUMBER of entries
+        # under a renamed key used to pass, miss `job_p50` for a real member,
+        # and take the uncapped branch — reproducing the inflated gate the arm
+        # exists to catch. The key set must be the credited members exactly.
+        if {str(k) for k in per_job} != member:
+            problems.append(
+                f"group_is_the_whole_workflow but per_job names "
+                f"{sorted(str(k) for k in per_job)!r}, not the credited members "
+                f"{sorted(member)!r} - the gate cannot be re-derived")
+            return None, problems
+        # Each member's two components are already required to be numbers and
+        # positive above (`missing setup/useful-work p50`), so nothing here
+        # reads an absent one as zero.
+        measured: list[float] = []
+        for _k in sorted(member):
+            _m = _num(all_p50.get(_k))
+            # No fallback to the component sum. A job without a strict measured
+            # p50 never becomes a member, so this is a malformed stamp, and
+            # assembling a gate out of step components is exactly the
+            # overstatement this arm exists to refuse.
+            if _m is None or _m <= 0:
+                problems.append(
+                    f"group_is_the_whole_workflow but member {_k!r} has no "
+                    f"measured job_p50 ({all_p50.get(_k)!r}) - the gate the group "
+                    "sets today cannot be re-derived")
+                return None, problems
+            measured.append(float(_m))
+        gate_today = round(max(measured), 1)
+        claimed_gate = _num(sc.get("gate_today_p50_s"))
+        if claimed_gate is None or abs(claimed_gate - gate_today) > 0.11:
+            problems.append(
+                f"gate_today_p50_s {sc.get('gate_today_p50_s')!r} != {gate_today}")
+        # The component sum survives only as a coherence check on the medians:
+        # the projection is max(setup) + max(useful), which can never be below
+        # any single member's setup + useful. If it is, the stamped medians do
+        # not come from one set of runs.
+        component_max = max(
+            ((_num(_as_dict(per_job.get(_k)).get("setup_p50_s")) or 0.0)
+             + (_num(_as_dict(per_job.get(_k)).get("useful_work_p50_s")) or 0.0))
+            for _k in sorted(member))
+        if projected + 0.11 < round(component_max, 1):
+            problems.append(
+                f"projected consolidated job {projected} is below the largest "
+                f"member's own setup + useful work ({round(component_max, 1)}) - "
+                "the stamped medians are not coherent")
+        if sc.get("remaining_tallest_job") is not None:
+            problems.append("group_is_the_whole_workflow but a remaining tallest job "
+                            "is named - there is no job outside the group")
+        if sc.get("remaining_tallest_p50_s") is not None:
+            problems.append("group_is_the_whole_workflow but a remaining tallest p50 "
+                            "is stamped - there is no job outside the group")
+        # The same +0.11 tolerance every other comparison in this arm carries.
+        # Exact, it rejected a legitimate FIRE whose stamped values had been
+        # rounded to one decimal on the way through the findings document
+        # ("projected consolidated job 60.0 is ABOVE the 59.9 gate").
+        if projected > gate_today + 0.11:
+            problems.append(
+                f"projected consolidated job {projected} is ABOVE the {gate_today} "
+                "gate the group sets today - consolidating would lengthen the merge")
+            return None, problems
+        return round(gate_today - projected, 1), problems
+    # The ordinary arm: there IS a job outside the group, so the gate the group
+    # sets itself is not what the projection is measured against and must not
+    # be stamped. Enforced on this side too — only the whole-workflow shape was
+    # checked, so a finding could carry both shapes' stamps and pass.
+    if sc.get("gate_today_p50_s") is not None:
+        problems.append(
+            f"group_is_the_whole_workflow is false but gate_today_p50_s "
+            f"{sc.get('gate_today_p50_s')!r} is stamped - the comparison is "
+            "against the tallest remaining job, not a gate the group sets itself")
     # The detector does not max over every remaining job: a job that ran in a
     # minority of the sampled runs cannot carry the neutrality proof, because on
     # the other runs the group's own members are the tallest thing left. It
@@ -5537,6 +6721,116 @@ _VR_OPT79_STAMP_KEYS = (
 _VR_OPT79_CREDITED_KIND = "opt79_net_negative_cache"
 _VR_OPT79_UNCREDITED_KIND = "opt79_uncredited_pole_cache"
 _VR_OPT79_UNCREDITED_DOC_KEY = "opt79_uncredited_pole_caches"
+# OPT79's credited WALL-CLOCK arm (a net-negative cache on the long pole of a
+# workflow that gates pull requests) and its pre-cascade sizing block — both
+# pinned identical to collect_runs' `_OPT79_POLE_KIND` / `_OPT79_POLE_SIZING_KEYS`.
+_VR_OPT79_POLE_KIND = "opt79_pole_net_negative_cache"
+# OPT79's second runner-minute proof: a job at or above the cluster floor that
+# is strictly shorter than the workflow's long pole, margin long_pole_p50 -
+# job_p50. Pinned identical to collect_runs' `_OPT79_PROOF_BELOW_LONG_POLE`.
+_VR_OPT79_PROOF_BELOW_LONG_POLE = "below_long_pole"
+_VR_OPT79_POLE_SIZING_KEYS = (
+    "waste_s",
+    "long_pole_job", "long_pole_p50_s",
+    "next_tallest_job", "floor_p50_s",
+    "headroom_s", "raw_wall_clock_s",
+    "capped_by_next_tallest_job",
+)
+# A long pole with less than this headroom over the next-tallest job is TIED
+# with it and is never a pole finding. Pinned to collect_runs'
+# `_OPT79_POLE_MIN_HEADROOM_S` by a coupling test.
+_VR_OPT79_POLE_MIN_HEADROOM_S = 1.0
+# The leading words of the plain-English clause the report states for each
+# `uncredited_reason` (`blocking_path._OPT79_UNCREDITED_REASON_PHRASES`); the
+# key set is pinned equal to collect_runs' `_OPT79_UNCREDITED_REASONS`.
+_VR_OPT79_UNCREDITED_REASON_PHRASES: dict[str, str] = {
+    "pole_tied_with_next_job": "it is tied with the next-tallest job",
+    "pole_merge_wait_zeroed_by_cross_check":
+        "the cross-checks found no merge wait it can shorten",
+    "pole_workflow_off_merge_gating_spine":
+        "the pull request can merge without waiting for this job",
+    "job_in_a_needs_chain_with_the_long_pole":
+        "it runs in a `needs:` chain with the slowest job",
+}
+_VR_OPT79_REASON_NEEDS_CHAIN = "job_in_a_needs_chain_with_the_long_pole"
+
+
+def _vr_opt79_needs_chain(data: dict, wf: str, job: str,
+                          long_pole_job: str) -> bool | None:
+    """Whether `job` and `long_pole_job` sit in one `needs:` chain (either
+    direction, any depth), re-derived from the scan's `workflow_job_graph`
+    (`{wf: {job_key: {name, needs}}}`). A job is matched by its plain `name:`
+    or its key, with a trailing matrix `(leg)` stripped - the collector's
+    `_job_needs_relations` heuristic. None when the graph is absent or either
+    name resolves to no job: the relation cannot be re-derived then."""
+    jobs = _as_dict(_as_dict(data.get("workflow_job_graph")).get(wf))
+    if not jobs or not job or not long_pole_job:
+        return None
+
+    def _base(v: str) -> str:
+        return re.sub(r"\s*\([^)]+\)\s*$", "", v).strip()
+
+    def _keys(target: str) -> set[str]:
+        out: set[str] = set()
+        for k, m in jobs.items():
+            nm = _as_dict(m).get("name")
+            cand = nm if isinstance(nm, str) and nm and "${{" not in nm else k
+            if _base(str(cand)) == _base(target):
+                out.add(str(k))
+        return out
+
+    jk, pk = _keys(job), _keys(long_pole_job)
+    if not jk or not pk:
+        return None
+    needs_of = {str(k): [str(n) for n in (_as_list(_as_dict(m).get("needs"))
+                                          if not isinstance(_as_dict(m).get("needs"), str)
+                                          else [_as_dict(m).get("needs")])]
+                for k, m in jobs.items()}
+
+    def _reaches(seed: set[str], goal: set[str]) -> bool:
+        seen: set[str] = set()
+        stack = list(seed)
+        while stack:
+            for n in needs_of.get(stack.pop(), []):
+                if n in goal:
+                    return True
+                if n not in seen:
+                    seen.add(n)
+                    stack.append(n)
+        return False
+
+    return _reaches(jk, pk) or _reaches(pk, jk)
+
+
+def _vr_opt79_chain_unresolved(wf: str, job: str, long_pole_job: str) -> str:
+    """The problem for a recorded `workflow_job_graph` in which `job` or the
+    long pole resolves to no job of `wf`: the chain cannot be re-derived, so the
+    verifier fails closed rather than skipping the check."""
+    return (f"`{job}` / long pole `{long_pole_job}` resolve to no job in "
+            f"workflow_job_graph[{wf!r}]: whether they share a `needs:` chain "
+            "cannot be re-derived")
+# The events on which a pull request waits for a workflow (the cascade's
+# `wall_clock._DEVELOPER_FACING_EVENTS`).
+_VR_OPT79_PR_EVENTS = frozenset({"pull_request", "merge_group"})
+
+
+def _opt79_sampled_events_problem(data: dict, wf: str, claimed: Any) -> str | None:
+    """`workflow_gates_pull_requests` against the events the run SAMPLED for the
+    workflow (`per_workflow_timing[wf].events`, else `events_by_wf[wf]`). When
+    events were sampled the claim must be exactly "a pull_request / merge_group
+    run was seen"; with none recorded the declared trigger stands unchecked."""
+    timing = _as_dict(_as_dict(data.get("per_workflow_timing")).get(wf))
+    events = _as_list(timing.get("events")) or _as_list(
+        _as_dict(data.get("events_by_wf")).get(wf))
+    events = [str(e) for e in events if str(e)]
+    if not events:
+        return None
+    want = bool(set(events) & _VR_OPT79_PR_EVENTS)
+    if claimed is not want:
+        return (f"workflow_gates_pull_requests={claimed!r} but the sampled events "
+                f"{sorted(set(events))} {'include' if want else 'include no'} "
+                "pull_request / merge_group run")
+    return None
 # The cache-verdict matchers, restated here rather than imported — this file is
 # standalone by design, and the point of the re-derivation is to judge a stamped
 # verdict with its OWN matcher: a verifier sharing the engine's object could not
@@ -5568,11 +6862,16 @@ _VR_OPT79_TAIL_MIN_FRAC = 0.25
 
 def _opt79_block_rederived(cn: dict, *, credited: bool,
                            finding_rm: float | None) -> list[str]:
-    """Re-derive one stamped OPT79 measurement block — the credited finding's
-    `cache_net_negative`, or an uncredited pole row, which is the SAME block with
-    a different `kind` and no minutes.
+    """Re-derive one stamped OPT79 measurement block — the runner-minute
+    finding's `cache_net_negative`, the wall-clock pole finding's (via
+    `_opt79_pole_finding_rederived`), or an uncredited row, which is the SAME
+    block with a different `kind` and no minutes.
 
-    Everything except the two sizing branches is shared, because the two rows are
+    Here `credited` means "carries minutes": only the runner-minute finding
+    passes True; the pole finding (a credited wall-clock finding) and the
+    uncredited row pass False.
+
+    Everything except the two sizing branches is shared, because the rows are
     the same measurement. The uncredited row used to be a hand-built subset with
     no `per_run`, so its medians and its `waste_s` were bare assertions no check
     could contradict; running the row/median/floor/bounds re-derivation over it
@@ -5676,8 +6975,9 @@ def _opt79_block_rederived(cn: dict, *, credited: bool,
         problems.append(f"job_runs={cn.get('job_runs')!r}")
     if denom is None or denom <= 0:
         problems.append(f"sampled_successful_run_count={cn.get('sampled_successful_run_count')!r}")
-    # An uncredited row carries no sizing, so an unknown volume is stated as
-    # null (both volume fields). A credited one is priced on it and needs it.
+    # A row that carries no minutes has no runner-minute sizing, so an unknown
+    # volume is stated as null (both volume fields). One that carries minutes is
+    # priced on the volume and needs it.
     null_volume = (not credited and cn.get("monthly_volume") is None)
     if null_volume:
         if cn.get("effective_monthly_volume") is not None:
@@ -5730,10 +7030,11 @@ def _opt79_block_rederived(cn: dict, *, credited: bool,
             "floor - a cache that rarely hits is a key problem, not a cost one")
 
     if not credited and cn.get("runner_min_saving") is not None:
-        # An uncredited row must carry NO sizing. A number here would enter a
-        # total through the first reader that treated the two rows alike.
+        # A row that carries no minutes must carry NO runner-minute sizing. A
+        # number here would enter a total through the first reader that treated
+        # the rows alike.
         problems.append(
-            f"an uncredited pole cache stamps runner_min_saving "
+            f"a row that carries no minutes stamps runner_min_saving "
             f"{cn.get('runner_min_saving')!r}; it must carry no sizing")
     if job_runs is not None and denom is not None and denom > 0 and monthly:
         effective = round(float(monthly) * min(max(job_runs / denom, 0.0), 1.0), 3)
@@ -5755,8 +7056,13 @@ def _opt79_block_rederived(cn: dict, *, credited: bool,
 
 
 def _opt79_uncredited_rows_rederived(data: dict) -> list[str]:
-    """Every uncredited OPT79 pole row re-derived from its own `per_run`, and
-    checked to contribute to no total.
+    """Every uncredited OPT79 row re-derived from its own `per_run`, and
+    checked to contribute to no total. ("pole" in the key and kind name,
+    `opt79_uncredited_pole_caches` / `opt79_uncredited_pole_cache`, is historical:
+    every such row is a long pole or a job tied with one, including a slowest
+    job demoted for being tied, zeroed by the cross-checks or off the
+    merge-gating spine, or a pull-request-workflow job `needs:`-chained to the
+    long pole.)
 
     These rows render with their measured excess per cache hit (`waste_s`) and
     their hit/miss populations, but with no runner-minutes and no wall-clock
@@ -5777,19 +7083,255 @@ def _opt79_uncredited_rows_rederived(data: dict) -> list[str]:
         if "on_critical_path" not in cn:
             out.append(f"{tag}: no on_critical_path - the report cannot say "
                        "whether this saving is on the merge wait")
-        elif cn.get("on_critical_path") and \
-                str(cn.get("job") or "") != str(cn.get("long_pole_job") or ""):
+        elif cn.get("on_critical_path") is not False:
+            # The long pole of a workflow that gates pull requests is OPT79's
+            # credited wall-clock arm now; nothing that reaches this list can
+            # carry the merge wait.
             out.append(
-                f"{tag}: claims the critical path, but {cn.get('job')!r} is not "
-                f"this workflow's long pole {cn.get('long_pole_job')!r}")
-        elif cn.get("on_critical_path") and \
-                cn.get("workflow_gates_pull_requests") is False:
-            out.append(
-                f"{tag}: claims the critical path on a workflow that runs on no "
-                "pull request")
+                f"{tag}: on_critical_path={cn.get('on_critical_path')!r} - a pole "
+                "cache on a pull-request workflow is credited as a finding in this "
+                "version; an uncredited row claiming the merge wait is a contract "
+                "violation")
+        out.extend(f"{tag}: {msg}" for msg in _opt79_uncredited_reason_problems(
+            cn, _as_dict(data)))
         out.extend(f"{tag}: {msg}" for msg in _opt79_block_rederived(
             cn, credited=False, finding_rm=None))
     return out
+
+
+def _opt79_uncredited_reason_problems(cn: dict, data: dict) -> list[str]:
+    """WHY an uncredited row is not the credited pole finding, checked.
+
+    The long pole of a workflow a pull request waits on, with at least 1s of
+    headroom, IS the credited pole finding; as an uncredited row it must name
+    one of the known reasons, and each reason must fit the row's own stamps.
+    A co-pole (a job tied with the long pole, lead under 1s) reads as a pole here.
+    The converse rule also applies: a job strictly shorter than its workflow's
+    long pole is the credited `below_long_pole` finding, so listing it as an
+    uncredited row is rejected."""
+    out: list[str] = []
+    job = str(cn.get("job") or "")
+    gates = cn.get("workflow_gates_pull_requests")
+    ev = _opt79_sampled_events_problem(data, str(cn.get("workflow_file") or ""), gates)
+    if ev:
+        out.append(ev)
+    lp, fl = _num(cn.get("long_pole_p50_s")), _num(cn.get("floor_p50_s"))
+    jp = _num(cn.get("job_p50_s"))
+    headroom = round(lp - fl, 1) if lp is not None and fl is not None else None
+    lp_job = str(cn.get("long_pole_job") or "")
+    # A job TIED with the long pole (within the 1s cutoff the pole arm uses for
+    # headroom) is a co-pole: as slow as the job that sets the merge wait, so it
+    # reads as a pole here.
+    lead = round(lp - jp, 1) if lp is not None and jp is not None else None
+    co_pole = (bool(job) and job != lp_job and lead is not None
+               and lead < _VR_OPT79_POLE_MIN_HEADROOM_S)
+    is_pole = bool(job) and (job == lp_job or co_pole) and gates is True
+    reason = cn.get("uncredited_reason")
+    if reason is None:
+        if is_pole and (headroom is None or headroom >= _VR_OPT79_POLE_MIN_HEADROOM_S):
+            out.append(
+                f"`{job}` is the long pole of a workflow pull requests wait on, with "
+                f"{headroom!r}s of headroom and no uncredited_reason: it should have "
+                "been the credited pole finding")
+        elif gates is True:
+            # Every row the collector lists on a workflow pull requests wait on
+            # carries a stamped reason; one without renders the "no recorded
+            # reason" fallback. Fails ALWAYS - a tie (headroom 0), a co-pole, or
+            # a row with no long pole recorded is no exemption.
+            out.append(
+                f"`{job}` is on a workflow pull requests wait on and names no "
+                "uncredited_reason: the collector never lists such a row, and the "
+                "report could only say no reason was recorded")
+        # The converse of the below-the-long-pole arm: a job strictly shorter
+        # than its workflow's long pole IS that credited runner-minute finding,
+        # on any workflow, so listing it here under-reports a priced saving.
+        if (lp_job and job and job != lp_job and lead is not None
+                and lead >= _VR_OPT79_POLE_MIN_HEADROOM_S):
+            out.append(
+                f"`{job}` ({jp}s) is {lead}s shorter than its workflow's long pole "
+                f"`{lp_job}` ({lp}s) and names no uncredited_reason: it should have "
+                f"been the credited `{_VR_OPT79_PROOF_BELOW_LONG_POLE}` "
+                "runner-minute finding")
+        return out
+    if reason not in _VR_OPT79_UNCREDITED_REASON_PHRASES:
+        return out + [f"uncredited_reason {reason!r} is not one of "
+                      f"{sorted(_VR_OPT79_UNCREDITED_REASON_PHRASES)}"]
+    if reason == _VR_OPT79_REASON_NEEDS_CHAIN:
+        # Not a pole: a job strictly shorter than the long pole of a
+        # pull-request workflow, chained to it by `needs:`. The chain is
+        # re-derived from `workflow_job_graph` when the run recorded it; without
+        # it, only the shape the collector can stamp is accepted (strictly
+        # shorter than its long pole, on a pull-request workflow).
+        # The collector reaches this reason only at a lead of at least the tie
+        # cutoff; under it the job is a co-pole, never a chained job.
+        if not (lp_job and job and job != lp_job and lead is not None
+                and lead >= _VR_OPT79_POLE_MIN_HEADROOM_S and gates is True):
+            out.append(
+                f"uncredited_reason {reason!r} needs a job strictly shorter than "
+                f"its long pole on a pull-request workflow: job {job!r} ({jp}s), "
+                f"long_pole_job {lp_job!r} ({lp}s), workflow_gates_pull_requests "
+                f"{gates!r}")
+        chained = _vr_opt79_needs_chain(
+            data, str(cn.get("workflow_file") or ""), job, lp_job)
+        if chained is False:
+            out.append(f"uncredited_reason {reason!r} but `{job}` and `{lp_job}` "
+                       "share no `needs:` path in workflow_job_graph")
+        elif chained is None and _as_dict(_as_dict(data.get(
+                "workflow_job_graph")).get(str(cn.get("workflow_file") or ""))):
+            # Graph recorded for the workflow but the job or the long pole
+            # resolves to no job in it: fail closed, never a silent skip.
+            out.append(_vr_opt79_chain_unresolved(
+                str(cn.get("workflow_file") or ""), job, lp_job))
+        if cn.get("uncredited_reason_detail") is not None:
+            out.append(f"uncredited_reason_detail on a {reason!r} row")
+        return out
+    # A demotion reason (zeroed by the cross-checks, off the merge-gating
+    # spine) can only come from a pole FINDING the collector demoted, and a pole
+    # finding exists only for the workflow's actual long pole. A co-pole (a job
+    # tied with it) never had one, so those two reasons require job ==
+    # long_pole_job exactly; only the tie reason may sit on a co-pole.
+    demotion = reason in ("pole_merge_wait_zeroed_by_cross_check",
+                          "pole_workflow_off_merge_gating_spine")
+    if not is_pole or (demotion and (job != lp_job or gates is not True)):
+        out.append(f"uncredited_reason {reason!r} names a pole the row is not: job "
+                   f"{job!r}, long_pole_job {cn.get('long_pole_job')!r}, "
+                   f"workflow_gates_pull_requests {gates!r}")
+    # Every reason renders "`job` is this workflow's slowest job, but ...": the
+    # stamps agreeing with each other is not enough when the timing the run
+    # MEASURED names another job as this workflow's long pole.
+    timing = _as_dict(_as_dict(data.get("per_workflow_timing")).get(
+        str(cn.get("workflow_file") or "")))
+    measured_pole = str(timing.get("long_pole_job") or "")
+    if measured_pole and measured_pole != job:
+        out.append(f"uncredited_reason {reason!r} on `{job}`, but "
+                   f"per_workflow_timing names {measured_pole!r} as this "
+                   "workflow's long pole, so the row is not its slowest job")
+    if reason == "pole_tied_with_next_job":
+        if headroom is None or headroom >= _VR_OPT79_POLE_MIN_HEADROOM_S:
+            out.append(f"uncredited_reason {reason!r} but the headroom is {headroom!r}s "
+                       f"- {_VR_OPT79_POLE_MIN_HEADROOM_S}s or more is not a tie")
+    elif headroom is not None and headroom < _VR_OPT79_POLE_MIN_HEADROOM_S:
+        out.append(f"uncredited_reason {reason!r} on a pole with {headroom}s of "
+                   "headroom, which is a tie (pole_tied_with_next_job)")
+    if reason == "pole_merge_wait_zeroed_by_cross_check":
+        if not str(cn.get("uncredited_reason_detail") or "").strip():
+            out.append("uncredited_reason_detail is empty: the cross-check that "
+                       "zeroed the merge wait must be named")
+        out.extend(_opt79_zeroed_derivation_problems(cn, lp, fl))
+    else:
+        if cn.get("uncredited_reason_detail") is not None:
+            out.append(f"uncredited_reason_detail on a {reason!r} row")
+        if cn.get("uncredited_derivation") is not None:
+            out.append(f"uncredited_derivation on a {reason!r} row")
+    if reason == "pole_workflow_off_merge_gating_spine":
+        out.extend(_opt79_off_spine_problems(job, data))
+    return out
+
+
+# Mirrors collect_runs' `_OPT79_ASCII_SPELLINGS` / `_opt79_ascii` /
+# `_opt79_secs`: the demotion detail states each cascade step in ASCII.
+_VR_OPT79_ASCII_SPELLINGS = (("\u2014", " - "), ("\u2013", "-"), ("\u2192", "->"),
+                             ("\u2265", ">="), ("\u2264", "<="), ("\u00d7", "x"),
+                             ("\u2026", "..."), ("\u2018", "'"), ("\u2019", "'"),
+                             ("\u201c", '"'), ("\u201d", '"'))
+
+
+def _vr_opt79_ascii(text: str) -> str:
+    for a, b in _VR_OPT79_ASCII_SPELLINGS:
+        text = text.replace(a, b)
+    text = text.encode("ascii", "backslashreplace").decode("ascii")
+    return " ".join(text.split())
+
+
+def _vr_opt79_secs(v: object) -> str:
+    return f"{float(v):g}s" if isinstance(v, (int, float)) and not isinstance(
+        v, bool) else "?s"
+
+
+def _opt79_zeroed_derivation_problems(cn: dict, lp: float | None,
+                                      fl: float | None) -> list[str]:
+    """`pole_merge_wait_zeroed_by_cross_check`, re-derived from the cascade
+    steps the row carries (`uncredited_derivation`): each step goes down from
+    where the last one ended, starting at the pole's own sizing
+    min(waste_s, long pole - floor), and the last one ends at a figure that
+    ROUNDS to 0s - the one the report would have rendered. The detail must end
+    by stating that last step. A pole demoted with merge wait left fails here."""
+    steps = cn.get("uncredited_derivation")
+    if not isinstance(steps, list) or not steps or not all(
+            isinstance(d, dict) for d in steps):
+        return ["uncredited_derivation is missing or empty: a zeroed merge wait "
+                "must carry the cascade steps that zeroed it"]
+    out: list[str] = []
+    waste = _num(cn.get("waste_s"))
+    prev = (round(min(waste, lp - fl), 1)
+            if waste is not None and lp is not None and fl is not None else None)
+    for i, d in enumerate(steps):
+        a, b = _num(d.get("from_s")), _num(d.get("to_s"))
+        if a is None or b is None or b > a + 1e-9:
+            out.append(f"uncredited_derivation[{i}] does not go down "
+                       f"({d.get('from_s')!r} -> {d.get('to_s')!r})")
+        elif prev is not None and abs(a - prev) > 0.11:
+            out.append(f"uncredited_derivation[{i}] starts at {a}, not at "
+                       f"{prev} (the pole's sizing or the previous step)")
+        if not str(d.get("reason") or "").strip():
+            out.append(f"uncredited_derivation[{i}] has no reason")
+        prev = b
+    last = steps[-1]
+    end = _num(last.get("to_s"))
+    if end is None or round(end) > 0:
+        out.append(f"uncredited_derivation ends at {last.get('to_s')!r}, which "
+                   "rounds to a second or more: the merge wait was not zeroed")
+    want = (f"{_vr_opt79_secs(last.get('from_s'))} to "
+            f"{_vr_opt79_secs(last.get('to_s'))}: "
+            f"{_vr_opt79_ascii(str(last.get('reason') or ''))}")
+    detail = str(cn.get("uncredited_reason_detail") or "")
+    if not detail.endswith(want):
+        out.append(f"uncredited_reason_detail {detail!r} does not end with the "
+                   f"last cascade step {want!r}")
+    return out
+
+
+def _vr_opt79_toks(s: str) -> frozenset:
+    return frozenset(t for t in re.split(r"[^a-z0-9]+", (s or "").lower()) if t)
+
+
+def _vr_opt79_scope_prefixed(check: str, job: str) -> bool:
+    """Mirror of collect_runs' `_job_name_scope_prefixed`: the job's name
+    appears INTACT in the check name, never fused into a compound."""
+    c, j = check.lower(), job.lower().strip()
+    if not j:
+        return False
+    start = 0
+    while True:
+        i = c.find(j, start)
+        if i < 0:
+            return False
+        before = c[i - 1] if i > 0 else ""
+        after = c[i + len(j)] if i + len(j) < len(c) else ""
+        if not (before and (before.isalnum() or before in "-_")) and not (
+                after and (after.isalnum() or after in "-_")):
+            return True
+        start = i + 1
+
+
+def _opt79_off_spine_problems(job: str, data: dict) -> list[str]:
+    """`pole_workflow_off_merge_gating_spine`, cross-checked: the job must be one
+    the run DROPPED from the merge-gating spine
+    (`pr_critical_path.dropped_non_required_checks` / `dropped_non_pr_checks`),
+    matched as `_stamp_off_spine_findings` matches it (exact tokens, or the
+    job's name intact inside a scope/matrix-prefixed check name)."""
+    cp = _as_dict(data.get("pr_critical_path"))
+    dropped = [str(n) for n in (_as_list(cp.get("dropped_non_required_checks"))
+                                + _as_list(cp.get("dropped_non_pr_checks")))]
+    jt = _vr_opt79_toks(job)
+    for n in dropped:
+        ct = _vr_opt79_toks(n)
+        if jt and (ct == jt or (jt < ct and _vr_opt79_scope_prefixed(n, job))):
+            return []
+    return [f"uncredited_reason 'pole_workflow_off_merge_gating_spine' but `{job}` "
+            f"is not among the checks the merge-gating spine dropped "
+            f"(pr_critical_path dropped_non_required_checks / dropped_non_pr_checks: "
+            f"{dropped[:8]})"]
 
 
 _VR_OPT79_EVIDENCE_RE = re.compile(
@@ -5893,7 +7435,8 @@ def _opt79_net_negative_cache_rederived(f: dict, data: dict) -> tuple[float | No
     The margin is the same quantity the generic `below_cluster_floor` arm
     computes — the job's own p50 below the workflow's cluster floor — re-derived
     from `per_workflow_timing`, because that is what makes `wall_clock_p50_s=0`
-    true for this finding."""
+    a conservative lower bound for this finding. For a `below_long_pole`
+    certificate the margin is instead long_pole_p50 - job_p50."""
     cn = _as_dict(f.get("cache_net_negative"))
     if cn.get("kind") != _VR_OPT79_CREDITED_KIND:
         return None, ["missing opt79_net_negative_cache evidence"]
@@ -5907,12 +7450,397 @@ def _opt79_net_negative_cache_rederived(f: dict, data: dict) -> tuple[float | No
         cn, credited=True, finding_rm=_num(f.get("runner_min_saving"))))
     problems.extend(_opt79_prose_rederived(f, cn))
 
+    # Two proofs make wall_clock_p50_s=0 true for this finding, each with its
+    # own margin: below the cluster floor (floor - job p50), or at/above it but
+    # strictly shorter than the long pole (long_pole_p50 - job p50).
+    proof = str(_as_dict(f.get("tier2_neutrality")).get("proof") or "")
+    if proof == _VR_OPT79_PROOF_BELOW_LONG_POLE:
+        margin, why = _below_long_pole_margin(f, data)
+        problems.extend(why)
+        return margin, problems
     margin = _below_floor_margin(f, data)
     if margin is None:
         problems.append(
             "the credited job's p50 is not strictly below the workflow cluster "
             "floor, so wall_clock_p50_s=0 is not established")
     return margin, problems
+
+
+_VR_OPT79_POLE_EVIDENCE_RE = re.compile(
+    r"measured a p50 of (\d+)s across (\d+) sampled run\(s\) whose log reported a "
+    r"cache HIT, against (\d+)s across (\d+) run\(s\) whose log reported a MISS: "
+    r"the hit path is (\d+)s SLOWER.*?`([^`]+)` is this workflow's slowest job at "
+    r"(\d+)s and its next-tallest job(?:, `([^`]*)`,)? runs (\d+)s; "
+    r"(?:the audit caps the saving at that (?P<cap_gap>\d+)s gap, so up to|the "
+    r"(?P<excess>\d+)s excess fits under that (?P<fit_gap>\d+)s gap, so all) "
+    r"(\d+)s of (?:the excess|it) comes off "
+    r"the merge wait on the (\d+)% of sampled runs where the cache hit "
+    r"\((\d+) of (\d+) runs read\)", re.S)
+# The note restates the cap: the gap, the pole's duration, the next job's.
+_VR_OPT79_POLE_NOTE_RE = re.compile(
+    r"capped at the (\d+)s gap between this job's duration \((\d+)s\) and "
+    r"(?:`([^`]*)`|the next-tallest job)'s \((\d+)s\)")
+
+
+def _opt79_hit_share_clause(cn: dict) -> str | None:
+    """The hit-rate clause an OPT79 pole merge-wait figure must carry, restated
+    from the STAMPED `hit_share` and counts (`_opt79_block_rederived` re-derives
+    those from per_run). None when a count is not an integer."""
+    share = _num(cn.get("hit_share"))
+    counts = [cn.get(k) for k in ("hits", "misses", "ambiguous_runs")]
+    if share is None or not all(isinstance(c, int) and not isinstance(c, bool)
+                                for c in counts):
+        return None
+    hits, misses, amb = counts
+    return (f"on the {share * 100:.0f}% of sampled runs where the cache hit "
+            f"({hits} of {hits + misses + amb} runs read)")
+
+
+def _opt79_pole_prose_rederived(f: dict, cn: dict) -> list[str]:
+    """The pole finding's evidence sentence restated from its stamped block: the
+    two measured paths, the slowest job, the next-tallest job and the capped
+    figure. A tampered sentence would otherwise reach the reader unchallenged —
+    nothing else in the report contradicts it."""
+    out: list[str] = []
+    ps = _as_dict(cn.get("pole_sizing"))
+
+    def _w(v: Any) -> str:
+        n = _num(v)
+        return "?" if n is None else f"{n:.0f}"
+
+    m = _VR_OPT79_POLE_EVIDENCE_RE.search(str(f.get("evidence") or ""))
+    if not m:
+        return ["evidence does not state the measured comparison, the slowest "
+                "job, the next-tallest job, the capped merge-wait figure and the "
+                "hit rate it applies to"]
+    # The named groups (the gap and the excess the sentence states) are paired
+    # with pole_sizing below; the numbered ones are restated as one tuple.
+    named = set(m.re.groupindex.values())
+    got = tuple(g for i, g in enumerate(m.groups(), 1) if i not in named)
+    share = _num(cn.get("hit_share"))
+    counts = [cn.get(k) for k in ("hits", "misses", "ambiguous_runs")]
+    read = (sum(counts) if all(isinstance(c, int) and not isinstance(c, bool)
+                               for c in counts) else None)
+    want = (_w(cn.get("hit_path_p50_s")), str(cn.get("hits")),
+            _w(cn.get("miss_path_p50_s")), str(cn.get("misses")),
+            _w(cn.get("waste_s")), str(cn.get("job") or ""),
+            _w(ps.get("long_pole_p50_s")), str(ps.get("next_tallest_job") or "") or None,
+            _w(ps.get("floor_p50_s")), _w(ps.get("raw_wall_clock_s")),
+            "?" if share is None else f"{share * 100:.0f}", str(cn.get("hits")),
+            str(read))
+    if got != want:
+        out.append(f"evidence states {got} but the stamped block gives {want}")
+    capped_prose = m.group("cap_gap") is not None
+    gap = m.group("cap_gap") if capped_prose else m.group("fit_gap")
+    if gap != _w(ps.get("headroom_s")):
+        out.append(f"evidence states a {gap}s gap but pole_sizing.headroom_s is "
+                   f"{_w(ps.get('headroom_s'))}s")
+    if not capped_prose and m.group("excess") != _w(ps.get("waste_s")):
+        out.append(f"evidence states a {m.group('excess')}s excess but "
+                   f"pole_sizing.waste_s is {_w(ps.get('waste_s'))}s")
+    if capped_prose is not (ps.get("capped_by_next_tallest_job") is True):
+        out.append(f"evidence says the saving is {'' if capped_prose else 'not '}"
+                   "capped at the gap, but pole_sizing.capped_by_next_tallest_job is "
+                   f"{ps.get('capped_by_next_tallest_job')!r}")
+    note = str(_as_dict(f.get("measured_evidence")).get("note") or "")
+    n = _VR_OPT79_POLE_NOTE_RE.search(note)
+    if not n:
+        out.append("the measured-evidence note does not state the gap the saving "
+                   "is capped at between this job's duration and the next-tallest "
+                   "job's")
+    else:
+        for key, said in (("headroom_s", n.group(1)), ("long_pole_p50_s", n.group(2)),
+                          ("floor_p50_s", n.group(4))):
+            if said != _w(ps.get(key)):
+                out.append(f"the note states {said}s where pole_sizing.{key} is "
+                           f"{_w(ps.get(key))}s")
+        if (n.group(3) or "") != str(ps.get("next_tallest_job") or ""):
+            out.append(f"the note names {n.group(3)!r} as the next-tallest job, not "
+                       f"pole_sizing.next_tallest_job "
+                       f"{ps.get('next_tallest_job')!r}")
+    return out
+
+
+def _opt79_pole_finding_rederived(f: dict, data: dict) -> list[str]:
+    """Re-derive OPT79's credited WALL-CLOCK finding — a net-negative cache on
+    the long pole of a workflow that gates pull requests — from its own stamps.
+
+        waste_s  = hit_path_p50 - miss_path_p50     (from per_run, shared arm)
+        headroom = long_pole_p50_s - floor_p50_s     (cross-checked against
+                                                      per_workflow_timing)
+        raw      = round(min(waste_s, headroom), 1)
+
+    `raw` must be what the finding was sized at before the generic cascade
+    (`wall_clock_uncapped_p50_s` when that cascade shrank it, else
+    `wall_clock_p50_s`), and any cascade derivation must only ever go down, give
+    a reason for every step and end on the credited figure. No runner-minutes on
+    the finding or the block: there is no runner-minute certificate to carry them."""
+    cn = _as_dict(f.get("cache_net_negative"))
+    if cn.get("kind") != _VR_OPT79_POLE_KIND:
+        return [f"an OPT79 finding with no runner-minute certificate must be kind "
+                f"{_VR_OPT79_POLE_KIND!r}, not {cn.get('kind')!r}"]
+    problems: list[str] = []
+    job = str(cn.get("job") or "")
+    affected = [str(j) for j in _as_list(f.get("affected_jobs")) if str(j)]
+    if not job or affected != [job] or job != str(cn.get("long_pole_job") or ""):
+        problems.append(
+            f"affected_jobs {affected!r}, job {job!r} and long_pole_job "
+            f"{cn.get('long_pole_job')!r} must all name the one long-pole job")
+    problems.extend(_opt79_block_rederived(cn, credited=False, finding_rm=None))
+    if cn.get("on_critical_path") is not True:
+        problems.append(f"on_critical_path={cn.get('on_critical_path')!r}: a pole "
+                        "finding is credited only because its job carries the merge wait")
+    if cn.get("workflow_gates_pull_requests") is not True:
+        problems.append(f"workflow_gates_pull_requests="
+                        f"{cn.get('workflow_gates_pull_requests')!r}: no pull request "
+                        "waits on this workflow, so there is no merge wait to credit")
+    if f.get("off_spine"):
+        problems.append("off_spine=True: the pull request can merge without this "
+                        "job, so a pole finding there must be an uncredited row")
+    ev = _opt79_sampled_events_problem(data, str(f.get("workflow_file") or ""),
+                                       cn.get("workflow_gates_pull_requests"))
+    if ev:
+        problems.append(ev)
+    if f.get("runner_min_saving") is not None:
+        problems.append(f"the pole finding states runner-minutes "
+                        f"{f.get('runner_min_saving')!r}; it has no runner-minute "
+                        "certificate to carry them")
+
+    ps = _as_dict(cn.get("pole_sizing"))
+    missing = [k for k in _VR_OPT79_POLE_SIZING_KEYS if k not in ps]
+    if missing:
+        problems.append(f"pole_sizing is missing stamped key(s) {missing}")
+    lp, fl = _num(cn.get("long_pole_p50_s")), _num(cn.get("floor_p50_s"))
+    waste = _num(cn.get("waste_s"))
+    if lp is None or fl is None or waste is None:
+        return problems + ["long_pole_p50_s / floor_p50_s / waste_s not stamped - "
+                           "the merge-wait figure cannot be re-derived"]
+    # The stamped timing must be the timing the run measured, when the doc
+    # carries it — otherwise a lowered floor widens the headroom at will.
+    timing = _as_dict(_as_dict(data.get("per_workflow_timing")).get(
+        str(f.get("workflow_file") or "")))
+    if not timing:
+        problems.append(f"per_workflow_timing has no entry for "
+                        f"{f.get('workflow_file')!r}: the stamped long pole and "
+                        "floor cannot be checked against what the run measured")
+    else:
+        for key, stamped in (("long_pole_p50", lp), ("floor_p50", fl)):
+            measured = _num(timing.get(key))
+            if measured is not None and abs(measured - stamped) > 0.11:
+                problems.append(
+                    f"stamped {key}_s {stamped} != per_workflow_timing {key} "
+                    f"{round(measured, 1)} (the floor/long pole the run measured)")
+        if str(timing.get("long_pole_job") or job) != job:
+            problems.append(f"per_workflow_timing names {timing.get('long_pole_job')!r}, "
+                            f"not {job!r}, as this workflow's long pole")
+        # The job the evidence names as the cap must be the tallest OTHER job
+        # the run measured; the prose check alone only compares the evidence
+        # with the same stamped name, so renaming both would pass.
+        jp = _as_dict(timing.get("job_p50"))
+        nxt = str(_as_dict(cn.get("pole_sizing")).get("next_tallest_job") or "")
+        others = {str(k): _num(v) or 0.0 for k, v in jp.items() if str(k) != job}
+        if not nxt:
+            problems.append("pole_sizing.next_tallest_job is empty: the job that "
+                            "caps the saving must be named")
+        elif not jp:
+            problems.append("per_workflow_timing records no job_p50 for this "
+                            "workflow: next_tallest_job cannot be checked")
+        else:
+            if nxt not in others:
+                problems.append(f"pole_sizing.next_tallest_job {nxt!r} is not another "
+                                "job this workflow's timing measured")
+            elif others[nxt] + 0.11 < max(others.values()):
+                problems.append(f"pole_sizing.next_tallest_job {nxt!r} ({others[nxt]}s) "
+                                "is not the tallest job other than the long pole")
+    headroom = round(lp - fl, 1)
+    if headroom < _VR_OPT79_POLE_MIN_HEADROOM_S:
+        problems.append(f"under 1s of headroom ({lp} - {fl}): a long pole tied with "
+                        "the next job sets no merge wait of its own")
+    raw = round(min(waste, headroom), 1)
+    for key, want in (("waste_s", waste), ("long_pole_p50_s", lp),
+                      ("floor_p50_s", fl), ("headroom_s", headroom),
+                      ("raw_wall_clock_s", raw)):
+        if not _close(ps.get(key), want, 0.11):
+            problems.append(f"pole_sizing.{key} {ps.get(key)!r} != re-derived {want}")
+    if ps.get("long_pole_job") != job:
+        problems.append(f"pole_sizing.long_pole_job {ps.get('long_pole_job')!r} != {job!r}")
+    if ps.get("capped_by_next_tallest_job") is not (waste > headroom):
+        problems.append(f"pole_sizing.capped_by_next_tallest_job "
+                        f"{ps.get('capped_by_next_tallest_job')!r} but the excess "
+                        f"{waste}s {'exceeds' if waste > headroom else 'is within'} "
+                        f"the {headroom}s headroom")
+    field = ("wall_clock_uncapped_p50_s" if "wall_clock_uncapped_p50_s" in f
+             else "wall_clock_p50_s")
+    sized = f.get(field)
+    if not _close(sized, raw, 0.11):
+        problems.append(f"{field} {sized!r} != min(waste_s {waste}, headroom "
+                        f"{headroom}) = {raw}, the wall-clock the measured excess "
+                        "allows")
+    wc = _num(f.get("wall_clock_p50_s"))
+    # Judged on the ROUNDED figure the block renders: 0 < wc <= 0.5 renders
+    # "up to 0s off the merge wait", which is no merge wait.
+    if wc is None or round(wc) <= 0:
+        problems.append(f"wall_clock_p50_s={f.get('wall_clock_p50_s')!r}: a pole "
+                        "cache with no merge wait left to credit (it rounds to "
+                        "0s) must be an uncredited row, not a finding")
+    deriv = f.get("wall_clock_derivation")
+    if deriv is not None:
+        steps = [d for d in _as_list(deriv) if isinstance(d, dict)]
+        prev = _num(sized)
+        if not steps:
+            problems.append("wall_clock_derivation is present but empty")
+        for i, d in enumerate(steps):
+            a, b = _num(d.get("from_s")), _num(d.get("to_s"))
+            if a is None or b is None or b > a + 1e-9:
+                problems.append(f"wall_clock_derivation[{i}] does not go down "
+                                f"({d.get('from_s')!r} -> {d.get('to_s')!r})")
+            elif prev is not None and abs(a - prev) > 0.11:
+                problems.append(f"wall_clock_derivation[{i}] starts at {a}, not at "
+                                f"the previous value {prev}")
+            if not str(d.get("reason") or "").strip():
+                problems.append(f"wall_clock_derivation[{i}] shrinks the saving "
+                                "with no reason")
+            prev = b
+        if steps and (prev is None or wc is None or abs(prev - wc) > 0.11):
+            problems.append(f"wall_clock_derivation ends at {prev!r}, not at the "
+                            f"credited wall_clock_p50_s {wc!r}")
+    elif wc is not None and not _close(wc, raw, 0.11):
+        problems.append(f"wall-clock {wc} differs from the sized {raw} with no "
+                        "derivation recorded")
+    problems.extend(_opt79_pole_prose_rederived(f, cn))
+    return problems
+
+
+def _opt79_finding_rederived(f: dict, data: dict) -> list[str]:
+    """Every OPT79 finding, routed by the arm it claims.
+
+    A finding WITH a `tier2_neutrality` certificate is a runner-minute arm
+    (below the cluster floor, or at/above it and below the long pole): it must
+    be kind `opt79_net_negative_cache` and claim no wall-clock (its certificate
+    says the job cannot make the workflow take longer; the full re-derivation, margin
+    included, runs in the Tier-2 pass). A finding WITHOUT one must be the
+    pole arm, re-derived by `_opt79_pole_finding_rederived`. There is no third
+    shape: an OPT79 finding that is neither is a contract violation."""
+    cert = f.get("tier2_neutrality")
+    if cert:
+        out: list[str] = []
+        kind = _as_dict(f.get("cache_net_negative")).get("kind")
+        if kind != _VR_OPT79_CREDITED_KIND:
+            out.append(f"a below-the-floor OPT79 finding must be kind "
+                       f"{_VR_OPT79_CREDITED_KIND!r}, not {kind!r}")
+        wc = f.get("wall_clock_p50_s")
+        if _num(wc) != 0:
+            out.append(f"a runner-minute-certified OPT79 finding claims wall_clock_p50_s="
+                       f"{wc!r}; its certificate says the job cannot make the "
+                       "workflow take longer, so it is runner-minutes only")
+        if f.get("wall_clock_uncapped_p50_s") is not None:
+            out.append("a runner-minute-certified OPT79 finding carries a wall-clock sizing")
+        return out
+    out = _opt79_pole_finding_rederived(f, data)
+    return out
+
+
+_VR_OPT79_POLE_MARKER_RE = re.compile(r"<!-- opt79-pole:([^ ]+) -->")
+
+
+def _vr_check_is_job(check: str, job: str) -> bool:
+    """A rendered pole check names this job: the same matrix base, or the job
+    behind a `Workflow / ` prefix (`CI / build` is job `build`)."""
+    c = _matrix_base(_cmp_name(check))
+    j = _matrix_base(_cmp_name(job))
+    return bool(j) and (c == j or c.endswith("/ " + j))
+
+
+def _opt79_pole_findings_rendered(report: str, poles: list[dict]) -> list[str]:
+    """Every pole-cache finding must REACH the page as its own block, opened by
+    its marker, carrying its title, its id and the credited merge-wait seconds —
+    and no marker may name a finding the run does not have."""
+    out: list[str] = []
+    marks = [(m.group(1), m.start()) for m in _VR_OPT79_POLE_MARKER_RE.finditer(report)]
+    ids = [i for i, _pos in marks]
+    want = {str(f.get("id") or "") for f in poles}
+    for i in sorted(set(ids) - want):
+        out.append(f"the report renders an OPT79 pole-cache block for {i!r}, which "
+                   "is not a pole-cache finding in the run")
+    for f in poles:
+        fid = str(f.get("id") or "")
+        hits = [pos for i, pos in marks if i == fid]
+        if len(hits) != 1:
+            out.append(f"{fid}: the pole-cache finding is rendered {len(hits)} time(s), "
+                       "not once")
+            continue
+        # The block's header is the line right after its marker.
+        lines = report[hits[0]:].split("\n", 2)
+        plain = _strip_render_artifacts(lines[1] if len(lines) > 1 else "")
+        title = _strip_render_artifacts(str(f.get("title") or ""))
+        wc = _num(f.get("wall_clock_p50_s")) or 0.0
+        if title not in plain or fid not in plain:
+            out.append(f"{fid}: its block does not open with its title and id")
+        if f"{wc:.0f}s off the merge wait" not in plain:
+            out.append(f"{fid}: its block does not state the credited "
+                       f"{wc:.0f}s off the merge wait")
+        elif wc > 0:
+            # The figure is per cache hit: the rendered hit rate must be the
+            # stamped share (re-derived from per_run by _opt79_block_rederived).
+            clause = _opt79_hit_share_clause(_as_dict(f.get("cache_net_negative")))
+            want = f"{wc:.0f}s off the merge wait {clause}"
+            if clause is None or want not in plain:
+                out.append(f"{fid}: its block does not state the credited figure "
+                           f"with its stamped hit rate: {want!r}")
+        if "min/mo" in plain or "runner-min" in plain:
+            out.append(f"{fid}: its block states runner-minutes it does not carry")
+        # Placement: the block sits under its long pole or under the off-pole
+        # section's own heading - never under the heading before it (the
+        # checkout stall tails, a Runner saving card), where it would read as
+        # part of that section. A fragment with no `##` heading is not placed.
+        # A long pole counts only when it is THIS finding's job's pole: the
+        # pre-fix block straight after another job's pole read as part of it.
+        heads = re.findall(r"(?m)^## .*$", report[:hits[0]])
+        jobs = [str(j) for j in (_as_list(f.get("affected_jobs"))
+                                 or ([f.get("job")] if f.get("job") else []))]
+        pole_head = _pole_header_sections(heads[-1]) if heads else []
+        own_pole = bool(pole_head) and any(
+            _vr_check_is_job(pole_head[0][1], j) for j in jobs)
+        if heads and not (own_pole
+                          or heads[-1].strip() == _VR_OPT79_OFF_POLE_HEADING):
+            out.append(f"{fid}: its block is not under its own long pole or its own "
+                       f"off-pole heading, but under {heads[-1].strip()!r}")
+    return out
+
+
+# The off-pole cache section's heading - a copy of the one
+# `blocking_path._opt79_off_pole_block` renders (a test pins the two equal).
+_VR_OPT79_OFF_POLE_HEADING = "## 💾 Measured cache cost on a workflow's slowest job"
+
+
+def check_opt79_findings_rederived(report: str, findings_path: Path | None) -> Check:
+    """Every OPT79 finding re-derived by the arm it claims, and every pole-cache
+    finding paired with its rendered block.
+
+    TOP-LEVEL, like the uncredited check: the pole finding carries no Tier-2
+    certificate, so the Tier-2 pass (which also compat-SKIPs a report with no
+    Tier-2 stamps) never sees it."""
+    name = "OPT79 findings re-derive by their arm, and pole caches render"
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return Check(name, True, err, skipped=True)
+    found = [f for f in _as_list(_as_dict(data).get("findings"))
+             if isinstance(f, dict) and str(f.get("pattern") or "") == "OPT79"]
+    if not found:
+        if _VR_OPT79_POLE_MARKER_RE.search(report):
+            return Check(name, False, "the report renders an OPT79 pole-cache block "
+                         "but the run recorded no OPT79 finding")
+        return Check(name, True, "no OPT79 findings")
+    bad: list[str] = []
+    for f in found:
+        fid = str(f.get("id") or "?")
+        bad.extend(f"{fid}: {msg}" for msg in _opt79_finding_rederived(f, _as_dict(data)))
+    poles = [f for f in found if not f.get("tier2_neutrality")
+             and _as_dict(f.get("cache_net_negative")).get("kind") == _VR_OPT79_POLE_KIND]
+    bad.extend(_opt79_pole_findings_rendered(report, poles))
+    return Check(name, not bad,
+                 f"{len(found)} OPT79 finding(s) re-derived ({len(poles)} pole "
+                 "cache(s) rendered)" if not bad else "; ".join(bad[:6]))
 
 
 # Verbatim copies of the OPT80 constants in `collect_runs.py` — verify_report is
@@ -5926,6 +7854,23 @@ _VR_OPT80_MIN_PROVEN_TAIL_RUNS = 2
 _VR_OPT80_MIN_GAP_S = 20.0
 _VR_OPT80_LOG_PROBE_MAX = 4
 _VR_OPT80_MIN_SAMPLED_OCCURRENCES = 6
+# A fetched log's outcome (`log_probe_outcomes`): `proven`, read-and-CLEAN (the
+# only outcomes the tail axis's N leaves out; coupled to the collector's
+# `_OPT80_CLEAN_LOG_OUTCOMES`), or a log that showed nothing about the fetch.
+_VR_OPT80_CLEAN_LOG_OUTCOMES = frozenset({
+    "tail_without_log_gap",
+    "tail_pause_was_advancing_or_pre_transfer",
+    "tail_pause_was_after_the_transfer_completed",
+})
+_VR_OPT80_UNREADABLE_LOG_OUTCOMES = frozenset({
+    "tail_run_log_unavailable",
+    "tail_run_step_window_unreadable",
+    "log_carries_no_parseable_timestamps",
+    "log_lines_without_timestamps",
+    "log_carries_no_progress_vocabulary",
+    "progress_lines_all_outside_step_window",
+    "quoted_progress_line_is_credential_shaped",
+})
 # The arm's own copy of the detector's transfer-progress regex. The stamped
 # `stalled_at_pct` and the "same N on both sides" predicate are what make a gap a
 # STALL rather than a slow fetch; re-reading the quoted lines here is the only
@@ -6209,6 +8154,660 @@ def _opt80_checkout_stall_rederived(f: dict) -> list[str]:
     return problems
 
 
+# ---- OPT80's tail axis ---------------------------------------------------------
+#
+# A slowest-job, pull-request OPT80 finding stamps `checkout_stall.tail_axis` and the
+# report renders it as "one run in N spends about X s longer on checkout, and
+# that run's log shows the fetch stalling" — a separate tail figure, never a p50
+# one. Every number in that sentence is re-derived here from the per-run checkout
+# durations and the per-run stall proofs; the stamped summary values are
+# compared, never trusted. X is the MEDIAN proven run's whole checkout excess:
+# not an upper bound, and not all of it is the proven pause. So the legacy
+# "loses up to X s on checkout to a stalled fetch" wording is matched too. It
+# always fails for the "loses" forms; the pattern below also accepts "spends
+# about X s on checkout to a stalled fetch", which is not rejected on wording
+# alone and is still held to the re-derived N and X.
+_VR_OPT80_TAIL_MARKER_RE = re.compile(r"<!-- opt80-tail:([^ ]+) -->")
+_VR_OPT80_TAIL_PHRASE_RE = re.compile(
+    r"one run in (\d+) (spends about|loses about|loses up to) (\d+)s "
+    r"(?:longer on checkout, and that run's log shows the fetch stalling"
+    r"|on checkout to a stalled fetch)")
+_VR_OPT80_TAIL_WORDING = "spends about"
+# The stray-sentence scan: the core "one run in N ... X s ... checkout" shape,
+# tolerant of a spaced unit, any verb, and a sentence that ends early. Every hit
+# must be the canonical sentence above (matched at the same offset) with numbers
+# a stamped axis re-derives to. "one run in" appears nowhere else in a report.
+_VR_OPT80_TAIL_SCAN_RE = re.compile(
+    r"one run in (\d+)\b[^\n]{0,80}?\b(\d+)\s*s(?:ec(?:onds?)?)?\b[^\n]{0,80}?checkout",
+    re.IGNORECASE)
+
+
+def _vr_opt80_job_rendered_as_pole(f: dict, report: str, data: dict | None = None) -> bool:
+    """Whether the finding's job is rendered as a Long pole of its OWN workflow.
+    A rendered pole header is resolved to the job the collector mapped it to
+    (`pr_critical_path.poles[].job`), so `CI / e2e / build` (a reusable-workflow
+    call whose job is `e2e / build`) never matches a plain `build` in the same
+    caller file. Only a header with no stamped pole entry falls back to the
+    check-run name `<workflow name> / <job>`, matched whole or with ONLY the
+    workflow-name prefix (the FIRST ` / ` segment) stripped: `CI / call-a /
+    test` is job `call-a / test`, never a plain `test`. A header in another
+    workflow file never matches."""
+    return any(_vr_opt80_pole_is_own(f, wf, check, data)
+               for wf, check, _body in _pole_header_sections(report))
+
+
+def _vr_opt80_pole_is_own(f: dict, wf: str, check: str, data: dict | None = None) -> bool:
+    """Whether ONE Long pole header (`wf` ▸ `check`) is the finding's own job,
+    by the rule `_vr_opt80_job_rendered_as_pole` documents."""
+    jobs = {_cmp_name(str(j)) for j in _as_list(f.get("affected_jobs")) if str(j)}
+    wf_f = str(f.get("workflow_file") or "").rsplit("/", 1)[-1]
+    if wf_f and wf and wf != wf_f:
+        return False
+    c = _cmp_name(check)
+    mapped = []
+    for p in _as_list(_as_dict(_as_dict(data).get("pr_critical_path")).get("poles")):
+        if (isinstance(p, dict) and p.get("check") and p.get("job")
+                and _cmp_name(str(p["check"])) == c):
+            p_wf = str(p.get("workflow_file") or "").rsplit("/", 1)[-1]
+            if not (wf_f and p_wf and p_wf != wf_f):
+                mapped.append(_cmp_name(str(p["job"])))
+    if mapped:
+        return any(job in jobs for job in mapped)
+    return c in jobs or (" / " in c and c.split(" / ", 1)[1] in jobs)
+
+
+# The dedicated off-pole section the renderer gives tail lines whose job is not
+# a drilled pole (`## ⏱️ Checkout stall tails on a workflow's slowest job`).
+_VR_OPT80_TAILS_HEADING = "Checkout stall tails"
+_VR_OPT80_HEADING_RE = re.compile(r"(?m)^##\s.*$")
+
+
+def _vr_opt80_enclosing(report: str, pos: int) -> "tuple[str, str]":
+    """(kind, label) of the report section holding offset `pos`: 'head' (above
+    the Contents: title, provenance, Bottom line), 'pole' (label = the Long
+    pole heading), 'tails' (the dedicated off-pole section), 'tier2' (the
+    runner-minute section or a Runner saving card) or 'other'."""
+    contents = report.find("## 📋 Contents")
+    heads = list(_VR_OPT80_HEADING_RE.finditer(report, 0, pos))
+    if (contents != -1 and pos < contents) or not heads:
+        return "head", "the headline / Bottom line (above the Contents)"
+    h = heads[-1].group(0)
+    if "Long pole" in h:
+        return "pole", h
+    if _VR_OPT80_TAILS_HEADING in h:
+        return "tails", h
+    if "Runner saving" in h or "Runner-minute reductions" in h:
+        return "tier2", "the runner-minute section"
+    return "other", h
+
+
+def _vr_opt80_marker_placed(f: dict, report: str, pos: int,
+                            data: dict | None = None) -> "str | None":
+    """None when a tail marker at `pos` sits where the finding's tail line
+    belongs - its OWN job's Long pole section, or the dedicated Checkout stall
+    tails section - else where it sits instead."""
+    kind, label = _vr_opt80_enclosing(report, pos)
+    if kind == "tails":
+        return None
+    if kind == "pole":
+        poles = _pole_header_sections(label)
+        if poles and _vr_opt80_pole_is_own(f, poles[0][0], poles[0][1], data):
+            return None
+        return f"another job's Long pole section ({label.strip()!r})"
+    return label if kind != "other" else f"the {label.strip()!r} section"
+
+
+def _vr_opt80_slowest_job_can_be_a_pole(f: dict, report: str, data: dict) -> bool:
+    """Whether a True on_critical_path with no rendered pole for the job is a
+    contradiction. The collector stamps it on a workflow's slowest job whether
+    or not that workflow runs on pull requests, so it is NOT one when the
+    workflow's recorded events hold no pull-request event (a push-only
+    nightly's job is never a pole), or when the workflow has no rendered pole
+    header at all (it ranked below the drilled poles). A header with no
+    workflow, or a finding with no workflow file, counts as the workflow's."""
+    wf_path = str(f.get("workflow_file") or "")
+    events = {str(e) for e in _as_list(_as_dict(data.get("events_by_wf")).get(wf_path)) if str(e)}
+    if not events:
+        events = {str(e) for e in _as_list(_as_dict(_as_dict(
+            data.get("per_workflow_timing")).get(wf_path)).get("events")) if str(e)}
+    if events and not events & _VR_PR_VOLUME_EVENTS:
+        return False
+    wf_f = wf_path.rsplit("/", 1)[-1]
+    return any(not wf_f or not wf or wf == wf_f
+               for wf, _check, _body in _pole_header_sections(report))
+
+
+def _vr_opt80_tail_rendered_off_pole(f: dict, report: str) -> bool:
+    """The finding stamps a tail axis AND its marked tail line sits in the
+    dedicated Checkout stall tails section (the renderer's off-pole block) -
+    not merely outside every pole, which a Runner saving card also is."""
+    if "tail_axis" not in _as_dict(f.get("checkout_stall")):
+        return False
+    pos = report.find(f"<!-- opt80-tail:{f.get('id')} -->")
+    return pos != -1 and _vr_opt80_enclosing(report, pos)[0] == "tails"
+
+
+def _vr_opt80_tail_axis_expected(cs: dict) -> "tuple[dict | None, list[str]]":
+    """The tail axis re-derived from the stamped per-run inputs, or None with
+    the reasons it cannot be. Only a tail run whose quoted log lines PROVE a
+    stall (same `Receiving objects: N%` below 100 on both sides, timestamps at
+    least `_VR_OPT80_MIN_GAP_S` apart) counts; its checkout seconds come from
+    `per_run_checkout_s`, not from the proof's own copy."""
+    per_run = [r for r in _as_list(cs.get("per_run_checkout_s")) if isinstance(r, dict)]
+    durs = {r.get("job_id"): _num(r.get("checkout_s")) for r in per_run}
+    vals = [float(d) for d in durs.values() if d is not None]
+    if not per_run or len(vals) != len(per_run):
+        return None, ["per_run_checkout_s is missing or carries a non-numeric duration"]
+    p50 = round(_vr_percentile(vals, 50), 1)
+    threshold = round(max(_VR_OPT80_TAIL_P95_MULTIPLE * p50,
+                          p50 + _VR_OPT80_TAIL_P95_ABS_S), 1)
+    # The slow runs, re-derived; the fetched logs, which must be distinct slow
+    # runs, as many as `logs_fetched` says; and every proof must be one of them.
+    slow = [r.get("job_id") for r in per_run
+            if float(durs[r.get("job_id")]) >= threshold]
+    raw_probed = cs.get("log_probed_job_ids")
+    probed = _as_list(raw_probed)
+    fetched_problems: list[str] = []
+    if not isinstance(raw_probed, list):
+        fetched_problems.append(
+            "log_probed_job_ids is missing, so which logs were fetched is unstated")
+    elif (len(set(map(str, probed))) != len(probed)
+          or not set(map(str, probed)) <= set(map(str, slow))):
+        fetched_problems.append(
+            "log_probed_job_ids are not distinct slow runs - a fetched log is "
+            "fetched for a slow run only")
+    elif _num(cs.get("logs_fetched")) != len(probed):
+        fetched_problems.append(
+            f"logs_fetched {cs.get('logs_fetched')!r} != the {len(probed)} "
+            "log_probed_job_ids")
+    for p in _as_list(cs.get("proven_tail_runs")):
+        if isinstance(p, dict) and str(p.get("job_id")) not in set(map(str, probed)):
+            fetched_problems.append(
+                f"proof for {p.get('job_id')!r} is not one of the logs fetched")
+    # What each fetched log showed. N leaves out ONLY a log read and shown
+    # clean; an unavailable or unparseable log, or a stall dropped as
+    # credential-shaped, showed nothing, so its slow run stays in N.
+    raw_outcomes = cs.get("log_probe_outcomes")
+    outcomes = [o for o in _as_list(raw_outcomes) if isinstance(o, dict)]
+    known = ({"proven"} | _VR_OPT80_CLEAN_LOG_OUTCOMES
+             | _VR_OPT80_UNREADABLE_LOG_OUTCOMES)
+    if not isinstance(raw_outcomes, list) or len(outcomes) != len(raw_outcomes):
+        fetched_problems.append(
+            "log_probe_outcomes is missing, so which fetched logs were read and "
+            "clean is unstated")
+    elif sorted(str(o.get("job_id")) for o in outcomes) != sorted(map(str, probed)):
+        fetched_problems.append(
+            "log_probe_outcomes do not name exactly the log_probed_job_ids")
+    elif any(str(o.get("outcome")) not in known for o in outcomes):
+        fetched_problems.append(
+            "log_probe_outcomes carry an outcome that is neither proven, clean "
+            "nor unreadable")
+    elif ({str(o.get("job_id")) for o in outcomes if o.get("outcome") == "proven"}
+          != {str(p.get("job_id")) for p in _as_list(cs.get("proven_tail_runs"))
+              if isinstance(p, dict)}):
+        fetched_problems.append(
+            "log_probe_outcomes' proven logs are not the proven_tail_runs")
+    if fetched_problems:
+        return None, fetched_problems
+    clean = sum(1 for o in outcomes
+                if str(o.get("outcome")) in _VR_OPT80_CLEAN_LOG_OUTCOMES)
+    probed_set = set(map(str, probed))
+    proven_s: list[float] = []
+    seen: set = set()
+    for p in _as_list(cs.get("proven_tail_runs")):
+        if not isinstance(p, dict):
+            continue
+        jid = p.get("job_id")
+        d = durs.get(jid)
+        if (jid in seen or d is None or d < threshold - 0.11
+                or str(jid) not in probed_set):
+            continue
+        before, after = _as_dict(p.get("before")), _as_dict(p.get("after"))
+        ma = _VR_OPT80_RECEIVING_RE.search(str(before.get("line") or ""))
+        mb = _VR_OPT80_RECEIVING_RE.search(str(after.get("line") or ""))
+        t0, t1 = _vr_opt80_ts(before.get("ts")), _vr_opt80_ts(after.get("ts"))
+        if (not ma or not mb or ma.groups() != mb.groups()
+                or int(ma.group(1)) >= 100 or t0 is None or t1 is None
+                or round(t1 - t0, 1) + 0.11 < _VR_OPT80_MIN_GAP_S):
+            continue
+        seen.add(jid)
+        proven_s.append(float(d))
+    if not proven_s:
+        return None, ["no tail run's log proves a stall, so there is no tail to state"]
+    n, k = len(per_run), len(proven_s)
+    m, logs_read = len(slow), len(probed)
+    # A log labelled `proven` whose quoted lines do not re-derive a stall is
+    # left out of N like a clean one: the smaller claim, never the larger.
+    clean += sum(1 for o in outcomes if o.get("outcome") == "proven") - k
+    counted = m - clean
+    tail_p50 = round(_vr_percentile(proven_s, 50), 1)
+    return {"sampled_runs": n, "slow_runs": m, "logs_read": logs_read,
+            "tail_runs": k, "logs_clean": clean,
+            "logs_unreadable": logs_read - k - clean, "counted_runs": counted,
+            "one_in_n": int(round(n / counted)),
+            "typical_checkout_p50_s": p50, "tail_checkout_p50_s": tail_p50,
+            "tail_loss_s": round(tail_p50 - p50, 1)}, []
+
+
+def _opt80_tail_axis_rederived(f: dict) -> list[str]:
+    """[] when the finding carries no tail axis, or carries one every number of
+    which re-derives; otherwise the reasons it does not."""
+    cs = _as_dict(f.get("checkout_stall"))
+    if "tail_axis" not in cs:
+        return []
+    axis = cs.get("tail_axis")
+    if not isinstance(axis, dict):
+        return [f"tail_axis is {type(axis).__name__}, not a block"]
+    problems: list[str] = []
+    if cs.get("on_critical_path") is not True or axis.get("on_critical_path") is not True:
+        problems.append(
+            f"a tail axis is stamped on a finding whose on_critical_path is "
+            f"{cs.get('on_critical_path')!r} - a stall off the merge wait has no "
+            "tail line to state")
+    if _num(f.get("wall_clock_p50_s")) != 0:
+        problems.append(
+            f"wall_clock_p50_s={f.get('wall_clock_p50_s')!r} - the tail is never a "
+            "p50 quantity, so an OPT80 finding credits no wall-clock")
+    want, why = _vr_opt80_tail_axis_expected(cs)
+    if want is None:
+        return problems + why
+    for key, val in want.items():
+        got = _num(axis.get(key))
+        tol = 0.11 if key.endswith("_s") else 0.0
+        if got is None or abs(got - float(val)) > tol:
+            problems.append(f"tail_axis.{key} {axis.get(key)!r} != re-derived {val}")
+    if want["tail_loss_s"] <= 0:
+        problems.append("the proven tail runs' checkout is not above the typical one")
+    return problems
+
+
+def _vr_opt80_workflow_prefixes(wf_path: str, workflow_names: object) -> set:
+    """Own copy of `collect_runs._opt80_workflow_prefixes`: the workflow's own
+    `name:`, else its file path or basename."""
+    name = " ".join(str(_as_dict(workflow_names).get(wf_path) or "").split())
+    if name:
+        return {name}
+    return {p for p in (str(wf_path), str(wf_path).rsplit("/", 1)[-1]) if p}
+
+
+def _vr_opt80_check_names_job(check: str, job_key: str, node: dict,
+                              wf_prefixes: "set | None" = None) -> bool:
+    """Own copy of `collect_runs._opt80_check_names_job`: is the required check
+    `check` the check-run of YAML job `job_key`, whole or behind ONLY this
+    workflow's own name prefix?"""
+    c = " ".join(str(check).split())
+    name = " ".join(str(node.get("name") or job_key).split())
+    pat = ".+?".join(re.escape(x) for x in re.split(r"\$\{\{.*?\}\}", name))
+    if node.get("matrix"):
+        pat += r"(?: \(.+\))?"
+    cands = {c} | {c[len(p) + 3:] for p in (wf_prefixes or set())
+                   if c.startswith(p + " / ")}
+    for cand in cands:
+        if cand == job_key or re.fullmatch(pat, cand):
+            return True
+        if node.get("reusable") and cand.startswith(name + " / "):
+            return True
+    return False
+
+
+def _vr_opt80_merge_gating_problems(f: dict, data: dict) -> list[str]:
+    """Re-derive the tail axis's `merge_gating` evidence from the stamped
+    required set and job graph: the required read was complete, the named
+    check is required and is the named required job's check, the finding's job
+    is that YAML job, and it is the required job or in its `needs:` closure."""
+    cs = _as_dict(f.get("checkout_stall"))
+    mg = _as_dict(_as_dict(cs.get("tail_axis")).get("merge_gating"))
+    wf = str(f.get("workflow_file") or "")
+    if not mg:
+        return ["the tail axis names no required check its job gates - the merge "
+                "wait is not shown to include this job"]
+    if data.get("required_checks_complete") is not True:
+        return ["the required-check read was not complete, so no job is shown to "
+                "be on the merge-gating path"]
+    if _vr_required_reachability_unresolved(data):
+        return ["a required status is published by this repo's own workflow and "
+                "names no job, so which jobs the merge waits on is unknown"]
+    req = {str(r) for r in _as_list(data.get("required_checks"))}
+    rc, rj, jk = (str(mg.get("required_check") or ""), str(mg.get("required_job") or ""),
+                  str(mg.get("job_key") or ""))
+    jobs = _as_dict(_as_dict(data.get("workflow_job_graph")).get(wf))
+    problems: list[str] = []
+    if rc not in req:
+        problems.append(f"merge_gating names {rc!r}, which is not a required check")
+    names = data.get("workflow_names")
+    graph = _as_dict(data.get("workflow_job_graph"))
+    if rj not in jobs or not _vr_opt80_check_names_job(
+            rc, rj, _as_dict(jobs.get(rj)), _vr_opt80_workflow_prefixes(wf, names)):
+        problems.append(f"merge_gating's required check {rc!r} is not job {rj!r} of {wf!r}")
+    else:
+        hits = [(str(w), str(k)) for w, wjobs in graph.items()
+                for k, n in _as_dict(wjobs).items()
+                if _vr_opt80_check_names_job(rc, str(k), _as_dict(n),
+                                             _vr_opt80_workflow_prefixes(str(w), names))]
+        if len(hits) > 1:
+            problems.append(
+                f"merge_gating's required check {rc!r} is ambiguous - it names "
+                f"{len(hits)} jobs, so which one the merge waits on is unknown")
+    job = str(cs.get("job") or "")
+    node = _as_dict(jobs.get(jk))
+    if jk not in jobs or " ".join(str(node.get("name") or jk).split()) != job:
+        problems.append(f"merge_gating's job {jk!r} is not the finding's job {job!r}")
+    closure, stack = {rj}, [rj]
+    while stack:
+        for dep in _as_list(_as_dict(jobs.get(stack.pop())).get("needs")):
+            if str(dep) in jobs and str(dep) not in closure:
+                closure.add(str(dep))
+                stack.append(str(dep))
+    if jk not in closure:
+        problems.append(f"{jk!r} is neither the required job {rj!r} nor needed by it")
+    want_basis = "required" if jk == rj else "needed_by_required"
+    if str(mg.get("basis") or "") != want_basis:
+        problems.append(f"merge_gating basis {mg.get('basis')!r} != {want_basis!r}")
+    return problems
+
+
+def _opt80_tail_axis_eligible(f: dict, data: dict) -> list[str]:
+    """[] when a stamped tail axis meets the collector's own gate; otherwise why
+    not. Mirrors `_detect_opt80_checkout_tail_stall`: the workflow DECLARES a
+    pull-request trigger (`declared_pr_workflows`), it was TIMED on sampled
+    pull-request runs (`per_workflow_timing[wf].event_scope` is a developer
+    event, never the `all-events` fallback), and the finding's job is that
+    workflow's slowest (`long_pole_job`). Fail-closed: a missing stamp is a
+    condition not shown to hold."""
+    cs = _as_dict(f.get("checkout_stall"))
+    if "tail_axis" not in cs:
+        return []
+    wf = str(f.get("workflow_file") or "")
+    job = str(cs.get("job") or (_as_list(f.get("affected_jobs")) or [""])[0])
+    crit = _as_dict(_as_dict(data.get("per_workflow_timing")).get(wf))
+    problems: list[str] = []
+    if wf not in {str(w) for w in _as_list(data.get("declared_pr_workflows"))}:
+        problems.append(
+            f"a tail axis is stamped on {wf!r}, which does not declare a pull-request "
+            "trigger - nothing waits on it to merge")
+    scope = str(crit.get("event_scope") or "")
+    if scope not in _VR_DEVELOPER_EVENTS:
+        problems.append(
+            f"a tail axis is stamped on {wf!r}, whose timing was not taken from pull "
+            f"request runs (event_scope {scope or 'unstated'!r}) - its slowest job and "
+            "checkout durations are not what a pull request waits on")
+    if str(crit.get("long_pole_job") or "") != job:
+        problems.append(
+            f"a tail axis is stamped on {job!r}, which is not {wf!r}'s slowest job "
+            f"({crit.get('long_pole_job')!r})")
+    problems.extend(_vr_opt80_merge_gating_problems(f, data))
+    return problems
+
+
+def check_opt80_tail_lines(report: str, findings_path: Path | None) -> Check:
+    """OPT80's tail line: stamped block, rendered line and numbers agree.
+
+    Fails on a tail axis whose numbers do not re-derive, on one stamped on a
+    finding off the critical path, on a stamped block with no marked line (or
+    two), on a marked line with no stamped block, on ANY "one run in N spends
+    about X s longer on checkout" sentence in the report whose N and X are not a
+    stamped finding's re-derived values, and on any sentence still in the legacy
+    "loses up to / about X s on checkout to a stalled fetch" wording (X is a
+    median whole-checkout excess: not a ceiling, and not all of it the proven
+    pause). Also fails a stamped axis that does not meet the collector's own
+    gate (`_opt80_tail_axis_eligible`: a declared pull-request workflow, a
+    developer `event_scope`, the job is `long_pole_job`, and the merge-gating
+    block re-derives from the required checks and job graph) and one stamped
+    with a non-zero `wall_clock_p50_s` (the tail is never a p50 quantity).
+    Placement: each marker sits in its own job's Long pole section or
+    the dedicated Checkout stall tails section (never above the Contents, in a
+    runner-minute card or in another job's pole), and every tail sentence sits
+    on a marked line or inside the same finding's own runner-saving card.
+    TOP-LEVEL: the Tier-2 pass compat-skips a report with no
+    Tier-2 stamps, and the tail line lives at the pole."""
+    name = "OPT80 tail lines re-derive and pair with their stamped blocks"
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return Check(name, True, err, skipped=True)
+    tails = [f for f in _as_list(_as_dict(data).get("findings"))
+             if isinstance(f, dict) and str(f.get("pattern") or "") == "OPT80"
+             and "tail_axis" in _as_dict(f.get("checkout_stall"))]
+    marker_hits = list(_VR_OPT80_TAIL_MARKER_RE.finditer(report))
+    marks = [(m.group(1), m.end()) for m in marker_hits]
+    phrases: list[tuple[int, str | None, int, str, int]] = []
+    for m in _VR_OPT80_TAIL_SCAN_RE.finditer(report):
+        canon = _VR_OPT80_TAIL_PHRASE_RE.match(report, m.start())
+        phrases.append((int(m.group(1)), canon.group(2) if canon else None,
+                        int(m.group(2)), m.group(0), m.start()))
+    if not tails:
+        if marks or phrases:
+            return Check(name, False,
+                         "the report renders an OPT80 tail line but no finding stamps "
+                         "a tail axis")
+        return Check(name, True, "no OPT80 tail axis stamped")
+    bad: list[str] = []
+    # ONE placement rule. A tail marker sits in its own job's Long pole section or
+    # in the dedicated Checkout stall tails section - never above the Contents
+    # (title, provenance, Bottom line), in a runner-minute card or in another
+    # job's pole. And every tail sentence sits on a marked line or inside the
+    # SAME finding's own runner-saving card (allowed just below): the tail is a
+    # separate figure, never headlined or summed, even when its numbers re-derive.
+    by_id = {str(f.get("id") or ""): f for f in tails}
+    spans: list[tuple[int, int]] = []
+    for m in marker_hits:
+        rest = report[m.end():]
+        start = m.end() + len(rest) - len(rest.lstrip("\n"))
+        spans.append((start, start + len(report[start:].split("\n", 1)[0])))
+        f = by_id.get(m.group(1))
+        where = _vr_opt80_marker_placed(f, report, m.start(), _as_dict(data)) if f else None
+        if where:
+            bad.append(f"{m.group(1)}: its tail line sits in {where} - it belongs in its "
+                       "own job's Long pole section or the Checkout stall tails section, "
+                       "never headlined or in a runner-minute card")
+    # The one other place the sentence may stand is the SAME finding's own
+    # Runner saving card, where it is the collector's evidence prose ("... - a
+    # tail figure, never added to the p50 merge wait or to any total"): that
+    # card is the finding's own row, not a headline or a sum.
+    for fid in by_id:
+        body = _tier2_body_for_marker(report, fid)
+        at = report.find(body) if body else -1
+        if at != -1:
+            spans.append((at, at + len(body)))
+    for *_rest, said, pos in phrases:
+        if not any(a <= pos < b for a, b in spans):
+            bad.append(f"a tail sentence {said!r} sits off its marked line, in "
+                       f"{_vr_opt80_enclosing(report, pos)[1]} - it belongs on its "
+                       "marked line (or inside the same finding's runner-saving "
+                       "card), never headlined or summed")
+    allowed: set[tuple[int, int]] = set()
+    want_ids = {str(f.get("id") or "") for f in tails}
+    for i in sorted({i for i, _ in marks} - want_ids):
+        bad.append(f"the report renders a tail line for {i!r}, which stamps no tail axis")
+    for f in tails:
+        fid = str(f.get("id") or "?")
+        bad.extend(f"{fid}: {msg}" for msg in _opt80_tail_axis_rederived(f))
+        bad.extend(f"{fid}: {msg}" for msg in _opt80_tail_axis_eligible(f, _as_dict(data)))
+        want, _why = _vr_opt80_tail_axis_expected(_as_dict(f.get("checkout_stall")))
+        if want is None:
+            continue
+        sentence = (f"one run in {want['one_in_n']} spends about "
+                    f"{want['tail_loss_s']:.0f}s longer on checkout, and that run's "
+                    "log shows the fetch stalling")
+        allowed.add((int(want["one_in_n"]), int(f"{want['tail_loss_s']:.0f}")))
+        hits = [end for i, end in marks if i == fid]
+        if len(hits) != 1:
+            bad.append(f"{fid}: its tail line is rendered {len(hits)} time(s), not once")
+            continue
+        line = report[hits[0]:].lstrip("\n").split("\n", 1)[0]
+        if sentence not in _strip_render_artifacts(line) and sentence not in line:
+            bad.append(f"{fid}: the line after its marker does not state the "
+                       f"re-derived {sentence!r}")
+    for n, word, x, said, _pos in phrases:
+        if word != _VR_OPT80_TAIL_WORDING:
+            bad.append(f"the report says {said!r}, which is not the canonical tail "
+                       "sentence (legacy or variant wording) - X is the median proven "
+                       "run's whole checkout excess - not an upper bound, and not all "
+                       "of it the proven pause; it must say 'spends about X s longer "
+                       "on checkout, and that run's log shows the fetch stalling'")
+        elif (n, x) not in allowed:
+            bad.append(f"the report says 'one run in {n} spends about {x}s longer on "
+                       "checkout', which no stamped tail axis re-derives to")
+    return Check(name, not bad,
+                 f"{len(tails)} tail line(s) re-derived and paired"
+                 if not bad else "; ".join(bad[:6]))
+
+
+# ---- OPT80's slowest job WITHOUT a tail line ----------------------------------
+#
+# An on-pole OPT80 finding with no tail axis stamps `tail_axis_withheld_reason`
+# and renders that reason's sentence. Own copy of the collector's
+# `_OPT80_TAIL_WITHHELD_SENTENCES` (pinned equal by a coupling test). None of
+# them claims a merge wait; the pre-fix sentence ("the stall's effect on the
+# merge wait is measured ... but not credited") did, for jobs the merge was not
+# shown to wait on, and any merge-wait claim on a finding with no tail axis fails.
+_VR_OPT80_TAIL_WITHHELD_SENTENCES = {
+    "not_on_pull_requests":
+        "`{job}` is this workflow's slowest job; the stall is measured (longest "
+        "pause {pause}s), but this workflow is not shown to run on pull requests, "
+        "so no merge-wait claim is made.",
+    "all_events_timing":
+        "`{job}` is this workflow's slowest job; the stall is measured on "
+        "all-events timing (longest pause {pause}s), with no pull-request sample, "
+        "so no tail line is printed.",
+    "merge_gating_unknown":
+        "`{job}` is this workflow's slowest job; the stall is measured (longest "
+        "pause {pause}s), but whether this job gates a merge could not be read "
+        "from branch protection, so no tail line is printed.",
+    "not_merge_gating":
+        "`{job}` is this workflow's slowest job; the stall is measured (longest "
+        "pause {pause}s), but the merge does not wait on this job, so no "
+        "merge-wait claim is made.",
+    "tail_not_derivable":
+        "`{job}` is this workflow's slowest job; the stall is measured (longest "
+        "pause {pause}s), but the proven runs yield no tail figure, so no tail "
+        "line is printed.",
+}
+_VR_OPT80_MERGE_WAIT_CLAIM_RE = re.compile(
+    r"\b(?:effect on|sits on|is on|lands on|reaches) (?:the |a |that run's )?merge wait",
+    re.IGNORECASE)
+_VR_OPT80_SLOWEST_JOB = "is this workflow's slowest job"
+
+
+def _vr_required_reachability_unresolved(data: dict) -> bool:
+    """Minimal own copy of `collect_runs._required_reachability_unresolved` (issue
+    #119): some required context is one a workflow that posts commit statuses posts
+    (`workflow_status_publishers`: exactly equal to one of an entry's `contexts`, or
+    its `names` fallback) and no YAML job in `workflow_job_graph` is that context's
+    check-run. Such a context (an in-repo `All CI` aggregate) waits on jobs no
+    `needs:` edge records, so no job can be called off the merge wait."""
+    pubs = _as_dict(data.get("workflow_status_publishers"))
+    posted = {str(s).strip() for p in pubs.values() if isinstance(p, dict)
+              for k in ("contexts", "names") for s in _as_list(p.get(k))}
+    if not posted:
+        return False
+    graph = _as_dict(data.get("workflow_job_graph"))
+    names = data.get("workflow_names")
+    for r in {str(x) for x in _as_list(data.get("required_checks"))}:
+        if r.strip() not in posted:
+            continue
+        if not any(_vr_opt80_check_names_job(r, str(k), _as_dict(n),
+                                             _vr_opt80_workflow_prefixes(str(w), names))
+                   for w, wjobs in graph.items() for k, n in _as_dict(wjobs).items()):
+            return True
+    return False
+
+
+def _vr_opt80_tail_withheld_expected(f: dict, data: dict) -> "set[str] | None":
+    """The reasons the stamped facts allow, in the collector's gate order, or
+    None when the doc predates the facts (no `declared_pr_workflows`)."""
+    wf = str(f.get("workflow_file") or "")
+    declared = data.get("declared_pr_workflows")
+    if not isinstance(declared, list):
+        return None
+    if wf not in {str(w) for w in declared}:
+        return {"not_on_pull_requests"}
+    crit = _as_dict(_as_dict(data.get("per_workflow_timing")).get(wf))
+    if str(crit.get("event_scope") or "") == "all-events":
+        return {"all_events_timing"}
+    if not (data.get("required_checks_complete") is True
+            and _as_list(data.get("required_checks"))
+            and _as_dict(_as_dict(data.get("workflow_job_graph")).get(wf))):
+        return {"merge_gating_unknown"}
+    # A required status the repo publishes itself, naming no job: which jobs the
+    # merge waits on is unknown, so "not merge-gating" is not a stamped fact.
+    if _vr_required_reachability_unresolved(data):
+        return {"merge_gating_unknown"}
+    # A shared check name cannot identify one workflow's job. Mirror the
+    # collector's ambiguity refusal, including workflow-prefix disambiguation.
+    graph = _as_dict(data.get("workflow_job_graph"))
+    for required in _as_list(data.get("required_checks")):
+        hits = [(str(w), str(k)) for w, jobs in graph.items()
+                for k, node in _as_dict(jobs).items()
+                if _vr_opt80_check_names_job(str(required), str(k), _as_dict(node),
+                    _vr_opt80_workflow_prefixes(str(w), data.get("workflow_names")))]
+        if len(hits) > 1 and any(w == wf for w, _ in hits):
+            return {"merge_gating_unknown"}
+    return {"not_merge_gating", "tail_not_derivable"}
+
+
+def _vr_opt80_tail_withheld_problems(f: dict, data: dict) -> list[str]:
+    cs = _as_dict(f.get("checkout_stall"))
+    ev = str(f.get("evidence") or "")
+    reason = cs.get("tail_axis_withheld_reason")
+    if "tail_axis" in cs:
+        return ([f"stamps a tail axis AND tail_axis_withheld_reason {reason!r}"]
+                if reason is not None else [])
+    problems: list[str] = []
+    claim = _VR_OPT80_MERGE_WAIT_CLAIM_RE.search(ev)
+    if claim:
+        problems.append(
+            f"claims a merge wait ({claim.group(0)!r}) with no tail axis "
+            f"(withheld reason {reason!r}) - the merge is not shown to wait on "
+            "this job")
+    if reason is None:
+        if _VR_OPT80_SLOWEST_JOB in ev:
+            problems.append("renders a slowest-job sentence but stamps no "
+                            "tail_axis_withheld_reason to pair it with")
+        return problems
+    if cs.get("on_critical_path") is not True:
+        problems.append(f"stamps tail_axis_withheld_reason {reason!r} on a job "
+                        "that is not its workflow's slowest")
+    tmpl = _VR_OPT80_TAIL_WITHHELD_SENTENCES.get(str(reason))
+    if tmpl is None:
+        return problems + [f"tail_axis_withheld_reason {reason!r} is not a known reason"]
+    pause = _num(cs.get("tail_run_longest_pause_s"))
+    sentence = tmpl.format(job=str(cs.get("job") or ""),
+                           pause=f"{float(pause or 0):.0f}")
+    if sentence not in ev:
+        problems.append(f"withheld reason {reason!r} but the evidence does not "
+                        f"render its sentence {sentence!r}")
+    allowed = _vr_opt80_tail_withheld_expected(f, data)
+    if allowed is not None and reason not in allowed:
+        problems.append(f"withheld reason {reason!r}, but the stamped facts give "
+                        f"{' or '.join(sorted(allowed))}")
+    return problems
+
+
+def check_opt80_tail_withheld_reasons(report: str, findings_path: Path | None) -> Check:
+    """An OPT80 slowest job with no tail line says WHY, in the sentence of its
+    stamped `tail_axis_withheld_reason`, and that reason re-derives from the
+    stamped facts (pull-request trigger, pull-request timing, a readable
+    required set). Fails any merge-wait claim on a finding with no tail axis,
+    and the pre-fix sentence anywhere in the report."""
+    name = "OPT80 slowest-job sentence pairs with its withheld reason"
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return Check(name, True, err, skipped=True)
+    bad: list[str] = []
+    if "effect on the merge wait is measured" in report:
+        bad.append("the report still says \"the stall's effect on the merge wait is "
+                   "measured\" - no stamped fact supports a merge-wait claim there")
+    n = 0
+    for f in _as_list(_as_dict(data).get("findings")):
+        if not (isinstance(f, dict) and str(f.get("pattern") or "") == "OPT80"):
+            continue
+        n += 1
+        bad.extend(f"{f.get('id') or '?'}: {p}"
+                   for p in _vr_opt80_tail_withheld_problems(f, _as_dict(data)))
+    return Check(name, not bad,
+                 f"{n} OPT80 finding(s) checked" if not bad else "; ".join(bad[:6]))
+
+
 def _opt65_suppressions_are_accounted_for(data: dict) -> list[str]:
     """Every OPT65 finding dropped for overlapping an OPT77 consolidation must be
     disclosed, and the consolidation that displaced it must actually be in the
@@ -6289,7 +8888,10 @@ def check_tier2_neutrality_derived(report: str, findings_path: Path | None,
         cert_claims = [c for c in _as_list(manifest.get("claims"))
                        if isinstance(c, dict) and c.get("kind") == "tier2_neutrality_line"]
     claim_by_subject = {str(c.get("subject")): c for c in cert_claims}
-    rendered_poles = {_cmp_name(check) for _wf, check, _body in _pole_header_sections(report)}
+    # Keyed by workflow FILE as well as job name: a `test` job in nightly.yml is
+    # not the `test` pole rendered for ci.yml.
+    rendered_poles = {(_wf_base(wf), _cmp_name(check))
+                      for wf, check, _body in _pole_header_sections(report)}
     bad: list[str] = []
     for idx, f in enumerate(ranked, 1):
         fid = _tier2_id(f, idx)
@@ -6312,7 +8914,37 @@ def check_tier2_neutrality_derived(report: str, findings_path: Path | None,
         # slowest job is reported, and reported uncredited — suppressing it would
         # hide the pattern's most valuable case to satisfy an inference that has
         # been replaced by a measurement.
-        if rendered_poles and jobs & rendered_poles and proof != "checkout_tail_excess":
+        # OPT77's whole-workflow groups are the SECOND exemption, on the same
+        # argument. Such a group is every job the workflow declares, so on a
+        # small repository its tallest member is very often a rendered pole —
+        # and the proxy would then reject a finding whose wall-clock
+        # neutrality has been re-derived from measurement right below: the arm
+        # requires `projected <= max_i(job_p50_i)`, which says in so many words
+        # that the collapsed job does not outlast the slowest member, pole or
+        # not. Refusing it would suppress the pattern on exactly the shape it
+        # was reopened for, to satisfy an inference a measurement has replaced.
+        # Narrow by construction: it applies only when the arm below actually
+        # runs and passes, because a failure there lands in `bad` anyway.
+        whole_workflow_opt77 = (
+            str(f.get("pattern") or "") == "OPT77"
+            and _as_dict(f.get("setup_consolidation")).get(
+                "group_is_the_whole_workflow") is True)
+        # OPT79's `below_long_pole` is the THIRD exemption, and only where the
+        # proxy's inference has been replaced: a drilled secondary pole that
+        # `workflow_job_graph` PROVES is in no `needs:` chain with its workflow's
+        # long pole (the arm below re-derives that it is strictly shorter than
+        # it), or one on a workflow no pull request waits on (no merge wait; the
+        # arm pairs that stamp with the sampled events). With no graph, or the
+        # chain present on a pull-request workflow, the proxy still applies.
+        unchained_below_long_pole = (
+            proof == _VR_OPT79_PROOF_BELOW_LONG_POLE
+            and str(f.get("pattern") or "") == "OPT79"
+            and _vr_opt79_below_long_pole_off_merge_gate(f, data))
+        wf_key = _wf_base(str(f.get("workflow_file") or ""))
+        on_pole = bool({(wf_key, j) for j in jobs} & rendered_poles)
+        if (rendered_poles and on_pole
+                and proof != "checkout_tail_excess" and not whole_workflow_opt77
+                and not unchained_below_long_pole):
             bad.append(f"{fid}: affected job is also rendered as a Long pole")
         if proof == "below_cluster_floor":
             got = _num(cert.get("margin_s"))
@@ -6336,6 +8968,13 @@ def check_tier2_neutrality_derived(report: str, findings_path: Path | None,
                 want = _below_floor_margin(f, data)
             if got is None or want is None or abs(got - want) > 0.11:
                 bad.append(f"{fid}: below-floor margin {got!r} != re-derived {want!r}")
+        elif proof == _VR_OPT79_PROOF_BELOW_LONG_POLE:
+            # OPT79's second runner-minute proof: at or above the cluster floor,
+            # strictly shorter than the long pole, and, on a pull-request
+            # workflow, in no `needs:` chain with it. The "rendered as a Long pole" proxy above still applies: it is
+            # what catches a chained job when the run recorded no job graph.
+            bad.extend(f"{fid}: {msg}"
+                       for msg in _tier2_below_long_pole_problems(f, data))
         elif proof == "post_completion_waste":
             if str(f.get("pattern") or "") not in {"OPT35", "OPT46", "OPT57", "OPT64"}:
                 bad.append(
@@ -6363,17 +9002,43 @@ def check_tier2_neutrality_derived(report: str, findings_path: Path | None,
                 bad.extend(f"{fid}: {msg}"
                            for msg in _opt80_checkout_stall_rederived(f))
                 # `on_critical_path` is what the evidence's "this workflow's
-                # slowest job" sentence is rendered from, and it is exactly the
-                # fact the exemption above turns off the blanket check for. It is
-                # re-derived here rather than trusted, from the same rendered
-                # poles the rule itself reads.
+                # slowest job" sentence is rendered from. It is re-derived, both
+                # ways and unconditionally, from the field the collector computes
+                # it from: the job is `per_workflow_timing[wf].long_pole_job`. A
+                # drilled chain pole that is not its workflow's slowest job (a
+                # `prep -> verify` chain) stamps False and matches.
+                claimed = _as_dict(f.get("checkout_stall")).get("on_critical_path")
+                cs_job = str(_as_dict(f.get("checkout_stall")).get("job") or "")
+                slowest = str(_as_dict(_as_dict(data.get("per_workflow_timing")).get(
+                    str(f.get("workflow_file") or ""))).get("long_pole_job") or "")
+                if claimed is not (bool(cs_job) and slowest == cs_job):
+                    bad.append(
+                        f"{fid}: on_critical_path={claimed!r}, but per_workflow_timing "
+                        f"names {slowest or None!r} as this workflow's slowest job "
+                        f"and the finding's job is {cs_job or None!r}")
                 if rendered_poles:
-                    claimed = _as_dict(f.get("checkout_stall")).get("on_critical_path")
-                    if bool(claimed) != bool(jobs & rendered_poles):
+                    on_pole = _vr_opt80_job_rendered_as_pole(f, report, data)
+                    # The on_critical_path claim itself is re-derived above, both
+                    # ways, against per_workflow_timing[wf].long_pole_job. What is
+                    # governed here is only "True needs a rendered pole", with three
+                    # exemptions:
+                    #  1. A slowest job whose workflow runs on pull requests but
+                    #     was not drilled (it ranks below the rendered poles) is on
+                    #     its own merge wait without a pole header. It is accepted
+                    #     only when its tail line renders in the dedicated Checkout
+                    #     stall tails section, not merely outside every pole
+                    #     (which a Runner saving card also is);
+                    #     `check_opt80_tail_lines` pairs and re-derives that line.
+                    #  2. A workflow whose recorded events hold no pull-request
+                    #     event (a push-only nightly's job is never a pole).
+                    #  3. A workflow with no rendered pole header at all.
+                    #  (2 and 3 live in `_vr_opt80_slowest_job_can_be_a_pole`.)
+                    if (bool(claimed) and not on_pole
+                            and not _vr_opt80_tail_rendered_off_pole(f, report)
+                            and _vr_opt80_slowest_job_can_be_a_pole(f, report, data)):
                         bad.append(
                             f"{fid}: on_critical_path={claimed!r} but the job is "
-                            f"{'' if jobs & rendered_poles else 'not '}rendered as "
-                            "a Long pole")
+                            "not rendered as a Long pole")
         elif proof == "non_pr_event":
             if not _non_pr_event_corroborated(f, data):
                 bad.append(f"{fid}: non_pr_event lacks stamped event-subset evidence")
@@ -6483,18 +9148,1277 @@ def _opt79_uncredited_rows_rendered(report: str, rows: list) -> list[str]:
         # WHY it is uncredited is a claim too: only the long pole of a
         # workflow that gates a PR may be told its saving is on the merge wait,
         # and only a workflow no PR runs may be told no PR waits on it.
-        says_merge_wait = "on the merge wait" in why
-        says_no_pr = "does not run on pull requests" in why
+        # A flat "shortens the merge wait" is the same claim; the needs-chain
+        # row may say only that shrinking it MAY shorten it.
+        says_merge_wait = ("on the merge wait" in why
+                           or re.search(r"(?<!may )\bshortens the merge wait", why)
+                           is not None)
+        says_undeclared = "does not run on pull requests" in why
+        says_unsampled = "so no measured pull request waits on it" in why
+        says_no_pr = says_undeclared or says_unsampled
         if says_merge_wait != bool(cn.get("on_critical_path")):
             out.append(f"{tag}: `{job}` line {'claims' if says_merge_wait else 'omits'}"
                        f" the merge wait but on_critical_path is "
                        f"{cn.get('on_critical_path')!r}")
         no_pr = (not cn.get("on_critical_path")
                  and cn.get("workflow_gates_pull_requests") is False)
+        frag = _VR_OPT79_UNCREDITED_REASON_PHRASES.get(
+            str(cn.get("uncredited_reason") or ""))
+        lp_job = str(cn.get("long_pole_job") or "")
+        if (frag and lp_job not in ("", job)
+                and cn.get("uncredited_reason") == "pole_tied_with_next_job"):
+            # A co-pole's line names the slowest job it is tied with (the
+            # renderer's twin), not "the next-tallest job", which is itself.
+            frag = _strip_render_artifacts(
+                f"is tied with `{lp_job}`, this workflow's slowest job")
+        # The line is read with its render artifacts stripped (backticks
+        # included), so the fragment is too: the chain reason's `needs:` would
+        # otherwise never match its own rendered line.
+        if frag and _strip_render_artifacts(frag) not in why:
+            out.append(f"{tag}: `{job}` line does not state its reason "
+                       f"({cn.get('uncredited_reason')!r}: {frag!r})")
+        # Only the long pole is the workflow's slowest job: a row whose job is
+        # not it (a `needs:`-chain job, a co-pole) must never be told it is.
+        if (lp_job and lp_job != job and f"{_strip_render_artifacts(job)} is "
+                "this workflow's slowest job" in why):
+            out.append(f"{tag}: `{job}` line calls it this workflow's slowest job, "
+                       f"but the long pole is `{lp_job}`")
         if says_no_pr != no_pr:
             out.append(f"{tag}: `{job}` line {'says' if says_no_pr else 'does not say'}"
                        " no pull request runs it, against the row's stamps")
+        elif no_pr and cn.get("declares_pull_request") is True:
+            # Declared but not sampled: the line must say what was MEASURED.
+            n = cn.get("sampled_successful_run_count")
+            want_txt = (f"none of its {n} sampled runs was a pull request, so no "
+                        "measured pull request waits on it")
+            if says_undeclared or want_txt not in why:
+                out.append(f"{tag}: `{job}` declares pull requests but none was "
+                           f"sampled; its line must say {want_txt!r}, not that the "
+                           "workflow does not run on pull requests")
+        elif no_pr and says_unsampled:
+            out.append(f"{tag}: `{job}` line says the workflow declares pull "
+                       "requests, but the row stamps declares_pull_request="
+                       f"{cn.get('declares_pull_request')!r}")
     return out
+
+
+# OPT82's ledger sentence — this verifier's own copy of
+# `blocking_path._OPT82_LEDGER_SENTENCE` (a test pins the two equal).
+_VR_OPT82_LEDGER_SENTENCE = (
+    "LEDGER (required before shipping): write a rule-by-rule ledger with one row "
+    "for every rule the current config enables (from `eslint --print-config`), "
+    "saying where it runs after the change - the fast pass, the type-aware pass, "
+    "or REPLACED BY <rule> with one line on what the replacement no longer checks "
+    "and why that is acceptable here - and add a test asserting that every "
+    "original rule is enabled in one of the two configs or has a REPLACED row. "
+    "A rule with no row is a coverage loss and blocks the change. A REPLACED row "
+    "is a deliberate, reviewed reduction in what lint checks: list each one for "
+    "a human to approve before merging.")
+# Every way of saying "switch the rules off", within one sentence, in either
+# order. The fix this pattern hands off must never be "turn the type-aware
+# rules off". Matched against `_vr_opt82_instruction_text`, which joins line
+# wraps and drops the measured evidence and the commands (a CI lint command
+# such as `eslint --report-unused-disable-directives --rule 'x: off'` is data,
+# and the benchmark's timing-only `--rule '<rule>: off'` run is labelled).
+_VR_OPT82_TARGET = r"(?:rules?|type[- ]aware|type[- ]checked|type information)"
+_VR_OPT82_DISABLE_RULES_RE = re.compile(
+    r"\bdisabl\w*\b[^.]{0,60}\brules?\b|\brules?\b[^.]{0,60}\bdisabl\w*"
+    r"|\bdisable-?type-?checked\b"
+    rf"|\bturn\w*\s+off\b[^.]{{0,60}}\b{_VR_OPT82_TARGET}"
+    rf"|\bturn\w*\b[^.]{{0,60}}\b{_VR_OPT82_TARGET}\b[^.]{{0,40}}\boff\b"
+    r"|\b(?:drop|dropp\w*|remov\w*|delet\w*)\b[^.]{0,60}\brules?\b"
+    r"|\brules?\b[^.]{0,40}\b(?:dropped|removed|deleted)\b"
+    r"|\brules?\b[^.]{0,60}\bto\s+['\"`]?off\b"
+    r"|\bset\w*\b[^.]{0,60}\b['\"`]?off['\"`]?(?=[\s.,;:)]|$)"
+    r"|:\s*['\"]off['\"]"
+    rf"|\bmov\w*\b[^.]{{0,60}}\b{_VR_OPT82_TARGET}\b[^.]{{0,60}}"
+    r"\b(?:non-?blocking|optional|advisory|informational|allowed to fail)\b",
+    re.I)
+# A command-line flag, with a quoted or `=` value: `--rule 'x: off'`,
+# `--report-unused-disable-directives`, `--parser-options project:false`.
+_VR_OPT82_FLAG_RE = re.compile(
+    r"--[\w-]+(?:=\S+|\s+'[^']*'|\s+\"[^\"]*\")?")
+
+
+def _vr_opt82_instruction_text(card: str) -> str:
+    """The card's instruction text: the measured evidence (`**Evidence:**` and
+    the prompt's `What ci-speedup saw:` line) and the benchmark command lines
+    are dropped, command flags are stripped, and line wraps are joined so a
+    phrase split across two lines still matches."""
+    kept: list[str] = []
+    for ln in card.splitlines():
+        s = ln.strip()
+        if s.startswith(("**Evidence:**", "What ci-speedup saw:")):
+            continue
+        if s.startswith("(") and "eslint" in s:      # a benchmark command line
+            continue
+        kept.append(_VR_OPT82_FLAG_RE.sub(" ", s))
+    return " ".join(" ".join(kept).split())
+_VR_OPT82_CARD_RE = re.compile(
+    r"<summary><strong>OPT82 - .*?</details>", re.S)
+# A saving claim on an OPT82 card: a runner-minute figure, "saves", a
+# `**Saving:**` label, or a "~N" duration. The card's only legitimate figures
+# are the labelled SIZING ceiling, the evidence's measured p50s ("measures 95s
+# at p50", no tilde) and the benchmark commands, so the SIZING line and the
+# benchmark lines are exempt and nothing else is.
+_VR_OPT82_SAVING_CLAIM_RE = re.compile(
+    r"runner-min|\bsaves\b|\*\*Saving:\*\*|^\s*Saving:|"
+    r"~\s*\d+(?:\.\d+)?\s*(?:s|m|min|h)\b", re.I | re.M)
+_VR_OPT82_SUMMARY_METRIC = "uncredited, benchmark first"
+
+
+def _opt82_card_where_keys(card: str) -> set[tuple[str, str]]:
+    """`{(wf_base, job_base)}` an OPT82 card's `**Where:**` line names."""
+    mw = re.search(r"^\*\*Where:\*\*\s*(.+)$", card, re.MULTILINE)
+    return {_appendix_wf_job_key(wf, job)
+            for wf, job in (_APPENDIX_WHERE_PAIR_RE.findall(mw.group(1)) if mw else [])}
+
+
+# ---- OPT83: independent steps on the long pole run one after another --------
+# This verifier's OWN copies of the collector's candidate rule and the renderer's
+# card strings (it re-derives rather than importing either answer; coupling tests
+# pin every copy equal to its source).
+_VR_OPT83_MIN_SHARE = 0.15
+_VR_OPT83_MIN_STEP_S = 20.0
+_VR_OPT83_COMPUTE_CATEGORIES = frozenset({"build", "test", "scan", "package"})
+_VR_OPT83_NOT_COMPUTE_RE = re.compile(
+    r"\b(sleep|sleeping|wait|waits|waiting|wait-all|cancel)\b", re.I)
+_VR_NON_WORK_STEP_RE = re.compile(
+    r"^(set up job|complete job|post\b|checkout\b|set up |setup [a-z]*node"
+    r"|(?:wait|wait-all|cancel)\s*$|wait for all background steps)",
+    re.IGNORECASE)
+_VR_OPT83_INDEPENDENCE_KEYS = (
+    "no_runtime_expression",
+    "no_shared_cache_or_artifact",
+    "no_action_steps",
+    "no_publish_deploy_or_upload",
+    "no_step_output_reads",
+    "no_env_output_or_path_write_read_later",
+    "no_directory_change",
+    "no_shared_build_tree",
+    "no_order_dependent_condition",
+    "no_continue_on_error",
+    "no_shared_tool_state",
+    "no_install_in_a_candidate",
+    "no_container_or_background_server",
+)
+_VR_OPT83_SIZING_LABEL = ("an UPPER BOUND, not a forecast: it assumes each step keeps "
+                          "its solo speed while they share one runner, and CPU, memory "
+                          "or disk contention can erase it. Not credited, and not in "
+                          "any total")
+_VR_OPT83_RAIL = (
+    "Use a `parallel:` group, where a failing step fails the job at the group's "
+    "end, rather than bare `background: true`, unless every background step is "
+    "covered by a `wait` or `wait-all` and none sets `continue-on-error`. Never "
+    "`cancel:` a step that does real verification. Never drop, narrow or skip a "
+    "step to make the group fit")
+_VR_OPT83_RUNNER_CAVEAT = (
+    "GitHub-hosted runners support `parallel:`. On self-hosted runners, run "
+    "actions/runner 2.336.0 or later: its release notes list background steps in "
+    "2.335.0 and, in 2.336.0, a fix that stops a cancelled background step from "
+    "affecting the job result. It is documented for github.com and GitHub "
+    "Enterprise Cloud, not GitHub Enterprise Server")
+_VR_OPT83_CARD_RE = re.compile(r'<a id="opt83-([^"]+)"></a>')
+
+
+def _vr_opt83_step_qualifies(name: str, category: str, p50: float,
+                             job_p50: float) -> bool:
+    """VERBATIM-SYNC with `collect_runs._opt83_step_qualifies` (body pinned)."""
+    if not name or job_p50 <= 0:
+        return False
+    if category not in _VR_OPT83_COMPUTE_CATEGORIES:
+        return False
+    if _VR_NON_WORK_STEP_RE.match(name) or _VR_OPT83_NOT_COMPUTE_RE.search(name):
+        return False
+    return p50 >= _VR_OPT83_MIN_STEP_S and p50 >= _VR_OPT83_MIN_SHARE * job_p50
+
+
+def _vr_opt83_card_bodies(report: str) -> dict[str, str]:
+    """Each OPT83 card, by its anchor id: from its anchor to the next anchor, the
+    next `## ` heading or the next horizontal rule, whichever comes first."""
+    out: dict[str, str] = {}
+    for m in _VR_OPT83_CARD_RE.finditer(report):
+        rest = report[m.end():]
+        stop = len(rest)
+        for pat in (r'<a id="', r"^## ", r"^---$"):
+            n = re.search(pat, rest, re.MULTILINE)
+            if n:
+                stop = min(stop, n.start())
+        out.setdefault(m.group(1), "")
+        out[m.group(1)] += rest[:stop]
+    return out
+
+
+def check_opt83_parallel_steps(report: str, findings_path: Path | None) -> Check:
+    """Every OPT83 finding sits on a drilled long pole, re-derives from that pole's
+    stamped step p50s, stamps its independence facts, carries no saving, and
+    renders exactly one card whose only duration claims are the candidate steps'
+    p50s, the pole's decomposed p50 and the labelled upper bound.
+
+    OPT83 is uncredited by design: the sum of the steps minus the slowest is a
+    ceiling that CPU, memory or disk contention can erase, so a number anywhere
+    else on the card, or on the finding, is a saving nobody measured."""
+    name = "parallel-step findings re-derive from the pole, stay uncredited and pair with their card"
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        # A rendered card is a claim this check exists to re-derive: with the
+        # findings unreadable it cannot be, which is a failure, not a skip.
+        if findings_path is not None and _VR_OPT83_CARD_RE.search(report):
+            return Check(name, False, f"the report renders an OPT83 card, but {err}")
+        return Check(name, True, err, skipped=True)
+    found = [f for f in _as_list(_as_dict(data).get("findings"))
+             if isinstance(f, dict) and str(f.get("pattern") or "") == "OPT83"]
+    cards = _vr_opt83_card_bodies(report)
+    bad: list[str] = []
+    # Every held-back gate is counted once AND listed once: the counter and the
+    # list the held-back row is drawn from must agree gate by gate (verdicts are
+    # counted only, so they are not in the list).
+    counter = _as_dict(_as_dict(data).get("opt83_withheld_by_gate"))
+    listed = [r for r in _as_list(_as_dict(data).get(_VR_OPT83_WITHHELD_DOC_KEY))
+              if isinstance(r, dict)]
+    for g in sorted(_VR_OPT83_WITHHOLD_PHRASES):
+        n_listed = sum(1 for r in listed if r.get("gate") == g)
+        n_counted = int(_num(counter.get(g)) or 0)
+        if n_counted != n_listed:
+            bad.append(f"held-back gate {g}: counted {n_counted}, listed {n_listed}")
+    if not found:
+        if cards:
+            bad.append("the report renders an OPT83 card, but the run recorded no "
+                       "OPT83 finding")
+        return Check(name, not bad, "; ".join(bad) if bad
+                     else "no parallel-step findings")
+    poles = [p for p in _as_list(_as_dict(_as_dict(data).get("pr_critical_path"))
+                                 .get("poles")) if isinstance(p, dict)]
+    rendered = {(w, c) for w, c, _b in _pole_header_sections(report)}
+    heads = [m.start() for m in re.finditer(r"^## ", report, re.MULTILINE)]
+    ids: set[str] = set()
+    for f in found:
+        fid = str(f.get("id") or "?")
+        cid = re.sub(r"[^A-Za-z0-9_.:-]+", "_", fid)
+        ids.add(cid)
+        wc = _num(f.get("wall_clock_p50_s"))
+        if wc:
+            bad.append(f"{fid}: OPT83 carries wall_clock_p50_s {wc} - it is uncredited")
+        if f.get("runner_min_saving") is not None:
+            bad.append(f"{fid}: OPT83 carries runner_min_saving "
+                       f"{f.get('runner_min_saving')!r} - it is uncredited")
+        if f.get("sizing_basis") != "uncredited":
+            bad.append(f"{fid}: OPT83 sizing_basis {f.get('sizing_basis')!r}, "
+                       "not 'uncredited'")
+        st = _as_dict(f.get("independent_steps"))
+        if st.get("kind") != "opt83_independent_steps":
+            bad.append(f"{fid}: missing its opt83_independent_steps block")
+            continue
+        ind = _as_dict(st.get("independence"))
+        missing = [k for k in _VR_OPT83_INDEPENDENCE_KEYS if ind.get(k) is not True]
+        if missing:
+            bad.append(f"{fid}: independence facts not stamped true: {missing}")
+        wfb = Path(str(f.get("workflow_file") or "")).name
+        job = str(st.get("job") or "")
+        pole = next((p for p in poles if Path(str(p.get("workflow_file") or "")).name
+                     == wfb and str(p.get("job") or "") == job), None)
+        if pole is None:
+            bad.append(f"{fid}: OPT83 on `{wfb}` ▸ `{job}`, which is not a drilled "
+                       "long pole")
+            continue
+        job_p50 = _num(pole.get("job_p50_s")) or 0.0
+        stamped = {str(_as_dict(s).get("step") or ""): _as_dict(s)
+                   for s in _as_list(pole.get("steps"))}
+        cand = [_as_dict(s) for s in _as_list(st.get("steps"))]
+        if len(cand) < 2:
+            bad.append(f"{fid}: OPT83 names {len(cand)} step(s); it needs two or more")
+        names = [str(s.get("step") or "") for s in cand]
+        repeated = sorted({n for n in names if names.count(n) > 1})
+        if repeated:
+            # The pole measured each step once; a repeat inflates the bound.
+            bad.append(f"{fid}: step(s) {repeated} named more than once")
+            continue
+        p50s: list[float] = []
+        for s in cand:
+            sn = str(s.get("step") or "")
+            ps = stamped.get(sn)
+            if ps is None:
+                bad.append(f"{fid}: step `{sn}` is not in the pole's measured steps")
+                continue
+            d = _num(ps.get("p50_s")) or 0.0
+            if _num(s.get("p50_s")) != d:
+                bad.append(f"{fid}: step `{sn}` p50 {s.get('p50_s')!r} != the pole's "
+                           f"measured {d}")
+            if not _vr_opt83_step_qualifies(sn, str(ps.get("category") or ""), d,
+                                            job_p50):
+                bad.append(f"{fid}: step `{sn}` ({ps.get('category')}, {d}s of "
+                           f"{job_p50}s) does not qualify as a candidate")
+            p50s.append(d)
+        want = round(sum(p50s) - max(p50s), 1) if len(p50s) >= 2 else 0.0
+        if _num(st.get("ceiling_s")) != want:
+            bad.append(f"{fid}: ceiling_s {st.get('ceiling_s')!r} != re-derived "
+                       f"{want} (sum of the steps' p50s minus the slowest)")
+        body = cards.get(cid)
+        if body is None:
+            bad.append(f"{fid}: OPT83 finding with no card in the report")
+            continue
+        if report.count(f'<a id="opt83-{cid}"></a>') != 1:
+            bad.append(f"{fid}: OPT83 card rendered more than once")
+        # PLACEMENT: inside its pole's section when that pole is rendered, else in
+        # the "other long poles" section. Never under Also noticed, Tier 2, a
+        # total or another pole; and its anchor is named nowhere outside it.
+        at = report.index(f'<a id="opt83-{cid}"></a>')
+        h0 = max((h for h in heads if h < at), default=-1)
+        h1 = min((h for h in heads if h > at), default=len(report))
+        head = report[h0:report.find("\n", h0)] if h0 >= 0 else ""
+        mine = {(Path(str(p.get("workflow_file") or "")).name,
+                 _strip_scope(str(p.get("check") or ""))) for p in poles
+                if Path(str(p.get("workflow_file") or "")).name == wfb
+                and str(p.get("job") or "") == job}
+        under = {(w, c) for w, c, _b in _pole_header_sections(head + "\n")}
+        if mine & rendered:
+            placed = bool(under & mine)
+        else:
+            placed = head.startswith("## ") and "Independent steps on other long poles" in head
+        if not placed:
+            bad.append(f"{fid}: card renders outside its pole's section (under "
+                       f"{head.strip()[:80]!r})")
+        sec_lo, sec_hi = max(h0, 0), h1
+        for m in re.finditer(rf"opt83-{re.escape(cid)}(?![\w.:-])", report):
+            if not sec_lo <= m.start() < sec_hi:
+                bad.append(f"{fid}: its anchor is named outside its own section")
+                break
+        flat = " ".join(body.split())
+        # The label sits on the line that states the bound: the prompt's copy of
+        # it does not label a bare number on the card.
+        bound_line = next((" ".join(ln.split()) for ln in body.splitlines()
+                           if f"up to {want:.0f}s sooner" in ln), "")
+        if bound_line and " ".join(_VR_OPT83_SIZING_LABEL.split()) not in bound_line:
+            bad.append(f"{fid}: card is missing its label beside the upper bound")
+        for need, what in ((f"up to {want:.0f}s sooner", "the upper bound"),
+                           (" ".join(_VR_OPT83_SIZING_LABEL.split()), "its label"),
+                           (" ".join(_VR_OPT83_RAIL.split()), "the parallel: rail"),
+                           (" ".join(_VR_OPT83_RUNNER_CAVEAT.split()),
+                            "the runner caveat")):
+            if need not in flat:
+                bad.append(f"{fid}: card is missing {what}")
+        # The measured facts the card restates (each step's p50, the pole's own
+        # decomposed p50) and the labelled upper bound. Anything else is a number
+        # nobody measured.
+        listing = next((ln for ln in body.splitlines()
+                        if ln.startswith("- **Steps that run one after another**")), "")
+        listed = re.findall(r"`([^`]*)` \d", listing)
+        # The card renders names through `_flatten_cell` (a `|` is escaped).
+        shown = [_flatten_cell(sn) for sn in names]
+        if listed != shown:
+            bad.append(f"{fid}: card does not list step(s) {names} (it lists {listed})")
+        # A step name may carry a flag such as `-timeout 300s`: a measured name,
+        # not a duration claim, so the names come out before the scan. Any other
+        # number with a time unit must be a seconds value the run measured;
+        # minutes and hours are always rejected.
+        # The job, YAML job and workflow file names are names too (`e2e-30m`,
+        # `nightly-24h.yml`), so they come out with the step names.
+        unquoted = flat
+        literal = set(names) | set(shown) | {
+            str(st.get("job") or ""), str(st.get("yaml_job") or ""),
+            Path(str(f.get("workflow_file") or "")).name}
+        for nm in sorted((" ".join(x.split()) for x in literal if x.strip()),
+                         key=len, reverse=True):
+            unquoted = unquoted.replace(nm, " ")
+        allowed = {f"{d:.0f}" for d in p50s} | {f"{want:.0f}", f"{job_p50:.0f}"}
+        dur = (r"(?<![\w.])(\d+(?:\.\d+)?)\s?"
+               r"(s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?)\b")
+        others = sorted({m for m, unit in re.findall(dur, unquoted, re.I)
+                         if unit.lower() not in ("s", "sec", "secs", "second", "seconds")
+                         or f"{float(m):.0f}" not in allowed})
+        if others:
+            bad.append(f"{fid}: card carries duration(s) {others} other than the "
+                       f"candidate steps' p50s, the pole's {job_p50:.0f}s and the {want:.0f}s upper bound")
+        if re.search(r"\bsaves?\b|\*\*Saving:\*\*|min/mo|runner-minute", flat, re.I):
+            bad.append(f"{fid}: card claims a saving")
+        # A share is a saving claim too ("~40% faster"), and none is measured.
+        pct = re.findall(r"(?<![\w.])\d+(?:\.\d+)?\s?%", unquoted)
+        if pct:
+            bad.append(f"{fid}: card carries a percentage {sorted(set(pct))}, a "
+                       "saving nobody measured")
+    orphans = sorted(set(cards) - ids)
+    if orphans:
+        bad.append(f"OPT83 card(s) with no OPT83 finding: {orphans}")
+    return Check(name, not bad, "; ".join(bad) if bad
+                 else f"{len(found)} OPT83 finding(s), {len(cards)} card(s) checked")
+
+
+# ---- OPT84: a slow step on the long pole runs a tool with a native drop-in ---
+# This verifier's OWN copies of the renderer's card strings and tables and of
+# the collector's gate sets and floors. Coupling tests in test_opt84_render.py
+# pin every copy equal: the card strings, names and docs/range tables to the
+# renderer's, the own-section heading to `_opt84_unrouted_block`'s, the fit
+# words to `_opt84_fit_words`, and the gates, floors, rows, fits and
+# categories to the engine's.
+_VR_OPT84_MIN_SHARE = 0.0
+_VR_OPT84_MIN_STEP_S = 20.0
+# The step categories a candidate may carry (collect_runs `_OPT84_CATEGORIES`).
+_VR_OPT84_CATEGORIES = frozenset({"scan", "build"})
+_VR_OPT84_ROWS = frozenset({"prettier", "eslint", "tsc"})
+_VR_OPT84_FITS = frozenset({"drop-in", "dual-run", "deferred_to_opt82"})
+# The ESLint fits that raise severity and risk to HIGH (collect_runs'
+# `_opt84_finding`: a live ESLint row, i.e. one not deferred to OPT82).
+_VR_OPT84_HIGH_FITS = frozenset({"drop-in", "dual-run"})
+_VR_OPT84_HELD_BACK_GATES = frozenset(_VR_OPT84_WITHHOLD_PHRASES)
+_VR_OPT84_VERDICT_GATES = frozenset({
+    "pole_not_file_backed", "no_candidate_step", "tool_not_in_table",
+    "target_already_in_use", "tsc_emits_not_in_v1", "eslint_reported_by_opt82",
+})
+_VR_OPT84_SIZING_LABEL = (
+    "a CEILING, not a forecast: the step's own measured p50 is the most the swap "
+    "can remove; the published speedup range is the catalog's, not this repo's "
+    "number. Not credited, and not in any total")
+_VR_OPT84_RAIL = (
+    "Every rule, plugin, file set and check stays: never drop, narrow or disable "
+    "one to make the swap fit, and never replace a `tsc` type-check with a tool "
+    "that only strips types; when the target lacks something the repo relies on, "
+    "run both tools rather than dropping it")
+_VR_OPT84_BENCHMARK = (
+    "Benchmark first: give the target the repo's migrated config (per its migration "
+    "guide where it has one; until then the target command below runs the tool's "
+    "defaults), then time "
+    "both tools on the same commit and the same runner class, checking the same files "
+    "with equivalent rules, before claiming a number; if the swap reformats files, "
+    "ship the recipe and the bulk reformat as separate commits")
+_VR_OPT84_SPLIT_UNKNOWN = (
+    "The tools share one step, so how the ceiling splits between them is unknown "
+    "until measured")
+_VR_OPT84_TS6_ALIAS = (
+    "A type-aware ESLint config in this repo calls the TypeScript compiler API, which "
+    "TypeScript 7.0 does not ship: keep the `@typescript/typescript6` alias beside "
+    "it for those tools")
+_VR_OPT84_SUMMARY = "uncredited, benchmark first"
+_VR_OPT84_REPLACEMENT = "is the native replacement"
+_VR_OPT84_SOURCE_NAME = {"prettier": "Prettier", "eslint": "ESLint", "tsc": "tsc"}
+_VR_OPT84_TARGET_NAME = {"prettier": "oxfmt", "eslint": "oxlint",
+                         "tsc": "TypeScript 7 (`typescript@^7`)"}
+_VR_OPT84_PUBLISHED_RANGE = {
+    "prettier": "~4-30×",
+    "eslint": "~8-20×",
+    "tsc": "8-12× (vendor-stated)",
+}
+_VR_OPT84_DOCS_URLS = {
+    "prettier": "https://oxc.rs/docs/guide/usage/formatter.html",
+    "eslint": "https://oxc.rs/docs/guide/usage/linter.html",
+    "tsc": "https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/",
+}
+_VR_OPT84_MIGRATION_DOCS_URLS = {
+    "prettier": "https://oxc.rs/docs/guide/usage/formatter/migrate-from-prettier.html",
+    "eslint": "https://oxc.rs/docs/guide/usage/linter/migrate-from-eslint.html",
+    "tsc": None,
+}
+_VR_OPT84_CARD_RE = re.compile(r'<a id="opt84-([^"]+)"></a>')
+_VR_OPT84_OWN_SECTION = "Tool swaps on other long poles"
+
+
+def _vr_opt84_card_bodies(report: str) -> dict[str, str]:
+    """Each OPT84 card, by its anchor id: from its anchor to the next anchor, the
+    next `## ` heading or the next horizontal rule, whichever comes first."""
+    out: dict[str, str] = {}
+    for m in _VR_OPT84_CARD_RE.finditer(report):
+        rest = report[m.end():]
+        stop = len(rest)
+        for pat in (r'<a id="', r"^## ", r"^---$"):
+            n = re.search(pat, rest, re.MULTILINE)
+            if n:
+                stop = min(stop, n.start())
+        out.setdefault(m.group(1), "")
+        out[m.group(1)] += rest[:stop]
+    return out
+
+
+def _vr_opt84_fit_words(t: dict) -> str:
+    """The verifier's own copy of `blocking_path._opt84_fit_words` (a coupling
+    test pins them equal): the fit words a tool's row must show for its stamp."""
+    n = t.get("packages")
+    note = ("" if not isinstance(n, int) or isinstance(n, bool) or n < 1
+            else (f"across {n} workspace package{'' if n == 1 else 's'}; "
+                  "task-runner filters not applied"))
+    fit = str(t.get("fit") or "")
+    reasons = [_flatten_cell(str(r)) for r in t.get("fit_reasons") or [] if r]
+    if fit == "dual-run":
+        why = "; ".join(reasons)
+        words = "run both" + (f": {why}" if why else "")
+    elif fit == "drop-in":
+        words = "drop-in"
+    elif fit == "deferred_to_opt82":
+        words = "see OPT82 first: its type-aware rules are that finding's to settle"
+    else:
+        words = _flatten_cell(fit) or "unknown"
+    return words + (f"; {note}" if note else "")
+
+
+# ESLint plugins oxlint implements natively (collect_runs
+# `_OPT84_OXLINT_NATIVE_PLUGINS`, copied; a coupling test pins them equal). Any
+# other plugin on a config the run reads makes an ESLint row a dual-run.
+_VR_OPT84_OXLINT_NATIVE_PLUGINS = frozenset({
+    "@typescript-eslint", "typescript-eslint", "unicorn", "import", "import-x",
+    "jsdoc", "jsx-a11y", "n", "promise", "jest", "vitest", "@vitest"})
+_VR_OPT84_TS_NATIVE_MAJOR = 7
+
+
+def _vr_opt84_plugin_name(p: str) -> str:
+    """collect_runs `_opt84_plugin_name`, copied: `eslint-plugin-x` is `x`, and
+    `@scope/eslint-plugin(-x)` is `@scope(/x)`."""
+    p = p.strip()
+    if p.startswith("eslint-plugin-"):
+        return p[len("eslint-plugin-"):]
+    if p.startswith("@") and "/eslint-plugin" in p:
+        scope, _sep, rest = p.partition("/eslint-plugin")
+        return scope + ("/" + rest.lstrip("-") if rest.lstrip("-") else "")
+    return p
+
+
+def _vr_opt84_major(spec: object) -> "int | None":
+    """collect_runs `_opt84_major`, copied: the major of a plain semver spec
+    (`^5.6.2`, `~7.0`, `5.6.2`, `=5`), the aliased version's for an npm alias
+    (`npm:@typescript/typescript6@6.0.2` is 6), else None: an open-ended range
+    (`>=5`, `>4`: the installed major may be any above it), `*`, a tag,
+    `workspace:*`, `catalog:`, a URL. A coupling test pins the two on samples."""
+    if not isinstance(spec, str):
+        return None
+    if spec.strip().startswith("npm:"):
+        aliased = spec.strip()[len("npm:"):]
+        at = aliased.rfind("@")
+        if at <= 0:
+            return None
+        spec = aliased[at + 1:]
+    m = re.fullmatch(r"\s*(?:\^|~|=|v)?\s*(\d+)(?:\.[\dx*]+){0,2}"
+                     r"(?:-[\w.]+)?\s*", spec)
+    return int(m.group(1)) if m else None
+
+
+def _vr_opt84_leaf_wd(t: dict) -> str:
+    """The directory the tool's (first) leaf runs in, read from its stamped
+    benchmark pair, which `cd`s there whenever it is not the checkout root."""
+    cmds = _as_list(t.get("benchmark_commands"))
+    m = re.match(r"\(cd (.+?) && time ", str(cmds[0]) if cmds else "")
+    if not m:
+        return ""
+    try:
+        parts = shlex.split(m.group(1))
+    except ValueError:
+        parts = [m.group(1)]
+    wd = (parts[0] if parts else "").strip().strip("/")
+    return "" if wd in (".", "./") else wd.removeprefix("./")
+
+
+def _vr_opt84_walk(wd: str) -> list[str]:
+    """`wd` and every directory above it, nearest first, ending at the root ""."""
+    out, d = [wd], wd
+    while d:
+        d = d.rsplit("/", 1)[0] if "/" in d else ""
+        out.append(d)
+    return out
+
+
+def _vr_opt84_eslint_configs(block: dict, wd: str, explicit: "str | None"
+                             ) -> "tuple[list[dict], list[str]]":
+    """The ESLint configs a run in `wd` reads, and the unreadable config files
+    that could be among them - collect_runs `_opt82_applicable_configs`, in
+    this file's words: the `-c` config when one is passed; else the nearest
+    flat config at or above `wd`; else the legacy cascade (the nearest
+    `.eslintrc*` and its ancestors up to `root: true` or a literal type-aware
+    OFF, plus every `.eslintrc*` below `wd`). A step that forces eslintrc mode
+    with `ESLINT_USE_FLAT_CONFIG=false` is not modelled here (the env is not
+    stamped); it reads as flat mode."""
+    import posixpath
+    configs = [c for c in _as_list(block.get("configs")) if isinstance(c, dict)]
+    unreadable = [str(u) for u in _as_list(block.get("unreadable")) if isinstance(u, str)]
+
+    def _udir(u: str) -> str:
+        return u.rsplit("/", 1)[0] if "/" in u else ""
+
+    def _flat_name(u: str) -> bool:
+        return u.rsplit("/", 1)[-1].startswith("eslint.config.")
+
+    if explicit:
+        want = posixpath.normpath(posixpath.join(wd, explicit) if wd else explicit)
+        return ([c for c in configs if c.get("path") == want],
+                [u for u in unreadable if u == want])
+    walk = _vr_opt84_walk(wd)
+    flat_dirs = ({str(c.get("dir") or "") for c in configs if c.get("format") == "flat"}
+                 | {_udir(u) for u in unreadable if _flat_name(u)})
+    flat_near = next((d for d in walk if d in flat_dirs), None)
+    if flat_near is not None:
+        return ([c for c in configs if c.get("format") == "flat"
+                 and str(c.get("dir") or "") == flat_near],
+                [u for u in unreadable if _flat_name(u) and _udir(u) == flat_near])
+    rc = [c for c in configs if c.get("format") != "flat"]
+    rc_unread = [u for u in unreadable if not _flat_name(u)]
+    rc_dirs = {str(c.get("dir") or "") for c in rc} | {_udir(u) for u in rc_unread}
+    near = next((d for d in walk if d in rc_dirs), None)
+
+    def _below(x: str) -> bool:
+        return x != "" and (wd == "" or x.startswith(wd + "/"))
+
+    def _halts(cs: list) -> bool:
+        return any(c.get("root") for c in cs) or any(
+            c.get("sets_off") and c.get("type_aware") != "on" for c in cs)
+
+    picked = [c for c in rc if (near is not None and c.get("dir") == near)
+              or (_below(str(c.get("dir") or "")) and str(c.get("dir")) != near)]
+    cascade: set[str] = set()
+    at_near = [c for c in rc if near is not None and c.get("dir") == near]
+    if at_near:
+        stop, d = _halts(at_near), near or ""
+        while d and not stop:
+            d = d.rsplit("/", 1)[0] if "/" in d else ""
+            here = [c for c in rc if str(c.get("dir") or "") == d]
+            cascade.add(d)
+            picked += [c for c in here if c not in picked]
+            stop = _halts(here)
+    bad = [u for u in rc_unread
+           if _udir(u) == near or _below(_udir(u)) or _udir(u) in cascade]
+    return picked, bad
+
+
+def _vr_opt84_eslint_flag(cmd: str) -> "str | None":
+    """The `-c` / `--config` value on an ESLint leaf, if any."""
+    try:
+        toks = shlex.split(cmd)
+    except ValueError:
+        toks = cmd.split()
+    for i, tok in enumerate(toks):
+        if tok in ("-c", "--config") and i + 1 < len(toks):
+            return toks[i + 1]
+        if tok.startswith("--config="):
+            return tok.split("=", 1)[1]
+    return None
+
+
+# ESLint CLI flags that load or change rules (or turn on type-aware parsing)
+# from outside the config: on the command, the swap is a dual-run (collect_runs
+# `_OPT84_ESLINT_RULE_FLAGS`, copied; a coupling test pins them equal).
+_VR_OPT84_ESLINT_RULE_FLAGS = frozenset({"--rulesdir", "--plugin", "--rule", "--parser",
+                                         "--ext", "--parser-options"})
+
+
+def _vr_opt84_leaf_flags(t: dict, flags: "frozenset[str]") -> list[str]:
+    """The `flags` the tool's stamped `leaf_command` carries (`--x` or `--x=v`)."""
+    try:
+        toks = shlex.split(str(t.get("leaf_command") or ""))
+    except ValueError:
+        toks = str(t.get("leaf_command") or "").split()
+    return list(dict.fromkeys(a.split("=", 1)[0] for a in toks[1:]
+                              if a.split("=", 1)[0] in flags))
+
+
+def _vr_opt84_eslint_dual_run_reasons(block: dict, t: dict) -> list[str]:
+    """Why the scan's own facts make this ESLint row a dual-run, read from the
+    configs its leaf's run reads: an unread or missing config, custom or local
+    rules, a plugin oxlint does not carry natively, type-aware parsing on or
+    unresolved, the react-hooks/exhaustive-deps rule, a shareable config or an
+    import not followed, or a truncated walk that never reached the directory.
+    Empty: nothing the scan read contradicts a plain swap."""
+    wd = _vr_opt84_leaf_wd(t)
+    cfgs, unread = _vr_opt84_eslint_configs(
+        block, wd, _vr_opt84_eslint_flag(str(t.get("leaf_command") or "")))
+    why: list[str] = []
+    if unread:
+        why.append(f"config(s) {sorted(unread)} could not be read")
+    if not cfgs and not unread:
+        why.append(f"no ESLint config the run in {wd or '.'!r} reads was recorded")
+    for flag in _vr_opt84_leaf_flags(t, _VR_OPT84_ESLINT_RULE_FLAGS):
+        why.append(f"ESLint CLI flag `{flag}` on its command")
+    if block.get("truncated") is not False:
+        dirs = [str(_as_dict(c).get("dir") or "") for c in _as_list(block.get("configs"))]
+        dirs += [u.rsplit("/", 1)[0] if "/" in u else ""
+                 for u in _as_list(block.get("unreadable")) if isinstance(u, str)]
+        seen = (any(d == "" for d in dirs) if wd == "" else
+                any(d == wd or d.startswith(wd + "/") for d in dirs))
+        if not seen:
+            why.append(f"the config walk was truncated before reaching {wd or '.'!r}")
+    facts_by_path = _as_dict(block.get("eslint_config_facts"))
+    for c in cfgs:
+        path = str(c.get("path") or "")
+        if c.get("custom_rules"):
+            why.append(f"custom local rules in `{path}`")
+        ta = str(c.get("type_aware") or "")
+        if ta in ("on", "unresolved"):
+            why.append(f"type-aware parsing {ta} in `{path}`")
+        for sc in _as_list(c.get("shared_configs")):
+            why.append(f"shareable config {sc} not followed (`{path}`)")
+        if c.get("unresolved_imports"):
+            why.append(f"a config import in `{path}` was not followed")
+        facts = facts_by_path.get(path)
+        if not isinstance(facts, dict):
+            why.append(f"`{path}`: its plugins and local rules were not read")
+            continue
+        if facts.get("local_rules"):
+            why.append(f"custom local rules in `{path}`")
+        for raw in _as_list(facts.get("plugins")):
+            pn = _vr_opt84_plugin_name(str(raw))
+            if pn and pn not in _VR_OPT84_OXLINT_NATIVE_PLUGINS:
+                why.append(f"plugin {pn} in `{path}`")
+        if facts.get("exhaustive_deps"):
+            why.append(f"react-hooks/exhaustive-deps rule in `{path}`")
+    return list(dict.fromkeys(why))
+
+
+def _vr_opt84_prettier_dual_run_reasons(block: dict, t: dict) -> list[str]:
+    """Why the scan's own facts make this Prettier row a dual-run: a Prettier
+    plugin declared by a package.json at or above its leaf's directory; a
+    directory on that walk whose plugins were not read (no `prettier_plugins`
+    in the scan, or an unreadable package.json there); a Prettier config the
+    scan did not open (`prettier_config_unreadable`) on that walk, or anywhere
+    below a run from the root; or a `--plugin` on the leaf's own command.
+
+    DOCUMENTED LIMITS (the engine's `_opt84_prettier_fit` reads these; this
+    backstop does not): a plugin or an unreadable package.json BELOW a run's
+    directory, and below a nested run its unopened configs; ground the scan
+    never walked (`_opt84_walk_up`'s "unknown"); no package.json read on the
+    walk at all; and a run whose leaf directory the benchmark pair does not
+    name (read as the root)."""
+    plugins = block.get("prettier_plugins")
+    if not isinstance(plugins, dict):
+        return ["its Prettier plugins were not read (the scan recorded no "
+                "prettier_plugins)"]
+    unreadable = {str(u) for u in _as_list(block.get("package_scripts_unreadable"))}
+    unopened = _as_dict(block.get("prettier_config_unreadable"))
+    why: list[str] = []
+    wd = _vr_opt84_leaf_wd(t)
+    walk = _vr_opt84_walk(wd)
+    for d in sorted(str(k) for k in unopened):
+        if d in walk or wd == "":
+            for path in _as_list(unopened.get(d)) or [d or "."]:
+                why.append(f"`{path}`: a Prettier config the scan did not open")
+    for flag in _vr_opt84_leaf_flags(t, frozenset({"--plugin"})):
+        why.append(f"Prettier CLI flag `{flag}` on its command")
+    for d in walk:
+        where = f"{d}/package.json" if d else "package.json"
+        got = plugins.get(d)
+        if d in unreadable or (got is not None and not isinstance(got, list)):
+            why.append(f"`{where}` could not be read, so its Prettier plugins were "
+                       "not read")
+        for name in got if isinstance(got, list) else []:
+            why.append(f"Prettier plugin {name} in `{where}`")
+    return why
+
+
+def check_opt84_tool_swap(report: str, findings_path: Path | None) -> Check:
+    """Every OPT84 finding sits on a drilled long pole, re-derives its step, share
+    and ceiling from that pole's stamped step p50s, names only table rows with
+    legal fits and known docs links, carries no saving, and renders exactly one
+    card, in its pole's section (after any OPT83 card, before any OPT81 card) or
+    in its own section, whose only duration and percentage claims are the step's
+    p50, the job's p50 and the step's share of it.
+
+    Each tool row is also held to the facts it was stamped from: the scan's
+    lint-tooling read must exist and not have failed; `published_range` is
+    required; `leaf_command` is one of the step's `resolved_leaves`;
+    `fit_reasons` is non-empty exactly on a dual-run; a tsc row's version reads
+    as a major under 7; and a "drop-in" is re-derived from the scan's ESLint
+    config facts / Prettier plugins and unopened Prettier configs, and from the
+    rule- or plugin-loading flags on the leaf's own command (and refused from a
+    walk not stamped complete: `truncated` missing counts as truncated).
+
+    Documented limits of that re-derivation (a backstop, not a second engine):
+    the Prettier ones listed on `_vr_opt84_prettier_dual_run_reasons`; for
+    ESLint, `ESLINT_USE_FLAT_CONFIG=false` and the nested-flat-config ambiguity
+    the engine holds back on are not re-read here.
+
+    OPT84 is uncredited by design: the step's own p50 is the most a swap can
+    remove, and the published range is the catalog's, so any other number on the
+    card is a saving nobody measured."""
+    name = "tool-swap findings re-derive from the pole, stay uncredited and pair with their card"
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        if findings_path is not None and _VR_OPT84_CARD_RE.search(report):
+            return Check(name, False, f"the report renders an OPT84 card, but {err}")
+        return Check(name, True, err, skipped=True)
+    doc = _as_dict(data)
+    all_findings = [f for f in _as_list(doc.get("findings")) if isinstance(f, dict)]
+    found = [f for f in all_findings if str(f.get("pattern") or "") == "OPT84"]
+    cards = _vr_opt84_card_bodies(report)
+    bad: list[str] = []
+    # Held-back gates are counted once AND listed once; verdicts are counted only.
+    counter = _as_dict(doc.get("opt84_withheld_by_gate"))
+    listed = [r for r in _as_list(doc.get(_VR_OPT84_WITHHELD_DOC_KEY))
+              if isinstance(r, dict)]
+    for g in sorted(_VR_OPT84_HELD_BACK_GATES):
+        n_listed = sum(1 for r in listed if r.get("gate") == g)
+        n_counted = int(_num(counter.get(g)) or 0)
+        if n_counted != n_listed:
+            bad.append(f"held-back gate {g}: counted {n_counted}, listed {n_listed}")
+    for r in listed:
+        g = str(r.get("gate") or "")
+        if g in _VR_OPT84_VERDICT_GATES:
+            bad.append(f"listed gate {g} is a verdict, never listed")
+        elif g not in _VR_OPT84_HELD_BACK_GATES:
+            bad.append(f"listed gate {g!r} is not an OPT84 held-back gate")
+    for g in counter:
+        if g not in _VR_OPT84_HELD_BACK_GATES | _VR_OPT84_VERDICT_GATES:
+            bad.append(f"counted gate {g!r} is not an OPT84 gate")
+    if not found:
+        if cards:
+            bad.append("the report renders an OPT84 card, but the run recorded no "
+                       "OPT84 finding")
+        return Check(name, not bad, "; ".join(bad) if bad else "no tool-swap findings")
+    # The scan's lint-tooling read every tool row's fit and version rest on
+    # (the engine holds a pole back as `type_aware_lint_scan_missing` /
+    # `type_aware_config_reader_failed` without it). A finding stamped while it
+    # is missing or failed rests on ground the scan never saw.
+    tal = doc.get("type_aware_lint")
+    block = tal if isinstance(tal, dict) else {}
+    if not isinstance(tal, dict):
+        bad.append(f"{len(found)} OPT84 finding(s), but the findings doc has no "
+                   "type_aware_lint block: the scan recorded no lint-tooling read, so "
+                   "no tool's fit or version could have been checked")
+    elif block.get("error"):
+        bad.append(f"{len(found)} OPT84 finding(s) stamped from a lint-tooling read "
+                   f"that failed ({block.get('error')})")
+    poles = [p for p in _as_list(_as_dict(doc.get("pr_critical_path")).get("poles"))
+             if isinstance(p, dict)]
+    rendered = {(w, c) for w, c, _b in _pole_header_sections(report)}
+    heads = [m.start() for m in re.finditer(r"^## ", report, re.MULTILINE)]
+    ids: set[str] = set()
+    for f in found:
+        fid = str(f.get("id") or "?")
+        cid = re.sub(r"[^A-Za-z0-9_.:-]+", "_", fid)
+        ids.add(cid)
+        if _num(f.get("wall_clock_p50_s")):
+            bad.append(f"{fid}: OPT84 carries wall_clock_p50_s "
+                       f"{f.get('wall_clock_p50_s')} - it is uncredited")
+        if f.get("runner_min_saving") is not None:
+            bad.append(f"{fid}: OPT84 carries runner_min_saving "
+                       f"{f.get('runner_min_saving')!r} - it is uncredited")
+        if f.get("sizing_basis") != "uncredited":
+            bad.append(f"{fid}: OPT84 sizing_basis {f.get('sizing_basis')!r}, "
+                       "not 'uncredited'")
+        ts = _as_dict(f.get("tool_swap"))
+        if ts.get("kind") != "opt84_tool_swap":
+            bad.append(f"{fid}: missing its opt84_tool_swap block")
+            continue
+        wfb = Path(str(f.get("workflow_file") or "")).name
+        job = str(ts.get("job") or "")
+        same_job = [p for p in poles if Path(str(p.get("workflow_file") or "")).name
+                    == wfb and str(p.get("job") or "") == job]
+        # Matrix legs can share one job; the engine stamps the pole it read
+        # (`pole_check`), so that pole is the one to re-derive from and to sit
+        # under. Without a stamp, the job's first pole (as the renderer joins).
+        pole_check = str(ts.get("pole_check") or "")
+        if pole_check:
+            same_job = [p for p in same_job if str(p.get("check") or "") == pole_check]
+        pole = same_job[0] if same_job else None
+        if pole is None:
+            bad.append(f"{fid}: OPT84 on `{wfb}` ▸ `{job}`"
+                       + (f" (pole `{pole_check}`)" if pole_check else "")
+                       + ", which is not a drilled long pole")
+            continue
+        job_p50 = _num(pole.get("job_p50_s")) or 0.0
+        step = str(ts.get("step") or "")
+        stamped = {str(_as_dict(s).get("step") or ""): _as_dict(s)
+                   for s in _as_list(pole.get("steps"))}
+        ps = stamped.get(step)
+        if ps is None:
+            bad.append(f"{fid}: step `{step}` is not in the pole's measured steps")
+            continue
+        d = _num(ps.get("p50_s")) or 0.0
+        cat = ts.get("category")
+        if cat not in _VR_OPT84_CATEGORIES:
+            bad.append(f"{fid}: step category {cat!r} is not one of "
+                       f"{sorted(_VR_OPT84_CATEGORIES)}")
+        elif cat != str(ps.get("category") or ""):
+            bad.append(f"{fid}: step category {cat!r} != the pole step's "
+                       f"{ps.get('category')!r}")
+        if _num(ts.get("step_p50_s")) != d:
+            bad.append(f"{fid}: step `{step}` p50 {ts.get('step_p50_s')!r} != the "
+                       f"pole's measured {d}")
+        if _num(ts.get("ceiling_s")) != d:
+            bad.append(f"{fid}: ceiling_s {ts.get('ceiling_s')!r} != the step's p50 {d}")
+        if _num(ts.get("job_p50_s")) != job_p50:
+            bad.append(f"{fid}: job_p50_s {ts.get('job_p50_s')!r} != the pole's "
+                       f"{job_p50}")
+        if not (job_p50 > 0 and d >= _VR_OPT84_MIN_STEP_S
+                and d >= _VR_OPT84_MIN_SHARE * job_p50):
+            bad.append(f"{fid}: step `{step}` ({d}s of {job_p50}s) does not qualify "
+                       "as a candidate")
+        share = _num(ts.get("share"))
+        if job_p50 > 0 and (share is None or abs(share - d / job_p50) > 0.0015):
+            bad.append(f"{fid}: share {ts.get('share')!r} != the re-derived "
+                       f"{d / job_p50:.3f}")
+        tools = [_as_dict(t) for t in _as_list(ts.get("tools"))]
+        if not tools:
+            bad.append(f"{fid}: OPT84 names no tool")
+        rows = [str(t.get("row") or "") for t in tools]
+        if len(set(rows)) != len(rows):
+            bad.append(f"{fid}: tool row(s) named more than once: {rows}")
+        # Every row deferred is the engine's `eslint_reported_by_opt82` verdict,
+        # counted and never emitted as a finding.
+        if tools and all(str(t.get("fit") or "") == "deferred_to_opt82" for t in tools):
+            bad.append(f"{fid}: every tool is deferred to OPT82; the engine records "
+                       "that as its eslint_reported_by_opt82 verdict, not a finding")
+        for t in tools:
+            row, fit = str(t.get("row") or ""), str(t.get("fit") or "")
+            if row not in _VR_OPT84_ROWS:
+                bad.append(f"{fid}: tool row {row!r} is not one of "
+                           f"{sorted(_VR_OPT84_ROWS)}")
+            if fit not in _VR_OPT84_FITS:
+                bad.append(f"{fid}: tool {row!r} fit {fit!r} is not one of "
+                           f"{sorted(_VR_OPT84_FITS)}")
+            # The engine defers only the ESLint row to OPT82 (its type-aware
+            # rules are OPT82's), and stamps a dual-run only with its reasons.
+            if fit == "deferred_to_opt82" and row != "eslint":
+                bad.append(f"{fid}: tool {row!r} fit 'deferred_to_opt82' on a row "
+                           "other than ESLint; the engine defers only ESLint")
+            stamped_reasons = [r for r in _as_list(t.get("fit_reasons"))
+                               if str(r or "").strip()]
+            if fit == "dual-run" and not stamped_reasons:
+                bad.append(f"{fid}: tool {row!r} fit 'dual-run' with no fit_reasons; "
+                           "the engine stamps a dual-run only with its reasons")
+            # …and only a dual-run: `fit_reasons` non-empty <=> fit == dual-run
+            # (the workspace-packages note rides on `packages`, never here).
+            if fit != "dual-run" and stamped_reasons:
+                bad.append(f"{fid}: tool {row!r} fit {fit!r} with fit_reasons "
+                           f"{stamped_reasons}; only a dual-run carries reasons")
+            leaves = [str(x) for x in _as_list(ts.get("resolved_leaves"))]
+            if str(t.get("leaf_command") or "") not in leaves:
+                bad.append(f"{fid}: tool {row!r} leaf_command "
+                           f"{str(t.get('leaf_command') or '')!r} is not one of the "
+                           f"step's resolved_leaves {leaves}")
+            # The tsc row exists only below the native compiler's major: its
+            # version must read, by the engine's rule, as a major under 7.
+            if row == "tsc":
+                major = _vr_opt84_major(t.get("source_version"))
+                if major is None:
+                    bad.append(f"{fid}: tsc row source_version "
+                               f"{t.get('source_version')!r} is not a readable "
+                               "TypeScript version; the engine holds such a step back")
+                elif major >= _VR_OPT84_TS_NATIVE_MAJOR:
+                    bad.append(f"{fid}: tsc row source_version "
+                               f"{t.get('source_version')!r} is already TypeScript "
+                               f"{major}, the native compiler; nothing to swap")
+            # A drop-in is re-derived from the scan facts the engine read: any
+            # fact that makes the swap lossy contradicts it.
+            if fit == "drop-in" and isinstance(tal, dict):
+                # A block with no `truncated` key is a walk nobody vouched for.
+                if block.get("truncated") is not False and row in ("prettier", "tsc"):
+                    bad.append(f"{fid}: {row} row stamped 'drop-in' from a truncated "
+                               "lint-tooling walk, which never showed what it skipped")
+                if row == "eslint":
+                    why = _vr_opt84_eslint_dual_run_reasons(block, t)
+                    if why:
+                        bad.append(f"{fid}: ESLint row stamped 'drop-in', but the "
+                                   "scan's facts call for a dual-run: "
+                                   + "; ".join(why))
+                elif row == "prettier":
+                    why = _vr_opt84_prettier_dual_run_reasons(block, t)
+                    if why:
+                        bad.append(f"{fid}: Prettier row stamped 'drop-in', but the "
+                                   "scan's facts call for a dual-run: "
+                                   + "; ".join(why))
+            if t.get("docs_url") != _VR_OPT84_DOCS_URLS.get(row):
+                bad.append(f"{fid}: tool {row!r} docs_url {t.get('docs_url')!r} is not "
+                           "the known docs link for its row")
+            if row in _VR_OPT84_ROWS and (
+                    t.get("migration_docs_url") != _VR_OPT84_MIGRATION_DOCS_URLS.get(row)):
+                bad.append(f"{fid}: tool {row!r} migration_docs_url "
+                           f"{t.get('migration_docs_url')!r} is not the known migration "
+                           f"guide for its row ({_VR_OPT84_MIGRATION_DOCS_URLS.get(row)!r})")
+            if "published_range" not in t:
+                bad.append(f"{fid}: tool {row!r} carries no published_range, a "
+                           "required stamp")
+            elif (row in _VR_OPT84_ROWS
+                    and t.get("published_range") != _VR_OPT84_PUBLISHED_RANGE.get(row)):
+                bad.append(f"{fid}: tool {row!r} published_range "
+                           f"{t.get('published_range')!r} is not the catalog's "
+                           f"{_VR_OPT84_PUBLISHED_RANGE.get(row)!r}")
+            # The engine's join (collect_runs `opt82_steps`): an OPT82 finding on
+            # the same workflow file whose `type_aware_lint` block names the same
+            # YAML job key and lint step. Never the display job: on a matrix lint
+            # job OPT82 names one matrix run, which need not be the pole's.
+            if fit == "deferred_to_opt82" and not any(
+                    str(o.get("pattern") or "") == "OPT82"
+                    and Path(str(o.get("workflow_file") or "")).name == wfb
+                    and str(_as_dict(o.get("type_aware_lint")).get("yaml_job") or "")
+                    == str(ts.get("yaml_job") or "")
+                    and " ".join(str(_as_dict(o.get("type_aware_lint")).get(
+                        "lint_step") or "").split()) == " ".join(step.split())
+                    and step.strip()
+                    for o in all_findings):
+                bad.append(f"{fid}: tool {row!r} is deferred to OPT82, but the run "
+                           f"has no OPT82 finding on `{wfb}` ▸ YAML job "
+                           f"`{ts.get('yaml_job')}` ▸ step `{step}`")
+        # Severity and risk, re-derived by the engine's rule: HIGH only when an
+        # ESLint row is reported here (fit drop-in or dual-run: a rule silently
+        # missing after the swap is a coverage loss nobody sees); a row deferred
+        # to OPT82 does not raise it. Everything else is MEDIUM.
+        want_sev = "HIGH" if any(str(t.get("row") or "") == "eslint"
+                                 and str(t.get("fit") or "") in _VR_OPT84_HIGH_FITS
+                                 for t in tools) else "MEDIUM"
+        for key in ("severity", "risk"):
+            if f.get(key) != want_sev:
+                bad.append(f"{fid}: {key} {f.get(key)!r}, but the engine's rule gives "
+                           f"{want_sev!r} for its tool rows")
+        if bool(ts.get("split_unknown")) != (len(tools) > 1):
+            bad.append(f"{fid}: split_unknown {ts.get('split_unknown')!r} with "
+                       f"{len(tools)} tool(s)")
+        body = cards.get(cid)
+        if body is None:
+            bad.append(f"{fid}: OPT84 finding with no card in the report")
+            continue
+        anchor = f'<a id="opt84-{cid}"></a>'
+        if report.count(anchor) != 1:
+            bad.append(f"{fid}: OPT84 card rendered more than once")
+        # PLACEMENT: inside its pole's section when that pole is rendered, else in
+        # its own section. Never under Also noticed, Tier 2, a total or another
+        # pole; after its pole's OPT83 card and before its OPT81 card.
+        at = report.index(anchor)
+        h0 = max((h for h in heads if h < at), default=-1)
+        h1 = min((h for h in heads if h > at), default=len(report))
+        head = report[h0:report.find("\n", h0)] if h0 >= 0 else ""
+        mine = {(Path(str(p.get("workflow_file") or "")).name,
+                 _strip_scope(str(p.get("check") or ""))) for p in same_job}
+        under = {(w, c) for w, c, _b in _pole_header_sections(head + "\n")}
+        if mine & rendered:
+            placed = bool(under & mine)
+        else:
+            placed = head.startswith("## ") and _VR_OPT84_OWN_SECTION in head
+        if not placed:
+            bad.append(f"{fid}: card renders outside its pole's section (under "
+                       f"{head.strip()[:80]!r})")
+        sec = report[max(h0, 0):h1]
+        rel = at - max(h0, 0)
+        if any(m.start() < rel for m in re.finditer(r'<a id="opt81-', sec)):
+            bad.append(f"{fid}: card sits after its pole's OPT81 card")
+        if any(m.start() > rel for m in re.finditer(r'<a id="opt83-', sec)):
+            bad.append(f"{fid}: card sits before its pole's OPT83 card")
+        for m in re.finditer(rf"opt84-{re.escape(cid)}(?![\w.:-])", report):
+            if not max(h0, 0) <= m.start() < h1:
+                bad.append(f"{fid}: its anchor is named outside its own section")
+                break
+        flat = " ".join(body.split())
+        if f"risk **{f.get('risk')}**" not in flat:
+            bad.append(f"{fid}: card states risk other than the finding's "
+                       f"{f.get('risk')!r}")
+        ceil_line = next((" ".join(ln.split()) for ln in body.splitlines()
+                          if ln.startswith("- **Ceiling:**")), "")
+        if not ceil_line.startswith(f"- **Ceiling:** {d:.0f}s"):
+            bad.append(f"{fid}: card does not state the {d:.0f}s ceiling")
+        if " ".join(_VR_OPT84_SIZING_LABEL.split()) not in ceil_line:
+            bad.append(f"{fid}: card is missing its label beside the ceiling")
+        if (" ".join(_VR_OPT84_SPLIT_UNKNOWN.split()) in flat) != (len(tools) > 1):
+            bad.append(f"{fid}: card's split sentence does not match its "
+                       f"{len(tools)} tool(s)")
+        for need, what in ((" ".join(_VR_OPT84_RAIL.split()), "the rail"),
+                           (" ".join(_VR_OPT84_BENCHMARK.split()), "the benchmark line"),
+                           (_VR_OPT84_SUMMARY, "its summary")):
+            if need not in flat:
+                bad.append(f"{fid}: card is missing {what}")
+        card_lines = [" ".join(ln.split()) for ln in body.splitlines()]
+        for t in tools:
+            row = str(t.get("row") or "")
+            # The tool's own row: the target is named the native replacement,
+            # never "a drop-in" (that is a fit, stated by the row's `fit:`).
+            src = _VR_OPT84_SOURCE_NAME.get(row)
+            tgt = _VR_OPT84_TARGET_NAME.get(row)
+            if src and tgt:
+                lead = f"- **{src} → {tgt}:**"
+                tline = next((ln for ln in card_lines if ln.startswith(lead)), None)
+                if tline is None:
+                    bad.append(f"{fid}: card has no row for {row!r}")
+                else:
+                    if f"{tgt} {_VR_OPT84_REPLACEMENT} (published range" not in tline:
+                        bad.append(f"{fid}: card's {row!r} row does not name {tgt} "
+                                   f"{_VR_OPT84_REPLACEMENT!r}")
+                    # The fit the row SHOWS is the fit the engine STAMPED: a
+                    # dual-run shown as a drop-in is a coverage loss in waiting.
+                    want_fit = " ".join(_vr_opt84_fit_words(t).split())
+                    if f"; fit: {want_fit}; docs: " not in tline:
+                        bad.append(f"{fid}: card's {row!r} fit does not read "
+                                   f"{want_fit!r}, the stamped fit")
+                    # The TS6 alias sentence rides on the tsc row exactly when
+                    # the engine stamped `typescript6_alias_needed`.
+                    if row == "tsc":
+                        has_alias = " ".join(_VR_OPT84_TS6_ALIAS.split()) in tline
+                        if has_alias != bool(t.get("typescript6_alias_needed")):
+                            bad.append(
+                                f"{fid}: card's tsc row's TypeScript 6 alias sentence "
+                                f"is {'present' if has_alias else 'absent'}, but "
+                                "typescript6_alias_needed is "
+                                f"{t.get('typescript6_alias_needed')!r}")
+            url = _VR_OPT84_DOCS_URLS.get(row)
+            if url and f"docs: {url}" not in flat:
+                bad.append(f"{fid}: card is missing the docs link for {row!r}")
+            mig = _VR_OPT84_MIGRATION_DOCS_URLS.get(row)
+            if mig and f"migration guide: {mig}" not in flat:
+                bad.append(f"{fid}: card is missing the migration guide for {row!r}")
+            rng = _VR_OPT84_PUBLISHED_RANGE.get(row)
+            if rng and f"published range {rng}" not in flat:
+                bad.append(f"{fid}: card is missing the published range for {row!r}")
+        # Names and commands are repo text, not duration claims: they come out
+        # before the scan. Anything else with a time unit must be the step's or
+        # the job's measured seconds; the only percentage is the step's share.
+        literal = {step, job, str(ts.get("yaml_job") or ""), wfb,
+                   str(ts.get("command") or ""), str(f.get("title") or "")}
+        literal |= {str(x) for x in _as_list(ts.get("resolved_leaves"))}
+        for t in tools:
+            literal |= {str(t.get("leaf_command") or ""), str(t.get("docs_url") or ""),
+                        str(t.get("migration_docs_url") or "")}
+            literal |= {str(x) for x in _as_list(t.get("benchmark_commands"))}
+            literal |= {str(x) for x in _as_list(t.get("fit_reasons"))}
+        literal |= {_flatten_cell(x) for x in list(literal)}
+        unquoted = flat
+        for nm in sorted((" ".join(x.split()) for x in literal if x.strip()),
+                         key=len, reverse=True):
+            unquoted = unquoted.replace(nm, " ")
+        allowed = {f"{d:.0f}", f"{job_p50:.0f}"}
+        dur = (r"(?<![\w.])(\d+(?:\.\d+)?)\s?"
+               r"(s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?)\b")
+        others = sorted({m for m, unit in re.findall(dur, unquoted, re.I)
+                         if unit.lower() not in ("s", "sec", "secs", "second", "seconds")
+                         or f"{float(m):.0f}" not in allowed})
+        if others:
+            bad.append(f"{fid}: card carries duration(s) {others} other than the "
+                       f"step's {d:.0f}s and the job's {job_p50:.0f}s")
+        if re.search(r"\bsaves?\b|\*\*Saving:\*\*|min/mo|runner-minute", flat, re.I):
+            bad.append(f"{fid}: card claims a saving")
+        want_pct = f"{(share or 0.0) * 100:.0f}%"
+        pct = [p.replace(" ", "") for p in
+               re.findall(r"(?<![\w.])\d+(?:\.\d+)?\s?%", unquoted)]
+        extra = sorted(set(pct) - {want_pct}) + (
+            [want_pct] * (pct.count(want_pct) - 1) if pct.count(want_pct) > 1 else [])
+        if extra:
+            bad.append(f"{fid}: card carries a percentage {extra} other than the "
+                       f"step's {want_pct} share, a saving nobody measured")
+    orphans = sorted(set(cards) - ids)
+    if orphans:
+        bad.append(f"OPT84 card(s) with no OPT84 finding: {orphans}")
+    return Check(name, not bad, "; ".join(bad) if bad
+                 else f"{len(found)} OPT84 finding(s), {len(cards)} card(s) checked")
+
+
+def check_opt82_type_aware_lint_uncredited(report: str,
+                                           findings_path: Path | None) -> Check:
+    """Every OPT82 finding is UNCREDITED and names its rules, and every OPT82
+    card carries the ledger requirement and never says "disable" about rules.
+
+    OPT82 claims a config fact and a measured ceiling, never a saving: a
+    `wall_clock_p50_s > 0` or a runner-minute saving on it is a number the
+    detector cannot have measured. "Type-aware is on" without a named rule is
+    a shape claim. And the card is the hand-off: without the ledger sentence
+    the agent is free to buy speed by dropping rules."""
+    name = "type-aware lint findings are uncredited, name their rules and carry the ledger"
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return Check(name, True, err, skipped=True)
+    found = [f for f in _as_list(_as_dict(data).get("findings"))
+             if isinstance(f, dict) and str(f.get("pattern") or "") == "OPT82"]
+    cards = _VR_OPT82_CARD_RE.findall(report)
+    if not found:
+        if cards:
+            return Check(name, False, "the report renders an OPT82 card, but the run "
+                         "recorded no OPT82 finding")
+        return Check(name, True, "no type-aware lint findings")
+    bad: list[str] = []
+    # The scan's own ESLint read. A finding stamped from a read that crashed,
+    # or from a walk that stopped before it could show the lint directory was
+    # visited, rests on ground the scan never saw.
+    block = _as_dict(_as_dict(data).get("type_aware_lint"))
+    for f in found:
+        fid = str(f.get("id") or "?")
+        if block.get("error"):
+            bad.append(f"{fid}: OPT82 finding stamped from an ESLint read that failed "
+                       f"({block.get('error')})")
+        if block.get("truncated") is True:
+            wd = str(_as_dict(f.get("type_aware_lint")).get("working_directory") or "")
+            dirs = [str(_as_dict(c).get("dir") or "") for c in _as_list(block.get("configs"))]
+            dirs += [u.rsplit("/", 1)[0] if "/" in u else ""
+                     for u in _as_list(block.get("unreadable")) if isinstance(u, str)]
+            seen = (any(d == "" for d in dirs) if wd == "" else
+                    any(d == wd or d.startswith(wd + "/") for d in dirs))
+            if not seen:
+                bad.append(f"{fid}: OPT82 finding stamped from a truncated config walk "
+                           f"that never reached its lint directory {wd or '.'!r}")
+        wc = _num(f.get("wall_clock_p50_s"))
+        if wc is not None and wc > 0:
+            bad.append(f"{fid}: OPT82 carries wall_clock_p50_s {wc} - it is uncredited "
+                       "by design and must carry no saving")
+        if f.get("runner_min_saving"):
+            bad.append(f"{fid}: OPT82 carries runner_min_saving "
+                       f"{f.get('runner_min_saving')!r} - it is uncredited by design")
+        tal = _as_dict(f.get("type_aware_lint"))
+        if tal.get("kind") != "opt82_type_aware_lint":
+            bad.append(f"{fid}: missing its opt82_type_aware_lint evidence block")
+        rules = [r for r in _as_list(tal.get("rules"))
+                 if str(_as_dict(r).get("rule") or "").strip()]
+        if not rules:
+            bad.append(f"{fid}: OPT82 names no type-aware rule - 'type-aware is on' "
+                       "without a named rule is a shape claim, not a finding")
+        # The card is the only place the rules, benchmark and ledger reach the
+        # reader, and the engine renders one per lint job (never folded, never
+        # capped), so each finding must have its OWN card naming every rule.
+        wfb = Path(str(f.get("workflow_file") or "")).name
+        jobs = _as_list(f.get("affected_jobs")) or ([f.get("job")] if f.get("job") else [])
+        fkeys = {(wfb, _matrix_base(_cmp_name(str(j)))) for j in jobs}
+        own = [c for c in cards if fkeys & _opt82_card_where_keys(c)]
+        if not own:
+            bad.append(f"{fid}: OPT82 finding on `{wfb}` "
+                       f"({', '.join(str(j) for j in jobs)}) has no card of its own - "
+                       "its rules, benchmark and ledger never reach the reader")
+        else:
+            body = _strip_render_artifacts(own[0])
+            missing = [str(_as_dict(r).get("rule")).strip() for r in rules
+                       if f"- {str(_as_dict(r).get('rule')).strip()}" not in body]
+            if missing:
+                bad.append(f"{fid}: its OPT82 card does not list rule(s) "
+                           + ", ".join(missing))
+        # A drilled pole whose job carries this finding is CATALOG-COVERED
+        # (`blocking_path._opt82_pole_for`, at any size: OPT82 is uncredited by
+        # design), so its section must never call it a coverage gap.
+        # Cover holds only when the finding's lint step IS the pole's dominant
+        # step (`blocking_path._opt82_lint_is_dominant`); a slow test job with a
+        # minor lint step is an honest gap, never failed here.
+        lint = str(tal.get("lint_step") or "").strip().casefold()
+        # Joined like the engine: the pole record's check OR job against the
+        # finding's jobs, then keyed by the check its header renders.
+        doms = set()
+        for p in _as_list(_as_dict(_as_dict(data).get("pr_critical_path")).get("poles")):
+            p = _as_dict(p)
+            if not lint or str(p.get("dominant_step") or "").strip().casefold() != lint:
+                continue
+            pwfb = Path(str(p.get("workflow_file") or "")).name
+            names = [str(p.get(k)) for k in ("check", "job") if p.get(k)]
+            if pwfb == wfb and any(_vr_check_is_job(n, str(j))
+                                   for n in names for j in jobs):
+                doms.add((pwfb, _matrix_base(_cmp_name(str(p.get("check") or "")))))
+        if not f.get("advisory") and lint:
+            for pwf, pcheck, body in _pole_header_sections(report):
+                if (Path(pwf).name, _matrix_base(_cmp_name(pcheck))) not in doms:
+                    continue
+                plain = _strip_render_artifacts(body)
+                if ("NO CATALOG PATTERN MATCHED" in plain
+                        or "this is a coverage gap" in plain):
+                    bad.append(f"{fid}: long pole `{pcheck}` carries this OPT82 finding "
+                               "but renders the coverage gap wording - OPT82 is its "
+                               "catalog match")
+    for card in cards:
+        if _strip_render_artifacts(_VR_OPT82_LEDGER_SENTENCE) not in \
+                _strip_render_artifacts(card):
+            bad.append("an OPT82 card is missing the ledger requirement sentence")
+        m = _VR_OPT82_DISABLE_RULES_RE.search(_vr_opt82_instruction_text(card))
+        if m:
+            bad.append(f"an OPT82 card says {m.group(0)!r} - the hand-off must never "
+                       "disable the type-aware rules or switch them off")
+        ms = re.search(r"</strong>\s*·\s*(.*?)\s*·", card)
+        if not ms or ms.group(1).strip() != _VR_OPT82_SUMMARY_METRIC:
+            bad.append(f"an OPT82 card's summary metric is "
+                       f"{(ms.group(1).strip() if ms else '(missing)')!r}, not "
+                       f"{_VR_OPT82_SUMMARY_METRIC!r} - it claims no saving")
+        for line in card.splitlines():
+            st = line.strip()
+            if st.startswith("SIZING:") or st.startswith("(time ") or \
+                    st.startswith("(cd "):
+                continue
+            mc = _VR_OPT82_SAVING_CLAIM_RE.search(line)
+            if mc:
+                bad.append(f"an OPT82 card claims a saving ({mc.group(0)!r} in "
+                           f"{st[:80]!r}) - it is uncredited by design")
+                break
+    return Check(name, not bad,
+                 f"{len(found)} OPT82 finding(s), {len(cards)} card(s) checked"
+                 if not bad else "; ".join(bad[:6]))
 
 
 def check_tier2_measured_basis(report: str, findings_path: Path | None) -> Check:
@@ -7348,6 +11272,12 @@ def check_pole_not_reframed_as_hygiene(report: str, findings_path: Path | None) 
         pat = str(f.get("pattern", ""))
         if pat not in block_keys:
             continue   # this pattern isn't rendered in the appendix
+        if pat == "OPT82":
+            # Numberless BY DESIGN, not valueless: the engine's `_on_pole_job`
+            # keeps an OPT82 card on a drilled-pole lint job (its card is the only
+            # place the rules and ledger reach the reader), so it is no
+            # contradiction of the pole headline. Mirror that exemption.
+            continue
         rm = f.get("runner_min_saving")
         rm = float(rm) if isinstance(rm, (int, float)) else 0.0
         wc = f.get("wall_clock_p50_s")
@@ -8427,6 +12357,23 @@ def check_cluster_lever_ceiling_escapes_sibling(report: str, findings_path: Path
 _HEADLINE_WIN_RE = re.compile(r"\*\*~\s*([0-9hms  ]+?)\*\*")
 
 
+def _cluster_leads_bottom_line(bl: str, rendered_s: float | None, f: dict, cluster_s: float) -> bool:
+    """True only when the Bottom line's crown sentence IS this cluster's: it names the cluster's
+    workflow (`` `<basename>` ``) and points at its **OPT73** entry, the two facts
+    `blocking_path._cluster_headline_bottom_line` always prints, and its first `~<clock>` win is not
+    smaller than the stamped ceiling by more than the 2s whole-second rendering tolerance (smaller is
+    a burial, the sibling burial guard's target). The number alone does not identify the crown:
+    reading `rendered >= ceiling` as "the cluster leads" credited a chain headroom to a small demoted
+    cluster (mastra-ai/mastra: a 58s off-spine `prebuild.yml` cluster under a ~15m 31s chain) and
+    FAILed a correct report, and an exact-number match is a coincidence when the sentence leads with
+    a different lever. A sentence that names the cluster is its crown even at an inflated number."""
+    if rendered_s is None:
+        return False
+    wf = _wf_base(str(f.get("workflow_file") or ""))
+    named = bool(wf) and "**OPT73**" in bl and f"`{wf}`" in bl
+    return named and rendered_s + 2.0 >= cluster_s
+
+
 def check_headline_consumes_stamped_cluster_ceiling(report: str, findings_path: Path | None) -> Check:
     """**Bottom line leads with the stamped cluster ceiling — no burial (#49, the burial invariant).**
     A credited cluster-floor lever (OPT73 with `cluster_floor_lever` stamped AND a positive
@@ -8557,10 +12504,11 @@ def check_headline_lever_is_presence_eligible(report: str, findings_path: Path |
     bl = next((ln for ln in report.splitlines() if "**Bottom line.**" in ln), "")
     m = _HEADLINE_WIN_RE.search(bl)
     rendered_s = _parse_clock_to_s(m.group(1)) if m else None
-    if rendered_s is None or rendered_s + 2.0 < best_s:
+    if not _cluster_leads_bottom_line(bl, rendered_s, best_f, best_s):
         return Check(name, True,
                      f"the credited cluster lever (OPT73 `{wf}`, ~{_fmt_clock(best_s)}) does not lead "
-                     "the Bottom line (buried or no `~<clock>` win) — the crown to presence-check is "
+                     "the Bottom line (buried, outranked by a different lever, or no `~<clock>` win) — the "
+                     "crown to presence-check is "
                      "not this lever. Coverage gap, not a clean pass.", skipped=True)
     # Re-derive the crowned lever's WORKFLOW gate frequency from the stamped per-check `pole_n`
     # (mirror of `blocking_path._toc_block`'s `wf_gate`): sum over every check in this workflow.
@@ -8641,13 +12589,15 @@ def check_headline_cluster_lever_on_spine(report: str, findings_path: Path | Non
     bl = next((ln for ln in report.splitlines() if "**Bottom line.**" in ln), "")
     m = _HEADLINE_WIN_RE.search(bl)
     rendered_s = _parse_clock_to_s(m.group(1)) if m else None
-    if rendered_s is None or rendered_s + 2.0 < best_s:
-        # The max credited cluster does not LEAD the Bottom line (buried / demoted / no tilde-win) —
-        # the fixed renderer's off-spine drop, or a genuine burial (the sibling guard's target). Not
-        # this guard's crown to judge → LOUD narrow skip (L8: never read clean on an unverifiable crown).
+    if not _cluster_leads_bottom_line(bl, rendered_s, best_f, best_s):
+        # The max credited cluster does not LEAD the Bottom line (buried / demoted / outranked by a
+        # chain or pole win the crown sentence names instead / no tilde-win) — the renderer's off-spine drop, or a genuine
+        # burial (the sibling guard's target). Not this guard's crown to judge → LOUD narrow skip
+        # (L8: never read clean on an unverifiable crown).
         return Check(name, True,
                      f"the max credited cluster lever (OPT73 `{wf}`, ~{_fmt_clock(best_s)}) does not "
-                     "lead the Bottom line (demoted/buried or no `~<clock>` win) — no off-spine crown "
+                     "lead the Bottom line (demoted/buried/outranked or no `~<clock>` win) — no "
+                     "off-spine crown "
                      "to catch. Coverage gap, not a clean pass.", skipped=True)
     if best_f.get("off_spine") is True:
         return Check(name, False,
@@ -8727,6 +12677,395 @@ def check_structural_pole_has_measured_step(findings_path: Path | None) -> Check
                  "file-backed structural lever(s) with NO measured dominant step — a name-inferred OPT75 "
                  "the admission gate forbids (file-backed + steps not sampled ⇒ no structural lever): "
                  + "; ".join(offenders))
+
+
+# --- The out-of-window step class (curl/curl, run 38018162993) ---------------------------
+# The jobs API reports a SKIPPED step as `started_at: 0001-01-01T00:00:00Z` with a real
+# `completed_at`. Read naively that is a ~63.9-billion-second step, and on curl it crowned a
+# HIGH OPT73 "shared step recurs across the cluster" finding for a step that never ran. A single
+# step can never outlast the job that contains it, so every step figure the findings cite is
+# bounded by its job's MEASURED window: the job's LONGEST sampled run,
+# `per_workflow_timing[wf].job_max`. Never the job's p50: a step's p50 is taken only over the
+# runs it ran in, so a conditional step that runs in 2 of 10 runs (280s in a 16s-median job)
+# is correctly longer than the job's all-runs p50. A job with no stamped longest run is still
+# bounded by the longest a GitHub Actions job may run at all (`_VR_JOB_RUN_MAX_S`), which is
+# what catches the year-1 sentinel on any job.
+_VR_JOB_RUN_MAX_S = 5 * 86400.0   # the self-hosted job execution limit; hosted jobs stop at 6h
+_VR_STEP_ROUNDING_S = 1.0          # stamps round to 0.1s / whole seconds; never a real overrun
+_VR_DUR_TOKEN_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(h|m|s)\b")
+_VR_AGGREGATE_STEP_RE = re.compile(r" \+ \d+ more \S+ steps?$")
+
+
+def _vr_dur_cell_s(cell: object) -> float | None:
+    """Seconds in a rendered duration cell (`277s`, `4m 37s`, `1h 02m`), else None."""
+    parts = _VR_DUR_TOKEN_RE.findall(str(cell or ""))
+    if not parts:
+        return None
+    mult = {"h": 3600.0, "m": 60.0, "s": 1.0}
+    return sum(float(v) * mult[u] for v, u in parts)
+
+
+def _vr_job_window_s(data: dict, wf: object, job: object) -> float | None:
+    """The job's longest sampled run (`per_workflow_timing[wf].job_max[job]`), else None."""
+    pwt = _as_dict(_as_dict(data.get("per_workflow_timing")).get(str(wf or "")))
+    v = _num(_as_dict(pwt.get("job_max")).get(str(job or "")))
+    return v if v is not None and v > 0 else None
+
+
+def _vr_step_overrun(value: float | None, window: float | None) -> str | None:
+    """Why a step figure is out of its job's window, else None."""
+    if value is None:
+        return None
+    if value > _VR_JOB_RUN_MAX_S:
+        return f"{value:.0f}s is longer than any GitHub Actions job may run"
+    if window is not None and value > window + _VR_STEP_ROUNDING_S:
+        return f"{value:.0f}s outlasts the job's longest sampled run ({window:.0f}s)"
+    return None
+
+
+def check_step_cited_within_job_window(findings_path: Path | None) -> Check:
+    """**The out-of-window step class (curl `test-linter`).** No finding may cite a step
+    duration longer than its job's measured window. Covers the three places a finding cites a
+    step: the `measured_evidence.waterfall` step list, the `measured_evidence.table` step
+    column (a `<step> p50` header next to a job column), and, for a finding on exactly ONE
+    affected job, a structural `decomposition`'s `dominant_p50_s`. Job-level sums the same
+    evidence prints (the waterfall's summed `measured_evidence.waterfall.job_p50_s`, the
+    table's `Job p50` column) are a sum of per-step medians, not one step, so they are
+    bounded only by `_VR_JOB_RUN_MAX_S`; so is a `+ N more <cat> steps` category aggregate.
+    Re-derived from `per_workflow_timing`, not from the finding's own figures (those are what
+    went wrong). The PASS detail counts the step figures held to a stamped job window apart
+    from those held only to the 5-day ceiling (no `job_max` stamped for their job)."""
+    name = "no finding cites a step longer than its job's measured window"
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return Check(name, True, err, skipped=True)
+    in_window = only_ceiling = sums = 0
+    offenders: list[str] = []
+
+    def _cite(f: dict, job: object, label: str, value: float | None, step: bool) -> None:
+        nonlocal in_window, only_ceiling, sums
+        if value is None:
+            return
+        window = _vr_job_window_s(data, f.get("workflow_file"), job) if step else None
+        if not step:
+            sums += 1
+        elif window is None:
+            only_ceiling += 1
+        else:
+            in_window += 1
+        why = _vr_step_overrun(value, window)
+        if why:
+            offenders.append(f"{f.get('id') or f.get('pattern')} ({f.get('pattern')}) "
+                             f"`{job}` {label}: {why}")
+
+    for f in _as_list(data.get("findings")):
+        if not isinstance(f, dict):
+            continue
+        me = _as_dict(f.get("measured_evidence"))
+        wfall = _as_dict(me.get("waterfall"))
+        wjob = wfall.get("job")
+        for s in _as_list(wfall.get("steps")):
+            s = _as_dict(s)
+            _cite(f, wjob, f"step `{s.get('step')}`", _num(s.get("p50_s")), True)
+        _cite(f, wjob, "summed job p50", _num(wfall.get("job_p50_s")), False)
+        table = _as_dict(me.get("table"))
+        headers = [str(h) for h in _as_list(table.get("headers"))]
+        if headers and "job" in headers[0].lower():
+            step_cols = [i for i, h in enumerate(headers)
+                         if i > 0 and h.strip().endswith(" p50") and "`" in h]
+            job_cols = [i for i, h in enumerate(headers)
+                        if i > 0 and h.strip().lower() == "job p50"]
+            for row in _as_list(table.get("rows")):
+                row = _as_list(row)
+                if not row:
+                    continue
+                rjob = str(row[0]).strip().strip("`")
+                for i in step_cols:
+                    if i < len(row):
+                        _cite(f, rjob, f"{headers[i]} cell", _vr_dur_cell_s(row[i]), True)
+                for i in job_cols:
+                    if i < len(row):
+                        _cite(f, rjob, "Job p50 cell", _vr_dur_cell_s(row[i]), False)
+        dec = _as_dict(f.get("decomposition"))
+        jobs = _as_list(f.get("affected_jobs"))
+        if dec and len(jobs) == 1:
+            # `<step> + N more <cat> steps` is a CATEGORY aggregate (a sum of step
+            # medians), so it is bounded like the other sums, not as one step.
+            dom = str(dec.get("dominant_step") or "")
+            _cite(f, jobs[0], f"dominant step `{dom}`", _num(dec.get("dominant_p50_s")),
+                  not _VR_AGGREGATE_STEP_RE.search(dom))
+    if not (in_window or only_ceiling or sums):
+        return Check(name, True, "no finding cites a step duration", skipped=True)
+    if offenders:
+        return Check(name, False,
+                     "finding(s) cite a step longer than the job that contains it (a skipped "
+                     "step's year-1 `started_at`, or a span outside its job, read as a "
+                     "duration): " + "; ".join(offenders[:8])
+                     + (f"; +{len(offenders) - 8} more" if len(offenders) > 8 else ""))
+    return Check(name, True,
+                 f"{in_window} step figure(s) inside their job's longest run; {only_ceiling} "
+                 "held only to the 5-day ceiling (no stamped job window)"
+                 + (f"; {sums} job-level and category sum(s) held to the 5-day ceiling"
+                    if sums else ""))
+
+
+def _vr_declared_timelines(data: dict, findings_path: Path | None
+                           ) -> tuple[bool, list[Path], list[tuple[str, dict | None, str]]]:
+    """`(bundle_present, dirs_tried, [(who, timeline | None, why_unreadable)])` for every
+    drilled-run timeline `data_bundle.logs[].steps_file` declares. A timeline lives in the
+    stamped `logs_dir` or the `<findings>.data/` sibling; with neither present (a
+    findings-only artifact such as a committed example) nothing is read and the list is
+    empty. A timeline that is missing, unreadable, not JSON or not an object with a
+    `steps` list comes back as None with the reason, naming every path tried."""
+    db = _as_dict(data.get("data_bundle"))
+    logs_dir = db.get("logs_dir")
+    dirs = [Path(str(logs_dir))] if logs_dir else []
+    if findings_path is not None:
+        dirs.append(findings_path.parent / (findings_path.name.rsplit(".", 1)[0] + ".data"))
+    bundle_present = any(d.is_dir() for d in dirs)
+    out: list[tuple[str, dict | None, str]] = []
+    for e in _as_list(db.get("logs")):
+        e = _as_dict(e)
+        sf = e.get("steps_file")
+        if not sf:
+            continue
+        who = (f"pole `{e.get('job') or e.get('check')}`"
+               + (f" run {e.get('run_id')}" if e.get("run_id") else ""))
+        if not bundle_present:
+            out.append((who, None, "bundle not present"))
+            continue
+        tl, errs = None, []
+        for c in (d / str(sf) for d in dirs):
+            try:
+                tl = json.loads(c.read_text(encoding="utf-8"))
+                break
+            except (OSError, UnicodeDecodeError) as exc:
+                errs.append(f"{c} ({type(exc).__name__})")
+            except json.JSONDecodeError:
+                errs.append(f"{c} (not JSON)")
+        if tl is None:
+            out.append((who, None, f"declared timeline `{sf}` could not be read; tried "
+                        + ", ".join(errs)))
+        elif not isinstance(tl, dict) or not isinstance(tl.get("steps"), list):
+            out.append((who, None, f"declared timeline `{sf}` is not a timeline object "
+                        "with a `steps` list"))
+        else:
+            out.append((who, tl, ""))
+    return bundle_present, dirs, out
+
+
+def check_declared_timelines_readable(findings_path: Path | None) -> Check:
+    """**A declared drilled-run timeline is never passed over silently.** With the bundle
+    directory present (`logs_dir` or the `<findings>.data/` sibling), every timeline
+    `data_bundle.logs[].steps_file` declares must read as a timeline object with a `steps`
+    list; a missing, unreadable, non-JSON or wrong-shape file FAILs, naming the pole, the
+    run and every path tried. That is a bundle-copy or harness fault, kept apart from
+    `check_stamped_decomposition_within_job`, which judges only the figures. With no bundle
+    directory anywhere (a findings-only artifact) the check SKIPs and says so."""
+    name = "declared drilled-run timelines are readable"
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return Check(name, True, err, skipped=True)
+    present, dirs, tls = _vr_declared_timelines(data, findings_path)
+    if not tls:
+        return Check(name, True, "no drilled-run timeline declared", skipped=True)
+    if not present:
+        return Check(name, True, f"drilled-run timeline bundle is not present (tried "
+                     + ", ".join(str(d) for d in dirs)
+                     + f"): {len(tls)} declared timeline(s) not read", skipped=True)
+    bad = [f"{who}: {why}" for who, tl, why in tls if tl is None]
+    if bad:
+        return Check(name, False, "declared drilled-run timeline(s) could not be read: "
+                     + "; ".join(bad[:8])
+                     + (f"; +{len(bad) - 8} more" if len(bad) > 8 else ""))
+    return Check(name, True, f"{len(tls)} declared timeline(s) read")
+
+
+def check_stamped_decomposition_within_job(findings_path: Path | None) -> Check:
+    """**The out-of-window step class, stamp side.** No per-step duration the engine stamps
+    may exceed its job: each `pr_critical_path.poles[].steps[].p50_s` is bounded by that pole
+    job's longest sampled run (`_vr_job_window_s`; never the pole's own `p50_s`, which a
+    conditional step's p50 may correctly exceed), or only by the 5-day ceiling when no
+    longest run is stamped; and each drilled run's per-step timeline
+    (`data_bundle.logs[].steps_file`) is bounded by that ONE run's `job_dur_s`, both as a
+    duration and as `start_s + dur_s`. A timeline with no numeric `job_dur_s`, or a step
+    with no numeric `dur_s`, FAILs (the figure cannot be bounded). Whether each declared
+    timeline could be READ is `check_declared_timelines_readable`'s; here an unreadable one
+    is only counted. The PASS detail counts figures held to a job window apart from those
+    held only to the ceiling, and timelines left unchecked; SKIP only when nothing at all
+    was checked."""
+    name = "no stamped step decomposition outlasts its job"
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return Check(name, True, err, skipped=True)
+    in_window = only_ceiling = 0
+    offenders: list[str] = []
+    for p in _as_list(_as_dict(data.get("pr_critical_path")).get("poles")):
+        p = _as_dict(p)
+        window = _vr_job_window_s(data, p.get("workflow_file"), p.get("job"))
+        for s in _as_list(p.get("steps")):
+            s = _as_dict(s)
+            v = _num(s.get("p50_s"))
+            if v is None:
+                continue
+            if window is None:
+                only_ceiling += 1
+            else:
+                in_window += 1
+            why = _vr_step_overrun(v, window)
+            if why:
+                offenders.append(f"pole `{p.get('job') or p.get('check')}` step "
+                                 f"`{s.get('step')}`: {why}")
+    present, dirs, tls = _vr_declared_timelines(data, findings_path)
+    unread = sum(1 for _w, tl, _why in tls if tl is None)
+    read = len(tls) - unread
+    timeline_steps = malformed = 0
+    for who, tl, _why in tls:
+        if tl is None:
+            continue
+        jd = _num(tl.get("job_dur_s"))
+        steps = _as_list(tl.get("steps"))
+        if steps and (jd is None or jd <= 0):
+            offenders.append(f"timeline `{tl.get('job')}` ({who}) stamps no numeric "
+                             f"`job_dur_s`, so its {len(steps)} step(s) cannot be bounded "
+                             "by their run")
+            continue
+        for s in steps:
+            s = _as_dict(s)
+            d = _num(s.get("dur_s"))
+            if d is None:
+                malformed += 1
+                continue
+            timeline_steps += 1
+            end = d + (_num(s.get("start_s")) or 0.0)
+            why = _vr_step_overrun(d, jd) or (
+                _vr_step_overrun(end, jd) and f"it ends at {end:.0f}s, after the "
+                f"job's {jd:.0f}s run")
+            if why:
+                offenders.append(f"timeline `{tl.get('job')}` step "
+                                 f"`{s.get('name')}`: {why}")
+    if malformed:
+        offenders.append(f"{malformed} malformed timeline step(s) with no numeric `dur_s`")
+    if offenders:
+        return Check(name, False, "stamped step(s) outlast the job that contains them: "
+                     + "; ".join(offenders[:8])
+                     + (f"; +{len(offenders) - 8} more" if len(offenders) > 8 else ""))
+    tail = ""
+    if tls and not present:
+        tail = (f"; {len(tls)} declared timeline(s) not checked (bundle not present: tried "
+                + ", ".join(str(d) for d in dirs) + ")")
+    elif unread:
+        tail = (f"; {unread} declared timeline(s) could not be read (see "
+                "`declared drilled-run timelines are readable`)")
+    pole_seen = in_window + only_ceiling
+    if not pole_seen and not timeline_steps:
+        if read:
+            return Check(name, True, f"{read} declared timeline(s) read, all empty"
+                         + tail, skipped=True)
+        return Check(name, True, ("no stamped step decomposition or timeline" + tail)
+                     if tail else "no stamped step decomposition or timeline", skipped=True)
+    return Check(name, True,
+                 f"{in_window} step figure(s) inside their job's longest run; {only_ceiling} "
+                 "held only to the 5-day ceiling (no stamped job window); "
+                 f"{timeline_steps} drilled-run timeline step(s) inside their run" + tail)
+
+
+# --- The omitted-steps line on a pole's step list ----------------------------------------
+# A pole's step list leaves out the declared steps GitHub skipped on every sampled run
+# (`skipped_steps`), those with no usable time (`unmeasured_steps`) and, for a job whose
+# every step was dropped, all of them (`step_decomposition_reason`); it times a step
+# timed in some sampled runs and skipped or untimeable in others it appeared in from the
+# runs that timed it (`partially_measured_steps`; a step absent from a run's step list is
+# not counted) and steps that
+# ran past the job's end only up to it (`trimmed_steps`). The renderer says so in one line
+# (`blocking_path._omitted_steps_note`, of which `_vr_omitted_steps_note` is the verbatim
+# twin, pinned by `test_omitted_steps_line_twin_matches_the_renderer`).
+_VR_NO_STEP_MEASURED_REASON = "no_step_measured_in_sample"
+_VR_OMITTED_LINE_RE = re.compile(
+    r"^(?:\(\d+ declared step\(s\) |"
+    r"\(\d+ step\(s\) (?:ran past the job's end|"
+    r"were timed in some sampled runs and skipped or untimeable in others)|"
+    r"No step could be measured: )")
+
+
+def _vr_omitted_steps_note(pole: dict) -> str | None:
+    """Verbatim twin of `blocking_path._omitted_steps_note`."""
+    def _n(key: str) -> int:
+        v = pole.get(key)
+        return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) \
+            and v > 0 else 0
+    sk, un, tr = _n("skipped_steps"), _n("unmeasured_steps"), _n("trimmed_steps")
+    pm = _n("partially_measured_steps")
+    if pole.get("step_decomposition_reason") == _VR_NO_STEP_MEASURED_REASON:
+        return f"No step could be measured: {sk} skipped, {un} with no usable time."
+    parts: list[str] = []
+    if sk:
+        parts.append(f"{sk} declared step(s) skipped on every sampled run")
+    if un:
+        parts.append(f"{un} with no usable time" if parts
+                     else f"{un} declared step(s) with no usable time")
+    out: list[str] = []
+    if parts:
+        out.append(" and ".join(parts) + " are not timed here")
+    if pm:
+        out.append(f"{pm} step(s) were timed in some sampled runs and skipped "
+                   "or untimeable in others")
+    if tr:
+        out.append(f"{tr} step(s) ran past the job's end in some run and are timed only "
+                   "up to it")
+    return "(" + "; ".join(out) + ")" if out else None
+
+
+def check_pole_omitted_steps_line(report: str, findings_path: Path | None) -> Check:
+    """**Visible drops.** Each rendered long pole whose stamp leaves declared steps out of
+    its step list or times from fewer runs (`skipped_steps`, `unmeasured_steps`,
+    `partially_measured_steps`, `trimmed_steps`, or a `step_decomposition_reason`)
+    carries EXACTLY the one line `_vr_omitted_steps_note`
+    re-derives from that stamp, and a pole with nothing left out carries none. Poles are
+    matched to their section on (workflow file name, check), as the other pole checks do;
+    an aggregation-gate pole (no step list) and a section two stamped poles share are not
+    judged, and the detail says how many sections that left out."""
+    name = "a pole's step list says how many skipped or untimeable steps it leaves out"
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return Check(name, True, err, skipped=True)
+    by_key: dict[tuple[str, str], list[dict]] = {}
+    for p in _as_list(_as_dict(data.get("pr_critical_path")).get("poles")):
+        if isinstance(p, dict):
+            by_key.setdefault((_wf_base(str(p.get("workflow_file") or "")),
+                               _cmp_name(str(p.get("check") or ""))), []).append(p)
+    judged = carried = unjudged = 0
+    bad: list[str] = []
+    for wf, check, body in _pole_header_sections(report):
+        poles = by_key.get((_wf_base(wf), _cmp_name(check))) or []
+        if len(poles) > 1 or (poles and _AGG_GATE_ROLE_MARKER in body):
+            unjudged += 1
+            continue
+        if not poles:
+            continue
+        want = _vr_omitted_steps_note(poles[0])
+        got = [ln.strip() for ln in body.splitlines()
+               if _VR_OMITTED_LINE_RE.match(ln.strip())]
+        judged += 1
+        if want is None and got:
+            bad.append(f"`{wf}` ▸ {check}: renders {got[0]!r} but its stamp leaves no "
+                       "step out")
+        elif want is not None and got != [want]:
+            bad.append(f"`{wf}` ▸ {check}: expected {want!r}, rendered "
+                       + (repr(got) if got else "no such line"))
+        elif want is not None:
+            carried += 1
+    # Sections this check cannot pair with exactly one stamp are counted, never hidden.
+    tail = (f"; {unjudged} section(s) not judged (shared key / aggregation gate)"
+            if unjudged else "")
+    if bad:
+        return Check(name, False, "a pole's omitted-steps line does not match its stamp: "
+                     + "; ".join(bad[:6]) + tail)
+    if not carried:
+        return Check(name, True, f"{judged} pole(s) judged; none leaves a declared step out"
+                     + tail, skipped=True)
+    return Check(name, True, f"{carried} pole(s) carry the omitted-steps line, each "
+                 f"matching its stamp; {judged - carried} leave nothing out" + tail)
 
 
 # --- The payload-binned-as-build class (nrwl/nx `Run Checks/Lint/Test/Build`) --------
@@ -9210,6 +13549,411 @@ _SANCTIONED_PRICING_PHRASE = "multiply by your runner's per-minute rate to get d
 _BACKTICK_SPAN_RE = re.compile(r"`[^`]*`")
 
 
+# =============================================================================
+# OPT81 — the same job, measurably faster on another runner class
+# =============================================================================
+# This file's OWN copies of the engine's constants and runner-class taxonomy
+# (`collect_runs._OPT81_*`, `blocking_path._OPT81_*`), all pinned in
+# tests/test_opt81_faster_runner.py:
+# `test_opt81_verifier_constants_stay_coupled_to_the_engine` pins the thresholds
+# (MIN_SAMPLES_PER_LABEL, MIN_GAP_S, MIN_GAP_FRAC, COVERED_FRAC,
+# CACHE_LEVER_MIN_S), CHEAPER_STRUCTURAL, PRESTART_PATTERNS, DISCLOSURE,
+# RUNNER_MIN_UNKNOWN, LOG_CHECKED, WITHHELD_DOC_KEY and INSTALL_SENTENCE (a
+# substring of the rendered StarSling option);
+# `test_opt81_taxonomy_is_a_named_table_with_a_verifier_twin` pins RUNNER_CLASSES
+# and RUNNER_ARCH. NUMBER_RE, RUNNER_MIN_LINE and CODE_SPAN_RE are the verifier's
+# own and have no engine twin. Every A1 number is re-derived from the stamped
+# per-run rows, never read back.
+_VR_OPT81_MIN_SAMPLES_PER_LABEL = 8
+_VR_OPT81_MIN_GAP_S = 30.0
+_VR_OPT81_MIN_GAP_FRAC = 0.25
+_VR_OPT81_COVERED_FRAC = 0.5
+_VR_OPT81_CACHE_LEVER_MIN_S = 30.0
+_VR_OPT81_CHEAPER_STRUCTURAL = frozenset({"OPT70", "OPT71", "OPT72", "OPT73", "OPT74",
+                                           "OPT78"})
+# Pre-start findings (queue wait) shorten no step of the job, so they never count
+# as a credited lever covering it (`collect_runs._PRESTART_AXIS_PATTERNS`).
+_VR_OPT81_PRESTART_PATTERNS = frozenset({"OPT43"})
+_VR_OPT81_DISCLOSURE = (
+    "The publisher of this skill sells CI runners. This finding compares your own "
+    "runs on runner classes you already use (A1), or names a class of lever and asks "
+    "you to benchmark before believing any number (A2); it never prices a runner.")
+_VR_OPT81_RUNNER_CLASSES = (
+    (re.compile(r"^starsling-(ubuntu|linux)(?:(?:-[\w.]+)+?(-(?P<size>\d+))?)?$", re.I),
+     "starsling", "linux"),
+    (re.compile(r"^starsling-windows(?:(?:-[\w.]+)+?(-(?P<size>\d+))?)?$", re.I),
+     "starsling", "windows"),
+    (re.compile(r"^starsling-macos(?:(?:-[\w.]+)+?(-(?P<size>\d+))?)?$", re.I),
+     "starsling", "macos"),
+    (re.compile(r"^ubuntu-(latest|\d{2}\.\d{2})(-arm)?-(?P<size>\d+)-?cores?$", re.I),
+     "github-larger", "linux"),
+    (re.compile(r"^windows-(latest|\d{4}|11)(-arm)?-(?P<size>\d+)-?cores?$", re.I),
+     "github-larger", "windows"),
+    (re.compile(r"^macos-(latest|\d+)-(?P<size>x?large)$", re.I), "github-larger", "macos"),
+    (re.compile(r"^ubuntu-slim$", re.I), "github-slim", "linux"),
+    (re.compile(r"^ubuntu-(latest|\d{2}\.\d{2})(-arm)?$", re.I),
+     "github-standard", "linux"),
+    (re.compile(r"^windows-(latest|\d{4}|11-arm)$", re.I), "github-standard", "windows"),
+    (re.compile(r"^macos-(latest|\d+)(-intel)?$", re.I), "github-standard", "macos"),
+)
+_VR_OPT81_RUNNER_ARCH = (
+    (re.compile(r"(^|-)arm(64)?(-|$)", re.I), "arm64"),
+    (re.compile(r"^macos-(latest|\d+)-xlarge$", re.I), "arm64"),
+    (re.compile(r"^macos-(latest|\d+)-(large|intel)$", re.I), "x64"),
+    (re.compile(r"^macos-([0-9]|1[0-3])$", re.I), "x64"),
+    (re.compile(r"^macos-(latest|\d+)$", re.I), "arm64"),
+)
+# Duration / saving / money tokens an A2 rendering must never carry. A label such
+# as `ubuntu-latest-8-cores` or the id OPT81 is not a number in this sense.
+_VR_OPT81_NUMBER_RE = re.compile(
+    r"(?<![\w-])\d+(?:\.\d+)?\s*(?:s|sec|secs|seconds|m|min|mins|minutes|h|hours|%)"
+    r"(?![\w-])|runner-min|~\s*\d|\$\s*\d", re.I)
+_VR_OPT81_INSTALL_SENTENCE = "installing the StarSling GitHub app"
+# A full A2 card renders only after its render-time log-level sub-gate passed,
+# and says so; a card without this phrase skipped the check (fail-open).
+_VR_OPT81_LOG_CHECKED = "no log-level lever matched this pole's log"
+# The A1 card's runner-minute line may state only that the effect is unknown: a
+# different runner class bills differently and the audit carries no rate table.
+_VR_OPT81_RUNNER_MIN_LINE = "**Runner-minute effect:**"
+_VR_OPT81_RUNNER_MIN_UNKNOWN = (
+    "unknown: a different runner class bills differently and this audit carries no "
+    "rate table")
+# Inline-code spans hold repo-controlled names (a job, a step, a label). A step
+# called `Run tests (30s timeout)` is a name, not a promised saving, so the
+# number ban reads only the advisory's own prose.
+_VR_OPT81_CODE_SPAN_RE = re.compile(r"`[^`\n]*`")
+
+
+def _vr_opt81_number_in(text: str) -> "re.Match[str] | None":
+    return _VR_OPT81_NUMBER_RE.search(_VR_OPT81_CODE_SPAN_RE.sub("``", text or ""))
+
+
+def _vr_opt81_label_arch(tok: str) -> str:
+    for rx, arch in _VR_OPT81_RUNNER_ARCH:
+        if rx.search(tok):
+            return arch
+    return "x64"
+
+
+def _vr_opt81_runner_class(label: object) -> "tuple[str, str, str, str] | None":
+    toks = [t for t in str(label or "").split() if t]
+    if not toks:
+        return None
+    found: set = set()
+    for tok in toks:
+        for rx, cls, os_ in _VR_OPT81_RUNNER_CLASSES:
+            m = rx.match(tok)
+            if m:
+                size = str(m.groupdict().get("size") or "").lower()
+                found.add((cls, os_, _vr_opt81_label_arch(tok), size))
+                break
+    if "self-hosted" in {t.lower() for t in toks} and not any(
+            f[0] == "starsling" for f in found):
+        return None
+    if len(found) != 1:
+        return None
+    return next(iter(found))
+
+
+def _vr_opt81_utc(value: str):
+    from datetime import datetime, timezone
+    if not value:
+        return None
+    try:
+        t = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return t if t.tzinfo is not None else t.replace(tzinfo=timezone.utc)
+
+
+def _vr_opt81_step_sha(names: list) -> str:
+    import hashlib
+    return hashlib.sha256("\n".join(str(n) for n in names).encode("utf-8")).hexdigest()[:16]
+
+
+def _vr_opt81_toks(s: str) -> frozenset:
+    return frozenset(t for t in re.split(r"[^a-z0-9]+", (s or "").lower()) if t)
+
+
+def _opt81_a1_rederived(f: dict, data: "dict | None" = None) -> list[str]:
+    """Every number an A1 finding states, re-derived from its own stamped rows.
+    A credit additionally needs the slow label to be the population the pole's
+    p50 describes: the stamped `pole_runner_label`, and (when the findings doc is
+    given and carries it) `per_workflow_timing[wf].job_runner[job]`."""
+    fid = str(f.get("id") or "?")
+    fr = _as_dict(f.get("faster_runner"))
+    out: list[str] = []
+    rows = [r for r in _as_list(fr.get("rows")) if isinstance(r, dict)]
+    by_label: dict[str, list[dict]] = {}
+    for r in rows:
+        by_label.setdefault(str(r.get("label") or ""), []).append(r)
+    slow, fast = _as_dict(fr.get("slow")), _as_dict(fr.get("fast"))
+    ls, lf = str(slow.get("label") or ""), str(fast.get("label") or "")
+    if set(by_label) != {ls, lf} or ls == lf:
+        return [f"OPT81 {fid}: the stamped rows carry labels {sorted(by_label)}, not the "
+                f"two compared labels `{ls}` and `{lf}`"]
+    p50: dict[str, float] = {}
+    for side, lb in (("slow", ls), ("fast", lf)):
+        durs = [_num(r.get("duration_s")) for r in by_label[lb]]
+        if any(d is None or d <= 0 for d in durs):
+            out.append(f"OPT81 {fid}: a `{lb}` row has no positive duration")
+            continue
+        n = len(durs)
+        st = slow if side == "slow" else fast
+        if st.get("n") != n:
+            out.append(f"OPT81 {fid}: {side} n is {st.get('n')!r}, the rows give {n}")
+        if n < _VR_OPT81_MIN_SAMPLES_PER_LABEL:
+            out.append(f"OPT81 {fid}: `{lb}` has {n} sample(s), below the "
+                       f"{_VR_OPT81_MIN_SAMPLES_PER_LABEL} the comparison requires")
+        p = round(_vr_percentile([float(d) for d in durs], 50), 1)
+        p50[side] = p
+        if abs((_num(st.get("p50_s")) or -1.0) - p) > 0.05:
+            out.append(f"OPT81 {fid}: {side} p50_s {st.get('p50_s')!r} does not "
+                       f"re-derive (the rows give {p})")
+        rc = _vr_opt81_runner_class(lb)
+        if rc is None:
+            out.append(f"OPT81 {fid}: `{lb}` cannot be classified by size, so it "
+                       "cannot be compared")
+        elif (st.get("class"), st.get("os"), st.get("arch"), st.get("size")) != rc:
+            out.append(f"OPT81 {fid}: `{lb}` is stamped {st.get('class')}/{st.get('os')}/"
+                       f"{st.get('arch')}/{st.get('size')!r} but classifies as "
+                       f"{rc[0]}/{rc[1]}/{rc[2]}/{rc[3]!r}")
+    if out:
+        return out
+    cs, cf = _vr_opt81_runner_class(ls), _vr_opt81_runner_class(lf)
+    if cs[1] != cf[1]:
+        out.append(f"OPT81 {fid}: `{ls}` and `{lf}` run different operating systems")
+    if cs[2] != cf[2]:
+        out.append(f"OPT81 {fid}: `{ls}` and `{lf}` use different processor "
+                   f"architectures ({cs[2]}, {cf[2]}); the gap would measure the "
+                   "architecture, not the runner")
+    if (cs[0], cs[3]) == (cf[0], cf[3]):
+        out.append(f"OPT81 {fid}: `{ls}` and `{lf}` are the same runner class "
+                   f"({cs[0]}); that is an image-version comparison")
+    names = [str(n) for n in _as_list(fr.get("step_names"))]
+    sha = _vr_opt81_step_sha(names)
+    if fr.get("step_list_sha") != sha:
+        out.append(f"OPT81 {fid}: step_list_sha does not match the stamped step names")
+    if any(r.get("step_list_sha") != sha for r in rows):
+        out.append(f"OPT81 {fid}: not every compared run executed the same step list")
+    if p50["slow"] <= p50["fast"]:
+        out.append(f"OPT81 {fid}: `{ls}` is stamped slower but its median is not")
+    gap = round(p50["slow"] - p50["fast"], 1)
+    floor = round(max(_VR_OPT81_MIN_GAP_S, _VR_OPT81_MIN_GAP_FRAC * p50["slow"]), 1)
+    if abs((_num(fr.get("gap_s")) or -1.0) - gap) > 0.05:
+        out.append(f"OPT81 {fid}: gap_s {fr.get('gap_s')!r} does not re-derive ({gap})")
+    if abs((_num(fr.get("floor_s")) or -1.0) - floor) > 0.05:
+        out.append(f"OPT81 {fid}: floor_s {fr.get('floor_s')!r} does not re-derive ({floor})")
+    if gap < floor:
+        out.append(f"OPT81 {fid}: the {gap}s gap is below its {floor}s floor")
+    for key, want in (("min_samples_per_label", _VR_OPT81_MIN_SAMPLES_PER_LABEL),
+                      ("min_gap_s", _VR_OPT81_MIN_GAP_S),
+                      ("min_gap_frac", _VR_OPT81_MIN_GAP_FRAC)):
+        if _num(fr.get(key)) != float(want):
+            out.append(f"OPT81 {fid}: stamped {key} {fr.get(key)!r} is not {want}")
+    # Runner matrix (the two labels co-occur in at least half of the smaller
+    # population's runs) or, otherwise, the two populations must overlap in time.
+    ids = {lb: {r.get("run_id") for r in by_label[lb] if r.get("run_id") is not None}
+           for lb in (ls, lf)}
+    shared = ids[ls] & ids[lf]
+    matrix = bool(shared) and 2 * len(shared) >= min(len(ids[ls]), len(ids[lf]))
+    if fr.get("runner_matrix") is not matrix:
+        out.append(f"OPT81 {fid}: runner_matrix {fr.get('runner_matrix')!r} does not "
+                   f"re-derive from the rows' run ids ({matrix})")
+    spans: dict[str, tuple] = {}
+    for lb in (ls, lf):
+        ts = [_vr_opt81_utc(str(r.get("at") or "")) for r in by_label[lb]]
+        spans[lb] = (None, None) if (not ts or None in ts) else (min(ts), max(ts))
+    if not matrix:
+        (s0, s1), (f0, f1) = spans[ls], spans[lf]
+        if None in (s0, s1, f0, f1) or not (s0 <= f1 and f0 <= s1):
+            out.append(f"OPT81 {fid}: `{ls}` and `{lf}` ran in different periods (or "
+                       "a run time is missing), so the gap is not a runner comparison")
+    for side, lb in (("slow", ls), ("fast", lf)):
+        st = slow if side == "slow" else fast
+        lo, hi = spans[lb]
+        if lo is not None and (_vr_opt81_utc(str(st.get("first_run_at") or "")) != lo
+                               or _vr_opt81_utc(str(st.get("last_run_at") or "")) != hi):
+            out.append(f"OPT81 {fid}: {side} first_run_at/last_run_at do not re-derive "
+                       "from the rows")
+    pre = _num(fr.get("credited_pre_cascade_s"))
+    n_slow, n_fast = len(by_label[ls]), len(by_label[lf])
+    if pre is None or pre < 0 or pre > gap + 0.05:
+        out.append(f"OPT81 {fid}: credited_pre_cascade_s {fr.get('credited_pre_cascade_s')!r} "
+                   f"exceeds the measured {gap}s gap")
+    elif pre > 0 and matrix:
+        out.append(f"OPT81 {fid}: wall-clock pre-credited on a runner matrix (both legs "
+                   "run in every run)")
+    elif pre > 0 and not (fr.get("job_is_workflow_long_pole") is True
+                          and n_slow > n_fast):
+        out.append(f"OPT81 {fid}: wall-clock pre-credited on a job that is not its "
+                   "workflow's long pole on the slower label (strictly more runs on "
+                   "the slower label)")
+    elif pre > 0:
+        pole_label = str(fr.get("pole_runner_label") or "")
+        timing = _as_dict(_as_dict(_as_dict(_as_dict(data).get("per_workflow_timing"))
+                                   .get(str(f.get("workflow_file") or "")))
+                          .get("job_runner"))
+        job = str(fr.get("job") or "")
+        if pole_label != ls:
+            out.append(f"OPT81 {fid}: wall-clock pre-credited, but the stamped pole "
+                       f"label `{pole_label}` is not the slower label `{ls}`; the gap "
+                       "does not describe the population the pole's median is "
+                       "measured on")
+        elif job in timing and str(timing[job]) != ls:
+            out.append(f"OPT81 {fid}: wall-clock pre-credited, but per_workflow_timing "
+                       f"measures the pole on `{timing[job]}`, not the slower label "
+                       f"`{ls}`; the gap does not describe that population")
+    wc = _num(f.get("wall_clock_p50_s")) or 0.0
+    if wc > (pre or 0.0) + 0.05:
+        out.append(f"OPT81 {fid}: wall_clock_p50_s {wc} exceeds its pre-cascade credit")
+    if f.get("runner_min_saving") is not None:
+        out.append(f"OPT81 {fid}: an A1 finding carries a runner-minute saving; a "
+                   "different runner class bills differently and none may be stated")
+    return out
+
+
+def _opt81_a2_rederived(f: dict, data: dict) -> list[str]:
+    """An A2 advisory carries no number, and gate (d) holds on the findings doc."""
+    fid = str(f.get("id") or "?")
+    fr = _as_dict(f.get("faster_runner"))
+    out: list[str] = []
+    if (_num(f.get("wall_clock_p50_s")) or 0.0) > 0:
+        out.append(f"OPT81 {fid}: an A2 advisory carries wall_clock_p50_s > 0")
+    if f.get("runner_min_saving") is not None:
+        out.append(f"OPT81 {fid}: an A2 advisory carries a runner_min_saving")
+    if not f.get("advisory"):
+        out.append(f"OPT81 {fid}: an A2 advisory is not marked advisory")
+    if _vr_opt81_number_in(str(f.get("evidence") or "")):
+        out.append(f"OPT81 {fid}: an A2 advisory's evidence states a number")
+    rc = _vr_opt81_runner_class(fr.get("runner_label"))
+    if rc is None or rc[0] != "github-standard":
+        out.append(f"OPT81 {fid}: A2 fires only on a standard GitHub-hosted label, not "
+                   f"`{fr.get('runner_label')}`")
+    job = str(fr.get("job") or "")
+    wf = _wf_base(str(f.get("workflow_file") or ""))
+    jt = _vr_opt81_toks(job)
+    timing = _as_dict(_as_dict(data.get("per_workflow_timing")).get(
+        str(f.get("workflow_file") or "")))
+    job_p50 = _num(_as_dict(timing.get("job_p50")).get(job)) or 0.0
+    for g in _as_list(data.get("findings")):
+        if not isinstance(g, dict) or g is f or g.get("pattern") == "OPT81":
+            continue
+        if _wf_base(str(g.get("workflow_file") or "")) != wf:
+            continue
+        if not any(str(j) == job or _vr_opt81_toks(str(j)) == jt
+                   for j in _as_list(g.get("affected_jobs"))):
+            continue
+        pat = str(g.get("pattern") or "")
+        if pat in _VR_OPT81_CHEAPER_STRUCTURAL:
+            out.append(f"OPT81 {fid}: {pat} already addresses `{job}`, so the "
+                       "last-resort advisory must not fire")
+        if pat == "OPT24":
+            out.append(f"OPT81 {fid}: a sharding finding already addresses `{job}`")
+        wc = _num(g.get("wall_clock_p50_s")) or 0.0
+        if (pat not in _VR_OPT81_PRESTART_PATTERNS and not g.get("advisory")
+                and job_p50 > 0
+                and wc >= _VR_OPT81_COVERED_FRAC * job_p50):
+            out.append(f"OPT81 {fid}: {pat} already credits {wc}s on `{job}`, at least "
+                       "half its median")
+        if pat == "OPT79" and wc >= _VR_OPT81_CACHE_LEVER_MIN_S:
+            out.append(f"OPT81 {fid}: a net-negative cache already addresses `{job}`")
+    # …and the uncredited net-negative caches, where a cache on a long pole lives.
+    for r in _as_list(data.get(_VR_OPT79_UNCREDITED_DOC_KEY)):
+        if not isinstance(r, dict):
+            continue
+        if _wf_base(str(r.get("workflow_file") or "")) != wf:
+            continue
+        rj = str(r.get("job") or "")
+        if not (rj == job or _vr_opt81_toks(rj) == jt):
+            continue
+        if (_num(r.get("waste_s")) or 0.0) >= _VR_OPT81_CACHE_LEVER_MIN_S:
+            out.append(f"OPT81 {fid}: a net-negative cache ({r.get('waste_s')}s per "
+                       f"hit) already addresses `{job}`")
+    return out
+
+
+def _opt81_rendered_block(report: str, fid: str) -> "tuple[int, str]":
+    anchor = f'<a id="opt81-{re.sub(r"[^A-Za-z0-9_.:-]+", "_", fid)}"></a>'
+    n = report.count(anchor)
+    if not n:
+        return 0, ""
+    start = report.index(anchor) + len(anchor)
+    nxt = [i for i in (report.find('<a id="', start), report.find("\n## ", start))
+           if i >= 0]
+    return n, report[start:min(nxt) if nxt else len(report)]
+
+
+def check_opt81_runner_comparison_rederived(report: str,
+                                            findings_path: Path | None) -> Check:
+    """OPT81: every A1 number re-derives from its stamped per-run rows; every A2
+    advisory carries no number and its last-resort gate holds on the findings doc;
+    every OPT81 finding renders exactly one anchored card that carries the
+    publisher disclosure, and a full A2 card names the app-install prerequisite (a
+    held-back A2 note renders no recipe, so it carries no install sentence)."""
+    name = "OPT81 runner-class comparisons re-derive and carry the publisher disclosure"
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return Check(name, True, err, skipped=True)
+    found = [f for f in _as_list(data.get("findings"))
+             if isinstance(f, dict) and f.get("pattern") == "OPT81"]
+    if not found:
+        if '<a id="opt81-' in report:
+            return Check(name, False, "the report renders an OPT81 card, but the run "
+                         "recorded no OPT81 finding")
+        return Check(name, True, "no OPT81 findings")
+    bad: list[str] = []
+    for f in found:
+        fid = str(f.get("id") or "?")
+        fr = _as_dict(f.get("faster_runner"))
+        half = fr.get("half")
+        if fr.get("disclosure") != _VR_OPT81_DISCLOSURE:
+            bad.append(f"OPT81 {fid}: the stamped disclosure is missing or altered")
+        if half == "A1":
+            bad.extend(_opt81_a1_rederived(f, data))
+            if _VR_OPT81_DISCLOSURE not in str(f.get("evidence") or ""):
+                bad.append(f"OPT81 {fid}: the evidence does not carry the disclosure")
+        elif half == "A2":
+            bad.extend(_opt81_a2_rederived(f, data))
+        else:
+            bad.append(f"OPT81 {fid}: neither the measured (A1) nor the advisory (A2) half")
+            continue
+        n, block = _opt81_rendered_block(report, fid)
+        if n != 1:
+            bad.append(f"OPT81 {fid}: rendered {n} time(s), not exactly once")
+            continue
+        card, _sep, fence = block.partition("```text")
+        if _VR_OPT81_DISCLOSURE not in card:
+            bad.append(f"OPT81 {fid}: its rendered card does not carry the disclosure line")
+        held = "advisory held back" in block
+        if not held and _VR_OPT81_DISCLOSURE not in fence:
+            bad.append(f"OPT81 {fid}: its agent prompt does not carry the disclosure line")
+        if half == "A1":
+            s, q = _as_dict(fr.get("slow")), _as_dict(fr.get("fast"))
+            for st in (s, q):
+                want = f"at p50 {(_num(st.get('p50_s')) or 0):.0f}s"
+                if want not in block:
+                    bad.append(f"OPT81 {fid}: the card does not state `{want}` for "
+                               f"`{st.get('label')}`")
+            rm_lines = [ln for ln in card.splitlines() if _VR_OPT81_RUNNER_MIN_LINE in ln]
+            if len(rm_lines) != 1 or rm_lines[0].split(_VR_OPT81_RUNNER_MIN_LINE, 1)[1] \
+                    .strip() != f"{_VR_OPT81_RUNNER_MIN_UNKNOWN}.":
+                bad.append(f"OPT81 {fid}: the A1 card's runner-minute line must say only "
+                           f"\"{_VR_OPT81_RUNNER_MIN_UNKNOWN}\" ({rm_lines!r})")
+        elif not held:
+            if _VR_OPT81_INSTALL_SENTENCE not in block:
+                bad.append(f"OPT81 {fid}: the A2 recipe omits the app-install prerequisite")
+            if _VR_OPT81_LOG_CHECKED not in block:
+                bad.append(f"OPT81 {fid}: the A2 card renders without its log-level "
+                           "check having passed")
+            m = _vr_opt81_number_in(block)
+            if m:
+                bad.append(f"OPT81 {fid}: the A2 card states a number (`{m.group(0)}`)")
+    return Check(name, not bad,
+                 f"{len(found)} OPT81 finding(s) re-derived and paired with the disclosure"
+                 if not bad else "; ".join(bad[:6]))
+
+
 def check_no_rate_derived_dollars(report: str, findings_path: Path | None = None) -> Check:
     name = "no rate-derived dollars on the minutes surfaces"
     hits: list[str] = []
@@ -9245,6 +13989,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_no_domain_leakage(report),
         check_skill_commit_provenance(report, skill_repo),
         check_rendered_patterns_exist(report, findings_path),
+        check_windows_setup_guidance(report, findings_path),
         check_data_driven_have_signal(findings_path),
         check_speed_poles_complete(report, findings_path),
         check_aggregation_gate_poles_never_prescribe(report, findings_path),
@@ -9265,6 +14010,11 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_tier2_neutrality_derived(report, findings_path, report_path),
         check_tier2_measured_basis(report, findings_path),
         check_opt79_uncredited_rows_rederived(report, findings_path),
+        check_opt82_type_aware_lint_uncredited(report, findings_path),
+        check_opt83_parallel_steps(report, findings_path),
+        check_opt84_tool_swap(report, findings_path),
+        check_opt79_findings_rederived(report, findings_path),
+        check_opt81_runner_comparison_rederived(report, findings_path),
         check_tier2_total_deoverlapped(report, findings_path, report_path),
         check_no_timing_endpoint_citation(report, report_path),
         check_tier2_claims_derivation_basis(report, findings_path, report_path),
@@ -9272,7 +14022,13 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_tier2_savings_rows_backed_by_cost_spine(report, findings_path),
         check_runner_minute_spine_contract(report, findings_path),
         check_no_rate_derived_dollars(report, findings_path),
+        check_opt80_tail_lines(report, findings_path),
+        check_opt80_tail_withheld_reasons(report, findings_path),
         check_structural_pole_has_measured_step(findings_path),
+        check_step_cited_within_job_window(findings_path),
+        check_stamped_decomposition_within_job(findings_path),
+        check_declared_timelines_readable(findings_path),
+        check_pole_omitted_steps_line(report, findings_path),
         check_structural_step_category_not_payload_binned_as_build(findings_path),
         check_detector_leaf_agrees_with_dominant_category(report, findings_path),
         check_pole_ceiling_within_cooccurrence(report, findings_path),

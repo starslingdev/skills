@@ -9,6 +9,7 @@ before printing the summary.
 
 - [The three-line header block](#the-three-line-header-block)
 - [Where each line comes from](#where-each-line-comes-from)
+- [The push-credential rows](#the-push-credential-rows)
 - [The vector-map receipt format](#the-vector-map-receipt-format)
 
 ---
@@ -41,6 +42,21 @@ re-derive them here. The one to be careful with is the P14.11 vector-map row:
 the id renders in backticks with **no space before it**, so a pattern
 expecting `| ` immediately ahead of the id matches nothing and silently drops
 the line.
+
+## The push-credential rows
+
+The report's hygiene section ends with a `### If a push credential leaks`
+sub-heading holding three hygiene rows (`sec.environments.branch-restricted`,
+`sec.environments.approval-holds`, `sec.secrets.environment-scoped`). They
+are hygiene checks like the rest: name a failed one in the hygiene clause, in
+one short clause each (`3 environments accept a branch any push credential
+can make`, `3 environments let the requester approve their own run`,
+`11 repo/org secrets sit outside every environment`), and an unmeasured one
+as unmeasured with its reason — never `0 secrets` over a list that could not
+be read. Say what must be done in plain words, as the row does; there is no
+prompt to hand to another agent. Never claim these rows would have stopped
+an attack by an admin or org owner; they do not, and the report does not say
+so either.
 
 ## The vector-map receipt format
 
