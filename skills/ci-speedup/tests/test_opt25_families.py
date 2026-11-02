@@ -7,10 +7,10 @@ import collect_runs as cr
 from wall_clock import WallClockContext
 
 
-def detect(large, packages=(159, 114, 88, 82, 74, 77, 96, 77), timing_context=True, marker="Shard ", suffix="", offset=0, **kwargs):
+def detect(slow, quick=(150, 120, 95, 85, 80, 75, 100, 90), timing_context=True, marker="Shard ", suffix="", offset=0, **kwargs):
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)
     jobs = []
-    for family, durations in (("large", large), ("packages", packages)):
+    for family, durations in (("slow", slow), ("quick", quick)):
         for index, duration in enumerate(durations):
             jobs.append({"name": f"Test ({marker}{family}-{index + offset}{suffix})",
                          "started_at": start.isoformat(),
@@ -28,12 +28,12 @@ def detect(large, packages=(159, 114, 88, 82, 74, 77, 96, 77), timing_context=Tr
 
 @pytest.mark.parametrize("marker,suffix,offset", [("Shard ", "", 0), ("Partition ", "", 0), ("Shard ", ", ubuntu22", 0), ("Shard ", "", 1), ("Shard ", "", 7)])
 def test_atomic_family_splits_slow_test_with_realistic_saving(marker, suffix, offset):
-    finding, _ = detect([817, 439, 436, 392, 492, 466], timing_context=False, marker=marker, suffix=suffix, offset=offset)
+    finding, _ = detect([800, 470, 455, 410, 480, 445], timing_context=False, marker=marker, suffix=suffix, offset=offset)
     note = finding["measured_evidence"]["note"]
     assert "split the slow test" in note.lower(), (note, finding["wall_clock_p50_s"])
     assert "rebalance" not in note.lower()
-    assert finding["wall_clock_p50_s"] == pytest.approx(325, abs=5)
-    assert "large" in finding["measured_evidence"]["summary"]
+    assert finding["wall_clock_p50_s"] == pytest.approx(320, abs=5)
+    assert "slow" in finding["measured_evidence"]["summary"]
     assert "atomic-unit" in finding["measured_evidence"]["summary"]
 
 
@@ -47,36 +47,36 @@ def test_plain_imbalance_uses_only_its_family_mean(marker):
     assert finding["wall_clock_p50_s"] == pytest.approx(173.3)
 
 
-@pytest.mark.parametrize("floor,combined,additional", [(430, 387, 62), (900, 0, 0)])
+@pytest.mark.parametrize("floor,combined,additional", [(430, 370, 50), (900, 0, 0)])
 def test_plateau_next_step_is_capped_by_existing_cross_workflow_floor(floor, combined, additional):
-    finding, crit = detect([817, 450, 440, 460, 492, 466])
+    finding, crit = detect([800, 470, 455, 410, 480, 445])
     assert "raise this family's shard count" in finding["measured_evidence"]["note"].lower()
     ctx = WallClockContext(workflow="ci.yml", crit=crit,
                            concurrent=(("other.yml", floor),), events=("pull_request",))
     cr._size_opt25_next_step(finding, ctx)
     assert finding["next_step"]["additional_wall_clock_ceiling_s"] == additional
     assert finding["next_step"]["combined_wall_clock_ceiling_s"] == combined
-    assert finding["wall_clock_p50_s"] == 325
+    assert finding["wall_clock_p50_s"] == 320
 
 
 def test_matrix_producer_command_names_numeric_planner_knob():
     workflow = {"jobs": {
         "plan": {"outputs": {"matrix": "${{ steps.make.outputs.matrix }}"},
-                 "steps": [{"id": "unrelated", "run": "python other.py --shards 99"},
-                           {"id": "make", "run": "python plan.py --split-shards 6"}]},
+                 "steps": [{"id": "unrelated", "run": "python other.py --shards 10"},
+                           {"id": "make", "run": "python plan.py --split-shards 4"}]},
         "test": {"name": "Test", "needs": "plan", "strategy": {
             "matrix": "${{ fromJSON(needs.plan.outputs.matrix) }}"}},
     }}
-    finding, _ = detect([817, 450, 440, 460, 492, 466], workflow_doc=workflow)
-    assert "--split-shards 6" in finding["measured_evidence"]["note"]
-    assert "--shards 99" not in finding["measured_evidence"]["note"]
+    finding, _ = detect([800, 470, 455, 410, 480, 445], workflow_doc=workflow)
+    assert "--split-shards 4" in finding["measured_evidence"]["note"]
+    assert "--shards 10" not in finding["measured_evidence"]["note"]
 
 
 @pytest.mark.parametrize("name", ["Test", "Test (Shard ${{ matrix.shard }})"])
 @pytest.mark.parametrize("command", [
-    'matrix=$(python plan.py --split-shards 6)\necho "matrix=$matrix" >> "$GITHUB_OUTPUT"',
-    'echo "matrix=$(python plan.py --split-shards 6)" >> "$GITHUB_OUTPUT"',
-    '# matrix=$(python old.py --shards 99)\npython plan.py --split-shards 6',
+    'matrix=$(python plan.py --split-shards 4)\necho "matrix=$matrix" >> "$GITHUB_OUTPUT"',
+    'echo "matrix=$(python plan.py --split-shards 4)" >> "$GITHUB_OUTPUT"',
+    '# matrix=$(python old.py --shards 10)\npython plan.py --split-shards 4',
 ])
 def test_realistic_planner_output_reaches_wall_clock_prompt(name, command):
     import blocking_path as bp
@@ -86,14 +86,14 @@ def test_realistic_planner_output_reaches_wall_clock_prompt(name, command):
         "test": {"name": name, "needs": "plan", "strategy": {
             "matrix": "${{ fromJSON(needs.plan.outputs.matrix) }}"}},
     }}
-    finding, _ = detect([817, 450, 440, 460, 492, 466], workflow_doc=workflow)
-    assert "--split-shards 6" in finding["measured_evidence"]["note"]
+    finding, _ = detect([800, 470, 455, 410, 480, 445], workflow_doc=workflow)
+    assert "--split-shards 4" in finding["measured_evidence"]["note"]
     prompt = "\n".join(bp._hygiene_prompt("OPT25", finding["title"], [finding],
                                        "https://example.com/catalog", saves_wc=True))
     assert "split the slow test" in prompt
     assert "raise this family's shard count" in prompt
-    assert "--split-shards 6" in prompt
-    assert "--shards 99" not in prompt
+    assert "--split-shards 4" in prompt
+    assert "--shards 10" not in prompt
 
 
 def _named_findings(pairs):
@@ -114,9 +114,9 @@ def test_platform_versions_remain_heterogeneous(prefix):
 
 
 def test_singleton_family_never_averages_other_families():
-    assert _named_findings([("Test (Shard large-0)", 800),
-                           ("Test (Shard packages-0)", 100),
-                           ("Test (Shard packages-1)", 90)]) == []
+    assert _named_findings([("Test (Shard slow-0)", 800),
+                           ("Test (Shard quick-0)", 100),
+                           ("Test (Shard quick-1)", 90)]) == []
 
 
 @pytest.mark.parametrize("legs", [
@@ -142,20 +142,20 @@ def test_unmarked_version_axis_below_the_legacy_threshold_is_not_flagged():
 
 
 def test_split_floor_includes_a_slower_leg_from_another_family():
-    findings = _named_findings([("Test (Shard large-0)", 900), ("Test (Shard large-1)", 200),
-                                ("Test (Shard packages-0)", 850), ("Test (Shard packages-1)", 100)])
+    findings = _named_findings([("Test (Shard slow-0)", 880), ("Test (Shard slow-1)", 200),
+                                ("Test (Shard quick-0)", 830), ("Test (Shard quick-1)", 100)])
     assert len(findings) == 1
-    # Splitting large-0 cannot pull the matrix below packages-0 (850s).
+    # Splitting slow-0 cannot pull the matrix below quick-0 (830s).
     assert findings[0]["wall_clock_p50_s"] == 50
-    assert "Test (Shard packages-0)" in findings[0]["measured_evidence"]["note"]
+    assert "Test (Shard quick-0)" in findings[0]["measured_evidence"]["note"]
 
 
 def test_wrapped_planner_flag_is_found():
     workflow = {"jobs": {
         "plan": {"outputs": {"matrix": "${{ steps.make.outputs.matrix }}"},
-                 "steps": [{"id": "make", "run": "python plan.py \\\n  --split-shards \\\n  6"}]},
+                 "steps": [{"id": "make", "run": "python plan.py \\\n  --split-shards \\\n  4"}]},
         "test": {"name": "Test", "needs": "plan", "strategy": {
             "matrix": "${{ fromJSON(needs.plan.outputs.matrix) }}"}},
     }}
-    finding, _ = detect([817, 450, 440, 460, 492, 466], workflow_doc=workflow)
-    assert "--split-shards 6" in finding["measured_evidence"]["note"]
+    finding, _ = detect([800, 470, 455, 410, 480, 445], workflow_doc=workflow)
+    assert "--split-shards 4" in finding["measured_evidence"]["note"]
