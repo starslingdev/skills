@@ -8106,6 +8106,8 @@ def _opt25_planner_knobs(base: str, workflow_doc: dict[str, Any]) -> list[str]:
         run = step.get("run")
         if not isinstance(run, str):
             continue
+        # Join shell line continuations so `--split-shards \` + `6` stays one flag.
+        run = _re.sub(r"\\\r?\n", " ", run)
         try:
             # Shell output assignments commonly wrap the planner in $(...).
             # Parse literal command substitutions separately, without executing
@@ -8209,8 +8211,11 @@ def _detect_opt25_shard_imbalance(
         # Scope the diagnosis to the slowest leg's named family. Unstructured
         # matrices retain the existing homogeneous/heterogeneous behavior.
         all_medians = medians
-        families = {n: _opt25_family(n[len(base):].strip().strip("()"))
-                    for n in medians if _matrix_base_name(n) == base}
+        # Only an explicit shard/partition axis makes numbered variants shard
+        # families; `postgres-14` or `Node.js 20` are distinct configurations.
+        families = ({n: _opt25_family(n[len(base):].strip().strip("()"))
+                     for n in medians if _matrix_base_name(n) == base}
+                    if base_sharded.get(base, False) else {})
         family = families.get(ranked[0])
         members = {n: d for n, d in medians.items() if families.get(n) == family}
         if family is not None and len(members) >= 2:
@@ -8223,6 +8228,13 @@ def _detect_opt25_shard_imbalance(
         slow_name, fast_name = ranked[0], ranked[-1]
         slow, fast = medians[slow_name], medians[fast_name]
         second = medians[ranked[1]]  # next-slowest leg = the new pole after a fix
+        # A slower leg of ANOTHER family in the same matrix still gates it after
+        # the fix, so it floors the saving too (legacy matrices: no outside legs).
+        outside_name = max((n for n in all_medians if n not in medians),
+                           key=all_medians.get, default=None)
+        outside_s = all_medians[outside_name] if outside_name is not None else 0.0
+        floor_name, floor_s = ((outside_name, outside_s) if outside_s > second
+                               else (ranked[1], second))
         if fast <= 0:
             continue
         ratio = slow / fast
@@ -8246,7 +8258,7 @@ def _detect_opt25_shard_imbalance(
         if is_sharded and not atomic:
             # Homogeneous suite: tests are interchangeable, so rebalance toward
             # the mean (achievable by redistributing test files / timing-split).
-            balanced = sum(medians.values()) / len(medians)
+            balanced = max(sum(medians.values()) / len(medians), outside_s)
             wc = round(max(slow - balanced, 0.0), 1)
             wc, cap_note = _cap_wall_clock(wc, slow_name, crit)
             title = "Shard Imbalance"
@@ -8264,7 +8276,7 @@ def _detect_opt25_shard_imbalance(
             # Heterogeneous matrix: legs do different work and can't be
             # rebalanced. Splitting the slow leg in two floors at the
             # NEXT-slowest leg, which becomes the new long pole.
-            wc = round(max(slow - max(slow / 2.0, second), 0.0), 1)
+            wc = round(max(slow - max(slow / 2.0, floor_s), 0.0), 1)
             wc, cap_note = _cap_wall_clock(wc, slow_name, crit)
             title = "Matrix Leg Imbalance"
             summary = (f"Across {n_samples} sampled `{base}` runs, the slowest leg "
@@ -8296,8 +8308,8 @@ def _detect_opt25_shard_imbalance(
                     "can't spread under the atomic-unit heuristic. Inspect its test timings "
                     "to confirm, then split the slow test itself (subtests or a "
                     "table-driven partition, or split the file). Adding shards or timing "
-                    f"data won't help that indivisible unit. Floors at `{ranked[1]}` "
-                    f"({second:.0f}s), or the split half ({slow / 2:.0f}s), whichever is higher.")
+                    f"data won't help that indivisible unit. Floors at `{floor_name}` "
+                    f"({floor_s:.0f}s), or the split half ({slow / 2:.0f}s), whichever is higher.")
             size_note = f"split the slow test or file; modeled saving ~{wc:.0f}s"
             rest = [medians[n] for n in ranked[1:]]
             plateau = _stats.median(rest)
