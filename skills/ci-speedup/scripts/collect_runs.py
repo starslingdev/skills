@@ -1720,9 +1720,12 @@ def _gh_probe_error_line(text: str) -> str:
     leading `X` / `✗` / `!` glyph. Prefer a marked failure over a successful
     account listed earlier when gh checks multiple hosts or accounts."""
     lines = [ln.strip() for ln in text.splitlines()]
-    for s in lines:
-        if re.match(r"^[X✗×!]\s+", s):
-            return re.sub(r"^[X✗×!]\s+", "", s)
+    # A failure glyph first, then a warning: gh prints `!` notes (e.g. missing token
+    # scopes) under accounts that logged in fine, which may be listed before the failure.
+    for marks in ("X✗×", "!"):
+        for s in lines:
+            if re.match(rf"^[{marks}]\s+", s):
+                return re.sub(rf"^[{marks}]\s+", "", s)
     for s in lines:
         if not s or _GH_HOST_LINE.match(s) or s.startswith(("✓", "-")):
             continue

@@ -1026,3 +1026,24 @@ def test_failed_gh_probe_skips_successful_accounts(monkeypatch):
     report = bp.render(out)
     assert "Failed to log in to github.com using token (GH_TOKEN)" in report
     assert "Logged in to github.example.com" not in report
+
+
+def test_failed_gh_probe_prefers_the_failure_over_an_earlier_warning(monkeypatch):
+    """gh marks a missing-scope note on a LOGGED-IN account with `!` (a warning, exit 0
+    on its own). When that account is listed before the one that actually failed, the
+    reason must quote the `X` failure, not the earlier warning."""
+    status = (
+        "github.example.com\n"
+        "  ✓ Logged in to github.example.com account example (keyring)\n"
+        "  - Active account: true\n"
+        "  ! Missing required token scopes: 'read:org'\n"
+        "github.com\n"
+        "  X Failed to log in to github.com using token (GH_TOKEN)\n"
+        "  - The token in GH_TOKEN is invalid.\n"
+    )
+    monkeypatch.delenv("CI_SPEEDUP_GH_FIXTURES", raising=False)
+    monkeypatch.setattr(cr.subprocess, "run", _real_gh_probe(status, 1))
+    out = cr.collect(_doc(), "o/r", max_runs=8, shallow_runs=8)
+    reason = out["data_sources"]["partial_reason"]
+    assert "Failed to log in to github.com using token (GH_TOKEN)" in reason
+    assert "Missing required token scopes" not in reason
