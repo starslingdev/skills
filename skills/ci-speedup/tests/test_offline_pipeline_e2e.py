@@ -2085,6 +2085,48 @@ def test_collect_credits_the_chained_pole_cache_untouched(tmp_path, monkeypatch)
     assert _opt79_rows(doc) == []
 
 
+def test_collect_does_not_charge_a_needs_job_its_upstream_run_time_as_queue(
+        tmp_path, monkeypatch):
+    """`chained.yml`'s `verify` (`needs: prep`) starts 2s after the 120s `prep`
+    finishes on every sampled run. Timed from the run trigger it reads 122s, above
+    the 60s PR bar, but that is `prep` RUNNING, not runner queueing. The real
+    collect() must hand OPT43 the scanned job graph so `verify` is timed from
+    `prep`'s completion and draws no queue finding. A call site that drops the
+    graph brings the false positive back, and this test goes red."""
+    doc = _collect_in_process(tmp_path, monkeypatch)
+    opt43 = [(f["workflow_file"], f["affected_jobs"], f.get("evidence"))
+             for f in doc["findings"] if f.get("pattern") == "OPT43"
+             and f.get("workflow_file") == _CHAINED]
+    assert opt43 == [], opt43
+
+
+def test_collect_skips_opt43_and_discloses_when_the_job_graph_is_missing(
+        tmp_path, monkeypatch):
+    """A findings input with no `workflow_job_graph` gives OPT43 no way to tell an
+    entry job from a `needs:`-gated one. Timing every job from the run trigger
+    would bring back the 122s false positive on `verify` under copy that says
+    upstream run time was excluded, so OPT43 is skipped for the workflow and the
+    skip is disclosed by name instead."""
+    repo_root = tmp_path / "repo"
+    _init_repo(repo_root)
+    fixtures = _replay_dir(tmp_path)
+    scan = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "scan.py"), "--root", str(repo_root),
+         "--repo", _REPO], capture_output=True, text=True, timeout=60)
+    assert scan.returncode == 0, scan.stderr
+    scan_doc = json.loads(scan.stdout)
+    scan_doc.pop("workflow_job_graph", None)
+    monkeypatch.setenv("CI_SPEEDUP_GH_FIXTURES", str(fixtures))
+    monkeypatch.delenv("CI_SPEEDUP_GH_RECORD", raising=False)
+    doc = cr.collect(scan_doc, _REPO, 20, root=repo_root)
+    opt43 = [(f["workflow_file"], f["affected_jobs"])
+             for f in doc["findings"] if f.get("pattern") == "OPT43"]
+    assert opt43 == [], opt43
+    skipped = {e["workflow"]: e["detectors"]
+               for e in doc["data_sources"].get("detectors_skipped") or []}
+    assert "OPT43" in skipped.get(_CHAINED, []), skipped
+
+
 @pytest.mark.parametrize("how", ["zeroed", "off_spine"])
 def test_collect_demotes_a_pole_finding_with_no_merge_wait_left(
         tmp_path, monkeypatch, how):

@@ -7954,22 +7954,22 @@ def test_aggregation_gate_near_miss_renders_byte_identically(monkeypatch):
     assert "🤖 Prompt for your coding agent" in after
 
 
-def test_aggregation_gate_yields_to_the_chain_member_framing(monkeypatch):
-    # A sink that IS a modal-chain member keeps the chain-stage rendering (`thank you, next`
-    # as stage 3/3): the chain model already frames it as serialized, and double-framing it
-    # would contradict that. Pinned byte-for-byte against detection-disabled rendering.
+def test_aggregation_gate_that_ends_a_chain_keeps_its_stage_and_prescribes_nothing():
+    # A sink that IS a modal-chain member (only ever the LAST stage: a sink is terminal)
+    # renders as the aggregation gate, with its chain stage kept in the role line. The
+    # chain-stage-only rendering drilled the verdict's own step and handed over an "optimize
+    # this step" prompt for a job that runs no work (starslingdev/skills' 3s `test` verdict
+    # ending the `test (self-hosted)` → `test` chain).
     doc = _agg_gate_doc()
     doc["pr_critical_path"]["chain_summary"] = {
         "modal_chain": ["build", "stable - x86_64-linux", "thank you, build"],
         "chain_p50_s": 598.0}
-    after = _pole_section(bp.render(doc, {}, {}, {}, "2026-07-28T00:00:00Z", {}),
-                          "thank you, build")
-    monkeypatch.setattr(bp, "_agg_gate_shape", lambda *a, **k: None)
-    before = _pole_section(bp.render(doc, {}, {}, {}, "2026-07-28T00:00:00Z", {}),
-                           "thank you, build")
-    assert after == before
-    assert "Stage 3/3 of the" in after and "gate chain" in after
-    assert "**Aggregation gate" not in after
+    sec = _pole_section(bp.render(doc, {}, {}, {}, "2026-07-28T00:00:00Z", {}),
+                        "thank you, build")
+    assert "**Aggregation gate" in sec
+    assert "stage 3/3 of the" in sec and "gate chain" in sec
+    assert "**➡️ Where the wait actually is:**" in sec
+    assert "🤖 Prompt for your coding agent" not in sec
 
 
 def test_agg_gate_shape_structural_conditions():

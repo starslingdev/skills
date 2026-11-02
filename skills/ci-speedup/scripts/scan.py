@@ -1775,6 +1775,190 @@ def _detect_opt9(doc: dict, raw: str) -> list[Hit]:
     return hits
 
 
+# ---- Job exclusivity (shared by the cross-job duplicate detectors) -----------
+#
+# Two jobs whose job-level `if:` conditions can never both be true never co-run
+# (e.g. a same-repo `test-self` and a fork-only `test-fork`): exactly one runs
+# per workflow run, so they are not a duplicated-work pair. The check is
+# CONSERVATIVE — it understands only `==` / `!=` comparisons between context
+# paths and string literals, combined with `&&` / `||` / parentheses. Anything
+# else (a function call, `!`, a bare truthy operand, a missing `if:`) means
+# "cannot prove exclusive", so a real duplicate keeps firing.
+
+_IF_TOKEN_RE = re.compile(
+    r"\s*(?:(?P<op>&&|\|\||==|!=|\(|\))"
+    r"|(?P<str>'(?:[^']|'')*')"
+    r"|(?P<path>[A-Za-z_][\w-]*(?:\.[A-Za-z_][\w-]*|\[\d+\])*))")
+_IF_DNF_CAP = 64
+# Only contexts whose value is the same for every job in a run can prove two
+# jobs disjoint. `needs.*` resolves per job (a job that does not directly need
+# `build` sees null), `github.job` is each job's own id, and `matrix` /
+# `strategy` / `steps` / `env` are per job or unavailable at job level.
+_IF_RUN_WIDE_ROOTS = ("github", "inputs", "vars")
+_IF_PER_JOB_GITHUB = ("github.job", "github.action")
+
+
+def _if_path_is_run_wide(path: str) -> bool:
+    root = re.split(r"[.\[]", path, maxsplit=1)[0]
+    if root not in _IF_RUN_WIDE_ROOTS:
+        return False
+    return not any(path == p or path.startswith(p) for p in _IF_PER_JOB_GITHUB)
+
+
+def _if_literal_may_be_number(lit: str) -> bool:
+    """Actions coerces mismatched operand types to numbers, so a numeric (or
+    null / boolean) context value equals every literal that reads as the same
+    number: `'1'` and `'1.0'`, or `''` and `'0'` (both 0). Err wide: anything
+    Python reads as a number, plus empty / whitespace-only."""
+    t = lit.strip()
+    if not t:
+        return True
+    try:
+        float(t)
+        return True
+    except ValueError:
+        pass
+    try:
+        int(t, 0)
+        return True
+    except ValueError:
+        return False
+
+
+class _IfUnparsed(Exception):
+    pass
+
+
+def _if_dnf(expr: object) -> list[frozenset] | None:
+    """The job condition as a disjunction of conjunctions of comparison atoms
+    `(op, (lhs, rhs))` with operands lower-cased (Actions compares strings and
+    context names case-insensitively), or None when the shape is outside the
+    conservative grammar above."""
+    if not isinstance(expr, str):
+        return None
+    s = expr.strip()
+    # Actions uses .NET OrdinalIgnoreCase, not Python Unicode lower(): e.g.
+    # Greek sigma and final sigma compare equal there but lower differently.
+    # Only ASCII folding is shared, so leave other conditions unproven.
+    if not s.isascii():
+        return None
+    m = re.fullmatch(r"\$\{\{(.*)\}\}", s, re.S)
+    if m:
+        s = m.group(1).strip()
+    toks: list[tuple[str, str]] = []
+    pos = 0
+    while pos < len(s):
+        if s[pos:].strip() == "":
+            break
+        t = _IF_TOKEN_RE.match(s, pos)
+        if not t or t.end() == pos:
+            return None
+        kind = t.lastgroup or ""
+        toks.append((kind, t.group(kind)))
+        pos = t.end()
+    i = 0
+
+    def peek() -> tuple[str, str]:
+        return toks[i] if i < len(toks) else ("", "")
+
+    def take() -> tuple[str, str]:
+        nonlocal i
+        if i >= len(toks):
+            raise _IfUnparsed
+        i += 1
+        return toks[i - 1]
+
+    def operand() -> tuple[str, str]:
+        kind, val = take()
+        if kind == "path":
+            if peek() == ("op", "("):
+                raise _IfUnparsed  # a function call
+            if not _if_path_is_run_wide(val.lower()):
+                raise _IfUnparsed  # same text, possibly a different value per job
+            return ("path", val.lower())
+        if kind == "str":
+            return ("str", val[1:-1].replace("''", "'").lower())
+        raise _IfUnparsed
+
+    def prim() -> list[frozenset]:
+        if peek() == ("op", "("):
+            take()
+            out = disj()
+            if take() != ("op", ")"):
+                raise _IfUnparsed
+            return out
+        lhs = operand()
+        kind, op = take()
+        if kind != "op" or op not in ("==", "!="):
+            raise _IfUnparsed
+        rhs = operand()
+        if lhs[0] == rhs[0] == "str":
+            raise _IfUnparsed
+        return [frozenset({(op, tuple(sorted((lhs, rhs))))})]
+
+    def conj() -> list[frozenset]:
+        out = prim()
+        while peek() == ("op", "&&"):
+            take()
+            right = prim()
+            out = [a | b for a in out for b in right]
+            if len(out) > _IF_DNF_CAP:
+                raise _IfUnparsed
+        return out
+
+    def disj() -> list[frozenset]:
+        out = conj()
+        while peek() == ("op", "||"):
+            take()
+            out = out + conj()
+            if len(out) > _IF_DNF_CAP:
+                raise _IfUnparsed
+        return out
+
+    try:
+        dnf = disj()
+    except (_IfUnparsed, RecursionError):  # pathological nesting = cannot prove
+        return None
+    return dnf if i == len(toks) and dnf else None
+
+
+def _atoms_contradict(a: tuple, b: tuple) -> bool:
+    """`x == y` vs `x != y`, or `x == 'p'` vs `x == 'q'` with p != q."""
+    (op_a, ops_a), (op_b, ops_b) = a, b
+    if ops_a == ops_b and op_a != op_b:
+        return True
+    if op_a == op_b == "==":
+        lit_a = [o for o in ops_a if o[0] == "str"]
+        lit_b = [o for o in ops_b if o[0] == "str"]
+        path_a = [o for o in ops_a if o[0] == "path"]
+        path_b = [o for o in ops_b if o[0] == "path"]
+        return (len(lit_a) == len(lit_b) == 1 and path_a == path_b
+                and lit_a[0] != lit_b[0]
+                and not (_if_literal_may_be_number(lit_a[0][1])
+                         and _if_literal_may_be_number(lit_b[0][1])))
+    return False
+
+
+def _jobs_mutually_exclusive(job_a: dict, job_b: dict) -> bool:
+    """True only when the two jobs' `if:` conditions are PROVABLY disjoint:
+    every way A can be true contradicts every way B can be true."""
+    da = _if_dnf(job_a.get("if") if isinstance(job_a, dict) else None)
+    db = _if_dnf(job_b.get("if") if isinstance(job_b, dict) else None)
+    if not da or not db:
+        return False
+    return all(any(_atoms_contradict(x, y) for x in ca for y in cb)
+               for ca in da for cb in db)
+
+
+def _co_running(jobs: dict, names: list[str]) -> list[str]:
+    """The subset of `names` that can run alongside at least one other job in
+    `names` — a job exclusive with every other one is never a duplicate copy."""
+    return [n for n in names
+            if any(m != n and not _jobs_mutually_exclusive(jobs.get(n) or {},
+                                                           jobs.get(m) or {})
+                   for m in names)]
+
+
 # ---- OPT14 — Repeated Checkout/Setup Without Artifact Handoff ----------------
 
 _INSTALL_RE = re.compile(
@@ -1807,6 +1991,8 @@ def _detect_opt14(doc: dict, raw: str) -> list[Hit]:
         if has_checkout and has_install:
             setup_jobs.append(job_name)
     has_handoff = has_upload and has_download
+    # Jobs that never co-run (provably exclusive `if:`) are not repeated work.
+    setup_jobs = _co_running(_jobs_from_doc(doc), setup_jobs)
     if len(setup_jobs) >= 2 and not has_handoff:
         return [Hit(
             line=1,
@@ -2507,8 +2693,10 @@ def _detect_opt12(doc: dict, raw: str) -> list[Hit]:
             continue
         sig = tuple(_step_sig(s) for s in steps)
         by_sig.setdefault(sig, []).append(name)
+    all_jobs = _jobs_from_doc(doc)
     hits: list[Hit] = []
     for sig, names in by_sig.items():
+        names = _co_running(all_jobs, names)  # exclusive jobs never co-run
         if len(names) < 2 or not any(_SETUP_SIG_RE.search(s) for s in sig):
             continue
         hits.append(Hit(
