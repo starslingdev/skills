@@ -26,7 +26,7 @@ def detect(large, packages=(159, 114, 88, 82, 74, 77, 96, 77), timing_context=Tr
     return findings[0], crit
 
 
-@pytest.mark.parametrize("marker,suffix,offset", [("Shard ", "", 0), ("", "", 0), ("Shard ", ", ubuntu22", 0), ("", "", 1), ("", "", 7)])
+@pytest.mark.parametrize("marker,suffix,offset", [("Shard ", "", 0), ("Partition ", "", 0), ("Shard ", ", ubuntu22", 0), ("Shard ", "", 1), ("Shard ", "", 7)])
 def test_atomic_family_splits_slow_test_with_realistic_saving(marker, suffix, offset):
     finding, _ = detect([817, 439, 436, 392, 492, 466], timing_context=False, marker=marker, suffix=suffix, offset=offset)
     note = finding["measured_evidence"]["note"]
@@ -37,7 +37,7 @@ def test_atomic_family_splits_slow_test_with_realistic_saving(marker, suffix, of
     assert "atomic-unit" in finding["measured_evidence"]["summary"]
 
 
-@pytest.mark.parametrize("marker", ["Shard ", ""])
+@pytest.mark.parametrize("marker", ["Shard ", "Partition "])
 def test_plain_imbalance_uses_only_its_family_mean(marker):
     finding, _ = detect([600, 500, 180], timing_context=False, marker=marker)
     assert "rebalance" in finding["measured_evidence"]["note"].lower()
@@ -117,3 +117,45 @@ def test_singleton_family_never_averages_other_families():
     assert _named_findings([("Test (Shard large-0)", 800),
                            ("Test (Shard packages-0)", 100),
                            ("Test (Shard packages-1)", 90)]) == []
+
+
+@pytest.mark.parametrize("legs", [
+    # Version axes without a shard/partition marker are distinct configurations,
+    # not interchangeable shards: no rebalance text, no oversized-test diagnosis.
+    [("postgres-14", 900), ("postgres-15", 800), ("postgres-16", 250)],
+    [("Node.js 18", 600), ("Node.js 20", 500), ("Node.js 22", 100)],
+    [("py3.11", 900), ("py3.12", 800), ("py3.13", 250)],
+])
+def test_unmarked_numbered_variants_keep_the_legacy_heterogeneous_diagnosis(legs):
+    findings = _named_findings([(f"Test ({variant})", seconds) for variant, seconds in legs])
+    assert len(findings) == 1
+    assert findings[0]["title"] == "Matrix Leg Imbalance"
+    assert "rebalance the test distribution" not in findings[0]["measured_evidence"]["note"]
+    assert "shard_family" not in findings[0]
+
+
+def test_unmarked_version_axis_below_the_legacy_threshold_is_not_flagged():
+    # 500/300 = 1.67x clears the atomic-unit cutoff but not the legacy 3x/2x
+    # imbalance threshold; without a shard marker it must stay unflagged.
+    assert _named_findings([("Test (postgres-14)", 500), ("Test (postgres-15)", 300),
+                            ("Test (postgres-16)", 290)]) == []
+
+
+def test_split_floor_includes_a_slower_leg_from_another_family():
+    findings = _named_findings([("Test (Shard large-0)", 900), ("Test (Shard large-1)", 200),
+                                ("Test (Shard packages-0)", 850), ("Test (Shard packages-1)", 100)])
+    assert len(findings) == 1
+    # Splitting large-0 cannot pull the matrix below packages-0 (850s).
+    assert findings[0]["wall_clock_p50_s"] == 50
+    assert "Test (Shard packages-0)" in findings[0]["measured_evidence"]["note"]
+
+
+def test_wrapped_planner_flag_is_found():
+    workflow = {"jobs": {
+        "plan": {"outputs": {"matrix": "${{ steps.make.outputs.matrix }}"},
+                 "steps": [{"id": "make", "run": "python plan.py \\\n  --split-shards \\\n  6"}]},
+        "test": {"name": "Test", "needs": "plan", "strategy": {
+            "matrix": "${{ fromJSON(needs.plan.outputs.matrix) }}"}},
+    }}
+    finding, _ = detect([817, 450, 440, 460, 492, 466], workflow_doc=workflow)
+    assert "--split-shards 6" in finding["measured_evidence"]["note"]
