@@ -111,14 +111,17 @@ before that pick, and do NOT narrate the menu in prose AHEAD of the
 question — no "the last option below saves it" describing choices the
 question has not yet presented: that forward-narration is what made a live
 close feel finished before the question was ever asked. This bans menu
-NARRATION, not the no-tool fallback's option list — on a platform with no
+NARRATION, not the no-tool fallback's option list (nor the mirror printed
+beside an experimental tool) — on a platform with no
 structured-question tool, the numbered options printed as the message's
 FINAL block ARE the question, not narration of one.
 
 **End the close BY ASKING the question — never by finishing a text
 message that leaves the choices unasked.** The offer IS the question,
 delivered per SKILL.md's interaction contract: a structured-question tool
-call where one exists (`AskUserQuestion` on Claude Code); where none does
+call where one exists (`AskUserQuestion` on Claude Code; for Codex's
+experimental `request_user_input`, ALSO print the same numbered list as the
+message's final block, since that tool can fail to render); where none does
 (most Codex runs), the question is the plain-message fallback whose
 numbered option list — SAME fixed options, SAME order, save last and
 verbatim — is printed as the FINAL block of your message and the turn ends

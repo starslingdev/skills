@@ -181,3 +181,32 @@ def test_skill_body_line_budget_guard_actually_fires_when_over():
     body = _skill_body_line_count(over)
     assert body == _SKILL_BODY_LINE_BUDGET          # frontmatter stripped, body isolated
     assert not (body < _SKILL_BODY_LINE_BUDGET)     # exactly at budget → the guard trips
+
+
+# --- Experimental-tool delivery (live Codex run, 2026-10-29) ------------------------
+
+def _interaction_contract(skill_md: str) -> str:
+    start = skill_md.index("**Interaction contract")
+    end = skill_md.index("agent-independent", start)
+    return re.sub(r"\s+", " ", skill_md[start:end])
+
+
+def test_experimental_question_tool_is_mirrored_in_the_plain_message():
+    """A live Codex close sent its fix question through the experimental
+    `request_user_input` tool, which never rendered; the agent then said it was
+    "waiting for your choice above" when nothing was visible, and offered a single
+    option with the always-last save dropped. The contract must (a) mirror the same
+    question + options in the plain message when the tool is experimental, (b) forbid
+    claiming to wait on a choice the user cannot see, and (c) keep >=2 options."""
+    contract = _interaction_contract(_SKILL_MD).replace("**", "")
+    # Long contiguous phrases: a shortened, negated or re-scoped rule goes red.
+    assert ("experimental — call it when exposed, and ALSO end your plain message "
+            "with the same question as a numbered option list, same options, same "
+            "order, sent before the call") in contract, \
+        "experimental tool not mirrored, re-scoped, or mirrored after a call that may hang"
+    assert ("Never say you are waiting on a choice unless its options are visible "
+            "in your own last message.") in contract
+    assert "(always ≥2 options unless a step below drops one by name)" in contract, \
+        "the >=2-option floor (with its named-exception carve-out) is not pinned"
+    assert ("phase 6's save option still last and verbatim "
+            "(`None, just save the report (.md)`)") in contract
