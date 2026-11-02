@@ -10107,7 +10107,7 @@ def _headline_followup_lines(
         for bound in reversed(cluster.get("wall_clock_derivation") or []):
             if not isinstance(bound, dict):
                 continue
-            if bound.get("bound") not in {"bound_cross_workflow", "bound_measured_critical_path"}:
+            if bound.get("bound") not in {"cross-workflow", "measured-critical-path"}:
                 continue
             if abs((_num(bound.get("to_s")) or 0.0) - effective) > 0.05:
                 continue
@@ -10115,7 +10115,7 @@ def _headline_followup_lines(
                               str(bound.get("reason") or ""))
             if match:
                 label, seconds = match[1], float(match[2])
-                if bound["bound"] == "bound_measured_critical_path":
+                if bound["bound"] == "measured-critical-path":
                     matches = [c for c in ((doc.get("pr_critical_path") or {}).get("checks") or [])
                                if _check_name(c) == label]
                     if len(matches) == 1 and matches[0].get("workflow_file"):
@@ -10142,6 +10142,7 @@ def _headline_followup_lines(
                      "re-measure all workflows after the change.")
     return [
         "> **What gates next:** " + next_gate,
+        "> This projection assumes the full headline saving is realized; a smaller fix may leave the current gate in place.",
         ">",
         "> **How to check it worked**",
         ">",

@@ -313,7 +313,9 @@ fix, use its applied cross-workflow bound rather than a sibling that descends
 with the fix. If the saved evidence cannot name a single next gate (for example,
 a population-weighted bound or a chain without a named competing path), say
 that the next gate is unavailable instead of inventing a label or duration.
-These are modeled post-fix floors, not observed after measurements.
+These are modeled post-fix floors, not observed after measurements. The report
+explicitly conditions this projection on realizing the full headline saving;
+a smaller fix may leave the current gate in place.
 
 - **Measure:** time from the push's first job created to the last job finished,
   across **all** workflows the push triggers. The last workflow to finish sets

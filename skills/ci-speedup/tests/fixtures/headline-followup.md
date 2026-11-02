@@ -9,9 +9,10 @@
 
 > **Bottom line.** A typical PR waits **10m 00s** for all checks to finish. The biggest single measured win is **~4m 10s** off the slowest fixable check, `tests` - see [Long pole 1](#pole-1) for the drill-down to the biggest lever.
 >
-> **10m 00s until all checks finish** - `tests` is the slowest check a typical PR waits on. 
+> **10m 00s until all checks finish** - `tests` is the slowest check a typical PR waits on.
 >
 > **What gates next:** After this fix, CI is gated by `quality.yml / lint` at ~350 s.
+> This projection assumes the full headline saving is realized; a smaller fix may leave the current gate in place.
 >
 > **How to check it worked**
 >

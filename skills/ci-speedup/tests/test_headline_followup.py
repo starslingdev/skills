@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 import blocking_path as bp
+from wall_clock import WallClockContext, size_wall_clock
 
 HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location("followup_verify", HERE / "verify_report.py")
@@ -46,6 +47,7 @@ def render(doc=None):
 
 
 def normalized(report):
+    report = "\n".join(line.rstrip() for line in report.split("\n"))
     return re.sub(r"\(skill commit `[^`]*`(?:, scripts tree `[^`]*`)?\)",
                   "(skill commit `NORMALIZED`)", report)
 
@@ -63,7 +65,7 @@ def test_headline_followup_verifier_is_registered_and_rejects_missing_content(tm
     check = vr.check_headline_followup(report, findings)
     assert check.ok and not check.skipped
     assert check.name in {c.name for c in vr.run_checks(report, tmp_path / "report.md", findings, None)}
-    for fragment in ["What gates next:", "How to check it worked", "**Measure:**",
+    for fragment in ["What gates next:", "This projection assumes", "How to check it worked", "**Measure:**",
                      "**Runs:**", "**Don't**", "**Caches:**"]:
         damaged = "\n".join(line for line in report.splitlines() if fragment not in line)
         assert not vr.check_headline_followup(damaged, findings).ok, fragment
@@ -78,7 +80,7 @@ def test_missing_floor_is_disclosed_without_inventing_measurements(tmp_path):
     assert "How to check it worked" in report
 
 
-@pytest.mark.parametrize("with_bound", [True, False])
+@pytest.mark.parametrize("with_bound", ["measured", "workflow", False])
 def test_cluster_headline_uses_its_stamped_floor_not_a_descending_sibling(with_bound):
     doc = document()
     doc["pr_critical_path"]["checks"].append({
@@ -89,9 +91,21 @@ def test_cluster_headline_uses_its_stamped_floor_not_a_descending_sibling(with_b
                    affected_jobs=["tests", "helper"],
                    evidence="A shared `Setup` step runs in both legs.")
     if with_bound:
-        finding["wall_clock_derivation"] = [{
-            "bound": "bound_measured_critical_path", "from_s": 400, "to_s": 250,
-            "reason": "wall-clock capped at the measured critical-path floor — `lint` (350s) is a slower concurrent check on a representative PR"}]
+        ctx = WallClockContext(
+            workflow=".github/workflows/test.yml", crit={"long_pole_p50": 600},
+            own_check_names=frozenset(["tests", "helper"]), cluster_floor_lever=True,
+            pr_checks=(("tests", 600), ("helper", 550), ("lint", 350))
+            if with_bound == "measured" else (),
+            concurrent=((".github/workflows/quality.yml", 350),)
+            if with_bound == "workflow" else ())
+        result = size_wall_clock(400, ctx)
+        finding["wall_clock_derivation"] = [
+            {"bound": b, "from_s": a, "to_s": c, "reason": why}
+            for b, a, c, why in result.derivation]
+        assert result.effective_s == 250
+        doc["per_workflow_timing"] = {
+            ".github/workflows/quality.yml": {"long_pole_job": "lint"}}
+
     report = render(doc)
     line = next(line for line in report.splitlines() if "What gates next:" in line)
     if with_bound:
@@ -99,3 +113,14 @@ def test_cluster_headline_uses_its_stamped_floor_not_a_descending_sibling(with_b
     else:
         assert "next gate is unavailable" in line
     assert "helper" not in line
+
+
+@pytest.mark.parametrize("saving", [100, None])
+def test_next_gate_is_conditional_on_realizing_full_headline_ceiling(saving):
+    doc = document()
+    if saving is None:
+        doc["findings"] = []
+    else:
+        doc["findings"][0]["wall_clock_p50_s"] = saving
+    report = render(doc)
+    assert "This projection assumes the full headline saving is realized; a smaller fix may leave the current gate in place." in report

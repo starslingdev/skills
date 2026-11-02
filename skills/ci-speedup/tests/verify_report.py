@@ -623,6 +623,7 @@ def check_headline_followup(report: str, findings_path: Path | None = None) -> C
             or gates[0] == "The next gate is unavailable from the saved floor evidence; re-measure all workflows after the change."):
         return Check(name, False, "missing or malformed gates-next line")
     required = [
+        "> This projection assumes the full headline saving is realized; a smaller fix may leave the current gate in place.",
         "> **How to check it worked**",
         "> - **Measure:** time from the push's first job created to the last job finished, across **all** workflows the push triggers.",
         "> - **Runs:** at least 2 before and 2 after, plus one unchanged rerun as a noise control.",
