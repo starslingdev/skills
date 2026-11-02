@@ -596,17 +596,53 @@ def check_headline_names_wall_clock(report: str) -> Check:
                  else f"headline names no wall-clock/merge axis: {bottom[:60]!r}")
 
 
+def _headline_gate_candidates(doc: dict) -> list[tuple[str, float]]:
+    """Every (label, seconds) the renderer could name as the next gate: a saved PR check at
+    its p50 or bimodal slow mode, or a floor named in a finding's stamped bound derivation."""
+    def num(v: object) -> float | None:
+        return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+    cp = doc.get("pr_critical_path") if isinstance(doc.get("pr_critical_path"), dict) else {}
+    checks = [c for c in (cp.get("checks") or []) if isinstance(c, dict)]
+    timing = doc.get("per_workflow_timing") if isinstance(doc.get("per_workflow_timing"), dict) else {}
+    out: list[tuple[str, float]] = []
+
+    def labels(check: str) -> list[str]:
+        found = [_strip_scope(check)]
+        for c in checks:
+            if str(c.get("name") or c.get("check") or "") == check and c.get("workflow_file"):
+                found.append(f"{_wf_base(str(c['workflow_file']))} / {_strip_scope(check)}")
+        for wf, t in timing.items():
+            if _wf_base(str(wf)) == check and isinstance(t, dict) and t.get("long_pole_job"):
+                found.append(f"{check} / {t['long_pole_job']}")
+        return found
+
+    for c in checks:
+        bi = c.get("bimodal") if isinstance(c.get("bimodal"), dict) else {}
+        for s in (num(c.get("p50_s")), num(bi.get("high_p50_s"))):
+            if s:
+                out += [(lbl, s) for lbl in labels(str(c.get("name") or c.get("check") or ""))]
+    for f in doc.get("findings") or []:
+        for bound in (f.get("wall_clock_derivation") or []) if isinstance(f, dict) else []:
+            m = re.search(r"floor [—-] `([^`]+)` \((\d+(?:\.\d+)?)s\)",
+                          str(bound.get("reason") or "") if isinstance(bound, dict) else "")
+            if m:
+                out += [(lbl, float(m[2])) for lbl in labels(m[1])]
+    return out
+
+
 def check_headline_followup(report: str, findings_path: Path | None = None) -> Check:
     """Every measured wall-clock headline includes a next gate and a measurement protocol."""
     name = "wall-clock headline carries next gate and verification guidance"
     measured = False
+    doc = None
     if findings_path:
         try:
             doc = json.loads(Path(findings_path).read_text())
             cp = doc.get("pr_critical_path") if isinstance(doc, dict) else None
             measured = bool(cp.get("poles")) if isinstance(cp, dict) else False
         except (OSError, ValueError, TypeError):
-            pass
+            doc = None
     if not measured:
         measured = bool(re.search(r"^> \*\*Bottom line\.\*\* A typical PR waits", report, re.MULTILINE))
     if not measured:
@@ -622,6 +658,13 @@ def check_headline_followup(report: str, findings_path: Path | None = None) -> C
             re.fullmatch(r"After this fix, CI is gated by `[^`]+` at ~\d+ s\.", gates[0])
             or gates[0] == "The next gate is unavailable from the saved floor evidence; re-measure all workflows after the change."):
         return Check(name, False, "missing or malformed gates-next line")
+    named = re.fullmatch(r"After this fix, CI is gated by `([^`]+)` at ~(\d+) s\.", gates[0])
+    if named and isinstance(doc, dict):
+        candidates = _headline_gate_candidates(doc)
+        label, secs = _norm_check(named[1]), int(named[2])
+        if not any(_norm_check(c) == label and abs(secs - s) <= 1 for c, s in candidates):
+            return Check(name, False, f"gates-next names `{named[1]}` at ~{secs} s, which no saved "
+                                      "check or stamped floor bound supports")
     required = [
         "> This projection assumes the full headline saving is realized; a smaller fix may leave the current gate in place.",
         "> **How to check it worked**",

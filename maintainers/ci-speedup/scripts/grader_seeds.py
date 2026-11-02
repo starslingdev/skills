@@ -171,8 +171,8 @@ CLASS_ENUM = frozenset({
 CHECK_CLASS = {
     "primary section present (Long poles)": "missing-phase-check",                       # a required phase section is absent
     "static-only banner matches CI shape": "fabricated-or-unsupported-finding",          # dormant-repo banner asserted at a live no-PR-gating repo / "no run timing" beside priced timed runs — the report contradicts its own data
-    "headline names the wall-clock (merge-wait) axis": "ambiguous-phase-instruction",
-    "wall-clock headline carries next gate and verification guidance": "missing-phase-check",     # headline mislabels the axis it renders
+    "headline names the wall-clock (merge-wait) axis": "ambiguous-phase-instruction",     # headline mislabels the axis it renders
+    "wall-clock headline carries next gate and verification guidance": "missing-phase-check",  # next-gate line or how-to-check block absent, or names a gate no saved floor supports
     "every #pole-N / #also-noticed / #pre-start-wait / #runner-minute-reductions reference resolves to an anchor": "missing-phase-check",  # broken cross-reference — a rendering-completeness gap
     "RCA hands off via prompts (never prescribes a fix, never dead-ends)": "prescribed-a-fix",  # exact match
     "agent-prompt MEASURED CAUSE never asserts timeline steps the pole doesn't render": "fabricated-or-unsupported-finding",  # a canned cause asserts a timeline shape the report contradicts

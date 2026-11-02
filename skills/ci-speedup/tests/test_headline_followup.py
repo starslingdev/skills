@@ -71,6 +71,18 @@ def test_headline_followup_verifier_is_registered_and_rejects_missing_content(tm
         assert not vr.check_headline_followup(damaged, findings).ok, fragment
 
 
+@pytest.mark.parametrize("bad", [
+    "After this fix, CI is gated by `quality.yml / nonexistent` at ~350 s.",
+    "After this fix, CI is gated by `quality.yml / lint` at ~999999 s.",
+])
+def test_headline_followup_verifier_rejects_a_gate_the_findings_do_not_support(tmp_path, bad):
+    report = render().replace(
+        "After this fix, CI is gated by `quality.yml / lint` at ~350 s.", bad)
+    findings = tmp_path / "findings.json"
+    findings.write_text(json.dumps(document()))
+    assert not vr.check_headline_followup(report, findings).ok
+
+
 def test_missing_floor_is_disclosed_without_inventing_measurements(tmp_path):
     doc = document()
     doc["pr_critical_path"]["checks"] = doc["pr_critical_path"]["checks"][:1]

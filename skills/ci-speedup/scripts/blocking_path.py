@@ -11381,11 +11381,12 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
         _config_era_disclosure_lines(cp, captured_at),
         # Fileless/managed status-check disclosure (PR-lifetime status-gating latency).
         _fileless_disclosure_lines(cp),
-        # "After the gate" runner-minute line.
+        # What gates next + how to check it worked (from the floor that sized the headline).
         _headline_followup_lines(
             doc, top_fixable, floor_pool,
             cluster=(_cluster_f if _cluster_f is not None and _cluster_s > _existing_win + 0.5 else None),
             chain=chain_active, win=win),
+        # "After the gate" runner-minute line.
         _tier2_bottom_line(all_findings, cs, doc),
     )
 
