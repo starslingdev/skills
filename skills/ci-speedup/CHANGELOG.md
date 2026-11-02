@@ -1188,6 +1188,8 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-11-01** — OPT25 scopes named shard families independently, diagnoses oversized test/file candidates at a 1.6× slow/second ratio, and sizes their split against the next leg. Plateau guidance follows dynamic matrix outputs to numeric planner knobs and keeps its cross-workflow-capped sequential ceiling separate from credited savings.
+
 - **2026-10-29** — Job-exclusivity proofs only fold ASCII conditions; Unicode literals whose Actions comparison differs from Python lowercasing no longer hide duplicated setup (PR #171).
 
 - **2026-10-29** — OPT14 (repeated checkout/setup without artifact handoff)
