@@ -8023,6 +8023,16 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
             f"Where: {locs}."]
     if ev:
         body.append(f"What ci-speedup saw: {ev}")
+    if pat == "OPT25":
+        # The diagnosis/next step must travel with the agent hand-off, including
+        # planner knobs. Use the same member as the credited magnitude.
+        guidance_members = [prefer] if prefer is not None else members[:8]
+        for member in guidance_members:
+            if not member.get("shard_family"):
+                continue  # legacy unstructured findings have no new family guidance
+            note = str((member.get("measured_evidence") or {}).get("note") or "").strip()
+            if note:
+                body.append(f"Investigate this measured shard diagnosis: {note}")
     body += [saving, "",
              "Read the catalog entry (background, fix recipe, and guardrail):",
              f"  {url}", ""]

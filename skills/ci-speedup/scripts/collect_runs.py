@@ -8045,7 +8045,14 @@ def _opt25_family(variant: str) -> str | None:
     parts = [part.strip() for part in variant.split(",")]
     candidates = []
     for i, part in enumerate(parts):
-        match = _re.fullmatch(r"(.*?[A-Za-z][\w .-]*?)[ _-]*\d+", part)
+        # Recognizable platform/runtime versions are distinct configurations,
+        # even when their spelling resembles a numbered family. Do not impose
+        # a starting index: sampled shard families may be one-based or partial.
+        if _re.fullmatch(
+                r"(?:ubuntu|macos|windows|node(?:js)?|python|go|ruby|java|jdk|dotnet|rust)"
+                r"[ _.-]*v?\d+(?:[._-]\d+)*", part, _re.IGNORECASE):
+            continue
+        match = _re.fullmatch(r"(.*?[A-Za-z][\w .-]*?)[ _-]*\d+[ _-]*", part)
         if not match:
             continue
         prefix = match.group(1).rstrip(" _-")
@@ -8071,7 +8078,9 @@ def _opt25_planner_knobs(base: str, workflow_doc: dict[str, Any]) -> list[str]:
     if not isinstance(jobs, dict):
         return []
     matches = [job for key, job in jobs.items() if isinstance(job, dict)
-               and str(job.get("name", key)) == base]
+               and (str(job.get("name", key)) == base
+                    or ("${{" in str(job.get("name", ""))
+                        and _matrix_base_name(str(job["name"])) == base))]
     if len(matches) != 1:
         return []
     strategy = matches[0].get("strategy") or {}
@@ -8098,7 +8107,19 @@ def _opt25_planner_knobs(base: str, workflow_doc: dict[str, Any]) -> list[str]:
         if not isinstance(run, str):
             continue
         try:
-            tokens = shlex.split(run, comments=True)
+            # Shell output assignments commonly wrap the planner in $(...).
+            # Parse literal command substitutions separately, without executing
+            # them; quoted assignments otherwise hide flags in one shell token.
+            source_lexer = shlex.shlex(run, posix=False, punctuation_chars="();&|<>")
+            source_lexer.whitespace_split = True
+            substitutions = [inner for token in source_lexer
+                             if not token.startswith("'")
+                             for inner in _re.findall(r"\$\(([^()]*)\)", token)]
+            tokens = []
+            for command in [run, *substitutions]:
+                lexer = shlex.shlex(command, posix=True, punctuation_chars="();&|<>")
+                lexer.whitespace_split = True
+                tokens.extend(list(lexer))
         except ValueError:
             continue
         for i, token in enumerate(tokens):
@@ -8196,8 +8217,9 @@ def _detect_opt25_shard_imbalance(
             medians = members
             shards = {n: shards[n] for n in medians}
             ranked = sorted(medians, key=medians.get, reverse=True)
-        else:
-            family = None
+        elif family is not None:
+            # A missing peer is missing evidence, not permission to pool families.
+            continue
         slow_name, fast_name = ranked[0], ranked[-1]
         slow, fast = medians[slow_name], medians[fast_name]
         second = medians[ranked[1]]  # next-slowest leg = the new pole after a fix
@@ -8314,6 +8336,7 @@ def _detect_opt25_shard_imbalance(
             realization=("direct" if wc > 0 else "none"), measured_evidence=me,
         ))
         if family is not None:
+            out[-1]["shard_family"] = family
             out[-1]["evidence"] = summary
             out[-1]["measured_signal"] = summary
         if next_step is not None:
