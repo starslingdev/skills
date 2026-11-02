@@ -923,6 +923,46 @@ def test_diag_durable_break_says_property_not_rerun():
     assert "RE-RUN the SAME audit" not in s
 
 
+def test_diag_gh_pass_that_never_ran_is_not_called_a_property_of_the_repo():
+    # A gh pass that could not start (no gh, no auth — or a sandboxed / offline shell
+    # where `gh auth status` fails) measured NOTHING about the repo. The diagnostics used
+    # to say "a broken run" and then "a PROPERTY of the repo … re-running reproduces it"
+    # in the same block — self-contradictory, and false for the sandbox case, where a
+    # retry with network access recovers the full pass.
+    doc = _fdoc(
+        ds={"tiers_run": [], "partial_kind": "gh_unavailable",
+            # The shape collect_runs._gh_unavailable_reason produces.
+            "partial_reason": "gh data pass could not start: `gh auth status` exited 1: "
+                              "error connecting to api.github.com. gh may be missing or "
+                              "logged out — or this shell is sandboxed / has no network "
+                              "access (gh works in a normal terminal but not here). If "
+                              "`gh auth status` succeeds elsewhere, retry the audit with "
+                              "network / host access."},
+        per_workflow_monthly_volume={})
+    s = build_summary(doc)
+    assert "EMPTY-SPINE DIAGNOSTICS" in s
+    assert "error connecting to api.github.com" in s
+    assert "PROPERTY of the repo" not in s
+    assert "re-running reproduces it" not in s
+    assert "sandbox" in s and "network" in s
+
+
+def test_gh_pass_that_never_ran_does_not_forbid_re_probing_gh():
+    # "the data pass already queried rulesets ... (do NOT re-probe gh)" is false when the
+    # gh pass never started — and the remedy in that case IS to retry gh.
+    doc = _fdoc(
+        ds={"tiers_run": [], "partial_kind": "gh_unavailable",
+            "partial_reason": "gh data pass could not start: `gh auth status` exited 1: "
+                              "Failed to log in. Retry the audit with network / host "
+                              "access."},
+        per_workflow_monthly_volume={})
+    s = build_summary(doc)
+    assert "do NOT re-probe gh" not in s
+    assert "already queried" not in s
+    assert "did NOT run — gh data pass could not start" not in s   # no doubled phrase
+    assert s.count("network / host access") == 1                    # remedy said once
+
+
 def test_diag_transient_classifier_pr_kept_keys_on_fetch_failures():
     assert _break_is_transient(_fdoc(cp={"sample_fetch_failures": 2}), "pr_kept") is True
     assert _break_is_transient(_fdoc(cp={"sample_fetch_failures": 0}), "pr_kept") is False
