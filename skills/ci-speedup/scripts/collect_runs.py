@@ -8088,9 +8088,131 @@ def _new_structural_finding(
     return out
 
 
+def _opt25_family(variant: str) -> str | None:
+    """Named numbered families only; bare indices retain the legacy diagnosis.
+
+    Keep every other axis intact, so platforms/configurations never mix.
+    """
+    parts = [part.strip() for part in variant.split(",")]
+    candidates = []
+    for i, part in enumerate(parts):
+        # Recognizable platform/runtime versions are distinct configurations,
+        # even when their spelling resembles a numbered family. Do not impose
+        # a starting index: sampled shard families may be one-based or partial.
+        if _re.fullmatch(
+                r"(?:ubuntu|macos|windows|node(?:js)?|python|go|ruby|java|jdk|dotnet|rust)"
+                r"[ _.-]*v?\d+(?:[._-]\d+)*", part, _re.IGNORECASE):
+            continue
+        match = _re.fullmatch(r"(.*?[A-Za-z][\w .-]*?)[ _-]*\d+[ _-]*", part)
+        if not match:
+            continue
+        prefix = match.group(1).rstrip(" _-")
+        # 'shard 1' carries an index but no named family such as 'large'.
+        if prefix.lower() in {"shard", "partition"}:
+            continue
+        candidates.append((i, prefix))
+    marked = [(i, prefix) for i, prefix in candidates
+              if _re.search(r"\b(?:shard|partition)\b", parts[i], _re.IGNORECASE)]
+    candidates = marked or candidates
+    if len(candidates) != 1:
+        return None
+    i, prefix = candidates[0]
+    parts[i] = prefix
+    return ", ".join(parts)
+
+
+def _opt25_planner_knobs(base: str, workflow_doc: dict[str, Any]) -> list[str]:
+    """Follow matrix -> job output -> producing step, never execute repo code."""
+    import shlex
+
+    jobs = workflow_doc.get("jobs") or {}
+    if not isinstance(jobs, dict):
+        return []
+    matches = [job for key, job in jobs.items() if isinstance(job, dict)
+               and (str(job.get("name", key)) == base
+                    or ("${{" in str(job.get("name", ""))
+                        and _matrix_base_name(str(job["name"])) == base))]
+    if len(matches) != 1:
+        return []
+    strategy = matches[0].get("strategy") or {}
+    matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
+    producer = _re.fullmatch(
+        r"\s*\$\{\{\s*fromJSON\(\s*needs\.([\w-]+)\.outputs\.([\w-]+)\s*\)\s*\}\}\s*",
+        matrix or "") if isinstance(matrix, str) else None
+    if not producer:
+        return []
+    job = jobs.get(producer[1]) or {}
+    if not isinstance(job, dict):
+        return []
+    outputs = job.get("outputs") or {}
+    expression = outputs.get(producer[2], "") if isinstance(outputs, dict) else ""
+    step_ref = _re.fullmatch(
+        r"\s*\$\{\{\s*steps\.([\w-]+)\.outputs\.[\w-]+\s*\}\}\s*", str(expression))
+    if not step_ref:
+        return []
+    knobs = []
+    for step in job.get("steps") or []:
+        if not isinstance(step, dict) or step.get("id") != step_ref[1]:
+            continue
+        run = step.get("run")
+        if not isinstance(run, str):
+            continue
+        # Join shell line continuations so `--split-shards \` + `6` stays one flag.
+        run = _re.sub(r"\\\r?\n", " ", run)
+        try:
+            # Shell output assignments commonly wrap the planner in $(...).
+            # Parse literal command substitutions separately, without executing
+            # them; quoted assignments otherwise hide flags in one shell token.
+            source_lexer = shlex.shlex(run, posix=False, punctuation_chars="();&|<>")
+            source_lexer.whitespace_split = True
+            substitutions = [inner for token in source_lexer
+                             if not token.startswith("'")
+                             for inner in _re.findall(r"\$\(([^()]*)\)", token)]
+            tokens = []
+            for command in [run, *substitutions]:
+                lexer = shlex.shlex(command, posix=True, punctuation_chars="();&|<>")
+                lexer.whitespace_split = True
+                tokens.extend(list(lexer))
+        except ValueError:
+            continue
+        for i, token in enumerate(tokens):
+            flag, sep, value = token.partition("=")
+            if not _re.fullmatch(r"--(?:shards|split-shards|[\w-]+-target-seconds|shard-count)", flag):
+                continue
+            if not sep:
+                value = tokens[i + 1] if i + 1 < len(tokens) else ""
+            if _re.fullmatch(r"\d+(?:\.\d+)?", value) and float(value) > 0:
+                knob = f"{flag} {value}"
+                if knob not in knobs:
+                    knobs.append(knob)
+    return knobs
+
+
+def _size_opt25_next_step(finding: dict[str, Any], ctx: WallClockContext) -> None:
+    """A sequential ceiling, never added to the first-step saving or totals."""
+    step = finding.get("next_step")
+    if finding.get("pattern") != "OPT25" or not isinstance(step, dict):
+        return
+    if not ctx.concurrent and not ctx.pr_checks:
+        return  # no measured cross-workflow floor: keep guidance qualitative
+    from dataclasses import replace
+    result = size_wall_clock(step["combined_raw_ceiling_s"],
+                             replace(ctx, affected_jobs=tuple(step["family_jobs"])))
+    first = size_wall_clock(float(finding.get("wall_clock_p50_s") or 0), ctx).effective_s
+    additional = round(max(0.0, result.effective_s - first), 1)
+    step["combined_wall_clock_ceiling_s"] = result.effective_s
+    step["additional_wall_clock_ceiling_s"] = additional
+    step["derivation"] = [dict(bound=b, from_s=a, to_s=c, reason=why)
+                          for b, a, c, why in result.derivation]
+    finding["measured_evidence"]["note"] += (
+        f" The combined split-and-shard-count ceiling is ~{result.effective_s:.0f}s "
+        f"of wall-clock, at most ~{additional:.0f}s beyond the first step, "
+        "capped by the existing cross-workflow floor; this is not an extra credited saving.")
+
+
 def _detect_opt25_shard_imbalance(
     wf_path: str, jobs_per_run: list[list[dict[str, Any]]], start_idx: int,
-    crit: dict[str, Any],
+    crit: dict[str, Any], workflow_doc: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Shard durations per matrix base name across runs; flag if max/min > 3
     (or > 2 if the slow shard sits on the workflow's long pole). Catalog body
@@ -8137,18 +8259,43 @@ def _detect_opt25_shard_imbalance(
             continue
         medians = {n: _stats.median([d for d, _ in ds]) for n, ds in shards.items()}
         ranked = sorted(medians, key=medians.get, reverse=True)
+        # Scope the diagnosis to the slowest leg's named family. Unstructured
+        # matrices retain the existing homogeneous/heterogeneous behavior.
+        all_medians = medians
+        # Only an explicit shard/partition axis makes numbered variants shard
+        # families; `postgres-14` or `Node.js 20` are distinct configurations.
+        families = ({n: _opt25_family(n[len(base):].strip().strip("()"))
+                     for n in medians if _matrix_base_name(n) == base}
+                    if base_sharded.get(base, False) else {})
+        family = families.get(ranked[0])
+        members = {n: d for n, d in medians.items() if families.get(n) == family}
+        if family is not None and len(members) >= 2:
+            medians = members
+            shards = {n: shards[n] for n in medians}
+            ranked = sorted(medians, key=medians.get, reverse=True)
+        elif family is not None:
+            # A missing peer is missing evidence, not permission to pool families.
+            continue
         slow_name, fast_name = ranked[0], ranked[-1]
         slow, fast = medians[slow_name], medians[fast_name]
         second = medians[ranked[1]]  # next-slowest leg = the new pole after a fix
+        # A slower leg of ANOTHER family in the same matrix still gates it after
+        # the fix, so it floors the saving too (legacy matrices: no outside legs).
+        outside_name = max((n for n in all_medians if n not in medians),
+                           key=all_medians.get, default=None)
+        outside_s = all_medians[outside_name] if outside_name is not None else 0.0
+        floor_name, floor_s = ((outside_name, outside_s) if outside_s > second
+                               else (ranked[1], second))
         if fast <= 0:
             continue
         ratio = slow / fast
         # Threshold from catalog: >3x normally, >2x if slow shard is the long pole.
         thresh = 2.0 if slow >= 0.9 * long_pole else 3.0
-        if ratio <= thresh:
+        atomic = family is not None and slow >= 1.6 * second
+        if ratio <= thresh and not atomic:
             continue
         idx += 1
-        is_sharded = base_sharded.get(base, False)
+        is_sharded = family is not None or base_sharded.get(base, False)
         n_samples = sum(len(v) for v in shards.values())
         # Build the run-cited evidence table: every leg, slowest→fastest, each
         # linking to the actual job log of its worst observed run.
@@ -8159,10 +8306,10 @@ def _detect_opt25_shard_imbalance(
             shown = f"[{worst_d:.0f}s]({worst_url})" if worst_url else f"{worst_d:.0f}s"
             rows.append([f"`{leg}`", f"{medians[leg]:.0f}s", str(len(samples)), shown])
         leg_word = "shard" if is_sharded else "leg"
-        if is_sharded:
+        if is_sharded and not atomic:
             # Homogeneous suite: tests are interchangeable, so rebalance toward
             # the mean (achievable by redistributing test files / timing-split).
-            balanced = sum(medians.values()) / len(medians)
+            balanced = max(sum(medians.values()) / len(medians), outside_s)
             wc = round(max(slow - balanced, 0.0), 1)
             wc, cap_note = _cap_wall_clock(wc, slow_name, crit)
             title = "Shard Imbalance"
@@ -8180,7 +8327,7 @@ def _detect_opt25_shard_imbalance(
             # Heterogeneous matrix: legs do different work and can't be
             # rebalanced. Splitting the slow leg in two floors at the
             # NEXT-slowest leg, which becomes the new long pole.
-            wc = round(max(slow - max(slow / 2.0, second), 0.0), 1)
+            wc = round(max(slow - max(slow / 2.0, floor_s), 0.0), 1)
             wc, cap_note = _cap_wall_clock(wc, slow_name, crit)
             title = "Matrix Leg Imbalance"
             summary = (f"Across {n_samples} sampled `{base}` runs, the slowest leg "
@@ -8197,6 +8344,39 @@ def _detect_opt25_shard_imbalance(
                     f"lower.")
             size_note = (f"split the slow leg `{slow_name}`; saving (~{wc:.0f}s) is "
                          f"bounded by the next-slowest leg ({second:.0f}s)")
+        next_step = None
+        if family is not None:
+            rule = "atomic-unit" if atomic else "plain-imbalance"
+            summary = (f"Family `{family}`; {rule} rule: slow/second = "
+                       f"{slow / second:.2f}x (atomic-unit cutoff 1.6x); "
+                       f"family mean {sum(medians.values()) / len(medians):.0f}s. " + summary)
+        if atomic:
+            title = "Oversized Test or File in Shard Family"
+            summary = (f"Family `{family}`; atomic-unit rule: slow/second = "
+                       f"{slow / second:.2f}x >= 1.6x. `{slow_name}` takes "
+                       f"{slow:.0f}s; next-slowest `{ranked[1]}` takes {second:.0f}s.")
+            note = ("The slow shard is one oversized test or file that the splitter "
+                    "can't spread under the atomic-unit heuristic. Inspect its test timings "
+                    "to confirm, then split the slow test itself (subtests or a "
+                    "table-driven partition, or split the file). Adding shards or timing "
+                    f"data won't help that indivisible unit. Floors at `{floor_name}` "
+                    f"({floor_s:.0f}s), or the split half ({slow / 2:.0f}s), whichever is higher.")
+            size_note = f"split the slow test or file; modeled saving ~{wc:.0f}s"
+            rest = [medians[n] for n in ranked[1:]]
+            plateau = _stats.median(rest)
+            if len(rest) >= 2 and second >= slow / 2 and all(
+                    0.85 * plateau <= d <= 1.15 * plateau for d in rest):
+                knobs = _opt25_planner_knobs(base, workflow_doc or {})
+                planner = ", ".join(f"`{knob}`" for knob in knobs) or "the repo's matrix planner"
+                note += (f" Then raise this family's shard count. Its legs plateau at "
+                         f"~{plateau:.0f}s, so the planner's target is the floor. "
+                         f"Inspect {planner} for the knob to turn.")
+                outside = max((d for n, d in all_medians.items() if n not in medians), default=0.0)
+                outside = max(outside, max((d for n, d in (crit.get("job_p50") or {}).items()
+                                            if n not in medians), default=0.0))
+                next_step = {"family": family, "plateau_s": plateau,
+                             "family_jobs": list(medians), "planner_knobs": knobs,
+                             "combined_raw_ceiling_s": max(0.0, slow - max(slow / 2, outside))}
         me = {
             "summary": summary,
             "table": {"headers": [leg_word.capitalize(), "Median", "Samples",
@@ -8218,6 +8398,12 @@ def _detect_opt25_shard_imbalance(
             wc_p50=wc, rm=None, size_note=size_note,
             realization=("direct" if wc > 0 else "none"), measured_evidence=me,
         ))
+        if family is not None:
+            out[-1]["shard_family"] = family
+            out[-1]["evidence"] = summary
+            out[-1]["measured_signal"] = summary
+        if next_step is not None:
+            out[-1]["next_step"] = next_step
     return out
 
 
@@ -25749,7 +25935,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
 
-        new = _detect_opt25_shard_imbalance(wf_path, jobs_per_run, next_id, crit)
+        new = _detect_opt25_shard_imbalance(
+            wf_path, jobs_per_run, next_id, crit, workflow_doc=_wf_docs.get(wf_path, {}))
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
 
@@ -26249,6 +26436,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 pr_check_populations=tuple(pr_check_populations),
                 chain_members=_chain_ctx_members, chain_p50_s=_chain_ctx_p50,
                 chain_win_s=_chain_ctx_win)
+            _size_opt25_next_step(f, ctx)
             res = size_wall_clock(float(wc), ctx)
             if res.derivation:
                 f["wall_clock_p50_s"] = res.effective_s

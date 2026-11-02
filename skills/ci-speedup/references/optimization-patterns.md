@@ -1855,17 +1855,25 @@ title_template: "Shard Imbalance"
 
 **Anti-pattern**: A matrix job where the slowest leg takes >3x longer than the fastest. The workflow's wall clock is bounded by the slowest leg, so the imbalance negates the parallelism benefit.
 
-**TWO DISTINCT CASES — the fix differs, so the detector must classify which it is:**
+**Classify within the slowest leg's family before choosing a remedy:**
+
+Strip trailing digits and separators from named variants (`slow-0` → `large`), preserving other matrix axes. Families exist only on an explicit `shard` / `partition` axis (`Shard slow-0`); unmarked numbered variants such as `postgres-14` or `Node.js 20` are distinct configurations. Rank and average only that family; a slower leg of another family in the same matrix still floors the saving. Without a named family structure, preserve the existing classification below. Recognizable platform/runtime version labels remain heterogeneous. Named shard families need no particular starting index: one-based and partially sampled families are supported. A singleton named family has no peer evidence and is not pooled with other families.
+
+**Atomic-unit case:** when the family's slowest median is at least **1.6×** its second-slowest, use the oversized-test/file hypothesis even with an explicit shard marker. Inspect test timings to confirm an indivisible unit, then split the slow test itself (subtests, a table-driven partition, or a smaller file). Adding shards or timing data cannot spread that unit. Model `slow − max(slow/2, second)` and apply the existing workflow and cross-workflow bounds. Evidence names the family and the rule. Otherwise retain the plain-imbalance remedy, using the family mean.
+
+**Other cases:**
 
 1. **Homogeneous sharded suite** — the matrix axis is an explicit `shard` / `partition` index (`test (shard 1/4)`, `(partition 2)`). The legs run *interchangeable slices of one test suite*, so a slow shard is a **distribution** problem. Fix = rebalance.
 2. **Heterogeneous matrix of distinct legs** — the matrix axis is a set of *different packages / configs / backends* (`@org/prisma-adapter …` vs `@org/memory-adapter …`; `(postgres)` vs `(mysql)`). The legs do **genuinely different work** and are **NOT interchangeable** — you cannot move tests between them. A slow leg here is the **long pole**, not a distribution skew. Fix = split the slow leg itself, NOT rebalance.
 
-**Fix recipe**: The remedy depends on which case the detector classified (the finding's evidence says which). For a **homogeneous sharded suite**, rebalance the distribution — enable timing-based splitting (pytest-split, nextest timing data) or raise the shard count so the hot shard drops toward the mean leg. For a **heterogeneous matrix of distinct legs**, you cannot rebalance non-interchangeable legs — split the slowest leg itself (sub-shard that package's suite, or split its backends into parallel jobs); the saving floors at the next-slowest leg.
+**Fix recipe**: First apply the family-scoped atomic-unit rule above: split the oversized test or file and inspect the planner knobs below for the next step. For findings outside that case, the remedy depends on which case the detector classified (the finding's evidence says which). For a **homogeneous sharded suite**, rebalance the distribution — enable timing-based splitting (pytest-split, nextest timing data) or raise the shard count so the hot shard drops toward the mean leg. For a **heterogeneous matrix of distinct legs**, you cannot rebalance non-interchangeable legs — split the slowest leg itself (sub-shard that package's suite, or split its backends into parallel jobs); the saving floors at the next-slowest leg.
+
+**Next step / planner knobs:** when the atomic split floors at the second leg and at least two remaining legs lie within ±15% of their median, raise this family's shard count next. The plateau is the planner target; keep the combined ceiling separate from the first fix and cap it through `wall_clock.py`'s existing cross-workflow bounds. Without a measured cross-workflow floor, offer only qualitative guidance. For a `fromJSON(needs.<job>.outputs.<x>)` matrix, follow that output to its producing step and surface numeric `--shards`, `--split-shards`, `--*-target-seconds`, or `--shard-count` flags from its command. Otherwise name "the repo's matrix planner". Inspect which knob controls the named family before changing it.
 
 **Detection heuristic**:
 
-- Collect per-leg median duration of a matrix base across sampled runs; flag if `max_leg_median / min_leg_median > 3` (**lower to 2x** when the slow leg is the workflow's long pole).
-- **Classify the case**: the matrix is *sharded* (case 1) only when the varying axis token is an explicit `shard`/`partition` marker. A prefix-varying / named-package / named-config axis is *heterogeneous* (case 2). Bare-number axes (node versions, etc.) are treated as heterogeneous (they are not interchangeable shards).
+- Collect per-leg median duration of a matrix base across sampled runs; flag an atomic-unit ratio of at least 1.6×, or a plain imbalance if `max_leg_median / min_leg_median > 3` (**lower to 2x** when the slow leg is the workflow's long pole).
+- **Classify the case**: without a named family, the matrix is *sharded* (case 1) only when the varying axis token is an explicit `shard`/`partition` marker. A prefix-varying / named-package / named-config axis is *heterogeneous* (case 2). Bare-number axes (node versions, etc.) are treated as heterogeneous (they are not interchangeable shards).
 
 **Fix — case 1 (sharded suite), achievable by redistribution**:
 

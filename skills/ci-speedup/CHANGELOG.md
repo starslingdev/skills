@@ -1188,6 +1188,8 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-11-02** — OPT25 scopes named shard families (explicit `shard`/`partition` axes only; unmarked version axes such as `postgres-14` keep the legacy diagnosis) independently, diagnoses oversized test/file candidates at a 1.6× slow/second ratio, and sizes their split against the next leg, including a slower leg from another family in the same matrix. Planner flags split across shell line continuations are recognized. Plateau guidance follows dynamic matrix outputs to numeric planner knobs and keeps its cross-workflow-capped sequential ceiling separate from credited savings. The wall-clock agent prompt includes this guidance (PR #173).
+
 - **2026-10-29** — Failed gh probes select the error account rather than an
   earlier successful login when multiple hosts or accounts are configured,
   including over a `!` warning (such as missing token scopes) printed under
