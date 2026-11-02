@@ -13,6 +13,17 @@ narrow what may be *claimed* and define *when* the phase runs. **They change non
 amendment and a locked decision could be read as interacting, the locked decision
 governs.
 
+**Measurement amendment 2026-11-02.** Phase 7 compares push-wide wall clock:
+first job created to last job finished across **all** workflows triggered by the
+push. This supersedes the former single-gating-check metric and sampling scope.
+The N=2/adaptive-to-4 after-sample rule, variance threshold, exact-head binding,
+rerun/dispatch mechanisms, opt-out, and workload-attribution safeguards remain.
+A sample now requires a complete matched cohort, not one selected workflow.
+The interim report protocol in `wall-clock-methodology.md` §7 additionally calls
+for at least two before samples and one unchanged rerun as a noise control;
+disclose that control separately, including its added cost. A missing complete
+cohort makes repository wall-clock change unavailable.
+
 ## Problem
 
 ci-speedup is a *speedup* tool, but today it never tells the user how much
@@ -25,7 +36,7 @@ measurable, with the disclaimers that keep it honest.
 ## Goal
 
 After a selected fix is applied to a branch and its CI has run, **automatically**
-report the measured before → after change in the gating check's merge-wait, as a
+report the measured before → after change in push-wide CI wall-clock, as a
 range with a sample size and the disclaimers below — **without the user asking**.
 
 Explicit non-goals (v1):
@@ -42,7 +53,7 @@ Explicit non-goals (v1):
 The skill's phases end at **6 (Present & hand off)**, where — on the user's pick —
 it applies the fix and (with the #234 close change, in flight) verifies it and
 pauses before committing / opening a PR. Phase 7 presupposes the user then
-**pushes the fix to a branch** and its CI runs the gating workflow; it runs
+**pushes the fix to a branch** and all workflows triggered by that push complete; it runs
 **after** that:
 
 ```
@@ -51,7 +62,7 @@ pauses before committing / opening a PR. Phase 7 presupposes the user then
 ```
 
 Trigger condition: the fix is bound to an exact remote head SHA AND that head's
-initial relevant CI run has completed (see "Sampling", and "Trigger and resume
+initial complete CI cohort has completed (see "Sampling", and "Trigger and resume
 contract" for the precise eligibility, binding, and resume rules). Those rules
 describe the phase once it exists; they do not make it live. Phase 6 today ends
 at applying the fix, so until the skill gains a push-to-branch step, **nothing
@@ -62,13 +73,16 @@ phase is reachable now.
 ## Measurement design
 
 ### "Before" — reuse, don't re-measure
-The report already computes the gating check's **p50 over the sampled window**
-(the measured critical-path / merge-wait — SKILL.md phase 3, the "Bottom line"
-figure). Reuse that exact number as the baseline. Do **not** re-run main.
+Reuse historical push cohorts with complete job creation/completion timestamps
+across all triggered workflows. For each push compute
+`max(job.completed_at) - min(job.created_at)`, then take the median over at least
+two comparable pushes. Do not substitute the report's gating-check p50: it is a
+different metric. Missing cross-workflow timestamps make the baseline unavailable.
+The unchanged rerun control must keep its bound commit and workload identical;
+report it separately rather than treating it as a changed-code sample.
 
 ### "After" — fresh runs on the fix branch
-- **Sampling: N = 2, adaptive up to 4** (Decision 1). Collect the gating
-  workflow's timing on the fix branch from N runs — the automatic push/PR run plus
+- **Sampling: N = 2, adaptive up to 4** (Decision 1). Collect the complete push-cohort timing on the fix branch from N samples — the automatic push/PR run plus
   reruns (see "Triggering"). CI wall-clock is noisy — in this repo's own data a
   single step swung 5m20s → 7m35s (±20%) across three runs, so **one run is not
   evidence** and even two can both land high or low by luck. If the runs disagree
@@ -99,7 +113,8 @@ figure). Reuse that exact number as the baseline. Do **not** re-run main.
   cost is disclosed (Decision 4), never hidden behind a "free" claim.
 
 ### What is compared
-The **gating check's wall-clock** (the merge-wait the report headlines):
+The **push-wide CI wall-clock**, from first job created to last job finished
+across all workflows triggered by each push:
 before-p50 vs after-median, plus the delta as a percentage and absolute time.
 Optionally, if the fix targeted a specific step, the step-level before/after too
 (the report already has the step timeline).
@@ -110,8 +125,8 @@ Every before/after MUST carry these; they are the difference between an honest
 measurement and a misleading one:
 
 1. **Sample size** — "N fresh runs" stated explicitly.
-2. **Asymmetry** — before = historical p50 of *M sampled main runs* (many
-   different commits, on `push` events); after = *N fresh branch runs* of a
+2. **Asymmetry** — before = historical p50 of *M complete historical push cohorts* (many
+   different commits, on `push` events); after = *N complete fresh branch cohorts* of a
    *single commit* (rerun attempts, on `pull_request`/rerun events), under
    possibly-different runner load, cache state, and queue conditions. So the
    "after" captures one commit's run-to-run noise, not the commit-to-commit
@@ -227,9 +242,9 @@ sampling decision — where the two could interact, **the locked decision govern
 
 ## Triggering the runs (Decision 3)
 
-- The fix is pushed to a branch; its `pull_request`/`push` CI runs once
-  automatically. That's sample 1 (cold cache). **Bootstrap (2026-09-08
-  amendment):** that completed automatic branch run **supplies the first sample** — this
+- The fix is pushed to a branch; its complete `pull_request`/`push` CI cohort
+  runs automatically. Once every triggered workflow finishes, that is sample 1 (cold cache). **Bootstrap (2026-09-08
+  amendment):** that completed automatic branch cohort **supplies the first sample** — this
   phase then collects only the remaining attempts up to N. Requiring two
   pre-existing samples before the component responsible for obtaining sample two
   may start would **deadlock**, since nothing else produces sample two. The
@@ -237,7 +252,7 @@ sampling decision — where the two could interact, **the locked decision govern
   among the N; the amendment names where sample one comes from, it does not raise
   or lower N.
 - For samples 2..N, **`gh run rerun <run-id>` is the primary mechanism** — it
-  re-runs the existing gating run on the same branch head, works for ANY workflow
+  re-runs each required member of the complete cohort on the same branch head, works for ANY workflow
   (no config needed), pollutes no history, and re-uses the identical commit so it
   isolates CI variance from code. It also hits the warm cache from sample 1 (the
   steady-state end — see "Cold vs. warm cache").
@@ -246,7 +261,7 @@ sampling decision — where the two could interact, **the locked decision govern
   cannot run attempts 2 and 3 at once. So samples 2..N are collected serially, and
   N samples cost ≈ N × one run of wall-clock on this path. (Same attempt model
   `collect_runs.py` already handles for rerun/attempt waste.)
-- **`workflow_dispatch` where the gating workflow declares it** — the only path
+- **`workflow_dispatch` where every required cohort member supports it** — the only path
   that yields *distinct run-ids* and can therefore fire N runs **truly in
   parallel** (≈ one run of wall-clock). But many workflows are `push`/`pull_request`
   only (the website's `ci.yml` is), so dispatch cannot be the primary path; use it
@@ -259,7 +274,14 @@ sampling decision — where the two could interact, **the locked decision govern
   rerun cannot drift this way — it re-uses the identical commit by construction —
   which is the second reason it is the primary path.
 - **Never re-push** (empty commits pollute history) — explicitly rejected.
-- Guard: only the gating workflow needs sampling — don't fan out every workflow.
+- Guard: enumerate all workflows triggered by the push, including delayed or
+  chained workflows, and bind their run/attempt identities to that same cohort.
+  Only complete cohorts contribute a repository wall-clock sample. A rerun of
+  the gating workflow alone remains a check-level diagnostic, not a new push
+  sample; never pair its fresh timing with stale sibling timings. Additional
+  sampling must reproduce the full relevant cohort with the same head, event,
+  workload and dependency semantics, or withhold the push-wide comparison.
+  Price the cost of that full cohort and the unchanged control before sampling.
 
 ## Trigger and resume contract (2026-09-08 amendment)
 
@@ -282,7 +304,7 @@ Phase 7 becomes eligible when all of the following hold:
    checkpoint decision and the fix reached the remote.
 2. The fix is bound to an **exact remote head SHA**, not a branch name. A branch
    name is a moving target; the comparison is about one commit.
-3. That head's initial relevant CI run has **completed** (it is sample one — see
+3. That head's initial complete CI cohort has **completed** (it is sample one — see
    Bootstrap above).
 
 During an ongoing authorized fix session, continue automatically when those facts
@@ -307,7 +329,7 @@ Bind the saved context to all of:
 - repository,
 - the baseline artifact the "before" came from,
 - the **fix head SHA**,
-- workflow / check identity being sampled,
+- workflow / check identity being sampled for every member of the complete push cohort,
 - the run and attempt IDs already collected.
 
 ### Repeat invocation
@@ -332,8 +354,8 @@ or removes the former pole often hands the gate to whatever check is now slowest
 Reporting the former pole's improvement as a merge-wait improvement would then
 describe a check that no longer decides when the user can merge.
 
-- Within the sampled workflow, **re-evaluate the gate/chain** on the after head
-  and report merge-wait against whatever now gates.
+- Across all workflows triggered by the push, **re-evaluate the gate/chain** on
+  the after head; the last completed job sets the end of the measured interval.
 - Never report a former pole's improvement as merge-wait improvement after
   another check has taken over. Report the check-level improvement as a
   check-level fact, and state that the gate moved.
@@ -341,22 +363,27 @@ describe a check that no longer decides when the user can merge.
   same after head, report the measured check-level result and mark the
   repository **merge-wait change unavailable**. Unavailable is an honest answer;
   a number that describes the wrong check is not.
-- **Do not expand sampling to unrelated workflows** to manufacture that number.
-  The sampling guard above (only the gating workflow is sampled) still holds, and
-  widening the fan-out would spend cost the locked disclosure did not price.
+- **Do not expand sampling to unrelated workflows** outside the push cohort.
+  All workflows actually triggered by that push are part of the metric, even
+  when none of their files changed. Disclose their sampling cost as part of the
+  complete cohort; never assume their duration remained unchanged.
 
 ## Fetching + computing "after"
 
-Compute the after with the same *metric* as the before — the gating check's
-per-run wall-clock, median + range — but note it needs new *enumeration* logic,
-not a like-for-like reuse of the data pass. The data pass samples the **run list**
-(one row per run-id, latest attempt only); rerun samples are N **attempts of a
-single run-id**, so the run list would show one row, not N. Reading the N attempts
-means enumerating them per-attempt (`filter=all` / the `/runs/{id}/attempts/{n}`
-endpoint), which the run-list sampler does not do — `collect_runs.py`'s attempt
-handling is the closest existing building block. Filter to the gating check, take
-each attempt's wall-clock, then median + range. (Where `workflow_dispatch`
-produced distinct run-ids, the ordinary run-list path applies.)
+For each complete cohort, compute `max(job.completed_at) - min(job.created_at)`
+across every job of every workflow triggered by the push. Aggregate those cohort
+intervals as median + range; never sum workflow durations or average per-job
+ratios. Bind every run and attempt to the exact head and trigger cohort, including
+workflow chains. A shared SHA alone does not prove two independent events belong
+to the same push. Wait for all relevant workflows to finish; missing timestamps,
+unresolved trigger membership, or an incomplete attempt bundle means the
+repository merge-wait change is unavailable.
+
+Rerun enumeration is per attempt (`filter=all` / `/runs/{id}/attempts/{n}`),
+not the latest-attempt run list. Use fresh job timestamps for that attempt,
+never the original run creation time. Dispatch samples must preserve the complete
+cohort's event and job-set semantics; otherwise report them as check-level facts.
+One former pole getting faster is not evidence of a push-wide speedup.
 
 ## Output (rendered in the close, plain-English)
 
@@ -364,9 +391,9 @@ Auto-emitted once phase 7 completes, in the phase-6 plain-English close voice (n
 jargon, no machinery — the #234 UX direction):
 
 ```
-Speedup (measured): the test check now merges in ~6m10s, down from ~8m36s — about 28% faster.
+Speedup (measured): push-wide CI now finishes in ~6m10s, down from ~8m36s — about 28% faster.
   • After: median of 3 fresh runs on your branch (5m50s–6m30s), including the cold first run.
-  • Before: median of 12 recent main runs.
+  • Before: median of 12 complete historical push cohorts.
   • This branch changes only CI config and runs the same jobs, so the gain is attributable to the fix.
   • Cache: the warm reruns are the steady state; a first push hits cold caches and can be slower.
   • CI timing varies run-to-run, on whatever runner tier/concurrency you use; this is one branch's runs vs recent history, not a controlled test.
@@ -381,7 +408,7 @@ claim that the fix is worth at least the measured delta.
 
 ## Cost, automation, and configuration (Decisions 4 & 5)
 
-N runs cost runner-minutes **and** wall-clock. On the primary rerun path the runs
+N complete push cohorts plus the unchanged control cost runner-minutes **and** wall-clock. On the primary rerun path the runs
 are serial, so wall-clock is ≈ N × one run (only `workflow_dispatch` parallelism
 collapses it to ≈ one run); billing is N × one run's runner-minutes regardless.
 
@@ -419,7 +446,10 @@ collapses it to ≈ one run); billing is N × one run's runner-minutes regardles
 
 ## Decisions (locked)
 
-All six resolved; these are the contract the implementation follows.
+All six resolved; these are the contract the implementation follows. Under the
+2026-11-02 metric amendment, a "run" sample means a complete matched push cohort.
+Single-workflow attempts are implementation units, never substitutes for that
+cohort. Cost estimates below use the whole cohort plus the separate noise control.
 
 1. **Default N = 2, adaptive up to 4.** Two is the minimum that can detect
    disagreement; the extra run is spent only when variance warrants it. On the
@@ -460,7 +490,7 @@ All six resolved; these are the contract the implementation follows.
 - A helper (or extend `collect_runs.py`) to: trigger the samples (serial reruns,
   or parallel `workflow_dispatch` where available), poll to completion, enumerate
   the run's **attempts** (new per-attempt fetch — the run-list sampler sees only
-  one row), median the gating check's wall-clock, run the two-part CI-only-scope
+  one row), compute each complete push cohort's first-created → last-finished interval, run the two-part CI-only-scope
   guard (no product code + same work ran), tag each run cold/warm by position, and
   emit the disclosed before/after block (all six disclaimers, real wall-clock +
   billing cost).

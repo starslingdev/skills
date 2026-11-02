@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import math
 import shlex
 import subprocess
 import sys
@@ -10091,6 +10092,71 @@ def _fold_bottom_line(out: list[str], *blocks: list[str]) -> None:
     out.append("")
 
 
+def _headline_followup_lines(
+        doc: dict[str, Any], pole: dict[str, Any] | None,
+        floors: list[dict[str, Any]], *, cluster: dict[str, Any] | None = None,
+        chain: bool = False, win: float = 0.0) -> list[str]:
+    """Explain the already-sized headline ceiling; never collect new timings.
+
+    Ordinary poles reuse the exact binding-floor selection that sized their
+    addressable win. Cluster fixes consume the applied cross-workflow bound,
+    since sibling legs move together. A chain or population-weighted bound may
+    not identify one next check: disclose that instead of fabricating a gate.
+    """
+    label, seconds = "", 0.0
+    if cluster is not None:
+        effective = _num(cluster.get("wall_clock_p50_s")) or 0.0
+        for bound in reversed(cluster.get("wall_clock_derivation") or []):
+            if not isinstance(bound, dict):
+                continue
+            if bound.get("bound") not in {"cross-workflow", "measured-critical-path"}:
+                continue
+            if abs((_num(bound.get("to_s")) or 0.0) - effective) > 0.05:
+                continue
+            match = re.search(r"floor [—-] `([^`]+)` \((\d+(?:\.\d+)?)s\)",
+                              str(bound.get("reason") or ""))
+            if match:
+                label, seconds = match[1], float(match[2])
+                if bound["bound"] == "measured-critical-path":
+                    matches = [c for c in ((doc.get("pr_critical_path") or {}).get("checks") or [])
+                               if _check_name(c) == label]
+                    if len(matches) == 1 and matches[0].get("workflow_file"):
+                        label = f"{_wf_base(str(matches[0]['workflow_file']))} / {label}"
+                else:
+                    matches = [t for w, t in (doc.get("per_workflow_timing") or {}).items()
+                               if _wf_base(w) == label]
+                    if len(matches) == 1 and matches[0].get("long_pole_job"):
+                        label += f" / {matches[0]['long_pole_job']}"
+                break
+    elif pole is not None and not chain and win > 0:
+        others = [c for c in floors if _clean_label(_check_name(c)) !=
+                  _clean_label(str(pole.get("check", "")))]
+        floor = _binding_floor(others, pole.get("_cooccur"), int(pole.get("_gating_n") or 0))
+        if floor:
+            seconds = _eff_floor_s(floor)
+            name = _check_name(floor)
+            workflow = str(floor.get("workflow_file") or "")
+            label = f"{_wf_base(workflow)} / {name}" if workflow else name
+    if label and math.isfinite(seconds) and seconds > 0:
+        next_gate = f"After this fix, CI is gated by {_safe_span(_clean_label(label))} at ~{seconds:.0f} s."
+    else:
+        next_gate = ("The next gate is unavailable from the saved floor evidence; "
+                     "re-measure all workflows after the change.")
+    return [
+        "> **What gates next:** " + next_gate,
+        "> This projection assumes the full headline saving is realized; a smaller fix may leave the current gate in place.",
+        ">",
+        "> **How to check it worked**",
+        ">",
+        "> - **Measure:** time from the push's first job created to the last job finished, "
+        "across **all** workflows the push triggers.",
+        "> - **Runs:** at least 2 before and 2 after, plus one unchanged rerun as a noise control.",
+        "> - **Don't** sum workflow durations, and don't average per-job ratios. "
+        "Both hide a gain on the one workflow that gates.",
+        "> - **Caches:** judge cache-touching fixes on the second run after the change.",
+    ]
+
+
 def _recoverable_reconciliation(ceiling_s: Any, typical_wait_s: Any) -> str:
     """Issue #66 fix 2: a recoverable 'up to ~X' ceiling that EXCEEDS the headline typical
     merge wait is incoherent read alone — a fix cannot give back more than the whole wait a
@@ -11334,6 +11400,11 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
         _config_era_disclosure_lines(cp, captured_at),
         # Fileless/managed status-check disclosure (PR-lifetime status-gating latency).
         _fileless_disclosure_lines(cp),
+        # What gates next + how to check it worked (from the floor that sized the headline).
+        _headline_followup_lines(
+            doc, top_fixable, floor_pool,
+            cluster=(_cluster_f if _cluster_f is not None and _cluster_s > _existing_win + 0.5 else None),
+            chain=chain_active, win=win),
         # "After the gate" runner-minute line.
         _tier2_bottom_line(all_findings, cs, doc),
     )
