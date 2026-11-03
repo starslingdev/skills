@@ -65,7 +65,7 @@ def test_signature_table_never_matches_assertions(text):
     ("The runner has received a shutdown signal", "Run checks", "lost-runner"),
     ("Process completed with exit code 137.", "Run checks", "oom"),
     ("Killed", "Run checks", "oom"),
-    ("Target page, context or browser has been closed", "Run browser", "browser-crash"),
+    ("Error: page.goto: Target crashed", "Run browser", "browser-crash"),
     ("npm ERR! code ECONNRESET", "npm ci", "network"),
     ("502 Bad Gateway registry.npmjs.org", "Install packages", "network"),
     ("ECONNRESET", "Run unit tests", None),
@@ -225,3 +225,27 @@ def test_window_stops_at_the_steps_own_exit_line():
 def test_window_ends_one_second_after_step_end():
     log = "2026-01-01T00:02:01.0000000Z ##[error]The runner has received a shutdown signal."
     assert cr._opt100_job_class(job(10), log) is None
+
+
+@pytest.mark.parametrize("text", [
+    "Error: locator.click: Target page, context or browser has been closed",
+    "Test timeout of 30000ms exceeded.",
+])
+def test_ordinary_browser_timeout_is_not_a_crash(text):
+    assert bp._classify_infra_failure(text, "Run e2e tests") is None
+
+
+@pytest.mark.parametrize("text", [
+    "Error: page.goto: Target crashed",
+    "Error: the browser has crashed",
+    "Browser closed unexpectedly",
+    "Error: browser has disconnected",
+    "Error: browserType.launch: Target closed",
+])
+def test_browser_crash_wording(text):
+    assert bp._classify_infra_failure(text, "Run e2e tests") == "browser-crash"
+
+
+def test_assertion_quoting_crash_wording_is_not_infrastructure():
+    assert bp._classify_infra_failure(
+        "expect(received).toContain(expected): Target crashed", "Run e2e tests") is None

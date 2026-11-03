@@ -44,7 +44,9 @@ from workflow_steps import (  # same-skill module; step walker
 _INFRA_FAILURE_SIGNATURES = {
     "lost-runner": r"the runner has received a shutdown signal|lost communication with the server|the hosted runner[^\n]*\blost\b",
     "oom": r"(?:process completed with )?exit code[ :]+137\b|^Killed[.!]?$",
-    "browser-crash": r"Target page, context or browser has been closed|^Error: browserType\.launch:[^\n]*(?:crashed|closed|disconnected)",
+    # Crash wording only: an ordinary test timeout also prints "Target page,
+    # context or browser has been closed" for the action it interrupted.
+    "browser-crash": r"\bbrowser has crashed\b|\bTarget crashed\b|\bBrowser closed unexpectedly\b|\bbrowser has disconnected\b|^Error: browserType\.launch:[^\n]*(?:crashed|closed|disconnected)",
     "network": r"\b(?:ECONNRESET|ETIMEDOUT|EAI_AGAIN)\b|(?:502|503)[^\n]*(?:registry|packages)|(?:registry|packages)[^\n]*(?:502|503)",
 }
 
@@ -60,7 +62,7 @@ def _classify_infra_failure(log: str, step_name: str) -> str | None:
         r"\b(?:install(?:ing|ation)?|fetch(?:ing)?|download(?:ing)?|checkout|restore)\b|\bnpm\s+ci\b",
         step_name, re.I))
     for line in log.splitlines():
-        if re.search(r"assert|expected|received|test asserts", line, re.I) and not re.search(
+        if re.search(r"\bassert|\bexpected\b|\breceived\b", line, re.I) and not re.search(
                 r"runner has received a shutdown signal", line, re.I):
             continue
         for kind, signature in _INFRA_FAILURE_SIGNATURES.items():
