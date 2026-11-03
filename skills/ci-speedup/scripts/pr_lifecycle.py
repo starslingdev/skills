@@ -211,7 +211,7 @@ def _query(repo, cursor):
             pageInfo {hasNextPage} nodes { __typename
               ... on ReadyForReviewEvent { createdAt } ... on ConvertToDraftEvent { createdAt } }
           }
-          head: commits(last: 1) { nodes { commit { oid statusCheckRollup { contexts(first: 100) { nodes { __typename
+          head: commits(last: 1) { nodes { commit { oid statusCheckRollup { contexts(first: 100) { pageInfo {hasNextPage} nodes { __typename
             ... on CheckRun { name completedAt conclusion } ... on StatusContext { context state createdAt } } } } } } }
           commits(first: 30) { pageInfo {hasNextPage} nodes { commit {
             oid committedDate checkSuites(first: 10, filterBy: {appId: 15368}) { pageInfo {hasNextPage} nodes {

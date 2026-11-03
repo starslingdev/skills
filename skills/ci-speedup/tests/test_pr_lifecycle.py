@@ -614,6 +614,13 @@ def test_estimate_with_nothing_completed_on_the_final_commit_names_the_reason():
         module().measure_pr(p, None)
 
 
+def test_query_reads_whether_the_final_commit_check_list_is_complete():
+    # The estimate refuses a merged head whose check list it cannot prove complete,
+    # so the query must ask GitHub whether that list has another page.
+    query = module()._query('sample/project', None)
+    assert 'statusCheckRollup { contexts(first: 100) { pageInfo {hasNextPage} nodes {' in query
+
+
 def test_verify_report_rejects_a_missing_basis_and_a_label_on_a_not_measured_block(tmp_path):
     vr = _verify()
     assert not vr.check_pr_lifecycle_block(_block(None), _findings(tmp_path, None)).ok
