@@ -7653,6 +7653,8 @@ def _opt98_full_suite(doc: dict[str, Any]) -> list[str]:
     jobs = doc.get('jobs') or {}
     if not isinstance(jobs, dict) or not jobs:
         return []
+    if _re.search(r'\$\{\{|\bGITHUB_EVENT(?:_NAME|_PATH)?\b', json.dumps(doc)):
+        return []
     for job in jobs.values():
         if not isinstance(job, dict) or job.get('if') is not None or job.get('uses'):
             return []
@@ -7663,6 +7665,13 @@ def _opt98_full_suite(doc: dict[str, Any]) -> list[str]:
                 return []
             action = str(step.get('uses', '')).split('@')[0].lower()
             run = str(step.get('run', ''))
+            if action and action not in ('actions/checkout', 'actions/setup-node',
+                    'actions/setup-python', 'actions/setup-go', 'actions/setup-java',
+                    'actions/setup-dotnet', 'actions/setup-ruby'):
+                return []
+            if run and (not _re.match(r'^(?:python3? -m pytest|pytest|go test|cargo test|dotnet test|ctest|rspec|jest|vitest)(?:\s|$)', run.strip())
+                        or _re.search(r'[;&|`$\\\n]', run)):
+                return []
             if action in ('actions/cache', 'actions/cache/restore') or any(
                     token in action for token in ('cache', 'nx-set-shas')):
                 return []
@@ -7675,14 +7684,16 @@ def _opt98_full_suite(doc: dict[str, Any]) -> list[str]:
 
 
 def _opt98_merge_volume(client: 'GhClient', repo: str, since: str,
-                        until: str) -> dict[str, Any]:
+                        until: str, *, branch: str | None = None) -> dict[str, Any]:
     """One REST search; total_count measures the fixed inclusive date window.
 
     The most recently updated 100 merged PR identities are only the churn sample, never the
     rate denominator. Search truncation/incompleteness is disclosed, not guessed.
     """
     from urllib.parse import quote
-    query = quote(f'repo:{repo} is:pr is:merged merged:{since}..{until}', safe='')
+    if not branch:
+        return {'reason': 'merge-count branch not readable'}
+    query = quote(f'repo:{repo} is:pr is:merged base:{json.dumps(branch)} merged:{since}..{until}', safe='')
     data = client.json(f'search/issues?q={query}&sort=updated&order=desc&per_page=100', allow_missing=True)
     if not isinstance(data, dict) or not isinstance(data.get('total_count'), int):
         return {'reason': 'merged PR search not readable'}
@@ -26587,7 +26598,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         if _opt98_end is not None:
             _opt98_until = (_opt98_end - _dt.timedelta(days=1)).date()
             _opt98_since = _opt98_until - _dt.timedelta(days=29)
-            _opt98_volume = _opt98_merge_volume(client, repo, str(_opt98_since), str(_opt98_until))
+            _opt98_volume = _opt98_merge_volume(client, repo, str(_opt98_since), str(_opt98_until), branch=default_branch)
     _opt98_new, _opt98_info = _detect_opt98_merge_queue(
         workflows=_wf_docs, runs_by_workflow=all_status_runs_by_wf,
         branch_rules=_opt98_rules, volume=_opt98_volume, start_id=next_id)

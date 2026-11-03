@@ -5,7 +5,7 @@ import collect_runs as cr
 
 WF = '.github/workflows/checks.yml'
 DOC = {'on': ['pull_request', 'merge_group'], 'jobs': {
-    'test': {'runs-on': 'ubuntu-latest', 'steps': [{'run': 'npm test'}]}}}
+    'test': {'runs-on': 'ubuntu-latest', 'steps': [{'run': 'pytest'}]}}}
 
 
 def detect(**overrides):
@@ -103,10 +103,10 @@ def test_volume_search_count_uses_fixed_window_and_incomplete_fails_closed():
         def json(self, path, **kwargs):
             assert 'merged%3A2026-01-01..2026-01-30' in path
             return {'total_count': 1200, 'incomplete_results': False, 'items': [{'number': 1}]}
-    assert cr._opt98_merge_volume(Search(), 'example/project', '2026-01-01', '2026-01-30')['merges_per_day'] == 40
+    assert cr._opt98_merge_volume(Search(), 'example/project', '2026-01-01', '2026-01-30', branch='main')['merges_per_day'] == 40
     class Incomplete:
         def json(self, *args, **kwargs): return {'total_count': 1200, 'incomplete_results': True}
-    assert cr._opt98_merge_volume(Incomplete(), 'example/project', '2026-01-01', '2026-01-30')['reason'] == 'merged PR search incomplete'
+    assert cr._opt98_merge_volume(Incomplete(), 'example/project', '2026-01-01', '2026-01-30', branch='main')['reason'] == 'merged PR search incomplete'
 
 
 def test_prompt_carries_queue_guardrail_without_claiming_savings():
@@ -153,7 +153,7 @@ def test_collector_dispatch_reaches_report(monkeypatch):
                     run['event'] = 'merge_group' if i % 2 else 'pull_request'
             return data
     client = QueueClient([('ubuntu-latest', 300)] * 20,
-                         'on: [pull_request, merge_group]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm test\n')
+                         'on: [pull_request, merge_group]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: pytest\n')
     monkeypatch.setattr(cr, 'GhClient', lambda *a, **k: client)
     result = cr.collect({'repo': 'example/project', 'findings': [{'id': 'f1', 'pattern': 'OPT1', 'workflow_file': _CI}]}, 'o/r', max_runs=20, shallow_runs=20)
     findings = [f for f in result['findings'] if f.get('pattern') == 'OPT98']
@@ -167,3 +167,31 @@ def test_malformed_workflow_does_not_abort_audit(doc):
     findings, info = detect(workflows={WF: doc})
     assert findings == []
     assert WF in info['unreadable_workflows']
+
+
+def test_merge_volume_filters_the_rule_branch():
+    from urllib.parse import unquote
+    class Search:
+        def json(self, path, **kwargs):
+            assert 'base:"main"' in unquote(path)
+            return {'total_count': 1200, 'incomplete_results': False, 'items': [{'number': 1}]}
+    volume = cr._opt98_merge_volume(Search(), 'example/project', '2026-01-01', '2026-01-30', branch='main')
+    assert volume['sampled_merged_prs'] == [1]
+
+
+def test_event_dependent_work_is_withheld():
+    for change in ('command', 'input', 'matrix', 'shell'):
+        doc = copy.deepcopy(DOC)
+        job = doc['jobs']['test']
+        if change == 'command': job['steps'][0]['run'] = "pytest ${{ github.event_name == 'merge_group' && 'smoke' || 'tests' }}"
+        if change == 'input': job['steps'].insert(0, {'uses': 'actions/setup-python@v5', 'with': {'python-version': '${{ github.event_name }}'}})
+        if change == 'matrix': job['strategy'] = {'matrix': '${{ fromJSON(github.event.inputs.matrix) }}'}
+        if change == 'shell': job['steps'][0]['run'] = 'pytest "$GITHUB_EVENT_NAME"'
+        assert cr._opt98_full_suite(doc) == [], change
+
+
+def test_unread_script_and_action_indirection_are_withheld():
+    for step in ({'run': 'npm test'}, {'uses': './.github/actions/build'}, {'uses': 'example/build@v1'}, {'run': './scripts/check.sh'}):
+        doc = copy.deepcopy(DOC)
+        doc['jobs']['test']['steps'] = [step]
+        assert cr._opt98_full_suite(doc) == [], step
