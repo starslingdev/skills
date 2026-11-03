@@ -109,6 +109,77 @@ def test_failed_job_that_ends_before_it_starts_is_still_unreadable():
         module().measure_pr(pr([check(500,600),check(560,550,'FAILURE',name='optional')]),['test'])
 
 
+def test_headline_reads_the_median_not_the_tail():
+    shares={k:dict(median=.05,p90=.05) for k in ('ci_running','red_waiting','everything_else','final_commit_ci')}
+    shares['green_waiting']=dict(median=.2,p90=.9)
+    data=dict(status='measured',sample_size=10,sampled=10,excluded={},shares=shares)
+    assert 'CI is not where your PRs wait.' not in module().render(data)
+
+
+def test_red_wait_ends_at_the_next_commit_not_a_later_one():
+    p=pr()
+    p['commits']['nodes'].insert(1,commit(300,[],'mid'))
+    assert module().measure_pr(p,['test'])['red_waiting']==.1
+
+
+def test_commit_dated_after_merge_never_ends_a_red_wait():
+    p=pr([check(500,600),check(600,700,'FAILURE',name='lint')])
+    p['commits']['nodes'].insert(0,commit(1200,[],'skewed'))
+    assert module().measure_pr(p,['test'])['red_waiting']==.2
+
+
+def test_running_and_red_outrank_later_categories():
+    # A slow job still running after the failure keeps that time in CI running,
+    # and a red interval that overlaps green time is not counted twice.
+    p=pr([check(500,600),check(600,700,'FAILURE',name='lint')])
+    p['commits']['nodes'][0]['commit']['checkSuites']['nodes'][0]['checkRuns']['nodes'].append(check(150,300,name='build'))
+    p['commits']['nodes'].insert(0,commit(800,[],'out-of-order'))
+    row=module().measure_pr(p,['test'])
+    assert row==dict(ci_running=.4,red_waiting=.2,green_waiting=.2,everything_else=.2,final_commit_ci=.2)
+
+
+def test_graphql_errors_alongside_data_are_not_measured():
+    page=connection([pr() for _ in range(10)])
+    result=module().collect(lambda q:dict(data=dict(repository=dict(pullRequests=page)),errors=[{'type':'X'}]),
+                            'sample/project',['test'])
+    assert result=={'status':'not measured','reason':'query 1 failed','queries':1}
+
+
+def test_median_and_nearest_rank_p90(monkeypatch):
+    m=module()
+    values=iter([i/100 for i in (7,1,10,3,5,2,9,4,8,6)])
+    monkeypatch.setattr(m,'measure_pr',lambda p,r:{k:next(values) if k=='ci_running' else 0 for k in
+                        ('ci_running','red_waiting','green_waiting','everything_else','final_commit_ci')})
+    result=m.collect(paged([pr() for _ in range(10)]),'sample/project',['test'])
+    assert result['shares']['ci_running']==dict(median=.055,p90=.09)
+
+
+def test_final_commit_share_reads_the_merged_head():
+    assert module().measure_pr(pr([check(500,550)]),['test'])['final_commit_ci']==.05
+
+
+def test_checks_outside_the_pr_lifetime_are_not_counted():
+    p=pr()
+    p['commits']['nodes'][0]['commit']['checkSuites']['nodes'][0]['checkRuns']['nodes'].append(check(-300,-100,'FAILURE',name='early'))
+    row=module().measure_pr(p,['test'])
+    assert row['ci_running']==.2 and row['red_waiting']==.2
+
+
+def test_required_check_finishing_after_merge_is_left_out():
+    with pytest.raises(ValueError,match='after merge'):
+        module().measure_pr(pr([check(500,1100)]),['test'])
+
+
+def test_latest_attempt_of_a_required_check_decides_green():
+    retried=dict(check(500,550,'FAILURE'),__typename='CheckRun')
+    assert module().measure_pr(pr(extra_contexts=[retried]),['test'])['green_waiting']==.4
+
+
+def test_oversized_page_is_malformed():
+    result=module().collect(paged([pr() for _ in range(11)]),'sample/project',['test'])
+    assert result['status']=='not measured' and result['reason']=='malformed PR page'
+
+
 def test_required_check_from_another_app_sets_green_start():
     # A required commit status (or another app's check) lives only in the final
     # commit's rollup, never in the Actions suites.
