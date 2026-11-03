@@ -170,3 +170,10 @@ def test_run_failure_upper_bound_avoids_impossible_candidates():
 
 def test_browser_launch_configuration_error_is_not_infrastructure():
     assert bp._classify_infra_failure("Error: browserType.launch: Executable doesn't exist", "Run browser tests") is None
+
+
+def test_missing_prior_attempt_page_withholds_ratio(monkeypatch):
+    monkeypatch.setattr(cr, "_fetch_job_log", lambda *a: "2026-01-01T00:01:00Z Killed")
+    findings, notes = cr._collect_opt100(object(), "example/project", "ci.yml", [job(i) for i in range(6)], {"checks"}, 0, prior_attempt_failures=1)
+    assert findings == []
+    assert notes["incomplete_job_population"]

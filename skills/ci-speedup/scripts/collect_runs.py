@@ -9049,10 +9049,11 @@ def _opt100_gating_names(jobs: list[dict[str, Any]], graph: dict[str, Any],
 def _collect_opt100(client: GhClient, repo: str, wf_path: str,
                     jobs: list[dict[str, Any]], gating_jobs: set[str] | None,
                     start_idx: int, *, complete_population: bool = True,
-                    monthly_volume: int | None = None, sample_denominator: int | None = None
+                    monthly_volume: int | None = None, sample_denominator: int | None = None,
+                    prior_attempt_failures: int = 0
                     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Fetch each failed gating job log once; keep raw text out of findings."""
-    if not complete_population:
+    if not complete_population or prior_attempt_failures:
         return [], {"incomplete_job_population": True, "unreadable_logs": 0}
     from collections import Counter
     failures = Counter(j.get("name") for j in jobs if j.get("conclusion") in {"failure", "timed_out"})
@@ -27036,6 +27037,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 }
             attempt_runs = _rerun_attempt_runs(all_runs) if all_runs is not None else []
             attempt_samples = []
+            _infra_attempt_errors = 0
             if attempt_runs:
                 # Prefetch the `filter=all` leg ONLY — never the `filter=latest` leg.
                 #
@@ -27060,6 +27062,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 attempt_samples, latest_failures = _attempt_job_samples(
                     client, repo, kept_all, memo=job_memo)
                 wf_failures += latest_failures
+                _infra_attempt_errors = wf_failures
                 jobs_fetch_failures += wf_failures
                 _add_cost_spine_fetch_failures(wf_path, wf_failures)
                 prior_runs: list[list[dict[str, Any]]] = []
@@ -27102,9 +27105,10 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 _names = _opt100_gating_names(_infra_jobs, _graph, _infra_gate)
                 new, _infra_notes = _collect_opt100(client, repo, wf_path, _infra_jobs, _names, next_id,
                                                    complete_population=not _infra_errors,
-                                                   monthly_volume=monthly, sample_denominator=len(all_runs))
+                                                   monthly_volume=monthly, sample_denominator=len(all_runs),
+                                                   prior_attempt_failures=_infra_attempt_errors)
                 findings_doc.setdefault("opt100_coverage", {})[wf_path] = _infra_notes
-                if _infra_errors or _infra_notes["unreadable_logs"]:
+                if _infra_errors or _infra_attempt_errors or _infra_notes["unreadable_logs"]:
                     _skip_detectors(wf_path, ["OPT100"], "some failed-job logs or job pages were unreadable; incomplete job populations withhold the finding")
                 next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
                 findings.extend(new)
