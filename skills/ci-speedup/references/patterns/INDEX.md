@@ -71,6 +71,8 @@ This order is also the compiled file's order; contributors see `README.md`.
 - OPT46 — Superseded Runs Not Cancelled (Missing Concurrency or `cancel-in-progress: false`) (MEDIUM, data-driven) — superseded runs keep running
 - OPT47 — Redundant push + pull_request Double-Trigger (MEDIUM, data-driven) — push and pull_request both fire
 - OPT48 — High Job-Level Failure Rate (>15% over 30d) (MEDIUM, data-driven) — job fails over 15% of runs
+- OPT98 — The Merge Queue Re-proves What Is Already Proven (MEDIUM, data-driven) — strict-rule churn and repeated full merge-queue validation
+
 ## Category 10 — Timing Anomalies
 - OPT49 — Slow Setup Step (MEDIUM, data-driven) — cut; id retired
 - OPT50 — Post Steps Taking Too Long (MEDIUM, data-driven) — cut; id retired

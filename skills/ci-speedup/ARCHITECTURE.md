@@ -26,8 +26,8 @@ developer's wait. It gets its own prominent section below.
 
 ## 1. Purpose & scope
 
-ci-speedup audits a repository's GitHub Actions workflows against a 93-pattern
-catalog — 82 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94, OPT96 and OPT97) plus 11 **structural /
+ci-speedup audits a repository's GitHub Actions workflows against a 94-pattern
+catalog — 83 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94, OPT96, OPT97 and OPT98) plus 11 **structural /
 critical-path** patterns (OPT70–OPT75, OPT78, OPT83, OPT84, OPT85 and OPT87, routed from the measured long pole; see
 §11) — and produces a **root-cause-analysis** markdown report with **measured**
 impact on two axes: developer wall-clock wait (the ranking axis) and
@@ -2798,7 +2798,7 @@ wired or removed rather than left to become archaeology.
 
 ## 11. The structural / critical-path track
 
-The hygiene/data-driven catalog (OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94, OPT96 and OPT97) is mostly **declarative** -
+The hygiene/data-driven catalog (OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94, OPT96, OPT97 and OPT98) is mostly **declarative** -
 static findings are locally-checkable YAML defects, while measured Tier-2 rows
 come from run history. Its blind spot: on real repos the merge is
 gated by a check that is *working as intended* and simply slow, with no
@@ -4092,7 +4092,7 @@ order of preference:
 - [`SKILL.md`](SKILL.md) - the canonical contract (phases, admission gate,
   quality review).
 - [`references/patterns/INDEX.md`](references/patterns/INDEX.md) -
-  the 93-pattern catalog, one file per pattern (frontmatter + body); the source
+  the 94-pattern catalog, one file per pattern (frontmatter + body); the source
   of truth for detection and the report's TL;DR / pattern background. The
   single-file [`references/optimization-patterns.md`](references/optimization-patterns.md)
   is compiled from `references/patterns/` by
@@ -4177,3 +4177,15 @@ Measured OPT97 replaces same-job OPT43/44, uses the pre-start axis, and credits
 only median queue above the repository P10 baseline on established gating jobs;
 the existing floor cascade still applies. No utilization or billing claim is
 derived from correlation.
+### Merge validation (OPT98)
+
+The required-check reader optionally returns strict/merge-queue metadata from
+the same API responses. A strict, queue-free candidate uses one REST search
+for the prior 30 complete UTC days; total_count supplies volume while up to
+100 merged PR identities supply a lower-bound churn sample against cached runs.
+Full-suite queue candidates join unconditional workflow jobs to successful
+first-attempt run medians. Both cases are uncredited and render in a dedicated
+Repeated merge validation section so a drilled pole cannot hide the observation.
+Malformed workflow shapes, unavailable branch rules and missing event timings
+are disclosed in data sources. Any declared queue workflow conservatively
+suppresses strict-rule advice, including one whose required status is unknown.

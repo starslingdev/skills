@@ -7543,6 +7543,7 @@ def _ruleset_ref_in_scope(detail: dict[str, Any], branch: str | None) -> bool:
 
 def _fetch_required_checks(
     client: "GhClient", repo: str, branch: str | None = "main",
+    *, branch_rules: dict[str, Any] | None = None,
 ) -> RequiredChecks | None:
     """The repo's REQUIRED status-check contexts, from rulesets + classic branch
     protection. Returns a `RequiredChecks` (names + completeness), or None when
@@ -7560,6 +7561,8 @@ def _fetch_required_checks(
 
     Repo-agnostic: driven entirely off the GitHub API, no hardcoded names."""
     names: set[str] = set()
+    strict_values: list[bool] = []
+    merge_queue = False
     found_any = False
     complete = True
     # Rulesets (the modern mechanism) — readable without admin on many repos.
@@ -7592,7 +7595,12 @@ def _fetch_required_checks(
             for rule in detail.get("rules") or []:
                 if not isinstance(rule, dict):
                     continue
+                if rule.get("type") == "merge_queue":
+                    merge_queue = True
                 if rule.get("type") == "required_status_checks":
+                    policy = (rule.get("parameters") or {}).get("strict_required_status_checks_policy")
+                    if isinstance(policy, bool):
+                        strict_values.append(policy)
                     found_any = True
                     params = rule.get("parameters") or {}
                     for c in params.get("required_status_checks") or []:
@@ -7614,6 +7622,8 @@ def _fetch_required_checks(
             f"repos/{repo}/branches/{branch}/protection/required_status_checks",
             allow_missing=True)
         if isinstance(prot, dict):
+            if isinstance(prot.get("strict"), bool):
+                strict_values.append(prot["strict"])
             found_any = True
             for c in prot.get("contexts") or []:
                 names.add(str(c))
@@ -7622,9 +7632,147 @@ def _fetch_required_checks(
                     names.add(str(c["context"]))
     else:
         complete = False
+    if branch_rules is not None:
+        branch_rules.update(strict=any(strict_values) if strict_values else None,
+                            merge_queue=merge_queue, complete=complete and isinstance(rulesets, list))
     if not found_any and complete:
         return None
     return RequiredChecks(frozenset(names), complete)
+
+
+def _opt98_full_suite(doc: dict[str, Any]) -> list[str]:
+    """Conservative static candidate: the same unconditional jobs on both events.
+
+    Dynamic job/step conditions and reusable workflows are unknown, not proof of
+    duplicated work. Any build-cache restore or affected-only signal clears the
+    candidate; dependency setup caches alone do not cache the test/build outputs.
+    """
+    events = doc.get('on', doc.get(True, {}))
+    if not isinstance(events, (dict, list)) or not {'pull_request', 'merge_group'} <= set(events):
+        return []
+    jobs = doc.get('jobs') or {}
+    if not isinstance(jobs, dict) or not jobs:
+        return []
+    for job in jobs.values():
+        if not isinstance(job, dict) or job.get('if') is not None or job.get('uses'):
+            return []
+        for step in job.get('steps') or []:
+            if not isinstance(step, dict) or step.get('if') is not None or 'parallel' in step or step.get('background'):
+                return []
+            if any(str(k).upper() in ('TURBO_TOKEN', 'NX_CLOUD_ACCESS_TOKEN', 'NX_CLOUD_AUTH_TOKEN') for k in (step.get('env') or {})):
+                return []
+            action = str(step.get('uses', '')).split('@')[0].lower()
+            run = str(step.get('run', ''))
+            if action in ('actions/cache', 'actions/cache/restore') or any(
+                    token in action for token in ('cache', 'nx-set-shas')):
+                return []
+            if _re.search(r'\bnx\s+affected\b|\bturbo\b[^\n]*(?:--filter|--affected)|\bvitest\b[^\n]*--changed|--remote[-_]cache|TURBO_TOKEN|NX_CLOUD', run, _re.I):
+                return []
+        env = {**(doc.get('env') or {}), **(job.get('env') or {})}
+        if any(str(k).upper() in ('TURBO_TOKEN', 'NX_CLOUD_ACCESS_TOKEN', 'NX_CLOUD_AUTH_TOKEN') for k in env):
+            return []
+    return sorted(str(k) for k in jobs)
+
+
+def _opt98_merge_volume(client: 'GhClient', repo: str, since: str,
+                        until: str) -> dict[str, Any]:
+    """One REST search; total_count measures the fixed inclusive date window.
+
+    The most recently updated 100 merged PR identities are only the churn sample, never the
+    rate denominator. Search truncation/incompleteness is disclosed, not guessed.
+    """
+    from urllib.parse import quote
+    query = quote(f'repo:{repo} is:pr is:merged merged:{since}..{until}', safe='')
+    data = client.json(f'search/issues?q={query}&sort=updated&order=desc&per_page=100', allow_missing=True)
+    if not isinstance(data, dict) or not isinstance(data.get('total_count'), int):
+        return {'reason': 'merged PR search not readable'}
+    if data.get('incomplete_results') is not False:
+        return {'reason': 'merged PR search incomplete'}
+    start, end = _parse_dt(since), _parse_dt(until)
+    if start is None or end is None or end < start:
+        return {'reason': 'merged PR window invalid'}
+    days = (end - start).days + 1
+    return {'merges_per_day': data['total_count'] / days, 'merged_count': data['total_count'],
+            'window_days': days, 'since': since, 'until': until,
+            'sampled_merged_prs': [row['number'] for row in data.get('items', [])
+                                  if isinstance(row, dict) and isinstance(row.get('number'), int)]}
+
+
+def _detect_opt98_merge_queue(*, workflows: dict[str, Any],
+                             runs_by_workflow: dict[str, Any],
+                             branch_rules: dict[str, Any], volume: dict[str, Any],
+                             start_id: int) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Report two independent, uncredited causes of repeated merge validation."""
+    info: dict[str, Any] = {'status': 'measured'}
+    findings: list[dict[str, Any]] = []
+    readable = branch_rules.get('complete') is True and isinstance(branch_rules.get('strict'), bool)
+    if not readable:
+        info['branch_rule'] = 'branch rule not readable'
+    if volume.get('reason'):
+        info['merged_prs'] = volume['reason']
+    queue_workflows, candidates = [], {}
+    for path, doc in workflows.items():
+        try:
+            events = doc.get('on', doc.get(True, {})) or {}
+            if not isinstance(events, (str, dict, list)):
+                raise ValueError('unreadable workflow triggers')
+            if 'merge_group' in events:
+                queue_workflows.append(path)
+            candidates[path] = _opt98_full_suite(doc)
+        except (TypeError, AttributeError, ValueError):
+            info.setdefault('unreadable_workflows', []).append(path)
+    if (readable and branch_rules['strict'] and not branch_rules.get('merge_queue')
+            and not queue_workflows and not info.get('unreadable_workflows')
+            and volume.get('merges_per_day', 0) >= 30):
+        identities = set(volume.get('sampled_merged_prs') or [])
+        bases: dict[int, set[str]] = {}
+        for runs in runs_by_workflow.values():
+            for run in runs or []:
+                if run.get('event') != 'pull_request':
+                    continue
+                for pr in run.get('pull_requests') or []:
+                    if pr.get('number') in identities and (pr.get('base') or {}).get('sha'):
+                        bases.setdefault(pr['number'], set()).add(pr['base']['sha'])
+        share = sum(len(v) > 1 for v in bases.values()) / len(identities) if identities else None
+        evidence = f"Require up to date is enabled without a merge queue; {volume['merges_per_day']:.1f} merged PRs/day. "
+        evidence += (f"Different-base CI re-runs observed on {share:.1%} of {len(identities)} sampled merged PRs (a lower bound from sampled runs)."
+                     if share is not None else 'Rebase-churn share not measured: no merged PR identities.')
+        f = _new_finding('OPT98', 'MEDIUM', 'Up-to-date rule repeats validation at high volume',
+                         '', '', evidence, 'merge-queue-reproving',
+                         'opt98--the-merge-queue-re-proves-what-is-already-proven', start_id + 1,
+                         size_note='Uncredited: rebase churn is observed, not a modeled saving.')
+        f['sizing_basis'] = 'measured'
+        f['merge_queue'] = {'case': 'strict', **volume, 'rebase_churn_share': share}
+        findings.append(f)
+    for path, jobs in candidates.items():
+        if not jobs:
+            continue
+        durations: dict[str, list[float]] = {'pull_request': [], 'merge_group': []}
+        for run in runs_by_workflow.get(path) or []:
+            event = run.get('event')
+            if event not in durations or run.get('conclusion') != 'success' or run.get('run_attempt', 1) != 1:
+                continue
+            start, end = _parse_dt(run.get('run_started_at')), _parse_dt(run.get('updated_at'))
+            if start is not None and end is not None and end > start:
+                durations[event].append((end - start).total_seconds())
+        if not all(durations.values()):
+            info.setdefault('unmeasured_workflows', []).append(path)
+            continue
+        pr, queue = (_percentile(durations[k], 50) for k in ('pull_request', 'merge_group'))
+        if queue < .8 * pr:
+            continue
+        evidence = (f'The same unconditional suite runs for pull_request and merge_group without affected-only execution or a build-cache restore; '
+                    f'queue median {queue:.1f}s ({len(durations["merge_group"])} runs), PR median {pr:.1f}s ({len(durations["pull_request"])} runs).')
+        f = _new_finding('OPT98', 'MEDIUM', 'The merge queue re-proves the full suite', path, '', evidence,
+                         'merge-queue-reproving', 'opt98--the-merge-queue-re-proves-what-is-already-proven',
+                         start_id + len(findings) + 1, size_note='Uncredited: affected-only savings are not modeled.')
+        f['sizing_basis'] = 'measured'
+        f['affected_jobs'] = jobs
+        f['merge_queue'] = {'case': 'reproving', 'queue_median_s': queue, 'pr_median_s': pr,
+                            'queue_samples': len(durations['merge_group']), 'pr_samples': len(durations['pull_request'])}
+        f['guardrail'] = 'Keep every required check on the merged result; never drop checks. Scope relative to the queue base with full fallback on resolution errors.'
+        findings.append(f)
+    return findings, info
 
 
 def _matrix_base_name(job_name: str) -> str:
@@ -25485,7 +25633,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             workflow_yaml_skew["reason"], default_branch)
     # Repo visibility — recorded as informational metadata on the cost spine.
     findings_doc["repo_visibility"] = _derive_repo_visibility(repo_info)
-    required_checks = _fetch_required_checks(client, repo, default_branch)
+    _opt98_rules: dict[str, Any] = {}
+    required_checks = _fetch_required_checks(client, repo, default_branch, branch_rules=_opt98_rules)
     findings_doc["required_checks"] = (
         sorted(required_checks.names) if required_checks is not None else None)
     findings_doc["required_checks_complete"] = (
@@ -26430,6 +26579,20 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             "workflow returned content")
 
     next_id = max((int(f["id"][1:]) for f in findings if f.get("id", "").startswith("f") and f["id"][1:].isdigit()), default=0)
+    # OPT98 reuses the rule reader and cached run pages. Only strict/no-queue
+    # candidates pay for one bounded merged-PR count query.
+    _opt98_volume: dict[str, Any] = {}
+    if _opt98_rules.get("strict") and _opt98_rules.get("complete") and not _opt98_rules.get("merge_queue") and not _opt82_merge_group_workflows(_wf_docs):
+        _opt98_end = (_parse_dt(created_before) if created_before else _unpinned_now())
+        if _opt98_end is not None:
+            _opt98_until = (_opt98_end - _dt.timedelta(days=1)).date()
+            _opt98_since = _opt98_until - _dt.timedelta(days=29)
+            _opt98_volume = _opt98_merge_volume(client, repo, str(_opt98_since), str(_opt98_until))
+    _opt98_new, _opt98_info = _detect_opt98_merge_queue(
+        workflows=_wf_docs, runs_by_workflow=all_status_runs_by_wf,
+        branch_rules=_opt98_rules, volume=_opt98_volume, start_id=next_id)
+    findings.extend(_opt98_new)
+    next_id += len(_opt98_new)
     # (workflow_file, job) pairs OPT81 A1 saw on two or more runner labels.
     _opt81_multi_label_jobs: set[tuple[str, str]] = set()
     # A single bounded inventory call only for a sufficiently sampled own-runner
@@ -27318,6 +27481,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         # the detectors read YAML that produced none of the timings. None = no skew we
         # could see. See `_root_branch_skew`.
         "workflow_yaml_skew": workflow_yaml_skew,
+        "merge_queue": _opt98_info,
         # Detectors that were NOT EVALUATED for a named workflow because their basis run
         # list was unfetchable. Their absence from the findings is UNKNOWN, not clean —
         # the whole reason this is DATA and not just a log line. The renderer must name
