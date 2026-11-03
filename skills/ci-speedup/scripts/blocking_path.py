@@ -6209,6 +6209,15 @@ def _data_sources_footer(doc: dict[str, Any], repo: str,
         rows.append(("cache seeding: held back", _opt96_line,
                      "Why a PR cache restore with no visible default-branch save "
                      "produced no OPT96 finding"))
+    _capacity_notes = doc.get("opt97_notes") or []
+    if _capacity_notes:
+        _capacity_line = "; ".join(
+            f"{_withheld_cell_text(n.get('workflow_file', ''))} / "
+            f"{_withheld_cell_text(n.get('job', ''))}: too few samples "
+            f"({_withheld_cell_text(n.get('samples', 0))}; minimum 15)"
+            for n in _capacity_notes if isinstance(n, dict))
+        rows.append(("single-slot capacity: held back", _capacity_line,
+                     "OPT97 queue versus in-flight correlation; runner-label populations need 15 samples"))
     out = ["## 🗄️ Data sources", ""]
     if lead:
         out += lead

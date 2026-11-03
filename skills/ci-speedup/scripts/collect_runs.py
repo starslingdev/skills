@@ -26648,10 +26648,6 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             _skip_detectors(wf_path, ["OPT97"],
                             f"the capacity check failed ({type(exc).__name__})")
             new = []
-        for _note in _opt97_notes:
-            _skip_detectors(wf_path, ["OPT97"],
-                            f"job `{_note['job']}`: too few samples "
-                            f"({_note['samples']}; minimum 15) for its runner label set")
         findings_doc.setdefault("opt97_notes", []).extend(_opt97_notes)
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         _merge_opt97_findings(findings, new, _wf_docs.get(wf_path, {}))

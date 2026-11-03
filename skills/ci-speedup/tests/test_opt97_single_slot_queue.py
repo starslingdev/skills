@@ -160,8 +160,11 @@ def test_collect_dispatches_and_discloses_insufficient_samples(tmp_path, monkeyp
     cr.collect(doc, 'o/r', max_runs=8, shallow_runs=8)
     assert seen, 'collect must dispatch OPT97 over sampled workflows'
     assert all(kw['all_jobs_by_wf'] for _, kw in seen)
-    assert any('OPT97' in str(row) and 'too few samples' in str(row)
-               for row in doc['data_sources']['detectors_skipped'])
+    assert doc['opt97_notes']
+    assert 'too few samples' in '\n'.join(bp._data_sources_footer(doc, 'o/r'))
+    assert not any('OPT97' in row['detectors']
+                   for row in doc['data_sources']['detectors_skipped']
+                   if 'too few samples' in row['reason'])
 
 
 @pytest.mark.parametrize('queues,expected', [
