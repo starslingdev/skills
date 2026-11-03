@@ -446,6 +446,17 @@ def test_estimate_treats_every_completed_final_check_as_required():
     assert row['green_waiting'] == .3
 
 
+def test_estimate_ignores_checks_that_completed_after_the_merge():
+    # A check still running at merge time did not gate it (a coverage upload, a docs
+    # build): for the estimate it never completed. Readable required checks keep the
+    # stricter rule: a required check finishing after merge leaves the PR out.
+    late = [dict(check(600, 1100, name='coverage'), __typename='CheckRun'),
+            dict(__typename='StatusContext', context='docs', state='FAILURE', createdAt=ts(1200))]
+    assert module().measure_pr(pr(extra_contexts=late), None) == module().measure_pr(pr(), ['test'])
+    with pytest.raises(ValueError, match='after merge'):
+        module().measure_pr(pr(extra_contexts=late[:1]), ['test', 'coverage'])
+
+
 def test_estimate_leaves_out_a_pr_whose_final_check_failed():
     failed = [dict(check(600, 700, 'FAILURE', name='optional'), __typename='CheckRun')]
     with pytest.raises(ValueError, match='not green on final commit'):

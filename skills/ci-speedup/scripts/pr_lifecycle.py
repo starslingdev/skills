@@ -95,7 +95,9 @@ def _green_start(pr, required):
     else:  # the estimate needs the whole list: a check past the page could be the last to pass
         contexts = _nodes(rollup['contexts'] if rollup else None, 'final commit checks')
     latest = _latest(_rollup_entries(contexts))
-    names = set(required) if required else {n for n, (_, _, counted) in latest.items() if counted}
+    # A check that completed after the merge did not gate it: for the estimate it never completed.
+    merged = _time(pr['mergedAt'])
+    names = set(required) if required else {n for n, (at, _, counted) in latest.items() if counted and at <= merged}
     if not names:
         raise ValueError('no completed checks on final commit')
     if not names.issubset(latest):
