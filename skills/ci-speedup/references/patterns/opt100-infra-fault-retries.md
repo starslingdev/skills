@@ -17,10 +17,10 @@ category: 10
 
 **Detection heuristic**:
 
-- Inspect only timestamp-bounded lines from the first failed step of each sampled failed job. Descriptive signatures live in `blocking_path.py`; assertion diagnostics never count. Network signatures require an install or fetch step. Missing logs or step timing do not imply a class.
-- Emit when at least five failures match and they represent at least 20% of the job's sampled failures. The denominator includes failures with unreadable logs; disclose those gaps. A readable required-check set must establish that the job gates merge.
+- Inspect only the first failed step of each sampled failed job: its timestamped lines up to one second past the step's whole-second end, stopping at that step's own runner exit line. A failed job with no failed step (a lost runner) is read from its check-run failure annotations instead of a log. Descriptive signatures live in `blocking_path.py`: lost runner or reclaimed spot machine, out of memory (the runner's own exit code 137 line, never a 137 or `Killed` printed by a test), browser crash (crash wording only; an ordinary test timeout that closes the page does not count), and network (connection errors, or a 502/503 beside HTTP wording, only in install, fetch or "Set up job" steps that do not also name test work). Assertion diagnostics never count. Missing logs or step timing do not imply a class.
+- Emit when at least five failures match and they represent at least 20% of the job's sampled failures. The denominator includes failures with unreadable logs, and the evidence states how many were unreadable. When no finding fires and the unread logs could have changed that, OPT100 is reported as not evaluated. A readable required-check set must establish that the job gates merge.
 - Show counts by class. A runner receiving at least five and 80% of the matched failures is named for investigation when its labels explicitly identify it as self-hosted.
-- Retry compute comes only from subsequent sampled attempts of the same run, with exactly one failed job in the preceding attempt. Ambiguous multi-failure retries receive no credit. Each attempt counts once; OPT64 does not claim runs already claimed here.
+- Retry compute comes only from the next sampled attempt of the same run, with exactly one failed job in the preceding attempt, and counts only jobs that ran in that attempt and ran again; a job skipped behind the failure would have run anyway. Ambiguous multi-failure retries receive no credit. Each attempt counts once; OPT64 does not claim runs already claimed here.
 - A same-run, same-commit fail-then-pass without an infrastructure signature adds a pointer to OPT48's quarantine recipe, not another finding.
 
 **Fix recipe**:

@@ -4189,3 +4189,23 @@ Repeated merge validation section so a drilled pole cannot hide the observation.
 Malformed workflow shapes, unavailable branch rules and missing event timings
 are disclosed in data sources. Any declared queue workflow conservatively
 suppresses strict-rule advice, including one whose required status is unknown.
+
+### Infrastructure faults (OPT100)
+
+`_opt100_workflow_pass` runs once per workflow after the repeated-attempt
+prefetch. It reuses the all-status and prior-attempt job pages, resolves
+observed job names to exactly one merge-gating YAML job, and reads evidence
+only for gating jobs with at least five failures: one log per failed job with
+a failed step, or one check-run annotations call (the job id is its check-run
+id) per failed job with no failed step, which is how a lost runner appears.
+`_opt100_job_class` parses log timestamps with the shared OPT80 line parser
+(seven fractional digits), keeps the first failed step's lines up to one second
+past its whole-second end, and stops at that step's runner exit line. The
+signature table in `blocking_path.py` then classifies lost runner, out of
+memory (the runner's own exit 137 line), browser crash (crash wording only) and
+network (errno or a 502/503 beside HTTP wording, in install, fetch or "Set up
+job" steps). Retry compute counts only jobs that ran in the failed attempt and
+again in the next. OPT100 is reported as not evaluated only when no finding
+fired and unread job pages or logs could change the verdict; a fired finding
+states its unread-log count. OPT64 then runs over the retries OPT100 did not
+claim.
