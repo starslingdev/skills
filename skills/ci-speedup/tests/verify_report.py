@@ -1925,14 +1925,33 @@ _LEAK_PATTERNS: tuple[tuple[str, str, bool], ...] = (
 
 # Where the renderer puts audited-repo identifiers (check, job, workflow, step
 # names): inline code spans, and TOC link text pointing at a pole anchor
-# (`[<check>](#pole-N)`). Fenced blocks are NOT stripped: agent prompts are
-# skill prose; a code span never crosses a line, so fence markers stay intact.
+# (`[<check>](#pole-N)`). Fenced blocks are left whole, code spans included:
+# agent prompts are skill prose, so "Please `run zizmor`" in one still trips.
+# Fence tracking follows _nonfence_markdown_lines (same char, run >= opener,
+# delimiter-only closer).
 _IDENT_CODE_SPAN_RE = re.compile(r"`[^`\n]+`")
 _IDENT_POLE_LINK_RE = re.compile(r"\[[^\]\n]*\]\(#pole-\d+\)")
 
 
 def _strip_audited_identifiers(report: str) -> str:
-    return _IDENT_POLE_LINK_RE.sub("[]", _IDENT_CODE_SPAN_RE.sub("``", report))
+    out: list[str] = []
+    fence: "tuple[str, int] | None" = None
+    for line in report.splitlines():
+        stripped = line.lstrip()
+        if fence is None:
+            for ch in ("`", "~"):
+                n = len(stripped) - len(stripped.lstrip(ch))
+                if n >= 3:
+                    fence = (ch, n)
+                    break
+            else:
+                line = _IDENT_POLE_LINK_RE.sub("[]", _IDENT_CODE_SPAN_RE.sub("``", line))
+        else:
+            n = len(stripped) - len(stripped.lstrip(fence[0]))
+            if n >= fence[1] and not stripped[n:].strip():
+                fence = None
+        out.append(line)
+    return "\n".join(out)
 
 # Every typographic dash the render boundary (_strip_emdashes) must flatten to an
 # ASCII "-". A report that still carries any of these slipped past the sanitizer.

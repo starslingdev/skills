@@ -2705,6 +2705,9 @@ def test_domain_leakage_still_fails_on_skill_prose(tmp_path: Path):
     # Inside an agent-prompt fence the text is still skill prose.
     fence = "\n```text\nThe ci-secure audit found nothing.\n```\n"
     assert _tag_for(rep + fence, _LEAK, tmp_path) == "FAIL"
+    # ...and the identifier exemption does not reach inside a fence.
+    fenced_span = "\n```text\nPlease `run zizmor` to confirm.\n```\n"
+    assert _tag_for(rep + fenced_span, _LEAK, tmp_path) == "FAIL"
     # Leak phrases no audited identifier carries are matched even in backticks.
     assert _tag_for(rep + "\nField `attacker_scenario`.\n", _LEAK, tmp_path) == "FAIL"
 
