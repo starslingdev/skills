@@ -5046,9 +5046,16 @@ def _opt96_condition_allows(condition: object, event: str, branch: str) -> bool:
     if not match:
         return True
     field, op, _, expected = match.groups()
-    actual = event if field == "event_name" else (
-        "refs/pull/1/merge" if event == "pull_request" else f"refs/heads/{branch}")
+    # Each seed event is evaluated as itself: a nightly warmer gated to
+    # `schedule` saves, and a merge-queue run's ref is the queue branch.
+    refs = {"pull_request": "refs/pull/1/merge",
+            "merge_group": f"refs/heads/gh-readonly-queue/{branch}/pr-1"}
+    actual = event if field == "event_name" else refs.get(event, f"refs/heads/{branch}")
     return (actual == expected) if op == "==" else (actual != expected)
+
+
+# setup-go caches by default from v4; older majors need `cache: true`.
+_OPT96_SETUP_GO_NO_DEFAULT_CACHE = re.compile(r"v[123](?:\.|$)")
 
 
 def _detect_opt96(parsed: list[tuple[str, dict, str]], root: Path,
@@ -5095,9 +5102,8 @@ def _detect_opt96(parsed: list[tuple[str, dict, str]], root: Path,
             incomplete.append({"path": rel, "reason": "OPT96: reusable workflow cycle"})
             return
         doc, raw = docs[rel]
-        condition_event = "pull_request" if event == "pull_request" else "push"
         for job_id, job in _jobs_from_doc(doc).items():
-            if not isinstance(job, dict) or not _opt96_condition_allows(job.get("if"), condition_event, branch):
+            if not isinstance(job, dict) or not _opt96_condition_allows(job.get("if"), event, branch):
                 continue
             if job.get("uses"):
                 target = str(job["uses"]).split("@", 1)[0]
@@ -5108,36 +5114,71 @@ def _detect_opt96(parsed: list[tuple[str, dict, str]], root: Path,
                 else:
                     walk(target, event, branch, stack | {rel})
                 continue
-            for step, condition in _steps_with_if(job):
-                if not _opt96_condition_allows(condition, condition_event, branch):
-                    continue
-                action = _uses(step).split("@", 1)[0].lower()
-                inputs = step.get("with") or {}
-                if not isinstance(inputs, dict):
-                    continue
-                restore = save = False
-                if action in {"actions/cache", "actions/cache/restore", "actions/cache/save"}:
-                    restore = action != "actions/cache/save"
-                    save = action != "actions/cache/restore" and str(inputs.get("lookup-only", False)).lower() != "true"
-                    family = _opt96_key_family(inputs.get("key"))
-                    aliases = {_opt96_key_family(k) for k in str(inputs.get("restore-keys", "")).splitlines()}
-                elif action in {"actions/setup-node", "actions/setup-python", "actions/setup-go", "actions/setup-java"}:
-                    cache = inputs.get("cache")
-                    if not cache or str(cache).lower() in {"false", "no", "off"}:
-                        continue
-                    family = f"{action}:{cache}"
-                    aliases = set()
-                    restore = True
-                    save = str(inputs.get("cache-read-only", False)).lower() != "true"
+            visit(_steps_with_if(job), rel, str(job_id), event, branch, ())
+
+    def composite_steps(ref, chain):
+        """Steps of a local composite action, or None when it cannot be read."""
+        if ref in chain or len(chain) > _MAX_LOCAL_ACTION_DEPTH:
+            return None
+        text = _read_local_action(root, ref)
+        try:
+            action_doc = yaml.safe_load(text) if text is not None else None
+        except yaml.YAMLError:
+            action_doc = None
+        runs = action_doc.get("runs") if isinstance(action_doc, dict) else None
+        if not isinstance(runs, dict):
+            return None
+        if str(runs.get("using", "")).lower() != "composite":
+            return []  # a JavaScript or Docker action has no step-level cache inputs
+        steps = runs.get("steps")
+        if not isinstance(steps, list):
+            return None
+        return [(st, st.get("if")) for st in steps if isinstance(st, dict)]
+
+    def visit(steps, rel, job_id, event, branch, chain):
+        for step, condition in steps:
+            if not _opt96_condition_allows(condition, event, branch):
+                continue
+            uses = _uses(step).strip()
+            action, _, version = uses.partition("@")
+            action = action.lower()
+            if _is_local_uses(uses) and not action.endswith((".yml", ".yaml")):
+                # A local composite action can hide a reader or a writer.
+                inner = composite_steps(uses.partition("@")[0], chain)
+                if inner is None:
+                    incomplete.append({"path": rel, "reason": "OPT96: unresolved local action; cache saves unknown"})
                 else:
+                    visit(inner, rel, job_id, event, branch, chain + (uses.partition("@")[0],))
+                continue
+            inputs = step.get("with") or {}
+            if not isinstance(inputs, dict):
+                continue
+            restore = save = False
+            if action in {"actions/cache", "actions/cache/restore", "actions/cache/save"}:
+                restore = action != "actions/cache/save"
+                save = action != "actions/cache/restore" and str(inputs.get("lookup-only", False)).lower() != "true"
+                family = _opt96_key_family(inputs.get("key"))
+                aliases = {_opt96_key_family(k) for k in str(inputs.get("restore-keys", "")).splitlines()}
+            elif action in {"actions/setup-node", "actions/setup-python", "actions/setup-go", "actions/setup-java"}:
+                cache = inputs.get("cache")
+                if (cache is None and action == "actions/setup-go"
+                        and not _OPT96_SETUP_GO_NO_DEFAULT_CACHE.match(version)):
+                    cache = True  # setup-go v4+ caches unless told not to
+                if cache is None or str(cache).lower() in {"", "false", "no", "off"}:
                     continue
-                if not family:
-                    incomplete.append({"path": rel, "reason": "OPT96: cache key has no stable prefix"})
-                    continue
-                if save and event != "pull_request":
-                    writers.add(family)
-                if restore and event == "pull_request":
-                    readers[(rel, str(job_id), family)] = aliases - {""}
+                family = f"{action}:{str(cache).lower()}"
+                aliases = set()
+                restore = True
+                save = str(inputs.get("cache-read-only", False)).lower() != "true"
+            else:
+                continue
+            if not family:
+                incomplete.append({"path": rel, "reason": "OPT96: cache key has no stable prefix"})
+                continue
+            if save and event != "pull_request":
+                writers.add(family)
+            if restore and event == "pull_request":
+                readers[(rel, job_id, family)] = aliases - {""}
 
     for rel, doc, _ in parsed:
         for event in ("pull_request", "push", "schedule", "merge_group"):

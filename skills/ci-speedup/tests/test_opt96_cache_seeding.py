@@ -160,15 +160,20 @@ def sampled_job(jid, install_s):
     }
 
 
+@pytest.mark.parametrize("push_restores", [False, True])
 @pytest.mark.parametrize("misses", [6, 1, 8])
-def test_saved_runs_dependency_cache_grounding_and_sizing(tmp_path, misses):
+def test_saved_runs_dependency_cache_grounding_and_sizing(tmp_path, misses, push_restores):
     # Keep the representative job a miss even for the sparse-tail case. Eight
     # requested samples use the existing magnitude budget, plus <=3 push probes.
     miss_ids = set(range(1, misses + 1))
     jobs = [sampled_job(i, 100 if i in miss_ids else 20) for i in range(1, 9)]
     logs = {i: ("Cache not found for input keys: deps-linux-lock" if i in miss_ids
                 else "Cache restored from key: deps-linux-lock") for i in range(1, 9)}
-    logs.update({i: "Cache restored from key: deps-linux-lock" for i in range(21, 26)})
+    # A push run that RESTORES proves the default branch holds the cache; one
+    # that misses and saves nothing is the unseeded shape OPT96 confirms.
+    logs.update({i: ("Cache restored from key: deps-linux-lock" if push_restores
+                     else "Cache not found for input keys: deps-linux-lock")
+                 for i in range(21, 26)})
 
     class Client:
         queries = errors = 0
@@ -191,7 +196,7 @@ def test_saved_runs_dependency_cache_grounding_and_sizing(tmp_path, misses):
     cd = pole.get("cache_dist")
     assert cd is not None, "dependency caches must use existing cache-distribution grounding"
     assert cd["fix_key"] == "dependency-cache"
-    assert cd["push"]["median"] == 0
+    assert cd["push"]["median"] == (0 if push_restores else 100)
     assert len([jid for jid in client.calls if jid >= 21]) <= cr._CACHE_PUSH_PROBE_MAX
     assert len(client.calls) <= 8 + cr._CACHE_PUSH_PROBE_MAX
     sizing = cd["sizing"]
@@ -202,9 +207,11 @@ def test_saved_runs_dependency_cache_grounding_and_sizing(tmp_path, misses):
         assert sizing.get("saving_s") is None
     else:
         assert sizing["saving_s"] == pytest.approx((100 - 20) * misses / 8)
-    if misses == 1:
+    if misses == 1 or push_restores:
         assert cd["recommendation"] == "check this"
-    else:
+    if push_restores:
+        assert cd["confirmed"] is False, "a default-branch restore refutes a missing seed"
+    elif misses != 1:
         assert cd["confirmed"] is True
 
 
@@ -249,8 +256,129 @@ def test_static_pr_only_reachability_can_confirm_without_push_samples():
     assert f['wall_clock_p50_s'] == 60
 
 
-def test_schedule_does_not_override_a_literal_push_exclusion(tmp_path):
+def test_schedule_only_writer_gated_to_push_never_runs(tmp_path):
+    # A schedule-only workflow whose save is gated to `push` never saves.
     write_workflow(tmp_path, 'ci.yml', RESTORE)
     warmer = SAVE.replace('{push: {branches: [main]}}', "{schedule: [{cron: '0 0 * * *'}]}")
-    write_workflow(tmp_path, 'warm.yml', warmer.replace('      - uses:', "      - if: github.event_name != 'push'\n        uses:"))
+    write_workflow(tmp_path, 'warm.yml', warmer.replace('      - uses:', "      - if: github.event_name == 'push'\n        uses:"))
     assert findings(tmp_path)
+
+
+@pytest.mark.parametrize('trigger,condition', [
+    ("{schedule: [{cron: '0 0 * * *'}]}", "github.event_name == 'schedule'"),
+    ("{schedule: [{cron: '0 0 * * *'}]}", "github.event_name != 'push'"),
+    ('merge_group', "github.event_name == 'merge_group'"),
+])
+def test_seed_event_conditions_evaluate_the_real_event_name(tmp_path, trigger, condition):
+    # A nightly warmer gated to its own event DOES save. Evaluating its
+    # condition as if the event were `push` invents a missing writer.
+    write_workflow(tmp_path, 'ci.yml', RESTORE)
+    warmer = SAVE.replace('{push: {branches: [main]}}', trigger)
+    write_workflow(tmp_path, 'warm.yml', warmer.replace('      - uses:', f"      - if: {condition}\n        uses:"))
+    assert not findings(tmp_path), "a writer gated to its own seed event is reachable"
+
+
+COMPOSITE = """runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        cache: pnpm
+"""
+
+
+def write_action(root, name, text):
+    path = root / ".github" / "actions" / name / "action.yml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+
+
+def test_local_composite_action_cache_points_are_followed(tmp_path):
+    uses_setup = """    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+"""
+    # Writer hidden in a composite action on push: the PR reader is seeded.
+    write_workflow(tmp_path, "ci.yml", NODE)
+    write_workflow(tmp_path, "main.yml", "on: {push: {branches: [main]}}\njobs:\n  build:\n"
+                   "    runs-on: ubuntu-latest\n" + uses_setup)
+    write_action(tmp_path, "setup", COMPOSITE)
+    assert not findings(tmp_path), "a composite action on push saves the same cache"
+    # Reader hidden in a composite action on PRs only: flagged.
+    (tmp_path / ".github" / "workflows" / "main.yml").unlink()
+    write_workflow(tmp_path, "ci.yml", "on: pull_request\njobs:\n  test:\n"
+                   "    runs-on: ubuntu-latest\n" + uses_setup)
+    assert findings(tmp_path), "a composite action's PR-only cache is unseeded"
+    # An unreadable local action can hide a writer: no flag, disclosed.
+    write_workflow(tmp_path, "main.yml", "on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n"
+                   "    steps:\n      - uses: ./.github/actions/missing\n")
+    result = subprocess.run([sys.executable, str(SCRIPTS / "scan.py"), "--root", str(tmp_path)],
+                            capture_output=True, text=True, check=True)
+    doc = json.loads(result.stdout)
+    assert not [f for f in doc["findings"] if f["pattern"] == "OPT96"]
+    assert any("OPT96" in entry["reason"] and "local action" in entry["reason"]
+               for entry in doc["scan_incomplete"])
+
+
+GO = """on: {%s}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'%s
+"""
+
+
+def test_setup_go_caches_by_default(tmp_path):
+    # setup-go v4+ caches with no `cache:` input. A default writer on push
+    # seeds an explicit `cache: true` reader; a default PR-only reader is flagged.
+    write_workflow(tmp_path, "ci.yml", GO % ("pull_request: {}", "\n          cache: true"))
+    write_workflow(tmp_path, "main.yml", GO % ("push: {branches: [main]}", ""))
+    assert not findings(tmp_path), "setup-go's default cache saves on push"
+    (tmp_path / ".github" / "workflows" / "main.yml").unlink()
+    write_workflow(tmp_path, "ci.yml", GO % ("pull_request: {}", ""))
+    assert findings(tmp_path), "setup-go's default cache restores on PRs"
+
+
+@pytest.mark.parametrize('log,miss', [
+    ('npm cache is not found\nCache restored from key: deps', 50),
+    ('Cache is not found', 100),
+    ('pip cache is not found', 100),
+])
+def test_setup_action_miss_wording_counts_as_a_miss(log, miss):
+    state = bp._cache_state_of_log(log, 'dependency-cache')
+    assert state is not None and state['miss_pct'] == miss
+
+
+def _cache_only_pole_doc():
+    pole = {"check": "Run Checks", "p50_s": 308.0, "workflow_file": "ci.yml", "job": "Run Checks",
+            "dominant_category": "test", "dominant_step": "Run tests",
+            "dominant_p50_s": 300.0, "dominant_share": 0.974, "job_p50_s": 308.0,
+            "steps": [{"step": "Run tests", "category": "test", "p50_s": 300.0},
+                      {"step": "Set up job", "category": "setup", "p50_s": 8.0}]}
+    doc = {"pr_critical_path": {
+        "critical_path_check": "Run Checks", "critical_path_s": 308.0,
+        "checks": [{"name": "Run Checks", "p50_s": 308.0, "present_on": 6, "pole_n": 6,
+                    "workflow_file": "ci.yml"}],
+        "check_present_n_pr": 6,
+        "populations": [[0.05, [["Run Checks", 308.0]]] for _ in range(6)],
+        "poles": [pole]}, "findings": []}
+    logs = {"Run Checks": "Cache restored from key: deps-linux-abc\n"
+                          "> run-tests --all\nPASS  src/foo.spec.ts (312 tests) 41200ms\n"}
+    return doc, logs
+
+
+def test_a_cache_restore_line_alone_does_not_close_a_coverage_gap():
+    # Nearly every job log carries a cache restore line. That observation is
+    # not a root-cause detector: the pole stays a coverage gap, so phase 4a's
+    # LLM gap-fill still renders and the gap capture still sees it.
+    doc, logs = _cache_only_pole_doc()
+    assert len(bp._gap_poles(doc, logs)) == 1, "cache lines must not hide a coverage gap"
+    analysis = {"cause": "SENTINEL-LLM-CAUSE slow suite.", "breakdown": [["tests", "~300s"]],
+                "evidence": ["PASS  src/foo.spec.ts (312 tests) 41200ms"],
+                "prompt": "SENTINEL-LLM-PROMPT investigate the suite."}
+    out = bp.render(doc, logs, analyses={"Run Checks": analysis})
+    assert "SENTINEL-LLM-CAUSE" in out, "the gap-fill must not be suppressed by a cache line"
+    assert bp._opt81_holding_leaf(None, bp._parse_log(logs["Run Checks"])) is None

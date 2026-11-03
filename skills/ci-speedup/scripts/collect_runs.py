@@ -23924,9 +23924,11 @@ def _cache_distribution(
         samples = [v for v in pr_values if not v.get("fork") and _miss(v) is not None]
         miss_share = (statistics.mean(_miss(v) for v in samples) / 100.0
                       if samples else 0.0)
+        # A push run that restored anything proves the default branch already
+        # holds this cache, so only full misses with no save confirm the gap.
         no_push_save = (bool(push_runs) and push_matched == 0) or (
             bool(push_vals) and not push_errors and len(push_vals) == push_matched
-            and all(v.get("saved") is False for v in push_vals))
+            and all(v.get("saved") is False and v.get("value") == 100 for v in push_vals))
         result["confirmed"] = bool(pr["upstream_median"] is not None
                                    and pr["upstream_median"] >= 50 and no_push_save)
         result["recommendation"] = ("check this" if miss_share < _CACHE_TAIL_MIN_FRAC

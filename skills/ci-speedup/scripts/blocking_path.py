@@ -1549,6 +1549,27 @@ def _install_build_section(lines: list[str], min_secs: float = _LIFECYCLE_BUILD_
     return (_cmd, _s, _e, _hit, _total, _secs, _cidx)
 
 
+# Dependency-cache restore outcomes. `actions/cache` logs "Cache not found for input
+# keys: …" on a miss; the setup-node / setup-python / setup-java implicit caches log
+# "<manager> cache is not found" and setup-go "Cache is not found". A hit is "Cache
+# restored from key: …" for all of them.
+_DEPENDENCY_CACHE_MISS_RE = re.compile(
+    r"Cache not found for input keys|\bcache is not found\b", re.I)
+_DEPENDENCY_CACHE_SAVED_RE = re.compile(
+    r"Cache saved successfully|Cache saved with (?:the )?key")
+# Leaves that record an observation, not a root cause: a restore line appears in
+# nearly every job log, so it never closes a coverage gap (phase 4a gap-fill and
+# capture still run) and never holds back the runner advisory.
+_OBSERVATION_ONLY_LEAVES = frozenset({"dependency-cache"})
+
+
+def _catalog_leaf(leaf: dict[str, Any] | None) -> dict[str, Any] | None:
+    """`leaf`, unless it is an observation-only leaf (then None)."""
+    if leaf is not None and leaf.get("fix_key") in _OBSERVATION_ONLY_LEAVES:
+        return None
+    return leaf
+
+
 def _cache_state_of_log(text: str | None, fix_key: str | None) -> dict[str, Any] | None:
     """Re-derive one run's cache state — `{miss_pct, cold, remote_off}` — from its log,
     for the given cache leaf. The single source of truth for the per-run miss rate the
@@ -1561,14 +1582,13 @@ def _cache_state_of_log(text: str | None, fix_key: str | None) -> dict[str, Any]
     lines = _clean_log(text)
     joined = "\n".join(lines)
     if fix_key == "dependency-cache":
-        misses = sum("Cache not found for input keys" in line for line in lines)
+        misses = sum(bool(_DEPENDENCY_CACHE_MISS_RE.search(line)) for line in lines)
         hits = sum("Cache restored from key" in line for line in lines)
         if not hits + misses:
             return None
         return {"miss_pct": 100.0 * misses / (hits + misses),
                 "cold": hits == 0, "remote_off": False, "restore_count": hits + misses,
-                "saved": any("Cache saved successfully" in line or "Cache saved with key" in line
-                             for line in lines)}
+                "saved": any(_DEPENDENCY_CACHE_SAVED_RE.search(line) for line in lines)}
     if fix_key in ("turbo-remote-cache", "turbo-partial-cache", "install-lifecycle-build"):
         # For the install-lifecycle leaf, measure the miss rate from the SAME install-step section
         # `_parse_log`'s detector fired on — NOT the whole log. Otherwise a later explicit
@@ -2473,9 +2493,10 @@ def _parse_log(text: str,
             "magnitude": {"label": "dependency cache misses", "unit": "%",
                           "value": dependency_state["miss_pct"]},
             "deeper": [],
-            "evidence": [line for line in lines if "Cache not found for input keys" in line
+            "evidence": [line for line in lines if _DEPENDENCY_CACHE_MISS_RE.search(line)
                          or "Cache restored from key" in line][:3],
-            "search": ["Cache not found for input keys", "Cache restored from key"],
+            "search": ["Cache not found for input keys", "cache is not found",
+                       "Cache restored from key"],
         }
     return None
 
@@ -8401,7 +8422,7 @@ def _opt81_holding_leaf(leaf: "dict[str, Any] | None",
     off-category (issue #16) still matched the pole's own log, so it is a
     cheaper lever than a different or larger runner class even though it is not
     the dominant work."""
-    return leaf if leaf is not None else offcat_leaf
+    return _catalog_leaf(leaf if leaf is not None else offcat_leaf)
 
 
 def _opt81_leaf_name(leaf: dict[str, Any]) -> str:
@@ -12139,7 +12160,7 @@ def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
         # a detector DID match its log, it just isn't the pole's dominant work — so it must
         # not pull an LLM gap-fill analysis (that path is for poles no detector recognized).
         analysis = (_match(analyses)
-                    if (leaf is None and offcat_leaf is None
+                    if (leaf is None and _catalog_leaf(offcat_leaf) is None
                         and not structural and not data_driven
                         and not _opt79_pole_covers(opt79_pole)
                         and not opt82_pole) else None)
@@ -12840,7 +12861,7 @@ def _gap_poles(doc: dict[str, Any],
                 if "=" in key:
                     continue  # an un-bindable key (summary flags it) — never borrow
                 log_text = logs.get(key)
-                if not log_text or _parse_log(log_text, _iso) is not None:
+                if not log_text or _catalog_leaf(_parse_log(log_text, _iso)) is not None:
                     continue
                 base = _pole_for_entry(poles, entry) or dict(entry)
                 if _catalog_covers(base):
@@ -12856,7 +12877,8 @@ def _gap_poles(doc: dict[str, Any],
     named = [p for p in poles if p.get("check")]
     for key, log_text in logs.items():
         pole = _sole_owner_pole(key, named)
-        if pole is None or not log_text or _parse_log(log_text, _iso) is not None:
+        if (pole is None or not log_text
+                or _catalog_leaf(_parse_log(log_text, _iso)) is not None):
             continue
         if _catalog_covers(pole):
             continue  # a catalog detector already covers it — not a gap

@@ -22,19 +22,22 @@ for a cold install.
 
 **Detection heuristic**: Correlate `actions/cache`, its separate `restore` and
 `save` actions, and the `cache:` inputs of `setup-node`, `setup-python`,
-`setup-go`, and `setup-java`. Normalize expression-valued platform and lockfile
+`setup-go` (cached by default from v4), and `setup-java`, including those
+inside local composite actions. Normalize expression-valued platform and lockfile
 hash components to a stable key prefix, including `restore-keys` fallbacks.
 A save is reachable through a default-branch push (including branch globs),
 `schedule`, or `merge_group` unless a literal job or step condition excludes
-it. Unknown conditions count as reachable. Follow local reusable workflow
-calls; unresolved calls suppress the finding and appear in `scan_incomplete`.
+it; each event's conditions are evaluated for that event. Unknown conditions
+count as reachable. Follow local reusable workflow calls and composite
+actions; unresolved ones suppress the finding and appear in `scan_incomplete`.
 Use repository metadata for the default branch when available; otherwise
 assume `main`/`master` and disclose the assumption in the evidence.
 
 Confirm the static candidate using the existing cache-distribution sampling:
 dependency-cache restore hit/miss lines on PR runs versus the existing bounded
 push probe. Confirmation requires a median PR miss rate of at least 50% and
-push logs showing no save, or a job absent from push runs. Below the 25% miss
+push logs showing neither a restore nor a save, or a job absent from push
+runs. A default-branch restore proves the cache is already seeded. Below the 25% miss
 tail, present it as **check this**, not a savings lever. Missing log evidence
 is an uncertainty, not proof that a cache was never saved.
 

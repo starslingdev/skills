@@ -4109,8 +4109,12 @@ order of preference:
 ### Default-branch dependency-cache seeding (OPT96)
 
 The static pass correlates PR restore families with default-branch save points,
-including local reusable callers. Unknown conditions remain reachable; unresolved
-calls disclose incomplete coverage rather than inventing an absent writer.
+including local reusable callers and local composite actions. Each seed event's
+conditions are evaluated for that event. Unknown conditions remain reachable; unresolved
+calls or actions disclose incomplete coverage rather than inventing an absent writer.
+The dependency-cache leaf is observation-only (`_OBSERVATION_ONLY_LEAVES`): a restore
+line never closes a coverage gap or holds back the OPT81 advisory, and a default-branch
+restore refutes the measured confirmation.
 The dependency-cache leaf reads restore outcomes using the existing magnitude
 sample and bounded push probe. Only a matching static finding can promote the
 measured install hit/miss difference, multiplied by upstream PR miss share.
