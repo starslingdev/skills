@@ -97,6 +97,18 @@ def test_query_reads_actions_jobs_within_graphql_limits():
     assert prs*(timeline+rollup+commits*suites*runs) <= 200_000
 
 
+def test_skipped_job_reported_as_ending_before_it_started_counts_as_zero():
+    # GitHub stamps skipped jobs (`if:` false) with a completion a few seconds
+    # before their start. That is a zero-length job, not an unreadable PR.
+    skipped=check(560,550,'SKIPPED',name='optional')
+    assert module().measure_pr(pr([check(500,600),skipped]),['test'])==module().measure_pr(pr(),['test'])
+
+
+def test_failed_job_that_ends_before_it_starts_is_still_unreadable():
+    with pytest.raises(ValueError,match='incomplete check interval'):
+        module().measure_pr(pr([check(500,600),check(560,550,'FAILURE',name='optional')]),['test'])
+
+
 def test_required_check_from_another_app_sets_green_start():
     # A required commit status (or another app's check) lives only in the final
     # commit's rollup, never in the Actions suites.
