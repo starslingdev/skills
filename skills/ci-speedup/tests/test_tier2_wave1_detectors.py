@@ -1739,7 +1739,10 @@ def test_detectors_wired_into_collect():
     # the rare re-fetch fallback), never call the latest-attempt fetcher directly.
     assert "_attempt_job_samples(" in src
     assert "_fetch_run_jobs_latest_attempt" not in src
-    assert "_detect_opt64_rerun_attempt_waste(" in src
+    # OPT64 runs inside the per-workflow OPT100 pass (over the retries OPT100 did
+    # not claim), which collect calls; pin both links of that chain.
+    assert "_opt100_workflow_pass(" in src
+    assert "_detect_opt64_rerun_attempt_waste(" in inspect.getsource(cr._opt100_workflow_pass)
     assert "_detect_opt35_fail_fast_waste(" in src
     assert "_opt35_shard_job_specs(" in src
     assert "_supersede_static_opt35(" in src
