@@ -901,7 +901,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Changed
 
-- **2026-11-03** — Document flaky-test quarantine with ownership, expiry, reporting and a product-failure guardrail; explain account capacity and explicit hosted fallback before changing runners; point mostly-idle queue waits to the single-slot resource diagnosis. (PR pending)
+- **2026-11-03** — Document flaky-test quarantine with ownership, expiry, reporting and a product-failure guardrail; explain account capacity and explicit hosted fallback before changing runners; point mostly-idle queue waits to the single-slot resource diagnosis. (#177)
 
 - **2026-11-02** — OPT70 requires a full run for lockfile, scoping-config and workflow changes, an unscoped default-branch or scheduled suite under OPT90's post-merge guardrail, and a one-time skip-logic test. OPT84 adds `bun check` as a recipe-only alternative with vendor benchmarks against older Bun; TypeScript 7 remains the default.
 
