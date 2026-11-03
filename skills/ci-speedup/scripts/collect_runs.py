@@ -4965,7 +4965,9 @@ _SIZING: dict[str, dict[str, Any]] = {
     "OPT24": {"model": "measured"},
     "OPT25": {"model": "measured"},
     "OPT43": {"model": "measured"},
+    "OPT97": {"model": "measured"},
     "OPT48": {"model": "measured"},
+    "OPT100": {"model": "measured"},
     "OPT49": {"model": "measured"},
     "OPT50": {"model": "measured"},
     "OPT51": {"model": "measured"},
@@ -7568,6 +7570,7 @@ def _ruleset_ref_in_scope(detail: dict[str, Any], branch: str | None) -> bool:
 
 def _fetch_required_checks(
     client: "GhClient", repo: str, branch: str | None = "main",
+    *, branch_rules: dict[str, Any] | None = None,
 ) -> RequiredChecks | None:
     """The repo's REQUIRED status-check contexts, from rulesets + classic branch
     protection. Returns a `RequiredChecks` (names + completeness), or None when
@@ -7585,6 +7588,9 @@ def _fetch_required_checks(
 
     Repo-agnostic: driven entirely off the GitHub API, no hardcoded names."""
     names: set[str] = set()
+    strict_values: list[bool] = []
+    merge_queue = False
+    classic_strict_read = False
     found_any = False
     complete = True
     # Rulesets (the modern mechanism) — readable without admin on many repos.
@@ -7617,7 +7623,12 @@ def _fetch_required_checks(
             for rule in detail.get("rules") or []:
                 if not isinstance(rule, dict):
                     continue
+                if rule.get("type") == "merge_queue":
+                    merge_queue = True
                 if rule.get("type") == "required_status_checks":
+                    policy = (rule.get("parameters") or {}).get("strict_required_status_checks_policy")
+                    if isinstance(policy, bool):
+                        strict_values.append(policy)
                     found_any = True
                     params = rule.get("parameters") or {}
                     for c in params.get("required_status_checks") or []:
@@ -7639,6 +7650,9 @@ def _fetch_required_checks(
             f"repos/{repo}/branches/{branch}/protection/required_status_checks",
             allow_missing=True)
         if isinstance(prot, dict):
+            if isinstance(prot.get("strict"), bool):
+                strict_values.append(prot["strict"])
+                classic_strict_read = True
             found_any = True
             for c in prot.get("contexts") or []:
                 names.add(str(c))
@@ -7647,9 +7661,361 @@ def _fetch_required_checks(
                     names.add(str(c["context"]))
     else:
         complete = False
+    if branch_rules is not None:
+        # GitHub enforces the stricter source, so ANY readable "on" is on. "Off" is
+        # known only when classic protection was actually read: a non-admin gets a
+        # 404 there even when it requires up-to-date branches, so a ruleset that
+        # says off next to an unread classic rule stays UNKNOWN (disclosed).
+        strict = True if any(strict_values) else (False if classic_strict_read else None)
+        branch_rules.update(strict=strict, merge_queue=merge_queue,
+                            complete=complete and isinstance(rulesets, list))
     if not found_any and complete:
         return None
     return RequiredChecks(frozenset(names), complete)
+
+
+_OPT98_MIN_MERGES_PER_DAY = 30      # C1: below this the up-to-date rule is cheap
+_OPT98_MIN_RUNS = 15                # C2: successful first-attempt runs per event (as OPT97)
+_OPT98_REPROVE_RATIO = .8           # C2: queue median at least this share of the PR median
+_OPT98_DIFFERENT_RATIO = 1.5        # C2: above this the queue runs different work, not the same
+_OPT98_CHURN_SAMPLE = 30            # C1: merged-PR timelines read, at most
+_OPT98_WINDOW_DAYS = 30             # C1: complete UTC days counted before the pin
+# Affected-only execution (the OPT70 signals) and build/remote-cache reuse, in a
+# command, an action input or an env name/value. Any one settles the workflow as
+# already scoped: it is not re-proving the whole suite.
+_OPT98_SCOPED_RE = _re.compile(
+    r"\bnx\s+affected\b|--filter[= ]?['\"]?[^\s'\"]*\[|\bturbo\b[^\n]*--affected\b"
+    r"|--changed(?:Since)?\b|--only-?changed\b|\bgit\s+diff\b[^\n]*--name-only"
+    r"|--remote[-_]cache|--disk[-_]cache|--build-cache\b|\bs?ccache\b"
+    r"|\bTURBO_(?:TOKEN|API|REMOTE\w*)\b|\bNX_CLOUD\w*", _re.I)
+_OPT98_SCOPED_ACTION_RE = _re.compile(
+    r"nx-set-shas|paths-filter|changed-files|cache|setup-gradle|gradle-build-action", _re.I)
+# Paths a dependency-only `actions/cache` restores; anything else is a build cache.
+_OPT98_DEP_CACHE_RE = _re.compile(
+    r"node_modules|\.npm\b|pnpm|yarn|\.cache/pip\b|pip-cache|pypoetry|\.cache/uv\b|(?:^|/)\.?venv\b"
+    r"|go/pkg/mod|\.cargo/(?:registry|git)\b|\.m2\b|ms-playwright|\.bun/install|vendor/bundle"
+    r"|\.nuget/packages|composer", _re.I)
+# Context that differs between a pull_request run and a merge_group run.
+_OPT98_EVENT_RE = _re.compile(
+    r"github\.event_name|github\.event\.|github\.(?:base_ref|head_ref|ref_name|ref)\b"
+    r"|merge_group|pull_request|\bGITHUB_(?:EVENT_NAME|EVENT_PATH|BASE_REF|HEAD_REF|REF_NAME|REF)\b")
+
+
+def _opt98_text(value: Any) -> str:
+    if value is None:
+        return ''
+    if isinstance(value, (str, int, float, bool)):
+        return str(value)
+    # YAML yields dates and non-string keys; text only feeds regex searches.
+    return json.dumps(value, default=str)
+
+
+def _opt98_mapping(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise TypeError('mapping expected')
+    return value
+
+
+def _opt98_static_scope(doc: dict[str, Any]) -> tuple[str, list[str], str]:
+    """(status, jobs, reason) for one workflow, statically.
+
+    status: 'none' (no merge_group trigger), 'queue_only' (merge_group without
+    pull_request: nothing is re-proven), 'scoped' (affected-only execution or a
+    build/remote cache restore somewhere), 'unknown' (work could differ between
+    the two events, or lives where it isn't read; `reason` names it) or 'full'
+    (the same jobs run on both events, unscoped). Expressions in places that
+    don't select work (names, concurrency, runner labels, secrets) don't count.
+    Package scripts and third-party actions are not read; the measured
+    queue/PR ratio is the second proof. Raises on a malformed document.
+    """
+    events = _wf_on(doc)
+    if not isinstance(events, (str, dict, list)):
+        raise ValueError('unreadable workflow triggers')
+    if not _on_has_event(events, 'merge_group'):
+        return 'none', [], ''
+    if not _on_has_event(events, 'pull_request'):
+        return 'queue_only', [], ''
+    jobs = doc.get('jobs')
+    if not isinstance(jobs, dict) or not jobs:
+        raise ValueError('unreadable jobs')
+    wf_env = _opt98_mapping(doc.get('env'))
+    unknown: list[str] = []
+    if _OPT98_SCOPED_RE.search(_opt98_text(wf_env)):
+        return 'scoped', [], 'workflow env'
+    if _OPT98_EVENT_RE.search(_opt98_text(list(wf_env.values()))):
+        unknown.append('event-dependent workflow env')
+    for jid, job in jobs.items():
+        if not isinstance(job, dict):
+            raise ValueError('unreadable job')
+        if job.get('uses'):
+            unknown.append(f'job `{jid}` calls a reusable workflow')
+            continue
+        job_env = _opt98_mapping(job.get('env'))
+        cond = _opt98_text(job.get('if'))
+        if _OPT98_EVENT_RE.search(cond):
+            unknown.append(f'event-dependent condition on job `{jid}`')
+        elif 'needs.' in cond:
+            unknown.append(f"job `{jid}` runs only on another job's output")
+        strategy = _opt98_text(job.get('strategy'))
+        if '${{' in strategy and (_OPT98_EVENT_RE.search(strategy) or _re.search(r'needs\.|fromJSON', strategy, _re.I)):
+            unknown.append(f'generated matrix on job `{jid}`')
+        if _OPT98_SCOPED_RE.search(_opt98_text(job_env)):
+            return 'scoped', [], f'job `{jid}` env'
+        work = [_opt98_text(list(job_env.values()))]
+        for step in job.get('steps') or []:
+            if not isinstance(step, dict) or not ('run' in step or 'uses' in step):
+                unknown.append(f'unrecognized step shape in job `{jid}`')
+                continue
+            action = str(step.get('uses') or '').split('@')[0].strip()
+            with_ = _opt98_mapping(step.get('with'))
+            step_env = _opt98_mapping(step.get('env'))
+            run = _opt98_text(step.get('run'))
+            if action.startswith('./'):
+                unknown.append(f'job `{jid}` uses local action `{action}`, not read')
+            if action.lower() in ('actions/cache', 'actions/cache/restore'):
+                paths = with_.get('path')
+                lines = [ln.strip() for ln in (paths if isinstance(paths, list) else str(paths or '').splitlines())
+                         if str(ln).strip()]
+                if not lines or not all(_OPT98_DEP_CACHE_RE.search(str(ln)) for ln in lines):
+                    return 'scoped', [], f'job `{jid}` restores a build cache'
+            elif action and _OPT98_SCOPED_ACTION_RE.search(action):
+                return 'scoped', [], f'job `{jid}` uses `{action}`'
+            if _OPT98_SCOPED_RE.search(' '.join((run, _opt98_text(with_), _opt98_text(step_env)))):
+                return 'scoped', [], f'job `{jid}` scopes or caches its work'
+            if _OPT98_EVENT_RE.search(_opt98_text(step.get('if'))):
+                unknown.append(f'event-dependent condition on job `{jid}`')
+            inputs = '' if action.lower() == 'actions/checkout' else _opt98_text(with_)
+            work.append(' '.join((run, inputs, _opt98_text(list(step_env.values())))))
+        if _OPT98_EVENT_RE.search(' '.join(work)):
+            unknown.append(f'event-dependent command or input in job `{jid}`')
+    if unknown:
+        return 'unknown', [], '; '.join(dict.fromkeys(unknown))
+    return 'full', sorted(str(k) for k in jobs), ''
+
+
+def _opt98_full_suite(doc: dict[str, Any]) -> list[str]:
+    """The jobs a workflow runs unscoped on both pull_request and merge_group, or []."""
+    status, jobs, _reason = _opt98_static_scope(doc)
+    return jobs if status == 'full' else []
+
+
+def _opt98_merge_volume(client: 'GhClient', repo: str, since: str,
+                        until: str, *, branch: str | None = None) -> dict[str, Any]:
+    """One REST search; total_count measures the fixed inclusive date window.
+
+    The most recently updated 100 merged PR identities are only the churn sample, never the
+    rate denominator. Search truncation/incompleteness is disclosed, not guessed.
+    """
+    from urllib.parse import quote
+    if not branch:
+        return {'reason': 'merge-count branch not readable'}
+    query = quote(f'repo:{repo} is:pr is:merged base:{json.dumps(branch)} merged:{since}..{until}', safe='')
+    data = client.json(f'search/issues?q={query}&sort=updated&order=desc&per_page=100', allow_missing=True)
+    if not isinstance(data, dict) or not isinstance(data.get('total_count'), int):
+        return {'reason': 'merged PR search not readable'}
+    if data.get('incomplete_results') is not False:
+        return {'reason': 'merged PR search incomplete'}
+    start, end = _parse_dt(since), _parse_dt(until)
+    if start is None or end is None or end < start:
+        return {'reason': 'merged PR window invalid'}
+    days = (end - start).days + 1
+    return {'merges_per_day': data['total_count'] / days, 'merged_count': data['total_count'],
+            'window_days': days, 'since': since, 'until': until,
+            'sampled_merged_prs': [row['number'] for row in data.get('items', [])
+                                  if isinstance(row, dict) and isinstance(row.get('number'), int)]}
+
+
+def _opt98_rebase_churn(client: 'GhClient', repo: str, numbers: list[Any]) -> dict[str, Any]:
+    """How many sampled merged PRs were brought up to date after opening.
+
+    One timeline page per PR, at most `_OPT98_CHURN_SAMPLE` PRs. A two-parent
+    commit is the base merged in (GitHub's "Update branch"); a head force-push is
+    a rebase (or an amend). Run pages can't answer this: GitHub empties a run's
+    `pull_requests[]` once the PR merges (forks never carry it), and its base SHA
+    is the base NOW, not at run time. A timeline over one page is read to its
+    first page, so the count is a lower bound.
+    """
+    sample = [n for n in numbers if isinstance(n, int)][:_OPT98_CHURN_SAMPLE]
+    out = {'sampled': 0, 'unreadable': 0, 'merged_base': 0, 'force_pushed': 0,
+           'updated': 0, 'truncated': 0}
+    for number in sample:
+        events = client.json(f'repos/{repo}/issues/{number}/timeline?per_page=100', allow_missing=True)
+        if not isinstance(events, list):
+            out['unreadable'] += 1
+            continue
+        out['sampled'] += 1
+        out['truncated'] += len(events) >= 100
+        rows = [e for e in events if isinstance(e, dict)]
+        merged = any(e.get('event') == 'committed' and len(e.get('parents') or []) > 1 for e in rows)
+        forced = any(e.get('event') == 'head_ref_force_pushed' for e in rows)
+        out['merged_base'] += merged
+        out['force_pushed'] += forced
+        out['updated'] += merged or forced
+    if not out['sampled']:
+        out['reason'] = 'no merged PR timeline was readable' if sample else 'no merged PR identities'
+    return out
+
+
+def _opt98_queue_runs(runs_by_workflow: dict[str, Any]) -> list[str]:
+    """Workflows with a cached merge_group run: a queue exists even when its
+    workflow file was not sampled or the ruleset was not readable."""
+    return sorted(str(path) for path, runs in (runs_by_workflow or {}).items()
+                  if any(isinstance(r, dict) and r.get('event') == 'merge_group' for r in runs or []))
+
+
+def _opt98_collect_volume(client: 'GhClient', repo: str, branch: str | None,
+                          rules: dict[str, Any], wf_docs: dict[str, Any],
+                          runs_by_workflow: dict[str, Any], created_before: str | None
+                          ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """(volume, churn) for the up-to-date case, paid for only when it can fire.
+
+    A readable strict rule with no visible queue (ruleset, workflow trigger or
+    cached merge_group run) buys one merged-PR search over the 30 complete UTC
+    days before the pin; at 30 merges a day or more, at most 30 timeline reads.
+    """
+    if not (rules.get('strict') is True and rules.get('complete') is True
+            and not rules.get('merge_queue') and not _opt82_merge_group_workflows(wf_docs)
+            and not _opt98_queue_runs(runs_by_workflow)):
+        return {}, None
+    end = _parse_dt(_normalize_pin(created_before)) if created_before else _unpinned_now()
+    if end is None:
+        return {'reason': 'merged PR window not readable: the date pin did not parse'}, None
+    until = (end - _dt.timedelta(days=1)).date()
+    since = until - _dt.timedelta(days=_OPT98_WINDOW_DAYS - 1)
+    volume = _opt98_merge_volume(client, repo, str(since), str(until), branch=branch)
+    churn = None
+    if volume.get('merges_per_day', 0) >= _OPT98_MIN_MERGES_PER_DAY:
+        churn = _opt98_rebase_churn(client, repo, volume.get('sampled_merged_prs') or [])
+    return volume, churn
+
+
+def _opt98_churn_sentence(churn: dict[str, Any] | None) -> tuple[str, float | None]:
+    if not churn or not churn.get('sampled'):
+        reason = (churn or {}).get('reason', 'merged PR timelines were not read')
+        return f'Rebase-churn share not measured: {reason}.', None
+    n, updated = churn['sampled'], churn['updated']
+    share = updated / n
+    text = (f"{updated} of {n} sampled merged PRs ({share:.0%}) were brought up to date after opening "
+            f"({churn['merged_base']} merged the base branch in, {churn['force_pushed']} force-pushed; "
+            "a force-push can also be an amend); each update re-runs required CI.")
+    if churn.get('unreadable'):
+        text += f" {churn['unreadable']} timeline(s) not readable."
+    if churn.get('truncated'):
+        text += f" {churn['truncated']} timeline(s) longer than one page: a lower bound."
+    return text, share
+
+
+def _detect_opt98_merge_queue(*, workflows: dict[str, Any],
+                             runs_by_workflow: dict[str, Any],
+                             branch_rules: dict[str, Any], volume: dict[str, Any],
+                             start_id: int, churn: dict[str, Any] | None = None,
+                             ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Report two independent, uncredited causes of repeated merge validation.
+
+    `info` carries every reason a case was not settled; `info['status']` is
+    'measured' (nothing withheld), 'partial' or 'not_measured' (nothing settled).
+    """
+    info: dict[str, Any] = {}
+    findings: list[dict[str, Any]] = []
+    readable = branch_rules.get('complete') is True and isinstance(branch_rules.get('strict'), bool)
+    if not readable:
+        info['branch_rule'] = 'branch rule not readable'
+    if volume.get('reason'):
+        info['merged_prs'] = volume['reason']
+    queue_workflows: list[str] = []
+    static: dict[str, tuple[str, list[str], str]] = {}
+    for path, doc in workflows.items():
+        try:
+            if not isinstance(doc, dict):
+                raise ValueError('unreadable workflow')
+            static[path] = _opt98_static_scope(doc)
+        except (TypeError, AttributeError, ValueError):
+            info.setdefault('unreadable_workflows', []).append(path)
+            continue
+        if static[path][0] != 'none':
+            queue_workflows.append(path)
+    queue_present = bool(branch_rules.get('merge_queue') or queue_workflows
+                         or _opt98_queue_runs(runs_by_workflow))
+    c1_settled = False
+    if readable and (not branch_rules['strict'] or queue_present):
+        c1_settled = True
+    elif readable and not info.get('unreadable_workflows'):
+        if 'merges_per_day' not in volume:
+            info.setdefault('merged_prs', 'merged PR count not fetched')
+        else:
+            c1_settled = True
+    if c1_settled and branch_rules['strict'] and not queue_present \
+            and volume['merges_per_day'] >= _OPT98_MIN_MERGES_PER_DAY:
+        churn_text, share = _opt98_churn_sentence(churn)
+        evidence = (f"Require up to date is enabled without a merge queue; {volume['merges_per_day']:.1f} "
+                    f"merged PRs/day over {volume.get('window_days', _OPT98_WINDOW_DAYS)} days. {churn_text}")
+        f = _new_finding('OPT98', 'MEDIUM', 'Up-to-date rule repeats validation at high volume',
+                         '', '', evidence, 'merge-queue-reproving',
+                         'opt98--the-merge-queue-re-proves-what-is-already-proven', start_id + 1,
+                         size_note='Uncredited: rebase churn is observed, not a modeled saving.')
+        f['sizing_basis'] = 'measured'
+        f['merge_queue'] = {'case': 'strict', **volume, 'rebase_churn_share': share,
+                            'churn': dict(churn or {})}
+        findings.append(f)
+    c2_settled = False
+    for path, (status, jobs, reason) in static.items():
+        if status == 'unknown':
+            info.setdefault('static_unknown', []).append(f'{path} ({reason})')
+            continue
+        if status != 'full':
+            c2_settled = c2_settled or status in ('scoped', 'queue_only')
+            continue
+        durations: dict[str, list[float]] = {'pull_request': [], 'merge_group': []}
+        for run in runs_by_workflow.get(path) or []:
+            event = run.get('event')
+            if event not in durations or run.get('conclusion') != 'success' or run.get('run_attempt', 1) != 1:
+                continue
+            start, end = _parse_dt(run.get('run_started_at')), _parse_dt(run.get('updated_at'))
+            if start is not None and end is not None and end > start:
+                durations[event].append((end - start).total_seconds())
+        n_pr, n_queue = len(durations['pull_request']), len(durations['merge_group'])
+        if not n_pr or not n_queue:
+            info.setdefault('unmeasured_workflows', []).append(path)
+            continue
+        if min(n_pr, n_queue) < _OPT98_MIN_RUNS:
+            info.setdefault('thin_samples', []).append(
+                f'{path} (queue {n_queue} and PR {n_pr} successful first-attempt runs; '
+                f'{_OPT98_MIN_RUNS} each needed)')
+            continue
+        c2_settled = True
+        pr, queue = (_percentile(durations[k], 50) for k in ('pull_request', 'merge_group'))
+        ratio = queue / pr
+        if ratio < _OPT98_REPROVE_RATIO:
+            continue
+        if ratio > _OPT98_DIFFERENT_RATIO:
+            info.setdefault('pr_runs_differ', []).append(
+                f'{path} (queue median {queue:.0f}s is {ratio:.1f}x the PR median {pr:.0f}s)')
+            continue
+        job_list = ', '.join(f'`{j}`' for j in jobs)
+        evidence = (f'`{path}` runs the same jobs {job_list} for pull_request and merge_group without '
+                    'affected-only execution or a build-cache restore; '
+                    f'queue median {queue:.1f}s ({n_queue} runs), PR median {pr:.1f}s ({n_pr} runs). '
+                    'Package scripts and third-party actions were not read; the matching medians are the measured proof.')
+        f = _new_finding('OPT98', 'MEDIUM', 'The merge queue re-proves the full suite', path, '', evidence,
+                         'merge-queue-reproving', 'opt98--the-merge-queue-re-proves-what-is-already-proven',
+                         start_id + len(findings) + 1, size_note='Uncredited: affected-only savings are not modeled.')
+        f['sizing_basis'] = 'measured'
+        f['affected_jobs'] = list(jobs)
+        f['merge_queue'] = {'case': 'reproving', 'queue_median_s': queue, 'pr_median_s': pr,
+                            'queue_samples': n_queue, 'pr_samples': n_pr}
+        f['guardrail'] = 'Keep every required check on the merged result; never drop checks. Scope relative to the queue base with full fallback on resolution errors.'
+        findings.append(f)
+    pending = any(info.get(k) for k in ('branch_rule', 'merged_prs', 'unreadable_workflows',
+                                        'static_unknown', 'unmeasured_workflows', 'thin_samples'))
+    if not pending:
+        info['status'] = 'measured'
+    elif c1_settled or c2_settled:
+        info['status'] = 'partial'
+    else:
+        info['status'] = 'not_measured'
+    return findings, info
 
 
 def _matrix_base_name(job_name: str) -> str:
@@ -8656,6 +9022,721 @@ def _detect_opt43_queue_time(
                 f["queue_cause_note"] = cause_note
             out.append(f)
     return out
+
+
+def _opt97_runner_inventory(client, repo):
+    """One optional page; incomplete/denied inventory never proves uniqueness."""
+    doc = client.json(f"repos/{repo}/actions/runners?per_page=100", allow_missing=True)
+    if not isinstance(doc, dict) or not isinstance(doc.get("runners"), list):
+        return None
+    count = doc.get("total_count")
+    return doc["runners"] if isinstance(count, int) and count == len(doc["runners"]) else None
+
+
+def _opt97_rank_correlation(xs: list[float], ys: list[float]) -> float:
+    """Spearman correlation with average ranks for ties; constants imply zero."""
+    def ranks(values):
+        ordered = sorted(range(len(values)), key=values.__getitem__)
+        result = [0.0] * len(values)
+        i = 0
+        while i < len(ordered):
+            end = i + 1
+            while end < len(ordered) and values[ordered[end]] == values[ordered[i]]:
+                end += 1
+            for pos in range(i, end):
+                result[ordered[pos]] = (i + end - 1) / 2
+            i = end
+        return result
+    a, b = ranks(xs), ranks(ys)
+    if not a:
+        return 0.0
+    ma, mb = statistics.mean(a), statistics.mean(b)
+    covariance = sum((x - ma) * (y - mb) for x, y in zip(a, b))
+    denominator = (sum((x - ma) ** 2 for x in a) * sum((y - mb) ** 2 for y in b)) ** .5
+    return covariance / denominator if denominator else 0.0
+
+
+def _opt97_job(doc: dict[str, Any], name: str) -> tuple[str, dict[str, Any]] | None:
+    """Resolve only an unambiguous job; unseen reusable children are excluded."""
+    jobs = doc.get("jobs") or {}
+    candidates = [(str(jid), job) for jid, job in jobs.items() if isinstance(job, dict)
+                  and not job.get("uses") and (str(job.get("name") or jid) == name
+                  or (not _name_template_is_degenerate(str(job.get("name") or jid))
+                      and _name_template_regex(str(job.get("name") or jid)).fullmatch(name))
+                  or _static_matrix_leg_match(str(job.get("name") or jid),
+                                              bool((job.get("strategy") or {}).get("matrix"))
+                                              if isinstance(job.get("strategy") or {}, dict) else False, name))]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+# A group key naming any of these differs per ref, PR, commit or run, so it never
+# makes unrelated PRs wait on each other. Anything else is shared across PRs.
+_OPT97_SCOPED_GROUP = re.compile(
+    r"github\.(?:ref|head_ref|sha|run_id|run_number|event\.number"
+    r"|event\.pull_request\.(?:number|head\.(?:ref|sha)))")
+
+
+def _opt97_global_group(doc: dict[str, Any], job: dict[str, Any],
+                        wf_path: str = "") -> tuple[str | None, str | None, str | None]:
+    """(comparison key, display text, level) of a one-at-a-time group shared across
+    PRs, else (None, None, level). A job-level `concurrency:` replaces the
+    workflow-level one. The string form is a group name; an omitted
+    `cancel-in-progress` is false (GitHub's default)."""
+    level = "job" if "concurrency" in job else "workflow"
+    config = job.get("concurrency") if level == "job" else doc.get("concurrency")
+    if isinstance(config, str):
+        group, cancel = config, False
+    elif isinstance(config, dict):
+        group, cancel = config.get("group"), config.get("cancel-in-progress", False)
+    else:
+        return None, None, None
+    if (cancel is not False or not isinstance(group, str) or not group.strip()
+            or _OPT97_SCOPED_GROUP.search(group)):
+        return None, None, level
+    key = group.strip().lower()  # GitHub concurrency groups are case-insensitive.
+    if "${{" in key:
+        # `${{ github.workflow }}` and inputs resolve per workflow: compare the
+        # unresolved text only within the workflow that wrote it.
+        key = f"{wf_path}::{key}"
+    return key, group.strip(), level
+
+
+def _opt97_intervals(wf_path, run, doc):
+    """Every non-skipped job of one run with its readiness anchor.
+
+    `ready` is when the job could first take a runner: the run's created_at for an
+    entry job held by a workflow-level global group (its jobs are created only when
+    the group frees), else the job's created_at, moved past the last needed
+    upstream completion. None when an upstream completion is unknown. Unresolved
+    jobs (no single YAML job) keep their created_at and carry no group."""
+    resolved = {id(j): _opt97_job(doc, str(j.get("name", ""))) for j in run}
+    out = []
+    for j in run:
+        if j.get("conclusion") == "skipped":
+            continue
+        match = resolved[id(j)]
+        group = group_text = None
+        ready = _parse_dt(j.get("created_at") or j.get("_run_created_at"))
+        if match is not None:
+            group, group_text, level = _opt97_global_group(doc, match[1], wf_path)
+            if group and level == "workflow" and int(j.get("run_attempt") or 1) == 1:
+                # A run held by a workflow-level group creates its jobs only when
+                # the group frees, so the wait precedes the job's created_at. A
+                # re-run keeps the first attempt's created_at: never use it there.
+                ready = _parse_dt(j.get("_run_created_at")) or ready
+            needs = match[1].get("needs") or []
+            needs = [needs] if isinstance(needs, str) else needs
+            ends = []
+            for need in needs:
+                upstream = [_parse_dt(u.get("completed_at")) for u in run
+                            if resolved[id(u)] and resolved[id(u)][0] == need]
+                if not upstream or not all(upstream):
+                    ends = []
+                    break
+                ends.append(max(upstream))
+            if needs:
+                # Job creation can precede upstream completion. Readiness cannot.
+                ready = max([*ends, *([ready] if ready else [])]) if ends else None
+        out.append({"job": j, "match": match, "ready": ready, "group": group,
+                    "group_text": group_text,
+                    "labels": tuple(sorted(str(x) for x in j.get("labels") or [] if x)),
+                    "start": _parse_dt(j.get("started_at")),
+                    "end": _parse_dt(j.get("completed_at"))})
+    return out
+
+
+def _opt97_samples(wf_path, jobs_per_run, doc, unresolved: list | None = None):
+    """Valid runnable-to-start intervals, excluding upstream execution.
+    `unresolved` ([unresolved, total]) counts sampled jobs that resolve to no
+    single YAML job (reusable children, ambiguous names) out of all non-skipped."""
+    rows = []
+    for run in jobs_per_run:
+        for iv in _opt97_intervals(wf_path, run, doc):
+            if unresolved is not None:
+                unresolved[1] += 1
+            if iv["match"] is None:
+                if unresolved is not None:
+                    unresolved[0] += 1
+                continue
+            created, start, end = iv["ready"], iv["start"], iv["end"]
+            if not created or not start or not end or not created <= start < end:
+                continue
+            rows.append({"workflow": wf_path, "job": iv["job"], "run": run,
+                         "node": iv["match"][0], "config": iv["match"][1],
+                         "labels": iv["labels"], "group": iv["group"],
+                         "group_text": iv["group_text"],
+                         "created": created, "start": start, "end": end,
+                         "queue": (start - created).total_seconds(),
+                         "runtime": (end - start).total_seconds()})
+    return rows
+
+
+def _opt97_competitors(wf_path, run, doc):
+    """In-flight intervals of one run's jobs: from readiness to completion; a job
+    that has not completed is still in flight (end None). A job whose upstream
+    has not completed is not yet competing, unless it already started."""
+    rows = []
+    for iv in _opt97_intervals(wf_path, run, doc):
+        created = iv["ready"] or iv["start"]
+        if created is None:
+            continue
+        rows.append({"id": iv["job"].get("id"), "labels": iv["labels"],
+                     "group": iv["group"], "created": created, "end": iv["end"]})
+    return rows
+
+
+def _opt97_inflight(row, labels, rivals) -> int:
+    """Competing jobs in flight when `row` became runnable: same exact label set,
+    or the same global group. A job created at the same instant does not count."""
+    at = row["created"]
+    return sum(1 for r in rivals
+               if r["created"] < at and (r["end"] is None or at < r["end"])
+               and ((labels and r["labels"] == labels)
+                    or (row["group"] and r["group"] == row["group"])))
+
+
+# The dense competition read: at most this many run-list pages (100 runs each)
+# and this many job lists per population. Hitting either cap means the
+# competition was not measured, never that it was small.
+_OPT97_DENSE_RUN_PAGES = 3
+_OPT97_DENSE_JOB_RUNS = 60
+# How far before the first sampled job a competing run may have been created and
+# still be in flight.
+_OPT97_DENSE_LOOKBACK = _dt.timedelta(hours=3)
+
+
+def _opt97_can_share(doc, labels, group, wf_path) -> bool:
+    """Whether any job of a workflow could use the same runners or group. Unknown
+    workflows, reusable calls and dynamic `runs-on` cannot be ruled out."""
+    jobs = doc.get("jobs") if isinstance(doc, dict) else None
+    if not isinstance(jobs, dict):
+        return True
+    want = {str(x).lower() for x in labels}
+    for job in jobs.values():
+        if not isinstance(job, dict):
+            continue
+        if job.get("uses"):
+            return True
+        if group and _opt97_global_group(doc, job, wf_path)[0] == group:
+            return True
+        runs_on = job.get("runs-on")
+        runs_on = [runs_on] if isinstance(runs_on, str) else runs_on
+        if not isinstance(runs_on, list) or any("${{" in str(x) for x in runs_on):
+            return True
+        if {str(x).lower() for x in runs_on} == want:  # runs-on is never empty
+            return True
+    return False
+
+
+def _opt97_dense_competition(client, repo, labels, group, lo, hi, *, workflow_docs,
+                             known_runs, stats, cache):
+    """Every run (any status) created in [lo, hi], and the jobs of those whose
+    workflow could share the runners or group: `(rivals, None)`, or
+    `(None, reason)` when the read failed or hit a cap. The newest-success sample
+    sees a small fraction of competing jobs, so counts come from here only."""
+    stats["populations"] += 1
+    fmt = "%Y-%m-%dT%H:%M:%SZ"
+    window = (f"{lo.astimezone(_dt.timezone.utc).strftime(fmt)}.."
+              f"{hi.astimezone(_dt.timezone.utc).strftime(fmt)}")
+    runs = []
+    for page in range(1, _OPT97_DENSE_RUN_PAGES + 1):
+        endpoint = f"repos/{repo}/actions/runs?created={window}&per_page=100&page={page}"
+        if endpoint not in cache:
+            stats["run_pages"] += 1
+            cache[endpoint] = client.json(endpoint, allow_missing=True)
+        body = cache[endpoint]
+        batch = body.get("workflow_runs") if isinstance(body, dict) else None
+        if not isinstance(batch, list):
+            return None, "the run list could not be read"
+        runs.extend(r for r in batch if isinstance(r, dict))
+        if len(batch) < 100:
+            break
+    else:
+        return None, f"more than {_OPT97_DENSE_RUN_PAGES * 100} runs in the window"
+    sharing = []
+    for run in runs:
+        path = str(run.get("path") or "").split("@")[0]
+        if _opt97_can_share(workflow_docs.get(path), labels, group, path):
+            sharing.append((path, run))
+    if sum(1 for _, run in sharing if str(run.get("id")) not in known_runs) > _OPT97_DENSE_JOB_RUNS:
+        return None, f"more than {_OPT97_DENSE_JOB_RUNS} runs could share the runners"
+    rivals = []
+    for path, run in sharing:
+        jobs = known_runs.get(str(run.get("id")))
+        if jobs is None:
+            endpoint = f"repos/{repo}/actions/runs/{run.get('id')}/jobs?per_page=100"
+            if endpoint not in cache:
+                stats["job_lists"] += 1
+                cache[endpoint] = client.json(endpoint, allow_missing=True)
+            body = cache[endpoint]
+            jobs = body.get("jobs") if isinstance(body, dict) else None
+            if not isinstance(jobs, list):
+                return None, "a job list could not be read"
+            total = body.get("total_count")
+            if isinstance(total, int) and total > len(jobs):
+                return None, "a run has more than 100 jobs"
+            jobs = [dict(j) for j in jobs if isinstance(j, dict)]
+            _stamp_run_context(run, jobs)
+        rivals.extend(_opt97_competitors(path, jobs, workflow_docs.get(path) or {}))
+    return rivals, None
+
+
+def _opt97_hints(samples, labels, runner_inventory):
+    """Static hints naming the likely one-at-a-time resource."""
+    hints = []
+    if samples[0]["group"]:
+        hints.append(f"global concurrency group `{samples[0]['group_text']}`")
+    if runner_inventory is not None:
+        # The inventory is the repository's own runner list. Organization
+        # runners serving the same label are not visible to it.
+        for label in labels:
+            matches = sum(1 for runner in runner_inventory
+                          if label in {str(x.get('name', '')) if isinstance(x, dict) else str(x)
+                                       for x in runner.get('labels', [])})
+            if matches == 1:
+                hints.append(f"label `{label}` has one repo-level runner "
+                             "(org runners not visible)")
+    for step in samples[0]["config"].get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        text = str(step.get("uses", "")) + " " + str(step.get("run", ""))
+        for token in ("android-emulator-runner", "xcrun simctl", "adb"):
+            if re.search(r"(?<![\w-])" + re.escape(token) + r"(?![\w-])", text):
+                hints.append(f"device step `{step.get('name') or token}`")
+    return list(dict.fromkeys(hints))
+
+
+def _detect_opt97_single_slot_queue(
+    wf_path: str, jobs_per_run: list[list[dict[str, Any]]], start_idx: int,
+    wf_doc: dict[str, Any], *, all_jobs_by_wf=None, workflow_docs=None,
+    baseline_queue_s: float | None = None, merge_gating_jobs: set[str] | None = None,
+    runner_inventory: list[dict[str, Any]] | None = None, notes: list | None = None,
+    competition=None,
+) -> list[dict[str, Any]]:
+    """Queue follows contention, but execution does not: a capacity hypothesis.
+
+    Per job and exact runner-label set. A population whose queue meets the
+    thresholds is evaluated only on a self-hosted label set or with a static hint
+    (global group, one repo-level runner, device step); on hosted runners an
+    account's concurrent-job limit raises queue and in-flight together, so that
+    queue stays with OPT43. In-flight counts come only from `competition(labels,
+    group, lo, hi)`, a dense read of every run in the window; without it, or when
+    it fails or is capped, the population is noted "competition not measured"
+    and never fires. Baseline is the P10 runnable queue of the OTHER sampled
+    jobs; with none, no wall-clock credit. Never a utilization claim.
+    """
+    unresolved = [0, 0]
+    own = _opt97_samples(wf_path, jobs_per_run, wf_doc, unresolved)
+    if unresolved[0] and notes is not None:
+        notes.append({"workflow_file": wf_path, "reason": "unresolved jobs",
+                      "unresolved": unresolved[0], "jobs": unresolved[1]})
+    docs = {**(workflow_docs or {}), wf_path: wf_doc}
+    pool = []
+    for path, runs in (all_jobs_by_wf or {wf_path: jobs_per_run}).items():
+        pool.extend(_opt97_samples(path, runs, docs.get(path, {})))
+    populations = {}
+    for row in own:
+        populations.setdefault((row["job"].get("name", ""), row["labels"]), []).append(row)
+    out = []
+    for (name, labels), samples in populations.items():
+        queues = [r["queue"] for r in samples]
+        median, p90 = statistics.median(queues), _percentile(queues, 90)
+        if median < 60 or p90 < 300:
+            continue  # no queue worth explaining: never noted
+        hints = _opt97_hints(samples, labels, runner_inventory)
+        if "self-hosted" not in {x.lower() for x in labels} and not hints:
+            continue  # hosted pool: an account's job limit explains this; OPT43 keeps it
+        note = {"workflow_file": wf_path, "job": name, "labels": list(labels),
+                "samples": len(samples)}
+        if len(samples) < 15:
+            if notes is not None:
+                notes.append({**note, "reason": "too few samples"})
+            continue
+        created = [r["created"] for r in samples]
+        rivals, why = (competition(labels, samples[0]["group"],
+                                   min(created) - _OPT97_DENSE_LOOKBACK, max(created))
+                       if competition is not None else (None, "no competition read"))
+        if rivals is None:
+            if notes is not None:
+                notes.append({**note, "reason": "competition not measured", "detail": why})
+            continue
+        counts = [_opt97_inflight(row, labels, rivals) for row in samples]
+        queue_rho = _opt97_rank_correlation(queues, counts)
+        runtime_rho = _opt97_rank_correlation([r["runtime"] for r in samples], counts)
+        if queue_rho < .6 or abs(runtime_rho) >= .3:
+            continue
+        resource = '; '.join(hints) or 'runner label set `' + ', '.join(labels) + '` (slot count unknown)'
+        evidence = (f"job `{name}` median queue {median:.0f}s, P90 {p90:.0f}s across {len(samples)} samples; "
+                    f"queue/in-flight rank correlation {queue_rho:.2f}, run-time/in-flight {runtime_rho:.2f} "
+                    f"(in-flight counted from {len(rivals)} jobs of every run in the window). "
+                    f"Likely resource: {resource}. Consistent with a one-at-a-time capacity limit; "
+                    "runner utilization was not measured.")
+        baseline = baseline_queue_s
+        if baseline is None:
+            others = [r["queue"] for r in pool
+                      if not (r["workflow"] == wf_path and r["job"].get("name", "") == name
+                              and r["labels"] == labels)]
+            baseline = _percentile(others, 10) if others else None
+        gating = merge_gating_jobs is not None and samples[0]["node"] in merge_gating_jobs
+        recoverable = []
+        for row in samples:
+            finishes = [(job, _parse_dt(job.get("completed_at"))) for job in row["run"]
+                        if job.get("conclusion") != "skipped"]
+            if baseline is None or any(end is None for _, end in finishes):
+                recoverable.append(0.0)
+                continue
+            reduction = max(0.0, row["queue"] - baseline)
+            before = max(end.timestamp() for _, end in finishes)
+            after = max(end.timestamp() - (reduction if job is row["job"] else 0.0)
+                        for job, end in finishes)
+            recoverable.append(max(0.0, before - after))
+        # Each sample's reduction is at most its queue above baseline, so the
+        # median is at most the median excess queue.
+        credited = statistics.median(recoverable) if gating else 0.0
+        if baseline is None:
+            size_note = "repository baseline unavailable (no other sampled jobs); no wall-clock credit"
+        else:
+            size_note = (f"median queue above repository baseline ({baseline:.1f}s, P10 of other sampled jobs); "
+                         + ('bounded by same-run job finish times including queue; existing floors still apply'
+                            if gating else 'merge-gating status not established; no wall-clock credit'))
+        f = _new_finding('OPT97', 'MEDIUM', 'Queue Caused by a One-at-a-Time Resource',
+                         wf_path, name, evidence, 'single-slot-queue',
+                         'opt97--queue-caused-by-a-one-at-a-time-resource', start_idx + len(out) + 1,
+                         wc_p50=round(credited, 1), rm=None, size_note=size_note,
+                         realization='direct', measured_evidence=_measured_evidence(
+                             ['Job', 'Median queue', 'P90 queue', 'Samples', 'Example job'],
+                             [[name, f'{median:.0f}s', f'{p90:.0f}s', str(len(samples)),
+                               _link(samples[-1]['queue'], str(samples[-1]['job'].get('html_url') or ''))]],
+                             evidence))
+        f['single_slot_queue'] = {'queue_p50_s': median, 'queue_p90_s': p90,
+                                 'baseline_queue_s': baseline, 'samples': len(samples),
+                                 'queue_rank_correlation': queue_rho, 'runtime_rank_correlation': runtime_rho,
+                                 'inflight_counts': counts, 'competing_jobs_read': len(rivals),
+                                 'labels': list(labels), 'hints': hints,
+                                 'runner_inventory': 'readable' if runner_inventory is not None else 'unknown'}
+        out.append(f)
+    return out
+
+
+def _merge_opt97_findings(findings, new, wf_doc):
+    """Measured capacity evidence replaces the same workflow's same-job OPT43
+    finding. OPT44 is accepted too, but no OPT44 detector exists today, so in
+    production only OPT43 is ever merged. A finding that also names other jobs,
+    or another workflow's finding, is kept."""
+    for measured in new:
+        related = set()
+        for old in list(findings):
+            if old.get('pattern') not in {'OPT43', 'OPT44'} or old.get('workflow_file') != measured['workflow_file']:
+                continue
+            jobs = set(old.get('affected_jobs') or [])
+            names = set(measured['affected_jobs'])
+            for name in measured['affected_jobs']:
+                match = _opt97_job(wf_doc, name)
+                if match:
+                    names.add(match[0])
+            if jobs and jobs <= names:
+                findings.remove(old)
+                related.add(old['pattern'])
+        measured['related_patterns'] = sorted(related)
+        findings.append(measured)
+
+
+def _opt100_failed_step(job: dict[str, Any]) -> dict[str, Any] | None:
+    """The job's first failed step, or None when no step recorded a failure."""
+    steps = sorted((s for s in job.get("steps") or []
+                    if s.get("conclusion") in {"failure", "timed_out"}),
+                   key=lambda s: s.get("number", 0))
+    return steps[0] if steps else None
+
+
+def _fetch_job_annotations(client: GhClient, repo: str,
+                           job: dict[str, Any]) -> list[str] | None:
+    """Failure-level annotation messages on a job's check run, or None if unreadable.
+
+    A job's id is its check-run id. A lost runner leaves no failed step and often
+    no log; the runner's own failure annotation is the only record of why. One
+    governed call per such job replaces the log fetch it would otherwise make."""
+    jid = job.get("id")
+    if not jid:
+        return None
+    data = client.json(f"repos/{repo}/check-runs/{jid}/annotations?per_page=50",
+                       allow_missing=True)
+    if not isinstance(data, list):
+        return None
+    return [str(a.get("message") or "") for a in data
+            if isinstance(a, dict) and a.get("annotation_level") == "failure"]
+
+
+def _opt100_annotation_class(messages: list[str]) -> str | None:
+    """Classify runner failure annotations as the runner's own `##[error]` lines.
+    No step name is supplied, so network signatures never apply here."""
+    from blocking_path import _classify_infra_failure
+    return _classify_infra_failure(
+        "\n".join("##[error]" + " ".join(m.split()) for m in messages), "")
+
+
+def _opt100_job_class(job: dict[str, Any], log: str) -> str | None:
+    """Only the first failed step can explain the failure; absent timing is unknown."""
+    from blocking_path import _classify_infra_failure
+    step = _opt100_failed_step(job)
+    if step is None:
+        return None
+    start, end = _parse_dt(step.get("started_at")), _parse_dt(step.get("completed_at"))
+    if start is None or end is None:
+        return None
+    # Step completion is truncated to whole seconds while the runner's own exit
+    # line is stamped after it, so the window runs one second past the recorded
+    # end and closes at that step's first exit line instead.
+    limit = end + _dt.timedelta(seconds=1)
+    lines = []
+    for line in log.splitlines():
+        # GitHub stamps seven fractional digits; the shared OPT80 parser
+        # truncates them where `datetime.fromisoformat` (3.9/3.10) rejects them.
+        record = _opt80_log_line(line)
+        if record is None:
+            continue
+        when, body = record
+        if start <= when < limit:
+            lines.append(body)
+            if body.startswith("##[error]Process completed with exit code"):
+                break
+    return _classify_infra_failure("\n".join(lines), str(step.get("name") or ""))
+
+
+def _opt100_failure_possible(runs: list[dict[str, Any]]) -> bool:
+    """Cheap upper bound on failures per job, counting possible prior attempts."""
+    return sum(max(0, int(r.get("run_attempt") or 1) - 1)
+               + (r.get("conclusion") in {"failure", "timed_out"}) for r in runs) >= 5
+
+
+def _opt100_gating_names(jobs: list[dict[str, Any]], graph: dict[str, Any],
+                         gating: dict[str, Any]) -> set[str]:
+    """Resolve observed display/matrix names only when one YAML job matches."""
+    names = set()
+    for job in jobs:
+        name = str(job.get("name") or "")
+        matches = [key for key, node in graph.items()
+                   if _opt80_check_names_job(name, key, node)]
+        if len(matches) == 1 and matches[0] in gating:
+            names.add(name)
+    return names
+
+
+def _collect_opt100(client: GhClient, repo: str, wf_path: str,
+                    jobs: list[dict[str, Any]], gating_jobs: set[str] | None,
+                    start_idx: int, *, complete_population: bool = True,
+                    monthly_volume: int | None = None, sample_denominator: int | None = None,
+                    prior_attempt_failures: int = 0, crit: dict[str, Any] | None = None
+                    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Fetch each failed gating job log once; keep raw text out of findings."""
+    if not complete_population or prior_attempt_failures:
+        return [], {"incomplete_job_population": True, "unreadable_logs": 0}
+    from collections import Counter
+    failures = Counter(j.get("name") for j in jobs if j.get("conclusion") in {"failure", "timed_out"})
+    targets = {j["id"]: j for j in jobs if j.get("id") is not None
+               and failures[j.get("name")] >= 5
+               and j.get("name") in (gating_jobs or set())
+               and j.get("conclusion") in {"failure", "timed_out"}}
+    logs: dict[Any, str | None] = {}
+    annotations: dict[Any, list[str] | None] = {}
+    for jid, j in targets.items():
+        # A failed job with no failed step (a lost runner) is read from its
+        # check-run annotations instead of a log it usually does not have.
+        if _opt100_failed_step(j) is None:
+            annotations[jid] = _fetch_job_annotations(client, repo, j)
+        else:
+            logs[jid] = _fetch_job_log(client, repo, j)
+    return _detect_opt100_infra_faults(wf_path, jobs, logs, gating_jobs, start_idx,
+                                      monthly_volume=monthly_volume, sample_denominator=sample_denominator,
+                                      crit=crit, annotations=annotations)
+
+
+def _opt100_workflow_pass(
+    client: GhClient, repo: str, wf_path: str, *,
+    all_runs: list[dict[str, Any]] | None,
+    attempt_samples: list[tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]],
+    attempt_errors: int, gate: dict[str, Any] | None, graph: dict[str, Any],
+    job_memo: dict[Any, Any], monthly: int | None, crit: dict[str, Any] | None,
+    next_id: int,
+) -> tuple[list[dict[str, Any]], str | None, int]:
+    """One workflow's OPT100 pass, then OPT64 over the retries OPT100 did not claim.
+
+    Returns (findings, skip reason or None, job-page fetch errors). OPT100 is
+    reported as not evaluated only when no finding fired and what could not be
+    read (job pages, failed-job logs, the merge gate) leaves the verdict open."""
+    findings: list[dict[str, Any]] = []
+    skip: str | None = None
+    errors = 0
+    claimed: set[Any] = set()
+    if all_runs is not None and gate and _opt100_failure_possible(all_runs):
+        kept, errors = _gather_run_jobs(client, repo, all_runs, memo=job_memo)
+        jobs: list[dict[str, Any]] = []
+        for run, run_jobs in kept:
+            _stamp_run_context(run, run_jobs)
+            jobs.extend(run_jobs)
+        for run, all_jobs, _latest in attempt_samples:
+            _stamp_run_context(run, all_jobs)
+            jobs.extend(all_jobs)
+        new, notes = _collect_opt100(client, repo, wf_path, jobs,
+                                     _opt100_gating_names(jobs, graph, gate), next_id,
+                                     complete_population=not errors,
+                                     monthly_volume=monthly, sample_denominator=len(all_runs),
+                                     prior_attempt_failures=attempt_errors, crit=crit)
+        if new:
+            claimed = {rid for f in new for rid in f["infra_failures"]["retry_run_ids"]}
+        elif notes.get("incomplete_job_population"):
+            skip = "some job pages were unreadable, so failed jobs could not be counted"
+        elif notes.get("undetermined"):
+            skip = ("; ".join(notes["undetermined_jobs"])
+                    + "; the unread logs could change the verdict")
+        findings.extend(new)
+        next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
+    elif all_runs is None or gate is None:
+        skip = "all-status jobs or the merge-gating job set could not be read"
+    if attempt_samples and all_runs is not None:
+        # One full retry cannot be charged to both failure families.
+        findings.extend(_detect_opt64_rerun_attempt_waste(
+            wf_path, [x for x in attempt_samples if _run_id(x[0]) not in claimed],
+            monthly, len(all_runs), next_id))
+    return findings, skip, errors
+
+
+def _detect_opt100_infra_faults(
+    wf_path: str, jobs: list[dict[str, Any]], logs: dict[Any, str],
+    gating_jobs: set[str] | None, start_idx: int, *,
+    monthly_volume: int | None = None, sample_denominator: int | None = None,
+    crit: dict[str, Any] | None = None,
+    annotations: dict[Any, list[str] | None] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Infra share uses every sampled failure as denominator, including unread logs.
+
+    A failed job with no failed step is classified from its failure annotations
+    (`annotations`, keyed by job id); a job whose log or annotations could not be
+    read counts as unreadable.
+
+    Retry compute is credited once, and only for a subsequent sampled attempt of
+    the same run whose sole failed job was this infra-class job. This avoids
+    claiming that a retry caused by several failures can be eliminated twice.
+    Monthly credit uses the same all-status scaling basis as repeated attempts.
+    Raw sample minutes remain separately stamped for verification.
+    """
+    from collections import Counter
+    notes: dict[str, Any] = {"unreadable_logs": 0, "gating_unknown": gating_jobs is None,
+                             "undetermined": False, "undetermined_jobs": []}
+    if not gating_jobs:
+        return [], notes
+    unique = {j["id"]: j for j in jobs if j.get("id") is not None}
+    jobs = list(unique.values())
+    out = []
+    run_id = lambda j: j.get("_run_id", j.get("run_id"))
+    attempt = lambda j: int(j.get("run_attempt") or 1)
+    for name in sorted(gating_jobs):
+        population = [j for j in jobs if j.get("name") == name]
+        failed = [j for j in population if j.get("conclusion") in {"failure", "timed_out"}]
+        if len(failed) < 5:
+            continue
+        classified, unreadable = [], 0
+        for j in failed:
+            if _opt100_failed_step(j) is None:
+                messages = (annotations or {}).get(j["id"])
+                if messages is None:
+                    unreadable += 1
+                else:
+                    classified.append((j, _opt100_annotation_class(messages)))
+            elif logs.get(j["id"]):
+                classified.append((j, _opt100_job_class(j, logs[j["id"]])))
+            else:
+                unreadable += 1
+        notes["unreadable_logs"] += unreadable
+        infra = [(j, kind) for j, kind in classified if kind]
+        if len(infra) < 5 or len(infra) / len(failed) < .2:
+            # Withheld. The verdict is settled only if the unread logs, all
+            # matching, still could not reach both floors.
+            could = len(infra) + unreadable
+            if unreadable and could >= 5 and could / len(failed) >= .2:
+                notes["undetermined"] = True
+                notes["undetermined_jobs"].append(
+                    f"`{name}`: {unreadable} of {len(failed)} failed-job logs unreadable")
+            continue
+        classes = dict(Counter(kind for _, kind in infra))
+        runner_counts = Counter(str(j.get("runner_name")) for j, _ in infra
+                                if j.get("runner_name") and "self-hosted" in j.get("labels", []))
+        degraded = next((n for n, count in runner_counts.most_common(1)
+                         if count >= 5 and count / len(infra) >= .8), None)
+        rerun_seconds, delays, claimed = 0.0, [], set()
+        for j, _ in infra:
+            rid, a = run_id(j), attempt(j)
+            if rid is None:
+                continue
+            same_attempt_failures = [x for x in jobs if run_id(x) == rid and attempt(x) == a
+                                     and x.get("conclusion") in {"failure", "timed_out"}]
+            prior_successes = {(x.get("name"), x.get("started_at"), x.get("completed_at"))
+                               for x in jobs if run_id(x) == rid and attempt(x) <= a
+                               and x.get("conclusion") == "success"
+                               and x.get("started_at") and x.get("completed_at")}
+            # Only work that ran in the failed attempt and ran again is repeated
+            # work; a downstream job skipped behind the failure would run anyway.
+            ran = {x.get("name") for x in jobs if run_id(x) == rid and attempt(x) == a
+                   and x.get("conclusion") not in (None, "skipped") and _job_started(x)}
+            retry = [x for x in jobs if run_id(x) == rid and attempt(x) == a + 1
+                     and x.get("name") in ran
+                     and (x.get("name"), x.get("started_at"), x.get("completed_at"))
+                     not in prior_successes]
+            if len(same_attempt_failures) != 1 or not retry or (rid, a + 1) in claimed:
+                continue
+            claimed.add((rid, a + 1))
+            rerun_seconds += sum(_job_compute_s(x) for x in retry)
+            retry_starts = [_parse_dt(x.get("started_at")) for x in retry]
+            retry_starts = [x for x in retry_starts if x is not None]
+            end = _parse_dt(j.get("completed_at"))
+            if end is not None and retry_starts:
+                delays.append(max(0.0, (min(retry_starts) - end).total_seconds()))
+        flaky = any(not kind and any(
+            x.get("conclusion") == "success" and run_id(x) == run_id(j)
+            and attempt(x) > attempt(j) for x in population) for j, kind in classified)
+        prompt = ("Investigate the first failing step with sling and recover the workflow's history and intent. "
+                  "Evaluate at most 2 attempts with short backoff for classified infrastructure failures only; "
+                  "never retry test assertions. Count retries so increases stay visible. "
+                  "Preserve every required check and flag policy changes for owner sign-off.")
+        if degraded:
+            prompt += f" Investigate whether runner `{degraded}` should stop receiving jobs while degraded."
+        if flaky:
+            prompt += " Same-commit fail-then-pass also occurred without an infra signature; consult OPT48's quarantine recipe."
+        scale = monthly_volume / sample_denominator if monthly_volume and sample_denominator else None
+        delay = _stats.median(delays) if delays else 0.0
+        rate = len(infra) / len(population)
+        wc, cap_note = _cap_wall_clock(delay * rate, name,
+                                       crit if crit is not None else _critical_path([[j] for j in jobs]))
+        monthly_note = (f"monthly scale {scale:.3g} yields {rerun_seconds / 60 * scale:.1f} runner-min/mo. "
+                        if scale is not None else "monthly volume unavailable; no monthly credit. ")
+        evidence = (f"{len(infra)} of {len(failed)} sampled failed jobs ({len(infra)/len(failed):.0%}) "
+                    f"matched first-failed-step infrastructure signatures: "
+                    + ", ".join(f"{k}: {v}" for k, v in sorted(classes.items()))
+                    + (f"; {unreadable} of {len(failed)} failed-job logs unreadable" if unreadable else "")
+                    + f". Sampled subsequent full attempts consumed {rerun_seconds / 60:.1f} runner-minutes; "
+                     + monthly_note + prompt)
+        title = "Infrastructure Faults Fail the Whole Run"
+        f = _new_finding("OPT100", "MEDIUM", title, wf_path, name, evidence,
+                         "infra-fault-retries", _catalog_anchor("OPT100", title), start_idx + len(out) + 1,
+                         wc_p50=wc, rm=(rerun_seconds / 60 * scale if scale is not None else (0.0 if not rerun_seconds else None)),
+                         size_note="Observed subsequent-attempt compute scaled by all-status monthly volume/sample count; raw sample minutes retained separately. Wall-clock remains subject to the existing floors.",
+                         measured_evidence=_measured_evidence(
+                             ["Class", "Failures", "Sampled job logs"],
+                             [[k, str(v), ", ".join(
+                                 f"[job]({j['html_url']})" for j, kind in infra
+                                 if kind == k and j.get("html_url"))]
+                              for k, v in sorted(classes.items())], evidence))
+        f["sizing_basis"] = "measured"
+        f["agent_prompt"] = prompt
+        f["infra_failures"] = {"classes": classes, "failed_jobs": len(failed),
+                               "infra_jobs": len(infra), "sampled_jobs": len(population),
+                               "unreadable_logs": unreadable,
+                               "degraded_runner": degraded, "flakes_observed": flaky,
+                               "rerun_delay_p50_s": delay, "retry_attempts": len(claimed),
+                               "sampled_rerun_minutes": rerun_seconds / 60, "monthly_scale": scale,
+                               "retry_run_ids": sorted({rid for rid, _ in claimed}), "wall_clock_cap_note": cap_note}
+        out.append(f)
+    return out, notes
 
 
 def _detect_opt48_failure_rate(
@@ -15292,7 +16373,7 @@ def _job_name_scope_prefixed(check_name: str, job_name: str) -> bool:
 # `_detect_structural_candidates` asks "did a hygiene fix already MATERIALLY
 # shorten this pole's RUN time?", and a queue-time saving answers a different
 # question, leaving the real OPT75/etc lever wrongly hidden on the headline gate.
-_PRESTART_AXIS_PATTERNS = frozenset({"OPT43"})
+_PRESTART_AXIS_PATTERNS = frozenset({"OPT43", "OPT97"})
 
 
 def _build_covered_job_savings(
@@ -25286,7 +26367,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             workflow_yaml_skew["reason"], default_branch)
     # Repo visibility — recorded as informational metadata on the cost spine.
     findings_doc["repo_visibility"] = _derive_repo_visibility(repo_info)
-    required_checks = _fetch_required_checks(client, repo, default_branch)
+    _opt98_rules: dict[str, Any] = {}
+    required_checks = _fetch_required_checks(client, repo, default_branch, branch_rules=_opt98_rules)
     findings_doc["required_checks"] = (
         sorted(required_checks.names) if required_checks is not None else None)
     findings_doc["required_checks_complete"] = (
@@ -26236,8 +27318,43 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             "workflow returned content")
 
     next_id = max((int(f["id"][1:]) for f in findings if f.get("id", "").startswith("f") and f["id"][1:].isdigit()), default=0)
+    # OPT98 reuses the rule reader and cached run pages. Only a readable strict
+    # rule with no visible queue pays for one merged-PR count (and, at volume,
+    # at most 30 merged-PR timelines for the rebase-churn share).
+    _opt98_volume, _opt98_churn = _opt98_collect_volume(
+        client, repo, default_branch, _opt98_rules, _wf_docs, all_status_runs_by_wf, created_before)
+    _opt98_new, _opt98_info = _detect_opt98_merge_queue(
+        workflows=_wf_docs, runs_by_workflow=all_status_runs_by_wf,
+        branch_rules=_opt98_rules, volume=_opt98_volume, start_id=next_id, churn=_opt98_churn)
+    findings.extend(_opt98_new)
+    next_id += len(_opt98_new)
     # (workflow_file, job) pairs OPT81 A1 saw on two or more runner labels.
     _opt81_multi_label_jobs: set[tuple[str, str]] = set()
+    # A single bounded inventory call only for a sufficiently sampled own-runner
+    # population. Permission failure or >100 runners leaves uniqueness unknown.
+    _opt97_inventory = findings_doc.get("runner_inventory")
+    if _opt97_inventory is None and any(
+            sum(1 for run in rows for job in run if "self-hosted" in (job.get("labels") or [])) >= 15
+            for rows in jobs_per_run_by_wf.values()):
+        _opt97_inventory = _opt97_runner_inventory(client, repo)
+    # OPT97's dense competition read: every run in a candidate population's
+    # window, made only for a population that already meets the queue thresholds
+    # on a self-hosted or hinted pool. Sampled runs' jobs are reused, responses are
+    # shared across populations, and the call counts reach the Data sources table.
+    _opt97_known_runs: dict[str, list[dict[str, Any]]] = {}
+    for _rows in jobs_per_run_by_wf.values():
+        for _run in _rows:
+            _rid = next((j.get("run_id") or j.get("_run_id") for j in _run
+                         if j.get("run_id") or j.get("_run_id")), None)
+            if _rid is not None:
+                _opt97_known_runs[str(_rid)] = _run
+    _opt97_calls = {"run_pages": 0, "job_lists": 0, "populations": 0}
+    _opt97_cache: dict[str, Any] = {}
+
+    def _opt97_competition(labels, group, lo, hi):
+        return _opt97_dense_competition(
+            client, repo, labels, group, lo, hi, workflow_docs=_wf_docs,
+            known_runs=_opt97_known_runs, stats=_opt97_calls, cache=_opt97_cache)
     for wf_path, jobs_per_run in jobs_per_run_by_wf.items():
         if not jobs_per_run:
             continue
@@ -26277,7 +27394,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         # found nothing". Disclosed through the same channel a fetch failure
         # uses, so the report NAMES the workflow instead.
         if not isinstance((_wf_docs.get(wf_path) or {}).get("jobs"), dict):
-            _skip_detectors(wf_path, ["OPT77", "OPT79", "OPT80", "OPT82"],
+            _skip_detectors(wf_path, ["OPT77", "OPT79", "OPT80", "OPT82", "OPT97"],
                             "its workflow YAML could not be parsed")
         # OPT77 shares OPT65's event-scoped monthly volume (same workflow, same
         # scaling question) so it costs no extra gh call, and reads the workflow
@@ -26430,6 +27547,32 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
 
+        # Capacity inference: queue thresholds from the sampled intervals, in-flight
+        # counts only from the bounded dense read above (`_opt97_competition`). The
+        # optional inventory probe supplies only complete repo-level lists. A
+        # workflow whose YAML could not be parsed is already disclosed as skipped.
+        _opt97_notes = []
+        try:
+            new = (_detect_opt97_single_slot_queue(
+                wf_path, jobs_per_run, next_id, _wf_docs.get(wf_path, {}),
+                all_jobs_by_wf=jobs_per_run_by_wf, workflow_docs=_wf_docs,
+                merge_gating_jobs=_opt80_merge_gating_jobs(
+                    wf_path, required_checks, findings_doc.get("workflow_job_graph"),
+                    crit_by_wf, workflow_names=findings_doc.get("workflow_names"),
+                    status_publishers=findings_doc.get("workflow_status_publishers")),
+                runner_inventory=_opt97_inventory, notes=_opt97_notes,
+                competition=_opt97_competition)
+                if isinstance((_wf_docs.get(wf_path) or {}).get("jobs"), dict) else [])
+        except Exception as exc:  # noqa: BLE001 — failure is disclosed, never clean
+            _skip_detectors(wf_path, ["OPT97"],
+                            f"the capacity check failed ({type(exc).__name__})")
+            new = []
+        findings_doc.setdefault("opt97_notes", []).extend(_opt97_notes)
+        next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
+        _merge_opt97_findings(findings, new, _wf_docs.get(wf_path, {}))
+        if _opt97_calls["populations"]:
+            findings_doc["opt97_competition_calls"] = dict(_opt97_calls)
+
         if wf_id is not None:
             new = _detect_opt48_failure_rate(client, repo, wf_id, wf_path, long_pole, monthly, next_id, created_before)
             next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
@@ -26495,6 +27638,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                     "prior_attempt_job_minutes": 0.0,
                 }
             attempt_runs = _rerun_attempt_runs(all_runs) if all_runs is not None else []
+            attempt_samples = []
+            _infra_attempt_errors = 0
             if attempt_runs:
                 # Prefetch the `filter=all` leg ONLY — never the `filter=latest` leg.
                 #
@@ -26519,6 +27664,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 attempt_samples, latest_failures = _attempt_job_samples(
                     client, repo, kept_all, memo=job_memo)
                 wf_failures += latest_failures
+                _infra_attempt_errors = wf_failures
                 jobs_fetch_failures += wf_failures
                 _add_cost_spine_fetch_failures(wf_path, wf_failures)
                 prior_runs: list[list[dict[str, Any]]] = []
@@ -26539,10 +27685,22 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                         "sampled_workflow_run_count": len(all_runs),
                         "runs": prior_runs,
                     }
-                new = _detect_opt64_rerun_attempt_waste(
-                    wf_path, attempt_samples, monthly, len(all_runs), next_id)
-                next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
-                findings.extend(new)
+            # Infra classification reuses all-status and prior-attempt job payloads.
+            # Require a readable merge gate; unknown membership never becomes a finding.
+            _infra_gate = _opt80_merge_gating_jobs(
+                wf_path, required_checks, findings_doc.get("workflow_job_graph"),
+                crit_by_wf, workflow_names=findings_doc.get("workflow_names"),
+                status_publishers=findings_doc.get("workflow_status_publishers"))
+            new, _infra_skip, _infra_errors = _opt100_workflow_pass(
+                client, repo, wf_path, all_runs=all_runs, attempt_samples=attempt_samples,
+                attempt_errors=_infra_attempt_errors, gate=_infra_gate,
+                graph=(findings_doc.get("workflow_job_graph") or {}).get(wf_path, {}),
+                job_memo=job_memo, monthly=monthly, crit=crit, next_id=next_id)
+            jobs_fetch_failures += _infra_errors
+            if _infra_skip:
+                _skip_detectors(wf_path, ["OPT100"], _infra_skip)
+            next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
+            findings.extend(new)
 
             if all_runs is not None and _opt35_shard_job_specs(wf_doc):
                 failure_run_jobs = []
@@ -27096,6 +28254,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         # the detectors read YAML that produced none of the timings. None = no skew we
         # could see. See `_root_branch_skew`.
         "workflow_yaml_skew": workflow_yaml_skew,
+        "merge_queue": _opt98_info,
         # Detectors that were NOT EVALUATED for a named workflow because their basis run
         # list was unfetchable. Their absence from the findings is UNKNOWN, not clean —
         # the whole reason this is DATA and not just a log line. The renderer must name

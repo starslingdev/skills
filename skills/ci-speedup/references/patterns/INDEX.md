@@ -65,12 +65,16 @@ This order is also the compiled file's order; contributors see `README.md`.
 - OPT42 — `TURBO_CACHE: remote:rw` in Release (HIGH, static) — TURBO_CACHE remote:rw in release
 ## Category 9 — Queue Times and Concurrency
 - OPT43 — Excessive Queue Time (MEDIUM, data-driven) — jobs wait long for a runner
+- OPT97 — Queue Caused by a One-at-a-Time Resource (MEDIUM, data-driven) — queue grows with in-flight jobs while execution stays flat
 - OPT44 — Concurrency Group Too Restrictive (MEDIUM, static) — concurrency group too narrow
 - OPT45 — Missing Concurrency Groups (HIGH, static) — no concurrency group
 - OPT46 — Superseded Runs Not Cancelled (Missing Concurrency or `cancel-in-progress: false`) (MEDIUM, data-driven) — superseded runs keep running
 - OPT47 — Redundant push + pull_request Double-Trigger (MEDIUM, data-driven) — push and pull_request both fire
 - OPT48 — High Job-Level Failure Rate (>15% over 30d) (MEDIUM, data-driven) — job fails over 15% of runs
+- OPT98 — The Merge Queue Re-proves What Is Already Proven (MEDIUM, data-driven) — strict-rule churn and repeated full merge-queue validation
+
 ## Category 10 — Timing Anomalies
+- OPT100 — Infrastructure Faults Fail the Whole Run (MEDIUM, data-driven) — classify first-step infrastructure failures before retrying
 - OPT49 — Slow Setup Step (MEDIUM, data-driven) — cut; id retired
 - OPT50 — Post Steps Taking Too Long (MEDIUM, data-driven) — cut; id retired
 - OPT51 — Install-to-Test Ratio >50% (MEDIUM, data-driven) — cut; id retired

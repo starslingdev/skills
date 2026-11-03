@@ -45,8 +45,8 @@ Checkout · 6. Conditional Execution · 7. Trigger and Scope · 8. Release Workf
 - **Category 6 — Conditional Execution**: merge_group step-vs-job conditions, draft-PR gating.
 - **Category 7 — Trigger and Scope**: missing path filters, no `--filter` on PR turbo, cron frequency, every PR paying for coverage that could run after merge (`OPT90`).
 - **Category 8 — Release Workflow**: release-path caching + redundancy.
-- **Category 9 — Queue Times and Concurrency**: missing/!coarse concurrency groups.
-- **Category 10 — Timing Anomalies**: failure-rate / bimodal duration signals (advisory), and the same job measured faster on another runner class (`OPT81`).
+- **Category 9 — Queue Times and Concurrency**: missing/!coarse concurrency groups; measured one-at-a-time capacity waits (`OPT97`) and repeated merge validation (`OPT98`).
+- **Category 10 — Timing Anomalies**: failure-rate / bimodal duration signals (advisory), and the same job measured faster on another runner class (`OPT81`), and infrastructure faults that fail whole runs (`OPT100`).
 - **Category 11 — Stack-Specific**: turbo task outputs, unstable turbo env keys, type-aware ESLint on a slow lint job (`OPT82`).
 - **Category 12 — Build Caching (language-agnostic)**: uncached compiled-language builds, a dependency compiled from source when a prebuilt package exists (`OPT86`), a compile nobody profiled (`OPT91`), a machine-wide .NET SDK reconciling unrelated workloads (`OPT94`).
 - **Category 13 — Hidden Failures and Dead Config**: dead env vars, misconfigured caches.
@@ -3361,6 +3361,86 @@ title_template: "Excessive Queue Time"
 
 ---
 
+### OPT97 — Queue Caused by a One-at-a-Time Resource
+
+<!-- METADATA
+pattern: OPT97
+impact: MEDIUM
+class: data-driven
+detector: manual
+affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml"
+fix_strategy: single-slot-queue
+title_template: "Queue Caused by a One-at-a-Time Resource"
+-->
+
+**TL;DR**: When queue time grows with competing jobs but execution time stays
+flat, investigate a shared slot before adding faster machines.
+
+**Anti-pattern**: A global concurrency group, unique runner label, emulator,
+device or shared database admits one job at a time while other work waits.
+This is a capacity finding. The sampled intervals do not measure utilization
+or prove which hinted resource causes the wait.
+
+**Detection heuristic**: Per job and exact runner-label set, require at least
+15 samples, median runnable-to-start queue of at least 60 seconds and P90 of
+at least 300 seconds. An entry job under a workflow-level global group is timed
+from the run's creation (first attempt only): GitHub creates that run's jobs only
+when the group frees. Evaluate only a self-hosted label set or a population
+with a resource hint below. On hosted runners an account's concurrent-job limit
+raises queue and in-flight work together, so that queue stays with OPT43.
+In-flight counts come from one bounded read of every run, any status, created
+in the population's window (three hours before its first sample to its last):
+at most 3 run-list pages, then job lists only for runs whose workflow could use
+the same runners or group, at most 60. A newest-success sample sees a small
+fraction of competing jobs, so it is never used for the count. A failed or
+capped read gives "check this: competition not measured", never a finding. At
+each job's runnable time, count jobs already in flight with the same label set
+or the same global group. Require Spearman rank correlation of queue versus
+in-flight count at least 0.6 and absolute run-time correlation below 0.3.
+Constant execution times have zero correlation. Exclude skipped jobs,
+incomplete intervals and upstream `needs:` execution. Fewer than 15 samples is
+disclosed as "too few samples" only when the queue already meets the
+thresholds on a pool OPT97 evaluates. Sampled jobs matching no single YAML job (reusable-workflow
+children, ambiguous names) are counted per workflow in Data sources.
+
+**Resource hints**: A global concurrency group: the string form or a `group`
+with `cancel-in-progress` false or omitted (GitHub's default), whose key does
+not reference the ref, head ref, PR number, commit SHA or run id. A job-level
+group replaces the workflow-level one; `${{ github.workflow }}` alone is global
+within its workflow. A label on exactly one repo-level runner when the
+repository's complete runner list is readable (organization runners are not
+visible, else unknown). Android-emulator runner actions, `xcrun simctl` or
+`adb`. Matching ports or database names in job-local service containers do not
+establish a shared resource. Correlation is evidence to investigate, not proof
+of causation.
+
+**Fix**, in order:
+
+1. Move the one-at-a-time step into its own job so unrelated work can run.
+2. Add slots: per-job database names, per-run emulators, or a group keyed per PR.
+3. Only then consider adding machines.
+
+**Guardrail**: Keep a real one-at-a-time limit where correctness needs one,
+such as deployment to one environment. Narrow its scope instead of removing it.
+Inspect the workflow's history and intent before changing policy.
+
+**Sizing**: Median queue above a baseline: the P10 runnable queue of the
+repository's other sampled jobs, never the population being evaluated. With no
+other jobs, no wall-clock credit. Only an established merge-gating job is
+credited. Cap each sampled reduction against all same-run job completion times,
+including queue; an independent later-finishing job removes the credit.
+Incomplete completion data receives no credit. The existing workflow and
+cross-workflow floors then apply. No runner-minute saving: waiting is not
+execution.
+
+**Relations**: Replaces the same workflow's same-job OPT43 finding; a finding
+naming other jobs, or another workflow's, is kept. The merge also accepts
+OPT44, but no OPT44 detector exists, so only OPT43 merges today. A rise in
+execution time with contention, a hosted pool without a hint, or an unmeasured
+competition does not fire OPT97; OPT43 remains.
+
+---
+
 ### OPT44 — Concurrency Group Too Restrictive
 
 <!-- METADATA
@@ -3613,7 +3693,114 @@ Root causes typically fall in a few buckets:
 
 ---
 
+### OPT98 — The Merge Queue Re-proves What Is Already Proven
+
+<!-- METADATA
+pattern: OPT98
+impact: MEDIUM
+class: data-driven
+detector: actions-merge-queue-reproving
+affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml"
+fix_strategy: merge-queue-reproving
+title_template: "The Merge Queue Re-proves What Is Already Proven"
+-->
+
+**TL;DR**: High PR volume makes repeated full validation expensive: a strict
+up-to-date rule repeatedly invalidates PR checks, or the merge queue runs the
+same full suite already run on the PR.
+
+**Anti-pattern**: Independent agent-authored PRs invalidate each other's base,
+or repeat identical work when assembled into the merged result.
+
+**Detection heuristic**:
+
+- **Strict rule at high volume:** reuse the classic required-status-check and
+  active, default-branch ruleset responses. The rule is on when any source says
+  so; it is off only when classic protection was read (a non-admin cannot read
+  it, so a ruleset saying off is not enough). Require no merge queue: no
+  merge-queue ruleset, no `merge_group` trigger and no cached `merge_group` run.
+  Require at least 30 merged PRs/day: one REST search counts merges on the
+  rule's branch in the 30 complete UTC days before the pin. Measure the
+  rebase-churn share from at most 30 of the newest merged PRs' timelines: a
+  two-parent commit (the base merged in) or a head force-push (a rebase, or an
+  amend). Run pages cannot answer this; GitHub empties a run's PR list once the
+  PR merges. An unread share says "not measured", never 0%. Unreadable rules,
+  incomplete searches and an unparseable date pin withhold this case and say why
+  in data sources.
+- **Full suite in the queue:** a workflow triggered by both `pull_request` and
+  `merge_group` runs the same jobs on both, with no affected-only scoping (the
+  OPT70 signals: `nx affected`, `turbo --filter=...[`, `--affected`, `--changed`,
+  `--onlyChanged`, a changed-files action) and no build or remote cache
+  (`actions/cache` beyond dependency directories, Turbo/Nx Cloud tokens,
+  `--remote_cache`, `--build-cache`, sccache). Expressions that don't select
+  work (names, concurrency, runner labels, secrets, matrix values) don't count.
+  Event-dependent conditions, commands, inputs or matrices, reusable workflows
+  and unread local actions make the scope unknown; each such workflow is named
+  in data sources. Package scripts and third-party actions are not read, so the
+  measured ratio is the second proof: at least 15 successful first-attempt runs
+  of each event, and a merge-group median from 0.8 to 1.5 times the PR median
+  (run start to completion update in the cached run pages). Above 1.5 the queue
+  is doing different work and is reported as such, not as re-proving. The
+  finding names the workflow and its jobs.
+
+**Fix recipe**:
+
+1. Replace the high-volume up-to-date rule with a merge queue.
+2. In the queue, scope work to what the queued change affects relative to the
+   queue's base, following [OPT70](#opt70--scope-the-buildtest-to-only-what-changed).
+3. Reuse build and test caches main writes; PRs and queue entries read only.
+   Follow [OPT74](#opt74--trust-boundary-forced-cold-work-producerconsumer-split).
+4. Use content-addressed remote caches to avoid re-proving an identical tree
+   that main already proved green.
+
+**Guardrail**: Keep every required check on the merged result. Scoping work
+is allowed; dropping required checks is not. A changed-set resolution error
+must run the full suite. Shared inputs must bypass scoping. Compare scoped and
+full results in parallel before rollout and preserve the full post-merge safety net.
+
+**Sizing**: Neither case receives wall-clock or runner-minute credit. Rebase
+churn is observed, and the queue and PR medians are measured; the affected-only
+counterfactual is not modeled.
+
+---
+
 ## Category 10: Timing Anomalies
+
+---
+
+### OPT100 — Infrastructure Faults Fail the Whole Run
+
+<!-- METADATA
+pattern: OPT100
+impact: MEDIUM
+class: data-driven
+detector: manual
+affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml"
+fix_strategy: infra-fault-retries
+title_template: "Infrastructure Faults Fail the Whole Run"
+-->
+
+**TL;DR**: Infrastructure failures can make an otherwise valid change pay for another complete CI attempt. Classify the first failing step before considering a bounded retry.
+
+**Anti-pattern**: A lost runner, exhausted memory, crashed browser, or install/fetch network fault fails a merge-gating job and causes the whole workflow to run again.
+
+**Detection heuristic**:
+
+- Inspect only the first failed step of each sampled failed job: its timestamped lines up to one second past the step's whole-second end, stopping at that step's own runner exit line. A failed job with no failed step (a lost runner) is read from its check-run failure annotations instead of a log. Descriptive signatures live in `blocking_path.py`: lost runner or reclaimed spot machine, out of memory (the runner's own exit code 137 line, never a 137 or `Killed` printed by a test), browser crash (crash wording only; an ordinary test timeout that closes the page does not count), and network (connection errors, or a 502/503 beside HTTP wording, only in install, fetch or "Set up job" steps that do not also name test work). Assertion diagnostics never count. Missing logs or step timing do not imply a class.
+- Emit when at least five failures match and they represent at least 20% of the job's sampled failures. The denominator includes failures with unreadable logs, and the evidence states how many were unreadable. When no finding fires and the unread logs could have changed that, OPT100 is reported as not evaluated. A readable required-check set must establish that the job gates merge.
+- Show counts by class. A runner receiving at least five and 80% of the matched failures is named for investigation when its labels explicitly identify it as self-hosted.
+- Retry compute comes only from the next sampled attempt of the same run, with exactly one failed job in the preceding attempt, and counts only jobs that ran in that attempt and ran again; a job skipped behind the failure would have run anyway. Ambiguous multi-failure retries receive no credit. Each attempt counts once; OPT64 does not claim runs already claimed here.
+- A same-run, same-commit fail-then-pass without an infrastructure signature adds a pointer to OPT48's quarantine recipe, not another finding.
+
+**Fix recipe**:
+
+1. Investigate the first failing step with `sling`. For confirmed infrastructure classes only, evaluate a maximum of two attempts and short backoff at the step boundary. A retry wrapper or the tool's own bounded retry may help; never retry test assertions indiscriminately.
+2. When failures cluster on one unhealthy self-hosted machine, stop routing work to that machine while degraded.
+3. Quarantine confirmed flakes using OPT48's owner, expiry and default-branch guardrails.
+
+**Guardrail**: A retry must not hide a product failure. Retry only classified infrastructure faults, preserve required checks, and count every retry so a rising failure rate remains visible.
+
+**Sizing**: Runner-minutes retain the observed subsequent-attempt compute and separately scale the monthly credit by all-status monthly volume divided by sampled run count, matching the report's existing monthly contract. Wall-clock is median observed retry delay multiplied by the job's infrastructure failure rate, subject to the existing workflow and cross-workflow floors. Missing retries imply zero measured savings, not estimated retries. OPT48 retains the general reliability signal without savings; OPT100 isolates the infrastructure share. OPT64 covers repeated attempts outside the claimed infrastructure runs.
 
 ---
 
@@ -4864,7 +5051,7 @@ title_template: "Dead Workflow Env Vars / Config"
 ## Category 14: Structural / Critical-Path Levers
 
 These patterns are a **different class** from everything above. The catalog
-patterns OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94 and OPT96 are *hygiene*: each is a named,
+patterns OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94, OPT96, OPT97, OPT98 and OPT100 are *hygiene*: each is a named,
 locally-checkable defect with
 a mechanical, low-risk fix, detected by matching workflow YAML against the
 catalog. OPT81, like OPT79 and OPT80, is derived from run history rather than matched against YAML, and its A2 advisory is risk MEDIUM. On real repos almost every hygiene hit moves **~0 developer

@@ -42,6 +42,48 @@ import untrusted_wrap as uw  # same-skill module; BEGIN/END untrusted-log markin
 from workflow_steps import (  # same-skill module; step walker
     parallel_steps_disclosure, parallel_steps_used, parallel_steps_used_for)
 
+# Infrastructure signatures describe failures, never arbitrary executable text.
+_INFRA_FAILURE_SIGNATURES = {
+    # A reclaimed spot/preemptible machine is a lost runner, even though its step
+    # exit line then reads 137; the earlier interruption line classifies first.
+    "lost-runner": r"the runner has received a shutdown signal|lost communication with the server|the hosted runner[^\n]*\blost\b|\binterrupted\b[^\n]*\b(?:spot|preemptible) (?:instance|vm)\b",
+    # The runner's own step exit, never a 137 or "Killed" a test's subprocess printed.
+    "oom": r"^##\[error\]Process completed with exit code 137\b",
+    # Crash wording only: an ordinary test timeout also prints "Target page,
+    # context or browser has been closed" for the action it interrupted.
+    "browser-crash": r"\bbrowser has crashed\b|\bTarget crashed\b|\bBrowser closed unexpectedly\b|\bbrowser has disconnected\b|^Error: browserType\.launch:[^\n]*(?:crashed|closed|disconnected)",
+    # A 502/503 counts only beside HTTP wording; package and byte counts such as
+    # "+1502 packages" or "(503.2 kB)" are progress output, not a registry error.
+    "network": r"\b(?:ECONNRESET|ETIMEDOUT|EAI_AGAIN)\b|\b(?:HTTP|status(?: code)?)\b[^\n]{0,40}\b(?:502|503)\b|\b(?:502|503)\b\W{0,3}(?:Bad Gateway|Service Unavailable)",
+}
+# Network faults count only in a step that installs or fetches something, including
+# the runner's own "Set up job" (action downloads). A step that also names test
+# work is a test step whose network errors may be the product's own.
+_INFRA_INSTALL_STEP = r"\b(?:install(?:ing|ation)?|fetch(?:ing)?|download(?:ing)?|checkout)\b|\bnpm\s+ci\b|^set up job$"
+_INFRA_TEST_STEP = r"\b(?:tests?|specs?|e2e|pytest|jest|vitest|playwright|cypress)\b"
+
+
+def _classify_infra_failure(log: str, step_name: str) -> str | None:
+    """Classify only an observed failure line; network errors require install/fetch.
+
+    Assertion diagnostics are explicitly excluded, even when their expected value
+    quotes an infrastructure signature. The caller supplies only the first failed
+    step's timestamp-bounded log, not a whole job's cleanup output.
+    """
+    install = bool(re.search(_INFRA_INSTALL_STEP, step_name.strip(), re.I)
+                   and not re.search(_INFRA_TEST_STEP, step_name, re.I))
+    for line in log.splitlines():
+        if re.search(r"\bassert|\bexpected\b|\breceived\b", line, re.I) and not re.search(
+                r"runner has received a shutdown signal", line, re.I):
+            continue
+        for kind, signature in _INFRA_FAILURE_SIGNATURES.items():
+            if kind == "network" and not install:
+                continue
+            if re.search(signature, line.strip(), re.I):
+                return kind
+    return None
+
+
 _LBLW = 33
 _BARW = 22
 _DURW = 7
@@ -111,7 +153,7 @@ _STRUCTURAL_PATTERNS = frozenset(
 # which the critical-path spine (job start → finish) doesn't capture. These are NOT
 # runner-minute hygiene, so they get their own "Pre-start wait" section instead of the
 # bill-savings appendix (which would wrongly tell the reader they remove ~0 wall-clock).
-_WAIT_PATTERNS = frozenset({"OPT43"})
+_WAIT_PATTERNS = frozenset({"OPT43", "OPT97"})
 
 
 def _is_tier2_finding(f: dict[str, Any]) -> bool:
@@ -6077,6 +6119,58 @@ def _opt96_unresolved_line(doc: dict[str, Any]) -> str:
     return f"{lead}: {reasons}."
 
 
+def _opt98_report_block(doc: dict[str, Any]) -> list[str]:
+    """Uncredited repeated-validation evidence stays visible even on drilled poles."""
+    findings = [f for f in doc.get("findings", []) if f.get("pattern") == "OPT98"]
+    if not findings:
+        return []
+    out = ["## Repeated merge validation", ""]
+    catalog = _build_catalog_url(doc.get("skill_commit_sha"))
+    for finding in findings:
+        wf = finding.get("workflow_file")
+        out += [f"### OPT98: {finding.get('title', 'Repeated validation')}" + (f" — `{wf}`" if wf else ""), "",
+                str(finding.get("evidence", "")), "",
+                "No wall-clock or runner-minute saving is credited.", "",
+                *_hygiene_prompt("OPT98", str(finding.get("title", "")), [finding],
+                                 _catalog_anchor(catalog, [finding]))]
+    return out
+
+
+# Entries shown per OPT97 Data sources row; the rest stay in findings JSON.
+_OPT97_ROW_ENTRIES = 5
+
+
+def _opt97_capacity_cells(doc: dict[str, Any]) -> tuple[str, str, str]:
+    """(check-this, held-back, fetch) cells for OPT97's Data sources rows."""
+    notes = [n for n in (doc.get("opt97_notes") or []) if isinstance(n, dict)]
+
+    def where(n: dict[str, Any]) -> str:
+        return (f"{_withheld_cell_text(n.get('workflow_file', ''))} / "
+                f"{_withheld_cell_text(n.get('job', ''))}")
+
+    def capped(parts: list[str]) -> str:
+        extra = len(parts) - _OPT97_ROW_ENTRIES
+        return "; ".join(parts[:_OPT97_ROW_ENTRIES]) + (
+            f"; +{extra} more in findings JSON" if extra > 0 else "")
+    check = [f"{where(n)}: competition not measured "
+             f"({_withheld_cell_text(n.get('detail') or 'not read')})"
+             for n in notes if n.get("reason") == "competition not measured"]
+    held = [f"{where(n)}: too few samples "
+            f"({_withheld_cell_text(n.get('samples', 0))}; minimum 15)"
+            for n in notes if n.get("reason") == "too few samples"]
+    held += [f"{_withheld_cell_text(n.get('workflow_file', ''))}: "
+             f"{_withheld_cell_text(n.get('unresolved', 0))} of "
+             f"{_withheld_cell_text(n.get('jobs', 0))} sampled jobs not matched to one YAML job"
+             for n in notes if n.get("reason") == "unresolved jobs"]
+    calls = doc.get("opt97_competition_calls")
+    fetch = ""
+    if isinstance(calls, dict) and calls.get("populations"):
+        fetch = (f"{calls.get('run_pages', 0)} run-list pages and {calls.get('job_lists', 0)} "
+                 f"job lists read for {calls.get('populations')} candidate population(s); "
+                 "at most 3 pages and 60 job lists each")
+    return (capped(check) if check else "", capped(held) if held else "", fetch)
+
+
 def _data_sources_footer(doc: dict[str, Any], repo: str,
                          lead: "list[str] | None" = None) -> list[str]:
     """A structured Data Sources table at the foot of the report - which tiers ran,
@@ -6206,12 +6300,38 @@ def _data_sources_footer(doc: dict[str, Any], repo: str,
         _wline = _withheld_candidates_line(doc, _row.doc_key, _row.noun)
         if _wline:
             rows.append((_row.label, _wline, _row.feeds))
+    _queue = ds.get("merge_queue") or {}
+    _queue_limits = [_queue[k] for k in ("branch_rule", "merged_prs") if _queue.get(k)]
+    if _queue.get("unmeasured_workflows"):
+        _queue_limits.append("queue/PR timing not measured for " + ", ".join(_queue["unmeasured_workflows"]))
+    if _queue.get("unreadable_workflows"):
+        _queue_limits.append("workflow configuration not readable for " + ", ".join(_queue["unreadable_workflows"]))
+    if _queue.get("static_unknown"):
+        _queue_limits.append("queue scope not settled for " + ", ".join(_queue["static_unknown"]))
+    if _queue.get("thin_samples"):
+        _queue_limits.append("too few queue/PR runs for " + ", ".join(_queue["thin_samples"]))
+    if _queue.get("pr_runs_differ"):
+        _queue_limits.append("PR runs differ from queue runs for " + ", ".join(_queue["pr_runs_differ"]))
+    if _queue_limits:
+        rows.append(("Merge queue", _flatten_cell("; ".join(_queue_limits)), "Repeated validation; unavailable evidence is not an all-clear"))
     _opt96_line = _opt96_unresolved_line(doc)
     if _opt96_line:
         rows.append(("cache seeding: held back", _opt96_line,
                      "Why a PR cache restore with no visible default-branch save "
                      "produced no OPT96 finding"))
-    out = ["## 🗄️ Data sources", ""]
+    _check, _held, _calls = _opt97_capacity_cells(doc)
+    if _check:
+        rows.append(("single-slot capacity: check this", _check,
+                     "OPT97 populations whose queue met the thresholds but whose competing "
+                     "jobs could not be counted; no finding was made"))
+    if _held:
+        rows.append(("single-slot capacity: held back", _held,
+                     "OPT97 queue versus in-flight correlation; runner-label populations "
+                     "need 15 samples and one YAML job per sampled job"))
+    if _calls:
+        rows.append(("single-slot capacity: competition fetch", _calls,
+                     "Counting every competing job in flight (all runs, any status) for OPT97"))
+    out = [*_opt98_report_block(doc), "## 🗄️ Data sources", ""]
     if lead:
         out += lead
     out += ["| Source | Coverage | Used for |", "| --- | --- | --- |"]
@@ -8033,6 +8153,23 @@ def _tier2_guardrail_sentence(f: dict[str, Any]) -> str:
     return note[idx:].strip() if idx >= 0 else ""
 
 
+def _opt98_task(members: list[dict[str, Any]]) -> list[str]:
+    """The OPT98 prompt's task lines: the up-to-date case's fix is a merge queue;
+    the re-proving case names the workflow and jobs to scope."""
+    if any((m.get("merge_queue") or {}).get("case") == "strict" for m in members):
+        return ["Replace the require-up-to-date branch rule with a merge queue: add a",
+                "merge_group trigger to every required workflow, confirm the required",
+                "checks report on merge_group runs, then turn the queue on and the",
+                "up-to-date requirement off."]
+    lines = []
+    for m in members:
+        lines += [f"Workflow: {m.get('workflow_file')}",
+                  f"Jobs: {', '.join(str(j) for j in m.get('affected_jobs') or [])}"]
+    return lines + ["Investigate the queue base, affected-only execution and main-written caches.",
+                    "Use the full suite when affected-set resolution fails and compare scoped",
+                    "and full results in parallel before adopting scoping."]
+
+
 def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
                     url: str, *, wait: bool = False, saves_wc: bool = False,
                     tier2: bool = False,
@@ -8062,6 +8199,16 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
                      for m in members[:8])
     if len(members) > 8:
         locs += f"; +{len(members) - 8} more (see findings JSON)"
+    if pat == "OPT98":
+        evidence = "\n".join(str(m.get("evidence", "")) for m in members)
+        return ["#### 🤖 Prompt for your coding agent", "", "```text",
+                "ci-speedup measured repeated merge validation:", evidence,
+                "No wall-clock or runner-minute saving is credited.",
+                "Read git log and the workflow's history and intent before changing policy;",
+                "an intent-contradicting change requires owner sign-off.",
+                *_opt98_task(members),
+                "Keep every required check on the merged result; never drop checks.",
+                f"Catalog context: {url}", "```", ""]
     if pat == "OPT82":
         # Numberless by design: the generic bill / off-path saving line would
         # describe it falsely (it may sit ON the critical path, and it claims
@@ -9102,6 +9249,7 @@ def _also_noticed_block(findings: list[dict[str, Any]],
             and str(f.get("pattern", "")) != "OPT81"             # → its pole / own §
             and str(f.get("pattern", "")) != "OPT83"             # → its pole / own §
             and str(f.get("pattern", "")) != "OPT84"             # → its pole / own §
+            and str(f.get("pattern", "")) != "OPT98"             # → uncredited validation section
             and not _on_pole_job(f)                               # valueless + all-pole-job → already AS a pole (#5)
             and not _is_opt79_pole_finding(f)]                    # OPT79 pole cache → its own block (at its pole, or `_opt79_off_pole_block`)
     if not elig:
@@ -10358,6 +10506,7 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     withheld_n = sum(1 for _r in _WITHHELD_ROWS
                      if _withheld_candidates_line(doc, _r.doc_key, _r.noun))
     withheld_n += bool(_opt96_unresolved_line(doc))
+    withheld_n += bool(_opt98_report_block(doc))
     # An OPT81 finding (a measured runner-class comparison, or a held-back A2) is
     # something to say too: without counting it, an OPT81-only doc collapsed to
     # the one-line note and its "Runner class comparisons" section was dropped.

@@ -26,8 +26,8 @@ developer's wait. It gets its own prominent section below.
 
 ## 1. Purpose & scope
 
-ci-speedup audits a repository's GitHub Actions workflows against a 92-pattern
-catalog — 81 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94 and OPT96) plus 11 **structural /
+ci-speedup audits a repository's GitHub Actions workflows against a 95-pattern
+catalog — 84 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94, OPT96, OPT97, OPT98 and OPT100) plus 11 **structural /
 critical-path** patterns (OPT70–OPT75, OPT78, OPT83, OPT84, OPT85 and OPT87, routed from the measured long pole; see
 §11) — and produces a **root-cause-analysis** markdown report with **measured**
 impact on two axes: developer wall-clock wait (the ranking axis) and
@@ -2798,7 +2798,7 @@ wired or removed rather than left to become archaeology.
 
 ## 11. The structural / critical-path track
 
-The hygiene/data-driven catalog (OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94 and OPT96) is mostly **declarative** -
+The hygiene/data-driven catalog (OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94, OPT96, OPT97, OPT98 and OPT100) is mostly **declarative** -
 static findings are locally-checkable YAML defects, while measured Tier-2 rows
 come from run history. Its blind spot: on real repos the merge is
 gated by a check that is *working as intended* and simply slow, with no
@@ -4092,7 +4092,7 @@ order of preference:
 - [`SKILL.md`](SKILL.md) - the canonical contract (phases, admission gate,
   quality review).
 - [`references/patterns/INDEX.md`](references/patterns/INDEX.md) -
-  the 92-pattern catalog, one file per pattern (frontmatter + body); the source
+  the 95-pattern catalog, one file per pattern (frontmatter + body); the source
   of truth for detection and the report's TL;DR / pattern background. The
   single-file [`references/optimization-patterns.md`](references/optimization-patterns.md)
   is compiled from `references/patterns/` by
@@ -4166,6 +4166,77 @@ is a secondary observation, never the entire install-step ceiling. Credited rows
 pass the within-workflow cap and the existing cross-workflow cascade; below-tail
 or unconfirmed rows retain “check this” wording. No additional probe budget is
 introduced.
+
+### Single-slot queue capacity (OPT97)
+
+`_detect_opt97_single_slot_queue` groups each workflow's sampled jobs by job and
+exact runner-label set. Readiness excludes upstream execution; an entry job
+under a workflow-level global group is timed from the run's creation, because
+GitHub creates such a run's jobs only when the group frees. A population that
+meets the queue thresholds (15 samples, median 60 s, P90 300 s) is evaluated
+only on a self-hosted label set or with a static hint (global group, one
+repo-level runner, device step). On hosted runners the account's
+concurrent-job limit raises queue and in-flight work together, so that queue
+stays with OPT43.
+
+In-flight counts never come from the newest-success sample, which sees a small
+fraction of competing work. `collect()` hands the detector
+`_opt97_dense_competition`: one bounded read of every run, any status, created
+in the population's window (at most 3 run-list pages), then job lists only for
+runs whose workflow could share the runners or group (at most 60; sampled runs
+are reused and responses shared across populations). A failed or capped read is
+noted "competition not measured" and never fires. Call counts, thin samples,
+unresolved jobs and unmeasured populations reach the Data sources table
+(`opt97_competition_calls`, `opt97_notes`; each row shows 5 entries, the rest
+stay in findings JSON).
+
+Measured OPT97 replaces the same workflow's same-job OPT43 (OPT44 is accepted
+but has no detector), uses the pre-start axis, and credits only established
+gating jobs: the median same-run completion change when the queue above the
+P10 of the other sampled jobs is removed. No baseline or incomplete completion
+timestamps give no credit; existing floors still apply. No utilization or
+billing claim is derived from correlation.
+
+### Merge validation (OPT98)
+
+The required-check reader optionally returns strict/merge-queue metadata from
+the same API responses. Strict is on when any source says so and off only when
+classic protection was read (a non-admin's 404 there leaves it unknown). A
+queue is present when a ruleset, a `merge_group` trigger or a cached
+`merge_group` run shows one. A strict, queue-free candidate uses one REST search
+for the prior 30 complete UTC days before the pin; total_count supplies volume.
+At 30 merges a day, up to 30 of the newest merged PR timelines supply the
+rebase-churn share (two-parent commits and head force-pushes). Run pages can't:
+GitHub empties `pull_requests[]` once a PR merges.
+`_opt98_static_scope` classifies each queue workflow as full, scoped (OPT70
+affected-only signals or a build/remote cache), queue-only or unknown
+(event-dependent conditions, commands, inputs or matrices; reusable workflows;
+unread local actions). Full candidates need 15 successful first-attempt runs per
+event and a queue/PR median ratio from 0.8 to 1.5. Both cases are uncredited and
+render in a dedicated Repeated merge validation section so a drilled pole cannot
+hide the observation. Unknown scopes, thin samples, slower queue runs, malformed
+workflows, unavailable branch rules and missing timings are named in data
+sources; `merge_queue.status` says measured, partial or not_measured.
+
+### Infrastructure faults (OPT100)
+
+`_opt100_workflow_pass` runs once per workflow after the repeated-attempt
+prefetch. It reuses the all-status and prior-attempt job pages, resolves
+observed job names to exactly one merge-gating YAML job, and reads evidence
+only for gating jobs with at least five failures: one log per failed job with
+a failed step, or one check-run annotations call (the job id is its check-run
+id) per failed job with no failed step, which is how a lost runner appears.
+`_opt100_job_class` parses log timestamps with the shared OPT80 line parser
+(seven fractional digits), keeps the first failed step's lines up to one second
+past its whole-second end, and stops at that step's runner exit line. The
+signature table in `blocking_path.py` then classifies lost runner, out of
+memory (the runner's own exit 137 line), browser crash (crash wording only) and
+network (errno or a 502/503 beside HTTP wording, in install, fetch or "Set up
+job" steps). Retry compute counts only jobs that ran in the failed attempt and
+again in the next. OPT100 is reported as not evaluated only when no finding
+fired and unread job pages or logs could change the verdict; a fired finding
+states its unread-log count. OPT64 then runs over the retries OPT100 did not
+claim.
 
 ### PR lifecycle context
 
