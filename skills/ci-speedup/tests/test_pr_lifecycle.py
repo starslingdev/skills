@@ -104,6 +104,13 @@ def test_skipped_job_reported_as_ending_before_it_started_counts_as_zero():
     assert module().measure_pr(pr([check(500,600),skipped]),['test'])==module().measure_pr(pr(),['test'])
 
 
+def test_job_cancelled_before_it_started_counts_as_zero():
+    # A job a newer push cancels before it starts (a concurrency group) gets the
+    # same completed-before-started stamp as a skipped job.
+    cancelled=check(560,550,'CANCELLED',name='superseded')
+    assert module().measure_pr(pr([check(500,600),cancelled]),['test'])==module().measure_pr(pr(),['test'])
+
+
 def test_failed_job_that_ends_before_it_starts_is_still_unreadable():
     with pytest.raises(ValueError,match='incomplete check interval'):
         module().measure_pr(pr([check(500,600),check(560,550,'FAILURE',name='optional')]),['test'])

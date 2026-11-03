@@ -112,8 +112,8 @@ def measure_pr(pr, required):
             checks.extend(_nodes(suite.get('checkRuns'), 'checkRuns'))
         for c in checks:
             a,b = _time(c.get('startedAt')), _time(c.get('completedAt'))
-            if b < a and c.get('conclusion') == 'SKIPPED':
-                b = a  # GitHub stamps skipped jobs as completing just before they start
+            if b < a and c.get('conclusion') in ('SKIPPED', 'CANCELLED'):
+                b = a  # skipped or cancelled-before-start jobs complete just before they "start"
             if b < a or not c.get('conclusion'):
                 raise ValueError('incomplete check interval')
             if a < end and b > start:
