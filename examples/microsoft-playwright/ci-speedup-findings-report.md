@@ -1,5 +1,9 @@
 # microsoft/playwright - why is the merge slow?
 
+**Where your PRs' time goes**
+
+not measured: lifecycle data was not collected
+
 | Repository | `microsoft/playwright` |
 | :--- | :--- |
 | **Audited commit** | [`3827650`](https://github.com/microsoft/playwright/commit/3827650d171cc1b035cbefb7e00bf5948d6809df) - file & line references are anchored to this tree |
