@@ -74,6 +74,7 @@ This order is also the compiled file's order; contributors see `README.md`.
 - OPT98 — The Merge Queue Re-proves What Is Already Proven (MEDIUM, data-driven) — strict-rule churn and repeated full merge-queue validation
 
 ## Category 10 — Timing Anomalies
+- OPT100 — Infrastructure Faults Fail the Whole Run (MEDIUM, data-driven) — classify first-step infrastructure failures before retrying
 - OPT49 — Slow Setup Step (MEDIUM, data-driven) — cut; id retired
 - OPT50 — Post Steps Taking Too Long (MEDIUM, data-driven) — cut; id retired
 - OPT51 — Install-to-Test Ratio >50% (MEDIUM, data-driven) — cut; id retired

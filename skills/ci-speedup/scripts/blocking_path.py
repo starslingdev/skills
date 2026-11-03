@@ -40,6 +40,48 @@ import untrusted_wrap as uw  # same-skill module; BEGIN/END untrusted-log markin
 from workflow_steps import (  # same-skill module; step walker
     parallel_steps_disclosure, parallel_steps_used, parallel_steps_used_for)
 
+# Infrastructure signatures describe failures, never arbitrary executable text.
+_INFRA_FAILURE_SIGNATURES = {
+    # A reclaimed spot/preemptible machine is a lost runner, even though its step
+    # exit line then reads 137; the earlier interruption line classifies first.
+    "lost-runner": r"the runner has received a shutdown signal|lost communication with the server|the hosted runner[^\n]*\blost\b|\binterrupted\b[^\n]*\b(?:spot|preemptible) (?:instance|vm)\b",
+    # The runner's own step exit, never a 137 or "Killed" a test's subprocess printed.
+    "oom": r"^##\[error\]Process completed with exit code 137\b",
+    # Crash wording only: an ordinary test timeout also prints "Target page,
+    # context or browser has been closed" for the action it interrupted.
+    "browser-crash": r"\bbrowser has crashed\b|\bTarget crashed\b|\bBrowser closed unexpectedly\b|\bbrowser has disconnected\b|^Error: browserType\.launch:[^\n]*(?:crashed|closed|disconnected)",
+    # A 502/503 counts only beside HTTP wording; package and byte counts such as
+    # "+1502 packages" or "(503.2 kB)" are progress output, not a registry error.
+    "network": r"\b(?:ECONNRESET|ETIMEDOUT|EAI_AGAIN)\b|\b(?:HTTP|status(?: code)?)\b[^\n]{0,40}\b(?:502|503)\b|\b(?:502|503)\b\W{0,3}(?:Bad Gateway|Service Unavailable)",
+}
+# Network faults count only in a step that installs or fetches something, including
+# the runner's own "Set up job" (action downloads). A step that also names test
+# work is a test step whose network errors may be the product's own.
+_INFRA_INSTALL_STEP = r"\b(?:install(?:ing|ation)?|fetch(?:ing)?|download(?:ing)?|checkout)\b|\bnpm\s+ci\b|^set up job$"
+_INFRA_TEST_STEP = r"\b(?:tests?|specs?|e2e|pytest|jest|vitest|playwright|cypress)\b"
+
+
+def _classify_infra_failure(log: str, step_name: str) -> str | None:
+    """Classify only an observed failure line; network errors require install/fetch.
+
+    Assertion diagnostics are explicitly excluded, even when their expected value
+    quotes an infrastructure signature. The caller supplies only the first failed
+    step's timestamp-bounded log, not a whole job's cleanup output.
+    """
+    install = bool(re.search(_INFRA_INSTALL_STEP, step_name.strip(), re.I)
+                   and not re.search(_INFRA_TEST_STEP, step_name, re.I))
+    for line in log.splitlines():
+        if re.search(r"\bassert|\bexpected\b|\breceived\b", line, re.I) and not re.search(
+                r"runner has received a shutdown signal", line, re.I):
+            continue
+        for kind, signature in _INFRA_FAILURE_SIGNATURES.items():
+            if kind == "network" and not install:
+                continue
+            if re.search(signature, line.strip(), re.I):
+                return kind
+    return None
+
+
 _LBLW = 33
 _BARW = 22
 _DURW = 7
