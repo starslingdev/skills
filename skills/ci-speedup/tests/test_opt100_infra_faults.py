@@ -378,3 +378,124 @@ def test_retry_minutes_skip_jobs_that_never_ran_in_the_failed_attempt():
                                       monthly_volume=6, sample_denominator=6)[0][0]
     assert f["infra_failures"]["sampled_rerun_minutes"] == 12
     assert f["runner_min_saving"] == 12
+
+
+def test_firing_finding_discloses_unreadable_logs():
+    jobs = [job(i * 10) for i in range(20)]
+    logs = {j["id"]: "2026-01-01T00:01:00Z " + (
+        OOM if i < 6 else "AssertionError: expected true") for i, j in enumerate(jobs) if i < 18}
+    findings, notes = cr._detect_opt100_infra_faults("ci.yml", jobs, logs, {"checks"}, 0)
+    assert "2 of 20 failed-job logs unreadable" in findings[0]["evidence"]
+    assert findings[0]["infra_failures"]["unreadable_logs"] == 2
+    assert not notes["undetermined"]
+
+
+@pytest.mark.parametrize("readable,infra,undetermined", [
+    (0, 0, True),     # nothing evaluated
+    (16, 1, True),    # 1 matched + 4 unread could reach the floor of 5
+    (17, 1, False),   # 1 matched + 3 unread cannot reach 5
+    (19, 0, False),   # one unread log cannot change the verdict
+])
+def test_unread_logs_leave_the_verdict_undetermined_only_when_they_could_flip_it(
+        readable, infra, undetermined):
+    jobs = [job(i * 10) for i in range(20)]
+    logs = {j["id"]: "2026-01-01T00:01:00Z " + (OOM if i < infra else "AssertionError")
+            for i, j in enumerate(jobs) if i < readable}
+    findings, notes = cr._detect_opt100_infra_faults("ci.yml", jobs, logs, {"checks"}, 0)
+    assert findings == []
+    assert notes["undetermined"] is undetermined
+
+
+def test_unread_logs_against_the_share_floor():
+    # 1 matched + 4 unread reach the count floor but only 5/30 = 17% < 20%.
+    jobs = [job(i * 10) for i in range(30)]
+    logs = {j["id"]: "2026-01-01T00:01:00Z " + (OOM if i < 1 else "AssertionError")
+            for i, j in enumerate(jobs) if i < 26}
+    assert cr._detect_opt100_infra_faults("ci.yml", jobs, logs, {"checks"}, 0)[1]["undetermined"] is False
+
+
+class Workflow:
+    """Drives the per-workflow OPT100 + OPT64 pass with recorded job pages."""
+
+    def __init__(self, monkeypatch, jobs, logs, *, page_errors=0):
+        self.opt64_samples = None
+        by_run = {}
+        for j in jobs:
+            by_run.setdefault(j["run_id"], []).append(j)
+        kept = [({"id": rid, "conclusion": "failure", "run_attempt": 1}, js)
+                for rid, js in by_run.items()]
+        self.runs = [run for run, _ in kept]
+        monkeypatch.setattr(cr, "_gather_run_jobs",
+                            lambda client, repo, all_runs, memo=None: (kept, page_errors))
+        monkeypatch.setattr(cr, "_fetch_job_log", lambda c, r, j: logs.get(j["id"]))
+
+        def opt64(wf_path, samples, monthly, denominator, start):
+            self.opt64_samples = samples
+            return []
+        monkeypatch.setattr(cr, "_detect_opt64_rerun_attempt_waste", opt64)
+
+    def run(self, attempt_samples=(), attempt_errors=0, gate=None):
+        graph = {"checks": {"name": "checks"}}
+        return cr._opt100_workflow_pass(
+            object(), "example/project", "ci.yml", all_runs=self.runs,
+            attempt_samples=list(attempt_samples), attempt_errors=attempt_errors,
+            gate={"checks": {}} if gate is None else gate, graph=graph, job_memo={},
+            monthly=None, crit=None, next_id=0)
+
+
+def _workflow_jobs(infra, readable, total=20):
+    jobs = [job(i * 10) for i in range(1, total + 1)]
+    logs = {j["id"]: "2026-01-01T00:01:00Z " + (OOM if n < infra else "AssertionError")
+            for n, j in enumerate(jobs) if n < readable}
+    return jobs, logs
+
+
+def test_firing_workflow_is_not_marked_skipped(monkeypatch):
+    jobs, logs = _workflow_jobs(infra=6, readable=18)
+    findings, skip, errors = Workflow(monkeypatch, jobs, logs).run()
+    assert [f["pattern"] for f in findings] == ["OPT100"]
+    assert skip is None
+    assert errors == 0
+
+
+def test_unevaluated_workflow_is_marked_skipped(monkeypatch):
+    jobs, logs = _workflow_jobs(infra=0, readable=0)
+    findings, skip, _ = Workflow(monkeypatch, jobs, logs).run()
+    assert findings == []
+    assert "20 of 20 failed-job logs unreadable" in skip
+
+
+def test_settled_verdict_with_one_unread_log_is_not_skipped(monkeypatch):
+    jobs, logs = _workflow_jobs(infra=0, readable=19)
+    assert Workflow(monkeypatch, jobs, logs).run()[1] is None
+
+
+@pytest.mark.parametrize("page_errors,attempt_errors", [(1, 0), (0, 1)])
+def test_unreadable_job_pages_skip_the_workflow(monkeypatch, page_errors, attempt_errors):
+    jobs, logs = _workflow_jobs(infra=6, readable=20)
+    findings, skip, errors = Workflow(monkeypatch, jobs, logs, page_errors=page_errors).run(
+        attempt_errors=attempt_errors)
+    assert findings == []
+    assert "job pages" in skip
+    assert errors == page_errors
+
+
+def test_unreadable_gate_is_skipped_without_fetching(monkeypatch):
+    jobs, logs = _workflow_jobs(infra=6, readable=20)
+    w = Workflow(monkeypatch, jobs, logs)
+    findings, skip, _ = cr._opt100_workflow_pass(
+        object(), "example/project", "ci.yml", all_runs=w.runs, attempt_samples=[],
+        attempt_errors=0, gate=None, graph={}, job_memo={}, monthly=None, crit=None, next_id=0)
+    assert findings == [] and "merge-gating" in skip
+
+
+def test_opt64_never_recounts_runs_claimed_by_infra_retries(monkeypatch):
+    jobs, logs = _workflow_jobs(infra=6, readable=20)
+    retries = [dict(j, id=j["id"] + 1, run_attempt=2, conclusion="success") for j in jobs[:6]]
+    samples = [({"id": j["run_id"]}, [j, r], [r]) for j, r in zip(jobs[:6], retries)]
+    other = ({"id": 999}, [], [])
+    w = Workflow(monkeypatch, jobs + retries, logs)
+    findings, skip, _ = w.run(attempt_samples=samples + [other])
+    claimed = findings[0]["infra_failures"]["retry_run_ids"]
+    assert len(claimed) == 6
+    assert w.opt64_samples == [other]
