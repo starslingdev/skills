@@ -1,7 +1,7 @@
 # Coverage-gap fallback — filling a pole the catalog can't analyse
 
-Depth for phase 4a/4b/4c (SKILL.md "Phases"). This fires **only** when a drilled
-long pole's captured log matched no catalog detector — most runs never reach it.
+Depth for phase 4a/4b/4c (SKILL.md "Phases"). Fires **only** when a drilled long pole's log
+matched no catalog detector, or only generic OPT75/OPT71 (they name no cause) — most runs never reach it.
 SKILL.md carries the essential contract; this doc is the full procedure and the
 maintainer-side capture/promotion detail.
 
@@ -13,7 +13,7 @@ maintainer-side capture/promotion detail.
 
 ## 4a. LLM gap-fill (mandatory when present)
 
-A drilled pole whose captured log matched **no catalog detector** renders a
+A drilled pole whose log matched **no catalog detector** (or only OPT75/OPT71) renders a
 coverage-gap note (the unfilled marker is "no drill-down available") and would
 otherwise dead-end — a *product failure*: the user came for a breakdown + a fix,
 not a shrug. So **you (the agent running the skill) fill the gap**: for each such
@@ -22,8 +22,9 @@ step timeline, work out what is actually eating the dominant step's time, and wr
 an analysis JSON `{cause, breakdown:[[label,detail],…], evidence:[verbatim log
 lines], prompt}`. Then re-render passing it as `--analysis KEY=PATH` (KEY keyed like
 `--log`). It renders as a clearly-labelled **🤖 LLM root-cause analysis** + a
-tailored agent prompt in place of the dead-end. `prompt` is just the log-grounded
-body (the cause + the intent check + options) — **the renderer prepends the standard
+tailored agent prompt in place of the dead-end (verify fails a pole still saying "no known
+root-cause pattern matched"). `prompt` is just the log-grounded body (the cause + the
+intent check + options) — **the renderer prepends the standard
 "does NOT prescribe the fix" disclaimer and appends the no-weakening rail** (speed is
 never bought by reducing what CI verifies), so don't add either yourself, and never edit
 the renderer to make the verify gate pass (a gate failure on an audit means fix your
