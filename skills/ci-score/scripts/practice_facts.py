@@ -3223,3 +3223,39 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path,
             facts[check]["evidence"] += _unread_note(parse_errs)
 
     return facts
+
+
+def _runner_advisories(parsed: list[tuple[str, dict, str]]) -> list[dict]:
+    """Repeated literal custom labels are portability advice, never scored facts.
+
+    Generic self-hosted OS/architecture selectors do not identify a runner
+    class. Expressions remain centralized even when their value is unknown.
+    """
+    by_label: dict[str, set[tuple[str, str]]] = {}
+    generic = {"self-hosted", "linux", "windows", "macos", "x64", "arm", "arm64"}
+    for filename, workflow, _raw in parsed:
+        jobs = workflow.get("jobs")
+        if not isinstance(jobs, dict):
+            continue
+        for job_id, job in jobs.items():
+            if not isinstance(job, dict):
+                continue
+            labels = job.get("runs-on")
+            if isinstance(labels, dict):
+                labels = labels.get("labels")
+            if isinstance(labels, str):
+                labels = [labels]
+            if not isinstance(labels, list):
+                continue
+            for label in labels:
+                if not isinstance(label, str):
+                    continue
+                label = label.strip()
+                if (not label or "${{" in label or label.lower() in generic
+                        or _runs_on_github_hosted(label)):
+                    continue
+                by_label.setdefault(label.lower(), set()).add((filename, str(job_id)))
+    return [dict(advisory_id="ci.runner.swappable", label=label,
+                 jobs=[dict(file=f, job=j) for f,j in sorted(jobs)],
+                 job_count=len(jobs))
+            for label,jobs in sorted(by_label.items()) if len(jobs) >= 3]

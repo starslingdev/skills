@@ -211,6 +211,26 @@ def verify(doc: dict[str, Any], report: str, registry: dict[str, Any]) -> list[s
 
     checks = [c for c in (stamp.get("checks") or []) if isinstance(c, dict)]
 
+    # Advisory identities are outside the registry and cannot become scored rows,
+    # even if a corrupted stamp adjusts passed/applicable consistently.
+    advisory_ids = {"ci.runner.swappable"}
+    if any(c.get("check_id") in advisory_ids for c in checks):
+        problems.append("ADVISORY: advisory entered the scored checks")
+    prefix, marker, section = report.partition("## Advisory notes")
+    if any(identity in prefix for identity in advisory_ids):
+        problems.append("ADVISORY: advisory appears inside or before the scored table")
+    if doc.get("advisory_notes") and not stamp.get("refusal"):
+        if not marker or "not part of the score" not in section:
+            problems.append("ADVISORY: missing unscored disclosure")
+        if any(line.startswith("|") and identity in line
+               for line in report.splitlines() for identity in advisory_ids):
+            problems.append("ADVISORY: advisory appears in a scored table row")
+        scorer = _load_sibling("ci_score_advisory_verifier", "ci_score.py")
+        clean_doc = dict(doc)
+        clean_doc.pop("advisory_notes", None)
+        if scorer.compute_ci_score(clean_doc, registry) != stamp:
+            problems.append("ADVISORY: score differs from recomputation without advisories")
+
     # The card links every check name to an in-document "What each check means"
     # subsection; that anchor target (a `### <label>` heading) must exist in the
     # SAME document, so no link points at an external file (owner, 2026-07-28).

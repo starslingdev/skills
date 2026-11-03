@@ -1017,6 +1017,8 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
 
 ### Added
 
+- **2026-11-03** — Add an explicitly unscored Advisory notes section for repeated custom runner labels, with one repository variable per runner class as the remedy. OD-CS27 is metadata-only: all eleven checks and ci-score-v0.1.8 stay unchanged; the verifier rejects advisory score contamination. (PR pending)
+
 - **Stakes-first TL;DR per recommendation** (2026-07-27): every rendered
   recommendation now opens with a one-line plain-English headline (the
   `tldr` field, required for every fix-table entry and asserted present by
