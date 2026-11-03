@@ -4169,12 +4169,30 @@ introduced.
 
 ### Single-slot queue capacity (OPT97)
 
-`_detect_opt97_single_slot_queue` compares queue and execution rank correlations
-against sampled in-flight jobs across workflows. Readiness excludes upstream
-execution. Each exact label set needs 15 samples; thinner sets are disclosed in
-Data sources. Runner inventory is unknown unless a complete list is supplied.
-Measured OPT97 replaces same-job OPT43/44, uses the pre-start axis, and credits
-only median queue above the repository P10 baseline on established gating jobs,
-bounded by the median change to same-run completion when that queue is removed.
-Incomplete completion timestamps receive no credit; existing floors still apply. No utilization or billing claim is
-derived from correlation.
+`_detect_opt97_single_slot_queue` groups each workflow's sampled jobs by job and
+exact runner-label set. Readiness excludes upstream execution; an entry job
+under a workflow-level global group is timed from the run's creation, because
+GitHub creates such a run's jobs only when the group frees. A population that
+meets the queue thresholds (15 samples, median 60 s, P90 300 s) is evaluated
+only on a self-hosted label set or with a static hint (global group, one
+repo-level runner, device step). On hosted runners the account's
+concurrent-job limit raises queue and in-flight work together, so that queue
+stays with OPT43.
+
+In-flight counts never come from the newest-success sample, which sees a small
+fraction of competing work. `collect()` hands the detector
+`_opt97_dense_competition`: one bounded read of every run, any status, created
+in the population's window (at most 3 run-list pages), then job lists only for
+runs whose workflow could share the runners or group (at most 60; sampled runs
+are reused and responses shared across populations). A failed or capped read is
+noted "competition not measured" and never fires. Call counts, thin samples,
+unresolved jobs and unmeasured populations reach the Data sources table
+(`opt97_competition_calls`, `opt97_notes`; each row shows 5 entries, the rest
+stay in findings JSON).
+
+Measured OPT97 replaces the same workflow's same-job OPT43 (OPT44 is accepted
+but has no detector), uses the pre-start axis, and credits only established
+gating jobs: the median same-run completion change when the queue above the
+P10 of the other sampled jobs is removed. No baseline or incomplete completion
+timestamps give no credit; existing floors still apply. No utilization or
+billing claim is derived from correlation.
