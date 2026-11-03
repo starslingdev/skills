@@ -6033,6 +6033,45 @@ def check_runner_minute_spine_contract(report: str, findings_path: Path | None) 
     return Check(name, True, f"runner_minute_spine rows re-derived ({len(rows)} row(s))")
 
 
+_SPINE_CONTENTS_COUNT_RE = re.compile(
+    r"(?:backed by a (\d+)-row cost spine|"
+    r"\*\*Runner-minute cost spine\*\* [-—] (\d+) workflow/job rows?)"
+    r"(?: \(\+(\d+) more runner-minute rows? hidden\))?")
+_SPINE_GLUED_HIDDEN_RE = re.compile(
+    r"^\|[^\n]*\n\+\d+\s+more\s+runner-minute\s+rows?\s+hidden", re.MULTILINE)
+
+
+def check_cost_spine_contents_count_matches_table(report: str,
+                                                  findings_path: Path | None) -> Check:
+    """The Contents line counts the cost-spine rows the table SHOWS and names the hidden
+    ones as the table does, and the table's hidden-row line is set apart from the table
+    (GitHub-flavoured markdown folds a plain line that directly follows a table into it as
+    one more row). 2026-11-03 dogfood: "a 13-row cost spine" over a 12-row table."""
+    name = "cost-spine Contents count matches the rows the table shows"
+    if not _RUNNER_MINUTE_SPINE_MARKER_RE.search(report or ""):
+        return Check(name, True, "no rendered cost spine", skipped=True)
+    rows, _total, hidden, err = _parse_runner_minute_spine_table(report)
+    if err:
+        return Check(name, True, f"cost-spine table unparsed ({err}); the spine "
+                     "contract check reports it", skipped=True)
+    hidden = hidden or 0
+    problems: list[str] = []
+    for m in _SPINE_CONTENTS_COUNT_RE.finditer(report or ""):
+        stated = int(m.group(1) or m.group(2))
+        stated_hidden = int(m.group(3) or 0)
+        if stated != len(rows) or stated_hidden != hidden:
+            problems.append(
+                f"Contents says {m.group(0)!r} but the table shows {len(rows)} row(s) "
+                f"with {hidden} hidden")
+    marker = _RUNNER_MINUTE_SPINE_MARKER_RE.search(report)
+    if marker and _SPINE_GLUED_HIDDEN_RE.search(report[marker.end():]):
+        problems.append("the hidden-row line directly follows the table, so GitHub renders "
+                        "it as a table row; separate it with a blank line")
+    if problems:
+        return Check(name, False, "; ".join(problems))
+    return Check(name, True, f"Contents and table agree: {len(rows)} shown, {hidden} hidden")
+
+
 def _text_from_json(v: object) -> str:
     if isinstance(v, dict):
         return " ".join(_text_from_json(x) for x in v.values())
@@ -14182,6 +14221,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_tier2_headline_matches_stamp(report, findings_path, report_path),
         check_tier2_savings_rows_backed_by_cost_spine(report, findings_path),
         check_runner_minute_spine_contract(report, findings_path),
+        check_cost_spine_contents_count_matches_table(report, findings_path),
         check_no_rate_derived_dollars(report, findings_path),
         check_opt80_tail_lines(report, findings_path),
         check_opt80_tail_withheld_reasons(report, findings_path),

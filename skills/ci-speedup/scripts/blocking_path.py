@@ -5398,7 +5398,7 @@ def _toc_block(pole_wfs: list[dict[str, Any]], wf_gate: dict[str, int],
         # totals/rows mirror the section's own strings (same helpers, same
         # ranked list), and `check_tier2_total_deoverlapped` re-derives both
         # renderings from findings.json so they can never drift apart.
-        spine_part = (f", backed by a {runner_spine_count}-row cost spine"
+        spine_part = (f", backed by a {_spine_count_phrase(runner_spine_count, '-row cost spine')}"
                       if runner_spine_count else "")
         lines += [f"**💸 Runner-minute reductions** — ~{tier2_toc['total_min']} of "
                   f"measured, merge-safe runner-minute savings{spine_part}: "
@@ -5418,9 +5418,10 @@ def _toc_block(pole_wfs: list[dict[str, Any]], wf_gate: dict[str, int],
                           "kept in the findings JSON)*"]
         lines.append("")
     elif runner_spine_count:
-        row_plural = "s" if runner_spine_count != 1 else ""
-        lines += [f"**Runner-minute cost spine** — {runner_spine_count} workflow/job "
-                  f"row{row_plural} showing where sampled runner minutes go: "
+        row_plural = "s" if min(runner_spine_count, _RUNNER_MINUTE_SPINE_CAP) != 1 else ""
+        rows_phrase = _spine_count_phrase(runner_spine_count, f" workflow/job row{row_plural}")
+        lines += [f"**Runner-minute cost spine** — {rows_phrase} showing where sampled "
+                  "runner minutes go: "
                   "[see below](#runner-minute-reductions).", ""]
     if also_count:
         plural = "s" if also_count != 1 else ""
@@ -7572,6 +7573,22 @@ def _runner_minute_spine_row_count(doc: dict[str, Any]) -> int:
     return len(rows) if isinstance(rows, list) else 0
 
 
+def _spine_hidden_rows_line(hidden: int) -> str:
+    """The table's hidden-row disclosure, shared by the table and the Contents line so
+    the two always say the same thing."""
+    return f"+{hidden} more runner-minute row{'' if hidden == 1 else 's'} hidden"
+
+
+def _spine_count_phrase(row_count: int, noun: str) -> str:
+    """`<shown><noun>`, plus the hidden-row disclosure when the table caps the rows.
+    The Contents line counts what the table SHOWS (2026-11-03 dogfood: "a 13-row cost
+    spine" over a 12-row table), and names the rest exactly as the table does."""
+    shown = min(row_count, _RUNNER_MINUTE_SPINE_CAP)
+    hidden = row_count - shown
+    phrase = f"{shown}{noun}"
+    return f"{phrase} ({_spine_hidden_rows_line(hidden)})" if hidden > 0 else phrase
+
+
 def _spine_identity_cell(value: object) -> str:
     return str(value or "").replace("\r", " ").replace("\n", " ").replace("|", "\\|").strip()
 
@@ -7650,8 +7667,9 @@ def _runner_minute_spine_block(doc: dict[str, Any]) -> list[str]:
         f"{_spine_num_cell(totals.get('raw_compute_runner_min_per_month'))} | "
         f"{_spine_num_cell(totals.get('billable_equiv_min_per_month'))} | 100.000% |")
     if hidden:
-        plural = "s" if len(hidden) != 1 else ""
-        lines.append(f"+{len(hidden)} more runner-minute row{plural} hidden")
+        # A blank line first: GitHub-flavoured markdown folds a plain line that directly
+        # follows a table into the table as one more row.
+        lines += ["", _spine_hidden_rows_line(len(hidden))]
     footnote = _measured_compute_footnote(spine)
     if footnote:
         lines += ["", footnote]
