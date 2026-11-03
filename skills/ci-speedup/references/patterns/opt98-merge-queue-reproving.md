@@ -21,19 +21,33 @@ or repeat identical work when assembled into the merged result.
 **Detection heuristic**:
 
 - **Strict rule at high volume:** reuse the classic required-status-check and
-  active, default-branch ruleset responses. Require a readable strict rule,
-  no merge-queue ruleset or declared merge-group workflow, and at least 30
-  merged PRs/day. One REST search counts merges in the previous 30 complete
-  UTC days; its 100 most recently updated result identities bound the churn sample. Report
-  the share with sampled CI runs on different base SHAs, explicitly a lower
-  bound because the run history is sampled. Unreadable rules or incomplete
-  search results withhold this case and disclose why in data sources.
-- **Full suite in the queue:** both events declare the same unconditional
-  jobs without affected-only commands or build/remote cache restoration.
-  Unknown conditions and reusable calls are withheld. Require the median
-  successful first-attempt merge-group run to last at least 80% of the PR
-  median, measured from run start to completion update in the cached run pages.
-  Report both medians and sample counts; missing event timings are disclosed.
+  active, default-branch ruleset responses. The rule is on when any source says
+  so; it is off only when classic protection was read (a non-admin cannot read
+  it, so a ruleset saying off is not enough). Require no merge queue: no
+  merge-queue ruleset, no `merge_group` trigger and no cached `merge_group` run.
+  Require at least 30 merged PRs/day: one REST search counts merges on the
+  rule's branch in the 30 complete UTC days before the pin. Measure the
+  rebase-churn share from at most 30 of the newest merged PRs' timelines: a
+  two-parent commit (the base merged in) or a head force-push (a rebase, or an
+  amend). Run pages cannot answer this; GitHub empties a run's PR list once the
+  PR merges. An unread share says "not measured", never 0%. Unreadable rules,
+  incomplete searches and an unparseable date pin withhold this case and say why
+  in data sources.
+- **Full suite in the queue:** a workflow triggered by both `pull_request` and
+  `merge_group` runs the same jobs on both, with no affected-only scoping (the
+  OPT70 signals: `nx affected`, `turbo --filter=...[`, `--affected`, `--changed`,
+  `--onlyChanged`, a changed-files action) and no build or remote cache
+  (`actions/cache` beyond dependency directories, Turbo/Nx Cloud tokens,
+  `--remote_cache`, `--build-cache`, sccache). Expressions that don't select
+  work (names, concurrency, runner labels, secrets, matrix values) don't count.
+  Event-dependent conditions, commands, inputs or matrices, reusable workflows
+  and unread local actions make the scope unknown; each such workflow is named
+  in data sources. Package scripts and third-party actions are not read, so the
+  measured ratio is the second proof: at least 15 successful first-attempt runs
+  of each event, and a merge-group median from 0.8 to 1.5 times the PR median
+  (run start to completion update in the cached run pages). Above 1.5 the queue
+  is doing different work and is reported as such, not as re-proving. The
+  finding names the workflow and its jobs.
 
 **Fix recipe**:
 

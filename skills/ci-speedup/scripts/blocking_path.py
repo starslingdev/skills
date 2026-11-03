@@ -6125,12 +6125,48 @@ def _opt98_report_block(doc: dict[str, Any]) -> list[str]:
     out = ["## Repeated merge validation", ""]
     catalog = _build_catalog_url(doc.get("skill_commit_sha"))
     for finding in findings:
-        out += [f"### OPT98: {finding.get('title', 'Repeated validation')}", "",
+        wf = finding.get("workflow_file")
+        out += [f"### OPT98: {finding.get('title', 'Repeated validation')}" + (f" — `{wf}`" if wf else ""), "",
                 str(finding.get("evidence", "")), "",
                 "No wall-clock or runner-minute saving is credited.", "",
                 *_hygiene_prompt("OPT98", str(finding.get("title", "")), [finding],
                                  _catalog_anchor(catalog, [finding]))]
     return out
+
+
+# Entries shown per OPT97 Data sources row; the rest stay in findings JSON.
+_OPT97_ROW_ENTRIES = 5
+
+
+def _opt97_capacity_cells(doc: dict[str, Any]) -> tuple[str, str, str]:
+    """(check-this, held-back, fetch) cells for OPT97's Data sources rows."""
+    notes = [n for n in (doc.get("opt97_notes") or []) if isinstance(n, dict)]
+
+    def where(n: dict[str, Any]) -> str:
+        return (f"{_withheld_cell_text(n.get('workflow_file', ''))} / "
+                f"{_withheld_cell_text(n.get('job', ''))}")
+
+    def capped(parts: list[str]) -> str:
+        extra = len(parts) - _OPT97_ROW_ENTRIES
+        return "; ".join(parts[:_OPT97_ROW_ENTRIES]) + (
+            f"; +{extra} more in findings JSON" if extra > 0 else "")
+    check = [f"{where(n)}: competition not measured "
+             f"({_withheld_cell_text(n.get('detail') or 'not read')})"
+             for n in notes if n.get("reason") == "competition not measured"]
+    held = [f"{where(n)}: too few samples "
+            f"({_withheld_cell_text(n.get('samples', 0))}; minimum 15)"
+            for n in notes if n.get("reason") == "too few samples"]
+    held += [f"{_withheld_cell_text(n.get('workflow_file', ''))}: "
+             f"{_withheld_cell_text(n.get('unresolved', 0))} of "
+             f"{_withheld_cell_text(n.get('jobs', 0))} sampled jobs not matched to one YAML job"
+             for n in notes if n.get("reason") == "unresolved jobs"]
+    calls = doc.get("opt97_competition_calls")
+    fetch = ""
+    if isinstance(calls, dict) and calls.get("populations"):
+        fetch = (f"{calls.get('run_pages', 0)} run-list pages and {calls.get('job_lists', 0)} "
+                 f"job lists read for {calls.get('populations')} candidate population(s); "
+                 "at most 3 pages and 60 job lists each")
+    return (capped(check) if check else "", capped(held) if held else "", fetch)
 
 
 def _data_sources_footer(doc: dict[str, Any], repo: str,
@@ -6268,6 +6304,12 @@ def _data_sources_footer(doc: dict[str, Any], repo: str,
         _queue_limits.append("queue/PR timing not measured for " + ", ".join(_queue["unmeasured_workflows"]))
     if _queue.get("unreadable_workflows"):
         _queue_limits.append("workflow configuration not readable for " + ", ".join(_queue["unreadable_workflows"]))
+    if _queue.get("static_unknown"):
+        _queue_limits.append("queue scope not settled for " + ", ".join(_queue["static_unknown"]))
+    if _queue.get("thin_samples"):
+        _queue_limits.append("too few queue/PR runs for " + ", ".join(_queue["thin_samples"]))
+    if _queue.get("pr_runs_differ"):
+        _queue_limits.append("PR runs differ from queue runs for " + ", ".join(_queue["pr_runs_differ"]))
     if _queue_limits:
         rows.append(("Merge queue", _flatten_cell("; ".join(_queue_limits)), "Repeated validation; unavailable evidence is not an all-clear"))
     _opt96_line = _opt96_unresolved_line(doc)
@@ -6275,15 +6317,18 @@ def _data_sources_footer(doc: dict[str, Any], repo: str,
         rows.append(("cache seeding: held back", _opt96_line,
                      "Why a PR cache restore with no visible default-branch save "
                      "produced no OPT96 finding"))
-    _capacity_notes = doc.get("opt97_notes") or []
-    if _capacity_notes:
-        _capacity_line = "; ".join(
-            f"{_withheld_cell_text(n.get('workflow_file', ''))} / "
-            f"{_withheld_cell_text(n.get('job', ''))}: too few samples "
-            f"({_withheld_cell_text(n.get('samples', 0))}; minimum 15)"
-            for n in _capacity_notes if isinstance(n, dict))
-        rows.append(("single-slot capacity: held back", _capacity_line,
-                     "OPT97 queue versus in-flight correlation; runner-label populations need 15 samples"))
+    _check, _held, _calls = _opt97_capacity_cells(doc)
+    if _check:
+        rows.append(("single-slot capacity: check this", _check,
+                     "OPT97 populations whose queue met the thresholds but whose competing "
+                     "jobs could not be counted; no finding was made"))
+    if _held:
+        rows.append(("single-slot capacity: held back", _held,
+                     "OPT97 queue versus in-flight correlation; runner-label populations "
+                     "need 15 samples and one YAML job per sampled job"))
+    if _calls:
+        rows.append(("single-slot capacity: competition fetch", _calls,
+                     "Counting every competing job in flight (all runs, any status) for OPT97"))
     out = [*_opt98_report_block(doc), "## 🗄️ Data sources", ""]
     if lead:
         out += lead
@@ -8106,6 +8151,23 @@ def _tier2_guardrail_sentence(f: dict[str, Any]) -> str:
     return note[idx:].strip() if idx >= 0 else ""
 
 
+def _opt98_task(members: list[dict[str, Any]]) -> list[str]:
+    """The OPT98 prompt's task lines: the up-to-date case's fix is a merge queue;
+    the re-proving case names the workflow and jobs to scope."""
+    if any((m.get("merge_queue") or {}).get("case") == "strict" for m in members):
+        return ["Replace the require-up-to-date branch rule with a merge queue: add a",
+                "merge_group trigger to every required workflow, confirm the required",
+                "checks report on merge_group runs, then turn the queue on and the",
+                "up-to-date requirement off."]
+    lines = []
+    for m in members:
+        lines += [f"Workflow: {m.get('workflow_file')}",
+                  f"Jobs: {', '.join(str(j) for j in m.get('affected_jobs') or [])}"]
+    return lines + ["Investigate the queue base, affected-only execution and main-written caches.",
+                    "Use the full suite when affected-set resolution fails and compare scoped",
+                    "and full results in parallel before adopting scoping."]
+
+
 def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
                     url: str, *, wait: bool = False, saves_wc: bool = False,
                     tier2: bool = False,
@@ -8142,10 +8204,8 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
                 "No wall-clock or runner-minute saving is credited.",
                 "Read git log and the workflow's history and intent before changing policy;",
                 "an intent-contradicting change requires owner sign-off.",
-                "Investigate the queue base, affected-only execution and main-written caches.",
+                *_opt98_task(members),
                 "Keep every required check on the merged result; never drop checks.",
-                "Use the full suite when affected-set resolution fails and compare scoped",
-                "and full results in parallel before adopting scoping.",
                 f"Catalog context: {url}", "```", ""]
     if pat == "OPT82":
         # Numberless by design: the generic bill / off-path saving line would

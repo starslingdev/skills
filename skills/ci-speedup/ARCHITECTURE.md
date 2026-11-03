@@ -4169,26 +4169,54 @@ introduced.
 
 ### Single-slot queue capacity (OPT97)
 
-`_detect_opt97_single_slot_queue` compares queue and execution rank correlations
-against sampled in-flight jobs across workflows. Readiness excludes upstream
-execution. Each exact label set needs 15 samples; thinner sets are disclosed in
-Data sources. Runner inventory is unknown unless a complete list is supplied.
-Measured OPT97 replaces same-job OPT43/44, uses the pre-start axis, and credits
-only median queue above the repository P10 baseline on established gating jobs;
-the existing floor cascade still applies. No utilization or billing claim is
-derived from correlation.
+`_detect_opt97_single_slot_queue` groups each workflow's sampled jobs by job and
+exact runner-label set. Readiness excludes upstream execution; an entry job
+under a workflow-level global group is timed from the run's creation, because
+GitHub creates such a run's jobs only when the group frees. A population that
+meets the queue thresholds (15 samples, median 60 s, P90 300 s) is evaluated
+only on a self-hosted label set or with a static hint (global group, one
+repo-level runner, device step). On hosted runners the account's
+concurrent-job limit raises queue and in-flight work together, so that queue
+stays with OPT43.
+
+In-flight counts never come from the newest-success sample, which sees a small
+fraction of competing work. `collect()` hands the detector
+`_opt97_dense_competition`: one bounded read of every run, any status, created
+in the population's window (at most 3 run-list pages), then job lists only for
+runs whose workflow could share the runners or group (at most 60; sampled runs
+are reused and responses shared across populations). A failed or capped read is
+noted "competition not measured" and never fires. Call counts, thin samples,
+unresolved jobs and unmeasured populations reach the Data sources table
+(`opt97_competition_calls`, `opt97_notes`; each row shows 5 entries, the rest
+stay in findings JSON).
+
+Measured OPT97 replaces the same workflow's same-job OPT43 (OPT44 is accepted
+but has no detector), uses the pre-start axis, and credits only established
+gating jobs: the median same-run completion change when the queue above the
+P10 of the other sampled jobs is removed. No baseline or incomplete completion
+timestamps give no credit; existing floors still apply. No utilization or
+billing claim is derived from correlation.
+
 ### Merge validation (OPT98)
 
 The required-check reader optionally returns strict/merge-queue metadata from
-the same API responses. A strict, queue-free candidate uses one REST search
-for the prior 30 complete UTC days; total_count supplies volume while up to
-100 merged PR identities supply a lower-bound churn sample against cached runs.
-Full-suite queue candidates join unconditional workflow jobs to successful
-first-attempt run medians. Both cases are uncredited and render in a dedicated
-Repeated merge validation section so a drilled pole cannot hide the observation.
-Malformed workflow shapes, unavailable branch rules and missing event timings
-are disclosed in data sources. Any declared queue workflow conservatively
-suppresses strict-rule advice, including one whose required status is unknown.
+the same API responses. Strict is on when any source says so and off only when
+classic protection was read (a non-admin's 404 there leaves it unknown). A
+queue is present when a ruleset, a `merge_group` trigger or a cached
+`merge_group` run shows one. A strict, queue-free candidate uses one REST search
+for the prior 30 complete UTC days before the pin; total_count supplies volume.
+At 30 merges a day, up to 30 of the newest merged PR timelines supply the
+rebase-churn share (two-parent commits and head force-pushes). Run pages can't:
+GitHub empties `pull_requests[]` once a PR merges.
+`_opt98_static_scope` classifies each queue workflow as full, scoped (OPT70
+affected-only signals or a build/remote cache), queue-only or unknown
+(event-dependent conditions, commands, inputs or matrices; reusable workflows;
+unread local actions). Full candidates need 15 successful first-attempt runs per
+event and a queue/PR median ratio from 0.8 to 1.5. Both cases are uncredited and
+render in a dedicated Repeated merge validation section so a drilled pole cannot
+hide the observation. Unknown scopes, thin samples, slower queue runs, malformed
+workflows, unavailable branch rules and missing timings are named in data
+sources; `merge_queue.status` says measured, partial or not_measured.
 
 ### Infrastructure faults (OPT100)
 

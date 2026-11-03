@@ -3383,21 +3383,36 @@ or prove which hinted resource causes the wait.
 
 **Detection heuristic**: Per job and exact runner-label set, require at least
 15 samples, median runnable-to-start queue of at least 60 seconds and P90 of
-at least 300 seconds. At each job's runnable time, count other sampled jobs
-already in flight with the same label set or literal global concurrency group.
-Require Spearman rank correlation of queue versus in-flight count at least
-0.6 and absolute run-time correlation below 0.3. Constant execution times have
-zero correlation. Exclude skipped jobs, incomplete intervals, unresolved job
-identities and upstream `needs:` execution. Fewer than 15 samples is disclosed
-as "too few samples", never an all-clear.
+at least 300 seconds. An entry job under a workflow-level global group is timed
+from the run's creation (first attempt only): GitHub creates that run's jobs only
+when the group frees. Evaluate only a self-hosted label set or a population
+with a resource hint below. On hosted runners an account's concurrent-job limit
+raises queue and in-flight work together, so that queue stays with OPT43.
+In-flight counts come from one bounded read of every run, any status, created
+in the population's window (three hours before its first sample to its last):
+at most 3 run-list pages, then job lists only for runs whose workflow could use
+the same runners or group, at most 60. A newest-success sample sees a small
+fraction of competing jobs, so it is never used for the count. A failed or
+capped read gives "check this: competition not measured", never a finding. At
+each job's runnable time, count jobs already in flight with the same label set
+or the same global group. Require Spearman rank correlation of queue versus
+in-flight count at least 0.6 and absolute run-time correlation below 0.3.
+Constant execution times have zero correlation. Exclude skipped jobs,
+incomplete intervals and upstream `needs:` execution. Fewer than 15 samples is
+disclosed as "too few samples" only when the queue already meets the
+thresholds on a pool OPT97 evaluates. Sampled jobs matching no single YAML job (reusable-workflow
+children, ambiguous names) are counted per workflow in Data sources.
 
-**Resource hints**: A literal group with `cancel-in-progress: false`; a label
-on exactly one registered runner when a complete inventory is supplied (else
-unknown); Android-emulator runner actions, `xcrun simctl` or `adb`; and a literal
-host port or database shared by independent service jobs. Expressions are not
-assumed global. Other sampled workflows compete only when their job identities
-and readiness are known. The sample may undercount competing work outside the
-audit window, so correlation is evidence to investigate, not proof of causation.
+**Resource hints**: A global concurrency group: the string form or a `group`
+with `cancel-in-progress` false or omitted (GitHub's default), whose key does
+not reference the ref, head ref, PR number, commit SHA or run id. A job-level
+group replaces the workflow-level one; `${{ github.workflow }}` alone is global
+within its workflow. A label on exactly one repo-level runner when the
+repository's complete runner list is readable (organization runners are not
+visible, else unknown). Android-emulator runner actions, `xcrun simctl` or
+`adb`. Matching ports or database names in job-local service containers do not
+establish a shared resource. Correlation is evidence to investigate, not proof
+of causation.
 
 **Fix**, in order:
 
@@ -3409,14 +3424,20 @@ audit window, so correlation is evidence to investigate, not proof of causation.
 such as deployment to one environment. Narrow its scope instead of removing it.
 Inspect the workflow's history and intent before changing policy.
 
-**Sizing**: Median queue above the repository's sampled P10 runnable-queue
-baseline, only for an established merge-gating job, then capped by the existing
-workflow and cross-workflow floors. No runner-minute saving: waiting is not
-execution. Unknown merge-gating status receives no wall-clock credit.
+**Sizing**: Median queue above a baseline: the P10 runnable queue of the
+repository's other sampled jobs, never the population being evaluated. With no
+other jobs, no wall-clock credit. Only an established merge-gating job is
+credited. Cap each sampled reduction against all same-run job completion times,
+including queue; an independent later-finishing job removes the credit.
+Incomplete completion data receives no credit. The existing workflow and
+cross-workflow floors then apply. No runner-minute saving: waiting is not
+execution.
 
-**Relations**: Replace same-job OPT44 static hints and OPT43 generic queue
-findings with this measured finding; retain unrelated jobs' findings. A rise in
-execution time with contention does not fire OPT97; OPT43 remains available.
+**Relations**: Replaces the same workflow's same-job OPT43 finding; a finding
+naming other jobs, or another workflow's, is kept. The merge also accepts
+OPT44, but no OPT44 detector exists, so only OPT43 merges today. A rise in
+execution time with contention, a hosted pool without a hint, or an unmeasured
+competition does not fire OPT97; OPT43 remains.
 
 ---
 
@@ -3694,19 +3715,33 @@ or repeat identical work when assembled into the merged result.
 **Detection heuristic**:
 
 - **Strict rule at high volume:** reuse the classic required-status-check and
-  active, default-branch ruleset responses. Require a readable strict rule,
-  no merge-queue ruleset or declared merge-group workflow, and at least 30
-  merged PRs/day. One REST search counts merges in the previous 30 complete
-  UTC days; its 100 most recently updated result identities bound the churn sample. Report
-  the share with sampled CI runs on different base SHAs, explicitly a lower
-  bound because the run history is sampled. Unreadable rules or incomplete
-  search results withhold this case and disclose why in data sources.
-- **Full suite in the queue:** both events declare the same unconditional
-  jobs without affected-only commands or build/remote cache restoration.
-  Unknown conditions and reusable calls are withheld. Require the median
-  successful first-attempt merge-group run to last at least 80% of the PR
-  median, measured from run start to completion update in the cached run pages.
-  Report both medians and sample counts; missing event timings are disclosed.
+  active, default-branch ruleset responses. The rule is on when any source says
+  so; it is off only when classic protection was read (a non-admin cannot read
+  it, so a ruleset saying off is not enough). Require no merge queue: no
+  merge-queue ruleset, no `merge_group` trigger and no cached `merge_group` run.
+  Require at least 30 merged PRs/day: one REST search counts merges on the
+  rule's branch in the 30 complete UTC days before the pin. Measure the
+  rebase-churn share from at most 30 of the newest merged PRs' timelines: a
+  two-parent commit (the base merged in) or a head force-push (a rebase, or an
+  amend). Run pages cannot answer this; GitHub empties a run's PR list once the
+  PR merges. An unread share says "not measured", never 0%. Unreadable rules,
+  incomplete searches and an unparseable date pin withhold this case and say why
+  in data sources.
+- **Full suite in the queue:** a workflow triggered by both `pull_request` and
+  `merge_group` runs the same jobs on both, with no affected-only scoping (the
+  OPT70 signals: `nx affected`, `turbo --filter=...[`, `--affected`, `--changed`,
+  `--onlyChanged`, a changed-files action) and no build or remote cache
+  (`actions/cache` beyond dependency directories, Turbo/Nx Cloud tokens,
+  `--remote_cache`, `--build-cache`, sccache). Expressions that don't select
+  work (names, concurrency, runner labels, secrets, matrix values) don't count.
+  Event-dependent conditions, commands, inputs or matrices, reusable workflows
+  and unread local actions make the scope unknown; each such workflow is named
+  in data sources. Package scripts and third-party actions are not read, so the
+  measured ratio is the second proof: at least 15 successful first-attempt runs
+  of each event, and a merge-group median from 0.8 to 1.5 times the PR median
+  (run start to completion update in the cached run pages). Above 1.5 the queue
+  is doing different work and is reported as such, not as re-proving. The
+  finding names the workflow and its jobs.
 
 **Fix recipe**:
 
