@@ -42,7 +42,7 @@ not measured: lifecycle data was not collected
 4. 🟡 [3.14t](#pole-4) - 25s · rarely the merge pole
 5. 🟡 [3.9](#pole-5) - 24s · rarely the merge pole
 
-**💸 Runner-minute reductions** - ~3 min/mo of measured, merge-safe runner-minute savings, backed by a 19-row cost spine: [section](#runner-minute-reductions).
+**💸 Runner-minute reductions** - ~3 min/mo of measured, merge-safe runner-minute savings, backed by a 12-row cost spine (+7 more runner-minute rows hidden): [section](#runner-minute-reductions).
 
 1. 🟢 [Cron Schedule Too Frequent](#r-1) - 3 min/mo
 
@@ -461,7 +461,7 @@ DELIVER & VERIFY
 
 All figures are runner-minutes; multiply by your runner's per-minute rate to get dollars.
 
-| Workflow | Job | Runner | Event | Status | Attempt | Volume | Raw min/mo | Billable min/mo | Share |
+| Workflow | Job | Runner | Event | Status | Attempt | Volume | Raw min/mo | Rounded-up min/mo | Share |
 | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: |
 | .github/workflows/tests.yaml | Windows | windows-latest | all-events | success | latest | all-status | 26.647 | 42.846 | 8.200% |
 | .github/workflows/pre-commit.yaml | main | ubuntu-latest | all-events | success | latest | all-status | 12.708 | 39.000 | 7.500% |
@@ -476,7 +476,10 @@ All figures are runner-minutes; multiply by your runner's per-minute rate to get
 | .github/workflows/tests.yaml | 3.12 | ubuntu-latest | all-events | success | latest | all-status | 9.899 | 37.000 | 7.100% |
 | .github/workflows/tests.yaml | 3.10 | ubuntu-latest | all-events | success | latest | all-status | 9.315 | 37.000 | 7.100% |
 | Total |  |  |  |  |  |  | 179.195 | 522.741 | 100.000% |
+
 +7 more runner-minute rows hidden
+
+Rounded-up min/mo rounds each job up to a whole minute, the way per-minute runner billing counts it. All 522.741 min/mo ran on GitHub-hosted runner labels.
 
 > These findings cut wall-clock-neutral runner spend without touching your merge gate; each R-numbered finding carries a machine-derived proof it cannot slow a PR.
 > **3 min/mo credited after de-overlap** (naive sum 3 min/mo; 1 neutral finding). All figures are runner-minutes; multiply by your runner's per-minute rate to get dollars.
@@ -498,7 +501,7 @@ _Schedule burn is counted only on event=schedule runs whose head_sha repeats con
 
 - **What ci-speedup measured:** 95 scheduled run(s) in 5 consecutive same-head_sha group(s) re-ran without a code change in the sampled schedule slice (95% of 100 schedule run(s)); ~3 runner-min/mo of schedule-event compute (mean over 20 timed run(s); ×0.30 to the 30d volume (30 runs); 100-run recent slice (not a full 30d census)).
 - **Why this can't slow your merge:** machine-derived proof: `non_pr_event` - `schedule` runs do not gate a PR merge (event=schedule subset only; consecutive same-head_sha schedule runs; schedule is not a developer PR/merge event).
-- **Source block:** `runner_minute_spine` matched 1 row for `.github/workflows/lock.yaml`; current measured cost spine for those rows is 3.200 raw min/mo, 30.000 billable min/mo.
+- **Source block:** `runner_minute_spine` matched 1 row for `.github/workflows/lock.yaml`; current measured cost spine for those rows is 3.200 raw min/mo, 30.000 rounded-up min/mo.
 - **Guardrail:** Confirm the cron cadence is not an operational SLA; prefer widening the interval only for cleanup/triage/build jobs where delayed execution is acceptable.
 - **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt36--cron-schedule-too-frequent
 

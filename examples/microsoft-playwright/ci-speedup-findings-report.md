@@ -50,7 +50,7 @@ not measured: lifecycle data was not collected
 
 **⏳ Pre-start wait** - 41 jobs wait in queue before starting (developer wall-clock the spine above doesn't capture): [see below](#pre-start-wait).
 
-**💸 Runner-minute reductions** - ~73,441 min/mo of measured, merge-safe runner-minute savings, backed by a 133-row cost spine: [section](#runner-minute-reductions).
+**💸 Runner-minute reductions** - ~73,441 min/mo of measured, merge-safe runner-minute savings, backed by a 12-row cost spine (+121 more runner-minute rows hidden): [section](#runner-minute-reductions).
 
 1. 🟢 [Superseded Runs Not Cancelled](#r-1) - 71,644 min/mo
 2. 🟢 [Superseded Runs Not Cancelled](#r-2) - 1,072 min/mo
@@ -555,7 +555,7 @@ failure mode and how you have guarded it before shipping.
 
 All figures are runner-minutes; multiply by your runner's per-minute rate to get dollars.
 
-| Workflow | Job | Runner | Event | Status | Attempt | Volume | Raw min/mo | Billable min/mo | Share |
+| Workflow | Job | Runner | Event | Status | Attempt | Volume | Raw min/mo | Rounded-up min/mo | Share |
 | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: |
 | .github/workflows/tests_mcp.yml | windows-latest - firefox | windows-latest | all-events | success | latest | all-status | 34713.000 | 35112.000 | 3.500% |
 | .github/workflows/tests_primary.yml | ubuntu-22.04 (webkit - Node.js 20) | ubuntu-22.04 | all-events | success | latest | all-status | 31765.092 | 32209.200 | 3.200% |
@@ -570,7 +570,10 @@ All figures are runner-minutes; multiply by your runner's per-minute rate to get
 | .github/workflows/tests_mcp.yml | windows-latest - chromium | windows-latest | all-events | success | latest | all-status | 20340.600 | 20790.000 | 2.100% |
 | .github/workflows/tests_mcp.yml | ubuntu-latest - firefox | ubuntu-latest | all-events | success | latest | all-status | 19838.000 | 20244.000 | 2.000% |
 | Total |  |  |  |  |  |  | 987431.780 | 1013124.508 | 100.000% |
+
 +121 more runner-minute rows hidden
+
+Rounded-up min/mo rounds each job up to a whole minute, the way per-minute runner billing counts it. 998471.212 of the 1013124.508 min/mo ran on GitHub-hosted runner labels and 14653.296 on labels not recognised as GitHub-hosted (`playwright-x64-ubuntu24-64-core`). A GitHub larger runner with a custom name is not recognised and counts here too. GitHub bills only the runners it hosts, so minutes on a self-hosted or third-party runner are not on the GitHub bill.
 
 > These findings cut wall-clock-neutral runner spend without touching your merge gate; each R-numbered finding carries a machine-derived proof it cannot slow a PR.
 > **73,441 min/mo credited after de-overlap** (naive sum 73,441 min/mo; 10 neutral findings; not promoted: 3 measured item(s) (3 without source rows) · 8 modeled item(s) · 6 structural shared-step item(s); see Also noticed). All figures are runner-minutes; multiply by your runner's per-minute rate to get dollars.
@@ -592,7 +595,7 @@ _Superseded = a run a NEWER run started before it finished - measured by timesta
 
 - **What ci-speedup measured:** 54 run(s) across 5 branch(es) were superseded (a newer run started before they finished) in the sampled window; ~71644-167291 runner-min/mo of cancellable-remainder compute - the lower figure credits only the 67% mean remainder each superseded run would have burned AFTER its successor started, not the whole run (mean over 4 timed run(s); ×3.36 to the 30d volume (336 runs); 100-run recent slice (not a full 30d census)). Superseded attribution is INFERENCE - the API marks no run 'cancelled-by-concurrency'. (sensitivity range: 71,644 min/mo to 167,291 min/mo)
 - **Why this can't slow your merge:** machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (superseded runs: same head_branch, a newer run started before this one finished (timestamp overlap); cancellation cause is inference).
-- **Source block:** `runner_minute_spine` matched 29 rows for `.github/workflows/tests_secondary.yml`; current measured cost spine for those rows is 263103.875 raw min/mo, 267586.928 billable min/mo.
+- **Source block:** `runner_minute_spine` matched 29 rows for `.github/workflows/tests_secondary.yml`; current measured cost spine for those rows is 263103.875 raw min/mo, 267586.928 rounded-up min/mo.
 - **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt46--superseded-runs-not-cancelled-missing-concurrency-or-cancel-in-progress-false
 
 #### 🤖 Prompt for your coding agent
@@ -651,7 +654,7 @@ _Superseded = a run a NEWER run started before it finished - measured by timesta
 
 - **What ci-speedup measured:** 7 run(s) across 3 branch(es) were superseded (a newer run started before they finished) in the sampled window; ~1072-11922 runner-min/mo of cancellable-remainder compute - the lower figure credits only the 73% mean remainder each superseded run would have burned AFTER its successor started, not the whole run (mean over 4 timed run(s); ×7.78 to the 30d volume (778 runs); 100-run recent slice (not a full 30d census)). Superseded attribution is INFERENCE - the API marks no run 'cancelled-by-concurrency'. (sensitivity range: 1,072 min/mo to 11,922 min/mo)
 - **Why this can't slow your merge:** machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (superseded runs: same head_branch, a newer run started before this one finished (timestamp overlap); cancellation cause is inference).
-- **Source block:** `runner_minute_spine` matched 5 rows for `.github/workflows/tests_components.yml`; current measured cost spine for those rows is 21636.828 raw min/mo, 23534.500 billable min/mo.
+- **Source block:** `runner_minute_spine` matched 5 rows for `.github/workflows/tests_components.yml`; current measured cost spine for those rows is 21636.828 raw min/mo, 23534.500 rounded-up min/mo.
 - **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt46--superseded-runs-not-cancelled-missing-concurrency-or-cancel-in-progress-false
 
 #### 🤖 Prompt for your coding agent
@@ -715,7 +718,7 @@ _Measured from GitHub jobs API `filter=all` minus `filter=latest` for workflow r
 
 - **What ci-speedup measured:** 6 sampled run_attempt>1 workflow run(s) had prior-attempt jobs present in `filter=all` but absent from `filter=latest`; the unique dominant failing job was `WebView on iOS Simulator (4/4)` (9 failed/timed-out prior-attempt job(s), 221.0 failed min) and it appeared again in the latest attempt. ~268 runner-min/mo of prior-attempt compute (43/30d ÷ 100 sampled all-status run(s)).
 - **Why this can't slow your merge:** machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `WebView on iOS Simulator (4/4)` identifies the retry cause, so prior-attempt compute is post-completion waste).
-- **Source block:** `runner_minute_spine` matched 4 prior-attempt rows for `.github/workflows/tests_webview_simulator.yml`; current measured cost spine for those rows is 403.203 raw min/mo, 415.807 billable min/mo.
+- **Source block:** `runner_minute_spine` matched 4 prior-attempt rows for `.github/workflows/tests_webview_simulator.yml`; current measured cost spine for those rows is 403.203 raw min/mo, 415.807 rounded-up min/mo.
 - **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
 
 #### 🤖 Prompt for your coding agent
@@ -774,7 +777,7 @@ _Superseded = a run a NEWER run started before it finished - measured by timesta
 
 - **What ci-speedup measured:** 7 run(s) across 5 branch(es) were superseded (a newer run started before they finished) in the sampled window; ~159-2378 runner-min/mo of cancellable-remainder compute - the lower figure credits only the 56% mean remainder each superseded run would have burned AFTER its successor started, not the whole run (mean over 6 timed run(s); ×8.75 to the 30d volume (875 runs); 100-run recent slice (not a full 30d census)). Superseded attribution is INFERENCE - the API marks no run 'cancelled-by-concurrency'. (sensitivity range: 159 min/mo to 2,378 min/mo)
 - **Why this can't slow your merge:** machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (superseded runs: same head_branch, a newer run started before this one finished (timestamp overlap); cancellation cause is inference).
-- **Source block:** `runner_minute_spine` matched 2 rows for `.github/workflows/infra.yml`; current measured cost spine for those rows is 4086.979 raw min/mo, 5250.000 billable min/mo.
+- **Source block:** `runner_minute_spine` matched 2 rows for `.github/workflows/infra.yml`; current measured cost spine for those rows is 4086.979 raw min/mo, 5250.000 rounded-up min/mo.
 - **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt46--superseded-runs-not-cancelled-missing-concurrency-or-cancel-in-progress-false
 
 #### 🤖 Prompt for your coding agent
@@ -833,7 +836,7 @@ _Superseded = a run a NEWER run started before it finished - measured by timesta
 
 - **What ci-speedup measured:** 9 run(s) across 4 branch(es) were superseded (a newer run started before they finished) in the sampled window; ~141-1821 runner-min/mo of cancellable-remainder compute - the lower figure credits only the 64% mean remainder each superseded run would have burned AFTER its successor started, not the whole run (mean over 8 timed run(s); ×0.68 to the 30d volume (68 runs); 100-run recent slice (not a full 30d census)). Superseded attribution is INFERENCE - the API marks no run 'cancelled-by-concurrency'. (sensitivity range: 141 min/mo to 1,821 min/mo)
 - **Why this can't slow your merge:** machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (superseded runs: same head_branch, a newer run started before this one finished (timestamp overlap); cancellation cause is inference).
-- **Source block:** `runner_minute_spine` matched 1 row for `.github/workflows/tests_bidi.yml`; current measured cost spine for those rows is 2354.941 raw min/mo, 2391.356 billable min/mo.
+- **Source block:** `runner_minute_spine` matched 1 row for `.github/workflows/tests_bidi.yml`; current measured cost spine for those rows is 2354.941 raw min/mo, 2391.356 rounded-up min/mo.
 - **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt46--superseded-runs-not-cancelled-missing-concurrency-or-cancel-in-progress-false
 
 #### 🤖 Prompt for your coding agent
@@ -894,7 +897,7 @@ _Measured from GitHub jobs API `filter=all` minus `filter=latest` for workflow r
 
 - **What ci-speedup measured:** 3 sampled run_attempt>1 workflow run(s) had prior-attempt jobs present in `filter=all` but absent from `filter=latest`; the unique dominant failing job was `WebView on iOS Simulator (3/4)` (3 failed/timed-out prior-attempt job(s), 46.1 failed min) and it appeared again in the latest attempt. ~82 runner-min/mo of prior-attempt compute (43/30d ÷ 100 sampled all-status run(s)).
 - **Why this can't slow your merge:** machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `WebView on iOS Simulator (3/4)` identifies the retry cause, so prior-attempt compute is post-completion waste).
-- **Source block:** `runner_minute_spine` matched 4 prior-attempt rows for `.github/workflows/tests_webview_simulator.yml`; current measured cost spine for those rows is 403.203 raw min/mo, 415.807 billable min/mo.
+- **Source block:** `runner_minute_spine` matched 4 prior-attempt rows for `.github/workflows/tests_webview_simulator.yml`; current measured cost spine for those rows is 403.203 raw min/mo, 415.807 rounded-up min/mo.
 - **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
 
 #### 🤖 Prompt for your coding agent
@@ -954,7 +957,7 @@ _Measured from GitHub jobs API `filter=all` minus `filter=latest` for workflow r
 
 - **What ci-speedup measured:** 2 sampled run_attempt>1 workflow run(s) had prior-attempt jobs present in `filter=all` but absent from `filter=latest`; the unique dominant failing job was `WebView on iOS Simulator (2/4)` (2 failed/timed-out prior-attempt job(s), 44.6 failed min) and it appeared again in the latest attempt. ~54 runner-min/mo of prior-attempt compute (43/30d ÷ 100 sampled all-status run(s)).
 - **Why this can't slow your merge:** machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `WebView on iOS Simulator (2/4)` identifies the retry cause, so prior-attempt compute is post-completion waste).
-- **Source block:** `runner_minute_spine` matched 4 prior-attempt rows for `.github/workflows/tests_webview_simulator.yml`; current measured cost spine for those rows is 403.203 raw min/mo, 415.807 billable min/mo.
+- **Source block:** `runner_minute_spine` matched 4 prior-attempt rows for `.github/workflows/tests_webview_simulator.yml`; current measured cost spine for those rows is 403.203 raw min/mo, 415.807 rounded-up min/mo.
 - **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
 
 #### 🤖 Prompt for your coding agent
@@ -1013,7 +1016,7 @@ _Schedule burn is counted only on event=schedule runs whose head_sha repeats con
 
 - **What ci-speedup measured:** 18 scheduled run(s) in 12 consecutive same-head_sha group(s) re-ran without a code change in the sampled schedule slice (18% of 100 schedule run(s)); ~13 runner-min/mo of schedule-event compute (mean over 20 timed run(s); ×0.30 to the 30d volume (30 runs); 100-run recent slice (not a full 30d census)).
 - **Why this can't slow your merge:** machine-derived proof: `non_pr_event` - `schedule` runs do not gate a PR merge (event=schedule subset only; consecutive same-head_sha schedule runs; schedule is not a developer PR/merge event).
-- **Source block:** `runner_minute_spine` matched 2 rows for `.github/workflows/publish_release.yml`; current measured cost spine for those rows is 104.943 raw min/mo, 140.600 billable min/mo.
+- **Source block:** `runner_minute_spine` matched 2 rows for `.github/workflows/publish_release.yml`; current measured cost spine for those rows is 104.943 raw min/mo, 140.600 rounded-up min/mo.
 - **Guardrail:** Confirm the cron cadence is not an operational SLA; prefer widening the interval only for cleanup/triage/build jobs where delayed execution is acceptable.
 - **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt36--cron-schedule-too-frequent
 
@@ -1073,7 +1076,7 @@ _Measured from GitHub jobs API `filter=all` minus `filter=latest` for workflow r
 
 - **What ci-speedup measured:** 1 sampled run_attempt>1 workflow run(s) had prior-attempt jobs present in `filter=all` but absent from `filter=latest`; the unique dominant failing job was `test_linux_docker / Docker noble amd64` (1 failed/timed-out prior-attempt job(s), 1.4 failed min) and it appeared again in the latest attempt. ~8 runner-min/mo of prior-attempt compute (11/30d ÷ 24 sampled all-status run(s)).
 - **Why this can't slow your merge:** machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `test_linux_docker / Docker noble amd64` identifies the retry cause, so prior-attempt compute is post-completion waste).
-- **Source block:** `runner_minute_spine` matched 4 prior-attempt rows for `.github/workflows/tests_docker_changes.yml`; current measured cost spine for those rows is 7.715 raw min/mo, 8.251 billable min/mo.
+- **Source block:** `runner_minute_spine` matched 4 prior-attempt rows for `.github/workflows/tests_docker_changes.yml`; current measured cost spine for those rows is 7.715 raw min/mo, 8.251 rounded-up min/mo.
 - **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
 
 #### 🤖 Prompt for your coding agent
@@ -1132,7 +1135,7 @@ _Measured from GitHub jobs API `filter=all` minus `filter=latest` for workflow r
 
 - **What ci-speedup measured:** 1 sampled run_attempt>1 workflow run(s) had prior-attempt jobs present in `filter=all` but absent from `filter=latest`; the unique dominant failing job was `publish NPM and driver` (1 failed/timed-out prior-attempt job(s), 1.0 failed min) and it appeared again in the latest attempt. ~1 runner-min/mo of prior-attempt compute (38/30d ÷ 100 sampled all-status run(s)).
 - **Why this can't slow your merge:** machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `publish NPM and driver` identifies the retry cause, so prior-attempt compute is post-completion waste).
-- **Source block:** `runner_minute_spine` matched 2 prior-attempt rows for `.github/workflows/publish_release.yml`; current measured cost spine for those rows is 0.729 raw min/mo, 1.140 billable min/mo.
+- **Source block:** `runner_minute_spine` matched 2 prior-attempt rows for `.github/workflows/publish_release.yml`; current measured cost spine for those rows is 0.729 raw min/mo, 1.140 rounded-up min/mo.
 - **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
 
 #### 🤖 Prompt for your coding agent
