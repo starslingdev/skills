@@ -4174,6 +4174,7 @@ against sampled in-flight jobs across workflows. Readiness excludes upstream
 execution. Each exact label set needs 15 samples; thinner sets are disclosed in
 Data sources. Runner inventory is unknown unless a complete list is supplied.
 Measured OPT97 replaces same-job OPT43/44, uses the pre-start axis, and credits
-only median queue above the repository P10 baseline on established gating jobs;
-the existing floor cascade still applies. No utilization or billing claim is
+only median queue above the repository P10 baseline on established gating jobs,
+bounded by the median change to same-run completion when that queue is removed.
+Incomplete completion timestamps receive no credit; existing floors still apply. No utilization or billing claim is
 derived from correlation.

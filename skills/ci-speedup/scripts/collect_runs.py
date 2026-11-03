@@ -8719,7 +8719,7 @@ def _opt97_samples(wf_path, jobs_per_run, doc):
             if not created or not start or not end or not created <= start < end:
                 continue
             labels = tuple(sorted(str(label) for label in j.get("labels", []) if label))
-            rows.append({"workflow": wf_path, "job": j, "node": jid, "config": config,
+            rows.append({"workflow": wf_path, "job": j, "run": run, "node": jid, "config": config,
                          "labels": labels, "group": _opt97_global_group(doc, config),
                          "created": created, "start": start, "end": end,
                          "queue": (start - created).total_seconds(),
@@ -8789,25 +8789,6 @@ def _detect_opt97_single_slot_queue(
             for token in ("android-emulator-runner", "xcrun simctl", "adb"):
                 if re.search(r"(?<![\w-])" + re.escape(token) + r"(?![\w-])", text):
                     hints.append(f"device step `{step.get('name') or token}`")
-        # A fixed service port/database is a hint only if a sibling independent
-        # job declares the same literal. Dynamic per-run names are not shared.
-        def literals(job):
-            values = set()
-            for service in (job.get('services') or {}).values():
-                if not isinstance(service, dict):
-                    continue
-                for port in service.get('ports') or []:
-                    if '${{' not in str(port) and ':' in str(port):
-                        values.add('port ' + str(port).split(':')[0])
-                for key, value in (service.get('env') or {}).items():
-                    if key in {'POSTGRES_DB', 'MYSQL_DATABASE', 'MONGO_INITDB_DATABASE'} and '${{' not in str(value):
-                        values.add('database ' + str(value))
-            return values
-        shared = set()
-        for jid, sibling in (wf_doc.get('jobs') or {}).items():
-            if jid != samples[0]['node'] and isinstance(sibling, dict) and not sibling.get('needs') and not config.get('needs'):
-                shared.update(literals(config) & literals(sibling))
-        hints.extend('shared fixed ' + value for value in sorted(shared))
         resource = '; '.join(dict.fromkeys(hints)) or 'runner label set `' + ', '.join(labels) + '` (slot count unknown)'
         evidence = (f"job `{name}` median queue {median:.0f}s, P90 {p90:.0f}s across {len(samples)} samples; "
                     f"queue/in-flight rank correlation {queue_rho:.2f}, run-time/in-flight {runtime_rho:.2f}. "
@@ -8815,12 +8796,25 @@ def _detect_opt97_single_slot_queue(
                     "runner utilization was not measured.")
         gating = merge_gating_jobs is not None and samples[0]["node"] in merge_gating_jobs
         excess = max(0.0, median - baseline_queue_s)
+        recoverable = []
+        for row in samples:
+            finishes = [(job, _parse_dt(job.get("completed_at"))) for job in row["run"]
+                        if job.get("conclusion") != "skipped"]
+            if not finishes or any(end is None for _, end in finishes):
+                recoverable.append(0.0)
+                continue
+            reduction = max(0.0, row["queue"] - baseline_queue_s)
+            before = max(end.timestamp() for _, end in finishes)
+            after = max(end.timestamp() - (reduction if job is row["job"] else 0.0)
+                        for job, end in finishes)
+            recoverable.append(max(0.0, before - after))
+        credited = min(excess, statistics.median(recoverable)) if gating else 0.0
         f = _new_finding('OPT97', 'MEDIUM', 'Queue Caused by a One-at-a-Time Resource',
                          wf_path, name, evidence, 'single-slot-queue',
                          'opt97--queue-caused-by-a-one-at-a-time-resource', start_idx + len(out) + 1,
-                         wc_p50=round(excess, 1) if gating else 0.0, rm=None,
+                         wc_p50=round(credited, 1), rm=None,
                          size_note=(f"median queue above repository baseline ({baseline_queue_s:.1f}s); "
-                                    + ('merge-gating job; existing floors still apply' if gating else
+                                    + ('bounded by same-run job finish times including queue; existing floors still apply' if gating else
                                        'merge-gating status not established; no wall-clock credit')),
                          realization='direct', measured_evidence=_measured_evidence(
                              ['Job', 'Median queue', 'P90 queue', 'Samples', 'Example job'],

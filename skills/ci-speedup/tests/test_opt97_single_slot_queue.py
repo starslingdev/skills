@@ -39,6 +39,18 @@ def test_queue_tracks_inflight_names_global_resource_and_measured_excess():
     assert f['wall_clock_p50_s'] == 335
     assert f['runner_min_saving'] is None
 
+    sample = runs()
+    doc = copy.deepcopy(DOC)
+    doc['jobs']['other'] = {'runs-on': 'ubuntu-latest'}
+    for row in sample:
+        sibling = copy.deepcopy(row[0])
+        sibling['name'] = 'other'
+        sibling['labels'] = ['ubuntu-latest']
+        sibling['completed_at'] = (datetime.fromisoformat(row[0]['completed_at']) + timedelta(seconds=1000)).isoformat()
+        row.append(sibling)
+    [bounded] = [f for f in detect(sample, doc) if f["affected_jobs"] == ["test"]]
+    assert bounded['wall_clock_p50_s'] == 0
+
 
 def test_overload_keeps_generic_queue_but_not_single_slot():
     assert detect(runs(overloaded=True)) == []
@@ -183,12 +195,13 @@ def test_independent_queue_thresholds_and_correlation(queues, expected):
     assert bool(detect(sample)) is expected
 
 
-def test_shared_database_hint_requires_parallel_fixed_resource():
+def test_job_local_services_are_not_shared_resource_hints():
     doc = copy.deepcopy(DOC)
     doc['jobs']['test']['services'] = {'db': {'env': {'POSTGRES_DB': 'integration'}, 'ports': ['5432:5432']}}
     doc['jobs']['other'] = copy.deepcopy(doc['jobs']['test'])
     [f] = detect(doc=doc)
-    assert 'shared fixed database integration' in f['evidence']
+    assert 'shared fixed database' not in f['evidence']
+    assert 'shared fixed port' not in f['evidence']
     doc['jobs']['other']['needs'] = ['test']
     [f] = detect(doc=doc)
     assert 'shared fixed database' not in f['evidence']

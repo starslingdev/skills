@@ -3393,9 +3393,9 @@ as "too few samples", never an all-clear.
 
 **Resource hints**: A literal group with `cancel-in-progress: false`; a label
 on exactly one registered runner when a complete inventory is supplied (else
-unknown); Android-emulator runner actions, `xcrun simctl` or `adb`; and a literal
-host port or database shared by independent service jobs. Expressions are not
-assumed global. Other sampled workflows compete only when their job identities
+unknown); Android-emulator runner actions, `xcrun simctl` or `adb`. Matching
+ports or database names in job-local service containers do not establish a
+shared resource. Expressions are not assumed global. Other sampled workflows compete only when their job identities
 and readiness are known. The sample may undercount competing work outside the
 audit window, so correlation is evidence to investigate, not proof of causation.
 
@@ -3410,8 +3410,10 @@ such as deployment to one environment. Narrow its scope instead of removing it.
 Inspect the workflow's history and intent before changing policy.
 
 **Sizing**: Median queue above the repository's sampled P10 runnable-queue
-baseline, only for an established merge-gating job, then capped by the existing
-workflow and cross-workflow floors. No runner-minute saving: waiting is not
+baseline, only for an established merge-gating job. Cap each sampled reduction
+against all same-run job completion times, including queue; an independent
+later-finishing job removes the credit. Incomplete completion data receives no
+credit. The existing workflow and cross-workflow floors then apply. No runner-minute saving: waiting is not
 execution. Unknown merge-gating status receives no wall-clock credit.
 
 **Relations**: Replace same-job OPT44 static hints and OPT43 generic queue
