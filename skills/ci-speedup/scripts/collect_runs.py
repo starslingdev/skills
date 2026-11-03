@@ -9018,6 +9018,10 @@ def _opt100_job_class(job: dict[str, Any], log: str) -> str | None:
     start, end = _parse_dt(step.get("started_at")), _parse_dt(step.get("completed_at"))
     if start is None or end is None:
         return None
+    # Step completion is truncated to whole seconds while the runner's own exit
+    # line is stamped after it, so the window runs one second past the recorded
+    # end and closes at that step's first exit line instead.
+    limit = end + _dt.timedelta(seconds=1)
     lines = []
     for line in log.splitlines():
         # GitHub stamps seven fractional digits; the shared OPT80 parser
@@ -9026,8 +9030,10 @@ def _opt100_job_class(job: dict[str, Any], log: str) -> str | None:
         if record is None:
             continue
         when, body = record
-        if start <= when <= end:
+        if start <= when < limit:
             lines.append(body)
+            if body.startswith("##[error]Process completed with exit code"):
+                break
     return _classify_infra_failure("\n".join(lines), str(step.get("name") or ""))
 
 

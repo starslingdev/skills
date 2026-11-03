@@ -205,3 +205,23 @@ def test_seven_digit_log_timestamps_are_classified():
     log = ("2026-01-01T00:00:59.9876543Z Running checks\n"
            "2026-01-01T00:01:00.1234567Z ##[error]The runner has received a shutdown signal.")
     assert cr._opt100_job_class(job(10), log) == "lost-runner"
+
+
+def test_exit_line_after_whole_second_step_end_is_in_window():
+    """Step completion is whole seconds; the runner's exit line lands just after it."""
+    log = ("2026-01-01T00:01:59.9000000Z Running checks\n"
+           "2026-01-01T00:02:00.4000000Z ##[error]Process completed with exit code 137.")
+    assert cr._opt100_job_class(job(10), log) == "oom"
+
+
+def test_window_stops_at_the_steps_own_exit_line():
+    """The one-second allowance never reaches the next step's output."""
+    log = ("2026-01-01T00:01:00.0000000Z AssertionError\n"
+           "2026-01-01T00:02:00.3000000Z ##[error]Process completed with exit code 1.\n"
+           "2026-01-01T00:02:00.5000000Z ##[error]The runner has received a shutdown signal.")
+    assert cr._opt100_job_class(job(10), log) is None
+
+
+def test_window_ends_one_second_after_step_end():
+    log = "2026-01-01T00:02:01.0000000Z ##[error]The runner has received a shutdown signal."
+    assert cr._opt100_job_class(job(10), log) is None
