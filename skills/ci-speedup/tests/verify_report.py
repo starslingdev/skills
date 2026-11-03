@@ -10669,7 +10669,7 @@ def check_tier2_total_deoverlapped(report: str, findings_path: Path | None,
             continue
         pat = str(f.get("pattern") or "")
         if (f.get("advisory") or str(f.get("tier2_superseded_by") or "").strip()
-                or pat == "OPT43" or pat in _VR_PER_POLE_STRUCTURAL
+                or pat in {"OPT43", "OPT97"} or pat in _VR_PER_POLE_STRUCTURAL
                 or (_num(f.get("runner_min_saving")) or 0.0) <= 0
                 or id(f) in promoted_ids):
             continue
@@ -13660,7 +13660,7 @@ _VR_OPT81_CHEAPER_STRUCTURAL = frozenset({"OPT70", "OPT71", "OPT72", "OPT73", "O
                                            "OPT78"})
 # Pre-start findings (queue wait) shorten no step of the job, so they never count
 # as a credited lever covering it (`collect_runs._PRESTART_AXIS_PATTERNS`).
-_VR_OPT81_PRESTART_PATTERNS = frozenset({"OPT43"})
+_VR_OPT81_PRESTART_PATTERNS = frozenset({"OPT43", "OPT97"})
 _VR_OPT81_DISCLOSURE = (
     "The publisher of this skill sells CI runners. This finding compares your own "
     "runs on runner classes you already use (A1), or names a class of lever and asks "

@@ -109,7 +109,7 @@ _STRUCTURAL_PATTERNS = frozenset(
 # which the critical-path spine (job start → finish) doesn't capture. These are NOT
 # runner-minute hygiene, so they get their own "Pre-start wait" section instead of the
 # bill-savings appendix (which would wrongly tell the reader they remove ~0 wall-clock).
-_WAIT_PATTERNS = frozenset({"OPT43"})
+_WAIT_PATTERNS = frozenset({"OPT43", "OPT97"})
 
 
 def _is_tier2_finding(f: dict[str, Any]) -> bool:

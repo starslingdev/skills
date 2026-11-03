@@ -45,7 +45,7 @@ Checkout · 6. Conditional Execution · 7. Trigger and Scope · 8. Release Workf
 - **Category 6 — Conditional Execution**: merge_group step-vs-job conditions, draft-PR gating.
 - **Category 7 — Trigger and Scope**: missing path filters, no `--filter` on PR turbo, cron frequency, every PR paying for coverage that could run after merge (`OPT90`).
 - **Category 8 — Release Workflow**: release-path caching + redundancy.
-- **Category 9 — Queue Times and Concurrency**: missing/!coarse concurrency groups.
+- **Category 9 — Queue Times and Concurrency**: missing/!coarse concurrency groups; measured one-at-a-time capacity waits (`OPT97`).
 - **Category 10 — Timing Anomalies**: failure-rate / bimodal duration signals (advisory), and the same job measured faster on another runner class (`OPT81`).
 - **Category 11 — Stack-Specific**: turbo task outputs, unstable turbo env keys, type-aware ESLint on a slow lint job (`OPT82`).
 - **Category 12 — Build Caching (language-agnostic)**: uncached compiled-language builds, a dependency compiled from source when a prebuilt package exists (`OPT86`), a compile nobody profiled (`OPT91`), a machine-wide .NET SDK reconciling unrelated workloads (`OPT94`).
@@ -3361,6 +3361,65 @@ title_template: "Excessive Queue Time"
 
 ---
 
+### OPT97 — Queue Caused by a One-at-a-Time Resource
+
+<!-- METADATA
+pattern: OPT97
+impact: MEDIUM
+class: data-driven
+detector: manual
+affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml"
+fix_strategy: single-slot-queue
+title_template: "Queue Caused by a One-at-a-Time Resource"
+-->
+
+**TL;DR**: When queue time grows with competing jobs but execution time stays
+flat, investigate a shared slot before adding faster machines.
+
+**Anti-pattern**: A global concurrency group, unique runner label, emulator,
+device or shared database admits one job at a time while other work waits.
+This is a capacity finding. The sampled intervals do not measure utilization
+or prove which hinted resource causes the wait.
+
+**Detection heuristic**: Per job and exact runner-label set, require at least
+15 samples, median runnable-to-start queue of at least 60 seconds and P90 of
+at least 300 seconds. At each job's runnable time, count other sampled jobs
+already in flight with the same label set or literal global concurrency group.
+Require Spearman rank correlation of queue versus in-flight count at least
+0.6 and absolute run-time correlation below 0.3. Constant execution times have
+zero correlation. Exclude skipped jobs, incomplete intervals, unresolved job
+identities and upstream `needs:` execution. Fewer than 15 samples is disclosed
+as "too few samples", never an all-clear.
+
+**Resource hints**: A literal group with `cancel-in-progress: false`; a label
+on exactly one registered runner when a complete inventory is supplied (else
+unknown); Android-emulator runner actions, `xcrun simctl` or `adb`; and a literal
+host port or database shared by independent service jobs. Expressions are not
+assumed global. Other sampled workflows compete only when their job identities
+and readiness are known. The sample may undercount competing work outside the
+audit window, so correlation is evidence to investigate, not proof of causation.
+
+**Fix**, in order:
+
+1. Move the one-at-a-time step into its own job so unrelated work can run.
+2. Add slots: per-job database names, per-run emulators, or a group keyed per PR.
+3. Only then consider adding machines.
+
+**Guardrail**: Keep a real one-at-a-time limit where correctness needs one,
+such as deployment to one environment. Narrow its scope instead of removing it.
+Inspect the workflow's history and intent before changing policy.
+
+**Sizing**: Median queue above the repository's sampled P10 runnable-queue
+baseline, only for an established merge-gating job, then capped by the existing
+workflow and cross-workflow floors. No runner-minute saving: waiting is not
+execution. Unknown merge-gating status receives no wall-clock credit.
+
+**Relations**: Replace same-job OPT44 static hints and OPT43 generic queue
+findings with this measured finding; retain unrelated jobs' findings. A rise in
+execution time with contention does not fire OPT97; OPT43 remains available.
+
+---
+
 ### OPT44 — Concurrency Group Too Restrictive
 
 <!-- METADATA
@@ -4864,7 +4923,7 @@ title_template: "Dead Workflow Env Vars / Config"
 ## Category 14: Structural / Critical-Path Levers
 
 These patterns are a **different class** from everything above. The catalog
-patterns OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94 and OPT96 are *hygiene*: each is a named,
+patterns OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94, OPT96 and OPT97 are *hygiene*: each is a named,
 locally-checkable defect with
 a mechanical, low-risk fix, detected by matching workflow YAML against the
 catalog. OPT81, like OPT79 and OPT80, is derived from run history rather than matched against YAML, and its A2 advisory is risk MEDIUM. On real repos almost every hygiene hit moves **~0 developer

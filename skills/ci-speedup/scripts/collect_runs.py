@@ -4939,6 +4939,7 @@ _SIZING: dict[str, dict[str, Any]] = {
     "OPT24": {"model": "measured"},
     "OPT25": {"model": "measured"},
     "OPT43": {"model": "measured"},
+    "OPT97": {"model": "measured"},
     "OPT48": {"model": "measured"},
     "OPT49": {"model": "measured"},
     "OPT50": {"model": "measured"},
@@ -8630,6 +8631,230 @@ def _detect_opt43_queue_time(
                 f["queue_cause_note"] = cause_note
             out.append(f)
     return out
+
+
+def _opt97_runner_inventory(client, repo):
+    """One optional page; incomplete/denied inventory never proves uniqueness."""
+    doc = client.json(f"repos/{repo}/actions/runners?per_page=100", allow_missing=True)
+    if not isinstance(doc, dict) or not isinstance(doc.get("runners"), list):
+        return None
+    count = doc.get("total_count")
+    return doc["runners"] if isinstance(count, int) and count == len(doc["runners"]) else None
+
+
+def _opt97_rank_correlation(xs: list[float], ys: list[float]) -> float:
+    """Spearman correlation with average ranks for ties; constants imply zero."""
+    def ranks(values):
+        ordered = sorted(range(len(values)), key=values.__getitem__)
+        result = [0.0] * len(values)
+        i = 0
+        while i < len(ordered):
+            end = i + 1
+            while end < len(ordered) and values[ordered[end]] == values[ordered[i]]:
+                end += 1
+            for pos in range(i, end):
+                result[ordered[pos]] = (i + end - 1) / 2
+            i = end
+        return result
+    a, b = ranks(xs), ranks(ys)
+    if not a:
+        return 0.0
+    ma, mb = statistics.mean(a), statistics.mean(b)
+    covariance = sum((x - ma) * (y - mb) for x, y in zip(a, b))
+    denominator = (sum((x - ma) ** 2 for x in a) * sum((y - mb) ** 2 for y in b)) ** .5
+    return covariance / denominator if denominator else 0.0
+
+
+def _opt97_job(doc: dict[str, Any], name: str) -> tuple[str, dict[str, Any]] | None:
+    """Resolve only an unambiguous job; unseen reusable children are excluded."""
+    jobs = doc.get("jobs") or {}
+    candidates = [(str(jid), job) for jid, job in jobs.items() if isinstance(job, dict)
+                  and not job.get("uses") and (str(job.get("name") or jid) == name
+                  or (not _name_template_is_degenerate(str(job.get("name") or jid))
+                      and _name_template_regex(str(job.get("name") or jid)).fullmatch(name))
+                  or _static_matrix_leg_match(str(job.get("name") or jid),
+                                              bool((job.get("strategy") or {}).get("matrix"))
+                                              if isinstance(job.get("strategy") or {}, dict) else False, name))]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _opt97_global_group(doc: dict[str, Any], job: dict[str, Any]) -> str | None:
+    config = job.get("concurrency", doc.get("concurrency"))
+    if not isinstance(config, dict) or config.get("cancel-in-progress") is not False:
+        return None
+    group = config.get("group")
+    # Dynamic keys may vary by PR, matrix or input. Do not call them global.
+    if not isinstance(group, str) or not group.strip() or "${{" in group:
+        return None
+    return group.strip().lower()  # GitHub concurrency groups are case-insensitive.
+
+
+def _opt97_samples(wf_path, jobs_per_run, doc):
+    """Valid runnable-to-start intervals, excluding upstream execution."""
+    rows = []
+    for run in jobs_per_run:
+        resolved = {id(j): _opt97_job(doc, str(j.get("name", ""))) for j in run}
+        for j in run:
+            match = resolved[id(j)]
+            if match is None or j.get("conclusion") == "skipped":
+                continue
+            jid, config = match
+            created = _parse_dt(j.get("created_at") or j.get("_run_created_at"))
+            start, end = _parse_dt(j.get("started_at")), _parse_dt(j.get("completed_at"))
+            needs = config.get("needs") or []
+            needs = [needs] if isinstance(needs, str) else needs
+            ends = []
+            for need in needs:
+                upstream = [_parse_dt(u.get("completed_at")) for u in run
+                            if resolved[id(u)] and resolved[id(u)][0] == need]
+                if not upstream or not all(upstream):
+                    ends = []
+                    break
+                ends.append(max(upstream))
+            if needs:
+                if not ends:
+                    continue
+                # Job creation can precede upstream completion. Readiness cannot.
+                created = max([*ends, *([created] if created else [])])
+            if not created or not start or not end or not created <= start < end:
+                continue
+            labels = tuple(sorted(str(label) for label in j.get("labels", []) if label))
+            rows.append({"workflow": wf_path, "job": j, "node": jid, "config": config,
+                         "labels": labels, "group": _opt97_global_group(doc, config),
+                         "created": created, "start": start, "end": end,
+                         "queue": (start - created).total_seconds(),
+                         "runtime": (end - start).total_seconds()})
+    return rows
+
+
+def _detect_opt97_single_slot_queue(
+    wf_path: str, jobs_per_run: list[list[dict[str, Any]]], start_idx: int,
+    wf_doc: dict[str, Any], *, all_jobs_by_wf=None, workflow_docs=None,
+    baseline_queue_s: float | None = None, merge_gating_jobs: set[str] | None = None,
+    runner_inventory: list[dict[str, Any]] | None = None, notes: list | None = None,
+) -> list[dict[str, Any]]:
+    """Queue follows contention, but execution does not: a capacity hypothesis.
+
+    Uses sampled intervals only, never a utilization claim. Exact runner-label
+    sets keep dissimilar pools separate. Other jobs sharing that label set OR a
+    literal global group compete; simultaneous creations do not count each other.
+    Baseline is the repository's sampled P10 runnable queue, not an invented zero.
+    """
+    own = _opt97_samples(wf_path, jobs_per_run, wf_doc)
+    docs = {**(workflow_docs or {}), wf_path: wf_doc}
+    pool = []
+    for path, runs in (all_jobs_by_wf or {wf_path: jobs_per_run}).items():
+        pool.extend(_opt97_samples(path, runs, docs.get(path, wf_doc if path == wf_path else {})))
+    if not pool:
+        pool = own
+    if baseline_queue_s is None:
+        baseline_queue_s = _percentile([r["queue"] for r in pool], 10) if pool else 0.0
+    populations = {}
+    for row in own:
+        populations.setdefault((row["job"].get("name", ""), row["labels"]), []).append(row)
+    out = []
+    for (name, labels), samples in populations.items():
+        if len(samples) < 15:
+            if notes is not None:
+                notes.append({"workflow_file": wf_path, "job": name, "labels": list(labels),
+                              "samples": len(samples), "reason": "too few samples"})
+            continue
+        queues = [r["queue"] for r in samples]
+        median, p90 = statistics.median(queues), _percentile(queues, 90)
+        counts = [sum(1 for other in pool
+                      if other["created"] < row["created"] < other["end"]
+                      and ((labels and labels == other["labels"])
+                           or (row["group"] and row["group"] == other["group"])))
+                  for row in samples]
+        queue_rho = _opt97_rank_correlation(queues, counts)
+        runtime_rho = _opt97_rank_correlation([r["runtime"] for r in samples], counts)
+        if median < 60 or p90 < 300 or queue_rho < .6 or abs(runtime_rho) >= .3:
+            continue
+        hints = []
+        group = samples[0]["group"]
+        if group:
+            hints.append(f"global concurrency group `{group}`")
+        if runner_inventory is not None:
+            for label in labels:
+                matches = sum(1 for runner in runner_inventory
+                              if label in {str(x.get('name', '')) if isinstance(x, dict) else str(x)
+                                           for x in runner.get('labels', [])})
+                if matches == 1:
+                    hints.append(f"label `{label}` has one registered runner")
+        config = samples[0]["config"]
+        for step in config.get("steps") or []:
+            if not isinstance(step, dict):
+                continue
+            text = str(step.get("uses", "")) + " " + str(step.get("run", ""))
+            for token in ("android-emulator-runner", "xcrun simctl", "adb"):
+                if re.search(r"(?<![\w-])" + re.escape(token) + r"(?![\w-])", text):
+                    hints.append(f"device step `{step.get('name') or token}`")
+        # A fixed service port/database is a hint only if a sibling independent
+        # job declares the same literal. Dynamic per-run names are not shared.
+        def literals(job):
+            values = set()
+            for service in (job.get('services') or {}).values():
+                if not isinstance(service, dict):
+                    continue
+                for port in service.get('ports') or []:
+                    if '${{' not in str(port) and ':' in str(port):
+                        values.add('port ' + str(port).split(':')[0])
+                for key, value in (service.get('env') or {}).items():
+                    if key in {'POSTGRES_DB', 'MYSQL_DATABASE', 'MONGO_INITDB_DATABASE'} and '${{' not in str(value):
+                        values.add('database ' + str(value))
+            return values
+        shared = set()
+        for jid, sibling in (wf_doc.get('jobs') or {}).items():
+            if jid != samples[0]['node'] and isinstance(sibling, dict) and not sibling.get('needs') and not config.get('needs'):
+                shared.update(literals(config) & literals(sibling))
+        hints.extend('shared fixed ' + value for value in sorted(shared))
+        resource = '; '.join(dict.fromkeys(hints)) or 'runner label set `' + ', '.join(labels) + '` (slot count unknown)'
+        evidence = (f"job `{name}` median queue {median:.0f}s, P90 {p90:.0f}s across {len(samples)} samples; "
+                    f"queue/in-flight rank correlation {queue_rho:.2f}, run-time/in-flight {runtime_rho:.2f}. "
+                    f"Likely resource: {resource}. Consistent with a one-at-a-time capacity limit; "
+                    "runner utilization was not measured.")
+        gating = merge_gating_jobs is not None and samples[0]["node"] in merge_gating_jobs
+        excess = max(0.0, median - baseline_queue_s)
+        f = _new_finding('OPT97', 'MEDIUM', 'Queue Caused by a One-at-a-Time Resource',
+                         wf_path, name, evidence, 'single-slot-queue',
+                         'opt97--queue-caused-by-a-one-at-a-time-resource', start_idx + len(out) + 1,
+                         wc_p50=round(excess, 1) if gating else 0.0, rm=None,
+                         size_note=(f"median queue above repository baseline ({baseline_queue_s:.1f}s); "
+                                    + ('merge-gating job; existing floors still apply' if gating else
+                                       'merge-gating status not established; no wall-clock credit')),
+                         realization='direct', measured_evidence=_measured_evidence(
+                             ['Job', 'Median queue', 'P90 queue', 'Samples', 'Example job'],
+                             [[name, f'{median:.0f}s', f'{p90:.0f}s', str(len(samples)),
+                               _link(samples[-1]['queue'], str(samples[-1]['job'].get('html_url') or ''))]],
+                             evidence))
+        f['single_slot_queue'] = {'queue_p50_s': median, 'queue_p90_s': p90,
+                                 'baseline_queue_s': baseline_queue_s, 'samples': len(samples),
+                                 'queue_rank_correlation': queue_rho, 'runtime_rank_correlation': runtime_rho,
+                                 'inflight_counts': counts, 'labels': list(labels), 'hints': hints,
+                                 'runner_inventory': 'readable' if runner_inventory is not None else 'unknown'}
+        f['queue_cause'] = 'config_controllable' if hints else 'unknown'
+        out.append(f)
+    return out
+
+
+def _merge_opt97_findings(findings, new, wf_doc):
+    """Measured capacity evidence replaces the same job's generic queue/static hint."""
+    for measured in new:
+        related = set()
+        for old in list(findings):
+            if old.get('pattern') not in {'OPT43', 'OPT44'} or old.get('workflow_file') != measured['workflow_file']:
+                continue
+            jobs = set(old.get('affected_jobs') or [])
+            names = set(measured['affected_jobs'])
+            for name in measured['affected_jobs']:
+                match = _opt97_job(wf_doc, name)
+                if match:
+                    names.add(match[0])
+            if jobs and jobs <= names:
+                findings.remove(old)
+                related.add(old['pattern'])
+        measured['related_patterns'] = sorted(related)
+        findings.append(measured)
 
 
 def _detect_opt48_failure_rate(
@@ -15266,7 +15491,7 @@ def _job_name_scope_prefixed(check_name: str, job_name: str) -> bool:
 # `_detect_structural_candidates` asks "did a hygiene fix already MATERIALLY
 # shorten this pole's RUN time?", and a queue-time saving answers a different
 # question, leaving the real OPT75/etc lever wrongly hidden on the headline gate.
-_PRESTART_AXIS_PATTERNS = frozenset({"OPT43"})
+_PRESTART_AXIS_PATTERNS = frozenset({"OPT43", "OPT97"})
 
 
 def _build_covered_job_savings(
@@ -26207,6 +26432,13 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     next_id = max((int(f["id"][1:]) for f in findings if f.get("id", "").startswith("f") and f["id"][1:].isdigit()), default=0)
     # (workflow_file, job) pairs OPT81 A1 saw on two or more runner labels.
     _opt81_multi_label_jobs: set[tuple[str, str]] = set()
+    # A single bounded inventory call only for a sufficiently sampled own-runner
+    # population. Permission failure or >100 runners leaves uniqueness unknown.
+    _opt97_inventory = findings_doc.get("runner_inventory")
+    if _opt97_inventory is None and any(
+            sum(1 for run in rows for job in run if "self-hosted" in (job.get("labels") or [])) >= 15
+            for rows in jobs_per_run_by_wf.values()):
+        _opt97_inventory = _opt97_runner_inventory(client, repo)
     for wf_path, jobs_per_run in jobs_per_run_by_wf.items():
         if not jobs_per_run:
             continue
@@ -26246,7 +26478,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         # found nothing". Disclosed through the same channel a fetch failure
         # uses, so the report NAMES the workflow instead.
         if not isinstance((_wf_docs.get(wf_path) or {}).get("jobs"), dict):
-            _skip_detectors(wf_path, ["OPT77", "OPT79", "OPT80", "OPT82"],
+            _skip_detectors(wf_path, ["OPT77", "OPT79", "OPT80", "OPT82", "OPT97"],
                             "its workflow YAML could not be parsed")
         # OPT77 shares OPT65's event-scoped monthly volume (same workflow, same
         # scaling question) so it costs no extra gh call, and reads the workflow
@@ -26398,6 +26630,31 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 job_graph=_opt43_graph)
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
+
+        # Capacity inference uses the sampled repository intervals, never new
+        # run/log calls. The bounded optional inventory probe above supplies only
+        # complete lists; unreadable/partial inventories remain unknown.
+        _opt97_notes = []
+        try:
+            new = _detect_opt97_single_slot_queue(
+                wf_path, jobs_per_run, next_id, _wf_docs.get(wf_path, {}),
+                all_jobs_by_wf=jobs_per_run_by_wf, workflow_docs=_wf_docs,
+                merge_gating_jobs=_opt80_merge_gating_jobs(
+                    wf_path, required_checks, findings_doc.get("workflow_job_graph"),
+                    crit_by_wf, workflow_names=findings_doc.get("workflow_names"),
+                    status_publishers=findings_doc.get("workflow_status_publishers")),
+                runner_inventory=_opt97_inventory, notes=_opt97_notes)
+        except Exception as exc:  # noqa: BLE001 — failure is disclosed, never clean
+            _skip_detectors(wf_path, ["OPT97"],
+                            f"the capacity check failed ({type(exc).__name__})")
+            new = []
+        for _note in _opt97_notes:
+            _skip_detectors(wf_path, ["OPT97"],
+                            f"job `{_note['job']}`: too few samples "
+                            f"({_note['samples']}; minimum 15) for its runner label set")
+        findings_doc.setdefault("opt97_notes", []).extend(_opt97_notes)
+        next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
+        _merge_opt97_findings(findings, new, _wf_docs.get(wf_path, {}))
 
         if wf_id is not None:
             new = _detect_opt48_failure_rate(client, repo, wf_id, wf_path, long_pole, monthly, next_id, created_before)

@@ -26,8 +26,8 @@ developer's wait. It gets its own prominent section below.
 
 ## 1. Purpose & scope
 
-ci-speedup audits a repository's GitHub Actions workflows against a 92-pattern
-catalog — 81 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94 and OPT96) plus 11 **structural /
+ci-speedup audits a repository's GitHub Actions workflows against a 93-pattern
+catalog — 82 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94, OPT96 and OPT97) plus 11 **structural /
 critical-path** patterns (OPT70–OPT75, OPT78, OPT83, OPT84, OPT85 and OPT87, routed from the measured long pole; see
 §11) — and produces a **root-cause-analysis** markdown report with **measured**
 impact on two axes: developer wall-clock wait (the ranking axis) and
@@ -2798,7 +2798,7 @@ wired or removed rather than left to become archaeology.
 
 ## 11. The structural / critical-path track
 
-The hygiene/data-driven catalog (OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94 and OPT96) is mostly **declarative** -
+The hygiene/data-driven catalog (OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94, OPT96 and OPT97) is mostly **declarative** -
 static findings are locally-checkable YAML defects, while measured Tier-2 rows
 come from run history. Its blind spot: on real repos the merge is
 gated by a check that is *working as intended* and simply slow, with no
@@ -4092,7 +4092,7 @@ order of preference:
 - [`SKILL.md`](SKILL.md) - the canonical contract (phases, admission gate,
   quality review).
 - [`references/patterns/INDEX.md`](references/patterns/INDEX.md) -
-  the 92-pattern catalog, one file per pattern (frontmatter + body); the source
+  the 93-pattern catalog, one file per pattern (frontmatter + body); the source
   of truth for detection and the report's TL;DR / pattern background. The
   single-file [`references/optimization-patterns.md`](references/optimization-patterns.md)
   is compiled from `references/patterns/` by
@@ -4166,3 +4166,14 @@ is a secondary observation, never the entire install-step ceiling. Credited rows
 pass the within-workflow cap and the existing cross-workflow cascade; below-tail
 or unconfirmed rows retain “check this” wording. No additional probe budget is
 introduced.
+
+### Single-slot queue capacity (OPT97)
+
+`_detect_opt97_single_slot_queue` compares queue and execution rank correlations
+against sampled in-flight jobs across workflows. Readiness excludes upstream
+execution. Each exact label set needs 15 samples; thinner sets are disclosed in
+Data sources. Runner inventory is unknown unless a complete list is supplied.
+Measured OPT97 replaces same-job OPT43/44, uses the pre-start axis, and credits
+only median queue above the repository P10 baseline on established gating jobs;
+the existing floor cascade still applies. No utilization or billing claim is
+derived from correlation.
