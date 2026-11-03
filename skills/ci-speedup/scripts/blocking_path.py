@@ -6083,7 +6083,8 @@ def _opt98_report_block(doc: dict[str, Any]) -> list[str]:
     out = ["## Repeated merge validation", ""]
     catalog = _build_catalog_url(doc.get("skill_commit_sha"))
     for finding in findings:
-        out += [f"### OPT98: {finding.get('title', 'Repeated validation')}", "",
+        wf = finding.get("workflow_file")
+        out += [f"### OPT98: {finding.get('title', 'Repeated validation')}" + (f" — `{wf}`" if wf else ""), "",
                 str(finding.get("evidence", "")), "",
                 "No wall-clock or runner-minute saving is credited.", "",
                 *_hygiene_prompt("OPT98", str(finding.get("title", "")), [finding],
@@ -6226,6 +6227,12 @@ def _data_sources_footer(doc: dict[str, Any], repo: str,
         _queue_limits.append("queue/PR timing not measured for " + ", ".join(_queue["unmeasured_workflows"]))
     if _queue.get("unreadable_workflows"):
         _queue_limits.append("workflow configuration not readable for " + ", ".join(_queue["unreadable_workflows"]))
+    if _queue.get("static_unknown"):
+        _queue_limits.append("queue scope not settled for " + ", ".join(_queue["static_unknown"]))
+    if _queue.get("thin_samples"):
+        _queue_limits.append("too few queue/PR runs for " + ", ".join(_queue["thin_samples"]))
+    if _queue.get("pr_runs_differ"):
+        _queue_limits.append("PR runs differ from queue runs for " + ", ".join(_queue["pr_runs_differ"]))
     if _queue_limits:
         rows.append(("Merge queue", _flatten_cell("; ".join(_queue_limits)), "Repeated validation; unavailable evidence is not an all-clear"))
     _opt96_line = _opt96_unresolved_line(doc)
@@ -8064,6 +8071,23 @@ def _tier2_guardrail_sentence(f: dict[str, Any]) -> str:
     return note[idx:].strip() if idx >= 0 else ""
 
 
+def _opt98_task(members: list[dict[str, Any]]) -> list[str]:
+    """The OPT98 prompt's task lines: the up-to-date case's fix is a merge queue;
+    the re-proving case names the workflow and jobs to scope."""
+    if any((m.get("merge_queue") or {}).get("case") == "strict" for m in members):
+        return ["Replace the require-up-to-date branch rule with a merge queue: add a",
+                "merge_group trigger to every required workflow, confirm the required",
+                "checks report on merge_group runs, then turn the queue on and the",
+                "up-to-date requirement off."]
+    lines = []
+    for m in members:
+        lines += [f"Workflow: {m.get('workflow_file')}",
+                  f"Jobs: {', '.join(str(j) for j in m.get('affected_jobs') or [])}"]
+    return lines + ["Investigate the queue base, affected-only execution and main-written caches.",
+                    "Use the full suite when affected-set resolution fails and compare scoped",
+                    "and full results in parallel before adopting scoping."]
+
+
 def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
                     url: str, *, wait: bool = False, saves_wc: bool = False,
                     tier2: bool = False,
@@ -8100,10 +8124,8 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
                 "No wall-clock or runner-minute saving is credited.",
                 "Read git log and the workflow's history and intent before changing policy;",
                 "an intent-contradicting change requires owner sign-off.",
-                "Investigate the queue base, affected-only execution and main-written caches.",
+                *_opt98_task(members),
                 "Keep every required check on the merged result; never drop checks.",
-                "Use the full suite when affected-set resolution fails and compare scoped",
-                "and full results in parallel before adopting scoping.",
                 f"Catalog context: {url}", "```", ""]
     if pat == "OPT82":
         # Numberless by design: the generic bill / off-path saving line would

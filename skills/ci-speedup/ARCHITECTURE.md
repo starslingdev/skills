@@ -4180,12 +4180,20 @@ derived from correlation.
 ### Merge validation (OPT98)
 
 The required-check reader optionally returns strict/merge-queue metadata from
-the same API responses. A strict, queue-free candidate uses one REST search
-for the prior 30 complete UTC days; total_count supplies volume while up to
-100 merged PR identities supply a lower-bound churn sample against cached runs.
-Full-suite queue candidates join unconditional workflow jobs to successful
-first-attempt run medians. Both cases are uncredited and render in a dedicated
-Repeated merge validation section so a drilled pole cannot hide the observation.
-Malformed workflow shapes, unavailable branch rules and missing event timings
-are disclosed in data sources. Any declared queue workflow conservatively
-suppresses strict-rule advice, including one whose required status is unknown.
+the same API responses. Strict is on when any source says so and off only when
+classic protection was read (a non-admin's 404 there leaves it unknown). A
+queue is present when a ruleset, a `merge_group` trigger or a cached
+`merge_group` run shows one. A strict, queue-free candidate uses one REST search
+for the prior 30 complete UTC days before the pin; total_count supplies volume.
+At 30 merges a day, up to 30 of the newest merged PR timelines supply the
+rebase-churn share (two-parent commits and head force-pushes). Run pages can't:
+GitHub empties `pull_requests[]` once a PR merges.
+`_opt98_static_scope` classifies each queue workflow as full, scoped (OPT70
+affected-only signals or a build/remote cache), queue-only or unknown
+(event-dependent conditions, commands, inputs or matrices; reusable workflows;
+unread local actions). Full candidates need 15 successful first-attempt runs per
+event and a queue/PR median ratio from 0.8 to 1.5. Both cases are uncredited and
+render in a dedicated Repeated merge validation section so a drilled pole cannot
+hide the observation. Unknown scopes, thin samples, slower queue runs, malformed
+workflows, unavailable branch rules and missing timings are named in data
+sources; `merge_queue.status` says measured, partial or not_measured.

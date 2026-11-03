@@ -7563,6 +7563,7 @@ def _fetch_required_checks(
     names: set[str] = set()
     strict_values: list[bool] = []
     merge_queue = False
+    classic_strict_read = False
     found_any = False
     complete = True
     # Rulesets (the modern mechanism) — readable without admin on many repos.
@@ -7624,6 +7625,7 @@ def _fetch_required_checks(
         if isinstance(prot, dict):
             if isinstance(prot.get("strict"), bool):
                 strict_values.append(prot["strict"])
+                classic_strict_read = True
             found_any = True
             for c in prot.get("contexts") or []:
                 names.add(str(c))
@@ -7633,54 +7635,143 @@ def _fetch_required_checks(
     else:
         complete = False
     if branch_rules is not None:
-        branch_rules.update(strict=any(strict_values) if strict_values else None,
-                            merge_queue=merge_queue, complete=complete and isinstance(rulesets, list))
+        # GitHub enforces the stricter source, so ANY readable "on" is on. "Off" is
+        # known only when classic protection was actually read: a non-admin gets a
+        # 404 there even when it requires up-to-date branches, so a ruleset that
+        # says off next to an unread classic rule stays UNKNOWN (disclosed).
+        strict = True if any(strict_values) else (False if classic_strict_read else None)
+        branch_rules.update(strict=strict, merge_queue=merge_queue,
+                            complete=complete and isinstance(rulesets, list))
     if not found_any and complete:
         return None
     return RequiredChecks(frozenset(names), complete)
 
 
-def _opt98_full_suite(doc: dict[str, Any]) -> list[str]:
-    """Conservative static candidate: the same unconditional jobs on both events.
+_OPT98_MIN_MERGES_PER_DAY = 30      # C1: below this the up-to-date rule is cheap
+_OPT98_MIN_RUNS = 15                # C2: successful first-attempt runs per event (as OPT97)
+_OPT98_REPROVE_RATIO = .8           # C2: queue median at least this share of the PR median
+_OPT98_DIFFERENT_RATIO = 1.5        # C2: above this the queue runs different work, not the same
+_OPT98_CHURN_SAMPLE = 30            # C1: merged-PR timelines read, at most
+_OPT98_WINDOW_DAYS = 30             # C1: complete UTC days counted before the pin
+# Affected-only execution (the OPT70 signals) and build/remote-cache reuse, in a
+# command, an action input or an env name/value. Any one settles the workflow as
+# already scoped: it is not re-proving the whole suite.
+_OPT98_SCOPED_RE = _re.compile(
+    r"\bnx\s+affected\b|--filter[= ]?['\"]?[^\s'\"]*\[|\bturbo\b[^\n]*--affected\b"
+    r"|--changed(?:Since)?\b|--only-?changed\b|\bgit\s+diff\b[^\n]*--name-only"
+    r"|--remote[-_]cache|--disk[-_]cache|--build-cache\b|\bs?ccache\b"
+    r"|\bTURBO_(?:TOKEN|API|REMOTE\w*)\b|\bNX_CLOUD\w*", _re.I)
+_OPT98_SCOPED_ACTION_RE = _re.compile(
+    r"nx-set-shas|paths-filter|changed-files|cache|setup-gradle|gradle-build-action", _re.I)
+# Paths a dependency-only `actions/cache` restores; anything else is a build cache.
+_OPT98_DEP_CACHE_RE = _re.compile(
+    r"node_modules|\.npm\b|pnpm|yarn|\.cache/pip\b|pip-cache|pypoetry|\.cache/uv\b|(?:^|/)\.?venv\b"
+    r"|go/pkg/mod|\.cargo/(?:registry|git)\b|\.m2\b|ms-playwright|\.bun/install|vendor/bundle"
+    r"|\.nuget/packages|composer", _re.I)
+# Context that differs between a pull_request run and a merge_group run.
+_OPT98_EVENT_RE = _re.compile(
+    r"github\.event_name|github\.event\.|github\.(?:base_ref|head_ref|ref_name|ref)\b"
+    r"|merge_group|pull_request|\bGITHUB_(?:EVENT_NAME|EVENT_PATH|BASE_REF|HEAD_REF|REF_NAME|REF)\b")
 
-    Dynamic job/step conditions and reusable workflows are unknown, not proof of
-    duplicated work. Any build-cache restore or affected-only signal clears the
-    candidate; dependency setup caches alone do not cache the test/build outputs.
+
+def _opt98_text(value: Any) -> str:
+    if value is None:
+        return ''
+    if isinstance(value, (str, int, float, bool)):
+        return str(value)
+    # YAML yields dates and non-string keys; text only feeds regex searches.
+    return json.dumps(value, default=str)
+
+
+def _opt98_mapping(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise TypeError('mapping expected')
+    return value
+
+
+def _opt98_static_scope(doc: dict[str, Any]) -> tuple[str, list[str], str]:
+    """(status, jobs, reason) for one workflow, statically.
+
+    status: 'none' (no merge_group trigger), 'queue_only' (merge_group without
+    pull_request: nothing is re-proven), 'scoped' (affected-only execution or a
+    build/remote cache restore somewhere), 'unknown' (work could differ between
+    the two events, or lives where it isn't read; `reason` names it) or 'full'
+    (the same jobs run on both events, unscoped). Expressions in places that
+    don't select work (names, concurrency, runner labels, secrets) don't count.
+    Package scripts and third-party actions are not read; the measured
+    queue/PR ratio is the second proof. Raises on a malformed document.
     """
-    events = doc.get('on', doc.get(True, {}))
-    if not isinstance(events, (dict, list)) or not {'pull_request', 'merge_group'} <= set(events):
-        return []
-    jobs = doc.get('jobs') or {}
+    events = _wf_on(doc)
+    if not isinstance(events, (str, dict, list)):
+        raise ValueError('unreadable workflow triggers')
+    if not _on_has_event(events, 'merge_group'):
+        return 'none', [], ''
+    if not _on_has_event(events, 'pull_request'):
+        return 'queue_only', [], ''
+    jobs = doc.get('jobs')
     if not isinstance(jobs, dict) or not jobs:
-        return []
-    if _re.search(r'\$\{\{|\bGITHUB_EVENT(?:_NAME|_PATH)?\b', json.dumps(doc)):
-        return []
-    for job in jobs.values():
-        if not isinstance(job, dict) or job.get('if') is not None or job.get('uses'):
-            return []
+        raise ValueError('unreadable jobs')
+    wf_env = _opt98_mapping(doc.get('env'))
+    unknown: list[str] = []
+    if _OPT98_SCOPED_RE.search(_opt98_text(wf_env)):
+        return 'scoped', [], 'workflow env'
+    if _OPT98_EVENT_RE.search(_opt98_text(list(wf_env.values()))):
+        unknown.append('event-dependent workflow env')
+    for jid, job in jobs.items():
+        if not isinstance(job, dict):
+            raise ValueError('unreadable job')
+        if job.get('uses'):
+            unknown.append(f'job `{jid}` calls a reusable workflow')
+            continue
+        job_env = _opt98_mapping(job.get('env'))
+        cond = _opt98_text(job.get('if'))
+        if _OPT98_EVENT_RE.search(cond):
+            unknown.append(f'event-dependent condition on job `{jid}`')
+        elif 'needs.' in cond:
+            unknown.append(f"job `{jid}` runs only on another job's output")
+        strategy = _opt98_text(job.get('strategy'))
+        if '${{' in strategy and (_OPT98_EVENT_RE.search(strategy) or _re.search(r'needs\.|fromJSON', strategy, _re.I)):
+            unknown.append(f'generated matrix on job `{jid}`')
+        if _OPT98_SCOPED_RE.search(_opt98_text(job_env)):
+            return 'scoped', [], f'job `{jid}` env'
+        work = [_opt98_text(list(job_env.values()))]
         for step in job.get('steps') or []:
-            if not isinstance(step, dict) or step.get('if') is not None or 'parallel' in step or step.get('background'):
-                return []
-            if any(str(k).upper() in ('TURBO_TOKEN', 'NX_CLOUD_ACCESS_TOKEN', 'NX_CLOUD_AUTH_TOKEN') for k in (step.get('env') or {})):
-                return []
-            action = str(step.get('uses', '')).split('@')[0].lower()
-            run = str(step.get('run', ''))
-            if action and action not in ('actions/checkout', 'actions/setup-node',
-                    'actions/setup-python', 'actions/setup-go', 'actions/setup-java',
-                    'actions/setup-dotnet', 'actions/setup-ruby'):
-                return []
-            if run and (not _re.match(r'^(?:python3? -m pytest|pytest|go test|cargo test|dotnet test|ctest|rspec|jest|vitest)(?:\s|$)', run.strip())
-                        or _re.search(r'[;&|`$\\\n]', run)):
-                return []
-            if action in ('actions/cache', 'actions/cache/restore') or any(
-                    token in action for token in ('cache', 'nx-set-shas')):
-                return []
-            if _re.search(r'\bnx\s+affected\b|\bturbo\b[^\n]*(?:--filter|--affected)|\bvitest\b[^\n]*--changed|--remote[-_]cache|TURBO_TOKEN|NX_CLOUD', run, _re.I):
-                return []
-        env = {**(doc.get('env') or {}), **(job.get('env') or {})}
-        if any(str(k).upper() in ('TURBO_TOKEN', 'NX_CLOUD_ACCESS_TOKEN', 'NX_CLOUD_AUTH_TOKEN') for k in env):
-            return []
-    return sorted(str(k) for k in jobs)
+            if not isinstance(step, dict) or not ('run' in step or 'uses' in step):
+                unknown.append(f'unrecognized step shape in job `{jid}`')
+                continue
+            action = str(step.get('uses') or '').split('@')[0].strip()
+            with_ = _opt98_mapping(step.get('with'))
+            step_env = _opt98_mapping(step.get('env'))
+            run = _opt98_text(step.get('run'))
+            if action.startswith('./'):
+                unknown.append(f'job `{jid}` uses local action `{action}`, not read')
+            if action.lower() in ('actions/cache', 'actions/cache/restore'):
+                paths = with_.get('path')
+                lines = [ln.strip() for ln in (paths if isinstance(paths, list) else str(paths or '').splitlines())
+                         if str(ln).strip()]
+                if not lines or not all(_OPT98_DEP_CACHE_RE.search(str(ln)) for ln in lines):
+                    return 'scoped', [], f'job `{jid}` restores a build cache'
+            elif action and _OPT98_SCOPED_ACTION_RE.search(action):
+                return 'scoped', [], f'job `{jid}` uses `{action}`'
+            if _OPT98_SCOPED_RE.search(' '.join((run, _opt98_text(with_), _opt98_text(step_env)))):
+                return 'scoped', [], f'job `{jid}` scopes or caches its work'
+            if _OPT98_EVENT_RE.search(_opt98_text(step.get('if'))):
+                unknown.append(f'event-dependent condition on job `{jid}`')
+            inputs = '' if action.lower() == 'actions/checkout' else _opt98_text(with_)
+            work.append(' '.join((run, inputs, _opt98_text(list(step_env.values())))))
+        if _OPT98_EVENT_RE.search(' '.join(work)):
+            unknown.append(f'event-dependent command or input in job `{jid}`')
+    if unknown:
+        return 'unknown', [], '; '.join(dict.fromkeys(unknown))
+    return 'full', sorted(str(k) for k in jobs), ''
+
+
+def _opt98_full_suite(doc: dict[str, Any]) -> list[str]:
+    """The jobs a workflow runs unscoped on both pull_request and merge_group, or []."""
+    status, jobs, _reason = _opt98_static_scope(doc)
+    return jobs if status == 'full' else []
 
 
 def _opt98_merge_volume(client: 'GhClient', repo: str, since: str,
@@ -7709,54 +7800,145 @@ def _opt98_merge_volume(client: 'GhClient', repo: str, since: str,
                                   if isinstance(row, dict) and isinstance(row.get('number'), int)]}
 
 
+def _opt98_rebase_churn(client: 'GhClient', repo: str, numbers: list[Any]) -> dict[str, Any]:
+    """How many sampled merged PRs were brought up to date after opening.
+
+    One timeline page per PR, at most `_OPT98_CHURN_SAMPLE` PRs. A two-parent
+    commit is the base merged in (GitHub's "Update branch"); a head force-push is
+    a rebase (or an amend). Run pages can't answer this: GitHub empties a run's
+    `pull_requests[]` once the PR merges (forks never carry it), and its base SHA
+    is the base NOW, not at run time. A timeline over one page is read to its
+    first page, so the count is a lower bound.
+    """
+    sample = [n for n in numbers if isinstance(n, int)][:_OPT98_CHURN_SAMPLE]
+    out = {'sampled': 0, 'unreadable': 0, 'merged_base': 0, 'force_pushed': 0,
+           'updated': 0, 'truncated': 0}
+    for number in sample:
+        events = client.json(f'repos/{repo}/issues/{number}/timeline?per_page=100', allow_missing=True)
+        if not isinstance(events, list):
+            out['unreadable'] += 1
+            continue
+        out['sampled'] += 1
+        out['truncated'] += len(events) >= 100
+        rows = [e for e in events if isinstance(e, dict)]
+        merged = any(e.get('event') == 'committed' and len(e.get('parents') or []) > 1 for e in rows)
+        forced = any(e.get('event') == 'head_ref_force_pushed' for e in rows)
+        out['merged_base'] += merged
+        out['force_pushed'] += forced
+        out['updated'] += merged or forced
+    if not out['sampled']:
+        out['reason'] = 'no merged PR timeline was readable' if sample else 'no merged PR identities'
+    return out
+
+
+def _opt98_queue_runs(runs_by_workflow: dict[str, Any]) -> list[str]:
+    """Workflows with a cached merge_group run: a queue exists even when its
+    workflow file was not sampled or the ruleset was not readable."""
+    return sorted(str(path) for path, runs in (runs_by_workflow or {}).items()
+                  if any(isinstance(r, dict) and r.get('event') == 'merge_group' for r in runs or []))
+
+
+def _opt98_collect_volume(client: 'GhClient', repo: str, branch: str | None,
+                          rules: dict[str, Any], wf_docs: dict[str, Any],
+                          runs_by_workflow: dict[str, Any], created_before: str | None
+                          ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """(volume, churn) for the up-to-date case, paid for only when it can fire.
+
+    A readable strict rule with no visible queue (ruleset, workflow trigger or
+    cached merge_group run) buys one merged-PR search over the 30 complete UTC
+    days before the pin; at 30 merges a day or more, at most 30 timeline reads.
+    """
+    if not (rules.get('strict') is True and rules.get('complete') is True
+            and not rules.get('merge_queue') and not _opt82_merge_group_workflows(wf_docs)
+            and not _opt98_queue_runs(runs_by_workflow)):
+        return {}, None
+    end = _parse_dt(_normalize_pin(created_before)) if created_before else _unpinned_now()
+    if end is None:
+        return {'reason': 'merged PR window not readable: the date pin did not parse'}, None
+    until = (end - _dt.timedelta(days=1)).date()
+    since = until - _dt.timedelta(days=_OPT98_WINDOW_DAYS - 1)
+    volume = _opt98_merge_volume(client, repo, str(since), str(until), branch=branch)
+    churn = None
+    if volume.get('merges_per_day', 0) >= _OPT98_MIN_MERGES_PER_DAY:
+        churn = _opt98_rebase_churn(client, repo, volume.get('sampled_merged_prs') or [])
+    return volume, churn
+
+
+def _opt98_churn_sentence(churn: dict[str, Any] | None) -> tuple[str, float | None]:
+    if not churn or not churn.get('sampled'):
+        reason = (churn or {}).get('reason', 'merged PR timelines were not read')
+        return f'Rebase-churn share not measured: {reason}.', None
+    n, updated = churn['sampled'], churn['updated']
+    share = updated / n
+    text = (f"{updated} of {n} sampled merged PRs ({share:.0%}) were brought up to date after opening "
+            f"({churn['merged_base']} merged the base branch in, {churn['force_pushed']} force-pushed; "
+            "a force-push can also be an amend); each update re-runs required CI.")
+    if churn.get('unreadable'):
+        text += f" {churn['unreadable']} timeline(s) not readable."
+    if churn.get('truncated'):
+        text += f" {churn['truncated']} timeline(s) longer than one page: a lower bound."
+    return text, share
+
+
 def _detect_opt98_merge_queue(*, workflows: dict[str, Any],
                              runs_by_workflow: dict[str, Any],
                              branch_rules: dict[str, Any], volume: dict[str, Any],
-                             start_id: int) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Report two independent, uncredited causes of repeated merge validation."""
-    info: dict[str, Any] = {'status': 'measured'}
+                             start_id: int, churn: dict[str, Any] | None = None,
+                             ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Report two independent, uncredited causes of repeated merge validation.
+
+    `info` carries every reason a case was not settled; `info['status']` is
+    'measured' (nothing withheld), 'partial' or 'not_measured' (nothing settled).
+    """
+    info: dict[str, Any] = {}
     findings: list[dict[str, Any]] = []
     readable = branch_rules.get('complete') is True and isinstance(branch_rules.get('strict'), bool)
     if not readable:
         info['branch_rule'] = 'branch rule not readable'
     if volume.get('reason'):
         info['merged_prs'] = volume['reason']
-    queue_workflows, candidates = [], {}
+    queue_workflows: list[str] = []
+    static: dict[str, tuple[str, list[str], str]] = {}
     for path, doc in workflows.items():
         try:
-            events = doc.get('on', doc.get(True, {})) or {}
-            if not isinstance(events, (str, dict, list)):
-                raise ValueError('unreadable workflow triggers')
-            if 'merge_group' in events:
-                queue_workflows.append(path)
-            candidates[path] = _opt98_full_suite(doc)
+            if not isinstance(doc, dict):
+                raise ValueError('unreadable workflow')
+            static[path] = _opt98_static_scope(doc)
         except (TypeError, AttributeError, ValueError):
             info.setdefault('unreadable_workflows', []).append(path)
-    if (readable and branch_rules['strict'] and not branch_rules.get('merge_queue')
-            and not queue_workflows and not info.get('unreadable_workflows')
-            and volume.get('merges_per_day', 0) >= 30):
-        identities = set(volume.get('sampled_merged_prs') or [])
-        bases: dict[int, set[str]] = {}
-        for runs in runs_by_workflow.values():
-            for run in runs or []:
-                if run.get('event') != 'pull_request':
-                    continue
-                for pr in run.get('pull_requests') or []:
-                    if pr.get('number') in identities and (pr.get('base') or {}).get('sha'):
-                        bases.setdefault(pr['number'], set()).add(pr['base']['sha'])
-        share = sum(len(v) > 1 for v in bases.values()) / len(identities) if identities else None
-        evidence = f"Require up to date is enabled without a merge queue; {volume['merges_per_day']:.1f} merged PRs/day. "
-        evidence += (f"Different-base CI re-runs observed on {share:.1%} of {len(identities)} sampled merged PRs (a lower bound from sampled runs)."
-                     if share is not None else 'Rebase-churn share not measured: no merged PR identities.')
+            continue
+        if static[path][0] != 'none':
+            queue_workflows.append(path)
+    queue_present = bool(branch_rules.get('merge_queue') or queue_workflows
+                         or _opt98_queue_runs(runs_by_workflow))
+    c1_settled = False
+    if readable and (not branch_rules['strict'] or queue_present):
+        c1_settled = True
+    elif readable and not info.get('unreadable_workflows'):
+        if 'merges_per_day' not in volume:
+            info.setdefault('merged_prs', 'merged PR count not fetched')
+        else:
+            c1_settled = True
+    if c1_settled and branch_rules['strict'] and not queue_present \
+            and volume['merges_per_day'] >= _OPT98_MIN_MERGES_PER_DAY:
+        churn_text, share = _opt98_churn_sentence(churn)
+        evidence = (f"Require up to date is enabled without a merge queue; {volume['merges_per_day']:.1f} "
+                    f"merged PRs/day over {volume.get('window_days', _OPT98_WINDOW_DAYS)} days. {churn_text}")
         f = _new_finding('OPT98', 'MEDIUM', 'Up-to-date rule repeats validation at high volume',
                          '', '', evidence, 'merge-queue-reproving',
                          'opt98--the-merge-queue-re-proves-what-is-already-proven', start_id + 1,
                          size_note='Uncredited: rebase churn is observed, not a modeled saving.')
         f['sizing_basis'] = 'measured'
-        f['merge_queue'] = {'case': 'strict', **volume, 'rebase_churn_share': share}
+        f['merge_queue'] = {'case': 'strict', **volume, 'rebase_churn_share': share,
+                            'churn': dict(churn or {})}
         findings.append(f)
-    for path, jobs in candidates.items():
-        if not jobs:
+    c2_settled = False
+    for path, (status, jobs, reason) in static.items():
+        if status == 'unknown':
+            info.setdefault('static_unknown', []).append(f'{path} ({reason})')
+            continue
+        if status != 'full':
+            c2_settled = c2_settled or status in ('scoped', 'queue_only')
             continue
         durations: dict[str, list[float]] = {'pull_request': [], 'merge_group': []}
         for run in runs_by_workflow.get(path) or []:
@@ -7766,23 +7948,46 @@ def _detect_opt98_merge_queue(*, workflows: dict[str, Any],
             start, end = _parse_dt(run.get('run_started_at')), _parse_dt(run.get('updated_at'))
             if start is not None and end is not None and end > start:
                 durations[event].append((end - start).total_seconds())
-        if not all(durations.values()):
+        n_pr, n_queue = len(durations['pull_request']), len(durations['merge_group'])
+        if not n_pr or not n_queue:
             info.setdefault('unmeasured_workflows', []).append(path)
             continue
-        pr, queue = (_percentile(durations[k], 50) for k in ('pull_request', 'merge_group'))
-        if queue < .8 * pr:
+        if min(n_pr, n_queue) < _OPT98_MIN_RUNS:
+            info.setdefault('thin_samples', []).append(
+                f'{path} (queue {n_queue} and PR {n_pr} successful first-attempt runs; '
+                f'{_OPT98_MIN_RUNS} each needed)')
             continue
-        evidence = (f'The same unconditional suite runs for pull_request and merge_group without affected-only execution or a build-cache restore; '
-                    f'queue median {queue:.1f}s ({len(durations["merge_group"])} runs), PR median {pr:.1f}s ({len(durations["pull_request"])} runs).')
+        c2_settled = True
+        pr, queue = (_percentile(durations[k], 50) for k in ('pull_request', 'merge_group'))
+        ratio = queue / pr
+        if ratio < _OPT98_REPROVE_RATIO:
+            continue
+        if ratio > _OPT98_DIFFERENT_RATIO:
+            info.setdefault('pr_runs_differ', []).append(
+                f'{path} (queue median {queue:.0f}s is {ratio:.1f}x the PR median {pr:.0f}s)')
+            continue
+        job_list = ', '.join(f'`{j}`' for j in jobs)
+        evidence = (f'`{path}` runs the same jobs {job_list} for pull_request and merge_group without '
+                    'affected-only execution or a build-cache restore; '
+                    f'queue median {queue:.1f}s ({n_queue} runs), PR median {pr:.1f}s ({n_pr} runs). '
+                    'Package scripts and third-party actions were not read; the matching medians are the measured proof.')
         f = _new_finding('OPT98', 'MEDIUM', 'The merge queue re-proves the full suite', path, '', evidence,
                          'merge-queue-reproving', 'opt98--the-merge-queue-re-proves-what-is-already-proven',
                          start_id + len(findings) + 1, size_note='Uncredited: affected-only savings are not modeled.')
         f['sizing_basis'] = 'measured'
-        f['affected_jobs'] = jobs
+        f['affected_jobs'] = list(jobs)
         f['merge_queue'] = {'case': 'reproving', 'queue_median_s': queue, 'pr_median_s': pr,
-                            'queue_samples': len(durations['merge_group']), 'pr_samples': len(durations['pull_request'])}
+                            'queue_samples': n_queue, 'pr_samples': n_pr}
         f['guardrail'] = 'Keep every required check on the merged result; never drop checks. Scope relative to the queue base with full fallback on resolution errors.'
         findings.append(f)
+    pending = any(info.get(k) for k in ('branch_rule', 'merged_prs', 'unreadable_workflows',
+                                        'static_unknown', 'unmeasured_workflows', 'thin_samples'))
+    if not pending:
+        info['status'] = 'measured'
+    elif c1_settled or c2_settled:
+        info['status'] = 'partial'
+    else:
+        info['status'] = 'not_measured'
     return findings, info
 
 
@@ -26590,18 +26795,14 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             "workflow returned content")
 
     next_id = max((int(f["id"][1:]) for f in findings if f.get("id", "").startswith("f") and f["id"][1:].isdigit()), default=0)
-    # OPT98 reuses the rule reader and cached run pages. Only strict/no-queue
-    # candidates pay for one bounded merged-PR count query.
-    _opt98_volume: dict[str, Any] = {}
-    if _opt98_rules.get("strict") and _opt98_rules.get("complete") and not _opt98_rules.get("merge_queue") and not _opt82_merge_group_workflows(_wf_docs):
-        _opt98_end = (_parse_dt(created_before) if created_before else _unpinned_now())
-        if _opt98_end is not None:
-            _opt98_until = (_opt98_end - _dt.timedelta(days=1)).date()
-            _opt98_since = _opt98_until - _dt.timedelta(days=29)
-            _opt98_volume = _opt98_merge_volume(client, repo, str(_opt98_since), str(_opt98_until), branch=default_branch)
+    # OPT98 reuses the rule reader and cached run pages. Only a readable strict
+    # rule with no visible queue pays for one merged-PR count (and, at volume,
+    # at most 30 merged-PR timelines for the rebase-churn share).
+    _opt98_volume, _opt98_churn = _opt98_collect_volume(
+        client, repo, default_branch, _opt98_rules, _wf_docs, all_status_runs_by_wf, created_before)
     _opt98_new, _opt98_info = _detect_opt98_merge_queue(
         workflows=_wf_docs, runs_by_workflow=all_status_runs_by_wf,
-        branch_rules=_opt98_rules, volume=_opt98_volume, start_id=next_id)
+        branch_rules=_opt98_rules, volume=_opt98_volume, start_id=next_id, churn=_opt98_churn)
     findings.extend(_opt98_new)
     next_id += len(_opt98_new)
     # (workflow_file, job) pairs OPT81 A1 saw on two or more runner labels.
