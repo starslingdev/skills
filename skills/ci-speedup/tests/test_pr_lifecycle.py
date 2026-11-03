@@ -457,6 +457,12 @@ def test_estimate_ignores_checks_that_completed_after_the_merge():
         module().measure_pr(pr(extra_contexts=late[:1]), ['test', 'coverage'])
 
 
+def test_estimate_counts_a_check_completing_at_the_merge_second():
+    at_merge = [dict(check(600, 1000, 'FAILURE', name='gate'), __typename='CheckRun')]
+    with pytest.raises(ValueError, match='not green on final commit'):
+        module().measure_pr(pr(extra_contexts=at_merge), None)
+
+
 def test_estimate_leaves_out_a_pr_whose_final_check_failed():
     failed = [dict(check(600, 700, 'FAILURE', name='optional'), __typename='CheckRun')]
     with pytest.raises(ValueError, match='not green on final commit'):
