@@ -17,6 +17,7 @@ This order is also the compiled file's order; contributors see `README.md`.
 - OPT9 — Tool-Specific Cache Flag Not Enabled (HIGH, static) — ESLint, Jest, tsc cache flags off
 - OPT79 — A Cache That Costs More Than It Saves (MEDIUM, data-driven) — cache restore slower than the install
 - OPT93 — NuGet Restores to a Slower Disk on Windows Runners (MEDIUM, data-driven) — measured cache placement on Windows
+- OPT96 — Cache Never Saved on the Default Branch (MEDIUM, static) — PR caches lack a reachable default-branch save
 ## Category 2 — Redundancy
 - OPT11 — Redundant Environment Variables (LOW, static) — same env var at two levels
 - OPT12 — Duplicated Setup Across Jobs (MEDIUM, static) — copy-pasted setup steps

@@ -13,6 +13,8 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-11-02** — Add OPT96 for dependency caches restored on PRs without a reachable default-branch save. Correlate cache families and reusable workflows, confirm misses through the existing bounded push probe, and credit measured hit/miss install differences only within workflow and cross-workflow floors. The catalog now contains 92 patterns. The optional OPT70 scoping detector remains deferred.
+
 - **2026-11-02** — Wall-clock report headlines name the next gate from their existing floor evidence, disclose when it is unavailable, and include a fixed push-wide verification protocol. The report verifier requires both blocks and rejects a named next gate or duration that no saved check or stamped floor bound supports, and the phase-7 plan uses first-job-created to last-job-finished across all triggered workflows. (#174)
 
 - **2026-10-27** — Windows OPT72 cards can point to the manual NuGet cache-placement or isolated .NET SDK benchmark when their measured dominant step matches. Routing and sizing are unchanged; the report verifier rejects misplaced or unsupported pointers, with failures registered for maintainer triage.

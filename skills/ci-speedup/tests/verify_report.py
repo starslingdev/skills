@@ -13241,6 +13241,7 @@ def check_structural_step_category_not_payload_binned_as_build(findings_path: Pa
 # dominant measured work. The `_VR_LEAF_STEP_CATEGORY` mirror is pinned to the engine map by
 # test_verify_report_self (L7).
 _VR_LEAF_STEP_CATEGORY: dict[str, str] = {
+    "dependency-cache": "install",
     "prisma-migrate-once": "test",
     "vitest-v8-coverage": "test",
     "vitest-isolate-pool": "test",

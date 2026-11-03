@@ -26,8 +26,8 @@ developer's wait. It gets its own prominent section below.
 
 ## 1. Purpose & scope
 
-ci-speedup audits a repository's GitHub Actions workflows against a 91-pattern
-catalog — 80 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93 and OPT94) plus 11 **structural /
+ci-speedup audits a repository's GitHub Actions workflows against a 92-pattern
+catalog — 81 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94 and OPT96) plus 11 **structural /
 critical-path** patterns (OPT70–OPT75, OPT78, OPT83, OPT84, OPT85 and OPT87, routed from the measured long pole; see
 §11) — and produces a **root-cause-analysis** markdown report with **measured**
 impact on two axes: developer wall-clock wait (the ranking axis) and
@@ -2798,7 +2798,7 @@ wired or removed rather than left to become archaeology.
 
 ## 11. The structural / critical-path track
 
-The hygiene/data-driven catalog (OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93 and OPT94) is mostly **declarative** -
+The hygiene/data-driven catalog (OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94 and OPT96) is mostly **declarative** -
 static findings are locally-checkable YAML defects, while measured Tier-2 rows
 come from run history. Its blind spot: on real repos the merge is
 gated by a check that is *working as intended* and simply slow, with no
@@ -3859,7 +3859,7 @@ cross-run-check locator phrase must co-occur with the section marker in the same
 
 A cache-miss finding is born from ONE drilled run's log, and the drilled run is deliberately the
 slow-mode representative — so its miss rate is NOT evidence the cache is a broad wall-clock lever.
-For a cache leaf (`turbo-*`, `buildx-no-cache`, `install-lifecycle-build`), `_cache_distribution`
+For a cache leaf (`turbo-*`, `buildx-no-cache`, `install-lifecycle-build`, `dependency-cache`), `_cache_distribution`
 stamps a per-pole **`cache_dist`** onto `pr_critical_path.poles[]`: the miss rate across the sampled
 runs, split PR vs push, with fork PRs excluded from the upstream median (a fork PR gets no repo
 secrets, so a secrets-gated remote cache is unreachable to it, and it cannot restore an upstream
@@ -4090,7 +4090,7 @@ order of preference:
 - [`SKILL.md`](SKILL.md) - the canonical contract (phases, admission gate,
   quality review).
 - [`references/patterns/INDEX.md`](references/patterns/INDEX.md) -
-  the 91-pattern catalog, one file per pattern (frontmatter + body); the source
+  the 92-pattern catalog, one file per pattern (frontmatter + body); the source
   of truth for detection and the report's TL;DR / pattern background. The
   single-file [`references/optimization-patterns.md`](references/optimization-patterns.md)
   is compiled from `references/patterns/` by
@@ -4105,3 +4105,17 @@ order of preference:
 - `maintainers/ci-speedup/MAINTAINERS.md` + `maintainers/ci-speedup/loops/gap-to-catalog-prompt.md`
   (maintainer-only, not shipped in an installed skill — source checkout only) -
   the gap → catalog loop (auto-draft a detector when the LLM fallback fires; §12.7).
+
+### Default-branch dependency-cache seeding (OPT96)
+
+The static pass correlates PR restore families with default-branch save points,
+including local reusable callers. Unknown conditions remain reachable; unresolved
+calls disclose incomplete coverage rather than inventing an absent writer.
+The dependency-cache leaf reads restore outcomes using the existing magnitude
+sample and bounded push probe. Only a matching static finding can promote the
+measured install hit/miss difference, multiplied by upstream PR miss share.
+Multiple cache results and absent hit timings remain uncredited. The leaf itself
+is a secondary observation, never the entire install-step ceiling. Credited rows
+pass the within-workflow cap and the existing cross-workflow cascade; below-tail
+or unconfirmed rows retain “check this” wording. No additional probe budget is
+introduced.

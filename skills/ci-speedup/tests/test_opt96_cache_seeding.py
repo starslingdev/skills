@@ -206,3 +206,51 @@ def test_saved_runs_dependency_cache_grounding_and_sizing(tmp_path, misses):
         assert cd["recommendation"] == "check this"
     else:
         assert cd["confirmed"] is True
+
+
+def test_quoted_false_does_not_disable_a_save(tmp_path):
+    write_workflow(tmp_path, 'ci.yml', RESTORE)
+    write_workflow(tmp_path, 'warm.yml', SAVE.replace('          path:', '          lookup-only: "false"\n          path:'))
+    assert not findings(tmp_path)
+
+
+@pytest.mark.parametrize('condition', ['false', "github.event_name == 'push' && github.ref != 'refs/heads/main'"])
+def test_literal_false_or_compound_branch_exclusion_is_not_a_writer(tmp_path, condition):
+    write_workflow(tmp_path, 'ci.yml', RESTORE)
+    write_workflow(tmp_path, 'warm.yml', SAVE.replace('      - uses:', f'      - if: {condition}\n        uses:'))
+    # Resolve the default branch explicitly, so master is not a fallback.
+    import scan
+    doc = scan.scan(tmp_path, SCRIPTS.parent / 'references/patterns', default_branch='main')
+    assert any(f['pattern'] == 'OPT96' for f in doc['findings'])
+
+
+def test_dependency_measurement_does_not_credit_multiple_cache_results():
+    state = bp._cache_state_of_log('Cache not found for input keys: a\nCache not found for input keys: b', 'dependency-cache')
+    samples = [{'cache_state': state, 'install_steps': {'Install': 100}},
+               {'cache_state': {'miss_pct': 0, 'restore_count': 1}, 'install_steps': {'Install': 20}}]
+    assert not cr._dependency_cache_sizing(samples, .5)['credited']
+
+
+def test_dependency_leaf_never_claims_whole_install_ceiling():
+    leaf = bp._parse_log('Cache not found for input keys: deps')
+    pole = {'dominant_category': 'install', 'dominant_step': 'Install dependencies'}
+    crown, observation = bp._demote_offcategory_leaf(leaf, pole)
+    assert crown is None
+    assert observation['fix_key'] == 'dependency-cache'
+
+
+def test_static_pr_only_reachability_can_confirm_without_push_samples():
+    f = {'pattern': 'OPT96', 'workflow_file': 'ci.yml', 'affected_jobs': ['test']}
+    cd = {'fix_key': 'dependency-cache', 'confirmed': False, 'push': None,
+          'push_reason': 'no push runs sampled for this workflow',
+          'pr': {'upstream_n': 8, 'upstream_median': 100},
+          'sizing': {'credited': True, 'step': 'Install', 'miss_time_s': 100, 'saving_s': 60, 'miss_share': .75}}
+    cr._ground_opt96([f], [{'workflow_file': 'ci.yml', 'job': 'test', 'cache_dist': cd}])
+    assert f['wall_clock_p50_s'] == 60
+
+
+def test_schedule_does_not_override_a_literal_push_exclusion(tmp_path):
+    write_workflow(tmp_path, 'ci.yml', RESTORE)
+    warmer = SAVE.replace('{push: {branches: [main]}}', "{schedule: [{cron: '0 0 * * *'}]}")
+    write_workflow(tmp_path, 'warm.yml', warmer.replace('      - uses:', "      - if: github.event_name != 'push'\n        uses:"))
+    assert findings(tmp_path)

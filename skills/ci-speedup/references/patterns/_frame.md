@@ -39,7 +39,7 @@ Checkout · 6. Conditional Execution · 7. Trigger and Scope · 8. Release Workf
 12. Build Caching (Language-Agnostic) · 13. Hidden Failures and Dead Config ·
 14. Structural / Critical-Path Levers
 
-- **Category 1 — Caching** (`OPT1`–): tool installs, build/test caches, dynamic cache keys, and the one pattern pointed the other way — a cache measured to cost more than it saves (`OPT79`), NuGet restores placed on a slower Windows disk (`OPT93`).
+- **Category 1 — Caching** (`OPT1`–): tool installs, build/test caches, dynamic cache keys, and the one pattern pointed the other way — a cache measured to cost more than it saves (`OPT79`), NuGet restores placed on a slower Windows disk (`OPT93`), caches never saved on the default branch (`OPT96`).
 - **Category 2 — Redundancy**: duplicate env, repeated setup sequences, redundant build steps, repeated fixed setup across independent small jobs (`OPT77`).
 - **Category 3 — Docker**: sleep-based readiness, over-broad `compose up`.
 - **Category 4 — Parallelization**: needless `needs:` serialization, unsharded long jobs, a test worker count nobody measured (`OPT88`), the slowest platform compiling its own tests (`OPT89`).
@@ -109,7 +109,7 @@ the id for the `vitest-isolate-pool` leaf, and is not part of the static scan.)
 ## Category 14: Structural / Critical-Path Levers
 
 These patterns are a **different class** from everything above. The catalog
-patterns OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93 and OPT94 are *hygiene*: each is a named,
+patterns OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94 and OPT96 are *hygiene*: each is a named,
 locally-checkable defect with
 a mechanical, low-risk fix, detected by matching workflow YAML against the
 catalog. OPT81, like OPT79 and OPT80, is derived from run history rather than matched against YAML, and its A2 advisory is risk MEDIUM. On real repos almost every hygiene hit moves **~0 developer

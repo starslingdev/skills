@@ -1468,7 +1468,7 @@ _EXPLICIT_BUILD_RE = re.compile(
 # distribution). Mirror of `collect_runs._CACHE_LEAF_KEYS` (kept coupled by a self-test).
 _CACHE_LEAF_KEYS = frozenset({
     "turbo-remote-cache", "turbo-partial-cache", "buildx-no-cache",
-    "install-lifecycle-build",
+    "install-lifecycle-build", "dependency-cache",
 })
 
 
@@ -1560,6 +1560,15 @@ def _cache_state_of_log(text: str | None, fix_key: str | None) -> dict[str, Any]
         return None
     lines = _clean_log(text)
     joined = "\n".join(lines)
+    if fix_key == "dependency-cache":
+        misses = sum("Cache not found for input keys" in line for line in lines)
+        hits = sum("Cache restored from key" in line for line in lines)
+        if not hits + misses:
+            return None
+        return {"miss_pct": 100.0 * misses / (hits + misses),
+                "cold": hits == 0, "remote_off": False, "restore_count": hits + misses,
+                "saved": any("Cache saved successfully" in line or "Cache saved with key" in line
+                             for line in lines)}
     if fix_key in ("turbo-remote-cache", "turbo-partial-cache", "install-lifecycle-build"):
         # For the install-lifecycle leaf, measure the miss rate from the SAME install-step section
         # `_parse_log`'s detector fired on — NOT the whole log. Otherwise a later explicit
@@ -2456,6 +2465,18 @@ def _parse_log(text: str,
             "evidence": ev,
             "search": [":test", "BUILD SUCCESSFUL in", "maxParallelForks"],
         }
+    dependency_state = _cache_state_of_log(text, "dependency-cache")
+    if dependency_state:
+        return {
+            "fix_key": "dependency-cache",
+            "unit_label": "dependency cache restore results",
+            "magnitude": {"label": "dependency cache misses", "unit": "%",
+                          "value": dependency_state["miss_pct"]},
+            "deeper": [],
+            "evidence": [line for line in lines if "Cache not found for input keys" in line
+                         or "Cache restored from key" in line][:3],
+            "search": ["Cache not found for input keys", "Cache restored from key"],
+        }
     return None
 
 
@@ -2513,6 +2534,20 @@ _NO_WEAKENING_LINES = [
 
 
 _FIX_META: dict[str, dict[str, Any]] = {
+    "dependency-cache": {
+        "cause": "Dependency cache restores miss in sampled runs. Check the cross-run "
+                 "distribution and whether the same cache is saved on the default branch.",
+        "look": "Correlate the PR restore key with default-branch save points and compare "
+                "the same install step on cache hits and misses.",
+        "constraints": "A miss alone does not prove missing default-branch seeding. Require "
+                       "the static reachability finding and measured confirmation. Keep the "
+                       "lockfile hash and identical key template; check cache overhead first.",
+        "docs": ["GitHub cache access restrictions: "
+                 "https://docs.github.com/en/actions/using-workflows/caching-dependencies-to-speed-up-workflows#restrictions-for-accessing-a-cache"],
+        "deliver": "Seed the same cache from an existing default-branch workflow, or a small "
+                   "install-only warmer if appropriate. Verify a fresh PR restores it. "
+                   "Without a timed hit sample, report the miss time without a saving number.",
+    },
     "prisma-migrate-once": {
         "cause": "Most of each test file's wall time is repeated schema rebuilds, not "
                  "test work: the job re-applies the full Prisma schema once per test "
@@ -4803,6 +4838,11 @@ def _apply_cache_dist(leaf: dict[str, Any] | None,
         return leaf
     if leaf.get("fix_key") not in _CACHE_LEAF_KEYS:
         return leaf
+    if leaf.get("fix_key") == "dependency-cache":
+        recommendation = (cache_dist.get("recommendation", "check this")
+                          if cache_dist.get("static_confirmed") else "check this")
+        leaf["unit_label"] = "dependency cache: " + recommendation
+        return leaf
     verdict = cache_dist.get("verdict")
     deeper = leaf.get("deeper") or []
     if verdict in ("cold", "churn"):
@@ -4937,6 +4977,7 @@ def _cache_health_block(cache_dist: dict[str, Any] | None) -> list[str]:
 # fix_key -> the `collect_runs._step_category` bin the leaf's fix addresses. Kept coupled to
 # the engine taxonomy AND verify_report's mirror by test_verify_report_self.
 _LEAF_STEP_CATEGORY: dict[str, str] = {
+    "dependency-cache": "install",
     "prisma-migrate-once": "test",
     "vitest-v8-coverage": "test",
     "vitest-isolate-pool": "test",
@@ -5005,6 +5046,10 @@ def _demote_offcategory_leaf(
     """Split a crowning leaf from a DEMOTED one. `(leaf, None)` keeps the crown; `(None,
     leaf)` when `_offcategory_leaf` fires — the caller renders the second element as a
     secondary observation instead of the pole's MEASURED CAUSE."""
+    # Dependency restore outcomes are distribution evidence, never a license
+    # to claim the entire install ceiling. OPT96 owns its separately sized row.
+    if leaf is not None and leaf.get("fix_key") == "dependency-cache":
+        return None, leaf
     if leaf is not None and _offcategory_leaf(leaf, pole):
         return None, leaf
     return leaf, None
@@ -5043,6 +5088,11 @@ def _offcategory_note_block(leaf: dict[str, Any], pole: dict[str, Any]) -> list[
            "is not crowned as the cause and is not credited the pole's wall-clock ceiling. "
            "Address the dominant step above first, then treat this as a smaller, separate "
            "cleanup."]
+    if fk == "dependency-cache":
+        out[-1] = ("**🔎 Dependency cache — check this.** Restore outcomes alone do not "
+                   "prove missing default-branch seeding. Only a matching OPT96 finding "
+                   "with timed hit and miss samples can claim a saving; this observation "
+                   "does not inherit the install step's wall-clock ceiling.")
     if fk in _HIGH_RISK_LEAVES:
         # A demoted HIGH-risk lever must not read as a low-stakes cleanup: the
         # sentence above would present it as exactly the quick win the catalog forbids.

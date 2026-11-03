@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -2922,7 +2923,7 @@ def _declarative_hits(entry: "CatalogEntry", doc: dict, raw: str):
 # cancellation saves a handful of runner-minutes, not a wall-clock lever — so it
 # should not carry HIGH visual weight.
 _SEVERITY_OVERRIDE: dict[str, str] = {"OPT37": "LOW", "OPT45": "LOW"}
-_NEEDS_LOG_CONFIRMATION: set[str] = {"OPT37"}
+_NEEDS_LOG_CONFIRMATION: set[str] = {"OPT37", "OPT96"}
 
 # Patterns whose remedy is NOT a CI-config change ci-speedup produces — it's a
 # change in a domain the tool doesn't own (here: editing test SOURCE to remove
@@ -2935,7 +2936,7 @@ _ADVISORY_PATTERNS: set[str] = {"OPT19"}
 # Patterns handled by a cross-workflow / repo-file / source-grep pass rather
 # than the per-file dispatch — excluded from `catalog_patterns_without_detector`.
 _NON_PERFILE_PATTERNS: set[str] = {
-    "OPT7", "OPT37", "OPT40",            # cross-workflow
+    "OPT7", "OPT37", "OPT40", "OPT96",   # cross-workflow
     "OPT52", "OPT53", "OPT58", "OPT59", "OPT60",  # turbo.json repo-file
     "OPT19",                              # source-file sleep grep
 }
@@ -5020,7 +5021,147 @@ def _detect_turbo(root: Path, ci_turbo_tasks: set[str] | None = None):
     return out, incomplete
 
 
-def _cross_workflow_hits(parsed: list[tuple[str, dict, str]], root: Path):
+def _opt96_key_family(key: object) -> str:
+    """Keep the stable prefix, ignoring expression-valued platform/hash parts."""
+    value = re.sub(r"\$\{\{.*?\}\}", "", str(key or ""), flags=re.S)
+    return re.sub(r"[-_]+", "-", value).strip("- ")
+
+
+def _opt96_condition_allows(condition: object, event: str, branch: str) -> bool:
+    """Exclude only a fully understood literal. Unknown expressions are reachable."""
+    if condition is False:
+        return False
+    value = str(condition or "").strip()
+    if value.startswith("${{") and value.endswith("}}"):
+        value = value[3:-2].strip()
+    value = value.strip()
+    if value.lower() == "false":
+        return False
+    # An unknown conjunct cannot override a literal exclusion. Disjunctions
+    # remain conservative: an unrecognised alternative might allow this event.
+    if "&&" in value and "||" not in value:
+        return all(_opt96_condition_allows(part.strip().strip("()"), event, branch)
+                   for part in value.split("&&"))
+    match = re.fullmatch(r"github\.(event_name|ref)\s*(==|!=)\s*(['\"])(.*?)\3", value)
+    if not match:
+        return True
+    field, op, _, expected = match.groups()
+    actual = event if field == "event_name" else (
+        "refs/pull/1/merge" if event == "pull_request" else f"refs/heads/{branch}")
+    return (actual == expected) if op == "==" else (actual != expected)
+
+
+def _detect_opt96(parsed: list[tuple[str, dict, str]], root: Path,
+                  default_branch: str | None = None):
+    """Correlate PR readers with reachable default-branch writers, including calls.
+
+    An unresolved call can conceal a writer, so absence is never claimed when
+    one exists. No network access is needed: callers may supply repo metadata.
+    """
+    from fnmatch import fnmatchcase
+
+    branches = [default_branch] if default_branch else ["main", "master"]
+    docs = {rel: (doc, raw) for rel, doc, raw in parsed}
+    graph = _build_workflow_call_graph(parsed)
+    incomplete = []
+    readers = {}
+    writers = set()
+
+    def triggers(doc, event, branch):
+        events = _on_event_names(doc)
+        if event not in events:
+            return False
+        on = doc.get("on", doc.get(True))
+        opts = on.get(event) if isinstance(on, dict) else None
+        if event != "push" or not isinstance(opts, dict):
+            return True
+        if "tags" in opts and "branches" not in opts:
+            return False
+        patterns = opts.get("branches")
+        if isinstance(patterns, list):
+            allowed = False
+            for pattern in patterns:
+                pattern = str(pattern)
+                negative = pattern.startswith("!")
+                if fnmatchcase(branch, pattern.lstrip("!")):
+                    allowed = not negative
+            if not allowed:
+                return False
+        ignored = opts.get("branches-ignore", [])
+        return not any(fnmatchcase(branch, str(p)) for p in ignored)
+
+    def walk(rel, event, branch, stack):
+        if rel in stack:
+            incomplete.append({"path": rel, "reason": "OPT96: reusable workflow cycle"})
+            return
+        doc, raw = docs[rel]
+        condition_event = "pull_request" if event == "pull_request" else "push"
+        for job_id, job in _jobs_from_doc(doc).items():
+            if not isinstance(job, dict) or not _opt96_condition_allows(job.get("if"), condition_event, branch):
+                continue
+            if job.get("uses"):
+                target = str(job["uses"]).split("@", 1)[0]
+                if _is_local_uses(target):
+                    target = target[2:]
+                if target not in graph.get(rel, []) or target not in docs:
+                    incomplete.append({"path": rel, "reason": "OPT96: unresolved reusable workflow; cache saves unknown"})
+                else:
+                    walk(target, event, branch, stack | {rel})
+                continue
+            for step, condition in _steps_with_if(job):
+                if not _opt96_condition_allows(condition, condition_event, branch):
+                    continue
+                action = _uses(step).split("@", 1)[0].lower()
+                inputs = step.get("with") or {}
+                if not isinstance(inputs, dict):
+                    continue
+                restore = save = False
+                if action in {"actions/cache", "actions/cache/restore", "actions/cache/save"}:
+                    restore = action != "actions/cache/save"
+                    save = action != "actions/cache/restore" and str(inputs.get("lookup-only", False)).lower() != "true"
+                    family = _opt96_key_family(inputs.get("key"))
+                    aliases = {_opt96_key_family(k) for k in str(inputs.get("restore-keys", "")).splitlines()}
+                elif action in {"actions/setup-node", "actions/setup-python", "actions/setup-go", "actions/setup-java"}:
+                    cache = inputs.get("cache")
+                    if not cache or str(cache).lower() in {"false", "no", "off"}:
+                        continue
+                    family = f"{action}:{cache}"
+                    aliases = set()
+                    restore = True
+                    save = str(inputs.get("cache-read-only", False)).lower() != "true"
+                else:
+                    continue
+                if not family:
+                    incomplete.append({"path": rel, "reason": "OPT96: cache key has no stable prefix"})
+                    continue
+                if save and event != "pull_request":
+                    writers.add(family)
+                if restore and event == "pull_request":
+                    readers[(rel, str(job_id), family)] = aliases - {""}
+
+    for rel, doc, _ in parsed:
+        for event in ("pull_request", "push", "schedule", "merge_group"):
+            for branch in branches:
+                if triggers(doc, event, branch):
+                    walk(rel, event, branch, set())
+    if incomplete:
+        return [], list({(x["path"], x["reason"]): x for x in incomplete}.values())
+    hits = []
+    for (rel, job, family), aliases in sorted(readers.items()):
+        if any(writer == family or any(writer.startswith(prefix) for prefix in aliases)
+               for writer in writers):
+            continue
+        branch_note = (f"default branch `{default_branch}` from repo metadata" if default_branch
+                       else "default branch name assumed: main/master")
+        hits.append(("OPT96", rel, Hit(
+            line=1, affected_jobs=[job], match_text=family,
+            evidence=f"cache family `{family}` is restored on PRs; no save on push to the default branch, schedule, or merge_group ({branch_note})",
+        )))
+    return hits, []
+
+
+def _cross_workflow_hits(parsed: list[tuple[str, dict, str]], root: Path,
+                         default_branch: str | None = None):
     """Return ``(hits, incomplete)`` aggregated across the cross-workflow /
     repo-file detectors. Only the turbo pass can produce coverage gaps."""
     out = []
@@ -5029,6 +5170,9 @@ def _cross_workflow_hits(parsed: list[tuple[str, dict, str]], root: Path):
     out += _detect_opt40(parsed, root)
     turbo_hits, incomplete = _detect_turbo(root, _ci_turbo_tasks(root, parsed))
     out += turbo_hits
+    cache_hits, cache_incomplete = _detect_opt96(parsed, root, default_branch)
+    out += cache_hits
+    incomplete += cache_incomplete
     return out, incomplete
 
 
@@ -5655,7 +5799,16 @@ def _trigger_conditionality(parsed: list[tuple[str, dict, str]]) -> dict[str, st
     return out
 
 
-def scan(root: Path, catalog_path: Path) -> dict[str, Any]:
+def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> dict[str, Any]:
+    if default_branch is None:
+        try:
+            ref = subprocess.run(
+                ["git", "-C", str(root), "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+                capture_output=True, text=True, timeout=2, check=False)
+            if ref.returncode == 0 and ref.stdout.strip().startswith("origin/"):
+                default_branch = ref.stdout.strip()[len("origin/"):]
+        except (OSError, subprocess.TimeoutExpired):
+            pass
     catalog = load_catalog(catalog_path)
     catalog_by_id = {c.pattern: c for c in catalog}
     static_entries = [c for c in catalog if c.finding_class == "static"]
@@ -5786,7 +5939,7 @@ def scan(root: Path, catalog_path: Path) -> dict[str, Any]:
                 findings.append(f)
 
     # --- Cross-workflow / repo-context pass ---
-    cross_hits, cross_incomplete = _cross_workflow_hits(parsed, root)
+    cross_hits, cross_incomplete = _cross_workflow_hits(parsed, root, default_branch)
     scan_incomplete.extend(cross_incomplete)
     for pat, wf, hit in cross_hits:
         entry = catalog_by_id.get(pat)
@@ -5903,13 +6056,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--skill-commit-sha", default=None)
     p.add_argument("--commit-sha", default=None)
     p.add_argument("--repo", default=None)
+    p.add_argument("--default-branch", default=None,
+                   help="Default branch from repo metadata; otherwise assume main/master.")
     args = p.parse_args(argv)
 
     catalog = args.catalog or (Path(__file__).resolve().parents[1]
                                / "references" / "patterns")
     t0 = time.time()
     try:
-        result = scan(args.root, catalog)
+        result = scan(args.root, catalog, args.default_branch)
     except FileNotFoundError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1

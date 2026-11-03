@@ -62,7 +62,7 @@ from wall_clock import (  # noqa: E402
     _concurrent_workflows,
     _resolve_job_p50,
     _wf_basename,
-    bound_within_workflow,
+    bound_within_workflow, CASCADE,
     credit_detrigger,
     credit_shared_substep,
     size_wall_clock,
@@ -21051,7 +21051,7 @@ _CACHE_COLD_MISS_PCT = 99.5
 # Mirror of `blocking_path._CACHE_LEAF_KEYS` (kept coupled by a self-test).
 _CACHE_LEAF_KEYS = frozenset({
     "turbo-remote-cache", "turbo-partial-cache", "buildx-no-cache",
-    "install-lifecycle-build",
+    "install-lifecycle-build", "dependency-cache",
 })
 
 # =============================================================================
@@ -23714,6 +23714,9 @@ def _magnitude_sample(
                 entry["fork"] = bool(hr) and hr.lower() != repo.lower()
                 entry["duration_s"] = round(_job_duration_s(j) or 0.0, 1)
                 entry["cache_state"] = states.get(jid)
+                if primary.get("fix_key") == "dependency-cache":
+                    entry["install_steps"] = {name: seconds for name, seconds in _step_durations(j)
+                                              if _step_category(name) == "install"}
             values.append(entry)
 
     values: list[dict[str, Any]] = []
@@ -23807,7 +23810,7 @@ def _cache_distribution(
     push (default-branch) probe, plus the re-derivable `verdict`. Only called for a
     cache leaf, so its fetches (≤ `_CACHE_PUSH_PROBE_MAX` push logs) are the targeted
     escalation, not paid on every audit."""
-    floor_pct = bp._PARTIAL_MISS_FLOOR_PCT
+    floor_pct = 50.0 if fix_key == "dependency-cache" else bp._PARTIAL_MISS_FLOOR_PCT
 
     def _miss(v: dict[str, Any]) -> float | None:
         st = v.get("cache_state") if isinstance(v.get("cache_state"), dict) else {}
@@ -23893,6 +23896,8 @@ def _cache_distribution(
         if st and isinstance(st.get("miss_pct"), (int, float)):
             push_vals.append({"run_url": str(job.get("html_url", "")).split("/job/")[0],
                               "value": round(float(st["miss_pct"]), 2)})
+            if fix_key == "dependency-cache":
+                push_vals[-1]["saved"] = st.get("saved")
     if not push_runs:
         push, push_reason = None, "no push runs sampled for this workflow"
     elif push_matched == 0:
@@ -23909,12 +23914,89 @@ def _cache_distribution(
     verdict = _cache_verdict(pr_values, tail, floor_pct=floor_pct,
                              tail_min_frac=_CACHE_TAIL_MIN_FRAC,
                              cold_pct=_CACHE_COLD_MISS_PCT)
-    return {
+    result = {
         "fix_key": fix_key, "metric": "miss_pct", "floor_pct": floor_pct,
         "tail_min_frac": _CACHE_TAIL_MIN_FRAC,
         "pr": pr, "tail": tail, "push": push, "push_reason": push_reason,
         "verdict": verdict, "push_logs_fetched": push_fetched,
     }
+    if fix_key == "dependency-cache":
+        samples = [v for v in pr_values if not v.get("fork") and _miss(v) is not None]
+        miss_share = (statistics.mean(_miss(v) for v in samples) / 100.0
+                      if samples else 0.0)
+        no_push_save = (bool(push_runs) and push_matched == 0) or (
+            bool(push_vals) and not push_errors and len(push_vals) == push_matched
+            and all(v.get("saved") is False for v in push_vals))
+        result["confirmed"] = bool(pr["upstream_median"] is not None
+                                   and pr["upstream_median"] >= 50 and no_push_save)
+        result["recommendation"] = ("check this" if miss_share < _CACHE_TAIL_MIN_FRAC
+                                    or not result["confirmed"] else "seed the default-branch cache")
+        result["sizing"] = _dependency_cache_sizing(samples, miss_share)
+    return result
+
+
+def _dependency_cache_sizing(samples: list[dict[str, Any]], miss_share: float) -> dict[str, Any]:
+    """Price matching install steps from hits and misses, without extra log calls."""
+    misses: dict[str, list[float]] = {}
+    hits: dict[str, list[float]] = {}
+    for sample in samples:
+        state = sample.get("cache_state") or {}
+        if state.get("restore_count", 1) != 1:
+            continue
+        rate = state.get("miss_pct")
+        # Mixed outcomes cannot identify which cache caused an install's cost.
+        target = misses if rate == 100 else hits if rate == 0 else None
+        if target is not None:
+            for name, seconds in (sample.get("install_steps") or {}).items():
+                target.setdefault(name, []).append(seconds)
+    if not misses:
+        return {"credited": False, "reason": "no timed install on a cache miss"}
+    name = max(misses, key=lambda n: statistics.median(misses[n]))
+    miss_time = statistics.median(misses[name])
+    result = {"step": name, "miss_time_s": miss_time, "miss_share": miss_share,
+              "credited": False}
+    if not hits.get(name):
+        result["reason"] = "no hit sample for the same install step"
+        return result
+    hit_time = statistics.median(hits[name])
+    result.update({"hit_time_s": hit_time, "credited": True,
+                   "saving_s": max(0.0, miss_time - hit_time) * miss_share})
+    return result
+
+
+def _ground_opt96(findings: list[dict[str, Any]], poles: list[dict[str, Any]]) -> None:
+    """Ground static reachability candidates before the ordinary savings cascade."""
+    for finding in findings:
+        if finding.get("pattern") != "OPT96":
+            continue
+        finding.update({"sizing_basis": "measured", "wall_clock_p50_s": None,
+                        "runner_min_saving": None, "tier": 2, "realization": "none",
+                        "size_note": "check this: no measured dependency-cache confirmation"})
+        candidates = [p for p in poles if p.get("workflow_file") == finding.get("workflow_file")
+                      and p.get("job") in (finding.get("affected_jobs") or [])]
+        cd = next((p["cache_dist"] for p in candidates
+                   if (p.get("cache_dist") or {}).get("fix_key") == "dependency-cache"), None)
+        if not cd:
+            continue
+        cd["static_confirmed"] = True
+        finding["cache_dist"] = cd
+        sizing = cd.get("sizing") or {}
+        # A PR-only workflow has no push bucket. The static reachability proof
+        # supplies the absent writer; a missing/failed push log alone never does.
+        if (cd.get("push_reason") == "no push runs sampled for this workflow"
+                and (cd.get("pr") or {}).get("upstream_n", 0) >= 2
+                and (cd.get("pr") or {}).get("upstream_median", 0) >= 50):
+            cd["confirmed"] = True
+            cd["recommendation"] = "seed the default-branch cache"
+        finding["size_note"] = cd.get("recommendation", "check this")
+        if sizing.get("step"):
+            finding["size_note"] += (f": `{sizing['step']}` takes {sizing['miss_time_s']:g}s "
+                                     "on a cache miss")
+        if not cd.get("confirmed") or not sizing.get("credited"):
+            finding["size_note"] += "; savings uncredited"
+            continue
+        finding.update({"wall_clock_p50_s": sizing["saving_s"],
+                        "tier": 1, "realization": "direct"})
 
 
 def _as_list_local(v: object) -> list:
@@ -26373,6 +26455,16 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
 
     findings_doc["findings"] = findings
 
+    # Capture once before sizing so OPT96 enters the same floor cascade as all
+    # measured findings. The later bundle section publishes this same manifest.
+    pole_logs = []
+    if with_logs and data_dir is not None:
+        pole_logs = _persist_pole_logs(
+            client, repo, drill_poles or poles, jobs_per_run_by_wf, data_dir,
+            events_jobs_by_wf=events_jobs_by_wf,
+            iso=findings_doc.get("test_runner_isolation"))
+    _ground_opt96(findings, drill_poles or poles)
+
     # The repo's longest measured job across ALL workflows — the physical ceiling on
     # any wall-clock saving (you can't save more than the slowest run takes). Used to
     # cap OPT19, whose source-sleep total is summed statically and isn't bound to a
@@ -26437,7 +26529,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 chain_members=_chain_ctx_members, chain_p50_s=_chain_ctx_p50,
                 chain_win_s=_chain_ctx_win)
             _size_opt25_next_step(f, ctx)
-            res = size_wall_clock(float(wc), ctx)
+            res = size_wall_clock(float(wc), ctx,
+                                  cascade=([("within-workflow", bound_within_workflow)] + CASCADE)
+                                  if f.get("pattern") == "OPT96" else None)
             if res.derivation:
                 f["wall_clock_p50_s"] = res.effective_s
                 f["wall_clock_uncapped_p50_s"] = res.raw_s
@@ -26641,12 +26735,6 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         # report / fix-agent can read the step's internal timing without
         # re-downloading. One fetch per pole job (the median-representative instance).
         if data_dir is not None:
-            pole_logs = _persist_pole_logs(
-                client, repo, drill_poles or poles, jobs_per_run_by_wf, data_dir,
-                events_jobs_by_wf=events_jobs_by_wf,
-                # scan's config fact, so the spine's leaf detection matches the
-                # renderer's (a config-gated leaf is invisible without it).
-                iso=findings_doc.get("test_runner_isolation"))
             logs_fetched = len(pole_logs)
             if pole_logs:
                 findings_doc["data_bundle"] = {
