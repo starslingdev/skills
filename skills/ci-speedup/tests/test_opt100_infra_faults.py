@@ -249,3 +249,33 @@ def test_browser_crash_wording(text):
 def test_assertion_quoting_crash_wording_is_not_infrastructure():
     assert bp._classify_infra_failure(
         "expect(received).toContain(expected): Target crashed", "Run e2e tests") is None
+
+
+@pytest.mark.parametrize("text,step", [
+    ("Packages: +1502", "pnpm install"),
+    ("added 1503 packages in 12s", "npm ci"),
+    ("Downloading packages (503.2 kB)", "Install dependencies"),
+    ("Progress: resolved 503, reused 502, downloaded 1, added 503", "pnpm install"),
+])
+def test_package_counts_are_not_registry_errors(text, step):
+    assert bp._classify_infra_failure(text, step) is None
+
+
+@pytest.mark.parametrize("text,step", [
+    ("npm ERR! 503 Service Unavailable - GET https://registry.example.test/pkg", "npm ci"),
+    ("ERROR: HTTP error 503 while getting https://packages.example.test/pkg.whl", "pip install"),
+    ("Request failed with status code 502", "yarn install"),
+    ("Response status code does not indicate success: 503 (Service Unavailable).", "Set up job"),
+    ("ECONNRESET", "Set up job"),
+])
+def test_registry_http_errors_are_network(text, step):
+    assert bp._classify_infra_failure(text, step) == "network"
+
+
+@pytest.mark.parametrize("step", [
+    "Restore test database and run tests",
+    "Download fixtures and run tests",
+    "Install browsers and run e2e",
+])
+def test_test_steps_named_for_setup_work_are_not_install_steps(step):
+    assert bp._classify_infra_failure("ECONNRESET", step) is None

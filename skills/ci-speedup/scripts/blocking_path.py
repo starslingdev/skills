@@ -47,8 +47,15 @@ _INFRA_FAILURE_SIGNATURES = {
     # Crash wording only: an ordinary test timeout also prints "Target page,
     # context or browser has been closed" for the action it interrupted.
     "browser-crash": r"\bbrowser has crashed\b|\bTarget crashed\b|\bBrowser closed unexpectedly\b|\bbrowser has disconnected\b|^Error: browserType\.launch:[^\n]*(?:crashed|closed|disconnected)",
-    "network": r"\b(?:ECONNRESET|ETIMEDOUT|EAI_AGAIN)\b|(?:502|503)[^\n]*(?:registry|packages)|(?:registry|packages)[^\n]*(?:502|503)",
+    # A 502/503 counts only beside HTTP wording; package and byte counts such as
+    # "+1502 packages" or "(503.2 kB)" are progress output, not a registry error.
+    "network": r"\b(?:ECONNRESET|ETIMEDOUT|EAI_AGAIN)\b|\b(?:HTTP|status(?: code)?)\b[^\n]{0,40}\b(?:502|503)\b|\b(?:502|503)\b\W{0,3}(?:Bad Gateway|Service Unavailable)",
 }
+# Network faults count only in a step that installs or fetches something, including
+# the runner's own "Set up job" (action downloads). A step that also names test
+# work is a test step whose network errors may be the product's own.
+_INFRA_INSTALL_STEP = r"\b(?:install(?:ing|ation)?|fetch(?:ing)?|download(?:ing)?|checkout)\b|\bnpm\s+ci\b|^set up job$"
+_INFRA_TEST_STEP = r"\b(?:tests?|specs?|e2e|pytest|jest|vitest|playwright|cypress)\b"
 
 
 def _classify_infra_failure(log: str, step_name: str) -> str | None:
@@ -58,9 +65,8 @@ def _classify_infra_failure(log: str, step_name: str) -> str | None:
     quotes an infrastructure signature. The caller supplies only the first failed
     step's timestamp-bounded log, not a whole job's cleanup output.
     """
-    install = bool(re.search(
-        r"\b(?:install(?:ing|ation)?|fetch(?:ing)?|download(?:ing)?|checkout|restore)\b|\bnpm\s+ci\b",
-        step_name, re.I))
+    install = bool(re.search(_INFRA_INSTALL_STEP, step_name.strip(), re.I)
+                   and not re.search(_INFRA_TEST_STEP, step_name, re.I))
     for line in log.splitlines():
         if re.search(r"\bassert|\bexpected\b|\breceived\b", line, re.I) and not re.search(
                 r"runner has received a shutdown signal", line, re.I):
