@@ -76,7 +76,7 @@ WHERE THE TIME GOES
 - No per-step breakdown was captured for this job; profile its slowest step in the repo.
 
 DATA-DRIVEN CATALOG PATTERN MATCHED
-- A data-driven catalog pattern (OPT25) matched this pole - see the **Also noticed** section below for the measured lever and its catalog fix recipe (it sits ON the critical path, so it shrinks this pole's wall time). The step above is the load-bearing one that lever targets; open its log (the Audit link) to see what inside it the lever reshapes.
+- A data-driven catalog pattern (OPT25) matched this pole - see the **Also noticed** section below for the measured lever and its catalog fix recipe (it sits ON the critical path, so it shrinks this pole's wall time). The step above is the load-bearing one that lever targets; open its log in a recent pull-request run of this job (no run log was captured for it here) to see what inside it the lever reshapes.
 
 WHAT'S ADDRESSABLE (wall-clock ceiling - don't over-promise)
 - up to ~4m 10s - it gates until it drops to the next concurrent check, `lint` (5m 50s); below that the gate moves and further savings are runner-minutes, not wall-clock.

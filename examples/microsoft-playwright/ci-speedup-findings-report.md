@@ -141,7 +141,7 @@ WHERE THE TIME GOES
 - The job's time is dominated by the `Run ./.github/actions/run-test` step: ~41m 14s (100% of the job wall), from the sampled per-step decomposition (no single-run timeline was captured for this job).
 
 STRUCTURAL CATALOG PATTERN MATCHED
-- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log (the Audit link) to see exactly what inside it the lever reshapes.
+- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log in a recent pull-request run of this job (no run log was captured for it here) to see exactly what inside it the lever reshapes.
 
 WHAT'S ADDRESSABLE (wall-clock ceiling - don't over-promise)
 - this job's matrix legs run in parallel, so speeding this one leg saves only ~1m 06s (the next leg, `windows-latest - firefox`, is 40m 15s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `windows-latest - firefox` (40m 15s), for up to ~1m 06s of merge wait.
@@ -218,7 +218,7 @@ WHERE THE TIME GOES
 - The job's time is dominated by the `Run ./.github/actions/run-test` step: ~72m 46s (100% of the job wall), from the sampled per-step decomposition (no single-run timeline was captured for this job).
 
 STRUCTURAL CATALOG PATTERN MATCHED
-- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log (the Audit link) to see exactly what inside it the lever reshapes.
+- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log in a recent pull-request run of this job (no run log was captured for it here) to see exactly what inside it the lever reshapes.
 
 WHAT'S ADDRESSABLE (wall-clock ceiling - don't over-promise)
 - this job's matrix legs run in parallel, so speeding this one leg saves only ~13m 24s (the next leg, `Test chrome on macos-latest`, is 59m 33s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `Test chrome on macos-latest` (59m 33s), for up to ~13m 24s of merge wait.
@@ -295,7 +295,7 @@ WHERE THE TIME GOES
 - The job's time is dominated by the `Run ./.github/actions/run-test` step: ~40m 04s (100% of the job wall), from the sampled per-step decomposition (no single-run timeline was captured for this job).
 
 STRUCTURAL CATALOG PATTERN MATCHED
-- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log (the Audit link) to see exactly what inside it the lever reshapes.
+- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log in a recent pull-request run of this job (no run log was captured for it here) to see exactly what inside it the lever reshapes.
 
 WHAT'S ADDRESSABLE (wall-clock ceiling - don't over-promise)
 - this job's matrix legs run in parallel, so speeding this one leg saves only ~8m 24s (the next leg, `macos-latest - firefox`, is 31m 51s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `macos-latest - chromium` (20m 14s), for up to ~20m 00s of merge wait.
@@ -373,7 +373,7 @@ WHERE THE TIME GOES
 - The job's time is dominated by the `Run ./.github/actions/run-test` step: ~59m 21s (100% of the job wall), from the sampled per-step decomposition (no single-run timeline was captured for this job).
 
 STRUCTURAL CATALOG PATTERN MATCHED
-- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log (the Audit link) to see exactly what inside it the lever reshapes.
+- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log in a recent pull-request run of this job (no run log was captured for it here) to see exactly what inside it the lever reshapes.
 
 WHAT'S ADDRESSABLE (wall-clock ceiling - don't over-promise)
 - this job's matrix legs run in parallel, so speeding this one leg saves only ~13m 32s (the next leg, `Test msedge on windows-latest`, is 46m 01s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `Test msedge on windows-latest` (46m 01s), for up to ~13m 32s of merge wait.
@@ -451,7 +451,7 @@ WHERE THE TIME GOES
 - The job's time is dominated by the `Run ./.github/actions/run-test` step: ~45m 48s (100% of the job wall), from the sampled per-step decomposition (no single-run timeline was captured for this job).
 
 STRUCTURAL CATALOG PATTERN MATCHED
-- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log (the Audit link) to see exactly what inside it the lever reshapes.
+- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log in a recent pull-request run of this job (no run log was captured for it here) to see exactly what inside it the lever reshapes.
 
 WHAT'S ADDRESSABLE (wall-clock ceiling - don't over-promise)
 - this job's matrix legs run in parallel, so speeding this one leg saves only ~4m 40s (the next leg, `ubuntu-22.04 (webkit - Node.js 20)`, is 41m 21s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `ubuntu-22.04 (webkit - Node.js 20)` (41m 21s), for up to ~4m 40s of merge wait.

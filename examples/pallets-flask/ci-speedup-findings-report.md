@@ -120,7 +120,7 @@ WHERE THE TIME GOES
 - The job's time is dominated by the `Run uv run --locked --no-default-groups --group dev tox run + 1 more other step` step: ~28s (67% of the job wall), from the sampled per-step decomposition (no single-run timeline was captured for this job).
 
 STRUCTURAL CATALOG PATTERN MATCHED
-- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log (the Audit link) to see exactly what inside it the lever reshapes.
+- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log in a recent pull-request run of this job (no run log was captured for it here) to see exactly what inside it the lever reshapes.
 
 WHAT'S ADDRESSABLE (wall-clock ceiling - don't over-promise)
 - up to ~7s - it gates until it drops to the next concurrent check, `PyPy` (26s); below that the gate moves and further savings are runner-minutes, not wall-clock.
@@ -198,7 +198,7 @@ WHERE THE TIME GOES
 - The job's time is dominated by the `Run uv run --locked --no-default-groups --group pre-commit pre-commit run --show-diff-on-failure --color=always --all-files + 1 more other step` step: ~11s (58% of the job wall), from the sampled per-step decomposition (no single-run timeline was captured for this job).
 
 STRUCTURAL CATALOG PATTERN MATCHED
-- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log (the Audit link) to see exactly what inside it the lever reshapes.
+- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log in a recent pull-request run of this job (no run log was captured for it here) to see exactly what inside it the lever reshapes.
 
 WHERE TO LOOK
 - The `pre-commit.yaml` workflow definition for the dominant step, and the tool/config it invokes (build tool, test runner, or install) - that's where its time is spent.
@@ -272,7 +272,7 @@ WHERE THE TIME GOES
 - The job's time is dominated by the `Run uv run --locked --no-default-groups --group dev tox run + 1 more other step` step: ~30s (87% of the job wall), from the sampled per-step decomposition (no single-run timeline was captured for this job).
 
 STRUCTURAL CATALOG PATTERN MATCHED
-- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log (the Audit link) to see exactly what inside it the lever reshapes.
+- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log in a recent pull-request run of this job (no run log was captured for it here) to see exactly what inside it the lever reshapes.
 
 WHERE TO LOOK
 - The `tests.yaml` workflow definition for the dominant step, and the tool/config it invokes (build tool, test runner, or install) - that's where its time is spent.
@@ -347,7 +347,7 @@ WHERE THE TIME GOES
 - The job's time is dominated by the `Run actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405` step: ~10s (42% of the job wall), from the sampled per-step decomposition (no single-run timeline was captured for this job).
 
 STRUCTURAL CATALOG PATTERN MATCHED
-- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log (the Audit link) to see exactly what inside it the lever reshapes.
+- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log in a recent pull-request run of this job (no run log was captured for it here) to see exactly what inside it the lever reshapes.
 
 WHERE TO LOOK
 - The `tests.yaml` workflow definition for the dominant step, and the tool/config it invokes (build tool, test runner, or install) - that's where its time is spent.
@@ -420,7 +420,7 @@ WHERE THE TIME GOES
 - The job's time is dominated by the `Run actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405` step: ~12s (55% of the job wall), from the sampled per-step decomposition (no single-run timeline was captured for this job).
 
 STRUCTURAL CATALOG PATTERN MATCHED
-- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log (the Audit link) to see exactly what inside it the lever reshapes.
+- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log in a recent pull-request run of this job (no run log was captured for it here) to see exactly what inside it the lever reshapes.
 
 WHERE TO LOOK
 - The `tests.yaml` workflow definition for the dominant step, and the tool/config it invokes (build tool, test runner, or install) - that's where its time is spent.

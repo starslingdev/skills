@@ -94,9 +94,10 @@ _PCTW = 4
 _CORELEN = 3 + _LBLW + 2 + _BARW + 2 + _DURW + 2 + _PCTW
 _MARKCOL = _CORELEN + 2
 _TOP_WORKFLOWS = 5  # render the long pole of this many distinct workflows (matches the
-# data layer's _STRUCTURAL_TOP_N so every analysed pole renders; the top
-# _DRILL_DISTINCT_MATRICES get a raw-log drill, poles below that render shallow from their
-# sampled per-step decomposition — see render-depth-2to5 spec / R1–R3 fixes)
+# data layer's _STRUCTURAL_TOP_N so every analysed pole renders). collect_runs'
+# _DRILL_DISTINCT_MATRICES equals this, so every rendered pole gets a raw-log drill; a pole
+# whose capture is missing (failed fetch, render without a bundle) renders shallow from its
+# sampled per-step decomposition and never cites an Audit link it lacks (R1–R3 fixes)
 _ALSO_NOTICED_CAP = 12  # max residual hygiene patterns shown in the "Also noticed" appendix
 _TIER2_CAP = 12  # max promoted runner-minute findings shown before the residual appendix
 _RUNNER_MINUTE_SPINE_CAP = 12  # max cost-spine rows rendered before a hidden-row disclosure
@@ -3626,13 +3627,23 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
         wtg.append("- No per-step breakdown was captured for this job; profile its "
                    "slowest step in the repo.")
     out += wtg + [""]
+    # Point at "the Audit link" ONLY when this pole's section renders one. `_audit_links`
+    # is what the render loop emits for the pole from these same inputs (its `leaf`
+    # argument shapes only the wording, never whether the line appears), so deriving it
+    # here keeps the prompt and the section in step without a flag a caller could forget.
+    # A pole with no captured log (a failed fetch, a render without a bundle) gets no
+    # Audit line, and its prompt must not send the agent to one (verify_report's
+    # `check_pole_audit_link_reference_resolves`).
+    log_ref = ("open its log (the Audit link)" if _audit_links(timeline, pole, None, run_url)
+               else "open its log in a recent pull-request run of this job (no run log "
+                    "was captured for it here)")
     if struct_pats:
         out += ["STRUCTURAL CATALOG PATTERN MATCHED",
                 f"- A structural catalog pattern ({', '.join(struct_pats)}) matched this "
                 "pole - see the **structural root-cause** section above for the measured "
                 "lever, its risk / guardrail / rollout, and the catalog fix recipe. The "
-                "step above is the load-bearing one that lever targets; open its log (the "
-                "Audit link) to see exactly what inside it the lever reshapes.", ""]
+                f"step above is the load-bearing one that lever targets; {log_ref} to see "
+                "exactly what inside it the lever reshapes.", ""]
     elif dd_pats == ["OPT81"]:
         out += ["RUNNER-CLASS COMPARISON MATCHED",
                 "- A measured runner-class comparison (OPT81) matched this pole - see its "
@@ -3645,8 +3656,7 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
                 f"pole - see {_dd_where(dd_pats)} for the measured lever and "
                 "its catalog fix recipe (it sits ON the critical path, so it shrinks this "
                 "pole's wall time). The step above is the load-bearing one that lever "
-                "targets; open its log (the Audit link) to see what inside it the lever "
-                "reshapes.", ""]
+                f"targets; {log_ref} to see what inside it the lever reshapes.", ""]
     if opt79:
         out += ["MEASURED CACHE PATTERN MATCHED",
                 "- OPT79 (a cache that costs more than it saves) matched this pole - "
@@ -3665,9 +3675,9 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
     if not struct_pats and not dd_pats and not opt79 and not opt82:
         out += ["NO CATALOG PATTERN MATCHED",
                 "- ci-speedup's detector set didn't recognize this job's stack, so there "
-                "is no named sub-cause. The step above is the load-bearing one; open its "
-                "log (the Audit link) and determine what inside it is slow (e.g. an "
-                "uncached build, a serial test phase, a large install).", ""]
+                f"is no named sub-cause. The step above is the load-bearing one; {log_ref} "
+                "and determine what inside it is slow (e.g. an uncached build, a serial "
+                "test phase, a large install).", ""]
     if opt79_minor:
         out += ["ALSO MEASURED ON THIS JOB",
                 "- A small measured cache cost (OPT79) is also shown in its **Measured "

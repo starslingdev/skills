@@ -17319,9 +17319,14 @@ def _structural_raw_estimate(
 # this depth, never structurally analyzed" — a check beyond this depth with no
 # lever is NOT proven inherent, it just wasn't examined.
 _STRUCTURAL_TOP_N = 5
-# Distinct job matrices the report drills (gate + next distinct by impact); matches
-# blocking_path._TOP_WORKFLOWS. Their gates are always decomposed + logged.
-_DRILL_DISTINCT_MATRICES = 2
+# Distinct job matrices the report drills (gate + next distinct by impact). MUST equal
+# blocking_path._TOP_WORKFLOWS, the number of poles the report renders: every rendered pole
+# gets its own captured log, step timeline, Audit link and cross-run check (SKILL.md 5a).
+# At 2 vs the renderer's 5, a third gating job rendered with no log while its prompt
+# pointed at an Audit link that was not there. Cost: one log fetch per extra pole plus
+# its magnitude probe (~2 fetches, more only on a wide spread), at most 3 extra poles.
+# Pinned by test_undrilled_pole_audit_link.py::test_drill_cap_equals_the_render_cap.
+_DRILL_DISTINCT_MATRICES = 5
 
 # Adaptive 2-pass run sampling. The dominant gh cost is one `GET /runs/{id}/jobs`
 # per sampled run; sampling all workflows at full --max-runs is wasteful because a

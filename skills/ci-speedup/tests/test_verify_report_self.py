@@ -74,6 +74,10 @@ def test_phase0_literals_stay_coupled_to_the_renderer():
     for literal in ("sits ON the merge-gating critical path",
                     "check a typical PR waits on",
                     "No per-step breakdown was captured",
+                    # `check_pole_audit_link_reference_resolves`: the prompt's pointer and the
+                    # section line it must resolve to. A reword of either would silently SKIP it.
+                    "Audit link",
+                    "**🔗 Audit:**",
                     "editable workflow file",
                     "biggest single measured win is",
                     "What a change here can buy",
