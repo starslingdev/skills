@@ -71,6 +71,7 @@ TRIAGE_ALLOWLIST = {
     "data basis disclosed; coverage gaps named, not silent": AUTO_SEED,                             # check_coverage_disclosed
     "workflows missing from the sample are NAMED in the report": AUTO_SEED,                         # check_run_list_gaps_named
     "report uses ASCII hyphens only (no em/en/figure/bar/minus dash)": AUTO_SEED,                   # check_no_typographic_dashes
+    "PR lifecycle block is consistent with its own shares": AUTO_SEED,                              # check_pr_lifecycle_block
     "code fences are balanced (no stray ``` breaking out of a fence)": AUTO_SEED,                   # check_fences_balanced
     "every rendered finding pattern exists in the findings JSON": AUTO_SEED,                        # check_rendered_patterns_exist
     "Windows setup benchmark pointers match their measured OPT72 card": AUTO_SEED,
@@ -180,6 +181,7 @@ CHECK_CLASS = {
     "data basis disclosed; coverage gaps named, not silent": "coverage-gap-dead-end",     # exact match (the spec's own no-silent-drop framing)
     "workflows missing from the sample are NAMED in the report": "coverage-gap-dead-end",  # a workflow that vanished from the sample rendering as measured
     "report uses ASCII hyphens only (no em/en/figure/bar/minus dash)": "other",           # pure formatting, no semantic root-cause fits
+    "PR lifecycle block is consistent with its own shares": "fabricated-or-unsupported-finding",  # a headline or share the block's own numbers do not support
     "code fences are balanced (no stray ``` breaking out of a fence)": "other",           # structural corruption guard, no semantic root-cause fits
     "every rendered finding pattern exists in the findings JSON": "fabricated-or-unsupported-finding",  # rendered claim not backed by findings
     "Windows setup benchmark pointers match their measured OPT72 card": "fabricated-or-unsupported-finding",

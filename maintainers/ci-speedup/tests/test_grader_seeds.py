@@ -39,7 +39,8 @@ def test_every_check_is_classified():
 def test_classification_counts_match_spec():
     counts = Counter(gs.TRIAGE_ALLOWLIST.values())
     # +1: wall-clock headlines carry next-gate and measurement instructions.
-    assert counts[gs.AUTO_SEED] == 75   # +1 (OPT84 tool swaps: the card's ceiling is the step's own p50, no other number); +1 (a pole's step list says how many skipped or untimeable steps it leaves out); +2 (a cited or stamped step never outlasts its job: the skipped-step year-1 start class); +1 (OPT83 parallel steps, below); +1 (OPT81 runner-class comparisons, below); +1 (OPT82 type-aware lint, below); +1 (OPT79 pole cache, below); +1 (OPT80 slowest job without a tail line: its sentence pairs with its stamped withheld reason, and no merge wait is claimed without a tail axis);
+    # +1: the PR lifecycle block's shares and headline agree with its own thresholds.
+    assert counts[gs.AUTO_SEED] == 76  # +1 (OPT84 tool swaps: the card's ceiling is the step's own p50, no other number); +1 (a pole's step list says how many skipped or untimeable steps it leaves out); +2 (a cited or stamped step never outlasts its job: the skipped-step year-1 start class); +1 (OPT83 parallel steps, below); +1 (OPT81 runner-class comparisons, below); +1 (OPT82 type-aware lint, below); +1 (OPT79 pole cache, below); +1 (OPT80 slowest job without a tail line: its sentence pairs with its stamped withheld reason, and no merge wait is claimed without a tail axis);
     # +1 (pre-flip audit: static-only banner matches CI shape — no dormant-repo hedge at a live no-PR-gating repo, no "no run timing" beside priced timed runs);
     # +2 (issue #114: crowned cluster lever is on the merge-gating spine — no off-spine crown; issue #115: headline leads with the observed wall when the chain sum diverges from the makespan);
     # +1 (issue #106: every 🤖 gap-fill evidence line is verbatim from the captured job log — the injection-residual grounding backstop);

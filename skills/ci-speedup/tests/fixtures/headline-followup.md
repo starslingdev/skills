@@ -1,5 +1,9 @@
 # example/project - why is the merge slow?
 
+**Where your PRs' time goes**
+
+not measured: lifecycle data was not collected
+
 | Repository | `example/project` |
 | :--- | :--- |
 | **Audited commit** | [`abcdef1`](https://github.com/example/project/commit/abcdef1234567890) - file & line references are anchored to this tree |

@@ -1401,6 +1401,32 @@ class GhClient:
             return None
         return None                                             # pragma: no cover
 
+    def graphql(self, query: str) -> Any:
+        """One read-only GraphQL request. No retries: lifecycle has a hard call cap."""
+        import hashlib
+        key = "graphql/lifecycle/" + hashlib.sha256(query.encode()).hexdigest()
+        self._bump(query=True)
+        if self._fixtures_dir:
+            return self._replay_json(key, True)
+        if self.gave_up:
+            return None
+        self._sleep_until_unblocked()
+        self._governor.acquire("graphql")
+        try:
+            result = subprocess.run(_gh_argv("graphql") + ["-f", "query=" + query],
+                                    capture_output=True, text=True, timeout=60)
+            if result.returncode:
+                return None
+            _, _, body = _split_headers_body(result.stdout or "")
+            data = json.loads(_strip_terminal_escapes(body))
+            if not isinstance(data, dict) or data.get("errors"):
+                return None
+            if self._record_dir:
+                self._record(key, "json", json.dumps(data))
+            return data
+        except (OSError, UnicodeDecodeError, subprocess.TimeoutExpired, json.JSONDecodeError):
+            return None
+
     def json(self, endpoint: str, allow_missing: bool = False) -> Any:
         """Run `gh api <endpoint>` and parse JSON. Returns None on failure.
 
@@ -26347,6 +26373,11 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         sorted(required_checks.names) if required_checks is not None else None)
     findings_doc["required_checks_complete"] = (
         required_checks.complete if required_checks is not None else False)
+
+    import pr_lifecycle
+    findings_doc["pr_lifecycle"] = pr_lifecycle.collect(
+        getattr(client, "graphql", lambda query: None), repo,
+        sorted(required_checks.names) if required_checks is not None and required_checks.complete else None)
 
     # MEASURED CRITICAL PATH — fetch the full check-run set for the 20 most recent
     # PRs that ran the FULL CI suite (their check-runs include every required

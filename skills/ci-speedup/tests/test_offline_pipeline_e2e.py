@@ -185,7 +185,8 @@ _JOB_ID = 9001
 #            or PR fetch. The OPT84 detector itself makes ZERO calls: it reads the
 #            pole's stamped step decomposition, the workflow YAML and the scan's
 #            package.json / ESLint config facts from the checkout.)
-_GOLDEN_GH_QUERY_COUNT = 111
+# Lifecycle adds one bounded GraphQL probe; this older replay has no lifecycle page.
+_GOLDEN_GH_QUERY_COUNT = 112
 # PR-H1: `push` is UNSCOPED (no `branches:`) so the same-head_sha push+PR run
 # pair in the corpus satisfies OPT47's structural precondition (a push scoped
 # only to the default branch is excluded by design).

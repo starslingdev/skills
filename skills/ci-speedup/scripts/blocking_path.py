@@ -35,6 +35,8 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Literal, NamedTuple
 
+import pr_lifecycle
+
 import claims  # same-skill module; typed claims layer (increment 1: headline family)
 import untrusted_wrap as uw  # same-skill module; BEGIN/END untrusted-log marking (#29)
 from workflow_steps import (  # same-skill module; step walker
@@ -10755,7 +10757,15 @@ def _unresolved_gate_lines(cp: dict[str, Any]) -> list[str]:
     return ["> **Merge gate unresolved:** " + _clean_label(str(cp["unresolved_reason"])), ""]
 
 
-def render(doc: dict[str, Any], logs: dict[str, str] | None = None,
+def render(doc: dict[str, Any], *args, **kwargs) -> str:
+    """Include lifecycle context on every report path, including static-only."""
+    report = _render_core(doc, *args, **kwargs)
+    block = pr_lifecycle.render(doc.get("pr_lifecycle"))
+    first, separator, rest = report.partition("\n\n")
+    return first + "\n\n" + block + "\n" + rest if separator else report + "\n\n" + block
+
+
+def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
            samples: dict[str, dict[str, Any]] | None = None,
            log_runs: dict[str, str] | None = None,
            captured_at: str = "",

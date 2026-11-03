@@ -1932,6 +1932,78 @@ def check_no_typographic_dashes(report: str) -> Check:
                  f"typographic dash(es) survived the render boundary: {found}")
 
 
+_LIFECYCLE_TITLE = "**Where your PRs' time goes**"
+_LIFECYCLE_HEADLINE = "CI is not where your PRs wait."
+_LIFECYCLE_ROW_RE = re.compile(r"^\| (.+?) \| (\d+(?:\.\d+)?)% \| (\d+(?:\.\d+)?)% \|$", re.MULTILINE)
+_LIFECYCLE_COVERAGE_RE = re.compile(r"Measured (\d+) of (\d+) merged PRs")
+_LIFECYCLE_ESTIMATE = "Estimated: required checks are not readable"
+_LIFECYCLE_BASES = ("required", "all-final-commit-checks")
+
+
+def _lifecycle_basis_violation(block: str, findings_path: Path | str | None) -> str | None:
+    """The estimate label appears exactly when the findings record the fallback basis
+    (every final-commit check treated as required). No findings, or a findings doc
+    without a measured lifecycle block, leaves nothing to cross-check."""
+    if findings_path is None:
+        return None
+    data, err = _load_findings_doc(Path(findings_path))
+    block_data = data.get("pr_lifecycle") if not err else None
+    if not isinstance(block_data, dict) or block_data.get("status") != "measured":
+        return None
+    basis, labelled = block_data.get("basis"), _LIFECYCLE_ESTIMATE in block
+    if basis not in _LIFECYCLE_BASES:
+        return f"measured lifecycle block records no known basis ({basis!r})"
+    if labelled != (basis == "all-final-commit-checks"):
+        return (f"estimate label {'shown' if labelled else 'missing'} on basis {basis!r}")
+    return None
+
+
+def check_pr_lifecycle_block(report: str, findings_path: Path | str | None = None) -> Check:
+    """The PR lifecycle block either says why it is not measured, or shows shares that
+    are internally consistent and a headline that matches its own thresholds (final-commit
+    CI median under 10% and green-waiting median over 25%, judged on the rendered
+    one-decimal percentages with half a step of rounding slack). The estimate label
+    appears exactly when the findings record the all-final-commit-checks basis."""
+    name = "PR lifecycle block is consistent with its own shares"
+    count = report.count(_LIFECYCLE_TITLE)
+    if count == 0:
+        return Check(name, True, "skipped - report predates the PR lifecycle block", skipped=True)
+    if count > 1:
+        return Check(name, False, f"lifecycle block rendered {count} times")
+    after = report.split(_LIFECYCLE_TITLE, 1)[1]
+    end = "Overlapping checks count once."
+    # A measured block ends with its footnote; the not-measured form is one line.
+    block = after.split(end, 1)[0] if end in after[:4000] else "\n".join(after.splitlines()[:4])
+    if "not measured:" in block:
+        reason = block.split("not measured:", 1)[1].split("\n", 1)[0].strip()
+        bad = [] if reason else ["no reason given"]
+        if _LIFECYCLE_HEADLINE in block or _LIFECYCLE_ROW_RE.search(block) or _LIFECYCLE_ESTIMATE in block:
+            bad.append("shares, headline or estimate label shown alongside 'not measured'")
+        return Check(name, not bad, "; ".join(bad) if bad else f"not measured, with reason: {reason}")
+    rows = {label: (float(m), float(p)) for label, m, p in _LIFECYCLE_ROW_RE.findall(block)}
+    need = ("CI running", "Green, waiting for review or merge", "CI on the final commit (subset)")
+    missing = [k for k in need if k not in rows]
+    if missing:
+        return Check(name, False, f"measured block lacks rows: {missing}")
+    bad = [f"{k}: median {m}% > p90 {p}%" for k, (m, p) in rows.items() if not 0 <= m <= p <= 100]
+    final, ci = rows["CI on the final commit (subset)"], rows["CI running"]
+    if final[0] > ci[0] or final[1] > ci[1]:
+        bad.append(f"final-commit CI {final} exceeds all CI running {ci}")
+    cov = _LIFECYCLE_COVERAGE_RE.search(block)
+    if not cov or not 0 < int(cov.group(1)) <= int(cov.group(2)):
+        bad.append("coverage line 'Measured N of M merged PRs' missing or inconsistent")
+    green = rows["Green, waiting for review or merge"][0]
+    if _LIFECYCLE_HEADLINE in block and not (final[0] <= 10.0 and green >= 25.0):
+        bad.append(f"headline shown at final-commit CI {final[0]}% / green {green}%")
+    if _LIFECYCLE_HEADLINE not in block and final[0] < 9.95 and green > 25.05:
+        bad.append(f"headline missing at final-commit CI {final[0]}% / green {green}%")
+    basis_bad = _lifecycle_basis_violation(block, findings_path)
+    if basis_bad:
+        bad.append(basis_bad)
+    return Check(name, not bad, "; ".join(bad) if bad else
+                 f"shares consistent; headline {'shown' if _LIFECYCLE_HEADLINE in block else 'withheld'} per thresholds")
+
+
 _FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,})([^`]*)$")   # opener: run + info string (no backtick)
 _FENCE_CLOSE_RE = re.compile(r"^ {0,3}(`{3,})[ \t]*$")   # closer: delimiter-only line
 
@@ -14073,6 +14145,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_cost_spine_shallow_disclosed(report, findings_path),
         check_date_matches_filename(report, report_path),
         check_no_typographic_dashes(report),
+        check_pr_lifecycle_block(report, findings_path),
         check_fences_balanced(report),
         check_no_domain_leakage(report),
         check_skill_commit_provenance(report, skill_repo),

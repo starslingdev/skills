@@ -1,5 +1,9 @@
 # pallets/flask - why is the merge slow?
 
+**Where your PRs' time goes**
+
+not measured: lifecycle data was not collected
+
 | Repository | `pallets/flask` |
 | :--- | :--- |
 | **Audited commit** | [`36e4a82`](https://github.com/pallets/flask/commit/36e4a824f340fdee7ed50937ba8e7f6bc7d17f81) - file & line references are anchored to this tree |
