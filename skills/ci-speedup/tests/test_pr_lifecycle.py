@@ -220,7 +220,7 @@ def test_truncated_nested_connections_never_claim_complete(field):
         module().measure_pr(p,['test'])
 
 
-@pytest.mark.parametrize('required', [None,[],['unobserved']])
+@pytest.mark.parametrize('required', [['unobserved'],['test','unobserved']])
 def test_unknown_required_checks_do_not_invent_green_wait(required):
     with pytest.raises(ValueError,match='required checks'):
         module().measure_pr(pr(),required)
@@ -349,7 +349,7 @@ def test_verify_report_rejects_a_headline_its_shares_do_not_support():
     inverted=_measured(.05,.5).replace('| CI running | 30.0% | 30.0% |','| CI running | 3.0% | 3.0% |')
     assert not vr.check_pr_lifecycle_block(inverted).ok
     assert not vr.check_pr_lifecycle_block("**Where your PRs' time goes**\n\nnot measured: \n").ok
-    assert 'check_pr_lifecycle_block(report),' in Path(vr.__file__).read_text()
+    assert 'check_pr_lifecycle_block(report, findings_path),' in Path(vr.__file__).read_text()
 
 
 def test_graphql_transport_records_and_replays_without_extra_requests(tmp_path,monkeypatch):
@@ -395,3 +395,96 @@ def test_draft_wait_is_remainder_not_green_wait():
     assert row['green_waiting']==.2
     assert row['red_waiting']==0
     assert row['everything_else']==.6
+
+
+# --- Decision 3: required checks not readable -> estimate from every final-commit check ---
+
+H = 3600
+ESTIMATE = "Estimated: required checks are not readable, so every check on each PR's final commit is treated as required."
+
+
+def rounds(commits, merge, timeline=(), extra_contexts=()):
+    """`commits` is [(oid, committed_at, check_runs)], oldest first; the last is the merged
+    head, whose runs (plus `extra_contexts`) also form its status rollup."""
+    oid = commits[-1][0]
+    rollup = [dict(c, __typename='CheckRun') for c in commits[-1][2]] + list(extra_contexts)
+    return dict(createdAt=ts(0), mergedAt=ts(merge), headRefOid=oid,
+                commits=connection([commit(at, runs, sha) for sha, at, runs in commits]),
+                head=head(oid, rollup), timelineItems=connection(list(timeline)))
+
+
+def seconds(row, key, p):
+    span = datetime.fromisoformat(p['mergedAt']).timestamp() - datetime.fromisoformat(p['createdAt']).timestamp()
+    return round(row[key] * span)
+
+
+def test_unreadable_required_checks_are_measured_as_an_estimate():
+    result = module().collect(paged([pr() for _ in range(10)]), 'sample/project', None)
+    assert result['status'] == 'measured'
+    assert result['basis'] == 'all-final-commit-checks'
+    text = module().render(result)
+    assert ESTIMATE in text
+    assert 'green waiting may be understated' in text
+
+
+def test_readable_required_checks_keep_the_required_basis_without_a_label():
+    result = module().collect(paged([pr() for _ in range(10)]), 'sample/project', ['test'])
+    assert result['status'] == 'measured' and result['basis'] == 'required'
+    assert result['shares']['green_waiting']['median'] == .4
+    assert 'Estimated:' not in module().render(result)
+
+
+def test_estimate_treats_every_completed_final_check_as_required():
+    # An optional check passing later moves the green moment; skipped, neutral and
+    # never-completed checks and pending statuses do not count.
+    extra = [dict(check(600, 700, name='optional'), __typename='CheckRun'),
+             dict(check(650, 900, 'SKIPPED', name='skipped'), __typename='CheckRun'),
+             dict(check(650, 900, 'NEUTRAL', name='neutral'), __typename='CheckRun'),
+             dict(name='queued', startedAt=None, completedAt=None, conclusion=None, __typename='CheckRun'),
+             dict(__typename='StatusContext', context='pending', state='PENDING', createdAt=ts(950))]
+    row = module().measure_pr(pr(extra_contexts=extra), None)
+    assert row['green_waiting'] == .3
+
+
+def test_estimate_leaves_out_a_pr_whose_final_check_failed():
+    failed = [dict(check(600, 700, 'FAILURE', name='optional'), __typename='CheckRun')]
+    with pytest.raises(ValueError, match='not green on final commit'):
+        module().measure_pr(pr(extra_contexts=failed), None)
+
+
+def test_estimate_needs_the_complete_final_commit_check_list():
+    p = pr()
+    p['head']['nodes'][0]['commit']['statusCheckRollup']['contexts']['pageInfo']['hasNextPage'] = True
+    with pytest.raises(ValueError, match='truncated'):
+        module().measure_pr(p, None)
+    p = pr()
+    p['head']['nodes'][0]['commit']['statusCheckRollup'] = None
+    with pytest.raises(ValueError, match='final commit'):
+        module().measure_pr(p, None)
+
+
+def _findings(tmp_path, basis, status='measured'):
+    import json
+    path = tmp_path / 'findings.json'
+    path.write_text(json.dumps({'pr_lifecycle': {'status': status, 'basis': basis}}))
+    return path
+
+
+def _block(basis):
+    shares = {k: dict(median=.1, p90=.2) for k in ('ci_running', 'red_waiting', 'green_waiting', 'everything_else')}
+    shares['final_commit_ci'] = dict(median=.05, p90=.1)
+    data = dict(status='measured', sample_size=12, sampled=12, excluded={}, shares=shares, basis=basis)
+    return '# t\n\n' + module().render(data) + '\n| Repository | x |\n'
+
+
+def test_verify_report_requires_the_estimate_label_exactly_on_the_fallback_basis(tmp_path):
+    vr = _verify()
+    fallback, required = _block('all-final-commit-checks'), _block('required')
+    assert ESTIMATE in fallback and ESTIMATE not in required
+    assert vr.check_pr_lifecycle_block(fallback, _findings(tmp_path, 'all-final-commit-checks')).ok
+    assert vr.check_pr_lifecycle_block(required, _findings(tmp_path, 'required')).ok
+    unlabelled = fallback.replace(ESTIMATE, '')
+    assert not vr.check_pr_lifecycle_block(unlabelled, _findings(tmp_path, 'all-final-commit-checks')).ok
+    assert not vr.check_pr_lifecycle_block(fallback, _findings(tmp_path, 'required')).ok
+    assert not vr.check_pr_lifecycle_block(fallback, _findings(tmp_path, None)).ok
+    assert 'check_pr_lifecycle_block(report, findings_path),' in Path(vr.__file__).read_text()

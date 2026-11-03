@@ -1936,13 +1936,34 @@ _LIFECYCLE_TITLE = "**Where your PRs' time goes**"
 _LIFECYCLE_HEADLINE = "CI is not where your PRs wait."
 _LIFECYCLE_ROW_RE = re.compile(r"^\| (.+?) \| (\d+(?:\.\d+)?)% \| (\d+(?:\.\d+)?)% \|$", re.MULTILINE)
 _LIFECYCLE_COVERAGE_RE = re.compile(r"Measured (\d+) of (\d+) merged PRs")
+_LIFECYCLE_ESTIMATE = "Estimated: required checks are not readable"
+_LIFECYCLE_BASES = ("required", "all-final-commit-checks")
 
 
-def check_pr_lifecycle_block(report: str) -> Check:
+def _lifecycle_basis_violation(block: str, findings_path: Path | str | None) -> str | None:
+    """The estimate label appears exactly when the findings record the fallback basis
+    (every final-commit check treated as required). No findings, or a findings doc
+    without a measured lifecycle block, leaves nothing to cross-check."""
+    if findings_path is None:
+        return None
+    data, err = _load_findings_doc(Path(findings_path))
+    block_data = data.get("pr_lifecycle") if not err else None
+    if not isinstance(block_data, dict) or block_data.get("status") != "measured":
+        return None
+    basis, labelled = block_data.get("basis"), _LIFECYCLE_ESTIMATE in block
+    if basis not in _LIFECYCLE_BASES:
+        return f"measured lifecycle block records no known basis ({basis!r})"
+    if labelled != (basis == "all-final-commit-checks"):
+        return (f"estimate label {'shown' if labelled else 'missing'} on basis {basis!r}")
+    return None
+
+
+def check_pr_lifecycle_block(report: str, findings_path: Path | str | None = None) -> Check:
     """The PR lifecycle block either says why it is not measured, or shows shares that
     are internally consistent and a headline that matches its own thresholds (final-commit
     CI median under 10% and green-waiting median over 25%, judged on the rendered
-    one-decimal percentages with half a step of rounding slack)."""
+    one-decimal percentages with half a step of rounding slack). The estimate label
+    appears exactly when the findings record the all-final-commit-checks basis."""
     name = "PR lifecycle block is consistent with its own shares"
     count = report.count(_LIFECYCLE_TITLE)
     if count == 0:
@@ -1956,8 +1977,8 @@ def check_pr_lifecycle_block(report: str) -> Check:
     if "not measured:" in block:
         reason = block.split("not measured:", 1)[1].split("\n", 1)[0].strip()
         bad = [] if reason else ["no reason given"]
-        if _LIFECYCLE_HEADLINE in block or _LIFECYCLE_ROW_RE.search(block):
-            bad.append("shares or headline shown alongside 'not measured'")
+        if _LIFECYCLE_HEADLINE in block or _LIFECYCLE_ROW_RE.search(block) or _LIFECYCLE_ESTIMATE in block:
+            bad.append("shares, headline or estimate label shown alongside 'not measured'")
         return Check(name, not bad, "; ".join(bad) if bad else f"not measured, with reason: {reason}")
     rows = {label: (float(m), float(p)) for label, m, p in _LIFECYCLE_ROW_RE.findall(block)}
     need = ("CI running", "Green, waiting for review or merge", "CI on the final commit (subset)")
@@ -1976,6 +1997,9 @@ def check_pr_lifecycle_block(report: str) -> Check:
         bad.append(f"headline shown at final-commit CI {final[0]}% / green {green}%")
     if _LIFECYCLE_HEADLINE not in block and final[0] < 9.95 and green > 25.05:
         bad.append(f"headline missing at final-commit CI {final[0]}% / green {green}%")
+    basis_bad = _lifecycle_basis_violation(block, findings_path)
+    if basis_bad:
+        bad.append(basis_bad)
     return Check(name, not bad, "; ".join(bad) if bad else
                  f"shares consistent; headline {'shown' if _LIFECYCLE_HEADLINE in block else 'withheld'} per thresholds")
 
@@ -14121,7 +14145,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_cost_spine_shallow_disclosed(report, findings_path),
         check_date_matches_filename(report, report_path),
         check_no_typographic_dashes(report),
-        check_pr_lifecycle_block(report),
+        check_pr_lifecycle_block(report, findings_path),
         check_fences_balanced(report),
         check_no_domain_leakage(report),
         check_skill_commit_provenance(report, skill_repo),

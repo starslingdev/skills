@@ -7,6 +7,13 @@ from datetime import datetime
 from statistics import median
 
 HEADLINE = "CI is not where your PRs wait. Most of their time is spent green, waiting to be merged."
+BASIS_REQUIRED = 'required'
+BASIS_ALL_FINAL = 'all-final-commit-checks'
+ESTIMATE_LABEL = ("Estimated: required checks are not readable, so every check on each PR's final commit is "
+                  "treated as required. An optional slow check delays the green moment, so green waiting may "
+                  "be understated.")
+PASSED = ('SUCCESS', 'NEUTRAL', 'SKIPPED')
+UNCOUNTED = ('SKIPPED', 'NEUTRAL')
 
 
 def _time(value):
@@ -53,34 +60,54 @@ def _without(intervals, occupied):
     return _length(intervals + occupied) - _length(occupied)
 
 
+def _latest(entries):
+    """Latest result per check name: (completed at, or inf if never, passed, counts as
+    a check when every check is treated as required)."""
+    latest = {}
+    for name, done, passed, counted in entries:
+        at = _time(done) if done else math.inf
+        if name not in latest or at > latest[name][0]:
+            latest[name] = (at, passed, counted)
+    return latest
+
+
+def _rollup_entries(contexts):
+    for c in contexts:
+        if c.get('__typename') == 'CheckRun':
+            yield (c.get('name'), c.get('completedAt'), c.get('conclusion') in PASSED,
+                   bool(c.get('completedAt')) and c.get('conclusion') not in UNCOUNTED)
+        elif c.get('__typename') == 'StatusContext':
+            yield (c.get('context'), c.get('createdAt'), c.get('state') == 'SUCCESS',
+                   c.get('state') not in ('PENDING', 'EXPECTED'))
+
+
 def _green_start(pr, required):
-    """When the last required check on the merged head passed. Reads the head's
-    status rollup, which carries every app's latest check and commit statuses."""
+    """When the last required check on the merged head passed, and the names that
+    were required. Reads the head's status rollup, which carries every app's latest
+    check and commit statuses. With no readable required checks, every completed,
+    non-skipped, non-neutral check on the merged head is treated as required."""
     heads = pr['head']['nodes']
     if len(heads) != 1 or heads[0]['commit']['oid'] != pr.get('headRefOid'):
         raise ValueError('final commit unavailable')
     rollup = heads[0]['commit']['statusCheckRollup']
-    latest = {}
-    for c in (rollup['contexts']['nodes'] if rollup else []):
-        if c.get('__typename') == 'CheckRun':
-            name, done, green = c.get('name'), c.get('completedAt'), c.get('conclusion') in ('SUCCESS', 'NEUTRAL', 'SKIPPED')
-        elif c.get('__typename') == 'StatusContext':
-            name, done, green = c.get('context'), c.get('createdAt'), c.get('state') == 'SUCCESS'
-        else:
-            continue
-        at = _time(done) if done else math.inf
-        if name not in latest or at > latest[name][0]:
-            latest[name] = (at, green)
-    if not set(required).issubset(latest):
+    if required:
+        contexts = rollup['contexts']['nodes'] if rollup else []
+    else:  # the estimate needs the whole list: a check past the page could be the last to pass
+        contexts = _nodes(rollup['contexts'] if rollup else None, 'final commit checks')
+    latest = _latest(_rollup_entries(contexts))
+    names = set(required) if required else {n for n, (_, _, counted) in latest.items() if counted}
+    if not names:
+        raise ValueError('no completed checks on final commit')
+    if not names.issubset(latest):
         raise ValueError('required checks missing on final commit')
-    if not all(latest[n][1] and latest[n][0] < math.inf for n in required):
+    if not all(latest[n][1] and latest[n][0] < math.inf for n in names):
         raise ValueError('required checks not green on final commit')
-    return max(latest[n][0] for n in required)
+    return max(latest[n][0] for n in names), names
 
 
 def measure_pr(pr, required):
-    if not required:
-        raise ValueError('required checks unavailable')
+    """`required` is the repo's required-check names, or empty/None when they are not
+    readable: then every check on the merged head stands in for them (an estimate)."""
     start, end = _time(pr['createdAt']), _time(pr['mergedAt'])
     if end <= start:
         raise ValueError('invalid PR lifetime')
@@ -120,7 +147,7 @@ def measure_pr(pr, required):
                 all_checks.append((max(start,a),min(end,b),c))
         if commit['oid'] == pr.get('headRefOid'):
             final = checks
-    green_start = _green_start(pr, required)
+    green_start, _ = _green_start(pr, required)
     if green_start > end:
         raise ValueError('required checks completed after merge')
     running = [(a,b) for a,b,_ in all_checks]
@@ -182,9 +209,10 @@ def _excluded_text(excluded):
 def collect(query, repo, required):
     """At most four queries, no nested pagination. A failed or malformed page refuses
     the whole block; a PR whose own history cannot be read completely is left out and
-    counted, and too few measurable PRs refuses the block."""
-    if not required:
-        return dict(status='not measured', reason='required checks unavailable', queries=0)
+    counted, and too few measurable PRs refuses the block. Without readable required
+    checks the block is an estimate from every check on each merged head; `basis`
+    records which one was used."""
+    basis = BASIS_REQUIRED if required else BASIS_ALL_FINAL
     rows, cursor, excluded, sampled = [], None, {}, 0
     for page in range(1,5):
         try:
@@ -222,7 +250,8 @@ def collect(query, repo, required):
         values=sorted(r[key] for r in rows)
         shares[key]=dict(median=median(values),p90=values[math.ceil(.9*len(values))-1])
     return dict(status='measured',sample_size=len(rows),sampled=sampled,excluded=excluded,shares=shares,queries=page,
-                sample_order='most recently updated merged PRs',required_checks=list(required))
+                sample_order='most recently updated merged PRs',basis=basis,
+                required_checks=list(required) if required else None)
 
 
 def render(data):
@@ -231,6 +260,9 @@ def render(data):
         reason=(data or {}).get('reason','lifecycle data was not collected')
         # Reasons are controlled collector messages, never GraphQL response text.
         return '\n'.join(lines+[f'not measured: {reason}',''])
+    estimate = data.get('basis') == BASIS_ALL_FINAL
+    if estimate:
+        lines += [ESTIMATE_LABEL, '']
     shares=data['shares']
     if shares['final_commit_ci']['median'] < .1 and shares['green_waiting']['median'] > .25:
         lines += [HEADLINE,'']
@@ -238,7 +270,8 @@ def render(data):
     coverage = f"Measured {data['sample_size']} of {sampled} merged PRs"
     if excluded:
         coverage += f" (left out: {_excluded_text(excluded)})"
-    lines += [coverage + ', the most recently updated (this tracks recent merges); current required-check names. '
+    checks = 'every completed check on each final commit' if estimate else 'current required-check names'
+    lines += [coverage + f', the most recently updated (this tracks recent merges); {checks}. '
               'Shares use each PR\'s open-to-merge lifetime. CI running counts every GitHub Actions job attempt; '
               'required checks from other apps or commit statuses only mark when the PR turned green. '
               'Red waiting ends at the next commit timestamp, not its push time (the API does not expose that time).', '',
