@@ -6072,6 +6072,57 @@ def check_cost_spine_contents_count_matches_table(report: str,
     return Check(name, True, f"Contents and table agree: {len(rows)} shown, {hidden} hidden")
 
 
+_DRILL_LOG_FETCHED_RE = re.compile(
+    r"pole jobs' raw logs, fetched \*\*([^*]+)\*\*"
+    r"(?: \((the same capture as|the same day as|newer than|older than) "
+    r"the critical-path audit above\))?")
+
+
+def _vr_capture_time(value: str):
+    import datetime as _vdt
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = _vdt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_vdt.timezone.utc)
+    return parsed, bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", text))
+
+
+def check_drill_log_capture_relation(report: str, findings_path: Path | None) -> Check:
+    """The Data sources line compares the drill logs' fetch time with the audit's scan
+    time truthfully: equal is "the same capture", never "newer". 2026-11-03 dogfood: two
+    identical timestamps were called "newer than the critical-path audit above"."""
+    name = "drill-log fetch time is compared truthfully with the audit's scan time"
+    m = _DRILL_LOG_FETCHED_RE.search(report or "")
+    if not m:
+        return Check(name, True, "no drill-log provenance line rendered", skipped=True)
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return Check(name, True, err, skipped=True)
+    import datetime as _vdt
+    cap, scan = _vr_capture_time(m.group(1)), _vr_capture_time(str(data.get("scanned_at") or ""))
+    if cap is None or scan is None:
+        expected = None
+    elif cap[1] or scan[1]:
+        cd = cap[0].astimezone(_vdt.timezone.utc).date()
+        sd = scan[0].astimezone(_vdt.timezone.utc).date()
+        expected = ("the same day as" if cd == sd else
+                    "newer than" if cd > sd else "older than")
+    else:
+        expected = ("the same capture as" if cap[0] == scan[0] else
+                    "newer than" if cap[0] > scan[0] else "older than")
+    if m.group(2) != expected:
+        return Check(name, False,
+                     f"logs fetched {m.group(1)!r}, audit scanned "
+                     f"{data.get('scanned_at')!r}: the line says {m.group(2)!r}, "
+                     f"expected {expected!r}")
+    return Check(name, True, f"relation {expected!r} matches the timestamps")
+
+
 # Mirror of blocking_path's GitHub-hosted label rule, kept independent on purpose.
 _VR_GITHUB_HOSTED_LABEL_RE = re.compile(r"^(ubuntu|windows|macos)-", re.IGNORECASE)
 
@@ -14294,6 +14345,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_runner_minute_spine_contract(report, findings_path),
         check_cost_spine_contents_count_matches_table(report, findings_path),
         check_cost_spine_runner_host_split(report, findings_path),
+        check_drill_log_capture_relation(report, findings_path),
         check_no_rate_derived_dollars(report, findings_path),
         check_opt80_tail_lines(report, findings_path),
         check_opt80_tail_withheld_reasons(report, findings_path),

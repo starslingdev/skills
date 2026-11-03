@@ -4529,6 +4529,41 @@ def _yaml_skew_lines(doc: dict[str, Any]) -> list[str]:
             "from a current default-branch checkout if that matters here."]
 
 
+def _parse_capture_time(value: str) -> tuple[datetime, bool] | None:
+    """(aware datetime, date_only) for an ISO-8601 timestamp or date, else None."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    date_only = bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", text))
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed, date_only
+
+
+def _capture_relation(captured_at: str, scanned_at: str) -> str:
+    """How the drill logs' fetch time relates to the audit's scan time: "the same capture
+    as", "newer than" or "older than" ("the same day as" when either side is a bare date
+    and the dates match). Empty when either side can't be parsed, so nothing is claimed.
+    2026-11-03 dogfood: the line said "newer than" for two identical timestamps, which is
+    the normal case (run.py passes the scan time as --captured-at)."""
+    cap, scan = _parse_capture_time(captured_at), _parse_capture_time(scanned_at)
+    if cap is None or scan is None:
+        return ""
+    (c, c_date), (s, s_date) = cap, scan
+    if c_date or s_date:
+        cd, sd = c.astimezone(timezone.utc).date(), s.astimezone(timezone.utc).date()
+        if cd == sd:
+            return "the same day as"
+        return "newer than" if cd > sd else "older than"
+    if c == s:
+        return "the same capture as"
+    return "newer than" if c > s else "older than"
+
+
 def _provenance_block(doc: dict[str, Any], repo: str, captured_at: str) -> list[str]:
     """Spell out WHERE the numbers come from: levels 1–2 are P50 from the committed
     ci-speedup audit (its own sample size + window + gate-sample completeness);
@@ -4759,9 +4794,11 @@ def _provenance_block(doc: dict[str, Any], repo: str, captured_at: str) -> list[
                    "guess), and no "
                    "check is labelled non-required on its account.")
     if captured_at:
+        relation = _capture_relation(captured_at, str(doc.get("scanned_at") or ""))
+        relation = f" ({relation} the critical-path audit above)" if relation else ""
         out.append(f"> - **Step internals + cross-run checks (the per-pole drill-downs):** the "
-                   f"pole jobs' raw logs, fetched **{captured_at}** (newer than the "
-                   "critical-path audit above). Each drill-down is **one representative "
+                   f"pole jobs' raw logs, fetched **{captured_at}**{relation}. Each "
+                   "drill-down is **one representative "
                    "run** of that job - the one closest to its typical time (for a "
                    "bimodal job, a representative of the slow mode the drill explains), "
                    "linked + labelled per pole - and the **Cross-run check** validates "
