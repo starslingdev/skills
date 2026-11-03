@@ -5047,10 +5047,9 @@ def _opt96_condition_allows(condition: object, event: str, branch: str) -> bool:
         return True
     field, op, _, expected = match.groups()
     # Each seed event is evaluated as itself: a nightly warmer gated to
-    # `schedule` saves, and a merge-queue run's ref is the queue branch.
-    refs = {"pull_request": "refs/pull/1/merge",
-            "merge_group": f"refs/heads/gh-readonly-queue/{branch}/pr-1"}
-    actual = event if field == "event_name" else refs.get(event, f"refs/heads/{branch}")
+    # `schedule` saves.
+    actual = event if field == "event_name" else (
+        "refs/pull/1/merge" if event == "pull_request" else f"refs/heads/{branch}")
     return (actual == expected) if op == "==" else (actual != expected)
 
 
@@ -5180,8 +5179,11 @@ def _detect_opt96(parsed: list[tuple[str, dict, str]], root: Path,
             if restore and event == "pull_request":
                 readers[(rel, job_id, family)] = aliases - {""}
 
+    # Seed events run on the default branch itself. `merge_group` is deliberately
+    # absent: a merge-queue run saves under its temporary `gh-readonly-queue/…`
+    # ref, which a new PR branch cannot restore from.
     for rel, doc, _ in parsed:
-        for event in ("pull_request", "push", "schedule", "merge_group"):
+        for event in ("pull_request", "push", "schedule"):
             for branch in branches:
                 if triggers(doc, event, branch):
                     walk(rel, event, branch, set())
@@ -5196,7 +5198,7 @@ def _detect_opt96(parsed: list[tuple[str, dict, str]], root: Path,
                        else "default branch name assumed: main/master")
         hits.append(("OPT96", rel, Hit(
             line=1, affected_jobs=[job], match_text=family,
-            evidence=f"cache family `{family}` is restored on PRs; no save on push to the default branch, schedule, or merge_group ({branch_note})",
+            evidence=f"cache family `{family}` is restored on PRs; no save on push to the default branch or on schedule ({branch_note})",
         )))
     return hits, []
 

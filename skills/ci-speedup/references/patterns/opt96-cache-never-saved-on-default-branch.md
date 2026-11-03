@@ -25,15 +25,18 @@ for a cold install.
 `setup-go` (cached by default from v4), and `setup-java`, including those
 inside local composite actions. Normalize expression-valued platform and lockfile
 hash components to a stable key prefix, including `restore-keys` fallbacks.
-A save is reachable through a default-branch push (including branch globs),
-`schedule`, or `merge_group` unless a literal job or step condition excludes
-it; each event's conditions are evaluated for that event. Unknown conditions
+A save is reachable through a default-branch push (including branch globs)
+or `schedule` unless a literal job or step condition excludes
+it; each event's conditions are evaluated for that event. A `merge_group` save
+does not count: it lands on the temporary `gh-readonly-queue/…` ref, which a
+new PR branch cannot restore from. Unknown conditions
 count as reachable. Follow local reusable workflow calls and composite
 actions; unresolved ones suppress the finding and appear in `scan_incomplete`.
 Use repository metadata for the default branch when available; otherwise
 assume `main`/`master` and disclose the assumption in the evidence.
 
-Confirm the static candidate using the existing cache-distribution sampling:
+Confirm the static candidate using the existing cache-distribution sampling,
+run only for a job a static finding names (matched by job id or its `name:`):
 dependency-cache restore hit/miss lines on PR runs versus the existing bounded
 push probe. Confirmation requires a median PR miss rate of at least 50% and
 push logs showing neither a restore nor a save, or a job absent from push

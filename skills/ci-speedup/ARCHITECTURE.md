@@ -4110,11 +4110,14 @@ order of preference:
 
 The static pass correlates PR restore families with default-branch save points,
 including local reusable callers and local composite actions. Each seed event's
-conditions are evaluated for that event. Unknown conditions remain reachable; unresolved
+conditions are evaluated for that event; a `merge_group` save never counts (it lands on the
+temporary queue ref, unreadable from a new PR branch). Unknown conditions remain reachable; unresolved
 calls or actions disclose incomplete coverage rather than inventing an absent writer.
 The dependency-cache leaf is observation-only (`_OBSERVATION_ONLY_LEAVES`): a restore
 line never closes a coverage gap or holds back the OPT81 advisory, and a default-branch
-restore refutes the measured confirmation.
+restore refutes the measured confirmation. Dependency-cache sampling and the push probe
+run only for a pole whose job a static OPT96 finding names (`_opt96_pole_matches`: job id,
+or its `name:` / matrix leg resolved through the workflow YAML).
 The dependency-cache leaf reads restore outcomes using the existing magnitude
 sample and bounded push probe. Only a matching static finding can promote the
 measured install hit/miss difference, multiplied by upstream PR miss share.

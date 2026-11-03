@@ -117,12 +117,23 @@ def test_local_reusable_workflow_inherits_callers_and_unresolved_suppresses(tmp_
                for entry in json.loads(result.stdout)["scan_incomplete"])
 
 
-@pytest.mark.parametrize("trigger", ["{push: {branches: ['ma*']}}", "{schedule: [{cron: '0 0 * * *'}]}", "merge_group"])
+@pytest.mark.parametrize("trigger", ["{push: {branches: ['ma*']}}", "{schedule: [{cron: '0 0 * * *'}]}"])
 def test_default_branch_glob_and_non_pr_seed_events(tmp_path, trigger):
     write_workflow(tmp_path, "ci.yml", RESTORE)
     assert findings(tmp_path), "positive control: cache has no seed event"
     write_workflow(tmp_path, "warm.yml", SAVE.replace("{push: {branches: [main]}}", trigger))
     assert not findings(tmp_path)
+
+
+def test_merge_queue_saves_do_not_seed_the_default_branch(tmp_path):
+    # A merge_group run saves under its temporary queue ref, which a new PR
+    # branch cannot read. A repo whose only save is in the merge queue is cold.
+    write_workflow(tmp_path, "ci.yml", RESTORE)
+    write_workflow(tmp_path, "warm.yml", SAVE.replace("{push: {branches: [main]}}", "merge_group"))
+    hits = findings(tmp_path)
+    assert hits, "a merge-queue-only save leaves new PR branches cold"
+    assert "merge_group" not in json.dumps(hits[0]["evidence"]), \
+        "the evidence must not list merge_group as a seed event"
 
 
 def test_dependency_leaf_sets_and_grounding_stay_coupled():
@@ -142,6 +153,24 @@ def test_only_confirmed_matched_static_candidates_get_measured_sizing():
     cd["confirmed"] = False
     cr._ground_opt96([f], [p])
     assert f["wall_clock_p50_s"] is None
+
+
+@pytest.mark.parametrize("pole_job", ["Unit tests", "Unit tests (ubuntu, 22)"])
+def test_named_jobs_ground_by_their_display_name(pole_job):
+    # The finding names the YAML job id; the measured pole carries the job's
+    # display `name:` (or a matrix leg of it). Both identify the same job.
+    wf = ".github/workflows/ci.yml"
+    f = {"pattern": "OPT96", "workflow_file": wf, "affected_jobs": ["test"]}
+    cd = {"fix_key": "dependency-cache", "confirmed": True, "recommendation": "seed the default-branch cache",
+          "sizing": {"credited": True, "step": "Install", "miss_time_s": 100, "saving_s": 60}}
+    p = {"workflow_file": wf, "job": pole_job, "cache_dist": cd}
+    wf_docs = {wf: {"jobs": {"test": {"name": "Unit tests"}, "lint": {}}}}
+    cr._ground_opt96([f], [p], wf_docs)
+    assert f["wall_clock_p50_s"] == 60, "a named job must still receive its measured sizing"
+    # A different job in the same workflow never borrows the measurement.
+    other = {"pattern": "OPT96", "workflow_file": wf, "affected_jobs": ["lint"]}
+    cr._ground_opt96([other], [p], wf_docs)
+    assert other["wall_clock_p50_s"] is None
 
 
 def sampled_job(jid, install_s):
@@ -192,7 +221,9 @@ def test_saved_runs_dependency_cache_grounding_and_sizing(tmp_path, misses, push
     cr._persist_pole_logs(client, "example/project", [pole],
                           {wf: [[j] for j in jobs]}, tmp_path, mag_runs=8,
                           events_jobs_by_wf={wf: {"push": [[sampled_job(i, 20)]
-                                                          for i in range(21, 26)]}})
+                                                          for i in range(21, 26)]}},
+                          opt96_findings=[{"pattern": "OPT96", "workflow_file": wf,
+                                           "affected_jobs": ["test"]}])
     cd = pole.get("cache_dist")
     assert cd is not None, "dependency caches must use existing cache-distribution grounding"
     assert cd["fix_key"] == "dependency-cache"
@@ -213,6 +244,39 @@ def test_saved_runs_dependency_cache_grounding_and_sizing(tmp_path, misses, push
         assert cd["confirmed"] is False, "a default-branch restore refutes a missing seed"
     elif misses != 1:
         assert cd["confirmed"] is True
+
+
+def test_cache_lines_without_a_static_finding_spend_no_extra_fetches(tmp_path):
+    # A cache restore line appears in nearly every job log. Without a static
+    # OPT96 finding for the pole's job, the drill keeps its previous shape: no
+    # dependency-cache sampling of sibling runs and no push-probe log fetch.
+    jobs = [sampled_job(i, 100 if i <= 6 else 20) for i in range(1, 9)]
+    logs = {i: ("Cache not found for input keys: deps-linux-lock" if i <= 6
+                else "Cache restored from key: deps-linux-lock") for i in range(1, 9)}
+    logs.update({i: "Cache not found for input keys: deps-linux-lock" for i in range(21, 26)})
+
+    class Client:
+        queries = errors = 0
+
+        def __init__(self):
+            self.calls = []
+
+        def text(self, endpoint, allow_missing=False):
+            jid = int(endpoint.split("/jobs/")[1].split("/")[0])
+            self.calls.append(jid)
+            return logs[jid]
+
+    client = Client()
+    wf = ".github/workflows/ci.yml"
+    pole = {"check": "test", "workflow_file": wf, "job": "test", "p50_s": 300}
+    cr._persist_pole_logs(client, "example/project", [pole],
+                          {wf: [[j] for j in jobs]}, tmp_path, mag_runs=8,
+                          events_jobs_by_wf={wf: {"push": [[sampled_job(i, 20)]
+                                                          for i in range(21, 26)]}})
+    assert not [jid for jid in client.calls if jid >= 21], \
+        "no push-probe fetch without a static OPT96 finding"
+    assert len(client.calls) == 1, "only the drilled log is fetched, as before"
+    assert "cache_dist" not in pole
 
 
 def test_quoted_false_does_not_disable_a_save(tmp_path):
@@ -267,7 +331,6 @@ def test_schedule_only_writer_gated_to_push_never_runs(tmp_path):
 @pytest.mark.parametrize('trigger,condition', [
     ("{schedule: [{cron: '0 0 * * *'}]}", "github.event_name == 'schedule'"),
     ("{schedule: [{cron: '0 0 * * *'}]}", "github.event_name != 'push'"),
-    ('merge_group', "github.event_name == 'merge_group'"),
 ])
 def test_seed_event_conditions_evaluate_the_real_event_name(tmp_path, trigger, condition):
     # A nightly warmer gated to its own event DOES save. Evaluating its

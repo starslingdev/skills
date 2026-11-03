@@ -23966,7 +23966,26 @@ def _dependency_cache_sizing(samples: list[dict[str, Any]], miss_share: float) -
     return result
 
 
-def _ground_opt96(findings: list[dict[str, Any]], poles: list[dict[str, Any]]) -> None:
+def _opt96_pole_matches(finding: dict[str, Any], pole: dict[str, Any],
+                        wf_docs: dict[str, Any] | None = None) -> bool:
+    """True when an OPT96 finding (YAML job ids) names the measured pole's job.
+    A pole carries the job's display name: its `name:` or a matrix leg of it,
+    resolved through the workflow YAML; an unnamed job's display is its id."""
+    wf = str(pole.get("workflow_file") or "")
+    if not wf or _wf_basename(wf) != _wf_basename(str(finding.get("workflow_file") or "")):
+        return False
+    job = str(pole.get("job") or "")
+    ids = [str(j) for j in (finding.get("affected_jobs") or [])]
+    if job in ids:
+        return True
+    doc = (wf_docs or {}).get(wf) if isinstance(wf_docs, dict) else None
+    jobs = doc.get("jobs") if isinstance(doc, dict) else None
+    hit = _opt83_match_yaml_job(jobs, job) if isinstance(jobs, dict) and job else None
+    return hit is not None and hit[0] in ids
+
+
+def _ground_opt96(findings: list[dict[str, Any]], poles: list[dict[str, Any]],
+                  wf_docs: dict[str, Any] | None = None) -> None:
     """Ground static reachability candidates before the ordinary savings cascade."""
     for finding in findings:
         if finding.get("pattern") != "OPT96":
@@ -23974,8 +23993,7 @@ def _ground_opt96(findings: list[dict[str, Any]], poles: list[dict[str, Any]]) -
         finding.update({"sizing_basis": "measured", "wall_clock_p50_s": None,
                         "runner_min_saving": None, "tier": 2, "realization": "none",
                         "size_note": "check this: no measured dependency-cache confirmation"})
-        candidates = [p for p in poles if p.get("workflow_file") == finding.get("workflow_file")
-                      and p.get("job") in (finding.get("affected_jobs") or [])]
+        candidates = [p for p in poles if _opt96_pole_matches(finding, p, wf_docs)]
         cd = next((p["cache_dist"] for p in candidates
                    if (p.get("cache_dist") or {}).get("fix_key") == "dependency-cache"), None)
         if not cd:
@@ -24024,6 +24042,8 @@ def _persist_pole_logs(
     jobs_per_run_by_wf: dict[str, list], data_dir: "Path", mag_runs: int = 3,
     events_jobs_by_wf: dict[str, dict[str, list]] | None = None,
     iso: dict[str, Any] | None = None,
+    opt96_findings: list[dict[str, Any]] | None = None,
+    wf_docs: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Capture the long-pole jobs' raw logs ONCE into a local data bundle, so the
     report (and the fix-agent it hands off to) can read the step's INTERNAL timing
@@ -24207,10 +24227,19 @@ def _persist_pole_logs(
         # annotates the SAME logs `_magnitude_sample` already fetches (no PR-bucket cost).
         leaf0 = bp._parse_log(log, iso) or {}
         _cache_fk = leaf0.get("fix_key") if leaf0.get("fix_key") in _CACHE_LEAF_KEYS else None
+        # A restore line sits in nearly every job log. Sample dependency-cache
+        # outcomes (sibling logs + the push probe) only for a job a static OPT96
+        # finding names; any other pole keeps its previous drill and fetch count.
+        _dep_unclaimed = _cache_fk == "dependency-cache" and not any(
+            _opt96_pole_matches(f, p, wf_docs) for f in (opt96_findings or [])
+            if f.get("pattern") == "OPT96")
+        if _dep_unclaimed:
+            _cache_fk = None
         _state_fn = (lambda lg, _fk=_cache_fk: bp._cache_state_of_log(lg, _fk)) if _cache_fk else None
         mag_fn: str | None = None
-        mag = _magnitude_sample(bp, client, repo, qual, repr_job, log, mag_runs,
-                                state_fn=_state_fn, iso=iso)
+        mag = (None if _dep_unclaimed else
+               _magnitude_sample(bp, client, repo, qual, repr_job, log, mag_runs,
+                                 state_fn=_state_fn, iso=iso))
         if _cache_fk and mag:
             p["cache_dist"] = _cache_distribution(
                 bp, client, repo, _cache_fk, mag, qual, p,
@@ -26464,8 +26493,10 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         pole_logs = _persist_pole_logs(
             client, repo, drill_poles or poles, jobs_per_run_by_wf, data_dir,
             events_jobs_by_wf=events_jobs_by_wf,
-            iso=findings_doc.get("test_runner_isolation"))
-    _ground_opt96(findings, drill_poles or poles)
+            iso=findings_doc.get("test_runner_isolation"),
+            opt96_findings=[f for f in findings if f.get("pattern") == "OPT96"],
+            wf_docs=_wf_docs)
+    _ground_opt96(findings, drill_poles or poles, _wf_docs)
 
     # The repo's longest measured job across ALL workflows — the physical ceiling on
     # any wall-clock saving (you can't save more than the slowest run takes). Used to
