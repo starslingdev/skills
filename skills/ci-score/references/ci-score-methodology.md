@@ -522,3 +522,15 @@ be inspected locally. Removing the old pass can lower the score: synthetic
 SHA-pinned and tag-pinned handoffs move 40 → 25 and 20 → 0. Both frozen
 controls retain every fact. This version follows the v0.1.7 cache off-values change and preserves
 both decisions.
+
+## Advisory notes (not part of the score)
+
+Advisories never enter passed/applicable and never change the eleven-check
+rubric or its version. They render after the scored checks, outside that table.
+`ci.runner.swappable` notes when the same literal custom runner label appears
+in at least three jobs. Use one repository variable per runner class, such as
+`runs-on: ${{ vars.RUNNER_LINUX }}`, to make changing runners a single setting
+change. Labels already supplied by variables, a matrix or reusable-workflow
+inputs, standard hosted labels, and generic OS/architecture selectors are silent.
+This is portability guidance only, with no pricing comparison. OD-CS27 records
+the metadata-only addition under `ci-score-v0.1.8`.

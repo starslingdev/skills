@@ -46,7 +46,8 @@ def _adapt(mod: Any) -> Any:
     """Let the old engine take a newer collector's calls: extra positional or
     keyword arguments to `_practice_facts` (a later collector may pass, for
     example, `parse_errors`) are dropped, and `_unresolved_setup_defaults`,
-    which OD-CS23 added, reads as "nothing recorded"."""
+    which OD-CS23 added, reads as "nothing recorded". Advisory notes added
+    later are empty on this historical engine and never enter its facts."""
     facts = mod._practice_facts
 
     def _practice_facts(parsed: Any, root: Any, *_args: Any, **_kwargs: Any) -> Any:
@@ -55,6 +56,8 @@ def _adapt(mod: Any) -> Any:
     mod._practice_facts = _practice_facts
     if not hasattr(mod, "_unresolved_setup_defaults"):
         mod._unresolved_setup_defaults = lambda *_a, **_k: []
+    if not hasattr(mod, "_runner_advisories"):
+        mod._runner_advisories = lambda *_a, **_k: []
     return mod
 
 

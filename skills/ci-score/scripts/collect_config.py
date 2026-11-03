@@ -325,6 +325,7 @@ def collect(root: Path, spec_path: Path = _DEFAULT_SPEC) -> tuple[dict[str, Any]
         doc["data_sources"]["ci_score_error"] = f"{type(exc).__name__}: {exc}"
         logger.debug("scoring failed: %s", doc["data_sources"]["ci_score_error"])
         return doc, 3
+    doc["advisory_notes"] = pf_mod._runner_advisories(parsed)
     doc["ci_score"] = stamp
     logger.debug("stamped: value=%s grade=%s refusal=%s",
                  stamp.get("value"), stamp.get("grade"),

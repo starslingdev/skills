@@ -373,6 +373,14 @@
       "why_a_version_bump": "Pass becomes not_applicable, removing both a pass and an applicable check; scores may fall. The owner approved this applicability change on 2026-10-27.",
       "blast_radius": "Both frozen controls retain all eleven facts and their scores. A synthetic PR workflow with a single SHA-pinned external call moves 40 to 25; a tag-pinned call moves 20 to 0.",
       "merge_order": "Follows the merged cache off-values change, ci-score-v0.1.7 and OD-CS25; both decisions are preserved."
+    },
+    {
+      "id": "OD-CS27",
+      "status": "DECIDED 2026-11-03",
+      "title": "Runner choice is an unscored advisory",
+      "metadata_only": true,
+      "decision": "Repeated hard-coded custom runner labels in at least three jobs produce ci.runner.swappable in Advisory notes, not part of the score. Advisories never enter passed/applicable. Use one repository variable per runner class; centralized expressions and standard labels are silent.",
+      "why_no_version_bump": "Metadata-only advisory surface. The eleven checks, arithmetic and ci-score-v0.1.8 spec_version remain unchanged."
     }
   ],
   "changelog": [
