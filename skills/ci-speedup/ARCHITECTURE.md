@@ -4260,15 +4260,47 @@ The merged head's `statusCheckRollup` (every app's latest checks plus commit
 statuses) decides when the last required check passed.
 Red waiting extends from failed-check completion to the next commit timestamp;
 GitHub no longer supports Commit.pushedDate, so this is explicitly not push
-latency. Current required-check names determine green waiting on the final
-head. Running wins interval overlaps, followed by red then green; draft waiting and everything
-else form the remainder. Ready-for-review and convert-to-draft timeline events
-exclude draft idle time from red/green waiting. The final-head CI share is a subset, not a fifth bucket.
+latency.
+
+Green waiting covers every review round. It is the union of each stretch where
+the PR's latest commit had all its required checks passed and no newer commit
+existed, running until the next commit timestamp or the merge. The merged
+head's stretch starts when its rollup shows the last required check passing.
+An earlier commit is read from the GitHub Actions jobs the same query already
+returns (no extra request): its stretch starts at the latest completion among
+the required names, and only when every required name is a passing job on that
+commit. An earlier commit whose required checks are absent, failing or
+unreadable adds no green time; it never makes the PR unmeasurable. Only the
+merged head's data is mandatory. A required check that only another app or a
+commit status reports keeps earlier rounds out of green, since those are read
+on the merged head alone. Running wins interval overlaps, followed by red then
+green; draft waiting and everything else form the remainder. Ready-for-review
+and convert-to-draft timeline events exclude draft idle time from red/green
+waiting. The final-head CI share is a subset, not a fifth bucket.
+
+Required checks come from rulesets and classic branch protection. When they are
+not fully readable (the usual case for a repository the caller cannot
+administer), the block is an estimate rather than `not measured`. Every check
+on each PR's merged head stands in for the required set: the rollup's latest
+check runs and commit statuses, excluding skipped and neutral ones and ones that
+did not complete by the merge (pending, never completed, or finishing after it).
+The estimate needs the head's complete check list (the rollup's `pageInfo`); a
+truncated or empty list leaves the PR out, counted by reason. An earlier commit
+is green under the estimate only when those names and all of its own completed
+jobs passed. The block's data records `basis` (`required` or
+`all-final-commit-checks`), and the rendered block carries the label
+"Estimated: required checks are not readable, ..." with the bias it implies:
+an optional slow check delays the green moment, so green waiting may be
+understated. Readable required checks keep the stricter rules (a required check
+finishing after merge leaves the PR out).
+
 The report gives per-PR median and nearest-rank p90 shares, and uses strict
 <10% final-head CI / >25% green thresholds for its headline. Current policy,
 update-order sampling and coverage are disclosed; no historical-policy claim is
 made. `verify_report.py` re-checks the rendered block (median <= p90, final-head
-CI within all CI, headline iff its own rendered shares cross the thresholds).
+CI within all CI, headline iff its own rendered shares cross the thresholds) and,
+given the findings, requires the estimate label exactly when the recorded basis
+is `all-final-commit-checks` (a measured block with no recorded basis fails).
 
 GraphQL uses a dedicated one-attempt GhClient transport (no retries, so the
 four-call ceiling includes transport failures), existing governor/breaker,

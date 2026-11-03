@@ -332,6 +332,26 @@ longest individual workflow duration nor the old gate's duration is a substitute
 when workflows start at different times. The phase-7 plan uses this same
 push-wide definition.
 
+### Where your PRs' time goes (PR lifecycle context)
+
+A short block near the top splits each sampled merged PR's open-to-merge life
+into CI running, red waiting for the next commit, green waiting for review or
+merge, and everything else, plus the final-commit CI share as a subset. It is
+context, never a finding or a saving.
+
+- **Green waiting covers every review round:** each stretch where the PR's
+  latest commit had passed its required checks, until the next commit or the
+  merge. An earlier round counts only when every required check is a passing
+  GitHub Actions job on that commit; otherwise it adds no green time.
+- **Estimated basis:** when required checks are not readable, every check that
+  completed on each PR's final commit by the merge (minus skipped and neutral
+  ones) is treated as required. The block says so in its first line and notes
+  that an optional slow check delays the green moment, so green waiting may be
+  understated.
+- **Headline:** "CI is not where your PRs wait" only when final-commit CI is
+  under 10% and green waiting over 25% of median PR life. Fewer than 10
+  measurable PRs renders "not measured" with the reason.
+
 
 **The report opens with a `## Contents` TOC, and every entry is an anchor link.**
 It MUST anchor-link the reversal table, every Tier (1/2/3), **every finding
