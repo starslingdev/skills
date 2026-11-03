@@ -45,7 +45,9 @@ def test_minutes_column_is_not_headed_billable_and_names_the_non_github_runners(
             "| Raw min/mo | Rounded-up min/mo | Share |") in report
     # 2 min (hosted, 61s) + 5 min (vendor) + 3 min (own), each x 10 runs a month.
     assert ("20.000 of the 100.000 min/mo ran on GitHub-hosted runner labels and 80.000 on "
-            "other labels (`linux self-hosted`, `starsling-ubuntu-24.04`).") in report
+            "labels not recognised as GitHub-hosted (`linux self-hosted`, "
+            "`starsling-ubuntu-24.04`).") in report
+    assert "A GitHub larger runner with a custom name is not recognised" in report
     assert "GitHub bills only the runners it hosts" in report
 
     vr = _load_verify_report()

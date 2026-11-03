@@ -7673,6 +7673,8 @@ def _spine_runner_host_note(spine: dict[str, Any]) -> str:
         shown += f" +{len(labels) - 4} more"
     lead = ("Rounded-up min/mo rounds each job up to a whole minute, the way per-minute "
             "runner billing counts it. ")
+    custom = (" A GitHub larger runner with a custom name is not recognised and "
+              "counts here too.")
     not_billed = (" GitHub bills only the runners it hosts, so minutes on a self-hosted or "
                   "third-party runner are not on the GitHub bill.")
     if not labels:
@@ -7680,9 +7682,9 @@ def _spine_runner_host_note(spine: dict[str, Any]) -> str:
     if not any(_is_github_hosted_label(_as_dict(r).get("runner_label"))
                for r in spine.get("rows") or []):
         return lead + (f"None of the {total:.3f} min/mo ran on GitHub-hosted runner labels "
-                       f"({shown}).") + not_billed
+                       f"({shown}).") + custom + not_billed
     return lead + (f"{hosted:.3f} of the {total:.3f} min/mo ran on GitHub-hosted runner labels "
-                   f"and {other:.3f} on other labels ({shown}).") + not_billed
+                   f"and {other:.3f} on labels not recognised as GitHub-hosted ({shown}).") + custom + not_billed
 
 
 def _spine_identity_cell(value: object) -> str:
