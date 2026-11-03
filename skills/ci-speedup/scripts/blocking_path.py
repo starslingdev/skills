@@ -6075,6 +6075,23 @@ def _opt96_unresolved_line(doc: dict[str, Any]) -> str:
     return f"{lead}: {reasons}."
 
 
+def _opt98_report_block(doc: dict[str, Any]) -> list[str]:
+    """Uncredited repeated-validation evidence stays visible even on drilled poles."""
+    findings = [f for f in doc.get("findings", []) if f.get("pattern") == "OPT98"]
+    if not findings:
+        return []
+    out = ["## Repeated merge validation", ""]
+    catalog = _build_catalog_url(doc.get("skill_commit_sha"))
+    for finding in findings:
+        wf = finding.get("workflow_file")
+        out += [f"### OPT98: {finding.get('title', 'Repeated validation')}" + (f" — `{wf}`" if wf else ""), "",
+                str(finding.get("evidence", "")), "",
+                "No wall-clock or runner-minute saving is credited.", "",
+                *_hygiene_prompt("OPT98", str(finding.get("title", "")), [finding],
+                                 _catalog_anchor(catalog, [finding]))]
+    return out
+
+
 # Entries shown per OPT97 Data sources row; the rest stay in findings JSON.
 _OPT97_ROW_ENTRIES = 5
 
@@ -6239,6 +6256,20 @@ def _data_sources_footer(doc: dict[str, Any], repo: str,
         _wline = _withheld_candidates_line(doc, _row.doc_key, _row.noun)
         if _wline:
             rows.append((_row.label, _wline, _row.feeds))
+    _queue = ds.get("merge_queue") or {}
+    _queue_limits = [_queue[k] for k in ("branch_rule", "merged_prs") if _queue.get(k)]
+    if _queue.get("unmeasured_workflows"):
+        _queue_limits.append("queue/PR timing not measured for " + ", ".join(_queue["unmeasured_workflows"]))
+    if _queue.get("unreadable_workflows"):
+        _queue_limits.append("workflow configuration not readable for " + ", ".join(_queue["unreadable_workflows"]))
+    if _queue.get("static_unknown"):
+        _queue_limits.append("queue scope not settled for " + ", ".join(_queue["static_unknown"]))
+    if _queue.get("thin_samples"):
+        _queue_limits.append("too few queue/PR runs for " + ", ".join(_queue["thin_samples"]))
+    if _queue.get("pr_runs_differ"):
+        _queue_limits.append("PR runs differ from queue runs for " + ", ".join(_queue["pr_runs_differ"]))
+    if _queue_limits:
+        rows.append(("Merge queue", _flatten_cell("; ".join(_queue_limits)), "Repeated validation; unavailable evidence is not an all-clear"))
     _opt96_line = _opt96_unresolved_line(doc)
     if _opt96_line:
         rows.append(("cache seeding: held back", _opt96_line,
@@ -6256,7 +6287,7 @@ def _data_sources_footer(doc: dict[str, Any], repo: str,
     if _calls:
         rows.append(("single-slot capacity: competition fetch", _calls,
                      "Counting every competing job in flight (all runs, any status) for OPT97"))
-    out = ["## 🗄️ Data sources", ""]
+    out = [*_opt98_report_block(doc), "## 🗄️ Data sources", ""]
     if lead:
         out += lead
     out += ["| Source | Coverage | Used for |", "| --- | --- | --- |"]
@@ -8078,6 +8109,23 @@ def _tier2_guardrail_sentence(f: dict[str, Any]) -> str:
     return note[idx:].strip() if idx >= 0 else ""
 
 
+def _opt98_task(members: list[dict[str, Any]]) -> list[str]:
+    """The OPT98 prompt's task lines: the up-to-date case's fix is a merge queue;
+    the re-proving case names the workflow and jobs to scope."""
+    if any((m.get("merge_queue") or {}).get("case") == "strict" for m in members):
+        return ["Replace the require-up-to-date branch rule with a merge queue: add a",
+                "merge_group trigger to every required workflow, confirm the required",
+                "checks report on merge_group runs, then turn the queue on and the",
+                "up-to-date requirement off."]
+    lines = []
+    for m in members:
+        lines += [f"Workflow: {m.get('workflow_file')}",
+                  f"Jobs: {', '.join(str(j) for j in m.get('affected_jobs') or [])}"]
+    return lines + ["Investigate the queue base, affected-only execution and main-written caches.",
+                    "Use the full suite when affected-set resolution fails and compare scoped",
+                    "and full results in parallel before adopting scoping."]
+
+
 def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
                     url: str, *, wait: bool = False, saves_wc: bool = False,
                     tier2: bool = False,
@@ -8107,6 +8155,16 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
                      for m in members[:8])
     if len(members) > 8:
         locs += f"; +{len(members) - 8} more (see findings JSON)"
+    if pat == "OPT98":
+        evidence = "\n".join(str(m.get("evidence", "")) for m in members)
+        return ["#### 🤖 Prompt for your coding agent", "", "```text",
+                "ci-speedup measured repeated merge validation:", evidence,
+                "No wall-clock or runner-minute saving is credited.",
+                "Read git log and the workflow's history and intent before changing policy;",
+                "an intent-contradicting change requires owner sign-off.",
+                *_opt98_task(members),
+                "Keep every required check on the merged result; never drop checks.",
+                f"Catalog context: {url}", "```", ""]
     if pat == "OPT82":
         # Numberless by design: the generic bill / off-path saving line would
         # describe it falsely (it may sit ON the critical path, and it claims
@@ -9147,6 +9205,7 @@ def _also_noticed_block(findings: list[dict[str, Any]],
             and str(f.get("pattern", "")) != "OPT81"             # → its pole / own §
             and str(f.get("pattern", "")) != "OPT83"             # → its pole / own §
             and str(f.get("pattern", "")) != "OPT84"             # → its pole / own §
+            and str(f.get("pattern", "")) != "OPT98"             # → uncredited validation section
             and not _on_pole_job(f)                               # valueless + all-pole-job → already AS a pole (#5)
             and not _is_opt79_pole_finding(f)]                    # OPT79 pole cache → its own block (at its pole, or `_opt79_off_pole_block`)
     if not elig:
@@ -10403,6 +10462,7 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     withheld_n = sum(1 for _r in _WITHHELD_ROWS
                      if _withheld_candidates_line(doc, _r.doc_key, _r.noun))
     withheld_n += bool(_opt96_unresolved_line(doc))
+    withheld_n += bool(_opt98_report_block(doc))
     # An OPT81 finding (a measured runner-class comparison, or a held-back A2) is
     # something to say too: without counting it, an OPT81-only doc collapsed to
     # the one-line note and its "Runner class comparisons" section was dropped.
