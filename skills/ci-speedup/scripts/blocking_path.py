@@ -5088,6 +5088,11 @@ def _derive_pole_leaf(
     off-category leaf. Pure over its inputs, so calling it twice on the same pole is exact."""
     log_text = logs.get(owner_key) if owner_key is not None else None
     leaf = _parse_log(log_text, iso) if log_text else None
+    # A restore line sits in nearly every job log. The dependency-cache leaf is
+    # evidence only where the OPT96-gated sampling ran on this pole.
+    if (leaf is not None and leaf.get("fix_key") == "dependency-cache"
+            and (pole.get("cache_dist") or {}).get("fix_key") != "dependency-cache"):
+        leaf = None
     leaf = _apply_cache_dist(leaf, pole.get("cache_dist"))
     leaf, offcat_leaf = _demote_offcategory_leaf(leaf, pole)
     return log_text, leaf, offcat_leaf
@@ -6051,6 +6056,25 @@ def _withheld_candidates_line(doc: dict[str, Any] | None, key: str,
     return f"{len(entries)} {noun} held back ({jobs}): {lead}{phrase}."
 
 
+def _opt96_unresolved_line(doc: dict[str, Any]) -> str:
+    """The OPT96 held-back disclosure: PR cache readers the scan could not decide
+    (a save it cannot read may seed them). Not a coverage gap: every workflow
+    file was scanned. "" when nothing was held back."""
+    entries = [e for e in (doc.get("opt96_unresolved") or []) if isinstance(e, dict)]
+    if not entries:
+        return ""
+    names = []
+    for e in entries:
+        if e.get("job"):
+            wf = str(e.get("workflow_file") or "").rsplit("/", 1)[-1]
+            names.append(_flatten_cell(f"`{e['job']}` in `{wf}`"))
+    names = list(dict.fromkeys(names))
+    shown = ", ".join(names[:5]) + (f", and {len(names) - 5} more" if len(names) > 5 else "")
+    reasons = "; ".join(dict.fromkeys(_flatten_cell(str(e.get("reason") or "")) for e in entries))
+    lead = f"{len(names)} cache reader(s) held back ({shown})" if names else "held back"
+    return f"{lead}: {reasons}."
+
+
 def _data_sources_footer(doc: dict[str, Any], repo: str,
                          lead: "list[str] | None" = None) -> list[str]:
     """A structured Data Sources table at the foot of the report - which tiers ran,
@@ -6180,6 +6204,11 @@ def _data_sources_footer(doc: dict[str, Any], repo: str,
         _wline = _withheld_candidates_line(doc, _row.doc_key, _row.noun)
         if _wline:
             rows.append((_row.label, _wline, _row.feeds))
+    _opt96_line = _opt96_unresolved_line(doc)
+    if _opt96_line:
+        rows.append(("cache seeding: held back", _opt96_line,
+                     "Why a PR cache restore with no visible default-branch save "
+                     "produced no OPT96 finding"))
     out = ["## 🗄️ Data sources", ""]
     if lead:
         out += lead
@@ -10326,6 +10355,7 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     # "measured, could not tell" read as "nothing found".
     withheld_n = sum(1 for _r in _WITHHELD_ROWS
                      if _withheld_candidates_line(doc, _r.doc_key, _r.noun))
+    withheld_n += bool(_opt96_unresolved_line(doc))
     # An OPT81 finding (a measured runner-class comparison, or a held-back A2) is
     # something to say too: without counting it, an OPT81-only doc collapsed to
     # the one-line note and its "Runner class comparisons" section was dropped.

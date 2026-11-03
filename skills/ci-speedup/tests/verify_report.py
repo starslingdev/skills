@@ -13351,6 +13351,8 @@ def check_detector_leaf_agrees_with_dominant_category(report: str,
 # `_VR_*` copies keep verify_report import-free; a coupling test pins them to the engine.
 _VR_CACHE_CONTEXT_MARKER = "<!-- ci-speedup:cache-context -->"
 _VR_PARTIAL_MISS_FLOOR_PCT = 40.0
+# Per-leaf floor override, mirror of `collect_runs._CACHE_FLOOR_BY_FIX_KEY`.
+_VR_CACHE_FLOOR_BY_FIX_KEY: dict[str, float] = {"dependency-cache": 50.0}
 _VR_CACHE_TAIL_MIN_FRAC = 0.25
 _VR_CACHE_COLD_MISS_PCT = 99.5
 _VR_BIGGEST_LEVER = "BIGGEST LEVER"
@@ -13394,7 +13396,9 @@ def _vr_cache_verdict(cache_dist: dict) -> str:
     if all(_is_cold(v) for v in upstream):
         return "cold"
     med = statistics.median([_miss(v) for v in upstream])
-    if med >= _VR_PARTIAL_MISS_FLOOR_PCT:
+    floor = _VR_CACHE_FLOOR_BY_FIX_KEY.get(str(cd.get("fix_key") or ""),
+                                           _VR_PARTIAL_MISS_FLOOR_PCT)
+    if med >= floor:
         return "churn"
     prev = tail.get("prevalence_max")
     if isinstance(prev, (int, float)) and prev >= _VR_CACHE_TAIL_MIN_FRAC:

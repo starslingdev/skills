@@ -4754,6 +4754,8 @@ def test_vr_cache_literals_stay_coupled_to_renderer():
     # Marker + thresholds equal across engine (blocking_path / collect_runs) and verifier.
     assert vr._VR_CACHE_CONTEXT_MARKER == bp._CACHE_CONTEXT_MARKER
     assert vr._VR_PARTIAL_MISS_FLOOR_PCT == bp._PARTIAL_MISS_FLOOR_PCT
+    assert vr._VR_CACHE_FLOOR_BY_FIX_KEY == cr._CACHE_FLOOR_BY_FIX_KEY
+    assert cr._CACHE_FLOOR_BY_FIX_KEY["dependency-cache"] == cr._DEPENDENCY_CACHE_FLOOR_PCT == 50.0
     assert vr._VR_CACHE_TAIL_MIN_FRAC == cr._CACHE_TAIL_MIN_FRAC
     assert vr._VR_CACHE_COLD_MISS_PCT == cr._CACHE_COLD_MISS_PCT
     # The demotion literals the renderer strips must match what the verifier looks for.

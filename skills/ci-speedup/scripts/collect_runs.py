@@ -21043,6 +21043,11 @@ _CACHE_PUSH_PROBE_MAX = 3
 # keep the finding's lever framing. Parallels `blocking_path._PARTIAL_MISS_FLOOR_PCT`'s
 # "most PRs touch few packages" rationale — a quarter of runs paying the miss is real.
 _CACHE_TAIL_MIN_FRAC = 0.25
+# Per-leaf partial-miss floor override. A dependency cache restores one key per
+# job, so at least half the sampled PR runs missing is the confirmation bar.
+# Mirrored by verify_report `_VR_CACHE_FLOOR_BY_FIX_KEY` (coupling test).
+_DEPENDENCY_CACHE_FLOOR_PCT = 50.0
+_CACHE_FLOOR_BY_FIX_KEY: dict[str, float] = {"dependency-cache": _DEPENDENCY_CACHE_FLOOR_PCT}
 # `_CACHE_COLD_MISS_PCT` — a per-run miss rate at/above this is "effectively 0 cached"
 # (a genuinely cold run), the case where a broad cache claim is legitimate. Kept just
 # under 100 so a lone restored package doesn't demote an otherwise-cold run.
@@ -23584,6 +23589,12 @@ def _dominant_step_sample(
             "this_run": round(this_run, 1), "escalated": False, "values": values}
 
 
+# Leaves that report the SAME magnitude (turbo's "% of tasks rebuilt", whether the
+# remote cache was off or partly warm in that run) compare across runs as one.
+_MAG_LEAF_FAMILY: dict[str, str] = {"turbo-remote-cache": "turbo",
+                                    "turbo-partial-cache": "turbo"}
+
+
 def _magnitude_sample(
     bp: Any, client: "GhClient", repo: str, qual: list[tuple[float, dict[str, Any]]],
     repr_job: dict[str, Any], repr_log: str, k_probe: int = 3, k_max: int = 8,
@@ -23624,6 +23635,16 @@ def _magnitude_sample(
         return None  # categorical-only finding (e.g. sequential playwright)
     primary_unit = mag.get("unit")
 
+    def _same_leaf_magnitude(leaf: dict[str, Any] | None) -> dict[str, Any] | None:
+        # A sibling's number counts only when the SAME detector fired on it. A
+        # sibling whose turbo miss fell below its floor can fall through to the
+        # dependency-cache leaf (a % too), and a seconds-unit leaf measures
+        # something else entirely: neither belongs in this cross-run sample.
+        if not leaf or (_MAG_LEAF_FAMILY.get(leaf.get("fix_key"), leaf.get("fix_key"))
+                        != _MAG_LEAF_FAMILY.get(primary.get("fix_key"), primary.get("fix_key"))):
+            return None
+        return leaf.get("magnitude")
+
     parsed: dict[Any, float | None] = {}
     states: dict[Any, Any] = {}   # jid -> cache_state (only populated when state_fn set)
     units: dict[Any, Any] = {}    # jid -> the run's own magnitude unit (for unit consistency)
@@ -23639,7 +23660,7 @@ def _magnitude_sample(
         log = (repr_log if jid == repr_job.get("id")
                else _fetch_job_log(client, repo, j))
         leaf = bp._parse_log(log, iso) if log else None
-        v = (leaf or {}).get("magnitude")
+        v = _same_leaf_magnitude(leaf)
         parsed[jid] = v["value"] if v and v.get("value") is not None else None
         units[jid] = (v or {}).get("unit")
         _record_state(jid, log)
@@ -23667,7 +23688,7 @@ def _magnitude_sample(
                     lambda j: (j.get("id"), _fetch_job_log(client, repo, j)),
                     chunk):
                 leaf = bp._parse_log(log, iso) if log else None
-                v = (leaf or {}).get("magnitude")
+                v = _same_leaf_magnitude(leaf)
                 parsed[jid] = v["value"] if v and v.get("value") is not None else None
                 units[jid] = (v or {}).get("unit")
                 _record_state(jid, log)
@@ -23810,7 +23831,7 @@ def _cache_distribution(
     push (default-branch) probe, plus the re-derivable `verdict`. Only called for a
     cache leaf, so its fetches (≤ `_CACHE_PUSH_PROBE_MAX` push logs) are the targeted
     escalation, not paid on every audit."""
-    floor_pct = 50.0 if fix_key == "dependency-cache" else bp._PARTIAL_MISS_FLOOR_PCT
+    floor_pct = _CACHE_FLOOR_BY_FIX_KEY.get(fix_key, bp._PARTIAL_MISS_FLOOR_PCT)
 
     def _miss(v: dict[str, Any]) -> float | None:
         st = v.get("cache_state") if isinstance(v.get("cache_state"), dict) else {}
@@ -23877,7 +23898,10 @@ def _cache_distribution(
         # either. `_job_has_log` keeps it out of both tallies AND out of the prefetch plan
         # (so no log is parked that the walk never consumes).
         job = next((j for j in run_jobs
-                    if str(j.get("name", "")) == job_name and _job_has_log(j)), None)
+                    if str(j.get("name", "")) == job_name and _job_has_log(j)
+                    # A dependency save runs in the job's post step: only a job that
+                    # ran to completion can show whether it saved.
+                    and (fix_key != "dependency-cache" or _dep_job_completed(j))), None)
         if job and job.get("id"):
             probe_jobs.append(job)
     # LEVER 3: fan the (≤ cap) probe logs out in one wave; the walk reads them from the
@@ -23925,16 +23949,50 @@ def _cache_distribution(
         miss_share = (statistics.mean(_miss(v) for v in samples) / 100.0
                       if samples else 0.0)
         # A push run that restored anything proves the default branch already
-        # holds this cache, so only full misses with no save confirm the gap.
-        no_push_save = (bool(push_runs) and push_matched == 0) or (
-            bool(push_vals) and not push_errors and len(push_vals) == push_matched
-            and all(v.get("saved") is False and v.get("value") == 100 for v in push_vals))
+        # holds this cache, so only full misses with no save confirm the gap. A
+        # push run whose job state cannot be verified (queued, in progress,
+        # cancelled, or a display name that only resembles the pole's) is
+        # unknown: it never counts as "did not save".
+        states = [_dep_push_run_state(run_jobs, job_name) for run_jobs in push_runs]
+        ran_sample = (bool(push_vals) and not push_errors and len(push_vals) == push_matched
+                      and all(v.get("saved") is False and v.get("value") == 100
+                              for v in push_vals))
+        never_ran = (bool(states) and push_matched == 0
+                     and all(s == "absent" for s in states))
+        no_push_save = ran_sample or never_ran
+        result["push_unknown_runs"] = sum(1 for s in states if s == "unknown")
         result["confirmed"] = bool(pr["upstream_median"] is not None
-                                   and pr["upstream_median"] >= 50 and no_push_save)
+                                   and pr["upstream_median"] >= floor_pct and no_push_save)
         result["recommendation"] = ("check this" if miss_share < _CACHE_TAIL_MIN_FRAC
                                     or not result["confirmed"] else "seed the default-branch cache")
         result["sizing"] = _dependency_cache_sizing(samples, miss_share)
     return result
+
+
+def _dep_job_completed(job: dict[str, Any]) -> bool:
+    """A job that ran to completion (its post-step cache save had its chance)."""
+    return str(job.get("conclusion") or "").strip().lower() in ("success", "failure")
+
+
+def _dep_push_run_state(run_jobs: list[dict[str, Any]], job_name: str) -> str:
+    """One push run, for the pole's job: "ran" (completed), "absent" (provably
+    did not run: no such job in a finished run, or GitHub skipped it) or
+    "unknown" (queued, in progress, cancelled, or only a similar name)."""
+    jobs = [j for j in (run_jobs or []) if isinstance(j, dict)]
+    exact = [j for j in jobs if str(j.get("name", "")) == job_name]
+    if exact:
+        if any(_dep_job_completed(j) for j in exact):
+            return "ran"
+        if all(str(j.get("conclusion") or "").strip().lower() == "skipped" for j in exact):
+            return "absent"
+        return "unknown"
+    similar = any(str(j.get("name", "")).startswith(job_name + " (")
+                  or str(j.get("name", "")).endswith(" / " + job_name)
+                  or str(j.get("name", "")).startswith(job_name + " / ")
+                  for j in jobs)
+    if similar or any(not str(j.get("conclusion") or "").strip() for j in jobs):
+        return "unknown"
+    return "absent"
 
 
 def _dependency_cache_sizing(samples: list[dict[str, Any]], miss_share: float) -> dict[str, Any]:
@@ -23966,52 +24024,161 @@ def _dependency_cache_sizing(samples: list[dict[str, Any]], miss_share: float) -
     return result
 
 
+def _opt96_job_display_matches(display: str, job: str) -> bool:
+    return job == display or job.startswith(display + " (")
+
+
 def _opt96_pole_matches(finding: dict[str, Any], pole: dict[str, Any],
                         wf_docs: dict[str, Any] | None = None) -> bool:
     """True when an OPT96 finding (YAML job ids) names the measured pole's job.
     A pole carries the job's display name: its `name:` or a matrix leg of it,
-    resolved through the workflow YAML; an unnamed job's display is its id."""
+    resolved through the workflow YAML; an unnamed job's display is its id. A
+    reader inside a reusable workflow runs under its caller: the pole is the
+    caller's workflow and its job reads `caller job / callee job`."""
     wf = str(pole.get("workflow_file") or "")
-    if not wf or _wf_basename(wf) != _wf_basename(str(finding.get("workflow_file") or "")):
-        return False
     job = str(pole.get("job") or "")
+    if not wf or not job:
+        return False
     ids = [str(j) for j in (finding.get("affected_jobs") or [])]
-    if job in ids:
-        return True
-    doc = (wf_docs or {}).get(wf) if isinstance(wf_docs, dict) else None
-    jobs = doc.get("jobs") if isinstance(doc, dict) else None
-    hit = _opt83_match_yaml_job(jobs, job) if isinstance(jobs, dict) and job else None
-    return hit is not None and hit[0] in ids
+    if _wf_basename(wf) == _wf_basename(str(finding.get("workflow_file") or "")):
+        if job in ids:
+            return True
+        doc = (wf_docs or {}).get(wf) if isinstance(wf_docs, dict) else None
+        jobs = doc.get("jobs") if isinstance(doc, dict) else None
+        hit = _opt83_match_yaml_job(jobs, job) if isinstance(jobs, dict) else None
+        if hit is not None and hit[0] in ids:
+            return True
+    parts = [p.strip() for p in job.split(" / ")]
+    for caller in finding.get("callers") or []:
+        if not isinstance(caller, dict) or len(parts) < 2:
+            continue
+        if _wf_basename(wf) != _wf_basename(str(caller.get("workflow_file") or "")):
+            continue
+        chain = [str(j) for j in caller.get("jobs") or []]
+        if not chain:
+            continue
+        doc = (wf_docs or {}).get(wf) if isinstance(wf_docs, dict) else None
+        jobs = doc.get("jobs") if isinstance(doc, dict) else None
+        head = parts[0]
+        hit = _opt83_match_yaml_job(jobs, head) if isinstance(jobs, dict) else None
+        if head != chain[0] and (hit is None or hit[0] != chain[0]):
+            continue
+        callee = str(caller.get("callee_name") or "")
+        if parts[-1] in ids or (callee and _opt96_job_display_matches(callee, parts[-1])):
+            return True
+    return False
+
+
+# Workflow triggers that run on the default branch: a workflow with none of
+# them has no push bucket to probe, so the static finding supplies the writer.
+_OPT96_SEED_TRIGGERS = frozenset({"push", "schedule", "workflow_run", "repository_dispatch"})
+
+
+def _opt96_workflow_triggers(doc: Any) -> set[str] | None:
+    if not isinstance(doc, dict):
+        return None
+    on = doc.get("on", doc.get(True))
+    if isinstance(on, str):
+        return {on}
+    if isinstance(on, list):
+        return {str(x) for x in on}
+    if isinstance(on, dict):
+        return {str(k) for k in on}
+    return None
+
+
+def _opt96_check_default_branch(findings_doc: dict[str, Any], gh_default: str | None) -> None:
+    """Cross-check the default branch the scan used against GitHub's. On a
+    mismatch every OPT96 finding is demoted to unconfirmed, and the mismatch is
+    disclosed in `opt96_unresolved`."""
+    stamp = findings_doc.get("opt96_default_branch")
+    if not gh_default or not isinstance(stamp, dict):
+        return
+    used = stamp.get("name")
+    if used == gh_default or (not used and gh_default in ("main", "master")):
+        return
+    scanned = f"`{used}`" if used else "main/master (assumed)"
+    note = f"the scan read default branch {scanned}, but GitHub reports `{gh_default}`"
+    held = findings_doc.setdefault("opt96_unresolved", [])
+    for f in findings_doc.get("findings") or []:
+        if f.get("pattern") != "OPT96":
+            continue
+        f["opt96_branch_mismatch"] = note
+        jobs = f.get("affected_jobs") or [None]
+        held.append({"workflow_file": f.get("workflow_file"), "job": jobs[0],
+                     "family": f.get("match_text"),
+                     "reason": f"{note}, so this finding is unconfirmed"})
+
+
+def _opt96_unconfirmed_reason(candidates: list[dict[str, Any]]) -> str:
+    if not candidates:
+        return "no matching pole"
+    probes = [str(p.get("opt96_probe") or "") for p in candidates]
+    other = next((p for p in probes if p.startswith("other-leaf:")), None)
+    if other:
+        return f"another detector (`{other.split(':', 1)[1]}`) took precedence"
+    if any(p == "no-restore-line" for p in probes):
+        return "confirmation failed: the sampled log shows no cache restore"
+    return "pole log not fetched"
 
 
 def _ground_opt96(findings: list[dict[str, Any]], poles: list[dict[str, Any]],
-                  wf_docs: dict[str, Any] | None = None) -> None:
-    """Ground static reachability candidates before the ordinary savings cascade."""
+                  wf_docs: dict[str, Any] | None = None,
+                  fetch_gaps: "set[str] | None" = None) -> None:
+    """Ground static reachability candidates before the ordinary savings cascade.
+    `fetch_gaps` is the set of workflow files whose run or job lists failed to
+    download: their missing push bucket is not evidence of anything."""
     for finding in findings:
         if finding.get("pattern") != "OPT96":
             continue
         finding.update({"sizing_basis": "measured", "wall_clock_p50_s": None,
-                        "runner_min_saving": None, "tier": 2, "realization": "none",
-                        "size_note": "check this: no measured dependency-cache confirmation"})
+                        "runner_min_saving": None, "tier": 2, "realization": "none"})
         candidates = [p for p in poles if _opt96_pole_matches(finding, p, wf_docs)]
-        cd = next((p["cache_dist"] for p in candidates
-                   if (p.get("cache_dist") or {}).get("fix_key") == "dependency-cache"), None)
-        if not cd:
+        pole = next((p for p in candidates
+                     if (p.get("cache_dist") or {}).get("fix_key") == "dependency-cache"), None)
+        if pole is None:
+            finding["size_note"] = (f"check this: {_opt96_unconfirmed_reason(candidates)}; "
+                                    "savings uncredited")
             continue
+        cd = pole["cache_dist"]
         cd["static_confirmed"] = True
         finding["cache_dist"] = cd
         sizing = cd.get("sizing") or {}
-        # A PR-only workflow has no push bucket. The static reachability proof
-        # supplies the absent writer; a missing/failed push log alone never does.
-        if (cd.get("push_reason") == "no push runs sampled for this workflow"
-                and (cd.get("pr") or {}).get("upstream_n", 0) >= 2
-                and (cd.get("pr") or {}).get("upstream_median", 0) >= 50):
-            cd["confirmed"] = True
-            cd["recommendation"] = "seed the default-branch cache"
-        finding["size_note"] = cd.get("recommendation", "check this")
+        pr = cd.get("pr") or {}
+        wf = str(pole.get("workflow_file") or "")
+        triggers = _opt96_workflow_triggers((wf_docs or {}).get(wf))
+        reason = None
+        if cd.get("push_reason") == "no push runs sampled for this workflow":
+            # A PR-only workflow has no push bucket: the static reachability
+            # proof supplies the absent writer. A workflow that DOES run on the
+            # default branch, or whose run list failed to download, only lacks
+            # a sample, and a missing sample proves nothing.
+            pr_only = (triggers is not None and not (triggers & _OPT96_SEED_TRIGGERS)
+                       and wf not in (fetch_gaps or set()))
+            if (pr_only and pr.get("upstream_n", 0) >= 2
+                    and (pr.get("upstream_median") or 0) >= _DEPENDENCY_CACHE_FLOOR_PCT):
+                cd["confirmed"] = True
+                cd["recommendation"] = "seed the default-branch cache"
+            elif not pr_only:
+                reason = "push probe unavailable"
+        elif not cd.get("confirmed") and (
+                (cd.get("push") is None and cd.get("push_reason")
+                 and "fetch" in str(cd.get("push_reason")))
+                or cd.get("push_unknown_runs")):
+            reason = "push probe unavailable"
+        if finding.get("opt96_branch_mismatch"):
+            reason = finding["opt96_branch_mismatch"]
+            cd["confirmed"] = False
+            cd["recommendation"] = "check this"
+        if not cd.get("confirmed"):
+            cd["recommendation"] = "check this"
+            reason = reason or "confirmation failed"
+        note = cd.get("recommendation", "check this")
+        if reason:
+            note += f": {reason}"
         if sizing.get("step"):
-            finding["size_note"] += (f": `{sizing['step']}` takes {sizing['miss_time_s']:g}s "
-                                     "on a cache miss")
+            note += f"; `{sizing['step']}` takes {sizing['miss_time_s']:g}s on a cache miss"
+        finding["size_note"] = note
         if not cd.get("confirmed") or not sizing.get("credited"):
             finding["size_note"] += "; savings uncredited"
             continue
@@ -24188,6 +24355,10 @@ def _persist_pole_logs(
 
     for p, wf, job, qual, repr_dur, repr_job, jid in drills:
         log = _fetch_job_log(client, repo, repr_job)
+        _opt96_named = any(_opt96_pole_matches(f, p, wf_docs) for f in (opt96_findings or [])
+                           if f.get("pattern") == "OPT96")
+        if _opt96_named and not log:
+            p["opt96_probe"] = "log-not-fetched"
         if not log:
             logger.warning("no log captured for pole job %r (id=%s) - fetch returned "
                            "empty; this pole will render without a drill-down", job, jid)
@@ -24230,11 +24401,13 @@ def _persist_pole_logs(
         # A restore line sits in nearly every job log. Sample dependency-cache
         # outcomes (sibling logs + the push probe) only for a job a static OPT96
         # finding names; any other pole keeps its previous drill and fetch count.
-        _dep_unclaimed = _cache_fk == "dependency-cache" and not any(
-            _opt96_pole_matches(f, p, wf_docs) for f in (opt96_findings or [])
-            if f.get("pattern") == "OPT96")
+        _dep_unclaimed = _cache_fk == "dependency-cache" and not _opt96_named
         if _dep_unclaimed:
             _cache_fk = None
+        if _opt96_named and leaf0.get("fix_key") != "dependency-cache":
+            # Why an OPT96 finding naming this pole stays unconfirmed.
+            p["opt96_probe"] = (f"other-leaf:{leaf0['fix_key']}" if leaf0.get("fix_key")
+                                else "no-restore-line")
         _state_fn = (lambda lg, _fk=_cache_fk: bp._cache_state_of_log(lg, _fk)) if _cache_fk else None
         mag_fn: str | None = None
         mag = (None if _dep_unclaimed else
@@ -24244,6 +24417,10 @@ def _persist_pole_logs(
             p["cache_dist"] = _cache_distribution(
                 bp, client, repo, _cache_fk, mag, qual, p,
                 events_jobs_by_wf or {}, _state_fn)
+        if _cache_fk == "dependency-cache":
+            # Restore outcomes live in cache_dist only. The pole's magnitude stays
+            # the dominant step's wall time, which `_mag_line` describes honestly.
+            mag = None
         if not mag:
             mag = _dominant_step_sample(timeline, qual, repr_job)
         if mag:
@@ -26496,7 +26673,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             iso=findings_doc.get("test_runner_isolation"),
             opt96_findings=[f for f in findings if f.get("pattern") == "OPT96"],
             wf_docs=_wf_docs)
-    _ground_opt96(findings, drill_poles or poles, _wf_docs)
+    _opt96_check_default_branch(findings_doc, default_branch)
+    _ground_opt96(findings, drill_poles or poles, _wf_docs,
+                  fetch_gaps={str(g.get("workflow_file")) for g in _sample_gaps()})
 
     # The repo's longest measured job across ALL workflows — the physical ceiling on
     # any wall-clock saving (you can't save more than the slowest run takes). Used to

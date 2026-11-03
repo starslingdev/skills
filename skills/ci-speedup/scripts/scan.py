@@ -5027,6 +5027,34 @@ def _opt96_key_family(key: object) -> str:
     return re.sub(r"[-_]+", "-", value).strip("- ")
 
 
+# Each `${{ … }}` in a cache key is an unknown run-time value: a wildcard.
+_OPT96_WILD = "\x00"
+
+
+def _opt96_key_pattern(key: object) -> str:
+    """The key template with every expression replaced by one wildcard marker."""
+    return re.sub(r"\$\{\{.*?\}\}", _OPT96_WILD, str(key or ""), flags=re.S).strip()
+
+
+def _opt96_has_literal(pattern: str) -> bool:
+    """True when a key template has literal text beyond expressions and separators."""
+    return bool(re.sub(r"[\x00\s\-_./:]+", "", pattern))
+
+
+def _opt96_rx(pattern: str, prefix: bool) -> "re.Pattern[str]":
+    body = ".*".join(re.escape(part) for part in pattern.split(_OPT96_WILD))
+    return re.compile(body + (".*" if prefix else ""), re.S)
+
+
+def _opt96_could_match(reader: str, writer: str, prefix: bool = False) -> bool:
+    """Whether one concrete key could satisfy both templates. Either side's
+    wildcards may stand for the other side's literal text. `prefix` reads the
+    reader as a `restore-keys` prefix."""
+    if _opt96_rx(reader, prefix).fullmatch(writer):
+        return True
+    return bool(_opt96_rx(writer, False).fullmatch(reader + (_OPT96_WILD if prefix else "")))
+
+
 def _opt96_condition_allows(condition: object, event: str, branch: str) -> bool:
     """Exclude only a fully understood literal. Unknown expressions are reachable."""
     if condition is False:
@@ -5055,65 +5083,138 @@ def _opt96_condition_allows(condition: object, event: str, branch: str) -> bool:
 
 # setup-go caches by default from v4; older majors need `cache: true`.
 _OPT96_SETUP_GO_NO_DEFAULT_CACHE = re.compile(r"v[123](?:\.|$)")
+# Events whose runs execute on the default branch, so their saves seed it.
+# `merge_group` is deliberately absent: a merge-queue run saves under its
+# temporary `gh-readonly-queue/…` ref, which a new PR branch cannot restore.
+# `workflow_dispatch` is absent too: it seeds only when someone runs it.
+_OPT96_SEED_EVENTS = ("push", "schedule", "workflow_run", "repository_dispatch")
+# Remote actions known to never save a dependency cache. Any other remote
+# action on a seed event may save one, so its saves are unknown.
+_OPT96_NON_CACHING_ACTIONS = frozenset({
+    "actions/checkout", "actions/upload-artifact", "actions/download-artifact",
+    "actions/github-script",
+})
+_OPT96_SETUP_ACTIONS = ("actions/setup-node", "actions/setup-python",
+                        "actions/setup-go", "actions/setup-java")
+
+
+def _opt96_list(value: object) -> list[str]:
+    """A trigger filter as a list: YAML allows one string, a list, or nothing."""
+    if value is None:
+        return []
+    if isinstance(value, (str, int, float)):
+        return [str(value)]
+    if isinstance(value, list):
+        return [str(v) for v in value if v is not None]
+    return []
+
+
+def _opt96_ref(uses: str) -> str:
+    """The repository (`owner/repo`) or local path a `uses:` names."""
+    target = uses.split("@", 1)[0].strip()
+    if _is_local_uses(target):
+        return target[2:]
+    return "/".join(target.lower().split("/")[:2])
+
+
+def _opt96_push_runs_on(opts: object, branch: str) -> bool:
+    """Whether a `push:` trigger fires for a push to `branch`."""
+    from fnmatch import fnmatchcase
+
+    if not isinstance(opts, dict):
+        return True
+    has_branch_filter = "branches" in opts or "branches-ignore" in opts
+    if ("tags" in opts or "tags-ignore" in opts) and not has_branch_filter:
+        return False  # a tags-only filter never fires for a branch push
+    patterns = _opt96_list(opts.get("branches"))
+    if patterns:
+        allowed = False
+        for pattern in patterns:
+            negative = pattern.startswith("!")
+            if fnmatchcase(branch, pattern.lstrip("!")):
+                allowed = not negative
+        if not allowed:
+            return False
+    return not any(fnmatchcase(branch, p) for p in _opt96_list(opts.get("branches-ignore")))
 
 
 def _detect_opt96(parsed: list[tuple[str, dict, str]], root: Path,
-                  default_branch: str | None = None):
-    """Correlate PR readers with reachable default-branch writers, including calls.
+                  default_branch: str | None = None, branch_source: str | None = None):
+    """Correlate PR cache readers with push or schedule writers (plus
+    `workflow_run` / `repository_dispatch`) reachable on the default branch,
+    following local reusable workflows and local composite actions.
 
-    An unresolved call can conceal a writer, so absence is never claimed when
-    one exists. No network access is needed: callers may supply repo metadata.
-    """
-    from fnmatch import fnmatchcase
+    `scan()` passes the default branch from `--default-branch` or, failing
+    that, the checkout's origin/HEAD; with neither, main and master are tried.
 
+    Returns `(hits, held_back)`. A reader is held back, never flagged, when a
+    writer whose saves cannot be read (an unresolved reusable workflow, local
+    action or remote action on a seed event) could plausibly produce its key,
+    or when the only matching writer depends on expression-only key parts. Each
+    held-back reader is an entry in `held_back` (the report's `opt96_unresolved`
+    disclosure), not a workflow-file coverage gap."""
+    try:
+        return _detect_opt96_inner(parsed, root, default_branch, branch_source)
+    except Exception as exc:  # noqa: BLE001 — a malformed workflow must never crash scan()
+        logger.warning("OPT96 detector failed: %s", exc)
+        return [], [{"workflow_file": None, "job": None, "family": None,
+                     "reason": f"the cache-seeding check could not read the workflows "
+                               f"({type(exc).__name__}); no cache-seeding finding was produced"}]
+
+
+def _detect_opt96_inner(parsed, root, default_branch, branch_source):
     branches = [default_branch] if default_branch else ["main", "master"]
     docs = {rel: (doc, raw) for rel, doc, raw in parsed}
     graph = _build_workflow_call_graph(parsed)
-    incomplete = []
-    readers = {}
-    writers = set()
+    # (rel, job_id, kind, pattern) -> {"aliases", "family", "callers", "refs"}
+    readers: dict[tuple, dict] = {}
+    writers: set[tuple[str, str]] = set()          # (kind, pattern)
+    manual: set[tuple[str, str]] = set()           # workflow_dispatch-only savers
+    unresolved: list[dict] = []                    # writers whose saves are unknown
+    file_refs: dict[str, set[str]] = {}
+
+    for rel, doc, _ in parsed:
+        refs = set()
+        for job in _jobs_from_doc(doc).values():
+            if not isinstance(job, dict):
+                continue
+            if isinstance(job.get("uses"), str):
+                refs.add(_opt96_ref(job["uses"]))
+            for step, _cond in _steps_with_if(job):
+                if _uses(step):
+                    refs.add(_opt96_ref(_uses(step)))
+        file_refs[rel] = refs
 
     def triggers(doc, event, branch):
-        events = _on_event_names(doc)
-        if event not in events:
+        if event not in _on_event_names(doc):
             return False
         on = doc.get("on", doc.get(True))
         opts = on.get(event) if isinstance(on, dict) else None
-        if event != "push" or not isinstance(opts, dict):
-            return True
-        if "tags" in opts and "branches" not in opts:
-            return False
-        patterns = opts.get("branches")
-        if isinstance(patterns, list):
-            allowed = False
-            for pattern in patterns:
-                pattern = str(pattern)
-                negative = pattern.startswith("!")
-                if fnmatchcase(branch, pattern.lstrip("!")):
-                    allowed = not negative
-            if not allowed:
-                return False
-        ignored = opts.get("branches-ignore", [])
-        return not any(fnmatchcase(branch, str(p)) for p in ignored)
+        return _opt96_push_runs_on(opts, branch) if event == "push" else True
 
-    def walk(rel, event, branch, stack):
+    def walk(rel, event, branch, stack, callers):
         if rel in stack:
-            incomplete.append({"path": rel, "reason": "OPT96: reusable workflow cycle"})
-            return
-        doc, raw = docs[rel]
+            return  # a cycle revisits a workflow already being walked
+        doc, _raw = docs[rel]
         for job_id, job in _jobs_from_doc(doc).items():
             if not isinstance(job, dict) or not _opt96_condition_allows(job.get("if"), event, branch):
                 continue
             if job.get("uses"):
-                target = str(job["uses"]).split("@", 1)[0]
+                uses = str(job["uses"])
+                target = uses.split("@", 1)[0]
                 if _is_local_uses(target):
                     target = target[2:]
-                if target not in graph.get(rel, []) or target not in docs:
-                    incomplete.append({"path": rel, "reason": "OPT96: unresolved reusable workflow; cache saves unknown"})
-                else:
-                    walk(target, event, branch, stack | {rel})
+                if target in graph.get(rel, []) and target in docs:
+                    walk(target, event, branch, stack | {rel}, callers + ((rel, str(job_id)),))
+                elif event != "pull_request" and not (
+                        target.startswith(".github/workflows/") and target not in docs):
+                    # A remote reusable workflow may save anything. A missing LOCAL
+                    # workflow file cannot run at all, so it hides no writer.
+                    unresolved.append({"ref": _opt96_ref(uses), "path": rel,
+                                       "inputs": json.dumps(job.get("with") or {}, default=str),
+                                       "what": "reusable workflow"})
                 continue
-            visit(_steps_with_if(job), rel, str(job_id), event, branch, ())
+            visit(_steps_with_if(job), rel, str(job_id), event, branch, (), callers)
 
     def composite_steps(ref, chain):
         """Steps of a local composite action, or None when it cannot be read."""
@@ -5134,88 +5235,162 @@ def _detect_opt96(parsed: list[tuple[str, dict, str]], root: Path,
             return None
         return [(st, st.get("if")) for st in steps if isinstance(st, dict)]
 
-    def visit(steps, rel, job_id, event, branch, chain):
+    def visit(steps, rel, job_id, event, branch, chain, callers):
         for step, condition in steps:
             if not _opt96_condition_allows(condition, event, branch):
                 continue
             uses = _uses(step).strip()
             action, _, version = uses.partition("@")
             action = action.lower()
-            if _is_local_uses(uses) and not action.endswith((".yml", ".yaml")):
-                # A local composite action can hide a reader or a writer.
-                inner = composite_steps(uses.partition("@")[0], chain)
-                if inner is None:
-                    incomplete.append({"path": rel, "reason": "OPT96: unresolved local action; cache saves unknown"})
-                else:
-                    visit(inner, rel, job_id, event, branch, chain + (uses.partition("@")[0],))
-                continue
             inputs = step.get("with") or {}
             if not isinstance(inputs, dict):
+                inputs = {}
+            if _is_local_uses(uses) and not action.endswith((".yml", ".yaml")):
+                # A local composite action can hide a reader or a writer.
+                local = uses.partition("@")[0]
+                inner = composite_steps(local, chain)
+                if inner is None:
+                    if event != "pull_request":
+                        unresolved.append({"ref": _opt96_ref(local), "path": rel,
+                                           "inputs": json.dumps(inputs, default=str),
+                                           "what": "local action"})
+                else:
+                    visit(inner, rel, job_id, event, branch, chain + (local,), callers)
                 continue
-            restore = save = False
             if action in {"actions/cache", "actions/cache/restore", "actions/cache/save"}:
                 restore = action != "actions/cache/save"
                 save = action != "actions/cache/restore" and str(inputs.get("lookup-only", False)).lower() != "true"
-                family = _opt96_key_family(inputs.get("key"))
-                aliases = {_opt96_key_family(k) for k in str(inputs.get("restore-keys", "")).splitlines()}
-            elif action in {"actions/setup-node", "actions/setup-python", "actions/setup-go", "actions/setup-java"}:
+                kind = "key"
+                pattern = _opt96_key_pattern(inputs.get("key"))
+                family = _opt96_key_family(inputs.get("key")) or re.sub(
+                    r"\s+", " ", str(inputs.get("key") or "")).strip()
+                aliases = {_opt96_key_pattern(k) for k in str(inputs.get("restore-keys") or "").splitlines()}
+            elif action in _OPT96_SETUP_ACTIONS:
                 cache = inputs.get("cache")
                 if (cache is None and action == "actions/setup-go"
                         and not _OPT96_SETUP_GO_NO_DEFAULT_CACHE.match(version)):
                     cache = True  # setup-go v4+ caches unless told not to
                 if cache is None or str(cache).lower() in {"", "false", "no", "off"}:
                     continue
-                family = f"{action}:{str(cache).lower()}"
+                kind = "setup"
+                pattern = family = f"{action}:{str(cache).lower()}"
                 aliases = set()
                 restore = True
                 save = str(inputs.get("cache-read-only", False)).lower() != "true"
             else:
+                if (uses and event != "pull_request" and not uses.startswith("docker://")
+                        and action not in _OPT96_NON_CACHING_ACTIONS
+                        and not (action.startswith("actions/setup-") and "cache" not in inputs)):
+                    unresolved.append({"ref": _opt96_ref(uses), "path": rel,
+                                       "inputs": json.dumps(inputs, default=str),
+                                       "what": "action"})
                 continue
-            if not family:
-                incomplete.append({"path": rel, "reason": "OPT96: cache key has no stable prefix"})
-                continue
-            if save and event != "pull_request":
-                writers.add(family)
+            if not pattern:
+                continue  # no key at all: nothing to correlate
+            if save and event in _OPT96_SEED_EVENTS:
+                writers.add((kind, pattern))
+            elif save and event == "workflow_dispatch":
+                manual.add((kind, pattern))
             if restore and event == "pull_request":
-                readers[(rel, job_id, family)] = aliases - {""}
+                entry = readers.setdefault((rel, job_id, kind, pattern), {
+                    "aliases": set(), "family": family, "callers": set(), "chain_files": set()})
+                entry["aliases"] |= aliases - {""}
+                if callers:
+                    entry["callers"].add(callers)
+                entry["chain_files"] |= {rel, *(c[0] for c in callers)}
 
-    # Seed events run on the default branch itself. `merge_group` is deliberately
-    # absent: a merge-queue run saves under its temporary `gh-readonly-queue/…`
-    # ref, which a new PR branch cannot restore from.
     for rel, doc, _ in parsed:
-        for event in ("pull_request", "push", "schedule"):
+        for event in ("pull_request", *_OPT96_SEED_EVENTS, "workflow_dispatch"):
             for branch in branches:
                 if triggers(doc, event, branch):
-                    walk(rel, event, branch, set())
-    if incomplete:
-        return [], list({(x["path"], x["reason"]): x for x in incomplete}.values())
-    hits = []
-    for (rel, job, family), aliases in sorted(readers.items()):
-        if any(writer == family or any(writer.startswith(prefix) for prefix in aliases)
-               for writer in writers):
+                    walk(rel, event, branch, set(), ())
+
+    if branch_source == "flag":
+        branch_note = f"default branch `{default_branch}` from repo metadata"
+    elif default_branch:
+        branch_note = f"default branch `{default_branch}` from the local origin/HEAD (may be stale)"
+    else:
+        branch_note = "default branch name assumed: main/master"
+
+    def satisfied(kind, pattern, aliases, pool):
+        """'yes' (a writer decidably matches), 'maybe' (only through an
+        expression-only template) or 'no'."""
+        verdict = "no"
+        for w_kind, w_pat in pool:
+            if w_kind != kind:
+                continue
+            if w_pat == pattern:
+                return "yes"
+            if kind != "key":
+                continue
+            matched = _opt96_could_match(pattern, w_pat) or any(
+                _opt96_could_match(a, w_pat, prefix=True) for a in aliases)
+            if not matched:
+                continue
+            if _opt96_has_literal(w_pat) and _opt96_has_literal(pattern):
+                return "yes"
+            verdict = "maybe"
+        return verdict
+
+    hits, held = [], []
+    for (rel, job, kind, pattern), info in sorted(readers.items()):
+        family, aliases = info["family"], info["aliases"]
+        state = satisfied(kind, pattern, aliases, writers)
+        if state == "yes":
             continue
-        branch_note = (f"default branch `{default_branch}` from repo metadata" if default_branch
-                       else "default branch name assumed: main/master")
-        hits.append(("OPT96", rel, Hit(
+        record = {"workflow_file": rel, "job": job, "family": family}
+        if state == "maybe":
+            held.append(dict(record, reason="the only matching save uses a key made "
+                                            "entirely of expressions, so whether it "
+                                            "seeds this cache cannot be decided"))
+            continue
+        literal = _opt96_key_family(family) if kind == "key" else ""
+        blockers = sorted({u["ref"] for u in unresolved
+                           if any(u["ref"] in file_refs.get(f, set()) for f in info["chain_files"])
+                           or (literal and literal in u["inputs"])})
+        if blockers:
+            held.append(dict(record, reason="a default-branch step whose saves cannot be read "
+                                            "(" + ", ".join(f"`{b}`" for b in blockers)
+                                            + ") may save this cache"))
+            continue
+        note = ""
+        if satisfied(kind, pattern, aliases, manual) != "no":
+            note = ("; a manual `workflow_dispatch` warmer saves it, which seeds the "
+                    "default branch only when someone runs it")
+        hit = Hit(
             line=1, affected_jobs=[job], match_text=family,
-            evidence=f"cache family `{family}` is restored on PRs; no save on push to the default branch or on schedule ({branch_note})",
-        )))
-    return hits, []
+            evidence=(f"cache family `{family}` is restored on PRs; no save on push to the "
+                      f"default branch or on schedule ({branch_note}){note}"),
+        )
+        if info["callers"]:
+            callee_doc = docs[rel][0]
+            spec = _jobs_from_doc(callee_doc).get(job)
+            display = str(spec.get("name") or job) if isinstance(spec, dict) else job
+            hit.callers = [{"workflow_file": chain[0][0],
+                            "jobs": [c[1] for c in chain],
+                            "callee_name": display}
+                           for chain in sorted(info["callers"])]
+        hits.append(("OPT96", rel, hit))
+    return hits, held
 
 
 def _cross_workflow_hits(parsed: list[tuple[str, dict, str]], root: Path,
-                         default_branch: str | None = None):
+                         default_branch: str | None = None,
+                         branch_source: str | None = None,
+                         opt96_held: list[dict] | None = None):
     """Return ``(hits, incomplete)`` aggregated across the cross-workflow /
-    repo-file detectors. Only the turbo pass can produce coverage gaps."""
+    repo-file detectors. Only the turbo pass can produce coverage gaps. OPT96's
+    held-back readers go to `opt96_held` (its own disclosure), never `incomplete`."""
     out = []
     out += _detect_opt7(parsed, root)
     out += _detect_opt37(parsed, root)
     out += _detect_opt40(parsed, root)
     turbo_hits, incomplete = _detect_turbo(root, _ci_turbo_tasks(root, parsed))
     out += turbo_hits
-    cache_hits, cache_incomplete = _detect_opt96(parsed, root, default_branch)
+    cache_hits, cache_held = _detect_opt96(parsed, root, default_branch, branch_source)
     out += cache_hits
-    incomplete += cache_incomplete
+    if opt96_held is not None:
+        opt96_held.extend(cache_held)
     return out, incomplete
 
 
@@ -5843,6 +6018,7 @@ def _trigger_conditionality(parsed: list[tuple[str, dict, str]]) -> dict[str, st
 
 
 def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> dict[str, Any]:
+    branch_source = "flag" if default_branch else None
     if default_branch is None:
         try:
             ref = subprocess.run(
@@ -5850,6 +6026,7 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
                 capture_output=True, text=True, timeout=2, check=False)
             if ref.returncode == 0 and ref.stdout.strip().startswith("origin/"):
                 default_branch = ref.stdout.strip()[len("origin/"):]
+                branch_source = "origin-head"
         except (OSError, subprocess.TimeoutExpired):
             pass
     catalog = load_catalog(catalog_path)
@@ -5982,7 +6159,9 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
                 findings.append(f)
 
     # --- Cross-workflow / repo-context pass ---
-    cross_hits, cross_incomplete = _cross_workflow_hits(parsed, root, default_branch)
+    opt96_held: list[dict] = []
+    cross_hits, cross_incomplete = _cross_workflow_hits(
+        parsed, root, default_branch, branch_source, opt96_held)
     scan_incomplete.extend(cross_incomplete)
     for pat, wf, hit in cross_hits:
         entry = catalog_by_id.get(pat)
@@ -5992,7 +6171,19 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
         f = _emit(entry, hit, wf, finding_idx)
         if hit.snippet:
             f["evidence_snippet"] = hit.snippet
+        if pat == "OPT96":
+            f["match_text"] = hit.match_text  # the cache family, as structured data
+        if getattr(hit, "callers", None):
+            f["callers"] = hit.callers  # OPT96 reader inside a reusable workflow
         findings.append(f)
+    if any(f.get("pattern") == "OPT96" for f in findings):
+        # collect_runs cross-checks this against GitHub's default branch.
+        extra_opt96: dict[str, Any] = {"opt96_default_branch": {
+            "name": default_branch, "source": branch_source or "assumed"}}
+    else:
+        extra_opt96 = {}
+    if opt96_held:
+        extra_opt96["opt96_unresolved"] = opt96_held
 
     # --- Source-file pass (OPT19) — sized inline from the measured sleep
     # total, which collect_runs' "measured" model preserves. ---
@@ -6024,7 +6215,7 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
                  for rel, doc, _raw in parsed for job in _opt12_first_step_in_a_group(doc)]
     if held_back:
         parallel_stats["held_back"] = held_back
-    extra: dict[str, Any] = {}
+    extra: dict[str, Any] = dict(extra_opt96)
     if parallel_steps_used(parallel_stats):
         # Stamped only when the syntax is used, so every other findings
         # document is byte-identical to before. Rendered as the "Parallel steps"
@@ -6100,7 +6291,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--commit-sha", default=None)
     p.add_argument("--repo", default=None)
     p.add_argument("--default-branch", default=None,
-                   help="Default branch from repo metadata; otherwise assume main/master.")
+                   help="Default branch name; if omitted, read from the checkout's origin/HEAD, "
+                        "else assume main/master.")
     args = p.parse_args(argv)
 
     catalog = args.catalog or (Path(__file__).resolve().parents[1]
