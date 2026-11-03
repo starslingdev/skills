@@ -69,6 +69,12 @@ def test_signature_table_never_matches_assertions(text):
     ("npm ERR! code ECONNRESET", "npm ci", "network"),
     ("502 Bad Gateway registry.npmjs.org", "Install packages", "network"),
     ("ECONNRESET", "Run unit tests", None),
+    ("ECONNRESET", "pnpm test", None),
+    ("ETIMEDOUT", "yarn test", None),
+    ("EAI_AGAIN", "pip check", None),
+    ("ECONNRESET", "pnpm install", "network"),
+    ("ETIMEDOUT", "yarn install", "network"),
+    ("EAI_AGAIN", "pip install", "network"),
 ])
 def test_signature_classes(text, step, expected):
     assert bp._classify_infra_failure(text, step) == expected
@@ -99,7 +105,10 @@ def test_retry_minutes_and_delay_from_sampled_attempts_only():
     for i in range(6):
         failed, passed = job(i * 10), job(i * 10 + 1, attempt=2, conclusion="success")
         passed.update(started_at="2026-01-01T00:05:00Z", completed_at="2026-01-01T00:07:00Z")
-        jobs.extend([failed, passed])
+        setup = job(i * 10 + 2, conclusion="success")
+        setup.update(name="setup", completed_at="2026-01-01T00:00:30Z")
+        carried = dict(setup, id=i * 10 + 3, run_attempt=2)
+        jobs.extend([failed, passed, setup, carried])
         logs[failed["id"]] = "2026-01-01T00:01:00Z Killed"
     f = cr._detect_opt100_infra_faults("ci.yml", jobs, logs, {"checks"}, 0, monthly_volume=6, sample_denominator=6)[0][0]
     assert f["runner_min_saving"] == 12

@@ -9112,7 +9112,13 @@ def _detect_opt100_infra_faults(
                 continue
             same_attempt_failures = [x for x in jobs if run_id(x) == rid and attempt(x) == a
                                      and x.get("conclusion") in {"failure", "timed_out"}]
-            retry = [x for x in jobs if run_id(x) == rid and attempt(x) == a + 1]
+            prior_successes = {(x.get("name"), x.get("started_at"), x.get("completed_at"))
+                               for x in jobs if run_id(x) == rid and attempt(x) <= a
+                               and x.get("conclusion") == "success"
+                               and x.get("started_at") and x.get("completed_at")}
+            retry = [x for x in jobs if run_id(x) == rid and attempt(x) == a + 1
+                     and (x.get("name"), x.get("started_at"), x.get("completed_at"))
+                     not in prior_successes]
             if len(same_attempt_failures) != 1 or not retry or (rid, a + 1) in claimed:
                 continue
             claimed.add((rid, a + 1))

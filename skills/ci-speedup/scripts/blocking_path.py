@@ -56,7 +56,9 @@ def _classify_infra_failure(log: str, step_name: str) -> str | None:
     quotes an infrastructure signature. The caller supplies only the first failed
     step's timestamp-bounded log, not a whole job's cleanup output.
     """
-    install = bool(re.search(r"install|fetch|download|checkout|npm ci|pnpm|yarn|pip|restore", step_name, re.I))
+    install = bool(re.search(
+        r"\b(?:install(?:ing|ation)?|fetch(?:ing)?|download(?:ing)?|checkout|restore)\b|\bnpm\s+ci\b",
+        step_name, re.I))
     for line in log.splitlines():
         if re.search(r"assert|expected|received|test asserts", line, re.I) and not re.search(
                 r"runner has received a shutdown signal", line, re.I):
