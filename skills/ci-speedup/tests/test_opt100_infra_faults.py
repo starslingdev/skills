@@ -36,7 +36,12 @@ def test_infra_six_of_twenty_class_breakdown():
 def test_assertions_keep_general_failure_signal():
     findings, _ = detect(0)
     assert findings == []
-    assert cr._SIZING["OPT48"]["model"] == "measured"
+    class Counts:
+        def json(self, endpoint):
+            return {"total_count": 120 if "status=failure" in endpoint else 300}
+    general = cr._detect_opt48_failure_rate(Counts(), "example/project", 1, "ci.yml", 120, 420, 0)
+    assert [f["pattern"] for f in general] == ["OPT48"]
+    assert general[0]["advisory"]
 
 
 def test_runner_cluster_named_in_prompt():
@@ -177,3 +182,10 @@ def test_missing_prior_attempt_page_withholds_ratio(monkeypatch):
     findings, notes = cr._collect_opt100(object(), "example/project", "ci.yml", [job(i) for i in range(6)], {"checks"}, 0, prior_attempt_failures=1)
     assert findings == []
     assert notes["incomplete_job_population"]
+
+
+def test_class_counts_link_to_sampled_jobs_without_raw_log_text():
+    f = detect()[0][0]
+    rows = f["measured_evidence"]["table"]["rows"]
+    assert any("https://github.com/example/project/actions/jobs/" in str(r) for r in rows)
+    assert "The runner has received" not in str(f)

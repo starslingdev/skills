@@ -9148,7 +9148,11 @@ def _detect_opt100_infra_faults(
                          wc_p50=delay * rate, rm=(rerun_seconds / 60 * scale if scale is not None else (0.0 if not rerun_seconds else None)),
                          size_note="Observed subsequent-attempt compute scaled by all-status monthly volume/sample count; raw sample minutes retained separately. Wall-clock remains subject to the existing floors.",
                          measured_evidence=_measured_evidence(
-                             ["Class", "Failures"], [[k, str(v)] for k, v in sorted(classes.items())], evidence))
+                             ["Class", "Failures", "Sampled job logs"],
+                             [[k, str(v), ", ".join(
+                                 f"[job]({j['html_url']})" for j, kind in infra
+                                 if kind == k and j.get("html_url"))]
+                              for k, v in sorted(classes.items())], evidence))
         f["sizing_basis"] = "measured"
         f["agent_prompt"] = prompt
         f["infra_failures"] = {"classes": classes, "failed_jobs": len(failed),
