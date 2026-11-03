@@ -291,3 +291,66 @@ def test_test_steps_named_for_setup_work_are_not_install_steps(step):
 def test_oom_requires_the_runners_own_exit_line(text):
     """A test's own subprocess may print 137 or Killed; only the runner's step exit counts."""
     assert bp._classify_infra_failure(text, "Run tests") is None
+
+
+LOST = ("The hosted runner: example-runner-7 lost communication with the server. "
+        "Anything in your workflow that terminates the runner process can cause this error.")
+
+
+def lost_runner_job(i):
+    """A lost runner leaves no failed step and no log; only the check run says why."""
+    j = job(i)
+    j["steps"] = [{"name": "Set up job", "number": 1, "conclusion": "success",
+                   "started_at": "2026-01-01T00:00:00Z", "completed_at": "2026-01-01T00:00:02Z"},
+                  {"name": "Run checks", "number": 2, "conclusion": None,
+                   "started_at": "2026-01-01T00:00:02Z", "completed_at": None}]
+    return j
+
+
+class AnnotationClient:
+    def __init__(self, messages):
+        self.messages, self.calls = messages, []
+
+    def json(self, endpoint, allow_missing=False):
+        self.calls.append(endpoint)
+        if self.messages is None:
+            return None
+        return [{"annotation_level": "failure", "message": m} for m in self.messages] + [
+            {"annotation_level": "warning", "message": "Node.js 16 actions are deprecated."}]
+
+
+def test_lost_runner_is_classified_from_check_run_annotations(monkeypatch):
+    fetched = []
+    monkeypatch.setattr(cr, "_fetch_job_log", lambda c, r, j: fetched.append(j["id"]))
+    client = AnnotationClient([LOST])
+    jobs = [lost_runner_job((i + 1) * 10) for i in range(6)]
+    findings, notes = cr._collect_opt100(client, "example/project", "ci.yml", jobs, {"checks"}, 0)
+    assert [f["infra_failures"]["classes"] for f in findings] == [{"lost-runner": 6}]
+    assert notes["unreadable_logs"] == 0
+    assert fetched == []
+    assert client.calls == [f"repos/example/project/check-runs/{(i + 1) * 10}/annotations?per_page=50"
+                            for i in range(6)]
+
+
+def test_unreadable_annotations_are_disclosed_not_inferred(monkeypatch):
+    monkeypatch.setattr(cr, "_fetch_job_log", lambda *a: None)
+    jobs = [lost_runner_job(i * 10) for i in range(6)]
+    findings, notes = cr._collect_opt100(AnnotationClient(None), "example/project", "ci.yml", jobs, {"checks"}, 0)
+    assert findings == []
+    assert notes["unreadable_logs"] == 6
+
+
+def test_warning_annotations_never_classify():
+    jobs = [lost_runner_job(i * 10) for i in range(6)]
+    warn = {j["id"]: [] for j in jobs}
+    assert cr._detect_opt100_infra_faults("ci.yml", jobs, {}, {"checks"}, 0, annotations=warn)[0] == []
+
+
+@pytest.mark.parametrize("text", [
+    "##[error]The runner has received a shutdown signal. This can happen when the runner service is stopped.",
+    "##[error]Runner worker-3 lost communication with the server.",
+    "##[error]The hosted runner: example-2 was lost.",
+    "##[error]The cloud provider interrupted the spot instance running this job.",
+])
+def test_lost_runner_signatures(text):
+    assert bp._classify_infra_failure(text, "") == "lost-runner"

@@ -9006,15 +9006,46 @@ def _merge_opt97_findings(findings, new, wf_doc):
         findings.append(measured)
 
 
+def _opt100_failed_step(job: dict[str, Any]) -> dict[str, Any] | None:
+    """The job's first failed step, or None when no step recorded a failure."""
+    steps = sorted((s for s in job.get("steps") or []
+                    if s.get("conclusion") in {"failure", "timed_out"}),
+                   key=lambda s: s.get("number", 0))
+    return steps[0] if steps else None
+
+
+def _fetch_job_annotations(client: GhClient, repo: str,
+                           job: dict[str, Any]) -> list[str] | None:
+    """Failure-level annotation messages on a job's check run, or None if unreadable.
+
+    A job's id is its check-run id. A lost runner leaves no failed step and often
+    no log; the runner's own failure annotation is the only record of why. One
+    governed call per such job replaces the log fetch it would otherwise make."""
+    jid = job.get("id")
+    if not jid:
+        return None
+    data = client.json(f"repos/{repo}/check-runs/{jid}/annotations?per_page=50",
+                       allow_missing=True)
+    if not isinstance(data, list):
+        return None
+    return [str(a.get("message") or "") for a in data
+            if isinstance(a, dict) and a.get("annotation_level") == "failure"]
+
+
+def _opt100_annotation_class(messages: list[str]) -> str | None:
+    """Classify runner failure annotations as the runner's own `##[error]` lines.
+    No step name is supplied, so network signatures never apply here."""
+    from blocking_path import _classify_infra_failure
+    return _classify_infra_failure(
+        "\n".join("##[error]" + " ".join(m.split()) for m in messages), "")
+
+
 def _opt100_job_class(job: dict[str, Any], log: str) -> str | None:
     """Only the first failed step can explain the failure; absent timing is unknown."""
     from blocking_path import _classify_infra_failure
-    steps = sorted((s for s in job.get("steps", [])
-                    if s.get("conclusion") in {"failure", "timed_out"}),
-                   key=lambda s: s.get("number", 0))
-    if not steps:
+    step = _opt100_failed_step(job)
+    if step is None:
         return None
-    step = steps[0]
     start, end = _parse_dt(step.get("started_at")), _parse_dt(step.get("completed_at"))
     if start is None or end is None:
         return None
@@ -9071,9 +9102,18 @@ def _collect_opt100(client: GhClient, repo: str, wf_path: str,
                and failures[j.get("name")] >= 5
                and j.get("name") in (gating_jobs or set())
                and j.get("conclusion") in {"failure", "timed_out"}}
-    logs = {jid: _fetch_job_log(client, repo, j) for jid, j in targets.items()}
+    logs: dict[Any, str | None] = {}
+    annotations: dict[Any, list[str] | None] = {}
+    for jid, j in targets.items():
+        # A failed job with no failed step (a lost runner) is read from its
+        # check-run annotations instead of a log it usually does not have.
+        if _opt100_failed_step(j) is None:
+            annotations[jid] = _fetch_job_annotations(client, repo, j)
+        else:
+            logs[jid] = _fetch_job_log(client, repo, j)
     return _detect_opt100_infra_faults(wf_path, jobs, logs, gating_jobs, start_idx,
-                                      monthly_volume=monthly_volume, sample_denominator=sample_denominator, crit=crit)
+                                      monthly_volume=monthly_volume, sample_denominator=sample_denominator,
+                                      crit=crit, annotations=annotations)
 
 
 def _detect_opt100_infra_faults(
@@ -9081,8 +9121,13 @@ def _detect_opt100_infra_faults(
     gating_jobs: set[str] | None, start_idx: int, *,
     monthly_volume: int | None = None, sample_denominator: int | None = None,
     crit: dict[str, Any] | None = None,
+    annotations: dict[Any, list[str] | None] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Infra share uses every sampled failure as denominator, including unread logs.
+
+    A failed job with no failed step is classified from its failure annotations
+    (`annotations`, keyed by job id); a job whose log or annotations could not be
+    read counts as unreadable.
 
     Retry compute is credited once, and only for a subsequent sampled attempt of
     the same run whose sole failed job was this infra-class job. This avoids
@@ -9104,9 +9149,19 @@ def _detect_opt100_infra_faults(
         failed = [j for j in population if j.get("conclusion") in {"failure", "timed_out"}]
         if len(failed) < 5:
             continue
-        classified = [(j, _opt100_job_class(j, logs[j["id"]]))
-                      for j in failed if logs.get(j["id"])]
-        notes["unreadable_logs"] += sum(not logs.get(j["id"]) for j in failed)
+        classified, unreadable = [], 0
+        for j in failed:
+            if _opt100_failed_step(j) is None:
+                messages = (annotations or {}).get(j["id"])
+                if messages is None:
+                    unreadable += 1
+                else:
+                    classified.append((j, _opt100_annotation_class(messages)))
+            elif logs.get(j["id"]):
+                classified.append((j, _opt100_job_class(j, logs[j["id"]])))
+            else:
+                unreadable += 1
+        notes["unreadable_logs"] += unreadable
         infra = [(j, kind) for j, kind in classified if kind]
         if len(infra) < 5 or len(infra) / len(failed) < .2:
             continue

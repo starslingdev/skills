@@ -42,7 +42,9 @@ from workflow_steps import (  # same-skill module; step walker
 
 # Infrastructure signatures describe failures, never arbitrary executable text.
 _INFRA_FAILURE_SIGNATURES = {
-    "lost-runner": r"the runner has received a shutdown signal|lost communication with the server|the hosted runner[^\n]*\blost\b",
+    # A reclaimed spot/preemptible machine is a lost runner, even though its step
+    # exit line then reads 137; the earlier interruption line classifies first.
+    "lost-runner": r"the runner has received a shutdown signal|lost communication with the server|the hosted runner[^\n]*\blost\b|\binterrupted\b[^\n]*\b(?:spot|preemptible) (?:instance|vm)\b",
     # The runner's own step exit, never a 137 or "Killed" a test's subprocess printed.
     "oom": r"^##\[error\]Process completed with exit code 137\b",
     # Crash wording only: an ordinary test timeout also prints "Target page,
