@@ -40,6 +40,35 @@ import untrusted_wrap as uw  # same-skill module; BEGIN/END untrusted-log markin
 from workflow_steps import (  # same-skill module; step walker
     parallel_steps_disclosure, parallel_steps_used, parallel_steps_used_for)
 
+# Infrastructure signatures describe failures, never arbitrary executable text.
+_INFRA_FAILURE_SIGNATURES = {
+    "lost-runner": r"the runner has received a shutdown signal|lost communication with the server|the hosted runner[^\n]*\blost\b",
+    "oom": r"(?:process completed with )?exit code[ :]+137\b|^Killed[.!]?$",
+    "browser-crash": r"Target page, context or browser has been closed|^Error: browserType\.launch:[^\n]*(?:crashed|closed|disconnected)",
+    "network": r"\b(?:ECONNRESET|ETIMEDOUT|EAI_AGAIN)\b|(?:502|503)[^\n]*(?:registry|packages)|(?:registry|packages)[^\n]*(?:502|503)",
+}
+
+
+def _classify_infra_failure(log: str, step_name: str) -> str | None:
+    """Classify only an observed failure line; network errors require install/fetch.
+
+    Assertion diagnostics are explicitly excluded, even when their expected value
+    quotes an infrastructure signature. The caller supplies only the first failed
+    step's timestamp-bounded log, not a whole job's cleanup output.
+    """
+    install = bool(re.search(r"install|fetch|download|checkout|npm ci|pnpm|yarn|pip|restore", step_name, re.I))
+    for line in log.splitlines():
+        if re.search(r"assert|expected|received|test asserts", line, re.I) and not re.search(
+                r"runner has received a shutdown signal", line, re.I):
+            continue
+        for kind, signature in _INFRA_FAILURE_SIGNATURES.items():
+            if kind == "network" and not install:
+                continue
+            if re.search(signature, line.strip(), re.I):
+                return kind
+    return None
+
+
 _LBLW = 33
 _BARW = 22
 _DURW = 7

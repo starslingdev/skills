@@ -46,7 +46,7 @@ Checkout · 6. Conditional Execution · 7. Trigger and Scope · 8. Release Workf
 - **Category 7 — Trigger and Scope**: missing path filters, no `--filter` on PR turbo, cron frequency, every PR paying for coverage that could run after merge (`OPT90`).
 - **Category 8 — Release Workflow**: release-path caching + redundancy.
 - **Category 9 — Queue Times and Concurrency**: missing/!coarse concurrency groups; measured one-at-a-time capacity waits (`OPT97`) and repeated merge validation (`OPT98`).
-- **Category 10 — Timing Anomalies**: failure-rate / bimodal duration signals (advisory), and the same job measured faster on another runner class (`OPT81`).
+- **Category 10 — Timing Anomalies**: failure-rate / bimodal duration signals (advisory), and the same job measured faster on another runner class (`OPT81`), and infrastructure faults that fail whole runs (`OPT100`).
 - **Category 11 — Stack-Specific**: turbo task outputs, unstable turbo env keys, type-aware ESLint on a slow lint job (`OPT82`).
 - **Category 12 — Build Caching (language-agnostic)**: uncached compiled-language builds, a dependency compiled from source when a prebuilt package exists (`OPT86`), a compile nobody profiled (`OPT91`), a machine-wide .NET SDK reconciling unrelated workloads (`OPT94`).
 - **Category 13 — Hidden Failures and Dead Config**: dead env vars, misconfigured caches.
@@ -3733,6 +3733,42 @@ counterfactual is not modeled.
 
 ---
 
+### OPT100 — Infrastructure Faults Fail the Whole Run
+
+<!-- METADATA
+pattern: OPT100
+impact: MEDIUM
+class: data-driven
+detector: manual
+affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml"
+fix_strategy: infra-fault-retries
+title_template: "Infrastructure Faults Fail the Whole Run"
+-->
+
+**TL;DR**: Infrastructure failures can make an otherwise valid change pay for another complete CI attempt. Classify the first failing step before considering a bounded retry.
+
+**Anti-pattern**: A lost runner, exhausted memory, crashed browser, or install/fetch network fault fails a merge-gating job and causes the whole workflow to run again.
+
+**Detection heuristic**:
+
+- Inspect only timestamp-bounded lines from the first failed step of each sampled failed job. Descriptive signatures live in `blocking_path.py`; assertion diagnostics never count. Network signatures require an install or fetch step. Missing logs or step timing do not imply a class.
+- Emit when at least five failures match and they represent at least 20% of the job's sampled failures. The denominator includes failures with unreadable logs; disclose those gaps. A readable required-check set must establish that the job gates merge.
+- Show counts by class. A runner receiving at least five and 80% of the matched failures is named for investigation when its labels explicitly identify it as self-hosted.
+- Retry compute comes only from subsequent sampled attempts of the same run, with exactly one failed job in the preceding attempt. Ambiguous multi-failure retries receive no credit. Each attempt counts once; OPT64 does not claim runs already claimed here.
+- A same-run, same-commit fail-then-pass without an infrastructure signature adds a pointer to OPT48's quarantine recipe, not another finding.
+
+**Fix recipe**:
+
+1. Investigate the first failing step with `sling`. For confirmed infrastructure classes only, evaluate a maximum of two attempts and short backoff at the step boundary. A retry wrapper or the tool's own bounded retry may help; never retry test assertions indiscriminately.
+2. When failures cluster on one unhealthy self-hosted machine, stop routing work to that machine while degraded.
+3. Quarantine confirmed flakes using OPT48's owner, expiry and default-branch guardrails.
+
+**Guardrail**: A retry must not hide a product failure. Retry only classified infrastructure faults, preserve required checks, and count every retry so a rising failure rate remains visible.
+
+**Sizing**: Runner-minutes retain the observed subsequent-attempt compute and separately scale the monthly credit by all-status monthly volume divided by sampled run count, matching the report's existing monthly contract. Wall-clock is median observed retry delay multiplied by the job's infrastructure failure rate, subject to the existing workflow and cross-workflow floors. Missing retries imply zero measured savings, not estimated retries. OPT48 retains the general reliability signal without savings; OPT100 isolates the infrastructure share. OPT64 covers repeated attempts outside the claimed infrastructure runs.
+
+---
+
 ### OPT49 — Slow Setup Step
 
 <!-- METADATA
@@ -4980,7 +5016,7 @@ title_template: "Dead Workflow Env Vars / Config"
 ## Category 14: Structural / Critical-Path Levers
 
 These patterns are a **different class** from everything above. The catalog
-patterns OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94, OPT96, OPT97 and OPT98 are *hygiene*: each is a named,
+patterns OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94, OPT96, OPT97, OPT98 and OPT100 are *hygiene*: each is a named,
 locally-checkable defect with
 a mechanical, low-risk fix, detected by matching workflow YAML against the
 catalog. OPT81, like OPT79 and OPT80, is derived from run history rather than matched against YAML, and its A2 advisory is risk MEDIUM. On real repos almost every hygiene hit moves **~0 developer

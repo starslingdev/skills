@@ -4941,6 +4941,7 @@ _SIZING: dict[str, dict[str, Any]] = {
     "OPT43": {"model": "measured"},
     "OPT97": {"model": "measured"},
     "OPT48": {"model": "measured"},
+    "OPT100": {"model": "measured"},
     "OPT49": {"model": "measured"},
     "OPT50": {"model": "measured"},
     "OPT51": {"model": "measured"},
@@ -9003,6 +9004,160 @@ def _merge_opt97_findings(findings, new, wf_doc):
                 related.add(old['pattern'])
         measured['related_patterns'] = sorted(related)
         findings.append(measured)
+
+
+def _opt100_job_class(job: dict[str, Any], log: str) -> str | None:
+    """Only the first failed step can explain the failure; absent timing is unknown."""
+    from blocking_path import _classify_infra_failure
+    steps = sorted((s for s in job.get("steps", [])
+                    if s.get("conclusion") in {"failure", "timed_out"}),
+                   key=lambda s: s.get("number", 0))
+    if not steps:
+        return None
+    step = steps[0]
+    start, end = _parse_dt(step.get("started_at")), _parse_dt(step.get("completed_at"))
+    if start is None or end is None:
+        return None
+    lines = []
+    for line in log.splitlines():
+        stamp, _, body = line.partition(" ")
+        when = _parse_dt(stamp)
+        if when is not None and start <= when <= end:
+            lines.append(body)
+    return _classify_infra_failure("\n".join(lines), str(step.get("name") or ""))
+
+
+def _opt100_failure_possible(runs: list[dict[str, Any]]) -> bool:
+    """Cheap upper bound on failures per job, counting possible prior attempts."""
+    return sum(max(0, int(r.get("run_attempt") or 1) - 1)
+               + (r.get("conclusion") in {"failure", "timed_out"}) for r in runs) >= 5
+
+
+def _opt100_gating_names(jobs: list[dict[str, Any]], graph: dict[str, Any],
+                         gating: dict[str, Any]) -> set[str]:
+    """Resolve observed display/matrix names only when one YAML job matches."""
+    names = set()
+    for job in jobs:
+        name = str(job.get("name") or "")
+        matches = [key for key, node in graph.items()
+                   if _opt80_check_names_job(name, key, node)]
+        if len(matches) == 1 and matches[0] in gating:
+            names.add(name)
+    return names
+
+
+def _collect_opt100(client: GhClient, repo: str, wf_path: str,
+                    jobs: list[dict[str, Any]], gating_jobs: set[str] | None,
+                    start_idx: int, *, complete_population: bool = True,
+                    monthly_volume: int | None = None, sample_denominator: int | None = None
+                    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Fetch each failed gating job log once; keep raw text out of findings."""
+    if not complete_population:
+        return [], {"incomplete_job_population": True, "unreadable_logs": 0}
+    from collections import Counter
+    failures = Counter(j.get("name") for j in jobs if j.get("conclusion") in {"failure", "timed_out"})
+    targets = {j["id"]: j for j in jobs if j.get("id") is not None
+               and failures[j.get("name")] >= 5
+               and j.get("name") in (gating_jobs or set())
+               and j.get("conclusion") in {"failure", "timed_out"}}
+    logs = {jid: _fetch_job_log(client, repo, j) for jid, j in targets.items()}
+    return _detect_opt100_infra_faults(wf_path, jobs, logs, gating_jobs, start_idx,
+                                      monthly_volume=monthly_volume, sample_denominator=sample_denominator)
+
+
+def _detect_opt100_infra_faults(
+    wf_path: str, jobs: list[dict[str, Any]], logs: dict[Any, str],
+    gating_jobs: set[str] | None, start_idx: int, *,
+    monthly_volume: int | None = None, sample_denominator: int | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Infra share uses every sampled failure as denominator, including unread logs.
+
+    Retry compute is credited once, and only for a subsequent sampled attempt of
+    the same run whose sole failed job was this infra-class job. This avoids
+    claiming that a retry caused by several failures can be eliminated twice.
+    Monthly credit uses the same all-status scaling basis as repeated attempts.
+    Raw sample minutes remain separately stamped for verification.
+    """
+    from collections import Counter
+    notes: dict[str, Any] = {"unreadable_logs": 0, "gating_unknown": gating_jobs is None}
+    if not gating_jobs:
+        return [], notes
+    unique = {j["id"]: j for j in jobs if j.get("id") is not None}
+    jobs = list(unique.values())
+    out = []
+    run_id = lambda j: j.get("_run_id", j.get("run_id"))
+    attempt = lambda j: int(j.get("run_attempt") or 1)
+    for name in sorted(gating_jobs):
+        population = [j for j in jobs if j.get("name") == name]
+        failed = [j for j in population if j.get("conclusion") in {"failure", "timed_out"}]
+        if len(failed) < 5:
+            continue
+        classified = [(j, _opt100_job_class(j, logs[j["id"]]))
+                      for j in failed if logs.get(j["id"])]
+        notes["unreadable_logs"] += sum(not logs.get(j["id"]) for j in failed)
+        infra = [(j, kind) for j, kind in classified if kind]
+        if len(infra) < 5 or len(infra) / len(failed) < .2:
+            continue
+        classes = dict(Counter(kind for _, kind in infra))
+        runner_counts = Counter(str(j.get("runner_name")) for j, _ in infra
+                                if j.get("runner_name") and "self-hosted" in j.get("labels", []))
+        degraded = next((n for n, count in runner_counts.most_common(1)
+                         if count >= 5 and count / len(infra) >= .8), None)
+        rerun_seconds, delays, claimed = 0.0, [], set()
+        for j, _ in infra:
+            rid, a = run_id(j), attempt(j)
+            if rid is None:
+                continue
+            same_attempt_failures = [x for x in jobs if run_id(x) == rid and attempt(x) == a
+                                     and x.get("conclusion") in {"failure", "timed_out"}]
+            retry = [x for x in jobs if run_id(x) == rid and attempt(x) == a + 1]
+            if len(same_attempt_failures) != 1 or not retry or (rid, a + 1) in claimed:
+                continue
+            claimed.add((rid, a + 1))
+            rerun_seconds += sum(_job_compute_s(x) for x in retry)
+            retry_starts = [_parse_dt(x.get("started_at")) for x in retry]
+            retry_starts = [x for x in retry_starts if x is not None]
+            end = _parse_dt(j.get("completed_at"))
+            if end is not None and retry_starts:
+                delays.append(max(0.0, (min(retry_starts) - end).total_seconds()))
+        flaky = any(not kind and any(
+            x.get("conclusion") == "success" and run_id(x) == run_id(j)
+            and attempt(x) > attempt(j) for x in population) for j, kind in classified)
+        prompt = ("Investigate the first failing step with sling and recover the workflow's history and intent. "
+                  "Evaluate at most 2 attempts with short backoff for classified infrastructure failures only; "
+                  "never retry test assertions. Count retries so increases stay visible. "
+                  "Preserve every required check and flag policy changes for owner sign-off.")
+        if degraded:
+            prompt += f" Investigate whether runner `{degraded}` should stop receiving jobs while degraded."
+        if flaky:
+            prompt += " Same-commit fail-then-pass also occurred without an infra signature; consult OPT48's quarantine recipe."
+        scale = monthly_volume / sample_denominator if monthly_volume and sample_denominator else None
+        delay = _stats.median(delays) if delays else 0.0
+        rate = len(infra) / len(population)
+        monthly_note = (f"monthly scale {scale:.3g} yields {rerun_seconds / 60 * scale:.1f} runner-min/mo. "
+                        if scale is not None else "monthly volume unavailable; no monthly credit. ")
+        evidence = (f"{len(infra)} of {len(failed)} sampled failed jobs ({len(infra)/len(failed):.0%}) "
+                    f"matched first-failed-step infrastructure signatures: "
+                    + ", ".join(f"{k}: {v}" for k, v in sorted(classes.items()))
+                    + f". Sampled subsequent full attempts consumed {rerun_seconds / 60:.1f} runner-minutes; "
+                     + monthly_note + prompt)
+        title = "Infrastructure Faults Fail the Whole Run"
+        f = _new_finding("OPT100", "MEDIUM", title, wf_path, name, evidence,
+                         "infra-fault-retries", _catalog_anchor("OPT100", title), start_idx + len(out) + 1,
+                         wc_p50=delay * rate, rm=(rerun_seconds / 60 * scale if scale is not None else (0.0 if not rerun_seconds else None)),
+                         size_note="Observed subsequent-attempt compute scaled by all-status monthly volume/sample count; raw sample minutes retained separately. Wall-clock remains subject to the existing floors.",
+                         measured_evidence=_measured_evidence(
+                             ["Class", "Failures"], [[k, str(v)] for k, v in sorted(classes.items())], evidence))
+        f["sizing_basis"] = "measured"
+        f["agent_prompt"] = prompt
+        f["infra_failures"] = {"classes": classes, "failed_jobs": len(failed),
+                               "infra_jobs": len(infra), "sampled_jobs": len(population),
+                               "degraded_runner": degraded, "flakes_observed": flaky,
+                               "rerun_delay_p50_s": delay, "retry_attempts": len(claimed),
+                               "sampled_rerun_minutes": rerun_seconds / 60, "monthly_scale": scale,
+                               "retry_run_ids": sorted({rid for rid, _ in claimed})}
+        out.append(f)
+    return out, notes
 
 
 def _detect_opt48_failure_rate(
@@ -26880,6 +27035,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                     "prior_attempt_job_minutes": 0.0,
                 }
             attempt_runs = _rerun_attempt_runs(all_runs) if all_runs is not None else []
+            attempt_samples = []
             if attempt_runs:
                 # Prefetch the `filter=all` leg ONLY — never the `filter=latest` leg.
                 #
@@ -26924,8 +27080,42 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                         "sampled_workflow_run_count": len(all_runs),
                         "runs": prior_runs,
                     }
+            # Infra classification reuses all-status and prior-attempt job payloads.
+            # Require a readable merge gate; unknown membership never becomes a finding.
+            _infra_gate = _opt80_merge_gating_jobs(
+                wf_path, required_checks, findings_doc.get("workflow_job_graph"),
+                crit_by_wf, workflow_names=findings_doc.get("workflow_names"),
+                status_publishers=findings_doc.get("workflow_status_publishers"))
+            _infra_claimed = set()
+            if all_runs is not None and _infra_gate and _opt100_failure_possible(all_runs):
+                _infra_kept, _infra_errors = _gather_run_jobs(
+                    client, repo, all_runs, memo=job_memo)
+                jobs_fetch_failures += _infra_errors
+                _infra_jobs = []
+                for _run, _jobs in _infra_kept:
+                    _stamp_run_context(_run, _jobs)
+                    _infra_jobs.extend(_jobs)
+                for _run, _all_jobs, _latest in attempt_samples:
+                    _stamp_run_context(_run, _all_jobs)
+                    _infra_jobs.extend(_all_jobs)
+                _graph = (findings_doc.get("workflow_job_graph") or {}).get(wf_path, {})
+                _names = _opt100_gating_names(_infra_jobs, _graph, _infra_gate)
+                new, _infra_notes = _collect_opt100(client, repo, wf_path, _infra_jobs, _names, next_id,
+                                                   complete_population=not _infra_errors,
+                                                   monthly_volume=monthly, sample_denominator=len(all_runs))
+                findings_doc.setdefault("opt100_coverage", {})[wf_path] = _infra_notes
+                if _infra_errors or _infra_notes["unreadable_logs"]:
+                    _skip_detectors(wf_path, ["OPT100"], "some failed-job logs or job pages were unreadable; incomplete job populations withhold the finding")
+                next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
+                findings.extend(new)
+                _infra_claimed = {rid for f in new for rid in f["infra_failures"]["retry_run_ids"]}
+            elif all_runs is None or _infra_gate is None:
+                _skip_detectors(wf_path, ["OPT100"], "all-status jobs or the merge-gating job set could not be read")
+            if attempt_samples:
+                # One full retry cannot be charged to both failure families.
                 new = _detect_opt64_rerun_attempt_waste(
-                    wf_path, attempt_samples, monthly, len(all_runs), next_id)
+                    wf_path, [x for x in attempt_samples if _run_id(x[0]) not in _infra_claimed],
+                    monthly, len(all_runs), next_id)
                 next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
                 findings.extend(new)
 

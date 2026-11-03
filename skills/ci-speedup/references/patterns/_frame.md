@@ -48,7 +48,7 @@ Checkout · 6. Conditional Execution · 7. Trigger and Scope · 8. Release Workf
 - **Category 7 — Trigger and Scope**: missing path filters, no `--filter` on PR turbo, cron frequency, every PR paying for coverage that could run after merge (`OPT90`).
 - **Category 8 — Release Workflow**: release-path caching + redundancy.
 - **Category 9 — Queue Times and Concurrency**: missing/!coarse concurrency groups; measured one-at-a-time capacity waits (`OPT97`) and repeated merge validation (`OPT98`).
-- **Category 10 — Timing Anomalies**: failure-rate / bimodal duration signals (advisory), and the same job measured faster on another runner class (`OPT81`).
+- **Category 10 — Timing Anomalies**: failure-rate / bimodal duration signals (advisory), and the same job measured faster on another runner class (`OPT81`), and infrastructure faults that fail whole runs (`OPT100`).
 - **Category 11 — Stack-Specific**: turbo task outputs, unstable turbo env keys, type-aware ESLint on a slow lint job (`OPT82`).
 - **Category 12 — Build Caching (language-agnostic)**: uncached compiled-language builds, a dependency compiled from source when a prebuilt package exists (`OPT86`), a compile nobody profiled (`OPT91`), a machine-wide .NET SDK reconciling unrelated workloads (`OPT94`).
 - **Category 13 — Hidden Failures and Dead Config**: dead env vars, misconfigured caches.
@@ -109,7 +109,7 @@ the id for the `vitest-isolate-pool` leaf, and is not part of the static scan.)
 ## Category 14: Structural / Critical-Path Levers
 
 These patterns are a **different class** from everything above. The catalog
-patterns OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94, OPT96, OPT97 and OPT98 are *hygiene*: each is a named,
+patterns OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94, OPT96, OPT97, OPT98 and OPT100 are *hygiene*: each is a named,
 locally-checkable defect with
 a mechanical, low-risk fix, detected by matching workflow YAML against the
 catalog. OPT81, like OPT79 and OPT80, is derived from run history rather than matched against YAML, and its A2 advisory is risk MEDIUM. On real repos almost every hygiene hit moves **~0 developer
