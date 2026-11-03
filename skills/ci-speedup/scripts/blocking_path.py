@@ -6075,6 +6075,41 @@ def _opt96_unresolved_line(doc: dict[str, Any]) -> str:
     return f"{lead}: {reasons}."
 
 
+# Entries shown per OPT97 Data sources row; the rest stay in findings JSON.
+_OPT97_ROW_ENTRIES = 5
+
+
+def _opt97_capacity_cells(doc: dict[str, Any]) -> tuple[str, str, str]:
+    """(check-this, held-back, fetch) cells for OPT97's Data sources rows."""
+    notes = [n for n in (doc.get("opt97_notes") or []) if isinstance(n, dict)]
+
+    def where(n: dict[str, Any]) -> str:
+        return (f"{_withheld_cell_text(n.get('workflow_file', ''))} / "
+                f"{_withheld_cell_text(n.get('job', ''))}")
+
+    def capped(parts: list[str]) -> str:
+        extra = len(parts) - _OPT97_ROW_ENTRIES
+        return "; ".join(parts[:_OPT97_ROW_ENTRIES]) + (
+            f"; +{extra} more in findings JSON" if extra > 0 else "")
+    check = [f"{where(n)}: competition not measured "
+             f"({_withheld_cell_text(n.get('detail') or 'not read')})"
+             for n in notes if n.get("reason") == "competition not measured"]
+    held = [f"{where(n)}: too few samples "
+            f"({_withheld_cell_text(n.get('samples', 0))}; minimum 15)"
+            for n in notes if n.get("reason") == "too few samples"]
+    held += [f"{_withheld_cell_text(n.get('workflow_file', ''))}: "
+             f"{_withheld_cell_text(n.get('unresolved', 0))} of "
+             f"{_withheld_cell_text(n.get('jobs', 0))} sampled jobs not matched to one YAML job"
+             for n in notes if n.get("reason") == "unresolved jobs"]
+    calls = doc.get("opt97_competition_calls")
+    fetch = ""
+    if isinstance(calls, dict) and calls.get("populations"):
+        fetch = (f"{calls.get('run_pages', 0)} run-list pages and {calls.get('job_lists', 0)} "
+                 f"job lists read for {calls.get('populations')} candidate population(s); "
+                 "at most 3 pages and 60 job lists each")
+    return (capped(check) if check else "", capped(held) if held else "", fetch)
+
+
 def _data_sources_footer(doc: dict[str, Any], repo: str,
                          lead: "list[str] | None" = None) -> list[str]:
     """A structured Data Sources table at the foot of the report - which tiers ran,
@@ -6209,15 +6244,18 @@ def _data_sources_footer(doc: dict[str, Any], repo: str,
         rows.append(("cache seeding: held back", _opt96_line,
                      "Why a PR cache restore with no visible default-branch save "
                      "produced no OPT96 finding"))
-    _capacity_notes = doc.get("opt97_notes") or []
-    if _capacity_notes:
-        _capacity_line = "; ".join(
-            f"{_withheld_cell_text(n.get('workflow_file', ''))} / "
-            f"{_withheld_cell_text(n.get('job', ''))}: too few samples "
-            f"({_withheld_cell_text(n.get('samples', 0))}; minimum 15)"
-            for n in _capacity_notes if isinstance(n, dict))
-        rows.append(("single-slot capacity: held back", _capacity_line,
-                     "OPT97 queue versus in-flight correlation; runner-label populations need 15 samples"))
+    _check, _held, _calls = _opt97_capacity_cells(doc)
+    if _check:
+        rows.append(("single-slot capacity: check this", _check,
+                     "OPT97 populations whose queue met the thresholds but whose competing "
+                     "jobs could not be counted; no finding was made"))
+    if _held:
+        rows.append(("single-slot capacity: held back", _held,
+                     "OPT97 queue versus in-flight correlation; runner-label populations "
+                     "need 15 samples and one YAML job per sampled job"))
+    if _calls:
+        rows.append(("single-slot capacity: competition fetch", _calls,
+                     "Counting every competing job in flight (all runs, any status) for OPT97"))
     out = ["## 🗄️ Data sources", ""]
     if lead:
         out += lead
