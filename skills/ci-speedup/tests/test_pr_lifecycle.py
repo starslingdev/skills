@@ -309,6 +309,42 @@ def test_malformed_pr_node_still_refuses_the_whole_block():
     assert result['status']=='not measured' and 'shares' not in result
 
 
+def _verify():
+    import importlib.util
+    spec=importlib.util.spec_from_file_location('lifecycle_vr',Path(__file__).with_name('verify_report.py'))
+    vr=importlib.util.module_from_spec(spec);sys.modules[spec.name]=vr;spec.loader.exec_module(vr)
+    return vr
+
+
+def _measured(final,green,ci=.3):
+    shares={k:dict(median=.05,p90=.1) for k in ('red_waiting','everything_else')}
+    shares.update(ci_running=dict(median=ci,p90=ci),green_waiting=dict(median=green,p90=green),
+                  final_commit_ci=dict(median=final,p90=final))
+    return module().render(dict(status='measured',sample_size=12,sampled=14,excluded={'x':2},shares=shares))
+
+
+@pytest.mark.parametrize('final,green',[(.05,.5),(.2,.5),(.05,.1),(.0999,.2501)])
+def test_verify_report_accepts_every_rendered_lifecycle_block(final,green):
+    import blocking_path
+    report=blocking_path.render({'findings':[],'pr_lifecycle':None})
+    for block in (_measured(final,green), module().render(dict(status='not measured',reason='query 1 failed'))):
+        check=_verify().check_pr_lifecycle_block('# t\n\n'+block+'\n| Repository | x |\n')
+        assert check.ok and not check.skipped, check.detail
+    assert _verify().check_pr_lifecycle_block(report).ok
+
+
+def test_verify_report_rejects_a_headline_its_shares_do_not_support():
+    vr=_verify()
+    tampered=_measured(.2,.5).replace("**Where your PRs' time goes**\n","**Where your PRs' time goes**\n\n"+module().HEADLINE+'\n')
+    assert not vr.check_pr_lifecycle_block(tampered).ok
+    withheld=_measured(.05,.5).replace(module().HEADLINE,'')
+    assert not vr.check_pr_lifecycle_block(withheld).ok
+    inverted=_measured(.05,.5).replace('| CI running | 30.0% | 30.0% |','| CI running | 3.0% | 3.0% |')
+    assert not vr.check_pr_lifecycle_block(inverted).ok
+    assert not vr.check_pr_lifecycle_block("**Where your PRs' time goes**\n\nnot measured: \n").ok
+    assert 'check_pr_lifecycle_block(report),' in Path(vr.__file__).read_text()
+
+
 def test_graphql_transport_records_and_replays_without_extra_requests(tmp_path,monkeypatch):
     import collect_runs as cr
     import json
