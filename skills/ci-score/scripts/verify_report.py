@@ -219,11 +219,18 @@ def verify(doc: dict[str, Any], report: str, registry: dict[str, Any]) -> list[s
     prefix, marker, section = report.partition("## Advisory notes")
     if any(identity in prefix for identity in advisory_ids):
         problems.append("ADVISORY: advisory appears inside or before the scored table")
-    if doc.get("advisory_notes") and not stamp.get("refusal"):
-        if not marker or "not part of the score" not in section:
+    # The section follows the card: the adherence disclosure closes the card,
+    # so a section rendered above the scored checks has no disclosure before it.
+    if marker and rr.DISCLOSURE not in prefix:
+        problems.append("ADVISORY: advisory section precedes the scored checks")
+    if not stamp.get("refusal"):
+        # Bound in both directions: every stored note renders once, and a
+        # bullet the document does not record is rejected too.
+        stored = doc.get("advisory_notes") or []
+        if stored and (not marker or "not part of the score" not in section):
             problems.append("ADVISORY: missing unscored disclosure")
         expected_notes = []
-        for note in doc["advisory_notes"]:
+        for note in stored:
             if note.get("advisory_id") != "ci.runner.swappable":
                 continue
             label = str(note.get("label", "")).replace("|", "\\|").replace("`", "\\`")
@@ -236,14 +243,15 @@ def verify(doc: dict[str, Any], report: str, registry: dict[str, Any]) -> list[s
                           if line.startswith("- **Runner choice (`ci.runner.swappable`):**")]
         if rendered_notes != expected_notes:
             problems.append("ADVISORY: rendered notes differ from the stored labels, counts or advice")
-        if any(line.startswith("|") and identity in line
-               for line in report.splitlines() for identity in advisory_ids):
+        if stored and any(line.startswith("|") and identity in line
+                          for line in report.splitlines() for identity in advisory_ids):
             problems.append("ADVISORY: advisory appears in a scored table row")
-        scorer = _load_sibling("ci_score_advisory_verifier", "ci_score.py")
-        clean_doc = dict(doc)
-        clean_doc.pop("advisory_notes", None)
-        if scorer.compute_ci_score(clean_doc, registry) != stamp:
-            problems.append("ADVISORY: score differs from recomputation without advisories")
+        if stored:
+            scorer = _load_sibling("ci_score_advisory_verifier", "ci_score.py")
+            clean_doc = dict(doc)
+            clean_doc.pop("advisory_notes", None)
+            if scorer.compute_ci_score(clean_doc, registry) != stamp:
+                problems.append("ADVISORY: score differs from recomputation without advisories")
 
     # The card links every check name to an in-document "What each check means"
     # subsection; that anchor target (a `### <label>` heading) must exist in the

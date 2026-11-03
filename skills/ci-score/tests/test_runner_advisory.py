@@ -133,3 +133,91 @@ def test_verifier_binds_each_advisory_bullet_to_its_note(alteration):
     else:
         text=text.replace(bullet,bullet.replace('vars.RUNNER_LINUX','vars.UNRELATED'))
     assert any('ADVISORY: rendered notes differ' in p for p in vr.verify(doc,text,SPEC))
+
+
+def multi_file(label='custom-linux'):
+    return [(f'wf{i}.yml', {'jobs': {'test': {'runs-on': label}}}, '') for i in range(3)]
+
+
+def all_pass_doc():
+    doc = fixture()
+    for fact in doc['practice_facts'].values():
+        if fact.get('state') == 'fail':
+            fact['state'] = 'pass'
+    doc['ci_score'] = sc.compute_ci_score(doc, SPEC)
+    return doc
+
+
+@pytest.mark.parametrize('label', ['custom-${{ matrix.size }}', ['self-hosted', 'Windows', 'X64'],
+                                   ['self-hosted', 'macOS', 'ARM64'], ['self-hosted', 'Linux', 'arm']])
+def test_partly_literal_expressions_and_generic_selectors_in_any_case_are_silent(label):
+    assert notes(label) == []
+
+
+def test_same_job_id_in_three_workflow_files_counts_three_jobs():
+    [note] = pf._runner_advisories(multi_file())
+    assert note['job_count'] == 3
+    assert [j['file'] for j in note['jobs']] == ['wf0.yml', 'wf1.yml', 'wf2.yml']
+
+
+def test_surrounding_whitespace_does_not_split_a_label():
+    parsed = workflows()
+    for job, label in zip(parsed[0][1]['jobs'].values(), [' custom-linux', 'custom-linux ', 'custom-linux']):
+        job['runs-on'] = label
+    assert pf._runner_advisories(parsed)[0]['job_count'] == 3
+
+
+def test_all_pass_report_still_renders_the_advisory_after_the_card():
+    doc = all_pass_doc(); doc['advisory_notes'] = notes()
+    text = rr.render_report(doc, SPEC)
+    assert text.index(rr.DISCLOSURE) < text.index('## Advisory notes') < text.index('## Recommendations')
+    assert vr.verify(doc, text, SPEC) == []
+
+
+def test_verifier_requires_the_unscored_disclosure():
+    doc = fixture(); doc['advisory_notes'] = notes()
+    text = rr.render_report(doc, SPEC).replace('These notes are not part of the score.', '')
+    assert 'ADVISORY: missing unscored disclosure' in vr.verify(doc, text, SPEC)
+
+
+def test_verifier_names_an_advisory_check_id_in_the_stamp():
+    doc = fixture(); doc['advisory_notes'] = notes()
+    doc['ci_score']['checks'].append({'check_id': 'ci.runner.swappable', 'label': 'Runner choice', 'state': 'fail'})
+    doc['ci_score']['checks_applicable'] += 1
+    assert 'ADVISORY: advisory entered the scored checks' in vr.verify(doc, rr.render_report(doc, SPEC), SPEC)
+
+
+def test_verifier_names_an_advisory_table_row_after_the_section():
+    doc = fixture(); doc['advisory_notes'] = notes()
+    text = rr.render_report(doc, SPEC) + '\n| ci.runner.swappable | fail |\n'
+    assert 'ADVISORY: advisory appears in a scored table row' in vr.verify(doc, text, SPEC)
+
+
+def test_verifier_recomputes_the_score_when_advisories_are_present():
+    doc = fixture(); doc['advisory_notes'] = notes()
+    inflated = all_pass_doc()['ci_score']
+    assert inflated != doc['ci_score']
+    doc['ci_score'] = inflated
+    problems = vr.verify(doc, rr.render_report(doc, SPEC), SPEC)
+    assert 'ADVISORY: score differs from recomputation without advisories' in problems
+
+
+def test_verifier_rejects_advisory_section_above_the_scored_checks():
+    doc = fixture(); doc['advisory_notes'] = notes()
+    text = rr.render_report(doc, SPEC)
+    block = text[text.index('## Advisory notes'):text.index('## Recommendations')]
+    text = text.replace(block, '').replace('| | Check | Evidence |', block + '| | Check | Evidence |', 1)
+    assert 'ADVISORY: advisory section precedes the scored checks' in vr.verify(doc, text, SPEC)
+
+
+def test_verifier_rejects_an_advisory_the_document_does_not_record():
+    doc = fixture(); doc['advisory_notes'] = notes()
+    text = rr.render_report(doc, SPEC)
+    doc['advisory_notes'] = []
+    assert any('ADVISORY: rendered notes differ' in p for p in vr.verify(doc, text, SPEC))
+
+
+def test_close_names_advisories_as_unscored_and_never_as_a_fix_slot():
+    close = (ROOT / 'references/close-contract.md').read_text()
+    para = next(p for p in close.split('\n\n') if 'advisory_notes' in p)
+    assert 'not part of the score' in para and 'never a fix slot' in para

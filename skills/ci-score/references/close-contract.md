@@ -103,6 +103,14 @@ stake kind is a **qualitative** category, never a measurement: name the
 kind and its mechanism, never a saved-seconds number, a runner-minute
 figure, or a dollar amount — the Boundaries ban still holds and a speed or
 cost *question* still routes to ci-speedup.
+
+**Advisory notes.** When a scored stamp's `findings.json` carries
+`advisory_notes`, add one line after the recommendations (or after the
+clean-repo line) naming each note's label and job count as an advisory
+that is **not part of the score**. An advisory is never a fix slot,
+never a menu option, never counted among the recommendations, and never
+changes the score line.
+
 Then a one-line note that the full verified report exists (every finding
 with its fix recipe, why the practice matters, and a paste-able agent
 prompt) — the SAVE CHOICE for it arrives in the question, not narrated in
