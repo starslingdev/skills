@@ -2771,7 +2771,7 @@ def test_phase2_patterns_have_detectors(tmp_path: Path):
     # mapping needs docker-compose.yml), so it is excluded here.
     for pat in ("OPT1", "OPT2", "OPT3", "OPT5", "OPT9", "OPT12", "OPT14",
                 "OPT16", "OPT19", "OPT21", "OPT27", "OPT29", "OPT31",
-                "OPT33", "OPT39", "OPT62", "OPT63", "OPT7", "OPT37", "OPT40",
+                "OPT33", "OPT39", "OPT62", "OPT63", "OPT7", "OPT37", "OPT40", "OPT96",
                 "OPT52", "OPT53", "OPT58", "OPT59", "OPT60"):
         assert pat not in without, f"{pat} should have a registered detector"
 

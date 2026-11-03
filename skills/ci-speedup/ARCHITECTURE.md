@@ -26,8 +26,8 @@ developer's wait. It gets its own prominent section below.
 
 ## 1. Purpose & scope
 
-ci-speedup audits a repository's GitHub Actions workflows against a 91-pattern
-catalog — 80 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93 and OPT94) plus 11 **structural /
+ci-speedup audits a repository's GitHub Actions workflows against a 92-pattern
+catalog — 81 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94 and OPT96) plus 11 **structural /
 critical-path** patterns (OPT70–OPT75, OPT78, OPT83, OPT84, OPT85 and OPT87, routed from the measured long pole; see
 §11) — and produces a **root-cause-analysis** markdown report with **measured**
 impact on two axes: developer wall-clock wait (the ranking axis) and
@@ -2798,7 +2798,7 @@ wired or removed rather than left to become archaeology.
 
 ## 11. The structural / critical-path track
 
-The hygiene/data-driven catalog (OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93 and OPT94) is mostly **declarative** -
+The hygiene/data-driven catalog (OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94 and OPT96) is mostly **declarative** -
 static findings are locally-checkable YAML defects, while measured Tier-2 rows
 come from run history. Its blind spot: on real repos the merge is
 gated by a check that is *working as intended* and simply slow, with no
@@ -3859,7 +3859,7 @@ cross-run-check locator phrase must co-occur with the section marker in the same
 
 A cache-miss finding is born from ONE drilled run's log, and the drilled run is deliberately the
 slow-mode representative — so its miss rate is NOT evidence the cache is a broad wall-clock lever.
-For a cache leaf (`turbo-*`, `buildx-no-cache`, `install-lifecycle-build`), `_cache_distribution`
+For a cache leaf (`turbo-*`, `buildx-no-cache`, `install-lifecycle-build`, `dependency-cache`), `_cache_distribution`
 stamps a per-pole **`cache_dist`** onto `pr_critical_path.poles[]`: the miss rate across the sampled
 runs, split PR vs push, with fork PRs excluded from the upstream median (a fork PR gets no repo
 secrets, so a secrets-gated remote cache is unreachable to it, and it cannot restore an upstream
@@ -3867,7 +3867,9 @@ feature branch's own scope — so it can run colder than upstream), plus a re-de
 **`verdict`** (`cold | churn | miss-tail |
 mostly-warm | insufficient`, `_cache_verdict`). The miss metric is always the per-run
 `cache_state.miss_pct` (read by `_cache_state_of_log` uniformly), NOT the leaf's magnitude (which is
-seconds for `install-lifecycle-build`).
+seconds for `install-lifecycle-build`). `dependency-cache` uses a 50% partial-miss floor
+(`_DEPENDENCY_CACHE_FLOOR_PCT`, mirrored in `verify_report._VR_CACHE_FLOOR_BY_FIX_KEY`) and the
+OPT96 confirmation described in "Default-branch dependency-cache seeding (OPT96)" below.
 
 Two properties make it honest:
 - **Every sampled run counts, not only the miss-heavy ones.** The distribution reuses the logs
@@ -4090,7 +4092,7 @@ order of preference:
 - [`SKILL.md`](SKILL.md) - the canonical contract (phases, admission gate,
   quality review).
 - [`references/patterns/INDEX.md`](references/patterns/INDEX.md) -
-  the 91-pattern catalog, one file per pattern (frontmatter + body); the source
+  the 92-pattern catalog, one file per pattern (frontmatter + body); the source
   of truth for detection and the report's TL;DR / pattern background. The
   single-file [`references/optimization-patterns.md`](references/optimization-patterns.md)
   is compiled from `references/patterns/` by
@@ -4105,3 +4107,62 @@ order of preference:
 - `maintainers/ci-speedup/MAINTAINERS.md` + `maintainers/ci-speedup/loops/gap-to-catalog-prompt.md`
   (maintainer-only, not shipped in an installed skill — source checkout only) -
   the gap → catalog loop (auto-draft a detector when the LLM fallback fires; §12.7).
+
+### Default-branch dependency-cache seeding (OPT96)
+
+The static pass correlates PR restore families with default-branch save points,
+including local reusable callers and local composite actions. Seed events are a push
+to the default branch, `schedule`, `workflow_run` and `repository_dispatch`, each
+evaluated against its own conditions; `merge_group` never counts (temporary queue
+ref) and a `workflow_dispatch`-only saver does not seed, though the evidence notes a
+manual warmer. Push filters: tags-only is non-branch only when neither `branches`
+nor `branches-ignore` is set, string filters are one pattern, null filters are safe.
+Unknown conditions remain reachable. Key matching treats every `${{ }}` expression
+as a wildcard; a writer matches when either template can match the other
+(`restore-keys` as prefixes). A match resting only on an all-expression template is
+undecidable and is held back; an all-expression reader with no matching writer is flagged.
+
+Uncertainty never reaches `scan_incomplete`. A reader the scan cannot decide is held
+back (no finding) and recorded in the top-level `opt96_unresolved` list (workflow_file,
+job, family, reason), rendered as a "cache seeding: held back" row in the Data sources
+table; a detector error is caught and disclosed the same way. Hold-back scope: a writer
+whose saves cannot be read on a seed event (remote reusable workflow, remote action not
+on the non-caching allowlist of checkout / upload-artifact / download-artifact /
+github-script, unreadable local composite) holds back only readers whose workflow or
+caller chain references the same repository or local path, or whose literal key prefix
+appears in that step's `with:` inputs. A missing local reusable file hides no writer.
+The default branch comes from `--default-branch`, else origin/HEAD (evidence notes it may
+be stale), else main/master; `collect_runs` compares the scan's `opt96_default_branch`
+stamp with GitHub's default branch and, on mismatch, demotes every OPT96 finding to
+unconfirmed and discloses it in `opt96_unresolved`. Readers inside a local reusable
+workflow carry `callers` (caller workflow, job chain, callee display name) so they ground
+on the caller's pole as "caller job / callee job".
+
+Measured confirmation needs a median upstream PR miss rate of at least 50% and either
+every sampled push log showing only misses with no save, the job absent from sampled
+push runs, or no push runs at all. Only push jobs that completed (success/failure) count;
+queued, in-progress, cancelled or display-name-mismatched push jobs are unknown and never
+confirm. The no-push-runs shortcut applies only when the workflow's `on:` has no
+push/schedule/workflow_run/repository_dispatch trigger and its run and job lists
+downloaded; otherwise the reason is "push probe unavailable". An unconfirmed finding's
+`size_note` names one of: no matching pole, pole log not fetched, another detector took
+precedence, confirmation failed, push probe unavailable, default-branch mismatch.
+The dependency-cache leaf is observation-only (`_OBSERVATION_ONLY_LEAVES`): a restore
+line never closes a coverage gap or holds back the OPT81 advisory, and a default-branch
+restore refutes the measured confirmation. Dependency-cache sampling and the push probe
+run only for a pole whose job a static OPT96 finding names (`_opt96_pole_matches`: job id,
+or its `name:` / matrix leg resolved through the workflow YAML).
+The "Dependency cache: check this" log leaf renders only when the OPT96-gated sampling
+ran on that pole (`pole.cache_dist.fix_key == "dependency-cache"`); a restore line alone
+renders nothing. Cross-run magnitude samples accept a sibling run's number only when the
+same detector (`fix_key`) fired on it (turbo's remote-off and partial leaves count as one
+family, `_MAG_LEAF_FAMILY`), and for OPT96-named poles the pole magnitude stays
+the dominant step's wall time with cache outcomes living only in `cache_dist`.
+The dependency-cache leaf reads restore outcomes using the existing magnitude
+sample and bounded push probe. Only a matching static finding can promote the
+measured install hit/miss difference, multiplied by upstream PR miss share.
+Multiple cache results and absent hit timings remain uncredited. The leaf itself
+is a secondary observation, never the entire install-step ceiling. Credited rows
+pass the within-workflow cap and the existing cross-workflow cascade; below-tail
+or unconfirmed rows retain “check this” wording. No additional probe budget is
+introduced.

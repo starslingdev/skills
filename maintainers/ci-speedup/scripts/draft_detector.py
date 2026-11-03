@@ -109,7 +109,9 @@ class Capture:
             text = self.log_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return None
-        return bp._parse_log(text)
+        # An observation-only leaf (a cache restore line) never closes a gap,
+        # matching the renderer's `_gap_poles`.
+        return bp._catalog_leaf(bp._parse_log(text))
 
     def log_sha(self) -> str | None:
         """SHA-256 of the raw job log, or None if unreadable. Used to detect the
