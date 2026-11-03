@@ -779,3 +779,305 @@ def test_unconfirmed_size_note_names_its_reason(probe, reason):
     g = {"pattern": "OPT96", "workflow_file": "ci.yml", "affected_jobs": ["other"]}
     cr._ground_opt96([g], [pole])
     assert "no matching pole" in g["size_note"]
+
+
+# ---------------------------------------------------------------------------
+# Coverage for behavior the mutation run showed untested (T1-T8).
+# ---------------------------------------------------------------------------
+
+MISS = "Cache not found for input keys: deps-linux-lock"
+HIT = "Cache restored from key: deps-linux-lock"
+
+
+def test_push_miss_that_saves_does_not_confirm(tmp_path):
+    pole, _, _ = dep_harness(tmp_path, push_logs={
+        i: MISS + "\nPost job cleanup.\nCache saved successfully" for i in range(21, 26)})
+    cd = pole["cache_dist"]
+    assert cd["push"]["median"] == 100
+    assert cd["confirmed"] is False, "a push run that saves seeds the default branch"
+    f = {"pattern": "OPT96", "workflow_file": pole["workflow_file"], "affected_jobs": ["test"]}
+    cr._ground_opt96([f], [pole])
+    assert f["wall_clock_p50_s"] is None
+
+
+def test_low_pr_miss_median_never_confirms(tmp_path):
+    # Push runs all miss and save nothing, but most PR runs hit: below the 50% floor.
+    pole, _, _ = dep_harness(tmp_path, misses=3)
+    assert pole["cache_dist"]["pr"]["upstream_median"] < cr._DEPENDENCY_CACHE_FLOOR_PCT
+    assert pole["cache_dist"]["confirmed"] is False
+
+
+def test_cancelled_push_job_never_confirms(tmp_path):
+    # A cancelled job that started has a partial log, but its post-step save never
+    # had its chance: it is not evidence that nothing saves.
+    pole, _, _ = dep_harness(tmp_path, push_jobs=[
+        [dict(sampled_job(i, 20), conclusion="cancelled")] for i in range(21, 26)])
+    assert pole["cache_dist"]["confirmed"] is False
+
+
+@pytest.mark.parametrize("log,saved", [
+    (MISS + "\nCache saved successfully", True),
+    (MISS + "\nCache saved with key: deps-linux-lock", True),
+    (MISS, False),
+])
+def test_cache_state_records_whether_the_log_saved(log, saved):
+    assert bp._cache_state_of_log(log, "dependency-cache")["saved"] is saved
+
+
+@pytest.mark.parametrize("change", [
+    {"pr": {"upstream_n": 1, "upstream_median": 100}},
+    {"pr": {"upstream_n": 8, "upstream_median": 30}},
+    {"push_reason": "1 of 1 push log fetch(es) failed"},
+])
+def test_pr_only_shortcut_negatives_stay_unconfirmed(change):
+    f = {"pattern": "OPT96", "workflow_file": "ci.yml", "affected_jobs": ["test"]}
+    cd = dict(_pr_only_cd(), **change)
+    cr._ground_opt96([f], [{"workflow_file": "ci.yml", "job": "test", "cache_dist": cd}],
+                     {"ci.yml": {"on": {"pull_request": {}}}})
+    assert cd["confirmed"] is False
+    assert f["wall_clock_p50_s"] is None
+
+
+def test_confirmed_but_uncredited_sizing_credits_nothing():
+    f = {"pattern": "OPT96", "workflow_file": "ci.yml", "affected_jobs": ["test"]}
+    cd = {"fix_key": "dependency-cache", "confirmed": True,
+          "recommendation": "seed the default-branch cache",
+          "sizing": {"credited": False, "step": "Install", "miss_time_s": 100,
+                     "reason": "no hit sample for the same install step"}}
+    cr._ground_opt96([f], [{"workflow_file": "ci.yml", "job": "test", "cache_dist": cd}])
+    assert f["wall_clock_p50_s"] is None
+    assert f["size_note"].endswith("savings uncredited")
+
+
+def test_writer_for_a_different_family_does_not_clear_a_reader(tmp_path):
+    write_workflow(tmp_path, "ci.yml", RESTORE)
+    write_workflow(tmp_path, "warm.yml", SAVE.replace("key: deps-", "key: tools-"))
+    assert [f["match_text"] for f in findings(tmp_path)] == ["deps"]
+
+
+REVISED = RESTORE.replace("key: deps-${{ runner.os }}", "key: deps-v2-${{ runner.os }}")
+
+
+def test_restore_keys_prefix_accepts_an_older_family(tmp_path):
+    write_workflow(tmp_path, "ci.yml", REVISED.replace(
+        "restore-keys: deps-${{ runner.os }}-", "restore-keys: deps-"))
+    write_workflow(tmp_path, "warm.yml", SAVE.replace("key: deps-", "key: deps-v1-"))
+    assert not findings(tmp_path), "restore-keys `deps-` restores a `deps-v1-` save"
+    write_workflow(tmp_path, "ci.yml", REVISED.replace(
+        "          restore-keys: deps-${{ runner.os }}-\n", ""))
+    assert findings(tmp_path), "without restore-keys the v1 save never matches v2"
+
+
+@pytest.mark.parametrize("warmer", [
+    SAVE.replace("actions/cache/save@v4", "actions/cache/restore@v4"),
+    SAVE.replace("actions/cache/save@v4", "actions/cache@v4").replace(
+        "          path:", "          lookup-only: true\n          path:"),
+])
+def test_non_writers_on_push_leave_the_finding(tmp_path, warmer):
+    write_workflow(tmp_path, "ci.yml", RESTORE)
+    write_workflow(tmp_path, "warm.yml", warmer)
+    assert findings(tmp_path)
+
+
+def test_read_only_setup_cache_on_push_leaves_the_finding(tmp_path):
+    write_workflow(tmp_path, "ci.yml", NODE)
+    write_workflow(tmp_path, "main.yml", NODE.replace(
+        "on: {pull_request: {}}", "on: {push: {branches: [main]}}").replace(
+        "          cache: pnpm\n", "          cache: pnpm\n          cache-read-only: true\n"))
+    assert findings(tmp_path)
+
+
+@pytest.mark.parametrize("trigger,flagged", [
+    ("{push: {tags: ['v*']}}", True),
+    ("{push: {branches-ignore: [main]}}", True),
+    ("{push: {branches: ['**', '!main']}}", True),
+    ("{push: {branches: [develop]}}", True),
+    ("{push: {branches-ignore: ['feature/*']}}", False),
+])
+def test_push_filters_decide_whether_the_warmer_runs_on_main(tmp_path, trigger, flagged):
+    write_workflow(tmp_path, "ci.yml", RESTORE)
+    write_workflow(tmp_path, "warm.yml", SAVE.replace("{push: {branches: [main]}}", trigger))
+    assert bool(findings(tmp_path)) is flagged
+
+
+def test_repo_default_branch_replaces_the_main_master_guess(tmp_path):
+    write_workflow(tmp_path, "ci.yml", RESTORE)
+    write_workflow(tmp_path, "warm.yml", SAVE.replace("[main]", "[develop]"))
+    assert not opt96(scan_doc(tmp_path, default_branch="develop"))
+    write_workflow(tmp_path, "warm.yml", SAVE)
+    [f] = opt96(scan_doc(tmp_path, default_branch="develop"))
+    assert "from repo metadata" in f["evidence"] and "assumed" not in f["evidence"]
+
+
+def test_default_branch_cli_flag(tmp_path):
+    write_workflow(tmp_path, "ci.yml", RESTORE)
+    write_workflow(tmp_path, "warm.yml", SAVE.replace("[main]", "[develop]"))
+    assert not findings(tmp_path, default_branch="develop")
+    assert findings(tmp_path, default_branch="main")
+
+
+def test_origin_head_fallback_picks_the_branch(tmp_path, monkeypatch):
+    for var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+        monkeypatch.delenv(var, raising=False)
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "symbolic-ref", "refs/remotes/origin/HEAD",
+                    "refs/remotes/origin/develop"], check=True)
+    write_workflow(tmp_path, "ci.yml", RESTORE)
+    write_workflow(tmp_path, "warm.yml", SAVE.replace("[main]", "[develop]"))
+    assert not findings(tmp_path, default_branch=None), "origin/HEAD names develop"
+
+
+def test_pole_in_another_workflow_never_borrows_sizing():
+    f = {"pattern": "OPT96", "workflow_file": ".github/workflows/ci.yml", "affected_jobs": ["test"]}
+    assert cr._opt96_pole_matches(f, {"workflow_file": ".github/workflows/ci.yml", "job": "test"})
+    assert not cr._opt96_pole_matches(
+        f, {"workflow_file": ".github/workflows/nightly.yml", "job": "test"})
+
+
+def test_named_job_is_sampled_through_persist_pole_logs(tmp_path):
+    wf = ".github/workflows/ci.yml"
+    miss_ids = set(range(1, 7))
+    jobs = [dict(sampled_job(i, 100 if i in miss_ids else 20), name="Unit tests")
+            for i in range(1, 9)]
+    logs = {i: (MISS if i in miss_ids else HIT) for i in range(1, 9)}
+    logs.update({i: MISS for i in range(21, 26)})
+    client = _LogClient(logs)
+    pole = {"check": "Unit tests", "workflow_file": wf, "job": "Unit tests", "p50_s": 300}
+    cr._persist_pole_logs(
+        client, "example/project", [pole], {wf: [[j] for j in jobs]}, tmp_path, mag_runs=8,
+        events_jobs_by_wf={wf: {"push": [[dict(sampled_job(i, 20), name="Unit tests")]
+                                         for i in range(21, 26)]}},
+        opt96_findings=[{"pattern": "OPT96", "workflow_file": wf, "affected_jobs": ["test"]}],
+        wf_docs={wf: {"jobs": {"test": {"name": "Unit tests"}}}})
+    assert pole["cache_dist"]["fix_key"] == "dependency-cache"
+
+
+def test_finding_for_another_job_triggers_no_sampling(tmp_path):
+    pole, client, _ = dep_harness(tmp_path, opt96_findings=[
+        {"pattern": "OPT96", "workflow_file": ".github/workflows/ci.yml",
+         "affected_jobs": ["lint"]}])
+    assert "cache_dist" not in pole
+    assert client.calls == [pole_id for pole_id in client.calls if pole_id < 21]
+    assert len(client.calls) == 1
+
+
+def test_job_level_false_writer_is_not_a_writer(tmp_path):
+    write_workflow(tmp_path, "ci.yml", RESTORE)
+    write_workflow(tmp_path, "warm.yml", SAVE.replace("    runs-on:", "    if: false\n    runs-on:"))
+    assert findings(tmp_path)
+
+
+@pytest.mark.parametrize("condition", ["github.event_name == 'pull_request'",
+                                       "${{ github.event_name == 'pull_request' }}"])
+def test_wrapped_and_bare_conditions_agree(tmp_path, condition):
+    write_workflow(tmp_path, "ci.yml", RESTORE)
+    write_workflow(tmp_path, "warm.yml", SAVE.replace(
+        "      - uses:", f'      - if: "{condition}"\n        uses:'))
+    assert findings(tmp_path), "a PR-only save does not seed, wrapped or bare"
+
+
+def test_main_only_reader_step_is_not_a_pr_reader(tmp_path):
+    write_workflow(tmp_path, "ci.yml", RESTORE.replace(
+        "      - uses:", "      - if: github.ref == 'refs/heads/main'\n        uses:"))
+    assert not findings(tmp_path)
+
+
+def test_cache_false_reader_is_not_a_reader(tmp_path):
+    write_workflow(tmp_path, "ci.yml", NODE.replace("cache: pnpm", "cache: false"))
+    assert not findings(tmp_path)
+
+
+def test_setup_go_v3_has_no_default_cache(tmp_path):
+    write_workflow(tmp_path, "ci.yml", (GO % ("pull_request: {}", "")).replace("@v5", "@v3"))
+    assert not findings(tmp_path)
+    write_workflow(tmp_path, "ci.yml", (GO % ("pull_request: {}", "")).replace("@v5", "@v4"))
+    assert findings(tmp_path)
+
+
+def test_fork_samples_are_excluded_from_the_miss_share():
+    samples = [{"cache_state": {"miss_pct": 100, "restore_count": 1},
+                "install_steps": {"Install": 100}},
+               {"cache_state": {"miss_pct": 0, "restore_count": 1},
+                "install_steps": {"Install": 20}}]
+    upstream_only = cr._dependency_cache_sizing(samples, 0.5)
+    assert upstream_only["saving_s"] == pytest.approx(40)
+
+
+def test_fork_runs_do_not_count_toward_confirmation(tmp_path):
+    # Fork PRs read only the base branch, so they run cold. Drop them all and the
+    # remaining upstream runs mostly hit: no confirmation, a small miss share.
+    wf = ".github/workflows/ci.yml"
+    jobs = []
+    for i in range(1, 9):
+        j = sampled_job(i, 100 if i <= 6 else 20)
+        j["_run_head_repo"] = "someone/fork" if i <= 5 else "example/project"
+        jobs.append(j)
+    logs = {i: (MISS if i <= 6 else HIT) for i in range(1, 9)}
+    logs.update({i: MISS for i in range(21, 26)})
+    client = _LogClient(logs)
+    pole = {"check": "test", "workflow_file": wf, "job": "test", "p50_s": 300}
+    cr._persist_pole_logs(client, "example/project", [pole], {wf: [[j] for j in jobs]},
+                          tmp_path, mag_runs=8,
+                          events_jobs_by_wf={wf: {"push": [[sampled_job(i, 20)]
+                                                           for i in range(21, 26)]}},
+                          opt96_findings=[{"pattern": "OPT96", "workflow_file": wf,
+                                           "affected_jobs": ["test"]}])
+    cd = pole["cache_dist"]
+    assert cd["pr"]["fork_n"] >= 1
+    assert cd["sizing"]["miss_share"] < 0.5
+
+
+def test_push_median_100_with_one_restore_is_check_this(tmp_path):
+    pole, _, _ = dep_harness(tmp_path, push_logs={21: MISS, 22: HIT, 23: MISS,
+                                                  24: MISS, 25: MISS})
+    cd = pole["cache_dist"]
+    assert cd["push"]["median"] == 100
+    assert cd["confirmed"] is False
+    assert cd["recommendation"] == "check this"
+
+
+def test_apply_cache_dist_respects_the_static_gate():
+    leaf = bp._parse_log(MISS)
+    cd = {"fix_key": "dependency-cache", "recommendation": "seed the default-branch cache"}
+    assert bp._apply_cache_dist(dict(leaf), cd)["unit_label"] == "dependency cache: check this"
+    gated = bp._apply_cache_dist(dict(leaf), dict(cd, static_confirmed=True))
+    assert gated["unit_label"] == "dependency cache: seed the default-branch cache"
+
+
+def test_collect_grounds_opt96_before_sizing_within_its_workflow(tmp_path, monkeypatch):
+    # End to end through collect(): the pole logs are captured BEFORE sizing, so
+    # the confirmed measurement enters the ordinary cascade, and the
+    # within-workflow bound caps it at the workflow's own measured wall.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "ci_speedup_opt96_collect_fakes",
+        Path(__file__).resolve().parent / "test_disclosure_reaches_the_artifact.py")
+    fakes = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = fakes
+    spec.loader.exec_module(fakes)
+    seen = {}
+
+    def _persist(client, repo, poles, *a, **kw):
+        seen["opt96"] = kw.get("opt96_findings")
+        for p in poles:
+            if p.get("job") == "Test suite":
+                p["cache_dist"] = {
+                    "fix_key": "dependency-cache", "confirmed": True,
+                    "recommendation": "seed the default-branch cache", "push": None,
+                    "push_reason": None, "pr": {"upstream_n": 8, "upstream_median": 100},
+                    "sizing": {"credited": True, "step": "Install", "miss_time_s": 9000,
+                               "saving_s": 9000.0}}
+        return []
+
+    monkeypatch.setattr(cr, "GhClient", fakes._TwoWorkflowClient)
+    monkeypatch.setattr(cr, "_persist_pole_logs", _persist)
+    finding = {"id": "f9", "pattern": "OPT96", "workflow_file": fakes._GATE,
+               "affected_jobs": ["Test suite"], "evidence": "cache family `deps`"}
+    doc = {"repo": "o/r", "findings": [finding]}
+    cr.collect(doc, "o/r", max_runs=8, shallow_runs=8, with_logs=True,
+               data_dir=tmp_path / "bundle")
+    assert [f["id"] for f in seen["opt96"]] == ["f9"]
+    [f] = [f for f in doc["findings"] if f.get("pattern") == "OPT96"]
+    assert f["cache_dist"]["static_confirmed"] is True
+    assert f["wall_clock_p50_s"] is not None
+    assert 0 < f["wall_clock_p50_s"] <= 1410, "bounded by the workflow's own wall"
