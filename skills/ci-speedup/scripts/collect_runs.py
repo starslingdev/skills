@@ -9042,30 +9042,62 @@ def _opt97_job(doc: dict[str, Any], name: str) -> tuple[str, dict[str, Any]] | N
     return candidates[0] if len(candidates) == 1 else None
 
 
-def _opt97_global_group(doc: dict[str, Any], job: dict[str, Any]) -> str | None:
-    config = job.get("concurrency", doc.get("concurrency"))
-    if not isinstance(config, dict) or config.get("cancel-in-progress") is not False:
-        return None
-    group = config.get("group")
-    # Dynamic keys may vary by PR, matrix or input. Do not call them global.
-    if not isinstance(group, str) or not group.strip() or "${{" in group:
-        return None
-    return group.strip().lower()  # GitHub concurrency groups are case-insensitive.
+# A group key naming any of these differs per ref, PR, commit or run, so it never
+# makes unrelated PRs wait on each other. Anything else is shared across PRs.
+_OPT97_SCOPED_GROUP = re.compile(
+    r"github\.(?:ref|head_ref|sha|run_id|run_number|event\.number"
+    r"|event\.pull_request\.(?:number|head\.(?:ref|sha)))")
 
 
-def _opt97_samples(wf_path, jobs_per_run, doc):
-    """Valid runnable-to-start intervals, excluding upstream execution."""
-    rows = []
-    for run in jobs_per_run:
-        resolved = {id(j): _opt97_job(doc, str(j.get("name", ""))) for j in run}
-        for j in run:
-            match = resolved[id(j)]
-            if match is None or j.get("conclusion") == "skipped":
-                continue
-            jid, config = match
-            created = _parse_dt(j.get("created_at") or j.get("_run_created_at"))
-            start, end = _parse_dt(j.get("started_at")), _parse_dt(j.get("completed_at"))
-            needs = config.get("needs") or []
+def _opt97_global_group(doc: dict[str, Any], job: dict[str, Any],
+                        wf_path: str = "") -> tuple[str | None, str | None, str | None]:
+    """(comparison key, display text, level) of a one-at-a-time group shared across
+    PRs, else (None, None, level). A job-level `concurrency:` replaces the
+    workflow-level one. The string form is a group name; an omitted
+    `cancel-in-progress` is false (GitHub's default)."""
+    level = "job" if "concurrency" in job else "workflow"
+    config = job.get("concurrency") if level == "job" else doc.get("concurrency")
+    if isinstance(config, str):
+        group, cancel = config, False
+    elif isinstance(config, dict):
+        group, cancel = config.get("group"), config.get("cancel-in-progress", False)
+    else:
+        return None, None, None
+    if (cancel is not False or not isinstance(group, str) or not group.strip()
+            or _OPT97_SCOPED_GROUP.search(group)):
+        return None, None, level
+    key = group.strip().lower()  # GitHub concurrency groups are case-insensitive.
+    if "${{" in key:
+        # `${{ github.workflow }}` and inputs resolve per workflow: compare the
+        # unresolved text only within the workflow that wrote it.
+        key = f"{wf_path}::{key}"
+    return key, group.strip(), level
+
+
+def _opt97_intervals(wf_path, run, doc):
+    """Every non-skipped job of one run with its readiness anchor.
+
+    `ready` is when the job could first take a runner: the run's created_at for an
+    entry job held by a workflow-level global group (its jobs are created only when
+    the group frees), else the job's created_at, moved past the last needed
+    upstream completion. None when an upstream completion is unknown. Unresolved
+    jobs (no single YAML job) keep their created_at and carry no group."""
+    resolved = {id(j): _opt97_job(doc, str(j.get("name", ""))) for j in run}
+    out = []
+    for j in run:
+        if j.get("conclusion") == "skipped":
+            continue
+        match = resolved[id(j)]
+        group = group_text = None
+        ready = _parse_dt(j.get("created_at") or j.get("_run_created_at"))
+        if match is not None:
+            group, group_text, level = _opt97_global_group(doc, match[1], wf_path)
+            if group and level == "workflow" and int(j.get("run_attempt") or 1) == 1:
+                # A run held by a workflow-level group creates its jobs only when
+                # the group frees, so the wait precedes the job's created_at. A
+                # re-run keeps the first attempt's created_at: never use it there.
+                ready = _parse_dt(j.get("_run_created_at")) or ready
+            needs = match[1].get("needs") or []
             needs = [needs] if isinstance(needs, str) else needs
             ends = []
             for need in needs:
@@ -9076,19 +9108,175 @@ def _opt97_samples(wf_path, jobs_per_run, doc):
                     break
                 ends.append(max(upstream))
             if needs:
-                if not ends:
-                    continue
                 # Job creation can precede upstream completion. Readiness cannot.
-                created = max([*ends, *([created] if created else [])])
+                ready = max([*ends, *([ready] if ready else [])]) if ends else None
+        out.append({"job": j, "match": match, "ready": ready, "group": group,
+                    "group_text": group_text,
+                    "labels": tuple(sorted(str(x) for x in j.get("labels") or [] if x)),
+                    "start": _parse_dt(j.get("started_at")),
+                    "end": _parse_dt(j.get("completed_at"))})
+    return out
+
+
+def _opt97_samples(wf_path, jobs_per_run, doc, unresolved: list | None = None):
+    """Valid runnable-to-start intervals, excluding upstream execution.
+    `unresolved` ([unresolved, total]) counts sampled jobs that resolve to no
+    single YAML job (reusable children, ambiguous names) out of all non-skipped."""
+    rows = []
+    for run in jobs_per_run:
+        for iv in _opt97_intervals(wf_path, run, doc):
+            if unresolved is not None:
+                unresolved[1] += 1
+            if iv["match"] is None:
+                if unresolved is not None:
+                    unresolved[0] += 1
+                continue
+            created, start, end = iv["ready"], iv["start"], iv["end"]
             if not created or not start or not end or not created <= start < end:
                 continue
-            labels = tuple(sorted(str(label) for label in j.get("labels", []) if label))
-            rows.append({"workflow": wf_path, "job": j, "node": jid, "config": config,
-                         "labels": labels, "group": _opt97_global_group(doc, config),
+            rows.append({"workflow": wf_path, "job": iv["job"], "run": run,
+                         "node": iv["match"][0], "config": iv["match"][1],
+                         "labels": iv["labels"], "group": iv["group"],
+                         "group_text": iv["group_text"],
                          "created": created, "start": start, "end": end,
                          "queue": (start - created).total_seconds(),
                          "runtime": (end - start).total_seconds()})
     return rows
+
+
+def _opt97_competitors(wf_path, run, doc):
+    """In-flight intervals of one run's jobs: from readiness to completion; a job
+    that has not completed is still in flight (end None). A job whose upstream
+    has not completed is not yet competing, unless it already started."""
+    rows = []
+    for iv in _opt97_intervals(wf_path, run, doc):
+        created = iv["ready"] or iv["start"]
+        if created is None:
+            continue
+        rows.append({"id": iv["job"].get("id"), "labels": iv["labels"],
+                     "group": iv["group"], "created": created, "end": iv["end"]})
+    return rows
+
+
+def _opt97_inflight(row, labels, rivals) -> int:
+    """Competing jobs in flight when `row` became runnable: same exact label set,
+    or the same global group. A job created at the same instant does not count."""
+    at = row["created"]
+    return sum(1 for r in rivals
+               if r["created"] < at and (r["end"] is None or at < r["end"])
+               and ((labels and r["labels"] == labels)
+                    or (row["group"] and r["group"] == row["group"])))
+
+
+# The dense competition read: at most this many run-list pages (100 runs each)
+# and this many job lists per population. Hitting either cap means the
+# competition was not measured, never that it was small.
+_OPT97_DENSE_RUN_PAGES = 3
+_OPT97_DENSE_JOB_RUNS = 60
+# How far before the first sampled job a competing run may have been created and
+# still be in flight.
+_OPT97_DENSE_LOOKBACK = _dt.timedelta(hours=3)
+
+
+def _opt97_can_share(doc, labels, group, wf_path) -> bool:
+    """Whether any job of a workflow could use the same runners or group. Unknown
+    workflows, reusable calls and dynamic `runs-on` cannot be ruled out."""
+    jobs = doc.get("jobs") if isinstance(doc, dict) else None
+    if not isinstance(jobs, dict):
+        return True
+    want = {str(x).lower() for x in labels}
+    for job in jobs.values():
+        if not isinstance(job, dict):
+            continue
+        if job.get("uses"):
+            return True
+        if group and _opt97_global_group(doc, job, wf_path)[0] == group:
+            return True
+        runs_on = job.get("runs-on")
+        runs_on = [runs_on] if isinstance(runs_on, str) else runs_on
+        if not isinstance(runs_on, list) or any("${{" in str(x) for x in runs_on):
+            return True
+        if {str(x).lower() for x in runs_on} == want:  # runs-on is never empty
+            return True
+    return False
+
+
+def _opt97_dense_competition(client, repo, labels, group, lo, hi, *, workflow_docs,
+                             known_runs, stats, cache):
+    """Every run (any status) created in [lo, hi], and the jobs of those whose
+    workflow could share the runners or group: `(rivals, None)`, or
+    `(None, reason)` when the read failed or hit a cap. The newest-success sample
+    sees a small fraction of competing jobs, so counts come from here only."""
+    stats["populations"] += 1
+    fmt = "%Y-%m-%dT%H:%M:%SZ"
+    window = (f"{lo.astimezone(_dt.timezone.utc).strftime(fmt)}.."
+              f"{hi.astimezone(_dt.timezone.utc).strftime(fmt)}")
+    runs = []
+    for page in range(1, _OPT97_DENSE_RUN_PAGES + 1):
+        endpoint = f"repos/{repo}/actions/runs?created={window}&per_page=100&page={page}"
+        if endpoint not in cache:
+            stats["run_pages"] += 1
+            cache[endpoint] = client.json(endpoint, allow_missing=True)
+        body = cache[endpoint]
+        batch = body.get("workflow_runs") if isinstance(body, dict) else None
+        if not isinstance(batch, list):
+            return None, "the run list could not be read"
+        runs.extend(r for r in batch if isinstance(r, dict))
+        if len(batch) < 100:
+            break
+    else:
+        return None, f"more than {_OPT97_DENSE_RUN_PAGES * 100} runs in the window"
+    sharing = []
+    for run in runs:
+        path = str(run.get("path") or "").split("@")[0]
+        if _opt97_can_share(workflow_docs.get(path), labels, group, path):
+            sharing.append((path, run))
+    if sum(1 for _, run in sharing if str(run.get("id")) not in known_runs) > _OPT97_DENSE_JOB_RUNS:
+        return None, f"more than {_OPT97_DENSE_JOB_RUNS} runs could share the runners"
+    rivals = []
+    for path, run in sharing:
+        jobs = known_runs.get(str(run.get("id")))
+        if jobs is None:
+            endpoint = f"repos/{repo}/actions/runs/{run.get('id')}/jobs?per_page=100"
+            if endpoint not in cache:
+                stats["job_lists"] += 1
+                cache[endpoint] = client.json(endpoint, allow_missing=True)
+            body = cache[endpoint]
+            jobs = body.get("jobs") if isinstance(body, dict) else None
+            if not isinstance(jobs, list):
+                return None, "a job list could not be read"
+            total = body.get("total_count")
+            if isinstance(total, int) and total > len(jobs):
+                return None, "a run has more than 100 jobs"
+            jobs = [dict(j) for j in jobs if isinstance(j, dict)]
+            _stamp_run_context(run, jobs)
+        rivals.extend(_opt97_competitors(path, jobs, workflow_docs.get(path) or {}))
+    return rivals, None
+
+
+def _opt97_hints(samples, labels, runner_inventory):
+    """Static hints naming the likely one-at-a-time resource."""
+    hints = []
+    if samples[0]["group"]:
+        hints.append(f"global concurrency group `{samples[0]['group_text']}`")
+    if runner_inventory is not None:
+        # The inventory is the repository's own runner list. Organization
+        # runners serving the same label are not visible to it.
+        for label in labels:
+            matches = sum(1 for runner in runner_inventory
+                          if label in {str(x.get('name', '')) if isinstance(x, dict) else str(x)
+                                       for x in runner.get('labels', [])})
+            if matches == 1:
+                hints.append(f"label `{label}` has one repo-level runner "
+                             "(org runners not visible)")
+    for step in samples[0]["config"].get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        text = str(step.get("uses", "")) + " " + str(step.get("run", ""))
+        for token in ("android-emulator-runner", "xcrun simctl", "adb"):
+            if re.search(r"(?<![\w-])" + re.escape(token) + r"(?![\w-])", text):
+                hints.append(f"device step `{step.get('name') or token}`")
+    return list(dict.fromkeys(hints))
 
 
 def _detect_opt97_single_slot_queue(
@@ -9096,113 +9284,118 @@ def _detect_opt97_single_slot_queue(
     wf_doc: dict[str, Any], *, all_jobs_by_wf=None, workflow_docs=None,
     baseline_queue_s: float | None = None, merge_gating_jobs: set[str] | None = None,
     runner_inventory: list[dict[str, Any]] | None = None, notes: list | None = None,
+    competition=None,
 ) -> list[dict[str, Any]]:
     """Queue follows contention, but execution does not: a capacity hypothesis.
 
-    Uses sampled intervals only, never a utilization claim. Exact runner-label
-    sets keep dissimilar pools separate. Other jobs sharing that label set OR a
-    literal global group compete; simultaneous creations do not count each other.
-    Baseline is the repository's sampled P10 runnable queue, not an invented zero.
+    Per job and exact runner-label set. A population whose queue meets the
+    thresholds is evaluated only on a self-hosted label set or with a static hint
+    (global group, one repo-level runner, device step); on hosted runners an
+    account's concurrent-job limit raises queue and in-flight together, so that
+    queue stays with OPT43. In-flight counts come only from `competition(labels,
+    group, lo, hi)`, a dense read of every run in the window; without it, or when
+    it fails or is capped, the population is noted "competition not measured"
+    and never fires. Baseline is the P10 runnable queue of the OTHER sampled
+    jobs; with none, no wall-clock credit. Never a utilization claim.
     """
-    own = _opt97_samples(wf_path, jobs_per_run, wf_doc)
+    unresolved = [0, 0]
+    own = _opt97_samples(wf_path, jobs_per_run, wf_doc, unresolved)
+    if unresolved[0] and notes is not None:
+        notes.append({"workflow_file": wf_path, "reason": "unresolved jobs",
+                      "unresolved": unresolved[0], "jobs": unresolved[1]})
     docs = {**(workflow_docs or {}), wf_path: wf_doc}
     pool = []
     for path, runs in (all_jobs_by_wf or {wf_path: jobs_per_run}).items():
-        pool.extend(_opt97_samples(path, runs, docs.get(path, wf_doc if path == wf_path else {})))
-    if not pool:
-        pool = own
-    if baseline_queue_s is None:
-        baseline_queue_s = _percentile([r["queue"] for r in pool], 10) if pool else 0.0
+        pool.extend(_opt97_samples(path, runs, docs.get(path, {})))
     populations = {}
     for row in own:
         populations.setdefault((row["job"].get("name", ""), row["labels"]), []).append(row)
     out = []
     for (name, labels), samples in populations.items():
-        if len(samples) < 15:
-            if notes is not None:
-                notes.append({"workflow_file": wf_path, "job": name, "labels": list(labels),
-                              "samples": len(samples), "reason": "too few samples"})
-            continue
         queues = [r["queue"] for r in samples]
         median, p90 = statistics.median(queues), _percentile(queues, 90)
-        counts = [sum(1 for other in pool
-                      if other["created"] < row["created"] < other["end"]
-                      and ((labels and labels == other["labels"])
-                           or (row["group"] and row["group"] == other["group"])))
-                  for row in samples]
+        if median < 60 or p90 < 300:
+            continue  # no queue worth explaining: never noted
+        hints = _opt97_hints(samples, labels, runner_inventory)
+        if "self-hosted" not in {x.lower() for x in labels} and not hints:
+            continue  # hosted pool: an account's job limit explains this; OPT43 keeps it
+        note = {"workflow_file": wf_path, "job": name, "labels": list(labels),
+                "samples": len(samples)}
+        if len(samples) < 15:
+            if notes is not None:
+                notes.append({**note, "reason": "too few samples"})
+            continue
+        created = [r["created"] for r in samples]
+        rivals, why = (competition(labels, samples[0]["group"],
+                                   min(created) - _OPT97_DENSE_LOOKBACK, max(created))
+                       if competition is not None else (None, "no competition read"))
+        if rivals is None:
+            if notes is not None:
+                notes.append({**note, "reason": "competition not measured", "detail": why})
+            continue
+        counts = [_opt97_inflight(row, labels, rivals) for row in samples]
         queue_rho = _opt97_rank_correlation(queues, counts)
         runtime_rho = _opt97_rank_correlation([r["runtime"] for r in samples], counts)
-        if median < 60 or p90 < 300 or queue_rho < .6 or abs(runtime_rho) >= .3:
+        if queue_rho < .6 or abs(runtime_rho) >= .3:
             continue
-        hints = []
-        group = samples[0]["group"]
-        if group:
-            hints.append(f"global concurrency group `{group}`")
-        if runner_inventory is not None:
-            for label in labels:
-                matches = sum(1 for runner in runner_inventory
-                              if label in {str(x.get('name', '')) if isinstance(x, dict) else str(x)
-                                           for x in runner.get('labels', [])})
-                if matches == 1:
-                    hints.append(f"label `{label}` has one registered runner")
-        config = samples[0]["config"]
-        for step in config.get("steps") or []:
-            if not isinstance(step, dict):
-                continue
-            text = str(step.get("uses", "")) + " " + str(step.get("run", ""))
-            for token in ("android-emulator-runner", "xcrun simctl", "adb"):
-                if re.search(r"(?<![\w-])" + re.escape(token) + r"(?![\w-])", text):
-                    hints.append(f"device step `{step.get('name') or token}`")
-        # A fixed service port/database is a hint only if a sibling independent
-        # job declares the same literal. Dynamic per-run names are not shared.
-        def literals(job):
-            values = set()
-            for service in (job.get('services') or {}).values():
-                if not isinstance(service, dict):
-                    continue
-                for port in service.get('ports') or []:
-                    if '${{' not in str(port) and ':' in str(port):
-                        values.add('port ' + str(port).split(':')[0])
-                for key, value in (service.get('env') or {}).items():
-                    if key in {'POSTGRES_DB', 'MYSQL_DATABASE', 'MONGO_INITDB_DATABASE'} and '${{' not in str(value):
-                        values.add('database ' + str(value))
-            return values
-        shared = set()
-        for jid, sibling in (wf_doc.get('jobs') or {}).items():
-            if jid != samples[0]['node'] and isinstance(sibling, dict) and not sibling.get('needs') and not config.get('needs'):
-                shared.update(literals(config) & literals(sibling))
-        hints.extend('shared fixed ' + value for value in sorted(shared))
-        resource = '; '.join(dict.fromkeys(hints)) or 'runner label set `' + ', '.join(labels) + '` (slot count unknown)'
+        resource = '; '.join(hints) or 'runner label set `' + ', '.join(labels) + '` (slot count unknown)'
         evidence = (f"job `{name}` median queue {median:.0f}s, P90 {p90:.0f}s across {len(samples)} samples; "
-                    f"queue/in-flight rank correlation {queue_rho:.2f}, run-time/in-flight {runtime_rho:.2f}. "
+                    f"queue/in-flight rank correlation {queue_rho:.2f}, run-time/in-flight {runtime_rho:.2f} "
+                    f"(in-flight counted from {len(rivals)} jobs of every run in the window). "
                     f"Likely resource: {resource}. Consistent with a one-at-a-time capacity limit; "
                     "runner utilization was not measured.")
+        baseline = baseline_queue_s
+        if baseline is None:
+            others = [r["queue"] for r in pool
+                      if not (r["workflow"] == wf_path and r["job"].get("name", "") == name
+                              and r["labels"] == labels)]
+            baseline = _percentile(others, 10) if others else None
         gating = merge_gating_jobs is not None and samples[0]["node"] in merge_gating_jobs
-        excess = max(0.0, median - baseline_queue_s)
+        recoverable = []
+        for row in samples:
+            finishes = [(job, _parse_dt(job.get("completed_at"))) for job in row["run"]
+                        if job.get("conclusion") != "skipped"]
+            if baseline is None or any(end is None for _, end in finishes):
+                recoverable.append(0.0)
+                continue
+            reduction = max(0.0, row["queue"] - baseline)
+            before = max(end.timestamp() for _, end in finishes)
+            after = max(end.timestamp() - (reduction if job is row["job"] else 0.0)
+                        for job, end in finishes)
+            recoverable.append(max(0.0, before - after))
+        # Each sample's reduction is at most its queue above baseline, so the
+        # median is at most the median excess queue.
+        credited = statistics.median(recoverable) if gating else 0.0
+        if baseline is None:
+            size_note = "repository baseline unavailable (no other sampled jobs); no wall-clock credit"
+        else:
+            size_note = (f"median queue above repository baseline ({baseline:.1f}s, P10 of other sampled jobs); "
+                         + ('bounded by same-run job finish times including queue; existing floors still apply'
+                            if gating else 'merge-gating status not established; no wall-clock credit'))
         f = _new_finding('OPT97', 'MEDIUM', 'Queue Caused by a One-at-a-Time Resource',
                          wf_path, name, evidence, 'single-slot-queue',
                          'opt97--queue-caused-by-a-one-at-a-time-resource', start_idx + len(out) + 1,
-                         wc_p50=round(excess, 1) if gating else 0.0, rm=None,
-                         size_note=(f"median queue above repository baseline ({baseline_queue_s:.1f}s); "
-                                    + ('merge-gating job; existing floors still apply' if gating else
-                                       'merge-gating status not established; no wall-clock credit')),
+                         wc_p50=round(credited, 1), rm=None, size_note=size_note,
                          realization='direct', measured_evidence=_measured_evidence(
                              ['Job', 'Median queue', 'P90 queue', 'Samples', 'Example job'],
                              [[name, f'{median:.0f}s', f'{p90:.0f}s', str(len(samples)),
                                _link(samples[-1]['queue'], str(samples[-1]['job'].get('html_url') or ''))]],
                              evidence))
         f['single_slot_queue'] = {'queue_p50_s': median, 'queue_p90_s': p90,
-                                 'baseline_queue_s': baseline_queue_s, 'samples': len(samples),
+                                 'baseline_queue_s': baseline, 'samples': len(samples),
                                  'queue_rank_correlation': queue_rho, 'runtime_rank_correlation': runtime_rho,
-                                 'inflight_counts': counts, 'labels': list(labels), 'hints': hints,
+                                 'inflight_counts': counts, 'competing_jobs_read': len(rivals),
+                                 'labels': list(labels), 'hints': hints,
                                  'runner_inventory': 'readable' if runner_inventory is not None else 'unknown'}
-        f['queue_cause'] = 'config_controllable' if hints else 'unknown'
         out.append(f)
     return out
 
 
 def _merge_opt97_findings(findings, new, wf_doc):
-    """Measured capacity evidence replaces the same job's generic queue/static hint."""
+    """Measured capacity evidence replaces the same workflow's same-job OPT43
+    finding. OPT44 is accepted too, but no OPT44 detector exists today, so in
+    production only OPT43 is ever merged. A finding that also names other jobs,
+    or another workflow's finding, is kept."""
     for measured in new:
         related = set()
         for old in list(findings):
@@ -26814,6 +27007,24 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             sum(1 for run in rows for job in run if "self-hosted" in (job.get("labels") or [])) >= 15
             for rows in jobs_per_run_by_wf.values()):
         _opt97_inventory = _opt97_runner_inventory(client, repo)
+    # OPT97's dense competition read: every run in a candidate population's
+    # window, made only for a population that already meets the queue thresholds
+    # on a self-hosted or hinted pool. Sampled runs' jobs are reused, responses are
+    # shared across populations, and the call counts reach the Data sources table.
+    _opt97_known_runs: dict[str, list[dict[str, Any]]] = {}
+    for _rows in jobs_per_run_by_wf.values():
+        for _run in _rows:
+            _rid = next((j.get("run_id") or j.get("_run_id") for j in _run
+                         if j.get("run_id") or j.get("_run_id")), None)
+            if _rid is not None:
+                _opt97_known_runs[str(_rid)] = _run
+    _opt97_calls = {"run_pages": 0, "job_lists": 0, "populations": 0}
+    _opt97_cache: dict[str, Any] = {}
+
+    def _opt97_competition(labels, group, lo, hi):
+        return _opt97_dense_competition(
+            client, repo, labels, group, lo, hi, workflow_docs=_wf_docs,
+            known_runs=_opt97_known_runs, stats=_opt97_calls, cache=_opt97_cache)
     for wf_path, jobs_per_run in jobs_per_run_by_wf.items():
         if not jobs_per_run:
             continue
@@ -27006,19 +27217,22 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
 
-        # Capacity inference uses the sampled repository intervals, never new
-        # run/log calls. The bounded optional inventory probe above supplies only
-        # complete lists; unreadable/partial inventories remain unknown.
+        # Capacity inference: queue thresholds from the sampled intervals, in-flight
+        # counts only from the bounded dense read above (`_opt97_competition`). The
+        # optional inventory probe supplies only complete repo-level lists. A
+        # workflow whose YAML could not be parsed is already disclosed as skipped.
         _opt97_notes = []
         try:
-            new = _detect_opt97_single_slot_queue(
+            new = (_detect_opt97_single_slot_queue(
                 wf_path, jobs_per_run, next_id, _wf_docs.get(wf_path, {}),
                 all_jobs_by_wf=jobs_per_run_by_wf, workflow_docs=_wf_docs,
                 merge_gating_jobs=_opt80_merge_gating_jobs(
                     wf_path, required_checks, findings_doc.get("workflow_job_graph"),
                     crit_by_wf, workflow_names=findings_doc.get("workflow_names"),
                     status_publishers=findings_doc.get("workflow_status_publishers")),
-                runner_inventory=_opt97_inventory, notes=_opt97_notes)
+                runner_inventory=_opt97_inventory, notes=_opt97_notes,
+                competition=_opt97_competition)
+                if isinstance((_wf_docs.get(wf_path) or {}).get("jobs"), dict) else [])
         except Exception as exc:  # noqa: BLE001 — failure is disclosed, never clean
             _skip_detectors(wf_path, ["OPT97"],
                             f"the capacity check failed ({type(exc).__name__})")
@@ -27026,6 +27240,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         findings_doc.setdefault("opt97_notes", []).extend(_opt97_notes)
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         _merge_opt97_findings(findings, new, _wf_docs.get(wf_path, {}))
+        if _opt97_calls["populations"]:
+            findings_doc["opt97_competition_calls"] = dict(_opt97_calls)
 
         if wf_id is not None:
             new = _detect_opt48_failure_rate(client, repo, wf_id, wf_path, long_pole, monthly, next_id, created_before)

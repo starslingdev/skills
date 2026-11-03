@@ -3383,21 +3383,36 @@ or prove which hinted resource causes the wait.
 
 **Detection heuristic**: Per job and exact runner-label set, require at least
 15 samples, median runnable-to-start queue of at least 60 seconds and P90 of
-at least 300 seconds. At each job's runnable time, count other sampled jobs
-already in flight with the same label set or literal global concurrency group.
-Require Spearman rank correlation of queue versus in-flight count at least
-0.6 and absolute run-time correlation below 0.3. Constant execution times have
-zero correlation. Exclude skipped jobs, incomplete intervals, unresolved job
-identities and upstream `needs:` execution. Fewer than 15 samples is disclosed
-as "too few samples", never an all-clear.
+at least 300 seconds. An entry job under a workflow-level global group is timed
+from the run's creation (first attempt only): GitHub creates that run's jobs only
+when the group frees. Evaluate only a self-hosted label set or a population
+with a resource hint below. On hosted runners an account's concurrent-job limit
+raises queue and in-flight work together, so that queue stays with OPT43.
+In-flight counts come from one bounded read of every run, any status, created
+in the population's window (three hours before its first sample to its last):
+at most 3 run-list pages, then job lists only for runs whose workflow could use
+the same runners or group, at most 60. A newest-success sample sees a small
+fraction of competing jobs, so it is never used for the count. A failed or
+capped read gives "check this: competition not measured", never a finding. At
+each job's runnable time, count jobs already in flight with the same label set
+or the same global group. Require Spearman rank correlation of queue versus
+in-flight count at least 0.6 and absolute run-time correlation below 0.3.
+Constant execution times have zero correlation. Exclude skipped jobs,
+incomplete intervals and upstream `needs:` execution. Fewer than 15 samples is
+disclosed as "too few samples" only when the queue already meets the
+thresholds on a pool OPT97 evaluates. Sampled jobs matching no single YAML job (reusable-workflow
+children, ambiguous names) are counted per workflow in Data sources.
 
-**Resource hints**: A literal group with `cancel-in-progress: false`; a label
-on exactly one registered runner when a complete inventory is supplied (else
-unknown); Android-emulator runner actions, `xcrun simctl` or `adb`; and a literal
-host port or database shared by independent service jobs. Expressions are not
-assumed global. Other sampled workflows compete only when their job identities
-and readiness are known. The sample may undercount competing work outside the
-audit window, so correlation is evidence to investigate, not proof of causation.
+**Resource hints**: A global concurrency group: the string form or a `group`
+with `cancel-in-progress` false or omitted (GitHub's default), whose key does
+not reference the ref, head ref, PR number, commit SHA or run id. A job-level
+group replaces the workflow-level one; `${{ github.workflow }}` alone is global
+within its workflow. A label on exactly one repo-level runner when the
+repository's complete runner list is readable (organization runners are not
+visible, else unknown). Android-emulator runner actions, `xcrun simctl` or
+`adb`. Matching ports or database names in job-local service containers do not
+establish a shared resource. Correlation is evidence to investigate, not proof
+of causation.
 
 **Fix**, in order:
 
@@ -3409,14 +3424,20 @@ audit window, so correlation is evidence to investigate, not proof of causation.
 such as deployment to one environment. Narrow its scope instead of removing it.
 Inspect the workflow's history and intent before changing policy.
 
-**Sizing**: Median queue above the repository's sampled P10 runnable-queue
-baseline, only for an established merge-gating job, then capped by the existing
-workflow and cross-workflow floors. No runner-minute saving: waiting is not
-execution. Unknown merge-gating status receives no wall-clock credit.
+**Sizing**: Median queue above a baseline: the P10 runnable queue of the
+repository's other sampled jobs, never the population being evaluated. With no
+other jobs, no wall-clock credit. Only an established merge-gating job is
+credited. Cap each sampled reduction against all same-run job completion times,
+including queue; an independent later-finishing job removes the credit.
+Incomplete completion data receives no credit. The existing workflow and
+cross-workflow floors then apply. No runner-minute saving: waiting is not
+execution.
 
-**Relations**: Replace same-job OPT44 static hints and OPT43 generic queue
-findings with this measured finding; retain unrelated jobs' findings. A rise in
-execution time with contention does not fire OPT97; OPT43 remains available.
+**Relations**: Replaces the same workflow's same-job OPT43 finding; a finding
+naming other jobs, or another workflow's, is kept. The merge also accepts
+OPT44, but no OPT44 detector exists, so only OPT43 merges today. A rise in
+execution time with contention, a hosted pool without a hint, or an unmeasured
+competition does not fire OPT97; OPT43 remains.
 
 ---
 
