@@ -222,6 +222,20 @@ def verify(doc: dict[str, Any], report: str, registry: dict[str, Any]) -> list[s
     if doc.get("advisory_notes") and not stamp.get("refusal"):
         if not marker or "not part of the score" not in section:
             problems.append("ADVISORY: missing unscored disclosure")
+        expected_notes = []
+        for note in doc["advisory_notes"]:
+            if note.get("advisory_id") != "ci.runner.swappable":
+                continue
+            label = str(note.get("label", "")).replace("|", "\\|").replace("`", "\\`")
+            expected_notes.append(
+                f"- **Runner choice (`ci.runner.swappable`):** {label} is hard-coded in "
+                f"{note.get('job_count', 0)} jobs. Use one repository variable per runner class, "
+                "for example `runs-on: ${{ vars.RUNNER_LINUX }}`, so switching runners "
+                "needs one setting change. Keep separate variables for different runner classes.")
+        rendered_notes = [line for line in section.split("\n## ", 1)[0].splitlines()
+                          if line.startswith("- **Runner choice (`ci.runner.swappable`):**")]
+        if rendered_notes != expected_notes:
+            problems.append("ADVISORY: rendered notes differ from the stored labels, counts or advice")
         if any(line.startswith("|") and identity in line
                for line in report.splitlines() for identity in advisory_ids):
             problems.append("ADVISORY: advisory appears in a scored table row")

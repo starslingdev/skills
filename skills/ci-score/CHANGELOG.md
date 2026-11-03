@@ -11,6 +11,8 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
 
 ## [Unreleased]
 
+- **2026-11-03** — **Fixed**: report verification now requires each runner advisory bullet to match its stored label, job count and advice inside the advisory section, rejecting missing, altered or duplicated bullets. (#182)
+
 - **2026-10-29** — **Fixed**: the step-0 and close questions can no longer go
   unseen on Codex. When the host's question tool is experimental, the same question
   and options also end the plain message, in the same order, sent before the tool

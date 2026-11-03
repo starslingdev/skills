@@ -113,3 +113,23 @@ def test_historical_engine_adapter_has_no_advisories():
     adapted = _adapt(historical)
     assert adapted._runner_advisories(workflows()) == []
     assert adapted._practice_facts([], None) == {'sentinel': True}
+
+
+@pytest.mark.parametrize('alteration', ['remove', 'label', 'count', 'move', 'duplicate', 'remedy'])
+def test_verifier_binds_each_advisory_bullet_to_its_note(alteration):
+    doc=fixture();doc['advisory_notes']=notes()
+    text=rr.render_report(doc,SPEC)
+    bullet=next(line for line in text.splitlines() if line.startswith('- **Runner choice'))
+    if alteration=='remove':
+        text=text.replace(bullet,'')
+    elif alteration=='label':
+        text=text.replace(bullet,bullet.replace('custom-linux','different-linux'))
+    elif alteration=='count':
+        text=text.replace(bullet,bullet.replace('3 jobs','30 jobs'))
+    elif alteration=='move':
+        text=text.replace(bullet,'')+'\n'+bullet
+    elif alteration=='duplicate':
+        text=text.replace(bullet,bullet+'\n'+bullet)
+    else:
+        text=text.replace(bullet,bullet.replace('vars.RUNNER_LINUX','vars.UNRELATED'))
+    assert any('ADVISORY: rendered notes differ' in p for p in vr.verify(doc,text,SPEC))
