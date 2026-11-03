@@ -312,7 +312,7 @@ def test_opt19_cap_respects_physical_bound():
 # exempt. If someone registers a new `measured` pattern, this fails until they
 # either drive it through the bound checker here or justify an exemption — so the
 # class-wide guard can't go blind to a detector added later.
-_RUNTIME_MEASURED_COVERED = {"OPT19", "OPT24", "OPT25", "OPT49", "OPT50", "OPT51"}
+_RUNTIME_MEASURED_COVERED = {"OPT19", "OPT24", "OPT25", "OPT49", "OPT50", "OPT51", "OPT100"}
 # OPT46/OPT47/OPT64 are run-elimination bill levers, OPT65 is exact billing
 # rounding waste below the cluster floor, OPT77 credits removed setup
 # payments for a consolidation that must project below the tallest job that
@@ -408,3 +408,21 @@ def test_opt48_is_exempt_because_it_credits_no_wall_clock():
         assert f.get("wall_clock_p50_s") is None, (
             "OPT48 now credits a wall-clock saving — it can no longer be exempt "
             "from the sizing-cap guard; drive it through `_physical_bound_violation`")
+
+
+def test_opt100_retry_delay_respects_runtime_headroom():
+    """A long human retry delay cannot credit more than the measured job headroom."""
+    jobs, logs = [], {}
+    for i in range(6):
+        failed = dict(_job("checks", 120), id=i*10, run_id=i, run_attempt=1, conclusion="failure",
+                      steps=[dict(name="Run checks", number=1, conclusion="failure",
+                                  started_at="2026-01-01T00:00:00Z", completed_at="2026-01-01T00:02:00Z")])
+        passed = dict(_job("checks", 120), id=i*10+1, run_id=i, run_attempt=2, conclusion="success",
+                      started_at="2026-01-01T01:00:00Z", completed_at="2026-01-01T01:02:00Z")
+        jobs.extend([failed, passed])
+        logs[failed["id"]] = "2026-01-01T00:01:00Z Killed"
+    crit = {"long_pole_job": "checks", "long_pole_p50": 120.0, "floor_p50": 70.0,
+            "job_p50": {"checks": 120.0, "lint": 70.0}}
+    f = cr._detect_opt100_infra_faults("ci.yml", jobs, logs, {"checks"}, 0, crit=crit)[0][0]
+    assert _physical_bound_violation(f, crit) is None
+    assert f["wall_clock_p50_s"] == 50.0

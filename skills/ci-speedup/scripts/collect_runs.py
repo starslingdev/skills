@@ -9050,7 +9050,7 @@ def _collect_opt100(client: GhClient, repo: str, wf_path: str,
                     jobs: list[dict[str, Any]], gating_jobs: set[str] | None,
                     start_idx: int, *, complete_population: bool = True,
                     monthly_volume: int | None = None, sample_denominator: int | None = None,
-                    prior_attempt_failures: int = 0
+                    prior_attempt_failures: int = 0, crit: dict[str, Any] | None = None
                     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Fetch each failed gating job log once; keep raw text out of findings."""
     if not complete_population or prior_attempt_failures:
@@ -9063,13 +9063,14 @@ def _collect_opt100(client: GhClient, repo: str, wf_path: str,
                and j.get("conclusion") in {"failure", "timed_out"}}
     logs = {jid: _fetch_job_log(client, repo, j) for jid, j in targets.items()}
     return _detect_opt100_infra_faults(wf_path, jobs, logs, gating_jobs, start_idx,
-                                      monthly_volume=monthly_volume, sample_denominator=sample_denominator)
+                                      monthly_volume=monthly_volume, sample_denominator=sample_denominator, crit=crit)
 
 
 def _detect_opt100_infra_faults(
     wf_path: str, jobs: list[dict[str, Any]], logs: dict[Any, str],
     gating_jobs: set[str] | None, start_idx: int, *,
     monthly_volume: int | None = None, sample_denominator: int | None = None,
+    crit: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Infra share uses every sampled failure as denominator, including unread logs.
 
@@ -9135,6 +9136,8 @@ def _detect_opt100_infra_faults(
         scale = monthly_volume / sample_denominator if monthly_volume and sample_denominator else None
         delay = _stats.median(delays) if delays else 0.0
         rate = len(infra) / len(population)
+        wc, cap_note = _cap_wall_clock(delay * rate, name,
+                                       crit if crit is not None else _critical_path([[j] for j in jobs]))
         monthly_note = (f"monthly scale {scale:.3g} yields {rerun_seconds / 60 * scale:.1f} runner-min/mo. "
                         if scale is not None else "monthly volume unavailable; no monthly credit. ")
         evidence = (f"{len(infra)} of {len(failed)} sampled failed jobs ({len(infra)/len(failed):.0%}) "
@@ -9145,7 +9148,7 @@ def _detect_opt100_infra_faults(
         title = "Infrastructure Faults Fail the Whole Run"
         f = _new_finding("OPT100", "MEDIUM", title, wf_path, name, evidence,
                          "infra-fault-retries", _catalog_anchor("OPT100", title), start_idx + len(out) + 1,
-                         wc_p50=delay * rate, rm=(rerun_seconds / 60 * scale if scale is not None else (0.0 if not rerun_seconds else None)),
+                         wc_p50=wc, rm=(rerun_seconds / 60 * scale if scale is not None else (0.0 if not rerun_seconds else None)),
                          size_note="Observed subsequent-attempt compute scaled by all-status monthly volume/sample count; raw sample minutes retained separately. Wall-clock remains subject to the existing floors.",
                          measured_evidence=_measured_evidence(
                              ["Class", "Failures", "Sampled job logs"],
@@ -9160,7 +9163,7 @@ def _detect_opt100_infra_faults(
                                "degraded_runner": degraded, "flakes_observed": flaky,
                                "rerun_delay_p50_s": delay, "retry_attempts": len(claimed),
                                "sampled_rerun_minutes": rerun_seconds / 60, "monthly_scale": scale,
-                               "retry_run_ids": sorted({rid for rid, _ in claimed})}
+                               "retry_run_ids": sorted({rid for rid, _ in claimed}), "wall_clock_cap_note": cap_note}
         out.append(f)
     return out, notes
 
@@ -27110,7 +27113,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 new, _infra_notes = _collect_opt100(client, repo, wf_path, _infra_jobs, _names, next_id,
                                                    complete_population=not _infra_errors,
                                                    monthly_volume=monthly, sample_denominator=len(all_runs),
-                                                   prior_attempt_failures=_infra_attempt_errors)
+                                                   prior_attempt_failures=_infra_attempt_errors, crit=crit)
                 findings_doc.setdefault("opt100_coverage", {})[wf_path] = _infra_notes
                 if _infra_errors or _infra_attempt_errors or _infra_notes["unreadable_logs"]:
                     _skip_detectors(wf_path, ["OPT100"], "some failed-job logs or job pages were unreadable; incomplete job populations withhold the finding")
