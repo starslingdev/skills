@@ -331,14 +331,14 @@ _RUNTIME_MEASURED_COVERED = {"OPT19", "OPT24", "OPT25", "OPT49", "OPT50", "OPT51
 # runner-minute sizing is covered by test_tier2_wave1_detectors.py and
 # independently re-derived by verify_report's OPT80 certificate arm.
 _MEASURED_EXEMPT = {
-    "OPT43", "OPT48", "OPT46", "OPT47", "OPT64", "OPT65", "OPT77", "OPT79", "OPT80",
+    "OPT43", "OPT97", "OPT48", "OPT46", "OPT47", "OPT64", "OPT65", "OPT77", "OPT79", "OPT80",
 }  # queue/advisory/bill-only
 
 
 def test_every_measured_pattern_is_covered_or_exempt():
     declared = {p for p, c in cr._SIZING.items() if c.get("model") == "measured"}
     # OPT43's exemption must stay anchored to the real axis set, not a guessed string.
-    assert "OPT43" in cr._PRESTART_AXIS_PATTERNS
+    assert {"OPT43", "OPT97"} <= cr._PRESTART_AXIS_PATTERNS
     accounted = _RUNTIME_MEASURED_COVERED | _MEASURED_EXEMPT
     missing = declared - accounted
     assert not missing, (

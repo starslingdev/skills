@@ -65,6 +65,7 @@ This order is also the compiled file's order; contributors see `README.md`.
 - OPT42 — `TURBO_CACHE: remote:rw` in Release (HIGH, static) — TURBO_CACHE remote:rw in release
 ## Category 9 — Queue Times and Concurrency
 - OPT43 — Excessive Queue Time (MEDIUM, data-driven) — jobs wait long for a runner
+- OPT97 — Queue Caused by a One-at-a-Time Resource (MEDIUM, data-driven) — queue grows with in-flight jobs while execution stays flat
 - OPT44 — Concurrency Group Too Restrictive (MEDIUM, static) — concurrency group too narrow
 - OPT45 — Missing Concurrency Groups (HIGH, static) — no concurrency group
 - OPT46 — Superseded Runs Not Cancelled (Missing Concurrency or `cancel-in-progress: false`) (MEDIUM, data-driven) — superseded runs keep running
