@@ -4171,13 +4171,22 @@ introduced.
 
 `pr_lifecycle.py` adds a separate `pr_lifecycle` document block and renders it
 near the report's top on every path. It does not alter CI findings or savings.
-The collector makes at most four read-only GraphQL requests, 25 merged PRs per
-page, ordered newest by creation time (GraphQL has no merged-at ordering).
-Nested commit/suite/check/review connections expose pageInfo; any truncation,
-query failure, missing required check or malformed timestamp makes the whole
-block `not measured`, with a controlled reason and no partial aggregate.
+The collector makes at most four read-only GraphQL requests, 10 merged PRs per
+page, ordered by most recent update (GraphQL has no merged-at ordering; update
+order tracks merges, while creation order drops long-lived PRs merged recently).
+Ten per page and GitHub Actions suites only (app 15368) keep a page inside
+GitHub's per-query resource limits: installed apps open an empty suite on every
+commit, and 25 PRs of full job history exceeded the limit on busy repos. A
+query failure or malformed page makes the whole block `not measured`. A PR
+whose own history is incomplete (force-pushed, a truncated nested connection,
+required checks missing or not green on the merged head, a malformed timestamp)
+is left out and counted by reason; the block shows "Measured N of M" and is
+`not measured` when fewer than 10 PRs remain.
 
-CI running is the union of all available check attempts, clipped to PR life.
+CI running is the union of all GitHub Actions job attempts, clipped to PR life;
+skipped jobs, which GitHub stamps as ending just before they start, count as zero.
+The merged head's `statusCheckRollup` (every app's latest checks plus commit
+statuses) decides when the last required check passed.
 Red waiting extends from failed-check completion to the next commit timestamp;
 GitHub no longer supports Commit.pushedDate, so this is explicitly not push
 latency. Current required-check names determine green waiting on the final
@@ -4185,8 +4194,10 @@ head. Running wins interval overlaps, followed by red then green; draft waiting 
 else form the remainder. Ready-for-review and convert-to-draft timeline events
 exclude draft idle time from red/green waiting. The final-head CI share is a subset, not a fifth bucket.
 The report gives per-PR median and nearest-rank p90 shares, and uses strict
-<10% final-head CI / >25% green thresholds for its headline. Current policy and
-newest-created sampling are disclosed; no historical-policy claim is made.
+<10% final-head CI / >25% green thresholds for its headline. Current policy,
+update-order sampling and coverage are disclosed; no historical-policy claim is
+made. `verify_report.py` re-checks the rendered block (median <= p90, final-head
+CI within all CI, headline iff its own rendered shares cross the thresholds).
 
 GraphQL uses a dedicated one-attempt GhClient transport (no retries, so the
 four-call ceiling includes transport failures), existing governor/breaker,
