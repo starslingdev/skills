@@ -5160,7 +5160,7 @@ _RUNNER_MINUTE_SPINE_REQUIRED_HEADERS = {
     "attempt": "attempt_filter",
     "volume": "volume_filter",
     "raw min/mo": "raw_compute_runner_min_per_month",
-    "billable min/mo": "billable_equiv_min_per_month",
+    "rounded-up min/mo": "billable_equiv_min_per_month",
     "share": "share_of_all_row_total",
 }
 _VR_RUNNER_MINUTE_SPINE_CAP = 12
@@ -6070,6 +6070,77 @@ def check_cost_spine_contents_count_matches_table(report: str,
     if problems:
         return Check(name, False, "; ".join(problems))
     return Check(name, True, f"Contents and table agree: {len(rows)} shown, {hidden} hidden")
+
+
+# Mirror of blocking_path's GitHub-hosted label rule, kept independent on purpose.
+_VR_GITHUB_HOSTED_LABEL_RE = re.compile(r"^(ubuntu|windows|macos)-", re.IGNORECASE)
+
+
+def _vr_is_github_hosted_label(label: object) -> bool:
+    toks = str(label or "").split()
+    if not toks or any(t.lower() == "self-hosted" for t in toks):
+        return False
+    return all(_VR_GITHUB_HOSTED_LABEL_RE.match(t) for t in toks)
+
+
+def _vr_spine_host_note(spine: dict) -> str:
+    """Rebuild the cost spine's runner-host sentence from the source rows (MIRROR of
+    blocking_path._spine_runner_host_note)."""
+    rows = [_as_dict(r) for r in _as_list(spine.get("rows"))]
+    hosted = sum(_num(r.get("billable_equiv_min_per_month")) or 0.0
+                 for r in rows if _vr_is_github_hosted_label(r.get("runner_label")))
+    other_rows = [r for r in rows if not _vr_is_github_hosted_label(r.get("runner_label"))]
+    other = sum(_num(r.get("billable_equiv_min_per_month")) or 0.0 for r in other_rows)
+    labels = sorted({str(r.get("runner_label") or "").strip() or "unknown runner"
+                     for r in other_rows})
+    total = _num(_as_dict(spine.get("totals")).get("billable_equiv_min_per_month"))
+    total = hosted + other if total is None else total
+    shown = ", ".join(
+        "`" + lb.replace("\r", " ").replace("\n", " ").replace("|", "\\|").strip() + "`"
+        for lb in labels[:4])
+    if len(labels) > 4:
+        shown += f" +{len(labels) - 4} more"
+    lead = ("Rounded-up min/mo rounds each job up to a whole minute, the way per-minute "
+            "runner billing counts it. ")
+    not_billed = (" GitHub bills only the runners it hosts, so minutes on a self-hosted or "
+                  "third-party runner are not on the GitHub bill.")
+    if not labels:
+        return lead + f"All {total:.3f} min/mo ran on GitHub-hosted runner labels."
+    if len(other_rows) == len(rows):
+        return lead + (f"None of the {total:.3f} min/mo ran on GitHub-hosted runner labels "
+                       f"({shown}).") + not_billed
+    return lead + (f"{hosted:.3f} of the {total:.3f} min/mo ran on GitHub-hosted runner labels "
+                   f"and {other:.3f} on other labels ({shown}).") + not_billed
+
+
+def check_cost_spine_runner_host_split(report: str, findings_path: Path | None) -> Check:
+    """The cost spine never calls its minutes GitHub-billable: the rounded-up column is
+    explained, and the minutes on runners GitHub does not host are named, re-derived from
+    the source rows. 2026-11-03 dogfood: a "Billable min/mo" column and its Share counted
+    `starsling-ubuntu-24.04` minutes, which GitHub does not bill."""
+    name = "cost spine names the minutes on runners GitHub does not host"
+    marker = _RUNNER_MINUTE_SPINE_MARKER_RE.search(report or "")
+    if not marker:
+        return Check(name, True, "no rendered cost spine", skipped=True)
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return Check(name, False, f"rendered cost spine without readable findings JSON: {err}")
+    spine = data.get("runner_minute_spine")
+    if not isinstance(spine, dict):
+        return Check(name, False, "rendered cost spine without a runner_minute_spine block")
+    section = report[marker.end():]
+    nxt = re.search(r"^##\s+", section, re.MULTILINE)
+    section = section[:nxt.start()] if nxt else section
+    problems: list[str] = []
+    if re.search(r"\|\s*billable min/mo\s*\|", section, re.IGNORECASE):
+        problems.append("the minutes column is headed Billable, but it counts every runner")
+    expected = _vr_spine_host_note(spine)
+    if expected not in section:
+        problems.append(f"runner-host sentence missing or not re-derivable (expected: "
+                        f"{expected!r})")
+    if problems:
+        return Check(name, False, "; ".join(problems))
+    return Check(name, True, "runner-host split re-derived from the spine rows")
 
 
 def _text_from_json(v: object) -> str:
@@ -11127,7 +11198,7 @@ def _tier2_expected_source_line(f: dict, data: dict) -> str | None:
         head = (f"matched {len(rows)} row{plural} for `{_flatten_cell(wf)}`")
     return (f"**Source block:** `runner_minute_spine` {head}; "
             "current measured cost spine for those rows is "
-            f"{raw:.3f} raw min/mo, {billable:.3f} billable min/mo.")
+            f"{raw:.3f} raw min/mo, {billable:.3f} rounded-up min/mo.")
 
 
 def _tier2_rendered_source_lines(body: str) -> list[str]:
@@ -14222,6 +14293,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_tier2_savings_rows_backed_by_cost_spine(report, findings_path),
         check_runner_minute_spine_contract(report, findings_path),
         check_cost_spine_contents_count_matches_table(report, findings_path),
+        check_cost_spine_runner_host_split(report, findings_path),
         check_no_rate_derived_dollars(report, findings_path),
         check_opt80_tail_lines(report, findings_path),
         check_opt80_tail_withheld_reasons(report, findings_path),

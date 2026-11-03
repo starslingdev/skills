@@ -7589,6 +7589,65 @@ def _spine_count_phrase(row_count: int, noun: str) -> str:
     return f"{phrase} ({_spine_hidden_rows_line(hidden)})" if hidden > 0 else phrase
 
 
+# GitHub-hosted runner image labels (`ubuntu-latest`, `windows-2022`, `macos-14`, the
+# `-<N>-cores` larger sizes, `ubuntu-slim`): the GitHub half of collect_runs'
+# `_PER_MINUTE_BILLED_LABEL_RE`, which also admits StarSling labels because StarSling
+# bills per minute too. GitHub bills only runners it hosts, so a self-hosted or
+# third-party runner's minutes are never on the GitHub bill. A runner's host is not a
+# risk or a defect; this only says who bills. A custom-named GitHub larger runner is
+# not recognised and counts as "other", which the note words as "not recognised".
+_GITHUB_HOSTED_LABEL_RE = re.compile(r"^(ubuntu|windows|macos)-", re.IGNORECASE)
+
+
+def _is_github_hosted_label(label: object) -> bool:
+    """A spine row's runner label (the space-joined, sorted jobs-API `labels[]`) names a
+    GitHub-hosted runner: every label is a GitHub image label and none is `self-hosted`."""
+    toks = str(label or "").split()
+    if not toks or any(t.lower() == "self-hosted" for t in toks):
+        return False
+    return all(_GITHUB_HOSTED_LABEL_RE.match(t) for t in toks)
+
+
+def _spine_runner_host_split(spine: dict[str, Any]) -> tuple[float, float, float, list[str]]:
+    """(GitHub-hosted, other, total) rounded-up min/mo and the other runner labels,
+    from every source row (shown and hidden). Verify_report rebuilds the same split."""
+    hosted = other = 0.0
+    other_labels: set[str] = set()
+    for row in spine.get("rows") or []:
+        row = _as_dict(row)
+        minutes = _num(row.get("billable_equiv_min_per_month")) or 0.0
+        label = str(row.get("runner_label") or "").strip()
+        if _is_github_hosted_label(label):
+            hosted += minutes
+        else:
+            other += minutes
+            other_labels.add(label or "unknown runner")
+    total = _num(_as_dict(spine.get("totals")).get("billable_equiv_min_per_month"))
+    return hosted, other, (hosted + other if total is None else total), sorted(other_labels)
+
+
+def _spine_runner_host_note(spine: dict[str, Any]) -> str:
+    """What the rounded-up column is, and how much of it ran on runners GitHub does not
+    host (2026-11-03 dogfood: a "Billable" column counted `starsling-ubuntu-24.04`
+    minutes GitHub never bills). Minutes only, no rates."""
+    hosted, other, total, labels = _spine_runner_host_split(spine)
+    shown = ", ".join(f"`{_spine_identity_cell(lb)}`" for lb in labels[:4])
+    if len(labels) > 4:
+        shown += f" +{len(labels) - 4} more"
+    lead = ("Rounded-up min/mo rounds each job up to a whole minute, the way per-minute "
+            "runner billing counts it. ")
+    not_billed = (" GitHub bills only the runners it hosts, so minutes on a self-hosted or "
+                  "third-party runner are not on the GitHub bill.")
+    if not labels:
+        return lead + f"All {total:.3f} min/mo ran on GitHub-hosted runner labels."
+    if not any(_is_github_hosted_label(_as_dict(r).get("runner_label"))
+               for r in spine.get("rows") or []):
+        return lead + (f"None of the {total:.3f} min/mo ran on GitHub-hosted runner labels "
+                       f"({shown}).") + not_billed
+    return lead + (f"{hosted:.3f} of the {total:.3f} min/mo ran on GitHub-hosted runner labels "
+                   f"and {other:.3f} on other labels ({shown}).") + not_billed
+
+
 def _spine_identity_cell(value: object) -> str:
     return str(value or "").replace("\r", " ").replace("\n", " ").replace("|", "\\|").strip()
 
@@ -7658,7 +7717,7 @@ def _runner_minute_spine_block(doc: dict[str, Any]) -> list[str]:
         ("All figures are runner-minutes; multiply by your runner's per-minute "
          "rate to get dollars."),
         "",
-        "| Workflow | Job | Runner | Event | Status | Attempt | Volume | Raw min/mo | Billable min/mo | Share |",
+        "| Workflow | Job | Runner | Event | Status | Attempt | Volume | Raw min/mo | Rounded-up min/mo | Share |",
         "| --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: |",
     ]
     lines += [_runner_minute_spine_table_row(row) for row in shown]
@@ -7670,6 +7729,7 @@ def _runner_minute_spine_block(doc: dict[str, Any]) -> list[str]:
         # A blank line first: GitHub-flavoured markdown folds a plain line that directly
         # follows a table into the table as one more row.
         lines += ["", _spine_hidden_rows_line(len(hidden))]
+    lines += ["", _spine_runner_host_note(spine)]
     footnote = _measured_compute_footnote(spine)
     if footnote:
         lines += ["", footnote]
@@ -7924,7 +7984,7 @@ def _tier2_source_line(f: dict[str, Any], doc: dict[str, Any]) -> str:
         head = (f"matched {len(rows)} row{plural} for `{_flatten_cell(wf)}`")
     return (f"**Source block:** `runner_minute_spine` {head}; "
             "current measured cost spine for those rows is "
-            f"{raw:.3f} raw min/mo, {billable:.3f} billable min/mo.")
+            f"{raw:.3f} raw min/mo, {billable:.3f} rounded-up min/mo.")
 
 
 def _has_tier2_stamp_surface(findings: list[dict[str, Any]]) -> bool:
