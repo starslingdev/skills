@@ -4166,3 +4166,29 @@ is a secondary observation, never the entire install-step ceiling. Credited rows
 pass the within-workflow cap and the existing cross-workflow cascade; below-tail
 or unconfirmed rows retain “check this” wording. No additional probe budget is
 introduced.
+
+### PR lifecycle context
+
+`pr_lifecycle.py` adds a separate `pr_lifecycle` document block and renders it
+near the report's top on every path. It does not alter CI findings or savings.
+The collector makes at most four read-only GraphQL requests, 25 merged PRs per
+page, ordered newest by creation time (GraphQL has no merged-at ordering).
+Nested commit/suite/check/review connections expose pageInfo; any truncation,
+query failure, missing required check or malformed timestamp makes the whole
+block `not measured`, with a controlled reason and no partial aggregate.
+
+CI running is the union of all available check attempts, clipped to PR life.
+Red waiting extends from failed-check completion to the next commit timestamp;
+GitHub no longer supports Commit.pushedDate, so this is explicitly not push
+latency. Current required-check names determine green waiting on the final
+head. Running wins interval overlaps, followed by red then green; everything
+else is the remainder. The final-head CI share is a subset, not a fifth bucket.
+The report gives per-PR median and nearest-rank p90 shares, and uses strict
+<10% final-head CI / >25% green thresholds for its headline. Current policy and
+newest-created sampling are disclosed; no historical-policy claim is made.
+
+GraphQL uses a dedicated one-attempt GhClient transport (no retries, so the
+four-call ceiling includes transport failures), existing governor/breaker,
+and hashed-query record/replay keys. See GitHub's
+[commit schema](https://docs.github.com/en/graphql/reference/commits) and
+[pull-request schema](https://docs.github.com/en/graphql/reference/pulls).
