@@ -9020,9 +9020,13 @@ def _opt100_job_class(job: dict[str, Any], log: str) -> str | None:
         return None
     lines = []
     for line in log.splitlines():
-        stamp, _, body = line.partition(" ")
-        when = _parse_dt(stamp)
-        if when is not None and start <= when <= end:
+        # GitHub stamps seven fractional digits; the shared OPT80 parser
+        # truncates them where `datetime.fromisoformat` (3.9/3.10) rejects them.
+        record = _opt80_log_line(line)
+        if record is None:
+            continue
+        when, body = record
+        if start <= when <= end:
             lines.append(body)
     return _classify_infra_failure("\n".join(lines), str(step.get("name") or ""))
 

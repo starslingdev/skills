@@ -198,3 +198,10 @@ def test_class_counts_link_to_sampled_jobs_without_raw_log_text():
     rows = f["measured_evidence"]["table"]["rows"]
     assert any("https://github.com/example/project/actions/jobs/" in str(r) for r in rows)
     assert "The runner has received" not in str(f)
+
+
+def test_seven_digit_log_timestamps_are_classified():
+    """Job logs carry seven fractional digits, which older parsers reject."""
+    log = ("2026-01-01T00:00:59.9876543Z Running checks\n"
+           "2026-01-01T00:01:00.1234567Z ##[error]The runner has received a shutdown signal.")
+    assert cr._opt100_job_class(job(10), log) == "lost-runner"
