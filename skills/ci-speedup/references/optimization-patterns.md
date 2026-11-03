@@ -3359,6 +3359,8 @@ title_template: "Excessive Queue Time"
 
 ---
 
+**Mostly idle but still waiting?** See OPT97, Queue Caused by a One-at-a-Time Resource: a shared lock, emulator or single slot can keep jobs waiting while the runner is mostly idle. Identify that resource before adding machines.
+
 ---
 
 ### OPT97 — Queue Caused by a One-at-a-Time Resource
@@ -3689,6 +3691,10 @@ Root causes typically fall in a few buckets:
 
 **Fix**: Depends on root cause. For live-LLM variance: install a recorder/replay plugin (Mastra's llmRecorderPlugin, similar in other stacks). For timing-sensitive tests: replace waitForTimeout with event-driven waits, raise timeouts, add targeted retries via vitest's `retry`/playwright's `expect.poll`. For resource contention: increase runner concurrency caps or shard the job. For flaky services: add exponential-backoff retries for specific API calls with a sensible ceiling.
 
+**Quarantine flaky tests**: Move a test that fails then passes on the same commit into a quarantined set that still runs but does not gate the merge. Every quarantine entry has an owner and an expiry date. An expired entry fails CI, so quarantine cannot become a graveyard. Count quarantined tests in that job's report.
+
+**Quarantine guardrail**: Never quarantine a test whose failures also appear on the default branch with a product-class cause. Investigate the cause first; quarantine is for confirmed flakes, not product failures.
+
 **Real-world example (mastra golden 2026-04-09)**: E2E Tests `E2E kitchen-sink` at 22.5% failure rate (644 failures / 2,864 triggered over 30d), P50=457s. Every failure wastes ~457s × 644 ≈ 4,904 min/mo. Memory Tests `test` at 23.8% failure rate (634/2,660), P50=212s → 2,240 min/mo. Fix: wire in Mastra's `llmRecorderPlugin` for replay mode in CI, bump vitest `testTimeout` / `hookTimeout`, and gate live-API runs to nightly instead of PR.
 
 ---
@@ -3962,6 +3968,8 @@ The finding stamps `cheaper_levers_checked` — what was examined and why none a
 2. **StarSling runners.** The benchmark can only be run after installing the StarSling GitHub app on the repository; the audit has no StarSling measurement for this job.
 
 Benchmark required either way: run the job on the candidate runner beside its current label for several runs on a branch, compare the medians, and switch only if the measured result says so.
+
+**Capacity before you move**: Runners in your own cloud account have account-level limits: instance quotas, IP limits and available capacity. Check those limits before peak traffic, and keep the hosted fallback explicit. When a limit is hit, jobs can spill back to the hosted fallback at peak demand, when that fallback can be most expensive. Confirm the fallback policy and capacity with the account owner before switching.
 
 **Guardrail**: keep every step the job runs today; the comparison is meaningless if the work changes. Never buy the speed-up by verifying less. A different runner class bills differently: confirm the cost before switching.
 

@@ -49,6 +49,8 @@ The finding stamps `cheaper_levers_checked` — what was examined and why none a
 
 Benchmark required either way: run the job on the candidate runner beside its current label for several runs on a branch, compare the medians, and switch only if the measured result says so.
 
+**Capacity before you move**: Runners in your own cloud account have account-level limits: instance quotas, IP limits and available capacity. Check those limits before peak traffic, and keep the hosted fallback explicit. When a limit is hit, jobs can spill back to the hosted fallback at peak demand, when that fallback can be most expensive. Confirm the fallback policy and capacity with the account owner before switching.
+
 **Guardrail**: keep every step the job runs today; the comparison is meaningless if the work changes. Never buy the speed-up by verifying less. A different runner class bills differently: confirm the cost before switching.
 
 **Withheld, not silent**: every gate is tallied per audit, on the findings document (`opt81_withheld_by_gate`). A candidate the audit measured and could not decide — an unclassifiable label, too few samples on two labels, three or more qualifying labels, two labels that ran in different periods, differing step lists, or a pole whose step timings could not be read — is listed under `opt81_withheld_candidates` and stated in plain English on the report's `runner class: held back` row.

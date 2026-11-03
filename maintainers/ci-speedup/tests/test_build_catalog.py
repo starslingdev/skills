@@ -134,3 +134,28 @@ def test_a_yaml_syntax_error_is_a_source_error_not_drift(tree, monkeypatch, caps
     monkeypatch.setattr(bc, "build", lambda: real_build(tree))
     assert bc.main(["--check"]) == 2
     assert "build_catalog:" in capsys.readouterr().err
+
+
+def test_agent_volume_recipes_preserve_quarantine_and_capacity_guardrails():
+    quarantine = next(bc.PATTERNS.glob("opt48-*.md")).read_text()
+    for phrase in (
+        "fails then passes on the same commit",
+        "still runs but does not gate the merge",
+        "Every quarantine entry has an owner and an expiry date",
+        "An expired entry fails CI",
+        "Count quarantined tests in that job's report",
+        "Never quarantine a test whose failures also appear on the default branch with a product-class cause",
+    ):
+        assert phrase in quarantine
+    capacity = next(bc.PATTERNS.glob("opt81-*.md")).read_text()
+    for phrase in (
+        "**Capacity before you move**",
+        "instance quotas, IP limits and available capacity",
+        "Check those limits before peak traffic",
+        "keep the hosted fallback explicit",
+        "jobs can spill back to the hosted fallback at peak demand",
+    ):
+        assert phrase in capacity
+    queue = next(bc.PATTERNS.glob("opt43-*.md")).read_text()
+    assert "See OPT97, Queue Caused by a One-at-a-Time Resource" in queue
+    assert "keep jobs waiting while the runner is mostly idle" in queue
