@@ -287,6 +287,8 @@ def test_test_steps_named_for_setup_work_are_not_install_steps(step):
     "exit code 137",
     "Error: Command failed with exit code 137",
     "child output: ##[error]Process completed with exit code 137.",
+    "Process completed with exit code 137.",
+    "##[error]Process completed with exit code 130.",
 ])
 def test_oom_requires_the_runners_own_exit_line(text):
     """A test's own subprocess may print 137 or Killed; only the runner's step exit counts."""
@@ -499,3 +501,141 @@ def test_opt64_never_recounts_runs_claimed_by_infra_retries(monkeypatch):
     claimed = findings[0]["infra_failures"]["retry_run_ids"]
     assert len(claimed) == 6
     assert w.opt64_samples == [other]
+
+
+# --- Boundaries and filters pinned by the mutation pass ----------------------
+
+
+@pytest.mark.parametrize("text,step,expected", [
+    ("[retry 1/2] Error: browserType.launch: Target closed", "Run e2e tests", None),
+    ("HTTP cache hit: 15023 bytes", "Install dependencies", None),
+    ("ECONNRESET", "Run actions/checkout@v4", "network"),
+])
+def test_signature_edges(text, step, expected):
+    assert bp._classify_infra_failure(text, step) == expected
+
+
+def test_lines_before_the_failed_step_are_ignored():
+    log = "2025-12-31T23:59:59.5000000Z ##[error]The runner has received a shutdown signal."
+    assert cr._opt100_job_class(job(10), log) is None
+
+
+def test_timed_out_step_is_the_failed_step():
+    j = job(10)
+    j["steps"][0]["conclusion"] = "timed_out"
+    assert cr._opt100_job_class(j, "2026-01-01T00:01:00Z " + OOM) == "oom"
+
+
+def test_warning_level_annotations_are_ignored(monkeypatch):
+    class WarningOnly(AnnotationClient):
+        def json(self, endpoint, allow_missing=False):
+            return [{"annotation_level": "warning", "message": LOST}]
+    jobs = [lost_runner_job((i + 1) * 10) for i in range(6)]
+    findings, notes = cr._collect_opt100(WarningOnly([]), "example/project", "ci.yml", jobs, {"checks"}, 0)
+    assert findings == []
+    assert notes["unreadable_logs"] == 0
+
+
+def test_runner_exit_annotation_classifies_as_oom():
+    assert cr._opt100_annotation_class(["Process completed with exit code 137."]) == "oom"
+
+
+def test_empty_annotation_list_is_read_not_unreadable():
+    jobs = [lost_runner_job(i * 10) for i in range(6)]
+    notes = cr._detect_opt100_infra_faults("ci.yml", jobs, {}, {"checks"}, 0,
+                                          annotations={j["id"]: [] for j in jobs})[1]
+    assert notes["unreadable_logs"] == 0
+
+
+@pytest.mark.parametrize("n,total", [(5, 5), (5, 25)])
+def test_count_and_share_floors_are_inclusive(n, total):
+    assert [f["pattern"] for f in detect(n, total)[0]] == ["OPT100"]
+
+
+def clustered(runners, labels=("self-hosted", "linux")):
+    jobs = [dict(job(i * 10, runner=r), labels=list(labels)) for i, r in enumerate(runners)]
+    logs = {j["id"]: "2026-01-01T00:01:00Z " + OOM for j in jobs}
+    return cr._detect_opt100_infra_faults("ci.yml", jobs, logs, {"checks"}, 0)[0][0]
+
+
+def test_runner_cluster_needs_eighty_percent():
+    assert clustered(["a"] * 5 + ["b"] * 3)["infra_failures"]["degraded_runner"] is None
+
+
+def test_runner_cluster_at_exactly_five_failures():
+    assert clustered(["a"] * 5)["infra_failures"]["degraded_runner"] == "a"
+
+
+def test_hosted_runner_cluster_is_never_named():
+    f = clustered(["a"] * 6, labels=("ubuntu-latest",))
+    assert f["infra_failures"]["degraded_runner"] is None
+    assert "`a`" not in f["agent_prompt"]
+
+
+def test_retry_after_several_failures_gets_no_credit():
+    jobs, logs = [], {}
+    for i in range(1, 7):
+        run = retried_run(i, dict(name="lint", run_attempt=1), dict(run_attempt=2, conclusion="success"))
+        jobs.extend(run)
+        logs[run[0]["id"]] = "2026-01-01T00:01:00Z " + OOM
+    f = cr._detect_opt100_infra_faults("ci.yml", jobs, logs, {"checks"}, 0)[0][0]
+    assert f["infra_failures"]["retry_attempts"] == 0
+    assert f["infra_failures"]["sampled_rerun_minutes"] == 0
+
+
+def test_each_retry_is_charged_to_the_attempt_before_it():
+    """Attempt 1 and 2 both fail on infrastructure; attempt 3 passes."""
+    jobs, logs = [], {}
+    for i in range(1, 4):
+        run = retried_run(i, dict(run_attempt=2), dict(run_attempt=3, conclusion="success"))
+        jobs.extend(run)
+        for failed in run[:2]:
+            logs[failed["id"]] = "2026-01-01T00:01:00Z " + OOM
+    f = cr._detect_opt100_infra_faults("ci.yml", jobs, logs, {"checks"}, 0)[0][0]
+    assert f["infra_failures"]["retry_attempts"] == 6
+    assert f["infra_failures"]["sampled_rerun_minutes"] == 12
+
+
+def test_retry_delay_runs_to_the_first_repeated_job():
+    jobs, logs = [], {}
+    for i in range(1, 7):
+        run = retried_run(
+            i, dict(name="lint", run_attempt=1, conclusion="success",
+                    completed_at="2026-01-01T00:01:00Z"),
+            dict(run_attempt=2, conclusion="success",
+                 started_at="2026-01-01T00:05:00Z", completed_at="2026-01-01T00:07:00Z"),
+            dict(name="lint", run_attempt=2, conclusion="success",
+                 started_at="2026-01-01T00:09:00Z", completed_at="2026-01-01T00:10:00Z"))
+        jobs.extend(run)
+        logs[run[0]["id"]] = "2026-01-01T00:01:00Z " + OOM
+    f = cr._detect_opt100_infra_faults("ci.yml", jobs, logs, {"checks"}, 0)[0][0]
+    assert f["infra_failures"]["rerun_delay_p50_s"] == 180
+
+
+def test_same_attempt_sibling_success_is_not_a_flake():
+    """Identically named matrix legs: one passing beside a failure is not fail-then-pass."""
+    jobs = [job(i * 10) for i in range(7)] + [job(61, conclusion="success")]
+    logs = {j["id"]: "2026-01-01T00:01:00Z " + (OOM if i < 6 else "AssertionError")
+            for i, j in enumerate(jobs[:7])}
+    f = cr._detect_opt100_infra_faults("ci.yml", jobs, logs, {"checks"}, 0)[0][0]
+    assert not f["infra_failures"]["flakes_observed"]
+
+
+def test_collection_fetches_at_exactly_five_failures(monkeypatch):
+    monkeypatch.setattr(cr, "_fetch_job_log", lambda *a: "2026-01-01T00:01:00Z " + OOM)
+    findings, _ = cr._collect_opt100(object(), "example/project", "ci.yml",
+                                     [job(i * 10) for i in range(1, 6)], {"checks"}, 0)
+    assert len(findings) == 1
+
+
+def test_collection_never_fetches_non_gating_logs(monkeypatch):
+    fetched = []
+    monkeypatch.setattr(cr, "_fetch_job_log", lambda c, r, j: fetched.append(j["name"]))
+    jobs = [dict(job(i * 10), name="lint") for i in range(1, 7)]
+    cr._collect_opt100(object(), "example/project", "ci.yml", jobs, {"checks"}, 0)
+    assert fetched == []
+
+
+def test_ambiguous_gating_name_is_not_resolved():
+    graph = {"unit": {"name": "checks"}, "integration": {"name": "checks"}}
+    assert cr._opt100_gating_names([dict(name="checks")], graph, {"unit": {}}) == set()
