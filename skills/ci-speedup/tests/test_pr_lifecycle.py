@@ -119,6 +119,17 @@ def test_graphql_requests_supported_commit_timestamp():
     assert 'HEAD_REF_FORCE_PUSHED_EVENT' in query
 
 
+def test_sample_follows_recent_merges_not_recent_creation():
+    # Newest-created merged PRs drop every long-lived PR that was opened earlier but
+    # merged recently, so the sample skews short. Update time tracks merge time.
+    query=module()._query('sample/project',None)
+    assert 'field: UPDATED_AT' in query and 'CREATED_AT' not in query
+    data=dict(status='measured',sample_size=1,sampled=1,excluded={},
+              shares={k:dict(median=.1,p90=.1) for k in ('ci_running','red_waiting','green_waiting','everything_else','final_commit_ci')})
+    text=module().render(data)
+    assert 'most recently updated' in text and 'creation time' not in text
+
+
 def test_rewritten_history_discards_all_lifecycle_shares():
     rewritten=pr()
     rewritten['timelineItems']=connection([{'__typename':'HeadRefForcePushedEvent'}])

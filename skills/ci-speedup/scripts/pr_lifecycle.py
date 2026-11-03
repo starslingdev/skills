@@ -128,7 +128,7 @@ def _query(repo, cursor):
     # 25 PRs * 50 commits * 5 suites * 50 checks stays below the GraphQL node
     # limit. Any nested truncation refuses measurement rather than paginating.
     return '''query { repository(owner: OWNER, name: NAME) {
-      pullRequests(first: 25, states: MERGED, orderBy: {field: CREATED_AT, direction: DESC}, after: CURSOR) {
+      pullRequests(first: 25, states: MERGED, orderBy: {field: UPDATED_AT, direction: DESC}, after: CURSOR) {
         pageInfo {hasNextPage endCursor}
         nodes { createdAt mergedAt headRefOid reviewDecision
           timelineItems(first: 100, itemTypes: [PULL_REQUEST_REVIEW, READY_FOR_REVIEW_EVENT, CONVERT_TO_DRAFT_EVENT, HEAD_REF_FORCE_PUSHED_EVENT]) {
@@ -178,7 +178,7 @@ def collect(query, repo, required):
         values=sorted(r[key] for r in rows)
         shares[key]=dict(median=median(values),p90=values[math.ceil(.9*len(values))-1])
     return dict(status='measured',sample_size=len(rows),shares=shares,queries=page,
-                sample_order='newest created merged PRs',required_checks=list(required))
+                sample_order='most recently updated merged PRs',required_checks=list(required))
 
 
 def render(data):
@@ -190,7 +190,7 @@ def render(data):
     shares=data['shares']
     if shares['final_commit_ci']['median'] < .1 and shares['green_waiting']['median'] > .25:
         lines += [HEADLINE,'']
-    lines += [f"Sample: {data['sample_size']} merged PRs, newest by creation time; current required-check names. "
+    lines += [f"Sample: {data['sample_size']} merged PRs, the most recently updated (this tracks recent merges); current required-check names. "
               'Shares use each PR\'s open-to-merge lifetime. CI intervals include every available attempt. '
               'Red waiting ends at the next commit timestamp, not its push time (the API does not expose that time).', '',
               '| Time | Median share | p90 share |','| --- | ---: | ---: |']
