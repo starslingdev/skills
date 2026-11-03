@@ -127,7 +127,7 @@ def test_runner_inventory_and_device_are_hints_not_utilization_claims():
     doc = copy.deepcopy(DOC)
     doc.pop('concurrency')
     [f] = detect(doc=doc, runner_inventory=[{'labels': [{'name': 'device'}]}])
-    assert 'one registered runner' in f['evidence']
+    assert 'one repo-level runner (org runners not visible)' in f['evidence']
     assert 'adb' in f['evidence']
     assert 'mostly idle' not in f['evidence']
     [unknown] = detect(doc=doc)
@@ -260,3 +260,67 @@ def test_collect_detector_exception_discloses_coverage_gap(monkeypatch):
     cr.collect(doc, 'o/r', max_runs=8, shallow_runs=8)
     assert any('OPT97' in str(row) and 'ValueError' in str(row)
                for row in doc['data_sources']['detectors_skipped'])
+
+
+# --- Global-group definition (string form, default cancel, scoped keys) ------
+
+@pytest.mark.parametrize('concurrency', [
+    'shared-device',                                   # string shorthand
+    {'group': 'shared-device'},                        # cancel-in-progress omitted = false
+    {'group': '${{ github.workflow }}', 'cancel-in-progress': False},
+])
+def test_global_group_forms_are_named(concurrency):
+    doc = copy.deepcopy(DOC)
+    doc['concurrency'] = concurrency
+    [f] = detect(doc=doc)
+    assert 'global concurrency group' in f['evidence']
+
+
+@pytest.mark.parametrize('concurrency', [
+    {'group': 'ci-${{ github.ref }}'},
+    {'group': '${{ github.head_ref || github.run_id }}'},
+    {'group': 'pr-${{ github.event.pull_request.number }}'},
+    {'group': 'n-${{ github.event.number }}'},
+    {'group': 'sha-${{ github.sha }}'},
+    {'group': 'shared-device', 'cancel-in-progress': True},
+    {'group': 'shared-device', 'cancel-in-progress': "${{ github.event_name == 'pull_request' }}"},
+])
+def test_scoped_or_cancelling_groups_are_not_global(concurrency):
+    doc = copy.deepcopy(DOC)
+    doc['concurrency'] = concurrency
+    [f] = detect(doc=doc)
+    assert 'global concurrency group' not in f['evidence']
+
+
+def test_job_level_concurrency_overrides_workflow_level():
+    scoped = copy.deepcopy(DOC)
+    scoped['jobs']['test']['concurrency'] = {'group': 'ci-${{ github.ref }}'}
+    [f] = detect(doc=scoped)
+    assert 'global concurrency group' not in f['evidence']
+    job_only = copy.deepcopy(DOC)
+    job_only.pop('concurrency')
+    job_only['jobs']['test']['concurrency'] = 'device-lock'
+    [f] = detect(doc=job_only)
+    assert 'global concurrency group `device-lock`' in f['evidence']
+
+
+def test_workflow_level_group_wait_is_measured_from_run_creation():
+    """A run waiting on a workflow-level group creates its jobs only when the
+    group frees: job created_at lands a second before started_at, so the wait
+    is visible only from the run's created_at."""
+    sample = runs()
+    for [job] in sample:
+        job['_run_created_at'] = job['created_at']
+        job['run_attempt'] = 1
+        job['created_at'] = (datetime.fromisoformat(job['started_at'])
+                             - timedelta(seconds=1)).isoformat()
+    [f] = detect(sample)
+    assert f['single_slot_queue']['queue_p50_s'] == 345
+    # A job-level group waits after job creation: no run-level anchor.
+    doc = copy.deepcopy(DOC)
+    doc['jobs']['test']['concurrency'] = doc.pop('concurrency')
+    assert detect(sample, doc) == []
+    # A re-run keeps the original run created_at: never charge that gap as queue.
+    for [job] in sample:
+        job['run_attempt'] = 2
+    assert detect(sample) == []

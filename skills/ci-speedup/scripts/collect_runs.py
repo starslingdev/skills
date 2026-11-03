@@ -8678,15 +8678,36 @@ def _opt97_job(doc: dict[str, Any], name: str) -> tuple[str, dict[str, Any]] | N
     return candidates[0] if len(candidates) == 1 else None
 
 
-def _opt97_global_group(doc: dict[str, Any], job: dict[str, Any]) -> str | None:
-    config = job.get("concurrency", doc.get("concurrency"))
-    if not isinstance(config, dict) or config.get("cancel-in-progress") is not False:
-        return None
-    group = config.get("group")
-    # Dynamic keys may vary by PR, matrix or input. Do not call them global.
-    if not isinstance(group, str) or not group.strip() or "${{" in group:
-        return None
-    return group.strip().lower()  # GitHub concurrency groups are case-insensitive.
+# A group key naming any of these differs per ref, PR, commit or run, so it never
+# makes unrelated PRs wait on each other. Anything else is shared across PRs.
+_OPT97_SCOPED_GROUP = re.compile(
+    r"github\.(?:ref|head_ref|sha|run_id|run_number|event\.number"
+    r"|event\.pull_request\.(?:number|head\.(?:ref|sha)))")
+
+
+def _opt97_global_group(doc: dict[str, Any], job: dict[str, Any],
+                        wf_path: str = "") -> tuple[str | None, str | None, str | None]:
+    """(comparison key, display text, level) of a one-at-a-time group shared across
+    PRs, else (None, None, level). A job-level `concurrency:` replaces the
+    workflow-level one. The string form is a group name; an omitted
+    `cancel-in-progress` is false (GitHub's default)."""
+    level = "job" if "concurrency" in job else "workflow"
+    config = job.get("concurrency") if level == "job" else doc.get("concurrency")
+    if isinstance(config, str):
+        group, cancel = config, False
+    elif isinstance(config, dict):
+        group, cancel = config.get("group"), config.get("cancel-in-progress", False)
+    else:
+        return None, None, None
+    if (cancel is not False or not isinstance(group, str) or not group.strip()
+            or _OPT97_SCOPED_GROUP.search(group)):
+        return None, None, level
+    key = group.strip().lower()  # GitHub concurrency groups are case-insensitive.
+    if "${{" in key:
+        # `${{ github.workflow }}` and inputs resolve per workflow: compare the
+        # unresolved text only within the workflow that wrote it.
+        key = f"{wf_path}::{key}"
+    return key, group.strip(), level
 
 
 def _opt97_samples(wf_path, jobs_per_run, doc):
@@ -8699,7 +8720,13 @@ def _opt97_samples(wf_path, jobs_per_run, doc):
             if match is None or j.get("conclusion") == "skipped":
                 continue
             jid, config = match
+            group, group_text, level = _opt97_global_group(doc, config, wf_path)
             created = _parse_dt(j.get("created_at") or j.get("_run_created_at"))
+            if group and level == "workflow" and int(j.get("run_attempt") or 1) == 1:
+                # A run held by a workflow-level group creates its jobs only when
+                # the group frees, so the wait precedes the job's created_at. A
+                # re-run keeps the first attempt's created_at: never use it there.
+                created = _parse_dt(j.get("_run_created_at")) or created
             start, end = _parse_dt(j.get("started_at")), _parse_dt(j.get("completed_at"))
             needs = config.get("needs") or []
             needs = [needs] if isinstance(needs, str) else needs
@@ -8720,7 +8747,7 @@ def _opt97_samples(wf_path, jobs_per_run, doc):
                 continue
             labels = tuple(sorted(str(label) for label in j.get("labels", []) if label))
             rows.append({"workflow": wf_path, "job": j, "run": run, "node": jid, "config": config,
-                         "labels": labels, "group": _opt97_global_group(doc, config),
+                         "labels": labels, "group": group, "group_text": group_text,
                          "created": created, "start": start, "end": end,
                          "queue": (start - created).total_seconds(),
                          "runtime": (end - start).total_seconds()})
@@ -8771,16 +8798,18 @@ def _detect_opt97_single_slot_queue(
         if median < 60 or p90 < 300 or queue_rho < .6 or abs(runtime_rho) >= .3:
             continue
         hints = []
-        group = samples[0]["group"]
-        if group:
-            hints.append(f"global concurrency group `{group}`")
+        if samples[0]["group"]:
+            hints.append(f"global concurrency group `{samples[0]['group_text']}`")
         if runner_inventory is not None:
+            # The inventory is the repository's own runner list. Organization
+            # runners serving the same label are not visible to it.
             for label in labels:
                 matches = sum(1 for runner in runner_inventory
                               if label in {str(x.get('name', '')) if isinstance(x, dict) else str(x)
                                            for x in runner.get('labels', [])})
                 if matches == 1:
-                    hints.append(f"label `{label}` has one registered runner")
+                    hints.append(f"label `{label}` has one repo-level runner "
+                                 "(org runners not visible)")
         config = samples[0]["config"]
         for step in config.get("steps") or []:
             if not isinstance(step, dict):
