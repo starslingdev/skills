@@ -11,7 +11,16 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
 
 ## [Unreleased]
 
-- **2026-11-03** — **Fixed**: report verification now requires each runner advisory bullet to match its stored label, job count and advice inside the advisory section, rejecting missing, altered or duplicated bullets. (#182)
+- **2026-11-03** — **Added** (OD-CS27, metadata-only): an Advisory notes section,
+  rendered after the scored checks and labelled not part of the score. Its
+  first note, `ci.runner.swappable`, fires when the same custom runner label is
+  hard-coded in at least three jobs and suggests one repository variable per
+  runner class. All eleven checks, the arithmetic and `ci-score-v0.1.8` are
+  unchanged. Report verification binds each advisory bullet to its stored
+  note (rejecting missing, altered, duplicated or unrecorded bullets), rejects
+  a section above the scored checks, and rejects any advisory in the scored
+  table or stamp. The close names each advisory in one line, never as a fix
+  slot. (#182)
 
 - **2026-10-29** — **Fixed**: the step-0 and close questions can no longer go
   unseen on Codex. When the host's question tool is experimental, the same question
@@ -1018,8 +1027,6 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
   actual output.
 
 ### Added
-
-- **2026-11-03** — Add an explicitly unscored Advisory notes section for repeated custom runner labels, with one repository variable per runner class as the remedy. OD-CS27 is metadata-only: all eleven checks and ci-score-v0.1.8 stay unchanged; the verifier rejects advisory score contamination. (#182)
 
 - **Stakes-first TL;DR per recommendation** (2026-07-27): every rendered
   recommendation now opens with a one-line plain-English headline (the
