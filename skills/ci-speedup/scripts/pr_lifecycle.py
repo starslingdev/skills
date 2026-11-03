@@ -61,7 +61,7 @@ def measure_pr(pr, required):
         raise ValueError('invalid PR lifetime')
     timeline = _nodes(pr.get('timelineItems'), 'timelineItems')
     if any(e.get('__typename') == 'HeadRefForcePushedEvent' for e in timeline):
-        raise ValueError('rewritten commit history; earlier check intervals unavailable')
+        raise ValueError('rewritten commit history (earlier checks unreadable)')
     transitions = sorted((_time(e.get('createdAt')), e['__typename']) for e in timeline
                          if e.get('__typename') in ('ReadyForReviewEvent', 'ConvertToDraftEvent'))
     draft_start = start if transitions and transitions[0][1] == 'ReadyForReviewEvent' else None
@@ -147,11 +147,20 @@ def _query(repo, cursor):
     }}'''.replace('OWNER',json.dumps(owner)).replace('NAME',json.dumps(name)).replace('CURSOR',json.dumps(cursor))
 
 
+MIN_MEASURED = 10
+
+
+def _excluded_text(excluded):
+    return ', '.join(f'{n} {reason}' for reason, n in sorted(excluded.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
 def collect(query, repo, required):
-    """At most four queries, no nested pagination and no partial aggregates."""
+    """At most four queries, no nested pagination. A failed or malformed page refuses
+    the whole block; a PR whose own history cannot be read completely is left out and
+    counted, and too few measurable PRs refuses the block."""
     if not required:
         return dict(status='not measured', reason='required checks unavailable', queries=0)
-    rows, cursor = [], None
+    rows, cursor, excluded, sampled = [], None, {}, 0
     for page in range(1,5):
         try:
             data = query(_query(repo,cursor))
@@ -161,7 +170,14 @@ def collect(query, repo, required):
             nodes = connection['nodes']
             if not isinstance(nodes,list) or len(nodes)>25:
                 raise ValueError('malformed PR page')
-            rows.extend(measure_pr(p,required) for p in nodes)
+            for p in nodes:
+                if not isinstance(p, dict):
+                    raise TypeError('malformed PR node')
+                sampled += 1
+                try:
+                    rows.append(measure_pr(p,required))
+                except ValueError as exc:
+                    excluded[str(exc)] = excluded.get(str(exc), 0) + 1
             info=connection['pageInfo']
             if info['hasNextPage'] is False:
                 break
@@ -171,13 +187,16 @@ def collect(query, repo, required):
         except (ValueError,KeyError,TypeError,AttributeError) as exc:
             reason = str(exc) if isinstance(exc,ValueError) else 'malformed lifecycle data'
             return dict(status='not measured',reason=reason,queries=page)
-    if not rows:
+    if not sampled:
         return dict(status='not measured',reason='no merged PRs',queries=page)
+    if len(rows) < MIN_MEASURED:
+        return dict(status='not measured',queries=page,
+                    reason=f'only {len(rows)} of {sampled} merged PRs could be measured ({_excluded_text(excluded)})')
     shares={}
     for key in rows[0]:
         values=sorted(r[key] for r in rows)
         shares[key]=dict(median=median(values),p90=values[math.ceil(.9*len(values))-1])
-    return dict(status='measured',sample_size=len(rows),shares=shares,queries=page,
+    return dict(status='measured',sample_size=len(rows),sampled=sampled,excluded=excluded,shares=shares,queries=page,
                 sample_order='most recently updated merged PRs',required_checks=list(required))
 
 
@@ -190,7 +209,11 @@ def render(data):
     shares=data['shares']
     if shares['final_commit_ci']['median'] < .1 and shares['green_waiting']['median'] > .25:
         lines += [HEADLINE,'']
-    lines += [f"Sample: {data['sample_size']} merged PRs, the most recently updated (this tracks recent merges); current required-check names. "
+    sampled, excluded = data.get('sampled', data['sample_size']), data.get('excluded') or {}
+    coverage = f"Measured {data['sample_size']} of {sampled} merged PRs"
+    if excluded:
+        coverage += f" (left out: {_excluded_text(excluded)})"
+    lines += [coverage + ', the most recently updated (this tracks recent merges); current required-check names. '
               'Shares use each PR\'s open-to-merge lifetime. CI intervals include every available attempt. '
               'Red waiting ends at the next commit timestamp, not its push time (the API does not expose that time).', '',
               '| Time | Median share | p90 share |','| --- | ---: | ---: |']

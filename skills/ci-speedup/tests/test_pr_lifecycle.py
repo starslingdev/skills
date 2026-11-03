@@ -141,6 +141,40 @@ def test_rewritten_history_discards_all_lifecycle_shares():
     assert 'rewritten commit history' in module().render(result)
 
 
+def rewritten_pr():
+    p=pr()
+    p['timelineItems']=connection([{'__typename':'HeadRefForcePushedEvent'}])
+    return p
+
+
+def test_one_unmeasurable_pr_is_excluded_and_disclosed_not_fatal():
+    # A single force-pushed PR must not blank the whole block: the rest are measured
+    # and the report names how many were left out and why.
+    page=connection([pr() for _ in range(11)]+[rewritten_pr()])
+    result=module().collect(lambda q:dict(data=dict(repository=dict(pullRequests=page))),
+                            'sample/project',['test'])
+    assert result['status']=='measured'
+    assert result['sample_size']==11 and result['sampled']==12
+    assert result['shares']['ci_running']['median']==.2
+    text=module().render(result)
+    assert 'Measured 11 of 12' in text and '1 rewritten commit history' in text
+
+
+def test_too_few_measurable_prs_is_not_measured():
+    page=connection([pr() for _ in range(9)]+[rewritten_pr()])
+    result=module().collect(lambda q:dict(data=dict(repository=dict(pullRequests=page))),
+                            'sample/project',['test'])
+    assert result['status']=='not measured' and 'shares' not in result
+    assert 'only 9 of 10' in module().render(result)
+
+
+def test_malformed_pr_node_still_refuses_the_whole_block():
+    page=connection([pr() for _ in range(11)]+[None])
+    result=module().collect(lambda q:dict(data=dict(repository=dict(pullRequests=page))),
+                            'sample/project',['test'])
+    assert result['status']=='not measured' and 'shares' not in result
+
+
 def test_graphql_transport_records_and_replays_without_extra_requests(tmp_path,monkeypatch):
     import collect_runs as cr
     import json
