@@ -731,6 +731,19 @@ def build_summary(doc: dict[str, Any], findings_path: str = "FINDINGS.json",
         scope = (" — recency-only (external required suite, no PR carried it)"
                  if cp.get("required_suite_unsatisfiable") else "")
         out.append(f"Sample: {spr}/{tgt} PRs ({complete}{gap}){scope}.")
+    # The gh API cost, from the same stamp the report's Data sources line quotes, so a
+    # run on a shared API budget sees it here, before rendering (2026-11-03 dogfood).
+    ds = doc.get("data_sources") if isinstance(doc.get("data_sources"), dict) else {}
+    calls = ds.get("gh_query_count")
+    if isinstance(calls, int) and not isinstance(calls, bool) and calls > 0:
+        cost = f"gh API cost: {calls} call(s)"
+        secs = _num((doc.get("timings") or {}).get("scripted_total_s"))
+        if secs:
+            cost += f" in ~{_clock(secs)}"
+        errs = ds.get("gh_error_count")
+        if isinstance(errs, int) and not isinstance(errs, bool) and errs > 0:
+            cost += f" ({errs} failed)"
+        out.append(cost + ".")
     out.append("")
 
     # The render command — so the agent never reads blocking_path.py to invoke it.
