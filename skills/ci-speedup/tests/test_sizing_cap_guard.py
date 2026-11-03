@@ -420,7 +420,7 @@ def test_opt100_retry_delay_respects_runtime_headroom():
         passed = dict(_job("checks", 120), id=i*10+1, run_id=i, run_attempt=2, conclusion="success",
                       started_at="2026-01-01T01:00:00Z", completed_at="2026-01-01T01:02:00Z")
         jobs.extend([failed, passed])
-        logs[failed["id"]] = "2026-01-01T00:01:00Z Killed"
+        logs[failed["id"]] = "2026-01-01T00:01:00Z ##[error]Process completed with exit code 137."
     crit = {"long_pole_job": "checks", "long_pole_p50": 120.0, "floor_p50": 70.0,
             "job_p50": {"checks": 120.0, "lint": 70.0}}
     f = cr._detect_opt100_infra_faults("ci.yml", jobs, logs, {"checks"}, 0, crit=crit)[0][0]

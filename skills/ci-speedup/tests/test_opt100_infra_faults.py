@@ -3,6 +3,8 @@ import collect_runs as cr
 import blocking_path as bp
 import pytest
 
+OOM = "##[error]Process completed with exit code 137."
+
 
 def job(i, infra=True, runner="worker-a", attempt=1, conclusion="failure"):
     return {"id": i, "name": "checks", "run_id": i // 10,
@@ -63,8 +65,7 @@ def test_signature_table_never_matches_assertions(text):
 
 @pytest.mark.parametrize("text,step,expected", [
     ("The runner has received a shutdown signal", "Run checks", "lost-runner"),
-    ("Process completed with exit code 137.", "Run checks", "oom"),
-    ("Killed", "Run checks", "oom"),
+    (OOM, "Run checks", "oom"),
     ("Error: page.goto: Target crashed", "Run browser", "browser-crash"),
     ("npm ERR! code ECONNRESET", "npm ci", "network"),
     ("502 Bad Gateway registry.npmjs.org", "Install packages", "network"),
@@ -83,7 +84,7 @@ def test_signature_classes(text, step, expected):
 def test_only_first_failed_step_log_is_classified():
     j = job(10)
     j["steps"].append({"name": "Cleanup", "number": 2, "conclusion": "failure", "started_at": "2026-01-01T00:02:01Z", "completed_at": "2026-01-01T00:03:00Z"})
-    log = "2026-01-01T00:01:00Z AssertionError\n2026-01-01T00:02:30Z Killed"
+    log = "2026-01-01T00:01:00Z AssertionError\n2026-01-01T00:02:30Z " + OOM
     assert cr._opt100_job_class(j, log) is None
 
 
@@ -96,7 +97,7 @@ def test_missing_logs_are_disclosed_not_inferred():
 
 def test_only_gating_jobs_fire():
     jobs = [job(i) for i in range(6)]
-    logs = {j["id"]: "2026-01-01T00:01:00Z Killed" for j in jobs}
+    logs = {j["id"]: "2026-01-01T00:01:00Z " + OOM for j in jobs}
     assert cr._detect_opt100_infra_faults("ci.yml", jobs, logs, set(), 0)[0] == []
 
 
@@ -109,7 +110,7 @@ def test_retry_minutes_and_delay_from_sampled_attempts_only():
         setup.update(name="setup", completed_at="2026-01-01T00:00:30Z")
         carried = dict(setup, id=i * 10 + 3, run_attempt=2)
         jobs.extend([failed, passed, setup, carried])
-        logs[failed["id"]] = "2026-01-01T00:01:00Z Killed"
+        logs[failed["id"]] = "2026-01-01T00:01:00Z " + OOM
     f = cr._detect_opt100_infra_faults("ci.yml", jobs, logs, {"checks"}, 0, monthly_volume=6, sample_denominator=6)[0][0]
     assert f["runner_min_saving"] == 12
     assert f["wall_clock_p50_s"] == 90
@@ -121,7 +122,7 @@ def test_live_collection_fetches_first_failed_step_logs(monkeypatch):
     fetched = []
     def fetch(client, repo, j):
         fetched.append(j["id"])
-        return "2026-01-01T00:01:00Z Killed"
+        return "2026-01-01T00:01:00Z " + OOM
     monkeypatch.setattr(cr, "_fetch_job_log", fetch)
     findings, notes = cr._collect_opt100(object(), "example/project", "ci.yml", jobs, {"checks"}, 0)
     assert len(findings) == 1
@@ -132,7 +133,7 @@ def test_live_collection_fetches_first_failed_step_logs(monkeypatch):
 def test_unclassified_fail_then_pass_adds_quarantine_pointer():
     jobs = [job(i * 10) for i in range(7)]
     jobs.append(job(61, attempt=2, conclusion="success"))
-    logs = {j["id"]: "2026-01-01T00:01:00Z " + ("Killed" if i < 6 else "AssertionError") for i, j in enumerate(jobs[:7])}
+    logs = {j["id"]: "2026-01-01T00:01:00Z " + (OOM if i < 6 else "AssertionError") for i, j in enumerate(jobs[:7])}
     f = cr._detect_opt100_infra_faults("ci.yml", jobs, logs, {"checks"}, 0)[0][0]
     assert f["infra_failures"]["flakes_observed"]
     assert "quarantine" in f["agent_prompt"]
@@ -144,7 +145,7 @@ def test_matrix_gating_names_are_resolved_from_observed_jobs():
 
 
 def test_missing_job_page_withholds_ratio(monkeypatch):
-    monkeypatch.setattr(cr, "_fetch_job_log", lambda *a: "2026-01-01T00:01:00Z Killed")
+    monkeypatch.setattr(cr, "_fetch_job_log", lambda *a: "2026-01-01T00:01:00Z " + OOM)
     findings, notes = cr._collect_opt100(object(), "example/project", "ci.yml", [job(i) for i in range(6)], {"checks"}, 0, complete_population=False)
     assert findings == []
     assert notes["incomplete_job_population"]
@@ -162,7 +163,7 @@ def test_monthly_scaling_preserves_observed_retry_minutes():
     for i in range(6):
         failed, passed = job(i * 10), job(i * 10 + 1, attempt=2, conclusion="success")
         jobs.extend([failed, passed])
-        logs[failed["id"]] = "2026-01-01T00:01:00Z Killed"
+        logs[failed["id"]] = "2026-01-01T00:01:00Z " + OOM
     f = cr._detect_opt100_infra_faults("ci.yml", jobs, logs, {"checks"}, 0, monthly_volume=12, sample_denominator=6)[0][0]
     assert f["runner_min_saving"] == 24
     assert f["infra_failures"]["sampled_rerun_minutes"] == 12
@@ -171,7 +172,7 @@ def test_monthly_scaling_preserves_observed_retry_minutes():
 
 def test_unknown_monthly_volume_never_labels_sample_as_monthly():
     jobs = [job(i*10) for i in range(6)] + [job(i*10+1,attempt=2,conclusion="success") for i in range(6)]
-    logs = {j["id"]: "2026-01-01T00:01:00Z Killed" for j in jobs[:6]}
+    logs = {j["id"]: "2026-01-01T00:01:00Z " + OOM for j in jobs[:6]}
     f = cr._detect_opt100_infra_faults("ci.yml", jobs, logs, {"checks"}, 0)[0][0]
     assert f["runner_min_saving"] is None
     assert f["infra_failures"]["sampled_rerun_minutes"] == 12
@@ -187,7 +188,7 @@ def test_browser_launch_configuration_error_is_not_infrastructure():
 
 
 def test_missing_prior_attempt_page_withholds_ratio(monkeypatch):
-    monkeypatch.setattr(cr, "_fetch_job_log", lambda *a: "2026-01-01T00:01:00Z Killed")
+    monkeypatch.setattr(cr, "_fetch_job_log", lambda *a: "2026-01-01T00:01:00Z " + OOM)
     findings, notes = cr._collect_opt100(object(), "example/project", "ci.yml", [job(i) for i in range(6)], {"checks"}, 0, prior_attempt_failures=1)
     assert findings == []
     assert notes["incomplete_job_population"]
@@ -279,3 +280,14 @@ def test_registry_http_errors_are_network(text, step):
 ])
 def test_test_steps_named_for_setup_work_are_not_install_steps(step):
     assert bp._classify_infra_failure("ECONNRESET", step) is None
+
+
+@pytest.mark.parametrize("text", [
+    "Killed",
+    "exit code 137",
+    "Error: Command failed with exit code 137",
+    "child output: ##[error]Process completed with exit code 137.",
+])
+def test_oom_requires_the_runners_own_exit_line(text):
+    """A test's own subprocess may print 137 or Killed; only the runner's step exit counts."""
+    assert bp._classify_infra_failure(text, "Run tests") is None
