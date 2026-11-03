@@ -116,6 +116,18 @@ def test_timezone_free_dates_are_not_measured():
 def test_graphql_requests_supported_commit_timestamp():
     query=module()._query('sample/project',None)
     assert 'committedDate' in query and 'pushedDate' not in query
+    assert 'HEAD_REF_FORCE_PUSHED_EVENT' in query
+
+
+def test_rewritten_history_discards_all_lifecycle_shares():
+    rewritten=pr()
+    rewritten['timelineItems']=connection([{'__typename':'HeadRefForcePushedEvent'}])
+    page=connection([pr(),rewritten])
+    result=module().collect(lambda q:dict(data=dict(repository=dict(pullRequests=page))),
+                            'sample/project',['test'])
+    assert result['status']=='not measured'
+    assert 'shares' not in result
+    assert 'rewritten commit history' in module().render(result)
 
 
 def test_graphql_transport_records_and_replays_without_extra_requests(tmp_path,monkeypatch):

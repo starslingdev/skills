@@ -60,6 +60,8 @@ def measure_pr(pr, required):
     if end <= start:
         raise ValueError('invalid PR lifetime')
     timeline = _nodes(pr.get('timelineItems'), 'timelineItems')
+    if any(e.get('__typename') == 'HeadRefForcePushedEvent' for e in timeline):
+        raise ValueError('rewritten commit history; earlier check intervals unavailable')
     transitions = sorted((_time(e.get('createdAt')), e['__typename']) for e in timeline
                          if e.get('__typename') in ('ReadyForReviewEvent', 'ConvertToDraftEvent'))
     draft_start = start if transitions and transitions[0][1] == 'ReadyForReviewEvent' else None
@@ -129,7 +131,7 @@ def _query(repo, cursor):
       pullRequests(first: 25, states: MERGED, orderBy: {field: CREATED_AT, direction: DESC}, after: CURSOR) {
         pageInfo {hasNextPage endCursor}
         nodes { createdAt mergedAt headRefOid reviewDecision
-          timelineItems(first: 100, itemTypes: [PULL_REQUEST_REVIEW, READY_FOR_REVIEW_EVENT, CONVERT_TO_DRAFT_EVENT]) {
+          timelineItems(first: 100, itemTypes: [PULL_REQUEST_REVIEW, READY_FOR_REVIEW_EVENT, CONVERT_TO_DRAFT_EVENT, HEAD_REF_FORCE_PUSHED_EVENT]) {
             pageInfo {hasNextPage} nodes { __typename ... on PullRequestReview { submittedAt }
               ... on ReadyForReviewEvent { createdAt } ... on ConvertToDraftEvent { createdAt } }
           }
