@@ -580,3 +580,42 @@ def test_round_with_truncated_or_missing_job_data_adds_no_green():
     truncated['checkSuites']['nodes'][0]['checkRuns']['pageInfo']['hasNextPage'] = True
     assert m._round_green_at(truncated, {'test'}, False) is None
     assert m._round_green_at(dict(complete, checkSuites=None), {'test'}, False) is None
+
+
+def test_round_turns_green_when_its_last_required_check_completes():
+    # A required job skipped late (its `needs:` failed to apply) still completes last;
+    # skips are zero-length, so running time does not mask the difference.
+    p = rounds([('a', 0, [check(0, H), check(3*H, 3*H, 'SKIPPED', name='deploy')]),
+                ('b', 11*H, [check(11*H, 12*H), check(12*H, 12*H, 'SKIPPED', name='deploy')])], 13*H)
+    assert seconds(module().measure_pr(p, ['test', 'deploy']), 'green_waiting', p) == 9*H
+
+
+def test_round_green_starts_no_earlier_than_the_pr_opened():
+    p = rounds([('a', -5*H, [check(-5*H, -4*H)]), ('b', 3*H, [check(3*H, 4*H)])], 5*H)
+    assert seconds(module().measure_pr(p, ['test']), 'green_waiting', p) == 4*H
+
+
+def test_pending_rerun_of_a_required_check_keeps_the_final_commit_not_green():
+    rerun = dict(name='test', startedAt=ts(700), completedAt=None, conclusion=None, __typename='CheckRun')
+    with pytest.raises(ValueError, match='not green on final commit'):
+        module().measure_pr(pr(extra_contexts=[rerun]), ['test'])
+
+
+def test_skipped_or_neutral_required_check_counts_as_passed():
+    extra = [dict(check(600, 700, 'SKIPPED', name='gate'), __typename='CheckRun'),
+             dict(check(600, 650, 'NEUTRAL', name='scan'), __typename='CheckRun')]
+    assert module().measure_pr(pr(extra_contexts=extra), ['test', 'gate', 'scan'])['green_waiting'] == .3
+
+
+def test_estimate_with_nothing_completed_on_the_final_commit_names_the_reason():
+    p = pr()
+    p['head'] = head('b', [dict(check(500, 600, 'SKIPPED'), __typename='CheckRun')])
+    with pytest.raises(ValueError, match='^no completed checks on final commit$'):
+        module().measure_pr(p, None)
+
+
+def test_verify_report_rejects_a_missing_basis_and_a_label_on_a_not_measured_block(tmp_path):
+    vr = _verify()
+    assert not vr.check_pr_lifecycle_block(_block(None), _findings(tmp_path, None)).ok
+    not_measured = "**Where your PRs' time goes**\n\n" + ESTIMATE + "\nnot measured: query 1 failed\n"
+    assert not vr.check_pr_lifecycle_block(not_measured).ok

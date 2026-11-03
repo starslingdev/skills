@@ -118,8 +118,8 @@ def _round_green_at(commit, names, estimate):
     except (ValueError, AttributeError, TypeError):
         return None
     need = set(names) | ({n for n, (_, _, counted) in latest.items() if counted} if estimate else set())
-    if not need.issubset(latest) or not all(latest[n][1] and latest[n][0] < math.inf for n in need):
-        return None
+    if not need.issubset(latest) or not all(latest[n][1] for n in need):
+        return None  # a passed job always has a completion time; unknown stays inf, never green
     return max(latest[n][0] for n in need)
 
 
