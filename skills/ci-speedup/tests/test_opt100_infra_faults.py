@@ -354,3 +354,27 @@ def test_warning_annotations_never_classify():
 ])
 def test_lost_runner_signatures(text):
     assert bp._classify_infra_failure(text, "") == "lost-runner"
+
+
+def retried_run(i, *later):
+    """Attempt 1 fails `checks` on infrastructure; `later` adds jobs for attempt 2+."""
+    failed = job(i * 10)
+    return [failed] + [dict(job(i * 10 + n + 1), **extra) for n, extra in enumerate(later)]
+
+
+def test_retry_minutes_skip_jobs_that_never_ran_in_the_failed_attempt():
+    """A downstream job skipped behind the failure would have run anyway."""
+    jobs, logs = [], {}
+    for i in range(1, 7):
+        run = retried_run(
+            i,
+            dict(name="deploy", run_attempt=1, conclusion="skipped", steps=[]),
+            dict(run_attempt=2, conclusion="success"),
+            dict(name="deploy", run_attempt=2, conclusion="success",
+                 started_at="2026-01-01T00:03:00Z", completed_at="2026-01-01T00:13:00Z"))
+        jobs.extend(run)
+        logs[run[0]["id"]] = "2026-01-01T00:01:00Z " + OOM
+    f = cr._detect_opt100_infra_faults("ci.yml", jobs, logs, {"checks"}, 0,
+                                      monthly_volume=6, sample_denominator=6)[0][0]
+    assert f["infra_failures"]["sampled_rerun_minutes"] == 12
+    assert f["runner_min_saving"] == 12

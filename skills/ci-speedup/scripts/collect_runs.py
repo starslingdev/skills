@@ -9181,7 +9181,12 @@ def _detect_opt100_infra_faults(
                                for x in jobs if run_id(x) == rid and attempt(x) <= a
                                and x.get("conclusion") == "success"
                                and x.get("started_at") and x.get("completed_at")}
+            # Only work that ran in the failed attempt and ran again is repeated
+            # work; a downstream job skipped behind the failure would run anyway.
+            ran = {x.get("name") for x in jobs if run_id(x) == rid and attempt(x) == a
+                   and x.get("conclusion") not in (None, "skipped") and _job_started(x)}
             retry = [x for x in jobs if run_id(x) == rid and attempt(x) == a + 1
+                     and x.get("name") in ran
                      and (x.get("name"), x.get("started_at"), x.get("completed_at"))
                      not in prior_successes]
             if len(same_attempt_failures) != 1 or not retry or (rid, a + 1) in claimed:
