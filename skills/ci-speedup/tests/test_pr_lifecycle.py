@@ -153,3 +153,11 @@ def test_collect_dispatches_lifecycle_and_report_discloses_it(monkeypatch):
     assert len(calls)==1 and doc['pr_lifecycle']['reason']=='query 1 failed'
     import blocking_path
     assert 'not measured: query 1 failed' in blocking_path.render(doc)
+
+
+def test_draft_wait_is_remainder_not_green_wait():
+    p=pr();p['timelineItems']=connection([{'__typename':'ReadyForReviewEvent','createdAt':ts(800)}])
+    row=module().measure_pr(p,['test'])
+    assert row['green_waiting']==.2
+    assert row['red_waiting']==0
+    assert row['everything_else']==.6

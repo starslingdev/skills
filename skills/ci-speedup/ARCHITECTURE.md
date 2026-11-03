@@ -4181,8 +4181,9 @@ CI running is the union of all available check attempts, clipped to PR life.
 Red waiting extends from failed-check completion to the next commit timestamp;
 GitHub no longer supports Commit.pushedDate, so this is explicitly not push
 latency. Current required-check names determine green waiting on the final
-head. Running wins interval overlaps, followed by red then green; everything
-else is the remainder. The final-head CI share is a subset, not a fifth bucket.
+head. Running wins interval overlaps, followed by red then green; draft waiting and everything
+else form the remainder. Ready-for-review and convert-to-draft timeline events
+exclude draft idle time from red/green waiting. The final-head CI share is a subset, not a fifth bucket.
 The report gives per-PR median and nearest-rank p90 shares, and uses strict
 <10% final-head CI / >25% green thresholds for its headline. Current policy and
 newest-created sampling are disclosed; no historical-policy claim is made.

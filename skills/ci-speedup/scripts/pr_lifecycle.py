@@ -59,7 +59,20 @@ def measure_pr(pr, required):
     start, end = _time(pr['createdAt']), _time(pr['mergedAt'])
     if end <= start:
         raise ValueError('invalid PR lifetime')
-    _nodes(pr.get('timelineItems'), 'timelineItems')
+    timeline = _nodes(pr.get('timelineItems'), 'timelineItems')
+    transitions = sorted((_time(e.get('createdAt')), e['__typename']) for e in timeline
+                         if e.get('__typename') in ('ReadyForReviewEvent', 'ConvertToDraftEvent'))
+    draft_start = start if transitions and transitions[0][1] == 'ReadyForReviewEvent' else None
+    drafts = []
+    for at, kind in transitions:
+        at = min(end, max(start, at))
+        if kind == 'ConvertToDraftEvent':
+            draft_start = at
+        elif draft_start is not None:
+            drafts.append((draft_start, at))
+            draft_start = None
+    if draft_start is not None:
+        drafts.append((draft_start, end))
     commits = _nodes(pr.get('commits'), 'commits')
     all_checks, pushes, final = [], [], []
     for row in commits:
@@ -99,8 +112,8 @@ def measure_pr(pr, required):
                 red.append((completion,min(later)))
     green = [(max(start,green_start),end)]
     ci = _length(running)
-    red_s = _without(red, running)
-    green_s = _without(green, running + red)
+    red_s = _without(red, running + drafts)
+    green_s = _without(green, running + red + drafts)
     duration = end-start
     final_ci = _length([(max(start,_time(c['startedAt'])),min(end,_time(c['completedAt']))) for c in final])
     return dict(ci_running=ci/duration, red_waiting=red_s/duration,
@@ -116,8 +129,9 @@ def _query(repo, cursor):
       pullRequests(first: 25, states: MERGED, orderBy: {field: CREATED_AT, direction: DESC}, after: CURSOR) {
         pageInfo {hasNextPage endCursor}
         nodes { createdAt mergedAt headRefOid reviewDecision
-          timelineItems(first: 100, itemTypes: [PULL_REQUEST_REVIEW]) {
-            pageInfo {hasNextPage} nodes { __typename ... on PullRequestReview { submittedAt } }
+          timelineItems(first: 100, itemTypes: [PULL_REQUEST_REVIEW, READY_FOR_REVIEW_EVENT, CONVERT_TO_DRAFT_EVENT]) {
+            pageInfo {hasNextPage} nodes { __typename ... on PullRequestReview { submittedAt }
+              ... on ReadyForReviewEvent { createdAt } ... on ConvertToDraftEvent { createdAt } }
           }
           commits(first: 50) { pageInfo {hasNextPage} nodes { commit {
             oid committedDate checkSuites(first: 5) { pageInfo {hasNextPage} nodes {
@@ -183,5 +197,5 @@ def render(data):
                       ('final_commit_ci','CI on the final commit (subset)')]:
         s=shares[key];lines.append(f"| {label} | {s['median']:.1%} | {s['p90']:.1%} |")
     lines += ['', 'Overlapping checks count once. Running time takes priority over red waiting, then green waiting; '
-              'everything else is the remainder. Category medians need not sum to 100%.','']
+              'draft waiting stays in everything else. Category medians need not sum to 100%.','']
     return '\n'.join(lines)
