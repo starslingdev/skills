@@ -104,3 +104,12 @@ def test_custom_labels_count_case_insensitively():
     for job,label in zip(parsed[0][1]['jobs'].values(), ['Custom-Linux','custom-linux','CUSTOM-LINUX']):
         job['runs-on']=label
     assert pf._runner_advisories(parsed)[0]['job_count']==3
+
+
+def test_historical_engine_adapter_has_no_advisories():
+    from types import SimpleNamespace
+    from _baseline_engine import _adapt
+    historical = SimpleNamespace(_practice_facts=lambda parsed, root: {'sentinel': True})
+    adapted = _adapt(historical)
+    assert adapted._runner_advisories(workflows()) == []
+    assert adapted._practice_facts([], None) == {'sentinel': True}
