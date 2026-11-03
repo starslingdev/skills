@@ -27,10 +27,16 @@ def commit(push, checks, oid):
     return dict(commit=dict(oid=oid, committedDate=ts(push), checkSuites=connection([dict(checkRuns=connection(checks))])))
 
 
-def pr(checks=None):
+def head(oid, contexts):
+    return connection([dict(commit=dict(oid=oid, statusCheckRollup=dict(contexts=connection(contexts))))])
+
+
+def pr(checks=None, extra_contexts=()):
+    final = checks or [check(500, 600)]
     return dict(createdAt=ts(0), mergedAt=ts(1000), headRefOid='b',
                 commits=connection([commit(0, [check(100, 200, 'FAILURE')], 'a'),
-                                    commit(400, checks or [check(500, 600)], 'b')]),
+                                    commit(400, final, 'b')]),
+                head=head('b', [dict(c, __typename='CheckRun') for c in final] + list(extra_contexts)),
                 timelineItems=connection([]))
 
 
@@ -61,17 +67,54 @@ def test_query_failure_discards_all_partial_results():
     assert 'query 2 failed' in module().render(result)
 
 
-def test_budget_is_four_queries_with_twenty_five_prs_each():
+def test_budget_is_four_queries_with_ten_prs_each():
     calls=[]
     def query(q):
         calls.append(q)
-        page = connection([pr() for _ in range(25)], True)
+        page = connection([pr() for _ in range(10)], True)
         page['pageInfo']['endCursor'] = str(len(calls))
         return dict(data=dict(repository=dict(pullRequests=page)))
     result=module().collect(query,'sample/project',['test'])
     assert len(calls)==4
-    assert all('first: 25' in q for q in calls)
-    assert result['sample_size']==100
+    assert all('pullRequests(first: 10,' in q for q in calls)
+    assert result['sample_size']==40
+
+
+def _firsts(query):
+    import re
+    return [int(n) for n in re.findall(r'\bfirst: (\d+)', query)]
+
+
+def test_query_reads_actions_jobs_within_graphql_limits():
+    # Installed apps open empty check suites on every commit, so an unfiltered
+    # five-suite window truncated nearly every PR, and 25 PRs of full job history
+    # exceeded GitHub's per-query resource limits. Read only GitHub Actions suites
+    # (app 15368) and ten PRs per query; the worst-case node count stays bounded.
+    query=module()._query('sample/project',None)
+    assert 'pullRequests(first: 10,' in query
+    assert 'checkSuites(first: 10, filterBy: {appId: 15368})' in query
+    prs, timeline, rollup, commits, suites, runs = _firsts(query)
+    assert prs*(timeline+rollup+commits*suites*runs) <= 200_000
+
+
+def test_required_check_from_another_app_sets_green_start():
+    # A required commit status (or another app's check) lives only in the final
+    # commit's rollup, never in the Actions suites.
+    status=dict(__typename='StatusContext', context='preview', state='SUCCESS', createdAt=ts(700))
+    row=module().measure_pr(pr(extra_contexts=[status]),['test','preview'])
+    assert row==dict(ci_running=.2,red_waiting=.2,green_waiting=.3,everything_else=.3,final_commit_ci=.1)
+
+
+def test_required_status_not_green_is_left_out():
+    status=dict(__typename='StatusContext', context='preview', state='PENDING', createdAt=ts(700))
+    with pytest.raises(ValueError,match='not green'):
+        module().measure_pr(pr(extra_contexts=[status]),['test','preview'])
+
+
+def test_final_commit_rollup_must_be_the_merged_head():
+    p=pr();p['head']=head('stale',p['head']['nodes'][0]['commit']['statusCheckRollup']['contexts']['nodes'])
+    with pytest.raises(ValueError,match='final commit'):
+        module().measure_pr(p,['test'])
 
 
 @pytest.mark.parametrize('field', ['commits','timelineItems','checkSuites','checkRuns'])
@@ -141,6 +184,17 @@ def test_rewritten_history_discards_all_lifecycle_shares():
     assert 'rewritten commit history' in module().render(result)
 
 
+def paged(*pages):
+    calls=[]
+    def query(q):
+        calls.append(q)
+        page=connection(pages[len(calls)-1], len(calls)<len(pages))
+        if page['pageInfo']['hasNextPage']:
+            page['pageInfo']['endCursor']=str(len(calls))
+        return dict(data=dict(repository=dict(pullRequests=page)))
+    return query
+
+
 def rewritten_pr():
     p=pr()
     p['timelineItems']=connection([{'__typename':'HeadRefForcePushedEvent'}])
@@ -150,8 +204,7 @@ def rewritten_pr():
 def test_one_unmeasurable_pr_is_excluded_and_disclosed_not_fatal():
     # A single force-pushed PR must not blank the whole block: the rest are measured
     # and the report names how many were left out and why.
-    page=connection([pr() for _ in range(11)]+[rewritten_pr()])
-    result=module().collect(lambda q:dict(data=dict(repository=dict(pullRequests=page))),
+    result=module().collect(paged([pr() for _ in range(10)],[pr(),rewritten_pr()]),
                             'sample/project',['test'])
     assert result['status']=='measured'
     assert result['sample_size']==11 and result['sampled']==12
@@ -169,9 +222,7 @@ def test_too_few_measurable_prs_is_not_measured():
 
 
 def test_malformed_pr_node_still_refuses_the_whole_block():
-    page=connection([pr() for _ in range(11)]+[None])
-    result=module().collect(lambda q:dict(data=dict(repository=dict(pullRequests=page))),
-                            'sample/project',['test'])
+    result=module().collect(paged([pr() for _ in range(10)],[pr(),None]),'sample/project',['test'])
     assert result['status']=='not measured' and 'shares' not in result
 
 

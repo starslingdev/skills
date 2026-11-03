@@ -53,6 +53,31 @@ def _without(intervals, occupied):
     return _length(intervals + occupied) - _length(occupied)
 
 
+def _green_start(pr, required):
+    """When the last required check on the merged head passed. Reads the head's
+    status rollup, which carries every app's latest check and commit statuses."""
+    heads = pr['head']['nodes']
+    if len(heads) != 1 or heads[0]['commit']['oid'] != pr.get('headRefOid'):
+        raise ValueError('final commit unavailable')
+    rollup = heads[0]['commit']['statusCheckRollup']
+    latest = {}
+    for c in (rollup['contexts']['nodes'] if rollup else []):
+        if c.get('__typename') == 'CheckRun':
+            name, done, green = c.get('name'), c.get('completedAt'), c.get('conclusion') in ('SUCCESS', 'NEUTRAL', 'SKIPPED')
+        elif c.get('__typename') == 'StatusContext':
+            name, done, green = c.get('context'), c.get('createdAt'), c.get('state') == 'SUCCESS'
+        else:
+            continue
+        at = _time(done) if done else math.inf
+        if name not in latest or at > latest[name][0]:
+            latest[name] = (at, green)
+    if not set(required).issubset(latest):
+        raise ValueError('required checks missing on final commit')
+    if not all(latest[n][1] and latest[n][0] < math.inf for n in required):
+        raise ValueError('required checks not green on final commit')
+    return max(latest[n][0] for n in required)
+
+
 def measure_pr(pr, required):
     if not required:
         raise ValueError('required checks unavailable')
@@ -93,16 +118,7 @@ def measure_pr(pr, required):
                 all_checks.append((max(start,a),min(end,b),c))
         if commit['oid'] == pr.get('headRefOid'):
             final = checks
-    latest = {}
-    for c in final:
-        name = c.get('name')
-        if name not in latest or _time(c['completedAt']) > _time(latest[name]['completedAt']):
-            latest[name] = c
-    if not set(required).issubset(latest):
-        raise ValueError('required checks missing on final commit')
-    if any(latest[n]['conclusion'] not in ('SUCCESS','NEUTRAL','SKIPPED') for n in required):
-        raise ValueError('required checks not green on final commit')
-    green_start = max(_time(latest[n]['completedAt']) for n in required)
+    green_start = _green_start(pr, required)
     if green_start > end:
         raise ValueError('required checks completed after merge')
     running = [(a,b) for a,b,_ in all_checks]
@@ -125,18 +141,24 @@ def measure_pr(pr, required):
 
 def _query(repo, cursor):
     owner, name = repo.split('/', 1)
-    # 25 PRs * 50 commits * 5 suites * 50 checks stays below the GraphQL node
-    # limit. Any nested truncation refuses measurement rather than paginating.
+    # Installed apps open empty check suites on every commit, so suites are limited
+    # to GitHub Actions (app 15368); 25 PRs of full job history exceeded GitHub's
+    # per-query resource limits on busy repos, so a page holds 10. A PR whose nested
+    # history is truncated is left out rather than paginated. The merged head's
+    # status rollup (every app's latest checks plus commit statuses) decides when
+    # the required checks passed.
     return '''query { repository(owner: OWNER, name: NAME) {
-      pullRequests(first: 25, states: MERGED, orderBy: {field: UPDATED_AT, direction: DESC}, after: CURSOR) {
+      pullRequests(first: 10, states: MERGED, orderBy: {field: UPDATED_AT, direction: DESC}, after: CURSOR) {
         pageInfo {hasNextPage endCursor}
-        nodes { createdAt mergedAt headRefOid reviewDecision
-          timelineItems(first: 100, itemTypes: [PULL_REQUEST_REVIEW, READY_FOR_REVIEW_EVENT, CONVERT_TO_DRAFT_EVENT, HEAD_REF_FORCE_PUSHED_EVENT]) {
-            pageInfo {hasNextPage} nodes { __typename ... on PullRequestReview { submittedAt }
+        nodes { createdAt mergedAt headRefOid
+          timelineItems(first: 100, itemTypes: [READY_FOR_REVIEW_EVENT, CONVERT_TO_DRAFT_EVENT, HEAD_REF_FORCE_PUSHED_EVENT]) {
+            pageInfo {hasNextPage} nodes { __typename
               ... on ReadyForReviewEvent { createdAt } ... on ConvertToDraftEvent { createdAt } }
           }
-          commits(first: 50) { pageInfo {hasNextPage} nodes { commit {
-            oid committedDate checkSuites(first: 5) { pageInfo {hasNextPage} nodes {
+          head: commits(last: 1) { nodes { commit { oid statusCheckRollup { contexts(first: 100) { nodes { __typename
+            ... on CheckRun { name completedAt conclusion } ... on StatusContext { context state createdAt } } } } } } }
+          commits(first: 30) { pageInfo {hasNextPage} nodes { commit {
+            oid committedDate checkSuites(first: 10, filterBy: {appId: 15368}) { pageInfo {hasNextPage} nodes {
               checkRuns(first: 50, filterBy: {checkType: ALL}) { pageInfo {hasNextPage}
                 nodes {name startedAt completedAt conclusion}
               }
@@ -148,6 +170,7 @@ def _query(repo, cursor):
 
 
 MIN_MEASURED = 10
+PAGE_SIZE = 10
 
 
 def _excluded_text(excluded):
@@ -168,7 +191,7 @@ def collect(query, repo, required):
                 return dict(status='not measured',reason=f'query {page} failed',queries=page)
             connection = data['data']['repository']['pullRequests']
             nodes = connection['nodes']
-            if not isinstance(nodes,list) or len(nodes)>25:
+            if not isinstance(nodes,list) or len(nodes)>PAGE_SIZE:
                 raise ValueError('malformed PR page')
             for p in nodes:
                 if not isinstance(p, dict):
@@ -214,7 +237,8 @@ def render(data):
     if excluded:
         coverage += f" (left out: {_excluded_text(excluded)})"
     lines += [coverage + ', the most recently updated (this tracks recent merges); current required-check names. '
-              'Shares use each PR\'s open-to-merge lifetime. CI intervals include every available attempt. '
+              'Shares use each PR\'s open-to-merge lifetime. CI running counts every GitHub Actions job attempt; '
+              'required checks from other apps or commit statuses only mark when the PR turned green. '
               'Red waiting ends at the next commit timestamp, not its push time (the API does not expose that time).', '',
               '| Time | Median share | p90 share |','| --- | ---: | ---: |']
     for key,label in [('ci_running','CI running'),('red_waiting','Red, waiting for the next commit'),
