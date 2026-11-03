@@ -488,3 +488,95 @@ def test_verify_report_requires_the_estimate_label_exactly_on_the_fallback_basis
     assert not vr.check_pr_lifecycle_block(fallback, _findings(tmp_path, 'required')).ok
     assert not vr.check_pr_lifecycle_block(fallback, _findings(tmp_path, None)).ok
     assert 'check_pr_lifecycle_block(report, findings_path),' in Path(vr.__file__).read_text()
+
+
+# --- Decision 4: green waiting covers every review round ---
+
+def test_green_on_an_earlier_commit_counts_until_the_next_commit():
+    # Green on A for 10 h, then B goes green and merges an hour later: 11 h, not 1 h.
+    p = rounds([('a', 0, [check(0, H)]), ('b', 11*H, [check(11*H, 12*H)])], 13*H)
+    row = module().measure_pr(p, ['test'])
+    assert seconds(row, 'green_waiting', p) == 11*H
+    assert seconds(row, 'final_commit_ci', p) == H
+
+
+def test_green_round_interrupted_by_a_red_commit_then_green_again():
+    p = rounds([('a', 0, [check(0, H)]), ('b', 5*H, [check(5*H, 6*H, 'FAILURE')]),
+                ('c', 8*H, [check(8*H, 9*H)])], 10*H)
+    row = module().measure_pr(p, ['test'])
+    assert seconds(row, 'green_waiting', p) == 5*H
+    assert seconds(row, 'red_waiting', p) == 2*H
+    assert seconds(row, 'ci_running', p) == 3*H
+
+
+def test_draft_inside_an_earlier_green_round_is_excluded():
+    draft = [{'__typename': 'ConvertToDraftEvent', 'createdAt': ts(3*H)},
+             {'__typename': 'ReadyForReviewEvent', 'createdAt': ts(5*H)}]
+    p = rounds([('a', 0, [check(0, H)]), ('b', 11*H, [check(11*H, 12*H)])], 13*H, timeline=draft)
+    row = module().measure_pr(p, ['test'])
+    assert seconds(row, 'green_waiting', p) == 9*H
+    assert seconds(row, 'everything_else', p) == 2*H
+
+
+def test_running_then_red_outrank_an_earlier_green_round():
+    # A passes its required check at 1 h; an optional job runs to 3 h, another fails at
+    # 5 h. Running wins 1-3 h and 4-5 h, red wins 5-11 h, green keeps 3-4 h, plus B.
+    p = rounds([('a', 0, [check(0, H), check(0, 3*H, name='lint'), check(4*H, 5*H, 'FAILURE', name='docs')]),
+                ('b', 11*H, [check(11*H, 12*H)])], 13*H)
+    row = module().measure_pr(p, ['test'])
+    assert {k: seconds(row, k, p) for k in ('ci_running', 'red_waiting', 'green_waiting', 'everything_else')} == \
+        dict(ci_running=5*H, red_waiting=6*H, green_waiting=2*H, everything_else=0)
+
+
+def test_intermediate_commit_without_its_required_checks_adds_no_green():
+    # The middle commit has no readable required check: it is the latest commit from
+    # 5 h to 11 h but adds no green time; A's and B's complete rounds still count.
+    for middle in ([], [check(5*H, 6*H, name='lint')]):
+        p = rounds([('a', 0, [check(0, H)]), ('m', 5*H, middle), ('b', 11*H, [check(11*H, 12*H)])], 13*H)
+        row = module().measure_pr(p, ['test'])
+        assert seconds(row, 'green_waiting', p) == 5*H
+
+
+def test_earlier_round_needs_every_required_check_on_that_commit():
+    # A required commit status is only read on the final commit, so earlier rounds
+    # cannot prove it passed and stay out of green.
+    status = dict(__typename='StatusContext', context='preview', state='SUCCESS', createdAt=ts(12*H))
+    p = rounds([('a', 0, [check(0, H)]), ('b', 11*H, [check(11*H, 12*H)])], 13*H, extra_contexts=[status])
+    row = module().measure_pr(p, ['test', 'preview'])
+    assert seconds(row, 'green_waiting', p) == H
+
+
+def test_estimate_basis_applies_to_every_round():
+    # With every final-commit check treated as required, an earlier commit is green
+    # only when those checks and all of its own completed checks passed.
+    final = [check(11*H, 12*H), check(11*H, 12*H, name='lint')]
+    p = rounds([('a', 0, [check(0, H), check(0, 2*H, name='lint')]), ('b', 11*H, final)], 13*H)
+    assert seconds(module().measure_pr(p, None), 'green_waiting', p) == 10*H
+    p = rounds([('a', 0, [check(0, H)]), ('b', 11*H, final)], 13*H)
+    assert seconds(module().measure_pr(p, None), 'green_waiting', p) == H
+    p = rounds([('a', 0, [check(0, H), check(0, H, name='lint'), check(0, H, 'CANCELLED', name='extra')]),
+                ('b', 11*H, final)], 13*H)
+    assert seconds(module().measure_pr(p, None), 'green_waiting', p) == H
+
+
+def test_incomplete_final_commit_data_excludes_the_pr_and_counts_it():
+    good = rounds([('a', 0, [check(0, H)]), ('b', 11*H, [check(11*H, 12*H)])], 13*H)
+    missing = rounds([('a', 0, [check(0, H)]), ('b', 11*H, [check(11*H, 12*H, name='lint')])], 13*H)
+    result = module().collect(paged([good for _ in range(10)], [missing]), 'sample/project', ['test'])
+    assert result['sample_size'] == 10 and result['excluded'] == {'required checks missing on final commit': 1}
+    assert result['shares']['green_waiting']['median'] == pytest.approx(11/13)
+
+
+def test_block_says_green_waiting_covers_every_review_round():
+    text = module().render(module().collect(paged([pr() for _ in range(10)]), 'sample/project', ['test']))
+    assert 'every review round' in text
+
+
+def test_round_with_truncated_or_missing_job_data_adds_no_green():
+    m = module()
+    complete = commit(0, [check(0, H)], 'a')['commit']
+    assert m._round_green_at(complete, {'test'}, False) == datetime.fromisoformat(ts(H)).timestamp()
+    truncated = commit(0, [check(0, H)], 'a')['commit']
+    truncated['checkSuites']['nodes'][0]['checkRuns']['pageInfo']['hasNextPage'] = True
+    assert m._round_green_at(truncated, {'test'}, False) is None
+    assert m._round_green_at(dict(complete, checkSuites=None), {'test'}, False) is None

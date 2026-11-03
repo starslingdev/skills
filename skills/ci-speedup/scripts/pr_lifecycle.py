@@ -105,6 +105,24 @@ def _green_start(pr, required):
     return max(latest[n][0] for n in names), names
 
 
+def _round_green_at(commit, names, estimate):
+    """When an earlier commit's last required check passed, or None when that cannot be
+    shown from its GitHub Actions jobs (truncated or missing data, a required check
+    absent or not passing). Under the estimate the commit's own completed checks must
+    pass too. Other apps' checks and commit statuses are read only on the merged head."""
+    try:
+        runs = [r for s in _nodes(commit.get('checkSuites'), 'checkSuites')
+                for r in _nodes(s.get('checkRuns'), 'checkRuns')]
+        latest = _latest((r.get('name'), r.get('completedAt'), r.get('conclusion') in PASSED,
+                          bool(r.get('completedAt')) and r.get('conclusion') not in UNCOUNTED) for r in runs)
+    except (ValueError, AttributeError, TypeError):
+        return None
+    need = set(names) | ({n for n, (_, _, counted) in latest.items() if counted} if estimate else set())
+    if not need.issubset(latest) or not all(latest[n][1] and latest[n][0] < math.inf for n in need):
+        return None
+    return max(latest[n][0] for n in need)
+
+
 def measure_pr(pr, required):
     """`required` is the repo's required-check names, or empty/None when they are not
     readable: then every check on the merged head stands in for them (an estimate)."""
@@ -147,7 +165,7 @@ def measure_pr(pr, required):
                 all_checks.append((max(start,a),min(end,b),c))
         if commit['oid'] == pr.get('headRefOid'):
             final = checks
-    green_start, _ = _green_start(pr, required)
+    green_start, names = _green_start(pr, required)
     if green_start > end:
         raise ValueError('required checks completed after merge')
     running = [(a,b) for a,b,_ in all_checks]
@@ -157,7 +175,16 @@ def measure_pr(pr, required):
             later = [p for p in pushes if p > completion and p <= end]
             if later:
                 red.append((completion,min(later)))
+    # Every review round: an earlier commit is green from its last required check
+    # passing until the next commit (or merge). Rounds whose checks cannot be read
+    # completely add nothing; only the merged head's data is mandatory.
     green = [(max(start,green_start),end)]
+    for i, row in enumerate(commits):
+        if row['commit']['oid'] == pr.get('headRefOid'):
+            continue
+        at = _round_green_at(row['commit'], names, not required)
+        if at is not None:
+            green.append((max(start, at), min(pushes[i+1:] + [end])))
     ci = _length(running)
     red_s = _without(red, running + drafts)
     green_s = _without(green, running + red + drafts)
@@ -274,7 +301,10 @@ def render(data):
     lines += [coverage + f', the most recently updated (this tracks recent merges); {checks}. '
               'Shares use each PR\'s open-to-merge lifetime. CI running counts every GitHub Actions job attempt; '
               'required checks from other apps or commit statuses only mark when the PR turned green. '
-              'Red waiting ends at the next commit timestamp, not its push time (the API does not expose that time).', '',
+              'Green waiting covers every review round: each stretch where the PR\'s latest commit had passed '
+              'its required checks, until the next commit or the merge. An earlier commit counts only when '
+              'every one of those checks is a GitHub Actions job on that commit. '
+              'Red and green waiting end at the next commit timestamp, not its push time (the API does not expose that time).', '',
               '| Time | Median share | p90 share |','| --- | ---: | ---: |']
     for key,label in [('ci_running','CI running'),('red_waiting','Red, waiting for the next commit'),
                       ('green_waiting','Green, waiting for review or merge'),('everything_else','Everything else'),
