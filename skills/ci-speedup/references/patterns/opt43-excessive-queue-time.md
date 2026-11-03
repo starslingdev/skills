@@ -22,3 +22,5 @@ category: 9
 **Fix**: Depends on root cause — if runner pool saturation: increase runner pool or use larger runners. If concurrency group: relax the group, or cancel superseded runs — but take the **scoped** predicate from [OPT45](#opt45--missing-concurrency-groups) / [OPT46](#opt46--superseded-runs-not-cancelled-missing-concurrency-or-cancel-in-progress-false). **Never a bare `cancel-in-progress: true`**: it kills in-flight runs on the default branch and on release tags (a half-finished deploy/publish/migration), and it must never be reachable from a PR whose head branch is itself the default branch.
 
 ---
+
+**Mostly idle but still waiting?** See OPT97, Queue Caused by a One-at-a-Time Resource: a shared lock, emulator or single slot can keep jobs waiting while the runner is mostly idle. Identify that resource before adding machines.
