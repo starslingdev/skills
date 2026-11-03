@@ -1911,13 +1911,28 @@ def check_date_matches_filename(report: str, report_path: Path | None) -> Check:
 # ci-secure's security framing that must NOT survive into a ci-speedup report.
 # Phrase-precise: an audited repo may legitimately run zizmor, and that name will
 # appear in a finding's evidence - that's the AUDITED REPO's content, not a leak.
-_LEAK_PATTERNS: tuple[tuple[str, str], ...] = (
-    (r"what an attacker (?:can|could) do", "attacker-capability prose label"),
-    (r"attacker_scenario", "attacker_scenario field"),
-    (r"ci-secure (?:skill|catalog|report|scan|finding|audit)", "ci-secure self-reference"),
-    (r"blended under the same severity", "zizmor methodology text"),
-    (r"\brun zizmor\b", "zizmor recommendation"),
+# The third field marks patterns an audited identifier can legitimately carry (a
+# check named `ci-secure scan`, a step named `Run zizmor`): those are matched
+# with the renderer's identifier spans removed (_strip_audited_identifiers).
+# The rest are skill vocabulary no identifier carries, matched everywhere.
+_LEAK_PATTERNS: tuple[tuple[str, str, bool], ...] = (
+    (r"what an attacker (?:can|could) do", "attacker-capability prose label", False),
+    (r"attacker_scenario", "attacker_scenario field", False),
+    (r"ci-secure (?:skill|catalog|report|scan|finding|audit)", "ci-secure self-reference", True),
+    (r"blended under the same severity", "zizmor methodology text", False),
+    (r"\brun zizmor\b", "zizmor recommendation", True),
 )
+
+# Where the renderer puts audited-repo identifiers (check, job, workflow, step
+# names): inline code spans, and TOC link text pointing at a pole anchor
+# (`[<check>](#pole-N)`). Fenced blocks are NOT stripped: agent prompts are
+# skill prose; a code span never crosses a line, so fence markers stay intact.
+_IDENT_CODE_SPAN_RE = re.compile(r"`[^`\n]+`")
+_IDENT_POLE_LINK_RE = re.compile(r"\[[^\]\n]*\]\(#pole-\d+\)")
+
+
+def _strip_audited_identifiers(report: str) -> str:
+    return _IDENT_POLE_LINK_RE.sub("[]", _IDENT_CODE_SPAN_RE.sub("``", report))
 
 # Every typographic dash the render boundary (_strip_emdashes) must flatten to an
 # ASCII "-". A report that still carries any of these slipped past the sanitizer.
@@ -2042,7 +2057,9 @@ def check_fences_balanced(report: str) -> Check:
 
 def check_no_domain_leakage(report: str) -> Check:
     name = "no ci-secure template leakage (security-domain framing in ci-speedup prose)"
-    hits = [why for pat, why in _LEAK_PATTERNS if re.search(pat, report, re.IGNORECASE)]
+    prose = _strip_audited_identifiers(report)
+    hits = [why for pat, why, ident_ok in _LEAK_PATTERNS
+            if re.search(pat, prose if ident_ok else report, re.IGNORECASE)]
     return Check(name, not hits,
                  "clean - only audited-repo content references security tooling, if any"
                  if not hits else f"template leak: {', '.join(hits)}")
