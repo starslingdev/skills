@@ -3140,6 +3140,41 @@ def check_pole_drill_belongs_to_its_job(report: str, findings_path: Path | None)
                  f"({len(drilled)} drilled job(s))")
 
 
+# A pole's prompt that sends the agent to "the Audit link" tells the truth ONLY when that
+# pole's section renders the `🔗 Audit:` line (`blocking_path._audit_links`, emitted only
+# when a run log was captured for the pole). The 2026-11-03 dogfood report rendered a third
+# pole with no captured log, so no Audit line, while its prompt said "open its log (the
+# Audit link)" - a coding agent sent to a link that is not there. Same dangling-reference
+# class as the cross-run check above, re-derived per pole. Literals pinned to the renderer
+# by `test_phase0_literals_stay_coupled_to_the_renderer`. The report footer's generic
+# "follow the pole's **🔗 Audit** link" note carries markup between the two words, so it
+# never matches the reference pattern.
+_AUDIT_LINK_REF_RE = re.compile(r"\bAudit link\b", re.IGNORECASE)
+_AUDIT_LINE_MARKER = "**🔗 Audit:**"
+
+
+def check_pole_audit_link_reference_resolves(report: str) -> Check:
+    """Each Audit pointer has a linked Audit line outside quoted code blocks."""
+    name = "every pole that cites the Audit link renders its own Audit line"
+    sections = _pole_header_sections(report)
+    citing = [(wf, check, body) for wf, check, body in sections
+              if _AUDIT_LINK_REF_RE.search(body)]
+    if not citing:
+        return Check(name, True, f"{len(sections)} pole(s); none cites an Audit link",
+                     skipped=not sections)
+    dangling = [f"`{wf}` ▸ {check}" for wf, check, body in citing
+                if not any(line.startswith(_AUDIT_LINE_MARKER)
+                           and re.search(r"\[[^\n]*\]\(https?://[^\s)]+\)", line)
+                           for line in _nonfence_markdown_lines(body))]
+    if dangling:
+        return Check(name, False,
+                     "pole(s) cite 'the Audit link' but render no linked '🔗 Audit:' line, "
+                     "so the prompt sends the agent to a link that "
+                     "is not there (capture the pole's log in the data pass, or render it "
+                     "without the pointer): " + "; ".join(dangling))
+    return Check(name, True, f"{len(citing)} pole(s) cite the Audit link; each renders it")
+
+
 # --- gap-fill evidence grounding (issue #106) --------------------------------
 # The phase-4a gap-fill has the driving agent READ a third-party job log and author an analysis
 # JSON `{cause, breakdown, evidence, prompt}` that renders ~verbatim as a `🤖 LLM root-cause
@@ -14342,6 +14377,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_speed_poles_complete(report, findings_path),
         check_aggregation_gate_poles_never_prescribe(report, findings_path),
         check_pole_drill_belongs_to_its_job(report, findings_path),
+        check_pole_audit_link_reference_resolves(report),
         check_gap_fill_evidence_grounded(report, findings_path),
         check_no_root_cause_pole_is_gap_filled(report),
         check_dropped_check_not_framed_on_path(report, findings_path),

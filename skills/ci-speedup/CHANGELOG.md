@@ -1204,6 +1204,10 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-11-04**: Select captured long-pole logs with the report's gate-frequency, slow-mode, and matrix ordering so equal caps cannot leave a displayed gate undrilled. Reject Audit pointers backed only by an unlinked marker or quoted code, and distinguish missing direct links from missing captured logs. (#185)
+
+- **2026-11-03** — Every rendered long pole is drilled. The data pass captured drill logs for 2 distinct job matrices while the report renders up to 5, so a third gating job rendered with no Audit line, captured timeline or cross-run check, yet its agent prompt said "open its log (the Audit link)". The drill cap now equals the render cap (at most 3 extra job-log fetches plus their magnitude probes). A pole whose log is still missing (a failed fetch, a render without a bundle) points the agent at a recent pull-request run instead of the Audit link, and `verify_report.py` fails any pole that cites the Audit link without rendering its Audit line. (#185)
+
 - **2026-11-04** — Keep a coverage-gap pole unfilled unless its attached analysis has a nonblank cause and prompt plus nonempty verbatim evidence lines. Empty or ungrounded analyses cannot suppress the waterfall and Audit warnings. (#184)
 
 - **2026-11-03** — A long pole whose only catalog match is a generic structural pattern (OPT75, "one step holds the time", or OPT71, "the check could be de-scoped") is now a coverage gap: with a captured log it renders the "no drill-down available" trigger naming the generic pattern, is listed in the gap signal, and takes the phase-4a `--analysis`, while its generic card still renders. Previously such a pole counted as covered, its log was never read, and the report said "no known root-cause pattern matched" for its top lever. The Audit line says that phrase only for a real gap, and `verify_report.py` fails any pole that says it without a `🤖 LLM root-cause analysis`. OPT70/72/73/74/78 name a cause and still cover their pole. (#184)

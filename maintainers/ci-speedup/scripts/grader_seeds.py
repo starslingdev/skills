@@ -79,6 +79,7 @@ TRIAGE_ALLOWLIST = {
     "report drills every gating pole, each with a hand-off prompt": AUTO_SEED,                      # check_speed_poles_complete
     "aggregation-gate poles tell the upstream story, never an optimize-this prompt": AUTO_SEED,    # check_aggregation_gate_poles_never_prescribe
     "each rendered pole's drill belongs to its own job (no cross-job log leak)": AUTO_SEED,         # check_pole_drill_belongs_to_its_job
+    "every pole that cites the Audit link renders its own Audit line": AUTO_SEED,                   # check_pole_audit_link_reference_resolves
     "every 🤖 gap-fill evidence line is verbatim from the captured job log (issue #106)": AUTO_SEED,  # check_gap_fill_evidence_grounded
     "a pole with no known root-cause pattern carries a gap-fill analysis": AUTO_SEED,             # check_no_root_cause_pole_is_gap_filled
     "no spine-dropped check is also framed on the merge-gating critical path": AUTO_SEED,           # check_dropped_check_not_framed_on_path
@@ -190,6 +191,7 @@ CHECK_CLASS = {
     "report drills every gating pole, each with a hand-off prompt": "missing-second-pole-or-finding",  # a required pole/finding is missing
     "aggregation-gate poles tell the upstream story, never an optimize-this prompt": "prescribed-a-fix",  # an "optimize this step" prompt over a `needs:`-only success sink that runs no work
     "each rendered pole's drill belongs to its own job (no cross-job log leak)": "fabricated-or-unsupported-finding",  # a drill misattributed to the wrong job's evidence
+    "every pole that cites the Audit link renders its own Audit line": "fabricated-or-unsupported-finding",  # a prompt points at an Audit link the pole does not render
     "every 🤖 gap-fill evidence line is verbatim from the captured job log (issue #106)": "fabricated-or-unsupported-finding",  # a quoted evidence line not in the captured log = a fabricated/altered quote
     "a pole with no known root-cause pattern carries a gap-fill analysis": "coverage-gap-dead-end",  # exact match: a pole shipped with no root cause while its log was in hand
     "no spine-dropped check is also framed on the merge-gating critical path": "mis-ranked-lever",  # spine/critical-path framing error

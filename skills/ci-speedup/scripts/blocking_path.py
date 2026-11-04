@@ -94,9 +94,10 @@ _PCTW = 4
 _CORELEN = 3 + _LBLW + 2 + _BARW + 2 + _DURW + 2 + _PCTW
 _MARKCOL = _CORELEN + 2
 _TOP_WORKFLOWS = 5  # render the long pole of this many distinct workflows (matches the
-# data layer's _STRUCTURAL_TOP_N so every analysed pole renders; the top
-# _DRILL_DISTINCT_MATRICES get a raw-log drill, poles below that render shallow from their
-# sampled per-step decomposition — see render-depth-2to5 spec / R1–R3 fixes)
+# data layer's _STRUCTURAL_TOP_N so every analysed pole renders). collect_runs'
+# _DRILL_DISTINCT_MATRICES equals this, so every rendered pole gets a raw-log drill; a pole
+# whose capture is missing (failed fetch, render without a bundle) renders shallow from its
+# sampled per-step decomposition and never cites an Audit link it lacks (R1–R3 fixes)
 _ALSO_NOTICED_CAP = 12  # max residual hygiene patterns shown in the "Also noticed" appendix
 _TIER2_CAP = 12  # max promoted runner-minute findings shown before the residual appendix
 _RUNNER_MINUTE_SPINE_CAP = 12  # max cost-spine rows rendered before a hidden-row disclosure
@@ -3645,13 +3646,23 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
         wtg.append("- No per-step breakdown was captured for this job; profile its "
                    "slowest step in the repo.")
     out += wtg + [""]
+    # Point at "the Audit link" ONLY when this pole's section renders one. `_audit_links`
+    # is what the render loop emits for the pole from these same inputs (its `leaf`
+    # argument shapes only the wording, never whether the line appears), so deriving it
+    # here keeps the prompt and the section in step without a flag a caller could forget.
+    # A pole with no captured log (a failed fetch, a render without a bundle) gets no
+    # Audit line, and its prompt must not send the agent to one (verify_report's
+    # `check_pole_audit_link_reference_resolves`).
+    log_ref = ("open its log (the Audit link)" if _audit_links(timeline, pole, None, run_url)
+               else "open its log in a recent pull-request run of this job "
+                    "(no direct log link is shown here)")
     if struct_pats:
         out += ["STRUCTURAL CATALOG PATTERN MATCHED",
                 f"- A structural catalog pattern ({', '.join(struct_pats)}) matched this "
                 "pole - see the **structural root-cause** section above for the measured "
                 "lever, its risk / guardrail / rollout, and the catalog fix recipe. The "
-                "step above is the load-bearing one that lever targets; open its log (the "
-                "Audit link) to see exactly what inside it the lever reshapes.", ""]
+                f"step above is the load-bearing one that lever targets; {log_ref} to see "
+                "exactly what inside it the lever reshapes.", ""]
     elif dd_pats == ["OPT81"]:
         out += ["RUNNER-CLASS COMPARISON MATCHED",
                 "- A measured runner-class comparison (OPT81) matched this pole - see its "
@@ -3664,8 +3675,7 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
                 f"pole - see {_dd_where(dd_pats)} for the measured lever and "
                 "its catalog fix recipe (it sits ON the critical path, so it shrinks this "
                 "pole's wall time). The step above is the load-bearing one that lever "
-                "targets; open its log (the Audit link) to see what inside it the lever "
-                "reshapes.", ""]
+                f"targets; {log_ref} to see what inside it the lever reshapes.", ""]
     if opt79:
         out += ["MEASURED CACHE PATTERN MATCHED",
                 "- OPT79 (a cache that costs more than it saves) matched this pole - "
@@ -3684,9 +3694,9 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
     if not struct_pats and not dd_pats and not opt79 and not opt82:
         out += ["NO CATALOG PATTERN MATCHED",
                 "- ci-speedup's detector set didn't recognize this job's stack, so there "
-                "is no named sub-cause. The step above is the load-bearing one; open its "
-                "log (the Audit link) and determine what inside it is slow (e.g. an "
-                "uncached build, a serial test phase, a large install).", ""]
+                f"is no named sub-cause. The step above is the load-bearing one; {log_ref} "
+                "and determine what inside it is slow (e.g. an uncached build, a serial "
+                "test phase, a large install).", ""]
     if opt79_minor:
         out += ["ALSO MEASURED ON THIS JOB",
                 "- A small measured cache cost (OPT79) is also shown in its **Measured "
@@ -5332,6 +5342,76 @@ def _mag_line(mag: dict[str, Any] | None, leaf: dict[str, Any] | None) -> list[s
         out.append(f"- [run {rid}]({url}) — {fmt(_num(x.get('value')))}{tag}")
     out.append("")
     return out
+
+
+def _select_render_poles(doc: dict[str, Any], poles: list[dict[str, Any]]) -> tuple[
+        list[dict[str, Any]], list[dict[str, Any]]]:
+    """Choose the exact bounded set both the collector drills and the report shows.
+
+    This uses only already-collected facts, including actual gate frequency and
+    aggregation-gate dependencies; choosing the same count by median is not enough.
+    The second result retains matrix siblings for structural-finding accounting.
+    """
+    cp = doc.get("pr_critical_path") or {}
+    checks = cp.get("checks") or []
+    counts, present, n = _gate_counts(cp)
+    if not n and checks and all(c.get("present_on") is not None for c in checks):
+        denominator = int(cp.get("check_present_n_pr") or 0)
+        if denominator:
+            present = {str(c.get("name", "")): int(c.get("present_on") or 0)
+                       for c in checks}
+            n = denominator
+    required = {str(c) for c in (doc.get("required_checks") or [])}
+    frequencies = {str(c.get("name", "")): c.get("pole_n") for c in checks}
+    have_frequencies = bool(frequencies) and all(v is not None for v in frequencies.values())
+
+    def typical_name(name: str) -> bool:
+        if name in required:
+            return True
+        if have_frequencies:
+            return (int(cp.get("check_present_n_pr") or 0) < _RARE_PRESENCE_MIN_PR
+                    or int(frequencies.get(name) or 0) >= _POLE_RECUR_FLOOR)
+        return n < _RARE_PRESENCE_MIN_PR or present.get(name, 0) > n * _RARE_PRESENCE_FRAC
+
+    def key(p):
+        return str(p.get("check", "")), str(p.get("workflow_file") or "")
+
+    def own_rank(p):
+        name = key(p)[0]
+        return n + 1 if name in required else counts.get(name, 0)
+
+    file_poles = [p for p in poles if str(p.get("workflow_file") or "").endswith(
+        (".yml", ".yaml")) and p.get("job")]
+    upstream_rank: dict[tuple[str, str], int] = {}
+    upstream_typical: set[tuple[str, str]] = set()
+    for p in file_poles:
+        shape = _agg_gate_shape(p, doc.get("workflow_job_graph"), list(checks))
+        if shape:
+            upstream = (_check_name(shape["slowest"]), str(
+                shape["slowest"].get("workflow_file") or p.get("workflow_file") or ""))
+            upstream_rank[upstream] = max(upstream_rank.get(upstream, 0), own_rank(p))
+            if typical_name(key(p)[0]):
+                upstream_typical.add(upstream)
+
+    def typical(p):
+        return typical_name(key(p)[0]) or key(p) in upstream_typical
+
+    def impact(p):
+        return max(_num(p.get("p50_s")) or 0.0,
+                   _num((p.get("bimodal") or {}).get("high_p50_s")) or 0.0)
+
+    file_poles = sorted((p for p in file_poles if typical(p)), key=lambda p: (
+        -max(own_rank(p), upstream_rank.get(key(p), 0)), -(_num(p.get("p50_s")) or 0.0))) + sorted(
+            (p for p in file_poles if not typical(p)), key=lambda p: -(_num(p.get("p50_s")) or 0.0))
+    matrices: list[dict[str, Any]] = []
+    for p in file_poles:
+        if not any(_same_matrix(key(p)[0], key(q)[0], key(p)[1], key(q)[1]) for q in matrices):
+            matrices.append(p)
+    if not matrices:
+        return [], file_poles
+    typical_rest = sorted((p for p in matrices[1:] if typical(p)), key=lambda p: -impact(p))
+    rare_rest = sorted((p for p in matrices[1:] if not typical(p)), key=lambda p: -impact(p))
+    return [matrices[0], *typical_rest, *rare_rest][:_TOP_WORKFLOWS], file_poles
 
 
 def _gate_counts(cp: dict[str, Any]) -> tuple[dict[str, int], dict[str, int], int]:
@@ -10966,16 +11046,6 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
                 wf = str(p.get("workflow_file", ""))
                 wf_gate[wf] = wf_gate.get(wf, 0) + _gatef(p)
 
-    # One representative pole per distinct JOB MATRIX (sibling legs collapse via
-    # `_same_matrix`). POLE 1 is the typical gate (slowest by median); POLE 2+ are the
-    # next distinct matrices by IMPACT = max(median, bimodal slow mode) - so the second
-    # finding is the next-biggest LEVER (a bimodal `test` job that's a long gate on a
-    # large share of PRs), not a higher-median but trivial check. Grouping by matrix,
-    # not workflow, lets two jobs in ONE workflow both surface (langfuse).
-    def _pole_impact(p: dict[str, Any]) -> float:
-        bi = p.get("bimodal") or {}
-        return max(_num(p.get("p50_s")) or 0.0, _num(bi.get("high_p50_s")) or 0.0)
-
     # A pole is part of the TYPICAL merge path only if it ran on a MAJORITY of sampled
     # PRs. A slow but rarely-run FILE pole — a label-gated / opt-in benchmark that ran on
     # a handful of PRs — must not headline "why is the merge slow?" just because it's long
@@ -11054,30 +11124,7 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
                          for c in (cp.get("checks") or [])
                          if str(c.get("name", "")) and _opt_in_rare_check(str(c.get("name", "")))}
 
-    def _by_p50(ps: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return sorted(ps, key=lambda p: -(_num(p.get("p50_s")) or 0.0))
-
-    # Among TYPICAL poles, order by how often each is the ACTUAL per-PR gate (its pole_count),
-    # tie-broken by p50. Presence (`_pole_typical`) only proves a check RAN on most PRs — not
-    # that it's the one most PRs wait on. A check present on every PR but slower than the real
-    # gate on only a handful of them (flwrlabs/flower: `datasets-test` is the slowest on 3/20
-    # while `framework-test` gates 17/20) must NOT head the list just because its global p50 is
-    # highest. A REQUIRED check gates every PR by definition (must pass to merge), so it ranks
-    # above the frequency-counted ones regardless of how often the sample shows it slowest —
-    # mirroring the `_pole_typical` required exemption so a required gate still headlines. When
-    # pole_count is unavailable (no populations) `_gatef` is 0 for all, so this reduces to the
-    # prior pure-p50 order — and a single typical pole is unaffected either way.
-    def _own_gate_rank(p: dict[str, Any]) -> int:
-        if str(p.get("check", "")) in _required_names:
-            return npop + 1
-        return _gatef(p)
-
-    # An AGGREGATION GATE (a `needs:`-everything verdict job, `_agg_gate_shape`) holds no time
-    # of its own: its wait IS its slowest `needs:` upstream member. So that member inherits the
-    # gate's rank (a job a required verdict needs is required in effect), and the p50
-    # tie-break then puts the real time-holder FIRST and the trivial gate after it. Without
-    # this a required 3s verdict headed the poles ahead of the 4m32s suite it waits on.
-    _agg_upstream_rank: dict[tuple[str, str], int] = {}
+    # Keep aggregation upstream members on the typical path for report labels.
     _agg_upstream_typical: set[tuple[str, str]] = set()
     for _ap in (p for p in poles if _is_file_pole(p)):
         _ash = _agg_gate_shape(_ap, doc.get("workflow_job_graph"),
@@ -11086,42 +11133,11 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
             continue
         _ak = (_check_name(_ash["slowest"]),
                str(_ash["slowest"].get("workflow_file") or _ap.get("workflow_file") or ""))
-        _agg_upstream_rank[_ak] = max(_agg_upstream_rank.get(_ak, 0), _own_gate_rank(_ap))
         if _typical_check(str(_ap.get("check", ""))):
             _agg_upstream_typical.add(_ak)
 
-    def _agg_key_of(p: dict[str, Any]) -> tuple[str, str]:
-        return (str(p.get("check", "")), str(p.get("workflow_file") or ""))
-
-    def _gate_rank(p: dict[str, Any]) -> int:
-        return max(_own_gate_rank(p), _agg_upstream_rank.get(_agg_key_of(p), 0))
-
-    def _by_gate_then_p50(ps: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return sorted(ps, key=lambda p: (-_gate_rank(p), -(_num(p.get("p50_s")) or 0.0)))
-
-    # Typical poles first, rare ones demoted below — so POLE 1 is the most-gating TYPICAL
-    # gate, not the slowest job overall (which can be a rare opt-in benchmark).
-    _file_all = [p for p in poles if _is_file_pole(p)]
-    file_poles = (_by_gate_then_p50([p for p in _file_all if _pole_typical(p)])
-                  + _by_p50([p for p in _file_all if not _pole_typical(p)]))
-    by_matrix: list[dict[str, Any]] = []
-    for p in file_poles:
-        if not any(_same_matrix(str(p.get("check", "")), str(q.get("check", "")),
-                                str(p.get("workflow_file", "")), str(q.get("workflow_file", "")))
-                   for q in by_matrix):
-            by_matrix.append(p)
-    if by_matrix:
-        # gate_rep = the most-gating typical pole (head of the typical-first order). The rest
-        # keep the tiering — remaining typical poles (by impact) before demoted rare ones —
-        # so a rare giant never outranks a real common gate even as POLE 2+.
-        gate_rep = by_matrix[0]
-        _rest_typ = sorted((p for p in by_matrix[1:] if _pole_typical(p)),
-                           key=lambda p: -_pole_impact(p))
-        _rest_rare = sorted((p for p in by_matrix[1:] if not _pole_typical(p)),
-                            key=lambda p: -_pole_impact(p))
-        pole_wfs = [gate_rep, *_rest_typ, *_rest_rare][:_TOP_WORKFLOWS]
-    else:
-        pole_wfs = []
+    pole_wfs, file_poles = _select_render_poles(doc, poles)
+    _file_all = file_poles
     # Stash each pole's per-PR co-occurrence (from `populations`) on the pole dict, so the floor
     # helpers (`_floor_note`/`_pole_addressable` → `_binding_floor`/`_floor_candidate`) can size the
     # addressable ceiling against the slowest sibling that co-occurs on a MAJORITY of THIS pole's
