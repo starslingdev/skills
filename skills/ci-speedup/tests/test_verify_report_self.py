@@ -4720,6 +4720,8 @@ def _tier2_promoted_finding(fid: str, runner_min: float = 120.0,
         f["fix_recipe_anchor"] = "opt35--missing-fail-fast"
     elif proof == "post_completion_waste_opt64":
         f["pattern"] = "OPT64"
+        f["rerun_sample"] = {"retried_runs": 3, "passed_on_retry": 0,
+                             "unsettled_on_retry": 0, "min_retried_runs": 3}
         f["title"] = "Repeated Workflow Attempts From Same Failing Job"
         f["workflow_file"] = ".github/workflows/ci.yml"
         f["affected_jobs"] = []

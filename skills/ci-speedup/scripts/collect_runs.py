@@ -15320,7 +15320,8 @@ def _detect_opt64_rerun_attempt_waste(
         # retry that failed again counts toward a ranked saving; one still
         # running (no conclusion) or cancelled/skipped may yet pass.
         retry_outcomes = {str(j.get("conclusion") or "").lower()
-                          for j in latest_jobs if _attempt_job_key(j) == key}
+                          for j in latest_jobs if _attempt_job_key(j) == key
+                          and _job_run_attempt(j) == latest_attempt}
         if "success" in retry_outcomes:
             bucket["passed_on_retry"] += 1
         elif not retry_outcomes or not retry_outcomes <= _FAIL_FAST_FAILURE_CONCLUSIONS:

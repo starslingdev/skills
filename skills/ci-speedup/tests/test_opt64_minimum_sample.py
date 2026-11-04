@@ -127,11 +127,11 @@ def test_legacy_one_run_opt64_is_not_ranked_and_carries_no_credit(tmp_path: Path
     assert "100 min/mo" not in report
 
 
-def test_legacy_three_run_opt64_still_ranks(tmp_path: Path):
+def test_legacy_three_run_opt64_has_unknown_retry_outcomes(tmp_path: Path):
     doc = vs._tier2_doc_for_verify()
     doc["findings"] = [_legacy_opt64(3)]
     report, _rp, _fp = vs._tier2_artifacts(tmp_path, doc)
-    assert "pattern=OPT64 -->" in report
+    assert "pattern=OPT64 -->" not in report
 
 
 def test_engine_formula_and_billable_gap_render_readably(tmp_path: Path):
@@ -171,7 +171,8 @@ def _ranked_then_tampered(tmp_path: Path, mutate):
     the findings.json under it. Returns the check (before, after)."""
     vr = vs._load_verify_report()
     doc = vs._tier2_doc_for_verify()
-    doc["findings"] = [_legacy_opt64(3)]
+    doc["findings"] = [vs._tier2_promoted_finding(
+        "f-opt64", 100.0, proof="post_completion_waste_opt64")]
     report, report_path, findings_path = vs._tier2_artifacts(tmp_path, doc)
     assert "pattern=OPT64 -->" in report
     before = _check_named(vr, report, report_path, findings_path)
@@ -184,6 +185,7 @@ def _ranked_then_tampered(tmp_path: Path, mutate):
 
 def test_verify_fails_a_report_ranking_opt64_on_one_retried_run(tmp_path: Path):
     def one_run(f):
+        f["rerun_sample"]["retried_runs"] = 1
         f["measured_evidence"]["table"]["rows"] = f["measured_evidence"]["table"]["rows"][:1]
     before, after = _ranked_then_tampered(tmp_path, one_run)
     assert before.ok and not before.skipped, before
@@ -193,7 +195,7 @@ def test_verify_fails_a_report_ranking_opt64_on_one_retried_run(tmp_path: Path):
 
 def test_verify_fails_a_report_ranking_opt64_on_a_flaky_retry(tmp_path: Path):
     def flaky(f):
-        f["rerun_sample"] = {"retried_runs": 3, "passed_on_retry": 1, "min_retried_runs": 3}
+        f["rerun_sample"] = {"retried_runs": 3, "passed_on_retry": 1, "unsettled_on_retry": 0, "min_retried_runs": 3}
     before, after = _ranked_then_tampered(tmp_path, flaky)
     assert before.ok and not before.skipped, before
     assert not after.ok and not after.skipped, after
@@ -204,7 +206,7 @@ def test_verify_check_reads_the_stamp_before_the_table(tmp_path: Path):
     # The table is capped at six rows; the stamp is the exact count.
     vr = vs._load_verify_report()
     f = copy.deepcopy(_legacy_opt64(3))
-    f["rerun_sample"] = {"retried_runs": 9, "passed_on_retry": 0, "min_retried_runs": 3}
+    f["rerun_sample"] = {"retried_runs": 9, "passed_on_retry": 0, "unsettled_on_retry": 0, "min_retried_runs": 3}
     assert vr._vr_opt64_hold_reason(f) is None
     f["rerun_sample"]["retried_runs"] = 2
     assert "2 retried run" in (vr._vr_opt64_hold_reason(f) or "")
@@ -225,13 +227,14 @@ def test_a_retry_still_running_is_not_counted_as_failing_again():
 
 
 def test_verify_group_cover_ignores_a_held_sibling(tmp_path: Path):
-    # Legacy siblings on one workflow: an eligible 80-min row and a one-retry
+    # Synthetic siblings on one workflow: an eligible 80-min row and a one-retry
     # 40-min row against 100 prior-attempt source minutes. The renderer holds
     # the 40-min sibling and promotes the 80; the verifier must agree.
     vr = vs._load_verify_report()
     doc = vs._tier2_doc_for_verify()
     ok = vs._opt64_finding("f-opt64a", 80.0, "test", line=31)
     held = vs._opt64_finding("f-opt64b", 40.0, "test", line=32)
+    held["rerun_sample"]["retried_runs"] = 1
     held["measured_evidence"]["table"]["rows"] = held["measured_evidence"]["table"]["rows"][:1]
     doc["findings"] = [ok, held]
     vs._set_tier2_spine_rows(doc, [vs._tier2_spine_row(
@@ -241,3 +244,31 @@ def test_verify_group_cover_ignores_a_held_sibling(tmp_path: Path):
     assert "id=f-opt64b" not in report
     chk = vr.check_tier2_savings_rows_backed_by_cost_spine(report, findings_path)
     assert chk.ok and not chk.skipped, chk
+
+
+def test_unknown_retry_outcomes_never_rank(tmp_path):
+    vr = vs._load_verify_report()
+    variants = [None, {'retried_runs': 3},
+                {'retried_runs': 3, 'passed_on_retry': 0},
+                {'retried_runs': 3, 'passed_on_retry': -1, 'unsettled_on_retry': 0},
+                {'retried_runs': 3, 'passed_on_retry': 0, 'unsettled_on_retry': 'unknown'}]
+    for stamp in variants:
+        f = _legacy_opt64(3)
+        if stamp is not None:
+            f['rerun_sample'] = stamp
+        assert bp._opt64_held(f) is not None, stamp
+        assert vr._vr_opt64_hold_reason(f) is not None, stamp
+        doc = vs._tier2_doc_for_verify()
+        doc['findings'] = [f]
+        assert 'pattern=OPT64 -->' not in bp.render(doc)
+
+
+def test_carried_forward_failure_does_not_prove_a_failed_retry():
+    samples = [_retried_run(f'r{i}') for i in range(3)]
+    for run, all_jobs, latest in samples:
+        prior_test = next(j for j in all_jobs if j['name'] == 'test' and j['run_attempt'] == 1)
+        latest[:] = [j for j in latest if j['name'] != 'test'] + [prior_test]
+        all_jobs[:] = [j for j in all_jobs if not (j['name'] == 'test' and j['run_attempt'] == 2)]
+    f = _detect(samples)[0]
+    assert f.get('advisory') is True
+    assert f['runner_min_saving'] is None

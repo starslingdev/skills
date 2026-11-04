@@ -4,9 +4,9 @@
       "kind": "tier2_section_lead",
       "subject": "f114",
       "fields": {
-        "raw_min": 73378.7,
-        "naive_min": 73378.7,
-        "count": 7,
+        "raw_min": 73029.3,
+        "naive_min": 73029.3,
+        "count": 5,
         "not_promoted_measured_no_source": 2,
         "not_promoted_measured_cert_deferred": 0,
         "not_promoted_modeled": 8,
@@ -40,17 +40,6 @@
     },
     {
       "kind": "tier2_neutrality_line",
-      "subject": "f115",
-      "fields": {
-        "proof": "post_completion_waste",
-        "margin_s": null,
-        "derivation_basis": "jobs_api_timestamps",
-        "pattern": "OPT64"
-      },
-      "rendered": "machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `WebView on iOS Simulator (4/4)` identifies the retry cause, so prior-attempt compute is post-completion waste)."
-    },
-    {
-      "kind": "tier2_neutrality_line",
       "subject": "f42",
       "fields": {
         "proof": "post_completion_waste",
@@ -70,17 +59,6 @@
         "pattern": "OPT46"
       },
       "rendered": "machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (superseded runs: same head_branch, a newer run started before this one finished (timestamp overlap); cancellation cause is inference)."
-    },
-    {
-      "kind": "tier2_neutrality_line",
-      "subject": "f116",
-      "fields": {
-        "proof": "post_completion_waste",
-        "margin_s": null,
-        "derivation_basis": "jobs_api_timestamps",
-        "pattern": "OPT64"
-      },
-      "rendered": "machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `WebView on iOS Simulator (3/4)` identifies the retry cause, so prior-attempt compute is post-completion waste)."
     },
     {
       "kind": "tier2_neutrality_line",
@@ -110,11 +88,11 @@
       "kind": "tier2_headline",
       "subject": "f114",
       "fields": {
-        "raw_min": 73378.7,
-        "count": 7,
+        "raw_min": 73029.3,
+        "count": 5,
         "derivation_basis": "jobs_api_timestamps"
       },
-      "rendered": "> **After the gate.** 73,379 min/mo of wall-clock-neutral runner minutes is recoverable (7 neutral findings; none can slow a merge)."
+      "rendered": "> **After the gate.** 73,029 min/mo of wall-clock-neutral runner minutes is recoverable (5 neutral findings; none can slow a merge)."
     },
     {
       "kind": "pole_gate_prompt",

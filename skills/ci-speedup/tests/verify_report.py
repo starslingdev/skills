@@ -5200,19 +5200,24 @@ _VR_OPT64_MIN_RETRIED_RUNS = 3
 def _vr_opt64_hold_reason(f: dict) -> str | None:
     """Why an OPT64 finding may NOT be ranked, or None when it may. The engine's
     `rerun_sample` stamp is exact; a legacy finding without it counts its evidence
-    table, one row per retried run (capped at six, above the minimum, so the
-    comparison stays exact). A dominant job that passed on the retry is a
+    table for sample size only; missing retry outcomes keep it advisory. A
+    dominant job that passed on the retry is a
     flaky-test signal (SKILL.md admission rule 3) whatever the count."""
     if str(f.get("pattern") or "") != "OPT64" or f.get("advisory"):
         return None
     stamp = _as_dict(f.get("rerun_sample"))
     n = stamp.get("retried_runs")
-    _int = lambda v: v if isinstance(v, int) and not isinstance(v, bool) else 0  # noqa: E731
-    if isinstance(n, int) and not isinstance(n, bool):
-        passed, unsettled = _int(stamp.get("passed_on_retry")), _int(stamp.get("unsettled_on_retry"))
+    valid = lambda value: isinstance(value, int) and not isinstance(value, bool) and value >= 0
+    if valid(n):
+        passed, unsettled = stamp.get("passed_on_retry"), stamp.get("unsettled_on_retry")
+        known = valid(passed) and valid(unsettled) and passed + unsettled <= n
     else:
         n = len(_as_list(_as_dict(_as_dict(f.get("measured_evidence")).get("table")).get("rows")))
-        passed = unsettled = 0
+        known = False
+    if not known:
+        if n < _VR_OPT64_MIN_RETRIED_RUNS:
+            return f"rests on {n} retried run(s), below the minimum of {_VR_OPT64_MIN_RETRIED_RUNS}"
+        return "retry outcomes are unavailable or invalid; re-collect before crediting a saving"
     runs = f"{n} retried run{'s' if n != 1 else ''}"
     if passed > 0:
         return f"in {passed} of {runs} the dominant job passed on the retry (flaky signal)"

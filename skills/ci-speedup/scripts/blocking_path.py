@@ -6488,23 +6488,22 @@ def _dedupe_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
 _OPT64_MIN_RETRIED_RUNS = 3
 
 
-def _opt64_retry_counts(f: dict[str, Any]) -> tuple[int, int]:
-    """(retried runs, runs whose dominant job passed or did not fail again on the
-    retry) for an OPT64
-    finding. The engine's `rerun_sample` stamp is exact. A legacy finding has no
-    stamp: its evidence table holds one row per retried run, capped at six,
-    which is above the minimum, so the below-minimum comparison stays exact. A
-    legacy finding cannot show a pass on the retry, so the count rule alone
-    applies to it."""
+def _opt64_retry_counts(f: dict[str, Any]) -> tuple[int, int | None]:
+    """Return the run count and non-failing retry count; None means unknown outcomes.
+
+    Legacy evidence rows can establish sample size, but carry no retry conclusions.
+    Missing or malformed outcome counts cannot certify that every retry failed.
+    """
     stamp = _as_dict(f.get("rerun_sample"))
     n = stamp.get("retried_runs")
-    if isinstance(n, int) and not isinstance(n, bool):
-        # A retry that passed and one that never failed again both hold the group.
-        held = sum(v for v in (stamp.get("passed_on_retry"), stamp.get("unsettled_on_retry"))
-                   if isinstance(v, int) and not isinstance(v, bool))
-        return n, held
+    valid = lambda value: isinstance(value, int) and not isinstance(value, bool) and value >= 0
+    if valid(n):
+        passed, unsettled = stamp.get("passed_on_retry"), stamp.get("unsettled_on_retry")
+        if valid(passed) and valid(unsettled) and passed + unsettled <= n:
+            return n, passed + unsettled
+        return n, None
     table = _as_dict(_as_dict(f.get("measured_evidence")).get("table"))
-    return len(_as_list(table.get("rows"))), 0
+    return len(_as_list(table.get("rows"))), None
 
 
 def _opt64_held(f: dict[str, Any]) -> dict[str, Any] | None:
@@ -6514,12 +6513,14 @@ def _opt64_held(f: dict[str, Any]) -> dict[str, Any] | None:
     if str(f.get("pattern") or "") != "OPT64" or f.get("advisory"):
         return None
     retried, passed = _opt64_retry_counts(f)
-    if passed <= 0 and retried >= _OPT64_MIN_RETRIED_RUNS:
+    if passed == 0 and retried >= _OPT64_MIN_RETRIED_RUNS:
         return None
     runs = f"{retried} retried run{'s' if retried != 1 else ''}"
     why = (f"in {passed} of {runs} the job did not fail again on the retry"
-           if passed > 0 else
-           f"this rests on {runs}; a ranked saving needs at least {_OPT64_MIN_RETRIED_RUNS}")
+           if passed is not None and passed > 0 else
+           f"this rests on {runs}; a ranked saving needs at least {_OPT64_MIN_RETRIED_RUNS}"
+           if retried < _OPT64_MIN_RETRIED_RUNS else
+           "retry outcomes are unavailable or invalid; re-collect before crediting a saving")
     return {**f, "advisory": True, "runner_min_saving": None,
             "size_note": f"advisory, uncredited: {why}"}
 

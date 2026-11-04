@@ -36,7 +36,7 @@ not measured: lifecycle data was not collected
 > - **Don't** sum workflow durations, and don't average per-job ratios. Both hide a gain on the one workflow that gates.
 > - **Caches:** judge cache-touching fixes on the second run after the change.
 >
-> **After the gate.** 73,379 min/mo of wall-clock-neutral runner minutes is recoverable (7 neutral findings; none can slow a merge).
+> **After the gate.** 73,029 min/mo of wall-clock-neutral runner minutes is recoverable (5 neutral findings; none can slow a merge).
 
 ## 📋 Contents
 
@@ -50,15 +50,13 @@ not measured: lifecycle data was not collected
 
 **⏳ Pre-start wait** - 41 jobs wait in queue before starting (developer wall-clock the spine above doesn't capture): [see below](#pre-start-wait).
 
-**💸 Runner-minute reductions** - ~73,379 min/mo of measured, merge-safe runner-minute savings, backed by a 133-row cost spine: [section](#runner-minute-reductions).
+**💸 Runner-minute reductions** - ~73,029 min/mo of measured, merge-safe runner-minute savings, backed by a 133-row cost spine: [section](#runner-minute-reductions).
 
 1. 🟢 [Superseded Runs Not Cancelled](#r-1) - 71,644 min/mo
 2. 🟢 [Superseded Runs Not Cancelled](#r-2) - 1,072 min/mo
-3. 🟢 [Repeated Workflow Attempts From Same…](#r-3) - 268 min/mo
-4. 🟢 [Superseded Runs Not Cancelled](#r-4) - 159 min/mo
-5. 🟢 [Superseded Runs Not Cancelled](#r-5) - 141 min/mo
-6. 🟢 [Repeated Workflow Attempts From Same…](#r-6) - 82 min/mo
-7. 🟢 [Cron Schedule Too Frequent](#r-7) - 13 min/mo
+3. 🟢 [Superseded Runs Not Cancelled](#r-3) - 159 min/mo
+4. 🟢 [Superseded Runs Not Cancelled](#r-4) - 141 min/mo
+5. 🟢 [Cron Schedule Too Frequent](#r-5) - 13 min/mo
 
 **🧹 Also noticed** - 15 findings (mostly off-path runner-minute savings; **one or more flagged DO sit on the critical path** and cut wall-clock): [see below](#also-noticed).
 
@@ -570,7 +568,7 @@ All figures are runner-minutes; multiply by your runner's per-minute rate to get
 +121 more runner-minute rows hidden
 
 > These findings cut wall-clock-neutral runner spend without touching your merge gate; each R-numbered finding carries a machine-derived proof it cannot slow a PR.
-> **73,379 min/mo credited after de-overlap** (naive sum 73,379 min/mo; 7 neutral findings; not promoted: 2 measured item(s) (2 without source rows) · 8 modeled item(s) · 6 structural shared-step item(s); see Also noticed). All figures are runner-minutes; multiply by your runner's per-minute rate to get dollars.
+> **73,029 min/mo credited after de-overlap** (naive sum 73,029 min/mo; 5 neutral findings; not promoted: 2 measured item(s) (2 without source rows) · 8 modeled item(s) · 6 structural shared-step item(s); see Also noticed). All figures are runner-minutes; multiply by your runner's per-minute rate to get dollars.
 
 <!-- ci-speedup:tier2-finding id=f114 pattern=OPT46 -->
 <a id="r-1"></a>
@@ -690,76 +688,12 @@ history, and apply the catalog's fix recipe where it is safe. State the
 failure mode and how you have guarded it before shipping.
 ```
 
-<!-- ci-speedup:tier2-finding id=f115 pattern=OPT64 -->
+<!-- ci-speedup:tier2-finding id=f42 pattern=OPT46 -->
 <a id="r-3"></a>
 
-## 🟢 Runner saving 3: `tests_webview_simulator.yml` - 268 min/mo
+## 🟢 Runner saving 3: `infra.yml` - 159 min/mo
 
 **The #3 merge-safe runner-minute saving measured on this repo, by size.**
-
-| Run | Latest attempt | Dominant failing job | Prior attempts | Prior attempt compute min | Dominant failure min |
-| --- | --- | --- | --- | --- | --- |
-| `28560703032` | 2 | `WebView on iOS Simulator (4/4)` | 1 | 65.7 | 21.8 |
-| `28555153022` | 3 | `WebView on iOS Simulator (4/4)` | 2 | 155.0 | 50.0 |
-| `28470726784` | 2 | `WebView on iOS Simulator (4/4)` | 1 | 69.1 | 27.2 |
-| `28412462737` | 4 | `WebView on iOS Simulator (4/4)` | 3 | 203.8 | 65.0 |
-| `27986856884` | 2 | `WebView on iOS Simulator (4/4)` | 1 | 62.1 | 26.4 |
-| `27973339667` | 2 | `WebView on iOS Simulator (4/4)` | 1 | 66.5 | 30.5 |
-
-_Measured from GitHub jobs API `filter=all` minus `filter=latest` for workflow runs whose run_attempt > 1. The finding is emitted only when each credited prior attempt has the same unique dominant failed/timed-out job and that dominant failing job appears in the latest attempt; ambiguous ties, mixed-cause attempts, and retry-only volume are withheld._
-
-**💸 Bill root-cause - OPT64 · Repeated Workflow Attempts From Same Failing Job** - risk **LOW**
-
-- **What ci-speedup measured:** 6 sampled run_attempt>1 workflow run(s) had prior-attempt jobs present in `filter=all` but absent from `filter=latest`; the unique dominant failing job was `WebView on iOS Simulator (4/4)` (9 failed/timed-out prior-attempt job(s), 221.0 failed min) and it appeared again in the latest attempt. ~268 runner-min/mo of prior-attempt compute (43/30d ÷ 100 sampled all-status run(s)).
-- **Why this can't slow your merge:** machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `WebView on iOS Simulator (4/4)` identifies the retry cause, so prior-attempt compute is post-completion waste).
-- **Source block:** `runner_minute_spine` matched 4 prior-attempt rows for `.github/workflows/tests_webview_simulator.yml`; current measured cost spine for those rows is 403.203 raw min/mo, 415.807 billable min/mo. The saving is credited in raw minutes; billable rounds each job up to a whole minute, as GitHub bills.
-- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
-
-#### 🤖 Prompt for your coding agent
-
-```text
-ci-speedup measured the pattern below but does NOT prescribe the fix -
-investigate it in the repo and apply a safe change.
-
-Pattern: OPT64 - Repeated Workflow Attempts From Same Failing Job.
-Where: tests_webview_simulator.yml.
-What ci-speedup saw: 6 sampled run_attempt>1 workflow run(s) had prior-attempt jobs present in `filter=all` but absent from `filter=latest`; the unique dominant failing job was `WebView on iOS Simulator (4/4)` (9 failed/timed-out prior-attempt job(s), 221.0 failed min) and it appeared again in the latest attempt. ~268 runner-min/mo of prior-attempt compute (43/30d ÷ 100 sampled all-status run(s)).
-Saving: 268 min/mo of runner capacity - a bill/capacity reduction, not a merge-wait cut. Neutrality certificate: `post_completion_waste` - compute burned after the run signal is already decided (run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `WebView on iOS Simulator (4/4)` identifies the retry cause, so prior-attempt compute is post-completion waste).
-
-Read the catalog entry (background, fix recipe, and guardrail):
-  https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
-
-NEVER BUY SPEED BY CHECKING LESS
-- The commit that merges must still be verified by exactly what verifies
-  it today. Unless the finding above IS that reduction, do not: delete or
-  narrow matrix legs so fewer configurations are tested; add
-  `continue-on-error`, `|| true`, or any other exit-code suppression;
-  narrow or remove a required status check, or change a job so a required
-  check stops reporting; skip tests behind a path/branch filter that do
-  cover the change; or cut test counts, timeouts, or retries in a way
-  that weakens the signal rather than the cost.
-- Not running a check against a change it cannot fail on is NOT checking
-  less, and several catalog fixes work exactly that way: a `paths:` /
-  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
-  selection. Those stay in bounds as long as the commit that merges is
-  still verified by every check its own change could fail - follow the
-  guardrail on the catalog recipe where this prompt links one, because
-  that is the half it exists to protect.
-- A pipeline that finishes sooner because it verifies less is a
-  regression, not a win. If that is the only way to make this faster, say
-  so and stop.
-
-Do: confirm the pattern at each location above, recover the intent from git
-history, and apply the catalog's fix recipe where it is safe. State the
-failure mode and how you have guarded it before shipping.
-```
-
-<!-- ci-speedup:tier2-finding id=f42 pattern=OPT46 -->
-<a id="r-4"></a>
-
-## 🟢 Runner saving 4: `infra.yml` - 159 min/mo
-
-**The #4 merge-safe runner-minute saving measured on this repo, by size.**
 
 | Workflow | Overlapping (raced) runs | Mean compute/run (timed basis) | Reclaimable remainder (mean per run) | Reclaimable runner-min/mo (range) |
 | --- | --- | --- | --- | --- |
@@ -814,11 +748,11 @@ failure mode and how you have guarded it before shipping.
 ```
 
 <!-- ci-speedup:tier2-finding id=f46 pattern=OPT46 -->
-<a id="r-5"></a>
+<a id="r-4"></a>
 
-## 🟢 Runner saving 5: `tests_bidi.yml` - 141 min/mo
+## 🟢 Runner saving 4: `tests_bidi.yml` - 141 min/mo
 
-**The #5 merge-safe runner-minute saving measured on this repo, by size.**
+**The #4 merge-safe runner-minute saving measured on this repo, by size.**
 
 | Workflow | Overlapping (raced) runs | Mean compute/run (timed basis) | Reclaimable remainder (mean per run) | Reclaimable runner-min/mo (range) |
 | --- | --- | --- | --- | --- |
@@ -872,73 +806,12 @@ history, and apply the catalog's fix recipe where it is safe. State the
 failure mode and how you have guarded it before shipping.
 ```
 
-<!-- ci-speedup:tier2-finding id=f116 pattern=OPT64 -->
-<a id="r-6"></a>
-
-## 🟢 Runner saving 6: `tests_webview_simulator.yml` - 82 min/mo
-
-**The #6 merge-safe runner-minute saving measured on this repo, by size.**
-
-| Run | Latest attempt | Dominant failing job | Prior attempts | Prior attempt compute min | Dominant failure min |
-| --- | --- | --- | --- | --- | --- |
-| `28043360084` | 2 | `WebView on iOS Simulator (3/4)` | 1 | 88.1 | 20.2 |
-| `27850434623` | 2 | `WebView on iOS Simulator (3/4)` | 1 | 44.2 | 9.1 |
-| `27849871516` | 2 | `WebView on iOS Simulator (3/4)` | 1 | 57.9 | 16.9 |
-
-_Measured from GitHub jobs API `filter=all` minus `filter=latest` for workflow runs whose run_attempt > 1. The finding is emitted only when each credited prior attempt has the same unique dominant failed/timed-out job and that dominant failing job appears in the latest attempt; ambiguous ties, mixed-cause attempts, and retry-only volume are withheld._
-
-**💸 Bill root-cause - OPT64 · Repeated Workflow Attempts From Same Failing Job** - risk **LOW**
-
-- **What ci-speedup measured:** 3 sampled run_attempt>1 workflow run(s) had prior-attempt jobs present in `filter=all` but absent from `filter=latest`; the unique dominant failing job was `WebView on iOS Simulator (3/4)` (3 failed/timed-out prior-attempt job(s), 46.1 failed min) and it appeared again in the latest attempt. ~82 runner-min/mo of prior-attempt compute (43/30d ÷ 100 sampled all-status run(s)).
-- **Why this can't slow your merge:** machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `WebView on iOS Simulator (3/4)` identifies the retry cause, so prior-attempt compute is post-completion waste).
-- **Source block:** `runner_minute_spine` matched 4 prior-attempt rows for `.github/workflows/tests_webview_simulator.yml`; current measured cost spine for those rows is 403.203 raw min/mo, 415.807 billable min/mo. The saving is credited in raw minutes; billable rounds each job up to a whole minute, as GitHub bills.
-- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
-
-#### 🤖 Prompt for your coding agent
-
-```text
-ci-speedup measured the pattern below but does NOT prescribe the fix -
-investigate it in the repo and apply a safe change.
-
-Pattern: OPT64 - Repeated Workflow Attempts From Same Failing Job.
-Where: tests_webview_simulator.yml.
-What ci-speedup saw: 3 sampled run_attempt>1 workflow run(s) had prior-attempt jobs present in `filter=all` but absent from `filter=latest`; the unique dominant failing job was `WebView on iOS Simulator (3/4)` (3 failed/timed-out prior-attempt job(s), 46.1 failed min) and it appeared again in the latest attempt. ~82 runner-min/mo of prior-attempt compute (43/30d ÷ 100 sampled all-status run(s)).
-Saving: 82 min/mo of runner capacity - a bill/capacity reduction, not a merge-wait cut. Neutrality certificate: `post_completion_waste` - compute burned after the run signal is already decided (run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `WebView on iOS Simulator (3/4)` identifies the retry cause, so prior-attempt compute is post-completion waste).
-
-Read the catalog entry (background, fix recipe, and guardrail):
-  https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
-
-NEVER BUY SPEED BY CHECKING LESS
-- The commit that merges must still be verified by exactly what verifies
-  it today. Unless the finding above IS that reduction, do not: delete or
-  narrow matrix legs so fewer configurations are tested; add
-  `continue-on-error`, `|| true`, or any other exit-code suppression;
-  narrow or remove a required status check, or change a job so a required
-  check stops reporting; skip tests behind a path/branch filter that do
-  cover the change; or cut test counts, timeouts, or retries in a way
-  that weakens the signal rather than the cost.
-- Not running a check against a change it cannot fail on is NOT checking
-  less, and several catalog fixes work exactly that way: a `paths:` /
-  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
-  selection. Those stay in bounds as long as the commit that merges is
-  still verified by every check its own change could fail - follow the
-  guardrail on the catalog recipe where this prompt links one, because
-  that is the half it exists to protect.
-- A pipeline that finishes sooner because it verifies less is a
-  regression, not a win. If that is the only way to make this faster, say
-  so and stop.
-
-Do: confirm the pattern at each location above, recover the intent from git
-history, and apply the catalog's fix recipe where it is safe. State the
-failure mode and how you have guarded it before shipping.
-```
-
 <!-- ci-speedup:tier2-finding id=f44 pattern=OPT36 -->
-<a id="r-7"></a>
+<a id="r-5"></a>
 
-## 🟢 Runner saving 7: `publish_release.yml` - 13 min/mo
+## 🟢 Runner saving 5: `publish_release.yml` - 13 min/mo
 
-**The #7 merge-safe runner-minute saving measured on this repo, by size.**
+**The #5 merge-safe runner-minute saving measured on this repo, by size.**
 
 | Workflow | Consecutive same-head_sha schedule runs | Mean compute/run | Credited runner-min/mo |
 | --- | --- | --- | --- |
