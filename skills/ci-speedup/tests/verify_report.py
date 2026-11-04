@@ -13682,6 +13682,7 @@ def check_structural_step_category_not_payload_binned_as_build(findings_path: Pa
 # test_verify_report_self (L7).
 _VR_LEAF_STEP_CATEGORY: dict[str, str] = {
     "dependency-cache": "install",
+    "cache-effective-path-mismatch": "install",
     "prisma-migrate-once": "test",
     "vitest-v8-coverage": "test",
     "vitest-isolate-pool": "test",

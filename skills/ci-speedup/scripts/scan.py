@@ -6017,6 +6017,104 @@ def _trigger_conditionality(parsed: list[tuple[str, dict, str]]) -> dict[str, st
     return out
 
 
+def _cache_effective_paths(root: Path, parsed: list) -> dict:
+    """Optional N01 context only; never a static finding. Do not execute Bazel.
+
+    Scoped configs, imports, dynamic flags and unknown runner OS are not read.
+    Use symbolic home/temp roots rather than the auditor machine's environment.
+    """
+    import posixpath
+
+    def normal(value, windows, shell=False):
+        value = str(value).strip().strip('"\'').replace("\\", "/")
+        value = value.replace("${{ runner.temp }}", "@temp")
+        # `$HOME` is expanded by a shell `run:` line only; actions/cache does not
+        # expand it (a literal `$HOME` cache path is itself a missing path).
+        home = r"^(?:~|\$HOME|\$\{HOME\})(?=/|$)" if shell else r"^~(?=/|$)"
+        value = re.sub(home, "@home", value)
+        if re.search(r"[$*?{};|&<>`]|^!", value):
+            return None
+        value = posixpath.normpath(value)
+        return value.lower() if windows else value
+
+    rc_unread = []
+    try:
+        rc = _read_config_text(root / ".bazelrc")
+    except OSError:
+        rc = ""
+    if rc is None:  # present but not UTF-8 text: unknown, never "no option"
+        rc, rc_unread = "", [".bazelrc not read (not UTF-8 text)"]
+    result = {}
+    for rel, doc, _raw in parsed:
+        for job_id, job in (doc.get("jobs") or {}).items():
+            if not isinstance(job, dict):
+                continue
+            runner = str(job.get("runs-on", ""))
+            windows = "windows" in runner.lower()
+            os_known = any(x in runner.lower() for x in ("ubuntu", "linux", "macos", "windows")) and "${{" not in runner
+            options, unread = [], list(rc_unread)
+            for line in rc.splitlines():
+                line = line.split("#", 1)[0].strip()
+                if not line:
+                    continue
+                if line.startswith(("import ", "try-import ")):
+                    unread.append(".bazelrc import not read")
+                if "--disk_cache=" not in line and "--repository_cache=" not in line:
+                    continue
+                if not re.match(r"^(?:common|build):?\s+", line):
+                    unread.append(".bazelrc scoped or command-specific cache option not read")
+                    continue
+                options.append((line, False))
+            steps = [step for step in (job.get("steps") or []) if isinstance(step, dict)]
+            for step in steps:
+                command = str(step.get("run", ""))
+                for line in command.splitlines():
+                    if re.match(r"^\s*bazel(?:isk)?\s+(?:build|test)\b", line):
+                        options.append((line, True))
+            paths = []
+            for option, shell in options:
+                # Preserve the one recognized expression, including its spaces.
+                option = option.replace("${{ runner.temp }}", "@temp")
+                for raw in re.findall(r"--(?:disk_cache|repository_cache)=(\"[^\"]*\"|'[^']*'|\S+)",
+                                      option):
+                    quoted = raw[:1] in "\"'"
+                    # A quoted value is read whole; an unterminated one is not read.
+                    norm = (None if quoted and (len(raw) < 2 or raw[-1] != raw[0])
+                            else normal(raw, windows, shell))
+                    raw = raw[1:-1] if quoted and norm is not None else raw
+                    if norm is None or not os_known:
+                        unread.append("dynamic cache option or runner OS not read")
+                    else:
+                        paths.append((raw, norm))
+            facts = []
+            for step in steps:
+                uses = str(step.get("uses", ""))
+                if not re.match(r"^actions/cache@", uses):
+                    continue
+                name = step.get("name") or "Run " + uses
+                if "${{" in str(name):
+                    continue
+                raw = str((step.get("with") or {}).get("path", ""))
+                caches = [normal(x, windows) for x in raw.splitlines() if x.strip()]
+                unknown = list(unread)
+                if not caches or None in caches:
+                    unknown.append("cache path not read")
+                likely = None
+                # Overlapping parent/child paths are not disjoint. Unknown or
+                # imported config prevents naming a particular effective path.
+                if caches and None not in caches and not unknown and os_known:
+                    disjoint = [original for original, tool in paths
+                                if all(tool != cache and not tool.startswith(cache + "/")
+                                       and not cache.startswith(tool + "/") for cache in caches)]
+                    if len(set(disjoint)) == 1:
+                        likely = disjoint[0]
+                facts.append({"step": str(name), "path": raw,
+                              "likely_directory": likely, "not_read": sorted(set(unknown))})
+            if facts:
+                result.setdefault(rel, {})[str(job.get("name") or job_id)] = facts
+    return result
+
+
 def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> dict[str, Any]:
     branch_source = "flag" if default_branch else None
     if default_branch is None:
@@ -6260,6 +6358,7 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
         # (`blocking_path`'s `vitest-isolate-pool`) must read before it can
         # claim the repo is still paying for per-file isolation.
         "test_runner_isolation": _read_test_runner_isolation(root),
+        "cache_effective_paths": _cache_effective_paths(root, parsed),
         # What the repo's ESLint config(s) say about TYPE-AWARE parsing and
         # which type-aware rules are on, plus the package scripts a workflow's
         # `npm run lint` resolves through. NOT a finding — the config fact the

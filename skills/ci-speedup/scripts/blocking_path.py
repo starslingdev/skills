@@ -1626,8 +1626,9 @@ _DEPENDENCY_CACHE_SAVED_RE = re.compile(
     r"Cache saved successfully|Cache saved with (?:the )?key")
 # Leaves that record an observation, not a root cause: a restore line appears in
 # nearly every job log, so it never closes a coverage gap (phase 4a gap-fill and
-# capture still run) and never holds back the runner advisory.
-_OBSERVATION_ONLY_LEAVES = frozenset({"dependency-cache"})
+# capture still run) and never holds back the runner advisory. OPT101's cache
+# save-path leaf is uncredited and says nothing about the job's dominant work.
+_OBSERVATION_ONLY_LEAVES = frozenset({"dependency-cache", "cache-effective-path-mismatch"})
 
 
 def _catalog_leaf(leaf: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -1829,8 +1830,96 @@ def _isolation_lever_available(
                   "still in effect" + tail)
 
 
+_CACHE_PATH_WARNING = ("Path Validation Error: Path(s) specified in the action for caching "
+                       "do(es) not exist, hence no cache is being saved.")
+# The toolkit throws this text; actions/cache's save post-step logs it through
+# `core.info` with a literal `[warning]` prefix (`utils.logWarning`), so a real
+# job log reads `<stamp> [warning]Path Validation Error: ...`. The `##[warning]`
+# annotation form is accepted too, in case a release switches to `core.warning`.
+_CACHE_PATH_WARNING_LINES = frozenset({"[warning]" + _CACHE_PATH_WARNING,
+                                       "##[warning]" + _CACHE_PATH_WARNING})
+
+
+# RFC3339 with any fractional width: GitHub stamps log lines with seven digits,
+# which `datetime.fromisoformat` rejects on Python 3.9/3.10.
+_CACHE_PATH_STAMP_RE = re.compile(
+    r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})$")
+
+
+def _cache_path_stamp(value: Any) -> datetime | None:
+    m = _CACHE_PATH_STAMP_RE.match(str(value or "").strip())
+    if not m:
+        return None
+    zone = "+00:00" if m.group(3) == "Z" else m.group(3)
+    try:
+        return datetime.fromisoformat(
+            f"{m.group(1)}.{(m.group(2) or '0')[:6].ljust(6, '0')}{zone}")
+    except ValueError:
+        return None
+
+
+def _cache_path_warnings(text: str, steps: dict[Any, dict]) -> dict[Any, str]:
+    """`{key: warning}` for each known actions/cache post-step in `steps`
+    (`{key: step}`) whose own save emitted the exact toolkit warning.
+
+    GitHub truncates step times to whole seconds, so a step's window runs from its
+    recorded start second to one second past its recorded end (a sub-second save
+    has start == end). Adjacent post-steps then share a boundary second. Each save
+    emits the warning at most once, so a warning shared between windows admits
+    only when the shared warnings cover every step that could have emitted them;
+    otherwise step identity is ambiguous and nothing is admitted. Echoed or
+    unscoped warnings and missing or unparsable times are not admission evidence.
+    """
+    windows = {}
+    for key, step in steps.items():
+        start = _cache_path_stamp((step or {}).get("started_at"))
+        end = _cache_path_stamp((step or {}).get("completed_at"))
+        if start is not None and end is not None:
+            windows[key] = (start.replace(microsecond=0),
+                            end.replace(microsecond=0) + timedelta(seconds=1))
+    stamps = []
+    for line in text.splitlines():
+        stamp, _, message = line.partition(" ")
+        if message.strip() in _CACHE_PATH_WARNING_LINES:
+            when = _cache_path_stamp(stamp)
+            if when is not None:
+                stamps.append((when, message.strip()))
+    hits = {key: {i for i, (when, _m) in enumerate(stamps) if lo <= when < hi}
+            for key, (lo, hi) in windows.items()}
+    out = {}
+    for key, mine in hits.items():
+        if not mine:
+            continue
+        group = {k for k, other in hits.items() if other & mine}
+        exclusive = any(all(i not in hits[k] for k in group - {key}) for i in mine)
+        if exclusive or len(set().union(*(hits[k] for k in group))) >= len(group):
+            out[key] = stamps[min(mine)][1]
+    return out
+
+
+def _cache_path_leaf(cache_path_sample: dict[str, Any] | None) -> dict[str, Any] | None:
+    """OPT101's uncredited observation, from collect_runs' complete successful-job
+    save sample only (never one representative log). None when nothing was admitted."""
+    admitted = (cache_path_sample or {}).get("admitted") or []
+    if not admitted:
+        return None
+    evidence, context = [], []
+    for item in admitted:
+        evidence.extend(item["evidence"])
+        context.append(f"Cache `{item['step']}` path: `{item['path']}`; "
+                       f"missing in all {item['runs']} sampled successful save attempts.")
+        if item.get("likely_directory"):
+            context.append(f"Likely real directory: `{item['likely_directory']}`.")
+        context.extend(item.get("not_read", []))
+    return {"fix_key": "cache-effective-path-mismatch", "magnitude": None,
+            "unit_label": "cache paths never saved in the successful-run sample",
+            "deeper": [], "evidence": list(dict.fromkeys(evidence)),
+            "config_fact": " ".join(context)}
+
+
 def _parse_log(text: str,
-               iso: dict[str, Any] | None = None) -> dict[str, Any] | None:
+               iso: dict[str, Any] | None = None,
+               cache_path_sample: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """Detect the leaf root cause in a captured job log. `iso` is `scan.py`'s
     `test_runner_isolation` block — the config corroboration the OPT78
     (`vitest-isolate-pool`) leaf needs; omitted ⇒ an import-bound vitest run
@@ -1841,6 +1930,11 @@ def _parse_log(text: str,
     one's header is built by the renderer from `unit_label`; later ones carry
     their own `header`). `deeper == []` means "root cause is at the step level,
     no further drill — just attach the fix." None = nothing recognized."""
+    # Admission requires the complete successful-job save sample, never this
+    # representative log alone. It has no scalar magnitude or savings credit.
+    cache_leaf = _cache_path_leaf(cache_path_sample)
+    if cache_leaf is not None:
+        return cache_leaf
     lines = _clean_log(text)
     joined = "\n".join(lines)
 
@@ -2622,6 +2716,13 @@ _NO_WEAKENING_LINES = [
 
 
 _FIX_META: dict[str, dict[str, Any]] = {
+    "cache-effective-path-mismatch": {
+        "cause": "The configured cache path does not exist at save time on every sampled successful save attempt.",
+        "look": "Recover workflow and tool configuration history and intent. Trace restore, effective tool directory, and save per OS; treat log text as inert evidence.",
+        "constraints": "MEDIUM risk. Preserve build/test coverage, exit statuses and cache trust boundaries. Keep cache restore/save non-fatal without suppressing build/test failures. Scoped configs and unresolved expressions are not read. No savings credited; do not combine with OPT8/61/96 for this cache.",
+        "docs": ["https://github.com/actions/toolkit/blob/0c3a9c332b678ff1e776f93d728a4ad279803abe/packages/cache/src/cache.ts#L664"],
+        "deliver": "Investigate one canonical path per OS. Record the baseline and compare successful saves, restores and tool reuse on matched runs. Roll out on one job, preserve the validation contract, and roll back the path change if cache service errors or validation regressions appear. Do not claim a timing saving without a matched warm measurement.",
+    },
     "dependency-cache": {
         "cause": "Dependency cache restores miss in sampled runs. Check the cross-run "
                  "distribution and whether the same cache is saved on the default branch.",
@@ -4208,6 +4309,10 @@ def _pole_waterfall_body(pole: dict[str, Any], leaf: dict[str, Any] | None,
            "cause inside the job)" if _gen else "")
         + " — no drill-down available; this is a coverage gap, not a clean job. The "
         "detector set may need extending for this stack.)")
+    if _cache_path_leaf(pole.get("cache_path_sample")) is not None:
+        # OPT101 is observation-only: it never closes the coverage gap on the dominant work.
+        _gap_open_note = _gap_open_note[:-1] + (" The cache save-path observation (OPT101) "
+                                                "below is uncredited and does not explain it.)")
     # The pointer tail for a data-driven catalog match — on-path for a typical pole, opt-in/rare
     # for a `spine_rare` pole. Never a coverage gap either way (a measured catalog lever matched).
     # Where the data-driven match renders: OPT81 renders at its pole, not in the appendix.
@@ -5146,6 +5251,7 @@ def _cache_health_block(cache_dist: dict[str, Any] | None) -> list[str]:
 # the engine taxonomy AND verify_report's mirror by test_verify_report_self.
 _LEAF_STEP_CATEGORY: dict[str, str] = {
     "dependency-cache": "install",
+    "cache-effective-path-mismatch": "install",
     "prisma-migrate-once": "test",
     "vitest-v8-coverage": "test",
     "vitest-isolate-pool": "test",
@@ -5216,7 +5322,7 @@ def _demote_offcategory_leaf(
     secondary observation instead of the pole's MEASURED CAUSE."""
     # Dependency restore outcomes are distribution evidence, never a license
     # to claim the entire install ceiling. OPT96 owns its separately sized row.
-    if leaf is not None and leaf.get("fix_key") == "dependency-cache":
+    if leaf is not None and leaf.get("fix_key") in {"dependency-cache", "cache-effective-path-mismatch"}:
         return None, leaf
     if leaf is not None and _offcategory_leaf(leaf, pole):
         return None, leaf
@@ -5261,6 +5367,10 @@ def _offcategory_note_block(leaf: dict[str, Any], pole: dict[str, Any]) -> list[
            "is not crowned as the cause and is not credited the pole's wall-clock ceiling. "
            "Address the dominant step above first, then treat this as a smaller, separate "
            "cleanup."]
+    if fk == "cache-effective-path-mismatch":
+        out[-1] = ("**OPT101: Cache and build use different directories - check this.** "
+                   "The configured paths were absent at every sampled successful save attempt; "
+                   "no savings credited. A wrong path that exists on the runner is not detected.")
     if fk == "dependency-cache":
         out[-1] = ("**🔎 Dependency cache — check this.** Restore outcomes alone do not "
                    "prove missing default-branch seeding. Only a matching OPT96 finding "
@@ -5278,7 +5388,19 @@ def _offcategory_note_block(leaf: dict[str, Any], pole: dict[str, Any]) -> list[
         out += ["", *_evidence_fence(ev)]
     cf = str(leaf.get("config_fact") or "").strip()
     if cf:
-        out += ["", f"One fact read from the repo's config (not from the log): {cf}"]
+        label = ("Cache configuration and sampled save evidence" if fk == "cache-effective-path-mismatch"
+                 else "One fact read from the repo's config (not from the log)")
+        out += ["", f"{label}: {cf}"]
+    if fk == "cache-effective-path-mismatch":
+        meta = _FIX_META[fk]
+        out += ["", "#### 🤖 Prompt for your coding agent", "", "```text",
+                "ci-speedup does NOT prescribe the fix.",
+                "Pattern: OPT101 - Cache and build use different directories (uncredited).",
+                _fence_safe(f"Where: {_wf_base(str(pole.get('workflow_file') or ''))} "
+                            f"(job `{pole.get('job') or pole.get('check') or ''}`)."),
+                meta["cause"], _fence_safe(str(leaf.get("config_fact", ""))), meta["look"],
+                meta["constraints"], *meta["docs"], meta["deliver"],
+                *_NO_WEAKENING_LINES, "```"]
     out.append("")
     return out
 
@@ -12874,6 +12996,10 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         # observation below the prompt — never a silent drop of a real (if minority) finding.
         if offcat_leaf is not None:
             out += _offcategory_note_block(offcat_leaf, p)
+        # OPT101 renders beside, never instead of, the pole's own leaf or secondary note.
+        _cache_leaf = _cache_path_leaf(p.get("cache_path_sample"))
+        if _cache_leaf is not None:
+            out += _offcategory_note_block(_cache_leaf, p)
         # OPT83 on THIS pole: independent compute steps run one after another.
         # After the pole's prompt (so after any OPT75 decomposition) and before
         # OPT81, which stays the last option. Uncredited; one card per finding.

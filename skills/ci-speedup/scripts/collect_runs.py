@@ -25361,6 +25361,53 @@ def _as_dict_local(v: object) -> dict:
 _NOOP_FLOOR_S = 30.0
 
 
+def _cache_path_sample(client, repo: str, jobs: list, facts: list,
+                       known: dict | None = None) -> dict:
+    """N01: every sampled successful job reaching this cache's save post-step.
+    No duration floor, bounded magnitude probe, or failed-run evidence may shrink
+    this denominator. Missing logs/ambiguous steps withhold, never imply warning.
+    """
+    import blocking_path as bp
+    # One pass over jobs, every fact checked while that job's log is loaded, then
+    # the log is released: memory stays one log wide however many runs warn.
+    state = [{"evidence": [], "runs": 0, "valid": True} for _ in facts]
+    for job in jobs:
+        if job.get("conclusion") != "success":
+            continue
+        live = [i for i, s in enumerate(state) if s["valid"]]
+        if not live:
+            break
+        if not isinstance(job.get("steps"), list) or not job["steps"]:
+            for i in live:
+                state[i]["valid"] = False
+            break
+        reached = {}
+        for i in live:
+            matches = [step for step in job["steps"]
+                       if isinstance(step, dict)
+                       and step.get("name") == "Post " + facts[i]["step"]
+                       and step.get("conclusion") != "skipped"]
+            if len(matches) > 1:
+                state[i]["valid"] = False
+            elif matches:
+                reached[i] = matches[0]
+        if not reached:
+            continue
+        # `known`: logs already in hand (the drilled one), never downloaded twice.
+        text = (known or {}).get(job.get("id"))
+        if text is None:
+            text = _fetch_job_log(client, repo, job)
+        hits = bp._cache_path_warnings(text or "", reached)
+        for i in reached:
+            state[i]["runs"] += 1
+            if i in hits:
+                state[i]["evidence"].append(hits[i])
+            else:
+                state[i]["valid"] = False
+    return {"admitted": [dict(fact, runs=s["runs"], evidence=s["evidence"])
+                         for fact, s in zip(facts, state) if s["valid"] and s["runs"]]}
+
+
 def _persist_pole_logs(
     client: "GhClient", repo: str, poles: list[dict[str, Any]],
     jobs_per_run_by_wf: dict[str, list], data_dir: "Path", mag_runs: int = 3,
@@ -25368,6 +25415,7 @@ def _persist_pole_logs(
     iso: dict[str, Any] | None = None,
     opt96_findings: list[dict[str, Any]] | None = None,
     wf_docs: dict[str, Any] | None = None,
+    cache_effective_paths: dict | None = None,
 ) -> list[dict[str, Any]]:
     """Capture the long-pole jobs' raw logs ONCE into a local data bundle, so the
     report (and the fix-agent it hands off to) can read the step's INTERNAL timing
@@ -25553,6 +25601,13 @@ def _persist_pole_logs(
         # vs push and fork vs upstream, so the renderer can't frame a mostly-warm cache
         # as a top miss/churn lever off the single (slow-mode) drilled run. `state_fn`
         # annotates the SAME logs `_magnitude_sample` already fetches (no PR-bucket cost).
+        facts = ((cache_effective_paths or {}).get(wf) or {}).get(job, [])
+        # A failed drilled run never reached the save, so it cannot gate the sample.
+        if facts and (bp._CACHE_PATH_WARNING in log or repr_job.get("conclusion") != "success"):
+            all_jobs = [j for run in jobs_per_run_by_wf.get(wf, []) for j in run
+                        if str(j.get("name", "")) == job]
+            p["cache_path_sample"] = _cache_path_sample(client, repo, all_jobs, facts,
+                                                        known={repr_job.get("id"): log})
         leaf0 = bp._parse_log(log, iso) or {}
         _cache_fk = leaf0.get("fix_key") if leaf0.get("fix_key") in _CACHE_LEAF_KEYS else None
         # A restore line sits in nearly every job log. Sample dependency-cache
@@ -27875,7 +27930,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             events_jobs_by_wf=events_jobs_by_wf,
             iso=findings_doc.get("test_runner_isolation"),
             opt96_findings=[f for f in findings if f.get("pattern") == "OPT96"],
-            wf_docs=_wf_docs)
+            wf_docs=_wf_docs,
+            cache_effective_paths=findings_doc.get("cache_effective_paths"))
     _opt96_check_default_branch(findings_doc, default_branch)
     _ground_opt96(findings, drill_poles or poles, _wf_docs,
                   fetch_gaps={str(g.get("workflow_file")) for g in _sample_gaps()})
