@@ -6124,7 +6124,11 @@ def check_drill_log_capture_relation(report: str, findings_path: Path | None) ->
 
 
 # Mirror of blocking_path's GitHub-hosted label rule, kept independent on purpose.
-_VR_GITHUB_HOSTED_LABEL_RE = re.compile(r"^(ubuntu|windows|macos)-", re.IGNORECASE)
+_VR_GITHUB_HOSTED_LABEL_RE = re.compile(
+    r"^(?:ubuntu-(?:latest|slim|(?:18|20|22|24|26)\.04)(?:-arm)?|"
+    r"windows-(?:latest|2019|2022|2025)(?:-vs2026)?|windows-11(?:-vs2026)?-arm|"
+    r"macos-(?:latest|11|12|13|14|15|26)(?:-(?:intel|large|xlarge))?|xcode-27)$",
+    re.IGNORECASE)
 
 
 def _vr_is_github_hosted_label(label: object) -> bool:

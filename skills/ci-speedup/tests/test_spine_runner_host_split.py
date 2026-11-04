@@ -73,7 +73,25 @@ def test_github_hosted_label_rule():
     assert bp._is_github_hosted_label("ubuntu-latest")
     assert bp._is_github_hosted_label("macos-14")
     assert bp._is_github_hosted_label("windows-2022")
+    assert bp._is_github_hosted_label("ubuntu-slim")
+    assert bp._is_github_hosted_label("ubuntu-24.04-arm")
+    assert bp._is_github_hosted_label("windows-11-vs2026-arm")
+    assert bp._is_github_hosted_label("macos-26-intel")
     assert not bp._is_github_hosted_label("starsling-ubuntu-24.04")
     assert not bp._is_github_hosted_label("linux self-hosted")
     assert not bp._is_github_hosted_label("self-hosted ubuntu-22.04")
     assert not bp._is_github_hosted_label("")
+
+
+def test_custom_labels_with_os_prefix_are_not_recognised_as_hosted(tmp_path):
+    vr = _load_verify_report()
+    for label in ('ubuntu-private', 'windows-build-pool', 'macos-lab'):
+        assert not bp._is_github_hosted_label(label)
+        assert not vr._vr_is_github_hosted_label(label)
+    doc = _mixed_runner_spine_doc()
+    for row in doc['runner_minute_spine']['rows']:
+        if row['runner_label'] == 'ubuntu-latest':
+            row['runner_label'] = 'ubuntu-private'
+    report = bp.render(doc)
+    assert 'None of the 100.000 min/mo ran on GitHub-hosted runner labels' in report
+    assert vr.check_cost_spine_runner_host_split(report, _write(tmp_path, doc)).ok

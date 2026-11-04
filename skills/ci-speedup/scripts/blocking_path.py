@@ -7626,14 +7626,15 @@ def _spine_count_phrase(row_count: int, noun: str) -> str:
     return f"{phrase} ({_spine_hidden_rows_line(hidden)})" if hidden > 0 else phrase
 
 
-# GitHub-hosted runner image labels (`ubuntu-latest`, `windows-2022`, `macos-14`, the
-# `-<N>-cores` larger sizes, `ubuntu-slim`): the GitHub half of collect_runs'
-# `_PER_MINUTE_BILLED_LABEL_RE`, which also admits StarSling labels because StarSling
-# bills per minute too. GitHub bills only runners it hosts, so a self-hosted or
-# third-party runner's minutes are never on the GitHub bill. A runner's host is not a
-# risk or a defect; this only says who bills. A custom-named GitHub larger runner is
-# not recognised and counts as "other", which the note words as "not recognised".
-_GITHUB_HOSTED_LABEL_RE = re.compile(r"^(ubuntu|windows|macos)-", re.IGNORECASE)
+# Recognised hosted image labels, including older labels retained in saved reports.
+# Arbitrary names beginning with an OS name are not evidence of a hosted image.
+# Current label reference: https://docs.github.com/en/actions/reference/runners/github-hosted-runners
+# A custom-named larger runner remains unrecognised; the note discloses that limit.
+_GITHUB_HOSTED_LABEL_RE = re.compile(
+    r"^(?:ubuntu-(?:latest|slim|(?:18|20|22|24|26)\.04)(?:-arm)?|"
+    r"windows-(?:latest|2019|2022|2025)(?:-vs2026)?|windows-11(?:-vs2026)?-arm|"
+    r"macos-(?:latest|11|12|13|14|15|26)(?:-(?:intel|large|xlarge))?|xcode-27)$",
+    re.IGNORECASE)
 
 
 def _is_github_hosted_label(label: object) -> bool:
