@@ -3104,7 +3104,7 @@ _AUDIT_LINE_MARKER = "**🔗 Audit:**"
 
 
 def check_pole_audit_link_reference_resolves(report: str) -> Check:
-    """Every pole whose text cites 'the Audit link' renders its own `🔗 Audit:` line."""
+    """Each Audit pointer has a linked Audit line outside quoted code blocks."""
     name = "every pole that cites the Audit link renders its own Audit line"
     sections = _pole_header_sections(report)
     citing = [(wf, check, body) for wf, check, body in sections
@@ -3113,11 +3113,13 @@ def check_pole_audit_link_reference_resolves(report: str) -> Check:
         return Check(name, True, f"{len(sections)} pole(s); none cites an Audit link",
                      skipped=not sections)
     dangling = [f"`{wf}` ▸ {check}" for wf, check, body in citing
-                if _AUDIT_LINE_MARKER not in body]
+                if not any(line.startswith(_AUDIT_LINE_MARKER)
+                           and re.search(r"\[[^\n]*\]\(https?://[^\s)]+\)", line)
+                           for line in _nonfence_markdown_lines(body))]
     if dangling:
         return Check(name, False,
-                     "pole(s) cite 'the Audit link' but render no '🔗 Audit:' line - no run "
-                     "log was captured for them, so the prompt sends the agent to a link that "
+                     "pole(s) cite 'the Audit link' but render no linked '🔗 Audit:' line, "
+                     "so the prompt sends the agent to a link that "
                      "is not there (capture the pole's log in the data pass, or render it "
                      "without the pointer): " + "; ".join(dangling))
     return Check(name, True, f"{len(citing)} pole(s) cite the Audit link; each renders it")

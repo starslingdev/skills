@@ -9,9 +9,8 @@ timeline and no cross-run check, yet its agent prompt said "open its log (the Au
 link)". The coding agent was sent to a link that does not exist, and `verify_report.py`
 passed the report, although SKILL.md 5a requires every gating pole fully drilled.
 
-Fix: the data pass captures a drill log for every pole the render can show (the drill
-cap equals the render cap), and the prompt only names "the Audit link" when the pole's
-section renders one. `verify_report.check_pole_audit_link_reference_resolves` FAILs any
+Fix: the data pass and report share one bounded pole selector, and the prompt only
+names "the Audit link" when the pole's section renders one. `verify_report.check_pole_audit_link_reference_resolves` FAILs any
 pole whose text cites the Audit link without carrying the `🔗 Audit:` line.
 
 Run from the repo root:
@@ -30,6 +29,8 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
+
+import pytest
 
 _SKILL_DIR = Path(__file__).resolve().parents[1]
 _SCRIPTS = _SKILL_DIR / "scripts"
@@ -345,3 +346,62 @@ def test_verify_registers_the_audit_link_check():
     """Wired into the CLI gate, not just defined: `run_checks` must include it."""
     names = [c.name for c in vr.run_checks(_report("plain"), None, None, None)]
     assert vr.check_pole_audit_link_reference_resolves(_report("plain")).name in names
+
+
+@pytest.mark.parametrize("fake_line", [
+    "**🔗 Audit:** unavailable",
+    "```text\n**🔗 Audit:** [run](https://github.com/o/r/actions/runs/42)\n```",
+])
+def test_verify_requires_a_real_audit_link_outside_code_fences(fake_line):
+    report = _report(fake_line + "\n\nOpen the Audit link to inspect the job.")
+    assert not vr.check_pole_audit_link_reference_resolves(report).ok
+    linked = _report("**🔗 Audit:** run [42](https://github.com/o/r/actions/runs/42)"
+                     "\n\nOpen the Audit link to inspect the job.")
+    assert vr.check_pole_audit_link_reference_resolves(linked).ok
+
+
+def test_captured_log_without_timeline_does_not_claim_log_is_missing():
+    doc = {
+        "repo": "o/r", "scanned_at": "2026-10-20T00:00:00Z",
+        "data_sources": {"runs_sampled": 20, "jobs_sampled": 20},
+        "pr_critical_path": {"poles": [_shallow_pole()]},
+        "findings": [],
+    }
+    report = bp.render(doc, logs={"ci": "plain output from the captured job\n"})
+    assert "no run log was captured for it here" not in report
+    assert "no direct log link is shown here" in report
+
+
+def test_capture_selection_matches_rendered_gate_frequency_and_slow_mode(monkeypatch, tmp_path):
+    names = ["alpha", "beta", "gamma", "delta", "epsilon", "common"]
+    medians = dict(zip(names, [600, 500, 400, 300, 200, 100]))
+    choices = [name for name, count in zip(names, [2, 2, 2, 2, 6, 6])
+               for _ in range(count)]
+
+    class PartitionedRepo(_ThreeGateRepo):
+        def __init__(self):
+            super().__init__()
+            self.jobs = {
+                100 + i: ([_job(100 + i, 0, name, medians[name], "Work")]
+                          if name != "common" else [])
+                         + [_job(100 + i, 5, "common",
+                                 1000 if name == "common" else 100, "Work")]
+                for i, name in enumerate(choices)}
+
+        def _json_live(self, endpoint, allow_missing=False):
+            match = re.match(r"repos/o/r/commits/s(\d+)/check-runs", endpoint)
+            if match:
+                return {"check_runs": [
+                    {key: job[key] for key in ("name", "started_at", "completed_at")}
+                    for job in self.jobs[100 + int(match[1])]]}
+            return super()._json_live(endpoint, allow_missing)
+
+    monkeypatch.setattr(cr, "GhClient", PartitionedRepo)
+    doc = cr.collect({"findings": [{"id": "f1", "workflow_file": _WF}]}, "o/r",
+                     max_runs=20, with_logs=True, data_dir=tmp_path / "bundle",
+                     shallow_runs=10)
+    report = _render_like_run_py(doc, tmp_path)
+    rendered = {name for _, name, _ in vr._pole_header_sections(report)}
+    captured = {entry["check"] for entry in doc["data_bundle"]["logs"]}
+    assert len(rendered) == 5
+    assert rendered == captured
