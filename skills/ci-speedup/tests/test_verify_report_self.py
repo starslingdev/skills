@@ -4891,12 +4891,14 @@ def _tier2_promoted_finding(fid: str, runner_min: float = 120.0,
         f["fix_recipe_anchor"] = "opt35--missing-fail-fast"
     elif proof == "post_completion_waste_opt64":
         f["pattern"] = "OPT64"
+        f["rerun_sample"] = {"retried_runs": 3, "passed_on_retry": 0,
+                             "unsettled_on_retry": 0, "min_retried_runs": 3}
         f["title"] = "Repeated Workflow Attempts From Same Failing Job"
         f["workflow_file"] = ".github/workflows/ci.yml"
         f["affected_jobs"] = []
         f["fix_key"] = f"OPT64:{fid}"
         f["evidence"] = (
-            "1 sampled run_attempt>1 workflow run had prior-attempt jobs present "
+            "3 sampled run_attempt>1 workflow runs had prior-attempt jobs present "
             "in filter=all but absent from filter=latest; the unique dominant "
             "failing job was test and it appeared again in the latest attempt.")
         f["measured_signal"] = (
@@ -4912,11 +4914,15 @@ def _tier2_promoted_finding(fid: str, runner_min: float = 120.0,
                     "prior-attempt compute is post-completion waste"),
         }
         f["measured_evidence"] = {
-            "summary": "1 run_attempt>1 retry had prior attempt compute behind test",
+            # Three retried runs: the minimum OPT64 needs to rank
+            # (test_opt64_minimum_sample.py); one would be held advisory.
+            "summary": "3 run_attempt>1 retries had prior attempt compute behind test",
             "table": {
                 "headers": ["Run", "Latest attempt", "Dominant failing job",
                             "Prior attempt compute min"],
-                "rows": [["`run-1`", "2", "`test`", "25.0"]],
+                "rows": [["`run-1`", "2", "`test`", "25.0"],
+                         ["`run-2`", "2", "`test`", "25.0"],
+                         ["`run-3`", "2", "`test`", "25.0"]],
             },
             "note": ("Measured from GitHub jobs API filter=all minus filter=latest "
                      "for workflow runs whose run_attempt > 1. The latest attempt "

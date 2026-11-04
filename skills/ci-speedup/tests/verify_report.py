@@ -5303,10 +5303,74 @@ def _load_findings_doc(findings_path: Path | None) -> tuple[dict, str | None]:
     return _as_dict(data), None
 
 
+# Twin of collect_runs._OPT64_MIN_RETRIED_RUNS / blocking_path._OPT64_MIN_RETRIED_RUNS
+# (test_opt64_minimum_sample.py pins all three equal). Re-derived here from the
+# findings JSON, never read from the report.
+_VR_OPT64_MIN_RETRIED_RUNS = 3
+
+
+def _vr_opt64_hold_reason(f: dict) -> str | None:
+    """Why an OPT64 finding may NOT be ranked, or None when it may. The engine's
+    `rerun_sample` stamp is exact; a legacy finding without it counts its evidence
+    table for sample size only; missing retry outcomes keep it advisory. A
+    dominant job that passed on the retry is a
+    flaky-test signal (SKILL.md admission rule 3) whatever the count."""
+    if str(f.get("pattern") or "") != "OPT64" or f.get("advisory"):
+        return None
+    stamp = _as_dict(f.get("rerun_sample"))
+    n = stamp.get("retried_runs")
+    valid = lambda value: isinstance(value, int) and not isinstance(value, bool) and value >= 0
+    if valid(n):
+        passed, unsettled = stamp.get("passed_on_retry"), stamp.get("unsettled_on_retry")
+        known = valid(passed) and valid(unsettled) and passed + unsettled <= n
+    else:
+        n = len(_as_list(_as_dict(_as_dict(f.get("measured_evidence")).get("table")).get("rows")))
+        known = False
+    if not known:
+        if n < _VR_OPT64_MIN_RETRIED_RUNS:
+            return f"rests on {n} retried run(s), below the minimum of {_VR_OPT64_MIN_RETRIED_RUNS}"
+        return "retry outcomes are unavailable or invalid; re-collect before crediting a saving"
+    runs = f"{n} retried run{'s' if n != 1 else ''}"
+    if passed > 0:
+        return f"in {passed} of {runs} the dominant job passed on the retry (flaky signal)"
+    if unsettled > 0:
+        return f"in {unsettled} of {runs} the dominant job did not fail again on the retry"
+    if n < _VR_OPT64_MIN_RETRIED_RUNS:
+        return f"rests on {runs}, below the minimum of {_VR_OPT64_MIN_RETRIED_RUNS}"
+    return None
+
+
+def check_opt64_minimum_sample(report: str, findings_path: Path | None) -> Check:
+    """No R-row may rank an OPT64 finding that rests on fewer retried runs than the
+    minimum, or whose dominant job passed on a retry. Reads the RAW findings JSON
+    (what the engine stamped), not the renderer's held view."""
+    name = "OPT64 is ranked only on enough retried runs"
+    ranked = [fid for fid, pat in _tier2_markers(report) if pat == "OPT64"]
+    if not ranked:
+        return Check(name, True, "no ranked OPT64 row", skipped=True)
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return Check(name, False, f"ranked OPT64 row(s) {ranked} but {err}")
+    by_id = {_tier2_id(f, idx): f for idx, f in enumerate(_as_list(data.get("findings")), 1)
+             if isinstance(f, dict)}
+    bad = []
+    for fid in ranked:
+        f = by_id.get(fid)
+        if f is None:
+            bad.append(f"{fid}: no such finding")
+            continue
+        why = _vr_opt64_hold_reason(f)
+        if why:
+            bad.append(f"{fid}: {why}")
+    return Check(name, not bad, "; ".join(bad) if bad
+                 else f"{len(ranked)} ranked OPT64 row(s) meet the minimum sample")
+
+
 def _tier2_findings(data: dict) -> list[dict]:
     return [f for f in _as_list(data.get("findings"))
             if isinstance(f, dict)
             and not f.get("advisory")
+            and _vr_opt64_hold_reason(f) is None
             and f.get("sizing_basis") == "measured"
             and isinstance(f.get("tier2_neutrality"), dict)
             and bool(f.get("tier2_neutrality"))
@@ -5329,6 +5393,7 @@ def _has_tier2_top_level_surface(data: dict) -> bool:
 def _has_positive_runner_min_candidate(data: dict) -> bool:
     return any(isinstance(f, dict)
                and not f.get("advisory")
+               and _vr_opt64_hold_reason(f) is None
                and not str(f.get("tier2_superseded_by") or "").strip()
                and (_num(f.get("runner_min_saving")) or 0.0) > 0
                for f in _as_list(data.get("findings")))
@@ -11019,7 +11084,10 @@ def check_tier2_total_deoverlapped(report: str, findings_path: Path | None,
         if not isinstance(f, dict):
             continue
         pat = str(f.get("pattern") or "")
-        if (f.get("advisory") or str(f.get("tier2_superseded_by") or "").strip()
+        # A held OPT64 is advisory to the renderer (`_admitted_findings`): no credit,
+        # so nothing for the lead to account for.
+        if (f.get("advisory") or _vr_opt64_hold_reason(f)
+                or str(f.get("tier2_superseded_by") or "").strip()
                 or pat in {"OPT43", "OPT97"} or pat in _VR_PER_POLE_STRUCTURAL
                 or (_num(f.get("runner_min_saving")) or 0.0) <= 0
                 or id(f) in promoted_ids):
@@ -11320,6 +11388,8 @@ def _tier2_opt64_group_cover_ok(f: dict, data: dict) -> bool:
             and str(g.get("pattern") or "") == "OPT64"
             and str(g.get("workflow_file") or "").strip() == wf
             and not g.get("advisory")
+            # A held sibling claims nothing: the renderer drops it to advisory.
+            and _vr_opt64_hold_reason(g) is None
             and g.get("sizing_basis") == "measured"
             and isinstance(g.get("tier2_neutrality"), dict)
             and bool(g.get("tier2_neutrality"))
@@ -11365,9 +11435,14 @@ def _tier2_expected_source_line(f: dict, data: dict) -> str | None:
                 f"`{_flatten_cell(wf)}`")
     else:
         head = (f"matched {len(rows)} row{plural} for `{_flatten_cell(wf)}`")
+    # Every pattern but OPT65 credits against RAW minutes (`_tier2_source_rows_cover_saving`),
+    # so a reader comparing the saving with the larger billable figure needs the reason.
+    why = ("" if str(f.get("pattern") or "") == "OPT65" else
+           " The saving is credited in raw minutes; the rounded-up figure rounds each "
+           "job up to a whole minute.")
     return (f"**Source block:** `runner_minute_spine` {head}; "
             "current measured cost spine for those rows is "
-            f"{raw:.3f} raw min/mo, {billable:.3f} rounded-up min/mo.")
+            f"{raw:.3f} raw min/mo, {billable:.3f} rounded-up min/mo.{why}")
 
 
 def _tier2_rendered_source_lines(body: str) -> list[str]:
@@ -14572,6 +14647,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_tier2_claims_derivation_basis(report, findings_path, report_path),
         check_tier2_headline_matches_stamp(report, findings_path, report_path),
         check_tier2_savings_rows_backed_by_cost_spine(report, findings_path),
+        check_opt64_minimum_sample(report, findings_path),
         check_runner_minute_spine_contract(report, findings_path),
         check_cost_spine_contents_count_matches_table(report, findings_path),
         check_cost_spine_runner_host_split(report, findings_path),
