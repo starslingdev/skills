@@ -1204,6 +1204,10 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-11-04** — Keep a coverage-gap pole unfilled unless its attached analysis has a nonblank cause and prompt plus nonempty verbatim evidence lines. Empty or ungrounded analyses cannot suppress the waterfall and Audit warnings. (#184)
+
+- **2026-11-03** — A long pole whose only catalog match is a generic structural pattern (OPT75, "one step holds the time", or OPT71, "the check could be de-scoped") is now a coverage gap: with a captured log it renders the "no drill-down available" trigger naming the generic pattern, is listed in the gap signal, and takes the phase-4a `--analysis`, while its generic card still renders. Previously such a pole counted as covered, its log was never read, and the report said "no known root-cause pattern matched" for its top lever. The Audit line says that phrase only for a real gap, and `verify_report.py` fails any pole that says it without a `🤖 LLM root-cause analysis`. OPT70/72/73/74/78 name a cause and still cover their pole. (#184)
+
 - **2026-11-04** — Keep missing sampled PR records in the recurring-gate uncertainty bound, for both population and chain-fact evidence. Treat malformed, negative or non-finite chain timings as undetermined instead of dropping a competing check or certifying a winner. (#186)
 
 - **2026-11-03** — The report verifier now checks that the headline's slowest check really recurs on runs without a bimodal gate. Before, it read only the per-PR populations, which the collector saves only for a bimodal gate, so a fully sampled run (20/20 PRs) skipped the check as "noise on this sample". When populations are absent, it now reads the per-PR chain timings saved on every run, on the same caps the engine ranks with, and leaves undetermined any PR whose slowest check those timings can't pin. A run with at least 6 sampled PRs whose per-PR data the verifier can't read now fails ("per-PR data present but not readable") instead of skipping, as does a rendered "gates N/M PRs" claim with no populations behind it. Rendered reports are unchanged. (#186)

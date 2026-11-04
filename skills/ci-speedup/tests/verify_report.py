@@ -3204,6 +3204,33 @@ def _ground_transform(text: str) -> str:
     return corpus
 
 
+# A pole that says nothing is known about what its job spends the time on. The renderer prints
+# these ONLY for a real coverage gap (a captured log, no catalog pattern that names a cause, no
+# gap-fill yet): the Audit line's "no known root-cause pattern matched" and the waterfall's
+# "matched no known root-cause pattern" note. Either one in a pole with no `🤖 LLM root-cause
+# analysis` block means the report's lever shipped with no root cause while its log was in hand
+# (dogfood 2026-11-03: an OPT75-only top pole). Pinned by test_generic_structural_gap_fill.py.
+_NO_ROOT_CAUSE_RE = re.compile(
+    r"no known root-cause pattern matched|matched no known root-cause pattern", re.IGNORECASE)
+
+
+def check_no_root_cause_pole_is_gap_filled(report: str) -> Check:
+    """Every pole that says "no known root-cause pattern matched" (or the waterfall's
+    equivalent) carries the phase-4a `🤖 LLM root-cause analysis` in the same section. A pole
+    whose only catalog match is generic (OPT75 / OPT71) says it too, so this fails the report
+    the dead-end marker check alone let through."""
+    name = "a pole with no known root-cause pattern carries a gap-fill analysis"
+    bad = [f"`{wf}` ▸ {check}" for wf, check, body in _pole_header_sections(report)
+           if _NO_ROOT_CAUSE_RE.search(body) and _LLM_ANALYSIS_MARKER not in body]
+    if bad:
+        return Check(name, False,
+                     "pole(s) say 'no known root-cause pattern matched' with no `🤖 LLM "
+                     "root-cause analysis` attached - phase 4a must read the pole's captured "
+                     "log and re-render with --analysis KEY=PATH: " + "; ".join(bad))
+    return Check(name, True, "no pole says 'no known root-cause pattern matched' without "
+                 "a gap-fill analysis")
+
+
 def check_gap_fill_evidence_grounded(report: str, findings_path: Path | None) -> Check:
     """Every quoted `evidence` line in a rendered `🤖 LLM root-cause analysis` block must be a
     SUBSTRING of the captured log that block claims to read (issue #106 — the injection residual's
@@ -14316,6 +14343,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_aggregation_gate_poles_never_prescribe(report, findings_path),
         check_pole_drill_belongs_to_its_job(report, findings_path),
         check_gap_fill_evidence_grounded(report, findings_path),
+        check_no_root_cause_pole_is_gap_filled(report),
         check_dropped_check_not_framed_on_path(report, findings_path),
         check_demoted_pole_not_framed_typical_gate(report, findings_path),
         check_headline_slowest_matches_stamp(report, findings_path, report_path),

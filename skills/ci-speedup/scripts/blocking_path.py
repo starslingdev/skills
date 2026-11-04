@@ -149,6 +149,25 @@ _DASH_GLYPHS = ("—", "–", "‒", "―", "−")  # em, en, figure, horizontal
 _SEVERITY_ORDER = {"HIGH": 0, "MEDIUM": 1, "LOW": 2, "MANUAL": 3}
 _STRUCTURAL_PATTERNS = frozenset(
     {"OPT70", "OPT71", "OPT72", "OPT73", "OPT74", "OPT75"})
+# Structural patterns that name NO cause inside the pole's job. A pole whose only catalog
+# matches are these is still a COVERAGE GAP for the phase-4a gap-fill: it renders the
+# "no drill-down available" trigger, is captured by `_gap_poles`, and takes `--analysis`.
+# - OPT75 is the catalog's neutral catch-all ("this lever just refuses to dead-end"): routed
+#   on the dominant step's CATEGORY alone, it says one step holds the time, not why.
+# - OPT71 is routed on REQUIRED-STATUS alone: the check could be de-scoped; nothing about
+#   what its steps spend the time on.
+# Every other structural pattern names a cause in the job: OPT70 an unscoped build, OPT72
+# setup dwarfing the payload, OPT73 a named shared step, OPT74 trust-boundary cold work,
+# OPT78 vitest isolation. (Dogfood 2026-11-03: an OPT75-only top pole shipped "no known
+# root-cause pattern matched" while its own log named the cause.)
+_GENERIC_STRUCTURAL_PATTERNS = frozenset({"OPT71", "OPT75"})
+
+
+def _specific_structural(structural: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The structural findings that name a cause in the job (`_GENERIC_STRUCTURAL_PATTERNS`
+    removed). Empty means the pole has no structural coverage a gap-fill would duplicate."""
+    return [f for f in structural
+            if str(f.get("pattern", "")) not in _GENERIC_STRUCTURAL_PATTERNS]
 # Pre-start WALL-CLOCK wait (queue time) — the developer waits before any work runs,
 # which the critical-path spine (job start → finish) doesn't capture. These are NOT
 # runner-minute hygiene, so they get their own "Pre-start wait" section instead of the
@@ -3690,7 +3709,8 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
             + _fence_body(out) + "\n```\n")
 
 
-def _llm_analysis_block(a: dict[str, Any], cross_run_rendered: bool = False) -> list[str]:
+def _llm_analysis_block(a: dict[str, Any], cross_run_rendered: bool = False,
+                        generic_patterns: "tuple[str, ...]" = ()) -> list[str]:
     """Render the LLM gap-fill for a pole with NO catalog detector match: a clearly
     LABELLED, log-grounded root-cause reading produced by the agent running the skill
     (see SKILL.md's gap-fill phase). The label + the cited verbatim lines keep
@@ -3699,7 +3719,10 @@ def _llm_analysis_block(a: dict[str, Any], cross_run_rendered: bool = False) -> 
 
     `cross_run_rendered` says whether this pole's "🔬 Cross-run check" section actually
     rendered; only then does the provenance line cite it (a singleton magnitude sample
-    suppresses that section, so the citation must be suppressed too, or it dangles)."""
+    suppresses that section, so the citation must be suppressed too, or it dangles).
+
+    `generic_patterns`: the generic structural pattern(s) (`_GENERIC_STRUCTURAL_PATTERNS`)
+    that DID match the pole. The lead then says so, rather than claiming no pattern matched."""
     if not isinstance(a, dict):
         return []
     # `cause`/`breakdown` are LLM prose ABOUT the log, so they can echo a credential the
@@ -3714,7 +3737,10 @@ def _llm_analysis_block(a: dict[str, Any], cross_run_rendered: bool = False) -> 
         return []
     _measured = ("the timeline + cross-run check above are measured"
                  if cross_run_rendered else "the timeline above is measured")
-    out = [f"**🤖 LLM root-cause analysis** — no catalog pattern matched this job, so "
+    _matched = (f"only the generic structural pattern {', '.join(generic_patterns)} "
+                "matched this job and it names no cause inside it"
+                if generic_patterns else "no catalog pattern matched this job")
+    out = [f"**🤖 LLM root-cause analysis** — {_matched}, so "
            "the analysis below is the skill's LLM reading the captured job log, "
            "**grounded in the lines quoted below**. It is a strong lead to verify, "
            f"**not** a measured catalog detector - {_measured}; this cause is inferred.",
@@ -4126,7 +4152,8 @@ def _pole_waterfall_body(pole: dict[str, Any], leaf: dict[str, Any] | None,
                      opt79_present: bool = False,
                      opt82_present: bool = False,
                      steps_overlap: "str | None" = None,
-                     steps_dropped: bool = False) -> list[str]:
+                     steps_dropped: bool = False,
+                     generic_structural: "tuple[str, ...]" = ()) -> list[str]:
     """The ASCII waterfall for one pole (no code fence): the blocking job's steps,
     then - when a log was captured - the dominant step's internals down to the
     root cause.
@@ -4148,7 +4175,26 @@ def _pole_waterfall_body(pole: dict[str, Any], leaf: dict[str, Any] | None,
     while the spine footnote demotes it (the paradedb `Test pg_search` double-framing).
 
     `steps_dropped` (`_pole_waterfall`, a pole whose every step was dropped): no step
-    header and no step rows, only the pointer lines and a Level-3 log drill."""
+    header and no step rows, only the pointer lines and a Level-3 log drill.
+
+    `generic_structural`: the pole's only catalog matches are these generic structural
+    patterns (`_GENERIC_STRUCTURAL_PATTERNS`) and a log was captured, so it reads as the
+    coverage gap it is (the phase-4a trigger), naming the pattern that did match."""
+    # The coverage-gap notes, shared by both render paths. A generic structural match is named
+    # so the note does not contradict its card below, but it never suppresses the trigger.
+    _gen = ", ".join(generic_structural)
+    _gap_filled_note = (
+        f"(only the generic structural pattern {_gen} matched this pole, and it names no "
+        "cause inside the job - see the **LLM root-cause analysis** below, which reads the "
+        "captured log directly.)" if _gen else
+        "(no catalog pattern matched this job's log - see the **LLM root-cause analysis** "
+        "below, which reads the captured log directly.)")
+    _gap_open_note = (
+        "(captured this job's log but matched no known root-cause pattern"
+        + (f" (only the generic structural pattern {_gen} below matched, and it names no "
+           "cause inside the job)" if _gen else "")
+        + " — no drill-down available; this is a coverage gap, not a clean job. The "
+        "detector set may need extending for this stack.)")
     # The pointer tail for a data-driven catalog match — on-path for a typical pole, opt-in/rare
     # for a `spine_rare` pole. Never a coverage gap either way (a measured catalog lever matched).
     # Where the data-driven match renders: OPT81 renders at its pole, not in the appendix.
@@ -4291,15 +4337,8 @@ def _pole_waterfall_body(pole: dict[str, Any], leaf: dict[str, Any] | None,
             # A log WAS captured but no detector recognized it - surface that loudly
             # rather than silently showing the timeline with no drill (a missed root
             # cause must read as a coverage gap, never as a clean job).
-            if analysis_present:
-                lines += ["", "   (no catalog pattern matched this job's log - see the "
-                          "**LLM root-cause analysis** below, which reads the captured "
-                          "log directly.)"]
-            else:
-                lines += ["", "   (captured this job's log but matched no known "
-                          "root-cause pattern — no drill-down available; this is a "
-                          "coverage gap, not a clean job. The detector set may need "
-                          "extending for this stack.)"]
+            lines += ["", "   " + (_gap_filled_note if analysis_present
+                                   else _gap_open_note)]
         return lines
 
     # Show the top steps, then ROLL UP the rest into one row so every second is
@@ -4367,13 +4406,9 @@ def _pole_waterfall_body(pole: dict[str, Any], leaf: dict[str, Any] | None,
             lines += ["", f"(no captured log for this job — run with `--log "
                       f"{wf_base.split('.')[0]}=<job log>` to drill into {_target}.)"]
         elif leaf is None and analysis_present:
-            lines += ["", "(no catalog pattern matched this job's log - see the **LLM "
-                      "root-cause analysis** below, which reads the captured log "
-                      "directly.)"]
+            lines += ["", _gap_filled_note]
         elif leaf is None:
-            lines += ["", "(captured this job's log but matched no known root-cause "
-                      "pattern — no drill-down available; this is a coverage gap, not a "
-                      "clean job. The detector set may need extending for this stack.)"]
+            lines += ["", _gap_open_note]
         return lines
     # Drill into the BIGGEST step (it's only part of the job - the other steps are
     # above it in the bars).
@@ -4409,12 +4444,20 @@ def _pole_waterfall_body(pole: dict[str, Any], leaf: dict[str, Any] | None,
 
 
 def _audit_links(timeline: dict[str, Any] | None, pole: dict[str, Any],
-                 leaf: dict[str, Any] | None, run_url: str | None) -> list[str]:
+                 leaf: dict[str, Any] | None, run_url: str | None,
+                 log_present: bool = True, analysis_present: bool = False,
+                 catalog_covered: bool = False) -> list[str]:
     """A deep-link audit trail so the drill is verifiable: representative run → its
     job → the dominant step's log. GitHub only anchors to the STEP (not a log line),
     and that step's log is long, so the note tells the reader to search it for the
     verbatim evidence (shown below) rather than implying it's at the top. [] when
-    there's no job URL to anchor to."""
+    there's no job URL to anchor to.
+
+    With no log-detector `leaf`, "no known root-cause pattern matched" is said ONLY for a
+    real coverage gap (a captured log, no catalog coverage, no gap-fill yet): verify_report
+    fails that phrase without a gap-fill analysis, so it must not appear on a pole whose
+    cause a non-log catalog pattern names (`catalog_covered`), on a filled pole
+    (`analysis_present`), or on a pole with no captured log to fill from."""
     if not isinstance(timeline, dict):
         return []
     job_url = str(timeline.get("job_url") or "")
@@ -4450,6 +4493,16 @@ def _audit_links(timeline: dict[str, Any] | None, pole: dict[str, Any],
                + " (the bars above are plain-English labels for these log lines).")
     elif leaf is not None:
         how = " — open the step and search for the **🔬 Evidence** lines below."
+    elif analysis_present:
+        how = (" — open the step and search for the verbatim lines the **LLM root-cause "
+               "analysis** below quotes.")
+    elif catalog_covered:
+        how = (" — open the step to inspect its log directly (the catalog pattern that "
+               "matched this pole is not read from this log, so there is no specific log "
+               "line to search for).")
+    elif not log_present:
+        how = (" — open the step to inspect its log directly (no job log was captured for "
+               "this run, so there is no specific callout to search for).")
     else:
         # No detector matched, so there are no Evidence lines / search terms to point
         # at - just send the reader to the step's own log.
@@ -12341,18 +12394,36 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         # OPT82 on this pole's lint job is a catalog match at any size (it is
         # uncredited by design; `_opt82_pole_for`). Its card stays in Also noticed.
         opt82_pole = _opt82_pole_for(p, all_findings)
+        # A structural match that names a cause in the job. The generic ones (OPT75, OPT71:
+        # `_GENERIC_STRUCTURAL_PATTERNS`) still render their card, but leave the pole a
+        # coverage gap when a log was captured, so phase 4a reads it.
+        structural_specific = _specific_structural(structural)
+        generic_structural = (tuple(sorted({str(f.get("pattern", "")) for f in structural}))
+                              if structural and not structural_specific
+                              and log_text is not None else ())
         # An LLM gap-fill analysis only applies to a pole that matched NO catalog
-        # detector (SKILL.md phase 4a). A structural- OR data-driven-track match IS a
-        # catalog match, so it suppresses the gap-fill exactly as a log-detector match
-        # (`leaf`) does.
+        # detector that names a cause (SKILL.md phase 4a). A specific structural- OR
+        # data-driven-track match IS such a match, so it suppresses the gap-fill exactly as
+        # a log-detector match (`leaf`) does.
         # A pole whose leaf was DEMOTED off-category (`offcat_leaf`) is NOT a coverage gap —
         # a detector DID match its log, it just isn't the pole's dominant work — so it must
         # not pull an LLM gap-fill analysis (that path is for poles no detector recognized).
+        _catalog_covered = bool(structural_specific or data_driven
+                                or _opt79_pole_covers(opt79_pole) or opt82_pole)
         analysis = (_match(analyses)
                     if (leaf is None and _catalog_leaf(offcat_leaf) is None
-                        and not structural and not data_driven
-                        and not _opt79_pole_covers(opt79_pole)
-                        and not opt82_pole) else None)
+                        and not _catalog_covered) else None)
+        if analysis and (
+                not isinstance(analysis, dict)
+                or not isinstance(analysis.get("cause"), str)
+                or not analysis["cause"].strip()
+                or not isinstance(analysis.get("prompt"), str)
+                or not analysis["prompt"].strip()
+                or not isinstance(analysis.get("evidence"), list)
+                or not analysis["evidence"]
+                or not all(isinstance(line, str) and line.strip()
+                           for line in analysis["evidence"])):
+            analysis = None
         out.append(f'<a id="pole-{i}"></a>')
         out.append("")
         # `wf_base` (a workflow FILENAME) and `check` are BOTH arbitrary repo text dropped
@@ -12457,7 +12528,11 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         out += ["```text", *_pole_waterfall(p, leaf, timeline,
                                             log_present=log_text is not None,
                                             analysis_present=bool(analysis),
-                                            structural_present=bool(structural),
+                                            # A generic-only match with a captured log
+                                            # is the gap note's job, not the pointer's.
+                                            structural_present=(bool(structural)
+                                                                and not generic_structural),
+                                            generic_structural=generic_structural,
                                             data_driven_present=bool(data_driven),
                                             data_driven_on_path=dd_on_path,
                                             data_driven_patterns=tuple(sorted(
@@ -12507,7 +12582,12 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
             out += [f"_The timeline and the per-step times above are from **one "
                     f"representative run** — {which}, [run {rid}]({run_url})."
                     + tail + "_", ""]
-        out += _audit_links(timeline, p, leaf, run_url)
+        out += _audit_links(timeline, p, leaf, run_url, log_present=log_text is not None,
+                            analysis_present=bool(analysis),
+                            catalog_covered=(_catalog_covered
+                                             or _catalog_leaf(offcat_leaf) is not None
+                                             or (bool(structural)
+                                                 and not generic_structural)))
         # The detector-specific evidence (the cross-run sample list + the verbatim
         # cause lines) only exists when a catalog pattern matched. The cross-run check
         # and the agent prompt, by contrast, render for EVERY pole - so an undetected
@@ -12548,7 +12628,8 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         elif analysis:
             # LLM gap-fill: no catalog match, so the agent's grounded reading of the
             # captured log stands in for the measured cause (clearly labelled).
-            out += _llm_analysis_block(analysis, cross_run_rendered=cross_run_rendered)
+            out += _llm_analysis_block(analysis, cross_run_rendered=cross_run_rendered,
+                                       generic_patterns=generic_structural)
         # The structural-track finding(s) routed to this pole render LOUD here — the
         # pole IS the structural lever, and they're excluded from the hygiene appendix,
         # so this is the only place their risk/guardrail/rollout appears.
@@ -13006,8 +13087,8 @@ def _gap_poles(doc: dict[str, Any],
     cp = doc.get("pr_critical_path") or {}
     poles = list(cp.get("poles") or [])
     # A pole that a catalog detector already covers is NOT a coverage gap, even when its
-    # OWN log matched no log-level (`_parse_log`) detector: a structural lever (OPT70–75)
-    # OR a data-driven finding (e.g. OPT24) routed to it with a credited wall-clock saving
+    # OWN log matched no log-level (`_parse_log`) detector: a specific structural lever
+    # (OPT70/72/73/74) OR a data-driven finding (e.g. OPT24) routed to it with a credited wall-clock saving
     # both mean the report already names a measured cause for it. Capturing such a pole and
     # telling a maintainer to "draft a NEW detector" (phase 4c) is the bug this guards
     # against — the render path suppresses the gap for these poles, so the capture must too.
@@ -13023,9 +13104,12 @@ def _gap_poles(doc: dict[str, Any],
     # would silently over-report gaps the day it lands.
     _iso = doc.get("test_runner_isolation")
 
+    # A GENERIC structural match (OPT75/OPT71, `_GENERIC_STRUCTURAL_PATTERNS`) names no cause
+    # in the job, so it does not cover the pole: the render path shows it as a gap, and the
+    # capture must agree (a log detector for that stack is exactly what the loop should draft).
     def _catalog_covers(pole: dict[str, Any]) -> bool:
-        return bool(_structural_for_pole(
-                        pole, findings, (doc.get("pr_critical_path") or {}).get("checks"))
+        return bool(_specific_structural(_structural_for_pole(
+                        pole, findings, (doc.get("pr_critical_path") or {}).get("checks")))
                     or _data_driven_for_pole(pole, findings)
                     or _opt79_pole_covers(_opt79_pole_for(pole, findings))
                     or _opt82_pole_for(pole, findings))
