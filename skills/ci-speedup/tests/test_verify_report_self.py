@@ -2675,6 +2675,43 @@ def test_domain_leakage_check_fails_on_ci_secure_framing(tmp_path: Path):
     assert _tag_for(_good(), _LEAK, tmp_path) == "PASS"
 
 
+# Trimmed from a real report: the audited repo runs a workflow whose check is
+# literally named `ci-secure scan`, and the renderer lists it in Data sources.
+_EXCLUDED_CHECKS_LINE = (
+    "\n> - **Narrowed to merge-blocking checks:** 4 non-required check(s) excluded from "
+    "the critical path - `lint`, `ci-secure`, `ci-secure scan` +1 more. They run on PRs "
+    "but aren't required and nothing required `needs:` them.\n")
+
+
+def test_domain_leakage_ignores_audited_identifiers(tmp_path: Path):
+    # An audited repo's own check / job / step names are its content, not a leak.
+    # The renderer emits them in backticks or as TOC link text to a pole anchor.
+    assert _tag_for(_good() + _EXCLUDED_CHECKS_LINE, _LEAK, tmp_path) == "PASS"
+    toc = "\n1. 🟠 [ci-secure scan](#pole-1) - 3m 14s (the gate)\n"
+    assert _tag_for(_good() + toc, _LEAK, tmp_path) == "PASS"
+    step = "\n- dominant step `Run zizmor` (other, 60% of job `ci-secure scan`)\n"
+    assert _tag_for(_good() + step, _LEAK, tmp_path) == "PASS"
+
+
+def test_domain_leakage_still_fails_on_skill_prose(tmp_path: Path):
+    # Skill-authored prose outside backticks still trips, even when the same
+    # phrase also appears as a backticked audited identifier in the report.
+    rep = _good() + _EXCLUDED_CHECKS_LINE
+    assert _tag_for(rep + "\nThe ci-secure scan found nothing here.\n", _LEAK, tmp_path) == "FAIL"
+    assert _tag_for(rep + "\nRun zizmor to confirm.\n", _LEAK, tmp_path) == "FAIL"
+    # Link text is prose unless it is a TOC pole entry.
+    link = "\nSee [the ci-secure report](https://example.com/r).\n"
+    assert _tag_for(rep + link, _LEAK, tmp_path) == "FAIL"
+    # Inside an agent-prompt fence the text is still skill prose.
+    fence = "\n```text\nThe ci-secure audit found nothing.\n```\n"
+    assert _tag_for(rep + fence, _LEAK, tmp_path) == "FAIL"
+    # ...and the identifier exemption does not reach inside a fence.
+    fenced_span = "\n```text\nPlease `run zizmor` to confirm.\n```\n"
+    assert _tag_for(rep + fenced_span, _LEAK, tmp_path) == "FAIL"
+    # Leak phrases no audited identifier carries are matched even in backticks.
+    assert _tag_for(rep + "\nField `attacker_scenario`.\n", _LEAK, tmp_path) == "FAIL"
+
+
 def test_rendered_pattern_check_fails_on_fabricated_pattern(tmp_path: Path):
     # A finding block for OPT99, which is NOT in the findings JSON -> fabrication FAIL.
     row = ("\n<details>\n<summary><strong>OPT99 - Invented finding</strong> · "
@@ -12306,3 +12343,13 @@ def test_chain_fact_unreadable_member_does_not_disappear(value):
     vr = _load_verify_report()
     fact = {"member_spans_s": {"test": 100.0, "other": value}, "runner_up_s": 0.0}
     assert vr._vr_chain_fact_poles({"chain_facts": [fact]}, {"test", "other"}) == ({}, 1, 1)
+
+
+@pytest.mark.parametrize("fragment", [
+    "For this audit, `run zizmor` to confirm.",
+    "See [the ci-secure report](#pole-1) for recommendations.",
+    "> ```text\n> Please `run zizmor` to confirm.\n> ```",
+    "    Please `run zizmor` to confirm.",
+])
+def test_domain_leakage_keeps_prose_and_code_blocks_visible(tmp_path, fragment):
+    assert _tag_for(_good() + "\n" + fragment + "\n", _LEAK, tmp_path) == "FAIL"
