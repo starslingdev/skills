@@ -97,6 +97,10 @@ def _measured_finding(
         out["affected_jobs"] = [job]
     if rerun_dominant_job:
         out["rerun_dominant_job"] = rerun_dominant_job
+    if pattern == "OPT64":
+        # A rankable OPT64 rests on the minimum sample with no pass on a retry.
+        out["rerun_sample"] = {"retried_runs": 3, "passed_on_retry": 0,
+                               "min_retried_runs": 3}
     if source_filter:
         out["runner_minute_source_filter"] = source_filter
     return out

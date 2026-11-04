@@ -52,9 +52,9 @@ def _tier2_promoted(doc: dict[str, Any]) -> list[dict[str, Any]]:
     population as the renderer's section/bottom-line call sites. Deferred
     import (the `_render_keys` `_match_key` precedent) keeps the module
     standalone-runnable."""
-    from blocking_path import _dedupe_findings, _tier2_source_backed_ranked
+    from blocking_path import _admitted_findings, _tier2_source_backed_ranked
     return _tier2_source_backed_ranked(
-        _dedupe_findings(_as_list(doc.get("findings"))), doc)
+        _admitted_findings(_as_list(doc.get("findings"))), doc)
 
 
 def _tier2_summary_line(doc: dict[str, Any]) -> str:

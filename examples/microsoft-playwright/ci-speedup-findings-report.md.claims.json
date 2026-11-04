@@ -4,10 +4,10 @@
       "kind": "tier2_section_lead",
       "subject": "f114",
       "fields": {
-        "raw_min": 73440.9,
-        "naive_min": 73440.9,
-        "count": 10,
-        "not_promoted_measured_no_source": 3,
+        "raw_min": 73378.7,
+        "naive_min": 73378.7,
+        "count": 7,
+        "not_promoted_measured_no_source": 2,
         "not_promoted_measured_cert_deferred": 0,
         "not_promoted_modeled": 8,
         "not_promoted_structural": 6,
@@ -84,17 +84,6 @@
     },
     {
       "kind": "tier2_neutrality_line",
-      "subject": "f117",
-      "fields": {
-        "proof": "post_completion_waste",
-        "margin_s": null,
-        "derivation_basis": "jobs_api_timestamps",
-        "pattern": "OPT64"
-      },
-      "rendered": "machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `WebView on iOS Simulator (2/4)` identifies the retry cause, so prior-attempt compute is post-completion waste)."
-    },
-    {
-      "kind": "tier2_neutrality_line",
       "subject": "f44",
       "fields": {
         "proof": "non_pr_event",
@@ -103,28 +92,6 @@
         "pattern": "OPT36"
       },
       "rendered": "machine-derived proof: `non_pr_event` - `schedule` runs do not gate a PR merge (event=schedule subset only; consecutive same-head_sha schedule runs; schedule is not a developer PR/merge event)."
-    },
-    {
-      "kind": "tier2_neutrality_line",
-      "subject": "f49",
-      "fields": {
-        "proof": "post_completion_waste",
-        "margin_s": null,
-        "derivation_basis": "jobs_api_timestamps",
-        "pattern": "OPT64"
-      },
-      "rendered": "machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `test_linux_docker / Docker noble amd64` identifies the retry cause, so prior-attempt compute is post-completion waste)."
-    },
-    {
-      "kind": "tier2_neutrality_line",
-      "subject": "f43",
-      "fields": {
-        "proof": "post_completion_waste",
-        "margin_s": null,
-        "derivation_basis": "jobs_api_timestamps",
-        "pattern": "OPT64"
-      },
-      "rendered": "machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `publish NPM and driver` identifies the retry cause, so prior-attempt compute is post-completion waste)."
     },
     {
       "kind": "headline_slowest",
@@ -143,11 +110,11 @@
       "kind": "tier2_headline",
       "subject": "f114",
       "fields": {
-        "raw_min": 73440.9,
-        "count": 10,
+        "raw_min": 73378.7,
+        "count": 7,
         "derivation_basis": "jobs_api_timestamps"
       },
-      "rendered": "> **After the gate.** 73,441 min/mo of wall-clock-neutral runner minutes is recoverable (10 neutral findings; none can slow a merge)."
+      "rendered": "> **After the gate.** 73,379 min/mo of wall-clock-neutral runner minutes is recoverable (7 neutral findings; none can slow a merge)."
     },
     {
       "kind": "pole_gate_prompt",

@@ -170,7 +170,10 @@ def _is_tier2_finding(f: dict[str, Any]) -> bool:
             and f.get("sizing_basis") == "measured"
             and isinstance(f.get("tier2_neutrality"), dict)
             and bool(f.get("tier2_neutrality"))
-            and (_num(f.get("runner_min_saving")) or 0.0) > 0)
+            and (_num(f.get("runner_min_saving")) or 0.0) > 0
+            # A caller holding a raw (un-admitted) finding gets the same answer
+            # as one reading `_admitted_findings`.
+            and _opt64_held(f) is None)
 
 
 def _is_tier2_superseded(f: dict[str, Any]) -> bool:
@@ -6478,6 +6481,53 @@ def _dedupe_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+# Twin of collect_runs._OPT64_MIN_RETRIED_RUNS (test_opt64_minimum_sample.py pins
+# them equal). The engine already emits a below-minimum or flaky OPT64 as
+# advisory; this holds a findings.json written by an OLDER engine to the same
+# rule, so re-rendering saved data never ranks a one-retry saving.
+_OPT64_MIN_RETRIED_RUNS = 3
+
+
+def _opt64_retry_counts(f: dict[str, Any]) -> tuple[int, int]:
+    """(retried runs, runs whose dominant job passed on the retry) for an OPT64
+    finding. The engine's `rerun_sample` stamp is exact. A legacy finding has no
+    stamp: its evidence table holds one row per retried run, capped at six,
+    which is above the minimum, so the below-minimum comparison stays exact. A
+    legacy finding cannot show a pass on the retry, so the count rule alone
+    applies to it."""
+    stamp = _as_dict(f.get("rerun_sample"))
+    n, passed = stamp.get("retried_runs"), stamp.get("passed_on_retry")
+    if isinstance(n, int) and not isinstance(n, bool):
+        ok = isinstance(passed, int) and not isinstance(passed, bool)
+        return n, passed if ok else 0
+    table = _as_dict(_as_dict(f.get("measured_evidence")).get("table"))
+    return len(_as_list(table.get("rows"))), 0
+
+
+def _opt64_held(f: dict[str, Any]) -> dict[str, Any] | None:
+    """An advisory copy of a non-advisory OPT64 finding that misses the minimum
+    sample or retried a flaky job, else None. Advisory means what it means for
+    OPT48: not ranked, no credited saving, kept out of the report."""
+    if str(f.get("pattern") or "") != "OPT64" or f.get("advisory"):
+        return None
+    retried, passed = _opt64_retry_counts(f)
+    if passed <= 0 and retried >= _OPT64_MIN_RETRIED_RUNS:
+        return None
+    runs = f"{retried} retried run{'s' if retried != 1 else ''}"
+    why = (f"in {passed} of {runs} the job passed on the retry (a flaky-test signal)"
+           if passed > 0 else
+           f"this rests on {runs}; a ranked saving needs at least {_OPT64_MIN_RETRIED_RUNS}")
+    return {**f, "advisory": True, "runner_min_saving": None,
+            "size_note": f"advisory, uncredited: {why}"}
+
+
+def _admitted_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The findings every report surface reads: exact duplicates collapsed, and
+    an OPT64 below its minimum sample (or on a flaky retry) held to advisory.
+    Copies, never the doc's own dicts, so the findings JSON is untouched."""
+    return [_opt64_held(f) or f for f in _dedupe_findings(findings)]
+
+
 def _coverage_gap_banner(scan_incomplete: list[dict[str, Any]] | None) -> list[str]:
     """A prominent warning when the static scan couldn't read/parse some workflow
     file - an unscanned file must never read as clean. [] when coverage is complete.
@@ -7884,7 +7934,7 @@ def _is_tier2_source_backed_finding(f: dict[str, Any], doc: dict[str, Any]) -> b
     # duplicate OPT64 entries.
     return (_tier2_source_rows_cover_saving(f, _tier2_spine_source_rows(f, doc))
             and _tier2_opt64_group_cover_ok(
-                f, _dedupe_findings(list(doc.get("findings") or [])), doc))
+                f, _admitted_findings(list(doc.get("findings") or [])), doc))
 
 
 def _tier2_source_line(f: dict[str, Any], doc: dict[str, Any]) -> str:
@@ -7904,9 +7954,14 @@ def _tier2_source_line(f: dict[str, Any], doc: dict[str, Any]) -> str:
                 f"`{_flatten_cell(wf)}`")
     else:
         head = (f"matched {len(rows)} row{plural} for `{_flatten_cell(wf)}`")
+    # Every pattern but OPT65 credits against RAW minutes (`_tier2_source_rows_cover_saving`),
+    # so a reader comparing the saving with the larger billable figure needs the reason.
+    why = ("" if str(f.get("pattern") or "") == "OPT65" else
+           " The saving is credited in raw minutes; billable rounds each job up to a "
+           "whole minute, as GitHub bills.")
     return (f"**Source block:** `runner_minute_spine` {head}; "
             "current measured cost spine for those rows is "
-            f"{raw:.3f} raw min/mo, {billable:.3f} billable min/mo.")
+            f"{raw:.3f} raw min/mo, {billable:.3f} billable min/mo.{why}")
 
 
 def _has_tier2_stamp_surface(findings: list[dict[str, Any]]) -> bool:
@@ -10474,7 +10529,7 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     back to the one-line no-critical-path note."""
     repo = doc.get("repo", "repo")
     catalog_url = _build_catalog_url(doc.get("skill_commit_sha"))
-    all_findings = _dedupe_findings(list(doc.get("findings") or []))
+    all_findings = _admitted_findings(list(doc.get("findings") or []))
     cs = cs or claims.ClaimSet()
     tier2_lines = _tier2_block(all_findings, catalog_url, cs, doc)
     also_lines, also_count, _also_on_path = _also_noticed_block(
@@ -10823,7 +10878,7 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
             _unresolved_gate_lines(cp) + ["_No measured critical path in this findings JSON._"]))
     repo = doc.get("repo", "repo")
     catalog_url = _build_catalog_url(doc.get("skill_commit_sha"))
-    all_findings = _dedupe_findings(list(doc.get("findings") or []))
+    all_findings = _admitted_findings(list(doc.get("findings") or []))
     # When adaptive sampling capped some workflows at the shallow depth (and didn't
     # deepen every candidate), the off-path findings aggregating those workflows are
     # approximate — flag it on the appendix so the figures aren't read as exact.
@@ -13011,7 +13066,7 @@ def _gap_poles(doc: dict[str, Any],
     # both mean the report already names a measured cause for it. Capturing such a pole and
     # telling a maintainer to "draft a NEW detector" (phase 4c) is the bug this guards
     # against — the render path suppresses the gap for these poles, so the capture must too.
-    findings = _dedupe_findings(list(doc.get("findings") or []))
+    findings = _admitted_findings(list(doc.get("findings") or []))
     # The SAME config fact the render path parses with. An import-bound vitest
     # pole is never a gap on either path: the fact only picks WHICH leaf it gets
     # (the OPT78 lever, or the guarded `vitest-import-bound` leaf when OPT78 is

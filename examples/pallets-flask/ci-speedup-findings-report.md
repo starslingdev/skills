@@ -498,7 +498,7 @@ _Schedule burn is counted only on event=schedule runs whose head_sha repeats con
 
 - **What ci-speedup measured:** 95 scheduled run(s) in 5 consecutive same-head_sha group(s) re-ran without a code change in the sampled schedule slice (95% of 100 schedule run(s)); ~3 runner-min/mo of schedule-event compute (mean over 20 timed run(s); ×0.30 to the 30d volume (30 runs); 100-run recent slice (not a full 30d census)).
 - **Why this can't slow your merge:** machine-derived proof: `non_pr_event` - `schedule` runs do not gate a PR merge (event=schedule subset only; consecutive same-head_sha schedule runs; schedule is not a developer PR/merge event).
-- **Source block:** `runner_minute_spine` matched 1 row for `.github/workflows/lock.yaml`; current measured cost spine for those rows is 3.200 raw min/mo, 30.000 billable min/mo.
+- **Source block:** `runner_minute_spine` matched 1 row for `.github/workflows/lock.yaml`; current measured cost spine for those rows is 3.200 raw min/mo, 30.000 billable min/mo. The saving is credited in raw minutes; billable rounds each job up to a whole minute, as GitHub bills.
 - **Guardrail:** Confirm the cron cadence is not an operational SLA; prefer widening the interval only for cleanup/triage/build jobs where delayed execution is acceptable.
 - **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt36--cron-schedule-too-frequent
 
