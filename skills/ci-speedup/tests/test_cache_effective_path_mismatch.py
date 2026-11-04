@@ -268,6 +268,23 @@ def test_collection_never_downloads_the_drilled_log_twice(tmp_path):
     assert len(calls) - len(base) == 2, 'only the two undrilled successful jobs are fetched'
 
 
+def test_failed_drilled_run_still_samples_the_successful_saves(tmp_path):
+    # actions/cache saves only on success, so a failed representative run has no
+    # warning to gate on; its successful siblings are still the evidence.
+    from test_opt96_cache_seeding import _LogClient
+    wf = '.github/workflows/ci.yml'
+    jobs = [dict(id=jid, name='build', conclusion='failure' if jid == 1 else 'success',
+                 status='completed', started_at='2026-11-04T00:00:00Z',
+                 completed_at='2026-11-04T00:05:00Z', steps=[dict(STEP)],
+                 html_url=f'https://github.com/o/r/actions/runs/{jid}/job/{jid}')
+            for jid in (1, 2, 3)]
+    client = _LogClient({1: 'build failed', 2: LOG, 3: LOG})
+    pole = dict(check='build', job='build', workflow_file=wf, p50_s=300)
+    cr._persist_pole_logs(client, 'o/r', [pole], {wf: [[j] for j in jobs]}, tmp_path,
+                          cache_effective_paths={wf: {'build': [FACT]}})
+    assert pole['cache_path_sample']['admitted'][0]['runs'] == 2
+
+
 def test_other_post_step_warning_does_not_admit(monkeypatch):
     job = dict(id=1, conclusion='success', steps=[dict(STEP, name='Post Other Cache')])
     monkeypatch.setattr(cr, '_fetch_job_log', lambda *a: LOG)

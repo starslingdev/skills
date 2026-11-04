@@ -25602,7 +25602,8 @@ def _persist_pole_logs(
         # as a top miss/churn lever off the single (slow-mode) drilled run. `state_fn`
         # annotates the SAME logs `_magnitude_sample` already fetches (no PR-bucket cost).
         facts = ((cache_effective_paths or {}).get(wf) or {}).get(job, [])
-        if facts and bp._CACHE_PATH_WARNING in log:
+        # A failed drilled run never reached the save, so it cannot gate the sample.
+        if facts and (bp._CACHE_PATH_WARNING in log or repr_job.get("conclusion") != "success"):
             all_jobs = [j for run in jobs_per_run_by_wf.get(wf, []) for j in run
                         if str(j.get("name", "")) == job]
             p["cache_path_sample"] = _cache_path_sample(client, repo, all_jobs, facts,
