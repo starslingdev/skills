@@ -6489,17 +6489,20 @@ _OPT64_MIN_RETRIED_RUNS = 3
 
 
 def _opt64_retry_counts(f: dict[str, Any]) -> tuple[int, int]:
-    """(retried runs, runs whose dominant job passed on the retry) for an OPT64
+    """(retried runs, runs whose dominant job passed or did not fail again on the
+    retry) for an OPT64
     finding. The engine's `rerun_sample` stamp is exact. A legacy finding has no
     stamp: its evidence table holds one row per retried run, capped at six,
     which is above the minimum, so the below-minimum comparison stays exact. A
     legacy finding cannot show a pass on the retry, so the count rule alone
     applies to it."""
     stamp = _as_dict(f.get("rerun_sample"))
-    n, passed = stamp.get("retried_runs"), stamp.get("passed_on_retry")
+    n = stamp.get("retried_runs")
     if isinstance(n, int) and not isinstance(n, bool):
-        ok = isinstance(passed, int) and not isinstance(passed, bool)
-        return n, passed if ok else 0
+        # A retry that passed and one that never failed again both hold the group.
+        held = sum(v for v in (stamp.get("passed_on_retry"), stamp.get("unsettled_on_retry"))
+                   if isinstance(v, int) and not isinstance(v, bool))
+        return n, held
     table = _as_dict(_as_dict(f.get("measured_evidence")).get("table"))
     return len(_as_list(table.get("rows"))), 0
 
@@ -6514,7 +6517,7 @@ def _opt64_held(f: dict[str, Any]) -> dict[str, Any] | None:
     if passed <= 0 and retried >= _OPT64_MIN_RETRIED_RUNS:
         return None
     runs = f"{retried} retried run{'s' if retried != 1 else ''}"
-    why = (f"in {passed} of {runs} the job passed on the retry (a flaky-test signal)"
+    why = (f"in {passed} of {runs} the job did not fail again on the retry"
            if passed > 0 else
            f"this rests on {runs}; a ranked saving needs at least {_OPT64_MIN_RETRIED_RUNS}")
     return {**f, "advisory": True, "runner_min_saving": None,
@@ -7883,7 +7886,7 @@ def _tier2_opt64_group_cover_ok(f: dict[str, Any], findings: list[dict[str, Any]
             if isinstance(g, dict)
             and str(g.get("pattern") or "") == "OPT64"
             and str(g.get("workflow_file") or "").strip() == wf
-            and not g.get("advisory")
+            and not g.get("advisory") and _opt64_held(g) is None
             and g.get("sizing_basis") == "measured"
             and isinstance(g.get("tier2_neutrality"), dict)
             and bool(g.get("tier2_neutrality"))

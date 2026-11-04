@@ -131,6 +131,7 @@ TRIAGE_ALLOWLIST = {
     "Tier-2 claims carry the jobs-API derivation-basis field": AUTO_SEED,                        # check_tier2_claims_derivation_basis
     "Tier-2 headline claim names the top stamped finding": AUTO_SEED,                             # check_tier2_headline_matches_stamp
     "Tier-2 savings rows are backed by runner-minute cost spine": AUTO_SEED,                      # check_tier2_savings_rows_backed_by_cost_spine
+    "OPT64 is ranked only on enough retried runs": AUTO_SEED,                                     # check_opt64_minimum_sample
     "runner-minute cost spine source block is re-derivable": AUTO_SEED,                           # check_runner_minute_spine_contract
     "no rate-derived dollars on the minutes surfaces": AUTO_SEED,                                 # check_no_rate_derived_dollars
     "shallow cost-spine sample is disclosed (re-derived from the stamped workflows)": AUTO_SEED,  # check_cost_spine_shallow_disclosed
@@ -240,6 +241,7 @@ CHECK_CLASS = {
     "Tier-2 claims carry the jobs-API derivation-basis field": "fabricated-or-unsupported-finding",  # a Tier-2 claim without its machine-readable data-source field
     "Tier-2 headline claim names the top stamped finding": "mis-ranked-lever",  # top bill-axis claim names the wrong ranked row
     "Tier-2 savings rows are backed by runner-minute cost spine": "fabricated-or-unsupported-finding",  # rendered savings rows not backed by cost-spine rows
+    "OPT64 is ranked only on enough retried runs": "fabricated-or-unsupported-finding",  # a ranked retry saving resting on too few retried runs, or on a flaky retry
     "runner-minute cost spine source block is re-derivable": "fabricated-or-unsupported-finding",  # cost-spine source rows/totals not backed by rates/stamps
     "no rate-derived dollars on the minutes surfaces": "fabricated-or-unsupported-finding",  # a rate-derived $/USD figure leaked onto a minutes-only surface
     "shallow cost-spine sample is disclosed (re-derived from the stamped workflows)": "coverage-gap-dead-end",  # an undisclosed shallow sample reads as exact coverage

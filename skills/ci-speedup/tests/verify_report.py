@@ -5206,15 +5206,18 @@ def _vr_opt64_hold_reason(f: dict) -> str | None:
     if str(f.get("pattern") or "") != "OPT64" or f.get("advisory"):
         return None
     stamp = _as_dict(f.get("rerun_sample"))
-    n, passed = stamp.get("retried_runs"), stamp.get("passed_on_retry")
-    if not (isinstance(n, int) and not isinstance(n, bool)):
+    n = stamp.get("retried_runs")
+    _int = lambda v: v if isinstance(v, int) and not isinstance(v, bool) else 0  # noqa: E731
+    if isinstance(n, int) and not isinstance(n, bool):
+        passed, unsettled = _int(stamp.get("passed_on_retry")), _int(stamp.get("unsettled_on_retry"))
+    else:
         n = len(_as_list(_as_dict(_as_dict(f.get("measured_evidence")).get("table")).get("rows")))
-        passed = 0
-    if not (isinstance(passed, int) and not isinstance(passed, bool)):
-        passed = 0
+        passed = unsettled = 0
     runs = f"{n} retried run{'s' if n != 1 else ''}"
     if passed > 0:
         return f"in {passed} of {runs} the dominant job passed on the retry (flaky signal)"
+    if unsettled > 0:
+        return f"in {unsettled} of {runs} the dominant job did not fail again on the retry"
     if n < _VR_OPT64_MIN_RETRIED_RUNS:
         return f"rests on {runs}, below the minimum of {_VR_OPT64_MIN_RETRIED_RUNS}"
     return None
@@ -11101,6 +11104,8 @@ def _tier2_opt64_group_cover_ok(f: dict, data: dict) -> bool:
             and str(g.get("pattern") or "") == "OPT64"
             and str(g.get("workflow_file") or "").strip() == wf
             and not g.get("advisory")
+            # A held sibling claims nothing: the renderer drops it to advisory.
+            and _vr_opt64_hold_reason(g) is None
             and g.get("sizing_basis") == "measured"
             and isinstance(g.get("tier2_neutrality"), dict)
             and bool(g.get("tier2_neutrality"))

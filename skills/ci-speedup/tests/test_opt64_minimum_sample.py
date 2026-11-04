@@ -87,7 +87,7 @@ def test_three_deterministic_retries_rank_with_a_readable_formula():
     assert (f["runner_min_saving"] or 0) > 0
     assert f["tier2_neutrality"]["proof"] == "post_completion_waste"
     assert f["rerun_sample"] == {
-        "retried_runs": 3, "passed_on_retry": 0, "min_retried_runs": 3,
+        "retried_runs": 3, "passed_on_retry": 0, "unsettled_on_retry": 0, "min_retried_runs": 3,
         "runs_30d": 153, "sampled_runs": 100}
     text = f["measured_evidence"]["summary"]
     assert "153 runs in 30 days; 100 sampled (any status), of which 3 were retried" in text
@@ -208,3 +208,36 @@ def test_verify_check_reads_the_stamp_before_the_table(tmp_path: Path):
     assert vr._vr_opt64_hold_reason(f) is None
     f["rerun_sample"]["retried_runs"] = 2
     assert "2 retried run" in (vr._vr_opt64_hold_reason(f) or "")
+
+
+# --------------------------- review hardening --------------------------------
+
+def test_a_retry_still_running_is_not_counted_as_failing_again():
+    # Two retries that failed again plus one whose `test` has no conclusion yet
+    # (the collector samples running retries): the third may still pass, so
+    # nothing proves the job failed on every retry. Advisory, no credit.
+    samples = [_retried_run("r1"), _retried_run("r2"), _retried_run("r3", None)]
+    f = _detect(samples)[0]
+    assert f["advisory"] is True
+    assert f["runner_min_saving"] is None
+    assert f["rerun_sample"]["unsettled_on_retry"] == 1
+    assert "had not finished" in f["evidence"]
+
+
+def test_verify_group_cover_ignores_a_held_sibling(tmp_path: Path):
+    # Legacy siblings on one workflow: an eligible 80-min row and a one-retry
+    # 40-min row against 100 prior-attempt source minutes. The renderer holds
+    # the 40-min sibling and promotes the 80; the verifier must agree.
+    vr = vs._load_verify_report()
+    doc = vs._tier2_doc_for_verify()
+    ok = vs._opt64_finding("f-opt64a", 80.0, "test", line=31)
+    held = vs._opt64_finding("f-opt64b", 40.0, "test", line=32)
+    held["measured_evidence"]["table"]["rows"] = held["measured_evidence"]["table"]["rows"][:1]
+    doc["findings"] = [ok, held]
+    vs._set_tier2_spine_rows(doc, [vs._tier2_spine_row(
+        doc, job="test", status="all-status", attempt="prior", raw=100.0, billable=120.0)])
+    report, _rp, findings_path = vs._tier2_artifacts(tmp_path, doc)
+    assert "id=f-opt64a pattern=OPT64 -->" in report
+    assert "id=f-opt64b" not in report
+    chk = vr.check_tier2_savings_rows_backed_by_cost_spine(report, findings_path)
+    assert chk.ok and not chk.skipped, chk

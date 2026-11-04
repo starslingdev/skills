@@ -15237,12 +15237,15 @@ def _opt82_rules_catalog() -> dict[str, dict[str, Any]]:
 _OPT64_MIN_RETRIED_RUNS = 3
 
 
-def _opt64_hold_reason(job: str, retried: int, passed_on_retry: int) -> str | None:
+def _opt64_hold_reason(job: str, retried: int, passed_on_retry: int,
+                       unsettled_on_retry: int = 0) -> str | None:
     """Why an OPT64 group is advisory instead of ranked, or None when it ranks.
 
     A dominant job that failed and then PASSED on the retry is a flaky-test
     signal (SKILL.md admission rule 3): its remedy is de-flaking, not a CI-config
-    change, whatever the count. Otherwise the group needs the minimum sample."""
+    change, whatever the count. A retry with no failing outcome yet (still
+    running, cancelled, skipped) may still pass, so it holds the group too.
+    Otherwise the group needs the minimum sample."""
     runs = f"{retried} retried run{'s' if retried != 1 else ''}"
     reasons = [f"this rests on {runs}"]
     if passed_on_retry > 0:
@@ -15250,6 +15253,10 @@ def _opt64_hold_reason(job: str, retried: int, passed_on_retry: int) -> str | No
             f"in {passed_on_retry} of {runs} `{job}` passed on the retry (the same run, "
             "so the same commit): a flaky-test signal whose remedy is de-flaking the "
             "job, not a CI-config change (see OPT48)")
+    elif unsettled_on_retry > 0:
+        reasons.append(
+            f"in {unsettled_on_retry} of {runs} `{job}` had not finished its retry with "
+            "a failure (still running, cancelled or skipped), so it may yet pass")
     elif retried < _OPT64_MIN_RETRIED_RUNS:
         reasons[0] += f"; a ranked saving needs at least {_OPT64_MIN_RETRIED_RUNS}"
     else:
@@ -15302,17 +15309,22 @@ def _detect_opt64_rerun_attempt_waste(
         bucket = by_job.setdefault(key, {
             "waste_s": 0.0, "failure_s": 0.0, "occurrences": 0,
             "failures": 0, "run_ids": [], "rows": [], "passed_on_retry": 0,
+            "unsettled_on_retry": 0,
         })
         bucket["waste_s"] += prior_s
         bucket["failure_s"] += fail_s
         bucket["occurrences"] += 1
         bucket["failures"] += fail_n
         # A re-run attempt re-runs the SAME run, so the same commit: a dominant
-        # job that failed and then passed here is a flaky-test signal.
-        if any(_attempt_job_key(j) == key
-               and str(j.get("conclusion") or "").lower() == "success"
-               for j in latest_jobs):
+        # job that failed and then passed here is a flaky-test signal. Only a
+        # retry that failed again counts toward a ranked saving; one still
+        # running (no conclusion) or cancelled/skipped may yet pass.
+        retry_outcomes = {str(j.get("conclusion") or "").lower()
+                          for j in latest_jobs if _attempt_job_key(j) == key}
+        if "success" in retry_outcomes:
             bucket["passed_on_retry"] += 1
+        elif not retry_outcomes or not retry_outcomes <= _FAIL_FAST_FAILURE_CONCLUSIONS:
+            bucket["unsettled_on_retry"] += 1
         if rid:
             bucket["run_ids"].append(rid)
         bucket["rows"].append([
@@ -15339,7 +15351,8 @@ def _detect_opt64_rerun_attempt_waste(
         failure_n = int(bucket["failures"])
         failure_min = float(bucket["failure_s"]) / 60.0
         passed_n = int(bucket["passed_on_retry"])
-        hold = _opt64_hold_reason(key, occurrence_n, passed_n)
+        unsettled_n = int(bucket["unsettled_on_retry"])
+        hold = _opt64_hold_reason(key, occurrence_n, passed_n, unsettled_n)
         basis = (f"{monthly_volume} runs in 30 days; {sample_denominator} sampled "
                  f"(any status), of which {occurrence_n} were retried after this "
                  "job failed")
@@ -15353,7 +15366,7 @@ def _detect_opt64_rerun_attempt_waste(
             evidence = (f"{head}. Their prior attempts used {prior_min:.1f} runner-min "
                         f"({basis}). Advisory, no saving credited: {hold}.")
         else:
-            evidence = (f"{head}, and did not pass on the retry. Their prior attempts "
+            evidence = (f"{head}, and failed again on every retry. Their prior attempts "
                         f"used {prior_min:.1f} runner-min, ~{credited:.0f} runner-min/mo "
                         f"scaled to the workflow's volume ({basis}).")
         me = _measured_evidence(
@@ -15383,6 +15396,7 @@ def _detect_opt64_rerun_attempt_waste(
             f"attempt ({prior_min:.1f} sampled prior-attempt min; scale {scale:.3g})")
         f["rerun_sample"] = {
             "retried_runs": occurrence_n, "passed_on_retry": passed_n,
+            "unsettled_on_retry": unsettled_n,
             "min_retried_runs": _OPT64_MIN_RETRIED_RUNS,
             "runs_30d": int(monthly_volume), "sampled_runs": int(sample_denominator)}
         f["rerun_dominant_job"] = key

@@ -32,11 +32,12 @@ the latest attempt, so their job minutes are bill waste once the retry exists.
    workflow's 30-day all-status run volume divided by the sampled all-status
    denominator. Wall-clock is zero because the credited attempts are superseded.
 6. Rank (credit) a saving only when at least 3 sampled retried runs share the
-   dominant failing job and in none of them did that job pass on the retry. A
-   retry re-runs the same run, so the same commit: a job that failed and then
-   passed is a flaky-test signal whose remedy is de-flaking, not a CI-config
-   change (SKILL.md admission rule 3). Fewer runs, or any pass on the retry,
-   emits the finding **advisory** as OPT48 is: no saving, not ranked, kept in
+   dominant failing job and that job failed again on every retry. A retry
+   re-runs the same run, so the same commit: a job that failed and then passed
+   is a flaky-test signal whose remedy is de-flaking, not a CI-config change
+   (SKILL.md admission rule 3); a retry still running, cancelled or skipped may
+   yet pass. Fewer runs, or any retry that did not fail again, emits the
+   finding **advisory** as OPT48 is: no saving, not ranked, kept in
    the findings JSON with a `rerun_sample` stamp and wording that names how many
    retried runs it rests on. The renderer and `verify_report.py` hold findings
    written by older engines to the same minimum.
