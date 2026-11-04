@@ -26,8 +26,8 @@ developer's wait. It gets its own prominent section below.
 
 ## 1. Purpose & scope
 
-ci-speedup audits a repository's GitHub Actions workflows against a 95-pattern
-catalog — 84 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94, OPT96, OPT97, OPT98 and OPT100) plus 11 **structural /
+ci-speedup audits a repository's GitHub Actions workflows against a 96-pattern
+catalog — 85 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94, OPT96, OPT97, OPT98, OPT100 and OPT101) plus 11 **structural /
 critical-path** patterns (OPT70–OPT75, OPT78, OPT83, OPT84, OPT85 and OPT87, routed from the measured long pole; see
 §11) — and produces a **root-cause-analysis** markdown report with **measured**
 impact on two axes: developer wall-clock wait (the ranking axis) and
@@ -4102,7 +4102,7 @@ order of preference:
 - [`SKILL.md`](SKILL.md) - the canonical contract (phases, admission gate,
   quality review).
 - [`references/patterns/INDEX.md`](references/patterns/INDEX.md) -
-  the 95-pattern catalog, one file per pattern (frontmatter + body); the source
+  the 96-pattern catalog, one file per pattern (frontmatter + body); the source
   of truth for detection and the report's TL;DR / pattern background. The
   single-file [`references/optimization-patterns.md`](references/optimization-patterns.md)
   is compiled from `references/patterns/` by
@@ -4317,3 +4317,15 @@ four-call ceiling includes transport failures), existing governor/breaker,
 and hashed-query record/replay keys. See GitHub's
 [commit schema](https://docs.github.com/en/graphql/reference/commits) and
 [pull-request schema](https://docs.github.com/en/graphql/reference/pulls).
+
+### Cache effective path mismatch (OPT101)
+
+The scan emits `cache_effective_paths` as optional context, never findings.
+When a drilled log contains the toolkit missing-path warning, collection checks
+every sampled successful instance of the same job that reached the same known
+actions/cache save post-step, without the duration filter used to pick the drill.
+Timestamp-scoped warning evidence is required in every such attempt; unknown
+logs and mixed results withhold. The pole carries `cache_path_sample` to the
+log leaf, which renders a secondary uncredited observation and prompt. It never
+claims the pole ceiling or contributes to `_SIZING`. See the pattern for the
+existing-wrong-path coverage limit and static-context exclusions.

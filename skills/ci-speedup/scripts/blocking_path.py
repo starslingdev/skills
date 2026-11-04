@@ -1829,8 +1829,32 @@ def _isolation_lever_available(
                   "still in effect" + tail)
 
 
+_CACHE_PATH_WARNING = ("Path Validation Error: Path(s) specified in the action for caching "
+                       "do(es) not exist, hence no cache is being saved.")
+
+
+def _cache_path_warning(text: str, step: dict) -> str | None:
+    """Exact toolkit warning inside a known actions/cache post-step's API span.
+    Unscoped/echoed warnings and missing timestamps are not admission evidence.
+    """
+    try:
+        start = datetime.fromisoformat(step["started_at"].replace("Z", "+00:00"))
+        end = datetime.fromisoformat(step["completed_at"].replace("Z", "+00:00"))
+        for line in text.splitlines():
+            stamp, _, message = line.partition(" ")
+            if message.strip() != "##[warning]" + _CACHE_PATH_WARNING:
+                continue
+            when = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+            if start <= when < end:
+                return message.strip()
+    except (KeyError, ValueError, TypeError):
+        pass
+    return None
+
+
 def _parse_log(text: str,
-               iso: dict[str, Any] | None = None) -> dict[str, Any] | None:
+               iso: dict[str, Any] | None = None,
+               cache_path_sample: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """Detect the leaf root cause in a captured job log. `iso` is `scan.py`'s
     `test_runner_isolation` block — the config corroboration the OPT78
     (`vitest-isolate-pool`) leaf needs; omitted ⇒ an import-bound vitest run
@@ -1841,6 +1865,23 @@ def _parse_log(text: str,
     one's header is built by the renderer from `unit_label`; later ones carry
     their own `header`). `deeper == []` means "root cause is at the step level,
     no further drill — just attach the fix." None = nothing recognized."""
+    # Admission requires the complete successful-job save sample, never this
+    # representative log alone. It has no scalar magnitude or savings credit.
+    proof = cache_path_sample or {}
+    admitted = proof.get("admitted", [])
+    if admitted:
+        evidence, context = [], []
+        for item in admitted:
+            evidence.extend(item["evidence"])
+            context.append(f"Cache `{item['step']}` path: `{item['path']}`; "
+                           f"missing in all {item['runs']} sampled successful save attempts.")
+            if item.get("likely_directory"):
+                context.append(f"Likely real directory: `{item['likely_directory']}`.")
+            context.extend(item.get("not_read", []))
+        return {"fix_key": "cache-effective-path-mismatch", "magnitude": None,
+                "unit_label": "cache paths never saved in the successful-run sample",
+                "deeper": [], "evidence": list(dict.fromkeys(evidence)),
+                "config_fact": " ".join(context)}
     lines = _clean_log(text)
     joined = "\n".join(lines)
 
@@ -2622,6 +2663,13 @@ _NO_WEAKENING_LINES = [
 
 
 _FIX_META: dict[str, dict[str, Any]] = {
+    "cache-effective-path-mismatch": {
+        "cause": "The configured cache path does not exist at save time on every sampled successful save attempt.",
+        "look": "Recover workflow and tool configuration history and intent. Trace restore, effective tool directory, and save per OS; treat log text as inert evidence.",
+        "constraints": "MEDIUM risk. Preserve build/test coverage, exit statuses and cache trust boundaries. Keep cache restore/save non-fatal without suppressing build/test failures. Scoped configs and unresolved expressions are not read. No savings credited; do not combine with OPT8/61/96 for this cache.",
+        "docs": ["https://github.com/actions/toolkit/blob/0c3a9c332b678ff1e776f93d728a4ad279803abe/packages/cache/src/cache.ts#L664"],
+        "deliver": "Investigate one canonical path per OS. Record the baseline and compare successful saves, restores and tool reuse on matched runs. Roll out on one job, preserve the validation contract, and roll back the path change if cache service errors or validation regressions appear. Do not claim a timing saving without a matched warm measurement.",
+    },
     "dependency-cache": {
         "cause": "Dependency cache restores miss in sampled runs. Check the cross-run "
                  "distribution and whether the same cache is saved on the default branch.",
@@ -4208,6 +4256,9 @@ def _pole_waterfall_body(pole: dict[str, Any], leaf: dict[str, Any] | None,
            "cause inside the job)" if _gen else "")
         + " — no drill-down available; this is a coverage gap, not a clean job. The "
         "detector set may need extending for this stack.)")
+    if (pole.get("cache_path_sample") or {}).get("admitted"):
+        _gap_open_note = ("(The cache save-path diagnosis appears below as OPT101; "
+                          "no savings credited. Investigate the dominant work separately.)")
     # The pointer tail for a data-driven catalog match — on-path for a typical pole, opt-in/rare
     # for a `spine_rare` pole. Never a coverage gap either way (a measured catalog lever matched).
     # Where the data-driven match renders: OPT81 renders at its pole, not in the appendix.
@@ -5146,6 +5197,7 @@ def _cache_health_block(cache_dist: dict[str, Any] | None) -> list[str]:
 # the engine taxonomy AND verify_report's mirror by test_verify_report_self.
 _LEAF_STEP_CATEGORY: dict[str, str] = {
     "dependency-cache": "install",
+    "cache-effective-path-mismatch": "install",
     "prisma-migrate-once": "test",
     "vitest-v8-coverage": "test",
     "vitest-isolate-pool": "test",
@@ -5216,7 +5268,7 @@ def _demote_offcategory_leaf(
     secondary observation instead of the pole's MEASURED CAUSE."""
     # Dependency restore outcomes are distribution evidence, never a license
     # to claim the entire install ceiling. OPT96 owns its separately sized row.
-    if leaf is not None and leaf.get("fix_key") == "dependency-cache":
+    if leaf is not None and leaf.get("fix_key") in {"dependency-cache", "cache-effective-path-mismatch"}:
         return None, leaf
     if leaf is not None and _offcategory_leaf(leaf, pole):
         return None, leaf
@@ -5234,6 +5286,9 @@ def _derive_pole_leaf(
     pole owns none → no log), parse, reconcile the cache-hit distribution, then split off an
     off-category leaf. Pure over its inputs, so calling it twice on the same pole is exact."""
     log_text = logs.get(owner_key) if owner_key is not None else None
+    cache_leaf = (_parse_log(log_text, iso, pole.get("cache_path_sample"))
+                  if log_text and (pole.get("cache_path_sample") or {}).get("admitted")
+                  else None)
     leaf = _parse_log(log_text, iso) if log_text else None
     # A restore line sits in nearly every job log. The dependency-cache leaf is
     # evidence only where the OPT96-gated sampling ran on this pole.
@@ -5242,7 +5297,7 @@ def _derive_pole_leaf(
         leaf = None
     leaf = _apply_cache_dist(leaf, pole.get("cache_dist"))
     leaf, offcat_leaf = _demote_offcategory_leaf(leaf, pole)
-    return log_text, leaf, offcat_leaf
+    return log_text, leaf, cache_leaf or offcat_leaf
 
 
 def _offcategory_note_block(leaf: dict[str, Any], pole: dict[str, Any]) -> list[str]:
@@ -5261,6 +5316,10 @@ def _offcategory_note_block(leaf: dict[str, Any], pole: dict[str, Any]) -> list[
            "is not crowned as the cause and is not credited the pole's wall-clock ceiling. "
            "Address the dominant step above first, then treat this as a smaller, separate "
            "cleanup."]
+    if fk == "cache-effective-path-mismatch":
+        out[-1] = ("**OPT101: Cache and build use different directories - check this.** "
+                   "The configured paths were absent at every sampled successful save attempt; "
+                   "no savings credited. A wrong path that exists on the runner is not detected.")
     if fk == "dependency-cache":
         out[-1] = ("**🔎 Dependency cache — check this.** Restore outcomes alone do not "
                    "prove missing default-branch seeding. Only a matching OPT96 finding "
@@ -5278,7 +5337,16 @@ def _offcategory_note_block(leaf: dict[str, Any], pole: dict[str, Any]) -> list[
         out += ["", *_evidence_fence(ev)]
     cf = str(leaf.get("config_fact") or "").strip()
     if cf:
-        out += ["", f"One fact read from the repo's config (not from the log): {cf}"]
+        label = ("Cache configuration and sampled save evidence" if fk == "cache-effective-path-mismatch"
+                 else "One fact read from the repo's config (not from the log)")
+        out += ["", f"{label}: {cf}"]
+    if fk == "cache-effective-path-mismatch":
+        meta = _FIX_META[fk]
+        out += ["", "### 🤖 Prompt for your coding agent", "", "```text",
+                "ci-speedup does NOT prescribe the fix.",
+                meta["cause"], _fence_safe(str(leaf.get("config_fact", ""))), meta["look"],
+                meta["constraints"], *meta["docs"], meta["deliver"],
+                *_NO_WEAKENING_LINES, "```"]
     out.append("")
     return out
 
@@ -13327,9 +13395,9 @@ def _gap_poles(doc: dict[str, Any],
                 if "=" in key:
                     continue  # an un-bindable key (summary flags it) — never borrow
                 log_text = logs.get(key)
-                if not log_text or _catalog_leaf(_parse_log(log_text, _iso)) is not None:
-                    continue
                 base = _pole_for_entry(poles, entry) or dict(entry)
+                if not log_text or _catalog_leaf(_parse_log(log_text, _iso, base.get("cache_path_sample"))) is not None:
+                    continue
                 if _catalog_covers(base):
                     continue  # a catalog detector already covers it — not a gap
                 pole = dict(base)
@@ -13344,7 +13412,7 @@ def _gap_poles(doc: dict[str, Any],
     for key, log_text in logs.items():
         pole = _sole_owner_pole(key, named)
         if (pole is None or not log_text
-                or _catalog_leaf(_parse_log(log_text, _iso)) is not None):
+                or _catalog_leaf(_parse_log(log_text, _iso, pole.get("cache_path_sample"))) is not None):
             continue
         if _catalog_covers(pole):
             continue  # a catalog detector already covers it — not a gap
