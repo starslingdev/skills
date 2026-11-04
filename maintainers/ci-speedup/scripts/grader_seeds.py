@@ -79,7 +79,9 @@ TRIAGE_ALLOWLIST = {
     "report drills every gating pole, each with a hand-off prompt": AUTO_SEED,                      # check_speed_poles_complete
     "aggregation-gate poles tell the upstream story, never an optimize-this prompt": AUTO_SEED,    # check_aggregation_gate_poles_never_prescribe
     "each rendered pole's drill belongs to its own job (no cross-job log leak)": AUTO_SEED,         # check_pole_drill_belongs_to_its_job
+    "every pole that cites the Audit link renders its own Audit line": AUTO_SEED,                   # check_pole_audit_link_reference_resolves
     "every 🤖 gap-fill evidence line is verbatim from the captured job log (issue #106)": AUTO_SEED,  # check_gap_fill_evidence_grounded
+    "a pole with no known root-cause pattern carries a gap-fill analysis": AUTO_SEED,             # check_no_root_cause_pole_is_gap_filled
     "no spine-dropped check is also framed on the merge-gating critical path": AUTO_SEED,           # check_dropped_check_not_framed_on_path
     "no spine-demoted pole carries the typical-gate framing (prompt / Contents)": AUTO_SEED,        # check_demoted_pole_not_framed_typical_gate
     "headline 'slowest check' names the data layer's critical_path_check": AUTO_SEED,               # check_headline_slowest_matches_stamp
@@ -133,6 +135,9 @@ TRIAGE_ALLOWLIST = {
     "Tier-2 savings rows are backed by runner-minute cost spine": AUTO_SEED,                      # check_tier2_savings_rows_backed_by_cost_spine
     "OPT64 is ranked only on enough retried runs": AUTO_SEED,                                     # check_opt64_minimum_sample
     "runner-minute cost spine source block is re-derivable": AUTO_SEED,                           # check_runner_minute_spine_contract
+    "cost-spine Contents count matches the rows the table shows": AUTO_SEED,                      # check_cost_spine_contents_count_matches_table
+    "cost spine names the minutes on runners GitHub does not host": AUTO_SEED,                    # check_cost_spine_runner_host_split
+    "drill-log fetch time is compared truthfully with the audit's scan time": AUTO_SEED,          # check_drill_log_capture_relation
     "no rate-derived dollars on the minutes surfaces": AUTO_SEED,                                 # check_no_rate_derived_dollars
     "shallow cost-spine sample is disclosed (re-derived from the stamped workflows)": AUTO_SEED,  # check_cost_spine_shallow_disclosed
     "the fetch plan matches its call sites (no unconsumed prefetches)": AUTO_SEED,                # check_prefetch_plan_consumed
@@ -190,7 +195,9 @@ CHECK_CLASS = {
     "report drills every gating pole, each with a hand-off prompt": "missing-second-pole-or-finding",  # a required pole/finding is missing
     "aggregation-gate poles tell the upstream story, never an optimize-this prompt": "prescribed-a-fix",  # an "optimize this step" prompt over a `needs:`-only success sink that runs no work
     "each rendered pole's drill belongs to its own job (no cross-job log leak)": "fabricated-or-unsupported-finding",  # a drill misattributed to the wrong job's evidence
+    "every pole that cites the Audit link renders its own Audit line": "fabricated-or-unsupported-finding",  # a prompt points at an Audit link the pole does not render
     "every 🤖 gap-fill evidence line is verbatim from the captured job log (issue #106)": "fabricated-or-unsupported-finding",  # a quoted evidence line not in the captured log = a fabricated/altered quote
+    "a pole with no known root-cause pattern carries a gap-fill analysis": "coverage-gap-dead-end",  # exact match: a pole shipped with no root cause while its log was in hand
     "no spine-dropped check is also framed on the merge-gating critical path": "mis-ranked-lever",  # spine/critical-path framing error
     "no spine-demoted pole carries the typical-gate framing (prompt / Contents)": "mis-ranked-lever",  # a demoted pole framed as the typical gate = a ranking-framing error
     "headline 'slowest check' names the data layer's critical_path_check": "mis-ranked-lever",  # headline doesn't match the measured critical path
@@ -243,6 +250,9 @@ CHECK_CLASS = {
     "Tier-2 savings rows are backed by runner-minute cost spine": "fabricated-or-unsupported-finding",  # rendered savings rows not backed by cost-spine rows
     "OPT64 is ranked only on enough retried runs": "fabricated-or-unsupported-finding",  # a ranked retry saving resting on too few retried runs, or on a flaky retry
     "runner-minute cost spine source block is re-derivable": "fabricated-or-unsupported-finding",  # cost-spine source rows/totals not backed by rates/stamps
+    "cost-spine Contents count matches the rows the table shows": "fabricated-or-unsupported-finding",  # a Contents row count the rendered table does not show
+    "cost spine names the minutes on runners GitHub does not host": "unscrubbed-or-disclosure-risk",  # minutes on non-GitHub runners presented as GitHub-billable without the disclosure
+    "drill-log fetch time is compared truthfully with the audit's scan time": "fabricated-or-unsupported-finding",  # a "newer"/"older" claim the two timestamps do not support
     "no rate-derived dollars on the minutes surfaces": "fabricated-or-unsupported-finding",  # a rate-derived $/USD figure leaked onto a minutes-only surface
     "shallow cost-spine sample is disclosed (re-derived from the stamped workflows)": "coverage-gap-dead-end",  # an undisclosed shallow sample reads as exact coverage
     "the fetch plan matches its call sites (no unconsumed prefetches)": "other",  # a drifted prefetch plan wasted API budget; a collection-orchestration bug, no data-faithfulness enum fits

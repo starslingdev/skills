@@ -177,8 +177,8 @@ Only the delivery mechanism varies; the contract is **agent-independent.**
    hygiene figures approximate (flagged). `run.py` then prints a **data-pass summary**
    to stdout — the gating resolution (required checks, **already resolved from rulesets
    + branch protection**: a fileless/managed check like `Claude Code Review` is flagged
-   auto-demoted, an empty set means none are declared), the addressable long poles, and
-   the **exact `blocking_path.py` render command** with per-pole bindings pre-filled.
+   auto-demoted, an empty set means none are declared), the addressable long poles, the gh
+   API call count, and the **exact `blocking_path.py` render command** with per-pole bindings pre-filled.
    **Act on that summary.** Do NOT re-query gh for branch protection / rulesets (the
    data pass did it — read `required_checks`), manually verify a fileless check's
    gating, or hand-spelunk `findings.json` with `python -c` — it's all in the summary.
@@ -212,8 +212,8 @@ Only the delivery mechanism varies; the contract is **agent-independent.**
    delete; don't auto-commit it or edit their `.gitignore`). Remember this internal
    path — the phase-6 "save the full report" option copies from it.
    - **4a. LLM gap-fill for coverage-gap poles (mandatory when present).**
-     A drilled pole whose captured log matched **no catalog detector** renders
-     the marker "no drill-down available" and would otherwise dead-end — a
+     A drilled pole whose log matched **no catalog detector** (or only generic OPT75/71)
+     renders the marker "no drill-down available" and would otherwise dead-end — a
      *product failure*. So **you (the agent running the skill) fill the gap**: for
      each such pole read its captured log (`data_bundle.logs[].file` under
      `logs_dir`) + the step timeline, work out what eats the dominant step's time,
@@ -312,7 +312,7 @@ Only the delivery mechanism varies; the contract is **agent-independent.**
    PROVISIONAL: the new config on too few post-change runs — "treat as provisional;
    re-audit"). Never present a retired-era or provisional number as current (live
    miss 2026-07-30). **Fast-CI preface (owner UX):** when that merge-wait figure is
-   under ~2 min AND carries no such era caveat, open by saying their CI is in good
+   under 2m 00s (the report's 🟡 tier; 2m 00s+ is 🟠) AND carries no such era caveat, open by saying their CI is in good
    shape — nothing to change unless a finding is a cheap, glaring easy win — then the
    same options, menu unchanged. Then state
    each gating long pole as one plain finding — the check it gates, its measured
@@ -405,15 +405,15 @@ dropped (never reframed into a softer finding):
    Actions failure-rate dashboard),
    not individual runs. OPT48 is the canonical example.
 
-## Quality review (mandatory before trusting a report)
+## Quality review (for worked examples; not a run phase)
 
-A report is not trusted until hostile, **independent** subagents re-derive
-every finding against the real repo clone (assume each finding is WRONG until
-proven), per `references/adversarial-review-rubric.md` — which checks not just
-"is the claim true" but **actionability** (a real, addressable CI-config cause,
-not "fix your code"), **evidence-verifies-the-headline-claim** (aggregate, not
-cherry-picked), causal sizing, severity calibration, and ≥2-pass independent
-agreement. A finding only one pass would defend is cut or escalated, not kept.
+Not one of the six phases: a user's run, interactive or headless, never spawns it (the
+phase-5 gate is the per-run check). Before a report ships as a worked example, hostile,
+**independent** subagents re-derive every finding against the real repo clone (assume
+each finding is WRONG until proven), per `references/adversarial-review-rubric.md`:
+**actionability** (a real, addressable CI-config cause, not "fix your code"),
+**evidence-verifies-the-headline-claim** (aggregate, not cherry-picked), causal sizing,
+severity calibration, ≥2-pass agreement; a one-pass-only finding is cut or escalated.
 
 ## Pattern catalog
 

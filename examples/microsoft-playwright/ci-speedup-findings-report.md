@@ -50,7 +50,7 @@ not measured: lifecycle data was not collected
 
 **⏳ Pre-start wait** - 41 jobs wait in queue before starting (developer wall-clock the spine above doesn't capture): [see below](#pre-start-wait).
 
-**💸 Runner-minute reductions** - ~73,029 min/mo of measured, merge-safe runner-minute savings, backed by a 133-row cost spine: [section](#runner-minute-reductions).
+**💸 Runner-minute reductions** - ~73,029 min/mo of measured, merge-safe runner-minute savings, backed by a 12-row cost spine (+121 more runner-minute rows hidden): [section](#runner-minute-reductions).
 
 1. 🟢 [Superseded Runs Not Cancelled](#r-1) - 71,644 min/mo
 2. 🟢 [Superseded Runs Not Cancelled](#r-2) - 1,072 min/mo
@@ -136,7 +136,7 @@ WHERE THE TIME GOES
 - The job's time is dominated by the `Run ./.github/actions/run-test` step: ~41m 14s (100% of the job wall), from the sampled per-step decomposition (no single-run timeline was captured for this job).
 
 STRUCTURAL CATALOG PATTERN MATCHED
-- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log (the Audit link) to see exactly what inside it the lever reshapes.
+- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log in a recent pull-request run of this job (no direct log link is shown here) to see exactly what inside it the lever reshapes.
 
 WHAT'S ADDRESSABLE (wall-clock ceiling - don't over-promise)
 - this job's matrix legs run in parallel, so speeding this one leg saves only ~1m 06s (the next leg, `windows-latest - firefox`, is 40m 15s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `windows-latest - firefox` (40m 15s), for up to ~1m 06s of merge wait.
@@ -213,7 +213,7 @@ WHERE THE TIME GOES
 - The job's time is dominated by the `Run ./.github/actions/run-test` step: ~72m 46s (100% of the job wall), from the sampled per-step decomposition (no single-run timeline was captured for this job).
 
 STRUCTURAL CATALOG PATTERN MATCHED
-- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log (the Audit link) to see exactly what inside it the lever reshapes.
+- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log in a recent pull-request run of this job (no direct log link is shown here) to see exactly what inside it the lever reshapes.
 
 WHAT'S ADDRESSABLE (wall-clock ceiling - don't over-promise)
 - this job's matrix legs run in parallel, so speeding this one leg saves only ~13m 24s (the next leg, `Test chrome on macos-latest`, is 59m 33s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `Test chrome on macos-latest` (59m 33s), for up to ~13m 24s of merge wait.
@@ -290,7 +290,7 @@ WHERE THE TIME GOES
 - The job's time is dominated by the `Run ./.github/actions/run-test` step: ~40m 04s (100% of the job wall), from the sampled per-step decomposition (no single-run timeline was captured for this job).
 
 STRUCTURAL CATALOG PATTERN MATCHED
-- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log (the Audit link) to see exactly what inside it the lever reshapes.
+- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log in a recent pull-request run of this job (no direct log link is shown here) to see exactly what inside it the lever reshapes.
 
 WHAT'S ADDRESSABLE (wall-clock ceiling - don't over-promise)
 - this job's matrix legs run in parallel, so speeding this one leg saves only ~8m 24s (the next leg, `macos-latest - firefox`, is 31m 51s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `macos-latest - chromium` (20m 14s), for up to ~20m 00s of merge wait.
@@ -368,7 +368,7 @@ WHERE THE TIME GOES
 - The job's time is dominated by the `Run ./.github/actions/run-test` step: ~59m 21s (100% of the job wall), from the sampled per-step decomposition (no single-run timeline was captured for this job).
 
 STRUCTURAL CATALOG PATTERN MATCHED
-- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log (the Audit link) to see exactly what inside it the lever reshapes.
+- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log in a recent pull-request run of this job (no direct log link is shown here) to see exactly what inside it the lever reshapes.
 
 WHAT'S ADDRESSABLE (wall-clock ceiling - don't over-promise)
 - this job's matrix legs run in parallel, so speeding this one leg saves only ~13m 32s (the next leg, `Test msedge on windows-latest`, is 46m 01s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `Test msedge on windows-latest` (46m 01s), for up to ~13m 32s of merge wait.
@@ -446,7 +446,7 @@ WHERE THE TIME GOES
 - The job's time is dominated by the `Run ./.github/actions/run-test` step: ~45m 48s (100% of the job wall), from the sampled per-step decomposition (no single-run timeline was captured for this job).
 
 STRUCTURAL CATALOG PATTERN MATCHED
-- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log (the Audit link) to see exactly what inside it the lever reshapes.
+- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log in a recent pull-request run of this job (no direct log link is shown here) to see exactly what inside it the lever reshapes.
 
 WHAT'S ADDRESSABLE (wall-clock ceiling - don't over-promise)
 - this job's matrix legs run in parallel, so speeding this one leg saves only ~4m 40s (the next leg, `ubuntu-22.04 (webkit - Node.js 20)`, is 41m 21s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `ubuntu-22.04 (webkit - Node.js 20)` (41m 21s), for up to ~4m 40s of merge wait.
@@ -550,7 +550,7 @@ failure mode and how you have guarded it before shipping.
 
 All figures are runner-minutes; multiply by your runner's per-minute rate to get dollars.
 
-| Workflow | Job | Runner | Event | Status | Attempt | Volume | Raw min/mo | Billable min/mo | Share |
+| Workflow | Job | Runner | Event | Status | Attempt | Volume | Raw min/mo | Rounded-up min/mo | Share |
 | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: |
 | .github/workflows/tests_mcp.yml | windows-latest - firefox | windows-latest | all-events | success | latest | all-status | 34713.000 | 35112.000 | 3.500% |
 | .github/workflows/tests_primary.yml | ubuntu-22.04 (webkit - Node.js 20) | ubuntu-22.04 | all-events | success | latest | all-status | 31765.092 | 32209.200 | 3.200% |
@@ -565,7 +565,10 @@ All figures are runner-minutes; multiply by your runner's per-minute rate to get
 | .github/workflows/tests_mcp.yml | windows-latest - chromium | windows-latest | all-events | success | latest | all-status | 20340.600 | 20790.000 | 2.100% |
 | .github/workflows/tests_mcp.yml | ubuntu-latest - firefox | ubuntu-latest | all-events | success | latest | all-status | 19838.000 | 20244.000 | 2.000% |
 | Total |  |  |  |  |  |  | 987431.780 | 1013124.508 | 100.000% |
+
 +121 more runner-minute rows hidden
+
+Rounded-up min/mo rounds each job up to a whole minute, the way per-minute runner billing counts it. 998471.212 of the 1013124.508 min/mo ran on GitHub-hosted runner labels and 14653.296 on labels not recognised as GitHub-hosted (`playwright-x64-ubuntu24-64-core`). A GitHub larger runner with a custom name is not recognised and counts here too. GitHub bills only the runners it hosts, so minutes on a self-hosted or third-party runner are not on the GitHub bill.
 
 > These findings cut wall-clock-neutral runner spend without touching your merge gate; each R-numbered finding carries a machine-derived proof it cannot slow a PR.
 > **73,029 min/mo credited after de-overlap** (naive sum 73,029 min/mo; 5 neutral findings; not promoted: 2 measured item(s) (2 without source rows) · 8 modeled item(s) · 6 structural shared-step item(s); see Also noticed). All figures are runner-minutes; multiply by your runner's per-minute rate to get dollars.
@@ -587,7 +590,7 @@ _Superseded = a run a NEWER run started before it finished - measured by timesta
 
 - **What ci-speedup measured:** 54 run(s) across 5 branch(es) were superseded (a newer run started before they finished) in the sampled window; ~71644-167291 runner-min/mo of cancellable-remainder compute - the lower figure credits only the 67% mean remainder each superseded run would have burned AFTER its successor started, not the whole run (mean over 4 timed run(s); ×3.36 to the 30d volume (336 runs); 100-run recent slice (not a full 30d census)). Superseded attribution is INFERENCE - the API marks no run 'cancelled-by-concurrency'. (sensitivity range: 71,644 min/mo to 167,291 min/mo)
 - **Why this can't slow your merge:** machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (superseded runs: same head_branch, a newer run started before this one finished (timestamp overlap); cancellation cause is inference).
-- **Source block:** `runner_minute_spine` matched 29 rows for `.github/workflows/tests_secondary.yml`; current measured cost spine for those rows is 263103.875 raw min/mo, 267586.928 billable min/mo. The saving is credited in raw minutes; billable rounds each job up to a whole minute, as GitHub bills.
+- **Source block:** `runner_minute_spine` matched 29 rows for `.github/workflows/tests_secondary.yml`; current measured cost spine for those rows is 263103.875 raw min/mo, 267586.928 rounded-up min/mo. The saving is credited in raw minutes; the rounded-up figure rounds each job up to a whole minute.
 - **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt46--superseded-runs-not-cancelled-missing-concurrency-or-cancel-in-progress-false
 
 #### 🤖 Prompt for your coding agent
@@ -646,7 +649,7 @@ _Superseded = a run a NEWER run started before it finished - measured by timesta
 
 - **What ci-speedup measured:** 7 run(s) across 3 branch(es) were superseded (a newer run started before they finished) in the sampled window; ~1072-11922 runner-min/mo of cancellable-remainder compute - the lower figure credits only the 73% mean remainder each superseded run would have burned AFTER its successor started, not the whole run (mean over 4 timed run(s); ×7.78 to the 30d volume (778 runs); 100-run recent slice (not a full 30d census)). Superseded attribution is INFERENCE - the API marks no run 'cancelled-by-concurrency'. (sensitivity range: 1,072 min/mo to 11,922 min/mo)
 - **Why this can't slow your merge:** machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (superseded runs: same head_branch, a newer run started before this one finished (timestamp overlap); cancellation cause is inference).
-- **Source block:** `runner_minute_spine` matched 5 rows for `.github/workflows/tests_components.yml`; current measured cost spine for those rows is 21636.828 raw min/mo, 23534.500 billable min/mo. The saving is credited in raw minutes; billable rounds each job up to a whole minute, as GitHub bills.
+- **Source block:** `runner_minute_spine` matched 5 rows for `.github/workflows/tests_components.yml`; current measured cost spine for those rows is 21636.828 raw min/mo, 23534.500 rounded-up min/mo. The saving is credited in raw minutes; the rounded-up figure rounds each job up to a whole minute.
 - **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt46--superseded-runs-not-cancelled-missing-concurrency-or-cancel-in-progress-false
 
 #### 🤖 Prompt for your coding agent
@@ -705,7 +708,7 @@ _Superseded = a run a NEWER run started before it finished - measured by timesta
 
 - **What ci-speedup measured:** 7 run(s) across 5 branch(es) were superseded (a newer run started before they finished) in the sampled window; ~159-2378 runner-min/mo of cancellable-remainder compute - the lower figure credits only the 56% mean remainder each superseded run would have burned AFTER its successor started, not the whole run (mean over 6 timed run(s); ×8.75 to the 30d volume (875 runs); 100-run recent slice (not a full 30d census)). Superseded attribution is INFERENCE - the API marks no run 'cancelled-by-concurrency'. (sensitivity range: 159 min/mo to 2,378 min/mo)
 - **Why this can't slow your merge:** machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (superseded runs: same head_branch, a newer run started before this one finished (timestamp overlap); cancellation cause is inference).
-- **Source block:** `runner_minute_spine` matched 2 rows for `.github/workflows/infra.yml`; current measured cost spine for those rows is 4086.979 raw min/mo, 5250.000 billable min/mo. The saving is credited in raw minutes; billable rounds each job up to a whole minute, as GitHub bills.
+- **Source block:** `runner_minute_spine` matched 2 rows for `.github/workflows/infra.yml`; current measured cost spine for those rows is 4086.979 raw min/mo, 5250.000 rounded-up min/mo. The saving is credited in raw minutes; the rounded-up figure rounds each job up to a whole minute.
 - **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt46--superseded-runs-not-cancelled-missing-concurrency-or-cancel-in-progress-false
 
 #### 🤖 Prompt for your coding agent
@@ -764,7 +767,7 @@ _Superseded = a run a NEWER run started before it finished - measured by timesta
 
 - **What ci-speedup measured:** 9 run(s) across 4 branch(es) were superseded (a newer run started before they finished) in the sampled window; ~141-1821 runner-min/mo of cancellable-remainder compute - the lower figure credits only the 64% mean remainder each superseded run would have burned AFTER its successor started, not the whole run (mean over 8 timed run(s); ×0.68 to the 30d volume (68 runs); 100-run recent slice (not a full 30d census)). Superseded attribution is INFERENCE - the API marks no run 'cancelled-by-concurrency'. (sensitivity range: 141 min/mo to 1,821 min/mo)
 - **Why this can't slow your merge:** machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (superseded runs: same head_branch, a newer run started before this one finished (timestamp overlap); cancellation cause is inference).
-- **Source block:** `runner_minute_spine` matched 1 row for `.github/workflows/tests_bidi.yml`; current measured cost spine for those rows is 2354.941 raw min/mo, 2391.356 billable min/mo. The saving is credited in raw minutes; billable rounds each job up to a whole minute, as GitHub bills.
+- **Source block:** `runner_minute_spine` matched 1 row for `.github/workflows/tests_bidi.yml`; current measured cost spine for those rows is 2354.941 raw min/mo, 2391.356 rounded-up min/mo. The saving is credited in raw minutes; the rounded-up figure rounds each job up to a whole minute.
 - **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt46--superseded-runs-not-cancelled-missing-concurrency-or-cancel-in-progress-false
 
 #### 🤖 Prompt for your coding agent
@@ -823,7 +826,7 @@ _Schedule burn is counted only on event=schedule runs whose head_sha repeats con
 
 - **What ci-speedup measured:** 18 scheduled run(s) in 12 consecutive same-head_sha group(s) re-ran without a code change in the sampled schedule slice (18% of 100 schedule run(s)); ~13 runner-min/mo of schedule-event compute (mean over 20 timed run(s); ×0.30 to the 30d volume (30 runs); 100-run recent slice (not a full 30d census)).
 - **Why this can't slow your merge:** machine-derived proof: `non_pr_event` - `schedule` runs do not gate a PR merge (event=schedule subset only; consecutive same-head_sha schedule runs; schedule is not a developer PR/merge event).
-- **Source block:** `runner_minute_spine` matched 2 rows for `.github/workflows/publish_release.yml`; current measured cost spine for those rows is 104.943 raw min/mo, 140.600 billable min/mo. The saving is credited in raw minutes; billable rounds each job up to a whole minute, as GitHub bills.
+- **Source block:** `runner_minute_spine` matched 2 rows for `.github/workflows/publish_release.yml`; current measured cost spine for those rows is 104.943 raw min/mo, 140.600 rounded-up min/mo. The saving is credited in raw minutes; the rounded-up figure rounds each job up to a whole minute.
 - **Guardrail:** Confirm the cron cadence is not an operational SLA; prefer widening the interval only for cleanup/triage/build jobs where delayed execution is acceptable.
 - **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt36--cron-schedule-too-frequent
 

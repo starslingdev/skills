@@ -76,7 +76,7 @@ WHERE THE TIME GOES
 - No per-step breakdown was captured for this job; profile its slowest step in the repo.
 
 DATA-DRIVEN CATALOG PATTERN MATCHED
-- A data-driven catalog pattern (OPT25) matched this pole - see the **Also noticed** section below for the measured lever and its catalog fix recipe (it sits ON the critical path, so it shrinks this pole's wall time). The step above is the load-bearing one that lever targets; open its log (the Audit link) to see what inside it the lever reshapes.
+- A data-driven catalog pattern (OPT25) matched this pole - see the **Also noticed** section below for the measured lever and its catalog fix recipe (it sits ON the critical path, so it shrinks this pole's wall time). The step above is the load-bearing one that lever targets; open its log in a recent pull-request run of this job (no direct log link is shown here) to see what inside it the lever reshapes.
 
 WHAT'S ADDRESSABLE (wall-clock ceiling - don't over-promise)
 - up to ~4m 10s - it gates until it drops to the next concurrent check, `lint` (5m 50s); below that the gate moves and further savings are runner-minutes, not wall-clock.
@@ -172,7 +172,7 @@ failure mode and how you have guarded it before shipping.
 >
 > - **Critical path + step P50:** the committed ci-speedup audit of `example/project`, scanned **2026-11-02** - P50 over **None runs / None jobs** across None workflows (latest runs at scan time).
 > - **Which checks gate (the critical-path ordering):** measured from **4/4 sampled PRs**.
-> - **Step internals + cross-run checks (the per-pole drill-downs):** the pole jobs' raw logs, fetched **2026-11-02T00:00:00Z** (newer than the critical-path audit above). Each drill-down is **one representative run** of that job - the one closest to its typical time (for a bimodal job, a representative of the slow mode the drill explains), linked + labelled per pole - and the **Cross-run check** validates the load-bearing magnitude (median + range) across several runs.
+> - **Step internals + cross-run checks (the per-pole drill-downs):** the pole jobs' raw logs, fetched **2026-11-02T00:00:00Z** (the same capture as the critical-path audit above). Each drill-down is **one representative run** of that job - the one closest to its typical time (for a bimodal job, a representative of the slow mode the drill explains), linked + labelled per pole - and the **Cross-run check** validates the load-bearing magnitude (median + range) across several runs.
 
 | Source | Coverage | Used for |
 | --- | --- | --- |

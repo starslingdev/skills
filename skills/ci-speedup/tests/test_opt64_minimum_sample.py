@@ -146,7 +146,7 @@ def test_engine_formula_and_billable_gap_render_readably(tmp_path: Path):
     source = next(line for line in report.splitlines()
                   if line.lstrip("- ").startswith("**Source block:**"))
     assert "credited in raw minutes" in source
-    assert "billable rounds each job up to a whole minute" in source
+    assert "the rounded-up figure rounds each job up to a whole minute" in source
     vr = vs._load_verify_report()
     chk = vr.check_tier2_savings_rows_backed_by_cost_spine(report, findings_path)
     assert chk.ok and not chk.skipped, chk
