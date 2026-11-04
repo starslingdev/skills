@@ -134,6 +134,9 @@ TRIAGE_ALLOWLIST = {
     "Tier-2 headline claim names the top stamped finding": AUTO_SEED,                             # check_tier2_headline_matches_stamp
     "Tier-2 savings rows are backed by runner-minute cost spine": AUTO_SEED,                      # check_tier2_savings_rows_backed_by_cost_spine
     "runner-minute cost spine source block is re-derivable": AUTO_SEED,                           # check_runner_minute_spine_contract
+    "cost-spine Contents count matches the rows the table shows": AUTO_SEED,                      # check_cost_spine_contents_count_matches_table
+    "cost spine names the minutes on runners GitHub does not host": AUTO_SEED,                    # check_cost_spine_runner_host_split
+    "drill-log fetch time is compared truthfully with the audit's scan time": AUTO_SEED,          # check_drill_log_capture_relation
     "no rate-derived dollars on the minutes surfaces": AUTO_SEED,                                 # check_no_rate_derived_dollars
     "shallow cost-spine sample is disclosed (re-derived from the stamped workflows)": AUTO_SEED,  # check_cost_spine_shallow_disclosed
     "the fetch plan matches its call sites (no unconsumed prefetches)": AUTO_SEED,                # check_prefetch_plan_consumed
@@ -245,6 +248,9 @@ CHECK_CLASS = {
     "Tier-2 headline claim names the top stamped finding": "mis-ranked-lever",  # top bill-axis claim names the wrong ranked row
     "Tier-2 savings rows are backed by runner-minute cost spine": "fabricated-or-unsupported-finding",  # rendered savings rows not backed by cost-spine rows
     "runner-minute cost spine source block is re-derivable": "fabricated-or-unsupported-finding",  # cost-spine source rows/totals not backed by rates/stamps
+    "cost-spine Contents count matches the rows the table shows": "fabricated-or-unsupported-finding",  # a Contents row count the rendered table does not show
+    "cost spine names the minutes on runners GitHub does not host": "unscrubbed-or-disclosure-risk",  # minutes on non-GitHub runners presented as GitHub-billable without the disclosure
+    "drill-log fetch time is compared truthfully with the audit's scan time": "fabricated-or-unsupported-finding",  # a "newer"/"older" claim the two timestamps do not support
     "no rate-derived dollars on the minutes surfaces": "fabricated-or-unsupported-finding",  # a rate-derived $/USD figure leaked onto a minutes-only surface
     "shallow cost-spine sample is disclosed (re-derived from the stamped workflows)": "coverage-gap-dead-end",  # an undisclosed shallow sample reads as exact coverage
     "the fetch plan matches its call sites (no unconsumed prefetches)": "other",  # a drifted prefetch plan wasted API budget; a collection-orchestration bug, no data-faithfulness enum fits

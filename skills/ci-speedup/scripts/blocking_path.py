@@ -4592,6 +4592,41 @@ def _yaml_skew_lines(doc: dict[str, Any]) -> list[str]:
             "from a current default-branch checkout if that matters here."]
 
 
+def _parse_capture_time(value: str) -> tuple[datetime, bool] | None:
+    """(aware datetime, date_only) for an ISO-8601 timestamp or date, else None."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    date_only = bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", text))
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed, date_only
+
+
+def _capture_relation(captured_at: str, scanned_at: str) -> str:
+    """How the drill logs' fetch time relates to the audit's scan time: "the same capture
+    as", "newer than" or "older than" ("the same day as" when either side is a bare date
+    and the dates match). Empty when either side can't be parsed, so nothing is claimed.
+    2026-11-03 dogfood: the line said "newer than" for two identical timestamps, which is
+    the normal case (run.py passes the scan time as --captured-at)."""
+    cap, scan = _parse_capture_time(captured_at), _parse_capture_time(scanned_at)
+    if cap is None or scan is None:
+        return ""
+    (c, c_date), (s, s_date) = cap, scan
+    if c_date or s_date:
+        cd, sd = c.astimezone(timezone.utc).date(), s.astimezone(timezone.utc).date()
+        if cd == sd:
+            return "the same day as"
+        return "newer than" if cd > sd else "older than"
+    if c == s:
+        return "the same capture as"
+    return "newer than" if c > s else "older than"
+
+
 def _provenance_block(doc: dict[str, Any], repo: str, captured_at: str) -> list[str]:
     """Spell out WHERE the numbers come from: levels 1–2 are P50 from the committed
     ci-speedup audit (its own sample size + window + gate-sample completeness);
@@ -4822,9 +4857,11 @@ def _provenance_block(doc: dict[str, Any], repo: str, captured_at: str) -> list[
                    "guess), and no "
                    "check is labelled non-required on its account.")
     if captured_at:
+        relation = _capture_relation(captured_at, str(doc.get("scanned_at") or ""))
+        relation = f" ({relation} the critical-path audit above)" if relation else ""
         out.append(f"> - **Step internals + cross-run checks (the per-pole drill-downs):** the "
-                   f"pole jobs' raw logs, fetched **{captured_at}** (newer than the "
-                   "critical-path audit above). Each drill-down is **one representative "
+                   f"pole jobs' raw logs, fetched **{captured_at}**{relation}. Each "
+                   "drill-down is **one representative "
                    "run** of that job - the one closest to its typical time (for a "
                    "bimodal job, a representative of the slow mode the drill explains), "
                    "linked + labelled per pole - and the **Cross-run check** validates "
@@ -5531,7 +5568,7 @@ def _toc_block(pole_wfs: list[dict[str, Any]], wf_gate: dict[str, int],
         # totals/rows mirror the section's own strings (same helpers, same
         # ranked list), and `check_tier2_total_deoverlapped` re-derives both
         # renderings from findings.json so they can never drift apart.
-        spine_part = (f", backed by a {runner_spine_count}-row cost spine"
+        spine_part = (f", backed by a {_spine_count_phrase(runner_spine_count, '-row cost spine')}"
                       if runner_spine_count else "")
         lines += [f"**💸 Runner-minute reductions** — ~{tier2_toc['total_min']} of "
                   f"measured, merge-safe runner-minute savings{spine_part}: "
@@ -5551,9 +5588,10 @@ def _toc_block(pole_wfs: list[dict[str, Any]], wf_gate: dict[str, int],
                           "kept in the findings JSON)*"]
         lines.append("")
     elif runner_spine_count:
-        row_plural = "s" if runner_spine_count != 1 else ""
-        lines += [f"**Runner-minute cost spine** — {runner_spine_count} workflow/job "
-                  f"row{row_plural} showing where sampled runner minutes go: "
+        row_plural = "s" if min(runner_spine_count, _RUNNER_MINUTE_SPINE_CAP) != 1 else ""
+        rows_phrase = _spine_count_phrase(runner_spine_count, f" workflow/job row{row_plural}")
+        lines += [f"**Runner-minute cost spine** — {rows_phrase} showing where sampled "
+                  "runner minutes go: "
                   "[see below](#runner-minute-reductions).", ""]
     if also_count:
         plural = "s" if also_count != 1 else ""
@@ -7705,6 +7743,84 @@ def _runner_minute_spine_row_count(doc: dict[str, Any]) -> int:
     return len(rows) if isinstance(rows, list) else 0
 
 
+def _spine_hidden_rows_line(hidden: int) -> str:
+    """The table's hidden-row disclosure, shared by the table and the Contents line so
+    the two always say the same thing."""
+    return f"+{hidden} more runner-minute row{'' if hidden == 1 else 's'} hidden"
+
+
+def _spine_count_phrase(row_count: int, noun: str) -> str:
+    """`<shown><noun>`, plus the hidden-row disclosure when the table caps the rows.
+    The Contents line counts what the table SHOWS (2026-11-03 dogfood: "a 13-row cost
+    spine" over a 12-row table), and names the rest exactly as the table does."""
+    shown = min(row_count, _RUNNER_MINUTE_SPINE_CAP)
+    hidden = row_count - shown
+    phrase = f"{shown}{noun}"
+    return f"{phrase} ({_spine_hidden_rows_line(hidden)})" if hidden > 0 else phrase
+
+
+# Recognised hosted image labels, including older labels retained in saved reports.
+# Arbitrary names beginning with an OS name are not evidence of a hosted image.
+# Current label reference: https://docs.github.com/en/actions/reference/runners/github-hosted-runners
+# A custom-named larger runner remains unrecognised; the note discloses that limit.
+_GITHUB_HOSTED_LABEL_RE = re.compile(
+    r"^(?:ubuntu-(?:latest|slim|(?:18|20|22|24|26)\.04)(?:-arm)?|"
+    r"windows-(?:latest|2019|2022|2025)(?:-vs2026)?|windows-11(?:-vs2026)?-arm|"
+    r"macos-(?:latest|11|12|13|14|15|26)(?:-(?:intel|large|xlarge))?|xcode-27)$",
+    re.IGNORECASE)
+
+
+def _is_github_hosted_label(label: object) -> bool:
+    """A spine row's runner label (the space-joined, sorted jobs-API `labels[]`) names a
+    GitHub-hosted runner: every label is a GitHub image label and none is `self-hosted`."""
+    toks = str(label or "").split()
+    if not toks or any(t.lower() == "self-hosted" for t in toks):
+        return False
+    return all(_GITHUB_HOSTED_LABEL_RE.match(t) for t in toks)
+
+
+def _spine_runner_host_split(spine: dict[str, Any]) -> tuple[float, float, float, list[str]]:
+    """(GitHub-hosted, other, total) rounded-up min/mo and the other runner labels,
+    from every source row (shown and hidden). Verify_report rebuilds the same split."""
+    hosted = other = 0.0
+    other_labels: set[str] = set()
+    for row in spine.get("rows") or []:
+        row = _as_dict(row)
+        minutes = _num(row.get("billable_equiv_min_per_month")) or 0.0
+        label = str(row.get("runner_label") or "").strip()
+        if _is_github_hosted_label(label):
+            hosted += minutes
+        else:
+            other += minutes
+            other_labels.add(label or "unknown runner")
+    total = _num(_as_dict(spine.get("totals")).get("billable_equiv_min_per_month"))
+    return hosted, other, (hosted + other if total is None else total), sorted(other_labels)
+
+
+def _spine_runner_host_note(spine: dict[str, Any]) -> str:
+    """What the rounded-up column is, and how much of it ran on runners GitHub does not
+    host (2026-11-03 dogfood: a "Billable" column counted `starsling-ubuntu-24.04`
+    minutes GitHub never bills). Minutes only, no rates."""
+    hosted, other, total, labels = _spine_runner_host_split(spine)
+    shown = ", ".join(f"`{_spine_identity_cell(lb)}`" for lb in labels[:4])
+    if len(labels) > 4:
+        shown += f" +{len(labels) - 4} more"
+    lead = ("Rounded-up min/mo rounds each job up to a whole minute, the way per-minute "
+            "runner billing counts it. ")
+    custom = (" A GitHub larger runner with a custom name is not recognised and "
+              "counts here too.")
+    not_billed = (" GitHub bills only the runners it hosts, so minutes on a self-hosted or "
+                  "third-party runner are not on the GitHub bill.")
+    if not labels:
+        return lead + f"All {total:.3f} min/mo ran on GitHub-hosted runner labels."
+    if not any(_is_github_hosted_label(_as_dict(r).get("runner_label"))
+               for r in spine.get("rows") or []):
+        return lead + (f"None of the {total:.3f} min/mo ran on GitHub-hosted runner labels "
+                       f"({shown}).") + custom + not_billed
+    return lead + (f"{hosted:.3f} of the {total:.3f} min/mo ran on GitHub-hosted runner labels "
+                   f"and {other:.3f} on labels not recognised as GitHub-hosted ({shown}).") + custom + not_billed
+
+
 def _spine_identity_cell(value: object) -> str:
     return str(value or "").replace("\r", " ").replace("\n", " ").replace("|", "\\|").strip()
 
@@ -7774,7 +7890,7 @@ def _runner_minute_spine_block(doc: dict[str, Any]) -> list[str]:
         ("All figures are runner-minutes; multiply by your runner's per-minute "
          "rate to get dollars."),
         "",
-        "| Workflow | Job | Runner | Event | Status | Attempt | Volume | Raw min/mo | Billable min/mo | Share |",
+        "| Workflow | Job | Runner | Event | Status | Attempt | Volume | Raw min/mo | Rounded-up min/mo | Share |",
         "| --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: |",
     ]
     lines += [_runner_minute_spine_table_row(row) for row in shown]
@@ -7783,8 +7899,10 @@ def _runner_minute_spine_block(doc: dict[str, Any]) -> list[str]:
         f"{_spine_num_cell(totals.get('raw_compute_runner_min_per_month'))} | "
         f"{_spine_num_cell(totals.get('billable_equiv_min_per_month'))} | 100.000% |")
     if hidden:
-        plural = "s" if len(hidden) != 1 else ""
-        lines.append(f"+{len(hidden)} more runner-minute row{plural} hidden")
+        # A blank line first: GitHub-flavoured markdown folds a plain line that directly
+        # follows a table into the table as one more row.
+        lines += ["", _spine_hidden_rows_line(len(hidden))]
+    lines += ["", _spine_runner_host_note(spine)]
     footnote = _measured_compute_footnote(spine)
     if footnote:
         lines += ["", footnote]
@@ -8039,7 +8157,7 @@ def _tier2_source_line(f: dict[str, Any], doc: dict[str, Any]) -> str:
         head = (f"matched {len(rows)} row{plural} for `{_flatten_cell(wf)}`")
     return (f"**Source block:** `runner_minute_spine` {head}; "
             "current measured cost spine for those rows is "
-            f"{raw:.3f} raw min/mo, {billable:.3f} billable min/mo.")
+            f"{raw:.3f} raw min/mo, {billable:.3f} rounded-up min/mo.")
 
 
 def _has_tier2_stamp_surface(findings: list[dict[str, Any]]) -> bool:

@@ -4412,7 +4412,7 @@ def _rendered_runner_minute_spine_report(*, workflow: str = ".github/workflows/c
     return f"""# report
 
 <!-- ci-speedup:runner-minute-spine -->
-| Workflow | Job | Runner | Event | Status | Attempt | Volume | Raw min/mo | Billable min/mo | Share |
+| Workflow | Job | Runner | Event | Status | Attempt | Volume | Raw min/mo | Rounded-up min/mo | Share |
 | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: |
 | `{workflow}` | `{job}` | `{runner}` | {event} | {status} | {attempt} | {volume} | {raw} | {billable} | {share} |
 {extra_rows}| Total |  |  |  |  |  |  | {total_raw} | {total_billable} | {total_share} |
@@ -5324,7 +5324,7 @@ def test_tier2_source_binding_filters_workflow_and_raw_job(tmp_path: Path):
     source = next(line for line in report.splitlines() if line.lstrip("- ").startswith("**Source block:**"))
 
     assert "matched 2 rows" in source
-    assert "950.000 raw min/mo, 1000.000 billable min/mo." in source
+    assert "950.000 raw min/mo, 1000.000 rounded-up min/mo." in source
     assert all(decoy not in source for decoy in ("900.000", "700.000", "$"))
     chk = vr.check_tier2_savings_rows_backed_by_cost_spine(report, findings_path)
     assert chk.ok and not chk.skipped, chk
@@ -5344,7 +5344,7 @@ def test_tier2_source_binding_preserves_scoped_and_case_sensitive_jobs(tmp_path:
     source = next(line for line in report.splitlines() if line.lstrip("- ").startswith("**Source block:**"))
 
     assert "matched 1 row" in source
-    assert "150.000 raw min/mo, 200.000 billable min/mo." in source
+    assert "150.000 raw min/mo, 200.000 rounded-up min/mo." in source
     chk = vr.check_tier2_savings_rows_backed_by_cost_spine(report, findings_path)
     assert chk.ok and not chk.skipped, chk
 
@@ -5366,7 +5366,7 @@ def test_tier2_source_binding_matches_matrix_rows_by_raw_base(tmp_path: Path):
     source = next(line for line in report.splitlines() if line.lstrip("- ").startswith("**Source block:**"))
 
     assert "matched 2 rows" in source
-    assert "130.000 raw min/mo, 170.000 billable min/mo." in source
+    assert "130.000 raw min/mo, 170.000 rounded-up min/mo." in source
     chk = vr.check_tier2_savings_rows_backed_by_cost_spine(report, findings_path)
     assert chk.ok and not chk.skipped, chk
 
@@ -5506,7 +5506,7 @@ def test_tier2_source_binding_uses_all_events_envelope_for_schedule(tmp_path: Pa
 
     assert "<!-- ci-speedup:tier2-finding" in report
     assert "matched 1 row" in source
-    assert "150.000 raw min/mo, 200.000 billable min/mo." in source
+    assert "150.000 raw min/mo, 200.000 rounded-up min/mo." in source
     chk = vr.check_tier2_savings_rows_backed_by_cost_spine(report, findings_path)
     assert chk.ok and not chk.skipped, chk
 
@@ -5621,7 +5621,7 @@ def test_tier2_opt64_wide_binding_binds_all_prior_rows_across_runners(tmp_path: 
     source = next(line for line in report.splitlines()
                   if line.lstrip("- ").startswith("**Source block:**"))
     assert "matched 3 prior-attempt rows for `.github/workflows/ci.yml`" in source
-    assert "180.000 raw min/mo, 230.000 billable min/mo." in source
+    assert "180.000 raw min/mo, 230.000 rounded-up min/mo." in source
     assert "$" not in source
     chk = vr.check_tier2_savings_rows_backed_by_cost_spine(report, findings_path)
     assert chk.ok and not chk.skipped, chk
@@ -6487,7 +6487,7 @@ def test_runner_minute_spine_contract_rejects_total_row_before_data(tmp_path: Pa
     report = """# report
 
 <!-- ci-speedup:runner-minute-spine -->
-| Workflow | Job | Runner | Event | Status | Attempt | Volume | Raw min/mo | Billable min/mo | Share |
+| Workflow | Job | Runner | Event | Status | Attempt | Volume | Raw min/mo | Rounded-up min/mo | Share |
 | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: |
 | Total |  |  |  |  |  |  | 100.000 | 150.000 | 100.000% |
 | `.github/workflows/ci.yml` | `build` | `ubuntu-latest` | all-events | success | latest | all-status | 100.000 | 150.000 | 100.000% |
@@ -6813,8 +6813,8 @@ def test_runner_minute_spine_contract_rejects_duplicate_rendered_headers(tmp_pat
         json.dumps(_render_ready_runner_minute_spine_doc(), indent=2) + "\n",
         encoding="utf-8")
     report = _rendered_runner_minute_spine_report().replace(
-        "| Workflow | Job | Runner | Event | Status | Attempt | Volume | Raw min/mo | Billable min/mo | Share |",
-        "| Workflow | Job | Runner | Event | Status | Attempt | Volume | Raw min/mo | Billable min/mo | Share | Share |")
+        "| Workflow | Job | Runner | Event | Status | Attempt | Volume | Raw min/mo | Rounded-up min/mo | Share |",
+        "| Workflow | Job | Runner | Event | Status | Attempt | Volume | Raw min/mo | Rounded-up min/mo | Share | Share |")
     report = report.replace(
         "| --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: |",
         "| --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: |")

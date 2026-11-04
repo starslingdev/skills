@@ -172,7 +172,7 @@ failure mode and how you have guarded it before shipping.
 >
 > - **Critical path + step P50:** the committed ci-speedup audit of `example/project`, scanned **2026-11-02** - P50 over **None runs / None jobs** across None workflows (latest runs at scan time).
 > - **Which checks gate (the critical-path ordering):** measured from **4/4 sampled PRs**.
-> - **Step internals + cross-run checks (the per-pole drill-downs):** the pole jobs' raw logs, fetched **2026-11-02T00:00:00Z** (newer than the critical-path audit above). Each drill-down is **one representative run** of that job - the one closest to its typical time (for a bimodal job, a representative of the slow mode the drill explains), linked + labelled per pole - and the **Cross-run check** validates the load-bearing magnitude (median + range) across several runs.
+> - **Step internals + cross-run checks (the per-pole drill-downs):** the pole jobs' raw logs, fetched **2026-11-02T00:00:00Z** (the same capture as the critical-path audit above). Each drill-down is **one representative run** of that job - the one closest to its typical time (for a bimodal job, a representative of the slow mode the drill explains), linked + labelled per pole - and the **Cross-run check** validates the load-bearing magnitude (median + range) across several runs.
 
 | Source | Coverage | Used for |
 | --- | --- | --- |

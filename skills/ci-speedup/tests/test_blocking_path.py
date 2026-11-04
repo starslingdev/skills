@@ -222,7 +222,7 @@ def test_runner_minute_spine_renderer_round_trips_against_verifier(tmp_path: Pat
     # The single minutes-only cost-spine shape (pricing excised 2026-07-20): no
     # SKU/Billing/Weighted/USD columns, just the runner-minute surface.
     assert ("| Workflow | Job | Runner | Event | Status | Attempt | Volume "
-            "| Raw min/mo | Billable min/mo | Share |") in report
+            "| Raw min/mo | Rounded-up min/mo | Share |") in report
     assert "| Total |" in report
     # The one-sentence pricing story leads the table; no dollar column anywhere.
     assert ("All figures are runner-minutes; multiply by your runner's per-minute "

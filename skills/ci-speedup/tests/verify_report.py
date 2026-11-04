@@ -5272,7 +5272,7 @@ _RUNNER_MINUTE_SPINE_REQUIRED_HEADERS = {
     "attempt": "attempt_filter",
     "volume": "volume_filter",
     "raw min/mo": "raw_compute_runner_min_per_month",
-    "billable min/mo": "billable_equiv_min_per_month",
+    "rounded-up min/mo": "billable_equiv_min_per_month",
     "share": "share_of_all_row_total",
 }
 _VR_RUNNER_MINUTE_SPINE_CAP = 12
@@ -6143,6 +6143,173 @@ def check_runner_minute_spine_contract(report: str, findings_path: Path | None) 
     if problems:
         return Check(name, False, "; ".join(problems[:12]))
     return Check(name, True, f"runner_minute_spine rows re-derived ({len(rows)} row(s))")
+
+
+_SPINE_CONTENTS_COUNT_RE = re.compile(
+    r"(?:backed by a (\d+)-row cost spine|"
+    r"\*\*Runner-minute cost spine\*\* [-—] (\d+) workflow/job rows?)"
+    r"(?: \(\+(\d+) more runner-minute rows? hidden\))?")
+_SPINE_GLUED_HIDDEN_RE = re.compile(
+    r"^\|[^\n]*\n\+\d+\s+more\s+runner-minute\s+rows?\s+hidden", re.MULTILINE)
+
+
+def check_cost_spine_contents_count_matches_table(report: str,
+                                                  findings_path: Path | None) -> Check:
+    """The Contents line counts the cost-spine rows the table SHOWS and names the hidden
+    ones as the table does, and the table's hidden-row line is set apart from the table
+    (GitHub-flavoured markdown folds a plain line that directly follows a table into it as
+    one more row). 2026-11-03 dogfood: "a 13-row cost spine" over a 12-row table."""
+    name = "cost-spine Contents count matches the rows the table shows"
+    if not _RUNNER_MINUTE_SPINE_MARKER_RE.search(report or ""):
+        return Check(name, True, "no rendered cost spine", skipped=True)
+    rows, _total, hidden, err = _parse_runner_minute_spine_table(report)
+    if err:
+        return Check(name, True, f"cost-spine table unparsed ({err}); the spine "
+                     "contract check reports it", skipped=True)
+    hidden = hidden or 0
+    problems: list[str] = []
+    for m in _SPINE_CONTENTS_COUNT_RE.finditer(report or ""):
+        stated = int(m.group(1) or m.group(2))
+        stated_hidden = int(m.group(3) or 0)
+        if stated != len(rows) or stated_hidden != hidden:
+            problems.append(
+                f"Contents says {m.group(0)!r} but the table shows {len(rows)} row(s) "
+                f"with {hidden} hidden")
+    marker = _RUNNER_MINUTE_SPINE_MARKER_RE.search(report)
+    if marker and _SPINE_GLUED_HIDDEN_RE.search(report[marker.end():]):
+        problems.append("the hidden-row line directly follows the table, so GitHub renders "
+                        "it as a table row; separate it with a blank line")
+    if problems:
+        return Check(name, False, "; ".join(problems))
+    return Check(name, True, f"Contents and table agree: {len(rows)} shown, {hidden} hidden")
+
+
+_DRILL_LOG_FETCHED_RE = re.compile(
+    r"pole jobs' raw logs, fetched \*\*([^*]+)\*\*"
+    r"(?: \((the same capture as|the same day as|newer than|older than) "
+    r"the critical-path audit above\))?")
+
+
+def _vr_capture_time(value: str):
+    import datetime as _vdt
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = _vdt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_vdt.timezone.utc)
+    return parsed, bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", text))
+
+
+def check_drill_log_capture_relation(report: str, findings_path: Path | None) -> Check:
+    """The Data sources line compares the drill logs' fetch time with the audit's scan
+    time truthfully: equal is "the same capture", never "newer". 2026-11-03 dogfood: two
+    identical timestamps were called "newer than the critical-path audit above"."""
+    name = "drill-log fetch time is compared truthfully with the audit's scan time"
+    m = _DRILL_LOG_FETCHED_RE.search(report or "")
+    if not m:
+        return Check(name, True, "no drill-log provenance line rendered", skipped=True)
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return Check(name, True, err, skipped=True)
+    import datetime as _vdt
+    cap, scan = _vr_capture_time(m.group(1)), _vr_capture_time(str(data.get("scanned_at") or ""))
+    if cap is None or scan is None:
+        expected = None
+    elif cap[1] or scan[1]:
+        cd = cap[0].astimezone(_vdt.timezone.utc).date()
+        sd = scan[0].astimezone(_vdt.timezone.utc).date()
+        expected = ("the same day as" if cd == sd else
+                    "newer than" if cd > sd else "older than")
+    else:
+        expected = ("the same capture as" if cap[0] == scan[0] else
+                    "newer than" if cap[0] > scan[0] else "older than")
+    if m.group(2) != expected:
+        return Check(name, False,
+                     f"logs fetched {m.group(1)!r}, audit scanned "
+                     f"{data.get('scanned_at')!r}: the line says {m.group(2)!r}, "
+                     f"expected {expected!r}")
+    return Check(name, True, f"relation {expected!r} matches the timestamps")
+
+
+# Mirror of blocking_path's GitHub-hosted label rule, kept independent on purpose.
+_VR_GITHUB_HOSTED_LABEL_RE = re.compile(
+    r"^(?:ubuntu-(?:latest|slim|(?:18|20|22|24|26)\.04)(?:-arm)?|"
+    r"windows-(?:latest|2019|2022|2025)(?:-vs2026)?|windows-11(?:-vs2026)?-arm|"
+    r"macos-(?:latest|11|12|13|14|15|26)(?:-(?:intel|large|xlarge))?|xcode-27)$",
+    re.IGNORECASE)
+
+
+def _vr_is_github_hosted_label(label: object) -> bool:
+    toks = str(label or "").split()
+    if not toks or any(t.lower() == "self-hosted" for t in toks):
+        return False
+    return all(_VR_GITHUB_HOSTED_LABEL_RE.match(t) for t in toks)
+
+
+def _vr_spine_host_note(spine: dict) -> str:
+    """Rebuild the cost spine's runner-host sentence from the source rows (MIRROR of
+    blocking_path._spine_runner_host_note)."""
+    rows = [_as_dict(r) for r in _as_list(spine.get("rows"))]
+    hosted = sum(_num(r.get("billable_equiv_min_per_month")) or 0.0
+                 for r in rows if _vr_is_github_hosted_label(r.get("runner_label")))
+    other_rows = [r for r in rows if not _vr_is_github_hosted_label(r.get("runner_label"))]
+    other = sum(_num(r.get("billable_equiv_min_per_month")) or 0.0 for r in other_rows)
+    labels = sorted({str(r.get("runner_label") or "").strip() or "unknown runner"
+                     for r in other_rows})
+    total = _num(_as_dict(spine.get("totals")).get("billable_equiv_min_per_month"))
+    total = hosted + other if total is None else total
+    shown = ", ".join(
+        "`" + lb.replace("\r", " ").replace("\n", " ").replace("|", "\\|").strip() + "`"
+        for lb in labels[:4])
+    if len(labels) > 4:
+        shown += f" +{len(labels) - 4} more"
+    lead = ("Rounded-up min/mo rounds each job up to a whole minute, the way per-minute "
+            "runner billing counts it. ")
+    custom = (" A GitHub larger runner with a custom name is not recognised and "
+              "counts here too.")
+    not_billed = (" GitHub bills only the runners it hosts, so minutes on a self-hosted or "
+                  "third-party runner are not on the GitHub bill.")
+    if not labels:
+        return lead + f"All {total:.3f} min/mo ran on GitHub-hosted runner labels."
+    if len(other_rows) == len(rows):
+        return lead + (f"None of the {total:.3f} min/mo ran on GitHub-hosted runner labels "
+                       f"({shown}).") + custom + not_billed
+    return lead + (f"{hosted:.3f} of the {total:.3f} min/mo ran on GitHub-hosted runner labels "
+                   f"and {other:.3f} on labels not recognised as GitHub-hosted ({shown}).") + custom + not_billed
+
+
+def check_cost_spine_runner_host_split(report: str, findings_path: Path | None) -> Check:
+    """The cost spine never calls its minutes GitHub-billable: the rounded-up column is
+    explained, and the minutes on runners GitHub does not host are named, re-derived from
+    the source rows. 2026-11-03 dogfood: a "Billable min/mo" column and its Share counted
+    `starsling-ubuntu-24.04` minutes, which GitHub does not bill."""
+    name = "cost spine names the minutes on runners GitHub does not host"
+    marker = _RUNNER_MINUTE_SPINE_MARKER_RE.search(report or "")
+    if not marker:
+        return Check(name, True, "no rendered cost spine", skipped=True)
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return Check(name, False, f"rendered cost spine without readable findings JSON: {err}")
+    spine = data.get("runner_minute_spine")
+    if not isinstance(spine, dict):
+        return Check(name, False, "rendered cost spine without a runner_minute_spine block")
+    section = report[marker.end():]
+    nxt = re.search(r"^##\s+", section, re.MULTILINE)
+    section = section[:nxt.start()] if nxt else section
+    problems: list[str] = []
+    if re.search(r"\|\s*billable min/mo\s*\|", section, re.IGNORECASE):
+        problems.append("the minutes column is headed Billable, but it counts every runner")
+    expected = _vr_spine_host_note(spine)
+    if expected not in section:
+        problems.append(f"runner-host sentence missing or not re-derivable (expected: "
+                        f"{expected!r})")
+    if problems:
+        return Check(name, False, "; ".join(problems))
+    return Check(name, True, "runner-host split re-derived from the spine rows")
 
 
 def _text_from_json(v: object) -> str:
@@ -11200,7 +11367,7 @@ def _tier2_expected_source_line(f: dict, data: dict) -> str | None:
         head = (f"matched {len(rows)} row{plural} for `{_flatten_cell(wf)}`")
     return (f"**Source block:** `runner_minute_spine` {head}; "
             "current measured cost spine for those rows is "
-            f"{raw:.3f} raw min/mo, {billable:.3f} billable min/mo.")
+            f"{raw:.3f} raw min/mo, {billable:.3f} rounded-up min/mo.")
 
 
 def _tier2_rendered_source_lines(body: str) -> list[str]:
@@ -14406,6 +14573,9 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_tier2_headline_matches_stamp(report, findings_path, report_path),
         check_tier2_savings_rows_backed_by_cost_spine(report, findings_path),
         check_runner_minute_spine_contract(report, findings_path),
+        check_cost_spine_contents_count_matches_table(report, findings_path),
+        check_cost_spine_runner_host_split(report, findings_path),
+        check_drill_log_capture_relation(report, findings_path),
         check_no_rate_derived_dollars(report, findings_path),
         check_opt80_tail_lines(report, findings_path),
         check_opt80_tail_withheld_reasons(report, findings_path),

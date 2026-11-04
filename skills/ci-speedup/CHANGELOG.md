@@ -907,6 +907,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Changed
 
+- **2026-11-03** — SKILL.md: the fast-CI "good shape" preface applies under exactly 2m 00s (the report's 🟡 tier), not "under ~2 min"; the hostile quality review is scoped to worked examples and is no longer called mandatory, since it is not a run phase and a user's run, interactive or headless, never spawns it. (#187)
 - **2026-11-03** — Document flaky-test quarantine with ownership, expiry, reporting and a product-failure guardrail; explain account capacity and explicit hosted fallback before changing runners; point mostly-idle queue waits to the single-slot resource diagnosis. (#177)
 
 - **2026-11-02** — OPT70 requires a full run for lockfile, scoping-config and workflow changes, an unscoped default-branch or scheduled suite under OPT90's post-merge guardrail, and a one-time skip-logic test. OPT84 adds `bun check` as a recipe-only alternative with vendor benchmarks against older Bun; TypeScript 7 remains the default.
@@ -1203,6 +1204,11 @@ unversioned and updates by reinstall from `main`.
   run improvised).
 
 ### Fixed
+
+- **2026-11-04** — Recognize complete hosted image labels in the runner-minute split; custom names beginning with an operating-system prefix remain unknown. Preserve documented slim, arm and larger macOS image forms. (#187)
+
+- **2026-11-03** — The report's Contents line counts the cost-spine rows the table shows and names the hidden ones in the table's own words ("12-row cost spine (+1 more runner-minute row hidden)", not "13-row"), and the hidden-row line is set apart from the table so GitHub no longer renders it as a table row. The cost spine's minutes column is "Rounded-up min/mo", not "Billable min/mo": a sentence under the table splits the minutes into GitHub-hosted runner labels and labels not recognised as GitHub-hosted, naming them, and says GitHub bills only the runners it hosts (minutes only, no rates). The Data sources line says the drill logs are "the same capture as" the audit when the timestamps match, instead of always "newer than". Three new `verify_report` invariants re-derive each of these from findings.json. (#187)
+- **2026-11-03** — `run.py`'s data-pass summary states the gh API call count (with run time and failed calls) from the same stamps the report quotes, so a run on a shared API budget sees its cost before rendering. (#187)
 
 - **2026-11-04**: Select captured long-pole logs with the report's gate-frequency, slow-mode, and matrix ordering so equal caps cannot leave a displayed gate undrilled. Reject Audit pointers backed only by an unlinked marker or quoted code, and distinguish missing direct links from missing captured logs. (#185)
 
