@@ -1911,13 +1911,61 @@ def check_date_matches_filename(report: str, report_path: Path | None) -> Check:
 # ci-secure's security framing that must NOT survive into a ci-speedup report.
 # Phrase-precise: an audited repo may legitimately run zizmor, and that name will
 # appear in a finding's evidence - that's the AUDITED REPO's content, not a leak.
-_LEAK_PATTERNS: tuple[tuple[str, str], ...] = (
-    (r"what an attacker (?:can|could) do", "attacker-capability prose label"),
-    (r"attacker_scenario", "attacker_scenario field"),
-    (r"ci-secure (?:skill|catalog|report|scan|finding|audit)", "ci-secure self-reference"),
-    (r"blended under the same severity", "zizmor methodology text"),
-    (r"\brun zizmor\b", "zizmor recommendation"),
+# The third field marks patterns an audited identifier can legitimately carry (a
+# check named `ci-secure scan`, a step named `Run zizmor`): those are matched
+# with the renderer's identifier spans removed (_strip_audited_identifiers).
+# The rest are skill vocabulary no identifier carries, matched everywhere.
+_LEAK_PATTERNS: tuple[tuple[str, str, bool], ...] = (
+    (r"what an attacker (?:can|could) do", "attacker-capability prose label", False),
+    (r"attacker_scenario", "attacker_scenario field", False),
+    (r"ci-secure (?:skill|catalog|report|scan|finding|audit)", "ci-secure self-reference", True),
+    (r"blended under the same severity", "zizmor methodology text", False),
+    (r"\brun zizmor\b", "zizmor recommendation", True),
 )
+
+# Only recognizable identifier positions get an exemption. Backticks alone do
+# not make prose an audited identifier: "Please `run zizmor`" is a recommendation.
+_IDENT_CODE_SPAN_RE = re.compile(r"`[^`\n]+`")
+_IDENT_POLE_TOC_RE = re.compile(
+    r"^(\s*\d+\.\s+[^\[\n]*)\[[^\]\n]*\]\(#pole-\d+\)(?=\s+[-—]\s+\d)")
+_IDENT_NARROWED_LIST_RE = re.compile(
+    r"^(> - \*\*Narrowed to merge-blocking checks:\*\* \d+ non-required check\(s\) "
+    r"excluded from the critical path - )(.*?)(\. They run on PRs)")
+_IDENT_NOUN_BEFORE_RE = re.compile(
+    r"\b(?:check|job|step|workflow|runner)(?:s)?(?: (?:named|called))?\s*[:=]?\s*$", re.I)
+_IDENT_NOUN_AFTER_RE = re.compile(r"^\s+(?:check|job|step|workflow|runner)\b", re.I)
+
+
+def _strip_audited_identifiers(report: str) -> str:
+    out: list[str] = []
+    fence: "tuple[str, int] | None" = None
+    for line in report.splitlines():
+        # A quoted fence is still a code block, whose backticks are literal.
+        content = re.sub(r"^(?: {0,3}>[ \t]?)+", "", line)
+        stripped = content.lstrip()
+        if fence is None:
+            for ch in ("`", "~"):
+                n = len(stripped) - len(stripped.lstrip(ch))
+                if n >= 3:
+                    fence = (ch, n)
+                    break
+            else:
+                if not content.startswith(("    ", "\t")):
+                    line = _IDENT_POLE_TOC_RE.sub(r"\1[]", line)
+                    line = _IDENT_NARROWED_LIST_RE.sub(
+                        lambda m: m[1] + _IDENT_CODE_SPAN_RE.sub("``", m[2]) + m[3], line)
+                    def identifier_span(m: re.Match) -> str:
+                        before = line[:m.start()].replace("*", "")
+                        after = line[m.end():].replace("*", "")
+                        return "``" if (_IDENT_NOUN_BEFORE_RE.search(before)
+                                        or _IDENT_NOUN_AFTER_RE.search(after)) else m[0]
+                    line = _IDENT_CODE_SPAN_RE.sub(identifier_span, line)
+        else:
+            n = len(stripped) - len(stripped.lstrip(fence[0]))
+            if n >= fence[1] and not stripped[n:].strip():
+                fence = None
+        out.append(line)
+    return "\n".join(out)
 
 # Every typographic dash the render boundary (_strip_emdashes) must flatten to an
 # ASCII "-". A report that still carries any of these slipped past the sanitizer.
@@ -2042,7 +2090,9 @@ def check_fences_balanced(report: str) -> Check:
 
 def check_no_domain_leakage(report: str) -> Check:
     name = "no ci-secure template leakage (security-domain framing in ci-speedup prose)"
-    hits = [why for pat, why in _LEAK_PATTERNS if re.search(pat, report, re.IGNORECASE)]
+    prose = _strip_audited_identifiers(report)
+    hits = [why for pat, why, ident_ok in _LEAK_PATTERNS
+            if re.search(pat, prose if ident_ok else report, re.IGNORECASE)]
     return Check(name, not hits,
                  "clean - only audited-repo content references security tooling, if any"
                  if not hits else f"template leak: {', '.join(hits)}")
@@ -3187,6 +3237,33 @@ def _ground_transform(text: str) -> str:
     for dash in _TYPOGRAPHIC_DASHES:
         corpus = corpus.replace(dash, "-")
     return corpus
+
+
+# A pole that says nothing is known about what its job spends the time on. The renderer prints
+# these ONLY for a real coverage gap (a captured log, no catalog pattern that names a cause, no
+# gap-fill yet): the Audit line's "no known root-cause pattern matched" and the waterfall's
+# "matched no known root-cause pattern" note. Either one in a pole with no `🤖 LLM root-cause
+# analysis` block means the report's lever shipped with no root cause while its log was in hand
+# (dogfood 2026-11-03: an OPT75-only top pole). Pinned by test_generic_structural_gap_fill.py.
+_NO_ROOT_CAUSE_RE = re.compile(
+    r"no known root-cause pattern matched|matched no known root-cause pattern", re.IGNORECASE)
+
+
+def check_no_root_cause_pole_is_gap_filled(report: str) -> Check:
+    """Every pole that says "no known root-cause pattern matched" (or the waterfall's
+    equivalent) carries the phase-4a `🤖 LLM root-cause analysis` in the same section. A pole
+    whose only catalog match is generic (OPT75 / OPT71) says it too, so this fails the report
+    the dead-end marker check alone let through."""
+    name = "a pole with no known root-cause pattern carries a gap-fill analysis"
+    bad = [f"`{wf}` ▸ {check}" for wf, check, body in _pole_header_sections(report)
+           if _NO_ROOT_CAUSE_RE.search(body) and _LLM_ANALYSIS_MARKER not in body]
+    if bad:
+        return Check(name, False,
+                     "pole(s) say 'no known root-cause pattern matched' with no `🤖 LLM "
+                     "root-cause analysis` attached - phase 4a must read the pole's captured "
+                     "log and re-render with --analysis KEY=PATH: " + "; ".join(bad))
+    return Check(name, True, "no pole says 'no known root-cause pattern matched' without "
+                 "a gap-fill analysis")
 
 
 def check_gap_fill_evidence_grounded(report: str, findings_path: Path | None) -> Check:
@@ -11545,9 +11622,19 @@ def check_workflow_gate_frequency_matches(report: str, findings_path: Path | Non
     except (OSError, json.JSONDecodeError):
         return Check(name, True, "findings unreadable", skipped=True)
     cp = _as_dict(_as_dict(data).get("pr_critical_path"))
+    # Claims first: the renderer only prints "gates N/M" from `populations` (bimodal-only), so a run
+    # without them legitimately renders no claim — that is the SKIP. A rendered claim with no
+    # populations to check it against is unverifiable output, never a quiet SKIP (bug 4).
+    claims = _GATE_FREQ_RE.findall(report)
+    if not claims:
+        return Check(name, True, "no rendered '`wf` gates N/M PRs' claim", skipped=True)
     pole_count, npop, dropped = _populations_pole_counts(cp)
     if not npop:
-        return Check(name, True, "no per-PR populations to re-derive gate frequency from", skipped=True)
+        return Check(name, False,
+                     f"{len(claims)} rendered '`wf` gates N/M PRs' claim(s) but no per-PR "
+                     "populations to re-derive them from — per-PR data "
+                     + ("present but not readable" if _vr_per_pr_data_present(cp)
+                        else "absent, so the claim has no basis"))
     wf_freq: dict[str, int] = {}
     for c in _as_list(cp.get("checks")):
         if not isinstance(c, dict):
@@ -11556,9 +11643,6 @@ def check_workflow_gate_frequency_matches(report: str, findings_path: Path | Non
         if wf.endswith((".yml", ".yaml")):
             wf_freq[wf] = wf_freq.get(wf, 0) + pole_count.get(
                 str(c.get("name") or c.get("check") or ""), 0)
-    claims = _GATE_FREQ_RE.findall(report)
-    if not claims:
-        return Check(name, True, "no rendered '`wf` gates N/M PRs' claim", skipped=True)
     bad: list[str] = []
     checked = 0
     unjoinable = 0
@@ -11619,8 +11703,15 @@ def check_spine_heavy_check_disclosed(report: str, findings_path: Path | None) -
     cp = _as_dict(_as_dict(data).get("pr_critical_path"))
     per_pr = _populations_per_pr(cp)
     pole_secs = _pole_header_sections(report)
-    if not per_pr or not pole_secs:
-        return Check(name, True, "no populations / no drilled poles", skipped=True)
+    if not pole_secs:
+        return Check(name, True, "no drilled poles", skipped=True)
+    if not per_pr:
+        # Not the bug-4 class: without `populations` the RENDERER floors on global presence, not on
+        # per-pole co-occurrence, and `chain_facts` record chain members only (no co-occurrence),
+        # so there is no per-pole floor here to disagree with. Say so rather than "no data".
+        return Check(name, True, "no populations stamped (no bimodal gate): the renderer floors on "
+                     "global presence on this run, outside this per-pole co-occurrence check",
+                     skipped=True)
     # Effective-floor value map (bimodal-aware, mirroring `_eff_floor_s`) + each check's workflow file
     # (for the sibling-leg corroboration). A floor is selected/valued by `eff`, not the bare p50.
     eff_by: dict[str, float] = {}
@@ -13655,13 +13746,75 @@ def _vr_pole_frequencies(per_pr: list[list[tuple[str, float]]],
     return freq
 
 
+def _vr_per_pr_count(cp: dict) -> int:
+    """Largest explicit sample count; missing records remain unknown PRs."""
+    counts = [cp.get("sampled_pr_count"), cp.get("populations_n")]
+    return max([v for v in counts if isinstance(v, int) and not isinstance(v, bool)]
+               + [len(_as_list(cp.get("chain_facts"))), len(_as_list(cp.get("populations")))])
+
+
+def _vr_per_pr_data_present(cp: dict) -> bool:
+    """True when the run clearly sampled enough PRs for a per-PR re-derivation: the stamped
+    `sampled_pr_count`, the persisted `chain_facts`, or the populations count reaches the stability
+    floor. A per-PR check that then finds nothing it can read must FAIL loudly, never SKIP as
+    "thin sample" (bug 4: a 20/20-sampled run whose recurring-gate check skipped on `populations`,
+    which the collector only stamps for bimodal gates)."""
+    return _vr_per_pr_count(cp) >= _VR_RARE_PRESENCE_MIN_PR
+
+
+def _vr_chain_fact_poles(cp: dict, candidates: "set[str] | None"
+                         ) -> tuple[dict[str, int], int, int]:
+    """Per-check pole frequency re-derived from `chain_facts`, the per-PR record the collector
+    stamps on EVERY run (`populations` is bimodal-only). Returns (lower, undetermined, n): `n`
+    chain-fact records (one per sampled PR, malformed ones included), `lower[c]` = PRs on which `c` is PROVABLY the slowest ranked check, and
+    `undetermined` = PRs whose slowest check the facts can't pin.
+
+    Why it is sound: `runner_up_s` is the longest path left with every chain member zeroed, and a
+    path is at least as long as any one of its members, so it bounds every NON-chain check's
+    capped span from above. When the slowest chain member (rounded to 0.1s, the engine's
+    `_pole_frequencies` basis) strictly exceeds `runner_up_s`, it is the PR's pole on the same
+    caps the engine ranks with; ties among members credit each, as the engine does. Otherwise the
+    pole may be a non-chain check and the PR is counted undetermined, so callers get a bound
+    (lower .. lower + undetermined), never a guess."""
+    lower: dict[str, int] = {}
+    undetermined = n = 0
+    for e in _as_list(cp.get("chain_facts")):
+        # Every record is a sampled PR. A malformed one is UNDETERMINED (it widens the bound),
+        # never dropped: dropped records could hide a recurring gate behind a fragmented PASS.
+        n += 1
+        spans = e.get("member_spans_s") if isinstance(e, dict) else None
+        ru = e.get("runner_up_s") if isinstance(e, dict) else None
+        if (not isinstance(spans, dict) or not isinstance(ru, (int, float))
+                or isinstance(ru, bool) or not math.isfinite(ru) or ru < 0):
+            undetermined += 1
+            continue
+        if any(not isinstance(v, (int, float)) or isinstance(v, bool)
+               or not math.isfinite(v) or v < 0 for v in spans.values()):
+            undetermined += 1
+            continue
+        scoped = {str(k): round(float(v), 1) for k, v in spans.items()
+                  if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
+                  and (candidates is None or str(k) in candidates)}
+        top = max(scoped.values(), default=0.0)
+        if not scoped or top <= round(float(ru), 1):
+            undetermined += 1
+            continue
+        for k, v in scoped.items():
+            if v == top:
+                lower[k] = lower.get(k, 0) + 1
+    return lower, undetermined, n
+
+
 def check_headline_pole_actually_gates(report: str, findings_path: Path | None) -> Check:
     """The rendered headline `critical_path_check` must ACTUALLY gate the merge — be the slowest
     job a PR waits on — on some sampled PRs. A headline that is the pole on FEWER than the
     recurrence floor of PRs while a genuine recurring gate (pole on >= floor) exists is a phantom
     gate (the expo/expo class: a lightweight always-present check crowned over the real 20-minute
-    suites). Re-derived from `populations` — job-p50-capped, the same basis the engine ranks on.
-    Required checks gate by definition (exempt). SKIPs on a thin sample / no populations.
+    suites). Re-derived from `populations` — job-p50-capped, the same basis the engine ranks on —
+    or, when the collector stamped none (it only does for a bimodal gate), from `chain_facts`
+    (`_vr_chain_fact_poles`, a sound bound on the same caps). Required checks gate by definition
+    (exempt). SKIPs only on a genuinely thin sample; a run that sampled enough PRs but left nothing
+    readable FAILS ("per-PR data present but not readable"), as does a bound too loose to decide.
 
     Why FAIL only when a real gate was PASSED OVER (not simply `hf < floor`): on a fragmented
     repo where NO check is the pole on >= floor PRs, the engine legitimately crowns the slowest
@@ -13682,10 +13835,6 @@ def check_headline_pole_actually_gates(report: str, findings_path: Path | None) 
         # degrade to the same "no headline" SKIP as empty findings (never a false FAIL/crash).
         return Check(name, True, "no headline critical_path_check (static-only / no spine)",
                      skipped=True)
-    per_pr = _populations_per_pr(cp)
-    if len(per_pr) < _VR_RARE_PRESENCE_MIN_PR:
-        return Check(name, True, f"only {len(per_pr)} PR population(s) (< {_VR_RARE_PRESENCE_MIN_PR}) "
-                     "— pole frequency is noise on this sample", skipped=True)
     # Required checks gate by definition (branch protection), even if never the slowest — exempt.
     # Match on the RAW name (as the engine's `req_names` does), NOT a scope-normalized key: a
     # `_cmp_name` collapse would let a required `@teamA/build` exempt an unrelated phantom
@@ -13698,25 +13847,63 @@ def check_headline_pole_actually_gates(report: str, findings_path: Path | None) 
     # monorepo scope-collision that a normalized key would introduce.
     ranked = {str(c.get("name") or c.get("check")) for c in _as_list(cp.get("checks"))
               if isinstance(c, dict)}
-    freq = _vr_pole_frequencies(per_pr, ranked or None)
+    # Per-PR basis: `populations` when stamped (exact), else `chain_facts`, which the collector
+    # stamps on EVERY run (a bound: some PRs' pole may be undetermined). `populations` is
+    # bimodal-only, so reading it alone skipped this check on most fully sampled runs (bug 4).
+    per_pr = _populations_per_pr(cp)
+    if len(per_pr) >= _VR_RARE_PRESENCE_MIN_PR:
+        freq, und, n_pr, basis = _vr_pole_frequencies(per_pr, ranked or None), 0, len(per_pr), \
+            "populations"
+    else:
+        freq, und, n_pr = _vr_chain_fact_poles(cp, ranked or None)
+        basis = "chain_facts"
+    if n_pr < _VR_RARE_PRESENCE_MIN_PR:
+        if _vr_per_pr_data_present(cp):
+            return Check(name, False,
+                         "per-PR data present but not readable: the run sampled "
+                         f"{cp.get('sampled_pr_count')} PR(s) with "
+                         f"{len(_as_list(cp.get('chain_facts')))} chain fact(s), yet only "
+                         f"{len(per_pr)} population(s) and {n_pr} chain fact(s) — the "
+                         "headline's recurrence can't be re-derived, so this check would otherwise "
+                         "skip on exactly the run that has the data")
+        return Check(name, True, f"only {n_pr} PR population(s) (< {_VR_RARE_PRESENCE_MIN_PR}) "
+                     "— pole frequency is noise on this sample", skipped=True)
+    missing = max(0, _vr_per_pr_count(cp) - n_pr)
+    und += missing
+    n_pr += missing
     hf = freq.get(str(headline), 0)
+    hf_hi = hf + und
     real_gates = sorted((n for n, c in freq.items() if c >= _VR_POLE_RECUR_FLOOR),
                         key=lambda n: -freq[n])
-    if hf < _VR_POLE_RECUR_FLOOR and real_gates:
+    span = f"{hf}/{n_pr}" if not und else f"{hf}-{hf_hi}/{n_pr}"
+    via = f" (from {basis}" + (f"; {und} PR(s) whose slowest check the facts can't pin" if und
+                               else "") + ")"
+    if hf_hi < _VR_POLE_RECUR_FLOOR and real_gates:
         top = [(n, freq[n]) for n in real_gates[:3]]
         return Check(name, False,
                      f"headline `{headline}` is the actual slowest job (the merge gate) on only "
-                     f"{hf}/{len(per_pr)} sampled PRs, yet genuine recurring gate(s) exist and were "
+                     f"{span} sampled PRs{via}, yet genuine recurring gate(s) exist and were "
                      f"passed over: {', '.join(f'{n} (gates {c})' for n, c in top)}. The headline is "
                      "not the gate — this is the phantom-gate class.")
     if hf >= _VR_POLE_RECUR_FLOOR:
         return Check(name, True,
-                     f"headline `{headline}` is the actual gate on {hf}/{len(per_pr)} sampled PRs "
+                     f"headline `{headline}` is the actual gate on {span} sampled PRs{via} "
                      f"(>= floor {_VR_POLE_RECUR_FLOOR})")
-    return Check(name, True,
-                 f"headline `{headline}` gates {hf}/{len(per_pr)} PRs; no check reaches the "
-                 f"recurrence floor ({_VR_POLE_RECUR_FLOOR}) on this fragmented sample, so the "
-                 "slowest-overall headline is the honest best available")
+    # Fragmented: no other check could reach the floor even if every undetermined PR were its pole
+    # (with an exact basis, `und == 0`, this is simply "no recurring gate exists").
+    others = (ranked | set(freq)) - {str(headline)}
+    could_gate = (any(freq.get(c, 0) + und >= _VR_POLE_RECUR_FLOOR for c in others)
+                  or (not ranked and und >= _VR_POLE_RECUR_FLOOR))
+    if hf_hi < _VR_POLE_RECUR_FLOOR and not could_gate:
+        return Check(name, True,
+                     f"headline `{headline}` gates {span} PRs{via}; no check reaches the "
+                     f"recurrence floor ({_VR_POLE_RECUR_FLOOR}) on this fragmented sample, so the "
+                     "slowest-overall headline is the honest best available")
+    # Only reachable with undetermined PRs: they decide the verdict, so it can't be re-derived.
+    return Check(name, False,
+                 f"per-PR data present but not readable: headline `{headline}` gates {span} PRs"
+                 f"{via}, and the undetermined PRs decide whether it is a recurring gate — the "
+                 "verdict can't be re-derived from the stamped per-PR data")
 
 
 # Priced-dollar surface excised 2026-07-20 (the pre-public development archive
@@ -14192,6 +14379,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_pole_drill_belongs_to_its_job(report, findings_path),
         check_pole_audit_link_reference_resolves(report),
         check_gap_fill_evidence_grounded(report, findings_path),
+        check_no_root_cause_pole_is_gap_filled(report),
         check_dropped_check_not_framed_on_path(report, findings_path),
         check_demoted_pole_not_framed_typical_gate(report, findings_path),
         check_headline_slowest_matches_stamp(report, findings_path, report_path),

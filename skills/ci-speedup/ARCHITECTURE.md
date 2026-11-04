@@ -4087,6 +4087,16 @@ order of preference:
    the adversarial-review rubric (Scope 5) enforce the label + grounding and that no
    pole ships as a dead-end.
 
+   **A generic structural match is still a gap.** OPT75 (the neutral "one step holds
+   the time" catch-all, routed on the dominant step's category) and OPT71 (routed on
+   required-status) name no cause inside the job (`_GENERIC_STRUCTURAL_PATTERNS`). A pole
+   whose only catalog matches are these, with a captured log, renders the gap note, is
+   listed by `_gap_poles`, and takes `--analysis`; its generic card still renders beside
+   the analysis. Every other structural pattern (OPT70/72/73/74/78) names a cause and
+   covers its pole. `verify_report` fails any pole that says "no known root-cause pattern
+   matched" with no analysis block, and the renderer says that phrase only for a real gap
+   (a captured log, no covering pattern, no analysis yet).
+
 ## 13. Cross-references
 
 - [`SKILL.md`](SKILL.md) - the canonical contract (phases, admission gate,

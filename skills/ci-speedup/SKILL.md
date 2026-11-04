@@ -212,8 +212,8 @@ Only the delivery mechanism varies; the contract is **agent-independent.**
    delete; don't auto-commit it or edit their `.gitignore`). Remember this internal
    path — the phase-6 "save the full report" option copies from it.
    - **4a. LLM gap-fill for coverage-gap poles (mandatory when present).**
-     A drilled pole whose captured log matched **no catalog detector** renders
-     the marker "no drill-down available" and would otherwise dead-end — a
+     A drilled pole whose log matched **no catalog detector** (or only generic OPT75/71)
+     renders the marker "no drill-down available" and would otherwise dead-end — a
      *product failure*. So **you (the agent running the skill) fill the gap**: for
      each such pole read its captured log (`data_bundle.logs[].file` under
      `logs_dir`) + the step timeline, work out what eats the dominant step's time,
