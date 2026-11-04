@@ -12413,6 +12413,8 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         analysis = (_match(analyses)
                     if (leaf is None and _catalog_leaf(offcat_leaf) is None
                         and not _catalog_covered) else None)
+        if analysis and not _llm_analysis_block(analysis):
+            analysis = None
         out.append(f'<a id="pole-{i}"></a>')
         out.append("")
         # `wf_base` (a workflow FILENAME) and `check` are BOTH arbitrary repo text dropped

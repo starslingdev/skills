@@ -214,3 +214,10 @@ def test_verify_fails_the_waterfall_wording_too():
 def test_verify_passes_pole_with_no_root_cause_once_analysis_attached():
     assert _no_root_cause_failures(
         _report(_AUDIT_NO_ROOT_CAUSE, "", _ANALYSIS_LEAD)) == []
+
+
+def test_prompt_only_analysis_does_not_hide_unfilled_root_cause():
+    report = _render(_doc(), {"prompt": "Inspect the captured build step."})
+    assert "🤖 LLM root-cause analysis" not in report
+    assert "no drill-down available; this is a coverage gap" in report
+    assert _no_root_cause_failures(report)
