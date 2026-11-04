@@ -1923,21 +1923,26 @@ _LEAK_PATTERNS: tuple[tuple[str, str, bool], ...] = (
     (r"\brun zizmor\b", "zizmor recommendation", True),
 )
 
-# Where the renderer puts audited-repo identifiers (check, job, workflow, step
-# names): inline code spans, and TOC link text pointing at a pole anchor
-# (`[<check>](#pole-N)`). Fenced blocks are left whole, code spans included:
-# agent prompts are skill prose, so "Please `run zizmor`" in one still trips.
-# Fence tracking follows _nonfence_markdown_lines (same char, run >= opener,
-# delimiter-only closer).
+# Only recognizable identifier positions get an exemption. Backticks alone do
+# not make prose an audited identifier: "Please `run zizmor`" is a recommendation.
 _IDENT_CODE_SPAN_RE = re.compile(r"`[^`\n]+`")
-_IDENT_POLE_LINK_RE = re.compile(r"\[[^\]\n]*\]\(#pole-\d+\)")
+_IDENT_POLE_TOC_RE = re.compile(
+    r"^(\s*\d+\.\s+[^\[\n]*)\[[^\]\n]*\]\(#pole-\d+\)(?=\s+[-—]\s+\d)")
+_IDENT_NARROWED_LIST_RE = re.compile(
+    r"^(> - \*\*Narrowed to merge-blocking checks:\*\* \d+ non-required check\(s\) "
+    r"excluded from the critical path - )(.*?)(\. They run on PRs)")
+_IDENT_NOUN_BEFORE_RE = re.compile(
+    r"\b(?:check|job|step|workflow|runner)(?:s)?(?: (?:named|called))?\s*[:=]?\s*$", re.I)
+_IDENT_NOUN_AFTER_RE = re.compile(r"^\s+(?:check|job|step|workflow|runner)\b", re.I)
 
 
 def _strip_audited_identifiers(report: str) -> str:
     out: list[str] = []
     fence: "tuple[str, int] | None" = None
     for line in report.splitlines():
-        stripped = line.lstrip()
+        # A quoted fence is still a code block, whose backticks are literal.
+        content = re.sub(r"^(?: {0,3}>[ \t]?)+", "", line)
+        stripped = content.lstrip()
         if fence is None:
             for ch in ("`", "~"):
                 n = len(stripped) - len(stripped.lstrip(ch))
@@ -1945,7 +1950,16 @@ def _strip_audited_identifiers(report: str) -> str:
                     fence = (ch, n)
                     break
             else:
-                line = _IDENT_POLE_LINK_RE.sub("[]", _IDENT_CODE_SPAN_RE.sub("``", line))
+                if not content.startswith(("    ", "\t")):
+                    line = _IDENT_POLE_TOC_RE.sub(r"\1[]", line)
+                    line = _IDENT_NARROWED_LIST_RE.sub(
+                        lambda m: m[1] + _IDENT_CODE_SPAN_RE.sub("``", m[2]) + m[3], line)
+                    def identifier_span(m: re.Match) -> str:
+                        before = line[:m.start()].replace("*", "")
+                        after = line[m.end():].replace("*", "")
+                        return "``" if (_IDENT_NOUN_BEFORE_RE.search(before)
+                                        or _IDENT_NOUN_AFTER_RE.search(after)) else m[0]
+                    line = _IDENT_CODE_SPAN_RE.sub(identifier_span, line)
         else:
             n = len(stripped) - len(stripped.lstrip(fence[0]))
             if n >= fence[1] and not stripped[n:].strip():

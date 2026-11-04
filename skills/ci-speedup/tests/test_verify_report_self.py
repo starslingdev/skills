@@ -12183,3 +12183,13 @@ def test_curl_skipped_step_sentinel_still_fails():
     assert not check.ok and not check.skipped, check
     assert "test-linter" in check.detail
     assert "longer than any GitHub Actions job may run" in check.detail
+
+
+@pytest.mark.parametrize("fragment", [
+    "For this audit, `run zizmor` to confirm.",
+    "See [the ci-secure report](#pole-1) for recommendations.",
+    "> ```text\n> Please `run zizmor` to confirm.\n> ```",
+    "    Please `run zizmor` to confirm.",
+])
+def test_domain_leakage_keeps_prose_and_code_blocks_visible(tmp_path, fragment):
+    assert _tag_for(_good() + "\n" + fragment + "\n", _LEAK, tmp_path) == "FAIL"
