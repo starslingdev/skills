@@ -6025,19 +6025,25 @@ def _cache_effective_paths(root: Path, parsed: list) -> dict:
     """
     import posixpath
 
-    def normal(value, windows):
+    def normal(value, windows, shell=False):
         value = str(value).strip().strip('"\'').replace("\\", "/")
         value = value.replace("${{ runner.temp }}", "@temp")
-        value = re.sub(r"^(?:~|\$HOME|\$\{HOME\})(?=/|$)", "@home", value)
+        # `$HOME` is expanded by a shell `run:` line only; actions/cache does not
+        # expand it (a literal `$HOME` cache path is itself a missing path).
+        home = r"^(?:~|\$HOME|\$\{HOME\})(?=/|$)" if shell else r"^~(?=/|$)"
+        value = re.sub(home, "@home", value)
         if re.search(r"[$*?{};|&<>`]|^!", value):
             return None
         value = posixpath.normpath(value)
         return value.lower() if windows else value
 
+    rc_unread = []
     try:
-        rc = (root / ".bazelrc").read_text(encoding="utf-8")
+        rc = _read_config_text(root / ".bazelrc")
     except OSError:
         rc = ""
+    if rc is None:  # present but not UTF-8 text: unknown, never "no option"
+        rc, rc_unread = "", [".bazelrc not read (not UTF-8 text)"]
     result = {}
     for rel, doc, _raw in parsed:
         for job_id, job in (doc.get("jobs") or {}).items():
@@ -6046,7 +6052,7 @@ def _cache_effective_paths(root: Path, parsed: list) -> dict:
             runner = str(job.get("runs-on", ""))
             windows = "windows" in runner.lower()
             os_known = any(x in runner.lower() for x in ("ubuntu", "linux", "macos", "windows")) and "${{" not in runner
-            options, unread = [], []
+            options, unread = [], list(rc_unread)
             for line in rc.splitlines():
                 line = line.split("#", 1)[0].strip()
                 if not line:
@@ -6056,21 +6062,26 @@ def _cache_effective_paths(root: Path, parsed: list) -> dict:
                 if "--disk_cache=" not in line and "--repository_cache=" not in line:
                     continue
                 if not re.match(r"^(?:common|build):?\s+", line):
-                    unread.append(".bazelrc scoped cache option not read")
+                    unread.append(".bazelrc scoped or command-specific cache option not read")
                     continue
-                options.append(line)
+                options.append((line, False))
             steps = [step for step in (job.get("steps") or []) if isinstance(step, dict)]
             for step in steps:
                 command = str(step.get("run", ""))
                 for line in command.splitlines():
                     if re.match(r"^\s*bazel(?:isk)?\s+(?:build|test)\b", line):
-                        options.append(line)
+                        options.append((line, True))
             paths = []
-            for option in options:
+            for option, shell in options:
                 # Preserve the one recognized expression, including its spaces.
                 option = option.replace("${{ runner.temp }}", "@temp")
-                for raw in re.findall(r"--(?:disk_cache|repository_cache)=([^\s]+)", option):
-                    norm = normal(raw, windows)
+                for raw in re.findall(r"--(?:disk_cache|repository_cache)=(\"[^\"]*\"|'[^']*'|\S+)",
+                                      option):
+                    quoted = raw[:1] in "\"'"
+                    # A quoted value is read whole; an unterminated one is not read.
+                    norm = (None if quoted and (len(raw) < 2 or raw[-1] != raw[0])
+                            else normal(raw, windows, shell))
+                    raw = raw[1:-1] if quoted and norm is not None else raw
                     if norm is None or not os_known:
                         unread.append("dynamic cache option or runner OS not read")
                     else:

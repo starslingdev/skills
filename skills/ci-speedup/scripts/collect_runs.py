@@ -25361,44 +25361,51 @@ def _as_dict_local(v: object) -> dict:
 _NOOP_FLOOR_S = 30.0
 
 
-def _cache_path_sample(client, repo: str, jobs: list, facts: list) -> dict:
+def _cache_path_sample(client, repo: str, jobs: list, facts: list,
+                       known: dict | None = None) -> dict:
     """N01: every sampled successful job reaching this cache's save post-step.
     No duration floor, bounded magnitude probe, or failed-run evidence may shrink
     this denominator. Missing logs/ambiguous steps withhold, never imply warning.
     """
     import blocking_path as bp
-    admitted = []
-    logs = {}
-    for fact in facts:
-        evidence, count, valid = [], 0, True
-        for job in jobs:
-            if job.get("conclusion") != "success":
-                continue
-            if not isinstance(job.get("steps"), list) or not job["steps"]:
-                valid = False
-                break
+    # One pass over jobs, every fact checked while that job's log is loaded, then
+    # the log is released: memory stays one log wide however many runs warn.
+    state = [{"evidence": [], "runs": 0, "valid": True} for _ in facts]
+    for job in jobs:
+        if job.get("conclusion") != "success":
+            continue
+        live = [i for i, s in enumerate(state) if s["valid"]]
+        if not live:
+            break
+        if not isinstance(job.get("steps"), list) or not job["steps"]:
+            for i in live:
+                state[i]["valid"] = False
+            break
+        reached = {}
+        for i in live:
             matches = [step for step in job["steps"]
                        if isinstance(step, dict)
-                       and step.get("name") == "Post " + fact["step"]
+                       and step.get("name") == "Post " + facts[i]["step"]
                        and step.get("conclusion") != "skipped"]
-            if not matches:
-                continue
-            if len(matches) != 1:
-                valid = False
-                break
-            step = matches[0]
-            count += 1
-            jid = job.get("id")
-            if jid not in logs:
-                logs[jid] = _fetch_job_log(client, repo, job)
-            warning = bp._cache_path_warning(logs[jid] or "", step)
-            if not warning:
-                valid = False
-                break
-            evidence.append(warning)
-        if valid and count:
-            admitted.append(dict(fact, runs=count, evidence=evidence))
-    return {"admitted": admitted}
+            if len(matches) > 1:
+                state[i]["valid"] = False
+            elif matches:
+                reached[i] = matches[0]
+        if not reached:
+            continue
+        # `known`: logs already in hand (the drilled one), never downloaded twice.
+        text = (known or {}).get(job.get("id"))
+        if text is None:
+            text = _fetch_job_log(client, repo, job)
+        hits = bp._cache_path_warnings(text or "", reached)
+        for i in reached:
+            state[i]["runs"] += 1
+            if i in hits:
+                state[i]["evidence"].append(hits[i])
+            else:
+                state[i]["valid"] = False
+    return {"admitted": [dict(fact, runs=s["runs"], evidence=s["evidence"])
+                         for fact, s in zip(facts, state) if s["valid"] and s["runs"]]}
 
 
 def _persist_pole_logs(
@@ -25598,7 +25605,8 @@ def _persist_pole_logs(
         if facts and bp._CACHE_PATH_WARNING in log:
             all_jobs = [j for run in jobs_per_run_by_wf.get(wf, []) for j in run
                         if str(j.get("name", "")) == job]
-            p["cache_path_sample"] = _cache_path_sample(client, repo, all_jobs, facts)
+            p["cache_path_sample"] = _cache_path_sample(client, repo, all_jobs, facts,
+                                                        known={repr_job.get("id"): log})
         leaf0 = bp._parse_log(log, iso) or {}
         _cache_fk = leaf0.get("fix_key") if leaf0.get("fix_key") in _CACHE_LEAF_KEYS else None
         # A restore line sits in nearly every job log. Sample dependency-cache

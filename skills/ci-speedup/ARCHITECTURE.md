@@ -4157,8 +4157,8 @@ push/schedule/workflow_run/repository_dispatch trigger and its run and job lists
 downloaded; otherwise the reason is "push probe unavailable". An unconfirmed finding's
 `size_note` names one of: no matching pole, pole log not fetched, another detector took
 precedence, confirmation failed, push probe unavailable, default-branch mismatch.
-The dependency-cache leaf is observation-only (`_OBSERVATION_ONLY_LEAVES`): a restore
-line never closes a coverage gap or holds back the OPT81 advisory, and a default-branch
+The dependency-cache and OPT101 cache-path leaves are observation-only
+(`_OBSERVATION_ONLY_LEAVES`): a restore line never closes a coverage gap or holds back the OPT81 advisory, and a default-branch
 restore refutes the measured confirmation. Dependency-cache sampling and the push probe
 run only for a pole whose job a static OPT96 finding names (`_opt96_pole_matches`: job id,
 or its `name:` / matrix leg resolved through the workflow YAML).
@@ -4321,11 +4321,16 @@ and hashed-query record/replay keys. See GitHub's
 ### Cache effective path mismatch (OPT101)
 
 The scan emits `cache_effective_paths` as optional context, never findings.
-When a drilled log contains the toolkit missing-path warning, collection checks
+When a drilled log contains the missing-path warning (actions/cache logs it as
+`[warning]Path Validation Error: ...`), collection checks
 every sampled successful instance of the same job that reached the same known
 actions/cache save post-step, without the duration filter used to pick the drill.
-Timestamp-scoped warning evidence is required in every such attempt; unknown
-logs and mixed results withhold. The pole carries `cache_path_sample` to the
-log leaf, which renders a secondary uncredited observation and prompt. It never
+Timestamp-scoped warning evidence is required in every such attempt (the window
+runs one second past the whole-second step end; a warning adjacent cache
+post-steps could both claim withholds unless all of them warned); unknown logs
+and mixed results withhold. Each log is read once, the drilled one is reused, and
+it is released before the next. The pole carries `cache_path_sample` to the
+renderer, which adds an uncredited observation and prompt beside the pole's own
+leaf and secondary note; the pole stays a coverage gap when nothing else matched. It never
 claims the pole ceiling or contributes to `_SIZING`. See the pattern for the
 existing-wrong-path coverage limit and static-context exclusions.

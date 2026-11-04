@@ -17,10 +17,14 @@ post-step runs. The cache cannot save those paths. This is different from OPT61
 (no ecosystem cache), OPT8 (key granularity), and OPT96 (default-branch seeding).
 
 **Detection heuristic:** `blocking_path._parse_log` admits this leaf only with
-`collect_runs` evidence that the exact toolkit missing-path warning occurred in
-the same cache's save post-step on every sampled successful job that reached it.
-The warning timestamp must lie inside that post-step's API timestamps, and the
-step must map to a literal actions/cache step in the scanned workflow. Failed
+`collect_runs` evidence that the exact missing-path warning occurred in the same
+cache's save post-step on every sampled successful job that reached it. The
+toolkit throws the message and actions/cache logs it with a literal `[warning]`
+prefix, so the job log reads `[warning]Path Validation Error: ...`. Step times
+are whole seconds, so the warning must lie between that post-step's start second
+and one second past its recorded end; a warning that adjacent cache post-steps
+could both claim admits only when every one of them warned. The step must map to
+a literal actions/cache step in the scanned workflow. Failed
 and cancelled jobs supply no evidence. Skipped saves are excluded; a successful
 save attempt with no warning, a missing log, or ambiguous step identity withholds
 the finding. Sampling uses all successful job instances already collected, not
@@ -34,15 +38,19 @@ its counters are per command and omit zero-hit categories.
 `.bazelrc` and literal workflow Bazel flags. A disjoint `--disk_cache=` or
 `--repository_cache=` path can name the likely real directory; static path
 comparison alone never emits. Home and runner-temp aliases are normalized
-symbolically per OS, Windows drive letters case-insensitively. Scoped config
-lines, imports, unknown runner OS and unresolved expressions are **not read**,
+symbolically per OS (`$HOME` only on a shell `run:` line: actions/cache does not
+expand it), Windows paths case-insensitively. Quoted values are read whole. A
+non-UTF-8 `.bazelrc`, scoped or command-specific config lines, imports, unknown
+runner OS and unresolved expressions are **not read**,
 never asserted as the cause. Overlapping paths are not disjoint.
 
 **Report:** An uncredited observation beside the drilled job, with the cache
 path, successful-save sample count, warning evidence and an investigation prompt.
-It never inherits the dominant step's addressable ceiling. No `_SIZING`
-percentage and no savings figure; do not add credit to OPT61, OPT8 or OPT96 for
-the same cache step. A warning proves no save in the observed attempts, not that
+It never inherits the dominant step's addressable ceiling and is observation-only:
+it never closes the coverage gap on the dominant work (phase 4a still runs), never
+replaces another secondary observation and never holds back OPT81. No `_SIZING`
+percentage and no savings figure. The engine does not reconcile OPT61, OPT8 or
+OPT96 credit on the same cache step; the prompt tells the reader not to add them. A warning proves no save in the observed attempts, not that
 no other cache or pre-existing entry could ever warm the build.
 
 **Coverage limit:** A wrong path that exists on the runner produces no warning
@@ -68,4 +76,7 @@ hit a cache-service 400, motivating per-OS validation and non-fatal caching.
 [uber/submitqueue#59](https://github.com/uber/submitqueue/pull/59) aligned disk and
 repository caches alongside per-job keys and application/test changes. Its first
 and second runs compare cold and warm states of the new configuration, not an
-isolated before/after saving. Neither source supplies credited timing here.
+isolated before/after saving. Neither source supplies credited timing here, and
+neither would trigger OPT101 as delivered: codex saves through a separate save
+action with a scoped config line, and submitqueue's old paths existed on the
+runner, so no warning was emitted.
