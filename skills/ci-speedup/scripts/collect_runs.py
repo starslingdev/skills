@@ -2351,37 +2351,6 @@ def _rank_spine_present_first(
     return order, present, n_pr, pole_freq
 
 
-def _order_drill_matrices(
-    matrices: "list[tuple[str, float]]",
-    impact: "Callable[[str, float], float]",
-    is_typical: "Callable[[str], bool]",
-) -> "list[tuple[str, float]]":
-    """Order the mappable job matrices for drill-bundle CAPTURE exactly as
-    ``blocking_path.render`` orders the poles it RENDERS: the gate (the slowest-median
-    typical matrix, already first in the present-first spine) leads, then the remaining
-    TYPICAL matrices by impact, then the rare/opt-in ones by impact.
-
-    Keeping this identical to the renderer is load-bearing: the captured (drilled) pole
-    set must equal the rendered pole set. A flat impact sort here pulls a rare-but-slow
-    conditional pole (e.g. a path-filtered `build` leg present on a minority of PRs, but
-    long when it runs) above a TYPICAL pole — so capture drills the rare one while the
-    renderer demotes it and renders the typical pole instead. That typical pole then has
-    no captured log, and ``_match_key``'s exact-workflow-stem rule binds it to a SIBLING
-    pole's bundle (a same-workflow drill), making the report show the wrong job's
-    timeline/magnitudes. Tiering here keeps every rendered pole's own log captured.
-    ``is_typical`` MUST encode the same `_RARE_PRESENCE_*` / required-check rule the
-    renderer uses, so the two never disagree about which pole is the rare one."""
-    if not matrices:
-        return []
-    gate = matrices[0]
-    rest = matrices[1:]
-    rest_typ = sorted((m for m in rest if is_typical(m[0])),
-                      key=lambda m: -impact(m[0], m[1]))
-    rest_rare = sorted((m for m in rest if not is_typical(m[0])),
-                       key=lambda m: -impact(m[0], m[1]))
-    return [gate, *rest_typ, *rest_rare]
-
-
 def _run_wall_s(r: dict[str, Any]) -> float | None:
     """Wall-time of a SINGLE run from run-LIST metadata alone (no per-run job fetch):
     `run_started_at`|`created_at` → `updated_at`. None when the timestamps are
@@ -17319,9 +17288,14 @@ def _structural_raw_estimate(
 # this depth, never structurally analyzed" — a check beyond this depth with no
 # lever is NOT proven inherent, it just wasn't examined.
 _STRUCTURAL_TOP_N = 5
-# Distinct job matrices the report drills (gate + next distinct by impact); matches
-# blocking_path._TOP_WORKFLOWS. Their gates are always decomposed + logged.
-_DRILL_DISTINCT_MATRICES = 2
+# Distinct job matrices the report drills (gate + next distinct by impact). MUST equal
+# blocking_path._TOP_WORKFLOWS, the number of poles the report renders: every rendered pole
+# gets its own captured log, step timeline, Audit link and cross-run check (SKILL.md 5a).
+# At 2 vs the renderer's 5, a third gating job rendered with no log while its prompt
+# pointed at an Audit link that was not there. Cost: one log fetch per extra pole plus
+# its magnitude probe (~2 fetches, more only on a wide spread), at most 3 extra poles.
+# Pinned by test_undrilled_pole_audit_link.py::test_drill_cap_equals_the_render_cap.
+_DRILL_DISTINCT_MATRICES = 5
 
 # Adaptive 2-pass run sampling. The dominant gh cost is one `GET /runs/{id}/jobs`
 # per sampled run; sampling all workflows at full --max-runs is wasteful because a
@@ -27058,55 +27032,19 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             pr_checks_tuple, crit_by_wf, findings_doc.get("workflow_job_graph"),
             triaged_fast_workflows, _STRUCTURAL_TOP_N):
         poles.append(_decompose_pole(check_name, check_p50))
-    # The report drills _DRILL_DISTINCT_MATRICES distinct job MATRICES (matrix legs that
-    # share one fix collapse to one). Beyond the gate (the slowest by median), the next
-    # matrix is chosen by IMPACT = max(median, bimodal slow mode) - so a bimodal lever
-    # (a job cheap on the typical PR but a long gate on a large share, e.g. a `test`
-    # job) is drilled as the 2nd finding instead of a higher-median but trivial check.
-    # Those gates can rank below _STRUCTURAL_TOP_N by median or hide under a big matrix
-    # in ONE workflow, so decompose them here even if absent from the top-N.
-    def _impact(check: str, p50: float) -> float:
-        bi = job_bimodal_all.get(check) or {}
-        return max(p50, float(bi.get("high_p50_s") or 0.0))
-
-    matrices: list[tuple[str, float]] = []
+    # Decompose all mapped candidates from facts already in memory, then use the
+    # report's selector. Median-first selection can miss a frequent gate when a
+    # bimodal slow mode pulls another candidate into the bounded capture set.
+    candidates = list(poles)
     for check_name, check_p50 in pr_checks_tuple:
-        _cm = _map_check_to_job(
-            check_name, crit_by_wf, require_developer_timing=True)
-        if _cm is None:
-            continue  # fileless / unmapped (e.g. an AI review bot) - nothing to drill
-        # Disambiguate by workflow file: a `Python 3.13` job in framework-test.yml is a
-        # DISTINCT matrix from a `Python 3.13` job in datasets-test.yml, even though
-        # GitHub gives them identical check-run names. Without the workflow key they
-        # collapse and only one is drilled, mis-binding the other's steps to a sibling.
-        if any(bp._same_matrix(check_name, m, _cm[0],
-                               (_map_check_to_job(
-                                   m, crit_by_wf,
-                                   require_developer_timing=True) or ("", ""))[0])
-               for m, _ in matrices):
+        if any(p.get("check") == check_name for p in candidates):
             continue
-        matrices.append((check_name, check_p50))
-    drill_poles: list[dict[str, Any]] = []
-    if matrices:
-        # Mirror the renderer's typical-first pole tiering so the captured (drilled) set
-        # equals the rendered set — otherwise a rare-but-slow pole gets drilled here but
-        # demoted in the report, leaving the rendered pole logless and mis-bound to a
-        # sibling's bundle by `_match_key`'s exact-workflow-stem rule. `_is_typical_check`
-        # uses the SAME pole-FREQUENCY demotion (`check_pole_freq >= _POLE_RECUR_FLOOR`), the
-        # `_RARE_PRESENCE_MIN_PR` sample-size floor, and the required-check exemption as
-        # `_rank_spine_present_first` and the renderer's `_typical_check` — so the drilled
-        # (captured) pole set can never disagree with `critical_path_check`.
-        def _is_typical_check(check: str) -> bool:
-            if present_n_pr < _RARE_PRESENCE_MIN_PR or check in req_names:
-                return True
-            return check_pole_freq.get(check, 0) >= _POLE_RECUR_FLOOR
-        ordered = _order_drill_matrices(matrices, _impact, _is_typical_check)
-        for check_name, check_p50 in ordered[:_DRILL_DISTINCT_MATRICES]:
-            existing = next((p for p in poles if p.get("check") == check_name), None)
-            if existing is None:
-                existing = _decompose_pole(check_name, check_p50)
-                poles.append(existing)
-            drill_poles.append(existing)   # the exact poles the renderer drills + we log
+        if _map_check_to_job(check_name, crit_by_wf, require_developer_timing=True) is not None:
+            candidates.append(_decompose_pole(check_name, check_p50))
+    drill_poles, _ = bp._select_render_poles(findings_doc, candidates)
+    # Retain the same candidate context for aggregation inheritance and matrix
+    # representatives when the report selects its five sections later.
+    poles = candidates
     # ENG-1 PR-N3 (the N2 as-built record): on a chain-gated repo the gate IS
     # the chain — its members drill first, in chain order, then the rest in
     # their existing span order. `critical_path_check` keeps its

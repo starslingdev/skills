@@ -94,9 +94,10 @@ _PCTW = 4
 _CORELEN = 3 + _LBLW + 2 + _BARW + 2 + _DURW + 2 + _PCTW
 _MARKCOL = _CORELEN + 2
 _TOP_WORKFLOWS = 5  # render the long pole of this many distinct workflows (matches the
-# data layer's _STRUCTURAL_TOP_N so every analysed pole renders; the top
-# _DRILL_DISTINCT_MATRICES get a raw-log drill, poles below that render shallow from their
-# sampled per-step decomposition — see render-depth-2to5 spec / R1–R3 fixes)
+# data layer's _STRUCTURAL_TOP_N so every analysed pole renders). collect_runs'
+# _DRILL_DISTINCT_MATRICES equals this, so every rendered pole gets a raw-log drill; a pole
+# whose capture is missing (failed fetch, render without a bundle) renders shallow from its
+# sampled per-step decomposition and never cites an Audit link it lacks (R1–R3 fixes)
 _ALSO_NOTICED_CAP = 12  # max residual hygiene patterns shown in the "Also noticed" appendix
 _TIER2_CAP = 12  # max promoted runner-minute findings shown before the residual appendix
 _RUNNER_MINUTE_SPINE_CAP = 12  # max cost-spine rows rendered before a hidden-row disclosure
@@ -149,6 +150,25 @@ _DASH_GLYPHS = ("—", "–", "‒", "―", "−")  # em, en, figure, horizontal
 _SEVERITY_ORDER = {"HIGH": 0, "MEDIUM": 1, "LOW": 2, "MANUAL": 3}
 _STRUCTURAL_PATTERNS = frozenset(
     {"OPT70", "OPT71", "OPT72", "OPT73", "OPT74", "OPT75"})
+# Structural patterns that name NO cause inside the pole's job. A pole whose only catalog
+# matches are these is still a COVERAGE GAP for the phase-4a gap-fill: it renders the
+# "no drill-down available" trigger, is captured by `_gap_poles`, and takes `--analysis`.
+# - OPT75 is the catalog's neutral catch-all ("this lever just refuses to dead-end"): routed
+#   on the dominant step's CATEGORY alone, it says one step holds the time, not why.
+# - OPT71 is routed on REQUIRED-STATUS alone: the check could be de-scoped; nothing about
+#   what its steps spend the time on.
+# Every other structural pattern names a cause in the job: OPT70 an unscoped build, OPT72
+# setup dwarfing the payload, OPT73 a named shared step, OPT74 trust-boundary cold work,
+# OPT78 vitest isolation. (Dogfood 2026-11-03: an OPT75-only top pole shipped "no known
+# root-cause pattern matched" while its own log named the cause.)
+_GENERIC_STRUCTURAL_PATTERNS = frozenset({"OPT71", "OPT75"})
+
+
+def _specific_structural(structural: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The structural findings that name a cause in the job (`_GENERIC_STRUCTURAL_PATTERNS`
+    removed). Empty means the pole has no structural coverage a gap-fill would duplicate."""
+    return [f for f in structural
+            if str(f.get("pattern", "")) not in _GENERIC_STRUCTURAL_PATTERNS]
 # Pre-start WALL-CLOCK wait (queue time) — the developer waits before any work runs,
 # which the critical-path spine (job start → finish) doesn't capture. These are NOT
 # runner-minute hygiene, so they get their own "Pre-start wait" section instead of the
@@ -3626,13 +3646,23 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
         wtg.append("- No per-step breakdown was captured for this job; profile its "
                    "slowest step in the repo.")
     out += wtg + [""]
+    # Point at "the Audit link" ONLY when this pole's section renders one. `_audit_links`
+    # is what the render loop emits for the pole from these same inputs (its `leaf`
+    # argument shapes only the wording, never whether the line appears), so deriving it
+    # here keeps the prompt and the section in step without a flag a caller could forget.
+    # A pole with no captured log (a failed fetch, a render without a bundle) gets no
+    # Audit line, and its prompt must not send the agent to one (verify_report's
+    # `check_pole_audit_link_reference_resolves`).
+    log_ref = ("open its log (the Audit link)" if _audit_links(timeline, pole, None, run_url)
+               else "open its log in a recent pull-request run of this job "
+                    "(no direct log link is shown here)")
     if struct_pats:
         out += ["STRUCTURAL CATALOG PATTERN MATCHED",
                 f"- A structural catalog pattern ({', '.join(struct_pats)}) matched this "
                 "pole - see the **structural root-cause** section above for the measured "
                 "lever, its risk / guardrail / rollout, and the catalog fix recipe. The "
-                "step above is the load-bearing one that lever targets; open its log (the "
-                "Audit link) to see exactly what inside it the lever reshapes.", ""]
+                f"step above is the load-bearing one that lever targets; {log_ref} to see "
+                "exactly what inside it the lever reshapes.", ""]
     elif dd_pats == ["OPT81"]:
         out += ["RUNNER-CLASS COMPARISON MATCHED",
                 "- A measured runner-class comparison (OPT81) matched this pole - see its "
@@ -3645,8 +3675,7 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
                 f"pole - see {_dd_where(dd_pats)} for the measured lever and "
                 "its catalog fix recipe (it sits ON the critical path, so it shrinks this "
                 "pole's wall time). The step above is the load-bearing one that lever "
-                "targets; open its log (the Audit link) to see what inside it the lever "
-                "reshapes.", ""]
+                f"targets; {log_ref} to see what inside it the lever reshapes.", ""]
     if opt79:
         out += ["MEASURED CACHE PATTERN MATCHED",
                 "- OPT79 (a cache that costs more than it saves) matched this pole - "
@@ -3665,9 +3694,9 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
     if not struct_pats and not dd_pats and not opt79 and not opt82:
         out += ["NO CATALOG PATTERN MATCHED",
                 "- ci-speedup's detector set didn't recognize this job's stack, so there "
-                "is no named sub-cause. The step above is the load-bearing one; open its "
-                "log (the Audit link) and determine what inside it is slow (e.g. an "
-                "uncached build, a serial test phase, a large install).", ""]
+                f"is no named sub-cause. The step above is the load-bearing one; {log_ref} "
+                "and determine what inside it is slow (e.g. an uncached build, a serial "
+                "test phase, a large install).", ""]
     if opt79_minor:
         out += ["ALSO MEASURED ON THIS JOB",
                 "- A small measured cache cost (OPT79) is also shown in its **Measured "
@@ -3690,7 +3719,8 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
             + _fence_body(out) + "\n```\n")
 
 
-def _llm_analysis_block(a: dict[str, Any], cross_run_rendered: bool = False) -> list[str]:
+def _llm_analysis_block(a: dict[str, Any], cross_run_rendered: bool = False,
+                        generic_patterns: "tuple[str, ...]" = ()) -> list[str]:
     """Render the LLM gap-fill for a pole with NO catalog detector match: a clearly
     LABELLED, log-grounded root-cause reading produced by the agent running the skill
     (see SKILL.md's gap-fill phase). The label + the cited verbatim lines keep
@@ -3699,7 +3729,10 @@ def _llm_analysis_block(a: dict[str, Any], cross_run_rendered: bool = False) -> 
 
     `cross_run_rendered` says whether this pole's "🔬 Cross-run check" section actually
     rendered; only then does the provenance line cite it (a singleton magnitude sample
-    suppresses that section, so the citation must be suppressed too, or it dangles)."""
+    suppresses that section, so the citation must be suppressed too, or it dangles).
+
+    `generic_patterns`: the generic structural pattern(s) (`_GENERIC_STRUCTURAL_PATTERNS`)
+    that DID match the pole. The lead then says so, rather than claiming no pattern matched."""
     if not isinstance(a, dict):
         return []
     # `cause`/`breakdown` are LLM prose ABOUT the log, so they can echo a credential the
@@ -3714,7 +3747,10 @@ def _llm_analysis_block(a: dict[str, Any], cross_run_rendered: bool = False) -> 
         return []
     _measured = ("the timeline + cross-run check above are measured"
                  if cross_run_rendered else "the timeline above is measured")
-    out = [f"**🤖 LLM root-cause analysis** — no catalog pattern matched this job, so "
+    _matched = (f"only the generic structural pattern {', '.join(generic_patterns)} "
+                "matched this job and it names no cause inside it"
+                if generic_patterns else "no catalog pattern matched this job")
+    out = [f"**🤖 LLM root-cause analysis** — {_matched}, so "
            "the analysis below is the skill's LLM reading the captured job log, "
            "**grounded in the lines quoted below**. It is a strong lead to verify, "
            f"**not** a measured catalog detector - {_measured}; this cause is inferred.",
@@ -4126,7 +4162,8 @@ def _pole_waterfall_body(pole: dict[str, Any], leaf: dict[str, Any] | None,
                      opt79_present: bool = False,
                      opt82_present: bool = False,
                      steps_overlap: "str | None" = None,
-                     steps_dropped: bool = False) -> list[str]:
+                     steps_dropped: bool = False,
+                     generic_structural: "tuple[str, ...]" = ()) -> list[str]:
     """The ASCII waterfall for one pole (no code fence): the blocking job's steps,
     then - when a log was captured - the dominant step's internals down to the
     root cause.
@@ -4148,7 +4185,26 @@ def _pole_waterfall_body(pole: dict[str, Any], leaf: dict[str, Any] | None,
     while the spine footnote demotes it (the paradedb `Test pg_search` double-framing).
 
     `steps_dropped` (`_pole_waterfall`, a pole whose every step was dropped): no step
-    header and no step rows, only the pointer lines and a Level-3 log drill."""
+    header and no step rows, only the pointer lines and a Level-3 log drill.
+
+    `generic_structural`: the pole's only catalog matches are these generic structural
+    patterns (`_GENERIC_STRUCTURAL_PATTERNS`) and a log was captured, so it reads as the
+    coverage gap it is (the phase-4a trigger), naming the pattern that did match."""
+    # The coverage-gap notes, shared by both render paths. A generic structural match is named
+    # so the note does not contradict its card below, but it never suppresses the trigger.
+    _gen = ", ".join(generic_structural)
+    _gap_filled_note = (
+        f"(only the generic structural pattern {_gen} matched this pole, and it names no "
+        "cause inside the job - see the **LLM root-cause analysis** below, which reads the "
+        "captured log directly.)" if _gen else
+        "(no catalog pattern matched this job's log - see the **LLM root-cause analysis** "
+        "below, which reads the captured log directly.)")
+    _gap_open_note = (
+        "(captured this job's log but matched no known root-cause pattern"
+        + (f" (only the generic structural pattern {_gen} below matched, and it names no "
+           "cause inside the job)" if _gen else "")
+        + " — no drill-down available; this is a coverage gap, not a clean job. The "
+        "detector set may need extending for this stack.)")
     # The pointer tail for a data-driven catalog match — on-path for a typical pole, opt-in/rare
     # for a `spine_rare` pole. Never a coverage gap either way (a measured catalog lever matched).
     # Where the data-driven match renders: OPT81 renders at its pole, not in the appendix.
@@ -4291,15 +4347,8 @@ def _pole_waterfall_body(pole: dict[str, Any], leaf: dict[str, Any] | None,
             # A log WAS captured but no detector recognized it - surface that loudly
             # rather than silently showing the timeline with no drill (a missed root
             # cause must read as a coverage gap, never as a clean job).
-            if analysis_present:
-                lines += ["", "   (no catalog pattern matched this job's log - see the "
-                          "**LLM root-cause analysis** below, which reads the captured "
-                          "log directly.)"]
-            else:
-                lines += ["", "   (captured this job's log but matched no known "
-                          "root-cause pattern — no drill-down available; this is a "
-                          "coverage gap, not a clean job. The detector set may need "
-                          "extending for this stack.)"]
+            lines += ["", "   " + (_gap_filled_note if analysis_present
+                                   else _gap_open_note)]
         return lines
 
     # Show the top steps, then ROLL UP the rest into one row so every second is
@@ -4367,13 +4416,9 @@ def _pole_waterfall_body(pole: dict[str, Any], leaf: dict[str, Any] | None,
             lines += ["", f"(no captured log for this job — run with `--log "
                       f"{wf_base.split('.')[0]}=<job log>` to drill into {_target}.)"]
         elif leaf is None and analysis_present:
-            lines += ["", "(no catalog pattern matched this job's log - see the **LLM "
-                      "root-cause analysis** below, which reads the captured log "
-                      "directly.)"]
+            lines += ["", _gap_filled_note]
         elif leaf is None:
-            lines += ["", "(captured this job's log but matched no known root-cause "
-                      "pattern — no drill-down available; this is a coverage gap, not a "
-                      "clean job. The detector set may need extending for this stack.)"]
+            lines += ["", _gap_open_note]
         return lines
     # Drill into the BIGGEST step (it's only part of the job - the other steps are
     # above it in the bars).
@@ -4409,12 +4454,20 @@ def _pole_waterfall_body(pole: dict[str, Any], leaf: dict[str, Any] | None,
 
 
 def _audit_links(timeline: dict[str, Any] | None, pole: dict[str, Any],
-                 leaf: dict[str, Any] | None, run_url: str | None) -> list[str]:
+                 leaf: dict[str, Any] | None, run_url: str | None,
+                 log_present: bool = True, analysis_present: bool = False,
+                 catalog_covered: bool = False) -> list[str]:
     """A deep-link audit trail so the drill is verifiable: representative run → its
     job → the dominant step's log. GitHub only anchors to the STEP (not a log line),
     and that step's log is long, so the note tells the reader to search it for the
     verbatim evidence (shown below) rather than implying it's at the top. [] when
-    there's no job URL to anchor to."""
+    there's no job URL to anchor to.
+
+    With no log-detector `leaf`, "no known root-cause pattern matched" is said ONLY for a
+    real coverage gap (a captured log, no catalog coverage, no gap-fill yet): verify_report
+    fails that phrase without a gap-fill analysis, so it must not appear on a pole whose
+    cause a non-log catalog pattern names (`catalog_covered`), on a filled pole
+    (`analysis_present`), or on a pole with no captured log to fill from."""
     if not isinstance(timeline, dict):
         return []
     job_url = str(timeline.get("job_url") or "")
@@ -4450,6 +4503,16 @@ def _audit_links(timeline: dict[str, Any] | None, pole: dict[str, Any],
                + " (the bars above are plain-English labels for these log lines).")
     elif leaf is not None:
         how = " — open the step and search for the **🔬 Evidence** lines below."
+    elif analysis_present:
+        how = (" — open the step and search for the verbatim lines the **LLM root-cause "
+               "analysis** below quotes.")
+    elif catalog_covered:
+        how = (" — open the step to inspect its log directly (the catalog pattern that "
+               "matched this pole is not read from this log, so there is no specific log "
+               "line to search for).")
+    elif not log_present:
+        how = (" — open the step to inspect its log directly (no job log was captured for "
+               "this run, so there is no specific callout to search for).")
     else:
         # No detector matched, so there are no Evidence lines / search terms to point
         # at - just send the reader to the step's own log.
@@ -5316,6 +5379,76 @@ def _mag_line(mag: dict[str, Any] | None, leaf: dict[str, Any] | None) -> list[s
         out.append(f"- [run {rid}]({url}) — {fmt(_num(x.get('value')))}{tag}")
     out.append("")
     return out
+
+
+def _select_render_poles(doc: dict[str, Any], poles: list[dict[str, Any]]) -> tuple[
+        list[dict[str, Any]], list[dict[str, Any]]]:
+    """Choose the exact bounded set both the collector drills and the report shows.
+
+    This uses only already-collected facts, including actual gate frequency and
+    aggregation-gate dependencies; choosing the same count by median is not enough.
+    The second result retains matrix siblings for structural-finding accounting.
+    """
+    cp = doc.get("pr_critical_path") or {}
+    checks = cp.get("checks") or []
+    counts, present, n = _gate_counts(cp)
+    if not n and checks and all(c.get("present_on") is not None for c in checks):
+        denominator = int(cp.get("check_present_n_pr") or 0)
+        if denominator:
+            present = {str(c.get("name", "")): int(c.get("present_on") or 0)
+                       for c in checks}
+            n = denominator
+    required = {str(c) for c in (doc.get("required_checks") or [])}
+    frequencies = {str(c.get("name", "")): c.get("pole_n") for c in checks}
+    have_frequencies = bool(frequencies) and all(v is not None for v in frequencies.values())
+
+    def typical_name(name: str) -> bool:
+        if name in required:
+            return True
+        if have_frequencies:
+            return (int(cp.get("check_present_n_pr") or 0) < _RARE_PRESENCE_MIN_PR
+                    or int(frequencies.get(name) or 0) >= _POLE_RECUR_FLOOR)
+        return n < _RARE_PRESENCE_MIN_PR or present.get(name, 0) > n * _RARE_PRESENCE_FRAC
+
+    def key(p):
+        return str(p.get("check", "")), str(p.get("workflow_file") or "")
+
+    def own_rank(p):
+        name = key(p)[0]
+        return n + 1 if name in required else counts.get(name, 0)
+
+    file_poles = [p for p in poles if str(p.get("workflow_file") or "").endswith(
+        (".yml", ".yaml")) and p.get("job")]
+    upstream_rank: dict[tuple[str, str], int] = {}
+    upstream_typical: set[tuple[str, str]] = set()
+    for p in file_poles:
+        shape = _agg_gate_shape(p, doc.get("workflow_job_graph"), list(checks))
+        if shape:
+            upstream = (_check_name(shape["slowest"]), str(
+                shape["slowest"].get("workflow_file") or p.get("workflow_file") or ""))
+            upstream_rank[upstream] = max(upstream_rank.get(upstream, 0), own_rank(p))
+            if typical_name(key(p)[0]):
+                upstream_typical.add(upstream)
+
+    def typical(p):
+        return typical_name(key(p)[0]) or key(p) in upstream_typical
+
+    def impact(p):
+        return max(_num(p.get("p50_s")) or 0.0,
+                   _num((p.get("bimodal") or {}).get("high_p50_s")) or 0.0)
+
+    file_poles = sorted((p for p in file_poles if typical(p)), key=lambda p: (
+        -max(own_rank(p), upstream_rank.get(key(p), 0)), -(_num(p.get("p50_s")) or 0.0))) + sorted(
+            (p for p in file_poles if not typical(p)), key=lambda p: -(_num(p.get("p50_s")) or 0.0))
+    matrices: list[dict[str, Any]] = []
+    for p in file_poles:
+        if not any(_same_matrix(key(p)[0], key(q)[0], key(p)[1], key(q)[1]) for q in matrices):
+            matrices.append(p)
+    if not matrices:
+        return [], file_poles
+    typical_rest = sorted((p for p in matrices[1:] if typical(p)), key=lambda p: -impact(p))
+    rare_rest = sorted((p for p in matrices[1:] if not typical(p)), key=lambda p: -impact(p))
+    return [matrices[0], *typical_rest, *rare_rest][:_TOP_WORKFLOWS], file_poles
 
 
 def _gate_counts(cp: dict[str, Any]) -> tuple[dict[str, int], dict[str, int], int]:
@@ -11031,16 +11164,6 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
                 wf = str(p.get("workflow_file", ""))
                 wf_gate[wf] = wf_gate.get(wf, 0) + _gatef(p)
 
-    # One representative pole per distinct JOB MATRIX (sibling legs collapse via
-    # `_same_matrix`). POLE 1 is the typical gate (slowest by median); POLE 2+ are the
-    # next distinct matrices by IMPACT = max(median, bimodal slow mode) - so the second
-    # finding is the next-biggest LEVER (a bimodal `test` job that's a long gate on a
-    # large share of PRs), not a higher-median but trivial check. Grouping by matrix,
-    # not workflow, lets two jobs in ONE workflow both surface (langfuse).
-    def _pole_impact(p: dict[str, Any]) -> float:
-        bi = p.get("bimodal") or {}
-        return max(_num(p.get("p50_s")) or 0.0, _num(bi.get("high_p50_s")) or 0.0)
-
     # A pole is part of the TYPICAL merge path only if it ran on a MAJORITY of sampled
     # PRs. A slow but rarely-run FILE pole — a label-gated / opt-in benchmark that ran on
     # a handful of PRs — must not headline "why is the merge slow?" just because it's long
@@ -11119,30 +11242,7 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
                          for c in (cp.get("checks") or [])
                          if str(c.get("name", "")) and _opt_in_rare_check(str(c.get("name", "")))}
 
-    def _by_p50(ps: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return sorted(ps, key=lambda p: -(_num(p.get("p50_s")) or 0.0))
-
-    # Among TYPICAL poles, order by how often each is the ACTUAL per-PR gate (its pole_count),
-    # tie-broken by p50. Presence (`_pole_typical`) only proves a check RAN on most PRs — not
-    # that it's the one most PRs wait on. A check present on every PR but slower than the real
-    # gate on only a handful of them (flwrlabs/flower: `datasets-test` is the slowest on 3/20
-    # while `framework-test` gates 17/20) must NOT head the list just because its global p50 is
-    # highest. A REQUIRED check gates every PR by definition (must pass to merge), so it ranks
-    # above the frequency-counted ones regardless of how often the sample shows it slowest —
-    # mirroring the `_pole_typical` required exemption so a required gate still headlines. When
-    # pole_count is unavailable (no populations) `_gatef` is 0 for all, so this reduces to the
-    # prior pure-p50 order — and a single typical pole is unaffected either way.
-    def _own_gate_rank(p: dict[str, Any]) -> int:
-        if str(p.get("check", "")) in _required_names:
-            return npop + 1
-        return _gatef(p)
-
-    # An AGGREGATION GATE (a `needs:`-everything verdict job, `_agg_gate_shape`) holds no time
-    # of its own: its wait IS its slowest `needs:` upstream member. So that member inherits the
-    # gate's rank (a job a required verdict needs is required in effect), and the p50
-    # tie-break then puts the real time-holder FIRST and the trivial gate after it. Without
-    # this a required 3s verdict headed the poles ahead of the 4m32s suite it waits on.
-    _agg_upstream_rank: dict[tuple[str, str], int] = {}
+    # Keep aggregation upstream members on the typical path for report labels.
     _agg_upstream_typical: set[tuple[str, str]] = set()
     for _ap in (p for p in poles if _is_file_pole(p)):
         _ash = _agg_gate_shape(_ap, doc.get("workflow_job_graph"),
@@ -11151,42 +11251,11 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
             continue
         _ak = (_check_name(_ash["slowest"]),
                str(_ash["slowest"].get("workflow_file") or _ap.get("workflow_file") or ""))
-        _agg_upstream_rank[_ak] = max(_agg_upstream_rank.get(_ak, 0), _own_gate_rank(_ap))
         if _typical_check(str(_ap.get("check", ""))):
             _agg_upstream_typical.add(_ak)
 
-    def _agg_key_of(p: dict[str, Any]) -> tuple[str, str]:
-        return (str(p.get("check", "")), str(p.get("workflow_file") or ""))
-
-    def _gate_rank(p: dict[str, Any]) -> int:
-        return max(_own_gate_rank(p), _agg_upstream_rank.get(_agg_key_of(p), 0))
-
-    def _by_gate_then_p50(ps: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return sorted(ps, key=lambda p: (-_gate_rank(p), -(_num(p.get("p50_s")) or 0.0)))
-
-    # Typical poles first, rare ones demoted below — so POLE 1 is the most-gating TYPICAL
-    # gate, not the slowest job overall (which can be a rare opt-in benchmark).
-    _file_all = [p for p in poles if _is_file_pole(p)]
-    file_poles = (_by_gate_then_p50([p for p in _file_all if _pole_typical(p)])
-                  + _by_p50([p for p in _file_all if not _pole_typical(p)]))
-    by_matrix: list[dict[str, Any]] = []
-    for p in file_poles:
-        if not any(_same_matrix(str(p.get("check", "")), str(q.get("check", "")),
-                                str(p.get("workflow_file", "")), str(q.get("workflow_file", "")))
-                   for q in by_matrix):
-            by_matrix.append(p)
-    if by_matrix:
-        # gate_rep = the most-gating typical pole (head of the typical-first order). The rest
-        # keep the tiering — remaining typical poles (by impact) before demoted rare ones —
-        # so a rare giant never outranks a real common gate even as POLE 2+.
-        gate_rep = by_matrix[0]
-        _rest_typ = sorted((p for p in by_matrix[1:] if _pole_typical(p)),
-                           key=lambda p: -_pole_impact(p))
-        _rest_rare = sorted((p for p in by_matrix[1:] if not _pole_typical(p)),
-                            key=lambda p: -_pole_impact(p))
-        pole_wfs = [gate_rep, *_rest_typ, *_rest_rare][:_TOP_WORKFLOWS]
-    else:
-        pole_wfs = []
+    pole_wfs, file_poles = _select_render_poles(doc, poles)
+    _file_all = file_poles
     # Stash each pole's per-PR co-occurrence (from `populations`) on the pole dict, so the floor
     # helpers (`_floor_note`/`_pole_addressable` → `_binding_floor`/`_floor_candidate`) can size the
     # addressable ceiling against the slowest sibling that co-occurs on a MAJORITY of THIS pole's
@@ -12459,18 +12528,36 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         # OPT82 on this pole's lint job is a catalog match at any size (it is
         # uncredited by design; `_opt82_pole_for`). Its card stays in Also noticed.
         opt82_pole = _opt82_pole_for(p, all_findings)
+        # A structural match that names a cause in the job. The generic ones (OPT75, OPT71:
+        # `_GENERIC_STRUCTURAL_PATTERNS`) still render their card, but leave the pole a
+        # coverage gap when a log was captured, so phase 4a reads it.
+        structural_specific = _specific_structural(structural)
+        generic_structural = (tuple(sorted({str(f.get("pattern", "")) for f in structural}))
+                              if structural and not structural_specific
+                              and log_text is not None else ())
         # An LLM gap-fill analysis only applies to a pole that matched NO catalog
-        # detector (SKILL.md phase 4a). A structural- OR data-driven-track match IS a
-        # catalog match, so it suppresses the gap-fill exactly as a log-detector match
-        # (`leaf`) does.
+        # detector that names a cause (SKILL.md phase 4a). A specific structural- OR
+        # data-driven-track match IS such a match, so it suppresses the gap-fill exactly as
+        # a log-detector match (`leaf`) does.
         # A pole whose leaf was DEMOTED off-category (`offcat_leaf`) is NOT a coverage gap —
         # a detector DID match its log, it just isn't the pole's dominant work — so it must
         # not pull an LLM gap-fill analysis (that path is for poles no detector recognized).
+        _catalog_covered = bool(structural_specific or data_driven
+                                or _opt79_pole_covers(opt79_pole) or opt82_pole)
         analysis = (_match(analyses)
                     if (leaf is None and _catalog_leaf(offcat_leaf) is None
-                        and not structural and not data_driven
-                        and not _opt79_pole_covers(opt79_pole)
-                        and not opt82_pole) else None)
+                        and not _catalog_covered) else None)
+        if analysis and (
+                not isinstance(analysis, dict)
+                or not isinstance(analysis.get("cause"), str)
+                or not analysis["cause"].strip()
+                or not isinstance(analysis.get("prompt"), str)
+                or not analysis["prompt"].strip()
+                or not isinstance(analysis.get("evidence"), list)
+                or not analysis["evidence"]
+                or not all(isinstance(line, str) and line.strip()
+                           for line in analysis["evidence"])):
+            analysis = None
         out.append(f'<a id="pole-{i}"></a>')
         out.append("")
         # `wf_base` (a workflow FILENAME) and `check` are BOTH arbitrary repo text dropped
@@ -12575,7 +12662,11 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         out += ["```text", *_pole_waterfall(p, leaf, timeline,
                                             log_present=log_text is not None,
                                             analysis_present=bool(analysis),
-                                            structural_present=bool(structural),
+                                            # A generic-only match with a captured log
+                                            # is the gap note's job, not the pointer's.
+                                            structural_present=(bool(structural)
+                                                                and not generic_structural),
+                                            generic_structural=generic_structural,
                                             data_driven_present=bool(data_driven),
                                             data_driven_on_path=dd_on_path,
                                             data_driven_patterns=tuple(sorted(
@@ -12625,7 +12716,12 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
             out += [f"_The timeline and the per-step times above are from **one "
                     f"representative run** — {which}, [run {rid}]({run_url})."
                     + tail + "_", ""]
-        out += _audit_links(timeline, p, leaf, run_url)
+        out += _audit_links(timeline, p, leaf, run_url, log_present=log_text is not None,
+                            analysis_present=bool(analysis),
+                            catalog_covered=(_catalog_covered
+                                             or _catalog_leaf(offcat_leaf) is not None
+                                             or (bool(structural)
+                                                 and not generic_structural)))
         # The detector-specific evidence (the cross-run sample list + the verbatim
         # cause lines) only exists when a catalog pattern matched. The cross-run check
         # and the agent prompt, by contrast, render for EVERY pole - so an undetected
@@ -12666,7 +12762,8 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         elif analysis:
             # LLM gap-fill: no catalog match, so the agent's grounded reading of the
             # captured log stands in for the measured cause (clearly labelled).
-            out += _llm_analysis_block(analysis, cross_run_rendered=cross_run_rendered)
+            out += _llm_analysis_block(analysis, cross_run_rendered=cross_run_rendered,
+                                       generic_patterns=generic_structural)
         # The structural-track finding(s) routed to this pole render LOUD here — the
         # pole IS the structural lever, and they're excluded from the hygiene appendix,
         # so this is the only place their risk/guardrail/rollout appears.
@@ -13124,8 +13221,8 @@ def _gap_poles(doc: dict[str, Any],
     cp = doc.get("pr_critical_path") or {}
     poles = list(cp.get("poles") or [])
     # A pole that a catalog detector already covers is NOT a coverage gap, even when its
-    # OWN log matched no log-level (`_parse_log`) detector: a structural lever (OPT70–75)
-    # OR a data-driven finding (e.g. OPT24) routed to it with a credited wall-clock saving
+    # OWN log matched no log-level (`_parse_log`) detector: a specific structural lever
+    # (OPT70/72/73/74) OR a data-driven finding (e.g. OPT24) routed to it with a credited wall-clock saving
     # both mean the report already names a measured cause for it. Capturing such a pole and
     # telling a maintainer to "draft a NEW detector" (phase 4c) is the bug this guards
     # against — the render path suppresses the gap for these poles, so the capture must too.
@@ -13141,9 +13238,12 @@ def _gap_poles(doc: dict[str, Any],
     # would silently over-report gaps the day it lands.
     _iso = doc.get("test_runner_isolation")
 
+    # A GENERIC structural match (OPT75/OPT71, `_GENERIC_STRUCTURAL_PATTERNS`) names no cause
+    # in the job, so it does not cover the pole: the render path shows it as a gap, and the
+    # capture must agree (a log detector for that stack is exactly what the loop should draft).
     def _catalog_covers(pole: dict[str, Any]) -> bool:
-        return bool(_structural_for_pole(
-                        pole, findings, (doc.get("pr_critical_path") or {}).get("checks"))
+        return bool(_specific_structural(_structural_for_pole(
+                        pole, findings, (doc.get("pr_critical_path") or {}).get("checks")))
                     or _data_driven_for_pole(pole, findings)
                     or _opt79_pole_covers(_opt79_pole_for(pole, findings))
                     or _opt82_pole_for(pole, findings))

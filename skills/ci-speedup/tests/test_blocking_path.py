@@ -4361,17 +4361,19 @@ def test_render_unrecognized_log_on_timeline_path_still_flags_the_gap():
     assert "no specific callout to search for" in md
 
 
-def _doc_with_structural_pole() -> dict:
+def _doc_with_structural_pole(pattern: str = "OPT75") -> dict:
     # A pole whose log matches NO leaf detector but to which a STRUCTURAL finding
     # (OPT70–75) is routed via `affected_jobs` — the reflex-dev/reflex shape: the
     # structural track IS the pole, so the finding must render AS the pole, not be
-    # dropped (excluded from "Also noticed") AND missing from the pole.
+    # dropped (excluded from "Also noticed") AND missing from the pole. With a captured
+    # log, a GENERIC pattern (OPT75/OPT71) leaves the pole a gap-fill target
+    # (test_generic_structural_gap_fill.py); a specific one (e.g. OPT72) covers it.
     doc = _doc_one_pole()
     job = "integration-app-harness (redis, 3.14, 1)"
     doc["pr_critical_path"]["poles"][0]["check"] = job
     doc["pr_critical_path"]["poles"][0]["job"] = job
     doc["findings"] = [
-        {"id": "f103", "pattern": "OPT75", "pattern_class": "structural",
+        {"id": "f103", "pattern": pattern, "pattern_class": "structural",
          "structural": True, "severity": "HIGH", "risk": "MEDIUM",
          "title": "Decompose the dominant addressable step",
          "workflow_file": ".github/workflows/pipeline.yml", "line": 0,
@@ -4390,14 +4392,17 @@ def test_structural_finding_routed_to_a_pole_renders_as_the_pole_not_a_dead_end(
     # "Also noticed" (the pole "already represents" it) but NEVER rendered at the pole,
     # so the pole falsely read "no catalog pattern matched" and the finding's
     # risk/guardrail/rollout rendered nowhere. The structural track IS the pole.
-    doc = _doc_with_structural_pole()
+    # OPT72 (a structural pattern that names a cause): the generic OPT75/OPT71 still
+    # render AT the pole but leave it a gap-fill target (test_generic_structural_gap_fill).
+    doc = _doc_with_structural_pole("OPT72")
     md = bp.render(doc, {"pipeline": "log that matches no leaf detector at all"}, {},
                    {"pipeline": "https://github.com/o/r/actions/runs/9"}, "2026-06-08")
     # (a) the pole no longer claims it's a coverage gap / no catalog match.
     assert "no drill-down available; this is a coverage gap" not in md
     assert "matched no known root-cause pattern" not in md
-    # (b) the OPT75 finding renders AT the pole with its mandatory risk axis.
-    assert "OPT75" in md
+    assert "no known root-cause pattern matched" not in md
+    # (b) the OPT72 finding renders AT the pole with its mandatory risk axis.
+    assert "OPT72" in md
     assert "Decompose the dominant addressable step" in md
     assert "risk **MEDIUM**" in md
     assert "Keep a full-suite fallback before scoping." in md          # guardrail
@@ -4588,15 +4593,17 @@ def test_is_pole_structural_uncredited_opt73_renders_as_a_pole():
 def test_structural_pole_with_analysis_suppresses_the_llm_gap_fill():
     # Even when an --analysis is supplied (the gap-fill ran), a structural catalog match
     # means the pole is NOT a coverage gap, so the LLM gap-fill must be suppressed
-    # (SKILL.md phase 4a fires only for poles that "matched no catalog detector").
-    doc = _doc_with_structural_pole()
+    # (SKILL.md phase 4a fires only for poles that "matched no catalog detector"). A
+    # structural pattern that names a cause (OPT72); the generic OPT75/OPT71 take the
+    # analysis instead (test_generic_structural_gap_fill.py).
+    doc = _doc_with_structural_pole("OPT72")
     analysis = {"cause": "serial test projects", "breakdown": [["a", "1s"]],
                 "evidence": ["X"], "prompt": "REPO: o/r\ndo the thing"}
     md = bp.render(doc, {"pipeline": "log matching no leaf detector"}, {},
                    {"pipeline": "https://github.com/o/r/actions/runs/9"}, "2026-06-08",
                    analyses={"pipeline": analysis})
     assert "🤖 LLM root-cause analysis" not in md
-    assert "OPT75" in md and "risk **MEDIUM**" in md
+    assert "OPT72" in md and "risk **MEDIUM**" in md
 
 
 def _doc_with_data_driven_pole() -> dict:
