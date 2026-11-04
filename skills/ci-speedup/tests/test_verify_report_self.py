@@ -3843,6 +3843,13 @@ def test_vr_headline_pole_per_pr_data_present_but_unreadable_fails(tmp_path: Pat
     # Chain facts present but every one malformed → the same loud FAIL.
     junk = [{"sha": "x", "chain": ["test"]}] * 20
     assert _tag_for(_good(), _HEADGATE, tmp_path, findings=_b4_findings(chain_facts=junk)) == "FAIL"
+    # Six readable facts on a fragmented sample plus fourteen malformed ones: the malformed PRs
+    # could hold a recurring gate, so they widen the bound (FAIL), never vanish into a PASS.
+    frag = _b4_findings(headline="c0", chain_facts=[
+        {"sha": f"{i}", "chain": [f"c{i}"], "member_spans_s": {f"c{i}": 100.0},
+         "runner_up_s": 10.0} for i in range(6)] + junk[:14])
+    frag["pr_critical_path"]["checks"] = [{"name": f"c{i}", "p50_s": 100.0} for i in range(6)]
+    assert _tag_for(_good(), _HEADGATE, tmp_path, findings=frag) == "FAIL"
     # A genuinely thin run (3 PRs sampled, 3 chain facts) still SKIPs.
     thin = _b4_findings(chain_facts=[_b4_chain_fact(i, *_B4_SPANS[i]) for i in range(3)], sampled=3)
     assert _tag_for(_good(), _HEADGATE, tmp_path, findings=thin) == "SKIP"

@@ -13650,7 +13650,7 @@ def _vr_chain_fact_poles(cp: dict, candidates: "set[str] | None"
                          ) -> tuple[dict[str, int], int, int]:
     """Per-check pole frequency re-derived from `chain_facts`, the per-PR record the collector
     stamps on EVERY run (`populations` is bimodal-only). Returns (lower, undetermined, n): `n`
-    readable PRs, `lower[c]` = PRs on which `c` is PROVABLY the slowest ranked check, and
+    chain-fact records (one per sampled PR, malformed ones included), `lower[c]` = PRs on which `c` is PROVABLY the slowest ranked check, and
     `undetermined` = PRs whose slowest check the facts can't pin.
 
     Why it is sound: `runner_up_s` is the longest path left with every chain member zeroed, and a
@@ -13663,16 +13663,17 @@ def _vr_chain_fact_poles(cp: dict, candidates: "set[str] | None"
     lower: dict[str, int] = {}
     undetermined = n = 0
     for e in _as_list(cp.get("chain_facts")):
-        if not isinstance(e, dict):
-            continue
-        spans = e.get("member_spans_s")
-        ru = e.get("runner_up_s")
+        # Every record is a sampled PR. A malformed one is UNDETERMINED (it widens the bound),
+        # never dropped: dropped records could hide a recurring gate behind a fragmented PASS.
+        n += 1
+        spans = e.get("member_spans_s") if isinstance(e, dict) else None
+        ru = e.get("runner_up_s") if isinstance(e, dict) else None
         if not isinstance(spans, dict) or not isinstance(ru, (int, float)) or isinstance(ru, bool):
+            undetermined += 1
             continue
         scoped = {str(k): round(float(v), 1) for k, v in spans.items()
                   if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
                   and (candidates is None or str(k) in candidates)}
-        n += 1
         top = max(scoped.values(), default=0.0)
         if not scoped or top <= round(float(ru), 1):
             undetermined += 1
@@ -13741,7 +13742,7 @@ def check_headline_pole_actually_gates(report: str, findings_path: Path | None) 
                          "per-PR data present but not readable: the run sampled "
                          f"{cp.get('sampled_pr_count')} PR(s) with "
                          f"{len(_as_list(cp.get('chain_facts')))} chain fact(s), yet only "
-                         f"{len(per_pr)} population(s) and {n_pr} readable chain fact(s) — the "
+                         f"{len(per_pr)} population(s) and {n_pr} chain fact(s) — the "
                          "headline's recurrence can't be re-derived, so this check would otherwise "
                          "skip on exactly the run that has the data")
         return Check(name, True, f"only {n_pr} PR population(s) (< {_VR_RARE_PRESENCE_MIN_PR}) "
