@@ -1204,6 +1204,10 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-11-04** — Keep missing sampled PR records in the recurring-gate uncertainty bound, for both population and chain-fact evidence. Treat malformed, negative or non-finite chain timings as undetermined instead of dropping a competing check or certifying a winner. (#186)
+
+- **2026-11-03** — The report verifier now checks that the headline's slowest check really recurs on runs without a bimodal gate. Before, it read only the per-PR populations, which the collector saves only for a bimodal gate, so a fully sampled run (20/20 PRs) skipped the check as "noise on this sample". When populations are absent, it now reads the per-PR chain timings saved on every run, on the same caps the engine ranks with, and leaves undetermined any PR whose slowest check those timings can't pin. A run with at least 6 sampled PRs whose per-PR data the verifier can't read now fails ("per-PR data present but not readable") instead of skipping, as does a rendered "gates N/M PRs" claim with no populations behind it. Rendered reports are unchanged. (#186)
+
 - **2026-11-04** — Limit the security-wording identifier exemption to named identifier positions, the excluded-check list and numbered pole contents links. Inline command prose, prose links and quoted or indented code remain checked. (#183)
 
 - **2026-11-03** — The report verifier no longer fails a correct report because the audited repo runs a check, job or step whose own name contains a security-tool phrase (a check named `ci-secure scan`, a step named `Run zizmor`). Those two leak phrases are now matched with the renderer's identifier spans (inline code and TOC pole links) removed; the same phrase in unbackticked skill prose, in other link text or inside an agent-prompt block still fails, and the other leak phrases are matched everywhere as before. Previously such a repo's report always failed verification and never got the option to save it. (#183)

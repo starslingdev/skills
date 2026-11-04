@@ -3819,6 +3819,136 @@ def test_vr_headline_pole_fragmented_repo_no_clean_gate_passes(tmp_path: Path):
     assert _tag_for(_good(), _HEADGATE, tmp_path, findings=f) == "PASS"
 
 
+# --- Bug 4 (2026-11-03 dogfood): per-PR checks skipped on a fully sampled run ------------------
+# The collector stamps `populations` only for a bimodal gate, so on a non-bimodal run that sampled
+# 20/20 PRs the recurring-gate check read 0 populations and SKIPPED as "noise on this sample" —
+# on exactly the run that had the per-PR data (`chain_facts`, stamped on every run). Trimmed from
+# that run's findings: a `test (self-hosted)` -> `test` chain, `python floor` the concurrent check.
+_B4_CHECKS = [
+    {"name": "test (self-hosted)", "p50_s": 126.0, "workflow_file": ".github/workflows/ci.yml"},
+    {"name": "python floor", "p50_s": 21.5, "workflow_file": ".github/workflows/python-floor.yml"},
+    {"name": "test", "p50_s": 3.0, "workflow_file": ".github/workflows/ci.yml"},
+    {"name": "ci-secure", "p50_s": 3.0, "workflow_file": ".github/workflows/ci-secure-check.yml"},
+    {"name": "ci-secure (self-hosted)", "p50_s": 16.0,
+     "workflow_file": ".github/workflows/ci-secure-check.yml"},
+]
+_B4_SPANS = [(116.0, 2.0, 20.0), (91.0, 3.0, 28.0), (109.0, 3.0, 21.0), (114.0, 3.0, 21.0),
+             (117.0, 3.0, 21.0), (118.0, 3.0, 22.0), (122.0, 3.0, 18.0), (123.0, 3.0, 20.0),
+             (123.0, 3.0, 24.0), (124.0, 3.0, 18.0), (126.0, 3.0, 21.0), (126.0, 3.0, 22.0),
+             (126.0, 3.0, 23.0), (126.0, 3.0, 25.0), (126.0, 3.0, 26.0), (126.0, 3.0, 27.0),
+             (126.0, 3.0, 31.0), (126.0, 3.0, 72.0), (126.0, 3.0, 22.0), (126.0, 3.0, 21.0)]
+
+
+def _b4_chain_fact(i: int, slow: float, tail: float, runner_up: float) -> dict:
+    return {"sha": f"{i:040x}", "chain": ["test (self-hosted)", "test"],
+            "member_spans_s": {"test (self-hosted)": slow, "test": tail},
+            "chain_s": slow + tail, "co_longest_n": 1, "runner_up_s": runner_up,
+            "chain_win_s": slow + tail - runner_up, "fallback": None}
+
+
+def _b4_findings(headline: str = "test (self-hosted)", chain_facts: list | None = None,
+                 sampled: int = 20) -> dict:
+    cf = ([_b4_chain_fact(i, *s) for i, s in enumerate(_B4_SPANS)]
+          if chain_facts is None else chain_facts)
+    return {"required_checks": ["ci-secure", "python floor", "test"],
+            "pr_critical_path": {
+                "sampled_pr_count": sampled, "critical_path_check": headline,
+                "check_present_n_pr": sampled, "checks": _B4_CHECKS,
+                "population_weighted": False, "populations_n": 0, "populations": [],
+                "chain_facts": cf}}
+
+
+def test_vr_headline_pole_runs_from_chain_facts_on_a_fully_sampled_run(tmp_path: Path):
+    # The dogfood run's shape: 20/20 sampled, 20 chain facts, `populations == []`. The headline
+    # IS the pole on all 20 PRs, so the check must RUN and PASS — not SKIP on "0 populations".
+    assert _tag_for(_good(), _HEADGATE, tmp_path, findings=_b4_findings()) == "PASS"
+
+
+def test_vr_headline_pole_phantom_caught_from_chain_facts(tmp_path: Path):
+    # Same data, phantom headline: `ci-secure (self-hosted)` (not required, never the slowest)
+    # crowned while `test (self-hosted)` provably gates 20/20 → the phantom-gate FAIL fires off
+    # `chain_facts` alone.
+    bad = _b4_findings(headline="ci-secure (self-hosted)")
+    assert _tag_for(_good(), _HEADGATE, tmp_path, findings=bad) == "FAIL"
+
+
+def test_vr_headline_pole_per_pr_data_present_but_unreadable_fails(tmp_path: Path):
+    # The class guard: 20 PRs sampled but no readable per-PR record (no populations, no chain
+    # facts) is a FAIL ("per-PR data present but not readable"), never a quiet thin-sample SKIP.
+    assert _tag_for(_good(), _HEADGATE, tmp_path,
+                    findings=_b4_findings(chain_facts=[])) == "FAIL"
+    # Chain facts present but every one malformed → the same loud FAIL.
+    junk = [{"sha": "x", "chain": ["test"]}] * 20
+    assert _tag_for(_good(), _HEADGATE, tmp_path, findings=_b4_findings(chain_facts=junk)) == "FAIL"
+    # Six readable facts on a fragmented sample plus fourteen malformed ones: the malformed PRs
+    # could hold a recurring gate, so they widen the bound (FAIL), never vanish into a PASS.
+    frag = _b4_findings(headline="c0", chain_facts=[
+        {"sha": f"{i}", "chain": [f"c{i}"], "member_spans_s": {f"c{i}": 100.0},
+         "runner_up_s": 10.0} for i in range(6)] + junk[:14])
+    frag["pr_critical_path"]["checks"] = [{"name": f"c{i}", "p50_s": 100.0} for i in range(6)]
+    assert _tag_for(_good(), _HEADGATE, tmp_path, findings=frag) == "FAIL"
+    # A genuinely thin run (3 PRs sampled, 3 chain facts) still SKIPs.
+    thin = _b4_findings(chain_facts=[_b4_chain_fact(i, *_B4_SPANS[i]) for i in range(3)], sampled=3)
+    assert _tag_for(_good(), _HEADGATE, tmp_path, findings=thin) == "SKIP"
+
+
+def test_vr_headline_pole_chain_fact_bound_too_loose_fails(tmp_path: Path):
+    # Every PR's competing path is at least as long as the slowest chain member, so the facts
+    # can't say which check is the pole on any PR. That is unreadable data, not a PASS.
+    loose = [_b4_chain_fact(i, 60.0, 60.0, 100.0) for i in range(20)]
+    assert _tag_for(_good(), _HEADGATE, tmp_path,
+                    findings=_b4_findings(chain_facts=loose)) == "FAIL"
+    # Mostly pinned: 18 PRs prove the headline gates; 2 loose ones can't change the verdict.
+    mixed = [_b4_chain_fact(i, 126.0, 3.0, 21.0) for i in range(18)] + loose[:2]
+    assert _tag_for(_good(), _HEADGATE, tmp_path,
+                    findings=_b4_findings(chain_facts=mixed)) == "PASS"
+
+
+def test_vr_chain_fact_poles_agree_with_the_engine_argmax():
+    # Soundness of the chain-facts bound against the ENGINE's own definitions: for random PRs over
+    # a graph with a `needs:` chain, a matrix node and a fileless peer, whenever the verifier pins
+    # a PR's pole it is exactly `collect_runs._pole_frequencies`' argmax set, on the same caps.
+    import random
+    sys.path.insert(0, str(_VERIFY.parents[1] / "scripts"))
+    import collect_runs as cr  # noqa: E402
+    vr = _load_verify_report()
+    graph = {"ci.yml": {"build": {"needs": []}, "test": {"needs": ["build"]},
+                        "unit": {"needs": [], "name": "unit (${{ matrix.os }})",
+                                 "matrix": {"os": ["linux", "mac"]}},
+                        "lint": {"needs": []}}}
+    crit = {"ci.yml": {"job_p50": {"build": 50.0, "test": 80.0, "unit (linux)": 70.0,
+                                   "unit (mac)": 90.0, "lint": 20.0}}}
+    names = ["build", "test", "unit (linux)", "unit (mac)", "lint", "bot-gate"]
+    caps = {"build": 60.0, "test": 100.0, "unit (linux)": 90.0, "unit (mac)": 110.0}
+    rng = random.Random(4)
+    pinned = 0
+    for _ in range(400):
+        checks = {n: float(rng.choice([0, 5, 20, 40, 60, 80, 95, 120, 150])) for n in names
+                  if rng.random() < 0.8}
+        facts = cr._chain_facts_for_pr(checks, caps, graph, crit)
+        if facts is None:
+            continue
+        engine = cr._pole_frequencies([checks], set(names), caps)
+        truth = {n for n, c in engine.items() if c}
+        lower, und, n = vr._vr_chain_fact_poles({"chain_facts": [facts]}, set(names))
+        assert n == 1
+        if und:
+            continue
+        pinned += 1
+        assert set(lower) == truth, (checks, facts, lower, truth)
+    assert pinned > 100   # the bound decides most PRs, so the agreement above is not vacuous
+
+
+def test_gate_frequency_claim_without_populations_fails(tmp_path: Path):
+    # Bug 4 guard on the gate-frequency check: a rendered "gates N/M" claim on a 20-PR run with no
+    # populations to re-derive it from is unverifiable → FAIL, not "no populations" SKIP.
+    F = "per-workflow gate frequency"
+    f = _b4_findings()
+    assert _tag_for(_good() + _gate_freq_claim("ci.yml", 20, 20), F, tmp_path, findings=f) == "FAIL"
+    # No claim rendered (what the renderer does without populations) → nothing to verify → SKIP.
+    assert _tag_for(_good(), F, tmp_path, findings=f) == "SKIP"
+
+
 # --- plan 007: the anti-unregistered-claim meta-guard (source lint + coupling + coverage) ------
 
 _FRAMING_LINT_TEMPLATES = (
@@ -12183,6 +12313,36 @@ def test_curl_skipped_step_sentinel_still_fails():
     assert not check.ok and not check.skipped, check
     assert "test-linter" in check.detail
     assert "longer than any GitHub Actions job may run" in check.detail
+
+
+@pytest.mark.parametrize("basis", ["chain_facts", "populations"])
+def test_headline_recurrence_keeps_missing_prs_in_the_uncertainty_bound(tmp_path, basis):
+    facts = [{"chain": [f"gate-{i}"], "member_spans_s": {f"gate-{i}": 100.0},
+              "runner_up_s": 0.0} for i in range(6)]
+    doc = _b4_findings(headline="gate-0", chain_facts=facts, sampled=20)
+    cp = doc["pr_critical_path"]
+    cp["checks"] = [{"name": f"gate-{i}", "p50_s": 100.0} for i in range(6)]
+    if basis == "populations":
+        cp["populations"] = [[1 / 20, [[f"gate-{i}", 100.0]]] for i in range(6)]
+        cp["populations_n"] = 20
+    assert _tag_for(_good(), _HEADGATE, tmp_path, findings=doc) == "FAIL"
+    # Complete fragmented evidence is still a valid pass.
+    cp["sampled_pr_count"] = cp["populations_n"] = 6
+    assert _tag_for(_good(), _HEADGATE, tmp_path, findings=doc) == "PASS"
+
+
+@pytest.mark.parametrize("value", [float("nan"), -1.0])
+def test_chain_fact_invalid_bounds_are_undetermined(value):
+    vr = _load_verify_report()
+    fact = {"member_spans_s": {"test": 100.0}, "runner_up_s": value}
+    assert vr._vr_chain_fact_poles({"chain_facts": [fact]}, {"test"}) == ({}, 1, 1)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -1.0, "unknown", False])
+def test_chain_fact_unreadable_member_does_not_disappear(value):
+    vr = _load_verify_report()
+    fact = {"member_spans_s": {"test": 100.0, "other": value}, "runner_up_s": 0.0}
+    assert vr._vr_chain_fact_poles({"chain_facts": [fact]}, {"test", "other"}) == ({}, 1, 1)
 
 
 @pytest.mark.parametrize("fragment", [
