@@ -13634,16 +13634,20 @@ def _vr_pole_frequencies(per_pr: list[list[tuple[str, float]]],
     return freq
 
 
+def _vr_per_pr_count(cp: dict) -> int:
+    """Largest explicit sample count; missing records remain unknown PRs."""
+    counts = [cp.get("sampled_pr_count"), cp.get("populations_n")]
+    return max([v for v in counts if isinstance(v, int) and not isinstance(v, bool)]
+               + [len(_as_list(cp.get("chain_facts"))), len(_as_list(cp.get("populations")))])
+
+
 def _vr_per_pr_data_present(cp: dict) -> bool:
     """True when the run clearly sampled enough PRs for a per-PR re-derivation: the stamped
     `sampled_pr_count`, the persisted `chain_facts`, or the populations count reaches the stability
     floor. A per-PR check that then finds nothing it can read must FAIL loudly, never SKIP as
     "thin sample" (bug 4: a 20/20-sampled run whose recurring-gate check skipped on `populations`,
     which the collector only stamps for bimodal gates)."""
-    def _n(v: object) -> int:
-        return v if isinstance(v, int) and not isinstance(v, bool) else 0
-    return max(_n(cp.get("sampled_pr_count")), _n(cp.get("populations_n")),
-               len(_as_list(cp.get("chain_facts")))) >= _VR_RARE_PRESENCE_MIN_PR
+    return _vr_per_pr_count(cp) >= _VR_RARE_PRESENCE_MIN_PR
 
 
 def _vr_chain_fact_poles(cp: dict, candidates: "set[str] | None"
@@ -13668,7 +13672,12 @@ def _vr_chain_fact_poles(cp: dict, candidates: "set[str] | None"
         n += 1
         spans = e.get("member_spans_s") if isinstance(e, dict) else None
         ru = e.get("runner_up_s") if isinstance(e, dict) else None
-        if not isinstance(spans, dict) or not isinstance(ru, (int, float)) or isinstance(ru, bool):
+        if (not isinstance(spans, dict) or not isinstance(ru, (int, float))
+                or isinstance(ru, bool) or not math.isfinite(ru) or ru < 0):
+            undetermined += 1
+            continue
+        if any(not isinstance(v, (int, float)) or isinstance(v, bool)
+               or not math.isfinite(v) or v < 0 for v in spans.values()):
             undetermined += 1
             continue
         scoped = {str(k): round(float(v), 1) for k, v in spans.items()
@@ -13747,6 +13756,9 @@ def check_headline_pole_actually_gates(report: str, findings_path: Path | None) 
                          "skip on exactly the run that has the data")
         return Check(name, True, f"only {n_pr} PR population(s) (< {_VR_RARE_PRESENCE_MIN_PR}) "
                      "— pole frequency is noise on this sample", skipped=True)
+    missing = max(0, _vr_per_pr_count(cp) - n_pr)
+    und += missing
+    n_pr += missing
     hf = freq.get(str(headline), 0)
     hf_hi = hf + und
     real_gates = sorted((n for n, c in freq.items() if c >= _VR_POLE_RECUR_FLOOR),

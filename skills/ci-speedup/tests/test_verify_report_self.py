@@ -12276,3 +12276,33 @@ def test_curl_skipped_step_sentinel_still_fails():
     assert not check.ok and not check.skipped, check
     assert "test-linter" in check.detail
     assert "longer than any GitHub Actions job may run" in check.detail
+
+
+@pytest.mark.parametrize("basis", ["chain_facts", "populations"])
+def test_headline_recurrence_keeps_missing_prs_in_the_uncertainty_bound(tmp_path, basis):
+    facts = [{"chain": [f"gate-{i}"], "member_spans_s": {f"gate-{i}": 100.0},
+              "runner_up_s": 0.0} for i in range(6)]
+    doc = _b4_findings(headline="gate-0", chain_facts=facts, sampled=20)
+    cp = doc["pr_critical_path"]
+    cp["checks"] = [{"name": f"gate-{i}", "p50_s": 100.0} for i in range(6)]
+    if basis == "populations":
+        cp["populations"] = [[1 / 20, [[f"gate-{i}", 100.0]]] for i in range(6)]
+        cp["populations_n"] = 20
+    assert _tag_for(_good(), _HEADGATE, tmp_path, findings=doc) == "FAIL"
+    # Complete fragmented evidence is still a valid pass.
+    cp["sampled_pr_count"] = cp["populations_n"] = 6
+    assert _tag_for(_good(), _HEADGATE, tmp_path, findings=doc) == "PASS"
+
+
+@pytest.mark.parametrize("value", [float("nan"), -1.0])
+def test_chain_fact_invalid_bounds_are_undetermined(value):
+    vr = _load_verify_report()
+    fact = {"member_spans_s": {"test": 100.0}, "runner_up_s": value}
+    assert vr._vr_chain_fact_poles({"chain_facts": [fact]}, {"test"}) == ({}, 1, 1)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -1.0, "unknown", False])
+def test_chain_fact_unreadable_member_does_not_disappear(value):
+    vr = _load_verify_report()
+    fact = {"member_spans_s": {"test": 100.0, "other": value}, "runner_up_s": 0.0}
+    assert vr._vr_chain_fact_poles({"chain_facts": [fact]}, {"test", "other"}) == ({}, 1, 1)
