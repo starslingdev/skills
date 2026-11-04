@@ -12413,7 +12413,16 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         analysis = (_match(analyses)
                     if (leaf is None and _catalog_leaf(offcat_leaf) is None
                         and not _catalog_covered) else None)
-        if analysis and not _llm_analysis_block(analysis):
+        if analysis and (
+                not isinstance(analysis, dict)
+                or not isinstance(analysis.get("cause"), str)
+                or not analysis["cause"].strip()
+                or not isinstance(analysis.get("prompt"), str)
+                or not analysis["prompt"].strip()
+                or not isinstance(analysis.get("evidence"), list)
+                or not analysis["evidence"]
+                or not all(isinstance(line, str) and line.strip()
+                           for line in analysis["evidence"])):
             analysis = None
         out.append(f'<a id="pole-{i}"></a>')
         out.append("")

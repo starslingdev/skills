@@ -221,3 +221,17 @@ def test_prompt_only_analysis_does_not_hide_unfilled_root_cause():
     assert "🤖 LLM root-cause analysis" not in report
     assert "no drill-down available; this is a coverage gap" in report
     assert _no_root_cause_failures(report)
+
+
+@pytest.mark.parametrize("missing", ["cause", "evidence", "prompt"])
+def test_ungrounded_analysis_does_not_count_as_gap_filled(missing):
+    analysis = {
+        "cause": "The build step performs redundant work.",
+        "prompt": "Inspect the captured build step.",
+        "evidence": ["Build step output"],
+    }
+    analysis.pop(missing)
+    report = _render(_doc(), analysis)
+    assert "🤖 LLM root-cause analysis" not in report
+    assert "no drill-down available; this is a coverage gap" in report
+    assert _no_root_cause_failures(report)
