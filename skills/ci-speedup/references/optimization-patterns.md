@@ -4898,7 +4898,8 @@ the latest attempt, so their job minutes are bill waste once the retry exists.
    retried runs it rests on. The renderer and `verify_report.py` hold findings
    written by older engines to the same minimum; missing or malformed retry
    outcomes remain advisory until a fresh collection establishes them. A
-   carried-forward job from an older attempt never proves that the retry failed.
+   carried-forward job from an older attempt never proves that the retry failed
+   and its unchanged compute is not counted as retry savings.
 
 **Fix**: Stabilize or de-flake the dominant failing job, or narrow the job so it
 runs only when its signal is needed. Do not hide the failure or make the workflow

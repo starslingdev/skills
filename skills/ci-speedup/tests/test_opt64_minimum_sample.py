@@ -272,3 +272,17 @@ def test_carried_forward_failure_does_not_prove_a_failed_retry():
     f = _detect(samples)[0]
     assert f.get('advisory') is True
     assert f['runner_min_saving'] is None
+
+
+def test_carried_forward_successful_jobs_do_not_inflate_retry_savings():
+    samples = [_retried_run(f'r{i}') for i in range(3)]
+    expected_prior_s = 0.0
+    for run, all_jobs, latest in samples:
+        prior_setup = next(j for j in all_jobs if j['name'] == 'setup' and j['run_attempt'] == 1)
+        latest[:] = [j for j in latest if j['name'] != 'setup'] + [prior_setup]
+        all_jobs[:] = [j for j in all_jobs if not (j['name'] == 'setup' and j['run_attempt'] == 2)]
+        expected_prior_s += sum(cr._job_compute_s(j) for j in all_jobs
+                                if j['name'] == 'test' and j['run_attempt'] == 1)
+    f = _detect(samples, monthly=100, denominator=100)[0]
+    assert not f.get('advisory')
+    assert f['runner_min_saving'] == round(expected_prior_s / 60.0, 1)

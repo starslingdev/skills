@@ -15293,7 +15293,9 @@ def _detect_opt64_rerun_attempt_waste(
         prior_jobs = _prior_attempt_jobs(run, all_jobs, latest_jobs)
         if not prior_jobs:
             continue
-        prior_s = sum(_job_compute_s(j) for j in prior_jobs)
+        latest_ids = {_job_id(j) for j in latest_jobs if _job_id(j)}
+        prior_s = sum(_job_compute_s(j) for j in prior_jobs
+                      if not _job_id(j) or _job_id(j) not in latest_ids)
         if prior_s <= 0:
             continue
         dominant = _dominant_prior_failing_job(prior_jobs, latest_jobs)
