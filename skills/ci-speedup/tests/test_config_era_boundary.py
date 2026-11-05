@@ -121,6 +121,17 @@ def test_partition_straddle_sufficient_post_uses_post_only():
     assert len(kept) == 6
 
 
+def test_partition_60_pre_40_post_stays_narrowed_to_the_current_era():
+    pre = [f"2026-06-{i + 1:03d}T00:00:00Z" for i in range(60)]
+    post = [f"2026-08-{i + 1:03d}T00:00:00Z" for i in range(40)]
+    kept, fact = cr._partition_config_era(
+        _runs(*pre, *post), "2026-07-01T00:00:00Z")
+    assert fact is not None
+    assert fact["rule"] == "post_only" and fact["kept_era"] == "post"
+    assert fact["pre_count"] == 60 and fact["post_count"] == 40
+    assert len(kept) == 40
+
+
 def test_partition_straddle_insufficient_post_keeps_pre_and_flags_disclosure():
     # 7 pre-change + 2 post-change (< _RARE_PRESENCE_MIN_PR) → keep PRE only, flag disclosure.
     pre = [f"2026-07-0{d}T00:00:00Z" for d in range(1, 8)]  # 7 runs
@@ -136,6 +147,71 @@ def test_partition_straddle_insufficient_post_keeps_pre_and_flags_disclosure():
     assert fact["sufficiency_min"] == cr._RARE_PRESENCE_MIN_PR
     # Single-change disclosed_pre: multi_change is False, the whole pre set is kept.
     assert fact["multi_change"] is False and fact["kept_count"] == 7
+
+
+def test_thin_post_disclosure_scales_to_a_100_pre_3_post_sample():
+    """A very thin current era keeps the established previous-configuration framing."""
+    doc = _era_doc()
+    doc["pr_critical_path"]["config_eras"] = [{
+        "workflow_file": ".github/workflows/ci.yml",
+        "boundary": "2026-07-17T00:00:00Z",
+        "kept_era": "pre", "rule": "disclosed_pre",
+        "pre_count": 100, "post_count": 3, "sufficiency_min": 6,
+    }]
+    report = bp.render(doc)
+    top_matter = report.split("## 📋 Contents", 1)[0]
+    assert bp._CONFIG_ERA_DISCLOSED_MARKER in top_matter
+    assert "Only 3 sampled runs have run since that change" in top_matter
+
+
+def test_runner_label_change_inside_an_identical_workflow_sample_is_disclosed():
+    """A gate moving runners is an era change even when the workflow blob is unchanged."""
+    wf = ".github/workflows/ci.yml"
+    runs = []
+    for i in range(110):
+        label = "runner-a" if i < 60 else "runner-b"
+        runs.append({
+            "id": i + 1,
+            "head_sha": f"sha{i}",
+            "created_at": f"2026-07-{i + 1:03d}T00:00:00Z",
+            "event": "pull_request",
+            "jobs": [{"name": "gate", "labels": [label]}],
+        })
+    facts: list[dict] = []
+    cr._era_resolve_thin_flip(
+        facts,
+        [f"sha{i}" for i in range(110)],
+        [{"gate": 30.0} for _ in range(110)],
+        {f"sha{i}": runs[i]["created_at"] for i in range(110)},
+        lambda name: wf if name == "gate" else None,
+        {wf: runs},
+        lambda _wf, _runs: None,
+    )
+    fact = next(f for f in facts if f.get("rule") == "runner_label_change")
+    assert fact["workflow_file"] == wf and fact["job"] == "gate"
+    assert fact["runner_label_counts"] == [
+        {"label": "runner-a", "count": 60},
+        {"label": "runner-b", "count": 50},
+    ]
+    doc = _era_doc()
+    doc["pr_critical_path"]["config_eras"] = [fact]
+    report = bp.render(doc)
+    assert bp._RUNNER_LABEL_ERA_MARKER in report
+    assert "`runner-a` (60 runs)" in report and "`runner-b` (50 runs)" in report
+
+
+def test_runner_label_era_without_its_disclosure_fails_the_guard(tmp_path):
+    doc = _era_doc()
+    doc["pr_critical_path"]["config_eras"] = [{
+        "workflow_file": ".github/workflows/ci.yml",
+        "job": "gate", "rule": "runner_label_change", "kept_era": "all",
+        "runner_label_counts": [
+            {"label": "runner-a", "count": 60},
+            {"label": "runner-b", "count": 50},
+        ],
+    }]
+    chk = vr.check_config_era_boundary("# report\n", _write(tmp_path, doc), None)
+    assert not chk.ok and "runner-label era" in chk.detail
 
 
 def test_partition_multi_boundary_disclosed_pre_narrows_to_the_immediately_prior_era():

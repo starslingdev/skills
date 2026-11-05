@@ -13,6 +13,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-11-05** — Disclose a merge-gating job's runner-label era when the observed label changes once inside an otherwise unchanged workflow sample. The report names both labels and their run counts without partitioning the sample, and verification rejects a stamped runner era whose disclosure is missing.
 - **2026-11-05** — Stop queued API reads after three consecutive authentication failures following a successful read. Reports now say when the GitHub token stopped working partway through and count failed logical job fetches, including queued fetches skipped after collection stopped, and no longer attribute that stop to rate limits, server errors or timeouts; job-list reads made for the shared-runner queue check count toward that total, and the stop reason is logged once. Rate limits and endpoint permission refusals retain their own handling.
 - **2026-11-05** — Qualify success-only headline timings when the already-fetched
   all-status page shows that at least 20% of 10 or more completed default-branch
