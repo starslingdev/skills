@@ -13,6 +13,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-11-05** — Compute a headline pole's addressable wall-clock saving separately for each sampled PR. Reports now split PRs where a concurrent sibling leaves zero saving from PRs with measured headroom, keep missing sibling observations unknown, and cap the headline at the largest observed per-PR saving.
 - **2026-11-05** — Detect timestamp-proven shell loops that run at least ten distinct test files sequentially, and hold back larger-runner advice with a pointer to OPT88's measured-concurrency guidance.
 - **2026-11-05** — Disclose a merge-gating job's runner-label era when the observed label changes once inside an otherwise unchanged workflow sample. The report names both labels and their run counts without partitioning the sample, and verification rejects a stamped runner era whose disclosure is missing.
 - **2026-11-05** — Attribute nested local reusable-workflow matrix checks to their editable leaf workflow. Follow scanned call targets with a cycle and depth bound, keeping unrelated local jobs from claiming remote calls and preserving bare matrix-name matching.
