@@ -2332,6 +2332,50 @@ def test_nested_reusable_matrix_checks_resolve_to_the_leaf_workflow():
     assert cr._check_to_job_node_scanned("tests / shards / unit (1)", graph) is None
 
 
+def test_nested_leaf_keeps_distinct_caller_identity_for_required_reachability():
+    caller = ".github/workflows/caller.yml"
+    leaf = ".github/workflows/leaf.yml"
+    graph = {
+        caller: {
+            "tests": {"name": "tests", "needs": [], "reusable": True,
+                      "uses": "./.github/workflows/leaf.yml"},
+            "optional": {"name": "optional", "needs": [], "reusable": True,
+                         "uses": "./.github/workflows/leaf.yml"},
+        },
+        leaf: {
+            "unit": {"name": "unit", "needs": [], "reusable": False},
+        },
+    }
+    required = "tests / unit"
+    optional = "optional / unit"
+
+    assert cr._required_reachable_checks(
+        [required, optional], {required}, graph, {}) == {required}
+    assert cr._pole_is_required_reachable(required, {required}, graph, {}) is True
+    assert cr._pole_is_required_reachable(optional, {required}, graph, {}) is False
+
+
+def test_nested_remote_caller_blocks_a_leading_placeholder_leaf_claim():
+    root = ".github/workflows/root.yml"
+    child = ".github/workflows/child.yml"
+    graph = {
+        root: {
+            "suite": {"name": "Suite", "needs": [], "reusable": True,
+                      "uses": "./.github/workflows/child.yml"},
+        },
+        child: {
+            "remote": {"name": "Remote", "needs": [], "reusable": True,
+                       "uses": "other/project/.github/workflows/build.yml@main"},
+            "local": {"name": "${{ matrix.os }} / build", "needs": [],
+                      "reusable": False, "matrix": True},
+        },
+    }
+
+    assert cr._check_to_job_node_scanned("Suite / Remote / build", graph) is None
+    assert cr._check_to_workflow_file_static("Suite / Remote / build", graph) is None
+    assert cr._check_to_job_node_scanned("Suite / linux / build", graph) == (child, "local")
+
+
 def test_scan_preserves_local_reusable_edges_for_nested_check_attribution():
     import importlib.util
     spec = importlib.util.spec_from_file_location("attribution_scan", _SCRIPTS / "scan.py")
