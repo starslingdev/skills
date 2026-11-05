@@ -57,7 +57,7 @@ def _job(duration_s: int, run_id: int) -> dict:
     }
 
 
-def test_critical_path_stamps_the_tail_from_dominant_runner_observations():
+def test_critical_path_stamps_the_tail_from_all_sampled_pr_observations():
     runs = [[_job(60, 100000 + i)] for i in range(85)]
     runs += [[_job(1500, 200000 + i)] for i in range(15)]
 
@@ -73,6 +73,25 @@ def test_critical_path_stamps_the_tail_from_dominant_runner_observations():
 def test_critical_path_does_not_stamp_a_smooth_distribution():
     runs = [[_job(60 + i % 31, 300000 + i)] for i in range(100)]
     assert not cr._critical_path(runs)["job_minority_tail"]
+
+
+def test_runner_label_transition_does_not_hide_the_tail():
+    fast = [[dict(_job(60, 400000 + i), labels=["runner-a"])] for i in range(85)]
+    slow = [[dict(_job(1500, 500000 + i), labels=["runner-b"])] for i in range(15)]
+    tail = cr._critical_path(fast + slow)["job_minority_tail"]["affected-unit"]
+    assert tail["tail_share_pct"] == 15.0
+
+
+def test_production_attachment_maps_only_required_closure_checks():
+    crit = cr._critical_path(
+        [[_job(60, 600000 + i)] for i in range(85)]
+        + [[_job(1500, 700000 + i)] for i in range(15)])
+    crit_by_wf = {".github/workflows/pipeline.yml": crit}
+    checks = [("affected-unit", 60.0)]
+
+    attached = cr._minority_tails_for_checks(checks, crit_by_wf, True)
+    assert attached["affected-unit"]["tail_share_pct"] == 15.0
+    assert cr._minority_tails_for_checks(checks, crit_by_wf, False) == {}
 
 
 def _doc(*, scoped: bool = True, tail: dict | None = None) -> dict:
@@ -121,3 +140,40 @@ def test_tail_outside_required_closure_has_no_own_finding():
     doc["required_checks"] = ["merge-gate"]
     report = bp.render(doc, captured_at="2026-11-05T00:00:00Z")
     assert "minority-gate-tail:" not in report
+
+
+def test_tail_marker_neutralizes_check_name_markup():
+    doc = _doc(tail=_tail())
+    check = doc["pr_critical_path"]["checks"][0]
+    check["name"] = "affected --> unit"
+    marker = next(line for line in bp.render(doc).splitlines()
+                  if "minority-gate-tail:" in line)
+    assert marker.count("-->") == 1
+
+
+def test_scope_prefixed_check_marker_renders_and_verifies(tmp_path: Path):
+    doc = _doc(tail=_tail())
+    doc["pr_critical_path"]["checks"][0]["name"] = "@scope/affected-unit"
+    report = bp.render(doc)
+    assert "<!-- minority-gate-tail:affected-unit -->" in report
+    findings = tmp_path / "findings.json"
+    findings.write_text(json.dumps(doc), encoding="utf-8")
+    check = _load_verify_report().check_minority_gate_tails(report, findings)
+    assert check.ok, check
+
+
+def test_verifier_binds_no_saving_disclosure_to_each_tail(tmp_path: Path):
+    doc = _doc(tail=_tail())
+    second = dict(doc["pr_critical_path"]["checks"][0])
+    second["name"] = "affected-integration"
+    second["minority_tail"] = dict(_tail(), example_url=(
+        "https://github.com/o/r/actions/runs/200013"))
+    doc["pr_critical_path"]["checks"].append(second)
+    report = bp.render(doc)
+    marker = "<!-- minority-gate-tail:affected-integration -->"
+    before, after = report.split(marker, 1)
+    after = after.replace("No saving is credited", "Saving is unknown", 1)
+    findings = tmp_path / "findings.json"
+    findings.write_text(json.dumps(doc), encoding="utf-8")
+    check = _load_verify_report().check_minority_gate_tails(before + marker + after, findings)
+    assert not check.ok

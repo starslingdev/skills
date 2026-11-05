@@ -5083,7 +5083,15 @@ def _critical_path(jobs_per_run: list[list[dict[str, Any]]]) -> dict[str, Any]:
         bi = _bimodal_split(by_runner[dominant])
         if bi is not None:
             job_bimodal[name] = bi
-        tail = _minority_gate_tail(by_job_runner_observations[name][dominant])
+        # The claim is a share of sampled PRs on which the check ran, so its
+        # denominator spans runner-label eras. Keep representative ranking
+        # dominant-runner scoped, but do not hide a slow minority merely because
+        # those PRs used another runner label.
+        tail = _minority_gate_tail([
+            observation
+            for runner_observations in by_job_runner_observations[name].values()
+            for observation in runner_observations
+        ])
         if tail is not None:
             job_minority_tail[name] = tail
     # Each job's LONGEST sampled run, across every runner it ran on: the bound on any one
@@ -5120,6 +5128,27 @@ def _critical_path(jobs_per_run: list[list[dict[str, Any]]]) -> dict[str, Any]:
         # The long-pole job's runner — the population that gates the wait.
         "runner_scope": lp_runner if lp_runner and lp_runner != "?" else "all-runners",
     }
+
+
+def _minority_tails_for_checks(
+        pr_checks: list[tuple[str, float]],
+        crit_by_wf: dict[str, dict[str, Any]],
+        required_scoped: bool) -> dict[str, dict[str, Any]]:
+    """Attach sampled tails only to checks in a confirmed required closure."""
+    if not required_scoped:
+        return {}
+    tails: dict[str, dict[str, Any]] = {}
+    for check, _p50 in pr_checks:
+        mapping = _map_check_to_job(
+            check, crit_by_wf, require_developer_timing=True)
+        if mapping is None:
+            continue
+        workflow, job = mapping
+        tail = ((crit_by_wf.get(workflow, {}).get("job_minority_tail") or {})
+                .get(job))
+        if isinstance(tail, dict):
+            tails[check] = tail
+    return tails
 
 
 # =============================================================================
@@ -27385,18 +27414,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # that descriptive evidence only after the required closure actually narrowed
     # the spine: an independent sibling outside every required `needs:` closure
     # must not acquire a merge-wait finding merely because it has a slow tail.
-    _minority_tail_by_check: dict[str, dict[str, Any]] = {}
-    if spine_required_scoped:
-        for _n, _p50 in pr_checks_tuple:
-            _mapping = _map_check_to_job(
-                _n, crit_by_wf, require_developer_timing=True)
-            if _mapping is None:
-                continue
-            _wf, _job = _mapping
-            _tail = ((crit_by_wf.get(_wf, {}).get("job_minority_tail") or {})
-                     .get(_job))
-            if isinstance(_tail, dict):
-                _minority_tail_by_check[_n] = _tail
+    _minority_tail_by_check = _minority_tails_for_checks(
+        pr_checks_tuple, crit_by_wf, spine_required_scoped)
     # ENG-1 PR-N1: per-PR chain TIMING facts (data-only; nothing renders or
     # ranks on them until PR-N2). One entry per sampled repr sha — the longest
     # `needs:` chain (capped member spans, `_span_caps` — the caps the ranking

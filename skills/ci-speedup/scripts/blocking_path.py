@@ -24,6 +24,7 @@ raw log (`--log`), so level-2 and the drill stay on one coherent run. Without a
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import math
@@ -11325,8 +11326,11 @@ def _minority_gate_tail_block(cp: dict[str, Any]) -> list[str]:
         if p90 is None or share is None or not url:
             continue
         name = _clean_label(str(check.get("name") or "check"))
+        marker_id = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-") or "check"
+        if marker_id != name:
+            marker_id += "-" + hashlib.sha256(name.encode("utf-8")).hexdigest()[:8]
         share_text = f"{share:.0f}" if float(share).is_integer() else f"{share:.1f}"
-        rows += [f"<!-- minority-gate-tail:{name} -->",
+        rows += [f"<!-- minority-gate-tail:{marker_id} -->",
                  f"> **⏱️ Slow tail on `{_lbl(name)}`:** on ~{share_text}% of PRs this "
                  f"check takes **{_clock(p90)}**; those PRs wait on it. "
                  f"[Example run]({url}). **No saving is credited** - this describes "

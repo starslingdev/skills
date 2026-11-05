@@ -38,6 +38,7 @@ when the bug genuinely cannot be expressed as a re-derivation property.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import math
@@ -14671,7 +14672,11 @@ def check_minority_gate_tails(report: str, findings_path: Path | None = None) ->
         slow = [(d, url) for d, url in observations if d is not None and d >= p90]
         share = 100.0 * len(slow) / len(durations)
         example = str(tail.get("example_url") or "")
-        marker = f"<!-- minority-gate-tail:{check_name} -->"
+        clean_name = _strip_scope(check_name)
+        marker_id = re.sub(r"[^A-Za-z0-9._-]+", "-", clean_name).strip("-") or "check"
+        if marker_id != clean_name:
+            marker_id += "-" + hashlib.sha256(clean_name.encode("utf-8")).hexdigest()[:8]
+        marker = f"<!-- minority-gate-tail:{marker_id} -->"
         if p90 < 600.0 or p90 < 3.0 * p50:
             failures.append(f"`{check_name}` does not meet the p90 tail threshold")
         if abs((_num(tail.get("p50_s")) or 0.0) - p50) > 0.11:
@@ -14684,9 +14689,14 @@ def check_minority_gate_tails(report: str, findings_path: Path | None = None) ->
             failures.append(f"`{check_name}` tail share drifted from observations")
         if not example or example not in {url for _d, url in slow if url}:
             failures.append(f"`{check_name}` example is not one of its slow-tail runs")
-        if marker not in report or _fmt_clock(p90) not in report or example not in report:
+        start = report.find(marker)
+        next_start = report.find("<!-- minority-gate-tail:", start + len(marker))
+        block = report[start:next_start if next_start >= 0 else len(report)] if start >= 0 else ""
+        share_text = f"{share:.0f}" if float(share).is_integer() else f"{share:.1f}"
+        if (not block or _fmt_clock(p90) not in block or example not in block
+                or f"~{share_text}% of PRs" not in block):
             failures.append(f"`{check_name}` stamped tail is not rendered with its p90 and link")
-        if "No saving is credited" not in report:
+        if "No saving is credited" not in block:
             failures.append(f"`{check_name}` tail lacks the no-saving disclosure")
     return Check(name, not failures,
                  "; ".join(failures[:6]) if failures
