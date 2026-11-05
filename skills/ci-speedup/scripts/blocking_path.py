@@ -9615,6 +9615,53 @@ def _also_noticed_block(findings: list[dict[str, Any]],
     doc = doc or {}
     rare_names = spine_rare_names or set()
 
+    # A dropped check gets exactly one framing: the spine's exclusion note wins over an
+    # OPT24 wall-clock magnitude. The collector's identity-aware `off_spine` stamp is the
+    # primary source, but older/direct artifacts can lack it; the verifier deliberately
+    # backstops those artifacts by comparing the rendered job name with the two dropped-check
+    # sets. Mirror that comparison here before any ranking or copy is chosen, including its
+    # measured matrix-homonym exception, so renderer and verifier cannot disagree about whether
+    # the appendix may call the finding on-path.
+    def _framing_name(value: Any) -> str:
+        out = re.sub(r"[*]", "", _clean_label(str(value)))
+        for dash in ("—", "–", "‒", "―", "−"):
+            out = out.replace(dash, "-")
+        return out.strip().lower()
+
+    cp = doc.get("pr_critical_path") or {}
+    dropped_names = {
+        _framing_name(n)
+        for n in ((cp.get("dropped_non_pr_checks") or [])
+                  + (cp.get("dropped_non_required_checks") or []))
+        if _framing_name(n)
+    }
+    matrix_legs: dict[str, set[str]] = {}
+    matrix_bare: dict[str, set[str]] = {}
+    for wf, row in (doc.get("per_workflow_timing") or {}).items():
+        wf_name = _wf_base(str(wf))
+        for job in ((row or {}).get("job_p50") or {}):
+            name = _framing_name(job)
+            if not name:
+                continue
+            matrix_bare.setdefault(name, set()).add(wf_name)
+            match = re.match(r"^(.+?)\s*\(.*\)$", name)
+            if match:
+                matrix_legs.setdefault(match.group(1).strip(), set()).add(wf_name)
+    matrix_homonyms = {
+        name: workflows - matrix_bare.get(name, set())
+        for name, workflows in matrix_legs.items()
+        if workflows - matrix_bare.get(name, set())
+    }
+    if dropped_names:
+        for finding in findings:
+            wf_name = _wf_base(str(finding.get("workflow_file") or ""))
+            jobs = finding.get("affected_jobs") or (
+                [finding.get("job")] if finding.get("job") else [])
+            if any((name := _framing_name(job)) in dropped_names
+                   and wf_name not in matrix_homonyms.get(name, set())
+                   for job in jobs):
+                finding["off_spine"] = True
+
     def _job_is_spine_rare(job: str) -> bool:
         # A job NAME the footnote demotes as opt-in / rare — exact, or unexpanded matrix
         # base<->rendered leg (mirrors `_stamp_spine_rare`'s NAME-level join, no sibling fold).

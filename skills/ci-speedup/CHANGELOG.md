@@ -1206,6 +1206,8 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-11-05** — Frame a check excluded from the merge-wait spine only as off-path when it also has a long-test sharding finding. The exclusion note now wins over the finding's wall-clock magnitude, so the report no longer describes the same check as both dropped and on the critical path.
+
 - **2026-11-04** — Retry a large run's job listing at 30 jobs per page when GitHub returns 502 at 100, preserving the complete run instead of disclosing it as unavailable. (#192)
 
 - **2026-11-04** — Keep retry savings advisory when saved findings lack valid retry outcomes, and require the dominant job to belong to the current attempt before treating it as a repeated failure. Legacy evidence rows prove sample size only, never retry conclusions; successful jobs carried forward unchanged are excluded from credited retry compute. (#188)
