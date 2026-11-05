@@ -17,6 +17,7 @@ from test_opt81_faster_runner import (  # noqa: E402
     _ONE_LABEL_PLAN,
     _Opt81Client,
 )
+from test_blocking_path import _doc_two_typical_poles_one_rare_gate  # noqa: E402
 
 
 class _FailureRateClient(_Opt81Client):
@@ -69,6 +70,8 @@ def test_six_of_ten_red_default_branch_runs_qualify_the_success_only_headline(
     rows = [_run(i, "failure" if i < 6 else "success") for i in range(10)]
     doc, report = _collect(monkeypatch, rows)
 
+    assert ("Measured over successful runs; 60% (6 of 10) of default-branch runs "
+            f"of `{_CI}` failed in the window.") in report
     stamp = doc["success_only_timing_by_workflow"][_CI]
     assert stamp == {
         "eligible_runs": 10,
@@ -76,8 +79,28 @@ def test_six_of_ten_red_default_branch_runs_qualify_the_success_only_headline(
         "failure_pct": 60,
         "status": "caveat",
     }
+
+
+def test_caveat_follows_the_workflow_supplying_the_headline_wait_not_the_first_fix():
+    doc = _doc_two_typical_poles_one_rare_gate()
+    timing_workflow = ".github/workflows/datasets-test.yml"
+    first_fix_workflow = ".github/workflows/framework-test.yml"
+    doc["success_only_timing_by_workflow"] = {
+        timing_workflow: {
+            "eligible_runs": 10, "failed_runs": 6,
+            "failure_pct": 60, "status": "caveat",
+        },
+        first_fix_workflow: {
+            "eligible_runs": 10, "failed_runs": 3,
+            "failure_pct": 30, "status": "caveat",
+        },
+    }
+
+    report = bp.render(doc)
+
     assert ("Measured over successful runs; 60% (6 of 10) of default-branch runs "
-            f"of `{_CI}` failed in the window.") in report
+            f"of `{timing_workflow}` failed in the window.") in report
+    assert f"of `{first_fix_workflow}` failed in the window" not in report
 
 
 def test_one_of_ten_failures_stays_below_the_named_threshold(monkeypatch):

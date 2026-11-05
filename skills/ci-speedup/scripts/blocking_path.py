@@ -12055,9 +12055,9 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         # cached all-status default-branch population was materially red.
         _success_only_caveat_lines(
             doc,
-            (_cluster_f
-             if _cluster_f is not None and _cluster_s > _existing_win + 0.5
-             else (top_fixable or (pole_wfs[0] if pole_wfs else poles[0])))),
+            next((p for p in poles
+                  if str(p.get("check", "")) == floor_name
+                  and p.get("workflow_file")), None)),
         # Config-era caveat: qualifies the headline number (folded, not a separate quote).
         _config_era_disclosure_lines(cp, captured_at),
         # Fileless/managed status-check disclosure (PR-lifetime status-gating latency).
