@@ -9937,6 +9937,11 @@ def _detect_opt48_failure_rate(
 # runner-minutes tier (spec §7).
 
 _COST_RUNLIST_MAX = 100  # one page of all-status runs for branch/dup grouping
+# The headline timing sample deliberately contains successful runs only. When the
+# same cached all-status page shows a materially red default branch, say so beside
+# the headline instead of letting a successful-run median read like the whole window.
+_SUCCESS_ONLY_CAVEAT_MIN_RUNS = 10
+_SUCCESS_ONLY_CAVEAT_FAILURE_RATE = 0.20
 _MIN_TIMED_RUNS = 3  # a per-run compute mean needs ≥3 timed runs to be stable
 # Deliberately BROAD: this is the safety carve-out for run-cancellation fixes,
 # so a false positive (skip a real finding) is acceptable but a false negative
@@ -26615,6 +26620,52 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # the FULL required suite. None when unreadable (no admin / no protection).
     repo_info = client.json(f"repos/{repo}")
     default_branch = (repo_info or {}).get("default_branch")
+    # The timing sample above is success-only. Reuse its already-fetched all-status
+    # page to stamp whether that successful-run median needs a failure-rate caveat;
+    # this is data already in hand, never another API call. Scope to completed runs on
+    # the repository's default branch and to the non-PR events that exercise that
+    # branch. Cancelled/skipped runs are neither successes nor failures here and stay
+    # out of both sides of the denominator.
+    _success_only_timing: dict[str, dict[str, Any]] = {}
+    for _wf_path, _all_runs in all_status_runs_by_wf.items():
+        _eligible_runs = [
+            _run for _run in _all_runs
+            if default_branch
+            and _run.get("status") == "completed"
+            and _run.get("head_branch") == default_branch
+            and _run.get("event") in {"push", "schedule", "workflow_dispatch"}
+            and _run.get("conclusion") not in {"cancelled", "skipped"}
+        ]
+        _failed_runs = [
+            _run for _run in _eligible_runs
+            if _run.get("conclusion") in {"failure", "timed_out"}
+        ]
+        _eligible_n = len(_eligible_runs)
+        _failed_n = len(_failed_runs)
+        _failure_rate = (_failed_n / _eligible_n) if _eligible_n else 0.0
+        _stamp: dict[str, Any] = {
+            "eligible_runs": _eligible_n,
+            "failed_runs": _failed_n,
+            "failure_pct": round(100 * _failure_rate),
+        }
+        if not default_branch:
+            _stamp.update({
+                "status": "default_branch_unknown",
+                "reason": ("default branch unknown: the repository read did not "
+                           "return it, so no default-branch runs could be counted"),
+            })
+        elif _eligible_n < _SUCCESS_ONLY_CAVEAT_MIN_RUNS:
+            _stamp.update({
+                "status": "too_few_runs",
+                "reason": (f"too few runs: {_eligible_n} eligible default-branch runs; "
+                           f"need at least {_SUCCESS_ONLY_CAVEAT_MIN_RUNS}"),
+            })
+        elif _failure_rate >= _SUCCESS_ONLY_CAVEAT_FAILURE_RATE:
+            _stamp["status"] = "caveat"
+        else:
+            _stamp["status"] = "below_threshold"
+        _success_only_timing[_wf_path] = _stamp
+    findings_doc["success_only_timing_by_workflow"] = _success_only_timing
     # `--root` is on for EVERY run now, so every workflow's YAML comes off the working
     # tree. `_root_is_clone_of` proved it is the right REPO; this asks the other half —
     # is it the right COMMIT LINE? A clean feature branch or a stale `main` is not dirty,
