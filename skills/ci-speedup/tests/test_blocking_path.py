@@ -6041,6 +6041,54 @@ def test_required_scoped_minority_pole_reads_as_required_path_conditional():
     assert "opt-in / conditional (e.g. label-gated)" not in md
 
 
+def test_confirmed_required_need_headlines_before_faster_unpinnable_keep():
+    """A conservative cat-3 keep stays visible without outranking a proven gate."""
+    doc = _doc_one_pole()
+    doc["required_checks"] = ["merge-gate"]
+    cp = doc["pr_critical_path"]
+    cp.update({
+        "spine_required_scoped": True,
+        "critical_path_check": "mystery matrix",
+        "critical_path_s": 500.0,
+        "checks": [
+            {"name": "mystery matrix", "p50_s": 500.0, "present_on": 20},
+            {"name": "unit", "p50_s": 300.0, "present_on": 20},
+        ],
+        "populations": [
+            [1.0, [["mystery matrix", 500.0], ["unit", 300.0]]]
+            for _ in range(20)
+        ],
+        "poles": [
+            {"check": "mystery matrix", "p50_s": 500.0,
+             "workflow_file": ".github/workflows/mystery.yml", "job": "mystery matrix",
+             "required_reachable": False},
+            {"check": "unit", "p50_s": 300.0,
+             "workflow_file": ".github/workflows/ci.yml", "job": "unit",
+             "required_reachable": True},
+        ],
+    })
+
+    selected, _ = bp._select_render_poles(doc, cp["poles"])
+    assert [p["check"] for p in selected] == ["unit", "mystery matrix"]
+
+    report = bp.render(doc, {}, {}, {}, "2026-11-05")
+    assert "Long pole 1: `ci.yml` ▸ `unit`" in report
+    assert "Could not confirm this check blocks merging" in report
+    headline = next(line for line in report.splitlines() if "until all checks finish" in line)
+    assert "`unit` is the slowest check a typical PR waits on" in headline
+    assert "mystery matrix" not in headline
+
+    # An unreadable required set has no reachability stamps and keeps the old order.
+    unreadable = _doc_one_pole()
+    unreadable_cp = unreadable["pr_critical_path"]
+    unreadable_cp["poles"] = [
+        {k: v for k, v in p.items() if k != "required_reachable"}
+        for p in cp["poles"]
+    ]
+    unchanged, _ = bp._select_render_poles(unreadable, unreadable_cp["poles"])
+    assert [p["check"] for p in unchanged] == ["mystery matrix", "unit"]
+
+
 def test_sampling_scoped_but_spine_unscoped_keeps_opt_in_framing():
     # Correctness guard for the flag fix: `required_suite_scoped` (the SAMPLING flag) can be
     # True on a partial / anchorless required read where `_scope_spine_to_required` stayed
