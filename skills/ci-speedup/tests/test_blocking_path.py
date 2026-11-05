@@ -857,6 +857,26 @@ def test_dropped_check_gets_one_off_path_framing_and_passes_verify(tmp_path: Pat
     assert "sits ON the merge-gating critical path" not in appendix
 
 
+def test_dropped_job_does_not_demote_a_finding_that_also_covers_a_kept_job():
+    doc = _doc_one_pole()
+    doc["pr_critical_path"]["dropped_non_required_checks"] = ["integration"]
+    doc["findings"] = [{
+        "id": "f1", "pattern": "OPT24", "severity": "HIGH",
+        "title": "Long Test Job Without Sharding",
+        "workflow_file": ".github/workflows/pipeline.yml", "line": 8,
+        "affected_jobs": ["integration", "tests-web"],
+        "runner_min_saving": 0, "wall_clock_p50_s": 400.0,
+    }]
+
+    out = bp.render(doc)
+    assert not doc["findings"][0].get("off_spine")
+    appendix = out.split("## 🧹 Also noticed - residual hygiene", 1)[1]
+    assert "sits ON the merge-gating critical path" in appendix
+    where = next(line for line in appendix.splitlines() if line.startswith("**Where:**"))
+    assert "tests-web" in where
+    assert "integration" not in where
+
+
 def test_render_excludes_pole_job_from_also_noticed_appendix():
     # Class A #5: a catalog finding on a job that is ALSO drilled as a long pole must NOT appear in
     # the "Also noticed" off-path appendix (the pole already headlines it as the biggest lever).

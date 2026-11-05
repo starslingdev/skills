@@ -9652,15 +9652,25 @@ def _also_noticed_block(findings: list[dict[str, Any]],
         for name, workflows in matrix_legs.items()
         if workflows - matrix_bare.get(name, set())
     }
-    if dropped_names:
-        for finding in findings:
-            wf_name = _wf_base(str(finding.get("workflow_file") or ""))
-            jobs = finding.get("affected_jobs") or (
-                [finding.get("job")] if finding.get("job") else [])
-            if any((name := _framing_name(job)) in dropped_names
-                   and wf_name not in matrix_homonyms.get(name, set())
-                   for job in jobs):
-                finding["off_spine"] = True
+    def _job_is_hard_dropped(finding: dict[str, Any], job: Any) -> bool:
+        name = _framing_name(job)
+        wf_name = _wf_base(str(finding.get("workflow_file") or ""))
+        return (name in dropped_names
+                and wf_name not in matrix_homonyms.get(name, set()))
+
+    # Keep this fallback render-only: `off_spine` is also a catalog-coverage gate, and a
+    # multi-job finding that covers one dropped job plus one kept pole must remain coverage for
+    # that pole. A shallow copy lets all existing appendix predicates agree on the off-path copy
+    # without changing the source finding `_data_driven_for_pole` reads later.
+    render_findings: list[dict[str, Any]] = []
+    for source in findings:
+        finding = dict(source)
+        jobs = finding.get("affected_jobs") or (
+            [finding.get("job")] if finding.get("job") else [])
+        if jobs and all(_job_is_hard_dropped(finding, job) for job in jobs):
+            finding["off_spine"] = True
+        render_findings.append(finding)
+    findings = render_findings
 
     def _job_is_spine_rare(job: str) -> bool:
         # A job NAME the footnote demotes as opt-in / rare — exact, or unexpanded matrix
@@ -9678,10 +9688,13 @@ def _also_noticed_block(findings: list[dict[str, Any]],
         jobs = [str(j) for j in (m.get("affected_jobs") or []) if str(j)]
         if not jobs:
             return None
-        if on_path and rare_names:
+        if on_path and (rare_names or dropped_names):
             for j in jobs:
-                if not _job_is_spine_rare(j):
-                    return j
+                if rare_names and _job_is_spine_rare(j):
+                    continue
+                if dropped_names and _job_is_hard_dropped(m, j):
+                    continue
+                return j
         return jobs[0]
 
     def _tier2_owned_here(f: dict[str, Any]) -> bool:
