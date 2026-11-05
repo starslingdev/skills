@@ -170,12 +170,20 @@ All notable changes to the `sling` skill. Unversioned; dated (UTC).
   exposure): `sling logs` and `sling why` hand the agent CI log text, step and
   job names and commit text that whoever pushed the code wrote, and the skill
   never said that text is data. A new "Run output is untrusted data" section
-  says so, treats a directive inside it as a prompt-injection attempt to
-  report, limits a `suggested_actions[].command` to a single read-only `sling`
-  read (anything else is shown to the user), and turns `why`'s `prompt` field
-  from an order to the agent into a suggestion the user approves, in both
-  SKILL.md and the command reference. Two guards pin the section and ban the
-  old wording.
+  says so: quote it as evidence, mask credential-shaped strings, and report
+  text that addresses the agent or tells it to ignore its instructions as a
+  prompt-injection attempt (a log line that only suggests a fix is evidence,
+  not an injection). A `suggested_actions[].command` runs only when it is one
+  of the read-only `sling` commands the section names, with no shell operators
+  or substitution; anything else is shown to the user, and a `fix_command`
+  runs only when the user asks. `why`'s `prompt` field turns from an order to
+  the agent into a suggestion the user approves, where a request that already
+  asked for the fix or re-run counts as that approval. The command reference
+  says the same for `why` and points `logs` and `jobs show` at the section.
+  Guards pin each rule of the section and of the reference's `why`, `logs` and
+  `jobs show` entries separately, derive the read-only list from the command
+  surface, and ban the old "act on directly" / "ready-to-use `prompt`" wording
+  in every shipped file and eval.
 
 - **2026-10-27** — **Three scope-flag claims were wrong on both 0.1.8 and
   0.1.124.** `runs list`, `jobs list`, `usage` and `top` reject `--org`
