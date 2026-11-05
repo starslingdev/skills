@@ -638,7 +638,8 @@ def _pole_cooccurrence(cp: dict[str, Any], pole_name: str) -> tuple[dict[str, in
     return cooccur, n_gating
 
 
-def _pole_per_pr_floor(cp: dict[str, Any], pole_name: str) -> dict[str, Any] | None:
+def _pole_per_pr_floor(cp: dict[str, Any], pole_name: str,
+                       own_names: set[str] | None = None) -> dict[str, Any] | None:
     """Exact sibling-floor evidence for ``pole_name`` from sampled PR populations.
 
     Each known row carries the observed pole duration, longest sibling, and the
@@ -647,7 +648,7 @@ def _pole_per_pr_floor(cp: dict[str, Any], pole_name: str) -> dict[str, Any] | N
     duration is addressable.  ``None`` preserves legacy behavior when no usable
     populations contain the pole.
     """
-    target = _floor_key(pole_name)
+    targets = {_floor_key(name) for name in (own_names or {pole_name})}
     rows: list[dict[str, Any]] = []
     unknown_n = 0
     total_n = 0
@@ -658,12 +659,24 @@ def _pole_per_pr_floor(cp: dict[str, Any], pole_name: str) -> dict[str, Any] | N
                         if float(duration) > 0]
         except (TypeError, ValueError):
             continue
-        own = [duration for name, duration in positive if _floor_key(name) == target]
+        own = [duration for name, duration in positive if _floor_key(name) in targets]
         if not own:
+            # The change has no work on this sampled PR, so its saving is known
+            # zero. Keep it in the denominator rather than silently shrinking
+            # the sample to PRs where the pole happened to run.
+            if positive:
+                sibling, floor_s = max(positive, key=lambda item: item[1])
+                total_n += 1
+                rows.append({
+                    "saving_s": 0.0,
+                    "sibling": sibling,
+                    "floor_s": floor_s,
+                    "before_s": 0.0,
+                })
             continue
         total_n += 1
         siblings = [(name, duration) for name, duration in positive
-                    if _floor_key(name) != target]
+                    if _floor_key(name) not in targets]
         if not siblings:
             unknown_n += 1
             continue
@@ -796,7 +809,8 @@ def _floor_note(pole: dict[str, Any],
     binding = _binding_floor(others, cooccur, gating_n)
     binding_s = _eff_floor_s(binding) if binding else 0.0
 
-    def _per_pr_split_note(max_saving: float) -> str:
+    def _per_pr_split_note(max_saving: float,
+                           evidence: dict[str, Any] | None = None) -> str:
         """Describe the measured PR populations behind this pole's ceiling.
 
         ``_cooccur``/``_gating_n`` come from the per-PR populations: gating_n
@@ -804,7 +818,7 @@ def _floor_note(pole: dict[str, Any],
         observations exist on those PRs.  Candidate ``present_on`` counts give
         the full observed population.  A missing observation remains unknown.
         """
-        exact = pole.get("_per_pr_floor")
+        exact = evidence if isinstance(evidence, dict) else pole.get("_per_pr_floor")
         if isinstance(exact, dict):
             rows = [row for row in (exact.get("rows") or []) if isinstance(row, dict)]
             total = int(exact.get("total_n") or 0)
@@ -865,6 +879,35 @@ def _floor_note(pole: dict[str, Any],
         if unknown_n:
             clauses.append(f"unknown on {unknown_n} of {total} PRs with a missing sibling observation")
         return " Per-PR split: " + "; ".join(clauses) + "." if clauses else ""
+    pole_wf = str(pole.get("workflow_file") or "")
+    legs = [c for c in candidates
+            if _same_matrix(pole_name, _check_name(c), pole_wf,
+                            str(c.get("workflow_file") or ""))]
+    non_legs = [c for c in others
+                if not _same_matrix(pole_name, _check_name(c), pole_wf,
+                                    str(c.get("workflow_file") or ""))]
+    floor_m = _floor_candidate(non_legs, cooccur, gating_n)
+    # A shared matrix change lowers every leg together. It remains addressable
+    # even when an equal sibling means this one leg alone saves zero; calculate
+    # its split from the whole matrix family rather than this leg's winner count.
+    if len(legs) >= 2 and floor_m is not None:
+        addr_leg = max(pole_p - binding_s, 0.0)
+        addr_m = max(pole_p - _binding_floor_s(non_legs, cooccur, gating_n), 0.0)
+        matrix_exact = pole.get("_per_pr_matrix_floor")
+        if isinstance(matrix_exact, dict):
+            addr_m = min(addr_m, max(_num(matrix_exact.get("max_saving_s")) or 0.0, 0.0))
+        if addr_m <= 0:
+            return []
+        return [
+            f"> **What a change here can buy (wall-clock):** this job's matrix legs run "
+            f"in parallel, so speeding **this one leg** saves only ~{_clock(addr_leg)} "
+            f"(the next leg, `{_clean_label(_check_name(floor_next))}`, is "
+            f"{_clock(_eff_floor_s(floor_next))}). Because the legs share one job config, a "
+            f"change that speeds *every* leg at once drops the whole matrix toward the next "
+            f"check, `{_clean_label(_check_name(floor_m))}` ({_clock(_eff_floor_s(floor_m))}), "
+            f"for up to **~{_clock(addr_m)}** of merge wait."
+            + _recoverable_reconciliation(addr_m, _tw)
+            + _per_pr_split_note(addr_m, matrix_exact), ""]
     # Non-gate guard + addressable cap. A pole that runs BEHIND a UNIVERSAL concurrent blocker —
     # INCLUDING an untunable managed/external check that `_floor_candidate` won't NAME — buys ~0
     # merge wait until that blocker is cut, which the pole's role line already states. Skip the
@@ -945,25 +988,6 @@ def _floor_note(pole: dict[str, Any],
             f"concurrent check with no workflow file to speed up here, `{cap_name}` "
             f"({_clock(binding_s)}), caps it there; below that the gate is that check, not this "
             "job." + _recoverable_reconciliation(addr_leg, _tw) + split_note, ""]
-    pole_wf = str(pole.get("workflow_file") or "")
-    legs = [c for c in candidates
-            if _same_matrix(pole_name, _check_name(c), pole_wf, str(c.get("workflow_file") or ""))]
-    non_legs = [c for c in others
-                if not _same_matrix(pole_name, _check_name(c), pole_wf,
-                                    str(c.get("workflow_file") or ""))]
-    floor_m = _floor_candidate(non_legs, cooccur, gating_n)
-    if len(legs) >= 2 and floor_m is not None:
-        addr_m = max(pole_p - _binding_floor_s(non_legs, cooccur, gating_n), 0.0)   # cap by managed/universal non-legs too
-        return [
-            f"> **What a change here can buy (wall-clock):** this job's matrix legs run "
-            f"in parallel, so speeding **this one leg** saves only ~{_clock(addr_leg)} "
-            f"(the next leg, `{_clean_label(_check_name(floor_next))}`, is "
-            f"{_clock(_eff_floor_s(floor_next))}). Because the legs share one job config, a "
-            f"change that speeds *every* leg at once drops the whole matrix toward the next "
-            f"check, `{_clean_label(_check_name(floor_m))}` ({_clock(_eff_floor_s(floor_m))}), "
-            f"for up to **~{_clock(addr_m)}** of merge wait."
-            + _recoverable_reconciliation(addr_m, _tw)
-            + _per_pr_split_note(addr_m), ""]
     return [
         f"> **What a change here can buy (wall-clock):** up to **~{_clock(addr_leg)}** — "
         f"it gates until it drops to the next concurrent check, "
@@ -11685,6 +11709,16 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         cooccur, gating_n = _pole_cooccurrence(cp, str(p.get("check", "")))
         p["_cooccur"], p["_gating_n"] = cooccur, gating_n
         p["_per_pr_floor"] = _pole_per_pr_floor(cp, str(p.get("check", "")))
+        _pn = str(p.get("check", ""))
+        _pwf = str(p.get("workflow_file") or "")
+        _matrix_names = {
+            str(c.get("name") or c.get("check") or "")
+            for c in (cp.get("checks") or [])
+            if _same_matrix(_pn, str(c.get("name") or c.get("check") or ""),
+                            _pwf, str(c.get("workflow_file") or ""))
+        }
+        p["_per_pr_matrix_floor"] = (
+            _pole_per_pr_floor(cp, _pn, _matrix_names) if len(_matrix_names) >= 2 else None)
         # Stash the pole's OWN gate/presence counts, so the agent-prompt gate line can state a
         # DEMOTED pole's real (low) gate frequency instead of borrowing the workflow's typical-gate
         # count (the caddy goreleaser-check contradiction). The demotion FLAG itself is stamped

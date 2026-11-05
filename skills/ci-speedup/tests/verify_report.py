@@ -3604,6 +3604,20 @@ def _verify_per_pr_floor_split(name: str, report: str, cp: dict) -> Check | None
     if not stamp:
         return Check(name, False, "rendered per-PR split has no critical_path_check stamp")
     target = _cmp_name(stamp)
+    targets = {target}
+    if "change that speeds *every* leg at once" in report:
+        stamp_wf = ""
+        for check in _as_list(cp.get("checks")):
+            if isinstance(check, dict) and _cmp_name(str(check.get("name") or "")) == target:
+                stamp_wf = str(check.get("workflow_file") or "")
+                break
+        base = re.sub(r"\s*\([^)]*\)\s*$", "", target)
+        for check in _as_list(cp.get("checks")):
+            if not isinstance(check, dict) or str(check.get("workflow_file") or "") != stamp_wf:
+                continue
+            candidate = _cmp_name(str(check.get("name") or ""))
+            if re.sub(r"\s*\([^)]*\)\s*$", "", candidate) == base:
+                targets.add(candidate)
     rows: list[tuple[float, str]] = []
     unknown_n = 0
     total_n = 0
@@ -3614,12 +3628,16 @@ def _verify_per_pr_floor_split(name: str, report: str, cp: dict) -> Check | None
                         if float(duration) > 0]
         except (TypeError, ValueError):
             continue
-        own = [duration for check, duration in positive if _cmp_name(check) == target]
+        own = [duration for check, duration in positive if _cmp_name(check) in targets]
         if not own:
+            if positive:
+                sibling, floor_s = max(positive, key=lambda item: item[1])
+                total_n += 1
+                rows.append((0.0, sibling))
             continue
         total_n += 1
         siblings = [(check, duration) for check, duration in positive
-                    if _cmp_name(check) != target]
+                    if _cmp_name(check) not in targets]
         if not siblings:
             unknown_n += 1
             continue

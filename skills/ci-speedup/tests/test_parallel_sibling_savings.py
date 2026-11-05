@@ -201,3 +201,67 @@ def test_verifiers_actually_validate_the_varying_per_pr_split(tmp_path):
         {"ok": check.ok, "skipped": check.skipped, "detail": check.detail}
         for check in checks
     ]
+
+
+def test_split_denominator_includes_sampled_prs_where_the_pole_did_not_run():
+    populations = (
+        *((0.1, (("pole", 600.0), ("next-check", 240.0))) for _ in range(4)),
+        *((0.1, (("pole", 600.0), ("blocker", 690.0))) for _ in range(2)),
+        *((0.1, (("other-path", 300.0),)) for _ in range(4)),
+    )
+    result = bound_measured_critical_path(500.0, WallClockContext(
+        pr_checks=populations[0][1],
+        pr_check_populations=populations,
+        own_check_names=frozenset({"pole"}),
+    ))
+    doc = _doc(result.reason or "", populations)
+    cp = doc["pr_critical_path"]
+    cp["sampled_pr_count"] = cp["sample_target"] = cp["check_present_n_pr"] = 10
+    cp["checks"] = [
+        {"name": "pole", "p50_s": 600.0, "present_on": 6,
+         "pole_n": 4, "workflow_file": ".github/workflows/ci.yml"},
+        {"name": "blocker", "p50_s": 690.0, "present_on": 2,
+         "pole_n": 2, "workflow_file": ".github/workflows/blocker.yml"},
+        {"name": "next-check", "p50_s": 240.0, "present_on": 4,
+         "pole_n": 0, "workflow_file": ".github/workflows/next.yml"},
+        {"name": "other-path", "p50_s": 300.0, "present_on": 4,
+         "pole_n": 4, "workflow_file": ".github/workflows/other.yml"},
+    ]
+    report = bp.render(doc)
+    split = next(line for line in report.splitlines() if "Per-PR split:" in line)
+    assert "0 on 6 of 10 PRs" in split
+    assert "up to 6m 00s on the other 4 of 10 PRs" in split
+
+
+def test_matrix_shared_fix_counts_prs_where_a_different_leg_wins():
+    populations = (
+        *((0.1, (("unit (a)", 600.0), ("unit (b)", 590.0), ("lint", 240.0)))
+          for _ in range(5)),
+        *((0.1, (("unit (a)", 590.0), ("unit (b)", 600.0), ("lint", 240.0)))
+          for _ in range(5)),
+    )
+    doc = _doc("matrix shared fix", populations)
+    cp = doc["pr_critical_path"]
+    cp["sampled_pr_count"] = cp["sample_target"] = cp["check_present_n_pr"] = 10
+    cp["critical_path_check"] = "unit (a)"
+    cp["critical_path_s"] = 600.0
+    cp["checks"] = [
+        {"name": "unit (a)", "p50_s": 600.0, "present_on": 10,
+         "pole_n": 5, "workflow_file": ".github/workflows/ci.yml"},
+        {"name": "unit (b)", "p50_s": 600.0, "present_on": 10,
+         "pole_n": 5, "workflow_file": ".github/workflows/ci.yml"},
+        {"name": "lint", "p50_s": 240.0, "present_on": 10,
+         "pole_n": 0, "workflow_file": ".github/workflows/lint.yml"},
+    ]
+    cp["poles"] = [{
+        "check": "unit (a)", "p50_s": 600.0,
+        "workflow_file": ".github/workflows/ci.yml", "job": "unit",
+        "dominant_step": "test", "dominant_p50_s": 500.0,
+        "steps": [{"step": "test", "category": "test", "p50_s": 500.0}],
+    }]
+    doc["findings"] = []
+    report = bp.render(doc)
+    matrix_note = next(line for line in report.splitlines()
+                       if "change that speeds *every* leg at once" in line)
+    assert "up to 6m 00s on 10 of 10 PRs" in matrix_note
+    assert "0 on 5 of 10 PRs" not in matrix_note

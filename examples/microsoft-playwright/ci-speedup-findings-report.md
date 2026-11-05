@@ -96,7 +96,7 @@ Each ◀ marks the blocker the next level opens. Long pole 1 below drills the ma
 
 **The check most PRs gate on.** A typical PR waits on this most often; the slowest concurrent check is `Windows (firefox)` (~72m 57s).
 
-> **What a change here can buy (wall-clock):** this job's matrix legs run in parallel, so speeding **this one leg** saves only ~1m 06s (the next leg, `windows-latest - firefox`, is 40m 15s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `windows-latest - firefox` (40m 15s), for up to **~1m 06s** of merge wait. Per-PR split: 0 on 9 of 16 PRs where another check runs longer; up to 39s on 1 of 16 PRs; up to 48s on 1 of 16 PRs; up to 1m 06s on 5 of 16 PRs.
+> **What a change here can buy (wall-clock):** this job's matrix legs run in parallel, so speeding **this one leg** saves only ~1m 06s (the next leg, `windows-latest - firefox`, is 40m 15s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `windows-latest - firefox` (40m 15s), for up to **~1m 06s** of merge wait. Per-PR split: 0 on 13 of 20 PRs where another check runs longer; up to 39s on 1 of 20 PRs; up to 48s on 1 of 20 PRs; up to 1m 06s on 5 of 20 PRs.
 
 ```text
 Where the job's ~41m 21s goes - every step, slowest first; they run in sequence and roughly add up to the job:
@@ -139,7 +139,7 @@ STRUCTURAL CATALOG PATTERN MATCHED
 - A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log in a recent pull-request run of this job (no direct log link is shown here) to see exactly what inside it the lever reshapes.
 
 WHAT'S ADDRESSABLE (wall-clock ceiling - don't over-promise)
-- this job's matrix legs run in parallel, so speeding this one leg saves only ~1m 06s (the next leg, `windows-latest - firefox`, is 40m 15s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `windows-latest - firefox` (40m 15s), for up to ~1m 06s of merge wait. Per-PR split: 0 on 9 of 16 PRs where another check runs longer; up to 39s on 1 of 16 PRs; up to 48s on 1 of 16 PRs; up to 1m 06s on 5 of 16 PRs.
+- this job's matrix legs run in parallel, so speeding this one leg saves only ~1m 06s (the next leg, `windows-latest - firefox`, is 40m 15s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `windows-latest - firefox` (40m 15s), for up to ~1m 06s of merge wait. Per-PR split: 0 on 13 of 20 PRs where another check runs longer; up to 39s on 1 of 20 PRs; up to 48s on 1 of 20 PRs; up to 1m 06s on 5 of 20 PRs.
 
 WHERE TO LOOK
 - The `tests_primary.yml` workflow definition for the dominant step, and the tool/config it invokes (build tool, test runner, or install) - that's where its time is spent.
@@ -175,7 +175,7 @@ DELIVER & VERIFY
 
 _Runs concurrently - becomes the gate once the slower checks above it drop below 72m 57s._
 
-> **What a change here can buy (wall-clock):** this job's matrix legs run in parallel, so speeding **this one leg** saves only ~13m 24s (the next leg, `Test chrome on macos-latest`, is 59m 33s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `Test chrome on macos-latest` (59m 33s), for up to **~13m 24s** of merge wait. Per-PR split: up to 13m 24s on 2 of 4 PRs; up to 15m 47s on 1 of 4 PRs; up to 20m 34s on 1 of 4 PRs.
+> **What a change here can buy (wall-clock):** this job's matrix legs run in parallel, so speeding **this one leg** saves only ~13m 24s (the next leg, `Test chrome on macos-latest`, is 59m 33s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `Test chrome on macos-latest` (59m 33s), for up to **~13m 24s** of merge wait. Per-PR split: 0 on 16 of 20 PRs where another check runs longer; up to 13m 24s on 2 of 20 PRs; up to 15m 47s on 1 of 20 PRs; up to 20m 34s on 1 of 20 PRs.
 
 ```text
 Where the job's ~72m 57s goes - every step, slowest first; they run in sequence and roughly add up to the job:
@@ -216,7 +216,7 @@ STRUCTURAL CATALOG PATTERN MATCHED
 - A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log in a recent pull-request run of this job (no direct log link is shown here) to see exactly what inside it the lever reshapes.
 
 WHAT'S ADDRESSABLE (wall-clock ceiling - don't over-promise)
-- this job's matrix legs run in parallel, so speeding this one leg saves only ~13m 24s (the next leg, `Test chrome on macos-latest`, is 59m 33s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `Test chrome on macos-latest` (59m 33s), for up to ~13m 24s of merge wait. Per-PR split: up to 13m 24s on 2 of 4 PRs; up to 15m 47s on 1 of 4 PRs; up to 20m 34s on 1 of 4 PRs.
+- this job's matrix legs run in parallel, so speeding this one leg saves only ~13m 24s (the next leg, `Test chrome on macos-latest`, is 59m 33s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `Test chrome on macos-latest` (59m 33s), for up to ~13m 24s of merge wait. Per-PR split: 0 on 16 of 20 PRs where another check runs longer; up to 13m 24s on 2 of 20 PRs; up to 15m 47s on 1 of 20 PRs; up to 20m 34s on 1 of 20 PRs.
 
 WHERE TO LOOK
 - The `tests_secondary.yml` workflow definition for the dominant step, and the tool/config it invokes (build tool, test runner, or install) - that's where its time is spent.
@@ -252,7 +252,7 @@ DELIVER & VERIFY
 
 _Runs concurrently behind `Windows (firefox)` (72m 57s); it becomes the gate only once every slower concurrent check drops below 40m 15s._
 
-> **What a change here can buy (wall-clock):** this job's matrix legs run in parallel, so speeding **this one leg** saves only ~8m 24s (the next leg, `macos-latest - firefox`, is 31m 51s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `macos-latest - chromium` (20m 14s), for up to **~20m 00s** of merge wait. Per-PR split: 0 on 14 of 20 PRs where another check runs longer; up to 20s on 1 of 20 PRs; up to 1m 28s on 1 of 20 PRs; up to 3m 10s on 1 of 20 PRs; up to 8m 24s on 1 of 20 PRs; up to 12m 02s on 1 of 20 PRs; up to 13m 12s on 1 of 20 PRs.
+> **What a change here can buy (wall-clock):** this job's matrix legs run in parallel, so speeding **this one leg** saves only ~8m 24s (the next leg, `macos-latest - firefox`, is 31m 51s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `macos-latest - chromium` (20m 14s), for up to **~20m 00s** of merge wait. Per-PR split: 0 on 14 of 20 PRs where another check runs longer; up to 20s on 1 of 20 PRs; up to 1m 28s on 1 of 20 PRs; up to 3m 10s on 1 of 20 PRs; up to 20m 04s on 1 of 20 PRs; up to 20m 08s on 1 of 20 PRs; up to 20m 18s on 1 of 20 PRs.
 
 ```text
 Where the job's ~40m 15s goes - every step, slowest first; they run in sequence and roughly add up to the job:
@@ -293,7 +293,7 @@ STRUCTURAL CATALOG PATTERN MATCHED
 - A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log in a recent pull-request run of this job (no direct log link is shown here) to see exactly what inside it the lever reshapes.
 
 WHAT'S ADDRESSABLE (wall-clock ceiling - don't over-promise)
-- this job's matrix legs run in parallel, so speeding this one leg saves only ~8m 24s (the next leg, `macos-latest - firefox`, is 31m 51s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `macos-latest - chromium` (20m 14s), for up to ~20m 00s of merge wait. Per-PR split: 0 on 14 of 20 PRs where another check runs longer; up to 20s on 1 of 20 PRs; up to 1m 28s on 1 of 20 PRs; up to 3m 10s on 1 of 20 PRs; up to 8m 24s on 1 of 20 PRs; up to 12m 02s on 1 of 20 PRs; up to 13m 12s on 1 of 20 PRs.
+- this job's matrix legs run in parallel, so speeding this one leg saves only ~8m 24s (the next leg, `macos-latest - firefox`, is 31m 51s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `macos-latest - chromium` (20m 14s), for up to ~20m 00s of merge wait. Per-PR split: 0 on 14 of 20 PRs where another check runs longer; up to 20s on 1 of 20 PRs; up to 1m 28s on 1 of 20 PRs; up to 3m 10s on 1 of 20 PRs; up to 20m 04s on 1 of 20 PRs; up to 20m 08s on 1 of 20 PRs; up to 20m 18s on 1 of 20 PRs.
 
 WHERE TO LOOK
 - The `tests_mcp.yml` workflow definition for the dominant step, and the tool/config it invokes (build tool, test runner, or install) - that's where its time is spent.
@@ -329,7 +329,7 @@ DELIVER & VERIFY
 
 **Rarely the merge gate - the actual slowest check a PR waits on, on only 1/20 sampled PRs.** Present on 5/20 PRs, but a slower concurrent check almost always gates ahead of it, so its 59m 33s is throughput/cost, not merge-wait. Speeding it helps only the PRs where it IS the pole - it won't move typical merge-wait.
 
-> **What a change here can buy (wall-clock):** this job's matrix legs run in parallel, so speeding **this one leg** saves only ~13m 32s (the next leg, `Test msedge on windows-latest`, is 46m 01s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `Test msedge on windows-latest` (46m 01s), for up to **~13m 32s** of merge wait. Per-PR split: 0 on 4 of 5 PRs where `Windows (firefox)` runs; up to 13m 32s on the other 1 of 5 PRs.
+> **What a change here can buy (wall-clock):** this job's matrix legs run in parallel, so speeding **this one leg** saves only ~13m 32s (the next leg, `Test msedge on windows-latest`, is 46m 01s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `Test msedge on windows-latest` (46m 01s), for up to **~13m 32s** of merge wait. Per-PR split: 0 on 19 of 20 PRs where another check runs longer; up to 13m 32s on the other 1 of 20 PRs.
 
 ```text
 Where the job's ~59m 33s goes - every step, slowest first; they run in sequence and roughly add up to the job:
@@ -371,7 +371,7 @@ STRUCTURAL CATALOG PATTERN MATCHED
 - A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log in a recent pull-request run of this job (no direct log link is shown here) to see exactly what inside it the lever reshapes.
 
 WHAT'S ADDRESSABLE (wall-clock ceiling - don't over-promise)
-- this job's matrix legs run in parallel, so speeding this one leg saves only ~13m 32s (the next leg, `Test msedge on windows-latest`, is 46m 01s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `Test msedge on windows-latest` (46m 01s), for up to ~13m 32s of merge wait. Per-PR split: 0 on 4 of 5 PRs where `Windows (firefox)` runs; up to 13m 32s on the other 1 of 5 PRs.
+- this job's matrix legs run in parallel, so speeding this one leg saves only ~13m 32s (the next leg, `Test msedge on windows-latest`, is 46m 01s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `Test msedge on windows-latest` (46m 01s), for up to ~13m 32s of merge wait. Per-PR split: 0 on 19 of 20 PRs where another check runs longer; up to 13m 32s on the other 1 of 20 PRs.
 
 WHERE TO LOOK
 - The `tests_secondary.yml` workflow definition for the dominant step, and the tool/config it invokes (build tool, test runner, or install) - that's where its time is spent.
@@ -406,8 +406,6 @@ DELIVER & VERIFY
 ## 🔴 Long pole 5: `tests_secondary.yml` ▸ `Test msedge on windows-latest` - 46m 01s
 
 **Rarely the merge gate - the actual slowest check a PR waits on, on only 0/20 sampled PRs.** Present on 5/20 PRs, but a slower concurrent check almost always gates ahead of it, so its 46m 01s is throughput/cost, not merge-wait. Speeding it helps only the PRs where it IS the pole - it won't move typical merge-wait.
-
-> **What a change here can buy (wall-clock):** this job's matrix legs run in parallel, so speeding **this one leg** saves only ~4m 40s (the next leg, `ubuntu-22.04 (webkit - Node.js 20)`, is 41m 21s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `ubuntu-22.04 (webkit - Node.js 20)` (41m 21s), for up to **~4m 40s** of merge wait. Per-PR split: 0 on 5 of 5 PRs where another check runs longer.
 
 ```text
 Where the job's ~46m 01s goes - every step, slowest first; they run in sequence and roughly add up to the job:
@@ -447,9 +445,6 @@ WHERE THE TIME GOES
 
 STRUCTURAL CATALOG PATTERN MATCHED
 - A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log in a recent pull-request run of this job (no direct log link is shown here) to see exactly what inside it the lever reshapes.
-
-WHAT'S ADDRESSABLE (wall-clock ceiling - don't over-promise)
-- this job's matrix legs run in parallel, so speeding this one leg saves only ~4m 40s (the next leg, `ubuntu-22.04 (webkit - Node.js 20)`, is 41m 21s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `ubuntu-22.04 (webkit - Node.js 20)` (41m 21s), for up to ~4m 40s of merge wait. Per-PR split: 0 on 5 of 5 PRs where another check runs longer.
 
 WHERE TO LOOK
 - The `tests_secondary.yml` workflow definition for the dominant step, and the tool/config it invokes (build tool, test runner, or install) - that's where its time is spent.
@@ -1473,7 +1468,7 @@ failure mode and how you have guarded it before shipping.
 
 | Source | Coverage | Used for |
 | --- | --- | --- |
-| ci-speedup static scan (skill commit `2f048be`, scripts tree `f3ee075`) | All `.github/workflows/*.yml` under the analyzed tree (3827650) | Static pattern detection (full OPT catalog) |
+| ci-speedup static scan (skill commit `2f048be`, scripts tree `db22d81-dirty`) | All `.github/workflows/*.yml` under the analyzed tree (3827650) | Static pattern detection (full OPT catalog) |
 | gh runs/jobs API (timestamps) | 161 runs / 1630 jobs sampled | Critical-path + per-step P50 |
 | job logs | not run | Sampled only for a slow pole worth log-level inspection |
 | workflow YAML | 18 from the analyzed checkout | `on:` triggers, matrix/shard axes, job timeouts (detector inputs) |
