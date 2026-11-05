@@ -3007,6 +3007,7 @@ def _era_resolve_thin_flip(
         check_wf_of: "Callable[[str], str | None]",
         sampled_runs_by_wf: dict[str, list[dict[str, Any]]],
         redrill: "Callable[[str, list[dict[str, Any]]], None]",
+        jobs_per_run_by_wf: dict[str, list[list[dict[str, Any]]]] | None = None,
 ) -> list[str]:
     """Decide the `disclosed_pre` → `post_only_thin` flip PRE-DRILL and re-drill the flipped
     workflow's spine from its POST runs (issue #74, owner-adjudicated direction (a): the timing
@@ -3030,6 +3031,75 @@ def _era_resolve_thin_flip(
     Returns the flipped workflow files (for logging / stamping). Non-straddling / non-`disclosed_pre`
     facts are untouched, so this is a pure no-op when nothing flips (byte-identity)."""
     flipped: list[str] = []
+
+    # A gate can change runners without changing the workflow file (for example, a repository or
+    # organization variable behind `runs-on`).  That is still a measurement-era boundary: mixing
+    # the two runner populations is honest only when the report names the split.  Detect the narrow,
+    # high-confidence shape here, after job collection: exactly two non-empty labels with one
+    # chronological transition for the same sampled gate.  It is disclosure-only; unlike a
+    # workflow-content era it does not partition the sample.
+    jobs_per_run_by_wf = jobs_per_run_by_wf or {}
+    existing_content_wfs = {
+        str(f.get("workflow_file") or "") for f in config_era_facts
+        if f.get("rule") != "runner_label_change"
+    }
+    gate_names_by_wf: dict[str, set[str]] = {}
+    for checks in per_sha_checks:
+        for check_name in checks:
+            wf = check_wf_of(check_name)
+            if wf:
+                gate_names_by_wf.setdefault(str(wf), set()).add(str(check_name))
+    for wf, gate_names in gate_names_by_wf.items():
+        if wf in existing_content_wfs:
+            continue  # a literal workflow edit already supplies the configuration-era disclosure
+        retained_by_run: dict[str, list[dict[str, Any]]] = {}
+        for run_jobs in jobs_per_run_by_wf.get(wf, []):
+            for job in run_jobs:
+                rid = str(job.get("_run_id") or "")
+                if rid:
+                    retained_by_run.setdefault(rid, []).append(job)
+        runs = sorted(sampled_runs_by_wf.get(wf, []),
+                      key=lambda r: str(r.get("created_at") or ""))
+        for gate_name in sorted(gate_names):
+            gate_tokens = _struct_toks(gate_name)
+            observations: list[tuple[str, str]] = []
+            job_display = ""
+            for run in runs:
+                embedded = run.get("jobs")
+                run_jobs = (embedded if isinstance(embedded, list)
+                            else retained_by_run.get(_run_id(run), []))
+                matches = [j for j in run_jobs if isinstance(j, dict)
+                           and _struct_toks(str(j.get("name") or "")) == gate_tokens]
+                labels = {_job_runner_label(j) for j in matches if _job_runner_label(j)}
+                if len(labels) != 1:
+                    continue
+                label = next(iter(labels))
+                job_display = str(matches[0].get("name") or gate_name)
+                observations.append((str(run.get("created_at") or ""), label))
+            if len(observations) < 2:
+                continue
+            groups: list[tuple[str, int, str]] = []
+            for ts, label in observations:
+                if groups and groups[-1][0] == label:
+                    old_label, count, start = groups[-1]
+                    groups[-1] = (old_label, count + 1, start)
+                else:
+                    groups.append((label, 1, ts))
+            if len(groups) != 2 or groups[0][0] == groups[1][0]:
+                continue
+            config_era_facts.append({
+                "workflow_file": wf,
+                "job": job_display,
+                "boundary": groups[1][2],
+                "kept_era": "all",
+                "rule": "runner_label_change",
+                "disclosure_only": True,
+                "runner_label_counts": [
+                    {"label": groups[0][0], "count": groups[0][1]},
+                    {"label": groups[1][0], "count": groups[1][1]},
+                ],
+            })
+
     if not config_era_facts:
         return flipped
     indexed = list(zip(repr_shas, per_sha_checks))
@@ -3100,7 +3170,8 @@ def _stamp_pole_repr_run_era(
     if not config_era_facts:
         return
     fact_by_wf = {str(f.get("workflow_file")): f
-                  for f in config_era_facts if f.get("workflow_file")}
+                  for f in config_era_facts
+                  if f.get("workflow_file") and f.get("rule") != "runner_label_change"}
     for p in poles:
         wf = str(p.get("workflow_file") or "")
         job = str(p.get("job") or "")
@@ -3167,11 +3238,13 @@ def _era_scope_enumeration(
     `verify_report.check_era_enumeration_bound` reads: no rendered pole/check may be a member of any
     era's `other_era_checks` (a check absent from the kept era). One report describes ONE
     configuration and names what the other configuration adds/removes."""
-    if not config_era_facts:
+    content_facts = [f for f in config_era_facts
+                     if f.get("rule") != "runner_label_change"]
+    if not content_facts:
         return pr_check_p50
     indexed = list(zip(repr_shas, per_sha_checks))
     to_drop: set[str] = set()
-    for fact in config_era_facts:
+    for fact in content_facts:
         wf = fact.get("workflow_file")
         if not wf:
             continue
@@ -3272,6 +3345,8 @@ def _era_stamp_spine_relevance(
     implies a non-empty enumeration set), so `verify_report`'s integrity arm needs no change. Mutates
     the facts in place."""
     for fact in config_era_facts:
+        if fact.get("rule") == "runner_label_change":
+            continue
         wf = fact.get("workflow_file")
         if not wf:
             continue
@@ -3341,7 +3416,8 @@ def _era_scope_pr_spine_sample(
     dropped-era makespan."""
     if not config_era_facts:
         return repr_shas, per_sha_checks, sha_intervals, 0
-    facts = [f for f in config_era_facts if f.get("workflow_file")]
+    facts = [f for f in config_era_facts
+             if f.get("workflow_file") and f.get("rule") != "runner_label_change"]
     if not facts:
         return repr_shas, per_sha_checks, sha_intervals, 0
     kept_shas: list[str] = []
@@ -4953,7 +5029,8 @@ def _pole_timing_spread(check: str, workflow_file: str, job: str,
     # it. Named so the range is never read as describing the current configuration when
     # the spine door retained the other era's runs.
     era = next((str(f.get("kept_era") or "") for f in (config_era_facts or [])
-                if str(f.get("workflow_file") or "") == workflow_file), "")
+                if str(f.get("workflow_file") or "") == workflow_file
+                and f.get("rule") != "runner_label_change"), "")
     observations = [j for run in (jobs_per_run_by_wf.get(workflow_file) or [])
                     for j in run if str(j.get("name", "")) == job]
     return _timing_spread(observations, check=check, workflow_file=workflow_file,
@@ -26952,7 +27029,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         events_jobs_by_wf[wf] = jbe
 
     _era_resolve_thin_flip(config_era_facts, repr_shas, per_sha_checks, _rep_ts,
-                           _era_check_wf_of, sampled_runs_by_wf, _era_redrill)
+                           _era_check_wf_of, sampled_runs_by_wf, _era_redrill,
+                           jobs_per_run_by_wf)
     # Reliable per-job execution times from the jobs API (runner-scoped, no
     # queue), across all sampled workflows. A check-run's started→completed span
     # can be inflated by queue waits and re-runs (e.g. an 80s `Integration test`
