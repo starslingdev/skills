@@ -879,3 +879,20 @@ def test_pipeline_unparseable_yaml_discloses_opt97_skip(monkeypatch):
                  if e['workflow'].endswith('test.yml'))
     assert 'OPT97' in entry['detectors'] and 'could not be parsed' in entry['reason']
     assert not [n for n in doc.get('opt97_notes') or [] if n['workflow_file'].endswith('test.yml')]
+
+
+def test_dense_job_list_reads_count_as_job_fetches():
+    """A token that dies during the dense read must be counted in the collection
+    banner's "N of M job fetches failed": each uncached job-list read is one fetch."""
+    class CountingClient(RunsClient):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.recorded = []
+
+        def record_job_fetch(self, failed):
+            self.recorded.append(failed)
+
+    page = {'workflow_runs': [_run(1), _run(6)]}
+    client = CountingClient([page], {1: _jobs_body(1)})
+    dense_call(client)
+    assert client.recorded == [False, True]

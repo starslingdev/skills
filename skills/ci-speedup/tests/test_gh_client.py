@@ -709,7 +709,7 @@ def test_job_fetch_counts_are_logical_fetches_not_pages(monkeypatch):
     assert client.job_fetch_failed_count == 0
 
 
-def test_mid_run_auth_failure_trips_the_breaker_without_fetching_the_whole_plan(monkeypatch):
+def test_mid_run_auth_failure_trips_the_breaker_without_fetching_the_whole_plan(monkeypatch, caplog):
     """A token can expire after run discovery succeeded. Three consecutive auth
     failures prove that the credential, not five independent job resources, is broken;
     the two queued fetches must be counted but must not spawn more ``gh`` processes."""
@@ -741,6 +741,9 @@ def test_mid_run_auth_failure_trips_the_breaker_without_fetching_the_whole_plan(
     assert client.errors == 5
     assert client.gave_up
     assert len(calls) == 4, "only the successful run list plus three auth failures fetch"
+    stops = [r for r in caplog.records if "GIVING UP on the whole gh pass" in r.getMessage()]
+    assert len(stops) == 1, "the stop reason must be logged once when the token dies"
+    assert "the token stopped working" in stops[0].getMessage()
 
 
 def test_auth_interruption_reason_has_no_dangling_separator():

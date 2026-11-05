@@ -901,12 +901,16 @@ class GhClient:
             already = self._gave_up
             self._gave_up = True
         if not already:
-            logger.warning(
-                "gh: GIVING UP on the whole gh pass — %s. Every remaining call will "
-                "fail immediately (no backoff). A sustained block cannot be waited "
-                "out inside a useful wall-clock, so the audit aborts with a DISCLOSED "
-                "coverage gap rather than hanging for hours and then rendering a "
-                "confident report off whatever survived.", why)
+            self._warn_giving_up(why)
+
+    @staticmethod
+    def _warn_giving_up(why: str) -> None:
+        logger.warning(
+            "gh: GIVING UP on the whole gh pass — %s. Every remaining call will "
+            "fail immediately (no backoff). A sustained block cannot be waited "
+            "out inside a useful wall-clock, so the audit aborts with a DISCLOSED "
+            "coverage gap rather than hanging for hours and then rendering a "
+            "confident report off whatever survived.", why)
 
     def _note_giveup(self, kind: str) -> None:
         """One endpoint just burned its whole attempt budget against a RETRYABLE
@@ -1482,15 +1486,19 @@ class GhClient:
                 # the report states the full sample gap without continuing to hit gh.
                 self._bump(error=True)
                 self._remember_failure_status(endpoint, status)
+                first_stop = False
                 with self._lock:
                     if self._had_successful_invoke:
                         self._consecutive_auth_failures += 1
                     auth_failures = self._consecutive_auth_failures
                     if auth_failures >= 3:
+                        # Decide the stop under the lock, so no queued worker slips
+                        # another call in, and say why exactly once.
+                        first_stop = not self._gave_up
                         self.auth_interrupted = True
                         self._gave_up = True
-                if auth_failures >= 3:
-                    self._trip_breaker(
+                if first_stop:
+                    self._warn_giving_up(
                         f"{auth_failures} consecutive authentication failures after "
                         "successful GitHub API calls; the token stopped working "
                         "partway through")
@@ -9384,6 +9392,9 @@ def _opt97_dense_competition(client, repo, labels, group, lo, hi, *, workflow_do
             if endpoint not in cache:
                 stats["job_lists"] += 1
                 cache[endpoint] = client.json(endpoint, allow_missing=True)
+                record = getattr(client, "record_job_fetch", None)
+                if callable(record):
+                    record(not isinstance(cache[endpoint], dict))
             body = cache[endpoint]
             jobs = body.get("jobs") if isinstance(body, dict) else None
             if not isinstance(jobs, list):
