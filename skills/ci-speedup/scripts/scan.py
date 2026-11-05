@@ -5681,6 +5681,8 @@ def _build_workflow_job_graph(
     - `reusable` marks a job that invokes a reusable workflow (`uses:` at job level): its
       leaf check-runs surface as `<job name> / <child job>`, so the consumer groups those
       children under this caller.
+    - `uses` preserves the call target so nested local children resolve only through
+      their actual workflow edges, never through a coincidentally matching job elsewhere.
     - `continue_on_error` marks a job that declares a LITERAL `continue-on-error: true`
       (see `_job_continue_on_error_is_literally_true`), so a consumer that crowns the job as
       a long pole can state what its failure does to the workflow run without re-reading YAML.
@@ -5714,6 +5716,7 @@ def _build_workflow_job_graph(
                 "name": name if isinstance(name, str) else str(jid),
                 "needs": [str(n) for n in needs if isinstance(n, str)],
                 "reusable": isinstance(job.get("uses"), str),
+                **({"uses": job["uses"]} if isinstance(job.get("uses"), str) else {}),
                 "matrix": isinstance(strategy, dict) and bool(strategy.get("matrix")),
                 "timeout_minutes": "timeout-minutes" in job,
                 "continue_on_error": _job_continue_on_error_is_literally_true(
