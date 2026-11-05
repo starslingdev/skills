@@ -330,6 +330,71 @@ def test_run_jobs_paginates_past_100():
     assert got is not None and len(got) == 142
 
 
+def test_run_jobs_retries_a_502_with_smaller_pages():
+    """A large run can make GitHub reject the 100-job page while serving the
+    same complete listing in smaller pages. Retry that one response shape at 30
+    before disclosing the run as unavailable."""
+    jobs = lambda lo, hi: [{"id": i, "name": f"pole-{i}"} for i in range(lo, hi)]  # noqa: E731
+
+    class _LargeRunClient(_PagingClient):
+        def failure_status(self, endpoint: str) -> int | None:
+            return 502 if endpoint.endswith("per_page=100") else None
+
+        def recover_failure(self, endpoint: str) -> None:
+            self.errors -= 1
+
+    client = _LargeRunClient({
+        "repos/o/r/actions/runs/7/jobs?per_page=30": {
+            "total_count": 64, "jobs": jobs(0, 30)},
+        "repos/o/r/actions/runs/7/jobs?per_page=30&page=2": {
+            "total_count": 64, "jobs": jobs(30, 60)},
+        "repos/o/r/actions/runs/7/jobs?per_page=30&page=3": {
+            "total_count": 64, "jobs": jobs(60, 64)},
+    })
+
+    got = collect_runs._fetch_run_jobs(client, "o/r", 7)
+
+    assert got is not None and [job["id"] for job in got] == list(range(64))
+    assert client.calls == [
+        "repos/o/r/actions/runs/7/jobs?per_page=100",
+        "repos/o/r/actions/runs/7/jobs?per_page=30",
+        "repos/o/r/actions/runs/7/jobs?per_page=30&page=2",
+        "repos/o/r/actions/runs/7/jobs?per_page=30&page=3",
+    ]
+    assert client.errors == 0
+
+
+def test_prefetched_502s_do_not_block_smaller_job_pages(monkeypatch, no_sleep):
+    """Concurrent large-page failures must leave the client able to fetch the
+    smaller pages that recover those same run-job listings."""
+    first = "repos/o/r/actions/runs/7/jobs?per_page=100"
+    second = "repos/o/r/actions/runs/8/jobs?per_page=100"
+
+    def _run(cmd, *args, **kwargs):
+        endpoint = cmd[-1]
+        if endpoint.endswith("per_page=100"):
+            return _server_error(cmd, *args, **kwargs)
+        run_id = int(endpoint.split("/runs/", 1)[1].split("/", 1)[0])
+        return _completed(
+            returncode=0,
+            stdout=_ok(
+                f'{{"total_count": 1, "jobs": [{{"id": {run_id}, "name": "pole"}}]}}'
+            ),
+        )
+
+    _patch_run(monkeypatch, _run)
+    client = GhClient()
+    client.prefetch_json([first, second])
+
+    first_jobs = collect_runs._fetch_run_jobs(client, "o/r", 7)
+    second_jobs = collect_runs._fetch_run_jobs(client, "o/r", 8)
+
+    assert first_jobs == [{"id": 7, "name": "pole"}]
+    assert second_jobs == [{"id": 8, "name": "pole"}]
+    assert not client.gave_up
+    assert client.errors == 0
+
+
 def test_run_jobs_filtered_paginates_and_keeps_the_filter_param():
     jobs = lambda lo, hi: [{"id": i} for i in range(lo, hi)]  # noqa: E731
     client = _PagingClient({
