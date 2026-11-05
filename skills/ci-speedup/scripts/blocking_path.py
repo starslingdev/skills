@@ -5779,6 +5779,8 @@ def _derived_partial_kind(ds: dict[str, Any]) -> str:
 
     The derivation exists only for docs that predate the stamp (the committed worked
     examples); `collect()` now stamps the key on every exit."""
+    if ds.get("auth_interrupted") is True:
+        return "collection_failed"
     kind = ds.get("partial_kind")
     if kind:
         return str(kind)

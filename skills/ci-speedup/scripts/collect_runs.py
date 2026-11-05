@@ -699,6 +699,9 @@ def _classify_gh_failure(stderr: str, status: int | None = None,
                        coverage gap (the data exists, we were blocked from it) —
                        loud even on an `allow_missing` endpoint.
       `server_error` — 5xx. RETRYABLE (transient); same coverage-gap rule.
+      `auth`         — 401, or a 403 whose response says the credential is bad,
+                       expired, or needs authentication. A repeated auth failure
+                       after successful calls means the token stopped working.
       `not_found`    — 404. The `allow_missing` contract's intended case.
       `forbidden`    — a 403 that is NOT a rate limit (no admin on the audited
                        repo). Also an `allow_missing` case, never retried.
@@ -736,6 +739,14 @@ def _classify_gh_failure(stderr: str, status: int | None = None,
             return "rate_limit"
     if status == 429 or limited:
         return "rate_limit"
+    if status == 401:
+        return "auth"
+    if status == 403 and (
+            "bad credentials" in s
+            or "requires authentication" in s
+            or "token expired" in s
+            or "token has expired" in s):
+        return "auth"
     if status == 404:
         return "not_found"
     if status == 403:
@@ -805,6 +816,11 @@ class GhClient:
         # `_lock` (the fetch pool shares one client, so one worker's give-up must stop
         # the others too).
         self._gave_up = False
+        self._had_successful_invoke = False
+        self._consecutive_auth_failures = 0
+        self.auth_interrupted = False
+        self.job_fetch_count = 0
+        self.job_fetch_failed_count = 0
         self._giveups = 0
         self._backoff_spent = 0.0
         # Final HTTP status for a failed endpoint, keyed rather than global because
@@ -842,6 +858,15 @@ class GhClient:
         with self._lock:
             self.queries += int(query)
             self.errors += int(error)
+
+    def record_job_fetch(self, failed: bool) -> None:
+        """Count logical run-job fetches, not pages, retries or memo hits.
+
+        Queued fetches skipped by the breaker still failed to supply their data.
+        """
+        with self._lock:
+            self.job_fetch_count += 1
+            self.job_fetch_failed_count += int(failed)
 
     def _remember_failure_status(self, endpoint: str, status: int | None) -> None:
         with self._lock:
@@ -1290,6 +1315,10 @@ class GhClient:
             quietly shrinks its sample and still renders a confident, WRONG report.
           - 5xx, and a TIMEOUT (the data exists; we just didn't get it — the same
             meaning as a 5xx): retried with 1s/2s/4s + jitter.
+          - auth rejection (401, or an auth-shaped 403): never retried per endpoint.
+            After a successful call, three consecutive auth rejections trip the
+            global breaker: the token stopped working, so trying more queued
+            endpoints cannot recover it.
           - Exhausting the retries on any of those is a REAL COVERAGE GAP: it
             counts toward `errors` (tripping the report's partial-coverage banner)
             EVEN on an `allow_missing` endpoint. `allow_missing` means "a 404
@@ -1323,6 +1352,9 @@ class GhClient:
             # replay short-circuits in `_json_live`/`_text_live` and never reaches here — so
             # the governor is acquired once per real subprocess and never in offline tests.
             self._governor.acquire(_route_key(endpoint))
+            if self.gave_up:
+                self._bump(error=True)
+                return None
             headers: dict[str, str] = {}
             status: int | None = None
             try:
@@ -1356,6 +1388,8 @@ class GhClient:
                         capture_output=True, text=True, timeout=timeout,
                     )
             except FileNotFoundError as e:      # gh isn't installed — retrying can't help
+                with self._lock:
+                    self._consecutive_auth_failures = 0
                 if not allow_missing:
                     self._bump(error=True)
                     print(f"gh error: {e}", file=sys.stderr)
@@ -1363,6 +1397,8 @@ class GhClient:
             except subprocess.TimeoutExpired as e:
                 kind, stderr, r = "server_error", f"timed out after {timeout}s: {e}", None
             except (OSError, UnicodeDecodeError) as e:
+                with self._lock:
+                    self._consecutive_auth_failures = 0
                 # WAVE-SAFETY (the parallel pass runs `_invoke` on the shared pool's
                 # threads): SPAWNING the subprocess is itself an OS operation that can fail
                 # for reasons other than "gh isn't installed" (`FileNotFoundError`, caught
@@ -1386,9 +1422,19 @@ class GhClient:
                     # unlucky calls spread across a healthy audit trip the breaker.
                     self._clear_failure_status(endpoint)
                     self._note_success()
+                    with self._lock:
+                        self._had_successful_invoke = True
+                        self._consecutive_auth_failures = 0
                     return body
                 stderr = (r.stderr or "").strip()
-                kind = _classify_gh_failure(stderr, status, headers)
+                # GitHub puts auth diagnostics in the JSON response body on some
+                # 403s, while gh's stderr can be only "HTTP 403". Classification
+                # needs both pieces of the same failed response; logging below still
+                # uses stderr so a response body is not sprayed into logs.
+                kind = _classify_gh_failure("\n".join((stderr, body)), status, headers)
+            if kind != "auth":
+                with self._lock:
+                    self._consecutive_auth_failures = 0
             if kind in ("rate_limit", "server_error"):
                 if attempt < _GH_MAX_ATTEMPTS:
                     if kind == "rate_limit":
@@ -1428,6 +1474,29 @@ class GhClient:
                 )
                 if not smaller_jobs_fallback:
                     self._note_giveup(kind)
+                return None
+            if kind == "auth":
+                # `allow_missing` means a resource may legitimately be absent; it
+                # never means a broken credential is optional. Count every planned
+                # fetch, including calls short-circuited after the breaker opens, so
+                # the report states the full sample gap without continuing to hit gh.
+                self._bump(error=True)
+                self._remember_failure_status(endpoint, status)
+                with self._lock:
+                    if self._had_successful_invoke:
+                        self._consecutive_auth_failures += 1
+                    auth_failures = self._consecutive_auth_failures
+                    if auth_failures >= 3:
+                        self.auth_interrupted = True
+                        self._gave_up = True
+                if auth_failures >= 3:
+                    self._trip_breaker(
+                        f"{auth_failures} consecutive authentication failures after "
+                        "successful GitHub API calls; the token stopped working "
+                        "partway through")
+                logger.warning(
+                    "gh api %s: authentication failed — counted as a coverage gap: %s",
+                    endpoint, stderr[:200])
                 return None
             if not allow_missing:
                 self._bump(error=True)
@@ -1875,6 +1944,24 @@ def _partial_kind(errors: int,
     if errors:
         return _PARTIAL_SAMPLE_THINNED
     return None
+
+
+def _stamp_auth_interruption(ds: dict[str, Any], client: GhClient) -> None:
+    """Preserve the cause and logical job-fetch counts on every collector exit."""
+    if getattr(client, "auth_interrupted", False) is not True:
+        return
+    total = client.job_fetch_count
+    failed = client.job_fetch_failed_count
+    ds.update({
+        "auth_interrupted": True,
+        "job_fetch_count": total,
+        "job_fetch_failed_count": failed,
+        "partial_kind": _PARTIAL_COLLECTION_FAILED,
+    })
+    reason = ("the GitHub token stopped working partway through; "
+              f"{failed} of {total} job fetches failed (including queued fetches "
+              "skipped after collection stopped)")
+    ds["partial_reason"] = reason + "; " + str(ds.get("partial_reason") or "")
 
 
 # =============================================================================
@@ -3823,6 +3910,9 @@ def _fetch_run_jobs(client: GhClient, repo: str,
     `_JobsPayload`'s docstring prescribes for a paginated fetcher, and every
     attempt-scoped truncation guard downstream becomes a no-op."""
     items = _paginate(client, f"repos/{repo}/actions/runs/{run_id}/jobs", "jobs")
+    record = getattr(client, "record_job_fetch", None)
+    if callable(record):
+        record(items is None)
     if items is None:
         return None
     return _JobsPayload(items, truncated=False)
@@ -3841,6 +3931,9 @@ def _fetch_run_jobs_filtered(client: GhClient, repo: str, run_id: int,
     """
     items = _paginate(client, f"repos/{repo}/actions/runs/{run_id}/jobs", "jobs",
                       params=f"filter={filter_value}")
+    record = getattr(client, "record_job_fetch", None)
+    if callable(record):
+        record(items is None)
     if items is None:
         return None
     return _JobsPayload(items, truncated=False)
@@ -25941,6 +26034,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 client.errors, _sample_gaps(), gave_up=True),
             "partial_kind": _PARTIAL_COLLECTION_FAILED,
         }
+        _stamp_auth_interruption(findings_doc["data_sources"], client)
         return findings_doc
     # Fetch failures in job samples that feed `runner_minute_spine` rows. Keep this
     # narrower than `jobs_fetch_failures`, which also includes detector-only probes.
@@ -28647,6 +28741,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         client.errors, _sample_gaps(), gave_up=getattr(client, "gave_up", False))
     findings_doc["data_sources"]["partial_kind"] = _partial_kind(
         client.errors, _sample_gaps(), gave_up=getattr(client, "gave_up", False))
+    _stamp_auth_interruption(findings_doc["data_sources"], client)
     findings_doc["per_workflow_monthly_volume"] = {
         wf: vol_by_wf[wf] for wf in sorted(final_volume_workflows) if wf in vol_by_wf
     }
