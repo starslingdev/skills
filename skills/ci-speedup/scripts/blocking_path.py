@@ -2646,6 +2646,65 @@ def _parse_log(text: str,
             "evidence": ev,
             "search": [":test", "BUILD SUCCESSFUL in", "maxParallelForks"],
         }
+    # --- L: one shell runner invokes many test files one after another ----------
+    # This is deliberately the last catalog leaf: a more specific detector above
+    # keeps precedence. Each admitted invocation needs a timestamped completion
+    # before the next invocation starts. That proves serial execution rather than
+    # inferring it merely from repeated command lines. The outer span must also be
+    # close to the sum of the invocation intervals, excluding loops with long gaps
+    # whose step time is dominated by work this detector cannot identify.
+    stamped: list[tuple[datetime, str, str]] = []
+    for raw in text.splitlines():
+        stamp, sep, message = raw.partition(" ")
+        when = _cache_path_stamp(stamp)
+        if sep and when is not None:
+            stamped.append((when, message.strip(), raw.strip()))
+    loop_command = re.compile(
+        r"^(?:\+\s+)?(?P<command>(?:\./|/)?[\w./-]*(?:test|spec)[\w./-]*)"
+        r"\s+(?P<file>(?:tests?|specs?)/\S+)$", re.IGNORECASE)
+    starts = [(i, when, m.group("command"), m.group("file"), raw)
+              for i, (when, message, raw) in enumerate(stamped)
+              if (m := loop_command.match(message))]
+    by_command: dict[str, list[tuple[int, datetime, str, str]]] = {}
+    for i, when, command, test_file, raw in starts:
+        by_command.setdefault(command, []).append((i, when, test_file, raw))
+    for command_starts in by_command.values():
+        if len(command_starts) < 10 or len({x[2] for x in command_starts}) < 10:
+            continue
+        intervals: list[tuple[datetime, datetime]] = []
+        complete = True
+        for pos, (line_i, started, test_file, _raw) in enumerate(command_starts):
+            next_line = (command_starts[pos + 1][0]
+                         if pos + 1 < len(command_starts) else len(stamped))
+            ended = next((when for when, message, _line in stamped[line_i + 1:next_line]
+                          if (test_file in message and re.search(
+                              r"\b(?:done|complete(?:d)?|finish(?:ed)?|passed|ok)\b",
+                              message, re.IGNORECASE))
+                          or re.search(r"^real\s+\d", message, re.IGNORECASE)), None)
+            if ended is None or ended <= started:
+                complete = False
+                break
+            intervals.append((started, ended))
+        if not complete:
+            continue
+        if any(intervals[i][1] > intervals[i + 1][0]
+               for i in range(len(intervals) - 1)):
+            continue
+        summed = sum((ended - started).total_seconds() for started, ended in intervals)
+        span = (intervals[-1][1] - intervals[0][0]).total_seconds()
+        observed_span = (stamped[-1][0] - stamped[0][0]).total_seconds()
+        if (summed <= 0 or span > summed * 1.10 + 2
+                or observed_span > summed * 1.10 + 2):
+            continue
+        return {
+            "fix_key": "test-loop-serial",
+            "unit_label": f"{len(command_starts)} test files run serially through one "
+                          "shell test runner",
+            "magnitude": None,
+            "deeper": [],
+            "evidence": [x[3] for x in command_starts[:2]],
+            "search": ["test loop", "parallel", "OPT88"],
+        }
     dependency_state = _cache_state_of_log(text, "dependency-cache")
     if dependency_state:
         return {
@@ -3065,6 +3124,25 @@ _FIX_META: dict[str, dict[str, Any]] = {
                    "once per-worker isolation is proven, or shard the suite across matrix "
                    "jobs by directory. Keep the full test count and (if present) a "
                    "complete merged coverage report; re-measure the step.",
+    },
+    "test-loop-serial": {
+        "cause": "The step invokes the same shell test runner for at least ten distinct "
+                 "test files one after another. Timestamped completions show that each "
+                 "invocation ends before the next begins, and their measured intervals "
+                 "account for nearly all of the step's elapsed span.",
+        "look": "`{wf}` — find the loop that passes one test file at a time to the "
+                "runner, then inspect the runner and tests for shared databases, ports, "
+                "temporary paths, ordering assumptions, and other reasons they may have "
+                "been kept serial.",
+        "constraints": "Preserve the full test set and its failure propagation. Isolate "
+                       "per-worker resources before adding concurrency, keep tests that "
+                       "truly require exclusivity in an explicit serial lane, and cap "
+                       "parallelism to the runner's measured CPU and memory limits.",
+        "docs": ["OPT88 in the ci-speedup catalog — measure test concurrency before "
+                 "choosing a worker count"],
+        "deliver": "Run independent files concurrently with a measured worker cap, keep "
+                   "any exclusive files in a serial lane, verify the same test count and "
+                   "results, and re-measure the step.",
     },
     "eslint-no-cache": {
         "cause": "The lint step runs `eslint` over the whole file tree with NO `--cache` "
@@ -5258,6 +5336,7 @@ _LEAF_STEP_CATEGORY: dict[str, str] = {
     "vitest-import-bound": "test",
     "playwright-parallel": "test",
     "pytest-no-xdist": "test",
+    "test-loop-serial": "test",
     "cargo-test-shard": "test",
     "benchmark-serial-reruns": "test",
     "android-emulator-shard": "test",
@@ -9083,7 +9162,12 @@ def _opt81_levers_checked(fr: dict[str, Any]) -> list[tuple[str, str]]:
     return out
 
 
-def _opt81_prompt(f: dict[str, Any], url: str) -> list[str]:
+def _opt81_prompt(f: dict[str, Any], url: str,
+                  held_back_by: str | None = None) -> list[str]:
+    if held_back_by in {"test-loop-serial", "pytest-no-xdist"}:
+        return ["A bigger runner will not help a sequential step: it runs on one core; "
+                "run the work in parallel first. Measure the safe worker count with "
+                f"[OPT88]({url}#opt88--test-concurrency-is-a-guess-not-a-measurement)."]
     half = _opt81_half(f)
     fr = f["faster_runner"]
     job = str(fr.get("job") or "")
@@ -9144,6 +9228,11 @@ def _opt81_card(f: dict[str, Any], catalog_url: str,
         "fix_recipe_anchor") else catalog_url
     job = _flatten_cell(str(fr.get("job") or ""))
     if half == "A2" and held_back_by:
+        if held_back_by in {"test-loop-serial", "pytest-no-xdist"}:
+            reason = " ".join(_opt81_prompt(f, catalog_url, held_back_by))
+            return [anchor, "",
+                    f"**🏎️ OPT81 runner-class advisory held back** for `{job}`: "
+                    f"{reason}", "", f"_{_OPT81_DISCLOSURE}_", ""]
         return [anchor, "",
                 f"**🏎️ OPT81 runner-class advisory held back** for `{job}`: a log-level "
                 f"lever (`{_flatten_cell(held_back_by)}`) matched this pole's own log, "
