@@ -17,7 +17,8 @@ unversioned and updates by reinstall from `main`.
   all-status page shows that at least 20% of 10 or more completed default-branch
   runs failed or timed out. The report names the workflow and exact failed/eligible
   count beside the Bottom line; cancelled, skipped, PR-branch and unrelated event
-  runs stay outside the population, and thin samples remain data-only.
+  runs stay outside the population, and thin samples or an unknown default
+  branch remain data-only with the reason stamped.
 
 - **2026-11-04** — Add OPT101: report an uncredited cache-path observation only when the missing-path warning occurs in every sampled successful save post-step. Optionally name a disjoint literal Bazel cache directory; disclose scoped/dynamic config as not read. Existing wrong paths without warnings remain undetected. Matches the real `[warning]` line actions/cache writes, with whole-second step windows, and still samples when the drilled run itself failed; the observation never closes a coverage gap or displaces another secondary note. The catalog now contains 96 patterns. (#190)
 - **2026-11-03** — Add OPT97 for queue time that tracks in-flight jobs while execution stays flat, on a self-hosted runner pool or one with a resource hint (global concurrency group, one repo-level runner, device step). In-flight counts come from one bounded read of every run in the population's window (at most 3 run-list pages and 60 job lists, disclosed in Data sources); a failed or capped read is "check this: competition not measured", never a finding. A same-workflow, same-job OPT43 finding is replaced by the measured one. Credit only queue above the P10 of the other sampled jobs, on established merge gates, through existing floors. Matching job-local service ports or database names are deliberately not a shared-resource hint: each job gets its own service containers. Catalog: 93 patterns. (#178)

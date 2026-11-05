@@ -26535,7 +26535,13 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             "failed_runs": _failed_n,
             "failure_pct": round(100 * _failure_rate),
         }
-        if _eligible_n < _SUCCESS_ONLY_CAVEAT_MIN_RUNS:
+        if not default_branch:
+            _stamp.update({
+                "status": "default_branch_unknown",
+                "reason": ("default branch unknown: the repository read did not "
+                           "return it, so no default-branch runs could be counted"),
+            })
+        elif _eligible_n < _SUCCESS_ONLY_CAVEAT_MIN_RUNS:
             _stamp.update({
                 "status": "too_few_runs",
                 "reason": (f"too few runs: {_eligible_n} eligible default-branch runs; "

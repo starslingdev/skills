@@ -137,3 +137,61 @@ def test_pr_branch_failures_and_cancelled_runs_are_not_in_the_population(monkeyp
     assert stamp["failed_runs"] == 0
     assert stamp["status"] == "below_threshold"
     assert "Measured over successful runs" not in report
+
+
+def test_caveat_follows_a_scoped_headline_check_name():
+    # A monorepo check name carrying an npm-style scope (`@acme/...`) is displayed
+    # without the scope in the headline. The caveat lookup must compare the same
+    # display label, or a red headline workflow silently loses its caveat.
+    doc = _doc_two_typical_poles_one_rare_gate()
+    cp = doc["pr_critical_path"]
+    old, new = "Python 3.11", "@acme/py Python 3.11"
+    for pole in cp["poles"]:
+        if pole["check"] == old:
+            pole["check"] = pole["job"] = new
+    for check in cp["checks"]:
+        if check["name"] == old:
+            check["name"] = new
+    cp["populations"] = [
+        [weight, [[new if name == old else name, dur] for name, dur in members]]
+        for weight, members in cp["populations"]]
+    timing_workflow = ".github/workflows/datasets-test.yml"
+    doc["success_only_timing_by_workflow"] = {
+        timing_workflow: {
+            "eligible_runs": 10, "failed_runs": 6,
+            "failure_pct": 60, "status": "caveat",
+        },
+    }
+
+    report = bp.render(doc)
+
+    assert "the slowest check a typical PR waits on is `py Python 3.11`" in report
+    assert ("Measured over successful runs; 60% (6 of 10) of default-branch runs "
+            f"of `{timing_workflow}` failed in the window.") in report
+
+
+class _NoDefaultBranchClient(_FailureRateClient):
+    def json(self, endpoint, allow_missing=False):
+        if endpoint == "repos/o/r":
+            return {}
+        return super().json(endpoint, allow_missing)
+
+
+def test_unknown_default_branch_stamps_that_reason_and_renders_nothing(monkeypatch):
+    rows = [_run(i, "failure" if i < 6 else "success") for i in range(10)]
+    client = _NoDefaultBranchClient(rows)
+    monkeypatch.setattr(cr, "GhClient", lambda *a, **k: client)
+    doc = cr.collect(
+        {"repo": "o/r", "findings": [
+            {"id": "f1", "pattern": "OPT1", "workflow_file": _CI},
+        ]},
+        "o/r",
+        max_runs=len(_ONE_LABEL_PLAN),
+        shallow_runs=len(_ONE_LABEL_PLAN),
+    )
+    report = bp.render(doc)
+
+    stamp = doc["success_only_timing_by_workflow"][_CI]
+    assert stamp["status"] == "default_branch_unknown"
+    assert "default branch" in stamp["reason"]
+    assert "Measured over successful runs" not in report

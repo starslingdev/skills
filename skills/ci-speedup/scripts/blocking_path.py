@@ -12053,11 +12053,15 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         _model_check,
         # The headline median is success-only; qualify it when the same workflow's
         # cached all-status default-branch population was materially red.
+        # Match on the display label `floor_name` carries (scope-stripped), and fall
+        # back to the slowest typical check's own stamped workflow when it is not drilled.
         _success_only_caveat_lines(
             doc,
             next((p for p in poles
-                  if str(p.get("check", "")) == floor_name
-                  and p.get("workflow_file")), None)),
+                  if _clean_label(str(p.get("check", ""))) == floor_name
+                  and p.get("workflow_file")),
+                 ({"workflow_file": src[0].get("workflow_file")}
+                  if src and src[0].get("workflow_file") else None))),
         # Config-era caveat: qualifies the headline number (folded, not a separate quote).
         _config_era_disclosure_lines(cp, captured_at),
         # Fileless/managed status-check disclosure (PR-lifetime status-gating latency).
