@@ -3386,6 +3386,7 @@ jobs: {}
     assert ci["lint"]["matrix"] is False                                                  # no strategy block -> not matrix
     assert ci["lint"]["timeout_minutes"] is False                                         # no timeout-minutes -> false
     assert ci["suite"]["reusable"] is True and ci["suite"]["needs"] == ["build"]          # job-level uses -> reusable
+    assert ci["suite"]["uses"] == "./.github/workflows/suite.yml"
     assert ".github/workflows/empty.yml" not in graph                                     # empty-jobs file omitted
 
 
