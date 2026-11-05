@@ -39,15 +39,24 @@ def test_serial_test_loop_leaf_rejects_only_eight_invocations():
     assert bp._parse_log(_loop_log(count=8)) is None
 
 
+def test_serial_test_loop_leaf_rejects_short_loop_with_long_tail():
+    log = _loop_log() + "\n" + (
+        "2026-11-05T00:33:00.0000000Z other test work completed")
+    assert bp._parse_log(log) is None
+
+
 def test_runner_advisory_explains_why_a_serial_loop_holds_it_back():
     finding = {
         "id": "f9",
         "pattern": "OPT81",
         "workflow_file": ".github/workflows/ci.yml",
         "faster_runner": {"half": "A2", "job": "test"},
+        "fix_recipe_anchor": "opt81--runner-class-upgrade",
     }
     card = "\n".join(bp._opt81_card(
         finding, "https://example.invalid/catalog", held_back_by="test-loop-serial"))
     assert ("a bigger runner will not help a sequential step: it runs on one core; "
             "run the work in parallel first") in card.lower()
     assert "OPT88" in card
+    assert "https://example.invalid/catalog#opt88--test-concurrency-is-a-guess-not-a-measurement" in card
+    assert "#opt81--runner-class-upgrade#" not in card

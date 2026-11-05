@@ -2692,7 +2692,9 @@ def _parse_log(text: str,
             continue
         summed = sum((ended - started).total_seconds() for started, ended in intervals)
         span = (intervals[-1][1] - intervals[0][0]).total_seconds()
-        if summed <= 0 or span > summed * 1.10 + 2:
+        observed_span = (stamped[-1][0] - stamped[0][0]).total_seconds()
+        if (summed <= 0 or span > summed * 1.10 + 2
+                or observed_span > summed * 1.10 + 2):
             continue
         return {
             "fix_key": "test-loop-serial",
@@ -9218,7 +9220,7 @@ def _opt81_card(f: dict[str, Any], catalog_url: str,
     job = _flatten_cell(str(fr.get("job") or ""))
     if half == "A2" and held_back_by:
         if held_back_by in {"test-loop-serial", "pytest-no-xdist"}:
-            reason = " ".join(_opt81_prompt(f, url, held_back_by))
+            reason = " ".join(_opt81_prompt(f, catalog_url, held_back_by))
             return [anchor, "",
                     f"**🏎️ OPT81 runner-class advisory held back** for `{job}`: "
                     f"{reason}", "", f"_{_OPT81_DISCLOSURE}_", ""]
