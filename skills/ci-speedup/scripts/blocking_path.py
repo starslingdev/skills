@@ -10834,6 +10834,33 @@ def _fold_bottom_line(out: list[str], *blocks: list[str]) -> None:
     out.append("")
 
 
+def _success_only_caveat_lines(
+        doc: dict[str, Any], pole: dict[str, Any] | None) -> list[str]:
+    """Qualify a successful-run headline when its default branch was materially red.
+
+    Collection stamps one entry per workflow from the all-status page it already
+    fetched. Only a threshold-qualified stamp renders; thin and healthy populations
+    remain data-only so legacy reports and ordinary green repos stay byte-identical.
+    """
+    if not isinstance(pole, dict):
+        return []
+    workflow = str(pole.get("workflow_file") or "")
+    by_workflow = doc.get("success_only_timing_by_workflow") or {}
+    stamp = by_workflow.get(workflow) if isinstance(by_workflow, dict) else None
+    if not isinstance(stamp, dict) or stamp.get("status") != "caveat":
+        return []
+    failed = int(_num(stamp.get("failed_runs")) or 0)
+    eligible = int(_num(stamp.get("eligible_runs")) or 0)
+    failure_pct = int(_num(stamp.get("failure_pct")) or 0)
+    if not workflow or eligible <= 0 or failed <= 0:
+        return []
+    return [
+        "> Measured over successful runs; "
+        f"{failure_pct}% ({failed} of {eligible}) of default-branch runs of "
+        f"`{_clean_label(workflow)}` failed in the window."
+    ]
+
+
 def _headline_followup_lines(
         doc: dict[str, Any], pole: dict[str, Any] | None,
         floors: list[dict[str, Any]], *, cluster: dict[str, Any] | None = None,
@@ -12084,6 +12111,17 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         out,
         _lead_block,
         _model_check,
+        # The headline median is success-only; qualify it when the same workflow's
+        # cached all-status default-branch population was materially red.
+        # Match on the display label `floor_name` carries (scope-stripped), and fall
+        # back to the slowest typical check's own stamped workflow when it is not drilled.
+        _success_only_caveat_lines(
+            doc,
+            next((p for p in poles
+                  if _clean_label(str(p.get("check", ""))) == floor_name
+                  and p.get("workflow_file")),
+                 ({"workflow_file": src[0].get("workflow_file")}
+                  if src and src[0].get("workflow_file") else None))),
         # Config-era caveat: qualifies the headline number (folded, not a separate quote).
         _config_era_disclosure_lines(cp, captured_at),
         # Fileless/managed status-check disclosure (PR-lifetime status-gating latency).

@@ -13,6 +13,12 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-11-05** — Qualify success-only headline timings when the already-fetched
+  all-status page shows that at least 20% of 10 or more completed default-branch
+  runs failed or timed out. The report names the workflow and exact failed/eligible
+  count beside the Bottom line; cancelled, skipped, PR-branch and unrelated event
+  runs stay outside the population, and thin samples or an unknown default
+  branch remain data-only with the reason stamped.
 - **2026-11-05** — Run all four config-era report guards whenever the findings carry a rendered era fact, including current-configuration facts created before per-era enumeration sets were added. A narrowed or provisional era banner can no longer coexist with a verifier coverage skip; only findings with no config-era stamp skip these guards.
 
 - **2026-11-04** — Add OPT101: report an uncredited cache-path observation only when the missing-path warning occurs in every sampled successful save post-step. Optionally name a disjoint literal Bazel cache directory; disclose scoped/dynamic config as not read. Existing wrong paths without warnings remain undetected. Matches the real `[warning]` line actions/cache writes, with whole-second step windows, and still samples when the drilled run itself failed; the observation never closes a coverage gap or displaces another secondary note. The catalog now contains 96 patterns. (#190)
