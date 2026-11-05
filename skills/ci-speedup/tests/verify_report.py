@@ -38,6 +38,7 @@ when the bug genuinely cannot be expressed as a re-derivation property.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import math
@@ -14735,6 +14736,80 @@ def check_no_rate_derived_dollars(report: str, findings_path: Path | None = None
     return Check(name, True, "no rate-derived dollar tokens on the minutes surfaces")
 
 
+def check_minority_gate_tails(report: str, findings_path: Path | None = None) -> Check:
+    """Re-derive every required-check tail from its stamped observations."""
+    name = "minority slow tails on merge-blocking checks are re-derived"
+    if findings_path is None or not Path(findings_path).exists():
+        return Check(name, True, "no findings JSON", skipped=True)
+    try:
+        data = _as_dict(json.loads(Path(findings_path).read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError):
+        return Check(name, True, "findings JSON is unreadable", skipped=True)
+    cp = _as_dict(data.get("pr_critical_path"))
+    stamped = [
+        (str(c.get("name") or ""), _as_dict(c.get("minority_tail")))
+        for c in _as_list(cp.get("checks"))
+        if isinstance(c, dict) and isinstance(c.get("minority_tail"), dict)
+    ]
+    if not stamped:
+        return Check(name, True, "no minority gate tails stamped", skipped=True)
+    if not cp.get("spine_required_scoped"):
+        return Check(name, False,
+                     "a minority tail is stamped outside a confirmed required/needs closure")
+
+    def percentile(values: list[float], pct: float) -> float:
+        values = sorted(values)
+        k = (len(values) - 1) * pct / 100.0
+        lo, hi = int(k), min(int(k) + 1, len(values) - 1)
+        return values[lo] + (values[hi] - values[lo]) * (k - lo)
+
+    failures: list[str] = []
+    for check_name, tail in stamped:
+        observations = [
+            (_num(row.get("duration_s")), str(row.get("url") or ""))
+            for row in _as_list(tail.get("observations"))
+            if isinstance(row, dict) and _num(row.get("duration_s")) is not None
+        ]
+        durations = [float(d) for d, _url in observations if d is not None and d > 0]
+        if not durations:
+            failures.append(f"`{check_name}` has no positive stamped observations")
+            continue
+        p50 = percentile(durations, 50)
+        p90 = percentile(durations, 90)
+        slow = [(d, url) for d, url in observations if d is not None and d >= p90]
+        share = 100.0 * len(slow) / len(durations)
+        example = str(tail.get("example_url") or "")
+        clean_name = _strip_scope(check_name)
+        marker_id = re.sub(r"[^A-Za-z0-9._-]+", "-", clean_name).strip("-") or "check"
+        if marker_id != clean_name:
+            marker_id += "-" + hashlib.sha256(clean_name.encode("utf-8")).hexdigest()[:8]
+        marker = f"<!-- minority-gate-tail:{marker_id} -->"
+        if p90 < 600.0 or p90 < 3.0 * p50:
+            failures.append(f"`{check_name}` does not meet the p90 tail threshold")
+        if abs((_num(tail.get("p50_s")) or 0.0) - p50) > 0.11:
+            failures.append(f"`{check_name}` p50 stamp drifted from observations")
+        if abs((_num(tail.get("p90_s")) or 0.0) - p90) > 0.11:
+            failures.append(f"`{check_name}` p90 stamp drifted from observations")
+        if int(_num(tail.get("tail_n")) or 0) != len(slow):
+            failures.append(f"`{check_name}` tail count drifted from observations")
+        if abs((_num(tail.get("tail_share_pct")) or 0.0) - share) > 0.11:
+            failures.append(f"`{check_name}` tail share drifted from observations")
+        if not example or example not in {url for _d, url in slow if url}:
+            failures.append(f"`{check_name}` example is not one of its slow-tail runs")
+        start = report.find(marker)
+        next_start = report.find("<!-- minority-gate-tail:", start + len(marker))
+        block = report[start:next_start if next_start >= 0 else len(report)] if start >= 0 else ""
+        share_text = f"{share:.0f}" if float(share).is_integer() else f"{share:.1f}"
+        if (not block or _fmt_clock(p90) not in block or example not in block
+                or f"~{share_text}% of PRs" not in block):
+            failures.append(f"`{check_name}` stamped tail is not rendered with its p90 and link")
+        if "No saving is credited" not in block:
+            failures.append(f"`{check_name}` tail lacks the no-saving disclosure")
+    return Check(name, not failures,
+                 "; ".join(failures[:6]) if failures
+                 else f"{len(stamped)} minority gate tail(s) re-derived")
+
+
 def run_checks(report, report_path, findings_path, skill_repo, clone=None):
     return [
         check_primary_section_present(report, findings_path),
@@ -14796,6 +14871,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_cost_spine_runner_host_split(report, findings_path),
         check_drill_log_capture_relation(report, findings_path),
         check_no_rate_derived_dollars(report, findings_path),
+        check_minority_gate_tails(report, findings_path),
         check_opt80_tail_lines(report, findings_path),
         check_opt80_tail_withheld_reasons(report, findings_path),
         check_structural_pole_has_measured_step(findings_path),
