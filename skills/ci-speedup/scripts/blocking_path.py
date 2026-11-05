@@ -890,7 +890,9 @@ def _floor_note(pole: dict[str, Any],
     # A shared matrix change lowers every leg together. It remains addressable
     # even when an equal sibling means this one leg alone saves zero; calculate
     # its split from the whole matrix family rather than this leg's winner count.
-    if len(legs) >= 2 and floor_m is not None:
+    if (len(legs) >= 2 and floor_m is not None
+            and not isinstance(pole.get("_chain_member"), dict)
+            and binding_s <= pole_p + 0.5):
         addr_leg = max(pole_p - binding_s, 0.0)
         addr_m = max(pole_p - _binding_floor_s(non_legs, cooccur, gating_n), 0.0)
         matrix_exact = pole.get("_per_pr_matrix_floor")
