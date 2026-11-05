@@ -675,6 +675,44 @@ def test_a_permanently_rate_limited_client_terminates_with_a_disclosed_gap(monke
         "every blocked call is a coverage gap and must be counted")
 
 
+@pytest.mark.parametrize("status", [401, 403])
+def test_mid_run_token_failure_reaches_the_collection_banner(monkeypatch, status):
+    class SerialPool:
+        def map(self, fn, values):
+            return map(fn, values)
+
+    backend = _TwoWorkflowClient()
+    calls = []
+
+    def run(argv, **kwargs):
+        endpoint = argv[-1]
+        calls.append(endpoint)
+        if "/actions/runs/" in endpoint and "/jobs" in endpoint:
+            return subprocess.CompletedProcess(
+                argv, 1, f'HTTP/2 {status} Unauthorized\n\n{{"message":"Bad credentials"}}',
+                f"gh: HTTP {status}")
+        payload = backend.json(endpoint)
+        if isinstance(payload, dict) and "workflows" in payload:
+            payload["workflows"] = payload["workflows"][:1]
+        return subprocess.CompletedProcess(argv, 0, json.dumps(payload), "")
+
+    monkeypatch.setattr(cr, "_fetch_pool", lambda: SerialPool())
+    monkeypatch.setattr(cr.subprocess, "run", run)
+    monkeypatch.setattr(cr.GhClient, "available", lambda self: True)
+    monkeypatch.setattr(cr._RestRateLimiter, "acquire", lambda *args: None)
+    out = cr.collect(_doc(), "o/r", max_runs=5, shallow_runs=5)
+    report = bp.render(out)
+    assert "the GitHub token stopped working partway through" in report
+    assert "5 of 5 job fetches failed" in report
+    assert "Collection FAILED" in report
+    # The token is the named cause; the generic abort clause must not also blame
+    # the stop on rate limits, server errors or timeouts.
+    assert "rate-limit blocks, server errors, or timeouts" not in report
+    assert "marginally fewer runs" not in report
+    assert bp._derived_partial_kind(out["data_sources"]) == "collection_failed"
+    assert sum("/jobs" in endpoint for endpoint in calls) == 3
+
+
 def test_collect_aborts_with_a_disclosed_gap_when_the_breaker_trips(monkeypatch):
     """...and the abort travels all the way to the artifact: `collect()` must bail out
     through the SAME disclosed-coverage-gap path the workflow-list failure uses, not
