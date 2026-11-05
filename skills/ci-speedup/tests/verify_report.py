@@ -13830,6 +13830,7 @@ _VR_LEAF_STEP_CATEGORY: dict[str, str] = {
     "vitest-import-bound": "test",
     "playwright-parallel": "test",
     "pytest-no-xdist": "test",
+    "test-loop-serial": "test",
     "cargo-test-shard": "test",
     "benchmark-serial-reruns": "test",
     "android-emulator-shard": "test",
