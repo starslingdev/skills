@@ -835,6 +835,64 @@ def test_rendered_tauri_shape_passes_the_spine_dropped_verify_gate_end_to_end(tm
         f"a footnote-demoted leg must not be framed on the merge-gating path:\n{line}"
 
 
+def test_dropped_check_gets_one_off_path_framing_and_passes_verify(tmp_path: Path):
+    doc = _doc_one_pole()
+    doc["skill_commit_sha"] = "abc1234"
+    doc["pr_critical_path"]["dropped_non_required_checks"] = ["integration"]
+    doc["findings"] = [{
+        "id": "f1", "pattern": "OPT24", "severity": "HIGH",
+        "title": "Long Test Job Without Sharding",
+        "workflow_file": ".github/workflows/integration.yml", "line": 8,
+        "affected_jobs": ["integration"],
+        "runner_min_saving": 0, "wall_clock_p50_s": 400.0,
+    }]
+
+    out = bp.render(doc)
+    fp = tmp_path / "findings.json"
+    fp.write_text(json.dumps(doc), encoding="utf-8")
+    line = _spine_dropped_check_line(out, fp)
+    assert line.startswith("PASS"), line
+
+    # The whole self-check passes, not just the framing invariant: the report is saveable.
+    import subprocess
+    rp = tmp_path / "report-2026-06-08.md"
+    rp.write_text(out, encoding="utf-8")
+    verify = Path(__file__).resolve().parent / "verify_report.py"
+    res = subprocess.run(
+        [sys.executable, str(verify), "--report", str(rp), "--findings", str(fp)],
+        capture_output=True, text=True)
+    fails = [ln for ln in res.stdout.splitlines() if ln.startswith("FAIL")]
+    assert res.returncode == 0 and not fails, "\n".join(fails) or res.stdout[-2000:]
+
+    appendix = out.split("## 🧹 Also noticed - residual hygiene", 1)[1]
+    assert appendix.count("off the merge-gating critical path, so ~0 developer wall-clock") == 1
+    assert "sits ON the merge-gating critical path" not in appendix
+
+
+def test_dropped_job_does_not_demote_a_finding_that_also_covers_a_kept_job(tmp_path: Path):
+    doc = _doc_one_pole()
+    doc["pr_critical_path"]["dropped_non_required_checks"] = ["integration"]
+    doc["findings"] = [{
+        "id": "f1", "pattern": "OPT24", "severity": "HIGH",
+        "title": "Long Test Job Without Sharding",
+        "workflow_file": ".github/workflows/pipeline.yml", "line": 8,
+        "affected_jobs": ["integration", "tests-web"],
+        "runner_min_saving": 0, "wall_clock_p50_s": 400.0,
+    }]
+
+    out = bp.render(doc)
+    assert not doc["findings"][0].get("off_spine")
+    appendix = out.split("## 🧹 Also noticed - residual hygiene", 1)[1]
+    assert "sits ON the merge-gating critical path" in appendix
+    where = next(line for line in appendix.splitlines() if line.startswith("**Where:**"))
+    assert "tests-web" in where
+    assert "integration" not in where
+    fp = tmp_path / "findings.json"
+    fp.write_text(json.dumps(doc), encoding="utf-8")
+    line = _spine_dropped_check_line(out, fp)
+    assert line.startswith("PASS"), line
+
+
 def test_render_excludes_pole_job_from_also_noticed_appendix():
     # Class A #5: a catalog finding on a job that is ALSO drilled as a long pole must NOT appear in
     # the "Also noticed" off-path appendix (the pole already headlines it as the biggest lever).
