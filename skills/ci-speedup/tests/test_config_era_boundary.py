@@ -344,6 +344,48 @@ def test_engine_renders_post_only_narrowed_note(tmp_path):
     assert chk.ok and not chk.skipped, chk.detail
 
 
+def test_post_only_banner_activates_every_era_guard(tmp_path):
+    """A rendered era banner is the verifier activation stamp even when the current-config fact
+    predates the per-era enumeration sets. All four guards must inspect it instead of reporting a
+    coverage SKIP; deleting the banner must remain detectable."""
+    doc = _era_doc()
+    cp = doc["pr_critical_path"]
+    cp["sampled_pr_count"] = 8
+    cp["era_dropped_pr_count"] = 12
+    cp["config_eras"] = [{
+        "workflow_file": ".github/workflows/ci.yml",
+        "boundary": "2026-07-17T00:00:00Z",
+        "kept_era": "post",
+        "rule": "post_only",
+        "kept_count": 8,
+        "post_count": 8,
+        "pre_count": 12,
+        "sufficiency_min": 6,
+    }]
+    report = bp.render(doc)
+    assert bp._CONFIG_ERA_NARROWED_MARKER in report
+    findings = _write(tmp_path, doc)
+
+    checks = [
+        vr.check_config_era_boundary(report, findings, None),
+        vr.check_era_enumeration_bound(report, findings, None),
+        vr.check_era_disclosure_matches_enumeration(report, findings, None),
+        vr.check_era_chain_spine_bound_to_kept_era(report, findings, None),
+    ]
+    assert all(check.ok and not check.skipped for check in checks), [
+        (check.name, check.ok, check.skipped, check.detail) for check in checks
+    ]
+
+    without_banner = report.replace(bp._CONFIG_ERA_NARROWED_MARKER, "")
+    mutants = [
+        vr.check_config_era_boundary(without_banner, findings, None),
+        vr.check_era_enumeration_bound(without_banner, findings, None),
+        vr.check_era_disclosure_matches_enumeration(without_banner, findings, None),
+        vr.check_era_chain_spine_bound_to_kept_era(without_banner, findings, None),
+    ]
+    assert any(not check.ok and not check.skipped for check in mutants)
+
+
 def test_degenerate_no_pole_render_still_surfaces_the_era_disclosure():
     """Silent-drop guard (issue #66): a straddle is stamped in collect() independent of whether any
     pole is crownable, so `config_eras` can be set while `poles == []` (all-fileless/managed gate).
@@ -748,18 +790,16 @@ def test_enum_bound_guard_passes_when_only_the_kept_era_enumerates(tmp_path):
     assert chk.ok and not chk.skipped, chk.detail
 
 
-def test_enum_bound_guard_skips_a_pre_69_artifact_without_the_enumeration_stamps(tmp_path):
-    """LOUD NARROW SKIP: a straddle stamped by #66/#68 but WITHOUT the #69 `other_era_checks`/
-    `kept_checks` sets — the bind isn't re-derivable, so the guard skips (a coverage gap, not a clean
-    pass) rather than vouching for an artifact it can't check. Matches the live evidence artifact."""
+def test_enum_bound_guard_runs_on_era_fact_without_enumeration_sets(tmp_path):
+    """The renderer recognizes the config-era fact even without later enumeration sets, so the
+    verifier runs too; there are simply no stamped other-era names for this guard to reject."""
     doc = _enum_doc(_disclosed_pre_fact(),
                     [{"name": "test", "workflow_file": _CI, "p50_s": 538.0, "present_on": 8,
                       "pole_n": 8},
                      {"name": "guard shard 3/4", "workflow_file": _CI, "p50_s": 150.0,
                       "present_on": 2, "pole_n": 0}])
     chk = vr.check_era_enumeration_bound("# report\n", _write(tmp_path, doc), None)
-    assert chk.ok and chk.skipped, chk.detail
-    assert "pre-#69" in chk.detail
+    assert chk.ok and not chk.skipped, chk.detail
 
 
 def test_enum_bound_guard_skips_when_no_config_eras(tmp_path):
@@ -1126,15 +1166,13 @@ def test_disclosure_match_guard_passes_on_healthy_disclosed_pre(tmp_path):
     assert chk.ok and not chk.skipped, chk.detail
 
 
-def test_disclosure_match_guard_skips_pre_69_artifact(tmp_path):
-    """LOUD NARROW SKIP: a straddle stamped by #66/#68 but WITHOUT the enumeration sets — the cleared-
-    stamp shape the OLD guard went blind on. Not re-derivable → a coverage gap, not a clean pass."""
+def test_disclosure_match_guard_runs_on_era_fact_without_enumeration_sets(tmp_path):
+    """An era fact activates disclosure verification even when later enumeration sets are absent."""
     doc = _enum_doc(_disclosed_pre_fact(),
                     [{"name": "guard shard 3/4", "workflow_file": _CI, "p50_s": 149.0,
                       "present_on": 2, "pole_n": 0}])
     chk = vr.check_era_disclosure_matches_enumeration("# r\n", _write(tmp_path, doc), None)
-    assert chk.ok and chk.skipped, chk.detail
-    assert "pre-#69/#74" in chk.detail
+    assert chk.ok and not chk.skipped, chk.detail
 
 
 def test_disclosure_match_guard_skips_when_no_straddle(tmp_path):
@@ -1928,14 +1966,14 @@ def test_spine_guard_passes_when_spine_is_scoped_to_kept(tmp_path):
     assert chk.ok and not chk.skipped, chk.detail
 
 
-def test_spine_guard_skips_pre_69_artifact_without_stamps(tmp_path):
-    """LOUD NARROW SKIP: a straddle stamped by #66/#68 but WITHOUT the #69/#74 enumeration sets — the
-    spine bind isn't re-derivable, so the guard skips (coverage gap, not a clean pass)."""
+def test_spine_guard_runs_on_era_fact_without_enumeration_sets(tmp_path):
+    """An era fact activates the spine guard; absent enumeration sets make its dependent legs
+    vacuous but must not turn the rendered era state into a verifier SKIP."""
     doc = _spine_doc(_disclosed_pre_fact(),
                      [{"name": "test", "workflow_file": _CI, "p50_s": 538.0, "present_on": 8}],
                      [], {"n": 0}, sampled_pr_count=8)
     chk = vr.check_era_chain_spine_bound_to_kept_era("# r\n", _write(tmp_path, doc), None)
-    assert chk.ok and chk.skipped, chk.detail
+    assert chk.ok and not chk.skipped, chk.detail
 
 
 def test_spine_guard_skips_when_nothing_straddled(tmp_path):
