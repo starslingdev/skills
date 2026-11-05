@@ -13,6 +13,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-11-05** — Split cache-key guidance by cache contents: dependency stores keep deterministic lockfile keys, while tool-result and build-output caches use a per-run primary key with a compatible `restore-keys` prefix so updated results can be saved after a restore.
 - **2026-11-05** — Surface a descriptive slow-tail finding when a confirmed merge-blocking check takes at least ten minutes at p90 and at least three times its median. The finding states the affected PR share and links an example run without crediting savings; smooth distributions and checks outside the required `needs:` closure stay quiet.
 - **2026-11-05** — Keep file-backed checks whose jobs cannot be identified visible without letting them headline over a confirmed required check or one of its `needs:` dependencies. Their role now says that merge blocking could not be confirmed; reports with an unreadable required set retain their previous ordering.
 - **2026-11-05** — Compute a headline pole's addressable wall-clock saving separately for each sampled PR. Reports now split PRs where a concurrent sibling leaves zero saving from PRs with measured headroom, keep missing sibling observations unknown, and cap the headline at the largest observed per-PR saving.
