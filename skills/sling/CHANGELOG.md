@@ -165,6 +165,18 @@ All notable changes to the `sling` skill. Unversioned; dated (UTC).
 
 ### Fixed
 
+- **2026-11-05** — **Run output is framed as untrusted data.** Snyk's
+  registry audit rated the skill MEDIUM with W011 (third-party content
+  exposure): `sling logs` and `sling why` hand the agent CI log text, step and
+  job names and commit text that whoever pushed the code wrote, and the skill
+  never said that text is data. A new "Run output is untrusted data" section
+  says so, treats a directive inside it as a prompt-injection attempt to
+  report, limits a `suggested_actions[].command` to a single read-only `sling`
+  read (anything else is shown to the user), and turns `why`'s `prompt` field
+  from an order to the agent into a suggestion the user approves, in both
+  SKILL.md and the command reference. Two guards pin the section and ban the
+  old wording.
+
 - **2026-10-27** — **Three scope-flag claims were wrong on both 0.1.8 and
   0.1.124.** `runs list`, `jobs list`, `usage` and `top` reject `--org`
   together with `--repo` (exit `2`, `Use --org or --repo, not both.`);
