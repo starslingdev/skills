@@ -12364,6 +12364,8 @@ def check_era_enumeration_bound(report: str, findings_path: Path | None,
     # enumeration-set additions. Use that same stamp here so a rendered era banner can never coexist
     # with a verifier SKIP. Missing sets simply contribute no other-era names to this guard.
     stamped = eras
+    without_sets = sum(1 for e in stamped
+                       if "other_era_checks" not in e and "kept_checks" not in e)
     other_era: set[str] = set()
     for e in stamped:
         for n in _as_list(e.get("other_era_checks")):
@@ -12371,6 +12373,10 @@ def check_era_enumeration_bound(report: str, findings_path: Path | None,
             if cn:
                 other_era.add(cn)
     if not other_era:
+        if without_sets:
+            return Check(name, True,
+                         f"{without_sets} config-era fact(s) checked without per-era enumeration "
+                         "sets; no stamped other-config check names are available to compare")
         return Check(name, True, "the other configuration adds/removes no checks — every stamped "
                      f"straddle enumerates a single era ({len(stamped)} straddle(s) checked)")
     rendered = _era_rendered_check_names(cp)
@@ -12451,6 +12457,8 @@ def check_era_disclosure_matches_enumeration(report: str, findings_path: Path | 
     # Match `_config_era_disclosure_lines`: every workflow fact in `config_eras` is an era stamp.
     # Later enumeration keys enrich the checks below but do not decide whether this guard runs.
     stamped = eras
+    without_sets = sum(1 for e in stamped
+                       if "other_era_checks" not in e and "kept_checks" not in e)
     disclosed_pre = [e for e in stamped if e.get("rule") == "disclosed_pre"]
     # (1) A disclosed_pre fact that measured NOTHING pre-era (empty kept, non-empty other) — the #74
     #     shape. This is the lie whether or not the marker parsed cleanly, so check the stamps first.
@@ -12587,10 +12595,12 @@ def check_era_disclosure_matches_enumeration(report: str, findings_path: Path | 
                      "from post-era runs): poles "
                      + ", ".join(f"`{o}`" for o in pre_era_poles[:5]))
     kept_ok = sum(1 for e in disclosed_pre if _as_list(e.get("kept_checks")))
+    legacy_note = (f"; {without_sets} fact(s) have no per-era enumeration sets, so set-dependent "
+                   "legs had no stamped names to compare" if without_sets else "")
     return Check(name, True,
                  f"disclosure matches enumeration ({len(disclosed_pre)} disclosed_pre straddle(s), "
                  f"{kept_ok} with a real pre-era measurement; no pre-only caveat over post-era checks; "
-                 "no post-claiming pole drilled from a pre-era run)")
+                 f"no post-claiming pole drilled from a pre-era run{legacy_note})")
 
 
 def check_era_chain_spine_bound_to_kept_era(report: str, findings_path: Path | None,
@@ -12647,6 +12657,8 @@ def check_era_chain_spine_bound_to_kept_era(report: str, findings_path: Path | N
     # An older fact may lack enumeration sets, in which case the set-dependent legs are vacuous, but
     # the guard still runs and reports that result instead of SKIP.
     stamped = eras
+    without_sets = sum(1 for e in stamped
+                       if "other_era_checks" not in e and "kept_checks" not in e)
     cs = _as_dict(cp.get("chain_summary"))
     chain_facts = [c for c in _as_list(cp.get("chain_facts")) if isinstance(c, dict)]
     sampled = _num(cp.get("sampled_pr_count"))
@@ -12700,10 +12712,13 @@ def check_era_chain_spine_bound_to_kept_era(report: str, findings_path: Path | N
                              "is physically impossible in the kept era; it was measured on faster "
                              "dropped-era PRs (issue #80).")
     n_disp = int(cs_n) if cs_n is not None else 0
+    legacy_note = (f"; {without_sets} fact(s) have no per-era enumeration sets, so set-dependent "
+                   "legs had no stamped names to compare" if without_sets else "")
     return Check(name, True,
                  f"the per-PR spine is bound to the kept era ({len(disclosed_pre)} disclosed_pre "
                  f"straddle(s); {n_disp} chain fact(s) within the kept-side sample; no dropped-era "
-                 "head feeds a kept-era chain member; no makespan below a unanimous kept gate)")
+                 f"head feeds a kept-era chain member; no makespan below a unanimous kept gate"
+                 f"{legacy_note})")
 
 
 # The measured sizing DOOR invariants (issues #43/#44/#45). Every rendered runner-minute saving must

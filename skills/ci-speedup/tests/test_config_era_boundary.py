@@ -800,6 +800,7 @@ def test_enum_bound_guard_runs_on_era_fact_without_enumeration_sets(tmp_path):
                       "present_on": 2, "pole_n": 0}])
     chk = vr.check_era_enumeration_bound("# report\n", _write(tmp_path, doc), None)
     assert chk.ok and not chk.skipped, chk.detail
+    assert "without per-era enumeration sets" in chk.detail
 
 
 def test_enum_bound_guard_skips_when_no_config_eras(tmp_path):
@@ -1173,6 +1174,7 @@ def test_disclosure_match_guard_runs_on_era_fact_without_enumeration_sets(tmp_pa
                       "present_on": 2, "pole_n": 0}])
     chk = vr.check_era_disclosure_matches_enumeration("# r\n", _write(tmp_path, doc), None)
     assert chk.ok and not chk.skipped, chk.detail
+    assert "no per-era enumeration sets" in chk.detail
 
 
 def test_disclosure_match_guard_skips_when_no_straddle(tmp_path):
@@ -1974,6 +1976,7 @@ def test_spine_guard_runs_on_era_fact_without_enumeration_sets(tmp_path):
                      [], {"n": 0}, sampled_pr_count=8)
     chk = vr.check_era_chain_spine_bound_to_kept_era("# r\n", _write(tmp_path, doc), None)
     assert chk.ok and not chk.skipped, chk.detail
+    assert "no per-era enumeration sets" in chk.detail
 
 
 def test_spine_guard_skips_when_nothing_straddled(tmp_path):
