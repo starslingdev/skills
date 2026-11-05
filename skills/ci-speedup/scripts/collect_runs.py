@@ -27513,8 +27513,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             and any(p.get("required_reachable") is False for p in candidates)):
         # The old crown can be a conservative cat-3 keep that happens to be slower.
         # Align the data stamp with the renderer's first confirmed merge-blocking pole.
-        cp["critical_path_check"] = str(drill_poles[0].get("check") or "")
-        cp["critical_path_s"] = float(drill_poles[0].get("p50_s") or 0.0)
+        critical_path = findings_doc["pr_critical_path"]
+        critical_path["critical_path_check"] = str(drill_poles[0].get("check") or "")
+        critical_path["critical_path_s"] = float(drill_poles[0].get("p50_s") or 0.0)
     # Retain the same candidate context for aggregation inheritance and matrix
     # representatives when the report selects its five sections later.
     poles = candidates
