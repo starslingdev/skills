@@ -11586,6 +11586,21 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
     fileless = sorted((p for p in poles if not _is_file_pole(p)),
                       key=lambda p: -_gatef(p))
 
+    # A required-scoped collector can retain a conservative cat-3 pole when it cannot map the
+    # check back to a workflow job.  Keep that pole visible, but do not let it define merge-wait
+    # claims once another pole is positively known to be required-reachable.  No stamps means the
+    # required set was unreadable, so the legacy ordering and headline inputs remain unchanged.
+    _have_confirmed_required_pole = any(
+        p.get("required_reachable") is True for p in poles)
+    _unconfirmed_required_names = {
+        str(p.get("check", "")) for p in poles
+        if p.get("required_reachable") is False
+    } if _have_confirmed_required_pole else set()
+    _headline_poles = [
+        p for p in poles
+        if str(p.get("check", "")) not in _unconfirmed_required_names
+    ] if _unconfirmed_required_names else poles
+
     # The HEADLINE gate = what most PRs actually wait on. Compare the most-gating
     # workflow against the most-gating fileless check by FREQUENCY, not duration.
     top_wf_freq = wf_gate.get(str(pole_wfs[0].get("workflow_file", "")), 0) if pole_wfs else 0
@@ -11595,7 +11610,8 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
     elif npop and fileless and top_fl_freq > top_wf_freq:
         blocker = fileless[0]
     else:
-        blocker = poles[0]  # no frequency data → slowest, as before
+        blocker = _headline_poles[0]
+        # With no reachability stamps this remains the old no-frequency fallback: the slowest pole.
     blocker_is_file = _is_file_pole(blocker)
     # `merge_dur` ("X until all checks finish") is the wall-clock FLOOR = max p50 over the
     # concurrent set, NOT the frequency-selected gate's own p50. Computed below, once `src`
@@ -11607,6 +11623,10 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
     # The visualization shows the typical PR; the minority giants are a footnote so
     # they never read as "what the merge always waits on".
     checks = cp.get("checks") or []
+    headline_checks = [
+        c for c in checks
+        if str(c.get("name", "")) not in _unconfirmed_required_names
+    ] if _unconfirmed_required_names else checks
 
     def _present(name: str) -> int:
         return present.get(name, 0)
@@ -11616,12 +11636,12 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
     # disagree with which pole headlines — especially on a small-sample fallback where a bare
     # `present > npop*0.5` would demote a check the data layer (and `_pole_typical`) kept.
     if npop >= _RARE_PRESENCE_MIN_PR:
-        typical = [c for c in checks if _typical_check(str(c.get("name", "")))]
-        minority_slow = [c for c in checks
+        typical = [c for c in headline_checks if _typical_check(str(c.get("name", "")))]
+        minority_slow = [c for c in headline_checks
                          if not _typical_check(str(c.get("name", "")))
                          and (_num(c.get("p50_s")) or 0) > (_num(blocker.get("p50_s")) or 0)]
     else:
-        typical, minority_slow = list(checks), []
+        typical, minority_slow = list(headline_checks), []
     typical.sort(key=lambda c: -(_num(c.get("p50_s")) or 0.0))
     minority_slow.sort(key=lambda c: -(_num(c.get("p50_s")) or 0.0))
     # Distinguish a rare FILE pole (a label-gated / conditional workflow job — fixable, just
@@ -11666,10 +11686,11 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
     # the poles. This is the VISUALIZATION set — it must stay the typical PR's checks.
     if typical:
         src: list[dict[str, Any]] = typical
-    elif checks:
-        src = sorted(checks, key=lambda c: -(_num(c.get("p50_s")) or 0.0))
-    else:  # no per-check list (minimal/static doc) - fall back to the poles
-        src = [{"name": p.get("check"), "p50_s": p.get("p50_s")} for p in poles]
+    elif headline_checks:
+        src = sorted(headline_checks, key=lambda c: -(_num(c.get("p50_s")) or 0.0))
+    else:  # no per-check list (minimal/static doc) - fall back to headline-eligible poles
+        src = [{"name": p.get("check"), "p50_s": p.get("p50_s")}
+               for p in _headline_poles]
 
     # The FLOOR-candidate pool — DISTINCT from `src` (Class A #6). A pole's addressable ceiling
     # floors against the slowest OTHER check that co-occurs with it on a majority of its OWN gating
@@ -11677,10 +11698,12 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
     # is heavy but runs on a MINORITY of PRs (so it's not in the typical-PR `src`) — e.g. lightdash
     # `E2E: API (Vitest)` (13m, on ~50% of PRs) genuinely caps `Deploy Preview`. Restricting the
     # floor pool to `src` (typical) hid such a check from the floor math: the ceiling overstated AND
-    # the heavy check was disclosed nowhere on the spine. So the floor pool is the FULL concurrent
-    # set; the co-occurrence filter still gates which qualify, so a rare non-co-occurring check can't
-    # inflate the floor. `src` stays the typical-PR chart; the two roles are no longer conflated.
-    floor_pool = sorted(checks, key=lambda c: -(_num(c.get("p50_s")) or 0.0)) if checks else src
+    # the heavy check was disclosed nowhere on the spine. So the floor pool is the full concurrent
+    # set that can be confirmed required-reachable; the co-occurrence filter still gates which
+    # qualify, so a rare non-co-occurring check can't inflate the floor. `src` stays the typical-PR
+    # chart; the two roles are no longer conflated.
+    floor_pool = (sorted(headline_checks, key=lambda c: -(_num(c.get("p50_s")) or 0.0))
+                  if headline_checks else src)
 
     gate_check = _clean_label(str(blocker.get("check", "")))
     nwf = len(pole_wfs)

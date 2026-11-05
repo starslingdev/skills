@@ -6054,6 +6054,10 @@ def test_confirmed_required_need_headlines_before_faster_unpinnable_keep():
             {"name": "mystery matrix", "p50_s": 500.0, "present_on": 20},
             {"name": "unit", "p50_s": 300.0, "present_on": 20},
         ],
+        "populations": [
+            [1.0, [["mystery matrix", 500.0], ["unit", 300.0]]]
+            for _ in range(20)
+        ],
         "poles": [
             {"check": "mystery matrix", "p50_s": 500.0,
              "workflow_file": ".github/workflows/mystery.yml", "job": "mystery matrix",
@@ -6070,6 +6074,9 @@ def test_confirmed_required_need_headlines_before_faster_unpinnable_keep():
     report = bp.render(doc, {}, {}, {}, "2026-11-05")
     assert "Long pole 1: `ci.yml` ▸ `unit`" in report
     assert "Could not confirm this check blocks merging" in report
+    headline = next(line for line in report.splitlines() if "until all checks finish" in line)
+    assert "`unit` is the slowest check a typical PR waits on" in headline
+    assert "mystery matrix" not in headline
 
     # An unreadable required set has no reachability stamps and keeps the old order.
     unreadable = _doc_one_pole()
