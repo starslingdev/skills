@@ -10598,6 +10598,7 @@ _CONFIG_ERA_NARROWED_MARKER = "narrowed to the current configuration"
 # FAILs too, and the direct-contradiction guard uses it to prove a pre-only disclosure never renders
 # over a post_only_thin (all-post) measurement.
 _CONFIG_ERA_THIN_MARKER = "treat these numbers as provisional"
+_RUNNER_LABEL_ERA_MARKER = "runner labels changed within the sample"
 # The marker the enumeration-binding clause carries when the OTHER configuration adds/removes
 # checks that this single-era report does not enumerate (issue #69). `verify_report`'s
 # check_era_enumeration_bound re-derives the bind from the stamped `other_era_checks`; this literal
@@ -10704,11 +10705,29 @@ def _config_era_disclosure_lines(cp: dict[str, Any], captured_at: str = "") -> l
         a loud ⚠️ line carrying `_CONFIG_ERA_THIN_MARKER` (provisional numbers).
       * `post_only` — the audit narrowed to the current config: a lighter note that the
         earlier (retired-config) runs were excluded so no drill-down blends the two."""
-    eras = [e for e in (cp.get("config_eras") or [])
-            if isinstance(e, dict) and e.get("workflow_file")]
-    if not eras:
+    stamped = [e for e in (cp.get("config_eras") or [])
+               if isinstance(e, dict) and e.get("workflow_file")]
+    if not stamped:
         return []
+    runner_eras = [e for e in stamped if e.get("rule") == "runner_label_change"]
+    eras = [e for e in stamped if e.get("rule") != "runner_label_change"]
     out: list[str] = []
+    for e in runner_eras:
+        counts = [x for x in (e.get("runner_label_counts") or [])
+                  if isinstance(x, dict) and x.get("label")]
+        if len(counts) != 2:
+            continue
+        wf = _clean_label(str(e.get("workflow_file") or ""))
+        job = _clean_label(str(e.get("job") or "gate"))
+        first, second = counts
+        out += [
+            f"> **`{wf}` / `{job}` {_RUNNER_LABEL_ERA_MARKER}.** The identical-workflow sample "
+            f"contains `{_clean_label(str(first['label']))}` "
+            f"({int(_num(first.get('count')) or 0)} runs) followed by "
+            f"`{_clean_label(str(second['label']))}` "
+            f"({int(_num(second.get('count')) or 0)} runs); the audit keeps both populations and "
+            "discloses the runner-era split rather than treating them as one configuration.",
+            ""]
     for e in eras:
         if e.get("rule") != "disclosed_pre":
             continue
@@ -10805,7 +10824,8 @@ def _bill_scope_era_note(doc: dict[str, Any]) -> list[str]:
     (`pr_critical_path.config_eras` non-empty); [] otherwise (byte-identical no-op)."""
     cp = doc.get("pr_critical_path") or {}
     eras = [e for e in (cp.get("config_eras") or [])
-            if isinstance(e, dict) and e.get("workflow_file")]
+            if isinstance(e, dict) and e.get("workflow_file")
+            and e.get("rule") != "runner_label_change"]
     if not eras:
         return []
     return [
