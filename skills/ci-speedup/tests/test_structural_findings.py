@@ -2281,6 +2281,161 @@ def test_reusable_workflow_slash_name_still_resolves_to_the_caller_converse():
     assert cr._check_to_job_node("Suite", jg, {}) == (".github/workflows/ci.yml", "suite")
 
 
+def test_nested_reusable_matrix_checks_resolve_to_the_leaf_workflow():
+    """GitHub prefixes every reusable caller to a leaf check name.
+
+    A two-level call therefore publishes ``tests / shards / unit (N)`` even
+    though the editable matrix template lives in ``shards.yml`` as
+    ``unit (${{ matrix.shard }})``.  All legs must stay file-backed; the bare
+    leaf names remain the single-level control, while a foreign app check does
+    not acquire a workflow merely because reusable callers exist.
+    """
+    caller = ".github/workflows/caller.yml"
+    suite = ".github/workflows/suite.yml"
+    shards = ".github/workflows/shards.yml"
+    graph = {
+        caller: {
+            "tests": {"name": "tests", "needs": [], "reusable": True,
+                      "matrix": False, "uses": "./.github/workflows/suite.yml"},
+        },
+        suite: {
+            "shards": {"name": "shards", "needs": [], "reusable": True,
+                       "matrix": False, "uses": "./.github/workflows/shards.yml"},
+        },
+        shards: {
+            "unit": {"name": "unit (${{ matrix.shard }})", "needs": [],
+                     "reusable": False, "matrix": True},
+        },
+    }
+    crit = {shards: {"job_p50": {
+        f"tests / shards / unit ({leg})": 300.0 + leg for leg in range(1, 5)
+    }}}
+
+    for leg in range(1, 5):
+        nested = f"tests / shards / unit ({leg})"
+        assert cr._check_to_job_node_scanned(nested, graph) == (shards, "unit")
+        assert cr._check_to_job_node(nested, graph, crit) == (shards, "unit")
+        assert cr._check_to_workflow_file_static(nested, graph) == shards
+
+        bare = f"unit ({leg})"
+        assert cr._check_to_job_node_scanned(bare, graph) == (shards, "unit")
+        assert cr._check_to_workflow_file_static(bare, graph) == shards
+
+    assert cr._check_to_job_node_scanned("external review", graph) is None
+    assert cr._check_to_workflow_file_static("external review", graph) is None
+
+    # A remote call must not borrow the coincidentally named local leaf.
+    graph[caller]["tests"]["uses"] = "other/project/.github/workflows/suite.yml@main"
+    assert cr._check_to_job_node_scanned("tests / shards / unit (1)", graph) is None
+    graph[caller]["tests"]["uses"] = "./.github/workflows/suite.yml"
+    graph[suite]["shards"]["uses"] = "./.github/workflows/caller.yml"
+    assert cr._check_to_job_node_scanned("tests / shards / unit (1)", graph) is None
+
+
+def test_nested_leaf_keeps_distinct_caller_identity_for_required_reachability():
+    caller = ".github/workflows/caller.yml"
+    leaf = ".github/workflows/leaf.yml"
+    graph = {
+        caller: {
+            "tests": {"name": "tests", "needs": [], "reusable": True,
+                      "uses": "./.github/workflows/leaf.yml"},
+            "optional": {"name": "optional", "needs": [], "reusable": True,
+                         "uses": "./.github/workflows/leaf.yml"},
+        },
+        leaf: {
+            "unit": {"name": "unit", "needs": [], "reusable": False},
+        },
+    }
+    required = "tests / unit"
+    optional = "optional / unit"
+
+    assert cr._required_reachable_checks(
+        [required, optional], {required}, graph, {}) == {required}
+    assert cr._pole_is_required_reachable(required, {required}, graph, {}) is True
+    assert cr._pole_is_required_reachable(optional, {required}, graph, {}) is False
+
+
+def test_nested_remote_caller_blocks_a_leading_placeholder_leaf_claim():
+    root = ".github/workflows/root.yml"
+    child = ".github/workflows/child.yml"
+    graph = {
+        root: {
+            "suite": {"name": "Suite", "needs": [], "reusable": True,
+                      "uses": "./.github/workflows/child.yml"},
+        },
+        child: {
+            "remote": {"name": "Remote", "needs": [], "reusable": True,
+                       "uses": "other/project/.github/workflows/build.yml@main"},
+            "local": {"name": "${{ matrix.os }} / build", "needs": [],
+                      "reusable": False, "matrix": True},
+        },
+    }
+
+    assert cr._check_to_job_node_scanned("Suite / Remote / build", graph) is None
+    assert cr._check_to_workflow_file_static("Suite / Remote / build", graph) is None
+    assert cr._check_to_job_node_scanned("Suite / linux / build", graph) == (child, "local")
+
+
+def test_scan_preserves_local_reusable_edges_for_nested_check_attribution():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("attribution_scan", _SCRIPTS / "scan.py")
+    scan = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = scan
+    spec.loader.exec_module(scan)
+    caller = ".github/workflows/caller.yml"
+    suite = ".github/workflows/suite.yml"
+    shards = ".github/workflows/shards.yml"
+    parsed = [
+        (caller, {"on": "pull_request", "jobs": {
+            "tests": {"uses": "./" + suite}}}, ""),
+        (suite, {"on": "workflow_call", "jobs": {
+            "shards": {"uses": "./" + shards}}}, ""),
+        (shards, {"on": "workflow_call", "jobs": {
+            "unit": {"name": "unit (${{ matrix.shard }})",
+                     "strategy": {"matrix": {"shard": [1, 2, 3, 4]}}}}}, ""),
+    ]
+    graph = scan._build_workflow_job_graph(parsed)
+    checks = [f"tests / shards / unit ({leg})" for leg in range(1, 5)]
+    paths = [cr._check_to_workflow_file_static(check, graph) for check in checks]
+    assert paths == [shards] * 4
+    graph[caller]["merge-gate"] = {"name": "merge-gate", "needs": ["tests"]}
+    assert cr._required_reachable_checks(checks, {"merge-gate"}, graph, {}) == set(checks)
+    graph[caller]["prepare"] = {"name": "prepare", "needs": []}
+    graph[caller]["tests"]["needs"] = ["prepare"]
+    assert "prepare" in cr._required_reachable_checks(
+        ["prepare", *checks], {checks[0]}, graph, {})
+    doc = _guard_shard_doc([], [])
+    cp = doc["pr_critical_path"]
+    cp["checks"] = [{"name": check, "workflow_file": path,
+                      "p50_s": 300.0, "present_on": 3}
+                     for check, path in zip(checks, paths)]
+    cp["poles"] = [{"check": check, "job": check, "workflow_file": path,
+                     "p50_s": 300.0, "steps": [{"step": "test", "category": "test",
+                                               "p50_s": 300.0}]}
+                    for check, path in zip(checks, paths)]
+    rendered = bp.render(doc)
+    assert all(check in rendered for check in checks)
+    assert "external / AI review" not in rendered
+
+
+def test_local_reusable_attribution_is_bounded_and_uses_actual_edges():
+    graph = {}
+    for i in range(18):
+        wf = f".github/workflows/w{i}.yml"
+        graph[wf] = {f"call{i}": {"name": f"call{i}", "reusable": True,
+                                  "uses": f"./.github/workflows/w{i + 1}.yml"}}
+    leaf = ".github/workflows/w16.yml"
+    graph[leaf]["unit"] = {"name": "unit", "reusable": False}
+    check = " / ".join([f"call{i}" for i in range(16)] + ["unit"])
+    assert cr._check_to_workflow_file_static(check, graph) == leaf
+    graph[".github/workflows/w17.yml"]["unit"] = {"name": "unit", "reusable": False}
+    too_deep = " / ".join([f"call{i}" for i in range(17)] + ["unit"])
+    assert cr._check_to_workflow_file_static(too_deep, graph) is None
+    # A missing edge cannot be filled in by finding a similarly named job.
+    graph[".github/workflows/w0.yml"]["call0"]["uses"] = "./.github/workflows/missing.yml"
+    assert cr._check_to_workflow_file_static(check, graph) is None
+
+
 def test_plain_name_without_slash_resolves_unchanged():
     # A plain check with NO `" / "` is untouched by the reorder: it resolves via the
     # sampled-timing anchor exactly as before.
