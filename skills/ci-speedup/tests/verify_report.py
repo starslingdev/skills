@@ -38,6 +38,7 @@ when the bug genuinely cannot be expressed as a re-derivation property.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import math
@@ -3591,6 +3592,102 @@ def _vr_gate_counts(cp: dict) -> tuple[dict, int]:
     return present, n
 
 
+def _verify_per_pr_floor_split(name: str, report: str, cp: dict) -> Check | None:
+    """Independently re-derive a rendered per-PR sibling-floor split.
+
+    Returns None when the report has no such claim. This deliberately reads
+    only the sampled populations and the stamped critical-path check; it does
+    not trust the renderer's aggregate candidates or a finding's prose.
+    """
+    if "Per-PR split:" not in report:
+        return None
+    stamp = str(cp.get("critical_path_check") or "")
+    if not stamp:
+        return Check(name, False, "rendered per-PR split has no critical_path_check stamp")
+    target = _cmp_name(stamp)
+    targets = {target}
+    if "change that speeds *every* leg at once" in report:
+        stamp_wf = ""
+        for check in _as_list(cp.get("checks")):
+            if isinstance(check, dict) and _cmp_name(str(check.get("name") or "")) == target:
+                stamp_wf = str(check.get("workflow_file") or "")
+                break
+        base = re.sub(r"\s*\([^)]*\)\s*$", "", target)
+        for check in _as_list(cp.get("checks")):
+            if not isinstance(check, dict) or str(check.get("workflow_file") or "") != stamp_wf:
+                continue
+            candidate = _cmp_name(str(check.get("name") or ""))
+            if re.sub(r"\s*\([^)]*\)\s*$", "", candidate) == base:
+                targets.add(candidate)
+    rows: list[tuple[float, str]] = []
+    unknown_n = 0
+    total_n = 0
+    for entry in _as_list(cp.get("populations")):
+        try:
+            _share, checks = entry
+            positive = [(str(check), float(duration)) for check, duration in checks
+                        if float(duration) > 0]
+        except (TypeError, ValueError):
+            continue
+        own = [duration for check, duration in positive if _cmp_name(check) in targets]
+        if not own:
+            if positive:
+                sibling, floor_s = max(positive, key=lambda item: item[1])
+                total_n += 1
+                rows.append((0.0, sibling))
+            continue
+        total_n += 1
+        siblings = [(check, duration) for check, duration in positive
+                    if _cmp_name(check) not in targets]
+        if not siblings:
+            unknown_n += 1
+            continue
+        sibling, floor_s = max(siblings, key=lambda item: item[1])
+        rows.append((max(max(own) - floor_s, 0.0), sibling))
+    if total_n <= 0:
+        return Check(name, False,
+                     "rendered per-PR split has no usable population containing its pole")
+    expected: list[str] = []
+    zero = [(saving, sibling) for saving, sibling in rows if saving <= 0]
+    positive = [(saving, sibling) for saving, sibling in rows if saving > 0]
+    if zero:
+        blockers = {_strip_scope(sibling) for _saving, sibling in zero}
+        blockers.discard("")
+        where = (f" where `{next(iter(blockers))}` runs"
+                 if len(blockers) == 1 else " where another check runs longer")
+        expected.append(f"0 on {len(zero)} of {total_n} PRs{where}")
+    if positive:
+        by_cap: dict[float, int] = {}
+        for saving, _sibling in positive:
+            cap = round(saving, 1)
+            by_cap[cap] = by_cap.get(cap, 0) + 1
+        for cap, count in sorted(by_cap.items()):
+            other = "the other " if zero and len(zero) + count == total_n else ""
+            expected.append(
+                f"up to {_fmt_clock(cap)} on {other}{count} of {total_n} PRs")
+    if unknown_n:
+        expected.append(
+            f"unknown on {unknown_n} of {total_n} PRs with a missing sibling observation")
+    missing = [claim for claim in expected if claim not in report]
+    if missing:
+        return Check(name, False,
+                     "per-PR sibling-floor split disagrees with populations; missing: "
+                     + "; ".join(missing))
+    max_saving = max((saving for saving, _sibling in rows), default=0.0)
+    bottom = next((line for line in report.splitlines() if "**Bottom line.**" in line), "")
+    match = _HEADLINE_WIN_RE.search(bottom)
+    rendered = _parse_clock_to_s(match.group(1)) if match else None
+    if rendered is None:
+        return Check(name, False, "per-PR split rendered without a parseable Bottom-line win")
+    if rendered > max_saving + 0.5:
+        return Check(name, False,
+                     f"Bottom-line win {_fmt_clock(rendered)} exceeds the independently re-derived "
+                     f"maximum per-PR saving {_fmt_clock(max_saving)}")
+    return Check(name, True,
+                 f"per-PR split matches {total_n} sampled populations and Bottom-line "
+                 f"{_fmt_clock(rendered)} <= maximum {_fmt_clock(max_saving)}")
+
+
 def _rare_demoted_check_names(data: dict) -> set[str]:
     """The set of `_cmp_name`-normalized check names the spine demotes as OPT-IN / RARE — the
     exact class whose level-1 footnote reads "a typical PR doesn't wait on it" — re-derived from
@@ -4066,6 +4163,9 @@ def check_headline_floor_presence_reconciled(report: str, findings_path: Path | 
     except (OSError, json.JSONDecodeError):
         return Check(name, True, "findings unreadable", skipped=True)
     cp = _as_dict(_as_dict(data).get("pr_critical_path"))
+    split_check = _verify_per_pr_floor_split(name, report, cp)
+    if split_check is not None:
+        return split_check
     stamp = cp.get("critical_path_check")
     # A non-string / empty stamp is a malformed or stampless bundle — degrade to the SAME SKIP as an
     # empty findings container (the wrong-type-container degradation contract), never a spurious FAIL.
@@ -13151,6 +13251,13 @@ def check_headline_cluster_lever_on_spine(report: str, findings_path: Path | Non
         # chain or pole win the crown sentence names instead / no tilde-win) — the renderer's off-spine drop, or a genuine
         # burial (the sibling guard's target). Not this guard's crown to judge → LOUD narrow skip
         # (L8: never read clean on an unverifiable crown).
+        split_check = _verify_per_pr_floor_split(
+            name, report, _as_dict(data.get("pr_critical_path")))
+        if split_check is not None:
+            if best_f.get("off_spine") is True:
+                return Check(name, False,
+                             f"per-PR floor is bounded, but OPT73 `{wf}` is stamped off_spine")
+            return split_check
         return Check(name, True,
                      f"the max credited cluster lever (OPT73 `{wf}`, ~{_fmt_clock(best_s)}) does not "
                      "lead the Bottom line (demoted/buried/outranked or no `~<clock>` win) — no "
@@ -14629,6 +14736,80 @@ def check_no_rate_derived_dollars(report: str, findings_path: Path | None = None
     return Check(name, True, "no rate-derived dollar tokens on the minutes surfaces")
 
 
+def check_minority_gate_tails(report: str, findings_path: Path | None = None) -> Check:
+    """Re-derive every required-check tail from its stamped observations."""
+    name = "minority slow tails on merge-blocking checks are re-derived"
+    if findings_path is None or not Path(findings_path).exists():
+        return Check(name, True, "no findings JSON", skipped=True)
+    try:
+        data = _as_dict(json.loads(Path(findings_path).read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError):
+        return Check(name, True, "findings JSON is unreadable", skipped=True)
+    cp = _as_dict(data.get("pr_critical_path"))
+    stamped = [
+        (str(c.get("name") or ""), _as_dict(c.get("minority_tail")))
+        for c in _as_list(cp.get("checks"))
+        if isinstance(c, dict) and isinstance(c.get("minority_tail"), dict)
+    ]
+    if not stamped:
+        return Check(name, True, "no minority gate tails stamped", skipped=True)
+    if not cp.get("spine_required_scoped"):
+        return Check(name, False,
+                     "a minority tail is stamped outside a confirmed required/needs closure")
+
+    def percentile(values: list[float], pct: float) -> float:
+        values = sorted(values)
+        k = (len(values) - 1) * pct / 100.0
+        lo, hi = int(k), min(int(k) + 1, len(values) - 1)
+        return values[lo] + (values[hi] - values[lo]) * (k - lo)
+
+    failures: list[str] = []
+    for check_name, tail in stamped:
+        observations = [
+            (_num(row.get("duration_s")), str(row.get("url") or ""))
+            for row in _as_list(tail.get("observations"))
+            if isinstance(row, dict) and _num(row.get("duration_s")) is not None
+        ]
+        durations = [float(d) for d, _url in observations if d is not None and d > 0]
+        if not durations:
+            failures.append(f"`{check_name}` has no positive stamped observations")
+            continue
+        p50 = percentile(durations, 50)
+        p90 = percentile(durations, 90)
+        slow = [(d, url) for d, url in observations if d is not None and d >= p90]
+        share = 100.0 * len(slow) / len(durations)
+        example = str(tail.get("example_url") or "")
+        clean_name = _strip_scope(check_name)
+        marker_id = re.sub(r"[^A-Za-z0-9._-]+", "-", clean_name).strip("-") or "check"
+        if marker_id != clean_name:
+            marker_id += "-" + hashlib.sha256(clean_name.encode("utf-8")).hexdigest()[:8]
+        marker = f"<!-- minority-gate-tail:{marker_id} -->"
+        if p90 < 600.0 or p90 < 3.0 * p50:
+            failures.append(f"`{check_name}` does not meet the p90 tail threshold")
+        if abs((_num(tail.get("p50_s")) or 0.0) - p50) > 0.11:
+            failures.append(f"`{check_name}` p50 stamp drifted from observations")
+        if abs((_num(tail.get("p90_s")) or 0.0) - p90) > 0.11:
+            failures.append(f"`{check_name}` p90 stamp drifted from observations")
+        if int(_num(tail.get("tail_n")) or 0) != len(slow):
+            failures.append(f"`{check_name}` tail count drifted from observations")
+        if abs((_num(tail.get("tail_share_pct")) or 0.0) - share) > 0.11:
+            failures.append(f"`{check_name}` tail share drifted from observations")
+        if not example or example not in {url for _d, url in slow if url}:
+            failures.append(f"`{check_name}` example is not one of its slow-tail runs")
+        start = report.find(marker)
+        next_start = report.find("<!-- minority-gate-tail:", start + len(marker))
+        block = report[start:next_start if next_start >= 0 else len(report)] if start >= 0 else ""
+        share_text = f"{share:.0f}" if float(share).is_integer() else f"{share:.1f}"
+        if (not block or _fmt_clock(p90) not in block or example not in block
+                or f"~{share_text}% of PRs" not in block):
+            failures.append(f"`{check_name}` stamped tail is not rendered with its p90 and link")
+        if "No saving is credited" not in block:
+            failures.append(f"`{check_name}` tail lacks the no-saving disclosure")
+    return Check(name, not failures,
+                 "; ".join(failures[:6]) if failures
+                 else f"{len(stamped)} minority gate tail(s) re-derived")
+
+
 def run_checks(report, report_path, findings_path, skill_repo, clone=None):
     return [
         check_primary_section_present(report, findings_path),
@@ -14690,6 +14871,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_cost_spine_runner_host_split(report, findings_path),
         check_drill_log_capture_relation(report, findings_path),
         check_no_rate_derived_dollars(report, findings_path),
+        check_minority_gate_tails(report, findings_path),
         check_opt80_tail_lines(report, findings_path),
         check_opt80_tail_withheld_reasons(report, findings_path),
         check_structural_pole_has_measured_step(findings_path),

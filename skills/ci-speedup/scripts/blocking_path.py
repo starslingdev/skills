@@ -24,6 +24,7 @@ raw log (`--log`), so level-2 and the drill stay on one coherent run. Without a
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import math
@@ -638,6 +639,66 @@ def _pole_cooccurrence(cp: dict[str, Any], pole_name: str) -> tuple[dict[str, in
     return cooccur, n_gating
 
 
+def _pole_per_pr_floor(cp: dict[str, Any], pole_name: str,
+                       own_names: set[str] | None = None) -> dict[str, Any] | None:
+    """Exact sibling-floor evidence for ``pole_name`` from sampled PR populations.
+
+    Each known row carries the observed pole duration, longest sibling, and the
+    resulting maximum single-pole saving.  A row where the pole ran without any
+    sibling is retained as unknown: absence is not evidence that the full pole
+    duration is addressable.  ``None`` preserves legacy behavior when no usable
+    populations contain the pole.
+    """
+    targets = {_floor_key(name) for name in (own_names or {pole_name})}
+    rows: list[dict[str, Any]] = []
+    unknown_n = 0
+    total_n = 0
+    for entry in cp.get("populations") or []:
+        try:
+            _share, checks = entry
+            positive = [(str(name), float(duration)) for name, duration in checks
+                        if float(duration) > 0]
+        except (TypeError, ValueError):
+            continue
+        own = [duration for name, duration in positive if _floor_key(name) in targets]
+        if not own:
+            # The change has no work on this sampled PR, so its saving is known
+            # zero. Keep it in the denominator rather than silently shrinking
+            # the sample to PRs where the pole happened to run.
+            if positive:
+                sibling, floor_s = max(positive, key=lambda item: item[1])
+                total_n += 1
+                rows.append({
+                    "saving_s": 0.0,
+                    "sibling": sibling,
+                    "floor_s": floor_s,
+                    "before_s": 0.0,
+                })
+            continue
+        total_n += 1
+        siblings = [(name, duration) for name, duration in positive
+                    if _floor_key(name) not in targets]
+        if not siblings:
+            unknown_n += 1
+            continue
+        sibling, floor_s = max(siblings, key=lambda item: item[1])
+        before_s = max(own)
+        rows.append({
+            "saving_s": max(before_s - floor_s, 0.0),
+            "sibling": sibling,
+            "floor_s": floor_s,
+            "before_s": before_s,
+        })
+    if total_n <= 0:
+        return None
+    return {
+        "total_n": total_n,
+        "unknown_n": unknown_n,
+        "rows": rows,
+        "max_saving_s": max((float(row["saving_s"]) for row in rows), default=0.0),
+    }
+
+
 def _floor_qualifies(c: dict[str, Any], cooccur: dict[str, int] | None, gating_n: int,
                      denom: int) -> bool:
     """Is concurrent check `c` 'near-universal' enough to FLOOR the merge? With per-pole
@@ -748,6 +809,108 @@ def _floor_note(pole: dict[str, Any],
     floor_next = _floor_candidate(others, cooccur, gating_n)
     binding = _binding_floor(others, cooccur, gating_n)
     binding_s = _eff_floor_s(binding) if binding else 0.0
+
+    def _per_pr_split_note(max_saving: float,
+                           evidence: dict[str, Any] | None = None) -> str:
+        """Describe the measured PR populations behind this pole's ceiling.
+
+        ``_cooccur``/``_gating_n`` come from the per-PR populations: gating_n
+        counts PRs where this pole was slowest, and cooccur says which sibling
+        observations exist on those PRs.  Candidate ``present_on`` counts give
+        the full observed population.  A missing observation remains unknown.
+        """
+        exact = evidence if isinstance(evidence, dict) else pole.get("_per_pr_floor")
+        if isinstance(exact, dict):
+            rows = [row for row in (exact.get("rows") or []) if isinstance(row, dict)]
+            total = int(exact.get("total_n") or 0)
+            unknown_n = int(exact.get("unknown_n") or 0)
+            if total <= 0 or max_saving < 0:
+                return ""
+            zero = [row for row in rows if (_num(row.get("saving_s")) or 0.0) <= 0]
+            positive = [row for row in rows if (_num(row.get("saving_s")) or 0.0) > 0]
+            clauses: list[str] = []
+            if zero:
+                blockers = {_clean_label(str(row.get("sibling") or "")) for row in zero}
+                blockers.discard("")
+                where = (f" where `{next(iter(blockers))}` runs"
+                         if len(blockers) == 1 else " where another check runs longer")
+                clauses.append(f"0 on {len(zero)} of {total} PRs{where}")
+            if positive:
+                by_cap: dict[float, int] = {}
+                for row in positive:
+                    cap = round(_num(row.get("saving_s")) or 0.0, 1)
+                    by_cap[cap] = by_cap.get(cap, 0) + 1
+                for cap, count in sorted(by_cap.items()):
+                    other = "the other " if zero and len(zero) + count == total else ""
+                    clauses.append(f"up to {_clock(cap)} on {other}{count} of {total} PRs")
+            if unknown_n:
+                clauses.append(
+                    f"unknown on {unknown_n} of {total} PRs with a missing sibling observation")
+            return " Per-PR split: " + "; ".join(clauses) + "." if clauses else ""
+        if not isinstance(cooccur, dict) or gating_n <= 0 or max_saving < 0:
+            return ""
+        total = max((int(c.get("present_on") or 0) for c in candidates), default=0)
+        if total <= 0 or gating_n > total:
+            return ""
+        clauses: list[str] = []
+        zero_n = total - gating_n
+        if zero_n:
+            # Name a blocker only when its stamped presence, less the PRs where
+            # it co-occurred with this pole as winner, covers the WHOLE
+            # zero-saving population.  A rare 690s check cannot be described as
+            # running on twelve PRs merely because it is the highest aggregate
+            # p50 among candidates.
+            blockers = [
+                c for c in others
+                if (_eff_floor_s(c) >= pole_p
+                    and max(int(c.get("present_on") or 0)
+                            - int(cooccur.get(_floor_key(_check_name(c)), 0)), 0) >= zero_n)
+            ]
+            blocker = max(blockers, key=_eff_floor_s) if blockers else None
+            where = (f" where `{_clean_label(_check_name(blocker))}` runs"
+                     if blocker is not None else " where another check runs longer")
+            clauses.append(f"0 on {zero_n} of {total} PRs{where}")
+        observed_n = (cooccur.get(_floor_key(_check_name(floor_next)), 0)
+                      if floor_next is not None else 0)
+        observed_n = min(max(int(observed_n), 0), gating_n)
+        if observed_n:
+            other = "the other " if zero_n + observed_n == total else ""
+            clauses.append(f"up to {_clock(max_saving)} on {other}{observed_n} of {total} PRs")
+        unknown_n = gating_n - observed_n
+        if unknown_n:
+            clauses.append(f"unknown on {unknown_n} of {total} PRs with a missing sibling observation")
+        return " Per-PR split: " + "; ".join(clauses) + "." if clauses else ""
+    pole_wf = str(pole.get("workflow_file") or "")
+    legs = [c for c in candidates
+            if _same_matrix(pole_name, _check_name(c), pole_wf,
+                            str(c.get("workflow_file") or ""))]
+    non_legs = [c for c in others
+                if not _same_matrix(pole_name, _check_name(c), pole_wf,
+                                    str(c.get("workflow_file") or ""))]
+    floor_m = _floor_candidate(non_legs, cooccur, gating_n)
+    # A shared matrix change lowers every leg together. It remains addressable
+    # even when an equal sibling means this one leg alone saves zero; calculate
+    # its split from the whole matrix family rather than this leg's winner count.
+    if (len(legs) >= 2 and floor_m is not None
+            and not isinstance(pole.get("_chain_member"), dict)
+            and binding_s <= pole_p + 0.5):
+        addr_leg = max(pole_p - binding_s, 0.0)
+        addr_m = max(pole_p - _binding_floor_s(non_legs, cooccur, gating_n), 0.0)
+        matrix_exact = pole.get("_per_pr_matrix_floor")
+        if isinstance(matrix_exact, dict):
+            addr_m = min(addr_m, max(_num(matrix_exact.get("max_saving_s")) or 0.0, 0.0))
+        if addr_m <= 0:
+            return []
+        return [
+            f"> **What a change here can buy (wall-clock):** this job's matrix legs run "
+            f"in parallel, so speeding **this one leg** saves only ~{_clock(addr_leg)} "
+            f"(the next leg, `{_clean_label(_check_name(floor_next))}`, is "
+            f"{_clock(_eff_floor_s(floor_next))}). Because the legs share one job config, a "
+            f"change that speeds *every* leg at once drops the whole matrix toward the next "
+            f"check, `{_clean_label(_check_name(floor_m))}` ({_clock(_eff_floor_s(floor_m))}), "
+            f"for up to **~{_clock(addr_m)}** of merge wait."
+            + _recoverable_reconciliation(addr_m, _tw)
+            + _per_pr_split_note(addr_m, matrix_exact), ""]
     # Non-gate guard + addressable cap. A pole that runs BEHIND a UNIVERSAL concurrent blocker —
     # INCLUDING an untunable managed/external check that `_floor_candidate` won't NAME — buys ~0
     # merge wait until that blocker is cut, which the pole's role line already states. Skip the
@@ -816,6 +979,7 @@ def _floor_note(pole: dict[str, Any],
             "runner-minutes, not wall-clock."
             + _recoverable_reconciliation(win, _tw) + floor_line, ""]
     addr_leg = max(pole_p - binding_s, 0.0)
+    split_note = _per_pr_split_note(addr_leg)
     # If the BINDING floor is a check with no workflow file (managed/external) sitting ABOVE the
     # highest file-backed floor we could name, the gate does NOT drop to that file check — it
     # drops to the untunable blocker. Name THAT honestly rather than quoting a faster file floor
@@ -826,31 +990,13 @@ def _floor_note(pole: dict[str, Any],
             f"> **What a change here can buy (wall-clock):** up to **~{_clock(addr_leg)}** — a "
             f"concurrent check with no workflow file to speed up here, `{cap_name}` "
             f"({_clock(binding_s)}), caps it there; below that the gate is that check, not this "
-            "job." + _recoverable_reconciliation(addr_leg, _tw), ""]
-    pole_wf = str(pole.get("workflow_file") or "")
-    legs = [c for c in candidates
-            if _same_matrix(pole_name, _check_name(c), pole_wf, str(c.get("workflow_file") or ""))]
-    non_legs = [c for c in others
-                if not _same_matrix(pole_name, _check_name(c), pole_wf,
-                                    str(c.get("workflow_file") or ""))]
-    floor_m = _floor_candidate(non_legs, cooccur, gating_n)
-    if len(legs) >= 2 and floor_m is not None:
-        addr_m = max(pole_p - _binding_floor_s(non_legs, cooccur, gating_n), 0.0)   # cap by managed/universal non-legs too
-        return [
-            f"> **What a change here can buy (wall-clock):** this job's matrix legs run "
-            f"in parallel, so speeding **this one leg** saves only ~{_clock(addr_leg)} "
-            f"(the next leg, `{_clean_label(_check_name(floor_next))}`, is "
-            f"{_clock(_eff_floor_s(floor_next))}). Because the legs share one job config, a "
-            f"change that speeds *every* leg at once drops the whole matrix toward the next "
-            f"check, `{_clean_label(_check_name(floor_m))}` ({_clock(_eff_floor_s(floor_m))}), "
-            f"for up to **~{_clock(addr_m)}** of merge wait."
-            + _recoverable_reconciliation(addr_m, _tw), ""]
+            "job." + _recoverable_reconciliation(addr_leg, _tw) + split_note, ""]
     return [
         f"> **What a change here can buy (wall-clock):** up to **~{_clock(addr_leg)}** — "
         f"it gates until it drops to the next concurrent check, "
         f"`{_clean_label(_check_name(floor_next))}` ({_clock(_eff_floor_s(floor_next))}); below "
         "that the gate moves and further savings are runner-minutes, not wall-clock."
-        + _recoverable_reconciliation(addr_leg, _tw), ""]
+        + _recoverable_reconciliation(addr_leg, _tw) + split_note, ""]
 
 
 # ── Aggregation gate (the degenerate chain SINK) ─────────────────────────────────────
@@ -1228,6 +1374,15 @@ def _pole_addressable(pole: dict[str, Any],
         # stamped chain headroom and its own span, never the chain-blind
         # `pole − binding` arithmetic below.
         return max(min(_num(ch.get("win_s")) or 0.0, pole_p), 0.0)
+    exact = pole.get("_per_pr_floor")
+    if isinstance(exact, dict) and int(exact.get("total_n") or 0) > 0:
+        # Preserve the existing conservative aggregate floor when it is lower,
+        # but never let it exceed the largest saving observed on any sampled
+        # PR. Rows with no sibling remain unknown and contribute no invented
+        # headroom.
+        aggregate = max(pole_p - binding_s, 0.0)
+        observed_max = max(_num(exact.get("max_saving_s")) or 0.0, 0.0)
+        return min(aggregate, observed_max)
     return max(pole_p - binding_s, 0.0)
 
 
@@ -5652,7 +5807,16 @@ def _select_render_poles(doc: dict[str, Any], poles: list[dict[str, Any]]) -> tu
         return [], file_poles
     typical_rest = sorted((p for p in matrices[1:] if typical(p)), key=lambda p: -impact(p))
     rare_rest = sorted((p for p in matrices[1:] if not typical(p)), key=lambda p: -impact(p))
-    return [matrices[0], *typical_rest, *rare_rest][:_TOP_WORKFLOWS], file_poles
+    selected = [matrices[0], *typical_rest, *rare_rest]
+    # A file-backed check that could not be pinned to a job is deliberately kept on the
+    # spine, but it is not evidence that the merge gate waits on that check. When the
+    # collector could resolve required reachability, keep every confirmed required/needs
+    # pole ahead of those conservative keeps. With no stamp (older findings or an
+    # unreadable required set), preserve the existing ordering byte-for-byte.
+    if any(p.get("required_reachable") is False for p in selected):
+        selected = ([p for p in selected if p.get("required_reachable") is not False]
+                    + [p for p in selected if p.get("required_reachable") is False])
+    return selected[:_TOP_WORKFLOWS], file_poles
 
 
 def _gate_counts(cp: dict[str, Any]) -> tuple[dict[str, int], dict[str, int], int]:
@@ -11395,6 +11559,39 @@ def render(doc: dict[str, Any], *args, **kwargs) -> str:
     return first + "\n\n" + block + "\n" + rest if separator else report + "\n\n" + block
 
 
+def _minority_gate_tail_block(cp: dict[str, Any]) -> list[str]:
+    """Render severe minority tails on the confirmed required closure.
+
+    This is descriptive evidence only: the typical-path headline and every
+    savings calculation remain median-based and unchanged.
+    """
+    if not cp.get("spine_required_scoped"):
+        return []
+    rows: list[str] = []
+    for check in _as_list(cp.get("checks")):
+        if not isinstance(check, dict):
+            continue
+        tail = _as_dict(check.get("minority_tail"))
+        p90 = _num(tail.get("p90_s"))
+        share = _num(tail.get("tail_share_pct"))
+        url = str(tail.get("example_url") or "")
+        if p90 is None or share is None or not url:
+            continue
+        name = _clean_label(str(check.get("name") or "check"))
+        marker_id = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-") or "check"
+        if marker_id != name:
+            marker_id += "-" + hashlib.sha256(name.encode("utf-8")).hexdigest()[:8]
+        share_text = f"{share:.0f}" if float(share).is_integer() else f"{share:.1f}"
+        rows += [f"<!-- minority-gate-tail:{marker_id} -->",
+                 f"> **⏱️ Slow tail on `{_lbl(name)}`:** on ~{share_text}% of PRs this "
+                 f"check takes **{_clock(p90)}**; those PRs wait on it. "
+                 f"[Example run]({url}). **No saving is credited** - this describes "
+                 "the real minority wait that the median hides.", ""]
+    if not rows:
+        return []
+    return ["## ⏱️ Slow tails on merge-blocking checks", "", *rows]
+
+
 def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
            samples: dict[str, dict[str, Any]] | None = None,
            log_runs: dict[str, str] | None = None,
@@ -11645,6 +11842,17 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
     for p in pole_wfs:
         cooccur, gating_n = _pole_cooccurrence(cp, str(p.get("check", "")))
         p["_cooccur"], p["_gating_n"] = cooccur, gating_n
+        p["_per_pr_floor"] = _pole_per_pr_floor(cp, str(p.get("check", "")))
+        _pn = str(p.get("check", ""))
+        _pwf = str(p.get("workflow_file") or "")
+        _matrix_names = {
+            str(c.get("name") or c.get("check") or "")
+            for c in (cp.get("checks") or [])
+            if _same_matrix(_pn, str(c.get("name") or c.get("check") or ""),
+                            _pwf, str(c.get("workflow_file") or ""))
+        }
+        p["_per_pr_matrix_floor"] = (
+            _pole_per_pr_floor(cp, _pn, _matrix_names) if len(_matrix_names) >= 2 else None)
         # Stash the pole's OWN gate/presence counts, so the agent-prompt gate line can state a
         # DEMOTED pole's real (low) gate frequency instead of borrowing the workflow's typical-gate
         # count (the caddy goreleaser-check contradiction). The demotion FLAG itself is stamped
@@ -11666,6 +11874,21 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
     fileless = sorted((p for p in poles if not _is_file_pole(p)),
                       key=lambda p: -_gatef(p))
 
+    # A required-scoped collector can retain a conservative cat-3 pole when it cannot map the
+    # check back to a workflow job.  Keep that pole visible, but do not let it define merge-wait
+    # claims once another pole is positively known to be required-reachable.  No stamps means the
+    # required set was unreadable, so the legacy ordering and headline inputs remain unchanged.
+    _have_confirmed_required_pole = any(
+        p.get("required_reachable") is True for p in poles)
+    _unconfirmed_required_names = {
+        str(p.get("check", "")) for p in poles
+        if p.get("required_reachable") is False
+    } if _have_confirmed_required_pole else set()
+    _headline_poles = [
+        p for p in poles
+        if str(p.get("check", "")) not in _unconfirmed_required_names
+    ] if _unconfirmed_required_names else poles
+
     # The HEADLINE gate = what most PRs actually wait on. Compare the most-gating
     # workflow against the most-gating fileless check by FREQUENCY, not duration.
     top_wf_freq = wf_gate.get(str(pole_wfs[0].get("workflow_file", "")), 0) if pole_wfs else 0
@@ -11675,7 +11898,8 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
     elif npop and fileless and top_fl_freq > top_wf_freq:
         blocker = fileless[0]
     else:
-        blocker = poles[0]  # no frequency data → slowest, as before
+        blocker = _headline_poles[0]
+        # With no reachability stamps this remains the old no-frequency fallback: the slowest pole.
     blocker_is_file = _is_file_pole(blocker)
     # `merge_dur` ("X until all checks finish") is the wall-clock FLOOR = max p50 over the
     # concurrent set, NOT the frequency-selected gate's own p50. Computed below, once `src`
@@ -11687,6 +11911,10 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
     # The visualization shows the typical PR; the minority giants are a footnote so
     # they never read as "what the merge always waits on".
     checks = cp.get("checks") or []
+    headline_checks = [
+        c for c in checks
+        if str(c.get("name", "")) not in _unconfirmed_required_names
+    ] if _unconfirmed_required_names else checks
 
     def _present(name: str) -> int:
         return present.get(name, 0)
@@ -11696,12 +11924,12 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
     # disagree with which pole headlines — especially on a small-sample fallback where a bare
     # `present > npop*0.5` would demote a check the data layer (and `_pole_typical`) kept.
     if npop >= _RARE_PRESENCE_MIN_PR:
-        typical = [c for c in checks if _typical_check(str(c.get("name", "")))]
-        minority_slow = [c for c in checks
+        typical = [c for c in headline_checks if _typical_check(str(c.get("name", "")))]
+        minority_slow = [c for c in headline_checks
                          if not _typical_check(str(c.get("name", "")))
                          and (_num(c.get("p50_s")) or 0) > (_num(blocker.get("p50_s")) or 0)]
     else:
-        typical, minority_slow = list(checks), []
+        typical, minority_slow = list(headline_checks), []
     typical.sort(key=lambda c: -(_num(c.get("p50_s")) or 0.0))
     minority_slow.sort(key=lambda c: -(_num(c.get("p50_s")) or 0.0))
     # Distinguish a rare FILE pole (a label-gated / conditional workflow job — fixable, just
@@ -11746,10 +11974,11 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
     # the poles. This is the VISUALIZATION set — it must stay the typical PR's checks.
     if typical:
         src: list[dict[str, Any]] = typical
-    elif checks:
-        src = sorted(checks, key=lambda c: -(_num(c.get("p50_s")) or 0.0))
-    else:  # no per-check list (minimal/static doc) - fall back to the poles
-        src = [{"name": p.get("check"), "p50_s": p.get("p50_s")} for p in poles]
+    elif headline_checks:
+        src = sorted(headline_checks, key=lambda c: -(_num(c.get("p50_s")) or 0.0))
+    else:  # no per-check list (minimal/static doc) - fall back to headline-eligible poles
+        src = [{"name": p.get("check"), "p50_s": p.get("p50_s")}
+               for p in _headline_poles]
 
     # The FLOOR-candidate pool — DISTINCT from `src` (Class A #6). A pole's addressable ceiling
     # floors against the slowest OTHER check that co-occurs with it on a majority of its OWN gating
@@ -11757,10 +11986,12 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
     # is heavy but runs on a MINORITY of PRs (so it's not in the typical-PR `src`) — e.g. lightdash
     # `E2E: API (Vitest)` (13m, on ~50% of PRs) genuinely caps `Deploy Preview`. Restricting the
     # floor pool to `src` (typical) hid such a check from the floor math: the ceiling overstated AND
-    # the heavy check was disclosed nowhere on the spine. So the floor pool is the FULL concurrent
-    # set; the co-occurrence filter still gates which qualify, so a rare non-co-occurring check can't
-    # inflate the floor. `src` stays the typical-PR chart; the two roles are no longer conflated.
-    floor_pool = sorted(checks, key=lambda c: -(_num(c.get("p50_s")) or 0.0)) if checks else src
+    # the heavy check was disclosed nowhere on the spine. So the floor pool is the full concurrent
+    # set that can be confirmed required-reachable; the co-occurrence filter still gates which
+    # qualify, so a rare non-co-occurring check can't inflate the floor. `src` stays the typical-PR
+    # chart; the two roles are no longer conflated.
+    floor_pool = (sorted(headline_checks, key=lambda c: -(_num(c.get("p50_s")) or 0.0))
+                  if headline_checks else src)
 
     gate_check = _clean_label(str(blocker.get("check", "")))
     nwf = len(pole_wfs)
@@ -12288,6 +12519,7 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
                             top_is_gate=(gate_is_slowest and not chain_active))
     _toc_at = len(out)
     out += _toc_lines
+    out += _minority_gate_tail_block(cp)
     # The prose provenance ("Where this data comes from") is consolidated into the
     # 🗄️ Data sources section at the foot (owner UX edit 2026-07-19) — no longer emitted
     # here after the Contents.
@@ -12653,6 +12885,14 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
                     f"`needs:` upstream, whose slowest measured member is `{_ag_slow}` "
                     f"(~{_ag_dur}). That member, not this check, is the lever."
                     + _ag_tail)))
+        elif p.get("required_reachable") is False:
+            role = cs.add(claims.Claim(
+                kind="pole_role_line", subject=check,
+                fields={"dur": dur, "required_reachable": False},
+                rendered=("**Could not confirm this check blocks merging.** A sampled "
+                          "workflow produced it, so it remains visible, but its display "
+                          "name could not be pinned to a required job or anything that job "
+                          "needs.")))
         elif p is blocker:
             if not npop:
                 # Claims layer (pole_role_line): the blocker pole's role label.
