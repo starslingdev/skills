@@ -17076,7 +17076,87 @@ def _check_to_workflow_file_static(
                     or _static_matrix_leg_match(nm, info.get("matrix"), check)):
                 hits.add(wf)
                 break
-    return next(iter(hits)) if len(hits) == 1 else None
+    if hits:
+        return next(iter(hits)) if len(hits) == 1 else None
+
+    nested = _local_reusable_leaf_nodes(check, job_graph)
+    files = {wf for wf, _ in nested}
+    return next(iter(files)) if len(files) == 1 else None
+
+
+def _local_reusable_leaf_nodes(
+    check: str, job_graph: dict[str, dict[str, dict[str, Any]]],
+    callers: set[tuple[str, str]] | None = None,
+    caller_paths: (dict[tuple[str, str],
+                        set[tuple[tuple[str, str], ...]]] | None) = None,
+) -> set[tuple[str, str]]:
+    """Follow only scanned local call edges; never borrow an unrelated leaf.
+
+    Each recursive hop consumes a caller prefix. A per-path file set rejects
+    cycles, and sixteen calls bounds malformed or adversarial workflow graphs.
+    Remote calls have no editable local leaf and deliberately remain unresolved.
+    """
+    found: set[tuple[str, str]] = set()
+
+    def matches(wf: str, name: str, info: dict[str, Any], value: str) -> bool:
+        return (name == value
+                or (not _name_template_is_degenerate(name)
+                    and not (_name_template_leads_with_placeholder(name)
+                             and _reusable_caller_claims(
+                                 value, {wf: job_graph.get(wf, {})}))
+                    and bool(_name_template_regex(name).fullmatch(value)))
+                or _static_matrix_leg_match(name, info.get("matrix"), value))
+
+    def walk(wf: str, remaining: str, seen: frozenset[str], depth: int,
+             path: tuple[tuple[str, str], ...] = ()) -> None:
+        if wf in seen or depth > 16:
+            return
+        for jid, info in job_graph.get(wf, {}).items():
+            name = str(info.get("name") or jid)
+            if not info.get("reusable"):
+                if depth and matches(wf, name, info, remaining):
+                    found.add((wf, jid))
+                    if callers is not None:
+                        callers.update(path)
+                    if caller_paths is not None:
+                        caller_paths.setdefault((wf, jid), set()).add(path)
+                continue
+            uses = info.get("uses")
+            if not isinstance(uses, str) or not uses.startswith("./.github/workflows/"):
+                continue
+            target = uses[2:]
+            if target not in job_graph:
+                continue
+            parts = remaining.split(" / ")
+            for cut in range(1, len(parts)):
+                if matches(wf, name, info, " / ".join(parts[:cut])):
+                    walk(target, " / ".join(parts[cut:]), seen | {wf}, depth + 1,
+                         path + ((wf, jid),))
+
+    for wf in job_graph:
+        walk(wf, check, frozenset(), 0)
+    return found
+
+
+def _nested_caller_path_is_reachable(
+    check: str, node: tuple[str, str], reachable: set[tuple[str, str]],
+    job_graph: dict[str, dict[str, dict[str, Any]]],
+) -> bool | None:
+    """Whether a nested check's own caller chain is merge-blocking.
+
+    Two callers may invoke the same leaf workflow.  The editable leaf node is
+    shared, but required-check identity is not: an optional caller must not
+    become required merely because a required caller reaches the same leaf.
+    ``None`` means the check did not resolve through a nested caller path.
+    """
+    paths: dict[tuple[str, str], set[tuple[tuple[str, str], ...]]] = {}
+    leaves = _local_reusable_leaf_nodes(check, job_graph, caller_paths=paths)
+    if leaves != {node} or not paths.get(node):
+        return None
+    return any(all(caller in reachable for caller in path)
+               for path in paths[node])
+
+
 def _check_to_job_node_scanned(
     check: str, job_graph: dict[str, dict[str, dict[str, Any]]],
 ) -> tuple[str, str] | None:
@@ -17125,9 +17205,11 @@ def _check_to_job_node_scanned(
                           and _reusable_caller_claims(check, job_graph))
                  and _name_template_regex(info.get("name") or jid).match(check))
                 or _static_matrix_leg_match(info.get("name") or jid, info.get("matrix"), check))]
-    if not tmpl or len({wf for wf, _ in tmpl}) > 1:
-        return None
-    return tmpl[0]
+    if tmpl:
+        return tmpl[0] if len({wf for wf, _ in tmpl}) == 1 else None
+
+    nested = _local_reusable_leaf_nodes(check, job_graph)
+    return next(iter(nested)) if len(nested) == 1 else None
 
 
 def _required_reachable_jobs(
@@ -17144,13 +17226,28 @@ def _required_reachable_jobs(
         node = _check_to_job_node(r, job_graph, crit_by_wf)
         if node is not None:
             anchors.add(node)
+            # Preserve the callers' upstream needs when a required child now
+            # resolves to its editable leaf rather than only to the caller.
+            callers: set[tuple[str, str]] = set()
+            leaves = _local_reusable_leaf_nodes(r, job_graph, callers)
+            if leaves == {node}:
+                anchors.update(callers)
     reachable: set[tuple[str, str]] = set(anchors)
     stack = list(anchors)
     while stack:
         wf, jid = stack.pop()
-        for dep in (job_graph.get(wf, {}).get(jid, {}) or {}).get("needs", []):
-            node = (wf, dep)
-            if dep in job_graph.get(wf, {}) and node not in reachable:
+        info = job_graph.get(wf, {}).get(jid, {}) or {}
+        dependencies = [(wf, dep) for dep in info.get("needs", [])
+                        if dep in job_graph.get(wf, {})]
+        # A required caller waits for every job in its local called workflow,
+        # including nested invocations. Keep those newly resolved leaf nodes in
+        # the same required closure; the visited set also terminates call cycles.
+        uses = info.get("uses")
+        if isinstance(uses, str) and uses.startswith("./.github/workflows/"):
+            target = uses[2:]
+            dependencies.extend((target, dep) for dep in job_graph.get(target, {}))
+        for node in dependencies:
+            if node not in reachable:
                 reachable.add(node)
                 stack.append(node)
     return reachable
@@ -17178,8 +17275,12 @@ def _pole_is_required_reachable(
     if pole_check in req_names:
         return True
     node = _check_to_job_node(pole_check, job_graph, crit_by_wf)
-    return node is not None and node in _required_reachable_jobs(
-        req_names, job_graph, crit_by_wf)
+    if node is None:
+        return False
+    reachable = _required_reachable_jobs(req_names, job_graph, crit_by_wf)
+    nested = _nested_caller_path_is_reachable(
+        pole_check, node, reachable, job_graph)
+    return nested if nested is not None else node in reachable
 
 
 def _required_reachable_checks(
@@ -17222,7 +17323,8 @@ def _required_reachable_checks(
             continue
         node = _check_to_job_node(c, job_graph, crit_by_wf)
         if node is not None:
-            if node in reachable:
+            nested = _nested_caller_path_is_reachable(c, node, reachable, job_graph)
+            if nested is True or (nested is None and node in reachable):
                 kept.add(c)
         elif _workflows_matching_check(c, crit_by_wf):
             # File-backed but unpinnable to a job id — keep (never silently drop a
