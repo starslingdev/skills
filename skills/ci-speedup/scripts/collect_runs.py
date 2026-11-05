@@ -17182,6 +17182,27 @@ def _pole_is_required_reachable(
         req_names, job_graph, crit_by_wf)
 
 
+def _stamp_pole_required_reachability(
+    poles: list[dict[str, Any]],
+    spine_required_scoped: bool,
+    req_names: "frozenset[str] | set[str]",
+    job_graph: dict[str, dict[str, dict[str, Any]]] | None,
+    crit_by_wf: dict[str, dict[str, Any]],
+) -> None:
+    """Stamp whether each retained pole is confirmed to block merging.
+
+    The stamp is intentionally absent when required-check reachability was unreadable or
+    did not narrow the spine. In that state the renderer preserves its historical order
+    instead of guessing. A False stamp identifies the conservative cat-3 keep: visible,
+    but ranked after every pole confirmed through the required/needs graph.
+    """
+    if not spine_required_scoped or not req_names or not job_graph:
+        return
+    for pole in poles:
+        pole["required_reachable"] = _pole_is_required_reachable(
+            str(pole.get("check") or ""), req_names, job_graph, crit_by_wf)
+
+
 def _required_reachable_checks(
     candidate_checks: "frozenset[str] | set[str] | list[str]",
     req_names: "frozenset[str] | set[str]",
@@ -27382,7 +27403,16 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             continue
         if _map_check_to_job(check_name, crit_by_wf, require_developer_timing=True) is not None:
             candidates.append(_decompose_pole(check_name, check_p50))
+    _stamp_pole_required_reachability(
+        candidates, spine_required_scoped, req_names,
+        findings_doc.get("workflow_job_graph"), crit_by_wf)
     drill_poles, _ = bp._select_render_poles(findings_doc, candidates)
+    if (drill_poles and spine_required_scoped
+            and any(p.get("required_reachable") is False for p in candidates)):
+        # The old crown can be a conservative cat-3 keep that happens to be slower.
+        # Align the data stamp with the renderer's first confirmed merge-blocking pole.
+        cp["critical_path_check"] = str(drill_poles[0].get("check") or "")
+        cp["critical_path_s"] = float(drill_poles[0].get("p50_s") or 0.0)
     # Retain the same candidate context for aggregation inheritance and matrix
     # representatives when the report selects its five sections later.
     poles = candidates

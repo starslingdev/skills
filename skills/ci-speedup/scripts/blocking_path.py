@@ -5573,7 +5573,16 @@ def _select_render_poles(doc: dict[str, Any], poles: list[dict[str, Any]]) -> tu
         return [], file_poles
     typical_rest = sorted((p for p in matrices[1:] if typical(p)), key=lambda p: -impact(p))
     rare_rest = sorted((p for p in matrices[1:] if not typical(p)), key=lambda p: -impact(p))
-    return [matrices[0], *typical_rest, *rare_rest][:_TOP_WORKFLOWS], file_poles
+    selected = [matrices[0], *typical_rest, *rare_rest]
+    # A file-backed check that could not be pinned to a job is deliberately kept on the
+    # spine, but it is not evidence that the merge gate waits on that check. When the
+    # collector could resolve required reachability, keep every confirmed required/needs
+    # pole ahead of those conservative keeps. With no stamp (older findings or an
+    # unreadable required set), preserve the existing ordering byte-for-byte.
+    if any(p.get("required_reachable") is False for p in selected):
+        selected = ([p for p in selected if p.get("required_reachable") is not False]
+                    + [p for p in selected if p.get("required_reachable") is False])
+    return selected[:_TOP_WORKFLOWS], file_poles
 
 
 def _gate_counts(cp: dict[str, Any]) -> tuple[dict[str, int], dict[str, int], int]:
@@ -12544,6 +12553,14 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
                     f"`needs:` upstream, whose slowest measured member is `{_ag_slow}` "
                     f"(~{_ag_dur}). That member, not this check, is the lever."
                     + _ag_tail)))
+        elif p.get("required_reachable") is False:
+            role = cs.add(claims.Claim(
+                kind="pole_role_line", subject=check,
+                fields={"dur": dur, "required_reachable": False},
+                rendered=("**Could not confirm this check blocks merging.** A sampled "
+                          "workflow produced it, so it remains visible, but its display "
+                          "name could not be pinned to a required job or anything that job "
+                          "needs.")))
         elif p is blocker:
             if not npop:
                 # Claims layer (pole_role_line): the blocker pole's role label.

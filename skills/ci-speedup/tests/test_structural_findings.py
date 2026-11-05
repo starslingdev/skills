@@ -4417,6 +4417,36 @@ def test_pole_is_required_reachable_separates_unpinnable_cat3_keep():
     assert cr._pole_is_required_reachable(None, req, job_graph, crit_by_wf) is True       # no pole -> defer
 
 
+def test_required_reachability_stamp_separates_cat3_and_skips_unreadable_sets():
+    ci = ".github/workflows/ci.yml"
+    mystery = ".github/workflows/mystery.yml"
+    graph = {
+        ci: {
+            "merge-gate": {"name": "merge-gate", "needs": ["unit"]},
+            "unit": {"name": "unit", "needs": []},
+        },
+        # Runtime timing proves this file produced the check, while the scanned job
+        # cannot pin that display name to an id: the conservative cat-3 shape.
+        mystery: {"other": {"name": "different display", "needs": []}},
+    }
+    crit = {
+        ci: {"job_p50": {"unit": 300.0}},
+        mystery: {"job_p50": {"mystery matrix": 500.0}},
+    }
+    poles = [
+        {"check": "mystery matrix", "workflow_file": mystery, "job": "mystery matrix"},
+        {"check": "unit", "workflow_file": ci, "job": "unit"},
+    ]
+    cr._stamp_pole_required_reachability(
+        poles, True, frozenset({"merge-gate"}), graph, crit)
+    assert [p["required_reachable"] for p in poles] == [False, True]
+
+    unreadable = [{"check": "mystery matrix"}, {"check": "unit"}]
+    cr._stamp_pole_required_reachability(
+        unreadable, False, frozenset({"merge-gate"}), graph, crit)
+    assert all("required_reachable" not in p for p in unreadable)
+
+
 def test_check_to_job_node_scanned_maps_matrix_check_without_timing():
     # httpx bug: a TRIAGE-SKIPPED workflow's gate matrix check (`Python 3.9`) must still map
     # to its editable job via the SCANNED name template (no sampled timing), instead of being
