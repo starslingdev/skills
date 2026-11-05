@@ -3170,7 +3170,8 @@ def _stamp_pole_repr_run_era(
     if not config_era_facts:
         return
     fact_by_wf = {str(f.get("workflow_file")): f
-                  for f in config_era_facts if f.get("workflow_file")}
+                  for f in config_era_facts
+                  if f.get("workflow_file") and f.get("rule") != "runner_label_change"}
     for p in poles:
         wf = str(p.get("workflow_file") or "")
         job = str(p.get("job") or "")
@@ -3237,11 +3238,13 @@ def _era_scope_enumeration(
     `verify_report.check_era_enumeration_bound` reads: no rendered pole/check may be a member of any
     era's `other_era_checks` (a check absent from the kept era). One report describes ONE
     configuration and names what the other configuration adds/removes."""
-    if not config_era_facts:
+    content_facts = [f for f in config_era_facts
+                     if f.get("rule") != "runner_label_change"]
+    if not content_facts:
         return pr_check_p50
     indexed = list(zip(repr_shas, per_sha_checks))
     to_drop: set[str] = set()
-    for fact in config_era_facts:
+    for fact in content_facts:
         wf = fact.get("workflow_file")
         if not wf:
             continue
@@ -3342,6 +3345,8 @@ def _era_stamp_spine_relevance(
     implies a non-empty enumeration set), so `verify_report`'s integrity arm needs no change. Mutates
     the facts in place."""
     for fact in config_era_facts:
+        if fact.get("rule") == "runner_label_change":
+            continue
         wf = fact.get("workflow_file")
         if not wf:
             continue
@@ -3411,7 +3416,8 @@ def _era_scope_pr_spine_sample(
     dropped-era makespan."""
     if not config_era_facts:
         return repr_shas, per_sha_checks, sha_intervals, 0
-    facts = [f for f in config_era_facts if f.get("workflow_file")]
+    facts = [f for f in config_era_facts
+             if f.get("workflow_file") and f.get("rule") != "runner_label_change"]
     if not facts:
         return repr_shas, per_sha_checks, sha_intervals, 0
     kept_shas: list[str] = []
@@ -4990,7 +4996,8 @@ def _pole_timing_spread(check: str, workflow_file: str, job: str,
     # it. Named so the range is never read as describing the current configuration when
     # the spine door retained the other era's runs.
     era = next((str(f.get("kept_era") or "") for f in (config_era_facts or [])
-                if str(f.get("workflow_file") or "") == workflow_file), "")
+                if str(f.get("workflow_file") or "") == workflow_file
+                and f.get("rule") != "runner_label_change"), "")
     observations = [j for run in (jobs_per_run_by_wf.get(workflow_file) or [])
                     for j in run if str(j.get("name", "")) == job]
     return _timing_spread(observations, check=check, workflow_file=workflow_file,

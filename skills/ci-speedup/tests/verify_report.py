@@ -12227,19 +12227,26 @@ def check_config_era_boundary(report: str, findings_path: Path | None,
         return Check(name, True, "no workflow sample straddled a config change — no era to bind",
                      skipped=True)
     runner_eras = [e for e in eras if e.get("rule") == "runner_label_change"]
+    report_lines = report.splitlines()
     for era in runner_eras:
         counts = [x for x in _as_list(era.get("runner_label_counts"))
                   if isinstance(x, dict) and x.get("label")]
         expected = [
-            f"`{str(x.get('label'))}` ({int(_num(x.get('count')) or 0)} runs)"
+            f"`{_strip_scope(str(x.get('label')))}` "
+            f"({int(_num(x.get('count')) or 0)} runs)"
             for x in counts
         ]
-        if (len(expected) != 2 or _RUNNER_LABEL_ERA_MARKER not in report
-                or any(piece not in report for piece in expected)):
+        wf = _strip_scope(str(era.get("workflow_file") or ""))
+        job = _strip_scope(str(era.get("job") or "gate"))
+        identity = f"`{wf}` / `{job}` {_RUNNER_LABEL_ERA_MARKER}"
+        matching_line = next((line for line in report_lines
+                              if identity in line
+                              and all(piece in line for piece in expected)), "")
+        if len(expected) != 2 or not matching_line:
             return Check(
                 name, False,
                 "a detected runner-label era is stamped in findings but the report does not "
-                "disclose both observed runner labels and their sample counts")
+                "disclose its workflow/job and both observed runner labels with their sample counts")
     eras = [e for e in eras if e.get("rule") != "runner_label_change"]
     if not eras:
         return Check(name, True,

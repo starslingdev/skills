@@ -168,6 +168,7 @@ def test_runner_label_change_inside_an_identical_workflow_sample_is_disclosed():
     """A gate moving runners is an era change even when the workflow blob is unchanged."""
     wf = ".github/workflows/ci.yml"
     runs = []
+    jobs_per_run = []
     for i in range(110):
         label = "runner-a" if i < 60 else "runner-b"
         runs.append({
@@ -175,8 +176,10 @@ def test_runner_label_change_inside_an_identical_workflow_sample_is_disclosed():
             "head_sha": f"sha{i}",
             "created_at": f"2026-07-{i + 1:03d}T00:00:00Z",
             "event": "pull_request",
-            "jobs": [{"name": "gate", "labels": [label]}],
         })
+        jobs_per_run.append([{
+            "name": "gate", "labels": [label], "_run_id": str(i + 1),
+        }])
     facts: list[dict] = []
     cr._era_resolve_thin_flip(
         facts,
@@ -186,6 +189,7 @@ def test_runner_label_change_inside_an_identical_workflow_sample_is_disclosed():
         lambda name: wf if name == "gate" else None,
         {wf: runs},
         lambda _wf, _runs: None,
+        {wf: jobs_per_run},
     )
     fact = next(f for f in facts if f.get("rule") == "runner_label_change")
     assert fact["workflow_file"] == wf and fact["job"] == "gate"
@@ -212,6 +216,77 @@ def test_runner_label_era_without_its_disclosure_fails_the_guard(tmp_path):
     }]
     chk = vr.check_config_era_boundary("# report\n", _write(tmp_path, doc), None)
     assert not chk.ok and "runner-label era" in chk.detail
+
+
+def test_runner_label_era_guard_matches_the_renderers_sanitized_labels(tmp_path):
+    """Repository-controlled runner labels take the same safe-name path on both sides."""
+    doc = _era_doc()
+    doc["pr_critical_path"]["config_eras"] = [{
+        "workflow_file": ".github/workflows/ci.yml",
+        "job": "gate", "rule": "runner_label_change", "kept_era": "all",
+        "runner_label_counts": [
+            {"label": "self-hosted`old", "count": 60},
+            {"label": "self-hosted`new", "count": 50},
+        ],
+    }]
+    report = bp.render(doc)
+    assert "self-hosted`old" not in report and "self-hosted`new" not in report
+    chk = vr.check_config_era_boundary(report, _write(tmp_path, doc), None)
+    assert chk.ok, chk.detail
+
+
+def test_runner_label_era_guard_binds_each_disclosure_to_its_workflow_and_job(tmp_path):
+    """A sibling with the same labels and counts cannot cover a missing era note."""
+    counts = [
+        {"label": "runner-a", "count": 60},
+        {"label": "runner-b", "count": 50},
+    ]
+    doc = _era_doc()
+    doc["pr_critical_path"]["config_eras"] = [
+        {"workflow_file": ".github/workflows/ci.yml", "job": "test",
+         "rule": "runner_label_change", "kept_era": "all",
+         "runner_label_counts": counts},
+        {"workflow_file": ".github/workflows/build.yml", "job": "build",
+         "rule": "runner_label_change", "kept_era": "all",
+         "runner_label_counts": counts},
+    ]
+    report = bp.render(doc)
+    report = "\n".join(line for line in report.splitlines()
+                       if "`.github/workflows/build.yml` / `build`" not in line)
+    chk = vr.check_config_era_boundary(report, _write(tmp_path, doc), None)
+    assert not chk.ok and "runner-label era" in chk.detail
+
+
+def test_runner_label_era_is_disclosure_only_and_never_partitions_the_spine():
+    """The synthetic boundary names the split but keeps both runner populations."""
+    wf = ".github/workflows/ci.yml"
+    fact = {
+        "workflow_file": wf, "job": "gate", "rule": "runner_label_change",
+        "boundary": "2026-07-02T00:00:00Z", "kept_era": "all",
+        "disclosure_only": True,
+        "runner_label_counts": [
+            {"label": "runner-a", "count": 1},
+            {"label": "runner-b", "count": 1},
+        ],
+    }
+    facts = [fact]
+    shas = ["pre", "post"]
+    checks = [{"gate": 30.0}, {"gate": 40.0}]
+    rep_ts = {"pre": "2026-07-01T00:00:00Z", "post": "2026-07-02T00:00:00Z"}
+    intervals = {
+        "pre": {"gate": ("2026-07-01T00:00:00Z", "2026-07-01T00:00:30Z")},
+        "post": {"gate": ("2026-07-02T00:00:00Z", "2026-07-02T00:00:40Z")},
+    }
+    check_wf = lambda name: wf if name == "gate" else None
+
+    p50 = {"gate": 35.0}
+    assert cr._era_scope_enumeration(
+        p50, shas, checks, rep_ts, facts, check_wf) is p50
+    got_shas, got_checks, got_intervals, dropped = cr._era_scope_pr_spine_sample(
+        shas, checks, intervals, rep_ts, {"gate"}, facts, check_wf)
+    assert got_shas is shas and got_checks is checks and got_intervals is intervals
+    assert dropped == 0
+    assert "kept_checks" not in fact and "other_era_checks" not in fact
 
 
 def test_partition_multi_boundary_disclosed_pre_narrows_to_the_immediately_prior_era():
