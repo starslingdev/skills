@@ -13,6 +13,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-11-05** — Add a partition-correctness caveat to OPT24 ("Long Test Job Without Sharding"): the shards must partition the input set exactly, the shard count must be validated wherever it is read, a documented rollback to a lower shard count must not silently defeat the new guard tests, and a result-collection step must keep every shard's failure, not just the first or last.
 - **2026-11-05** — Detect timestamp-proven shell loops that run at least ten distinct test files sequentially, and hold back larger-runner advice with a pointer to OPT88's measured-concurrency guidance.
 - **2026-11-05** — Disclose a merge-gating job's runner-label era when the observed label changes once inside an otherwise unchanged workflow sample. The report names both labels and their run counts without partitioning the sample, and verification rejects a stamped runner era whose disclosure is missing.
 - **2026-11-05** — Attribute nested local reusable-workflow matrix checks to their editable leaf workflow. Follow scanned call targets with a cycle and depth bound, keeping unrelated local jobs from claiming remote calls and preserving bare matrix-name matching.
