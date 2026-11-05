@@ -364,6 +364,37 @@ def test_run_jobs_retries_a_502_with_smaller_pages():
     assert client.errors == 0
 
 
+def test_prefetched_502s_do_not_block_smaller_job_pages(monkeypatch, no_sleep):
+    """Concurrent large-page failures must leave the client able to fetch the
+    smaller pages that recover those same run-job listings."""
+    first = "repos/o/r/actions/runs/7/jobs?per_page=100"
+    second = "repos/o/r/actions/runs/8/jobs?per_page=100"
+
+    def _run(cmd, *args, **kwargs):
+        endpoint = cmd[-1]
+        if endpoint.endswith("per_page=100"):
+            return _server_error(cmd, *args, **kwargs)
+        run_id = int(endpoint.split("/runs/", 1)[1].split("/", 1)[0])
+        return _completed(
+            returncode=0,
+            stdout=_ok(
+                f'{{"total_count": 1, "jobs": [{{"id": {run_id}, "name": "pole"}}]}}'
+            ),
+        )
+
+    _patch_run(monkeypatch, _run)
+    client = GhClient()
+    client.prefetch_json([first, second])
+
+    first_jobs = collect_runs._fetch_run_jobs(client, "o/r", 7)
+    second_jobs = collect_runs._fetch_run_jobs(client, "o/r", 8)
+
+    assert first_jobs == [{"id": 7, "name": "pole"}]
+    assert second_jobs == [{"id": 8, "name": "pole"}]
+    assert not client.gave_up
+    assert client.errors == 0
+
+
 def test_run_jobs_filtered_paginates_and_keeps_the_filter_param():
     jobs = lambda lo, hi: [{"id": i} for i in range(lo, hi)]  # noqa: E731
     client = _PagingClient({

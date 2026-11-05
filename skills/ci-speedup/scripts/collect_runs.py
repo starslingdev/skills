@@ -1419,7 +1419,15 @@ class GhClient:
                 # case is the most expensive of the three (a full `timeout` per
                 # attempt), so gating this on `rate_limit` left the worst case with no
                 # terminal condition at all.
-                self._note_giveup(kind)
+                smaller_jobs_fallback = (
+                    kind == "server_error"
+                    and status == 502
+                    and "/actions/runs/" in endpoint
+                    and endpoint.split("?", 1)[0].endswith("/jobs")
+                    and "per_page=100" in endpoint
+                )
+                if not smaller_jobs_fallback:
+                    self._note_giveup(kind)
                 return None
             if not allow_missing:
                 self._bump(error=True)
