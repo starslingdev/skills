@@ -3591,6 +3591,84 @@ def _vr_gate_counts(cp: dict) -> tuple[dict, int]:
     return present, n
 
 
+def _verify_per_pr_floor_split(name: str, report: str, cp: dict) -> Check | None:
+    """Independently re-derive a rendered per-PR sibling-floor split.
+
+    Returns None when the report has no such claim. This deliberately reads
+    only the sampled populations and the stamped critical-path check; it does
+    not trust the renderer's aggregate candidates or a finding's prose.
+    """
+    if "Per-PR split:" not in report:
+        return None
+    stamp = str(cp.get("critical_path_check") or "")
+    if not stamp:
+        return Check(name, False, "rendered per-PR split has no critical_path_check stamp")
+    target = _cmp_name(stamp)
+    rows: list[tuple[float, str]] = []
+    unknown_n = 0
+    total_n = 0
+    for entry in _as_list(cp.get("populations")):
+        try:
+            _share, checks = entry
+            positive = [(str(check), float(duration)) for check, duration in checks
+                        if float(duration) > 0]
+        except (TypeError, ValueError):
+            continue
+        own = [duration for check, duration in positive if _cmp_name(check) == target]
+        if not own:
+            continue
+        total_n += 1
+        siblings = [(check, duration) for check, duration in positive
+                    if _cmp_name(check) != target]
+        if not siblings:
+            unknown_n += 1
+            continue
+        sibling, floor_s = max(siblings, key=lambda item: item[1])
+        rows.append((max(max(own) - floor_s, 0.0), sibling))
+    if total_n <= 0:
+        return Check(name, False,
+                     "rendered per-PR split has no usable population containing its pole")
+    expected: list[str] = []
+    zero = [(saving, sibling) for saving, sibling in rows if saving <= 0]
+    positive = [(saving, sibling) for saving, sibling in rows if saving > 0]
+    if zero:
+        blockers = {_strip_scope(sibling) for _saving, sibling in zero}
+        blockers.discard("")
+        where = (f" where `{next(iter(blockers))}` runs"
+                 if len(blockers) == 1 else " where another check runs longer")
+        expected.append(f"0 on {len(zero)} of {total_n} PRs{where}")
+    if positive:
+        by_cap: dict[float, int] = {}
+        for saving, _sibling in positive:
+            cap = round(saving, 1)
+            by_cap[cap] = by_cap.get(cap, 0) + 1
+        for cap, count in sorted(by_cap.items()):
+            other = "the other " if zero and len(zero) + count == total_n else ""
+            expected.append(
+                f"up to {_fmt_clock(cap)} on {other}{count} of {total_n} PRs")
+    if unknown_n:
+        expected.append(
+            f"unknown on {unknown_n} of {total_n} PRs with a missing sibling observation")
+    missing = [claim for claim in expected if claim not in report]
+    if missing:
+        return Check(name, False,
+                     "per-PR sibling-floor split disagrees with populations; missing: "
+                     + "; ".join(missing))
+    max_saving = max((saving for saving, _sibling in rows), default=0.0)
+    bottom = next((line for line in report.splitlines() if "**Bottom line.**" in line), "")
+    match = _HEADLINE_WIN_RE.search(bottom)
+    rendered = _parse_clock_to_s(match.group(1)) if match else None
+    if rendered is None:
+        return Check(name, False, "per-PR split rendered without a parseable Bottom-line win")
+    if rendered > max_saving + 0.5:
+        return Check(name, False,
+                     f"Bottom-line win {_fmt_clock(rendered)} exceeds the independently re-derived "
+                     f"maximum per-PR saving {_fmt_clock(max_saving)}")
+    return Check(name, True,
+                 f"per-PR split matches {total_n} sampled populations and Bottom-line "
+                 f"{_fmt_clock(rendered)} <= maximum {_fmt_clock(max_saving)}")
+
+
 def _rare_demoted_check_names(data: dict) -> set[str]:
     """The set of `_cmp_name`-normalized check names the spine demotes as OPT-IN / RARE — the
     exact class whose level-1 footnote reads "a typical PR doesn't wait on it" — re-derived from
@@ -4066,6 +4144,9 @@ def check_headline_floor_presence_reconciled(report: str, findings_path: Path | 
     except (OSError, json.JSONDecodeError):
         return Check(name, True, "findings unreadable", skipped=True)
     cp = _as_dict(_as_dict(data).get("pr_critical_path"))
+    split_check = _verify_per_pr_floor_split(name, report, cp)
+    if split_check is not None:
+        return split_check
     stamp = cp.get("critical_path_check")
     # A non-string / empty stamp is a malformed or stampless bundle — degrade to the SAME SKIP as an
     # empty findings container (the wrong-type-container degradation contract), never a spurious FAIL.
@@ -13125,6 +13206,13 @@ def check_headline_cluster_lever_on_spine(report: str, findings_path: Path | Non
         # chain or pole win the crown sentence names instead / no tilde-win) — the renderer's off-spine drop, or a genuine
         # burial (the sibling guard's target). Not this guard's crown to judge → LOUD narrow skip
         # (L8: never read clean on an unverifiable crown).
+        split_check = _verify_per_pr_floor_split(
+            name, report, _as_dict(data.get("pr_critical_path")))
+        if split_check is not None:
+            if best_f.get("off_spine") is True:
+                return Check(name, False,
+                             f"per-PR floor is bounded, but OPT73 `{wf}` is stamped off_spine")
+            return split_check
         return Check(name, True,
                      f"the max credited cluster lever (OPT73 `{wf}`, ~{_fmt_clock(best_s)}) does not "
                      "lead the Bottom line (demoted/buried/outranked or no `~<clock>` win) — no "

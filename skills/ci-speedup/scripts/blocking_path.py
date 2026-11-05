@@ -638,6 +638,53 @@ def _pole_cooccurrence(cp: dict[str, Any], pole_name: str) -> tuple[dict[str, in
     return cooccur, n_gating
 
 
+def _pole_per_pr_floor(cp: dict[str, Any], pole_name: str) -> dict[str, Any] | None:
+    """Exact sibling-floor evidence for ``pole_name`` from sampled PR populations.
+
+    Each known row carries the observed pole duration, longest sibling, and the
+    resulting maximum single-pole saving.  A row where the pole ran without any
+    sibling is retained as unknown: absence is not evidence that the full pole
+    duration is addressable.  ``None`` preserves legacy behavior when no usable
+    populations contain the pole.
+    """
+    target = _floor_key(pole_name)
+    rows: list[dict[str, Any]] = []
+    unknown_n = 0
+    total_n = 0
+    for entry in cp.get("populations") or []:
+        try:
+            _share, checks = entry
+            positive = [(str(name), float(duration)) for name, duration in checks
+                        if float(duration) > 0]
+        except (TypeError, ValueError):
+            continue
+        own = [duration for name, duration in positive if _floor_key(name) == target]
+        if not own:
+            continue
+        total_n += 1
+        siblings = [(name, duration) for name, duration in positive
+                    if _floor_key(name) != target]
+        if not siblings:
+            unknown_n += 1
+            continue
+        sibling, floor_s = max(siblings, key=lambda item: item[1])
+        before_s = max(own)
+        rows.append({
+            "saving_s": max(before_s - floor_s, 0.0),
+            "sibling": sibling,
+            "floor_s": floor_s,
+            "before_s": before_s,
+        })
+    if total_n <= 0:
+        return None
+    return {
+        "total_n": total_n,
+        "unknown_n": unknown_n,
+        "rows": rows,
+        "max_saving_s": max((float(row["saving_s"]) for row in rows), default=0.0),
+    }
+
+
 def _floor_qualifies(c: dict[str, Any], cooccur: dict[str, int] | None, gating_n: int,
                      denom: int) -> bool:
     """Is concurrent check `c` 'near-universal' enough to FLOOR the merge? With per-pole
@@ -757,6 +804,34 @@ def _floor_note(pole: dict[str, Any],
         observations exist on those PRs.  Candidate ``present_on`` counts give
         the full observed population.  A missing observation remains unknown.
         """
+        exact = pole.get("_per_pr_floor")
+        if isinstance(exact, dict):
+            rows = [row for row in (exact.get("rows") or []) if isinstance(row, dict)]
+            total = int(exact.get("total_n") or 0)
+            unknown_n = int(exact.get("unknown_n") or 0)
+            if total <= 0 or max_saving < 0:
+                return ""
+            zero = [row for row in rows if (_num(row.get("saving_s")) or 0.0) <= 0]
+            positive = [row for row in rows if (_num(row.get("saving_s")) or 0.0) > 0]
+            clauses: list[str] = []
+            if zero:
+                blockers = {_clean_label(str(row.get("sibling") or "")) for row in zero}
+                blockers.discard("")
+                where = (f" where `{next(iter(blockers))}` runs"
+                         if len(blockers) == 1 else " where another check runs longer")
+                clauses.append(f"0 on {len(zero)} of {total} PRs{where}")
+            if positive:
+                by_cap: dict[float, int] = {}
+                for row in positive:
+                    cap = round(_num(row.get("saving_s")) or 0.0, 1)
+                    by_cap[cap] = by_cap.get(cap, 0) + 1
+                for cap, count in sorted(by_cap.items()):
+                    other = "the other " if zero and len(zero) + count == total else ""
+                    clauses.append(f"up to {_clock(cap)} on {other}{count} of {total} PRs")
+            if unknown_n:
+                clauses.append(
+                    f"unknown on {unknown_n} of {total} PRs with a missing sibling observation")
+            return " Per-PR split: " + "; ".join(clauses) + "." if clauses else ""
         if not isinstance(cooccur, dict) or gating_n <= 0 or max_saving < 0:
             return ""
         total = max((int(c.get("present_on") or 0) for c in candidates), default=0)
@@ -765,7 +840,17 @@ def _floor_note(pole: dict[str, Any],
         clauses: list[str] = []
         zero_n = total - gating_n
         if zero_n:
-            blockers = [c for c in others if _eff_floor_s(c) >= pole_p]
+            # Name a blocker only when its stamped presence, less the PRs where
+            # it co-occurred with this pole as winner, covers the WHOLE
+            # zero-saving population.  A rare 690s check cannot be described as
+            # running on twelve PRs merely because it is the highest aggregate
+            # p50 among candidates.
+            blockers = [
+                c for c in others
+                if (_eff_floor_s(c) >= pole_p
+                    and max(int(c.get("present_on") or 0)
+                            - int(cooccur.get(_floor_key(_check_name(c)), 0)), 0) >= zero_n)
+            ]
             blocker = max(blockers, key=_eff_floor_s) if blockers else None
             where = (f" where `{_clean_label(_check_name(blocker))}` runs"
                      if blocker is not None else " where another check runs longer")
@@ -1262,6 +1347,15 @@ def _pole_addressable(pole: dict[str, Any],
         # stamped chain headroom and its own span, never the chain-blind
         # `pole − binding` arithmetic below.
         return max(min(_num(ch.get("win_s")) or 0.0, pole_p), 0.0)
+    exact = pole.get("_per_pr_floor")
+    if isinstance(exact, dict) and int(exact.get("total_n") or 0) > 0:
+        # Preserve the existing conservative aggregate floor when it is lower,
+        # but never let it exceed the largest saving observed on any sampled
+        # PR. Rows with no sibling remain unknown and contribute no invented
+        # headroom.
+        aggregate = max(pole_p - binding_s, 0.0)
+        observed_max = max(_num(exact.get("max_saving_s")) or 0.0, 0.0)
+        return min(aggregate, observed_max)
     return max(pole_p - binding_s, 0.0)
 
 
@@ -11570,6 +11664,7 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
     for p in pole_wfs:
         cooccur, gating_n = _pole_cooccurrence(cp, str(p.get("check", "")))
         p["_cooccur"], p["_gating_n"] = cooccur, gating_n
+        p["_per_pr_floor"] = _pole_per_pr_floor(cp, str(p.get("check", "")))
         # Stash the pole's OWN gate/presence counts, so the agent-prompt gate line can state a
         # DEMOTED pole's real (low) gate frequency instead of borrowing the workflow's typical-gate
         # count (the caddy goreleaser-check contradiction). The demotion FLAG itself is stamped

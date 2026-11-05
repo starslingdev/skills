@@ -139,3 +139,65 @@ def test_missing_sibling_observation_is_unknown_not_full_headroom():
     assert result.reason is not None
     assert "unknown on 1 of 2 PRs" in result.reason
     assert "up to 6m 00s on 1 of 2 PRs" in result.reason
+
+
+def test_split_does_not_name_a_slow_check_that_misses_most_zero_saving_prs():
+    pole = {
+        "check": "pole", "p50_s": 600.0,
+        "_cooccur": {"next-check": 8}, "_gating_n": 8,
+    }
+    candidates = [
+        {"name": "pole", "p50_s": 600.0, "present_on": 20,
+         "workflow_file": ".github/workflows/ci.yml"},
+        {"name": "rare-slow", "p50_s": 690.0, "present_on": 4,
+         "workflow_file": ".github/workflows/rare.yml"},
+        {"name": "next-check", "p50_s": 240.0, "present_on": 8,
+         "workflow_file": ".github/workflows/next.yml"},
+    ]
+    note = "\n".join(bp._floor_note(pole, candidates))
+    assert "0 on 12 of 20 PRs where another check runs longer" in note
+    assert "0 on 12 of 20 PRs where `rare-slow` runs" not in note
+
+
+def _varying_floor_report(tmp_path: Path):
+    populations = (
+        *((0.05, (("pole", 600.0), ("shard-matrix", 690.0))) for _ in range(12)),
+        *((0.05, (("pole", 600.0), ("next-check", 590.0))) for _ in range(8)),
+    )
+    ctx = WallClockContext(
+        pr_checks=populations[0][1],
+        pr_check_populations=populations,
+        own_check_names=frozenset({"pole"}),
+        cluster_floor_lever=True,
+    )
+    result = bound_measured_critical_path(500.0, ctx)
+    assert result.value == 4.0 and result.reason is not None
+    assert "maximum per-PR saving is 10s" in result.reason
+    doc = _doc(result.reason, populations)
+    doc["findings"][0]["wall_clock_p50_s"] = result.value
+    doc["findings"][0]["wall_clock_derivation"][0]["to_s"] = result.value
+    report = bp.render(doc)
+    findings_path = tmp_path / "varying-floor-findings.json"
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+    return report, findings_path
+
+
+def test_headline_never_exceeds_varying_per_pr_maximum(tmp_path):
+    report, _findings_path = _varying_floor_report(tmp_path)
+    bottom = next(line for line in report.splitlines() if "**Bottom line.**" in line)
+    rendered = re.search(r"biggest single measured win is \*\*~([^*]+)\*\*", bottom)
+    assert rendered
+    assert _clock_seconds(rendered.group(1)) <= 10.0
+
+
+def test_verifiers_actually_validate_the_varying_per_pr_split(tmp_path):
+    report, findings_path = _varying_floor_report(tmp_path)
+    vr = _verify_report()
+    checks = (
+        vr.check_headline_cluster_lever_on_spine(report, findings_path),
+        vr.check_headline_floor_presence_reconciled(report, findings_path),
+    )
+    assert all(check.ok and not check.skipped for check in checks), [
+        {"ok": check.ok, "skipped": check.skipped, "detail": check.detail}
+        for check in checks
+    ]
