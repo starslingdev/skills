@@ -2103,6 +2103,8 @@ title_template: "Test concurrency is set by guess, not measurement"
 
 **Detection heuristic** (manual; read, never inferred):
 
+A log-level `test-loop-serial` observation can point here when timestamped evidence shows that one shell runner executes at least ten distinct test files one after another; OPT88 remains manual because the safe worker count still has to be measured.
+
 1. The slow step runs tests, and concurrency is set explicitly (serial, or a fixed number), or not at all on a runner whose test tool defaults to serial. Look everywhere it can be set: the test command, the workflow, and the test tool's own config files (for example `local_test_jobs` and a `test_env` thread count such as `RUST_TEST_THREADS` in `.bazelrc`, or pytest, jest and nextest config files).
 2. The setting does not match the runner: compare it with the core count of the job's runner label. If the label is custom and its core count is not documented, measure it first with a one-line probe step (`nproc`, or `[Environment]::ProcessorCount` on Windows).
 3. Look for what forced it: tests marked serial or skipped under parallel runs, shared fixed resources (one database name, a fixed port, a temp path), real-time waits (`sleep`, fixed-interval polling, see [OPT19](#opt19--test-source-sleep-dominance-includes-playwright-waitfortimeout)). If nothing forced it, say so: the tests did not force the setting, and only the measurement in fix step 3 justifies changing it.
