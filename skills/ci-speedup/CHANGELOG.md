@@ -14,6 +14,14 @@ unversioned and updates by reinstall from `main`.
 ### Added
 
 - **2026-11-05** — Attribute nested local reusable-workflow matrix checks to their editable leaf workflow. Follow scanned call targets with a cycle and depth bound, keeping unrelated local jobs from claiming remote calls and preserving bare matrix-name matching.
+- **2026-11-05** — Stop queued API reads after three consecutive authentication failures following a successful read. Reports now say when the GitHub token stopped working partway through and count failed logical job fetches, including queued fetches skipped after collection stopped, and no longer attribute that stop to rate limits, server errors or timeouts; job-list reads made for the shared-runner queue check count toward that total, and the stop reason is logged once. Rate limits and endpoint permission refusals retain their own handling.
+- **2026-11-05** — Qualify success-only headline timings when the already-fetched
+  all-status page shows that at least 20% of 10 or more completed default-branch
+  runs failed or timed out. The report names the workflow and exact failed/eligible
+  count beside the Bottom line; cancelled, skipped, PR-branch and unrelated event
+  runs stay outside the population, and thin samples or an unknown default
+  branch remain data-only with the reason stamped.
+- **2026-11-05** — Run all four config-era report guards whenever the findings carry a rendered era fact, including current-configuration facts created before per-era enumeration sets were added. A narrowed or provisional era banner can no longer coexist with a verifier coverage skip; only findings with no config-era stamp skip these guards.
 
 - **2026-11-04** — Add OPT101: report an uncredited cache-path observation only when the missing-path warning occurs in every sampled successful save post-step. Optionally name a disjoint literal Bazel cache directory; disclose scoped/dynamic config as not read. Existing wrong paths without warnings remain undetected. Matches the real `[warning]` line actions/cache writes, with whole-second step windows, and still samples when the drilled run itself failed; the observation never closes a coverage gap or displaces another secondary note. The catalog now contains 96 patterns. (#190)
 - **2026-11-03** — Add OPT97 for queue time that tracks in-flight jobs while execution stays flat, on a self-hosted runner pool or one with a resource hint (global concurrency group, one repo-level runner, device step). In-flight counts come from one bounded read of every run in the population's window (at most 3 run-list pages and 60 job lists, disclosed in Data sources); a failed or capped read is "check this: competition not measured", never a finding. A same-workflow, same-job OPT43 finding is replaced by the measured one. Credit only queue above the P10 of the other sampled jobs, on established merge gates, through existing floors. Matching job-local service ports or database names are deliberately not a shared-resource hint: each job gets its own service containers. Catalog: 93 patterns. (#178)
@@ -1207,6 +1215,8 @@ unversioned and updates by reinstall from `main`.
   run improvised).
 
 ### Fixed
+
+- **2026-11-05** — Frame a check excluded from the merge-wait spine only as off-path when it also has a long-test sharding finding. The exclusion note now wins over the finding's wall-clock magnitude, so the report no longer describes the same check as both dropped and on the critical path. A finding that covers both an excluded check and a kept one stays on the critical path and names the kept check.
 
 - **2026-11-04** — Retry a large run's job listing at 30 jobs per page when GitHub returns 502 at 100, preserving the complete run instead of disclosing it as unavailable. (#192)
 

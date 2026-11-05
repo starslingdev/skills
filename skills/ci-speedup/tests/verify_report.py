@@ -12342,9 +12342,9 @@ def check_era_enumeration_bound(report: str, findings_path: Path | None,
     `kept_checks` alongside. This guard re-derives the bind: NO check the report enumerates (from
     `pr_critical_path.checks` / `poles` / `populations`) may be a member of any era's
     `other_era_checks` — i.e. no rendered pole/check is absent from the kept era's stamped run set.
-    FAILs loudly and names the leak. A LOUD NARROW SKIP on a straddle artifact that predates the
-    #69 enumeration stamps (a stamped straddle but no `other_era_checks`/`kept_checks` key anywhere
-    — nothing to re-derive against). Standalone; keys on `pr_critical_path`."""
+    FAILs loudly and names the leak. Every config-era fact activates the guard; older facts without
+    per-era enumeration sets have no stamped other-era names to compare, but are still checked rather
+    than mislabeled as uncovered. Standalone; keys on `pr_critical_path`."""
     name = "check enumeration is bound to the kept config era (no other-config check leaks in)"
     if not findings_path:
         return Check(name, True, "no findings — no config-era stamp to bind", skipped=True)
@@ -12360,14 +12360,12 @@ def check_era_enumeration_bound(report: str, findings_path: Path | None,
     if not eras:
         return Check(name, True, "no workflow sample straddled a config change — no era to bind",
                      skipped=True)
-    # LOUD NARROW SKIP: a straddle is stamped but none carries the #69 enumeration stamps — a
-    # pre-#69 artifact whose enumeration was never era-scoped. Nothing to re-derive against (not a
-    # clean pass: the report may well leak, we just can't prove it from this artifact).
-    stamped = [e for e in eras if "other_era_checks" in e or "kept_checks" in e]
-    if not stamped:
-        return Check(name, True, "straddle stamped but no per-era enumeration sets "
-                     "(other_era_checks/kept_checks) — pre-#69 artifact, enumeration bind not "
-                     "re-derivable. Coverage gap, not a clean pass.", skipped=True)
+    # The renderer keys its era banner on every workflow fact in `config_eras`, not on the later
+    # enumeration-set additions. Use that same stamp here so a rendered era banner can never coexist
+    # with a verifier SKIP. Missing sets simply contribute no other-era names to this guard.
+    stamped = eras
+    without_sets = sum(1 for e in stamped
+                       if "other_era_checks" not in e and "kept_checks" not in e)
     other_era: set[str] = set()
     for e in stamped:
         for n in _as_list(e.get("other_era_checks")):
@@ -12375,6 +12373,10 @@ def check_era_enumeration_bound(report: str, findings_path: Path | None,
             if cn:
                 other_era.add(cn)
     if not other_era:
+        if without_sets:
+            return Check(name, True,
+                         f"{without_sets} config-era fact(s) checked without per-era enumeration "
+                         "sets; no stamped other-config check names are available to compare")
         return Check(name, True, "the other configuration adds/removes no checks — every stamped "
                      f"straddle enumerates a single era ({len(stamped)} straddle(s) checked)")
     rendered = _era_rendered_check_names(cp)
@@ -12421,9 +12423,9 @@ def check_era_disclosure_matches_enumeration(report: str, findings_path: Path | 
         kept/other spine check). NOTE: a disclosed_pre may now be spine-IRRELEVANT (empty kept AND
         empty other) — a valid suppressed state, distinct from the #74 hollow shape (empty kept,
         NON-empty other) that still FAILs.
-    A LOUD NARROW SKIP on a straddle artifact without the enumeration stamps (pre-#69/#74 — the
-    cleared-stamp shape the OLD guard went blind on; not re-derivable, a coverage gap not a clean
-    pass). Standalone; keys on `pr_critical_path` + the rendered disclosure marker.
+    Every config-era fact activates the guard, including an older fact without the later enumeration
+    sets; only an absent `config_eras` stamp skips. Standalone; keys on `pr_critical_path` + the
+    rendered disclosure marker.
 
     **Timing-provenance leg, basis-aware (issue #77).** A POST-claiming straddle whose pole drilled a
     PRE-era run FAILs — but "pre-era" is judged by the pole's stamped classification BASIS, closing
@@ -12452,11 +12454,11 @@ def check_era_disclosure_matches_enumeration(report: str, findings_path: Path | 
     if not eras:
         return Check(name, True, "no workflow sample straddled a config change — no era to bind",
                      skipped=True)
-    stamped = [e for e in eras if "other_era_checks" in e or "kept_checks" in e]
-    if not stamped:
-        return Check(name, True, "straddle stamped but no per-era enumeration sets "
-                     "(other_era_checks/kept_checks) — pre-#69/#74 artifact, the disclosure/enumeration "
-                     "bind isn't re-derivable. Coverage gap, not a clean pass.", skipped=True)
+    # Match `_config_era_disclosure_lines`: every workflow fact in `config_eras` is an era stamp.
+    # Later enumeration keys enrich the checks below but do not decide whether this guard runs.
+    stamped = eras
+    without_sets = sum(1 for e in stamped
+                       if "other_era_checks" not in e and "kept_checks" not in e)
     disclosed_pre = [e for e in stamped if e.get("rule") == "disclosed_pre"]
     # (1) A disclosed_pre fact that measured NOTHING pre-era (empty kept, non-empty other) — the #74
     #     shape. This is the lie whether or not the marker parsed cleanly, so check the stamps first.
@@ -12593,10 +12595,12 @@ def check_era_disclosure_matches_enumeration(report: str, findings_path: Path | 
                      "from post-era runs): poles "
                      + ", ".join(f"`{o}`" for o in pre_era_poles[:5]))
     kept_ok = sum(1 for e in disclosed_pre if _as_list(e.get("kept_checks")))
+    legacy_note = (f"; {without_sets} fact(s) have no per-era enumeration sets, so set-dependent "
+                   "legs had no stamped names to compare" if without_sets else "")
     return Check(name, True,
                  f"disclosure matches enumeration ({len(disclosed_pre)} disclosed_pre straddle(s), "
                  f"{kept_ok} with a real pre-era measurement; no pre-only caveat over post-era checks; "
-                 "no post-claiming pole drilled from a pre-era run)")
+                 f"no post-claiming pole drilled from a pre-era run{legacy_note})")
 
 
 def check_era_chain_spine_bound_to_kept_era(report: str, findings_path: Path | None,
@@ -12631,8 +12635,9 @@ def check_era_chain_spine_bound_to_kept_era(report: str, findings_path: Path | N
          legitimately fast minority PR; a non-unanimous kept gate is NOT re-derivable this way offline
          (the median PR may not have run it) and is left to leg 2 + the engine-side door.
 
-    Standalone; keys on `pr_critical_path`. A LOUD NARROW SKIP on a straddle artifact predating the
-    #69/#74 enumeration stamps (nothing to re-derive against). Pure SKIP when nothing straddled."""
+    Standalone; keys on `pr_critical_path`. Every config-era fact activates the guard; later
+    enumeration stamps add stronger legs but do not gate execution. Pure SKIP when nothing
+    straddled."""
     name = "the per-PR chain/makespan spine is bound to the kept config era (no dropped-era PR blends in)"
     if not findings_path:
         return Check(name, True, "no findings — no config-era stamp to bind", skipped=True)
@@ -12648,11 +12653,12 @@ def check_era_chain_spine_bound_to_kept_era(report: str, findings_path: Path | N
     if not eras:
         return Check(name, True, "no workflow sample straddled a config change — no spine to bind",
                      skipped=True)
-    stamped = [e for e in eras if "other_era_checks" in e or "kept_checks" in e]
-    if not stamped:
-        return Check(name, True, "straddle stamped but no per-era enumeration sets — pre-#69/#74 "
-                     "artifact, the spine bind isn't re-derivable. Coverage gap, not a clean pass.",
-                     skipped=True)
+    # The rendered banner and all verifier guards share `config_eras` as their activation stamp.
+    # An older fact may lack enumeration sets, in which case the set-dependent legs are vacuous, but
+    # the guard still runs and reports that result instead of SKIP.
+    stamped = eras
+    without_sets = sum(1 for e in stamped
+                       if "other_era_checks" not in e and "kept_checks" not in e)
     cs = _as_dict(cp.get("chain_summary"))
     chain_facts = [c for c in _as_list(cp.get("chain_facts")) if isinstance(c, dict)]
     sampled = _num(cp.get("sampled_pr_count"))
@@ -12706,10 +12712,13 @@ def check_era_chain_spine_bound_to_kept_era(report: str, findings_path: Path | N
                              "is physically impossible in the kept era; it was measured on faster "
                              "dropped-era PRs (issue #80).")
     n_disp = int(cs_n) if cs_n is not None else 0
+    legacy_note = (f"; {without_sets} fact(s) have no per-era enumeration sets, so set-dependent "
+                   "legs had no stamped names to compare" if without_sets else "")
     return Check(name, True,
                  f"the per-PR spine is bound to the kept era ({len(disclosed_pre)} disclosed_pre "
                  f"straddle(s); {n_disp} chain fact(s) within the kept-side sample; no dropped-era "
-                 "head feeds a kept-era chain member; no makespan below a unanimous kept gate)")
+                 f"head feeds a kept-era chain member; no makespan below a unanimous kept gate"
+                 f"{legacy_note})")
 
 
 # The measured sizing DOOR invariants (issues #43/#44/#45). Every rendered runner-minute saving must

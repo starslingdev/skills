@@ -663,8 +663,9 @@ era's `other_era_checks` — a check absent from the kept era's runs. A second, 
 (`check_era_disclosure_matches_enumeration`, issue #74) keys on the RENDERED disclosure marker: a
 pre-only "measures the previous configuration" caveat must not co-exist with an all-post / hollow
 (empty-`kept_checks`) measurement — re-derivable now that the flip makes stamps always survive. Both
-are a loud narrow SKIP on a straddle artifact predating the enumeration stamps (the cleared-stamp
-shape the old guard went blind on — the bind isn't re-derivable, a coverage gap not a clean pass).
+run on every `config_eras` fact, the same stamp the renderer's era banner reads; a fact predating the
+enumeration stamps contributes no other-era names to the set-dependent legs (said in the detail),
+and only findings with no `config_eras` stamp skip.
 
 **Per-PR spine door — the makespan/chain layer is bound to the kept era too (issue #80).** The
 enumeration bind above scopes the CHECK SET (`pr_check_p50`) by NAME, but a check name survives a
