@@ -748,6 +748,38 @@ def _floor_note(pole: dict[str, Any],
     floor_next = _floor_candidate(others, cooccur, gating_n)
     binding = _binding_floor(others, cooccur, gating_n)
     binding_s = _eff_floor_s(binding) if binding else 0.0
+
+    def _per_pr_split_note(max_saving: float) -> str:
+        """Describe the measured PR populations behind this pole's ceiling.
+
+        ``_cooccur``/``_gating_n`` come from the per-PR populations: gating_n
+        counts PRs where this pole was slowest, and cooccur says which sibling
+        observations exist on those PRs.  Candidate ``present_on`` counts give
+        the full observed population.  A missing observation remains unknown.
+        """
+        if not isinstance(cooccur, dict) or gating_n <= 0 or max_saving < 0:
+            return ""
+        total = max((int(c.get("present_on") or 0) for c in candidates), default=0)
+        if total <= 0 or gating_n > total:
+            return ""
+        clauses: list[str] = []
+        zero_n = total - gating_n
+        if zero_n:
+            blockers = [c for c in others if _eff_floor_s(c) >= pole_p]
+            blocker = max(blockers, key=_eff_floor_s) if blockers else None
+            where = (f" where `{_clean_label(_check_name(blocker))}` runs"
+                     if blocker is not None else " where another check runs longer")
+            clauses.append(f"0 on {zero_n} of {total} PRs{where}")
+        observed_n = (cooccur.get(_floor_key(_check_name(floor_next)), 0)
+                      if floor_next is not None else 0)
+        observed_n = min(max(int(observed_n), 0), gating_n)
+        if observed_n:
+            other = "the other " if zero_n + observed_n == total else ""
+            clauses.append(f"up to {_clock(max_saving)} on {other}{observed_n} of {total} PRs")
+        unknown_n = gating_n - observed_n
+        if unknown_n:
+            clauses.append(f"unknown on {unknown_n} of {total} PRs with a missing sibling observation")
+        return " Per-PR split: " + "; ".join(clauses) + "." if clauses else ""
     # Non-gate guard + addressable cap. A pole that runs BEHIND a UNIVERSAL concurrent blocker —
     # INCLUDING an untunable managed/external check that `_floor_candidate` won't NAME — buys ~0
     # merge wait until that blocker is cut, which the pole's role line already states. Skip the
@@ -816,6 +848,7 @@ def _floor_note(pole: dict[str, Any],
             "runner-minutes, not wall-clock."
             + _recoverable_reconciliation(win, _tw) + floor_line, ""]
     addr_leg = max(pole_p - binding_s, 0.0)
+    split_note = _per_pr_split_note(addr_leg)
     # If the BINDING floor is a check with no workflow file (managed/external) sitting ABOVE the
     # highest file-backed floor we could name, the gate does NOT drop to that file check — it
     # drops to the untunable blocker. Name THAT honestly rather than quoting a faster file floor
@@ -826,7 +859,7 @@ def _floor_note(pole: dict[str, Any],
             f"> **What a change here can buy (wall-clock):** up to **~{_clock(addr_leg)}** — a "
             f"concurrent check with no workflow file to speed up here, `{cap_name}` "
             f"({_clock(binding_s)}), caps it there; below that the gate is that check, not this "
-            "job." + _recoverable_reconciliation(addr_leg, _tw), ""]
+            "job." + _recoverable_reconciliation(addr_leg, _tw) + split_note, ""]
     pole_wf = str(pole.get("workflow_file") or "")
     legs = [c for c in candidates
             if _same_matrix(pole_name, _check_name(c), pole_wf, str(c.get("workflow_file") or ""))]
@@ -844,13 +877,14 @@ def _floor_note(pole: dict[str, Any],
             f"change that speeds *every* leg at once drops the whole matrix toward the next "
             f"check, `{_clean_label(_check_name(floor_m))}` ({_clock(_eff_floor_s(floor_m))}), "
             f"for up to **~{_clock(addr_m)}** of merge wait."
-            + _recoverable_reconciliation(addr_m, _tw), ""]
+            + _recoverable_reconciliation(addr_m, _tw)
+            + _per_pr_split_note(addr_m), ""]
     return [
         f"> **What a change here can buy (wall-clock):** up to **~{_clock(addr_leg)}** — "
         f"it gates until it drops to the next concurrent check, "
         f"`{_clean_label(_check_name(floor_next))}` ({_clock(_eff_floor_s(floor_next))}); below "
         "that the gate moves and further savings are runner-minutes, not wall-clock."
-        + _recoverable_reconciliation(addr_leg, _tw), ""]
+        + _recoverable_reconciliation(addr_leg, _tw) + split_note, ""]
 
 
 # ── Aggregation gate (the degenerate chain SINK) ─────────────────────────────────────

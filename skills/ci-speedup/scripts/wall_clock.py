@@ -398,7 +398,7 @@ def bound_measured_critical_path(value: float, ctx: WallClockContext) -> BoundRe
             f"off the chain wait, capped at the {_bound_via} "
             f"(~{min(ctx.chain_win_s, _member_span):.0f}s)"))
     weighted = 0.0
-    per_pop: list[tuple[float, float, str | None, float, float]] = []
+    per_pop: list[tuple[float, float, str | None, float, float, bool]] = []
     for share, checks in pops:
         own = [d for n, d in checks if n in ctx.own_check_names]
         others = [(n, d) for n, d in checks if n not in ctx.own_check_names]
@@ -418,18 +418,27 @@ def bound_measured_critical_path(value: float, ctx: WallClockContext) -> BoundRe
             # This finding's check doesn't run in this population → no saving here.
             cap, floor_name, floor = 0.0, None, 0.0
         elif not others:
-            cap, floor_name, floor = value, None, 0.0
+            # With several sampled PR populations, an absent sibling is missing
+            # evidence, not proof that this pole has the whole PR wall to itself.
+            # Keep the legacy one-population fallback, but give an unobserved
+            # sibling population no credit until a concurrent floor is known.
+            cap, floor_name, floor = ((0.0, None, 0.0) if len(pops) > 1
+                                      else (value, None, 0.0))
+            unknown = len(pops) > 1
         else:
             floor_name, floor = max(others, key=lambda kv: kv[1])
             cap = max(0.0, min(value, own_max - floor))
+            unknown = False
+        if own_max <= 0:
+            unknown = False
         weighted += share * cap
-        per_pop.append((share, cap, floor_name, floor, own_max))
+        per_pop.append((share, cap, floor_name, floor, own_max, unknown))
     weighted = round(weighted, 1)
     if weighted >= round(value, 1):
         return BoundResult(round(value, 1))  # nothing gated it in any population
     # Single population — the classic floor message (names the gating check).
     if len(pops) == 1:
-        _, cap, floor_name, floor, own_max = per_pop[0]
+        _, cap, floor_name, floor, own_max, _unknown = per_pop[0]
         if cap <= 0:
             _kind = ("gates the merge as a serialized whole"
                      if floor_name == "the gate chain"
@@ -445,16 +454,45 @@ def bound_measured_critical_path(value: float, ctx: WallClockContext) -> BoundRe
     # Multiple populations — the merge gate is bimodal, so the saving is credited
     # only on the PRs where this check is near the pole, share-weighted (the
     # expected wall-clock over the sampled PR critical paths).
-    nonzero = sum(1 for _s, cap, *_ in per_pop if cap > 0)
-    # Denominator is the number of POPULATIONS (sampled PRs that ran >=1 of the
-    # gate's checks), which can be < the report header's sampled-PR count when a
-    # sampled PR ran none — so spell that out rather than write "sampled PRs" and
-    # read as a contradiction of the header.
+    total = len(per_pop)
+    unknown_n = sum(1 for *_rest, unknown in per_pop if unknown)
+    known = [row for row in per_pop if not row[-1]]
+    zero = [row for row in known if row[1] <= 0]
+    positive = [row for row in known if row[1] > 0]
+
+    def _duration(seconds: float) -> str:
+        whole = max(0, round(seconds))
+        hours, rem = divmod(whole, 3600)
+        minutes, secs = divmod(rem, 60)
+        if hours:
+            return f"{hours}h {minutes:02d}m {secs:02d}s"
+        if minutes:
+            return f"{minutes}m {secs:02d}s"
+        return f"{secs}s"
+
+    clauses: list[str] = []
+    if zero:
+        names = {str(row[2]) for row in zero if row[2]}
+        suffix = f" where `{next(iter(names))}` runs" if len(names) == 1 else ""
+        clauses.append(f"0 on {len(zero)} of {total} PRs{suffix}")
+    if positive:
+        caps = {round(row[1], 1) for row in positive}
+        if len(caps) == 1:
+            cap = next(iter(caps))
+            other = "the other " if zero and len(zero) + len(positive) == total else ""
+            clauses.append(f"up to {_duration(cap)} on {other}{len(positive)} of {total} PRs")
+        else:
+            for cap in sorted(caps):
+                count = sum(1 for row in positive if round(row[1], 1) == cap)
+                clauses.append(f"up to {_duration(cap)} on {count} of {total} PRs")
+    if unknown_n:
+        clauses.append(f"unknown on {unknown_n} of {total} PRs with a missing sibling observation")
+    maximum = max((row[1] for row in known), default=0.0)
+    split = "; ".join(clauses)
     return BoundResult(weighted, (
-        f"population-weighted measured floor — the merge gate is bimodal, so the "
-        f"critical path differs by PR; this check is the pole on ~{nonzero}/{len(per_pop)} "
-        f"PR populations (sampled PRs that ran a gated check), giving an expected "
-        f"Δ {weighted:.0f}s of the {value:.0f}s raw saving"))
+        f"per-PR measured floor — {split}; the maximum per-PR saving is {maximum:.0f}s; "
+        f"the population-weighted expected Δ is {_duration(weighted)} of the "
+        f"{_duration(value)} raw saving"))
 
 
 def bound_cross_workflow(value: float, ctx: WallClockContext) -> BoundResult:
