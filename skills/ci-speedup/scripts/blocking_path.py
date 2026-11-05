@@ -10774,6 +10774,33 @@ def _fold_bottom_line(out: list[str], *blocks: list[str]) -> None:
     out.append("")
 
 
+def _success_only_caveat_lines(
+        doc: dict[str, Any], pole: dict[str, Any] | None) -> list[str]:
+    """Qualify a successful-run headline when its default branch was materially red.
+
+    Collection stamps one entry per workflow from the all-status page it already
+    fetched. Only a threshold-qualified stamp renders; thin and healthy populations
+    remain data-only so legacy reports and ordinary green repos stay byte-identical.
+    """
+    if not isinstance(pole, dict):
+        return []
+    workflow = str(pole.get("workflow_file") or "")
+    by_workflow = doc.get("success_only_timing_by_workflow") or {}
+    stamp = by_workflow.get(workflow) if isinstance(by_workflow, dict) else None
+    if not isinstance(stamp, dict) or stamp.get("status") != "caveat":
+        return []
+    failed = int(_num(stamp.get("failed_runs")) or 0)
+    eligible = int(_num(stamp.get("eligible_runs")) or 0)
+    failure_pct = int(_num(stamp.get("failure_pct")) or 0)
+    if not workflow or eligible <= 0 or failed <= 0:
+        return []
+    return [
+        "> Measured over successful runs; "
+        f"{failure_pct}% ({failed} of {eligible}) of default-branch runs of "
+        f"`{_clean_label(workflow)}` failed in the window."
+    ]
+
+
 def _headline_followup_lines(
         doc: dict[str, Any], pole: dict[str, Any] | None,
         floors: list[dict[str, Any]], *, cluster: dict[str, Any] | None = None,
@@ -12024,6 +12051,13 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         out,
         _lead_block,
         _model_check,
+        # The headline median is success-only; qualify it when the same workflow's
+        # cached all-status default-branch population was materially red.
+        _success_only_caveat_lines(
+            doc,
+            (_cluster_f
+             if _cluster_f is not None and _cluster_s > _existing_win + 0.5
+             else (top_fixable or (pole_wfs[0] if pole_wfs else poles[0])))),
         # Config-era caveat: qualifies the headline number (folded, not a separate quote).
         _config_era_disclosure_lines(cp, captured_at),
         # Fileless/managed status-check disclosure (PR-lifetime status-gating latency).
