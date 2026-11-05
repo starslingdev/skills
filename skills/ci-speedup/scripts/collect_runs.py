@@ -807,6 +807,11 @@ class GhClient:
         self._gave_up = False
         self._giveups = 0
         self._backoff_spent = 0.0
+        # Final HTTP status for a failed endpoint, keyed rather than global because
+        # pooled workers fail independently. Pagination uses this only for the
+        # jobs-endpoint 502 fallback; every other failure keeps the ordinary loud-gap
+        # path. Cleared when the same endpoint later succeeds.
+        self._failure_status_by_endpoint: dict[str, int | None] = {}
         # Deterministic offline replay/record — see `_fixture_name` above. Read
         # once here (not re-checked per call) so a run's mode is fixed for its
         # lifetime. Both unset (the default) is byte-identical to the live path
@@ -837,6 +842,26 @@ class GhClient:
         with self._lock:
             self.queries += int(query)
             self.errors += int(error)
+
+    def _remember_failure_status(self, endpoint: str, status: int | None) -> None:
+        with self._lock:
+            self._failure_status_by_endpoint[endpoint] = status
+
+    def _clear_failure_status(self, endpoint: str) -> None:
+        with self._lock:
+            self._failure_status_by_endpoint.pop(endpoint, None)
+
+    def failure_status(self, endpoint: str) -> int | None:
+        """Final HTTP status from this endpoint's latest failed live request."""
+        with self._lock:
+            return self._failure_status_by_endpoint.get(endpoint)
+
+    def recover_failure(self, endpoint: str) -> None:
+        """Remove a counted endpoint failure after its complete fallback succeeds."""
+        with self._lock:
+            if endpoint in self._failure_status_by_endpoint:
+                self.errors = max(0, self.errors - 1)
+                del self._failure_status_by_endpoint[endpoint]
 
     @property
     def gave_up(self) -> bool:
@@ -1359,6 +1384,7 @@ class GhClient:
                 if r.returncode == 0:
                     # A success means the failure (if any) was transient — don't let two
                     # unlucky calls spread across a healthy audit trip the breaker.
+                    self._clear_failure_status(endpoint)
                     self._note_success()
                     return body
                 stderr = (r.stderr or "").strip()
@@ -1382,6 +1408,7 @@ class GhClient:
                         _GH_MAX_ATTEMPTS, wait, stderr[:200])
                     continue
                 self._bump(error=True)
+                self._remember_failure_status(endpoint, status)
                 logger.warning(
                     "gh api %s: %s — GAVE UP after %d attempts. This is a REAL "
                     "COVERAGE GAP (the data exists; we were blocked from it), not "
@@ -1396,8 +1423,9 @@ class GhClient:
                 return None
             if not allow_missing:
                 self._bump(error=True)
-                logger.debug("gh api %s failed (rc=%s, %s): %s",
-                             endpoint, r.returncode, kind, stderr[:200])
+            self._remember_failure_status(endpoint, status)
+            logger.debug("gh api %s failed (rc=%s, %s): %s",
+                         endpoint, r.returncode, kind, stderr[:200])
             return None
         return None                                             # pragma: no cover
 
@@ -1653,6 +1681,16 @@ def _paginate(client: GhClient, path: str, key: str, *, params: str = "",
             endpoint += f"&page={page}"
         doc = client.json(endpoint)
         if doc is None:
+            failure_status = getattr(client, "failure_status", lambda _endpoint: None)
+            if (per_page == 100 and key == "jobs" and failure_status(endpoint) == 502
+                    and "/actions/runs/" in path and path.endswith("/jobs")):
+                logger.warning(
+                    "gh paginate %s: page %d returned 502 at 100 items/page; "
+                    "restarting the complete jobs walk at 30 items/page", path, page)
+                fallback = _paginate(client, path, key, params=params, per_page=30)
+                if fallback is not None:
+                    getattr(client, "recover_failure", lambda _endpoint: None)(endpoint)
+                return fallback
             logger.warning(
                 "gh paginate %s: page %d failed — abandoning the whole fetch "
                 "(%d item(s) already read) rather than returning a silently "

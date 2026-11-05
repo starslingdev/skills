@@ -1206,6 +1206,8 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-11-04** — Retry a large run's job listing at 30 jobs per page when GitHub returns 502 at 100, preserving the complete run instead of disclosing it as unavailable. (this PR)
+
 - **2026-11-04** — Keep retry savings advisory when saved findings lack valid retry outcomes, and require the dominant job to belong to the current attempt before treating it as a repeated failure. Legacy evidence rows prove sample size only, never retry conclusions; successful jobs carried forward unchanged are excluded from credited retry compute. (#188)
 
 - **2026-11-03** — OPT64 (repeated workflow attempts) ranks a saving only when at least 3 sampled retried runs share the dominant failing job and that job failed again on every retry. A retry re-runs the same commit, so a job that failed and then passed is a flaky-test signal (SKILL.md admission rule 3), and a retry still running, cancelled or skipped may yet pass. Fewer runs, or any retry that did not fail again, emit the finding advisory as OPT48 is: no saving, not ranked, kept in the findings JSON with a `rerun_sample` stamp and evidence saying how many retried runs it rests on. The scaling formula reads "153 runs in 30 days; 100 sampled (any status), of which N were retried after this job failed", and each runner-minute Source block says the saving is credited in raw minutes while billable rounds each job up to a whole minute. The renderer and `verify_report.py` hold findings from older engines to the same minimum, and a new verify check fails any report that ranks OPT64 below it. (#188)
