@@ -3007,6 +3007,7 @@ def _era_resolve_thin_flip(
         check_wf_of: "Callable[[str], str | None]",
         sampled_runs_by_wf: dict[str, list[dict[str, Any]]],
         redrill: "Callable[[str, list[dict[str, Any]]], None]",
+        jobs_per_run_by_wf: dict[str, list[list[dict[str, Any]]]] | None = None,
 ) -> list[str]:
     """Decide the `disclosed_pre` → `post_only_thin` flip PRE-DRILL and re-drill the flipped
     workflow's spine from its POST runs (issue #74, owner-adjudicated direction (a): the timing
@@ -3030,6 +3031,75 @@ def _era_resolve_thin_flip(
     Returns the flipped workflow files (for logging / stamping). Non-straddling / non-`disclosed_pre`
     facts are untouched, so this is a pure no-op when nothing flips (byte-identity)."""
     flipped: list[str] = []
+
+    # A gate can change runners without changing the workflow file (for example, a repository or
+    # organization variable behind `runs-on`).  That is still a measurement-era boundary: mixing
+    # the two runner populations is honest only when the report names the split.  Detect the narrow,
+    # high-confidence shape here, after job collection: exactly two non-empty labels with one
+    # chronological transition for the same sampled gate.  It is disclosure-only; unlike a
+    # workflow-content era it does not partition the sample.
+    jobs_per_run_by_wf = jobs_per_run_by_wf or {}
+    existing_content_wfs = {
+        str(f.get("workflow_file") or "") for f in config_era_facts
+        if f.get("rule") != "runner_label_change"
+    }
+    gate_names_by_wf: dict[str, set[str]] = {}
+    for checks in per_sha_checks:
+        for check_name in checks:
+            wf = check_wf_of(check_name)
+            if wf:
+                gate_names_by_wf.setdefault(str(wf), set()).add(str(check_name))
+    for wf, gate_names in gate_names_by_wf.items():
+        if wf in existing_content_wfs:
+            continue  # a literal workflow edit already supplies the configuration-era disclosure
+        retained_by_run: dict[str, list[dict[str, Any]]] = {}
+        for run_jobs in jobs_per_run_by_wf.get(wf, []):
+            for job in run_jobs:
+                rid = str(job.get("_run_id") or "")
+                if rid:
+                    retained_by_run.setdefault(rid, []).append(job)
+        runs = sorted(sampled_runs_by_wf.get(wf, []),
+                      key=lambda r: str(r.get("created_at") or ""))
+        for gate_name in sorted(gate_names):
+            gate_tokens = _struct_toks(gate_name)
+            observations: list[tuple[str, str]] = []
+            job_display = ""
+            for run in runs:
+                embedded = run.get("jobs")
+                run_jobs = (embedded if isinstance(embedded, list)
+                            else retained_by_run.get(_run_id(run), []))
+                matches = [j for j in run_jobs if isinstance(j, dict)
+                           and _struct_toks(str(j.get("name") or "")) == gate_tokens]
+                labels = {_job_runner_label(j) for j in matches if _job_runner_label(j)}
+                if len(labels) != 1:
+                    continue
+                label = next(iter(labels))
+                job_display = str(matches[0].get("name") or gate_name)
+                observations.append((str(run.get("created_at") or ""), label))
+            if len(observations) < 2:
+                continue
+            groups: list[tuple[str, int, str]] = []
+            for ts, label in observations:
+                if groups and groups[-1][0] == label:
+                    old_label, count, start = groups[-1]
+                    groups[-1] = (old_label, count + 1, start)
+                else:
+                    groups.append((label, 1, ts))
+            if len(groups) != 2 or groups[0][0] == groups[1][0]:
+                continue
+            config_era_facts.append({
+                "workflow_file": wf,
+                "job": job_display,
+                "boundary": groups[1][2],
+                "kept_era": "all",
+                "rule": "runner_label_change",
+                "disclosure_only": True,
+                "runner_label_counts": [
+                    {"label": groups[0][0], "count": groups[0][1]},
+                    {"label": groups[1][0], "count": groups[1][1]},
+                ],
+            })
+
     if not config_era_facts:
         return flipped
     indexed = list(zip(repr_shas, per_sha_checks))
@@ -3100,7 +3170,8 @@ def _stamp_pole_repr_run_era(
     if not config_era_facts:
         return
     fact_by_wf = {str(f.get("workflow_file")): f
-                  for f in config_era_facts if f.get("workflow_file")}
+                  for f in config_era_facts
+                  if f.get("workflow_file") and f.get("rule") != "runner_label_change"}
     for p in poles:
         wf = str(p.get("workflow_file") or "")
         job = str(p.get("job") or "")
@@ -3167,11 +3238,13 @@ def _era_scope_enumeration(
     `verify_report.check_era_enumeration_bound` reads: no rendered pole/check may be a member of any
     era's `other_era_checks` (a check absent from the kept era). One report describes ONE
     configuration and names what the other configuration adds/removes."""
-    if not config_era_facts:
+    content_facts = [f for f in config_era_facts
+                     if f.get("rule") != "runner_label_change"]
+    if not content_facts:
         return pr_check_p50
     indexed = list(zip(repr_shas, per_sha_checks))
     to_drop: set[str] = set()
-    for fact in config_era_facts:
+    for fact in content_facts:
         wf = fact.get("workflow_file")
         if not wf:
             continue
@@ -3272,6 +3345,8 @@ def _era_stamp_spine_relevance(
     implies a non-empty enumeration set), so `verify_report`'s integrity arm needs no change. Mutates
     the facts in place."""
     for fact in config_era_facts:
+        if fact.get("rule") == "runner_label_change":
+            continue
         wf = fact.get("workflow_file")
         if not wf:
             continue
@@ -3341,7 +3416,8 @@ def _era_scope_pr_spine_sample(
     dropped-era makespan."""
     if not config_era_facts:
         return repr_shas, per_sha_checks, sha_intervals, 0
-    facts = [f for f in config_era_facts if f.get("workflow_file")]
+    facts = [f for f in config_era_facts
+             if f.get("workflow_file") and f.get("rule") != "runner_label_change"]
     if not facts:
         return repr_shas, per_sha_checks, sha_intervals, 0
     kept_shas: list[str] = []
@@ -4920,7 +4996,8 @@ def _pole_timing_spread(check: str, workflow_file: str, job: str,
     # it. Named so the range is never read as describing the current configuration when
     # the spine door retained the other era's runs.
     era = next((str(f.get("kept_era") or "") for f in (config_era_facts or [])
-                if str(f.get("workflow_file") or "") == workflow_file), "")
+                if str(f.get("workflow_file") or "") == workflow_file
+                and f.get("rule") != "runner_label_change"), "")
     observations = [j for run in (jobs_per_run_by_wf.get(workflow_file) or [])
                     for j in run if str(j.get("name", "")) == job]
     return _timing_spread(observations, check=check, workflow_file=workflow_file,
@@ -17076,7 +17153,87 @@ def _check_to_workflow_file_static(
                     or _static_matrix_leg_match(nm, info.get("matrix"), check)):
                 hits.add(wf)
                 break
-    return next(iter(hits)) if len(hits) == 1 else None
+    if hits:
+        return next(iter(hits)) if len(hits) == 1 else None
+
+    nested = _local_reusable_leaf_nodes(check, job_graph)
+    files = {wf for wf, _ in nested}
+    return next(iter(files)) if len(files) == 1 else None
+
+
+def _local_reusable_leaf_nodes(
+    check: str, job_graph: dict[str, dict[str, dict[str, Any]]],
+    callers: set[tuple[str, str]] | None = None,
+    caller_paths: (dict[tuple[str, str],
+                        set[tuple[tuple[str, str], ...]]] | None) = None,
+) -> set[tuple[str, str]]:
+    """Follow only scanned local call edges; never borrow an unrelated leaf.
+
+    Each recursive hop consumes a caller prefix. A per-path file set rejects
+    cycles, and sixteen calls bounds malformed or adversarial workflow graphs.
+    Remote calls have no editable local leaf and deliberately remain unresolved.
+    """
+    found: set[tuple[str, str]] = set()
+
+    def matches(wf: str, name: str, info: dict[str, Any], value: str) -> bool:
+        return (name == value
+                or (not _name_template_is_degenerate(name)
+                    and not (_name_template_leads_with_placeholder(name)
+                             and _reusable_caller_claims(
+                                 value, {wf: job_graph.get(wf, {})}))
+                    and bool(_name_template_regex(name).fullmatch(value)))
+                or _static_matrix_leg_match(name, info.get("matrix"), value))
+
+    def walk(wf: str, remaining: str, seen: frozenset[str], depth: int,
+             path: tuple[tuple[str, str], ...] = ()) -> None:
+        if wf in seen or depth > 16:
+            return
+        for jid, info in job_graph.get(wf, {}).items():
+            name = str(info.get("name") or jid)
+            if not info.get("reusable"):
+                if depth and matches(wf, name, info, remaining):
+                    found.add((wf, jid))
+                    if callers is not None:
+                        callers.update(path)
+                    if caller_paths is not None:
+                        caller_paths.setdefault((wf, jid), set()).add(path)
+                continue
+            uses = info.get("uses")
+            if not isinstance(uses, str) or not uses.startswith("./.github/workflows/"):
+                continue
+            target = uses[2:]
+            if target not in job_graph:
+                continue
+            parts = remaining.split(" / ")
+            for cut in range(1, len(parts)):
+                if matches(wf, name, info, " / ".join(parts[:cut])):
+                    walk(target, " / ".join(parts[cut:]), seen | {wf}, depth + 1,
+                         path + ((wf, jid),))
+
+    for wf in job_graph:
+        walk(wf, check, frozenset(), 0)
+    return found
+
+
+def _nested_caller_path_is_reachable(
+    check: str, node: tuple[str, str], reachable: set[tuple[str, str]],
+    job_graph: dict[str, dict[str, dict[str, Any]]],
+) -> bool | None:
+    """Whether a nested check's own caller chain is merge-blocking.
+
+    Two callers may invoke the same leaf workflow.  The editable leaf node is
+    shared, but required-check identity is not: an optional caller must not
+    become required merely because a required caller reaches the same leaf.
+    ``None`` means the check did not resolve through a nested caller path.
+    """
+    paths: dict[tuple[str, str], set[tuple[tuple[str, str], ...]]] = {}
+    leaves = _local_reusable_leaf_nodes(check, job_graph, caller_paths=paths)
+    if leaves != {node} or not paths.get(node):
+        return None
+    return any(all(caller in reachable for caller in path)
+               for path in paths[node])
+
+
 def _check_to_job_node_scanned(
     check: str, job_graph: dict[str, dict[str, dict[str, Any]]],
 ) -> tuple[str, str] | None:
@@ -17125,9 +17282,11 @@ def _check_to_job_node_scanned(
                           and _reusable_caller_claims(check, job_graph))
                  and _name_template_regex(info.get("name") or jid).match(check))
                 or _static_matrix_leg_match(info.get("name") or jid, info.get("matrix"), check))]
-    if not tmpl or len({wf for wf, _ in tmpl}) > 1:
-        return None
-    return tmpl[0]
+    if tmpl:
+        return tmpl[0] if len({wf for wf, _ in tmpl}) == 1 else None
+
+    nested = _local_reusable_leaf_nodes(check, job_graph)
+    return next(iter(nested)) if len(nested) == 1 else None
 
 
 def _required_reachable_jobs(
@@ -17144,13 +17303,28 @@ def _required_reachable_jobs(
         node = _check_to_job_node(r, job_graph, crit_by_wf)
         if node is not None:
             anchors.add(node)
+            # Preserve the callers' upstream needs when a required child now
+            # resolves to its editable leaf rather than only to the caller.
+            callers: set[tuple[str, str]] = set()
+            leaves = _local_reusable_leaf_nodes(r, job_graph, callers)
+            if leaves == {node}:
+                anchors.update(callers)
     reachable: set[tuple[str, str]] = set(anchors)
     stack = list(anchors)
     while stack:
         wf, jid = stack.pop()
-        for dep in (job_graph.get(wf, {}).get(jid, {}) or {}).get("needs", []):
-            node = (wf, dep)
-            if dep in job_graph.get(wf, {}) and node not in reachable:
+        info = job_graph.get(wf, {}).get(jid, {}) or {}
+        dependencies = [(wf, dep) for dep in info.get("needs", [])
+                        if dep in job_graph.get(wf, {})]
+        # A required caller waits for every job in its local called workflow,
+        # including nested invocations. Keep those newly resolved leaf nodes in
+        # the same required closure; the visited set also terminates call cycles.
+        uses = info.get("uses")
+        if isinstance(uses, str) and uses.startswith("./.github/workflows/"):
+            target = uses[2:]
+            dependencies.extend((target, dep) for dep in job_graph.get(target, {}))
+        for node in dependencies:
+            if node not in reachable:
                 reachable.add(node)
                 stack.append(node)
     return reachable
@@ -17178,8 +17352,12 @@ def _pole_is_required_reachable(
     if pole_check in req_names:
         return True
     node = _check_to_job_node(pole_check, job_graph, crit_by_wf)
-    return node is not None and node in _required_reachable_jobs(
-        req_names, job_graph, crit_by_wf)
+    if node is None:
+        return False
+    reachable = _required_reachable_jobs(req_names, job_graph, crit_by_wf)
+    nested = _nested_caller_path_is_reachable(
+        pole_check, node, reachable, job_graph)
+    return nested if nested is not None else node in reachable
 
 
 def _required_reachable_checks(
@@ -17222,7 +17400,8 @@ def _required_reachable_checks(
             continue
         node = _check_to_job_node(c, job_graph, crit_by_wf)
         if node is not None:
-            if node in reachable:
+            nested = _nested_caller_path_is_reachable(c, node, reachable, job_graph)
+            if nested is True or (nested is None and node in reachable):
                 kept.add(c)
         elif _workflows_matching_check(c, crit_by_wf):
             # File-backed but unpinnable to a job id — keep (never silently drop a
@@ -26809,7 +26988,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         events_jobs_by_wf[wf] = jbe
 
     _era_resolve_thin_flip(config_era_facts, repr_shas, per_sha_checks, _rep_ts,
-                           _era_check_wf_of, sampled_runs_by_wf, _era_redrill)
+                           _era_check_wf_of, sampled_runs_by_wf, _era_redrill,
+                           jobs_per_run_by_wf)
     # Reliable per-job execution times from the jobs API (runner-scoped, no
     # queue), across all sampled workflows. A check-run's started→completed span
     # can be inflated by queue waits and re-runs (e.g. an 80s `Integration test`
