@@ -12217,6 +12217,7 @@ _CONFIG_ERA_DISCLOSED_MARKER = "measures the previous configuration"
 _CONFIG_ERA_NARROWED_MARKER = "narrowed to the current configuration"
 # The post_only_thin provisional marker (issue #74) — mirrors blocking_path._CONFIG_ERA_THIN_MARKER.
 _CONFIG_ERA_THIN_MARKER = "treat these numbers as provisional"
+_RUNNER_LABEL_ERA_MARKER = "runner labels changed within the sample"
 _RECOVERABLE_RECONCILE_MARKER = "slow-mode/worst-case figure on the PRs where"
 # A recoverable ceiling within this margin of the typical wait is coherent read alone (clock
 # rounding + benign aggregation) — only a ceiling clearly ABOVE the wait needs the reconciliation.
@@ -12306,6 +12307,31 @@ def check_config_era_boundary(report: str, findings_path: Path | None,
     if not eras:
         return Check(name, True, "no workflow sample straddled a config change — no era to bind",
                      skipped=True)
+    runner_eras = [e for e in eras if e.get("rule") == "runner_label_change"]
+    report_lines = report.splitlines()
+    for era in runner_eras:
+        counts = [x for x in _as_list(era.get("runner_label_counts"))
+                  if isinstance(x, dict) and x.get("label")]
+        expected = [
+            f"`{_strip_scope(str(x.get('label')))}` "
+            f"({int(_num(x.get('count')) or 0)} runs)"
+            for x in counts
+        ]
+        wf = _strip_scope(str(era.get("workflow_file") or ""))
+        job = _strip_scope(str(era.get("job") or "gate"))
+        identity = f"`{wf}` / `{job}` {_RUNNER_LABEL_ERA_MARKER}"
+        matching_line = next((line for line in report_lines
+                              if identity in line
+                              and all(piece in line for piece in expected)), "")
+        if len(expected) != 2 or not matching_line:
+            return Check(
+                name, False,
+                "a detected runner-label era is stamped in findings but the report does not "
+                "disclose its workflow/job and both observed runner labels with their sample counts")
+    eras = [e for e in eras if e.get("rule") != "runner_label_change"]
+    if not eras:
+        return Check(name, True,
+                     f"{len(runner_eras)} runner-label era(s) carry labels and counts")
     # Issue #116: a pre-era straddle owes the LOUD disclosure only when it can touch the headline.
     # A push/cron-only or check-neutral straddle (0 PR-gating spine checks) legitimately suppresses
     # its global caveat — the renderer gates on the same `_era_fact_spine_relevant`, so excluding it
