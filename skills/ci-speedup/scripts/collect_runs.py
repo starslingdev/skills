@@ -5055,7 +5055,11 @@ def _critical_path(jobs_per_run: list[list[dict[str, Any]]]) -> dict[str, Any]:
     different runners are each measured correctly."""
     # name -> runner_label -> [durations]
     by_job_runner: dict[str, dict[str, list[float]]] = {}
-    by_job_runner_observations: dict[str, dict[str, list[tuple[float, str]]]] = {}
+    # name -> sampled PR identity -> (run timestamp, duration, example URL).
+    # A workflow sample can contain several commits from one PR. The rendered
+    # tail claims a share of PRs, so retain only that PR's newest sampled run.
+    by_job_pr_observation: dict[str, dict[str, tuple[str, float, str]]] = {}
+    anonymous_observation = 0
     for run_jobs in jobs_per_run:
         for j in run_jobs:
             d = _job_duration_s(j)
@@ -5064,8 +5068,24 @@ def _critical_path(jobs_per_run: list[list[dict[str, Any]]]) -> dict[str, Any]:
             name = str(j.get("name", "?"))
             label = _job_runner_label(j) or "?"
             by_job_runner.setdefault(name, {}).setdefault(label, []).append(d)
-            by_job_runner_observations.setdefault(name, {}).setdefault(label, []).append(
-                (d, str(j.get("html_url") or "")))
+            pr_number = j.get("_run_pr_number")
+            head_sha = str(j.get("_run_head_sha") or "")
+            run_id = str(j.get("_run_id") or "")
+            if isinstance(pr_number, int):
+                sample_id = f"pr:{pr_number}"
+            elif head_sha:
+                sample_id = f"sha:{head_sha}"
+            elif run_id:
+                sample_id = f"run:{run_id}"
+            else:
+                anonymous_observation += 1
+                sample_id = f"observation:{anonymous_observation}"
+            timestamp = str(j.get("_run_created_at") or "")
+            prior = by_job_pr_observation.setdefault(name, {}).get(sample_id)
+            observation = (timestamp, d, str(j.get("html_url") or ""))
+            if prior is None or timestamp > prior[0] or (
+                    timestamp == prior[0] and d > prior[1]):
+                by_job_pr_observation[name][sample_id] = observation
 
     job_p50: dict[str, float] = {}
     job_p95: dict[str, float] = {}
@@ -5088,9 +5108,8 @@ def _critical_path(jobs_per_run: list[list[dict[str, Any]]]) -> dict[str, Any]:
         # dominant-runner scoped, but do not hide a slow minority merely because
         # those PRs used another runner label.
         tail = _minority_gate_tail([
-            observation
-            for runner_observations in by_job_runner_observations[name].values()
-            for observation in runner_observations
+            (duration, url)
+            for _timestamp, duration, url in by_job_pr_observation[name].values()
         ])
         if tail is not None:
             job_minority_tail[name] = tail
@@ -18351,12 +18370,14 @@ def _stamp_run_context(run: dict[str, Any], jobs: list[dict[str, Any]]) -> None:
     # (free — already on the run object) so `_stamp_pole_repr_run_era` can content-classify a
     # drilled representative run's config era (issue #77), not just timestamp it.
     head_sha = str(run.get("head_sha") or "")
+    pr_number = _run_pr_number(run)
     for job in jobs:
         job["_run_created_at"] = run_created
         job["_run_event"] = ev
         job["_run_id"] = rid
         job["_run_head_repo"] = head_repo
         job["_run_head_sha"] = head_sha
+        job["_run_pr_number"] = pr_number
 
 
 def _crit_for(

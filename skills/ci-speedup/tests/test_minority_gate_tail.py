@@ -82,6 +82,29 @@ def test_runner_label_transition_does_not_hide_the_tail():
     assert tail["tail_share_pct"] == 15.0
 
 
+def test_multiple_commits_on_one_pr_count_as_one_sampled_pr():
+    runs = []
+    for pr_number in range(1, 86):
+        job = dict(_job(60, 800000 + pr_number),
+                   _run_pr_number=pr_number,
+                   _run_created_at="2026-11-05T10:00:00Z")
+        runs.append([job])
+    for pr_number in range(86, 101):
+        job = dict(_job(1500, 800000 + pr_number),
+                   _run_pr_number=pr_number,
+                   _run_created_at="2026-11-05T10:00:00Z")
+        runs.append([job])
+    for pr_number in range(1, 11):
+        old = dict(_job(1500, 900000 + pr_number),
+                   _run_pr_number=pr_number,
+                   _run_created_at="2026-11-04T10:00:00Z")
+        runs.append([old])
+
+    tail = cr._critical_path(runs)["job_minority_tail"]["affected-unit"]
+    assert tail["n"] == 100
+    assert tail["tail_share_pct"] == 15.0
+
+
 def test_production_attachment_maps_only_required_closure_checks():
     crit = cr._critical_path(
         [[_job(60, 600000 + i)] for i in range(85)]
