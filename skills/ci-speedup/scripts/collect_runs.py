@@ -1891,6 +1891,12 @@ def _gh_unavailable_reason(probe_failure: str | None) -> str:
             "audit with network / host access.")
 
 
+# The breaker's generic cause. An auth interruption names its own cause instead
+# (`_stamp_auth_interruption`), so the banner never blames a dead token on rate limits.
+_GENERIC_ABORT_CAUSE = ("after repeated GitHub API failures (rate-limit blocks, "
+                        "server errors, or timeouts)")
+
+
 def _partial_reason(errors: int,
                     sample_gaps: list[dict[str, str]] | None = None,
                     gave_up: bool = False) -> str | None:
@@ -1918,9 +1924,9 @@ def _partial_reason(errors: int,
     parts = []
     if gave_up:
         parts.append(
-            "collection was ABORTED after repeated GitHub API failures (rate-limit "
-            "blocks, server errors, or timeouts), so the gh pass is INCOMPLETE — "
-            "whatever was measured before the abort is not a full picture of the repo")
+            "collection was ABORTED " + _GENERIC_ABORT_CAUSE + ", so the gh pass is "
+            "INCOMPLETE — whatever was measured before the abort is not a full "
+            "picture of the repo")
     if errors:
         parts.append(f"{errors} gh API call(s) failed during collection")
     if gaps:
@@ -1961,7 +1967,9 @@ def _stamp_auth_interruption(ds: dict[str, Any], client: GhClient) -> None:
     reason = ("the GitHub token stopped working partway through; "
               f"{failed} of {total} job fetches failed (including queued fetches "
               "skipped after collection stopped)")
-    ds["partial_reason"] = reason + "; " + str(ds.get("partial_reason") or "")
+    rest = str(ds.get("partial_reason") or "").replace(
+        " " + _GENERIC_ABORT_CAUSE, "")
+    ds["partial_reason"] = reason + ("; " + rest if rest else "")
 
 
 # =============================================================================

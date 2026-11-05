@@ -743,6 +743,17 @@ def test_mid_run_auth_failure_trips_the_breaker_without_fetching_the_whole_plan(
     assert len(calls) == 4, "only the successful run list plus three auth failures fetch"
 
 
+def test_auth_interruption_reason_has_no_dangling_separator():
+    client = GhClient()
+    client.auth_interrupted = True
+    client.job_fetch_count, client.job_fetch_failed_count = 4, 2
+    ds: dict = {}
+    collect_runs._stamp_auth_interruption(ds, client)
+    assert ds["partial_reason"].startswith("the GitHub token stopped working partway")
+    assert "2 of 4 job fetches failed" in ds["partial_reason"]
+    assert not ds["partial_reason"].rstrip().endswith(";")
+
+
 def test_rate_limit_is_retried_logged_at_warning_and_then_succeeds(monkeypatch, no_sleep, caplog):
     _patch_run(monkeypatch, _script([
         _completed(returncode=1, stdout=_RATE_LIMITED, stderr=_SECONDARY),

@@ -705,6 +705,9 @@ def test_mid_run_token_failure_reaches_the_collection_banner(monkeypatch, status
     assert "the GitHub token stopped working partway through" in report
     assert "5 of 5 job fetches failed" in report
     assert "Collection FAILED" in report
+    # The token is the named cause; the generic abort clause must not also blame
+    # the stop on rate limits, server errors or timeouts.
+    assert "rate-limit blocks, server errors, or timeouts" not in report
     assert "marginally fewer runs" not in report
     assert bp._derived_partial_kind(out["data_sources"]) == "collection_failed"
     assert sum("/jobs" in endpoint for endpoint in calls) == 3
