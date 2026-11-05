@@ -4663,6 +4663,39 @@ def _bimodal_split(durs: list[float], *, min_n: int = 8, min_frac: float = 0.30,
             "low_p50_s": round(lo_med, 1), "high_p50_s": round(hi_med, 1)}
 
 
+def _minority_gate_tail(observations: list[tuple[float, str]]) -> dict[str, Any] | None:
+    """Describe a large slow tail without turning it into a savings claim.
+
+    The p50/p90 rule is deliberately separate from `_bimodal_split`: a 15% tail
+    is too small for that helper's two-population floor, but it can still be the
+    real merge wait on those PRs.  Keep every observation so the report verifier
+    can independently re-derive the quantiles, share, and example link.
+    """
+    rows = [(float(d), str(url or "")) for d, url in observations if d > 0]
+    if not rows:
+        return None
+    durations = [d for d, _url in rows]
+    p50 = _percentile(durations, 50)
+    p90 = _percentile(durations, 90)
+    if p90 < 600.0 or p90 < 3.0 * p50:
+        return None
+    slow = [(d, url) for d, url in rows if d >= p90]
+    example = next((url for _d, url in slow if url), "")
+    if not slow or not example:
+        return None
+    return {
+        "n": len(rows),
+        "p50_s": round(p50, 1),
+        "p90_s": round(p90, 1),
+        "tail_n": len(slow),
+        "tail_share_pct": round(100.0 * len(slow) / len(rows), 1),
+        "example_url": example,
+        "observations": [
+            {"duration_s": round(d, 1), "url": url} for d, url in rows
+        ],
+    }
+
+
 # =============================================================================
 # Descriptive timing spread (workstream C)
 # =============================================================================
@@ -4945,6 +4978,7 @@ def _critical_path(jobs_per_run: list[list[dict[str, Any]]]) -> dict[str, Any]:
     different runners are each measured correctly."""
     # name -> runner_label -> [durations]
     by_job_runner: dict[str, dict[str, list[float]]] = {}
+    by_job_runner_observations: dict[str, dict[str, list[tuple[float, str]]]] = {}
     for run_jobs in jobs_per_run:
         for j in run_jobs:
             d = _job_duration_s(j)
@@ -4953,11 +4987,14 @@ def _critical_path(jobs_per_run: list[list[dict[str, Any]]]) -> dict[str, Any]:
             name = str(j.get("name", "?"))
             label = _job_runner_label(j) or "?"
             by_job_runner.setdefault(name, {}).setdefault(label, []).append(d)
+            by_job_runner_observations.setdefault(name, {}).setdefault(label, []).append(
+                (d, str(j.get("html_url") or "")))
 
     job_p50: dict[str, float] = {}
     job_p95: dict[str, float] = {}
     job_runner: dict[str, str] = {}
     job_bimodal: dict[str, dict[str, Any]] = {}
+    job_minority_tail: dict[str, dict[str, Any]] = {}
     for name, by_runner in by_job_runner.items():
         # This job's dominant runner = the one it ran on most (most samples).
         dominant = max(sorted(by_runner), key=lambda r: len(by_runner[r]))
@@ -4969,6 +5006,9 @@ def _critical_path(jobs_per_run: list[list[dict[str, Any]]]) -> dict[str, Any]:
         bi = _bimodal_split(by_runner[dominant])
         if bi is not None:
             job_bimodal[name] = bi
+        tail = _minority_gate_tail(by_job_runner_observations[name][dominant])
+        if tail is not None:
+            job_minority_tail[name] = tail
     # Each job's LONGEST sampled run, across every runner it ran on: the bound on any one
     # step of that job. A step's p50 is taken over the runs it ran in, so a conditional
     # step can legitimately exceed the job's all-runs p50, but never the job's longest
@@ -4994,6 +5034,7 @@ def _critical_path(jobs_per_run: list[list[dict[str, Any]]]) -> dict[str, Any]:
         "job_p50": job_p50,
         "job_max": job_max,
         "job_bimodal": job_bimodal,
+        "job_minority_tail": job_minority_tail,
         # Per-job dominant runner label string (job name -> sorted labels, e.g.
         # "ubuntu-latest"): the population each job's p50 above describes. Read by
         # OPT65's same-runner rounding check, the billed-runner lookup, and OPT81
@@ -27159,6 +27200,23 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 # trace it — an ambiguous-internal check looks identical to a real bot.
                 logger.debug("critical path: check %r left unmapped (no scanned job-graph "
                              "match, or ambiguous across workflows) — renders external", _n)
+    # A required/reachable check can have a small but severe slow tail that its
+    # median and the >=30% bimodal detector intentionally do not surface.  Stamp
+    # that descriptive evidence only after the required closure actually narrowed
+    # the spine: an independent sibling outside every required `needs:` closure
+    # must not acquire a merge-wait finding merely because it has a slow tail.
+    _minority_tail_by_check: dict[str, dict[str, Any]] = {}
+    if spine_required_scoped:
+        for _n, _p50 in pr_checks_tuple:
+            _mapping = _map_check_to_job(
+                _n, crit_by_wf, require_developer_timing=True)
+            if _mapping is None:
+                continue
+            _wf, _job = _mapping
+            _tail = ((crit_by_wf.get(_wf, {}).get("job_minority_tail") or {})
+                     .get(_job))
+            if isinstance(_tail, dict):
+                _minority_tail_by_check[_n] = _tail
     # ENG-1 PR-N1: per-PR chain TIMING facts (data-only; nothing renders or
     # ranks on them until PR-N2). One entry per sampled repr sha — the longest
     # `needs:` chain (capped member spans, `_span_caps` — the caps the ranking
@@ -27223,7 +27281,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
              **({"workflow_file": _check_wf[n]} if n in _check_wf else {}),
              **({"timing_source": check_timing_source[n]}
                 if n in check_timing_source else {}),
-             **({"bimodal": job_bimodal_all[n]} if n in job_bimodal_all else {})}
+             **({"bimodal": job_bimodal_all[n]} if n in job_bimodal_all else {}),
+             **({"minority_tail": _minority_tail_by_check[n]}
+                if n in _minority_tail_by_check else {})}
             for n, p in pr_checks_tuple],
         # When a check is bimodal across PRs, wall-clock is sized as the EXPECTED
         # value over the per-PR critical paths (one population per sampled PR), so

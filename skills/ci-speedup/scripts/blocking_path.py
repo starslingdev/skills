@@ -11286,6 +11286,36 @@ def render(doc: dict[str, Any], *args, **kwargs) -> str:
     return first + "\n\n" + block + "\n" + rest if separator else report + "\n\n" + block
 
 
+def _minority_gate_tail_block(cp: dict[str, Any]) -> list[str]:
+    """Render severe minority tails on the confirmed required closure.
+
+    This is descriptive evidence only: the typical-path headline and every
+    savings calculation remain median-based and unchanged.
+    """
+    if not cp.get("spine_required_scoped"):
+        return []
+    rows: list[str] = []
+    for check in _as_list(cp.get("checks")):
+        if not isinstance(check, dict):
+            continue
+        tail = _as_dict(check.get("minority_tail"))
+        p90 = _num(tail.get("p90_s"))
+        share = _num(tail.get("tail_share_pct"))
+        url = str(tail.get("example_url") or "")
+        if p90 is None or share is None or not url:
+            continue
+        name = _clean_label(str(check.get("name") or "check"))
+        share_text = f"{share:.0f}" if float(share).is_integer() else f"{share:.1f}"
+        rows += [f"<!-- minority-gate-tail:{name} -->",
+                 f"> **⏱️ Slow tail on `{_lbl(name)}`:** on ~{share_text}% of PRs this "
+                 f"check takes **{_clock(p90)}**; those PRs wait on it. "
+                 f"[Example run]({url}). **No saving is credited** - this describes "
+                 "the real minority wait that the median hides.", ""]
+    if not rows:
+        return []
+    return ["## ⏱️ Slow tails on merge-blocking checks", "", *rows]
+
+
 def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
            samples: dict[str, dict[str, Any]] | None = None,
            log_runs: dict[str, str] | None = None,
@@ -12179,6 +12209,7 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
                             top_is_gate=(gate_is_slowest and not chain_active))
     _toc_at = len(out)
     out += _toc_lines
+    out += _minority_gate_tail_block(cp)
     # The prose provenance ("Where this data comes from") is consolidated into the
     # 🗄️ Data sources section at the foot (owner UX edit 2026-07-19) — no longer emitted
     # here after the Contents.
