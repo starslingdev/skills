@@ -62,9 +62,11 @@ from wall_clock import (  # noqa: E402
     _concurrent_workflows,
     _resolve_job_p50,
     _wf_basename,
+    bound_commit_projection,
     bound_within_workflow, CASCADE,
     credit_detrigger,
     credit_shared_substep,
+    project_commit_wall,
     size_wall_clock,
 )
 
@@ -27277,6 +27279,13 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # with no merge_group runs this is the identity map: one member per group, exactly
     # the pre-#58 per-sha behaviour.
     _rep_ts, _rep_members = _group_dev_shas_by_pr(sha_meta)
+    _member_check_runs: dict[str, list[dict[str, Any]]] = {}
+
+    def _checks_for_member(member_sha: str) -> list[dict[str, Any]] | None:
+        rows = _fetch_check_runs(client, repo, member_sha)
+        if rows is not None:
+            _member_check_runs[member_sha] = rows
+        return rows
 
     def _checks_for(rep_sha: str) -> dict[str, float] | None:
         # UNION the check-runs across every head_sha the PR ran on (its pull_request
@@ -27287,7 +27296,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         # failure exactly as the pre-#58 per-sha path did.
         res = _union_member_checks(
             _rep_members.get(rep_sha, [rep_sha]),
-            lambda member: _fetch_check_runs(client, repo, member))
+            _checks_for_member)
         if res is None:
             return None  # propagate the fetch failure — don't fake a partial PR
         m, iv = res
@@ -27750,6 +27759,185 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # uses) plus the attempt-scoped, span-capped empirical makespan cross-check.
     _chain_spine = (set(_confirmed_gate_checks)
                     if _confirmed_gate_checks is not None else set(pr_check_p50))
+
+    def _commit_job_node(workflow: str, job_name: str) -> str | None:
+        mapped = _check_to_job_node(job_name, _jg, crit_by_wf)
+        return mapped[1] if mapped is not None and mapped[0] == workflow else None
+
+    def _needs_chain(workflow: str, node: str | None) -> set[str]:
+        if node is None:
+            return set()
+        jobs = (_jg or {}).get(workflow) or {}
+        parents: dict[str, set[str]] = {}
+        children: dict[str, set[str]] = defaultdict(set)
+        for key, candidate in jobs.items():
+            raw_needs = candidate.get("needs") if isinstance(candidate, dict) else []
+            needed = [raw_needs] if isinstance(raw_needs, str) else (raw_needs or [])
+            parents[str(key)] = {str(item) for item in needed}
+            for item in needed:
+                children[str(item)].add(str(key))
+        seen: set[str] = {node}
+        for edges in (parents, children):
+            reached = {node}
+            todo = [node]
+            while todo:
+                current = todo.pop()
+                for adjacent in edges.get(current, set()):
+                    if adjacent not in reached:
+                        reached.add(adjacent)
+                        todo.append(adjacent)
+            seen.update(reached)
+        return seen
+
+    _commit_facts: list[dict[str, Any]] = []
+    _commit_shas: list[str] = []
+    _commit_checks_by_sha: dict[str, dict[str, float]] = {}
+    _commit_dropped_workflows: dict[str, set[str]] = {}
+    _era_facts = [fact for fact in config_era_facts
+                  if fact.get("workflow_file")
+                  and fact.get("rule") != "runner_label_change"]
+    for _rep in _era_repr_shas:
+        for _sha in _rep_members.get(_rep, [_rep]):
+            _ts = str((sha_meta.get(_sha) or {}).get("ts") or "")
+            _dropped_wfs = {
+                str(fact["workflow_file"]) for fact in _era_facts
+                if _era_pr_side(_ts, fact, _sha) == "dropped"
+            }
+            _checks = {
+                str(row.get("name") or "?"): float(duration)
+                for row in (_member_check_runs.get(_sha) or [])
+                if (duration := _duration_s(row.get("started_at"),
+                                            row.get("completed_at"))) is not None
+                and duration > 0
+                and _era_check_wf_of(str(row.get("name") or "?")) not in _dropped_wfs
+            }
+            if _dropped_wfs and not any(name in _chain_spine for name in _checks):
+                continue
+            _commit_shas.append(_sha)
+            _commit_checks_by_sha[_sha] = _checks
+            _commit_dropped_workflows[_sha] = _dropped_wfs
+    for _sha in _commit_shas:
+        _event = str((sha_meta.get(_sha) or {}).get("event") or "")
+        _run_rows: list[tuple[str, dict[str, Any]]] = []
+        for _wf in sorted(set(sampled_runs_by_wf) | set(all_status_runs_by_wf)):
+            if _wf in _commit_dropped_workflows.get(_sha, set()):
+                continue
+            _runs_by_id: dict[str, dict[str, Any]] = {}
+            for _run in [*(all_status_runs_by_wf.get(_wf) or []),
+                         *(sampled_runs_by_wf.get(_wf) or [])]:
+                _runs_by_id[str(_run.get("id") or id(_run))] = _run
+            _runs = list(_runs_by_id.values())
+            for _run in _runs:
+                if (str(_run.get("head_sha") or "") == _sha
+                        and str(_run.get("event") or "") == _event):
+                    _run_rows.append((_wf, _run))
+
+        _jobs_by_run: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for _wf, _job_runs in jobs_per_run_by_wf.items():
+            for _job_run in _job_runs:
+                if not _job_run:
+                    continue
+                _rid = str(_job_run[0].get("_run_id") or "")
+                if _rid:
+                    _jobs_by_run[(_wf, _rid)] = _job_run
+
+        _expected_workflows: set[str] = set()
+        for _check_name in (_commit_checks_by_sha.get(_sha) or {}):
+            _mapped = _check_to_job_node(_check_name, _jg, crit_by_wf)
+            if _mapped is not None:
+                _expected_workflows.add(_mapped[0])
+        _missing: set[str] = _expected_workflows - {_wf for _wf, _run in _run_rows}
+        _created: list[float] = []
+        _job_rows: list[dict[str, Any]] = []
+        for _wf, _run in _run_rows:
+            _created_dt = _parse_dt(str(_run.get("created_at") or ""))
+            if _created_dt is not None:
+                _created.append(_created_dt.timestamp())
+            _rid = str(_run.get("id") or "")
+            _run_jobs = _jobs_by_run.get((_wf, _rid))
+            if not _run_jobs:
+                _missing.add(_wf)
+                continue
+            _completed_here = False
+            for _job in _run_jobs:
+                _started_dt = _parse_dt(str(_job.get("started_at") or ""))
+                _completed_dt = _parse_dt(str(_job.get("completed_at") or ""))
+                if _started_dt is None or _completed_dt is None:
+                    continue
+                _duration = _completed_dt.timestamp() - _started_dt.timestamp()
+                if _duration < 0:
+                    continue
+                _completed_here = True
+                _job_rows.append({
+                    "name": str(_job.get("name") or ""),
+                    "workflow_file": _wf,
+                    "duration_s": round(_duration, 3),
+                    "completed_ts": _completed_dt.timestamp(),
+                    "node": _commit_job_node(_wf, str(_job.get("name") or "")),
+                })
+            if not _completed_here:
+                _missing.add(_wf)
+
+        _job_rows.sort(key=lambda row: (-float(row["duration_s"]),
+                                        str(row["workflow_file"]), str(row["name"])))
+        _slowest = _job_rows[0] if _job_rows else None
+        _excluded = (_needs_chain(str(_slowest["workflow_file"]), _slowest.get("node"))
+                     if _slowest else set())
+
+        def _outside_slowest_chain(row: dict[str, Any]) -> bool:
+            if _slowest is None or row["workflow_file"] != _slowest["workflow_file"]:
+                return True
+            if row.get("node") not in _excluded:
+                return True
+            # Matrix display legs share one YAML node but execute independently.
+            # Preserve another concrete leg as a floor; a repeated attempt with
+            # the same display name is not an independent sibling.
+            node = row.get("node")
+            spec = ((_jg or {}).get(str(row["workflow_file"])) or {}).get(node) or {}
+            return bool(node == _slowest.get("node")
+                        and row.get("name") != _slowest.get("name")
+                        and isinstance(spec, dict) and spec.get("matrix"))
+
+        _next = next((row for row in _job_rows[1:]
+                      if _outside_slowest_chain(row)), None) if _slowest else None
+        _observed = (round(max(float(row["completed_ts"]) for row in _job_rows)
+                           - min(_created), 3)
+                     if _job_rows and _created else None)
+        _partial = bool(_missing or not _run_rows or _observed is None)
+        _fact: dict[str, Any] = {
+            "sha": _sha,
+            "event": _event,
+            "partial": _partial,
+            "missing_workflows": sorted(_missing),
+            "wall_s": None if _partial else _observed,
+            **({"observed_wall_s": _observed} if _observed is not None else {}),
+            **({"slowest_job": {k: _slowest[k] for k in
+                                ("name", "workflow_file", "duration_s")}}
+               if _slowest else {}),
+            **({"next_longest_job": {k: _next[k] for k in
+                                     ("name", "workflow_file", "duration_s")}}
+               if _next else {}),
+        }
+        if not _partial and _slowest is not None:
+            _projection = project_commit_wall(
+                float(_observed), float(_slowest["duration_s"]),
+                float(_next["duration_s"]) if _next else 0.0, 4.0)
+            _fact["projection_4x"] = {
+                "job_speedup": 4.0,
+                "projected_s": _projection.projected_s,
+                "multiple": _projection.multiple,
+            }
+        _commit_facts.append(_fact)
+
+    _complete_walls = [float(f["wall_s"]) for f in _commit_facts
+                       if isinstance(f.get("wall_s"), (int, float))]
+    _commit_wall_clock = {
+        "p50_s": (round(_percentile(_complete_walls, 50), 3)
+                  if _complete_walls else None),
+        "p90_s": (round(_percentile(_complete_walls, 90), 3)
+                  if _complete_walls else None),
+        "facts": _commit_facts,
+    }
     _chain_facts = _stamp_chain_facts(
         _era_repr_shas, _era_per_sha_checks, _chain_spine, _span_caps, _jg,
         crit_by_wf, _era_sha_intervals)
@@ -27769,6 +27957,13 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                       if _chain_ctx_members else 0.0)
     _chain_ctx_win = (float((_chain_summary_val or {}).get("chain_win_p50_s") or 0.0)
                       if _chain_ctx_members else 0.0)
+    _commit_ctx_facts = tuple(
+        (float(f["wall_s"]), float(f["slowest_job"]["duration_s"]),
+         float((f.get("next_longest_job") or {}).get("duration_s") or 0.0))
+        for f in _commit_facts
+        if isinstance(f.get("wall_s"), (int, float))
+        and isinstance(f.get("slowest_job"), dict)
+    )
     findings_doc["pr_critical_path"] = {
         # KEPT-side count post the #80 spine door: `sampled_pr_count` is the number of PRs whose
         # timing actually feeds the rendered chain/makespan/populations/presence — a dropped-era PR
@@ -27831,6 +28026,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         # chain, competing-path bound, signed divergence) — the verifier
         # re-derives it from `chain_facts`.
         "chain_summary": _chain_summary_val,
+        "commit_wall_clock": _commit_wall_clock,
         # Per-population check sets (one population per sampled PR that ran >=1
         # tracked check; share = 1/m). Persisted so the report's "Long poles"
         # section can show how OFTEN each check is the actual pole across sampled
@@ -28821,7 +29017,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 pr_checks=pr_checks_tuple, own_check_names=own_check_names,
                 pr_check_populations=tuple(pr_check_populations),
                 chain_members=_chain_ctx_members, chain_p50_s=_chain_ctx_p50,
-                chain_win_s=_chain_ctx_win)
+                chain_win_s=_chain_ctx_win, commit_wall_facts=_commit_ctx_facts)
             _size_opt25_next_step(f, ctx)
             res = size_wall_clock(float(wc), ctx,
                                   cascade=([("within-workflow", bound_within_workflow)] + CASCADE)
@@ -29003,6 +29199,36 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 f["workflow_activity"] = act
         _o81_next = max(_o81_next, max((int(f["id"][1:]) for f in new), default=_o81_next))
         findings.extend(new)
+
+    # Structural findings are routed after the main sizing loop. Apply the
+    # shared whole-commit projection bound once more at the final findings door
+    # so those late additions cannot publish a saving above the next-job floor.
+    _commit_only_ctx = WallClockContext(commit_wall_facts=_commit_ctx_facts)
+    for _finding in findings:
+        _saving = _finding.get("wall_clock_p50_s")
+        if not isinstance(_saving, (int, float)) or _saving <= 0:
+            continue
+        if any(isinstance(step, dict) and step.get("bound") == "commit-projection"
+               for step in (_finding.get("wall_clock_derivation") or [])):
+            continue
+        _bounded = bound_commit_projection(float(_saving), _commit_only_ctx)
+        if _bounded.value >= round(float(_saving), 1):
+            continue
+        _finding.setdefault("wall_clock_uncapped_p50_s", round(float(_saving), 1))
+        _finding["wall_clock_p50_s"] = _bounded.value
+        _finding.setdefault("wall_clock_derivation", []).append({
+            "bound": "commit-projection",
+            "from_s": round(float(_saving), 1),
+            "to_s": _bounded.value,
+            "reason": _bounded.reason,
+        })
+        _previous_note = str(_finding.get("size_note") or "")
+        _finding["size_note"] = (
+            f"{_previous_note}; {_bounded.reason}" if _previous_note
+            else str(_bounded.reason or ""))
+        if _bounded.value <= 0:
+            _finding["tier"] = 2
+            _finding["realization"] = "none"
     findings_doc["findings"] = findings
 
     # encord §6 Cause 2: stamp `off_spine` on findings whose job was DROPPED from the
