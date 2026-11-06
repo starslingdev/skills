@@ -379,6 +379,7 @@ def test_full_verifier_reads_cluster_win_after_smaller_queue_clock(
                   if line.startswith("> **Bottom line.**"))
     assert bottom.index("~1m 00s of it waiting") < bottom.index("removes **~5m 00s**")
     assert "**OPT73** in `ci.yml`" in bottom
+    assert vr._headline_win_s(bottom) == 300.0
     failures = [check for check in vr.run_checks(
         report, report_path, findings_path, skill_repo=None)
         if not check.skipped and not check.ok and "provenance" not in check.name]

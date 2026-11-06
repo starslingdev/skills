@@ -13026,7 +13026,7 @@ def check_cluster_lever_ceiling_escapes_sibling(report: str, findings_path: Path
 
 _HEADLINE_WIN_RE = re.compile(r"\*\*~\s*([0-9hms  ]+?)\*\*")
 _COMMIT_WORK_WIN_RE = re.compile(
-    r"biggest credited code finding[^.!?\n]{0,160}?removes\s+\*\*~\s*"
+    r"biggest credited code finding[^\n]{0,240}?removes\s+\*\*~\s*"
     r"([0-9hms  ]+?)\*\*", re.IGNORECASE)
 
 
@@ -13041,7 +13041,7 @@ def _headline_win_s(bottom_line: str) -> float | None:
 def _cluster_leads_bottom_line(bl: str, rendered_s: float | None, f: dict, cluster_s: float) -> bool:
     """True only when the Bottom line's crown sentence IS this cluster's: it names the cluster's
     workflow (`` `<basename>` ``) and points at its **OPT73** entry, the two facts
-    `blocking_path._cluster_headline_bottom_line` always prints, and its first `~<clock>` win is not
+    `blocking_path._cluster_headline_bottom_line` always prints, and its credited `~<clock>` win is not
     smaller than the stamped ceiling by more than the 2s whole-second rendering tolerance (smaller is
     a burial, the sibling burial guard's target). The number alone does not identify the crown:
     reading `rendered >= ceiling` as "the cluster leads" credited a chain headroom to a small demoted
@@ -13069,7 +13069,7 @@ def check_headline_consumes_stamped_cluster_ceiling(report: str, findings_path: 
     catches BOTH live reports. LOUD narrow SKIP when OPT73 findings exist but NONE carries the persisted
     `cluster_floor_lever` marker (a legacy artifact predating the #49 stamp — burial can't be verified),
     so it can never read clean on a real cluster report. Standalone; keys on
-    `findings[].cluster_floor_lever` / `wall_clock_p50_s` and the rendered `~<clock>`."""
+    `findings[].cluster_floor_lever` / `wall_clock_p50_s` and the rendered credited `~<clock>`."""
     name = "Bottom-line headline leads with the stamped cluster-floor ceiling (no burial)"
     if not findings_path:
         return Check(name, True, "no findings path", skipped=True)
@@ -13104,7 +13104,7 @@ def check_headline_consumes_stamped_cluster_ceiling(report: str, findings_path: 
     best_f, best_s = max(credited, key=lambda t: t[1])
     wf = best_f.get("workflow_file", "?")
     # The rendered Bottom line names the merge wait in bold WITHOUT a tilde and the addressable win in
-    # bold WITH a leading `~`. Parse the first `~<clock>` in the Bottom-line paragraph.
+    # bold WITH a leading `~`. Parse that credited win rather than the queue/work clocks.
     bl = next((ln for ln in report.splitlines() if "**Bottom line.**" in ln), "")
     rendered_s = _headline_win_s(bl)
     if rendered_s is None:
@@ -13239,7 +13239,7 @@ def check_headline_cluster_lever_on_spine(report: str, findings_path: Path | Non
     dropped/kept check sets). The stamped off-spine cluster can be the workflow's heaviest step yet
     never gate the merge — it is bill/throughput, not merge-wait — so crowning it as the typical-PR
     "biggest single measured win" (~9m08s over a 1m56s wall, 4.7x the whole wait) is the defect. Keys
-    on `findings[].cluster_floor_lever` / `off_spine` / `wall_clock_p50_s` and the rendered first
+    on `findings[].cluster_floor_lever` / `off_spine` / `wall_clock_p50_s` and the rendered credited
     `~<clock>`. LOUD narrow SKIP when the max credited cluster does not lead (correctly demoted / no
     tilde-win), so it never reads clean on an unverifiable crown."""
     name = "Bottom-line crowned cluster lever is on the merge-gating spine (not off-spine)"
