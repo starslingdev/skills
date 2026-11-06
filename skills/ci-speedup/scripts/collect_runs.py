@@ -2516,7 +2516,7 @@ def _fallback_last_jobs(
     rep_members: dict[str, list[str]],
     jobs_per_run_by_wf: dict[str, list[list[dict[str, Any]]]],
 ) -> dict[str, tuple[str, float]]:
-    """Return the job that completed last for each sampled commit population.
+    """Return the slowest job for each sampled commit population.
 
     This is used only when required-check reachability did not produce a scoped
     gate. The normal required-scoped rank remains byte-for-byte unchanged. Jobs
@@ -2528,7 +2528,7 @@ def _fallback_last_jobs(
         for rep in repr_shas
         for member in rep_members.get(rep, [rep])
     }
-    winners: dict[str, tuple[float, str, float]] = {}
+    winners: dict[str, tuple[float, float, str]] = {}
     for workflow_runs in jobs_per_run_by_wf.values():
         for run_jobs in workflow_runs:
             for job in run_jobs:
@@ -2540,11 +2540,11 @@ def _fallback_last_jobs(
                 name = str(job.get("name") or "")
                 if rep is None or completed is None or duration is None or not name:
                     continue
-                candidate = (completed.timestamp(), name, round(duration, 1))
+                candidate = (round(duration, 1), completed.timestamp(), name)
                 current = winners.get(rep)
                 if current is None or candidate > current:
                     winners[rep] = candidate
-    return {rep: (winner[1], winner[2]) for rep, winner in winners.items()}
+    return {rep: (winner[2], winner[0]) for rep, winner in winners.items()}
 
 
 def _run_wall_s(r: dict[str, Any]) -> float | None:
