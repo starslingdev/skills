@@ -5454,7 +5454,7 @@ _OPT9_BUILD_STATE_RE = re.compile(
     re.IGNORECASE,
 )
 _OPT9_RESULT_CACHE_RE = re.compile(
-    r"(?:\beslint\b|\bprettier\b|\bjest\b)",
+    r"(?:\beslint\b|\bprettier\b|\bjest\b|\bvitest\b)",
     re.IGNORECASE,
 )
 

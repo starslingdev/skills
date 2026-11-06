@@ -54,6 +54,17 @@ def _collect(monkeypatch) -> dict:
                     "`--cache` flag"
                 ),
             },
+            {
+                "id": "f4",
+                "pattern": "OPT9",
+                "workflow_file": _CI,
+                "affected_jobs": ["test"],
+                "title": "TypeScript Vitest cache",
+                "evidence": (
+                    "job `test` runs `vitest` over generated TypeScript fixtures "
+                    "without its result cache"
+                ),
+            },
         ],
     }
     return cr.collect(doc, "o/r", max_runs=8, shallow_runs=8)
@@ -130,6 +141,35 @@ def test_build_state_is_uncredited_while_eslint_keeps_existing_sizing(
             "not a credited bill saving"
         ),
         "sizing_basis": "modeled",
+    }
+
+    vitest = by_id["f4"]
+    assert {
+        key: vitest.get(key)
+        for key in (
+            "wall_clock_p50_s",
+            "runner_min_saving",
+            "tier",
+            "realization",
+            "runner_min_unrealizable_s",
+            "runner_min_unrealizable",
+            "size_note",
+            "runner_min_note",
+            "sizing_basis",
+        )
+    } == {
+        key: eslint.get(key)
+        for key in (
+            "wall_clock_p50_s",
+            "runner_min_saving",
+            "tier",
+            "realization",
+            "runner_min_unrealizable_s",
+            "runner_min_unrealizable",
+            "size_note",
+            "runner_min_note",
+            "sizing_basis",
+        )
     }
 
     report = _verify_full(doc, tmp_path)
