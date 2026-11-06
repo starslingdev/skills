@@ -13,6 +13,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-11-06** — Measure missing path-filter opportunities from the changed files in already-sampled pull requests. Reports use the repository's own `paths-ignore` precedent when available, otherwise a narrow documentation-only fallback, and label the resulting runner-minute estimate as a modeled upper bound with the observed hit count.
 - **2026-11-06** — Keep a reusable workflow's standalone pull-request checks outside a caller's required-check closure. Only caller-prefixed nested checks inherit that caller's merge-gating role; direct runs retain their own reachability.
 - **2026-11-06** — Keep the merge-wait headline on the slowest confirmed required or `needs:`-reachable check when a sampled file-backed check cannot be pinned to a job. Per-PR gate counts, the typical-path rendering and report verification now use the same confirmed gate population, while the unconfirmed check remains visible with its qualification.
 - **2026-11-05** — Keep full-history checkouts when a workflow directly invokes a first-party shell, Python, or Node script that walks Git history. The scanner follows one guarded repository-local script hop, fails closed for unreadable or escaping paths, and deliberately does not follow scripts invoked by that script.
