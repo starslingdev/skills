@@ -3809,7 +3809,7 @@ agent prompt in `_PROMPTS`; it is **not** a prescribed fix):
 | `fix_key` | Root cause | `magnitude` (the one load-bearing number) |
 | --- | --- | --- |
 | `prisma-migrate-once` | `db push --force-reset` per test group | DB-migration share of the slowest test file |
-| `vitest-v8-coverage` | istanbul coverage instruments every file | compile+instrument share of test work |
+| `vitest-v8-coverage` | compile/instrument/load dominates measured summed worker time | compile+instrument share of test work |
 | `vitest-isolate-pool` | per-file isolation re-pays the import cost (OPT78, HIGH risk). Gated on `scan.py`'s `test_runner_isolation` config fact — whose `verdict` field must read `isolation_on` — so every `_parse_log` caller (render, `_gap_poles`, `_persist_pole_logs` / `_magnitude_sample`) must pass that block; a guard test pins that every call site does | import share of the vitest run |
 | `vitest-import-bound` | the same import-bound split when OPT78 is WITHHELD (opted out, config not fully read, an unresolvable `isolate` value, a crashed config reader, vm pool): names the split and the withheld reason, forbids flipping isolation. Its config sentence travels as the leaf's `config_fact`, rendered outside the untrusted-log block | import share of the vitest run |
 | `turbo-remote-cache` | remote caching off / 0 cached → every package rebuilt | packages rebuilt (cache-miss %) |
