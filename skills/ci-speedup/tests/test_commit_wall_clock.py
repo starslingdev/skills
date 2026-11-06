@@ -177,6 +177,55 @@ class _MatrixSiblingClient(_TwoWorkflowClient):
         return super().json(endpoint, allow_missing)
 
 
+class _FailedWorkflowRunClient(_TwoWorkflowClient):
+    def json(self, endpoint: str, allow_missing: bool = False):
+        match = re.match(r"repos/o/r/actions/workflows/2/runs\?(.*)", endpoint)
+        if match and not re.search(r"per_page=1(?![0-9])", match.group(1)):
+            self.queries += 1
+            return {"workflow_runs": [{
+                "id": 202,
+                "event": "pull_request",
+                "head_sha": _SHA,
+                "status": "completed",
+                "conclusion": "failure",
+                "created_at": _iso(60),
+                "run_started_at": _iso(60),
+                "updated_at": _iso(120),
+            }]}
+        if re.match(r"repos/o/r/commits/[^/]+/check-runs", endpoint):
+            self.queries += 1
+            return {"check_runs": [
+                {"name": "first-short", "started_at": _iso(0),
+                 "completed_at": _iso(300)},
+                {"name": "first-long", "started_at": _iso(0),
+                 "completed_at": _iso(900)},
+            ]}
+        if endpoint == "repos/o/r/branches/main/protection/required_status_checks":
+            self.queries += 1
+            return {"contexts": ["first-long"]}
+        return super().json(endpoint, allow_missing)
+
+
+class _ZeroWallClient(_TwoWorkflowClient):
+    def json(self, endpoint: str, allow_missing: bool = False):
+        match = re.match(r"repos/o/r/actions/workflows/(\d+)/runs\?(.*)", endpoint)
+        if match and not re.search(r"per_page=1(?![0-9])", match.group(2)):
+            result = super().json(endpoint, allow_missing)
+            for run in result["workflow_runs"]:
+                run.update({
+                    "created_at": _iso(0), "run_started_at": _iso(0),
+                    "updated_at": _iso(0),
+                })
+            return result
+        match = re.match(r"repos/o/r/actions/runs/(101|202)/jobs", endpoint)
+        if match:
+            run_id = int(match.group(1))
+            name = "first-long" if run_id == 101 else "second-long"
+            self.queries += 1
+            return {"jobs": [_job(name, run_id, 0, 0)]}
+        return super().json(endpoint, allow_missing)
+
+
 _DOC = {
     "repo": "o/r",
     "skill_commit_sha": "installed:unversioned",
@@ -296,6 +345,32 @@ def test_independent_matrix_leg_can_be_the_next_longest_floor(monkeypatch):
     assert fact["slowest_job"]["name"] == "second-long (one)"
     assert fact["next_longest_job"]["name"] == "second-long (two)"
     assert fact["next_longest_job"]["duration_s"] == 1000.0
+
+
+def test_failed_all_status_run_without_jobs_makes_commit_partial(monkeypatch):
+    doc = _collect(monkeypatch, _FailedWorkflowRunClient)
+    fact = doc["pr_critical_path"]["commit_wall_clock"]["facts"][0]
+
+    assert fact["partial"] is True
+    assert fact["wall_s"] is None
+    assert fact["missing_workflows"] == [_SECOND]
+
+
+def test_zero_projected_wall_omits_multiple_and_still_renders_and_verifies(
+        monkeypatch, tmp_path: Path):
+    doc = _collect(monkeypatch, _ZeroWallClient)
+    fact = doc["pr_critical_path"]["commit_wall_clock"]["facts"][0]
+    assert fact["wall_s"] == 0.0
+    assert fact["projection_4x"]["projected_s"] == 0.0
+    assert fact["projection_4x"]["multiple"] is None
+
+    report = bp.render(doc, captured_at="2026-11-06T00:00:00Z")
+    assert "**Per-commit PR wait:** p50 **0m 00s**, p90 **0m 00s**" in report
+    assert "(**infx**)" not in report
+    findings_path = tmp_path / "findings.json"
+    findings_path.write_text(json.dumps(doc, allow_nan=False), encoding="utf-8")
+    check = vr.check_commit_wall_clock_projection(report, findings_path)
+    assert check.ok, check
 
 
 def test_verifier_rejects_a_projection_multiple_above_the_shared_cap(

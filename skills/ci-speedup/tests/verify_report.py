@@ -659,8 +659,12 @@ def check_commit_wall_clock_projection(report: str, findings_path: Path | None) 
         if claimed_projected is None or abs(claimed_projected - projected) > 0.11:
             failures.append(
                 f"fact {index} projected_s {claimed_projected!r} != {projected}")
-        if (claimed_multiple is None or cap_multiple is None
-                or claimed_multiple > cap_multiple + 0.001):
+        if cap_multiple is None:
+            if claimed_multiple is not None:
+                failures.append(
+                    f"fact {index} multiple {claimed_multiple!r} must be absent "
+                    "for a zero projected wall")
+        elif claimed_multiple is None or claimed_multiple > cap_multiple + 0.001:
             failures.append(
                 f"fact {index} multiple {claimed_multiple!r} exceeds {cap_multiple}")
 
@@ -690,15 +694,14 @@ def check_commit_wall_clock_projection(report: str, findings_path: Path | None) 
         basis, wall, slowest, next_longest = min(
             complete, key=lambda row: abs(row[1] - expected_p50))
         projected, multiple = projection(wall, slowest, next_longest, 4.0)
-        if multiple is None:
-            failures.append("sampled p50 projection has an undefined multiple")
-            multiple = 0.0
         expected_line = (
             "> **Per-commit PR wait:** p50 "
             f"**{duration(expected_p50)}**, p90 **{duration(expected_p90)}**, from the "
             "earliest workflow run created to the last job completed across every "
-            "workflow on that commit. At the sampled p50 commit, a 4x speedup to its "
-            f"slowest job projects to **{duration(projected)}** (**{multiple:.2f}x**).")
+            "workflow on that commit."
+            + (" At the sampled p50 commit, a 4x speedup to its slowest job "
+               f"projects to **{duration(projected)}** (**{multiple:.2f}x**)."
+               if multiple is not None else ""))
         if report.splitlines().count(expected_line) != 1:
             failures.append("report lacks the re-derived per-commit wait/projection line")
     elif _num(stamp.get("p50_s")) is not None or _num(stamp.get("p90_s")) is not None:

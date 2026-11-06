@@ -27573,9 +27573,14 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     for _sha in _commit_shas:
         _event = str((sha_meta.get(_sha) or {}).get("event") or "")
         _run_rows: list[tuple[str, dict[str, Any]]] = []
-        for _wf, _runs in sampled_runs_by_wf.items():
+        for _wf in sorted(set(sampled_runs_by_wf) | set(all_status_runs_by_wf)):
             if _wf in _commit_dropped_workflows.get(_sha, set()):
                 continue
+            _runs_by_id: dict[str, dict[str, Any]] = {}
+            for _run in [*(all_status_runs_by_wf.get(_wf) or []),
+                         *(sampled_runs_by_wf.get(_wf) or [])]:
+                _runs_by_id[str(_run.get("id") or id(_run))] = _run
+            _runs = list(_runs_by_id.values())
             for _run in _runs:
                 if (str(_run.get("head_sha") or "") == _sha
                         and str(_run.get("event") or "") == _event):
