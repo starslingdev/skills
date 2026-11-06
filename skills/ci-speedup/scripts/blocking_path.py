@@ -11639,6 +11639,76 @@ def _minority_gate_tail_block(cp: dict[str, Any]) -> list[str]:
     return ["## ⏱️ Slow tails on merge-blocking checks", "", *rows]
 
 
+def _default_branch_push_lane_block(doc: dict[str, Any]) -> list[str]:
+    """Render post-merge push timing without feeding the merge-gate spine."""
+    lane = doc.get("default_branch_push_lane")
+    if not isinstance(lane, dict):
+        return []
+    sampled = int(_num(lane.get("sampled_push_count")) or 0)
+    lines = [
+        "<!-- ci-speedup:default-branch-push-lane -->",
+        "## 📦 After merge, not a merge gate",
+        "",
+    ]
+    if sampled == 0:
+        return [*lines, "No pushes to the default branch in the window.", ""]
+
+    facts = [
+        fact for fact in (lane.get("facts") or [])
+        if isinstance(fact, dict) and fact.get("partial") is not True
+        and (_num(fact.get("wall_s")) or 0) > 0
+    ]
+    p50 = _num(lane.get("p50_s")) or 0.0
+    p90 = _num(lane.get("p90_s")) or 0.0
+    if not facts or p50 <= 0 or p90 <= 0:
+        return [
+            *lines,
+            f"Sampled **{sampled}** default-branch push(es), but no complete "
+            "commit-wide timing fact was available for this lane.",
+            "",
+        ]
+
+    typical = min(
+        facts,
+        key=lambda fact: abs((_num(fact.get("wall_s")) or 0.0) - p50))
+    slowest = typical.get("slowest_job") or {}
+    next_job = typical.get("next_longest_job") or {}
+    lines += [
+        f"Across **{len(facts)}** complete sampled pushes, the full per-commit "
+        f"wall is p50 **{_clock(p50)}** and p90 **{_clock(p90)}**.",
+        "",
+    ]
+    slow_name = str(slowest.get("name") or "")
+    next_name = str(next_job.get("name") or "")
+    if slow_name:
+        sentence = f"The typical slowest job is `{_lbl(slow_name)}`"
+        if next_name:
+            sentence += f"; the next-longest independent job is `{_lbl(next_name)}`"
+        lines += [sentence + ".", ""]
+
+    projections = [
+        value for key, value in typical.items()
+        if str(key).startswith("projection_") and isinstance(value, dict)
+    ]
+    if projections:
+        projection = projections[0]
+        speedup = _num(projection.get("job_speedup")) or 0.0
+        projected = _num(projection.get("projected_s")) or 0.0
+        multiple = _num(projection.get("multiple")) or 0.0
+        if speedup > 0 and projected > 0 and multiple > 0:
+            lines += [
+                f"Making `{_lbl(slow_name)}` **{speedup:g}x** faster projects to "
+                f"**{_clock(projected)}** (**{multiple:.2f}x**) for the full push.",
+                "",
+            ]
+    lines += [
+        "These runs start after merge. Their times stay out of the merge-gate "
+        "Bottom line, headline, ranked spine and scores.",
+        "",
+    ]
+    return lines
+
+
 def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
            samples: dict[str, dict[str, Any]] | None = None,
            log_runs: dict[str, str] | None = None,
@@ -11732,6 +11802,7 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
     # hygiene appendix, because it IS developer wall-clock (the spine just doesn't see
     # the pre-start portion).
     queue_lines = _queue_wait_block(all_findings, catalog_url, shallow_note)
+    push_lane_lines = _default_branch_push_lane_block(doc)
     runner_spine_count = _runner_minute_spine_row_count(doc)
     tier2_lines = _tier2_block(all_findings, catalog_url, cs, doc)
 
@@ -13570,6 +13641,8 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
     # the spine doesn't capture, NOT hygiene), then the promoted runner-minute tier, then
     # the off-path / set-aside material — the residual hygiene appendix, advisory signals, and the
     # judgment-needed checklist.
+    if push_lane_lines:
+        out += ["---", "", *push_lane_lines]
     if queue_lines:
         out += ["---", "", *queue_lines]
     if tier2_lines:

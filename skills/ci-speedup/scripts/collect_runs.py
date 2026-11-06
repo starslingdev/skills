@@ -10300,6 +10300,9 @@ def _detect_opt48_failure_rate(
 # runner-minutes tier (spec §7).
 
 _COST_RUNLIST_MAX = 100  # one page of all-status runs for branch/dup grouping
+# Default-branch pushes are a separate, post-merge lane. Bound the number of
+# pushed commits whose workflow jobs we fetch so the extra API cost stays fixed.
+_DEFAULT_BRANCH_PUSH_SAMPLE_MAX = 10
 # The headline timing sample deliberately contains successful runs only. When the
 # same cached all-status page shows a materially red default branch, say so beside
 # the headline instead of letting a successful-run median read like the whole window.
@@ -26330,6 +26333,12 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # several repos in one process must not measure the later ones against the first
     # call's clock. See `_reset_unpinned_now`.
     _reset_unpinned_now()
+    # Dependency handoff: the shared commit-wide clock lands separately. Preserve
+    # an injected producer-shaped fixture before this pass rebuilds
+    # `pr_critical_path`. Reconciliation will feed the bounded cohort below through
+    # the shared fact helper; this change intentionally does not copy that producer.
+    _supplied_commit_wall_clock = copy.deepcopy(
+        ((findings_doc.get("pr_critical_path") or {}).get("commit_wall_clock") or {}))
     # Guard the shallow depth: `--shallow-runs 0` (or negative) would make the shallow
     # pass fetch nothing, leave every workflow at p50=0, deepen nothing, and silently
     # emit a report with no timing — a coverage-gap masquerade. Clamp to >=1 (the
@@ -27163,6 +27172,71 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             _stamp["status"] = "below_threshold"
         _success_only_timing[_wf_path] = _stamp
     findings_doc["success_only_timing_by_workflow"] = _success_only_timing
+    # Pushes to the default branch happen after merge, so sample them on their
+    # own axis. Reuse the all-status pages already fetched above to choose the
+    # latest pushed SHAs; only the bounded per-run job walks are new API calls.
+    # The supplied commit-wall facts are deliberately consumed rather than
+    # reimplemented here: they are the merge seam for the shared producer.
+    _push_runs_by_sha: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    _push_created_by_sha: dict[str, str] = {}
+    for _push_runs in all_status_runs_by_wf.values():
+        for _push_run in _push_runs:
+            _push_sha = str(_push_run.get("head_sha") or "")
+            if (not _push_sha or not default_branch
+                    or _push_run.get("event") != "push"
+                    or _push_run.get("head_branch") != default_branch
+                    or _push_run.get("status") != "completed"
+                    or _push_run.get("conclusion") in {"cancelled", "skipped"}):
+                continue
+            _push_runs_by_sha[_push_sha].append(_push_run)
+            _push_created = str(_push_run.get("created_at") or "")
+            _push_created_by_sha[_push_sha] = max(
+                _push_created_by_sha.get(_push_sha, ""), _push_created)
+    _push_shas = sorted(
+        _push_runs_by_sha,
+        key=lambda sha: (_push_created_by_sha.get(sha, ""), sha),
+        reverse=True)[:_DEFAULT_BRANCH_PUSH_SAMPLE_MAX]
+    _push_run_rows = [
+        run
+        for sha in _push_shas
+        for run in sorted(
+            _push_runs_by_sha[sha],
+            key=lambda row: (str(row.get("id") or ""),
+                             str(row.get("created_at") or "")))
+    ]
+    _push_job_rows, _push_job_failures = _gather_run_jobs(
+        client, repo, _push_run_rows, keep_empty=True)
+
+    _supplied_push_facts = {
+        str(fact.get("sha") or ""): fact
+        for fact in (_supplied_commit_wall_clock.get("facts") or [])
+        if isinstance(fact, dict) and fact.get("event") == "push"
+    }
+    _push_facts = [
+        copy.deepcopy(_supplied_push_facts[sha])
+        for sha in _push_shas if sha in _supplied_push_facts
+    ]
+    _push_walls = [
+        float(fact["wall_s"])
+        for fact in _push_facts
+        if fact.get("partial") is not True
+        and isinstance(fact.get("wall_s"), (int, float))
+        and not isinstance(fact.get("wall_s"), bool)
+        and float(fact["wall_s"]) > 0
+    ]
+    findings_doc["default_branch_push_lane"] = {
+        "sample_cap": _DEFAULT_BRANCH_PUSH_SAMPLE_MAX,
+        "sampled_push_count": len(_push_shas),
+        "sampled_run_count": len(_push_run_rows),
+        "job_fetch_count": len(_push_run_rows),
+        "job_fetch_failures": _push_job_failures,
+        "job_rows_returned": len(_push_job_rows),
+        "p50_s": (round(_percentile(_push_walls, 50), 3)
+                  if _push_walls else None),
+        "p90_s": (round(_percentile(_push_walls, 90), 3)
+                  if _push_walls else None),
+        "facts": _push_facts,
+    }
     # `--root` is on for EVERY run now, so every workflow's YAML comes off the working
     # tree. `_root_is_clone_of` proved it is the right REPO; this asks the other half —
     # is it the right COMMIT LINE? A clean feature branch or a stale `main` is not dirty,
