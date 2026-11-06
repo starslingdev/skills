@@ -5442,6 +5442,10 @@ _OPT9_BUILD_STATE_RE = re.compile(
     r"generated[ -](?:client|output|code)|\bcodegen\b|code generation)",
     re.IGNORECASE,
 )
+_OPT9_RESULT_CACHE_RE = re.compile(
+    r"(?:\beslint\b|\bprettier\b|\bjest\b)",
+    re.IGNORECASE,
+)
 
 
 def _opt9_is_build_state(f: dict[str, Any]) -> bool:
@@ -5451,6 +5455,8 @@ def _opt9_is_build_state(f: dict[str, Any]) -> bool:
         str(f.get(key) or "")
         for key in ("title", "evidence", "match_text", "fix_strategy")
     )
+    if _OPT9_RESULT_CACHE_RE.search(evidence):
+        return False
     return bool(_OPT9_BUILD_STATE_RE.search(evidence))
 
 # Patterns whose modeled runner-min is NOT a realizable compute saving. The
@@ -5565,6 +5571,7 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
         f["runner_min_saving"] = None
         f["tier"] = 2
         f["realization"] = "none"
+        f["opt9_measure_before_after"] = True
         f["size_note"] = (
             "build-state and generated-output cache costs vary with restore, "
             "validation, and save overhead — measure before and after on the "

@@ -25,10 +25,10 @@ def _collect(monkeypatch) -> dict:
                 "id": "f1",
                 "pattern": "OPT9",
                 "workflow_file": _CI,
-                "affected_jobs": ["test"],
+                "affected_jobs": ["typecheck"],
                 "title": "TypeScript incremental build state",
                 "evidence": (
-                    "job `test` runs `tsc` without `--incremental`; the proposed "
+                    "job `typecheck` runs `tsc` without `--incremental`; the proposed "
                     "cache persists `.tsbuildinfo`"
                 ),
             },
@@ -36,10 +36,10 @@ def _collect(monkeypatch) -> dict:
                 "id": "f2",
                 "pattern": "OPT9",
                 "workflow_file": _CI,
-                "affected_jobs": ["test"],
+                "affected_jobs": ["generate-client"],
                 "title": "Generated client cache",
                 "evidence": (
-                    "job `test` regenerates an API client and could cache the "
+                    "job `generate-client` regenerates an API client and could cache the "
                     "generated-client output"
                 ),
             },
@@ -48,8 +48,11 @@ def _collect(monkeypatch) -> dict:
                 "pattern": "OPT9",
                 "workflow_file": _CI,
                 "affected_jobs": ["test"],
-                "title": "ESLint cache",
-                "evidence": "job `test` runs `eslint` without its `--cache` flag",
+                "title": "TypeScript ESLint cache",
+                "evidence": (
+                    "job `test` runs `eslint` over generated code without its "
+                    "`--cache` flag"
+                ),
             },
         ],
     }
@@ -90,6 +93,7 @@ def test_build_state_is_uncredited_while_eslint_keeps_existing_sizing(
         assert finding["runner_min_saving"] is None
         assert finding["tier"] == 2
         assert finding["realization"] == "none"
+        assert finding["opt9_measure_before_after"] is True
         assert "measure before and after" in finding["size_note"].lower()
 
     eslint = by_id["f3"]
@@ -102,6 +106,8 @@ def test_build_state_is_uncredited_while_eslint_keeps_existing_sizing(
             "realization",
             "runner_min_unrealizable_s",
             "runner_min_unrealizable",
+            "size_note",
+            "runner_min_note",
             "sizing_basis",
         )
     } == {
@@ -111,7 +117,20 @@ def test_build_state_is_uncredited_while_eslint_keeps_existing_sizing(
         "realization": "direct",
         "runner_min_unrealizable_s": 75.0,
         "runner_min_unrealizable": True,
+        "size_note": (
+            "ephemeral-runner caveat — this saving assumes a warm local cache, "
+            "which GitHub-hosted/ephemeral runners don't have; verify a "
+            "warm-vs-cold step-time delta before claiming wall-clock (OPT8 guardrail)"
+        ),
+        "runner_min_note": (
+            "runner-minute saving is ALSO unproven on ephemeral runners — the "
+            "cache writes to a working-dir path the next runner discards; "
+            "realizable only with a persisted actions/cache for that dir + a "
+            "measured warm-vs-cold delta (none here), so this is config-hygiene, "
+            "not a credited bill saving"
+        ),
         "sizing_basis": "modeled",
     }
 
-    _verify_full(doc, tmp_path)
+    report = _verify_full(doc, tmp_path)
+    assert "measure before and after" in report.lower()
