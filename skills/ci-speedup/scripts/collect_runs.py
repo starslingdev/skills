@@ -27544,21 +27544,38 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         return seen
 
     _commit_facts: list[dict[str, Any]] = []
-    _commit_shas = [member for rep in _era_repr_shas
-                    for member in _rep_members.get(rep, [rep])]
+    _commit_shas: list[str] = []
     _commit_checks_by_sha: dict[str, dict[str, float]] = {}
-    for _sha in _commit_shas:
-        _commit_checks_by_sha[_sha] = {
-            str(row.get("name") or "?"): float(duration)
-            for row in (_member_check_runs.get(_sha) or [])
-            if (duration := _duration_s(row.get("started_at"),
-                                        row.get("completed_at"))) is not None
-            and duration > 0
-        }
+    _commit_dropped_workflows: dict[str, set[str]] = {}
+    _era_facts = [fact for fact in config_era_facts
+                  if fact.get("workflow_file")
+                  and fact.get("rule") != "runner_label_change"]
+    for _rep in _era_repr_shas:
+        for _sha in _rep_members.get(_rep, [_rep]):
+            _ts = str((sha_meta.get(_sha) or {}).get("ts") or "")
+            _dropped_wfs = {
+                str(fact["workflow_file"]) for fact in _era_facts
+                if _era_pr_side(_ts, fact, _sha) == "dropped"
+            }
+            _checks = {
+                str(row.get("name") or "?"): float(duration)
+                for row in (_member_check_runs.get(_sha) or [])
+                if (duration := _duration_s(row.get("started_at"),
+                                            row.get("completed_at"))) is not None
+                and duration > 0
+                and _era_check_wf_of(str(row.get("name") or "?")) not in _dropped_wfs
+            }
+            if _dropped_wfs and not any(name in _chain_spine for name in _checks):
+                continue
+            _commit_shas.append(_sha)
+            _commit_checks_by_sha[_sha] = _checks
+            _commit_dropped_workflows[_sha] = _dropped_wfs
     for _sha in _commit_shas:
         _event = str((sha_meta.get(_sha) or {}).get("event") or "")
         _run_rows: list[tuple[str, dict[str, Any]]] = []
         for _wf, _runs in sampled_runs_by_wf.items():
+            if _wf in _commit_dropped_workflows.get(_sha, set()):
+                continue
             for _run in _runs:
                 if (str(_run.get("head_sha") or "") == _sha
                         and str(_run.get("event") or "") == _event):
@@ -27615,9 +27632,23 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         _slowest = _job_rows[0] if _job_rows else None
         _excluded = (_needs_chain(str(_slowest["workflow_file"]), _slowest.get("node"))
                      if _slowest else set())
+
+        def _outside_slowest_chain(row: dict[str, Any]) -> bool:
+            if _slowest is None or row["workflow_file"] != _slowest["workflow_file"]:
+                return True
+            if row.get("node") not in _excluded:
+                return True
+            # Matrix display legs share one YAML node but execute independently.
+            # Preserve another concrete leg as a floor; a repeated attempt with
+            # the same display name is not an independent sibling.
+            node = row.get("node")
+            spec = ((_jg or {}).get(str(row["workflow_file"])) or {}).get(node) or {}
+            return bool(node == _slowest.get("node")
+                        and row.get("name") != _slowest.get("name")
+                        and isinstance(spec, dict) and spec.get("matrix"))
+
         _next = next((row for row in _job_rows[1:]
-                      if str(row["workflow_file"]) != str(_slowest["workflow_file"])
-                      or row.get("node") not in _excluded), None) if _slowest else None
+                      if _outside_slowest_chain(row)), None) if _slowest else None
         _observed = (round(max(float(row["completed_ts"]) for row in _job_rows)
                            - min(_created), 3)
                      if _job_rows and _created else None)
@@ -28918,6 +28949,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     for _finding in findings:
         _saving = _finding.get("wall_clock_p50_s")
         if not isinstance(_saving, (int, float)) or _saving <= 0:
+            continue
+        if any(isinstance(step, dict) and step.get("bound") == "commit-projection"
+               for step in (_finding.get("wall_clock_derivation") or [])):
             continue
         _bounded = bound_commit_projection(float(_saving), _commit_only_ctx)
         if _bounded.value >= round(float(_saving), 1):

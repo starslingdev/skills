@@ -151,6 +151,32 @@ class _PullRequestAndQueueClient(_TwoWorkflowClient):
         return super().json(endpoint, allow_missing)
 
 
+class _MatrixSiblingClient(_TwoWorkflowClient):
+    def json(self, endpoint: str, allow_missing: bool = False):
+        if endpoint.startswith("repos/o/r/actions/runs/202/jobs"):
+            self.queries += 1
+            return {"jobs": [
+                _job("second-long (one)", 202, 60, 1500),
+                _job("second-long (two)", 202, 60, 1060),
+            ]}
+        if re.match(r"repos/o/r/commits/[^/]+/check-runs", endpoint):
+            self.queries += 1
+            return {"check_runs": [
+                {"name": "first-short", "started_at": _iso(0),
+                 "completed_at": _iso(300)},
+                {"name": "first-long", "started_at": _iso(0),
+                 "completed_at": _iso(900)},
+                {"name": "second-long (one)", "started_at": _iso(60),
+                 "completed_at": _iso(1500)},
+                {"name": "second-long (two)", "started_at": _iso(60),
+                 "completed_at": _iso(1060)},
+            ]}
+        if endpoint == "repos/o/r/branches/main/protection/required_status_checks":
+            self.queries += 1
+            return {"contexts": ["second-long (one)"]}
+        return super().json(endpoint, allow_missing)
+
+
 _DOC = {
     "repo": "o/r",
     "skill_commit_sha": "installed:unversioned",
@@ -220,6 +246,10 @@ def test_collect_stamps_one_commit_wall_across_both_workflows_and_verifies(
         report, report_path, findings_path, skill_repo=None)
         if not check.skipped and not check.ok]
     assert failures == [], [(check.name, check.detail) for check in failures]
+    assert all(sum(
+        1 for step in (finding.get("wall_clock_derivation") or [])
+        if step.get("bound") == "commit-projection") <= 1
+        for finding in doc["findings"])
 
 
 def test_missing_workflow_run_makes_the_commit_partial_instead_of_shorter(
@@ -252,6 +282,20 @@ def test_pull_request_and_merge_queue_members_each_get_a_commit_stamp(monkeypatc
 
     assert {fact["sha"] for fact in facts} == {_SHA, "queue-sha"}
     assert len(facts) == 2
+
+
+def test_independent_matrix_leg_can_be_the_next_longest_floor(monkeypatch):
+    doc = json.loads(json.dumps(_DOC))
+    doc["workflow_job_graph"][_SECOND] = {
+        "second-long": {"name": "second-long", "needs": [], "matrix": True},
+    }
+    monkeypatch.setattr(cr, "GhClient", _MatrixSiblingClient)
+    collected = cr.collect(doc, "o/r", max_runs=1, shallow_runs=1)
+    fact = collected["pr_critical_path"]["commit_wall_clock"]["facts"][0]
+
+    assert fact["slowest_job"]["name"] == "second-long (one)"
+    assert fact["next_longest_job"]["name"] == "second-long (two)"
+    assert fact["next_longest_job"]["duration_s"] == 1000.0
 
 
 def test_verifier_rejects_a_projection_multiple_above_the_shared_cap(
