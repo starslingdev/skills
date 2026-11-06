@@ -14,6 +14,10 @@ unversioned and updates by reinstall from `main`.
 ### Added
 
 - **2026-11-06** — Keep Vitest coverage-provider guidance grounded in matched measurements. The report preserves the measured compile/load share, asks maintainers to time both providers on the same commit, warns that coverage thresholds need re-baselining, and credits no provider-switch saving without matched results.
+- **2026-11-06** — Keep OPT9 compiler build-state and generated-output cache suggestions uncredited until a same-workload before/after measurement shows a net saving. Lint and format result caches retain their existing sizing.
+- **2026-11-06** — Limit minority slow-tail findings to checks confirmed as required or reachable through a required job's `needs:` graph. A conservatively retained file-backed check whose job cannot be identified stays visible on the measured spine without being described as merge-blocking, and verification rejects a tail attached to such a check.
+- **2026-11-06** — Measure missing path-filter opportunities from the changed files in already-sampled pull requests. Reports use the repository's own `paths-ignore` precedent when available, otherwise a narrow documentation-only fallback, and label the resulting runner-minute estimate as a modeled upper bound with the observed hit count.
+- **2026-11-06** — Keep a reusable workflow's standalone pull-request checks outside a caller's required-check closure. Only caller-prefixed nested checks inherit that caller's merge-gating role; direct runs retain their own reachability.
 - **2026-11-06** — Keep the merge-wait headline on the slowest confirmed required or `needs:`-reachable check when a sampled file-backed check cannot be pinned to a job. Per-PR gate counts, the typical-path rendering and report verification now use the same confirmed gate population, while the unconfirmed check remains visible with its qualification.
 - **2026-11-05** — Keep full-history checkouts when a workflow directly invokes a first-party shell, Python, or Node script that walks Git history. The scanner follows one guarded repository-local script hop, fails closed for unreadable or escaping paths, and deliberately does not follow scripts invoked by that script.
 - **2026-11-05** — Preserve dependency-cache evidence when a job log also contains a sequential shell test loop. The newer loop detector now runs after every pre-existing log detector, so it cannot displace an established root cause.
@@ -1226,6 +1230,8 @@ unversioned and updates by reinstall from `main`.
   run improvised).
 
 ### Fixed
+
+- **2026-11-05** — Attribute each zero-saving PR to its own concurrent blocker in the per-PR sibling split, falling back to generic wording when those blockers differ or the target check did not run. A rendered split now supplements the existing headline-presence reconciliation instead of bypassing it.
 
 - **2026-11-05** — Frame a check excluded from the merge-wait spine only as off-path when it also has a long-test sharding finding. The exclusion note now wins over the finding's wall-clock magnitude, so the report no longer describes the same check as both dropped and on the critical path. A finding that covers both an excluded check and a kept one stays on the critical path and names the kept check.
 

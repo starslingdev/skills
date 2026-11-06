@@ -159,6 +159,97 @@ def test_split_does_not_name_a_slow_check_that_misses_most_zero_saving_prs():
     assert "0 on 12 of 20 PRs where `rare-slow` runs" not in note
 
 
+def test_measured_split_does_not_blame_one_check_for_unrelated_zero_saving_prs():
+    populations = (
+        *((0.1, (("pole", 600.0), ("blocker", 690.0))) for _ in range(2)),
+        *((0.1, (("pole", 600.0), ("next-check", 240.0))) for _ in range(2)),
+        *((0.1, (("other-path", 300.0),)) for _ in range(6)),
+    )
+    result = bound_measured_critical_path(500.0, WallClockContext(
+        pr_checks=populations[0][1],
+        pr_check_populations=populations,
+        own_check_names=frozenset({"pole"}),
+    ))
+    assert result.reason is not None
+    assert "0 on 8 of 10 PRs where another check runs longer" in result.reason
+    assert "0 on 8 of 10 PRs where `blocker` runs" not in result.reason
+
+
+def test_split_verification_does_not_bypass_presence_reconciliation(tmp_path):
+    populations = (
+        *((0.1, (("pole", 600.0), ("next-check", 240.0))) for _ in range(4)),
+        *((0.1, (("other-path", 300.0),)) for _ in range(6)),
+    )
+    result = bound_measured_critical_path(500.0, WallClockContext(
+        pr_checks=populations[0][1],
+        pr_check_populations=populations,
+        own_check_names=frozenset({"pole"}),
+        cluster_floor_lever=True,
+    ))
+    assert result.reason is not None
+    doc = _doc(result.reason, populations)
+    cp = doc["pr_critical_path"]
+    cp["sampled_pr_count"] = cp["sample_target"] = cp["check_present_n_pr"] = 10
+    cp["checks"] = [
+        {"name": "pole", "p50_s": 600.0, "present_on": 4, "pole_n": 4,
+         "workflow_file": ".github/workflows/ci.yml"},
+        {"name": "next-check", "p50_s": 240.0, "present_on": 4, "pole_n": 0,
+         "workflow_file": ".github/workflows/next.yml"},
+        {"name": "other-path", "p50_s": 300.0, "present_on": 6, "pole_n": 6,
+         "workflow_file": ".github/workflows/other.yml"},
+    ]
+    doc["findings"][0]["wall_clock_p50_s"] = result.value
+    doc["findings"][0]["wall_clock_derivation"][0]["to_s"] = result.value
+    report = bp.render(doc)
+    assert "Per-PR split:" in report
+    reconciliation = ("ran on only 4/10 sampled PRs, so a typical PR finishes in "
+                      "5m 00s")
+    assert reconciliation in report
+    report = report.replace(reconciliation, "")
+    findings_path = tmp_path / "missing-presence-findings.json"
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+    check = _verify_report().check_headline_floor_presence_reconciled(
+        report, findings_path)
+    assert not check.ok, check.detail
+
+
+def test_split_renderer_and_verifier_keep_absence_generic_with_same_floor_name(tmp_path):
+    populations = (
+        *((0.1, (("pole", 600.0), ("blocker", 690.0))) for _ in range(2)),
+        *((0.1, (("blocker", 300.0),)) for _ in range(6)),
+        *((0.1, (("pole", 600.0), ("next-check", 240.0))) for _ in range(2)),
+    )
+    result = bound_measured_critical_path(500.0, WallClockContext(
+        pr_checks=populations[0][1],
+        pr_check_populations=populations,
+        own_check_names=frozenset({"pole"}),
+        cluster_floor_lever=True,
+    ))
+    assert result.reason is not None
+    assert "0 on 8 of 10 PRs where another check runs longer" in result.reason
+    doc = _doc(result.reason, populations)
+    cp = doc["pr_critical_path"]
+    cp["sampled_pr_count"] = cp["sample_target"] = cp["check_present_n_pr"] = 10
+    cp["checks"] = [
+        {"name": "pole", "p50_s": 600.0, "present_on": 4, "pole_n": 2,
+         "workflow_file": ".github/workflows/ci.yml"},
+        {"name": "blocker", "p50_s": 300.0, "present_on": 8, "pole_n": 8,
+         "workflow_file": ".github/workflows/blocker.yml"},
+        {"name": "next-check", "p50_s": 240.0, "present_on": 2, "pole_n": 0,
+         "workflow_file": ".github/workflows/next.yml"},
+    ]
+    doc["findings"][0]["wall_clock_p50_s"] = result.value
+    doc["findings"][0]["wall_clock_derivation"][0]["to_s"] = result.value
+    report = bp.render(doc)
+    assert "slowest check a typical PR waits on" in report, report
+    assert "Per-PR split: 0 on 8 of 10 PRs where another check runs longer" in report
+    findings_path = tmp_path / "target-absence-findings.json"
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+    check = _verify_report().check_headline_floor_presence_reconciled(
+        report, findings_path)
+    assert check.ok and not check.skipped, check.detail
+
+
 def _varying_floor_report(tmp_path: Path):
     populations = (
         *((0.05, (("pole", 600.0), ("shard-matrix", 690.0))) for _ in range(12)),

@@ -673,6 +673,7 @@ def _pole_per_pr_floor(cp: dict[str, Any], pole_name: str,
                     "sibling": sibling,
                     "floor_s": floor_s,
                     "before_s": 0.0,
+                    "target_ran": False,
                 })
             continue
         total_n += 1
@@ -688,6 +689,7 @@ def _pole_per_pr_floor(cp: dict[str, Any], pole_name: str,
             "sibling": sibling,
             "floor_s": floor_s,
             "before_s": before_s,
+            "target_ran": True,
         })
     if total_n <= 0:
         return None
@@ -833,7 +835,9 @@ def _floor_note(pole: dict[str, Any],
                 blockers = {_clean_label(str(row.get("sibling") or "")) for row in zero}
                 blockers.discard("")
                 where = (f" where `{next(iter(blockers))}` runs"
-                         if len(blockers) == 1 else " where another check runs longer")
+                         if (len(blockers) == 1
+                             and all(row.get("target_ran") is not False for row in zero))
+                         else " where another check runs longer")
                 clauses.append(f"0 on {len(zero)} of {total} PRs{where}")
             if positive:
                 by_cap: dict[float, int] = {}
@@ -8908,8 +8912,13 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
         # describe it falsely (it may sit ON the critical path, and it claims
         # no runner-minutes), so it gets its own body.
         return _opt82_prompt(title, members, url, locs)
+    opt9_measure = [m for m in members if m.get("opt9_measure_before_after") is True]
     prefer: dict[str, Any] | None = None
-    if wait:
+    if pat == "OPT9" and len(opt9_measure) == len(members):
+        saving = ("Saving: uncredited - compiler build-state and generated-output "
+                  "cache overhead can cancel the avoided work. Measure before and "
+                  "after on the same workload before crediting seconds.")
+    elif wait:
         saving = ("Cost: developer WALL-CLOCK wait before the job starts (queue / "
                   "wait-to-start) - NOT a runner-bill saving and NOT off the critical "
                   "path. For a `needs:`-gated job it is measured from when its last "
@@ -8969,6 +8978,12 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
             f"Where: {locs}."]
     if ev:
         body.append(f"What ci-speedup saw: {ev}")
+    if opt9_measure and len(opt9_measure) != len(members):
+        body.append(
+            "Compiler build-state and generated-output occurrences in this group "
+            "are uncredited: measure before and after on the same workload before "
+            "crediting seconds."
+        )
     if pat == "OPT25":
         # The diagnosis/next step must travel with the agent hand-off, including
         # planner knobs. Use the same member as the credited magnitude.
@@ -9990,6 +10005,30 @@ def _also_noticed_block(findings: list[dict[str, Any]],
         # the valueless + all-pole test below excludes exactly those, mirroring
         # `check_pole_not_reframed_as_hygiene`. A finding that also touches a NON-pole job still
         # renders (the all-pole guard keeps it), so its signal is not lost off-path.
+        if str(f.get("pattern") or "") == "OPT32":
+            measurement = f.get("path_filter_measurement")
+            if isinstance(measurement, dict):
+                sampled = measurement.get("sampled_prs")
+                skipped = measurement.get("would_skip_prs")
+                rate = measurement.get("hit_rate")
+                stamp_ok = (
+                    isinstance(sampled, int) and not isinstance(sampled, bool) and sampled > 0
+                    and isinstance(skipped, int) and not isinstance(skipped, bool)
+                    and 0 <= skipped <= sampled
+                    and isinstance(rate, (int, float)) and not isinstance(rate, bool)
+                    and math.isclose(float(rate), round(skipped / sampled, 4), abs_tol=5e-5)
+                )
+                modeled_ok = (
+                    skipped == 0
+                    or (f.get("runner_min_unrealizable") is True
+                        and (_num(f.get("runner_min_unrealizable_s")) or 0.0) > 0)
+                )
+                if stamp_ok and modeled_ok and f.get("runner_min_saving") is None:
+                    # This measured row is deliberately uncredited, but it is not
+                    # valueless: a positive hit rate renders a modeled upper bound,
+                    # while zero is itself the measured result. Keep either result
+                    # visible without letting it compete with the pole in the close.
+                    return False
         if (_num(f.get("runner_min_saving")) or 0.0) > 0 or _saves_wall_clock(f):
             return False
         # OPT82 is numberless BY DESIGN (uncredited, benchmark first), not
@@ -10103,6 +10142,11 @@ def _also_noticed_block(findings: list[dict[str, Any]],
             ev = _group_evidence(ms, prefer=driver)
         elif pat == "OPT82":
             summary_metric = "uncredited, benchmark first"
+            ev = _group_evidence(ms, compose=True)
+        elif pat == "OPT32":
+            modeled = sum(_num(m.get("runner_min_unrealizable_s")) or 0.0 for m in ms)
+            summary_metric = (f"{_fmt_runner_min(modeled)} modeled upper bound"
+                              if modeled > 0 else "no bill saving")
             ev = _group_evidence(ms, compose=True)
         else:
             summary_metric = bill

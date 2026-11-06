@@ -3619,7 +3619,7 @@ def _verify_per_pr_floor_split(name: str, report: str, cp: dict) -> Check | None
             candidate = _cmp_name(str(check.get("name") or ""))
             if re.sub(r"\s*\([^)]*\)\s*$", "", candidate) == base:
                 targets.add(candidate)
-    rows: list[tuple[float, str]] = []
+    rows: list[tuple[float, str, bool]] = []
     unknown_n = 0
     total_n = 0
     for entry in _as_list(cp.get("populations")):
@@ -3634,7 +3634,7 @@ def _verify_per_pr_floor_split(name: str, report: str, cp: dict) -> Check | None
             if positive:
                 sibling, floor_s = max(positive, key=lambda item: item[1])
                 total_n += 1
-                rows.append((0.0, sibling))
+                rows.append((0.0, sibling, False))
             continue
         total_n += 1
         siblings = [(check, duration) for check, duration in positive
@@ -3643,22 +3643,25 @@ def _verify_per_pr_floor_split(name: str, report: str, cp: dict) -> Check | None
             unknown_n += 1
             continue
         sibling, floor_s = max(siblings, key=lambda item: item[1])
-        rows.append((max(max(own) - floor_s, 0.0), sibling))
+        rows.append((max(max(own) - floor_s, 0.0), sibling, True))
     if total_n <= 0:
         return Check(name, False,
                      "rendered per-PR split has no usable population containing its pole")
     expected: list[str] = []
-    zero = [(saving, sibling) for saving, sibling in rows if saving <= 0]
-    positive = [(saving, sibling) for saving, sibling in rows if saving > 0]
+    zero = [(saving, sibling, target_ran)
+            for saving, sibling, target_ran in rows if saving <= 0]
+    positive = [(saving, sibling, target_ran)
+                for saving, sibling, target_ran in rows if saving > 0]
     if zero:
-        blockers = {_strip_scope(sibling) for _saving, sibling in zero}
+        blockers = {_strip_scope(sibling) for _saving, sibling, _target_ran in zero}
         blockers.discard("")
         where = (f" where `{next(iter(blockers))}` runs"
-                 if len(blockers) == 1 else " where another check runs longer")
+                 if len(blockers) == 1 and all(target_ran for *_rest, target_ran in zero)
+                 else " where another check runs longer")
         expected.append(f"0 on {len(zero)} of {total_n} PRs{where}")
     if positive:
         by_cap: dict[float, int] = {}
-        for saving, _sibling in positive:
+        for saving, _sibling, _target_ran in positive:
             cap = round(saving, 1)
             by_cap[cap] = by_cap.get(cap, 0) + 1
         for cap, count in sorted(by_cap.items()):
@@ -3673,7 +3676,7 @@ def _verify_per_pr_floor_split(name: str, report: str, cp: dict) -> Check | None
         return Check(name, False,
                      "per-PR sibling-floor split disagrees with populations; missing: "
                      + "; ".join(missing))
-    max_saving = max((saving for saving, _sibling in rows), default=0.0)
+    max_saving = max((saving for saving, _sibling, _target_ran in rows), default=0.0)
     bottom = next((line for line in report.splitlines() if "**Bottom line.**" in line), "")
     match = _HEADLINE_WIN_RE.search(bottom)
     rendered = _parse_clock_to_s(match.group(1)) if match else None
@@ -4164,13 +4167,20 @@ def check_headline_floor_presence_reconciled(report: str, findings_path: Path | 
         return Check(name, True, "findings unreadable", skipped=True)
     cp = _as_dict(_as_dict(data).get("pr_critical_path"))
     split_check = _verify_per_pr_floor_split(name, report, cp)
-    if split_check is not None:
+    if split_check is not None and not split_check.ok:
         return split_check
+
+    def _with_split(presence_check: Check) -> Check:
+        """A rendered split is an additional invariant, never an early exit."""
+        if split_check is None or not presence_check.ok:
+            return presence_check
+        return Check(name, True, f"{split_check.detail}; {presence_check.detail}")
+
     stamp = cp.get("critical_path_check")
     # A non-string / empty stamp is a malformed or stampless bundle — degrade to the SAME SKIP as an
     # empty findings container (the wrong-type-container degradation contract), never a spurious FAIL.
     if not isinstance(stamp, str) or not stamp:
-        return Check(name, True, "no critical_path_check stamped", skipped=True)
+        return _with_split(Check(name, True, "no critical_path_check stamped", skipped=True))
     stamped = _cmp_name(stamp)
 
     # The named slowest check's OWN p50 — a FIELD read from checks[], keyed the same way the engine
@@ -4189,12 +4199,13 @@ def check_headline_floor_presence_reconciled(report: str, findings_path: Path | 
             if nm == str(stamp):
                 break
     if slowest_p50 is None:
-        return Check(name, True, "critical_path_check carries no numeric checks[].p50_s", skipped=True)
+        return _with_split(Check(
+            name, True, "critical_path_check carries no numeric checks[].p50_s", skipped=True))
 
     present_map, npop = _vr_gate_counts(cp)          # the engine's _gate_counts (present, n)
     if not npop:
-        return Check(name, True, "no per-PR populations to re-derive presence/floor from",
-                     skipped=True)
+        return _with_split(Check(
+            name, True, "no per-PR populations to re-derive presence/floor from", skipped=True))
     spresent = present_map.get(str(stamp))
     if spresent is None:
         for nm, cnt in present_map.items():
@@ -4207,20 +4218,22 @@ def check_headline_floor_presence_reconciled(report: str, findings_path: Path | 
     # None below the stability floor, so the engine keeps the slowest check's p50 and lowers nothing).
     maxima = [max(p for _n, p in pr) for pr in _populations_per_pr(cp) if pr]
     if len(maxima) < _VR_RARE_PRESENCE_MIN_PR:
-        return Check(name, True,
-                     f"only {len(maxima)} per-PR populations (< {_VR_RARE_PRESENCE_MIN_PR}) — the "
-                     "population floor is not derivable, so the slowest check's p50 stands unlowered",
-                     skipped=True)
+        return _with_split(Check(
+            name, True,
+            f"only {len(maxima)} per-PR populations (< {_VR_RARE_PRESENCE_MIN_PR}) — the "
+            "population floor is not derivable, so the slowest check's p50 stands unlowered",
+            skipped=True))
     pop_floor = statistics.median(maxima)
 
     # The engine LOWERS the floor (→ the Form-2 contradiction risk) ⇔ the slowest is non-universal AND
     # the population floor is strictly below its p50 — EXACTLY blocking_path's `floor_p50 = _pop_floor`
     # guard (`0 < _spresent < npop` and `_pop_floor < slowest_p50`). Otherwise no reconciliation is owed.
     if not (0 < spresent < npop and pop_floor < slowest_p50):
-        return Check(name, True,
-                     f"`{stamp}` floor not lowered (present {spresent}/{npop}, "
-                     f"pop-floor {_fmt_clock(pop_floor)} vs p50 {_fmt_clock(slowest_p50)}) — no "
-                     "reconciliation owed", skipped=True)
+        return _with_split(Check(
+            name, True,
+            f"`{stamp}` floor not lowered (present {spresent}/{npop}, "
+            f"pop-floor {_fmt_clock(pop_floor)} vs p50 {_fmt_clock(slowest_p50)}) — no "
+            "reconciliation owed", skipped=True))
 
     # PHYSICAL BOUND (issue #24): the renderer caps the population floor at the MEASURED makespan p50
     # (the median per-PR span-capped wall) — a re-run-inflated per-PR check p50 can leave `pop_floor`
@@ -4264,9 +4277,10 @@ def check_headline_floor_presence_reconciled(report: str, findings_path: Path | 
                      f"was lowered (present {spresent}/{npop}), so the headline must disclose either "
                      "the presence caveat (minority-present) or the conditional-p50 overstatement "
                      f"(majority-present); expected {presence_recon!r} or {overstatement_recon!r}")
-    return Check(name, True,
-                 f"headline reconciles `{stamp}` ({spresent}/{npop} presence, ~"
-                 f"{_fmt_clock(slowest_p50)}) with the {merge_dur} population floor")
+    return _with_split(Check(
+        name, True,
+        f"headline reconciles `{stamp}` ({spresent}/{npop} presence, ~"
+        f"{_fmt_clock(slowest_p50)}) with the {merge_dur} population floor"))
 
 
 # The presence-CAUSAL headline template (blocking_path `elif gate_is_slowest:`, non-universal
@@ -11886,6 +11900,31 @@ def check_pole_not_reframed_as_hygiene(report: str, findings_path: Path | None) 
             # place the rules and ledger reach the reader), so it is no
             # contradiction of the pole headline. Mirror that exemption.
             continue
+        if pat == "OPT32":
+            measurement = f.get("path_filter_measurement")
+            if isinstance(measurement, dict):
+                sampled = measurement.get("sampled_prs")
+                skipped = measurement.get("would_skip_prs")
+                rate = measurement.get("hit_rate")
+                stamp_ok = (
+                    isinstance(sampled, int) and not isinstance(sampled, bool) and sampled > 0
+                    and isinstance(skipped, int) and not isinstance(skipped, bool)
+                    and 0 <= skipped <= sampled
+                    and isinstance(rate, (int, float)) and not isinstance(rate, bool)
+                    and math.isclose(float(rate), round(skipped / sampled, 4), abs_tol=5e-5)
+                )
+                modeled_ok = (
+                    skipped == 0
+                    or (f.get("runner_min_unrealizable") is True
+                        and isinstance(f.get("runner_min_unrealizable_s"), (int, float))
+                        and not isinstance(f.get("runner_min_unrealizable_s"), bool)
+                        and float(f["runner_min_unrealizable_s"]) > 0)
+                )
+                if stamp_ok and modeled_ok and f.get("runner_min_saving") is None:
+                    # A measured OPT32 row is descriptive rather than a second
+                    # credited pole lever: a positive result renders an explicitly
+                    # modeled upper bound, and zero is itself useful evidence.
+                    continue
         rm = f.get("runner_min_saving")
         rm = float(rm) if isinstance(rm, (int, float)) else 0.0
         wc = f.get("wall_clock_p50_s")
@@ -14757,6 +14796,12 @@ def check_minority_gate_tails(report: str, findings_path: Path | None = None) ->
     if not cp.get("spine_required_scoped"):
         return Check(name, False,
                      "a minority tail is stamped outside a confirmed required/needs closure")
+    required = {str(check) for check in _as_list(data.get("required_checks"))}
+    confirmed = {
+        str(pole.get("check") or "")
+        for pole in _as_list(cp.get("poles"))
+        if isinstance(pole, dict) and pole.get("required_reachable") is True
+    } | required
 
     def percentile(values: list[float], pct: float) -> float:
         values = sorted(values)
@@ -14766,6 +14811,9 @@ def check_minority_gate_tails(report: str, findings_path: Path | None = None) ->
 
     failures: list[str] = []
     for check_name, tail in stamped:
+        if check_name not in confirmed:
+            failures.append(
+                f"`{check_name}` is not confirmed required or needs-reachable")
         observations = [
             (_num(row.get("duration_s")), str(row.get("url") or ""))
             for row in _as_list(tail.get("observations"))
