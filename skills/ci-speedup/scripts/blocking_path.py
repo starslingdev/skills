@@ -2212,8 +2212,8 @@ def _parse_log(text: str,
                  "rows": [("transform + import (compile/instrument/load)", compile_load,
                            None),
                           ("actual test assertions", te, None)],
-                 "blocker_note": "BIGGEST LEVER - caused by istanbul coverage "
-                                 "instrumenting every imported file",
+                 "blocker_note": "BIGGEST MEASURED PHASE - compile/instrument/load "
+                                 "dominates the summed worker time in this run",
                  "pct_of": "sum", "scale_to_step": True},
             ],
         }
@@ -2975,21 +2975,24 @@ _FIX_META: dict[str, dict[str, Any]] = {
                    "step to confirm the drop.",
     },
     "vitest-v8-coverage": {
-        "cause": "The gating `test` job runs vitest with istanbul coverage across "
-                 "every package, and the compile+instrument phase dominates the run, "
-                 "not the assertions - istanbul instruments every imported file.",
+        "cause": "The gating `test` job ran vitest with istanbul coverage across "
+                 "every package. In the measured run, compile+instrument/load took "
+                 "the dominant share of the summed worker time; the assertions did not.",
         "look": "the vitest config / coverage setup and the package test scripts - "
                 "grep for `coverage`, `provider: 'istanbul'`, `--coverage`. Check what "
                 "actually consumes the coverage output (a PR gate? a report upload?).",
         "constraints": "If coverage must gate PRs, switching provider or scoping it "
-                       "has to keep whatever consumes the output working. The v8 "
-                       "provider is much cheaper than istanbul but reports slightly "
-                       "differently - verify the consumer.",
+                       "has to keep whatever consumes the output working. Time both "
+                       "providers on the same commit before choosing one. Coverage "
+                       "figures change between providers, so re-baseline thresholds "
+                       "and verify the consumer. No provider-switch saving is credited "
+                       "without matched measurements.",
         "docs": ["Vitest coverage docs (v8 vs istanbul providers): "
                  "https://vitest.dev/guide/coverage"],
-        "deliver": "Decide whether coverage needs to gate PRs at all, and if so which "
-                   "provider fits; apply the change to the vitest config / scripts, "
-                   "verify the coverage consumer still works, and re-measure the step.",
+        "deliver": "Decide whether coverage needs to gate PRs at all. If comparing "
+                   "providers, time both on the same commit, account for changed coverage "
+                   "figures and re-baseline thresholds, verify the coverage consumer still "
+                   "works, and re-measure the step.",
     },
     # OPT78 - see references/patterns/opt78-*.md. HIGH risk: this lever buys
     # speed by letting test files SHARE a module registry, which can leak state

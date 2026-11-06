@@ -13,6 +13,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-11-06** — Keep Vitest coverage-provider guidance grounded in matched measurements. The report preserves the measured compile/load share, asks maintainers to time both providers on the same commit, warns that coverage thresholds need re-baselining, and credits no provider-switch saving without matched results.
 - **2026-11-05** — Preserve dependency-cache evidence when a job log also contains a sequential shell test loop. The newer loop detector now runs after every pre-existing log detector, so it cannot displace an established root cause.
 - **2026-11-05** — Split cache-key guidance by cache contents: dependency stores keep deterministic lockfile keys, while tool-result and build-output caches use a per-run primary key with a compatible `restore-keys` prefix so updated results can be saved after a restore.
 - **2026-11-05** — Add a partition-correctness caveat to OPT24 ("Long Test Job Without Sharding"): the shards must partition the input set exactly, the shard count must be validated wherever it is read, a documented rollback to a lower shard count must not silently defeat the new guard tests, and a result-collection step must keep every shard's failure, not just the first or last.
