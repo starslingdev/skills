@@ -652,8 +652,13 @@ def _pole_per_pr_floor(cp: dict[str, Any], pole_name: str,
     targets = {_floor_key(name) for name in (own_names or {pole_name})}
     rows: list[dict[str, Any]] = []
     unknown_n = 0
+    incomplete_n = 0
     total_n = 0
-    for entry in cp.get("populations") or []:
+    populations = cp.get("populations") or []
+    completeness = cp.get("population_check_runs_complete") or []
+    completion_aligned = (
+        isinstance(completeness, list) and len(completeness) == len(populations))
+    for pop_idx, entry in enumerate(populations):
         try:
             _share, checks = entry
             positive = [(str(name), float(duration)) for name, duration in checks
@@ -680,7 +685,20 @@ def _pole_per_pr_floor(cp: dict[str, Any], pole_name: str,
         siblings = [(name, duration) for name, duration in positive
                     if _floor_key(name) not in targets]
         if not siblings:
-            unknown_n += 1
+            if completion_aligned and completeness[pop_idx] is True:
+                before_s = max(own)
+                rows.append({
+                    "saving_s": before_s,
+                    "sibling": "",
+                    "floor_s": 0.0,
+                    "before_s": before_s,
+                    "target_ran": True,
+                    "single_check": True,
+                })
+            else:
+                unknown_n += 1
+                if completion_aligned:
+                    incomplete_n += 1
             continue
         sibling, floor_s = max(siblings, key=lambda item: item[1])
         before_s = max(own)
@@ -696,6 +714,8 @@ def _pole_per_pr_floor(cp: dict[str, Any], pole_name: str,
     return {
         "total_n": total_n,
         "unknown_n": unknown_n,
+        "incomplete_n": incomplete_n,
+        "completion_known": completion_aligned,
         "rows": rows,
         "max_saving_s": max((float(row["saving_s"]) for row in rows), default=0.0),
     }
@@ -826,10 +846,16 @@ def _floor_note(pole: dict[str, Any],
             rows = [row for row in (exact.get("rows") or []) if isinstance(row, dict)]
             total = int(exact.get("total_n") or 0)
             unknown_n = int(exact.get("unknown_n") or 0)
+            incomplete_n = int(exact.get("incomplete_n") or 0)
             if total <= 0 or max_saving < 0:
                 return ""
             zero = [row for row in rows if (_num(row.get("saving_s")) or 0.0) <= 0]
-            positive = [row for row in rows if (_num(row.get("saving_s")) or 0.0) > 0]
+            single = [row for row in rows
+                      if (_num(row.get("saving_s")) or 0.0) > 0
+                      and row.get("single_check") is True]
+            positive = [row for row in rows
+                        if (_num(row.get("saving_s")) or 0.0) > 0
+                        and row.get("single_check") is not True]
             clauses: list[str] = []
             if zero:
                 blockers = {_clean_label(str(row.get("sibling") or "")) for row in zero}
@@ -847,9 +873,23 @@ def _floor_note(pole: dict[str, Any],
                 for cap, count in sorted(by_cap.items()):
                     other = "the other " if zero and len(zero) + count == total else ""
                     clauses.append(f"up to {_clock(cap)} on {other}{count} of {total} PRs")
-            if unknown_n:
+            if single:
+                by_cap: dict[float, int] = {}
+                for row in single:
+                    cap = round(_num(row.get("saving_s")) or 0.0, 1)
+                    by_cap[cap] = by_cap.get(cap, 0) + 1
+                for cap, count in sorted(by_cap.items()):
+                    other = "the other " if zero and len(zero) + count == total else ""
+                    clauses.append(
+                        f"up to {_clock(cap)} on {other}{count} of {total} PRs "
+                        "where it was the only check")
+            if incomplete_n:
                 clauses.append(
-                    f"unknown on {unknown_n} of {total} PRs with a missing sibling observation")
+                    f"unknown on {incomplete_n} of {total} PRs with an incomplete check-runs read")
+            legacy_unknown_n = unknown_n - incomplete_n
+            if legacy_unknown_n:
+                clauses.append(
+                    f"unknown on {legacy_unknown_n} of {total} PRs with a missing sibling observation")
             return " Per-PR split: " + "; ".join(clauses) + "." if clauses else ""
         if not isinstance(cooccur, dict) or gating_n <= 0 or max_saving < 0:
             return ""
@@ -923,6 +963,23 @@ def _floor_note(pole: dict[str, Any],
     # on its slow PRs) and counts managed checks; the addressable win is `pole − binding`, never
     # `pole − the file-backed name` (else a universal managed check between them inflates it).
     # floor_next is None when there's no FILE-BACKED floor to NAME → no coherent note.
+    exact_floor = pole.get("_per_pr_floor")
+    if (isinstance(exact_floor, dict) and pole_p > 0
+            and exact_floor.get("completion_known") is True):
+        exact_max = max(_num(exact_floor.get("max_saving_s")) or 0.0, 0.0)
+        has_unknown = int(exact_floor.get("unknown_n") or 0) > 0
+        # An aggregate sibling can be slower while this pole still gates a
+        # subset of sampled PRs. Preserve that measured split instead of
+        # suppressing the note under the aggregate non-gate guard.
+        if binding_s >= pole_p and (exact_max > 0 or has_unknown):
+            lead = (f"up to **~{_clock(exact_max)}** on the sampled PRs where this "
+                    "check gates"
+                    if exact_max > 0 else
+                    "unknown on sampled PRs whose check-runs read was incomplete")
+            return [
+                "> **What a change here can buy (wall-clock):** " + lead
+                + "; the ceiling varies by PR because the concurrent check set varies."
+                + _per_pr_split_note(exact_max, exact_floor), ""]
     if pole_p <= 0 or binding_s >= pole_p or floor_next is None:
         return []
     ch = pole.get("_chain_member")
@@ -2818,9 +2875,84 @@ def _parse_log(text: str,
             "search": ["Cache not found for input keys", "cache is not found",
                        "Cache restored from key"],
         }
-    # --- L: one shell runner invokes many test files one after another ----------
-    # This is deliberately the last catalog leaf: a more specific detector above
-    # keeps precedence. Each admitted invocation needs a timestamped completion
+    # --- L: isolated tests in one file wait on the same fixed timer ------------
+    # This is narrower than the shell-loop detector below. Four tests in ONE file
+    # must each carry an explicit, distinct schema/database/prefix marker inside
+    # its own timestamped interval. Similar runtimes then identify a fixed wait
+    # that safe in-job concurrency can overlap; without the isolation markers the
+    # detector fails closed because shared state can make that change flaky.
+    isolated_start = re.compile(
+        r"^(?:START|RUN|BEGIN)\s+"
+        r"(?P<node>(?P<file>\S+\.(?:py|[cm]?[jt]sx?))::\S+)$",
+        re.IGNORECASE,
+    )
+    isolation_marker = re.compile(
+        r"\b(?:(?:schema|database|db|prefix)(?:[_ -]?name)?\s*[:=]\s*"
+        r"(?P<assigned>[A-Za-z0-9_.-]+)|"
+        r"creat(?:e|es|ed|ing)\s+"
+        r"(?P<created>(?:schema|database|db|prefix)[_.-][A-Za-z0-9_.-]+))",
+        re.IGNORECASE,
+    )
+    stamped_tests: list[tuple[datetime, str, str, str]] = []
+    for raw in text.splitlines():
+        stamp, sep, message = raw.partition(" ")
+        when = _cache_path_stamp(stamp)
+        if sep and when is not None:
+            stamped_tests.append((when, message.strip(), raw.strip(), stamp))
+    starts = [(i, when, m.group("file"), m.group("node"), raw)
+              for i, (when, message, raw, _stamp) in enumerate(stamped_tests)
+              if (m := isolated_start.match(message))]
+    if (len(starts) >= 4 and len({row[2] for row in starts}) == 1
+            and len({row[3] for row in starts}) == len(starts)):
+        durations: list[float] = []
+        markers: list[str] = []
+        evidence: list[str] = []
+        complete = True
+        for pos, (line_i, started, _file, node, raw) in enumerate(starts):
+            next_line = starts[pos + 1][0] if pos + 1 < len(starts) else len(stamped_tests)
+            next_started = starts[pos + 1][1] if pos + 1 < len(starts) else None
+            window = stamped_tests[line_i + 1:next_line]
+            completion = next(((offset, when) for offset, (when, message, _raw, _stamp)
+                               in enumerate(window)
+                               if re.match(r"^(?:PASS|OK|DONE)\s+" + re.escape(node) + r"$",
+                                           message, re.IGNORECASE)), None)
+            if completion is None:
+                complete = False
+                break
+            completion_offset, ended = completion
+            marker_window = window[:completion_offset]
+            found = [(m.group("assigned") or m.group("created")).casefold()
+                     for _when, message, _raw, _stamp in marker_window
+                     if (m := isolation_marker.search(message))]
+            if (ended <= started or (next_started is not None and ended > next_started)
+                    or len(set(found)) != 1):
+                complete = False
+                break
+            durations.append((ended - started).total_seconds())
+            markers.append(found[0])
+            if len(evidence) < 2:
+                evidence.extend([raw, next(
+                    row for _when, message, row, _stamp in marker_window
+                    if isolation_marker.search(message)
+                )])
+        if complete and len(set(markers)) == len(markers) and min(durations) > 0:
+            summed = sum(durations)
+            span = (starts[-1][1] + timedelta(seconds=durations[-1])
+                    - starts[0][1]).total_seconds()
+            if (summed >= 120 and max(durations) <= min(durations) * 1.05
+                    and span <= summed * 1.05 + 1):
+                return {
+                    "fix_key": "test-isolated-serial",
+                    "unit_label": f"{len(starts)} isolated tests in one file run "
+                                  "strictly in sequence on a near-identical timer",
+                    "magnitude": None,
+                    "deeper": [],
+                    "evidence": evidence[:4],
+                    "search": ["schema", "concurrent", "shared state"],
+                }
+    # --- M: one shell runner invokes many test files one after another ----------
+    # This stays ahead of the image-build leaf below. Each admitted invocation
+    # needs a timestamped completion
     # before the next invocation starts. That proves serial execution rather than
     # inferring it merely from repeated command lines. The outer span must also be
     # close to the sum of the invocation intervals, excluding loops with long gaps
@@ -2877,6 +3009,46 @@ def _parse_log(text: str,
             "evidence": [x[3] for x in command_starts[:2]],
             "search": ["test loop", "parallel", "OPT88"],
         }
+    # --- M: a multi-platform image compiles its foreign architecture under emulation
+    compile_re = re.compile(
+        r"\b(?:go\s+build|cargo\s+build|(?:npm|pnpm|yarn)\s+(?:run\s+)?build|"
+        r"cmake\s+--build|dotnet\s+(?:build|publish)|gradle\w*\s+.*\bbuild|"
+        r"make(?:\s|$))", re.IGNORECASE)
+    operations: dict[str, tuple[str, str]] = {}
+    durations: list[tuple[str, float, str, str]] = []
+    for line in lines:
+        match = re.search(r"#(\d+)\s+\[linux/([^\s\]]+)[^\]]*\]\s+RUN\s+(.+)", line)
+        if match and compile_re.search(match.group(3)):
+            operations[match.group(1)] = (match.group(2).lower(), line)
+            continue
+        done = re.search(r"#(\d+)\s+DONE\s+([\d.]+)s\b", line)
+        if done and done.group(1) in operations:
+            arch, header = operations.pop(done.group(1))
+            durations.append((arch, float(done.group(2)), header, line))
+    native = sum(seconds for arch, seconds, _header, _done in durations
+                 if arch in {"amd64", "x86_64"})
+    emulated = sum(seconds for arch, seconds, _header, _done in durations
+                   if arch not in {"amd64", "x86_64"})
+    total = native + emulated
+    if native > 0 and emulated > 0 and emulated / total >= 0.50:
+        share = round(100 * emulated / total)
+        return {
+            "fix_key": "emulated-image-compile",
+            "unit_label": (f"native compile {native:g}s; foreign-architecture compile "
+                           f"{emulated:g}s ({share}% of measured compile time)"),
+            "magnitude": {"label": "emulated compile seconds", "unit": "s",
+                          "value": round(emulated, 3)},
+            "deeper": [{
+                "rows": [("native linux/amd64 compile", native, None),
+                         ("foreign-architecture compile", emulated, None)],
+                "blocker_note": (f"foreign-architecture work is {share}% of measured "
+                                 "compile time"),
+                "pct_of": "sum",
+            }],
+            "evidence": [item for _arch, _seconds, header, done in durations
+                         for item in (header, done)][:6],
+            "search": ["docker/build-push-action", "BUILDPLATFORM", "TARGETARCH"],
+        }
     return None
 
 
@@ -2930,6 +3102,40 @@ _NO_WEAKENING_LINES = [
     "- A pipeline that finishes sooner because it verifies less is a",
     "  regression, not a win. If that is the only way to make this faster, say",
     "  so and stop.",
+]
+
+_CONCURRENCY_ORDER_LINE = (
+    "Concurrency order: First use OPT88 to measure and fill the existing job's idle "
+    "cores; only then add shards or jobs."
+)
+_SHARD_RUNNER_MINUTE_LINE = (
+    "Runner-minute effect: With safe in-job concurrency, runner minutes go down because "
+    "the same job finishes sooner; extra shard jobs repeat checkout and setup and bill "
+    "each job, so a saturated runner buys more wall-clock speed only by spending runner "
+    "minutes."
+)
+_MACHINE_RUNNER_MINUTE_LINE = (
+    "Runner cost effect: A faster machine can reduce elapsed runner minutes, while "
+    "each runner class bills at its own rate; compare both elapsed minutes and billed cost."
+)
+_RELOCATION_RUNNER_MINUTE_LINE = (
+    "Runner-minute effect: If the structural fix moves work to added jobs or machines, "
+    "duplicated checkout and setup raise runner minutes; moving the same work without "
+    "duplication is roughly level, and removing measured work lowers them."
+)
+
+_JOB_EXPANDING_LEAVES = frozenset({
+    "playwright-parallel", "pytest-no-xdist", "test-isolated-serial",
+    "test-loop-serial", "cargo-test-shard", "benchmark-serial-reruns",
+    "android-emulator-shard", "gradle-test-parallelism",
+})
+_VERIFICATION_BAR_LINES = [
+    "VERIFICATION BAR",
+    "- A scoped local run is pre-flight only. Call the change verified only after "
+    "the repository's own CI gate passes on the pushed branch, or after exactly "
+    "the commands that gate CI pass on the change.",
+    "- State the pole's observed range beside the predicted saving. Do not open a "
+    "pull request when the predicted saving is smaller than that range.",
 ]
 
 
@@ -3287,6 +3493,24 @@ _FIX_META: dict[str, dict[str, Any]] = {
                    "jobs by directory. Keep the full test count and (if present) a "
                    "complete merged coverage report; re-measure the step.",
     },
+    "test-isolated-serial": {
+        "cause": "Four or more tests in the same file run strictly one after another "
+                 "for near-identical durations, and each interval logs its own unique "
+                 "schema, database or prefix. That positive isolation evidence makes "
+                 "the repeated fixed wait a candidate for safe in-job concurrency.",
+        "look": "`{wf}` and the named test file — confirm every test owns the logged "
+                "isolation marker, then look for any remaining shared state: fixed ports, "
+                "process globals, filesystem paths, queues, clocks or ordering assumptions.",
+        "constraints": "The logged marker proves only the named schema/database/prefix "
+                       "is unique. Adversarially test the other shared state, preserve the "
+                       "same test count and failure propagation, and keep any genuinely "
+                       "exclusive tests in a serial lane.",
+        "docs": ["OPT88 in the ci-speedup catalog — measure in-job test concurrency "
+                 "before choosing a worker count"],
+        "deliver": "Run the isolated tests concurrently inside this one job with a "
+                   "measured worker cap, check that shared state is not reused, preserve the "
+                   "full test set and failures, and re-measure wall clock and runner minutes.",
+    },
     "test-loop-serial": {
         "cause": "The step invokes the same shell test runner for at least ten distinct "
                  "test files one after another. Timestamped completions show that each "
@@ -3305,6 +3529,30 @@ _FIX_META: dict[str, dict[str, Any]] = {
         "deliver": "Run independent files concurrently with a measured worker cap, keep "
                    "any exclusive files in a serial lane, verify the same test count and "
                    "results, and re-measure the step.",
+    },
+    "emulated-image-compile": {
+        "cause": "Buildx spends at least half of the measured compile time building a "
+                 "foreign architecture under emulation instead of compiling it natively "
+                 "or cross-compiling from the build platform.",
+        "look": "`{wf}` and its repository-local Dockerfile — trace the compile stage, "
+                "the target architecture arguments, and the artifact copied into each "
+                "final image. Confirm the timed buildx operations belong to that stage.",
+        "constraints": "Preserve every published platform, artifact contents, release "
+                       "flags, tests, provenance, and manifest assembly. A BUILDPLATFORM "
+                       "change must pass the target architecture explicitly and confirm "
+                       "the produced binary format. Size the opportunity only from the "
+                       "measured foreign-architecture compile seconds.",
+        "docs": ["Docker multi-platform build strategies: "
+                 "https://docs.docker.com/build/building/multi-platform/"],
+        "deliver": "Build platform-independent output once on `FROM "
+                   "--platform=$BUILDPLATFORM` and copy it into each target image, or "
+                   "cross-compile with explicit target arguments. This removes most "
+                   "emulated compile seconds, so both wall time and runner minutes should "
+                   "fall. If cross-compilation is unsafe, use a native runner per "
+                   "architecture and merge manifests; that cuts wall time but adds jobs "
+                   "and a merge step, so runner minutes will usually stay level or rise. "
+                   "Run each image on its native architecture and re-measure both "
+                   "wall time and total runner minutes.",
     },
     "eslint-no-cache": {
         "cause": "The lint step runs `eslint` over the whole file tree with NO `--cache` "
@@ -3768,6 +4016,14 @@ def _build_agent_prompt(leaf: dict[str, Any] | None, pole: dict[str, Any],
            *_timing_spread_prompt_lines(pole),
            ""]
 
+    fix_key = str((leaf or {}).get("fix_key", ""))
+    if fix_key in _JOB_EXPANDING_LEAVES:
+        out += [_CONCURRENCY_ORDER_LINE, _SHARD_RUNNER_MINUTE_LINE, ""]
+    elif structural:
+        out += ["Structural cost context: This pole also matched a structural catalog "
+                "pattern; account for its job or machine movement separately.",
+                _RELOCATION_RUNNER_MINUTE_LINE, ""]
+
     _bi = pole.get("bimodal")
     _slow_drill = isinstance(_bi, dict) and _num(_bi.get("high_p50_s"))
     _rep = ("representative of the slow mode" if _slow_drill else "closest to the P50")
@@ -3833,6 +4089,7 @@ def _build_agent_prompt(leaf: dict[str, Any] | None, pole: dict[str, Any],
             "CONSTRAINTS / FAILURE MODE TO GUARD"] + constraints + [
             "", "READ FIRST"] + [f"- {d}" for d in meta["docs"]] + [
             "", *_NO_WEAKENING_LINES,
+            "", *_VERIFICATION_BAR_LINES,
             "", "DELIVER & VERIFY", f"- {meta['deliver']}"]
     return ("#### 🤖 Prompt for your coding agent\n\n```text\n"
             + _fence_body(out) + "\n```\n")
@@ -3924,6 +4181,8 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
             "step from the refreshed report.",
             "",
             *_NO_WEAKENING_LINES,
+            "",
+            *_VERIFICATION_BAR_LINES,
         ]
         return ("#### 🤖 Prompt for your coding agent\n\n```text\n"
                 + _fence_body(out) + "\n```\n")
@@ -3968,6 +4227,8 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
            *_advisory_prompt_lines(pole),
            *_timing_spread_prompt_lines(pole),
            ""]
+    if struct_pats:
+        out += [_RELOCATION_RUNNER_MINUTE_LINE, ""]
     wtg = ["WHERE THE TIME GOES" + (f" (representative run {rid})" if rid else "")]
     pole_dom = str(pole.get("dominant_step") or "")
     pole_dom_d = _num(pole.get("dominant_p50_s"))
@@ -4061,7 +4322,7 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
             f"- The `{wf}` workflow definition for {look_step}, and the tool/config it "
             "invokes (build tool, test runner, or install) - that's where its time is "
             "spent.", "",
-            *_NO_WEAKENING_LINES, "",
+            *_NO_WEAKENING_LINES, "", *_VERIFICATION_BAR_LINES, "",
             "DELIVER & VERIFY",
             f"- A change that cuts {look_step}'s wall time without dropping coverage; "
             "re-measure the step on a PR run to confirm the reduction."]
@@ -4154,6 +4415,18 @@ def _strip_rail_echo(body: str) -> str:
     return "\n".join(kept).rstrip("\n")
 
 
+def _strip_verification_bar_echo(body: str) -> str:
+    """Keep verification claims in gap-fill prompts renderer-owned.
+
+    The gap-fill body is model output. Drop every line that tries to define
+    verification, including partial or contradictory copies of the heading;
+    the canonical bar is appended after this returns. Other analysis remains.
+    """
+    lines = body.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    kept = [line for line in lines if "verif" not in line.lower()]
+    return "\n".join(kept).rstrip("\n")
+
+
 def _llm_agent_prompt(body: str, pole: dict[str, Any] | None = None) -> str:
     """Wrap an LLM-authored, log-tailored agent prompt (from the analysis JSON) in the
     same copy-paste block matched/generic prompts use, **prepending the standard
@@ -4201,8 +4474,9 @@ def _llm_agent_prompt(body: str, pole: dict[str, Any] | None = None) -> str:
     # `verify_report`'s one-rail-per-prompt count with a misleading "renderer bug"
     # message. Excise-then-append leaves exactly one canonical rail whatever the model
     # wrote, and is unchanged (idempotent) on a body already ending in that block.
-    body = _strip_rail_echo(body)
-    body = body.rstrip("\n") + "\n\n" + "\n".join(_NO_WEAKENING_LINES)
+    body = _strip_verification_bar_echo(_strip_rail_echo(body))
+    body = (body.rstrip("\n") + "\n\n" + "\n".join(_NO_WEAKENING_LINES)
+            + "\n\n" + "\n".join(_VERIFICATION_BAR_LINES))
     # The LLM-authored body is model output grounded in the repo log — it can echo a repo
     # name / log line carrying a ``` run. Fence-safe it PER-LINE (its own line breaks survive)
     # so a model-emitted stray fence can't close this ```text block.
@@ -5504,7 +5778,9 @@ _LEAF_STEP_CATEGORY: dict[str, str] = {
     "vitest-import-bound": "test",
     "playwright-parallel": "test",
     "pytest-no-xdist": "test",
+    "test-isolated-serial": "test",
     "test-loop-serial": "test",
+    "emulated-image-compile": "build",
     "cargo-test-shard": "test",
     "benchmark-serial-reruns": "test",
     "android-emulator-shard": "test",
@@ -5647,7 +5923,7 @@ def _offcategory_note_block(leaf: dict[str, Any], pole: dict[str, Any]) -> list[
                             f"(job `{pole.get('job') or pole.get('check') or ''}`)."),
                 meta["cause"], _fence_safe(str(leaf.get("config_fact", ""))), meta["look"],
                 meta["constraints"], *meta["docs"], meta["deliver"],
-                *_NO_WEAKENING_LINES, "```"]
+                *_NO_WEAKENING_LINES, "", *_VERIFICATION_BAR_LINES, "```"]
     out.append("")
     return out
 
@@ -5891,6 +6167,7 @@ def _population_typical_floor(cp: dict[str, Any]) -> float | None:
 def _toc_block(pole_wfs: list[dict[str, Any]], wf_gate: dict[str, int],
                npop: int, also_count: int | None = None,
                pr_floor: bool = False, queue_count: int = 0,
+               queue_aggregate: bool = False,
                also_on_path: bool = False,
                runner_spine_count: int = 0,
                tier2_toc: "dict[str, Any] | None" = None,
@@ -5899,8 +6176,9 @@ def _toc_block(pole_wfs: list[dict[str, Any]], wf_gate: dict[str, int],
     `#pole-N` drill-down), then a one-line "Pre-start wait" pointer when `queue_count`
     > 0, then a one-line pointer to the off-path "Also noticed" hygiene. `also_count`
     is None until the hygiene appendix is wired in (Phase 2); a 0 renders no hygiene
-    line. `queue_count` is the number of pre-start-wait findings (0 renders no wait
-    line). `pr_floor` swaps the "gate your merge" framing for the PR-floor one so the
+    line. `queue_count` is the number of pre-start-wait findings; a measured commit
+    aggregate gets its own wording through `queue_aggregate`. `pr_floor` swaps the
+    "gate your merge" framing for the PR-floor one so the
     TOC doesn't contradict the demotion banner. [] when there's nothing to list."""
     if not pole_wfs:
         return []
@@ -5950,6 +6228,10 @@ def _toc_block(pole_wfs: list[dict[str, Any]], wf_gate: dict[str, int],
         lines += [f"**⏳ Pre-start wait** — {queue_count} job{qp} wait{'' if qp else 's'} "
                   "in queue before starting (developer wall-clock the spine above doesn't "
                   "capture): [see below](#pre-start-wait).", ""]
+    elif queue_aggregate:
+        lines += ["**⏳ Pre-start wait** — runner queue measured across sampled commits "
+                  "(developer wall-clock before or between jobs): "
+                  "[see below](#pre-start-wait).", ""]
     if tier2_toc and tier2_toc.get("rows"):
         # First-class entry (owner request): the money section gets the same
         # visual weight as the poles — marker, the de-overlapped total up
@@ -8984,6 +9266,8 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
             "are uncredited: measure before and after on the same workload before "
             "crediting seconds."
         )
+    if pat in {"OPT24", "OPT25"}:
+        body += [_CONCURRENCY_ORDER_LINE, _SHARD_RUNNER_MINUTE_LINE]
     if pat == "OPT25":
         # The diagnosis/next step must travel with the agent hand-off, including
         # planner knobs. Use the same member as the credited magnitude.
@@ -9001,7 +9285,14 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
         # §8.1 landmine 1 — mandatory on every skip-family / trigger-scope
         # prompt, whichever framing branch built the saving line above.
         body += _PENDING_CAVEAT_LINES + [""]
-    body += _NO_WEAKENING_LINES + [
+    # The pole-range rule compares a wall-clock saving with the pole's observed timing
+    # range, so it travels only with wall-clock hand-offs; a runner-minute (bill),
+    # Tier-2 or queue-wait saving is not comparable with that range. The CI-backed
+    # verification lines apply to every prompt.
+    _bar = (_VERIFICATION_BAR_LINES if saves_wc
+            else [line for line in _VERIFICATION_BAR_LINES
+                  if not line.startswith("- State the pole's observed range")])
+    body += _NO_WEAKENING_LINES + [""] + _bar + [
         "",
         "Do: confirm the pattern at each location above, recover the intent from git",
         "history, and apply the catalog's fix recipe where it is safe. State the",
@@ -9140,7 +9431,7 @@ def _opt82_prompt(title: str, members: list[dict[str, Any]], url: str,
         "Read the catalog entry (background, fix recipe, and guardrail):",
         f"  {url}", "",
     ]
-    body += _NO_WEAKENING_LINES + [
+    body += _NO_WEAKENING_LINES + [""] + _VERIFICATION_BAR_LINES + [
         "",
         "Do: run the benchmark first and report it, recover the intent of the lint",
         "config from git history, answer the per-rule question, then apply (a)",
@@ -9151,16 +9442,59 @@ def _opt82_prompt(title: str, members: list[dict[str, Any]], url: str,
             *[_fence_safe(l) for l in body], "```"]
 
 
+def _commit_wait_bottom_line(commit_clock: dict[str, Any],
+                             findings: list[dict[str, Any]]) -> str:
+    """Full developer wait with a coherent queue/work decomposition."""
+    wall = _num(commit_clock.get("p50_s")) or 0.0
+    queue = _num(commit_clock.get("queue_p50_s")) or 0.0
+    if wall <= 0 or queue <= 0:
+        return ""
+    queue = min(queue, wall)
+    work = wall - queue
+    eligible = [
+        ((_num(f.get("wall_clock_p50_s")) or 0.0), f)
+        for f in findings
+        if (str(f.get("pattern") or "") not in {"OPT43", "OPT97"}
+            and not f.get("off_spine") and not f.get("advisory")
+            and not f.get("spine_rare"))
+    ]
+    saving, saving_f = max(eligible, key=lambda pair: pair[0],
+                           default=(0.0, None))
+    saving = min(max(saving, 0.0), work)
+    bottom = (
+        f"> **Bottom line.** The full developer wall is **{_clock(wall)}**: "
+        "a typical PR waits from workflow creation until the commit's last job "
+        f"finishes, including **~{_clock(queue)} of it waiting for a runner** "
+        f"({queue / wall:.0%}); the remaining **~{_clock(work)}** is work.")
+    if saving > 0 and wall > saving:
+        projected = wall - saving
+        lever = ""
+        if (saving_f and str(saving_f.get("pattern") or "") == "OPT73"
+                and saving_f.get("cluster_floor_lever") is True):
+            wf = _wf_base(str(saving_f.get("workflow_file") or ""))
+            lever = f" **OPT73** in `{wf}`" if wf else " **OPT73**"
+        bottom += (
+            f" The biggest credited code finding{lever} removes **~{_clock(saving)}** "
+            f"of work, reducing the full wait to **~{_clock(projected)} "
+            f"({wall / projected:.2f}x)**; it does not claim the queue seconds.")
+    return bottom
+
+
 def _queue_wait_block(findings: list[dict[str, Any]], catalog_url: str,
-                      shallow_note: str = "") -> list[str]:
+                      shallow_note: str = "",
+                      commit_clock: dict[str, Any] | None = None) -> list[str]:
     """Pre-start WALL-CLOCK wait (queue time). A PR waits in queue before its jobs
     start running — developer wall-clock the critical-path spine (job start → finish)
     doesn't capture, and NOT a runner-minute saving — so it gets its own section rather
     than the bill-savings appendix. Grouped by pattern; each a `<details>` with the
     worst-queued jobs ranked by P90 wait, evidence, the catalog fix recipe, and an agent
-    prompt. [] when there's no queue-wait finding."""
+    prompt. [] when neither a queue-wait finding nor a commit queue split exists."""
     wait = [f for f in findings if _is_wait_finding(f)]
-    if not wait:
+    commit_clock = commit_clock if isinstance(commit_clock, dict) else {}
+    queue_p50 = _num(commit_clock.get("queue_p50_s")) or 0.0
+    wall_p50 = _num(commit_clock.get("p50_s")) or 0.0
+    work_p50 = max(wall_p50 - min(queue_p50, wall_p50), 0.0)
+    if not wait and queue_p50 <= 0:
         return []
     # Disclosure parity with the hygiene appendix's "+N more … kept in the findings JSON":
     # `_is_wait_finding` drops queue findings whose floor-capped savable wait is 0 (queue
@@ -9185,14 +9519,32 @@ def _queue_wait_block(findings: list[dict[str, Any]], catalog_url: str,
                     key=lambda kv: -max((_num(m.get("wall_clock_p50_s")) or 0)
                                         for m in kv[1]))
     lines = ['<a id="pre-start-wait"></a>', "",
-             "## ⏳ Pre-start wait (queue time)", "",
-             "> Time a PR waits in queue **before its jobs start running** — developer "
-             "wall-clock the critical-path spine above does **not** capture (the spine "
-             "measures each job from start to finish). Usually runner-pool saturation or "
-             "a restrictive concurrency group. Ranked by savable wait (the floor-capped "
-             "addressable part; each finding's evidence quotes the raw P90 queue). **Note:** "
-             "for a `needs:`-gated job the *wait-to-start* is measured from when its last "
-             "needed upstream job completed, so upstream run time is never counted as queue.", ""]
+             "## ⏳ Pre-start wait (queue time)", ""]
+    if queue_p50 > 0:
+        lines += [
+            "> Runner-pickup time is developer wait, separate from the work jobs perform. "
+            "Usually it points to runner-pool saturation or a restrictive concurrency group. "
+            "Queue findings below are ranked by savable wait (the floor-capped addressable "
+            "part; each finding's evidence quotes the raw P90 queue). **Note:** for a "
+            "`needs:`-gated job the *wait-to-start* is measured from when its last needed "
+            "upstream job completed, so upstream run time is never counted as queue.", ""]
+    else:
+        lines += [
+            "> Time a PR waits in queue **before its jobs start running** — developer "
+            "wall-clock the critical-path spine above does **not** capture (the spine "
+            "measures each job from start to finish). Usually runner-pool saturation or "
+            "a restrictive concurrency group. Ranked by savable wait (the floor-capped "
+            "addressable part; each finding's evidence quotes the raw P90 queue). **Note:** "
+            "for a `needs:`-gated job the *wait-to-start* is measured from when its last "
+            "needed upstream job completed, so upstream run time is never counted as queue.", ""]
+    if queue_p50 > 0 and wall_p50 > 0:
+        share = queue_p50 / wall_p50
+        lines += [
+            f"> Across {int(commit_clock.get('n') or 0)} sampled commits, the typical "
+            f"developer wait is **{_clock(wall_p50)}**: **~{_clock(queue_p50)} waiting "
+            f"for a runner** ({share:.0%}) and **~{_clock(work_p50)} of work**.",
+            "",
+        ]
     if shallow_note:
         lines += [f"> ⚠️ _{shallow_note}_", ""]
     if dropped:
@@ -9371,6 +9723,7 @@ def _opt81_prompt(f: dict[str, Any], url: str,
             pattern,
             f"Where: {wf} ({job}).",
             f"What ci-speedup saw: {_opt81_evidence(f)}"]
+    body += ["", _MACHINE_RUNNER_MINUTE_LINE]
     if half == "A1":
         body += ["", "Do: find out why some runs of this job use the slower label (a fork "
                  "pull request, an event or a matrix condition can select it on "
@@ -9389,7 +9742,8 @@ def _opt81_prompt(f: dict[str, Any], url: str,
                  _OPT81_A2_OPTION_LARGER, _OPT81_A2_OPTION_STARSLING,
                  _OPT81_A2_BENCHMARK]
     body += ["", "Read the catalog entry (background, fix recipe, and guardrail):",
-             f"  {url}", "", *_NO_WEAKENING_LINES, "", _OPT81_DISCLOSURE]
+             f"  {url}", "", *_NO_WEAKENING_LINES, "", *_VERIFICATION_BAR_LINES,
+             "", _OPT81_DISCLOSURE]
     return ["#### 🤖 Prompt for your coding agent", "", "```text",
             *[_fence_safe(l) for l in body], "```"]
 
@@ -9591,7 +9945,7 @@ def _opt83_prompt(f: dict[str, Any], url: str) -> list[str]:
             f"Runner: {_OPT83_RUNNER_CAVEAT}.",
             "",
             "Read the catalog entry (background, fix recipe, and guardrail):",
-            f"  {url}", "", *_NO_WEAKENING_LINES]
+            f"  {url}", "", *_NO_WEAKENING_LINES, "", *_VERIFICATION_BAR_LINES]
     return ["#### 🤖 Prompt for your coding agent (OPT83)", "", "```text",
             *[_fence_safe(l) for l in body], "```"]
 
@@ -11334,7 +11688,9 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     tier2_lines = _tier2_block(all_findings, catalog_url, cs, doc)
     also_lines, also_count, _also_on_path = _also_noticed_block(
         all_findings, catalog_url, doc=doc)
-    queue_lines = _queue_wait_block(all_findings, catalog_url)
+    queue_lines = _queue_wait_block(
+        all_findings, catalog_url,
+        commit_clock=(doc.get("pr_critical_path") or {}).get("commit_wall_clock"))
     # `scan_incomplete` means a workflow file could NOT be scanned — an unscanned
     # file must never read as clean, so a populated coverage gap is itself something
     # to report even with zero findings. Only the truly-empty case (no findings AND
@@ -11405,6 +11761,7 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
                           str(e) for e in evs)]
     no_pr_gating = bool(_wt) and not _pr_gating_wfs
     gh_never_started = ds.get("partial_kind") == "gh_unavailable"
+    _static_commit_wall = _num((cp.get("commit_wall_clock") or {}).get("p50_s")) or 0.0
 
     # Machine-readable static-only marker (an HTML comment, invisible in rendered
     # markdown). `verify_report._is_static_only` keys off THIS, not the human banner
@@ -11454,6 +11811,14 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
                 "**cloud bill** (runner-minutes), not measured developer wall-clock. "
                 "Re-run when the GitHub API is reachable again (e.g. once a rate limit "
                 "has reset) to get the measured wall-clock critical path.", ""]
+    elif _static_commit_wall > 0:
+        out += ["> [!IMPORTANT]",
+                "> **Commit-level developer wait was measured, but no per-check spine "
+                "could be ranked.** The supplied commit timing still covers workflow "
+                "creation through the last completed job, including runner-pickup "
+                "queue. The sections below show that full wait and any static findings; "
+                "individual long poles remain unavailable because no file-backed pole "
+                "was resolved.", ""]
     elif no_pr_gating:
         # Third shape (issue: false dormant banner on live shapes) — the repo may be
         # perfectly active; its CI just never gates a PR. Say THAT, own any timing we
@@ -11530,6 +11895,13 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     else:
         bottom = ["> **Bottom line.** No PR run timing was available, so this report "
                   "can't rank what a PR waits on before the merge."]
+    _commit_bottom = _commit_wait_bottom_line(
+        cp.get("commit_wall_clock") or {}, all_findings)
+    if _commit_bottom:
+        # A supplied commit wall is measured even when no individual pole could
+        # be rendered. Keep the static banner, but make its Bottom line agree
+        # with the same full-wait fact shown in the queue section.
+        bottom = [_commit_bottom]
     if also_count:
         plural = "s" if also_count != 1 else ""
         # The no-PR-gating shape has no merge wall-clock to unlock EVER (no workflow
@@ -11653,6 +12025,96 @@ def _minority_gate_tail_block(cp: dict[str, Any]) -> list[str]:
     return ["## ⏱️ Slow tails on merge-blocking checks", "", *rows]
 
 
+def _default_branch_push_lane_block(doc: dict[str, Any]) -> list[str]:
+    """Render post-merge push timing without feeding the merge-gate spine."""
+    lane = doc.get("default_branch_push_lane")
+    if not isinstance(lane, dict):
+        return []
+    sampled = int(_num(lane.get("sampled_push_count")) or 0)
+    lines = [
+        "<!-- ci-speedup:default-branch-push-lane -->",
+        "## 📦 After merge, not a merge gate",
+        "",
+    ]
+    status = str(lane.get("status") or "")
+    if status == "default_branch_unknown":
+        return [
+            *lines,
+            "Push timing could not be measured because the default branch could not "
+            "be determined.",
+            "",
+        ]
+    if status == "run_list_incomplete":
+        return [
+            *lines,
+            "Push timing could not be measured because push run-list coverage was "
+            "incomplete.",
+            "",
+        ]
+    if sampled == 0:
+        return [
+            *lines,
+            "No eligible completed pushes to the default branch were sampled in "
+            "the window.",
+            "",
+        ]
+
+    facts = [
+        fact for fact in (lane.get("facts") or [])
+        if isinstance(fact, dict) and fact.get("partial") is not True
+        and (_num(fact.get("wall_s")) or 0) > 0
+    ]
+    p50 = _num(lane.get("p50_s")) or 0.0
+    p90 = _num(lane.get("p90_s")) or 0.0
+    if not facts or p50 <= 0 or p90 <= 0:
+        return [
+            *lines,
+            f"Sampled **{sampled}** default-branch push(es), but no complete "
+            "commit-wide timing fact was available for this lane.",
+            "",
+        ]
+
+    typical = min(
+        facts,
+        key=lambda fact: abs((_num(fact.get("wall_s")) or 0.0) - p50))
+    slowest = typical.get("slowest_job") or {}
+    next_job = typical.get("next_longest_job") or {}
+    lines += [
+        f"Across **{len(facts)}** complete sampled pushes, the full per-commit "
+        f"wall is p50 **{_clock(p50)}** and p90 **{_clock(p90)}**.",
+        "",
+    ]
+    slow_name = str(slowest.get("name") or "")
+    next_name = str(next_job.get("name") or "")
+    if slow_name:
+        sentence = f"The typical slowest job is `{_lbl(slow_name)}`"
+        if next_name:
+            sentence += f"; the next-longest independent job is `{_lbl(next_name)}`"
+        lines += [sentence + ".", ""]
+
+    projections = [
+        value for key, value in typical.items()
+        if str(key).startswith("projection_") and isinstance(value, dict)
+    ]
+    if projections:
+        projection = projections[0]
+        speedup = _num(projection.get("job_speedup")) or 0.0
+        projected = _num(projection.get("projected_s")) or 0.0
+        multiple = _num(projection.get("multiple")) or 0.0
+        if speedup > 0 and projected > 0 and multiple > 0:
+            lines += [
+                f"Making `{_lbl(slow_name)}` **{speedup:g}x** faster projects to "
+                f"**{_clock(projected)}** (**{multiple:.2f}x**) for the full push.",
+                "",
+            ]
+    lines += [
+        "These runs start after merge. Their times stay out of the merge-gate "
+        "Bottom line, headline, ranked spine and scores.",
+        "",
+    ]
+    return lines
+
+
 def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
            samples: dict[str, dict[str, Any]] | None = None,
            log_runs: dict[str, str] | None = None,
@@ -11670,6 +12132,18 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
     cs = claims.ClaimSet()
     _LAST_CLAIMS = cs
     cp = doc.get("pr_critical_path") or {}
+    push_lane_lines = _default_branch_push_lane_block(doc)
+
+    def _with_push_lane(rendered: str) -> str:
+        if not push_lane_lines:
+            return rendered
+        lane = "\n\n---\n\n" + "\n".join(push_lane_lines).rstrip()
+        footer = "\n\n---\n\nGenerated by"
+        footer_at = rendered.rfind(footer)
+        if footer_at >= 0:
+            return rendered[:footer_at].rstrip() + lane + rendered[footer_at:]
+        return rendered.rstrip() + lane
+
     poles = sorted((p for p in (cp.get("poles") or []) if p.get("check")),
                    key=lambda p: -(_num(p.get("p50_s")) or 0.0))
     if not poles:
@@ -11683,7 +12157,7 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         # fall back to the one-line note only when there is genuinely nothing static.
         _static = _render_static_only(doc, captured_at, cs)
         if _static:
-            return _static
+            return _with_push_lane(_static)
         # Issue #12 degenerate case: no job-groundable pole to crown, but the sampled PRs DID
         # carry fileless/managed status checks (all-fileless repo, or every gating check is a
         # bot/label/app with no sampled workflow job). Say so honestly — name the slowest gate and
@@ -11704,11 +12178,11 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
             # this path bypasses that terminal scrub, so without it the typographic dashes in the
             # shared disclosure prose would survive and trip verify_report's ASCII-hyphens-only
             # invariant on a real all-fileless degenerate repo.
-            return _strip_emdashes("\n".join([
+            return _with_push_lane(_strip_emdashes("\n".join([
                 f"# {doc.get('repo', 'repo')} — why is the merge slow?", "",
-                *_unresolved_gate_lines(cp), *_deg_era_lines, *_deg_fileless_lines]))
-        return _strip_emdashes("\n".join(
-            _unresolved_gate_lines(cp) + ["_No measured critical path in this findings JSON._"]))
+                *_unresolved_gate_lines(cp), *_deg_era_lines, *_deg_fileless_lines])))
+        return _with_push_lane(_strip_emdashes("\n".join(
+            _unresolved_gate_lines(cp) + ["_No measured critical path in this findings JSON._"])))
     repo = doc.get("repo", "repo")
     catalog_url = _build_catalog_url(doc.get("skill_commit_sha"))
     all_findings = _admitted_findings(list(doc.get("findings") or []))
@@ -11745,7 +12219,9 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
     # Pre-start wall-clock wait (queue time) — its own section, ABOVE the runner-minute
     # hygiene appendix, because it IS developer wall-clock (the spine just doesn't see
     # the pre-start portion).
-    queue_lines = _queue_wait_block(all_findings, catalog_url, shallow_note)
+    queue_lines = _queue_wait_block(
+        all_findings, catalog_url, shallow_note,
+        commit_clock=cp.get("commit_wall_clock"))
     runner_spine_count = _runner_minute_spine_row_count(doc)
     tier2_lines = _tier2_block(all_findings, catalog_url, cs, doc)
 
@@ -12490,6 +12966,30 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         out += [f"> **Bottom line.** A typical PR waits **{merge_dur}** for all checks "
                 "to finish; the per-pole drill-downs below trace where that time goes.",
                 ""]
+    # A developer waits from the first workflow's creation until the commit's
+    # last job completes. When the collector supplies that per-commit wall and
+    # its queue/work split, lead with the full wait. Code/config findings may
+    # remove work only; their speedup multiple is therefore stated on the full
+    # wait, with runner-pickup queue left intact. Legacy artifacts and zero-queue
+    # commits keep the existing Bottom line byte-for-byte.
+    _commit_clock = cp.get("commit_wall_clock") or {}
+    _commit_wall = _num(_commit_clock.get("p50_s")) or 0.0
+    _commit_queue = _num(_commit_clock.get("queue_p50_s")) or 0.0
+    _queue_bottom = _commit_wait_bottom_line(_commit_clock, all_findings)
+    if _queue_bottom:
+        # The chain, all-external and withheld Bottom lines carry their own
+        # framing (the chain to fix, no workflow to drill, why timing is
+        # withheld); the full-wait decomposition is added after it rather than
+        # replacing it. The generic and single-win lines are replaced outright.
+        _keep_framing = bool(chain_active or nwf == 0 or all_poles_withheld)
+        _prefix = "> **Bottom line.** "
+        for _i in range(len(out) - 1, -1, -1):
+            if out[_i].startswith("> **Bottom line.**"):
+                if _keep_framing and _queue_bottom.startswith(_prefix):
+                    out[_i] = out[_i].rstrip() + " " + _queue_bottom[len(_prefix):]
+                else:
+                    out[_i] = _queue_bottom
+                break
     # Owner UX edit (2026-07-19): TOP MATTER = metadata table → ONE Bottom-line blockquote
     # → Contents, nothing else. Everything that used to render as its own blockquote between
     # the headline and the Contents FOLDS into the single Bottom-line quote (via
@@ -12504,7 +13004,10 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
     #   • the "After the gate" runner-minute line (`_tier2_bottom_line`).
     # The bill-scope methodology note was MOVED down into 🗄️ Data sources (see
     # `_bill_scope_era_note`) — it sizes total compute, not the headline.
-    _lead_block = ["> " + lead] if lead.strip() else []
+    _lead_block = [(
+        "> **Work-only drill:** " + lead
+        if _commit_wall > 0 and _commit_queue > 0 else "> " + lead
+    )] if lead.strip() else []
     _model_check = []
     # Reuse the already-`_num`-parsed `_dvg` (never a bare `float()` on the raw field: a persisted /
     # externally-supplied summary can carry a non-numeric `divergence_pct` that would crash the render).
@@ -12597,6 +13100,8 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
     # Bottom-line blockquote above — owner UX edit 2026-07-19; nothing renders between it
     # and the Contents.)
     queue_count = sum(1 for f in all_findings if _is_wait_finding(f))
+    queue_aggregate = bool((_num((cp.get("commit_wall_clock") or {}).get(
+        "queue_p50_s")) or 0.0) > 0)
     _t2_ranked = _tier2_source_backed_ranked(all_findings, doc)
     tier2_count = len(_t2_ranked)
     tier2_toc = None
@@ -12629,7 +13134,8 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
     # Contents' first row: the frequency gate is the slowest single check AND the gate is
     # not a `needs:` chain (a chain's slowest single check is not the gate).
     _toc_lines = _toc_block(pole_wfs, wf_gate, npop, also_count, pr_floor=is_pr_floor,
-                            queue_count=queue_count, also_on_path=also_on_path,
+                            queue_count=queue_count, queue_aggregate=queue_aggregate,
+                            also_on_path=also_on_path,
                             runner_spine_count=runner_spine_count,
                             tier2_toc=tier2_toc,
                             top_is_gate=(gate_is_slowest and not chain_active))
@@ -13633,6 +14139,8 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
     # the spine doesn't capture, NOT hygiene), then the promoted runner-minute tier, then
     # the off-path / set-aside material — the residual hygiene appendix, advisory signals, and the
     # judgment-needed checklist.
+    if push_lane_lines:
+        out += ["---", "", *push_lane_lines]
     if queue_lines:
         out += ["---", "", *queue_lines]
     if tier2_lines:

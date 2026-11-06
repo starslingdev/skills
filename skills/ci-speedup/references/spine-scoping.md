@@ -13,6 +13,7 @@ why a given check did or didn't headline.
 - [Required-checks reading is branch- and enforcement-scoped](#required-checks-reading-is-branch--and-enforcement-scoped)
 - [Pole `provenance` (cross-repo seam)](#pole-provenance-cross-repo-seam)
 - [One-path poles are demoted, never the headline](#one-path-poles-are-demoted-never-the-headline)
+- [Default-branch pushes use a separate lane](#default-branch-pushes-use-a-separate-lane)
 
 ## Required-scoped spine
 
@@ -84,3 +85,13 @@ The signal is per-PR (`pole_n` per check); ranking happens in `collect_runs`, so
 headline, drilled poles, structural findings, and the data-pass summary all agree,
 and `verify_report.check_headline_pole_actually_gates` FAILs any report whose
 headline gates too few PRs while a genuine recurring gate was passed over.
+
+## Default-branch pushes use a separate lane
+
+Workflows triggered by a `push` to the default branch run after the merge. Their
+per-commit wall clock is reported in the **After merge, not a merge gate**
+section, with its own p50, p90 and job floor. Those values never enter the
+merge-gate Bottom line, headline, Tier 1 ranking or scores. Collection reuses
+the all-status workflow pages and bounds the cohort to the ten most recent
+pushed commits; the shared commit-wide collector supplies their facts. When no
+eligible completed push is sampled, the section says so explicitly.

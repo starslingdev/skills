@@ -235,6 +235,11 @@ class WallClockContext:
     # by the gate it never runs alongside. Empty → fall back to the single
     # `pr_checks` path (no bimodal gate found).
     pr_check_populations: tuple[PrPopulation, ...] = ()
+    # Completeness of the check-runs read behind each population. A complete
+    # singleton proves that the target was the PR's only check; an incomplete
+    # read keeps the missing sibling floor unknown. Empty/misaligned preserves
+    # the legacy conservative behavior for older artifacts.
+    pr_check_populations_complete: tuple[bool, ...] = ()
     # ENG-1 PR-N3 — the chain facts (from `pr_critical_path.chain_summary`),
     # empty/zero on chainless or legacy artifacts (behavior then identical to
     # the pre-chain cascade). `chain_members` = the modal chain's check names;
@@ -244,9 +249,11 @@ class WallClockContext:
     chain_p50_s: float = 0.0
     chain_win_s: float = 0.0
     # One tuple per complete sampled commit: (whole-commit wall, slowest job,
-    # next-longest job outside the slowest job's `needs:` chain). The commit
-    # projection bound uses every tuple, then takes the median allowed saving.
-    commit_wall_facts: tuple[tuple[float, float, float], ...] = ()
+    # next-longest job outside the slowest job's `needs:` chain[, that chain's
+    # span on the commit]). The commit projection bound uses every tuple, then
+    # takes the median allowed saving. Without the fourth value the slowest job
+    # is its own chain.
+    commit_wall_facts: tuple[tuple[float, ...], ...] = ()
     # #44 — a CLUSTER-FLOOR lever (OPT73): its fix lowers ALL of `own_check_names`
     # (the concurrent sibling legs running the shared step) in lockstep, so a
     # SIBLING leg can never be the floor that caps it — the sibling descends WITH
@@ -279,12 +286,25 @@ class CommitProjection:
     multiple: float | None
 
 
-def project_commit_wall(wall_s: float, slowest_job_s: float,
-                        next_longest_s: float, job_speedup: float) -> CommitProjection:
-    """Project the whole-commit wait after speeding up its slowest job.
+def project_commit_wall(
+    wall_s: float,
+    slowest_job_s: float,
+    next_longest_s: float,
+    job_speedup: float,
+    *,
+    chain_s: float | None = None,
+    pole_s: float | None = None,
+    runner_up_s: float | None = None,
+    round_result: bool = True,
+) -> CommitProjection:
+    """Project a whole-commit wait after speeding up its slowest job.
 
-    The next-longest job outside that job's dependency chain is the physical
-    floor. Every report projection and every finding cap uses this one formula.
+    The default is the single-job projection: work outside the slowest job is
+    unchanged and the next-longest independent job is the floor. When the job
+    belongs to a serial ``needs:`` chain, the chain inputs replace that
+    single-job path. Other chain members remain in series, while ``runner_up_s``
+    is the longest path that does not pass through the pole. Queue time and
+    other gaps already present in ``wall_s`` remain unchanged.
     """
     wall = max(float(wall_s), 0.0)
     slowest = max(float(slowest_job_s), 0.0)
@@ -292,8 +312,27 @@ def project_commit_wall(wall_s: float, slowest_job_s: float,
     speedup = float(job_speedup)
     if speedup <= 0:
         raise ValueError("job_speedup must be greater than zero")
-    projected = max(0.0, wall - slowest + max(slowest / speedup, next_longest))
-    projected = round(projected, 1)
+
+    chain_values = (chain_s, pole_s, runner_up_s)
+    if all(value is None for value in chain_values):
+        projected = wall - slowest + max(slowest / speedup, next_longest)
+    elif any(value is None for value in chain_values):
+        raise ValueError(
+            "chain_s, pole_s and runner_up_s must be supplied together"
+        )
+    else:
+        chain = max(float(chain_s), 0.0)
+        pole = max(float(pole_s), 0.0)
+        runner_up = max(float(runner_up_s), 0.0)
+        if pole > chain:
+            raise ValueError("pole_s cannot exceed chain_s")
+        unchanged = max(wall - max(chain, runner_up), 0.0)
+        projected_path = max(chain - pole + pole / speedup, runner_up)
+        projected = unchanged + projected_path
+
+    projected = max(projected, 0.0)
+    if round_result:
+        projected = round(projected, 1)
     multiple = round(wall / projected, 2) if projected > 0 else None
     return CommitProjection(projected, multiple)
 
@@ -418,8 +457,31 @@ def bound_measured_critical_path(value: float, ctx: WallClockContext) -> BoundRe
         _member_span = max((d for _share, checks in pops for n, d in checks
                             if n in (ctx.own_check_names & ctx.chain_members)),
                            default=0.0)
-        cap = max(0.0, min(value, ctx.chain_win_s, _member_span))
-        if cap >= round(value, 1):
+        # The chain and member spans are independently reduced aggregates. A
+        # slow population can make the member maximum exceed the chain median,
+        # so use a coherent projection baseline without changing the existing
+        # conservative headroom cap.
+        _chain_for_projection = max(ctx.chain_p50_s, _member_span)
+        _runner_up = max(_chain_for_projection - ctx.chain_win_s, 0.0)
+        _remaining = max(_member_span - value, 0.0)
+        _speedup = (_member_span / _remaining
+                    if _remaining > 0 else float("inf"))
+        _projection = project_commit_wall(
+            _chain_for_projection,
+            _member_span,
+            _runner_up,
+            _speedup,
+            chain_s=_chain_for_projection,
+            pole_s=_member_span,
+            runner_up_s=_runner_up,
+            round_result=False,
+        )
+        cap = max(0.0, min(
+            value,
+            _chain_for_projection - _projection.projected_s,
+            _member_span,
+        ))
+        if round(cap, 1) >= round(value, 1):
             return BoundResult(round(value, 1))
         _bound_via = ("chain's headroom" if ctx.chain_win_s <= _member_span
                       else "member's own span")
@@ -428,8 +490,9 @@ def bound_measured_critical_path(value: float, ctx: WallClockContext) -> BoundRe
             f"off the chain wait, capped at the {_bound_via} "
             f"(~{min(ctx.chain_win_s, _member_span):.0f}s)"))
     weighted = 0.0
-    per_pop: list[tuple[float, float, str | None, float, float, bool]] = []
-    for share, checks in pops:
+    completion_aligned = len(ctx.pr_check_populations_complete) == len(pops)
+    per_pop: list[tuple[float, float, str | None, float, float, bool, bool, bool]] = []
+    for pop_idx, (share, checks) in enumerate(pops):
         own = [d for n, d in checks if n in ctx.own_check_names]
         others = [(n, d) for n, d in checks if n not in ctx.own_check_names]
         if _chain_on and not _cluster:
@@ -447,28 +510,33 @@ def bound_measured_critical_path(value: float, ctx: WallClockContext) -> BoundRe
         if own_max <= 0:
             # This finding's check doesn't run in this population → no saving here.
             cap, floor_name, floor = 0.0, None, 0.0
+            unknown = incomplete = single_check = False
         elif not others:
             # With several sampled PR populations, an absent sibling is missing
             # evidence, not proof that this pole has the whole PR wall to itself.
             # Keep the legacy one-population fallback, but give an unobserved
             # sibling population no credit until a concurrent floor is known.
-            cap, floor_name, floor = ((0.0, None, 0.0) if len(pops) > 1
-                                      else (value, None, 0.0))
-            unknown = len(pops) > 1
+            complete = (completion_aligned
+                        and ctx.pr_check_populations_complete[pop_idx])
+            cap, floor_name, floor = (
+                (min(value, own_max), None, 0.0)
+                if len(pops) == 1 or complete else (0.0, None, 0.0))
+            unknown = len(pops) > 1 and not complete
+            incomplete = unknown and completion_aligned
+            single_check = len(pops) > 1 and complete
         else:
             floor_name, floor = max(others, key=lambda kv: kv[1])
             cap = max(0.0, min(value, own_max - floor))
-            unknown = False
-        if own_max <= 0:
-            unknown = False
+            unknown = incomplete = single_check = False
         weighted += share * cap
-        per_pop.append((share, cap, floor_name, floor, own_max, unknown))
+        per_pop.append((share, cap, floor_name, floor, own_max, unknown,
+                        incomplete, single_check))
     weighted = round(weighted, 1)
     if weighted >= round(value, 1):
         return BoundResult(round(value, 1))  # nothing gated it in any population
     # Single population — the classic floor message (names the gating check).
     if len(pops) == 1:
-        _, cap, floor_name, floor, own_max, _unknown = per_pop[0]
+        _, cap, floor_name, floor, own_max, _unknown, _incomplete, _single = per_pop[0]
         if cap <= 0:
             _kind = ("gates the merge as a serialized whole"
                      if floor_name == "the gate chain"
@@ -478,6 +546,11 @@ def bound_measured_critical_path(value: float, ctx: WallClockContext) -> BoundRe
                 f"no wall-clock saving — `{floor_name}` ({floor:.0f}s) {_kind}; this "
                 f"workflow's slowest check is only {own_max:.0f}s, so shortening it "
                 f"doesn't move the developer's wait"))
+        if floor_name is None:
+            return BoundResult(weighted, (
+                "wall-clock capped at this check's observed span "
+                f"({own_max:.0f}s) — it was the only check in the sampled "
+                "population, so there is no concurrent floor"))
         return BoundResult(weighted, (
             f"wall-clock capped at the measured critical-path floor — `{floor_name}` "
             f"({floor:.0f}s) is a slower concurrent check on a representative PR"))
@@ -485,10 +558,12 @@ def bound_measured_critical_path(value: float, ctx: WallClockContext) -> BoundRe
     # only on the PRs where this check is near the pole, share-weighted (the
     # expected wall-clock over the sampled PR critical paths).
     total = len(per_pop)
-    unknown_n = sum(1 for *_rest, unknown in per_pop if unknown)
-    known = [row for row in per_pop if not row[-1]]
+    unknown_n = sum(1 for row in per_pop if row[5])
+    incomplete_n = sum(1 for row in per_pop if row[6])
+    known = [row for row in per_pop if not row[5]]
     zero = [row for row in known if row[1] <= 0]
-    positive = [row for row in known if row[1] > 0]
+    single = [row for row in known if row[1] > 0 and row[7]]
+    positive = [row for row in known if row[1] > 0 and not row[7]]
 
     def _duration(seconds: float) -> str:
         whole = max(0, round(seconds))
@@ -518,8 +593,23 @@ def bound_measured_critical_path(value: float, ctx: WallClockContext) -> BoundRe
             for cap in sorted(caps):
                 count = sum(1 for row in positive if round(row[1], 1) == cap)
                 clauses.append(f"up to {_duration(cap)} on {count} of {total} PRs")
-    if unknown_n:
-        clauses.append(f"unknown on {unknown_n} of {total} PRs with a missing sibling observation")
+    if single:
+        by_cap: dict[float, int] = {}
+        for row in single:
+            cap = round(row[1], 1)
+            by_cap[cap] = by_cap.get(cap, 0) + 1
+        for cap, count in sorted(by_cap.items()):
+            other = "the other " if zero and len(zero) + count == total else ""
+            clauses.append(
+                f"up to {_duration(cap)} on {other}{count} of {total} PRs "
+                "where it was the only check")
+    if incomplete_n:
+        clauses.append(
+            f"unknown on {incomplete_n} of {total} PRs with an incomplete check-runs read")
+    legacy_unknown_n = unknown_n - incomplete_n
+    if legacy_unknown_n:
+        clauses.append(
+            f"unknown on {legacy_unknown_n} of {total} PRs with a missing sibling observation")
     maximum = max((row[1] for row in known), default=0.0)
     split = "; ".join(clauses)
     return BoundResult(weighted, (
@@ -545,12 +635,17 @@ def bound_commit_projection(value: float, ctx: WallClockContext) -> BoundResult:
     if value <= 0 or not ctx.commit_wall_facts:
         return BoundResult(round(value, 1))
     caps: list[float] = []
-    for wall, slowest, next_longest in ctx.commit_wall_facts:
+    for fact in ctx.commit_wall_facts:
+        wall, slowest, next_longest = fact[:3]
+        chain = fact[3] if len(fact) > 3 else slowest
         if wall <= 0 or slowest <= 0:
             continue
         remaining = max(slowest - value, 0.0)
         speedup = slowest / remaining if remaining > 0 else float("inf")
-        projected = project_commit_wall(wall, slowest, next_longest, speedup)
+        projected = project_commit_wall(
+            wall, slowest, next_longest, speedup,
+            **({"chain_s": chain, "pole_s": slowest, "runner_up_s": next_longest}
+               if chain > slowest else {}))
         caps.append(max(0.0, wall - projected.projected_s))
     if not caps:
         return BoundResult(round(value, 1))

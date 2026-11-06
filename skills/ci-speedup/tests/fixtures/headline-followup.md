@@ -104,6 +104,10 @@ NEVER BUY SPEED BY CHECKING LESS
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
 
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+- State the pole's observed range beside the predicted saving. Do not open a pull request when the predicted saving is smaller than that range.
+
 DELIVER & VERIFY
 - A change that cuts the dominant step's wall time without dropping coverage; re-measure the step on a PR run to confirm the reduction.
 ```
@@ -134,6 +138,8 @@ investigate it in the repo and apply a safe change.
 Pattern: OPT25 - Shard imbalance.
 Where: test.yml (tests).
 What ci-speedup saw: One shard gates the matrix.
+Concurrency order: First use OPT88 to measure and fill the existing job's idle cores; only then add shards or jobs.
+Runner-minute effect: With safe in-job concurrency, runner minutes go down because the same job finishes sooner; extra shard jobs repeat checkout and setup and bill each job, so a saturated runner buys more wall-clock speed only by spending runner minutes.
 Saving: developer WALL-CLOCK (~4m 10s) - this job is a long pole ON the merge-gating critical path, so its catalog fix shortens the merge wait. NOT a runner-bill cut, and NOT off the critical path.
 
 Read the catalog entry (background, fix recipe, and guardrail):
@@ -158,6 +164,10 @@ NEVER BUY SPEED BY CHECKING LESS
 - A pipeline that finishes sooner because it verifies less is a
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
+
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+- State the pole's observed range beside the predicted saving. Do not open a pull request when the predicted saving is smaller than that range.
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the

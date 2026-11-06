@@ -16,15 +16,15 @@ not measured: lifecycle data was not collected
 >
 > **41m 12s until all checks finish** - the slowest check a typical PR waits on is `Windows (firefox)` (~72m 57s), but it ran on only 4/20 sampled PRs, so a typical PR finishes in 41m 12s; `ubuntu-22.04 (webkit - Node.js 20)` is the check most PRs gate on (drilled below). (`Test chrome on macos-latest` is slower (~59m 33s) but it ran on only 5/20 sampled PRs - it looks opt-in / conditional (e.g. label-gated), so a typical PR doesn't wait on it and its time is throughput/cost, not merge-wait; unless it's a *required* status check it isn't the gate here. See its long pole below.) 
 >
-> **⚠️ `.github/workflows/tests_webview_simulator.yml` changed ~121 days ago - this audit measures ONLY the new configuration on a thin sample.** Only 1 sampled run have run on the new configuration (the gate-bearing PRs are all post-change, so there is no pre-change gate run to measure the old config) - treat these numbers as provisional; re-run as post-change history accumulates for stable numbers.
+> **⚠️ `.github/workflows/tests_webview_simulator.yml` changed ~122 days ago - this audit measures ONLY the new configuration on a thin sample.** Only 1 sampled run have run on the new configuration (the gate-bearing PRs are all post-change, so there is no pre-change gate run to measure the old config) - treat these numbers as provisional; re-run as post-change history accumulates for stable numbers.
 >
-> **`.github/workflows/fix-flakes.yml` changed ~111 days ago - narrowed to the current configuration.** This audit measures only the 11 runs since that change; the 8 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/fix-flakes.yml` changed ~112 days ago - narrowed to the current configuration.** This audit measures only the 11 runs since that change; the 8 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
-> **`.github/workflows/publish_release.yml` changed ~113 days ago - narrowed to the current configuration.** This audit measures only the 14 runs since that change; the 6 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/publish_release.yml` changed ~114 days ago - narrowed to the current configuration.** This audit measures only the 14 runs since that change; the 6 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
 > **`.github/workflows/tests_bidi.yml` changed ~118 days ago - narrowed to the current configuration.** This audit measures only the 8 runs since that change; the 12 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
-> **`.github/workflows/tests_secondary.yml` changed ~125 days ago - narrowed to the current configuration.** This audit measures only the 18 runs since that change; the 2 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/tests_secondary.yml` changed ~126 days ago - narrowed to the current configuration.** This audit measures only the 18 runs since that change; the 2 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
 > **What gates next:** After this fix, CI is gated by `tests_mcp.yml / windows-latest - firefox` at ~2415 s.
 > This projection assumes the full headline saving is realized; a smaller fix may leave the current gate in place.
@@ -132,6 +132,8 @@ THE GATE
 - Workflow `tests_primary.yml`, job `ubuntu-22.04 (webkit - Node.js 20)`.
 - Slowest check a typical PR waits on: P50 41m 21s; its workflow `tests_primary.yml` gates 7/20 sampled PRs.
 
+Runner-minute effect: If the structural fix moves work to added jobs or machines, duplicated checkout and setup raise runner minutes; moving the same work without duplication is roughly level, and removing measured work lowers them.
+
 WHERE THE TIME GOES
 - The job's time is dominated by the `Run ./.github/actions/run-test` step: ~41m 14s (100% of the job wall), from the sampled per-step decomposition (no single-run timeline was captured for this job).
 
@@ -163,6 +165,10 @@ NEVER BUY SPEED BY CHECKING LESS
 - A pipeline that finishes sooner because it verifies less is a
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
+
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+- State the pole's observed range beside the predicted saving. Do not open a pull request when the predicted saving is smaller than that range.
 
 DELIVER & VERIFY
 - A change that cuts the dominant step's wall time without dropping coverage; re-measure the step on a PR run to confirm the reduction.
@@ -209,6 +215,8 @@ THE GATE
 - Workflow `tests_secondary.yml`, job `Windows (firefox)`.
 - Slowest check a typical PR waits on: P50 72m 57s; its workflow `tests_secondary.yml` gates 5/20 sampled PRs.
 
+Runner-minute effect: If the structural fix moves work to added jobs or machines, duplicated checkout and setup raise runner minutes; moving the same work without duplication is roughly level, and removing measured work lowers them.
+
 WHERE THE TIME GOES
 - The job's time is dominated by the `Run ./.github/actions/run-test` step: ~72m 46s (100% of the job wall), from the sampled per-step decomposition (no single-run timeline was captured for this job).
 
@@ -240,6 +248,10 @@ NEVER BUY SPEED BY CHECKING LESS
 - A pipeline that finishes sooner because it verifies less is a
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
+
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+- State the pole's observed range beside the predicted saving. Do not open a pull request when the predicted saving is smaller than that range.
 
 DELIVER & VERIFY
 - A change that cuts the dominant step's wall time without dropping coverage; re-measure the step on a PR run to confirm the reduction.
@@ -286,6 +298,8 @@ THE GATE
 - Workflow `tests_mcp.yml`, job `windows-latest - firefox`.
 - Slowest check a typical PR waits on: P50 40m 15s; its workflow `tests_mcp.yml` gates 6/20 sampled PRs.
 
+Runner-minute effect: If the structural fix moves work to added jobs or machines, duplicated checkout and setup raise runner minutes; moving the same work without duplication is roughly level, and removing measured work lowers them.
+
 WHERE THE TIME GOES
 - The job's time is dominated by the `Run ./.github/actions/run-test` step: ~40m 04s (100% of the job wall), from the sampled per-step decomposition (no single-run timeline was captured for this job).
 
@@ -317,6 +331,10 @@ NEVER BUY SPEED BY CHECKING LESS
 - A pipeline that finishes sooner because it verifies less is a
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
+
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+- State the pole's observed range beside the predicted saving. Do not open a pull request when the predicted saving is smaller than that range.
 
 DELIVER & VERIFY
 - A change that cuts the dominant step's wall time without dropping coverage; re-measure the step on a PR run to confirm the reduction.
@@ -364,6 +382,8 @@ THE GATE
 - Workflow `tests_secondary.yml`, job `Test chrome on macos-latest`.
 - Rarely the merge pole - the actual slowest check a PR waits on, on only 1/20 sampled PRs (present on 5/20): P50 59m 33s. A slower concurrent check usually gates ahead, so speeding it helps only the PRs where it IS the pole, not typical merge-wait.
 
+Runner-minute effect: If the structural fix moves work to added jobs or machines, duplicated checkout and setup raise runner minutes; moving the same work without duplication is roughly level, and removing measured work lowers them.
+
 WHERE THE TIME GOES
 - The job's time is dominated by the `Run ./.github/actions/run-test` step: ~59m 21s (100% of the job wall), from the sampled per-step decomposition (no single-run timeline was captured for this job).
 
@@ -395,6 +415,10 @@ NEVER BUY SPEED BY CHECKING LESS
 - A pipeline that finishes sooner because it verifies less is a
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
+
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+- State the pole's observed range beside the predicted saving. Do not open a pull request when the predicted saving is smaller than that range.
 
 DELIVER & VERIFY
 - A change that cuts the dominant step's wall time without dropping coverage; re-measure the step on a PR run to confirm the reduction.
@@ -440,6 +464,8 @@ THE GATE
 - Workflow `tests_secondary.yml`, job `Test msedge on windows-latest`.
 - Rarely the merge pole - the actual slowest check a PR waits on, on only 0/20 sampled PRs (present on 5/20): P50 46m 01s. A slower concurrent check usually gates ahead, so speeding it helps only the PRs where it IS the pole, not typical merge-wait.
 
+Runner-minute effect: If the structural fix moves work to added jobs or machines, duplicated checkout and setup raise runner minutes; moving the same work without duplication is roughly level, and removing measured work lowers them.
+
 WHERE THE TIME GOES
 - The job's time is dominated by the `Run ./.github/actions/run-test` step: ~45m 48s (100% of the job wall), from the sampled per-step decomposition (no single-run timeline was captured for this job).
 
@@ -468,6 +494,10 @@ NEVER BUY SPEED BY CHECKING LESS
 - A pipeline that finishes sooner because it verifies less is a
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
+
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+- State the pole's observed range beside the predicted saving. Do not open a pull request when the predicted saving is smaller than that range.
 
 DELIVER & VERIFY
 - A change that cuts the dominant step's wall time without dropping coverage; re-measure the step on a PR run to confirm the reduction.
@@ -526,6 +556,9 @@ NEVER BUY SPEED BY CHECKING LESS
 - A pipeline that finishes sooner because it verifies less is a
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
+
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -622,6 +655,9 @@ NEVER BUY SPEED BY CHECKING LESS
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
 
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
 failure mode and how you have guarded it before shipping.
@@ -680,6 +716,9 @@ NEVER BUY SPEED BY CHECKING LESS
 - A pipeline that finishes sooner because it verifies less is a
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
+
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -740,6 +779,9 @@ NEVER BUY SPEED BY CHECKING LESS
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
 
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
 failure mode and how you have guarded it before shipping.
@@ -798,6 +840,9 @@ NEVER BUY SPEED BY CHECKING LESS
 - A pipeline that finishes sooner because it verifies less is a
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
+
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -859,6 +904,9 @@ NEVER BUY SPEED BY CHECKING LESS
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
 
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
 failure mode and how you have guarded it before shipping.
@@ -891,6 +939,8 @@ investigate it in the repo and apply a safe change.
 Pattern: OPT24 - Long Test Job Without Sharding.
 Where: tests_primary.yml (Installation Test ubuntu-latest); tests_primary.yml (Installation Test windows-latest); tests_primary.yml (Installation Test macos-latest); tests_secondary.yml (time test runner - realtime); tests_secondary.yml (Test chrome on ubuntu-22.04); tests_secondary.yml (Test chrome-beta on ubuntu-22.04); tests_secondary.yml (time test runner - frozen); tests_secondary.yml (Test chrome on macos-latest); +1 more (see findings JSON).
 What ci-speedup saw: job `Test chrome on macos-latest` p50 3573s over 4 runs, no shard axis observed (job names lack a `shard` / `partition` matrix marker)
+Concurrency order: First use OPT88 to measure and fill the existing job's idle cores; only then add shards or jobs.
+Runner-minute effect: With safe in-job concurrency, runner minutes go down because the same job finishes sooner; extra shard jobs repeat checkout and setup and bill each job, so a saturated runner buys more wall-clock speed only by spending runner minutes.
 Saving: developer WALL-CLOCK (~6m 51s) - this job is a long pole ON the merge-gating critical path, so its catalog fix shortens the merge wait. NOT a runner-bill cut, and NOT off the critical path.
 
 Read the catalog entry (background, fix recipe, and guardrail):
@@ -916,6 +966,10 @@ NEVER BUY SPEED BY CHECKING LESS
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
 
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+- State the pole's observed range beside the predicted saving. Do not open a pull request when the predicted saving is smaller than that range.
+
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
 failure mode and how you have guarded it before shipping.
@@ -940,6 +994,8 @@ investigate it in the repo and apply a safe change.
 Pattern: OPT25 - Matrix Leg Imbalance.
 Where: tests_components.yml (- Node.js 20); tests_secondary.yml (Windows).
 What ci-speedup saw: leg `Windows (firefox)` median 4377s vs `Windows (chromium)` 1598s - 2.7× imbalance over 3 sampled runs (heterogeneous legs - split the slow leg, don't rebalance)
+Concurrency order: First use OPT88 to measure and fill the existing job's idle cores; only then add shards or jobs.
+Runner-minute effect: With safe in-job concurrency, runner minutes go down because the same job finishes sooner; extra shard jobs repeat checkout and setup and bill each job, so a saturated runner buys more wall-clock speed only by spending runner minutes.
 Saving: developer WALL-CLOCK (~3m 21s) - this job is a long pole ON the merge-gating critical path, so its catalog fix shortens the merge wait. NOT a runner-bill cut, and NOT off the critical path.
 
 Read the catalog entry (background, fix recipe, and guardrail):
@@ -964,6 +1020,10 @@ NEVER BUY SPEED BY CHECKING LESS
 - A pipeline that finishes sooner because it verifies less is a
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
+
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+- State the pole's observed range beside the predicted saving. Do not open a pull request when the predicted saving is smaller than that range.
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -1013,6 +1073,9 @@ NEVER BUY SPEED BY CHECKING LESS
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
 
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
 failure mode and how you have guarded it before shipping.
@@ -1061,6 +1124,9 @@ NEVER BUY SPEED BY CHECKING LESS
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
 
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
 failure mode and how you have guarded it before shipping.
@@ -1108,6 +1174,9 @@ NEVER BUY SPEED BY CHECKING LESS
 - A pipeline that finishes sooner because it verifies less is a
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
+
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -1158,6 +1227,9 @@ NEVER BUY SPEED BY CHECKING LESS
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
 
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
 failure mode and how you have guarded it before shipping.
@@ -1205,6 +1277,9 @@ NEVER BUY SPEED BY CHECKING LESS
 - A pipeline that finishes sooner because it verifies less is a
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
+
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -1255,6 +1330,9 @@ NEVER BUY SPEED BY CHECKING LESS
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
 
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
 failure mode and how you have guarded it before shipping.
@@ -1302,6 +1380,9 @@ NEVER BUY SPEED BY CHECKING LESS
 - A pipeline that finishes sooner because it verifies less is a
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
+
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -1351,6 +1432,9 @@ NEVER BUY SPEED BY CHECKING LESS
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
 
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
 failure mode and how you have guarded it before shipping.
@@ -1398,6 +1482,9 @@ NEVER BUY SPEED BY CHECKING LESS
 - A pipeline that finishes sooner because it verifies less is a
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
+
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -1447,6 +1534,9 @@ NEVER BUY SPEED BY CHECKING LESS
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
 
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
 failure mode and how you have guarded it before shipping.
@@ -1468,7 +1558,7 @@ failure mode and how you have guarded it before shipping.
 
 | Source | Coverage | Used for |
 | --- | --- | --- |
-| ci-speedup static scan (skill commit `2f048be`, scripts tree `db22d81-dirty`) | All `.github/workflows/*.yml` under the analyzed tree (3827650) | Static pattern detection (full OPT catalog) |
+| ci-speedup static scan (skill commit `2f048be`, scripts tree `463d800`) | All `.github/workflows/*.yml` under the analyzed tree (3827650) | Static pattern detection (full OPT catalog) |
 | gh runs/jobs API (timestamps) | 161 runs / 1630 jobs sampled | Critical-path + per-step P50 |
 | job logs | not run | Sampled only for a slow pole worth log-level inspection |
 | workflow YAML | 18 from the analyzed checkout | `on:` triggers, matrix/shard axes, job timeouts (detector inputs) |
