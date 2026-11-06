@@ -13,7 +13,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
-- **2026-11-06** — Report default-branch push timing in a separate after-merge lane, including the full per-commit p50 and p90, its slowest and next-longest jobs, and bounded improvement projections. The lane samples at most ten pushes and stays outside merge-gate headlines, rankings and scores.
+- **2026-11-06** — Report default-branch push timing in a separate after-merge lane, including the full per-commit p50 and p90, its slowest and next-longest jobs, and bounded improvement projections. The lane samples at most ten pushes, times them with the same per-commit builder as the PR wait (reading only those pushes' job lists not already fetched), and stays outside merge-gate headlines, rankings and scores.
 - **2026-11-06** — Measure pull-request wait once per sampled commit, from the earliest workflow run creation through the last completed job across every workflow on that SHA. Reports now show commit-level p50/p90, mark commits with missing workflow jobs as partial, and bound slowest-job projections and finding savings at the next independent job.
 - **2026-11-06** — Keep Vitest coverage-provider guidance grounded in matched measurements. The report preserves the measured compile/load share, asks maintainers to time both providers on the same commit, warns that coverage thresholds need re-baselining, and credits no provider-switch saving without matched results.
 - **2026-11-06** — Keep OPT9 compiler build-state and generated-output cache suggestions uncredited until a same-workload before/after measurement shows a net saving. Lint and format result caches retain their existing sizing.

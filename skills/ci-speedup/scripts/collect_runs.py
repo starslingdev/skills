@@ -26390,12 +26390,6 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # several repos in one process must not measure the later ones against the first
     # call's clock. See `_reset_unpinned_now`.
     _reset_unpinned_now()
-    # Dependency handoff: the shared commit-wide clock lands separately. Preserve
-    # an injected producer-shaped fixture before this pass rebuilds
-    # `pr_critical_path`. Reconciliation will feed the bounded cohort below through
-    # the shared fact helper; this change intentionally does not copy that producer.
-    _supplied_commit_wall_clock = copy.deepcopy(
-        ((findings_doc.get("pr_critical_path") or {}).get("commit_wall_clock") or {}))
     # Guard the shallow depth: `--shallow-runs 0` (or negative) would make the shallow
     # pass fetch nothing, leave every workflow at p50=0, deepen nothing, and silently
     # emit a report with no timing — a coverage-gap masquerade. Clamp to >=1 (the
@@ -27235,8 +27229,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # The supplied commit-wall facts are deliberately consumed rather than
     # reimplemented here: they are the merge seam for the shared producer.
     _push_runs_by_sha: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    _push_run_wf: dict[str, str] = {}
     _push_created_by_sha: dict[str, str] = {}
-    for _push_runs in all_status_runs_by_wf.values():
+    for _push_wf, _push_runs in all_status_runs_by_wf.items():
         for _push_run in _push_runs:
             _push_sha = str(_push_run.get("head_sha") or "")
             if (not _push_sha or not default_branch
@@ -27246,6 +27241,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                     or _push_run.get("conclusion") in {"cancelled", "skipped"}):
                 continue
             _push_runs_by_sha[_push_sha].append(_push_run)
+            _push_run_wf[str(_push_run.get("id") or id(_push_run))] = _push_wf
             _push_created = str(_push_run.get("created_at") or "")
             _push_created_by_sha[_push_sha] = max(
                 _push_created_by_sha.get(_push_sha, ""), _push_created)
@@ -27260,23 +27256,6 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             _push_runs_by_sha[sha],
             key=lambda row: (str(row.get("id") or ""),
                              str(row.get("created_at") or "")))
-    ]
-    _supplied_push_facts = {
-        str(fact.get("sha") or ""): fact
-        for fact in (_supplied_commit_wall_clock.get("facts") or [])
-        if isinstance(fact, dict) and fact.get("event") == "push"
-    }
-    _push_facts = [
-        copy.deepcopy(_supplied_push_facts[sha])
-        for sha in _push_shas if sha in _supplied_push_facts
-    ]
-    _push_walls = [
-        float(fact["wall_s"])
-        for fact in _push_facts
-        if fact.get("partial") is not True
-        and isinstance(fact.get("wall_s"), (int, float))
-        and not isinstance(fact.get("wall_s"), bool)
-        and float(fact["wall_s"]) > 0
     ]
     if not default_branch:
         _push_lane_status = "default_branch_unknown"
@@ -27293,16 +27272,12 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         "sample_cap": _DEFAULT_BRANCH_PUSH_SAMPLE_MAX,
         "sampled_push_count": len(_push_shas),
         "sampled_run_count": len(_push_run_rows),
-        # The shared commit-wall helper will own these reads when it is wired to
-        # this bounded cohort. Until then its facts are supplied through the seam
-        # above, so issuing lane-only job requests would fetch data no code uses.
+        # Timing is filled in after the shared per-commit producer below runs.
         "job_fetch_count": 0,
         "job_fetch_failures": 0,
-        "p50_s": (round(_percentile(_push_walls, 50), 3)
-                  if _push_walls else None),
-        "p90_s": (round(_percentile(_push_walls, 90), 3)
-                  if _push_walls else None),
-        "facts": _push_facts,
+        "p50_s": None,
+        "p90_s": None,
+        "facts": [],
     }
     # `--root` is on for EVERY run now, so every workflow's YAML comes off the working
     # tree. `_root_is_clone_of` proved it is the right REPO; this asks the other half —
@@ -27900,36 +27875,23 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             _commit_shas.append(_sha)
             _commit_checks_by_sha[_sha] = _checks
             _commit_dropped_workflows[_sha] = _dropped_wfs
-    for _sha in _commit_shas:
-        _event = str((sha_meta.get(_sha) or {}).get("event") or "")
-        _run_rows: list[tuple[str, dict[str, Any]]] = []
-        for _wf in sorted(set(sampled_runs_by_wf) | set(all_status_runs_by_wf)):
-            if _wf in _commit_dropped_workflows.get(_sha, set()):
+    _commit_jobs_by_run: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for _wf, _job_runs in jobs_per_run_by_wf.items():
+        for _job_run in _job_runs:
+            if not _job_run:
                 continue
-            _runs_by_id: dict[str, dict[str, Any]] = {}
-            for _run in [*(all_status_runs_by_wf.get(_wf) or []),
-                         *(sampled_runs_by_wf.get(_wf) or [])]:
-                _runs_by_id[str(_run.get("id") or id(_run))] = _run
-            _runs = list(_runs_by_id.values())
-            for _run in _runs:
-                if (str(_run.get("head_sha") or "") == _sha
-                        and str(_run.get("event") or "") == _event):
-                    _run_rows.append((_wf, _run))
+            _rid = str(_job_run[0].get("_run_id") or "")
+            if _rid:
+                _commit_jobs_by_run[(_wf, _rid)] = _job_run
 
-        _jobs_by_run: dict[tuple[str, str], list[dict[str, Any]]] = {}
-        for _wf, _job_runs in jobs_per_run_by_wf.items():
-            for _job_run in _job_runs:
-                if not _job_run:
-                    continue
-                _rid = str(_job_run[0].get("_run_id") or "")
-                if _rid:
-                    _jobs_by_run[(_wf, _rid)] = _job_run
-
-        _expected_workflows: set[str] = set()
-        for _check_name in (_commit_checks_by_sha.get(_sha) or {}):
-            _mapped = _check_to_job_node(_check_name, _jg, crit_by_wf)
-            if _mapped is not None:
-                _expected_workflows.add(_mapped[0])
+    def _commit_wall_fact(_sha: str, _event: str,
+                          _run_rows: list[tuple[str, dict[str, Any]]],
+                          _jobs_by_run: dict[tuple[str, str], list[dict[str, Any]]],
+                          _expected_workflows: set[str]) -> dict[str, Any]:
+        """One commit's wall clock across every workflow run on that SHA and
+        event: earliest run creation to the last job completion, with the
+        slowest job, the next-longest job outside its `needs:` chain, and the
+        shared projection. Used by the PR lane and the default-branch push lane."""
         _missing: set[str] = _expected_workflows - {_wf for _wf, _run in _run_rows}
         _created: list[float] = []
         _job_rows: list[dict[str, Any]] = []
@@ -28011,7 +27973,32 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 "projected_s": _projection.projected_s,
                 "multiple": _projection.multiple,
             }
-        _commit_facts.append(_fact)
+        return _fact
+
+    for _sha in _commit_shas:
+        _event = str((sha_meta.get(_sha) or {}).get("event") or "")
+        _run_rows: list[tuple[str, dict[str, Any]]] = []
+        _run_rows: list[tuple[str, dict[str, Any]]] = []
+        for _wf in sorted(set(sampled_runs_by_wf) | set(all_status_runs_by_wf)):
+            if _wf in _commit_dropped_workflows.get(_sha, set()):
+                continue
+            _runs_by_id: dict[str, dict[str, Any]] = {}
+            for _run in [*(all_status_runs_by_wf.get(_wf) or []),
+                         *(sampled_runs_by_wf.get(_wf) or [])]:
+                _runs_by_id[str(_run.get("id") or id(_run))] = _run
+            _runs = list(_runs_by_id.values())
+            for _run in _runs:
+                if (str(_run.get("head_sha") or "") == _sha
+                        and str(_run.get("event") or "") == _event):
+                    _run_rows.append((_wf, _run))
+
+        _expected_workflows: set[str] = set()
+        for _check_name in (_commit_checks_by_sha.get(_sha) or {}):
+            _mapped = _check_to_job_node(_check_name, _jg, crit_by_wf)
+            if _mapped is not None:
+                _expected_workflows.add(_mapped[0])
+        _commit_facts.append(_commit_wall_fact(
+            _sha, _event, _run_rows, _commit_jobs_by_run, _expected_workflows))
 
     _complete_walls = [float(f["wall_s"]) for f in _commit_facts
                        if isinstance(f.get("wall_s"), (int, float))]
@@ -28022,6 +28009,44 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                   if _complete_walls else None),
         "facts": _commit_facts,
     }
+    # The default-branch push lane uses the same per-commit builder. Its pushed
+    # commits' job lists are the lane's only new API reads: at most the runs of
+    # `_DEFAULT_BRANCH_PUSH_SAMPLE_MAX` commits, memoised with every other job read.
+    _push_lane = findings_doc.get("default_branch_push_lane") or {}
+    if _push_shas and _push_lane.get("status") == "complete":
+        _push_rows_by_sha = {
+            _sha: [(_push_run_wf.get(str(_run.get("id") or id(_run)), ""), _run)
+                   for _run in _push_runs_by_sha[_sha]]
+            for _sha in _push_shas
+        }
+        _push_to_fetch = [
+            _run for _sha in _push_shas for _wf, _run in _push_rows_by_sha[_sha]
+            if (_wf, str(_run.get("id") or "")) not in _commit_jobs_by_run
+        ]
+        _push_kept, _push_failures = _gather_run_jobs(
+            client, repo, _push_to_fetch, keep_empty=True, memo=job_memo)
+        _push_jobs_by_run = dict(_commit_jobs_by_run)
+        for _run, _jobs in _push_kept:
+            _rid = str(_run.get("id") or "")
+            _push_jobs_by_run[(_push_run_wf.get(_rid, ""), _rid)] = list(_jobs)
+        _push_facts = [
+            _commit_wall_fact(_sha, "push", _push_rows_by_sha[_sha], _push_jobs_by_run,
+                              {_wf for _wf, _run in _push_rows_by_sha[_sha]})
+            for _sha in _push_shas
+        ]
+        _push_walls = [float(f["wall_s"]) for f in _push_facts
+                       if isinstance(f.get("wall_s"), (int, float))
+                       and not isinstance(f.get("wall_s"), bool)
+                       and float(f["wall_s"]) > 0]
+        _push_lane.update({
+            "job_fetch_count": len(_push_to_fetch),
+            "job_fetch_failures": int(_push_failures),
+            "p50_s": (round(_percentile(_push_walls, 50), 3)
+                      if _push_walls else None),
+            "p90_s": (round(_percentile(_push_walls, 90), 3)
+                      if _push_walls else None),
+            "facts": _push_facts,
+        })
     _chain_facts = _stamp_chain_facts(
         _era_repr_shas, _era_per_sha_checks, _chain_spine, _span_caps, _jg,
         crit_by_wf, _era_sha_intervals)

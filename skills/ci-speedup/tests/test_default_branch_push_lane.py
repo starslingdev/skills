@@ -147,39 +147,10 @@ class _PushLaneClient:
         return ""
 
 
-def _commit_wall_fixture() -> dict:
-    facts = []
-    for sha in _PUSH_SHAS:
-        facts.append({
-            "sha": sha,
-            "event": "push",
-            "partial": False,
-            "wall_s": 2100.0,
-            "slowest_job": {
-                "name": "publish-image",
-                "workflow_file": _PUBLISH,
-                "duration_s": 2100.0,
-            },
-            "next_longest_job": {
-                "name": "verify",
-                "workflow_file": _GATE,
-                "duration_s": 300.0,
-            },
-            "projection_3x": {
-                "job_speedup": 3.0,
-                "projected_s": 700.0,
-                "multiple": 3.0,
-            },
-        })
-    return {"p50_s": 2100.0, "p90_s": 2100.0, "facts": facts}
-
-
 def _doc() -> dict:
     return {
         "repo": "o/r",
         "skill_commit_sha": "installed:unversioned",
-        # Producer-shaped fixture until the shared commit-wall collector lands.
-        "pr_critical_path": {"commit_wall_clock": _commit_wall_fixture()},
         "workflow_job_graph": {
             _GATE: {"merge-gate": {"name": "merge-gate", "needs": []}},
             _PUBLISH: {"publish-image": {"name": "publish-image", "needs": []}},
@@ -222,7 +193,9 @@ def test_collect_renders_a_capped_default_branch_push_lane_and_verifies(
     assert lane.get("sampled_push_count") == 10
     assert lane.get("sample_cap") == 10
     assert lane.get("sampled_run_count") == 20
-    assert lane.get("job_fetch_count") == 0
+    # The headline sample already fetched the gate workflow's push runs; only the
+    # ten sampled publish runs are new job reads, and the memo keeps it at that.
+    assert lane.get("job_fetch_count") == 10
     assert lane.get("job_fetch_failures") == 0
     assert [fact["sha"] for fact in lane.get("facts", [])] == list(reversed(_PUSH_SHAS))[:10]
 
@@ -232,7 +205,9 @@ def test_collect_renders_a_capped_default_branch_push_lane_and_verifies(
     assert "p90 **35m 00s**" in report
     assert "`publish-image`" in report
     assert "`verify`" in report
-    assert "projects to **11m 40s** (**3.00x**)" in report
+    # The lane uses the shared per-commit projection (4x on the slowest job),
+    # capped by the next-longest job: 2100 - 2100 + max(525, 300) = 525 s.
+    assert "projects to **8m 45s** (**4.00x**)" in report
     bottom_line = next(line for line in report.splitlines() if "**Bottom line.**" in line)
     assert "2m 00s" in bottom_line
     assert "35m 00s" not in bottom_line
@@ -312,3 +287,32 @@ def test_long_push_job_names_use_the_same_rendered_label_in_the_verifier(
     report, findings_path, _report_path = _write_artifacts(tmp_path, doc)
     check = vr.check_default_branch_push_lane_isolated(report, findings_path)
     assert check.ok and not check.skipped, check.detail
+
+
+def test_real_collection_times_the_push_lane_without_supplied_facts(
+        monkeypatch, tmp_path: Path):
+    """The lane's facts come from the shared per-commit producer on a real run,
+    not from facts injected into the input findings."""
+    plain = _doc()
+    client = _PushLaneClient()
+    monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
+    doc = cr.collect(plain, "o/r", max_runs=20, shallow_runs=20)
+    lane = doc["default_branch_push_lane"]
+
+    assert lane.get("sampled_push_count") == 10
+    assert lane.get("p50_s") == 2100.0
+    assert lane.get("p90_s") == 2100.0
+    facts = lane.get("facts") or []
+    assert len(facts) == 10
+    assert all(fact.get("event") == "push" and fact.get("partial") is False
+               for fact in facts)
+    assert {fact["slowest_job"]["name"] for fact in facts} == {"publish-image"}
+    assert {fact["next_longest_job"]["name"] for fact in facts} == {"verify"}
+    assert lane.get("job_fetch_failures") == 0
+
+    report, findings_path, report_path = _write_artifacts(tmp_path, doc)
+    assert "p50 **35m 00s**" in report
+    assert "no complete commit-wide timing fact" not in report
+    checks = vr.run_checks(report, report_path, findings_path, skill_repo=None)
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
