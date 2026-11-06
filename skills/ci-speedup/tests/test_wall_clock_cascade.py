@@ -458,3 +458,19 @@ def test_no_chain_data_keeps_the_classic_floor():
     )
     res = bound_measured_critical_path(38.0, ctx)
     assert res.value == 0.0, "legacy behavior must not change without chain data"
+
+
+def test_single_population_cap_names_the_targets_own_span_not_a_blocker():
+    ctx = WallClockContext(
+        pr_checks=(("only", 60.0),),
+        pr_check_populations=((1.0, (("only", 60.0),)),),
+        pr_check_populations_complete=(True,),
+        own_check_names=frozenset({"only"}),
+    )
+
+    result = bound_measured_critical_path(100.0, ctx)
+
+    assert result.value == 60.0
+    assert result.reason is not None
+    assert "this check's observed span (60s)" in result.reason
+    assert "`None`" not in result.reason
