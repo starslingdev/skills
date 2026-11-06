@@ -9023,7 +9023,14 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
         # §8.1 landmine 1 — mandatory on every skip-family / trigger-scope
         # prompt, whichever framing branch built the saving line above.
         body += _PENDING_CAVEAT_LINES + [""]
-    body += _NO_WEAKENING_LINES + [""] + _VERIFICATION_BAR_LINES + [
+    # The pole-range rule compares a wall-clock saving with the pole's observed timing
+    # range, so it travels only with wall-clock hand-offs; a runner-minute (bill),
+    # Tier-2 or queue-wait saving is not comparable with that range. The CI-backed
+    # verification lines apply to every prompt.
+    _bar = (_VERIFICATION_BAR_LINES if saves_wc
+            else [line for line in _VERIFICATION_BAR_LINES
+                  if not line.startswith("- State the pole's observed range")])
+    body += _NO_WEAKENING_LINES + [""] + _bar + [
         "",
         "Do: confirm the pattern at each location above, recover the intent from git",
         "history, and apply the catalog's fix recipe where it is safe. State the",

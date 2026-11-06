@@ -74,7 +74,7 @@ def _prompts() -> dict[str, str]:
                 "job": "test",
                 "runner_minutes_per_month": 400.0,
             }],
-            "https://example.invalid/catalog#opt24",
+            "https://example.invalid/catalog#opt24", saves_wc=True,
         )),
         "OPT82": "\n".join(bp._opt82_prompt(
             "Type-aware lint",
@@ -212,3 +212,51 @@ def test_skill_body_line_count_stays_net_zero() -> None:
     lines = text.splitlines()
     frontmatter_end = lines.index("---", 1)
     assert len(lines[frontmatter_end + 1 :]) == 499
+
+
+def _hygiene_member() -> dict:
+    return {
+        "pattern": "OPT61",
+        "title": "Missing dependency cache",
+        "workflow_file": ".github/workflows/ci.yml",
+        "job": "lint",
+        "runner_minutes_per_month": 400.0,
+    }
+
+
+def test_bill_only_hygiene_prompts_keep_ci_bar_without_pole_range_rule() -> None:
+    """A runner-minute saving is not comparable with a pole's timing range.
+
+    Bill-only, Tier-2 and queue-wait prompts still require CI-backed verification,
+    but the pole-range rule belongs only to wall-clock hand-offs.
+    """
+    variants = {
+        "also noticed": {},
+        "tier2": {"tier2": True},
+        "queue wait": {"wait": True},
+    }
+    for name, kwargs in variants.items():
+        prompt = "\n".join(bp._hygiene_prompt(
+            "OPT61", "Missing dependency cache", [_hygiene_member()],
+            "https://example.invalid/catalog#opt61", **kwargs,
+        ))
+        assert "A scoped local run is pre-flight only" in prompt, name
+        assert "repository's own CI gate passes" in prompt, name
+        assert "observed range beside the predicted saving" not in prompt, name
+
+
+def test_wall_clock_hygiene_prompt_keeps_pole_range_rule() -> None:
+    prompt = "\n".join(bp._hygiene_prompt(
+        "OPT61", "Missing dependency cache", [_hygiene_member()],
+        "https://example.invalid/catalog#opt61", saves_wc=True,
+    ))
+    assert "observed range beside the predicted saving" in prompt
+
+
+def test_close_still_runs_the_pole_prompt_verbatim() -> None:
+    """The pick contract hands the agent the rendered prompt unchanged."""
+    import re
+
+    text = (_SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+    close = re.sub(r"\s+", " ", text)
+    assert "run that pole's agent prompt verbatim" in close
