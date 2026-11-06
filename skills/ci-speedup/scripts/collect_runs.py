@@ -5163,12 +5163,15 @@ def _critical_path(jobs_per_run: list[list[dict[str, Any]]]) -> dict[str, Any]:
 def _minority_tails_for_checks(
         pr_checks: list[tuple[str, float]],
         crit_by_wf: dict[str, dict[str, Any]],
-        required_scoped: bool) -> dict[str, dict[str, Any]]:
+        confirmed_checks: "frozenset[str] | set[str]",
+) -> dict[str, dict[str, Any]]:
     """Attach sampled tails only to checks in a confirmed required closure."""
-    if not required_scoped:
+    if not confirmed_checks:
         return {}
     tails: dict[str, dict[str, Any]] = {}
     for check, _p50 in pr_checks:
+        if check not in confirmed_checks:
+            continue
         mapping = _map_check_to_job(
             check, crit_by_wf, require_developer_timing=True)
         if mapping is None:
@@ -5441,6 +5444,44 @@ _EPHEMERAL_RUNNER_MIN_CAVEAT = (
     "writes to a working-dir path the next runner discards; realizable only "
     "with a persisted actions/cache for that dir + a measured warm-vs-cold "
     "delta (none here), so this is config-hygiene, not a credited bill saving")
+
+# OPT9 covers two materially different cache shapes. Lint and format result
+# caches avoid reprocessing the same inputs, so their existing conservative
+# sizing remains useful. Compiler build state and generated output can cost as
+# much to restore, validate, and save as they avoid; a cache hit alone does not
+# establish a saving. Keep those findings visible, but require a measured
+# before/after comparison rather than assigning the generic OPT9 default.
+_OPT9_BUILD_STATE_RE = re.compile(
+    r"(?:\btsc\b|typescript|tsbuildinfo|--incremental\b|"
+    r"generated[ -](?:client|output|code)|\bcodegen\b|code generation)",
+    re.IGNORECASE,
+)
+_OPT9_RESULT_CACHE_RE = re.compile(
+    r"(?:\beslint\b|\bprettier\b|\bjest\b|\bvitest\b)",
+    re.IGNORECASE,
+)
+
+
+def _opt9_is_build_state(f: dict[str, Any]) -> bool:
+    if f.get("pattern") != "OPT9":
+        return False
+    tool = str(f.get("opt9_tool") or "").lower()
+    if tool == "tsc":
+        return True
+    if tool in {"eslint", "prettier", "jest", "vitest"}:
+        return False
+    title = str(f.get("title") or "")
+    if _OPT9_RESULT_CACHE_RE.search(title):
+        return False
+    if _OPT9_BUILD_STATE_RE.search(title):
+        return True
+    evidence = " ".join(
+        str(f.get(key) or "")
+        for key in ("evidence", "match_text", "fix_strategy")
+    )
+    if _OPT9_RESULT_CACHE_RE.search(evidence):
+        return False
+    return bool(_OPT9_BUILD_STATE_RE.search(evidence))
 
 # Patterns whose modeled runner-min is NOT a realizable compute saving. The
 # credited `runner_min_saving` is set to None (so the bill headline / Also-noticed
@@ -5725,6 +5766,20 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
     long_pole = crit.get("long_pole_p50", 0.0)
     floor = crit.get("floor_p50", 0.0)
     model = cfg["model"]
+
+    if _opt9_is_build_state(f):
+        f["wall_clock_p50_s"] = None
+        f["runner_min_saving"] = None
+        f["tier"] = 2
+        f["realization"] = "none"
+        f["opt9_measure_before_after"] = True
+        f["size_note"] = (
+            "build-state and generated-output cache costs vary with restore, "
+            "validation, and save overhead — measure before and after on the "
+            "same workload before crediting seconds"
+        )
+        return
+
     # Guardrail A — D12 serial-gate auto-demote.
     if pat in _SERIAL_GATE_PATTERNS:
         model = "wall-clock-negative"
@@ -27766,8 +27821,13 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # that descriptive evidence only after the required closure actually narrowed
     # the spine: an independent sibling outside every required `needs:` closure
     # must not acquire a merge-wait finding merely because it has a slow tail.
+    _minority_tail_confirmed = {
+        _n for _n, _p50 in pr_checks_tuple
+        if spine_required_scoped and _pole_is_required_reachable(
+            _n, req_names, _jg, crit_by_wf)
+    }
     _minority_tail_by_check = _minority_tails_for_checks(
-        pr_checks_tuple, crit_by_wf, spine_required_scoped)
+        pr_checks_tuple, crit_by_wf, _minority_tail_confirmed)
     # ENG-1 PR-N1: per-PR chain TIMING facts (data-only; nothing renders or
     # ranks on them until PR-N2). One entry per sampled repr sha — the longest
     # `needs:` chain (capped member spans, `_span_caps` — the caps the ranking

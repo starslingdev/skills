@@ -6387,6 +6387,12 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
             for hit in hits:
                 finding_idx += 1
                 f = _emit(entry, hit, rel, finding_idx)
+                if entry.pattern == "OPT9" and "#" in hit.match_text:
+                    # The detector owns the tool identity. Keep it separate from
+                    # the job name and command prose so downstream sizing cannot
+                    # confuse a job such as `eslint-typecheck` with an ESLint
+                    # result-cache finding when the matched tool was `tsc`.
+                    f["opt9_tool"] = hit.match_text.rsplit("#", 1)[-1]
                 # Attach the verbatim matched code so the report shows the real
                 # workflow text, not prose in a yaml fence. Prefer a snippet the
                 # detector set explicitly (e.g. an `on:` block for an absence
