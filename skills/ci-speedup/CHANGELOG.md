@@ -1227,6 +1227,8 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-11-06** — Rank fallback and unresolved merge-wait candidates by the job that actually completes last on each sampled commit. A long pull-request job remains eligible even when its check run is absent from the per-PR check population; readable required-check scopes retain their existing ranking.
+
 - **2026-11-05** — Attribute each zero-saving PR to its own concurrent blocker in the per-PR sibling split, falling back to generic wording when those blockers differ or the target check did not run. A rendered split now supplements the existing headline-presence reconciliation instead of bypassing it.
 
 - **2026-11-05** — Frame a check excluded from the merge-wait spine only as off-path when it also has a long-test sharding finding. The exclusion note now wins over the finding's wall-clock magnitude, so the report no longer describes the same check as both dropped and on the critical path. A finding that covers both an excluded check and a kept one stays on the critical path and names the kept check.

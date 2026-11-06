@@ -2511,6 +2511,42 @@ def _rank_spine_present_first(
     return order, present, n_pr, pole_freq
 
 
+def _fallback_last_jobs(
+    repr_shas: list[str],
+    rep_members: dict[str, list[str]],
+    jobs_per_run_by_wf: dict[str, list[list[dict[str, Any]]]],
+) -> dict[str, tuple[str, float]]:
+    """Return the job that completed last for each sampled commit population.
+
+    This is used only when required-check reachability did not produce a scoped
+    gate. The normal required-scoped rank remains byte-for-byte unchanged. Jobs
+    from push/schedule runs are excluded: they belong to the post-merge lane, not
+    the pull-request fallback.
+    """
+    member_to_rep = {
+        member: rep
+        for rep in repr_shas
+        for member in rep_members.get(rep, [rep])
+    }
+    winners: dict[str, tuple[float, str, float]] = {}
+    for workflow_runs in jobs_per_run_by_wf.values():
+        for run_jobs in workflow_runs:
+            for job in run_jobs:
+                if str(job.get("_run_event") or "") not in _DEVELOPER_EVENTS:
+                    continue
+                rep = member_to_rep.get(str(job.get("_run_head_sha") or ""))
+                completed = _parse_dt(str(job.get("completed_at") or ""))
+                duration = _job_duration_s(job)
+                name = str(job.get("name") or "")
+                if rep is None or completed is None or duration is None or not name:
+                    continue
+                candidate = (completed.timestamp(), name, round(duration, 1))
+                current = winners.get(rep)
+                if current is None or candidate > current:
+                    winners[rep] = candidate
+    return {rep: (winner[1], winner[2]) for rep, winner in winners.items()}
+
+
 def _run_wall_s(r: dict[str, Any]) -> float | None:
     """Wall-time of a SINGLE run from run-LIST metadata alone (no per-run job fetch):
     `run_started_at`|`created_at` → `updated_at`. None when the timestamps are
@@ -27267,6 +27303,32 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         logger.info("critical path: dropped %d non-required (non-merge-gating) "
                     "check(s): %s", len(dropped_non_required),
                     dropped_non_required[:8])
+    if not spine_required_scoped:
+        # A fallback/unresolved spine must rank the job that actually ended each
+        # sampled commit. Check-run populations can omit a producing workflow's
+        # job entirely; the already-fetched job rows retain the completion fact.
+        _last_jobs = _fallback_last_jobs(repr_shas, _rep_members, jobs_per_run_by_wf)
+        if _last_jobs:
+            _known_check_names = set(pr_check_p50)
+            _fallback_durations: dict[str, list[float]] = {}
+            _completed_rows: list[dict[str, float]] = []
+            for _sha, _checks in zip(repr_shas, per_sha_checks):
+                _row = dict(_checks)
+                _last = _last_jobs.get(_sha)
+                if _last is not None:
+                    _name, _duration = _last
+                    # Existing check-run candidates already have the complete
+                    # per-commit population and retain their historical rank.
+                    # Recover only a last job that population omitted entirely.
+                    if _name not in _known_check_names:
+                        _row[_name] = _duration
+                        _fallback_durations.setdefault(_name, []).append(_duration)
+                _completed_rows.append(_row)
+            per_sha_checks = _completed_rows
+            for _name, _durations in _fallback_durations.items():
+                if _name not in pr_check_p50:
+                    pr_check_p50[_name] = round(_percentile(_durations, 50), 1)
+                    check_timing_source[_name] = "workflow_jobs"
     # Config-era enumeration binding (issue #69). #66/#68 scoped the SPINE RUNS to one era, but
     # the CHECK SET was still enumerated from the raw PR sample — so a disclosed_pre report leaked
     # post-era-only checks (the NEW config's `guard shard N/4` jobs, carried by 2 post-change PRs)
