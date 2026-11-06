@@ -13,7 +13,6 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
-- **2026-11-06** — Require every long-pole agent hand-off to treat scoped local runs as pre-flight evidence, call a change verified only after the repository's own CI gate or its exact gating commands pass, and withhold pull requests whose predicted saving is smaller than the pole's observed range.
 - **2026-11-06** — Keep Vitest coverage-provider guidance grounded in matched measurements. The report preserves the measured compile/load share, asks maintainers to time both providers on the same commit, warns that coverage thresholds need re-baselining, and credits no provider-switch saving without matched results.
 - **2026-11-06** — Keep OPT9 compiler build-state and generated-output cache suggestions uncredited until a same-workload before/after measurement shows a net saving. Lint and format result caches retain their existing sizing.
 - **2026-11-06** — Limit minority slow-tail findings to checks confirmed as required or reachable through a required job's `needs:` graph. A conservatively retained file-backed check whose job cannot be identified stays visible on the measured spine without being described as merge-blocking, and verification rejects a tail attached to such a check.
@@ -933,6 +932,8 @@ unversioned and updates by reinstall from `main`.
   re-rendered. (#72)
 
 ### Changed
+
+- **2026-11-06** — Require every long-pole agent hand-off to treat scoped local runs as pre-flight evidence, call a change verified only after the repository's own CI gate or its exact gating commands pass, and withhold pull requests whose predicted saving is smaller than the pole's observed range.
 
 - **2026-11-03** — SKILL.md: the fast-CI "good shape" preface applies under exactly 2m 00s (the report's 🟡 tier), not "under ~2 min"; the hostile quality review is scoped to worked examples and is no longer called mandatory, since it is not a run phase and a user's run, interactive or headless, never spawns it. (#187)
 - **2026-11-03** — Document flaky-test quarantine with ownership, expiry, reporting and a product-failure guardrail; explain account capacity and explicit hosted fallback before changing runners; point mostly-idle queue waits to the single-slot resource diagnosis. (#177)
