@@ -5495,6 +5495,13 @@ def _opt32_default_path_matches(path: str) -> bool:
 
 def _opt32_ignored_by_patterns(path: str, patterns: list[str]) -> bool:
     """Apply ordered paths-ignore patterns, including conservative `!` restores."""
+    # An unsupported positive pattern merely misses a possible skip. An
+    # unsupported negative pattern is different: ignoring its restore could
+    # claim a skip that GitHub would not make, so fail the whole path closed.
+    if any(str(raw).strip().startswith("!")
+           and any(c in str(raw).strip()[1:] for c in "[]{}+\\")
+           for raw in patterns):
+        return False
     ignored = False
     for raw in patterns:
         pattern = str(raw).strip()
@@ -5547,7 +5554,10 @@ def _opt32_changed_files(client: GhClient, repo: str, pr_number: int) -> list[st
                 files.append(name)
         if len(doc) < 100:
             return files
-    return files
+    # GitHub exposes at most 3,000 files for this endpoint. A full last page
+    # therefore cannot prove the PR ended at the API ceiling; treating the
+    # prefix as complete could falsely classify a later code file as ignored.
+    return None
 
 
 def _measure_opt32_path_filters(

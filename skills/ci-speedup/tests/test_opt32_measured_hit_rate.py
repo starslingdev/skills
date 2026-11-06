@@ -136,3 +136,17 @@ def test_opt32_changed_files_fetch_is_paginated_and_bounded():
     client = _PathFilterClient(paths)
     assert len(cr._opt32_changed_files(client, "o/r", 1)) == 201
     assert client.changed_file_calls == 3
+
+
+def test_opt32_changed_files_fetch_rejects_the_api_ceiling_as_incomplete():
+    paths = {1: [f"docs/file-{i}.md" for i in range(3000)]}
+    client = _PathFilterClient(paths)
+
+    assert cr._opt32_changed_files(client, "o/r", 1) is None
+    assert client.changed_file_calls == cr._OPT32_CHANGED_FILES_MAX_PAGES
+
+
+def test_opt32_unsupported_negative_glob_fails_closed():
+    patterns = ["docs/**", "!docs/[ab]/**"]
+
+    assert not cr._opt32_ignored_by_patterns("docs/a/guide.md", patterns)
