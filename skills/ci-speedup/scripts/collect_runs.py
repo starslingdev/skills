@@ -2364,6 +2364,9 @@ def _commit_queue_work_split(commit_fact: dict[str, Any]) -> dict[str, float]:
     to ``commit_wall_s`` rather than summing concurrent job durations.
     """
     wall_s = _finite_float(commit_fact.get("commit_wall_s"))
+    if wall_s is None:
+        # The per-commit producer stamps its complete wall as `wall_s`.
+        wall_s = _finite_float(commit_fact.get("wall_s"))
     wall_start = _parse_dt(str(commit_fact.get("created_at") or ""))
     jobs = [j for j in (commit_fact.get("jobs") or []) if isinstance(j, dict)]
     if wall_s is None or wall_s < 0 or wall_start is None or not jobs:
@@ -2419,7 +2422,10 @@ def _stamp_commit_queue_work(clock: dict[str, Any]) -> dict[str, Any]:
     out = copy.deepcopy(clock)
     complete: list[dict[str, Any]] = []
     stamped: list[dict[str, Any]] = []
-    for raw in out.get("commits") or []:
+    # The per-commit producer publishes `facts`; `commits` is the earlier
+    # hand-off name. Enrich whichever list the stamp carries, in place.
+    key = "facts" if isinstance(out.get("facts"), list) else "commits"
+    for raw in out.get(key) or []:
         if not isinstance(raw, dict):
             continue
         fact = dict(raw)
@@ -2429,12 +2435,12 @@ def _stamp_commit_queue_work(clock: dict[str, Any]) -> dict[str, Any]:
             if fact.get("partial") is not True:
                 complete.append(fact)
         stamped.append(fact)
-    out["commits"] = stamped
+    out[key] = stamped
     if not complete:
         return out
     queue = [float(f["queue_s"]) for f in complete]
     work = [float(f["work_s"]) for f in complete]
-    walls = [float(f.get("commit_wall_s") or 0.0) for f in complete]
+    walls = [float(f.get("commit_wall_s") or f.get("wall_s") or 0.0) for f in complete]
     shares = [q / wall for q, wall in zip(queue, walls) if wall > 0]
     out.update({
         "n": len(complete),

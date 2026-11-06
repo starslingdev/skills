@@ -420,3 +420,46 @@ def test_partial_only_stamp_skips_and_static_report_uses_full_wait(tmp_path):
     static_check = vr.check_commit_queue_work_credit(
         static_report, static_path, static_report_path)
     assert static_check.ok, static_check.detail
+
+
+def _producer_fact(sha: str) -> dict:
+    """The per-commit wall-clock producer's own fact shape: `facts`, `wall_s`,
+    the first run's `created_at`, and job intervals whose queued time is the
+    job's `created_at`."""
+    return {
+        "sha": sha,
+        "event": "pull_request",
+        "partial": False,
+        "missing_workflows": [],
+        "wall_s": 1290.0,
+        "observed_wall_s": 1290.0,
+        "created_at": _iso(0),
+        "slowest_job": {"name": "test", "workflow_file": _CI, "duration_s": 390.0},
+        "jobs": [{
+            "name": "test", "workflow_file": _CI, "created_at": _iso(0),
+            "started_at": _iso(900), "completed_at": _iso(1290),
+        }],
+    }
+
+
+def test_queue_split_consumes_the_producers_fact_shape(monkeypatch, tmp_path):
+    clock = cr._stamp_commit_queue_work({
+        "p50_s": 1290.0, "p90_s": 1290.0,
+        "facts": [_producer_fact(f"s{i}") for i in range(1, 21)],
+    })
+    assert clock.get("queue_p50_s") == 900.0
+    assert clock.get("work_p50_s") == 390.0
+    assert all(fact.get("queue_s") == 900.0 for fact in clock["facts"])
+    assert abs(clock.get("queue_share_p50") - 900.0 / 1290.0) < 0.000001
+
+    monkeypatch.setattr(cr, "GhClient", _QueueClient)
+    doc = copy.deepcopy(_DOC)
+    doc["commit_wall_clock"] = {
+        "p50_s": 1290.0, "p90_s": 1290.0,
+        "facts": [_producer_fact(f"s{i}") for i in range(1, 21)],
+    }
+    doc = cr.collect(doc, "o/r", max_runs=20, shallow_runs=20)
+    assert doc["pr_critical_path"]["commit_wall_clock"].get("queue_p50_s") == 900.0
+    report, findings_path, _report_path = _write_artifacts(tmp_path, doc)
+    check = vr.check_commit_queue_work_credit(report, findings_path)
+    assert check.ok and not check.skipped, check.detail

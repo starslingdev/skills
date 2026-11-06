@@ -14849,7 +14849,7 @@ def check_commit_queue_work_credit(report: str, findings_path: Path | None,
     except (OSError, ValueError) as exc:
         return Check(name, False, f"could not read findings JSON: {exc}")
     clock = _as_dict(_as_dict(data.get("pr_critical_path")).get("commit_wall_clock"))
-    commits = _as_list(clock.get("commits"))
+    commits = _as_list(clock.get("facts")) or _as_list(clock.get("commits"))
     if not commits:
         return Check(name, True, "no per-commit queue/work stamp", skipped=True)
 
@@ -14903,7 +14903,9 @@ def check_commit_queue_work_credit(report: str, findings_path: Path | None,
         if fact.get("partial") is True:
             continue
         try:
-            wall = float(fact.get("commit_wall_s"))
+            wall = float(fact.get("commit_wall_s")
+                         if fact.get("commit_wall_s") is not None
+                         else fact.get("wall_s"))
         except (TypeError, ValueError):
             continue
         start = _ts(fact.get("created_at"))
