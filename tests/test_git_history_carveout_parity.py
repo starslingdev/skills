@@ -59,8 +59,10 @@ def _restore_local_action_index(request):
         return
     speed = request.getfixturevalue("sides")[0]
     saved = getattr(speed, "_GIT_HISTORY_LOCAL_ACTIONS", None)
+    saved_scripts = getattr(speed, "_GIT_HISTORY_LOCAL_SCRIPTS", None)
     yield
     speed._GIT_HISTORY_LOCAL_ACTIONS = saved
+    speed._GIT_HISTORY_LOCAL_SCRIPTS = saved_scripts
 
 
 # Where a `$` or a `HEAD` SITS on the command line decides whether it says
@@ -153,7 +155,10 @@ def test_operand_position_rows_get_the_verdict_they_are_pinned_to(sides):
 def test_the_copied_patterns_are_character_identical(sides):
     speed, score = sides
     for name in ("_GIT_HISTORY_RE", "_HISTORY_JOB_NAME_RE", "_LINE_CONTINUATION_RE",
-                 "_NESTED_LOCAL_USES_RE"):
+                 "_NESTED_LOCAL_USES_RE", "_FIRST_PARTY_SCRIPT_RE",
+                 "_SCRIPT_GIT_HISTORY_RE", "_SCRIPT_LITERAL_CALL_RE",
+                 "_SCRIPT_LITERAL_ARG_RE", "_SCRIPT_COMMENT_LINE_RE",
+                 "_SCRIPT_GIT_ARGS_RE"):
         a, b = getattr(speed, name), getattr(score, name)
         assert a.pattern == b.pattern, f"{name} pattern text diverged"
         assert a.flags == b.flags, f"{name} flags diverged"
@@ -182,6 +187,7 @@ _JOB_BATTERY = [
 def test_job_needs_git_history_agrees_on_every_battery_row(sides):
     speed, score = sides
     speed._GIT_HISTORY_LOCAL_ACTIONS = set()
+    speed._GIT_HISTORY_LOCAL_SCRIPTS = set()
     mismatches = [
         name for name, job in _JOB_BATTERY
         if speed._job_needs_git_history(job, name)
