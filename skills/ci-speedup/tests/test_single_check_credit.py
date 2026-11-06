@@ -260,3 +260,18 @@ def test_singleton_and_faster_sibling_ceilings_match_the_verifier(monkeypatch, t
         report, report_path, findings_path, skill_repo=None)
         if not check.skipped and not check.ok]
     assert failures == [], [(check.name, check.detail) for check in failures]
+
+
+def test_collect_sizing_credits_complete_single_workflow_prs(monkeypatch):
+    """Through collect's own cascade, not a hand-built context: every sampled
+    check here belongs to the finding's workflow, so each population has no
+    outside sibling. Complete reads keep the full raw saving; the four
+    incomplete reads stay unknown and drop out of the weighted credit."""
+    complete = _collect(monkeypatch, _SingleCheckClient)["findings"][0]
+    assert complete["wall_clock_p50_s"] == 500.0
+
+    incomplete = _collect(monkeypatch, _IncompleteSingletonClient)["findings"][0]
+    assert incomplete["wall_clock_p50_s"] == 300.0
+    reasons = " ".join(str(step.get("reason") or "")
+                       for step in incomplete.get("wall_clock_derivation") or [])
+    assert "unknown on 4 of 10 PRs with an incomplete check-runs read" in reasons
