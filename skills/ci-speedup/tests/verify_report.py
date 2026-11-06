@@ -4164,13 +4164,20 @@ def check_headline_floor_presence_reconciled(report: str, findings_path: Path | 
         return Check(name, True, "findings unreadable", skipped=True)
     cp = _as_dict(_as_dict(data).get("pr_critical_path"))
     split_check = _verify_per_pr_floor_split(name, report, cp)
-    if split_check is not None:
+    if split_check is not None and not split_check.ok:
         return split_check
+
+    def _with_split(presence_check: Check) -> Check:
+        """A rendered split is an additional invariant, never an early exit."""
+        if split_check is None or not presence_check.ok:
+            return presence_check
+        return Check(name, True, f"{split_check.detail}; {presence_check.detail}")
+
     stamp = cp.get("critical_path_check")
     # A non-string / empty stamp is a malformed or stampless bundle — degrade to the SAME SKIP as an
     # empty findings container (the wrong-type-container degradation contract), never a spurious FAIL.
     if not isinstance(stamp, str) or not stamp:
-        return Check(name, True, "no critical_path_check stamped", skipped=True)
+        return _with_split(Check(name, True, "no critical_path_check stamped", skipped=True))
     stamped = _cmp_name(stamp)
 
     # The named slowest check's OWN p50 — a FIELD read from checks[], keyed the same way the engine
@@ -4189,12 +4196,13 @@ def check_headline_floor_presence_reconciled(report: str, findings_path: Path | 
             if nm == str(stamp):
                 break
     if slowest_p50 is None:
-        return Check(name, True, "critical_path_check carries no numeric checks[].p50_s", skipped=True)
+        return _with_split(Check(
+            name, True, "critical_path_check carries no numeric checks[].p50_s", skipped=True))
 
     present_map, npop = _vr_gate_counts(cp)          # the engine's _gate_counts (present, n)
     if not npop:
-        return Check(name, True, "no per-PR populations to re-derive presence/floor from",
-                     skipped=True)
+        return _with_split(Check(
+            name, True, "no per-PR populations to re-derive presence/floor from", skipped=True))
     spresent = present_map.get(str(stamp))
     if spresent is None:
         for nm, cnt in present_map.items():
@@ -4207,20 +4215,22 @@ def check_headline_floor_presence_reconciled(report: str, findings_path: Path | 
     # None below the stability floor, so the engine keeps the slowest check's p50 and lowers nothing).
     maxima = [max(p for _n, p in pr) for pr in _populations_per_pr(cp) if pr]
     if len(maxima) < _VR_RARE_PRESENCE_MIN_PR:
-        return Check(name, True,
-                     f"only {len(maxima)} per-PR populations (< {_VR_RARE_PRESENCE_MIN_PR}) — the "
-                     "population floor is not derivable, so the slowest check's p50 stands unlowered",
-                     skipped=True)
+        return _with_split(Check(
+            name, True,
+            f"only {len(maxima)} per-PR populations (< {_VR_RARE_PRESENCE_MIN_PR}) — the "
+            "population floor is not derivable, so the slowest check's p50 stands unlowered",
+            skipped=True))
     pop_floor = statistics.median(maxima)
 
     # The engine LOWERS the floor (→ the Form-2 contradiction risk) ⇔ the slowest is non-universal AND
     # the population floor is strictly below its p50 — EXACTLY blocking_path's `floor_p50 = _pop_floor`
     # guard (`0 < _spresent < npop` and `_pop_floor < slowest_p50`). Otherwise no reconciliation is owed.
     if not (0 < spresent < npop and pop_floor < slowest_p50):
-        return Check(name, True,
-                     f"`{stamp}` floor not lowered (present {spresent}/{npop}, "
-                     f"pop-floor {_fmt_clock(pop_floor)} vs p50 {_fmt_clock(slowest_p50)}) — no "
-                     "reconciliation owed", skipped=True)
+        return _with_split(Check(
+            name, True,
+            f"`{stamp}` floor not lowered (present {spresent}/{npop}, "
+            f"pop-floor {_fmt_clock(pop_floor)} vs p50 {_fmt_clock(slowest_p50)}) — no "
+            "reconciliation owed", skipped=True))
 
     # PHYSICAL BOUND (issue #24): the renderer caps the population floor at the MEASURED makespan p50
     # (the median per-PR span-capped wall) — a re-run-inflated per-PR check p50 can leave `pop_floor`
@@ -4264,9 +4274,10 @@ def check_headline_floor_presence_reconciled(report: str, findings_path: Path | 
                      f"was lowered (present {spresent}/{npop}), so the headline must disclose either "
                      "the presence caveat (minority-present) or the conditional-p50 overstatement "
                      f"(majority-present); expected {presence_recon!r} or {overstatement_recon!r}")
-    return Check(name, True,
-                 f"headline reconciles `{stamp}` ({spresent}/{npop} presence, ~"
-                 f"{_fmt_clock(slowest_p50)}) with the {merge_dur} population floor")
+    return _with_split(Check(
+        name, True,
+        f"headline reconciles `{stamp}` ({spresent}/{npop} presence, ~"
+        f"{_fmt_clock(slowest_p50)}) with the {merge_dur} population floor"))
 
 
 # The presence-CAUSAL headline template (blocking_path `elif gate_is_slowest:`, non-universal
