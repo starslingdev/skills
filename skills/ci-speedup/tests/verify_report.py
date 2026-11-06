@@ -14081,6 +14081,7 @@ _VR_LEAF_STEP_CATEGORY: dict[str, str] = {
     "pytest-no-xdist": "test",
     "test-isolated-serial": "test",
     "test-loop-serial": "test",
+    "emulated-image-compile": "build",
     "cargo-test-shard": "test",
     "benchmark-serial-reruns": "test",
     "android-emulator-shard": "test",

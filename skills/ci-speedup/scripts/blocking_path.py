@@ -2951,8 +2951,8 @@ def _parse_log(text: str,
                     "search": ["schema", "concurrent", "shared state"],
                 }
     # --- M: one shell runner invokes many test files one after another ----------
-    # This is deliberately the last catalog leaf: a more specific detector above
-    # keeps precedence. Each admitted invocation needs a timestamped completion
+    # This stays ahead of the image-build leaf below. Each admitted invocation
+    # needs a timestamped completion
     # before the next invocation starts. That proves serial execution rather than
     # inferring it merely from repeated command lines. The outer span must also be
     # close to the sum of the invocation intervals, excluding loops with long gaps
@@ -3008,6 +3008,46 @@ def _parse_log(text: str,
             "deeper": [],
             "evidence": [x[3] for x in command_starts[:2]],
             "search": ["test loop", "parallel", "OPT88"],
+        }
+    # --- M: a multi-platform image compiles its foreign architecture under emulation
+    compile_re = re.compile(
+        r"\b(?:go\s+build|cargo\s+build|(?:npm|pnpm|yarn)\s+(?:run\s+)?build|"
+        r"cmake\s+--build|dotnet\s+(?:build|publish)|gradle\w*\s+.*\bbuild|"
+        r"make(?:\s|$))", re.IGNORECASE)
+    operations: dict[str, tuple[str, str]] = {}
+    durations: list[tuple[str, float, str, str]] = []
+    for line in lines:
+        match = re.search(r"#(\d+)\s+\[linux/([^\s\]]+)[^\]]*\]\s+RUN\s+(.+)", line)
+        if match and compile_re.search(match.group(3)):
+            operations[match.group(1)] = (match.group(2).lower(), line)
+            continue
+        done = re.search(r"#(\d+)\s+DONE\s+([\d.]+)s\b", line)
+        if done and done.group(1) in operations:
+            arch, header = operations.pop(done.group(1))
+            durations.append((arch, float(done.group(2)), header, line))
+    native = sum(seconds for arch, seconds, _header, _done in durations
+                 if arch in {"amd64", "x86_64"})
+    emulated = sum(seconds for arch, seconds, _header, _done in durations
+                   if arch not in {"amd64", "x86_64"})
+    total = native + emulated
+    if native > 0 and emulated > 0 and emulated / total >= 0.50:
+        share = round(100 * emulated / total)
+        return {
+            "fix_key": "emulated-image-compile",
+            "unit_label": (f"native compile {native:g}s; foreign-architecture compile "
+                           f"{emulated:g}s ({share}% of measured compile time)"),
+            "magnitude": {"label": "emulated compile seconds", "unit": "s",
+                          "value": round(emulated, 3)},
+            "deeper": [{
+                "rows": [("native linux/amd64 compile", native, None),
+                         ("foreign-architecture compile", emulated, None)],
+                "blocker_note": (f"foreign-architecture work is {share}% of measured "
+                                 "compile time"),
+                "pct_of": "sum",
+            }],
+            "evidence": [item for _arch, _seconds, header, done in durations
+                         for item in (header, done)][:6],
+            "search": ["docker/build-push-action", "BUILDPLATFORM", "TARGETARCH"],
         }
     return None
 
@@ -3489,6 +3529,30 @@ _FIX_META: dict[str, dict[str, Any]] = {
         "deliver": "Run independent files concurrently with a measured worker cap, keep "
                    "any exclusive files in a serial lane, verify the same test count and "
                    "results, and re-measure the step.",
+    },
+    "emulated-image-compile": {
+        "cause": "Buildx spends at least half of the measured compile time building a "
+                 "foreign architecture under emulation instead of compiling it natively "
+                 "or cross-compiling from the build platform.",
+        "look": "`{wf}` and its repository-local Dockerfile — trace the compile stage, "
+                "the target architecture arguments, and the artifact copied into each "
+                "final image. Confirm the timed buildx operations belong to that stage.",
+        "constraints": "Preserve every published platform, artifact contents, release "
+                       "flags, tests, provenance, and manifest assembly. A BUILDPLATFORM "
+                       "change must pass the target architecture explicitly and confirm "
+                       "the produced binary format. Size the opportunity only from the "
+                       "measured foreign-architecture compile seconds.",
+        "docs": ["Docker multi-platform build strategies: "
+                 "https://docs.docker.com/build/building/multi-platform/"],
+        "deliver": "Build platform-independent output once on `FROM "
+                   "--platform=$BUILDPLATFORM` and copy it into each target image, or "
+                   "cross-compile with explicit target arguments. This removes most "
+                   "emulated compile seconds, so both wall time and runner minutes should "
+                   "fall. If cross-compilation is unsafe, use a native runner per "
+                   "architecture and merge manifests; that cuts wall time but adds jobs "
+                   "and a merge step, so runner minutes will usually stay level or rise. "
+                   "Run each image on its native architecture and re-measure both "
+                   "wall time and total runner minutes.",
     },
     "eslint-no-cache": {
         "cause": "The lint step runs `eslint` over the whole file tree with NO `--cache` "
@@ -5716,6 +5780,7 @@ _LEAF_STEP_CATEGORY: dict[str, str] = {
     "pytest-no-xdist": "test",
     "test-isolated-serial": "test",
     "test-loop-serial": "test",
+    "emulated-image-compile": "build",
     "cargo-test-shard": "test",
     "benchmark-serial-reruns": "test",
     "android-emulator-shard": "test",

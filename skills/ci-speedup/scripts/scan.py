@@ -1678,6 +1678,134 @@ def _uses(step: dict) -> str:
     return str(step.get("uses") or "")
 
 
+_OPT102_ROOT: Path | None = None
+_OPT102_COMPILE_RE = re.compile(
+    r"\b(?:go\s+build|cargo\s+build|(?:npm|pnpm|yarn)\s+(?:run\s+)?build|"
+    r"cmake\s+--build|dotnet\s+(?:build|publish)|gradle\w*\s+.*\bbuild|make(?:\s|$))",
+    re.IGNORECASE,
+)
+# Only a stage that runs on the build platform avoids emulation. GOOS / GOARCH /
+# --target flags inside a target-platform stage still execute under emulation.
+_OPT102_BUILDPLATFORM_RE = re.compile(
+    r"--platform=\$(?:\{BUILDPLATFORM\}|BUILDPLATFORM\b)", re.IGNORECASE)
+
+
+def _detect_opt102(doc: dict, raw: str) -> list[Hit]:
+    """Find local multi-platform image builds whose compile stage lacks a
+    build-platform pin or an explicit cross-compilation target."""
+    if _OPT102_ROOT is None:
+        return []
+    root = _OPT102_ROOT.resolve()
+    jobs = doc.get("jobs") or {}
+    if not isinstance(jobs, dict):
+        return []
+    hits: list[Hit] = []
+    for job_name, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        for step in _steps(job):
+            if not re.match(r"^docker/build-push-action@", _uses(step)):
+                continue
+            with_ = step.get("with") or {}
+            if not isinstance(with_, dict):
+                continue
+            value = with_.get("platforms")
+            if isinstance(value, list):
+                platforms = [str(item).strip().lower() for item in value]
+            else:
+                platforms = [item.strip().lower() for item in
+                             re.split(r"[,\n]", str(value or "")) if item.strip()]
+            # Hosted x64 runners are the assumed build platform; an arm runner
+            # (or an unresolved expression) leaves the host unknown, so stay silent.
+            runs_on = json.dumps(job.get("runs-on")).lower()
+            if "arm" in runs_on or "${{" in runs_on:
+                continue
+            if not any(p.startswith("linux/") and p != "linux/amd64"
+                       for p in platforms):
+                continue
+            context = str(with_.get("context") or ".").strip()
+            dockerfile = str(with_.get("file") or "Dockerfile").strip()
+            target = str(with_.get("target") or "").strip()
+            if (not context or not dockerfile or "${{" in context + dockerfile + target
+                    or "://" in context or context.startswith("git@")
+                    or Path(context).is_absolute() or Path(dockerfile).is_absolute()):
+                continue
+            candidate = (root / dockerfile if "file" in with_
+                         else root / context / dockerfile).resolve()
+            try:
+                candidate.relative_to(root)
+                docker_text = candidate.read_text(encoding="utf-8", errors="replace")
+            except (ValueError, OSError):
+                continue
+            raw_stages = [stage for stage in
+                          re.split(r"(?im)(?=^\s*FROM\s+)", docker_text)
+                          if re.match(r"(?i)^\s*FROM\s+", stage)]
+            stages: list[tuple[str, str, set[str]]] = []
+            aliases: dict[str, int] = {}
+            on_build_platform: list[bool] = []
+            for index, stage in enumerate(raw_stages):
+                clean = "\n".join(line for line in stage.splitlines()
+                                  if not line.lstrip().startswith("#"))
+                header = clean.splitlines()[0].strip()
+                header_match = re.match(
+                    r"(?i)^FROM(?:\s+--\S+)*\s+(\S+)(?:\s+AS\s+(\S+))?", header)
+                if not header_match:
+                    continue
+                refs = {header_match.group(1)}
+                refs.update(re.findall(
+                    r"(?im)^\s*COPY\b[^\n]*?--from=([^\s]+)", clean))
+                base = aliases.get(header_match.group(1).lower())
+                on_build_platform.append(bool(
+                    _OPT102_BUILDPLATFORM_RE.search(header)
+                    or (base is not None and on_build_platform[base])))
+                stages.append((header, clean, refs))
+                if header_match.group(2):
+                    aliases[header_match.group(2).lower()] = index
+            if not stages:
+                continue
+            if target:
+                selected = aliases.get(target.lower())
+                if selected is None:
+                    continue
+            else:
+                selected = len(stages) - 1
+            reachable: set[int] = set()
+            pending = [selected]
+            while pending:
+                index = pending.pop()
+                if index in reachable or index >= len(stages):
+                    continue
+                reachable.add(index)
+                for ref in stages[index][2]:
+                    ref_index = (int(ref) if ref.isdigit() and int(ref) < len(stages)
+                                 else aliases.get(ref.lower()))
+                    if ref_index is not None:
+                        pending.append(ref_index)
+            risky_stage = None
+            for index in sorted(reachable):
+                header, clean, _refs = stages[index]
+                runs = re.findall(
+                    r"(?ims)^\s*RUN\s+(.+?)(?=^\s*[A-Z][A-Z0-9]*\s+|\Z)", clean)
+                if (any(_OPT102_COMPILE_RE.search(run) for run in runs)
+                        and not on_build_platform[index]):
+                    risky_stage = (header, clean)
+                    break
+            if risky_stage is None:
+                continue
+            line = _line_of_in_job(raw, str(job_name), "docker/build-push-action@")
+            stage_head = risky_stage[0]
+            hits.append(Hit(
+                line=line,
+                affected_jobs=[str(job_name)],
+                evidence=(f"job `{job_name}` builds {', '.join(platforms)} from "
+                          f"`{candidate.relative_to(root)}`; compile stage "
+                          f"`{stage_head}` has no build-platform or cross-target signal"),
+                match_text=str(candidate.relative_to(root)),
+                snippet=_raw_line(raw, line),
+            ))
+    return hits
+
+
 def _run(step: dict) -> str:
     r = step.get("run")
     return r if isinstance(r, str) else ""
@@ -2967,6 +3095,7 @@ _DETECTORS: dict[str, Any] = {
     "OPT45": _detect_opt45,
     "OPT62": _detect_opt62,
     "OPT63": _detect_opt63,
+    "OPT102": _detect_opt102,
 }
 
 
@@ -6338,7 +6467,8 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
 
     # Index local composite actions that run git-history ops, so OPT28 can see a
     # `git checkout origin/main` hidden inside `uses: ./.github/actions/foo`.
-    global _GIT_HISTORY_LOCAL_ACTIONS, _GIT_HISTORY_LOCAL_SCRIPTS
+    global _GIT_HISTORY_LOCAL_ACTIONS, _GIT_HISTORY_LOCAL_SCRIPTS, _OPT102_ROOT
+    _OPT102_ROOT = root
     _GIT_HISTORY_LOCAL_ACTIONS = _index_local_git_actions(root, parsed)
     _GIT_HISTORY_LOCAL_SCRIPTS = _index_local_git_scripts(root, parsed)
 
