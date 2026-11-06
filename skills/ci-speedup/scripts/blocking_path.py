@@ -2801,6 +2801,19 @@ def _parse_log(text: str,
             "evidence": ev,
             "search": [":test", "BUILD SUCCESSFUL in", "maxParallelForks"],
         }
+    dependency_state = _cache_state_of_log(text, "dependency-cache")
+    if dependency_state:
+        return {
+            "fix_key": "dependency-cache",
+            "unit_label": "dependency cache restore results",
+            "magnitude": {"label": "dependency cache misses", "unit": "%",
+                          "value": dependency_state["miss_pct"]},
+            "deeper": [],
+            "evidence": [line for line in lines if _DEPENDENCY_CACHE_MISS_RE.search(line)
+                         or "Cache restored from key" in line][:3],
+            "search": ["Cache not found for input keys", "cache is not found",
+                       "Cache restored from key"],
+        }
     # --- L: one shell runner invokes many test files one after another ----------
     # This is deliberately the last catalog leaf: a more specific detector above
     # keeps precedence. Each admitted invocation needs a timestamped completion
@@ -2859,19 +2872,6 @@ def _parse_log(text: str,
             "deeper": [],
             "evidence": [x[3] for x in command_starts[:2]],
             "search": ["test loop", "parallel", "OPT88"],
-        }
-    dependency_state = _cache_state_of_log(text, "dependency-cache")
-    if dependency_state:
-        return {
-            "fix_key": "dependency-cache",
-            "unit_label": "dependency cache restore results",
-            "magnitude": {"label": "dependency cache misses", "unit": "%",
-                          "value": dependency_state["miss_pct"]},
-            "deeper": [],
-            "evidence": [line for line in lines if _DEPENDENCY_CACHE_MISS_RE.search(line)
-                         or "Cache restored from key" in line][:3],
-            "search": ["Cache not found for input keys", "cache is not found",
-                       "Cache restored from key"],
         }
     return None
 
