@@ -473,7 +473,10 @@ def bound_measured_critical_path(value: float, ctx: WallClockContext) -> BoundRe
     clauses: list[str] = []
     if zero:
         names = {str(row[2]) for row in zero if row[2]}
-        suffix = f" where `{next(iter(names))}` runs" if len(names) == 1 else ""
+        all_zero_rows_name_a_floor = all(row[2] for row in zero)
+        suffix = (f" where `{next(iter(names))}` runs"
+                  if len(names) == 1 and all_zero_rows_name_a_floor
+                  else " where another check runs longer")
         clauses.append(f"0 on {len(zero)} of {total} PRs{suffix}")
     if positive:
         caps = {round(row[1], 1) for row in positive}

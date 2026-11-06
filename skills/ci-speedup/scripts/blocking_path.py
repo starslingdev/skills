@@ -673,6 +673,7 @@ def _pole_per_pr_floor(cp: dict[str, Any], pole_name: str,
                     "sibling": sibling,
                     "floor_s": floor_s,
                     "before_s": 0.0,
+                    "target_ran": False,
                 })
             continue
         total_n += 1
@@ -688,6 +689,7 @@ def _pole_per_pr_floor(cp: dict[str, Any], pole_name: str,
             "sibling": sibling,
             "floor_s": floor_s,
             "before_s": before_s,
+            "target_ran": True,
         })
     if total_n <= 0:
         return None
@@ -833,7 +835,9 @@ def _floor_note(pole: dict[str, Any],
                 blockers = {_clean_label(str(row.get("sibling") or "")) for row in zero}
                 blockers.discard("")
                 where = (f" where `{next(iter(blockers))}` runs"
-                         if len(blockers) == 1 else " where another check runs longer")
+                         if (len(blockers) == 1
+                             and all(row.get("target_ran") is not False for row in zero))
+                         else " where another check runs longer")
                 clauses.append(f"0 on {len(zero)} of {total} PRs{where}")
             if positive:
                 by_cap: dict[float, int] = {}
