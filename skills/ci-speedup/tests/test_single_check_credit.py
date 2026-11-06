@@ -14,7 +14,11 @@ sys.path.insert(0, str(_SCRIPTS))
 
 import blocking_path as bp  # noqa: E402
 import collect_runs as cr  # noqa: E402
-from wall_clock import WallClockContext, bound_measured_critical_path  # noqa: E402
+from wall_clock import (  # noqa: E402
+    WallClockContext,
+    bound_commit_projection,
+    bound_measured_critical_path,
+)
 
 
 _VR_SPEC = importlib.util.spec_from_file_location(
@@ -170,6 +174,20 @@ def _population_context(doc: dict) -> WallClockContext:
     )
 
 
+def _commit_context(doc: dict) -> WallClockContext:
+    facts = doc["pr_critical_path"]["commit_wall_clock"]["facts"]
+    return WallClockContext(commit_wall_facts=tuple(
+        (
+            float(fact["wall_s"]),
+            float(fact["slowest_job"]["duration_s"]),
+            float((fact.get("next_longest_job") or {}).get("duration_s") or 0.0),
+        )
+        for fact in facts
+        if isinstance(fact.get("wall_s"), (int, float))
+        and isinstance(fact.get("slowest_job"), dict)
+    ))
+
+
 def test_complete_single_check_prs_keep_the_full_saving(monkeypatch, tmp_path):
     doc = _collect(monkeypatch, _SingleCheckClient)
     cp = doc["pr_critical_path"]
@@ -181,15 +199,27 @@ def test_complete_single_check_prs_keep_the_full_saving(monkeypatch, tmp_path):
     assert "0 on 6 of 10 PRs where `sibling` runs" in result.reason
     assert "up to 8m 20s on the other 4 of 10 PRs where it was the only check" in result.reason
 
+    projected = bound_commit_projection(result.value, _commit_context(doc))
+    assert projected.value == 90.0
+    assert projected.reason is not None
+
     finding = doc["findings"][0]
-    finding["wall_clock_p50_s"] = result.value
+    finding["wall_clock_p50_s"] = projected.value
     finding["wall_clock_uncapped_p50_s"] = 500.0
-    finding["wall_clock_derivation"] = [{
-        "bound": "measured-critical-path",
-        "from_s": 500.0,
-        "to_s": result.value,
-        "reason": result.reason,
-    }]
+    finding["wall_clock_derivation"] = [
+        {
+            "bound": "measured-critical-path",
+            "from_s": 500.0,
+            "to_s": result.value,
+            "reason": result.reason,
+        },
+        {
+            "bound": "commit-projection",
+            "from_s": result.value,
+            "to_s": projected.value,
+            "reason": projected.reason,
+        },
+    ]
     report = bp.render(doc, captured_at="2026-11-06T00:00:00Z")
     assert "4 of 10 PRs where it was the only check" in report
 
@@ -235,16 +265,28 @@ def test_singleton_and_faster_sibling_ceilings_match_the_verifier(monkeypatch, t
     assert "up to 5m 00s on 2 of 10 PRs" in result.reason
     assert "up to 8m 20s on 4 of 10 PRs where it was the only check" in result.reason
 
+    projected = bound_commit_projection(result.value, _commit_context(doc))
+    assert projected.value == 90.0
+    assert projected.reason is not None
+
     finding = doc["findings"][0]
     finding["affected_jobs"] = ["pole-key"]
-    finding["wall_clock_p50_s"] = result.value
+    finding["wall_clock_p50_s"] = projected.value
     finding["wall_clock_uncapped_p50_s"] = 500.0
-    finding["wall_clock_derivation"] = [{
-        "bound": "measured-critical-path",
-        "from_s": 500.0,
-        "to_s": result.value,
-        "reason": result.reason,
-    }]
+    finding["wall_clock_derivation"] = [
+        {
+            "bound": "measured-critical-path",
+            "from_s": 500.0,
+            "to_s": result.value,
+            "reason": result.reason,
+        },
+        {
+            "bound": "commit-projection",
+            "from_s": result.value,
+            "to_s": projected.value,
+            "reason": projected.reason,
+        },
+    ]
     report = bp.render(doc, captured_at="2026-11-06T00:00:00Z")
     assert "up to 5m 00s on 2 of 10 PRs" in report
     assert "up to 10m 00s on 4 of 10 PRs where it was the only check" in report
