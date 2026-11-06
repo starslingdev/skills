@@ -8316,6 +8316,26 @@ def test_pole_without_the_declaration_and_its_sibling_remain_unrouted():
     assert advisory not in sibling
     assert "confirm it is not a required check" not in sibling
     assert "OPT71 recipe (c)" not in sibling
+    # Outside its own lines, the advisory pole's section is otherwise byte-identical to
+    # the un-annotated one: the declaration adds facts and (here, with required-check
+    # status unknown) a confirm-first instruction; it re-frames nothing else. Drop the
+    # advisory lines from both sides and collapse blank runs, so any real re-framing
+    # still shows up as a difference.
+    markers = (advisory, "Required-check status is unavailable or partial")
+
+    def _without_advisory(text: str) -> str:
+        kept: list[str] = []
+        for line in text.splitlines():
+            if any(marker in line for marker in markers):
+                continue
+            if line == "" and kept and kept[-1] == "":
+                continue
+            kept.append(line)
+        return "\n".join(kept)
+
+    annotated = _pole_section(md, "e2e")
+    assert advisory in annotated
+    assert _without_advisory(annotated) == _without_advisory(plain)
 
 
 # ── Job-selection collision regression ──────────────────────────────────────
