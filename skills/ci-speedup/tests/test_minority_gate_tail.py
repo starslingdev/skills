@@ -15,6 +15,7 @@ import blocking_path as bp  # noqa: E402
 import collect_runs as cr  # noqa: E402
 
 from test_blocking_path import _doc_one_pole  # noqa: E402
+from test_structural_findings import _FakeCollectClient, _collect_job, _iso  # noqa: E402
 
 
 def _load_verify_report():
@@ -112,9 +113,112 @@ def test_production_attachment_maps_only_required_closure_checks():
     crit_by_wf = {".github/workflows/pipeline.yml": crit}
     checks = [("affected-unit", 60.0)]
 
-    attached = cr._minority_tails_for_checks(checks, crit_by_wf, True)
+    attached = cr._minority_tails_for_checks(
+        checks, crit_by_wf, {"affected-unit"})
     assert attached["affected-unit"]["tail_share_pct"] == 15.0
-    assert cr._minority_tails_for_checks(checks, crit_by_wf, False) == {}
+    assert cr._minority_tails_for_checks(checks, crit_by_wf, set()) == {}
+
+
+class _TailScopeClient(_FakeCollectClient):
+    """Twenty PRs where both retained checks have the same 15% slow tail."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._shas = [f"tail-{i}" for i in range(20)]
+        self._jobs = {}
+        for i, sha in enumerate(self._shas):
+            duration = 1500 if i >= 17 else 60
+            jobs = []
+            for name in ("merge-gate", "unpinned"):
+                job = _collect_job(name, duration)
+                job["html_url"] = f"https://github.com/o/r/actions/runs/{1000 + i}"
+                jobs.append(job)
+            self._jobs[1000 + i] = jobs
+
+    def _runs(self, wf_id: int) -> list[dict]:
+        if wf_id != 1:
+            return []
+        return [{
+            "id": 1000 + i,
+            "event": "pull_request",
+            "head_sha": sha,
+            "status": "completed",
+            "conclusion": "success",
+            "created_at": _iso(i),
+            "run_started_at": _iso(i),
+            "updated_at": _iso(i + (1500 if i >= 17 else 60)),
+        } for i, sha in enumerate(self._shas)]
+
+    def _check_runs(self, sha: str) -> list[dict]:
+        i = int(sha.rsplit("-", 1)[1])
+        duration = 1500 if i >= 17 else 60
+        return [{
+            "name": name,
+            "started_at": _iso(i),
+            "completed_at": _iso(i + duration),
+        } for name in ("merge-gate", "unpinned")]
+
+    def json(self, endpoint: str, allow_missing: bool = False):
+        if endpoint.startswith("repos/o/r/actions/workflows?"):
+            self.queries += 1
+            return {"workflows": [{
+                "id": 1,
+                "path": ".github/workflows/pipeline.yml",
+                "name": "pipeline",
+            }]}
+        return super().json(endpoint, allow_missing=allow_missing)
+
+
+def test_collect_attaches_a_tail_only_to_a_confirmed_merge_gate(
+        monkeypatch, tmp_path: Path):
+    client = _TailScopeClient()
+    monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
+    monkeypatch.setattr(
+        cr, "_fetch_required_checks",
+        lambda *args, **kwargs: cr.RequiredChecks(
+            frozenset({"merge-gate"}), complete=True))
+    workflow = ".github/workflows/pipeline.yml"
+    doc = cr.collect({
+        "repo": "o/r",
+        "skill_commit_sha": "07d0352",
+        "findings": [{"id": "f1", "workflow_file": workflow}],
+        "workflow_job_graph": {workflow: {
+            "gate": {"name": "merge-gate", "needs": []},
+        }},
+    }, "o/r", max_runs=20, shallow_runs=20)
+    report = bp.render(doc, captured_at="2026-11-06T00:00:00Z")
+    findings = tmp_path / "findings.json"
+    report_path = tmp_path / "report.md"
+    findings.write_text(json.dumps(doc), encoding="utf-8")
+    report_path.write_text(report, encoding="utf-8")
+
+    checks = _load_verify_report().run_checks(
+        report, report_path, findings, skill_repo=None)
+    failed = [check for check in checks if not check.ok and not check.skipped]
+    assert not failed, failed
+    tail_check = next(
+        check for check in checks
+        if check.name == "minority slow tails on merge-blocking checks are re-derived")
+    assert tail_check.ok and not tail_check.skipped
+    assert {check["name"] for check in doc["pr_critical_path"]["checks"]} == {
+        "merge-gate", "unpinned",
+    }
+    attached = {
+        check["name"] for check in doc["pr_critical_path"]["checks"]
+        if "minority_tail" in check
+    }
+    assert attached == {"merge-gate"}
+
+    by_name = {check["name"]: check for check in doc["pr_critical_path"]["checks"]}
+    by_name["unpinned"]["minority_tail"] = by_name["merge-gate"]["minority_tail"]
+    tampered_report = bp.render(doc, captured_at="2026-11-06T00:00:00Z")
+    findings.write_text(json.dumps(doc), encoding="utf-8")
+    tampered = _load_verify_report().run_checks(
+        tampered_report, report_path, findings, skill_repo=None)
+    tail_check = next(
+        check for check in tampered
+        if check.name == "minority slow tails on merge-blocking checks are re-derived")
+    assert not tail_check.ok
 
 
 def _doc(*, scoped: bool = True, tail: dict | None = None) -> dict:
@@ -177,6 +281,9 @@ def test_tail_marker_neutralizes_check_name_markup():
 def test_scope_prefixed_check_marker_renders_and_verifies(tmp_path: Path):
     doc = _doc(tail=_tail())
     doc["pr_critical_path"]["checks"][0]["name"] = "@scope/affected-unit"
+    doc["pr_critical_path"]["poles"][0].update(
+        {"check": "@scope/affected-unit", "required_reachable": True})
+    doc["required_checks"] = ["@scope/affected-unit"]
     report = bp.render(doc)
     assert "<!-- minority-gate-tail:affected-unit -->" in report
     findings = tmp_path / "findings.json"
@@ -192,11 +299,15 @@ def test_verifier_binds_no_saving_disclosure_to_each_tail(tmp_path: Path):
     second["minority_tail"] = dict(_tail(), example_url=(
         "https://github.com/o/r/actions/runs/200013"))
     doc["pr_critical_path"]["checks"].append(second)
+    doc["required_checks"].append("affected-integration")
     report = bp.render(doc)
+    findings = tmp_path / "findings.json"
+    findings.write_text(json.dumps(doc), encoding="utf-8")
+    intact = _load_verify_report().check_minority_gate_tails(report, findings)
+    assert intact.ok and not intact.skipped, intact
+
     marker = "<!-- minority-gate-tail:affected-integration -->"
     before, after = report.split(marker, 1)
     after = after.replace("No saving is credited", "Saving is unknown", 1)
-    findings = tmp_path / "findings.json"
-    findings.write_text(json.dumps(doc), encoding="utf-8")
     check = _load_verify_report().check_minority_gate_tails(before + marker + after, findings)
     assert not check.ok

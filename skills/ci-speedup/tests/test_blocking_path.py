@@ -1034,6 +1034,49 @@ def test_parse_log_detects_vitest_istanbul_coverage():
     assert any("transform" in r[0] for r in last["rows"])
 
 
+def test_vitest_coverage_guidance_requires_matched_provider_timing():
+    log = "\n".join([
+        "$ vitest run --coverage --coverage.provider=istanbul",
+        " RUN  v4.1.5 /repo/packages/core",
+        "      Coverage enabled with istanbul",
+        " Duration  12.18s (transform 12.24s, setup 0ms, import 19.07s, "
+        "tests 4.13s, environment 7ms)",
+        " RUN  v4.1.5 /repo/packages/web",
+        " Duration  19.30s (transform 7.03s, setup 0ms, import 14.25s, "
+        "tests 32.56s, environment 0ms)",
+    ])
+    leaf = bp._parse_log(log)
+
+    # Keep the existing detector and measured compile/load share while making the
+    # provider recommendation honest about what this single run can establish.
+    assert leaf is not None and leaf["fix_key"] == "vitest-v8-coverage"
+    assert leaf["magnitude"]["value"] == round(100 * 52.59 / (52.59 + 36.69), 2)
+    note = leaf["deeper"][-1]["blocker_note"].lower()
+    assert "caused by" not in note
+
+    pole = {
+        "check": "test", "workflow_file": ".github/workflows/ci.yml", "p50_s": 120.0,
+        "dominant_step": "test", "dominant_p50_s": 100.0, "dominant_share": 0.83,
+        "steps": [{"step": "test", "category": "test", "p50_s": 100.0}],
+    }
+    prompt = bp._build_agent_prompt(
+        leaf, pole, [], "https://example.invalid/actions/runs/1",
+        "example/repo", "abc1234", 5, 20, timeline=None)
+    guidance = prompt.lower()
+    assert "much cheaper" not in guidance
+    assert "time both providers on the same commit" in guidance
+    assert "coverage figures change" in guidance
+    assert "re-baseline thresholds" in guidance
+    assert "no provider-switch saving is credited" in guidance
+
+    architecture = (Path(__file__).resolve().parents[1] / "ARCHITECTURE.md").read_text()
+    catalog_row = next(
+        line for line in architecture.splitlines() if line.startswith("| `vitest-v8-coverage`")
+    )
+    assert "instruments every file" not in catalog_row.lower()
+    assert "measured" in catalog_row.lower()
+
+
 def test_parse_log_detects_vitest_import_bound_without_coverage():
     # No coverage, and import dominates tests -> the import-bound leaf, NOT istanbul.
     log = "\n".join([
