@@ -13870,6 +13870,7 @@ _VR_LEAF_STEP_CATEGORY: dict[str, str] = {
     "vitest-import-bound": "test",
     "playwright-parallel": "test",
     "pytest-no-xdist": "test",
+    "test-isolated-serial": "test",
     "test-loop-serial": "test",
     "cargo-test-shard": "test",
     "benchmark-serial-reruns": "test",
@@ -14859,6 +14860,63 @@ def check_minority_gate_tails(report: str, findings_path: Path | None = None) ->
                  else f"{len(stamped)} minority gate tail(s) re-derived")
 
 
+def check_job_adding_prompts_state_runner_minute_effect(
+        report: str, findings_path: Path | None = None) -> Check:
+    """Closed-world prompt guard for fixes that add jobs, shards or machines.
+
+    The guard reads every rendered coding-agent prompt, rather than trusting a
+    list of call sites. Known job-expanding families remain recognizable after
+    their cost line is deleted, which makes the missing-line mutant fail closed.
+    """
+    name = "job-adding prompts state their runner-minute effect"
+    blocks = re.findall(
+        r"#### 🤖 Prompt for your coding agent\s*\n\s*```text\n(.*?)\n```",
+        report,
+        flags=re.DOTALL,
+    )
+    failures: list[str] = []
+    for index, body in enumerate(blocks, 1):
+        known_shard = "Pattern: OPT24 " in body or "Pattern: OPT25 " in body
+        machine = ("Option 1, a larger GitHub-hosted runner" in body
+                   or "Option 2, StarSling runners" in body)
+        structural = "structural catalog pattern" in body
+        isolated = ("unique schema, database or prefix" in body
+                    or "isolated tests concurrently inside this one job" in body)
+        # The renderer owns this label, so it remains a stable family marker
+        # when only the cost line is deleted. Free-form action wording is not a
+        # safe discriminator: generic investigation prompts can discuss adding
+        # work to an existing job without recommending another billed runner.
+        job_expanding = "Concurrency order:" in body
+        if not (known_shard or machine or structural or isolated or job_expanding):
+            continue
+        expected_prefix = "Runner cost effect:" if machine else "Runner-minute effect:"
+        cost_lines = [line for line in body.splitlines()
+                      if line.startswith(expected_prefix)]
+        if len(cost_lines) != 1:
+            failures.append(
+                f"prompt {index} has {len(cost_lines)} runner-minute effect lines"
+            )
+        if known_shard:
+            order = body.find("Concurrency order:")
+            shard_action = body.lower().find("add shards")
+            if order < 0 or shard_action < 0 or order >= shard_action:
+                failures.append(
+                    f"prompt {index} does not put OPT88/in-job concurrency before shards"
+                )
+            if "OPT88" not in body:
+                failures.append(f"prompt {index} does not name OPT88")
+            if "repeat checkout and setup" not in body or "bill each job" not in body:
+                failures.append(f"prompt {index} omits the per-job setup/billing cost")
+        if isolated and "runner minutes go down" not in body:
+            failures.append(f"prompt {index} does not say in-job runner minutes go down")
+    return Check(
+        name,
+        not failures,
+        "; ".join(failures[:6]) if failures
+        else f"{len(blocks)} coding-agent prompt(s) checked",
+    )
+
+
 def run_checks(report, report_path, findings_path, skill_repo, clone=None):
     return [
         check_primary_section_present(report, findings_path),
@@ -14867,6 +14925,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_headline_followup(report, findings_path),
         check_pole_anchors_resolve(report),
         check_rca_hands_off_never_prescribes(report),
+        check_job_adding_prompts_state_runner_minute_effect(report, findings_path),
         check_measured_cause_matches_rendered_timeline(report),
         check_skip_family_prompts_carry_pending_caveat(report),
         check_also_noticed_count_honest(report),

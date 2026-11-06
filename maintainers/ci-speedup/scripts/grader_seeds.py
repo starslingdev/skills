@@ -56,7 +56,7 @@ EXCLUDE = "exclude"       # run/harness artifact → never a skill bug
 # The committed, reviewable TRIAGE ALLOWLIST. Keyed by the live `verify_report.Check.name` string
 # (what `run_checks` actually yields) so the classification can be applied at runtime and the
 # "every check is classified" invariant is directly testable; the originating `check_*` function
-# name is in the trailing comment for cross-reference with spec §2-A. 73 AUTO_SEED / 1 EXCLUDE /
+# name is in the trailing comment for cross-reference with spec §2-A. 84 AUTO_SEED / 1 EXCLUDE /
 # 3 TRIAGE — a new `verify_report` check makes `test_every_check_is_classified` go red until it's
 # classified here (so no check is ever left undisposed).
 TRIAGE_ALLOWLIST = {
@@ -66,6 +66,7 @@ TRIAGE_ALLOWLIST = {
     "headline names the wall-clock (merge-wait) axis": AUTO_SEED,                                   # check_headline_names_wall_clock
     "every #pole-N / #also-noticed / #pre-start-wait / #runner-minute-reductions reference resolves to an anchor": AUTO_SEED,  # check_pole_anchors_resolve
     "RCA hands off via prompts (never prescribes a fix, never dead-ends)": AUTO_SEED,               # check_rca_hands_off_never_prescribes
+    "job-adding prompts state their runner-minute effect": AUTO_SEED,                               # check_job_adding_prompts_state_runner_minute_effect
     "agent-prompt MEASURED CAUSE never asserts timeline steps the pole doesn't render": AUTO_SEED,  # check_measured_cause_matches_rendered_timeline
     "TOC 'Also noticed' count == appendix rows + hidden pointer": AUTO_SEED,                        # check_also_noticed_count_honest
     "data basis disclosed; coverage gaps named, not silent": AUTO_SEED,                             # check_coverage_disclosed
@@ -183,6 +184,7 @@ CHECK_CLASS = {
     "wall-clock headline carries next gate and verification guidance": "missing-phase-check",  # next-gate line or how-to-check block absent, or names a gate no saved floor supports
     "every #pole-N / #also-noticed / #pre-start-wait / #runner-minute-reductions reference resolves to an anchor": "missing-phase-check",  # broken cross-reference — a rendering-completeness gap
     "RCA hands off via prompts (never prescribes a fix, never dead-ends)": "prescribed-a-fix",  # exact match
+    "job-adding prompts state their runner-minute effect": "missing-phase-check",  # a required cost disclosure is absent from a job-expanding hand-off
     "agent-prompt MEASURED CAUSE never asserts timeline steps the pole doesn't render": "fabricated-or-unsupported-finding",  # a canned cause asserts a timeline shape the report contradicts
     "TOC 'Also noticed' count == appendix rows + hidden pointer": "fabricated-or-unsupported-finding",  # a rendered count not backed by the data
     "data basis disclosed; coverage gaps named, not silent": "coverage-gap-dead-end",     # exact match (the spec's own no-silent-drop framing)

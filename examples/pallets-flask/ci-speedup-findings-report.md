@@ -116,6 +116,8 @@ THE GATE
 - Workflow `tests.yaml`, job `Windows`.
 - Slowest check a typical PR waits on: P50 34s.
 
+Runner-minute effect: If the structural fix moves work to added jobs or machines, duplicated checkout and setup raise runner minutes; moving the same work without duplication is roughly level, and removing measured work lowers them.
+
 WHERE THE TIME GOES
 - The job's time is dominated by the `Run uv run --locked --no-default-groups --group dev tox run + 1 more other step` step: ~28s (67% of the job wall), from the sampled per-step decomposition (no single-run timeline was captured for this job).
 
@@ -194,6 +196,8 @@ THE GATE
 - Workflow `pre-commit.yaml`, job `main`.
 - Slowest check a typical PR waits on: P50 19s.
 
+Runner-minute effect: If the structural fix moves work to added jobs or machines, duplicated checkout and setup raise runner minutes; moving the same work without duplication is roughly level, and removing measured work lowers them.
+
 WHERE THE TIME GOES
 - The job's time is dominated by the `Run uv run --locked --no-default-groups --group pre-commit pre-commit run --show-diff-on-failure --color=always --all-files + 1 more other step` step: ~11s (58% of the job wall), from the sampled per-step decomposition (no single-run timeline was captured for this job).
 
@@ -267,6 +271,8 @@ REPO: pallets/flask (audited at commit 36e4a82)
 THE GATE
 - Workflow `tests.yaml`, job `PyPy`.
 - Rarely the merge pole - the actual slowest check a PR waits on, on only 0/20 sampled PRs (present on 18/20): P50 26s. A slower concurrent check usually gates ahead, so speeding it helps only the PRs where it IS the pole, not typical merge-wait.
+
+Runner-minute effect: If the structural fix moves work to added jobs or machines, duplicated checkout and setup raise runner minutes; moving the same work without duplication is roughly level, and removing measured work lowers them.
 
 WHERE THE TIME GOES
 - The job's time is dominated by the `Run uv run --locked --no-default-groups --group dev tox run + 1 more other step` step: ~30s (87% of the job wall), from the sampled per-step decomposition (no single-run timeline was captured for this job).
@@ -343,6 +349,8 @@ THE GATE
 - Workflow `tests.yaml`, job `3.14t`.
 - Rarely the merge pole - the actual slowest check a PR waits on, on only 0/20 sampled PRs (present on 18/20): P50 25s. A slower concurrent check usually gates ahead, so speeding it helps only the PRs where it IS the pole, not typical merge-wait.
 
+Runner-minute effect: If the structural fix moves work to added jobs or machines, duplicated checkout and setup raise runner minutes; moving the same work without duplication is roughly level, and removing measured work lowers them.
+
 WHERE THE TIME GOES
 - The job's time is dominated by the `Run actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405` step: ~10s (42% of the job wall), from the sampled per-step decomposition (no single-run timeline was captured for this job).
 
@@ -415,6 +423,8 @@ REPO: pallets/flask (audited at commit 36e4a82)
 THE GATE
 - Workflow `tests.yaml`, job `3.9`.
 - Rarely the merge pole - the actual slowest check a PR waits on, on only 0/20 sampled PRs (present on 4/20): P50 24s. A slower concurrent check usually gates ahead, so speeding it helps only the PRs where it IS the pole, not typical merge-wait.
+
+Runner-minute effect: If the structural fix moves work to added jobs or machines, duplicated checkout and setup raise runner minutes; moving the same work without duplication is roughly level, and removing measured work lowers them.
 
 WHERE THE TIME GOES
 - The job's time is dominated by the `Run actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405` step: ~12s (55% of the job wall), from the sampled per-step decomposition (no single-run timeline was captured for this job).
