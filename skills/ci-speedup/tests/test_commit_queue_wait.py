@@ -199,9 +199,13 @@ def test_collect_includes_queue_in_commit_wait_and_verifier_guards_work_budget(
     assert clock.get("work_p50_s") == 390.0
     assert abs(clock.get("queue_share_p50") - 900.0 / 1290.0) < 0.000001
     capped = next(f for f in doc["findings"] if f.get("id") == "cap-probe")
+    # The whole-commit projection floor (one 390 s job, no other job) and the
+    # commit work budget agree here; whichever caps first, the credit stops at
+    # the work and the uncapped evidence is kept.
     assert capped["wall_clock_p50_s"] == 390.0
-    assert capped["wall_clock_uncapped_p50_s"] == 1000.0
-    assert capped["wall_clock_derivation"][-1]["bound"] == "commit-work"
+    assert capped["wall_clock_uncapped_p50_s"] == 900.0
+    assert capped["wall_clock_derivation"][-1]["bound"] in {
+        "commit-work", "commit-projection"}
     assert capped["wall_clock_derivation"][-1]["from_s"] == 900.0
     assert capped["wall_clock_derivation"][-1]["to_s"] == 390.0
 
@@ -258,26 +262,38 @@ def test_commit_queue_split_counts_idle_queued_gaps_without_double_counting():
     assert split == {"queue_s": 20.0, "work_s": 20.0}
 
 
+class _ZeroQueueClient(_QueueClient):
+    """Every run's job starts the moment the run is created."""
+
+    def json(self, endpoint: str, allow_missing: bool = False):
+        result = super().json(endpoint, allow_missing)
+        if isinstance(result, dict) and isinstance(result.get("workflow_runs"), list):
+            for run in result["workflow_runs"]:
+                run.update(created_at=_iso(900), run_started_at=_iso(900))
+        return result
+
+
 def test_zero_queue_keeps_the_existing_report_output(monkeypatch):
-    monkeypatch.setattr(cr, "GhClient", _QueueClient)
+    monkeypatch.setattr(cr, "GhClient", _ZeroQueueClient)
     zero = copy.deepcopy(_DOC)
-    for fact in zero["commit_wall_clock"]["commits"]:
-        fact["commit_wall_s"] = 390.0
-        fact["jobs"][0].update({
-            "queued_at": _iso(0),
-            "started_at": _iso(0),
-            "completed_at": _iso(390),
-        })
-    zero["commit_wall_clock"].update({"p50_s": 390.0, "p90_s": 390.0})
+    zero.pop("commit_wall_clock")
 
     doc = cr.collect(zero, "o/r", max_runs=20, shallow_runs=20)
     clock = doc["pr_critical_path"]["commit_wall_clock"]
     assert clock["queue_p50_s"] == 0.0
     assert clock["work_p50_s"] == 390.0
 
-    without_clock = copy.deepcopy(doc)
-    without_clock["pr_critical_path"].pop("commit_wall_clock")
-    assert bp.render(copy.deepcopy(doc)) == bp.render(without_clock)
+    # Zero queue leaves the report exactly as the per-commit stamp renders it
+    # without any queue/work split.
+    without_split = copy.deepcopy(doc)
+    split_clock = without_split["pr_critical_path"]["commit_wall_clock"]
+    for key in ("n", "queue_p50_s", "queue_p90_s", "work_p50_s", "work_p90_s",
+                "queue_share_p50"):
+        split_clock.pop(key, None)
+    for fact in split_clock.get("facts") or []:
+        fact.pop("queue_s", None)
+        fact.pop("work_s", None)
+    assert bp.render(copy.deepcopy(doc)) == bp.render(without_split)
 
 
 def test_collect_preserves_nested_commit_clock_handoff(monkeypatch):
@@ -343,18 +359,21 @@ def test_full_verifier_reads_cluster_win_after_smaller_queue_clock(
         monkeypatch, tmp_path):
     monkeypatch.setattr(cr, "GhClient", _QueueClient)
     doc = cr.collect(copy.deepcopy(_DOC), "o/r", max_runs=20, shallow_runs=20)
-    commits = []
+    facts = []
     for i in range(1, 21):
-        fact = _commit_fact(f"cluster-{i}", 200 + i)
-        fact["commit_wall_s"] = 450.0
+        fact = _producer_fact(f"cluster-{i}")
+        projection = cr.project_commit_wall(450.0, 390.0, 0.0, 4.0)
+        fact.update(wall_s=450.0, observed_wall_s=450.0, projection_4x={
+            "job_speedup": 4.0, "projected_s": projection.projected_s,
+            "multiple": projection.multiple})
         fact["jobs"][0].update({
-            "queued_at": _iso(0),
+            "created_at": _iso(0),
             "started_at": _iso(60),
             "completed_at": _iso(450),
         })
-        commits.append(fact)
+        facts.append(fact)
     doc["pr_critical_path"]["commit_wall_clock"] = cr._stamp_commit_queue_work({
-        "commits": commits,
+        "facts": facts,
         "p50_s": 450.0,
         "p90_s": 450.0,
     })

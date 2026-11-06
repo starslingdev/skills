@@ -385,3 +385,22 @@ def test_verifier_rejects_a_projection_multiple_above_the_shared_cap(
     check = vr.check_commit_wall_clock_projection(report, findings_path)
     assert not check.ok
     assert "exceeds 1.56" in check.detail
+
+
+def test_commit_fact_carries_the_run_start_and_job_intervals_for_the_queue_split(
+        monkeypatch):
+    """The queue/work split needs the commit's first run creation and every job's
+    queued/started/completed times; the producer stamps them on each fact."""
+    doc = _collect(monkeypatch)
+    fact = doc["pr_critical_path"]["commit_wall_clock"]["facts"][0]
+
+    assert fact.get("created_at") == _iso(0)
+    jobs = fact.get("jobs")
+    assert isinstance(jobs, list)
+    assert sorted((job["name"], job["started_at"], job["completed_at"])
+                  for job in jobs) == [
+        ("first-long", _iso(0), _iso(900)),
+        ("first-short", _iso(0), _iso(300)),
+        ("second-long", _iso(60), _iso(1500)),
+    ]
+    assert all(job["workflow_file"] in (_FIRST, _SECOND) for job in jobs)

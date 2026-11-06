@@ -28013,11 +28013,17 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 _expected_workflows.add(_mapped[0])
         _missing: set[str] = _expected_workflows - {_wf for _wf, _run in _run_rows}
         _created: list[float] = []
+        _created_iso: dict[float, str] = {}
         _job_rows: list[dict[str, Any]] = []
+        # Raw per-job intervals for the runner queue / work split. Queued time
+        # is the job's own `created_at` when GitHub gives it.
+        _job_intervals: list[dict[str, str]] = []
         for _wf, _run in _run_rows:
             _created_dt = _parse_dt(str(_run.get("created_at") or ""))
             if _created_dt is not None:
                 _created.append(_created_dt.timestamp())
+                _created_iso.setdefault(_created_dt.timestamp(),
+                                        str(_run.get("created_at") or ""))
             _rid = str(_run.get("id") or "")
             _run_jobs = _jobs_by_run.get((_wf, _rid))
             if not _run_jobs:
@@ -28033,6 +28039,13 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 if _duration < 0:
                     continue
                 _completed_here = True
+                _job_intervals.append({
+                    "name": str(_job.get("name") or ""),
+                    "workflow_file": _wf,
+                    "created_at": str(_job.get("created_at") or ""),
+                    "started_at": str(_job.get("started_at") or ""),
+                    "completed_at": str(_job.get("completed_at") or ""),
+                })
                 _job_rows.append({
                     "name": str(_job.get("name") or ""),
                     "workflow_file": _wf,
@@ -28074,6 +28087,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             "event": _event,
             "partial": _partial,
             "missing_workflows": sorted(_missing),
+            **({"created_at": _created_iso[min(_created)]} if _created else {}),
+            "jobs": _job_intervals,
             "wall_s": None if _partial else _observed,
             **({"observed_wall_s": _observed} if _observed is not None else {}),
             **({"slowest_job": {k: _slowest[k] for k in
