@@ -5470,9 +5470,14 @@ def _opt9_is_build_state(f: dict[str, Any]) -> bool:
         return True
     if tool in {"eslint", "prettier", "jest", "vitest"}:
         return False
+    title = str(f.get("title") or "")
+    if _OPT9_RESULT_CACHE_RE.search(title):
+        return False
+    if _OPT9_BUILD_STATE_RE.search(title):
+        return True
     evidence = " ".join(
         str(f.get(key) or "")
-        for key in ("title", "evidence", "match_text", "fix_strategy")
+        for key in ("evidence", "match_text", "fix_strategy")
     )
     if _OPT9_RESULT_CACHE_RE.search(evidence):
         return False

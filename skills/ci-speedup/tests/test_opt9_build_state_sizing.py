@@ -40,7 +40,7 @@ def _collect(monkeypatch) -> dict:
                 "affected_jobs": ["generate-client"],
                 "title": "Generated client cache",
                 "evidence": (
-                    "job `generate-client` regenerates an API client and could cache the "
+                    "job `vitest-codegen` regenerates an API client and could cache the "
                     "generated-client output"
                 ),
             },
