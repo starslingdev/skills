@@ -14,10 +14,12 @@ import blocking_path as bp  # noqa: E402
 
 
 def _write_build(root: Path, dockerfile: str, *, context: str = ".",
-                 file: str | None = None, target: str | None = None) -> set[str]:
+                 file: str | None = None, target: str | None = None,
+                 platforms: str = "linux/amd64,linux/arm64",
+                 runs_on: str = "ubuntu-latest") -> set[str]:
     workflow_dir = root / ".github" / "workflows"
     workflow_dir.mkdir(parents=True)
-    inputs = f"          context: {context}\n          platforms: linux/amd64,linux/arm64\n"
+    inputs = f"          context: {context}\n          platforms: {platforms}\n"
     if file:
         inputs += f"          file: {file}\n"
     if target:
@@ -27,11 +29,11 @@ def _write_build(root: Path, dockerfile: str, *, context: str = ".",
 on: push
 jobs:
   image:
-    runs-on: ubuntu-latest
+    runs-on: RUNS_ON
     steps:
       - uses: docker/build-push-action@v6
         with:
-INPUTS""".replace("INPUTS", inputs.rstrip()),
+INPUTS""".replace("INPUTS", inputs.rstrip()).replace("RUNS_ON", runs_on),
         encoding="utf-8",
     )
     docker_path = root / (file or "Dockerfile")
@@ -150,6 +152,53 @@ def test_opt102_ignores_remote_build_context(tmp_path: Path):
 RUN go build -o /out/server ./cmd/server
 """,
         context="https://example.invalid/source.git",
+    )
+    assert "OPT102" not in patterns
+
+
+def test_opt102_target_os_flags_alone_do_not_avoid_emulation(tmp_path: Path):
+    # Without FROM --platform=$BUILDPLATFORM the stage runs on the target platform,
+    # so GOOS / GOARCH / --target flags still compile under emulation.
+    patterns = _write_build(
+        tmp_path,
+        """FROM golang:1.23 AS build
+RUN CGO_ENABLED=0 GOOS=linux go build -o /out/server ./cmd/server
+FROM scratch
+COPY --from=build /out/server /server
+""",
+    )
+    assert "OPT102" in patterns
+
+
+def test_opt102_accepts_buildplatform_inherited_through_stage_alias(tmp_path: Path):
+    patterns = _write_build(
+        tmp_path,
+        """FROM --platform=$BUILDPLATFORM golang:1.23 AS toolchain
+FROM toolchain AS build
+ARG TARGETARCH
+RUN GOARCH=$TARGETARCH go build -o /out/server ./cmd/server
+FROM scratch
+COPY --from=build /out/server /server
+""",
+    )
+    assert "OPT102" not in patterns
+
+
+def test_opt102_detects_foreign_only_platform_on_x64_runner(tmp_path: Path):
+    patterns = _write_build(
+        tmp_path,
+        "FROM golang:1.23\nRUN go build -o /server ./cmd/server\n",
+        platforms="linux/arm64",
+    )
+    assert "OPT102" in patterns
+
+
+def test_opt102_stays_silent_on_arm_runner_building_arm_only(tmp_path: Path):
+    patterns = _write_build(
+        tmp_path,
+        "FROM golang:1.23\nRUN go build -o /server ./cmd/server\n",
+        platforms="linux/arm64",
+        runs_on="ubuntu-24.04-arm",
     )
     assert "OPT102" not in patterns
 

@@ -1912,19 +1912,21 @@ fix_strategy: emulated-multi-platform-image-compilation
 title_template: "Foreign-Architecture Image Compilation Runs Under Emulation"
 -->
 
-**Anti-pattern**: A `docker/build-push-action` step builds both `linux/amd64` and
-another Linux architecture from a repository-local Dockerfile whose compile stage
-does not pin itself to `$BUILDPLATFORM` or select an explicit cross-compilation
-target. Buildx can then run the foreign compile through emulation, which is often
-far slower than native compilation.
+**Anti-pattern**: A `docker/build-push-action` step on an x64 hosted runner builds
+a foreign Linux architecture from a repository-local Dockerfile whose compile stage
+does not run on the build platform (`FROM --platform=$BUILDPLATFORM`). Buildx then
+runs the foreign compile through emulation, which is often far slower than native
+compilation. Target flags such as `GOARCH`, `GOOS` or `--target` inside a
+target-platform stage do not avoid this: the compiler itself still runs emulated.
 
 **Detection heuristic**:
 
-- require an explicit `linux/amd64` plus a foreign Linux platform
+- require a foreign Linux platform (anything other than `linux/amd64`) on a job
+  whose `runs-on` is not an arm runner or an unresolved expression
 - read only a repository-local build context and Dockerfile
-- require a compile command in a Dockerfile stage
-- stay quiet when that stage uses `$BUILDPLATFORM`, `tonistiigi/xx`, `GOARCH`,
-  `GOOS`, `--target`, or `CARGO_BUILD_TARGET`
+- require a compile command in a Dockerfile stage the built target reaches
+- stay quiet when that stage's `FROM` uses `--platform=$BUILDPLATFORM`, directly or
+  through the stage it is based on
 - confirm the opportunity from buildx per-platform `RUN` and `DONE` lines; size it
   only when foreign-architecture compile time is at least half of the measured total
 

@@ -1684,12 +1684,10 @@ _OPT102_COMPILE_RE = re.compile(
     r"cmake\s+--build|dotnet\s+(?:build|publish)|gradle\w*\s+.*\bbuild|make(?:\s|$))",
     re.IGNORECASE,
 )
-_OPT102_CROSS_RE = re.compile(
-    r"(?:\$(?:\{BUILDPLATFORM\}|BUILDPLATFORM)|tonistiigi/xx|"
-    r"\bGO(?:ARCH|OS)\b|\bCARGO_BUILD_TARGET\b|"
-    r"(?:^|\s)--target(?:\s|=))",
-    re.IGNORECASE | re.MULTILINE,
-)
+# Only a stage that runs on the build platform avoids emulation. GOOS / GOARCH /
+# --target flags inside a target-platform stage still execute under emulation.
+_OPT102_BUILDPLATFORM_RE = re.compile(
+    r"--platform=\$(?:\{BUILDPLATFORM\}|BUILDPLATFORM\b)", re.IGNORECASE)
 
 
 def _detect_opt102(doc: dict, raw: str) -> list[Hit]:
@@ -1717,9 +1715,13 @@ def _detect_opt102(doc: dict, raw: str) -> list[Hit]:
             else:
                 platforms = [item.strip().lower() for item in
                              re.split(r"[,\n]", str(value or "")) if item.strip()]
-            if ("linux/amd64" not in platforms
-                    or not any(p.startswith("linux/") and p != "linux/amd64"
-                               for p in platforms)):
+            # Hosted x64 runners are the assumed build platform; an arm runner
+            # (or an unresolved expression) leaves the host unknown, so stay silent.
+            runs_on = json.dumps(job.get("runs-on")).lower()
+            if "arm" in runs_on or "${{" in runs_on:
+                continue
+            if not any(p.startswith("linux/") and p != "linux/amd64"
+                       for p in platforms):
                 continue
             context = str(with_.get("context") or ".").strip()
             dockerfile = str(with_.get("file") or "Dockerfile").strip()
@@ -1740,6 +1742,7 @@ def _detect_opt102(doc: dict, raw: str) -> list[Hit]:
                           if re.match(r"(?i)^\s*FROM\s+", stage)]
             stages: list[tuple[str, str, set[str]]] = []
             aliases: dict[str, int] = {}
+            on_build_platform: list[bool] = []
             for index, stage in enumerate(raw_stages):
                 clean = "\n".join(line for line in stage.splitlines()
                                   if not line.lstrip().startswith("#"))
@@ -1751,6 +1754,10 @@ def _detect_opt102(doc: dict, raw: str) -> list[Hit]:
                 refs = {header_match.group(1)}
                 refs.update(re.findall(
                     r"(?im)^\s*COPY\b[^\n]*?--from=([^\s]+)", clean))
+                base = aliases.get(header_match.group(1).lower())
+                on_build_platform.append(bool(
+                    _OPT102_BUILDPLATFORM_RE.search(header)
+                    or (base is not None and on_build_platform[base])))
                 stages.append((header, clean, refs))
                 if header_match.group(2):
                     aliases[header_match.group(2).lower()] = index
@@ -1780,7 +1787,7 @@ def _detect_opt102(doc: dict, raw: str) -> list[Hit]:
                 runs = re.findall(
                     r"(?ims)^\s*RUN\s+(.+?)(?=^\s*[A-Z][A-Z0-9]*\s+|\Z)", clean)
                 if (any(_OPT102_COMPILE_RE.search(run) for run in runs)
-                        and not _OPT102_CROSS_RE.search(clean)):
+                        and not on_build_platform[index]):
                     risky_stage = (header, clean)
                     break
             if risky_stage is None:
