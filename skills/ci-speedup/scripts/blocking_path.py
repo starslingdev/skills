@@ -1082,8 +1082,23 @@ def _pole_job_node(pole: dict[str, Any],
     return cands[0] if len(cands) == 1 else None
 
 
+def _advisory_required_status(pole: dict[str, Any],
+                              required_checks: Any,
+                              required_checks_complete: bool) -> str:
+    """Return required / not-required / unknown for an advisory-job disclosure.
+
+    An empty complete set is a real answer. A missing or partial read is unknown and
+    cannot authorize changing the trigger.
+    """
+    if not required_checks_complete:
+        return "unknown"
+    required = {str(check) for check in _as_list(required_checks)}
+    return "required" if str(pole.get("check") or "") in required else "not-required"
+
+
 def _advisory_job_line(pole: dict[str, Any],
-                       job_graph: dict[str, Any] | None) -> str:
+                       job_graph: dict[str, Any] | None,
+                       required_status: str = "unknown") -> str:
     """The advisory-job disclosure for `pole`, or "" when its job declares no literal
     job-level `continue-on-error: true`.
 
@@ -1110,19 +1125,28 @@ def _advisory_job_line(pole: dict[str, Any],
     this docstring claimed the two readings "stand together" at different strengths; they do
     not, and that claim is withdrawn.
 
-    WHY IT RECOMMENDS NOTHING. The no-weakening rail below forbids buying speed by verifying
-    less, and its carve-out is scoped to a check the change cannot fail on - which an advisory
-    job whose tests do cover the change is not. So this discloses; it does not advise moving,
-    skipping, or dropping the job."""
+    ROUTING STAYS OUT OF THIS LINE. This is the reader-facing disclosure. The copy-paste
+    prompt may route a declared advisory job to OPT71(c), but only when the required-check
+    read is complete and excludes this check; `_advisory_prompt_lines` owns that narrowly
+    scoped instruction."""
     node = _pole_job_node(pole, job_graph)
     if not node or node.get("continue_on_error") is not True:
         return ""
-    return ("> **Declared advisory: this job sets `continue-on-error: true`.** Its failure "
+    base = ("> **Declared advisory: this job sets `continue-on-error: true`.** Its failure "
             "does not fail the workflow run, so the run can pass on a PR where this job "
             "failed. That is run-scoped only: the job still reports its own check-run "
-            "conclusion, so a branch protection rule or ruleset requiring this specific check "
-            "can still block a merge, and this report does not read those rules. The timings "
-            "below are measured the same either way.")
+            "conclusion.")
+    if required_status == "required":
+        status = (" The readable required-check set includes this check, so it can still "
+                  "block a merge.")
+    elif required_status == "not-required":
+        status = (" The readable required-check set excludes this check, so this job cannot "
+                  "block the merge as a required status.")
+    else:
+        status = (" Required-check status is unavailable or partial, so a branch rule may "
+                  "still require it and it can still block a merge; confirm it is not a "
+                  "required check before changing its trigger.")
+    return base + status + " The timings below are measured the same either way."
 
 
 def _agg_gate_shape(pole: dict[str, Any], job_graph: dict[str, Any] | None,
@@ -3702,15 +3726,38 @@ def _advisory_prompt_lines(pole: dict[str, Any]) -> list[str]:
     body reaches the agent only if it is repeated in here. Stamped onto the pole by the
     renderer (`_advisory_declared`) rather than re-derived, so the bullet and the report's
     own disclosure can never disagree about which poles are advisory. Same strength as that
-    disclosure, and the same absence of advice: it does not tell the agent the job may be
-    moved, skipped or dropped - the no-weakening rail further down the prompt still governs."""
+    disclosure. A complete required-check read that excludes the check unlocks one narrowly
+    scoped route: OPT71(c), keeping the job and its advisory declaration while moving it off
+    the PR trigger. The shared no-weakening rail remains unchanged."""
     if not pole.get("_advisory_declared"):
         return []
-    return ["- Declared advisory: this job sets `continue-on-error: true`, so its failure "
-            "does not fail the workflow run. The job still reports its own check-run "
-            "conclusion, so a branch rule requiring this specific check can still block a "
-            "merge; this report does not read those rules. The timings are measured the "
-            "same either way, and this is context, not permission to verify less."]
+    status = str(pole.get("_advisory_required_status") or "unknown")
+    disclosure = ("- Declared advisory: this job sets `continue-on-error: true`, so its "
+                  "failure does not fail the workflow run. The job still reports its own "
+                  "check-run conclusion. The timings are measured the same either way.")
+    if status == "required":
+        return [disclosure,
+                "- The readable required-check set includes this check, so keep it on the "
+                "PR path; the advisory declaration is context, not permission to verify less."]
+    if status != "not-required":
+        return [disclosure,
+                "- Required-check status is unavailable or partial: confirm it is not a "
+                "required check before changing its trigger. Do not route or de-scope it "
+                "from this evidence."]
+    return [
+        "- decide first whether this job is meant to gate; if it is, make its failures fail "
+        "the job instead of moving it.",
+        disclosure,
+        "- Route this declared advisory, non-required check to OPT71 recipe (c): make it "
+        "advisory-async by running it after merge or on a schedule and still publishing its "
+        "result.",
+        "- Before moving it, enumerate every consumer of the job and its outputs. If it "
+        "feeds a required aggregator, treat it as a gate and follow the decide-first rule.",
+        "- Why this is safe: moving a job that cannot block the merge off the PR trigger "
+        "changes what the developer waits on, not what verifies the merge.",
+        "- Scoped advisory exception: this check may be moved off the PR trigger.",
+        "- Never delete the job. Never remove its `continue-on-error` while moving it.",
+    ]
 
 
 def _build_agent_prompt(leaf: dict[str, Any] | None, pole: dict[str, Any],
@@ -4177,7 +4224,7 @@ def _llm_agent_prompt(body: str, pole: dict[str, Any] | None = None) -> str:
     # so a body that quoted the report's own sentence is not doubled.
     _adv = _advisory_prompt_lines(_as_dict(pole))
     if _adv and "continue-on-error: true" not in body:
-        body = _adv[0].lstrip("- ") + "\n\n" + body
+        body = "\n".join(line.lstrip("- ") for line in _adv) + "\n\n" + body
     # The observed timing spread, for the same reason: this body is LLM-authored, so the
     # gap-fill hand-off gets the SAME sentence the pole section shows rather than the
     # model's own account of how much the check varies. Idempotent - a body that already
@@ -13261,13 +13308,18 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         # what this pole's ranking MEANS before any drill, prompt or saving is read. Plain
         # prose, not a `Claim`: it asserts no framing-vocabulary phrase and no derived
         # quantity - it restates one scanned YAML fact - so it has no comparator to bind.
-        _adv = _advisory_job_line(p, doc.get("workflow_job_graph"))
+        _adv_required_status = _advisory_required_status(
+            p, doc.get("required_checks"),
+            doc.get("required_checks_complete") is True)
+        _adv = _advisory_job_line(
+            p, doc.get("workflow_job_graph"), _adv_required_status)
         if _adv:
             out += [_adv, ""]
         # Stamped so the copy-paste agent prompt below can repeat the fact without
         # re-resolving the pole's job: one resolution, one answer, no way for the prose and
         # the prompt to disagree about whether this pole is advisory.
         p["_advisory_declared"] = bool(_adv)
+        p["_advisory_required_status"] = _adv_required_status if _adv else ""
         # Machine marker: which log-detector leaf crowned this pole's MEASURED CAUSE. Emitted
         # only for a leaf that survived off-category demotion, so verify_report re-derives the
         # crowned leaf's category and asserts it agrees with the pole's dominant_category.

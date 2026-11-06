@@ -13,6 +13,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-11-06** — Route a job declared with literal job-level `continue-on-error: true` to OPT71's advisory-async recipe only when a complete required-check read excludes its check. The prompt first asks whether the job should gate, keeps required and unknown-status jobs on the PR path, and never deletes the advisory job or removes its declaration during the move.
 - **2026-11-06** — Measure missing path-filter opportunities from the changed files in already-sampled pull requests. Reports use the repository's own `paths-ignore` precedent when available, otherwise a narrow documentation-only fallback, and label the resulting runner-minute estimate as a modeled upper bound with the observed hit count.
 - **2026-11-06** — Keep a reusable workflow's standalone pull-request checks outside a caller's required-check closure. Only caller-prefixed nested checks inherit that caller's merge-gating role; direct runs retain their own reachability.
 - **2026-11-06** — Keep the merge-wait headline on the slowest confirmed required or `needs:`-reachable check when a sampled file-backed check cannot be pinned to a job. Per-PR gate counts, the typical-path rendering and report verification now use the same confirmed gate population, while the unconfirmed check remains visible with its qualification.

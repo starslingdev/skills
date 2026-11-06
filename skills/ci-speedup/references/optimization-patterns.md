@@ -5297,9 +5297,11 @@ The router stops at (1)-(2). Consumer enumeration is a mandatory **reasoning-ste
 
 **Fix recipe**: Once consumers are enumerated and the check is genuinely advisory, the options in increasing aggressiveness are: (a) **narrow the trigger** — drop `synchronize` so it runs once per PR open/ready, not on every push; (b) **gate it** behind a `paths:` filter or a label so it only runs when relevant; (c) **make it advisory-async** — move it to run post-merge / on a schedule and post its result without blocking the PR. Pick the least aggressive option that removes the wait.
 
+When the workflow literally declares job-level `continue-on-error: true` and a complete required-check read excludes that job's check, the hand-off routes directly to (c). Decide first whether the job is meant to gate; if it is, make its failures fail the job instead of moving it. Otherwise, moving a job that cannot block the merge off the PR trigger changes what the developer waits on, not what verifies the merge. Keep the job and its output, and keep `continue-on-error` during the move. A partial or unavailable required-check read only asks the maintainer to confirm the check is not required; it never unlocks this route.
+
 **Risk**: **MEDIUM** — reversible, but narrowing a trigger can drop a signal developers actually use (a preview URL they click, a size comment they read). Confirm with the consumers enumeration; if anyone relies on it per-push, prefer making it async over removing it.
 
-**Guardrail**: Never de-scope a check whose required-status is **unknown** (branch-protection 404). Keep the advisory output reachable (async comment) rather than deleting it outright.
+**Guardrail**: Never de-scope a check whose required-status is **unknown** (branch-protection 404). Keep the advisory output reachable (async comment) rather than deleting it outright. The declared-advisory route never deletes the job or removes its `continue-on-error`; if the job was intended to gate, correct that declaration and keep it on the PR path.
 
 **Rollout**: Change the trigger on a branch, watch one week of PRs, confirm no one re-requests the dropped signal, then keep.
 
