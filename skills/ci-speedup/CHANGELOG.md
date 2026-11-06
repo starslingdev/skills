@@ -13,6 +13,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-11-06** — Measure pull-request wait once per sampled commit, from the earliest workflow run creation through the last completed job across every workflow on that SHA. Reports now show commit-level p50/p90, mark commits with missing workflow jobs as partial, and bound slowest-job projections and finding savings at the next independent job.
 - **2026-11-06** — Keep a reusable workflow's standalone pull-request checks outside a caller's required-check closure. Only caller-prefixed nested checks inherit that caller's merge-gating role; direct runs retain their own reachability.
 - **2026-11-06** — Keep the merge-wait headline on the slowest confirmed required or `needs:`-reachable check when a sampled file-backed check cannot be pinned to a job. Per-PR gate counts, the typical-path rendering and report verification now use the same confirmed gate population, while the unconfirmed check remains visible with its qualification.
 - **2026-11-05** — Keep full-history checkouts when a workflow directly invokes a first-party shell, Python, or Node script that walks Git history. The scanner follows one guarded repository-local script hop, fails closed for unreadable or escaping paths, and deliberately does not follow scripts invoked by that script.
