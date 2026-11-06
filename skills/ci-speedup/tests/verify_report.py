@@ -3619,7 +3619,7 @@ def _verify_per_pr_floor_split(name: str, report: str, cp: dict) -> Check | None
             candidate = _cmp_name(str(check.get("name") or ""))
             if re.sub(r"\s*\([^)]*\)\s*$", "", candidate) == base:
                 targets.add(candidate)
-    rows: list[tuple[float, str]] = []
+    rows: list[tuple[float, str, bool]] = []
     unknown_n = 0
     total_n = 0
     for entry in _as_list(cp.get("populations")):
@@ -3634,7 +3634,7 @@ def _verify_per_pr_floor_split(name: str, report: str, cp: dict) -> Check | None
             if positive:
                 sibling, floor_s = max(positive, key=lambda item: item[1])
                 total_n += 1
-                rows.append((0.0, sibling))
+                rows.append((0.0, sibling, False))
             continue
         total_n += 1
         siblings = [(check, duration) for check, duration in positive
@@ -3643,22 +3643,25 @@ def _verify_per_pr_floor_split(name: str, report: str, cp: dict) -> Check | None
             unknown_n += 1
             continue
         sibling, floor_s = max(siblings, key=lambda item: item[1])
-        rows.append((max(max(own) - floor_s, 0.0), sibling))
+        rows.append((max(max(own) - floor_s, 0.0), sibling, True))
     if total_n <= 0:
         return Check(name, False,
                      "rendered per-PR split has no usable population containing its pole")
     expected: list[str] = []
-    zero = [(saving, sibling) for saving, sibling in rows if saving <= 0]
-    positive = [(saving, sibling) for saving, sibling in rows if saving > 0]
+    zero = [(saving, sibling, target_ran)
+            for saving, sibling, target_ran in rows if saving <= 0]
+    positive = [(saving, sibling, target_ran)
+                for saving, sibling, target_ran in rows if saving > 0]
     if zero:
-        blockers = {_strip_scope(sibling) for _saving, sibling in zero}
+        blockers = {_strip_scope(sibling) for _saving, sibling, _target_ran in zero}
         blockers.discard("")
         where = (f" where `{next(iter(blockers))}` runs"
-                 if len(blockers) == 1 else " where another check runs longer")
+                 if len(blockers) == 1 and all(target_ran for *_rest, target_ran in zero)
+                 else " where another check runs longer")
         expected.append(f"0 on {len(zero)} of {total_n} PRs{where}")
     if positive:
         by_cap: dict[float, int] = {}
-        for saving, _sibling in positive:
+        for saving, _sibling, _target_ran in positive:
             cap = round(saving, 1)
             by_cap[cap] = by_cap.get(cap, 0) + 1
         for cap, count in sorted(by_cap.items()):
@@ -3673,7 +3676,7 @@ def _verify_per_pr_floor_split(name: str, report: str, cp: dict) -> Check | None
         return Check(name, False,
                      "per-PR sibling-floor split disagrees with populations; missing: "
                      + "; ".join(missing))
-    max_saving = max((saving for saving, _sibling in rows), default=0.0)
+    max_saving = max((saving for saving, _sibling, _target_ran in rows), default=0.0)
     bottom = next((line for line in report.splitlines() if "**Bottom line.**" in line), "")
     match = _HEADLINE_WIN_RE.search(bottom)
     rendered = _parse_clock_to_s(match.group(1)) if match else None
