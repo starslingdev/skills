@@ -196,6 +196,10 @@ def test_collect_attaches_a_tail_only_to_a_confirmed_merge_gate(
         report, report_path, findings, skill_repo=None)
     failed = [check for check in checks if not check.ok and not check.skipped]
     assert not failed, failed
+    tail_check = next(
+        check for check in checks
+        if check.name == "minority slow tails on merge-blocking checks are re-derived")
+    assert tail_check.ok and not tail_check.skipped
     assert {check["name"] for check in doc["pr_critical_path"]["checks"]} == {
         "merge-gate", "unpinned",
     }
