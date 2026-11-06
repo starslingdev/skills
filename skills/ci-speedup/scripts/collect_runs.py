@@ -5194,12 +5194,15 @@ def _critical_path(jobs_per_run: list[list[dict[str, Any]]]) -> dict[str, Any]:
 def _minority_tails_for_checks(
         pr_checks: list[tuple[str, float]],
         crit_by_wf: dict[str, dict[str, Any]],
-        required_scoped: bool) -> dict[str, dict[str, Any]]:
+        confirmed_checks: "frozenset[str] | set[str]",
+) -> dict[str, dict[str, Any]]:
     """Attach sampled tails only to checks in a confirmed required closure."""
-    if not required_scoped:
+    if not confirmed_checks:
         return {}
     tails: dict[str, dict[str, Any]] = {}
     for check, _p50 in pr_checks:
+        if check not in confirmed_checks:
+            continue
         mapping = _map_check_to_job(
             check, crit_by_wf, require_developer_timing=True)
         if mapping is None:
@@ -5271,7 +5274,7 @@ _SIZING: dict[str, dict[str, Any]] = {
     "OPT17": {"model": "direct", "default_s": 30.0},
     "OPT23": {"model": "parallel-rebalance"},
     "OPT28": {"model": "direct", "default_s": 5.0},
-    "OPT32": {"model": "runner-min-only", "hit_rate": 0.3},
+    "OPT32": {"model": "runner-min-only"},
     # OPT35's STATIC fallback (residual appendix rows, when a shard matrix has no
     # failed-run history for the measured upgrade to fire) names ONE matrix job in
     # affected_jobs — so it must be sized off THAT job's own p50, never the
@@ -5473,6 +5476,44 @@ _EPHEMERAL_RUNNER_MIN_CAVEAT = (
     "with a persisted actions/cache for that dir + a measured warm-vs-cold "
     "delta (none here), so this is config-hygiene, not a credited bill saving")
 
+# OPT9 covers two materially different cache shapes. Lint and format result
+# caches avoid reprocessing the same inputs, so their existing conservative
+# sizing remains useful. Compiler build state and generated output can cost as
+# much to restore, validate, and save as they avoid; a cache hit alone does not
+# establish a saving. Keep those findings visible, but require a measured
+# before/after comparison rather than assigning the generic OPT9 default.
+_OPT9_BUILD_STATE_RE = re.compile(
+    r"(?:\btsc\b|typescript|tsbuildinfo|--incremental\b|"
+    r"generated[ -](?:client|output|code)|\bcodegen\b|code generation)",
+    re.IGNORECASE,
+)
+_OPT9_RESULT_CACHE_RE = re.compile(
+    r"(?:\beslint\b|\bprettier\b|\bjest\b|\bvitest\b)",
+    re.IGNORECASE,
+)
+
+
+def _opt9_is_build_state(f: dict[str, Any]) -> bool:
+    if f.get("pattern") != "OPT9":
+        return False
+    tool = str(f.get("opt9_tool") or "").lower()
+    if tool == "tsc":
+        return True
+    if tool in {"eslint", "prettier", "jest", "vitest"}:
+        return False
+    title = str(f.get("title") or "")
+    if _OPT9_RESULT_CACHE_RE.search(title):
+        return False
+    if _OPT9_BUILD_STATE_RE.search(title):
+        return True
+    evidence = " ".join(
+        str(f.get(key) or "")
+        for key in ("evidence", "match_text", "fix_strategy")
+    )
+    if _OPT9_RESULT_CACHE_RE.search(evidence):
+        return False
+    return bool(_OPT9_BUILD_STATE_RE.search(evidence))
+
 # Patterns whose modeled runner-min is NOT a realizable compute saving. The
 # credited `runner_min_saving` is set to None (so the bill headline / Also-noticed
 # appendix skip it) and the modeled amount is preserved in `runner_min_unrealizable_s` so the
@@ -5486,6 +5527,183 @@ _WALL_CLOCK_ONLY_NO_RUNNER_MIN = {"OPT21"}
 #           `if:` guards / an internal change-gate) and the trigger can be
 #           narrowed safely — a per-workflow judgment we don't fake.
 _RUNNER_MIN_UPPER_BOUND = {"OPT32"}
+
+_OPT32_CHANGED_FILES_MAX_PAGES = 30
+_OPT32_DEFAULT_PATHS = ("*.md", "docs/**/*.md", "LICENSE*", ".github/*.md")
+
+
+def _opt32_glob_matches(path: str, pattern: str) -> bool:
+    """Conservative GitHub-path glob subset used by the OPT32 estimator.
+
+    Unsupported constructs do not match. That can undercount a possible skip,
+    which is preferable to claiming savings for a pull request the filter would
+    still run.
+    """
+    path = path.lstrip("/")
+    pattern = pattern.strip().lstrip("/")
+    if not path or not pattern or any(c in pattern for c in "[]{}"):
+        return False
+    out = []
+    i = 0
+    while i < len(pattern):
+        c = pattern[i]
+        if c == "*":
+            if i + 1 < len(pattern) and pattern[i + 1] == "*":
+                i += 2
+                if i < len(pattern) and pattern[i] == "/":
+                    out.append("(?:.*/)?")
+                    i += 1
+                else:
+                    out.append(".*")
+                continue
+            out.append("[^/]*")
+        elif c == "?":
+            out.append("[^/]")
+        else:
+            out.append(re.escape(c))
+        i += 1
+    return re.fullmatch("".join(out), path) is not None
+
+
+def _opt32_default_path_matches(path: str) -> bool:
+    """The deliberately narrow fallback when the repository has no precedent."""
+    path = path.lstrip("/")
+    if "/" not in path and (path.endswith(".md") or path.startswith("LICENSE")):
+        return True
+    if path.startswith("docs/") and path.endswith(".md"):
+        return True
+    return (path.startswith(".github/") and path.count("/") == 1
+            and path.endswith(".md"))
+
+
+def _opt32_ignored_by_patterns(path: str, patterns: list[str]) -> bool:
+    """Apply ordered paths-ignore patterns, including conservative `!` restores."""
+    # An unsupported positive pattern merely misses a possible skip. An
+    # unsupported negative pattern is different: ignoring its restore could
+    # claim a skip that GitHub would not make, so fail the whole path closed.
+    if any(str(raw).strip().startswith("!")
+           and any(c in str(raw).strip()[1:] for c in "[]{}+\\")
+           for raw in patterns):
+        return False
+    ignored = False
+    for raw in patterns:
+        pattern = str(raw).strip()
+        negated = pattern.startswith("!")
+        if negated:
+            pattern = pattern[1:]
+        if _opt32_glob_matches(path, pattern):
+            ignored = not negated
+    return ignored
+
+
+def _opt32_repository_paths_ignore(
+    wf_docs: dict[str, dict[str, Any]],
+) -> tuple[list[str], list[str]]:
+    patterns: list[str] = []
+    sources: list[str] = []
+    for wf_path, doc in wf_docs.items():
+        on = doc.get("on") if isinstance(doc, dict) else None
+        if on is None and isinstance(doc, dict):
+            on = doc.get(True)
+        if not isinstance(on, dict):
+            continue
+        for event in ("pull_request", "pull_request_target", "push"):
+            cfg = on.get(event)
+            values = cfg.get("paths-ignore") if isinstance(cfg, dict) else None
+            if isinstance(values, str):
+                values = [values]
+            if not isinstance(values, list):
+                continue
+            usable = [str(v) for v in values if isinstance(v, str) and v.strip()]
+            if usable:
+                patterns.extend(usable)
+                sources.append(wf_path)
+    return list(dict.fromkeys(patterns)), list(dict.fromkeys(sources))
+
+
+def _opt32_changed_files(client: GhClient, repo: str, pr_number: int) -> list[str] | None:
+    """Fetch one sampled PR's changed files, bounded at GitHub's 3,000-file limit."""
+    files: list[str] = []
+    for page in range(1, _OPT32_CHANGED_FILES_MAX_PAGES + 1):
+        endpoint = f"repos/{repo}/pulls/{pr_number}/files?per_page=100"
+        if page > 1:
+            endpoint += f"&page={page}"
+        doc = client.json(endpoint)
+        if not isinstance(doc, list):
+            return None
+        for row in doc:
+            name = row.get("filename") if isinstance(row, dict) else None
+            if isinstance(name, str) and name:
+                files.append(name)
+        if len(doc) < 100:
+            return files
+    # GitHub exposes at most 3,000 files for this endpoint. A full last page
+    # therefore cannot prove the PR ended at the API ceiling; treating the
+    # prefix as complete could falsely classify a later code file as ignored.
+    return None
+
+
+def _measure_opt32_path_filters(
+    client: GhClient,
+    repo: str,
+    findings: list[dict[str, Any]],
+    sampled_runs_by_wf: dict[str, list[dict[str, Any]]],
+    wf_docs: dict[str, dict[str, Any]],
+) -> None:
+    """Measure OPT32 only from PRs already selected by the normal run sample."""
+    targets = [f for f in findings if f.get("pattern") == "OPT32"]
+    if not targets:
+        return
+    repo_patterns, pattern_sources = _opt32_repository_paths_ignore(wf_docs)
+    numbers_by_workflow = {
+        workflow: list(dict.fromkeys(
+            number for run in runs for number in [_run_pr_number(run)]
+            if isinstance(number, int)))
+        for workflow, runs in sampled_runs_by_wf.items()
+    }
+    all_numbers = list(dict.fromkeys(
+        number for finding in targets
+        for number in numbers_by_workflow.get(
+            str(finding.get("workflow_file") or ""), [])))
+    changed = {number: _opt32_changed_files(client, repo, number)
+               for number in all_numbers}
+    for finding in targets:
+        numbers = numbers_by_workflow.get(str(finding.get("workflow_file") or ""), [])
+        if not numbers or any(changed[number] is None for number in numbers):
+            continue
+        would_skip = 0
+        for number in numbers:
+            paths = changed[number] or []
+            if not paths:
+                continue
+            if repo_patterns:
+                skip = all(_opt32_ignored_by_patterns(path, repo_patterns) for path in paths)
+            else:
+                skip = all(_opt32_default_path_matches(path) for path in paths)
+            would_skip += int(skip)
+        sampled = len(numbers)
+        hit_rate = would_skip / sampled
+        source = "repository paths-ignore" if repo_patterns else "conservative defaults"
+        finding["path_filter_measurement"] = {
+            "sampled_prs": sampled,
+            "would_skip_prs": would_skip,
+            "hit_rate": round(hit_rate, 4),
+            "source": source,
+            "patterns": repo_patterns or list(_OPT32_DEFAULT_PATHS),
+            "source_workflows": pattern_sources,
+        }
+        measured = (f" Measured {would_skip} of {sampled} sampled PRs as fully "
+                    "covered by the candidate filter.")
+        if repo_patterns:
+            named = ", ".join(f"`{p}`" for p in repo_patterns)
+            workflows = ", ".join(f"`{p}`" for p in pattern_sources)
+            suffix = (f" Measured with repository `paths-ignore` from {workflows}: "
+                      f"{named}.")
+        else:
+            suffix = (" Measured with conservative documentation-only defaults: "
+                      "`*.md`, `docs/**/*.md`, `LICENSE*`, `.github/*.md`.")
+        finding["evidence"] = (str(finding.get("evidence") or "").rstrip()
+                               + measured + suffix)
 
 
 def _affected_job_p50(f: dict[str, Any], crit: dict[str, Any]) -> float:
@@ -5579,6 +5797,20 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
     long_pole = crit.get("long_pole_p50", 0.0)
     floor = crit.get("floor_p50", 0.0)
     model = cfg["model"]
+
+    if _opt9_is_build_state(f):
+        f["wall_clock_p50_s"] = None
+        f["runner_min_saving"] = None
+        f["tier"] = 2
+        f["realization"] = "none"
+        f["opt9_measure_before_after"] = True
+        f["size_note"] = (
+            "build-state and generated-output cache costs vary with restore, "
+            "validation, and save overhead — measure before and after on the "
+            "same workload before crediting seconds"
+        )
+        return
+
     # Guardrail A — D12 serial-gate auto-demote.
     if pat in _SERIAL_GATE_PATTERNS:
         model = "wall-clock-negative"
@@ -5673,7 +5905,9 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
         # sampled timings (a reusable-workflow caller, an unmappable name), we
         # do NOT substitute the long pole — we render qualitatively (omit rather
         # than fake), since we genuinely can't size the job's own cost.
-        rate = cfg.get("hit_rate", 0.0)
+        measurement = f.get("path_filter_measurement") if pat == "OPT32" else None
+        rate = (measurement.get("hit_rate", 0.0)
+                if isinstance(measurement, dict) else cfg.get("hit_rate", 0.0))
         cost_basis = cfg.get("cost_basis")
         if cfg.get("scope") == "job":
             per_run_s = _affected_job_p50(f, crit)
@@ -5728,6 +5962,13 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
                     "runner-minute (bill) only — at most the affected jobs' own "
                     f"compute × {rate_label}; re-grounded in the cost "
                     "spine's MEASURED billable compute when a spine is built")
+            elif pat == "OPT32" and isinstance(measurement, dict):
+                skipped = int(measurement.get("would_skip_prs") or 0)
+                sampled = int(measurement.get("sampled_prs") or 0)
+                f["size_note"] = (
+                    "runner-minute (bill) only — modeled upper bound from the "
+                    f"measured path-filter hit rate: {skipped} of {sampled} sampled PRs "
+                    "would skip × the workflow's measured per-run job cost × monthly volume")
             else:
                 # Most runner-min-only patterns are below the cluster floor; some
                 # (e.g. OPT12, a composite-action dedup) are wall-clock-NEUTRAL by
@@ -27550,8 +27791,13 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # that descriptive evidence only after the required closure actually narrowed
     # the spine: an independent sibling outside every required `needs:` closure
     # must not acquire a merge-wait finding merely because it has a slow tail.
+    _minority_tail_confirmed = {
+        _n for _n, _p50 in pr_checks_tuple
+        if spine_required_scoped and _pole_is_required_reachable(
+            _n, req_names, _jg, crit_by_wf)
+    }
     _minority_tail_by_check = _minority_tails_for_checks(
-        pr_checks_tuple, crit_by_wf, spine_required_scoped)
+        pr_checks_tuple, crit_by_wf, _minority_tail_confirmed)
     # ENG-1 PR-N1: per-PR chain TIMING facts (data-only; nothing renders or
     # ranks on them until PR-N2). One entry per sampled repr sha — the longest
     # `needs:` chain (capped member spans, `_span_caps` — the caps the ranking
@@ -28560,6 +28806,13 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     _opt96_check_default_branch(findings_doc, default_branch)
     _ground_opt96(findings, drill_poles or poles, _wf_docs,
                   fetch_gaps={str(g.get("workflow_file")) for g in _sample_gaps()})
+
+    # OPT32's bill estimate is useful only when it reflects this repository's
+    # sampled pull requests. Reuse the run sample already selected above, fetch
+    # changed files for those PRs only, and stamp the measured fraction before
+    # the common sizing pass consumes it.
+    _measure_opt32_path_filters(
+        client, repo, findings, sampled_runs_by_wf, _wf_docs)
 
     # The repo's longest measured job across ALL workflows — the physical ceiling on
     # any wall-clock saving (you can't save more than the slowest run takes). Used to

@@ -587,6 +587,9 @@ def test_runner_min_demoted_for_unrealizable_patterns():
     #   OPT32 — missing paths filter is a gross upper bound (B3)
     for pat in ("OPT21", "OPT3", "OPT9", "OPT32"):
         f = {"pattern": pat, "affected_jobs": ["changed-tests"]}
+        if pat == "OPT32":
+            f["path_filter_measurement"] = {
+                "hit_rate": 0.3, "would_skip_prs": 3, "sampled_prs": 10}
         _size_finding(f, _CRIT, monthly_volume=4950)
         assert f["runner_min_saving"] is None, pat
         assert f["runner_min_unrealizable"] is True, pat

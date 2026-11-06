@@ -660,7 +660,8 @@ def size_wall_clock(raw_s: float, ctx: WallClockContext,
     programming errors, not runtime conditions). Returns the effective saving
     plus the derivation chain."""
     steps = CASCADE if cascade is None else cascade
-    v = float(raw_s)
+    quantized_raw_s = round(float(raw_s), 1)
+    v = quantized_raw_s
     derivation: list[tuple[str, float, float, str]] = []
     for name, fn in steps:
         r = fn(v, ctx)
@@ -675,4 +676,4 @@ def size_wall_clock(raw_s: float, ctx: WallClockContext,
                     f"({v} -> {r.value}) without a reason")
             derivation.append((name, round(v, 1), round(r.value, 1), r.reason))
             v = r.value
-    return WallClockResult(round(float(raw_s), 1), round(v, 1), derivation)
+    return WallClockResult(quantized_raw_s, round(v, 1), derivation)
