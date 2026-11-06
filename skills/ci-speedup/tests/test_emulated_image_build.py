@@ -100,4 +100,3 @@ def test_buildx_log_measures_emulated_compile_share():
     assert leaf is not None and leaf["fix_key"] == "emulated-image-compile"
     assert leaf["magnitude"] == {
         "label": "emulated compile seconds", "unit": "s", "value": 1289.0}
-
