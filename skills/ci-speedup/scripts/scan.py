@@ -453,6 +453,7 @@ _HISTORY_JOB_NAME_RE = re.compile(
 # per scan() from the referenced action files; consulted by
 # `_job_needs_git_history` so OPT28 never recommends shallowing such a job.
 _GIT_HISTORY_LOCAL_ACTIONS: set[str] = set()
+_GIT_HISTORY_LOCAL_SCRIPTS: set[str] = set()
 
 # A `uses:` naming THIS repository: `./path`, or the self-repository prefix
 # `$/path` GitHub shipped 2026-07-30 (same commit, same files, no checkout
@@ -478,6 +479,135 @@ def _has_git_history_op(text: str) -> bool:
     every surface `_GIT_HISTORY_RE` is matched against, so line continuations are
     joined in exactly one place."""
     return bool(_GIT_HISTORY_RE.search(_LINE_CONTINUATION_RE.sub(" ", text)))
+
+
+# One deliberately bounded hop into a first-party script invoked directly by a
+# workflow run step. This is narrower than `_GIT_HISTORY_RE`: prose and
+# working-tree-only commands inside a general-purpose script must not make a
+# full-history checkout look load-bearing.
+_FIRST_PARTY_SCRIPT_RE = re.compile(
+    r"(?:^|[\n;&|])\s*(?:"
+    r"(?P<direct>\./[^\s;&|]+)|"
+    r"(?:bash|python|node)\s+(?P<interpreter>(?!-)(?:\./)?[^\s;&|]+)"
+    r")(?=\s|$)",
+    re.M,
+)
+_SCRIPT_GIT_HISTORY_RE = re.compile(
+    r"(?:^|[\n;&|])\s*(?:"
+    r"git\s+(?:rev-list|describe|merge-base)\b|"
+    r"git\s+log\b[^\n|;&]*\.\.\.?|"
+    r"git\s+diff\b(?:(?!\s--\s|>)[^\n|;&])*(?:\.\.\.?|\borigin/|\brefs/|HEAD[~^]|\.sha\b|\$[({]?[A-Za-z_0-9])|"
+    r"git\s+fetch\b[^\n|;&]*(?:--unshallow\b|--depth(?:=|\s)|--tags\b)|"
+    r"(?:npx\s+|pnpm\s+|yarn\s+)?changesets?\b|"
+    r"(?:dorny/paths-filter|tj-actions/changed-files)\b"
+    r")",
+    re.I | re.M,
+)
+_SCRIPT_LITERAL_CALL_RE = re.compile(
+    r"subprocess\.(?:run|call|check_call|check_output|Popen)\s*\(\s*\[(?P<python>[^\]\n]*)\]|"
+    r"(?:spawn|spawnSync|execFile|execFileSync)\s*\(\s*['\"]git['\"]\s*,\s*\[(?P<node>[^\]\n]*)\]",
+    re.I,
+)
+_SCRIPT_LITERAL_ARG_RE = re.compile(r"(['\"])(.*?)\1")
+_SCRIPT_COMMENT_LINE_RE = re.compile(r"^\s*(?:#|//).*$", re.M)
+_SCRIPT_GIT_ARGS_RE = re.compile(
+    r"^git\s+(?:rev-list|describe|merge-base)\b|"
+    r"^git\s+log\b.*\.\.\.?|"
+    r"^git\s+diff\b(?:(?!\s--\s|>).)*(?:\.\.\.?|\borigin/|\brefs/|HEAD[~^]|\.sha\b|\$[({]?[A-Za-z_0-9])|"
+    r"^git\s+fetch\b.*(?:--unshallow\b|--depth(?:=|\s)|--tags\b)",
+    re.I,
+)
+
+
+def _first_party_script_refs(text: str) -> set[str]:
+    """Return direct, relative script operands from a workflow `run:` block."""
+    joined = _LINE_CONTINUATION_RE.sub(" ", text)
+    return {ref.strip("'\"") for match in _FIRST_PARTY_SCRIPT_RE.finditer(joined)
+            if (ref := (match.group("direct") or match.group("interpreter")))}
+
+
+def _script_working_directory(job: dict, step: dict) -> str:
+    """The step's effective Actions working directory, relative to root."""
+    defaults = job.get("defaults")
+    run_defaults = defaults.get("run") if isinstance(defaults, dict) else None
+    inherited = (run_defaults.get("working-directory")
+                 if isinstance(run_defaults, dict) else None)
+    value = step.get("working-directory", inherited)
+    return str(value).strip() if value not in (None, "") else "."
+
+
+def _script_ref_key(ref: str, working_directory: str) -> str:
+    return ref if working_directory in ("", ".") else f"{working_directory}\0{ref}"
+
+
+def _script_key_parts(key: str) -> tuple[str, str]:
+    working_directory, separator, ref = key.partition("\0")
+    return (working_directory, ref) if separator else (".", working_directory)
+
+
+def _local_script_path(root: Path, key: str) -> "Path | None":
+    """Resolve a relative script ref only when its real path stays in root."""
+    working_directory, ref = _script_key_parts(key)
+    candidate = root / (ref[2:] if ref.startswith("./") else ref)
+    if working_directory != ".":
+        candidate = root / working_directory / (ref[2:] if ref.startswith("./") else ref)
+    try:
+        root_n = os.path.realpath(root)
+        candidate_n = os.path.realpath(candidate)
+        if os.path.commonpath([root_n, candidate_n]) != root_n:
+            return None
+    except ValueError:
+        return None
+    return candidate
+
+
+def _read_local_script(root: Path, key: str) -> "str | None":
+    path = _local_script_path(root, key)
+    if path is None:
+        return None
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except (OSError, ValueError):
+        return None
+
+
+def _has_script_git_history_op(text: str) -> bool:
+    without_comments = _SCRIPT_COMMENT_LINE_RE.sub("", text)
+    joined = _LINE_CONTINUATION_RE.sub(" ", without_comments)
+    if _SCRIPT_GIT_HISTORY_RE.search(joined):
+        return True
+    for match in _SCRIPT_LITERAL_CALL_RE.finditer(joined):
+        raw = match.group("python") or match.group("node") or ""
+        args = [value for _quote, value in _SCRIPT_LITERAL_ARG_RE.findall(raw)]
+        if match.group("python") is not None:
+            if not args or args.pop(0).lower() != "git":
+                continue
+        command = "git " + " ".join(args)
+        if _SCRIPT_GIT_ARGS_RE.search(command):
+            return True
+    return False
+
+
+def _local_script_needs_history(root: Path, key: str) -> bool:
+    """Read exactly one invoked script; unreadable or external refs fail closed."""
+    text = _read_local_script(root, key)
+    return text is None or _has_script_git_history_op(text)
+
+
+def _index_local_git_scripts(root: Path,
+                             parsed: list[tuple[str, dict, str]]) -> set[str]:
+    """Index invoked first-party scripts that directly need git history."""
+    refs: set[str] = set()
+    for _rel, doc, _raw in parsed:
+        for job in _jobs_from_doc(doc).values():
+            if not isinstance(job, dict):
+                continue
+            for step in _steps(job):
+                working_directory = _script_working_directory(job, step)
+                refs.update(_script_ref_key(ref, working_directory)
+                            for ref in _first_party_script_refs(
+                                str(step.get("run") or "")))
+    return {ref for ref in refs if _local_script_needs_history(root, ref)}
 
 
 # A local `uses:` reference written inside an action or reusable-workflow file
@@ -576,6 +706,12 @@ def _job_needs_git_history(job: dict, job_name: str = "") -> bool:
         for s in _steps(job):
             if _uses(s).split("@")[0].strip() in _GIT_HISTORY_LOCAL_ACTIONS:
                 return True
+    if _GIT_HISTORY_LOCAL_SCRIPTS:
+        for step in _steps(job):
+            working_directory = _script_working_directory(job, step)
+            for ref in _first_party_script_refs(str(step.get("run") or "")):
+                if _script_ref_key(ref, working_directory) in _GIT_HISTORY_LOCAL_SCRIPTS:
+                    return True
     # Name-based fallback: a changeset/release/version job almost always needs
     # history even when the op lives in an invoked script. Conservative on
     # purpose — never recommend shallowing one of these.
@@ -6202,8 +6338,9 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
 
     # Index local composite actions that run git-history ops, so OPT28 can see a
     # `git checkout origin/main` hidden inside `uses: ./.github/actions/foo`.
-    global _GIT_HISTORY_LOCAL_ACTIONS
+    global _GIT_HISTORY_LOCAL_ACTIONS, _GIT_HISTORY_LOCAL_SCRIPTS
     _GIT_HISTORY_LOCAL_ACTIONS = _index_local_git_actions(root, parsed)
+    _GIT_HISTORY_LOCAL_SCRIPTS = _index_local_git_scripts(root, parsed)
 
     # Index the repo's DECLARED checkout payload (submodule paths, LFS-tracked
     # path patterns) and the text of every local composite action, so OPT76 can

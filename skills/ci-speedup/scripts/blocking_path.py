@@ -2801,6 +2801,19 @@ def _parse_log(text: str,
             "evidence": ev,
             "search": [":test", "BUILD SUCCESSFUL in", "maxParallelForks"],
         }
+    dependency_state = _cache_state_of_log(text, "dependency-cache")
+    if dependency_state:
+        return {
+            "fix_key": "dependency-cache",
+            "unit_label": "dependency cache restore results",
+            "magnitude": {"label": "dependency cache misses", "unit": "%",
+                          "value": dependency_state["miss_pct"]},
+            "deeper": [],
+            "evidence": [line for line in lines if _DEPENDENCY_CACHE_MISS_RE.search(line)
+                         or "Cache restored from key" in line][:3],
+            "search": ["Cache not found for input keys", "cache is not found",
+                       "Cache restored from key"],
+        }
     # --- L: one shell runner invokes many test files one after another ----------
     # This is deliberately the last catalog leaf: a more specific detector above
     # keeps precedence. Each admitted invocation needs a timestamped completion
@@ -2859,19 +2872,6 @@ def _parse_log(text: str,
             "deeper": [],
             "evidence": [x[3] for x in command_starts[:2]],
             "search": ["test loop", "parallel", "OPT88"],
-        }
-    dependency_state = _cache_state_of_log(text, "dependency-cache")
-    if dependency_state:
-        return {
-            "fix_key": "dependency-cache",
-            "unit_label": "dependency cache restore results",
-            "magnitude": {"label": "dependency cache misses", "unit": "%",
-                          "value": dependency_state["miss_pct"]},
-            "deeper": [],
-            "evidence": [line for line in lines if _DEPENDENCY_CACHE_MISS_RE.search(line)
-                         or "Cache restored from key" in line][:3],
-            "search": ["Cache not found for input keys", "cache is not found",
-                       "Cache restored from key"],
         }
     return None
 
@@ -5764,10 +5764,13 @@ def _select_render_poles(doc: dict[str, Any], poles: list[dict[str, Any]]) -> tu
                        for c in checks}
             n = denominator
     required = {str(c) for c in (doc.get("required_checks") or [])}
+    reachability = {str(c.get("name", "")): c.get("required_reachable") for c in checks}
     frequencies = {str(c.get("name", "")): c.get("pole_n") for c in checks}
     have_frequencies = bool(frequencies) and all(v is not None for v in frequencies.values())
 
     def typical_name(name: str) -> bool:
+        if reachability.get(name) is False:
+            return False
         if name in required:
             return True
         if have_frequencies:
@@ -5833,11 +5836,16 @@ def _gate_counts(cp: dict[str, Any]) -> tuple[dict[str, int], dict[str, int], in
     that gates almost every PR. ({}, {}, 0) when populations weren't recorded."""
     pole_count: dict[str, int] = {}
     present: dict[str, int] = {}
+    unconfirmed = {
+        str(c.get("name", "")) for c in (cp.get("checks") or [])
+        if isinstance(c, dict) and c.get("required_reachable") is False
+    }
     n = 0
     for entry in cp.get("populations") or []:
         try:
             _share, cks = entry
-            pos = [(str(nm), float(p)) for nm, p in cks if float(p) > 0]
+            pos = [(str(nm), float(p)) for nm, p in cks
+                   if float(p) > 0 and str(nm) not in unconfirmed]
         except (TypeError, ValueError):
             continue
         if not pos:
@@ -11755,6 +11763,10 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
     # and is never demoted. Keeping the SAME threshold as collect_runs keeps the rendered
     # order/labels in agreement with `critical_path_check` and the data-pass summary.
     _required_names = {str(c) for c in (doc.get("required_checks") or [])}
+    _required_reachability = {
+        str(c.get("name", "")): c.get("required_reachable")
+        for c in (cp.get("checks") or []) if isinstance(c, dict)
+    }
     # Pole FREQUENCY (times a check is the ACTUAL critical path) drives the typical/rare split,
     # keyed off the engine's stamped `checks[].pole_n` — the same signal `_rank_spine_present_first`
     # ranks by, so the rendered demotion can't disagree with `critical_path_check`. Presence>half
@@ -11780,6 +11792,8 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         # too-small sample the frequency is noise (everything typical). New findings use the
         # pole-frequency floor; findings that PREDATE `pole_n` fall back to the legacy presence
         # rule (unchanged) so old committed reports render identically.
+        if _required_reachability.get(name) is False:
+            return False
         if name in _required_names:
             return True
         if _have_pole_n:

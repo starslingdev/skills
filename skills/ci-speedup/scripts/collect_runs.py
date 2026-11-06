@@ -2468,6 +2468,7 @@ def _rank_spine_present_first(
     per_sha_checks: list[dict[str, float]],
     req_names: "frozenset[str] | set[str]",
     caps: dict[str, float] | None = None,
+    confirmed_gate_checks: "frozenset[str] | set[str] | None" = None,
 ) -> tuple[tuple[tuple[str, float], ...], dict[str, int], int, dict[str, int]]:
     """Order the merge-wait spine so checks that ACTUALLY gate the merge — the slowest job a PR
     waits on, on at least `_POLE_RECUR_FLOOR` sampled PRs — rank ABOVE one-path outliers, each
@@ -2484,14 +2485,24 @@ def _rank_spine_present_first(
     PRs. Ranking by how often a check is the real critical path picks the recurring gates a
     developer actually waits on (validated on expo: playwright-windows/android-build lead;
     check-packages, the actual pole on 0/20 PRs, drops out of the headline)."""
-    present, n_pr = _check_presence(per_sha_checks, set(pr_check_p50))
-    pole_freq = _pole_frequencies(per_sha_checks, set(pr_check_p50), caps)
+    all_checks = set(pr_check_p50)
+    present, n_pr = _check_presence(per_sha_checks, all_checks)
+    # Once required reachability has been resolved, an unpinnable conservative keep is not
+    # evidence about which check blocked merging. Keep it in the spine for disclosure, but
+    # compute recurrence only among checks confirmed required/needs-reachable. None means
+    # reachability was unreadable and preserves the historical basis exactly.
+    gate_checks = (all_checks if confirmed_gate_checks is None
+                   else all_checks & set(confirmed_gate_checks))
+    gate_freq = _pole_frequencies(per_sha_checks, gate_checks, caps)
+    pole_freq = {c: gate_freq.get(c, 0) for c in all_checks}
     tier_ok = n_pr >= _RARE_PRESENCE_MIN_PR
 
     def is_rare(c: str) -> bool:
         # Rare == not a recurring actual gate: the slowest job on FEWER than the floor of sampled
         # PRs. Required checks gate by definition (exempt). Below the min-sample floor the
         # frequency is noise, so demote nothing (plain p50 order).
+        if confirmed_gate_checks is not None and c not in confirmed_gate_checks:
+            return True
         return bool(tier_ok and c not in req_names
                     and pole_freq.get(c, 0) < _POLE_RECUR_FLOOR)
 
@@ -27306,6 +27317,19 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     pr_check_p50, _fileless_check_p50 = _partition_fileless_checks(
         pr_check_p50, check_timing_source, crit_by_wf,
         findings_doc.get("workflow_job_graph"))
+    # A literal required status is confirmed merge-blocking even when an external publisher gives
+    # it no workflow file to drill. In a required-scoped spine, retain that measured status in the
+    # crown basis; the fileless exclusion still applies to every unconfirmed app/label check.
+    if spine_required_scoped:
+        _required_fileless = {
+            name: span for name, span in _fileless_check_p50.items() if name in req_names
+        }
+        if _required_fileless:
+            pr_check_p50.update(_required_fileless)
+            _fileless_check_p50 = {
+                name: span for name, span in _fileless_check_p50.items()
+                if name not in _required_fileless
+            }
     if _fileless_check_p50:
         logger.info(
             "critical path: excluded %d fileless/managed check(s) from the headline/makespan "
@@ -27328,8 +27352,15 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # One caps source for the ranking, the populations, AND the chain facts —
     # they must never disagree about a check's de-inflated magnitude (ENG-1 N1).
     _span_caps = _pole_caps(job_p50_all, job_bimodal_all)
+    _job_graph = findings_doc.get("workflow_job_graph")
+    _confirmed_gate_checks: frozenset[str] | None = None
+    if spine_required_scoped and req_names and _job_graph:
+        _confirmed_gate_checks = frozenset(
+            name for name in pr_check_p50
+            if _pole_is_required_reachable(name, req_names, _job_graph, crit_by_wf))
     pr_checks_tuple, check_present, present_n_pr, check_pole_freq = _rank_spine_present_first(
-        pr_check_p50, _era_per_sha_checks, req_names, _span_caps)
+        pr_check_p50, _era_per_sha_checks, req_names, _span_caps,
+        _confirmed_gate_checks)
     # Headline-crown recovery. The crowned `critical_path_check` (pr_checks_tuple[0]) is what the
     # report HEADLINES as the merge gate. When it maps to a workflow that run-list triage skipped
     # (jobs never fetched), the headline pole has no sampled job to drill and dead-ends ("no
@@ -27470,8 +27501,10 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # ranks on them until PR-N2). One entry per sampled repr sha — the longest
     # `needs:` chain (capped member spans, `_span_caps` — the caps the ranking
     # uses) plus the attempt-scoped, span-capped empirical makespan cross-check.
+    _chain_spine = (set(_confirmed_gate_checks)
+                    if _confirmed_gate_checks is not None else set(pr_check_p50))
     _chain_facts = _stamp_chain_facts(
-        _era_repr_shas, _era_per_sha_checks, set(pr_check_p50), _span_caps, _jg,
+        _era_repr_shas, _era_per_sha_checks, _chain_spine, _span_caps, _jg,
         crit_by_wf, _era_sha_intervals)
     _chain_summary_val = _chain_summary(_chain_facts)
     # ENG-1 PR-N3: an OPT21 (unnecessary `needs:`) finding whose workflow hosts
@@ -27527,6 +27560,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
              # renderer reads it so its demotion agrees with `critical_path_check`, and
              # verify_report re-derives it from `populations` to catch a phantom gate.
              "pole_n": check_pole_freq.get(n, 0),
+             **({"required_reachable": False}
+                if (_confirmed_gate_checks is not None
+                    and n not in _confirmed_gate_checks) else {}),
              **({"workflow_file": _check_wf[n]} if n in _check_wf else {}),
              **({"timing_source": check_timing_source[n]}
                 if n in check_timing_source else {}),
@@ -27695,13 +27731,17 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         candidates, spine_required_scoped, req_names,
         findings_doc.get("workflow_job_graph"), crit_by_wf)
     drill_poles, _ = bp._select_render_poles(findings_doc, candidates)
-    if (drill_poles and spine_required_scoped
-            and any(p.get("required_reachable") is False for p in candidates)):
-        # The old crown can be a conservative cat-3 keep that happens to be slower.
-        # Align the data stamp with the renderer's first confirmed merge-blocking pole.
-        critical_path = findings_doc["pr_critical_path"]
-        critical_path["critical_path_check"] = str(drill_poles[0].get("check") or "")
-        critical_path["critical_path_s"] = float(drill_poles[0].get("p50_s") or 0.0)
+    if _confirmed_gate_checks:
+        # Keep the data crown on the ranker's slowest confirmed merge-blocking check. Render
+        # order also accounts for aggregation shape and is therefore not a safe crown source.
+        _confirmed_crown = next(
+            ((name, span) for name, span in pr_checks_tuple
+             if name in _confirmed_gate_checks), None)
+        if _confirmed_crown is not None:
+            _crown_name, _crown_span = _confirmed_crown
+            critical_path = findings_doc["pr_critical_path"]
+            critical_path["critical_path_check"] = _crown_name
+            critical_path["critical_path_s"] = float(_crown_span)
     # Retain the same candidate context for aggregation inheritance and matrix
     # representatives when the report selects its five sections later.
     poles = candidates
