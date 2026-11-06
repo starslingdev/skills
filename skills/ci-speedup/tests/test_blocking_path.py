@@ -8441,6 +8441,16 @@ def test_unknown_required_status_requires_confirmation_without_route():
     assert "may be moved off the PR trigger" not in prompt
 
 
+def test_llm_gap_fill_keeps_advisory_route_when_body_repeats_declaration():
+    prompt = bp._llm_agent_prompt(
+        "The job sets `continue-on-error: true`; inspect its expensive setup.",
+        {"_advisory_declared": True, "_advisory_required_status": "not-required"})
+
+    assert "decide first whether this job is meant to gate" in prompt
+    assert "OPT71 recipe (c)" in prompt
+    assert "may be moved off the PR trigger" in prompt
+
+
 def test_distinct_opt77_consolidations_render_as_separate_rows():
     # A workflow can carry more than one consolidation: the detector groups by
     # runner label AND by setup prefix, so a row of Node checks and a row of Python

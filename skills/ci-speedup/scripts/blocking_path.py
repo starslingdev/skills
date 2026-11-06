@@ -4220,11 +4220,16 @@ def _llm_agent_prompt(body: str, pole: dict[str, Any] | None = None) -> str:
     # The advisory declaration is the renderer's to state here for the same reason the
     # disclaimer is: this body is LLM-authored, so a fact the agent must not be missing is
     # added by the renderer rather than left to the author. It leads, because it qualifies
-    # what the rest of the prompt is worth. Prepended only when it is not already present,
-    # so a body that quoted the report's own sentence is not doubled.
+    # what the rest of the prompt is worth. De-duplicate only the disclosure when the body
+    # already names the literal declaration: the remaining advisory lines carry the route,
+    # required-status guard and scoped exception, and must not disappear with that sentence.
     _adv = _advisory_prompt_lines(_as_dict(pole))
-    if _adv and "continue-on-error: true" not in body:
-        body = "\n".join(line.lstrip("- ") for line in _adv) + "\n\n" + body
+    if _adv:
+        _adv_missing = [line for line in _adv
+                        if not ("continue-on-error: true" in body
+                                and line.startswith("- Declared advisory:"))]
+        if _adv_missing:
+            body = "\n".join(line.lstrip("- ") for line in _adv_missing) + "\n\n" + body
     # The observed timing spread, for the same reason: this body is LLM-authored, so the
     # gap-fill hand-off gets the SAME sentence the pole section shows rather than the
     # model's own account of how much the check varies. Idempotent - a body that already
