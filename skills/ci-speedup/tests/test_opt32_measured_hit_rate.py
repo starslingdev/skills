@@ -82,7 +82,7 @@ def test_opt32_measures_three_of_sixty_through_collect_and_full_verifier(
     doc = _collect(monkeypatch, client)
     finding = _opt32(doc)
 
-    assert finding["path_filter_measurement"]["would_skip_prs"] == 3
+    assert finding.get("path_filter_measurement", {}).get("would_skip_prs") == 3
     assert finding["path_filter_measurement"]["sampled_prs"] == 60
     assert finding["path_filter_measurement"]["hit_rate"] == 0.05
     assert "3 of 60 sampled PRs" in finding["size_note"]
