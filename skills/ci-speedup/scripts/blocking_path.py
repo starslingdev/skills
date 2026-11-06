@@ -10087,6 +10087,11 @@ def _also_noticed_block(findings: list[dict[str, Any]],
         elif pat == "OPT82":
             summary_metric = "uncredited, benchmark first"
             ev = _group_evidence(ms, compose=True)
+        elif pat == "OPT32":
+            modeled = sum(_num(m.get("runner_min_unrealizable_s")) or 0.0 for m in ms)
+            summary_metric = (f"{_fmt_runner_min(modeled)} modeled upper bound"
+                              if modeled > 0 else "no bill saving")
+            ev = _group_evidence(ms, compose=True)
         else:
             summary_metric = bill
             # The displayed magnitude is an aggregate over ALL members and "Where" lists
