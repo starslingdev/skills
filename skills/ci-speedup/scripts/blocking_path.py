@@ -12588,9 +12588,18 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
     _commit_queue = _num(_commit_clock.get("queue_p50_s")) or 0.0
     _queue_bottom = _commit_wait_bottom_line(_commit_clock, all_findings)
     if _queue_bottom:
+        # The chain, all-external and withheld Bottom lines carry their own
+        # framing (the chain to fix, no workflow to drill, why timing is
+        # withheld); the full-wait decomposition is added after it rather than
+        # replacing it. The generic and single-win lines are replaced outright.
+        _keep_framing = bool(chain_active or nwf == 0 or all_poles_withheld)
+        _prefix = "> **Bottom line.** "
         for _i in range(len(out) - 1, -1, -1):
             if out[_i].startswith("> **Bottom line.**"):
-                out[_i] = _queue_bottom
+                if _keep_framing and _queue_bottom.startswith(_prefix):
+                    out[_i] = out[_i].rstrip() + " " + _queue_bottom[len(_prefix):]
+                else:
+                    out[_i] = _queue_bottom
                 break
     # Owner UX edit (2026-07-19): TOP MATTER = metadata table → ONE Bottom-line blockquote
     # → Contents, nothing else. Everything that used to render as its own blockquote between
