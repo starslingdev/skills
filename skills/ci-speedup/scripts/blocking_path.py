@@ -2875,7 +2875,82 @@ def _parse_log(text: str,
             "search": ["Cache not found for input keys", "cache is not found",
                        "Cache restored from key"],
         }
-    # --- L: one shell runner invokes many test files one after another ----------
+    # --- L: isolated tests in one file wait on the same fixed timer ------------
+    # This is narrower than the shell-loop detector below. Four tests in ONE file
+    # must each carry an explicit, distinct schema/database/prefix marker inside
+    # its own timestamped interval. Similar runtimes then identify a fixed wait
+    # that safe in-job concurrency can overlap; without the isolation markers the
+    # detector fails closed because shared state can make that change flaky.
+    isolated_start = re.compile(
+        r"^(?:START|RUN|BEGIN)\s+"
+        r"(?P<node>(?P<file>\S+\.(?:py|[cm]?[jt]sx?))::\S+)$",
+        re.IGNORECASE,
+    )
+    isolation_marker = re.compile(
+        r"\b(?:(?:schema|database|db|prefix)(?:[_ -]?name)?\s*[:=]\s*"
+        r"(?P<assigned>[A-Za-z0-9_.-]+)|"
+        r"creat(?:e|es|ed|ing)\s+"
+        r"(?P<created>(?:schema|database|db|prefix)[_.-][A-Za-z0-9_.-]+))",
+        re.IGNORECASE,
+    )
+    stamped_tests: list[tuple[datetime, str, str, str]] = []
+    for raw in text.splitlines():
+        stamp, sep, message = raw.partition(" ")
+        when = _cache_path_stamp(stamp)
+        if sep and when is not None:
+            stamped_tests.append((when, message.strip(), raw.strip(), stamp))
+    starts = [(i, when, m.group("file"), m.group("node"), raw)
+              for i, (when, message, raw, _stamp) in enumerate(stamped_tests)
+              if (m := isolated_start.match(message))]
+    if (len(starts) >= 4 and len({row[2] for row in starts}) == 1
+            and len({row[3] for row in starts}) == len(starts)):
+        durations: list[float] = []
+        markers: list[str] = []
+        evidence: list[str] = []
+        complete = True
+        for pos, (line_i, started, _file, node, raw) in enumerate(starts):
+            next_line = starts[pos + 1][0] if pos + 1 < len(starts) else len(stamped_tests)
+            next_started = starts[pos + 1][1] if pos + 1 < len(starts) else None
+            window = stamped_tests[line_i + 1:next_line]
+            completion = next(((offset, when) for offset, (when, message, _raw, _stamp)
+                               in enumerate(window)
+                               if re.match(r"^(?:PASS|OK|DONE)\s+" + re.escape(node) + r"$",
+                                           message, re.IGNORECASE)), None)
+            if completion is None:
+                complete = False
+                break
+            completion_offset, ended = completion
+            marker_window = window[:completion_offset]
+            found = [(m.group("assigned") or m.group("created")).casefold()
+                     for _when, message, _raw, _stamp in marker_window
+                     if (m := isolation_marker.search(message))]
+            if (ended <= started or (next_started is not None and ended > next_started)
+                    or len(set(found)) != 1):
+                complete = False
+                break
+            durations.append((ended - started).total_seconds())
+            markers.append(found[0])
+            if len(evidence) < 2:
+                evidence.extend([raw, next(
+                    row for _when, message, row, _stamp in marker_window
+                    if isolation_marker.search(message)
+                )])
+        if complete and len(set(markers)) == len(markers) and min(durations) > 0:
+            summed = sum(durations)
+            span = (starts[-1][1] + timedelta(seconds=durations[-1])
+                    - starts[0][1]).total_seconds()
+            if (summed >= 120 and max(durations) <= min(durations) * 1.05
+                    and span <= summed * 1.05 + 1):
+                return {
+                    "fix_key": "test-isolated-serial",
+                    "unit_label": f"{len(starts)} isolated tests in one file run "
+                                  "strictly in sequence on a near-identical timer",
+                    "magnitude": None,
+                    "deeper": [],
+                    "evidence": evidence[:4],
+                    "search": ["schema", "concurrent", "shared state"],
+                }
+    # --- M: one shell runner invokes many test files one after another ----------
     # This is deliberately the last catalog leaf: a more specific detector above
     # keeps precedence. Each admitted invocation needs a timestamped completion
     # before the next invocation starts. That proves serial execution rather than
@@ -2989,6 +3064,31 @@ _NO_WEAKENING_LINES = [
     "  so and stop.",
 ]
 
+_CONCURRENCY_ORDER_LINE = (
+    "Concurrency order: First use OPT88 to measure and fill the existing job's idle "
+    "cores; only then add shards or jobs."
+)
+_SHARD_RUNNER_MINUTE_LINE = (
+    "Runner-minute effect: With safe in-job concurrency, runner minutes go down because "
+    "the same job finishes sooner; extra shard jobs repeat checkout and setup and bill "
+    "each job, so a saturated runner buys more wall-clock speed only by spending runner "
+    "minutes."
+)
+_MACHINE_RUNNER_MINUTE_LINE = (
+    "Runner cost effect: A faster machine can reduce elapsed runner minutes, while "
+    "each runner class bills at its own rate; compare both elapsed minutes and billed cost."
+)
+_RELOCATION_RUNNER_MINUTE_LINE = (
+    "Runner-minute effect: If the structural fix moves work to added jobs or machines, "
+    "duplicated checkout and setup raise runner minutes; moving the same work without "
+    "duplication is roughly level, and removing measured work lowers them."
+)
+
+_JOB_EXPANDING_LEAVES = frozenset({
+    "playwright-parallel", "pytest-no-xdist", "test-isolated-serial",
+    "test-loop-serial", "cargo-test-shard", "benchmark-serial-reruns",
+    "android-emulator-shard", "gradle-test-parallelism",
+})
 _VERIFICATION_BAR_LINES = [
     "VERIFICATION BAR",
     "- A scoped local run is pre-flight only. Call the change verified only after "
@@ -3352,6 +3452,24 @@ _FIX_META: dict[str, dict[str, Any]] = {
                    "once per-worker isolation is proven, or shard the suite across matrix "
                    "jobs by directory. Keep the full test count and (if present) a "
                    "complete merged coverage report; re-measure the step.",
+    },
+    "test-isolated-serial": {
+        "cause": "Four or more tests in the same file run strictly one after another "
+                 "for near-identical durations, and each interval logs its own unique "
+                 "schema, database or prefix. That positive isolation evidence makes "
+                 "the repeated fixed wait a candidate for safe in-job concurrency.",
+        "look": "`{wf}` and the named test file — confirm every test owns the logged "
+                "isolation marker, then look for any remaining shared state: fixed ports, "
+                "process globals, filesystem paths, queues, clocks or ordering assumptions.",
+        "constraints": "The logged marker proves only the named schema/database/prefix "
+                       "is unique. Adversarially test the other shared state, preserve the "
+                       "same test count and failure propagation, and keep any genuinely "
+                       "exclusive tests in a serial lane.",
+        "docs": ["OPT88 in the ci-speedup catalog — measure in-job test concurrency "
+                 "before choosing a worker count"],
+        "deliver": "Run the isolated tests concurrently inside this one job with a "
+                   "measured worker cap, check that shared state is not reused, preserve the "
+                   "full test set and failures, and re-measure wall clock and runner minutes.",
     },
     "test-loop-serial": {
         "cause": "The step invokes the same shell test runner for at least ten distinct "
@@ -3834,6 +3952,14 @@ def _build_agent_prompt(leaf: dict[str, Any] | None, pole: dict[str, Any],
            *_timing_spread_prompt_lines(pole),
            ""]
 
+    fix_key = str((leaf or {}).get("fix_key", ""))
+    if fix_key in _JOB_EXPANDING_LEAVES:
+        out += [_CONCURRENCY_ORDER_LINE, _SHARD_RUNNER_MINUTE_LINE, ""]
+    elif structural:
+        out += ["Structural cost context: This pole also matched a structural catalog "
+                "pattern; account for its job or machine movement separately.",
+                _RELOCATION_RUNNER_MINUTE_LINE, ""]
+
     _bi = pole.get("bimodal")
     _slow_drill = isinstance(_bi, dict) and _num(_bi.get("high_p50_s"))
     _rep = ("representative of the slow mode" if _slow_drill else "closest to the P50")
@@ -4037,6 +4163,8 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
            *_advisory_prompt_lines(pole),
            *_timing_spread_prompt_lines(pole),
            ""]
+    if struct_pats:
+        out += [_RELOCATION_RUNNER_MINUTE_LINE, ""]
     wtg = ["WHERE THE TIME GOES" + (f" (representative run {rid})" if rid else "")]
     pole_dom = str(pole.get("dominant_step") or "")
     pole_dom_d = _num(pole.get("dominant_p50_s"))
@@ -5586,6 +5714,7 @@ _LEAF_STEP_CATEGORY: dict[str, str] = {
     "vitest-import-bound": "test",
     "playwright-parallel": "test",
     "pytest-no-xdist": "test",
+    "test-isolated-serial": "test",
     "test-loop-serial": "test",
     "cargo-test-shard": "test",
     "benchmark-serial-reruns": "test",
@@ -9072,6 +9201,8 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
             "are uncredited: measure before and after on the same workload before "
             "crediting seconds."
         )
+    if pat in {"OPT24", "OPT25"}:
+        body += [_CONCURRENCY_ORDER_LINE, _SHARD_RUNNER_MINUTE_LINE]
     if pat == "OPT25":
         # The diagnosis/next step must travel with the agent hand-off, including
         # planner knobs. Use the same member as the credited magnitude.
@@ -9527,6 +9658,7 @@ def _opt81_prompt(f: dict[str, Any], url: str,
             pattern,
             f"Where: {wf} ({job}).",
             f"What ci-speedup saw: {_opt81_evidence(f)}"]
+    body += ["", _MACHINE_RUNNER_MINUTE_LINE]
     if half == "A1":
         body += ["", "Do: find out why some runs of this job use the slower label (a fork "
                  "pull request, an event or a matrix condition can select it on "

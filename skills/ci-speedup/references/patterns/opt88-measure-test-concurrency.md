@@ -28,6 +28,18 @@ A log-level `test-loop-serial` observation can point here when timestamped evide
 2. The setting does not match the runner: compare it with the core count of the job's runner label. If the label is custom and its core count is not documented, measure it first with a one-line probe step (`nproc`, or `[Environment]::ProcessorCount` on Windows).
 3. Look for what forced it: tests marked serial or skipped under parallel runs, shared fixed resources (one database name, a fixed port, a temp path), real-time waits (`sleep`, fixed-interval polling, see [OPT19](#opt19--test-source-sleep-dominance-includes-playwright-waitfortimeout)). If nothing forced it, say so: the tests did not force the setting, and only the measurement in fix step 3 justifies changing it.
 
+Common settings can leave cores idle, but each is evidence to measure rather than a saving to credit:
+
+| Configuration signal | Default or behavior to verify | Measurement question |
+|---|---|---|
+| `workers: 1` under CI | A project override serializes the suite even on a multi-core runner | Does a higher isolated worker count improve the median without raising flakes or memory failures? |
+| Playwright | CI defaults to 50% of logical cores | Does the repository override it, and is the default best for this runner and browser mix? |
+| `pytest -n auto` | xdist resolves `auto` from physical cores | Is that physical-core count the best point for this suite's CPU, memory and shared services? |
+| Maven without `-T` | Reactor modules are built without Maven's parallel reactor | Are modules independent enough for a measured `-T` setting? |
+| CTest without `-j` | Tests run without CTest's explicit parallel level | Which measured parallel level preserves fixtures, resource locks and failures? |
+
+The table carries no seconds and no modeled saving. Time the settings on the repository's real runner class and workload.
+
 **Fix recipe**:
 
 1. Separate what cannot share: give each worker its own resource (a per-worker database name, an ephemeral port, a per-worker temp directory), and move tests that truly cannot run concurrently onto a serial lane that still runs in the same command (run the parallel set, then the serial set).
