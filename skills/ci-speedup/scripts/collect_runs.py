@@ -5465,6 +5465,11 @@ _OPT9_RESULT_CACHE_RE = re.compile(
 def _opt9_is_build_state(f: dict[str, Any]) -> bool:
     if f.get("pattern") != "OPT9":
         return False
+    tool = str(f.get("opt9_tool") or "").lower()
+    if tool == "tsc":
+        return True
+    if tool in {"eslint", "prettier", "jest", "vitest"}:
+        return False
     evidence = " ".join(
         str(f.get(key) or "")
         for key in ("title", "evidence", "match_text", "fix_strategy")

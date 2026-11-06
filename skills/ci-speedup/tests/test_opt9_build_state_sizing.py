@@ -12,6 +12,7 @@ sys.path.insert(0, str(_SKILL / "scripts"))
 
 import blocking_path as bp  # noqa: E402
 import collect_runs as cr  # noqa: E402
+import scan  # noqa: E402
 from test_opt81_faster_runner import _CI, _Opt81Client  # noqa: E402
 
 
@@ -174,3 +175,49 @@ def test_build_state_is_uncredited_while_eslint_keeps_existing_sizing(
 
     report = _verify_full(doc, tmp_path)
     assert "measure before and after" in report.lower()
+
+
+def test_scanned_tsc_stays_uncredited_in_result_cache_named_job(
+        monkeypatch, tmp_path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  eslint-typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - run: tsc -p packages/eslint-config/tsconfig.json --noEmit
+"""
+    workflow_path = tmp_path / _CI
+    workflow_path.parent.mkdir(parents=True)
+    workflow_path.write_text(workflow, encoding="utf-8")
+    scanned = scan.scan(
+        tmp_path, _SKILL / "references" / "patterns", default_branch="main")
+
+    class _NamedJobClient(_Opt81Client):
+        def _job(self, i):
+            job = super()._job(i)
+            job["name"] = "eslint-typecheck"
+            return job
+
+        def json(self, endpoint, allow_missing=False):
+            payload = super().json(endpoint, allow_missing=allow_missing)
+            if (endpoint.startswith("repos/o/r/actions/workflows/1/runs?")
+                    and "workflow_runs" in payload):
+                for number, run in enumerate(payload["workflow_runs"], 1):
+                    run["pull_requests"] = [{"number": number}]
+            if endpoint.startswith("repos/o/r/commits/s"):
+                payload["check_runs"][0]["name"] = "eslint-typecheck"
+            return payload
+
+    client = _NamedJobClient([("ubuntu-latest", 197)] * 8, yaml=workflow)
+    monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
+    doc = cr.collect(scanned, "o/r", max_runs=8, shallow_runs=8)
+    finding = next(
+        f for f in doc["findings"]
+        if f["pattern"] == "OPT9" and f.get("opt9_tool") == "tsc"
+    )
+
+    assert finding.get("opt9_measure_before_after") is True
+    assert finding["wall_clock_p50_s"] is None
+    assert finding["runner_min_saving"] is None
+    _verify_full(doc, tmp_path)
