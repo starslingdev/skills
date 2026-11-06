@@ -14256,8 +14256,9 @@ def check_headline_pole_actually_gates(report: str, findings_path: Path | None) 
     # Restrict the pole re-derivation to the ranked check set (the engine argmaxes over exactly
     # these — `set(pr_check_p50)`), keyed by RAW name to match `critical_path_check` and avoid the
     # monorepo scope-collision that a normalized key would introduce.
-    ranked = {str(c.get("name") or c.get("check")) for c in _as_list(cp.get("checks"))
-              if isinstance(c, dict)}
+    ranked_rows = [c for c in _as_list(cp.get("checks")) if isinstance(c, dict)]
+    ranked = {str(c.get("name") or c.get("check")) for c in ranked_rows
+              if c.get("required_reachable") is not False}
     # Per-PR basis: `populations` when stamped (exact), else `chain_facts`, which the collector
     # stamps on EVERY run (a bound: some PRs' pole may be undetermined). `populations` is
     # bimodal-only, so reading it alone skipped this check on most fully sampled runs (bug 4).
