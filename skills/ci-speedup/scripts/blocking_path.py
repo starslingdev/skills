@@ -2830,8 +2830,10 @@ def _parse_log(text: str,
         re.IGNORECASE,
     )
     isolation_marker = re.compile(
-        r"\b(?:schema|database|db|prefix)(?:[_ -]?name)?\s*[:=]\s*"
-        r"(?P<marker>[A-Za-z0-9_.-]+)",
+        r"\b(?:(?:schema|database|db|prefix)(?:[_ -]?name)?\s*[:=]\s*"
+        r"(?P<assigned>[A-Za-z0-9_.-]+)|"
+        r"creat(?:e|es|ed|ing)\s+"
+        r"(?P<created>(?:schema|database|db|prefix)[_.-][A-Za-z0-9_.-]+))",
         re.IGNORECASE,
     )
     stamped_tests: list[tuple[datetime, str, str, str]] = []
@@ -2850,20 +2852,29 @@ def _parse_log(text: str,
         complete = True
         for pos, (line_i, started, _file, node, raw) in enumerate(starts):
             next_line = starts[pos + 1][0] if pos + 1 < len(starts) else len(stamped_tests)
+            next_started = starts[pos + 1][1] if pos + 1 < len(starts) else None
             window = stamped_tests[line_i + 1:next_line]
-            ended = next((when for when, message, _raw, _stamp in window
-                          if re.match(r"^(?:PASS|OK|DONE)\s+" + re.escape(node) + r"$",
-                                      message, re.IGNORECASE)), None)
-            found = [m.group("marker") for _when, message, _raw, _stamp in window
+            completion = next(((offset, when) for offset, (when, message, _raw, _stamp)
+                               in enumerate(window)
+                               if re.match(r"^(?:PASS|OK|DONE)\s+" + re.escape(node) + r"$",
+                                           message, re.IGNORECASE)), None)
+            if completion is None:
+                complete = False
+                break
+            completion_offset, ended = completion
+            marker_window = window[:completion_offset]
+            found = [(m.group("assigned") or m.group("created")).casefold()
+                     for _when, message, _raw, _stamp in marker_window
                      if (m := isolation_marker.search(message))]
-            if ended is None or ended <= started or len(set(found)) != 1:
+            if (ended <= started or (next_started is not None and ended > next_started)
+                    or len(set(found)) != 1):
                 complete = False
                 break
             durations.append((ended - started).total_seconds())
             markers.append(found[0])
             if len(evidence) < 2:
                 evidence.extend([raw, next(
-                    row for _when, message, row, _stamp in window
+                    row for _when, message, row, _stamp in marker_window
                     if isolation_marker.search(message)
                 )])
         if complete and len(set(markers)) == len(markers) and min(durations) > 0:
@@ -3879,7 +3890,9 @@ def _build_agent_prompt(leaf: dict[str, Any] | None, pole: dict[str, Any],
     if fix_key in _JOB_EXPANDING_LEAVES:
         out += [_CONCURRENCY_ORDER_LINE, _SHARD_RUNNER_MINUTE_LINE, ""]
     elif structural:
-        out += [_RELOCATION_RUNNER_MINUTE_LINE, ""]
+        out += ["Structural cost context: This pole also matched a structural catalog "
+                "pattern; account for its job or machine movement separately.",
+                _RELOCATION_RUNNER_MINUTE_LINE, ""]
 
     _bi = pole.get("bimodal")
     _slow_drill = isinstance(_bi, dict) and _num(_bi.get("high_p50_s"))

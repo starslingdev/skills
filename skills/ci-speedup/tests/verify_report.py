@@ -14879,7 +14879,8 @@ def check_job_adding_prompts_state_runner_minute_effect(
         known_shard = "Pattern: OPT24 " in body or "Pattern: OPT25 " in body
         machine = ("Option 1, a larger GitHub-hosted runner" in body
                    or "Option 2, StarSling runners" in body)
-        structural = "structural catalog pattern" in body
+        structural = ("structural catalog pattern" in body
+                      or "Structural cost context:" in body)
         isolated = ("unique schema, database or prefix" in body
                     or "isolated tests concurrently inside this one job" in body)
         # The renderer owns this label, so it remains a stable family marker
@@ -14897,9 +14898,21 @@ def check_job_adding_prompts_state_runner_minute_effect(
                 f"prompt {index} has {len(cost_lines)} runner-minute effect lines"
             )
         if known_shard:
-            order = body.find("Concurrency order:")
-            shard_action = body.lower().find("add shards")
-            if order < 0 or shard_action < 0 or order >= shard_action:
+            lines = body.splitlines()
+            order_lines = [i for i, line in enumerate(lines)
+                           if line.startswith("Concurrency order:")]
+            cost_line = next((i for i, line in enumerate(lines)
+                              if line.startswith("Runner-minute effect:")), -1)
+            shard_actions = [i for i, line in enumerate(lines)
+                             if not line.startswith("Concurrency order:")
+                             and re.search(
+                                 r"(?i)\b(?:add|raise|increase|split)\w*\b[^.]*"
+                                 r"\b(?:shards?|jobs?)\b",
+                                 line,
+                             )]
+            targets = [cost_line, *shard_actions]
+            if (len(order_lines) != 1 or any(target < 0 for target in targets)
+                    or any(order_lines[0] >= target for target in targets)):
                 failures.append(
                     f"prompt {index} does not put OPT88/in-job concurrency before shards"
                 )

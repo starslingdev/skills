@@ -27,10 +27,38 @@ def _isolated_log(durations: tuple[int, ...] = (60, 60, 60, 60),
         if markers:
             lines.append(
                 f"{_stamp(at + timedelta(seconds=1))} "
-                f"isolation schema=schema_test_{index}"
+                f"creating schema_test_{index}"
             )
         at += timedelta(seconds=duration)
         lines.append(f"{_stamp(at)} PASS {node}")
+    return "\n".join(lines)
+
+
+def _overlapping_timestamp_log() -> str:
+    at = datetime(2026, 11, 6, tzinfo=timezone.utc)
+    lines: list[str] = []
+    for index in range(1, 5):
+        started = at + timedelta(seconds=(index - 1) * 30)
+        node = f"tests/test_accounts.py::test_account_{index}"
+        lines += [
+            f"{_stamp(started)} START {node}",
+            f"{_stamp(started + timedelta(seconds=1))} creating schema_test_{index}",
+            f"{_stamp(started + timedelta(seconds=60))} PASS {node}",
+        ]
+    return "\n".join(lines)
+
+
+def _post_completion_marker_log() -> str:
+    at = datetime(2026, 11, 6, tzinfo=timezone.utc)
+    lines: list[str] = []
+    for index in range(1, 5):
+        node = f"tests/test_accounts.py::test_account_{index}"
+        lines += [
+            f"{_stamp(at)} START {node}",
+            f"{_stamp(at + timedelta(seconds=60))} PASS {node}",
+            f"{_stamp(at + timedelta(seconds=61))} creating schema_test_{index}",
+        ]
+        at += timedelta(seconds=62)
     return "\n".join(lines)
 
 
@@ -68,6 +96,8 @@ def test_isolated_same_file_tests_get_the_concurrency_leaf() -> None:
 def test_isolated_test_leaf_rejects_varied_timers_and_missing_markers() -> None:
     assert bp._parse_log(_isolated_log((60, 72, 60, 48))) is None
     assert bp._parse_log(_isolated_log(markers=False)) is None
+    assert bp._parse_log(_overlapping_timestamp_log()) is None
+    assert bp._parse_log(_post_completion_marker_log()) is None
 
 
 def test_isolated_test_prompt_names_safety_and_lower_runner_minutes() -> None:
@@ -123,6 +153,36 @@ def test_verifier_rejects_an_opt24_prompt_with_the_cost_line_removed() -> None:
     clean = next(check for check in vr.run_checks(prompt, None, None, None)
                  if check.name == _CHECK_NAME)
     assert clean.ok
+    without_cost = "\n".join(
+        line for line in prompt.splitlines() if not line.startswith(_COST_PREFIX)
+    )
+    broken = next(check for check in vr.run_checks(without_cost, None, None, None)
+                  if check.name == _CHECK_NAME)
+    assert not broken.ok
+
+
+def test_verifier_rejects_shard_order_guidance_moved_after_its_cost() -> None:
+    lines = _pattern_prompt("OPT24").splitlines()
+    order = next(line for line in lines if line.startswith(_ORDER_PREFIX))
+    lines.remove(order)
+    lines.insert(lines.index("```"), order)
+    moved = "\n".join(lines)
+    broken = next(check for check in vr.run_checks(moved, None, None, None)
+                  if check.name == _CHECK_NAME)
+    assert not broken.ok
+
+
+def test_verifier_covers_structural_context_beside_a_log_leaf() -> None:
+    leaf = {
+        "fix_key": "dependency-cache",
+        "unit_label": "dependency cache misses",
+        "evidence": [],
+    }
+    prompt = bp._build_agent_prompt(
+        leaf, _pole(), [], None, "example/repo", None, 1, 1,
+        structural=[{"pattern": "OPT75"}],
+    )
+    assert "Structural cost context:" in prompt
     without_cost = "\n".join(
         line for line in prompt.splitlines() if not line.startswith(_COST_PREFIX)
     )
