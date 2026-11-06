@@ -3315,20 +3315,26 @@ _FIX_META: dict[str, dict[str, Any]] = {
         "constraints": "A persisted `.eslintcache` can mask a real lint failure if it "
                        "isn't invalidated when the rules change: a warm entry is reused "
                        "for an unchanged file even after an eslint/plugin/config bump that "
-                       "would now flag it. Key the CI cache on the lockfile + eslint config "
-                       "+ plugin versions (with a `restore-keys` fallback) so a rule change "
-                       "busts it, and keep `--cache-strategy content` if mtimes are "
-                       "unreliable in CI. Don't weaken coverage: every file eslint lints "
-                       "today must still be linted.",
+                       "would now flag it. Use a rolling primary cache key ending in "
+                       "`${{ github.sha }}`, for example "
+                       "`<tool>-<os>-<lockfile-hash>-${{ github.sha }}`, and use the matching "
+                       "stable `restore-keys` prefix `<tool>-<os>-<lockfile-hash>-`. Include "
+                       "the eslint config and plugin versions in that dependency hash. An exact key hit is "
+                       "not saved again, while the rolling key saves the updated results. "
+                       "Keep `--cache-strategy content` if mtimes are unreliable in CI. "
+                       "Don't weaken coverage: every file eslint lints today must still be "
+                       "linted.",
         "docs": ["ESLint CLI — caching (`--cache`, `--cache-location`, "
                  "`--cache-strategy`): https://eslint.org/docs/latest/use/command-line-interface#caching",
                  "actions/cache — persisting a directory across runs: "
                  "https://github.com/actions/cache"],
         "deliver": "Enable `--cache` with a stable `--cache-location` and persist the "
-                   "`.eslintcache` across CI runs (actions/cache keyed to bust on "
-                   "dependency/eslint-config changes), so warm runs only re-lint changed "
-                   "files. Verify a deliberately-introduced lint error still fails CI (the "
-                   "cache must not hide it) and re-measure the lint step.",
+                   "`.eslintcache` across CI runs with a per-run primary key such as "
+                   "`<tool>-<os>-<lockfile-hash>-${{ github.sha }}` plus the matching "
+                   "`<tool>-<os>-<lockfile-hash>-` `restore-keys` prefix, so warm runs only "
+                   "re-lint changed files and the updated cache "
+                   "is saved. Verify a deliberately-introduced lint error still fails CI "
+                   "(the cache must not hide it) and re-measure the lint step.",
     },
     "cargo-test-shard": {
         "cause": "The job runs the whole test suite through the standard `cargo test` "
