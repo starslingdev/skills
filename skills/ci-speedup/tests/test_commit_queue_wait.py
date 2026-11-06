@@ -152,6 +152,19 @@ _DOC = {
         "tier": 1,
         "realization": "direct",
         "advisory": True,
+    }, {
+        "id": "rare-code-finding",
+        "pattern": "OPT24",
+        "severity": "HIGH",
+        "title": "Rare long test job",
+        "workflow_file": _CI,
+        "affected_jobs": ["test"],
+        "sizing_basis": "measured",
+        "wall_clock_p50_s": 300.0,
+        "runner_min_saving": 0.0,
+        "tier": 1,
+        "realization": "direct",
+        "spine_rare": True,
     }],
     # Supplied by the per-commit wall-clock pass. Queue/work enrichment consumes
     # these facts; it does not produce or project them.
@@ -267,6 +280,20 @@ def test_zero_queue_keeps_the_existing_report_output(monkeypatch):
     assert bp.render(copy.deepcopy(doc)) == bp.render(without_clock)
 
 
+def test_collect_preserves_nested_commit_clock_handoff(monkeypatch):
+    monkeypatch.setattr(cr, "GhClient", _QueueClient)
+    nested = copy.deepcopy(_DOC)
+    nested["pr_critical_path"] = {
+        "commit_wall_clock": nested.pop("commit_wall_clock"),
+    }
+
+    doc = cr.collect(nested, "o/r", max_runs=20, shallow_runs=20)
+
+    clock = doc["pr_critical_path"]["commit_wall_clock"]
+    assert clock["queue_p50_s"] == 900.0
+    assert clock["work_p50_s"] == 390.0
+
+
 def test_skewed_medians_keep_projection_above_the_queue(monkeypatch, tmp_path):
     monkeypatch.setattr(cr, "GhClient", _QueueClient)
     doc = cr.collect(copy.deepcopy(_DOC), "o/r", max_runs=20, shallow_runs=20)
@@ -310,6 +337,52 @@ def test_skewed_medians_keep_projection_above_the_queue(monkeypatch, tmp_path):
         missing_work, findings_path, report_path)
     assert missing_work_check.ok is False
     assert "coherent work remainder" in missing_work_check.detail
+
+
+def test_full_verifier_reads_cluster_win_after_smaller_queue_clock(
+        monkeypatch, tmp_path):
+    monkeypatch.setattr(cr, "GhClient", _QueueClient)
+    doc = cr.collect(copy.deepcopy(_DOC), "o/r", max_runs=20, shallow_runs=20)
+    commits = []
+    for i in range(1, 21):
+        fact = _commit_fact(f"cluster-{i}", 200 + i)
+        fact["commit_wall_s"] = 450.0
+        fact["jobs"][0].update({
+            "queued_at": _iso(0),
+            "started_at": _iso(60),
+            "completed_at": _iso(450),
+        })
+        commits.append(fact)
+    doc["pr_critical_path"]["commit_wall_clock"] = cr._stamp_commit_queue_work({
+        "commits": commits,
+        "p50_s": 450.0,
+        "p90_s": 450.0,
+    })
+    cluster = copy.deepcopy(doc["findings"][0])
+    cluster.update({
+        "id": "cluster-finding",
+        "pattern": "OPT73",
+        "title": "Shared test setup across matrix legs",
+        "wall_clock_p50_s": 300.0,
+        "cluster_floor_lever": True,
+        "cluster_legs_concurrent": True,
+        "affected_jobs": ["test", "test-2"],
+        "evidence": "the `test setup` step repeats across the matrix",
+        "off_spine": False,
+    })
+    cluster.pop("spine_rare", None)
+    cluster.pop("advisory", None)
+    doc["findings"] = [cluster]
+
+    report, findings_path, report_path = _write_artifacts(tmp_path, doc)
+    bottom = next(line for line in report.splitlines()
+                  if line.startswith("> **Bottom line.**"))
+    assert bottom.index("~1m 00s of it waiting") < bottom.index("removes **~5m 00s**")
+    assert "**OPT73** in `ci.yml`" in bottom
+    failures = [check for check in vr.run_checks(
+        report, report_path, findings_path, skill_repo=None)
+        if not check.skipped and not check.ok and "provenance" not in check.name]
+    assert failures == [], [(check.name, check.detail) for check in failures]
 
 
 def test_partial_only_stamp_skips_and_static_report_uses_full_wait(tmp_path):

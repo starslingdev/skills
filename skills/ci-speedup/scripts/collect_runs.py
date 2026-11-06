@@ -26291,6 +26291,14 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             data_dir: "Path | None" = None,
             shallow_runs: int = _SHALLOW_RUNS,
             root: "Path | None" = None) -> dict[str, Any]:
+    # Preserve an upstream per-commit handoff before this pass rebuilds
+    # `pr_critical_path`. The queue/work consumer accepts either location, and
+    # must not make nested callers move the stamp to a temporary top-level key.
+    _incoming_commit_clock = (
+        (findings_doc.get("pr_critical_path") or {}).get("commit_wall_clock")
+        if isinstance(findings_doc.get("pr_critical_path"), dict) else None)
+    if not isinstance(_incoming_commit_clock, dict):
+        _incoming_commit_clock = findings_doc.get("commit_wall_clock")
     # One unpinned 30-day window per RUN (not per interpreter): a harness that collects
     # several repos in one process must not measure the later ones against the first
     # call's clock. See `_reset_unpinned_now`.
@@ -29337,7 +29345,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # enrich an in-progress document without copying the producer here.
     _commit_clock = findings_doc["pr_critical_path"].get("commit_wall_clock")
     if not isinstance(_commit_clock, dict):
-        _commit_clock = findings_doc.get("commit_wall_clock")
+        _commit_clock = _incoming_commit_clock
     if isinstance(_commit_clock, dict):
         _commit_clock = _stamp_commit_queue_work(_commit_clock)
         findings_doc["pr_critical_path"]["commit_wall_clock"] = _commit_clock

@@ -9152,12 +9152,15 @@ def _commit_wait_bottom_line(commit_clock: dict[str, Any],
         return ""
     queue = min(queue, wall)
     work = wall - queue
-    saving = max((
-        (_num(f.get("wall_clock_p50_s")) or 0.0)
+    eligible = [
+        ((_num(f.get("wall_clock_p50_s")) or 0.0), f)
         for f in findings
         if (str(f.get("pattern") or "") not in {"OPT43", "OPT97"}
-            and not f.get("off_spine") and not f.get("advisory"))
-    ), default=0.0)
+            and not f.get("off_spine") and not f.get("advisory")
+            and not f.get("spine_rare"))
+    ]
+    saving, saving_f = max(eligible, key=lambda pair: pair[0],
+                           default=(0.0, None))
     saving = min(max(saving, 0.0), work)
     bottom = (
         f"> **Bottom line.** The full developer wall is **{_clock(wall)}**: "
@@ -9166,8 +9169,13 @@ def _commit_wait_bottom_line(commit_clock: dict[str, Any],
         f"({queue / wall:.0%}); the remaining **~{_clock(work)}** is work.")
     if saving > 0 and wall > saving:
         projected = wall - saving
+        lever = ""
+        if (saving_f and str(saving_f.get("pattern") or "") == "OPT73"
+                and saving_f.get("cluster_floor_lever") is True):
+            wf = _wf_base(str(saving_f.get("workflow_file") or ""))
+            lever = f" **OPT73** in `{wf}`" if wf else " **OPT73**"
         bottom += (
-            f" The biggest credited code finding removes **~{_clock(saving)}** "
+            f" The biggest credited code finding{lever} removes **~{_clock(saving)}** "
             f"of work, reducing the full wait to **~{_clock(projected)} "
             f"({wall / projected:.2f}x)**; it does not claim the queue seconds.")
     return bottom
