@@ -692,7 +692,7 @@ def test_the_missing_producer_evidence_is_named_in_the_module():
     """The stop condition is part of the contract: name the fields a producer
     would have to add, so a later adapter has a target instead of a guess."""
     missing = js.MISSING_PRODUCER_EVIDENCE
-    assert isinstance(missing, tuple) and len(missing) >= 5
+    assert isinstance(missing, tuple) and len(missing) == 4
     assert all(isinstance(m, str) and m.strip() for m in missing)
 
 

@@ -13,6 +13,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-11-06** — Stamp matched whole-gating-set observations for future joint-scenario sizing only when every confirmed required check maps to one independent, concurrent job execution with attempt and runner identity. Joint effects remain empty because no current finding supplies per-observation local reductions, affected-work and matrix identity, and an unchanged scheduling/coverage/job-set certificate together.
 - **2026-11-06** — Measure pull-request wait once per sampled commit, from the earliest workflow run creation through the last completed job across every workflow on that SHA. Reports now show commit-level p50/p90, mark commits with missing workflow jobs as partial, and bound slowest-job projections and finding savings at the next independent job.
 - **2026-11-06** — Keep Vitest coverage-provider guidance grounded in matched measurements. The report preserves the measured compile/load share, asks maintainers to time both providers on the same commit, warns that coverage thresholds need re-baselining, and credits no provider-switch saving without matched results.
 - **2026-11-06** — Keep OPT9 compiler build-state and generated-output cache suggestions uncredited until a same-workload before/after measurement shows a net saving. Lint and format result caches retain their existing sizing.

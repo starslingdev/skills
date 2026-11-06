@@ -2778,7 +2778,7 @@ bounds the gaps list originally named - three implemented, one deliberately not:
   `run.event`; required-check gating would add a usually-blank, contentious cap
   on top. Left out on purpose rather than shipped hollow.
 
-### Joint scenarios for two concurrent checks — contract present, nothing feeds it
+### Joint scenarios for two concurrent checks — observations only
 
 `scripts/joint_scenario.py` holds a data contract and a pure calculator for
 sizing **two findings on two different concurrent checks together**. It exists
@@ -2787,24 +2787,26 @@ and 299s, cutting 100s off either alone moves the gate by 1s or 0s while doing
 both moves it by 100s, and `wall_clock_p50_s` is an already-capped merge-wait
 saving rather than a post-fix duration, so subtracting the stamps yields 1s.
 
-**It is imported by nothing.** No stage calls it, it has no `main()`, and no
-report renders a joint block. That is deliberate, not an oversight: the module's
-`MISSING_PRODUCER_EVIDENCE` tuple names the six things a producer would have to
-stamp first (per-observation durations for the whole gating set, stamped
-concurrency validation, per-observation local reductions, affected-step
-identity, stable matrix-leg identity, and a local-runtime-only certificate),
-none of which the engine stamps today. `load_inputs` on a current findings
-artifact returns `contract_inputs_absent` rather than reconstructing a scenario
-out of the aggregate stamps that happen to be present.
+The collector stamps matched observations only when every check in the whole
+confirmed gating set maps to one concrete job execution, every execution has
+attempt and runner identity, the checks have no `needs:` relationship, and
+their measured intervals overlap within the scheduling tolerance. Unknown
+required sets, matrix jobs and incomplete observations produce no stamp.
+
+No report renders a joint block yet. The artifact deliberately carries an
+empty `effects` list because no current finding supplies all four remaining
+requirements named by `MISSING_PRODUCER_EVIDENCE`: per-observation local
+reductions, affected-work identity, stable matrix-leg identity, and a
+local-runtime-only scheduling/coverage/job-set certificate. Aggregate savings
+stamps are not adapted into effects.
 
 The methodology is `references/wall-clock-methodology.md` §8; the tests are
 `tests/test_joint_sizing.py`, which pin the numbers and every rejection code.
 The refusal vocabulary is closed: `REJECTION_CODES` exports it, a rejection
 built with a code outside it raises, and the suite asserts the exported set is
 exactly the set of codes the module can actually produce.
-**The next step that would change this status is a producer**, not more
-calculator: until one exists the module stays inert, and it should be either
-wired or removed rather than left to become archaeology.
+**The next step that would change this status is an effect producer**, not more
+calculator. Until one qualifies, the measured observations remain data-only.
 
 ## 11. The structural / critical-path track
 

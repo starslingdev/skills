@@ -226,6 +226,41 @@ class _ZeroWallClient(_TwoWorkflowClient):
         return super().json(endpoint, allow_missing)
 
 
+class _JointObservationClient(_TwoWorkflowClient):
+    """Two independent required checks with matched starts and stable identity."""
+
+    def json(self, endpoint: str, allow_missing: bool = False):
+        match = re.match(r"repos/o/r/actions/workflows/(\d+)/runs\?(.*)", endpoint)
+        if match and not re.search(r"per_page=1(?![0-9])", match.group(2)):
+            result = super().json(endpoint, allow_missing)
+            for run in result["workflow_runs"]:
+                run["run_attempt"] = 1
+                if int(match.group(1)) == 2:
+                    run.update({
+                        "created_at": _iso(2),
+                        "run_started_at": _iso(2),
+                        "updated_at": _iso(1502),
+                    })
+            return result
+        if endpoint.startswith("repos/o/r/actions/runs/202/jobs"):
+            self.queries += 1
+            return {"jobs": [_job("second-long", 202, 2, 1502)]}
+        if re.match(r"repos/o/r/commits/[^/]+/check-runs", endpoint):
+            self.queries += 1
+            return {"check_runs": [
+                {"name": "first-short", "started_at": _iso(0),
+                 "completed_at": _iso(300)},
+                {"name": "first-long", "started_at": _iso(0),
+                 "completed_at": _iso(900)},
+                {"name": "second-long", "started_at": _iso(2),
+                 "completed_at": _iso(1502)},
+            ]}
+        if endpoint == "repos/o/r/branches/main/protection/required_status_checks":
+            self.queries += 1
+            return {"contexts": ["first-long", "second-long"]}
+        return super().json(endpoint, allow_missing)
+
+
 _DOC = {
     "repo": "o/r",
     "skill_commit_sha": "installed:unversioned",
@@ -295,10 +330,101 @@ def test_collect_stamps_one_commit_wall_across_both_workflows_and_verifies(
         report, report_path, findings_path, skill_repo=None)
         if not check.skipped and not check.ok]
     assert failures == [], [(check.name, check.detail) for check in failures]
+
+
+def test_collect_stamps_matched_joint_gating_observations_with_identity(
+        monkeypatch, tmp_path: Path):
+    doc = _collect(monkeypatch, _JointObservationClient)
+    inputs = doc.get("joint_scenario_inputs")
+
+    assert inputs is not None
+    assert inputs["contract_version"] == 1
+    assert inputs["topology"] == "independent_concurrent"
+    assert inputs["effects"] == []
+    assert inputs["check_names"] == ["first-long", "second-long"]
+    assert inputs["observations"] == [{
+        "observation_id": _SHA,
+        "basis": "job_started_at_to_completed_at",
+        "check_durations": {"first-long": 900.0, "second-long": 1500.0},
+        "concurrency_validated": True,
+        "scheduling_residual_s": 2.0,
+        "check_attempts": {
+            "first-long": "101#attempt1",
+            "second-long": "202#attempt1",
+        },
+        "check_runners": {
+            "first-long": "ubuntu-latest",
+            "second-long": "ubuntu-latest",
+        },
+    }]
+    report = bp.render(doc, captured_at="2026-11-06T00:00:00Z")
+    findings_path = tmp_path / "findings.json"
+    report_path = tmp_path / "report.md"
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+    report_path.write_text(report, encoding="utf-8")
+    assert bp._LAST_CLAIMS is not None
+    report_path.with_name(report_path.name + ".claims.json").write_text(
+        json.dumps(bp._LAST_CLAIMS.to_json()), encoding="utf-8")
+    failures = [check for check in vr.run_checks(
+        report, report_path, findings_path, skill_repo=None)
+        if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
     assert all(sum(
         1 for step in (finding.get("wall_clock_derivation") or [])
         if step.get("bound") == "commit-projection") <= 1
         for finding in doc["findings"])
+
+
+def test_collect_does_not_stamp_dependent_checks_as_a_joint_observation(monkeypatch):
+    monkeypatch.setitem(
+        _DOC["workflow_job_graph"][_FIRST]["first-long"],
+        "needs", ["first-short"])
+
+    class _DependentChecksClient(_JointObservationClient):
+        def json(self, endpoint: str, allow_missing: bool = False):
+            if endpoint == "repos/o/r/branches/main/protection/required_status_checks":
+                self.queries += 1
+                return {"contexts": ["first-short", "first-long"]}
+            return super().json(endpoint, allow_missing)
+
+    doc = _collect(monkeypatch, _DependentChecksClient)
+
+    assert "joint_scenario_inputs" not in doc
+
+
+def test_collect_does_not_guess_a_matrix_leg_identity(monkeypatch):
+    doc = json.loads(json.dumps(_DOC))
+    doc["workflow_job_graph"][_SECOND]["second-long"]["matrix"] = True
+
+    class _MatrixJointClient(_JointObservationClient):
+        def json(self, endpoint: str, allow_missing: bool = False):
+            if endpoint.startswith("repos/o/r/actions/runs/202/jobs"):
+                self.queries += 1
+                return {"jobs": [
+                    _job("second-long (one)", 202, 2, 1502),
+                    _job("second-long (two)", 202, 2, 1002),
+                ]}
+            if re.match(r"repos/o/r/commits/[^/]+/check-runs", endpoint):
+                self.queries += 1
+                return {"check_runs": [
+                    {"name": "first-short", "started_at": _iso(0),
+                     "completed_at": _iso(300)},
+                    {"name": "first-long", "started_at": _iso(0),
+                     "completed_at": _iso(900)},
+                    {"name": "second-long (one)", "started_at": _iso(2),
+                     "completed_at": _iso(1502)},
+                    {"name": "second-long (two)", "started_at": _iso(2),
+                     "completed_at": _iso(1002)},
+                ]}
+            if endpoint == "repos/o/r/branches/main/protection/required_status_checks":
+                self.queries += 1
+                return {"contexts": ["first-long", "second-long (one)"]}
+            return super().json(endpoint, allow_missing)
+
+    monkeypatch.setattr(cr, "GhClient", _MatrixJointClient)
+    collected = cr.collect(doc, "o/r", max_runs=1, shallow_runs=1)
+
+    assert "joint_scenario_inputs" not in collected
 
 
 def test_missing_workflow_run_makes_the_commit_partial_instead_of_shorter(

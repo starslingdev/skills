@@ -75,6 +75,7 @@ from wall_clock import (  # noqa: E402
 # `wait-all:` / `cancel:` control steps are skipped. (The RUN-DATA side — the
 # jobs API's `steps` with timestamps — is a different list and is not walked.)
 from workflow_steps import is_group_step, job_walk  # noqa: E402
+import joint_scenario as joint  # noqa: E402
 
 
 # =============================================================================
@@ -3720,6 +3721,75 @@ def _job_runner_label(job: dict[str, Any]) -> str:
     `ubuntu-latest`, `ubuntu-24.04-arm`). Empty when absent."""
     labels = job.get("labels") or []
     return " ".join(sorted(str(x) for x in labels)) if labels else ""
+
+
+def _joint_gating_observation(
+    observation_id: str,
+    check_nodes: dict[str, tuple[str, str]],
+    job_rows: list[dict[str, Any]],
+    connected: Callable[[str, str, str], bool],
+) -> dict[str, Any] | None:
+    """Build one identity-complete observation of the whole gating set.
+
+    This is deliberately stricter than the ordinary spine. Every check must
+    resolve to exactly one concrete job execution with a run attempt and runner
+    identity. Matrix expansions, same-name collisions, missing runner labels,
+    and any ``needs:`` connection make the observation unusable for the v1
+    independent-concurrent calculator rather than being guessed through.
+    """
+    if len(check_nodes) < 2:
+        return None
+
+    selected: dict[str, dict[str, Any]] = {}
+    for check, (workflow, node) in sorted(check_nodes.items()):
+        matches = [
+            row for row in job_rows
+            if row.get("workflow_file") == workflow and row.get("node") == node
+        ]
+        if len(matches) != 1:
+            return None
+        row = matches[0]
+        if not str(row.get("run_id") or "").strip():
+            return None
+        if not str(row.get("runner") or "").strip():
+            return None
+        selected[check] = row
+
+    pairs = list(check_nodes.items())
+    for index, (_left_check, (left_wf, left_node)) in enumerate(pairs):
+        for _right_check, (right_wf, right_node) in pairs[index + 1:]:
+            if left_wf == right_wf and (
+                    connected(left_wf, left_node, right_node)
+                    or connected(left_wf, right_node, left_node)):
+                return None
+
+    starts = [float(row["started_ts"]) for row in selected.values()]
+    ends = [float(row["completed_ts"]) for row in selected.values()]
+    residual = max(starts) - min(starts)
+    overlap = max(starts) < min(ends)
+    concurrency_validated = bool(
+        overlap and residual <= joint.CONCURRENCY_TOLERANCE_S)
+    if not concurrency_validated:
+        return None
+
+    return {
+        "observation_id": observation_id,
+        "basis": "job_started_at_to_completed_at",
+        "check_durations": {
+            check: float(row["duration_s"])
+            for check, row in sorted(selected.items())
+        },
+        "concurrency_validated": concurrency_validated,
+        "scheduling_residual_s": round(residual, 3),
+        "check_attempts": {
+            check: f"{row['run_id']}#attempt{row.get('run_attempt') or 1}"
+            for check, row in sorted(selected.items())
+        },
+        "check_runners": {
+            check: str(row["runner"])
+            for check, row in sorted(selected.items())
+        },
+    }
 
 
 # -----------------------------------------------------------------------------
@@ -18644,6 +18714,7 @@ def _stamp_run_context(run: dict[str, Any], jobs: list[dict[str, Any]]) -> None:
     run_created = run.get("created_at")
     ev = str(run.get("event") or "")
     rid = _run_id(run)
+    run_attempt = run.get("run_attempt") or 1
     # Head repo (owner/name) of the run — a fork PR's head repo differs from the
     # audited repo, and a fork run runs colder (no repo secrets, so a secrets-gated
     # remote cache is unreachable to it). Stamped here (free —
@@ -18659,6 +18730,7 @@ def _stamp_run_context(run: dict[str, Any], jobs: list[dict[str, Any]]) -> None:
         job["_run_created_at"] = run_created
         job["_run_event"] = ev
         job["_run_id"] = rid
+        job["_run_attempt"] = run_attempt
         job["_run_head_repo"] = head_repo
         job["_run_head_sha"] = head_sha
         job["_run_pr_number"] = pr_number
@@ -27790,6 +27862,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         return seen
 
     _commit_facts: list[dict[str, Any]] = []
+    _joint_observations: list[dict[str, Any]] = []
     _commit_shas: list[str] = []
     _commit_checks_by_sha: dict[str, dict[str, float]] = {}
     _commit_dropped_workflows: dict[str, set[str]] = {}
@@ -27872,8 +27945,12 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                     "name": str(_job.get("name") or ""),
                     "workflow_file": _wf,
                     "duration_s": round(_duration, 3),
+                    "started_ts": _started_dt.timestamp(),
                     "completed_ts": _completed_dt.timestamp(),
                     "node": _commit_job_node(_wf, str(_job.get("name") or "")),
+                    "run_id": str(_job.get("_run_id") or ""),
+                    "run_attempt": _job.get("_run_attempt") or 1,
+                    "runner": _job_runner_label(_job),
                 })
             if not _completed_here:
                 _missing.add(_wf)
@@ -27903,6 +27980,37 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         _observed = (round(max(float(row["completed_ts"]) for row in _job_rows)
                            - min(_created), 3)
                      if _job_rows and _created else None)
+
+        _joint_nodes: dict[str, tuple[str, str]] = {}
+        _commit_checks = _commit_checks_by_sha.get(_sha) or {}
+        for _check in sorted(_chain_spine):
+            if _check not in _commit_checks:
+                _joint_nodes = {}
+                break
+            _mapped = _map_check_to_job(_check, crit_by_wf,
+                                        require_developer_timing=True)
+            if _mapped is None:
+                _joint_nodes = {}
+                break
+            _mapped_wf, _mapped_job = _mapped
+            _mapped_node = _commit_job_node(_mapped_wf, _mapped_job)
+            if _mapped_node is None:
+                _joint_nodes = {}
+                break
+            _mapped_spec = (((_jg or {}).get(_mapped_wf) or {}).get(
+                _mapped_node) or {})
+            if isinstance(_mapped_spec, dict) and _mapped_spec.get("matrix"):
+                _joint_nodes = {}
+                break
+            _joint_nodes[_check] = (_mapped_wf, _mapped_node)
+        if (_confirmed_gate_checks is not None
+                and len(_joint_nodes) == len(_chain_spine)):
+            _joint_observation = _joint_gating_observation(
+                _sha, _joint_nodes, _job_rows,
+                lambda workflow, left, right: right in _needs_chain(workflow, left))
+            if _joint_observation is not None:
+                _joint_observations.append(_joint_observation)
+
         _partial = bool(_missing or not _run_rows or _observed is None)
         _fact: dict[str, Any] = {
             "sha": _sha,
@@ -27938,6 +28046,19 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                   if _complete_walls else None),
         "facts": _commit_facts,
     }
+    if _joint_observations:
+        findings_doc[joint.JOINT_SCENARIO_INPUTS_KEY] = {
+            "contract_version": joint.SCENARIO_CONTRACT_VERSION,
+            "topology": joint.SUPPORTED_TOPOLOGY,
+            "basis": "job_started_at_to_completed_at",
+            "check_names": sorted(_chain_spine),
+            "observations": _joint_observations,
+            # No current finding carries per-observation local reductions,
+            # affected-work identity, stable matrix identity, and the local-
+            # runtime-only certificate together. The stop-clause path stamps
+            # the measured gating observations now and invents no effect adapter.
+            "effects": [],
+        }
     _chain_facts = _stamp_chain_facts(
         _era_repr_shas, _era_per_sha_checks, _chain_spine, _span_caps, _jg,
         crit_by_wf, _era_sha_intervals)

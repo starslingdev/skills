@@ -26,8 +26,10 @@ decompose across matrix legs, and is absent entirely when no bound fired.
 So this module refuses to guess. It consumes an explicit, producer-stamped
 contract of matched observations and per-observation local effects, validates
 every admission condition, and either returns exact numbers or a named
-rejection. `MISSING_PRODUCER_EVIDENCE` records what a producer would have to
-stamp for that contract to be satisfiable; nothing in the engine stamps it yet.
+rejection. The collector now stamps identity-complete observations when the
+whole confirmed gating set is independent and concurrent.
+`MISSING_PRODUCER_EVIDENCE` records what findings still have to supply before
+the contract can contain an effect; no current finding qualifies.
 
 SCOPE
 -----
@@ -82,20 +84,9 @@ CAPPED_STAMP_FIELDS = frozenset({
     "chain_win_s",
 })
 
-#: What no current producer stamps. This is the stop condition for the
+#: What no current effect producer stamps. This is the stop condition for the
 #: workstream, kept in code so a later adapter has a target rather than a guess.
 MISSING_PRODUCER_EVIDENCE = (
-    "per-observation gating durations for the WHOLE gating set: "
-    "`pr_critical_path.chain_facts` is the closest artifact and it does carry "
-    "per-sha, era-scoped `member_spans_s`, but only for the members of that "
-    "PR's winning chain, span-capped per check — never every competitor, and "
-    "with no attempt or runner identity. `populations` is bimodal-gated and "
-    "identity-free, and raw per-run job durations survive only as a local in "
-    "the collector, which returns aggregated job_p50/job_p95",
-    "stamped concurrency validation: overlap is inferred structurally from the "
-    "`needs:` closure and DEFAULTS TO CONCURRENT when no job graph is "
-    "available; per-check start/finish intervals exist in memory but are "
-    "reduced to a single makespan scalar and never persisted",
     "per-observation local duration reductions: raw pre-cascade estimates are "
     "one scalar per finding (and one scalar across ALL legs for a cluster "
     "finding), never a value per matched observation bounded by that "
@@ -719,10 +710,11 @@ def load_inputs(doc: Mapping[str, Any]
                            ScenarioRejection | None]:
     """Read a producer-stamped contract out of a findings artifact.
 
-    No producer stamps it today, so on a current artifact this returns
-    `contract_inputs_absent` — deliberately, rather than reconstructing a
-    scenario out of the aggregate stamps that happen to be present.
-    See `MISSING_PRODUCER_EVIDENCE`.
+    The collector stamps this key only when it can match the whole confirmed
+    gating set to independent, concurrent job executions. Current artifacts
+    may therefore contain observations and no effects; callers must keep that
+    distinct from reconstructing effects from aggregate savings stamps. See
+    `MISSING_PRODUCER_EVIDENCE`.
     """
     raw = doc.get(JOINT_SCENARIO_INPUTS_KEY) if isinstance(doc, Mapping) else None
     if not isinstance(raw, Mapping) or not raw:
