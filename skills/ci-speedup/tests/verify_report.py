@@ -3618,7 +3618,33 @@ def _verify_per_pr_floor_split(
             and _as_list(f.get("affected_jobs"))
         ]
         if len(crowned) == 1:
-            stamp = str(_as_list(crowned[0].get("affected_jobs"))[0] or stamp)
+            finding = crowned[0]
+            workflow = str(finding.get("workflow_file") or "")
+            graph = _as_dict(_as_dict(data).get("workflow_job_graph")).get(workflow)
+            graph = _as_dict(graph)
+            sampled = [
+                str(check.get("name") or "")
+                for check in _as_list(cp.get("checks"))
+                if isinstance(check, dict) and str(check.get("name") or "")
+                and (not workflow or str(check.get("workflow_file") or "") == workflow)
+            ]
+            resolved: list[str] = []
+            for affected in _as_list(finding.get("affected_jobs")):
+                job_key = str(affected or "")
+                direct = [name for name in sampled if _cmp_name(name) == _cmp_name(job_key)]
+                if direct:
+                    resolved.extend(direct)
+                    continue
+                node = _as_dict(graph.get(job_key))
+                job_name = str(node.get("name") or job_key)
+                is_matrix = bool(node.get("matrix"))
+                resolved.extend(
+                    name for name in sampled
+                    if _vr_job_produces_check(job_name, is_matrix, name))
+            resolved = list(dict.fromkeys(resolved))
+            if resolved:
+                current = str(cp.get("critical_path_check") or "")
+                stamp = current if current in resolved else resolved[0]
     if not stamp:
         return Check(name, False, "rendered per-PR split has no critical_path_check stamp")
     target = _cmp_name(stamp)

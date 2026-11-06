@@ -459,6 +459,11 @@ def bound_measured_critical_path(value: float, ctx: WallClockContext) -> BoundRe
                 f"no wall-clock saving — `{floor_name}` ({floor:.0f}s) {_kind}; this "
                 f"workflow's slowest check is only {own_max:.0f}s, so shortening it "
                 f"doesn't move the developer's wait"))
+        if floor_name is None:
+            return BoundResult(weighted, (
+                "wall-clock capped at this check's observed span "
+                f"({own_max:.0f}s) — it was the only check in the sampled "
+                "population, so there is no concurrent floor"))
         return BoundResult(weighted, (
             f"wall-clock capped at the measured critical-path floor — `{floor_name}` "
             f"({floor:.0f}s) is a slower concurrent check on a representative PR"))

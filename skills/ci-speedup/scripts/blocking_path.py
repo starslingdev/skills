@@ -876,7 +876,7 @@ def _floor_note(pole: dict[str, Any],
             if single:
                 by_cap: dict[float, int] = {}
                 for row in single:
-                    cap = round(min(_num(row.get("saving_s")) or 0.0, max_saving), 1)
+                    cap = round(_num(row.get("saving_s")) or 0.0, 1)
                     by_cap[cap] = by_cap.get(cap, 0) + 1
                 for cap, count in sorted(by_cap.items()):
                     other = "the other " if zero and len(zero) + count == total else ""

@@ -215,3 +215,48 @@ def test_incomplete_single_check_reads_remain_unknown(monkeypatch):
     assert result.value == 0.0
     assert result.reason is not None
     assert "unknown on 4 of 10 PRs with an incomplete check-runs read" in result.reason
+
+
+def test_singleton_and_faster_sibling_ceilings_match_the_verifier(monkeypatch, tmp_path):
+    doc = _collect(monkeypatch, _SingleCheckClient)
+    cp = doc["pr_critical_path"]
+    for population in cp["populations"][4:6]:
+        sibling = next(check for check in population[1] if check[0] == "sibling")
+        sibling[1] = 300.0
+
+    graph = doc["workflow_job_graph"][_WORKFLOW]
+    pole_node = graph.pop("pole")
+    pole_node["name"] = "pole"
+    graph["pole-key"] = pole_node
+
+    result = bound_measured_critical_path(500.0, _population_context(doc))
+    assert result.value == 260.0
+    assert result.reason is not None
+    assert "up to 5m 00s on 2 of 10 PRs" in result.reason
+    assert "up to 8m 20s on 4 of 10 PRs where it was the only check" in result.reason
+
+    finding = doc["findings"][0]
+    finding["affected_jobs"] = ["pole-key"]
+    finding["wall_clock_p50_s"] = result.value
+    finding["wall_clock_uncapped_p50_s"] = 500.0
+    finding["wall_clock_derivation"] = [{
+        "bound": "measured-critical-path",
+        "from_s": 500.0,
+        "to_s": result.value,
+        "reason": result.reason,
+    }]
+    report = bp.render(doc, captured_at="2026-11-06T00:00:00Z")
+    assert "up to 5m 00s on 2 of 10 PRs" in report
+    assert "up to 10m 00s on 4 of 10 PRs where it was the only check" in report
+
+    findings_path = tmp_path / "findings.json"
+    report_path = tmp_path / "report.md"
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+    report_path.write_text(report, encoding="utf-8")
+    assert bp._LAST_CLAIMS is not None
+    report_path.with_name(report_path.name + ".claims.json").write_text(
+        json.dumps(bp._LAST_CLAIMS.to_json()), encoding="utf-8")
+    failures = [check for check in vr.run_checks(
+        report, report_path, findings_path, skill_repo=None)
+        if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
