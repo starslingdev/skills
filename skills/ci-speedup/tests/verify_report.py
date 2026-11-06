@@ -4619,6 +4619,99 @@ def check_headline_chain_matches_stamp(report: str, findings_path: Path | None,
                     if undrilled else ""))
 
 
+def check_chain_projection_matches_facts(findings_path: Path | None) -> Check:
+    """Re-derive whole-commit projections whose slowest job is in a chain.
+
+    The commit stamp supplies the whole wait and requested job speedup; the
+    chain stamp independently supplies the serialized members and the longest
+    path that survives with those members removed. The projection must keep
+    queue/gaps and every other chain member while flooring at that surviving
+    path.
+    """
+    name = "chain projections re-derive from stamped chain facts"
+    if not findings_path:
+        return Check(name, True, "no findings JSON supplied", skipped=True)
+    try:
+        data = json.loads(findings_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return Check(name, False, "findings.json unreadable")
+    cp = data.get("pr_critical_path") if isinstance(data, dict) else None
+    cp = cp if isinstance(cp, dict) else {}
+    chain_by_sha = {
+        str(fact.get("sha") or ""): fact
+        for fact in _as_list(cp.get("chain_facts"))
+        if isinstance(fact, dict) and fact.get("sha")
+    }
+    commit_stamp = cp.get("commit_wall_clock")
+    if not chain_by_sha or not isinstance(commit_stamp, dict):
+        return Check(name, True,
+                     "no paired chain and whole-commit facts", skipped=True)
+
+    failures: list[str] = []
+    checked = 0
+    for commit_fact in _as_list(commit_stamp.get("facts")):
+        if not isinstance(commit_fact, dict) or commit_fact.get("partial") is True:
+            continue
+        chain_fact = chain_by_sha.get(str(commit_fact.get("sha") or ""))
+        slowest = commit_fact.get("slowest_job")
+        if chain_fact is None or not isinstance(slowest, dict):
+            continue
+        pole_name = str(slowest.get("name") or "")
+        spans = chain_fact.get("member_spans_s")
+        if not isinstance(spans, dict) or pole_name not in spans:
+            continue
+        try:
+            wall = float(commit_fact["wall_s"])
+            chain = float(chain_fact["chain_s"])
+            pole = float(spans[pole_name])
+            runner_up = float(chain_fact.get("runner_up_s") or 0.0)
+        except (KeyError, TypeError, ValueError):
+            failures.append(
+                f"commit {commit_fact.get('sha')!r} has non-numeric chain projection facts")
+            continue
+        for key, projection in commit_fact.items():
+            if not (str(key).startswith("projection_") and isinstance(projection, dict)):
+                continue
+            try:
+                speedup = float(projection["job_speedup"])
+                if speedup <= 0:
+                    raise ValueError
+            except (KeyError, TypeError, ValueError):
+                failures.append(f"{key} carries no positive job_speedup")
+                continue
+            unchanged = max(wall - max(chain, runner_up), 0.0)
+            expected_projected = round(
+                unchanged + max(chain - pole + pole / speedup, runner_up), 1)
+            expected_multiple = (round(wall / expected_projected, 2)
+                                 if expected_projected > 0 else None)
+            claimed_projected = _num(projection.get("projected_s"))
+            claimed_multiple = _num(projection.get("multiple"))
+            checked += 1
+            if (claimed_projected is None
+                    or abs(claimed_projected - expected_projected) > 0.11):
+                failures.append(
+                    f"{key} projected_s {claimed_projected!r} != chain-derived "
+                    f"{expected_projected}")
+            if expected_multiple is None:
+                if claimed_multiple is not None:
+                    failures.append(
+                        f"{key} multiple {claimed_multiple!r} must be absent for "
+                        "a zero projected wall")
+            elif (claimed_multiple is None
+                  or abs(claimed_multiple - expected_multiple) > 0.001):
+                failures.append(
+                    f"{key} multiple {claimed_multiple!r} != chain-derived "
+                    f"{expected_multiple}")
+
+    if not checked and not failures:
+        return Check(name, True,
+                     "no whole-commit projection targets a stamped chain member",
+                     skipped=True)
+    return Check(name, not failures,
+                 "; ".join(failures[:8]) if failures
+                 else f"{checked} chain projection(s) re-derived")
+
+
 # --- The physical-bounds invariant family (issue #25) ------------------------------------------
 # Three machine-checkable coherence guards over the rendered spine. All re-derive their ground-truth
 # comparison values from `findings.json` (never rendered text as source; L1), mirror the engine's
@@ -14861,6 +14954,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_headline_floor_presence_reconciled(report, findings_path),
         check_headline_presence_causal_only_when_minority(report, findings_path),
         check_headline_chain_matches_stamp(report, findings_path, report_path),
+        check_chain_projection_matches_facts(findings_path),
         check_aggregate_total_ge_largest_member(report, findings_path, report_path),
         check_headline_wait_within_makespan(report, findings_path, report_path),
         check_headline_basis_excludes_fileless(report, findings_path, report_path),

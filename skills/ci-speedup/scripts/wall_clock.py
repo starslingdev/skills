@@ -268,6 +268,60 @@ class WallClockResult:
     derivation: list[tuple[str, float, float, str]] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class CommitProjection:
+    projected_s: float
+    multiple: float | None
+
+
+def project_commit_wall(
+    wall_s: float,
+    slowest_job_s: float,
+    next_longest_s: float,
+    job_speedup: float,
+    *,
+    chain_s: float | None = None,
+    pole_s: float | None = None,
+    runner_up_s: float | None = None,
+) -> CommitProjection:
+    """Project a whole-commit wait after speeding up its slowest job.
+
+    The default is the single-job projection: work outside the slowest job is
+    unchanged and the next-longest independent job is the floor. When the job
+    belongs to a serial ``needs:`` chain, the chain inputs replace that
+    single-job path. Other chain members remain in series, while ``runner_up_s``
+    is the longest path that does not pass through the pole. Queue time and
+    other gaps already present in ``wall_s`` remain unchanged.
+    """
+    wall = max(float(wall_s), 0.0)
+    slowest = max(float(slowest_job_s), 0.0)
+    next_longest = max(float(next_longest_s), 0.0)
+    speedup = float(job_speedup)
+    if speedup <= 0:
+        raise ValueError("job_speedup must be greater than zero")
+
+    chain_values = (chain_s, pole_s, runner_up_s)
+    if all(value is None for value in chain_values):
+        projected = wall - slowest + max(slowest / speedup, next_longest)
+    elif any(value is None for value in chain_values):
+        raise ValueError(
+            "chain_s, pole_s and runner_up_s must be supplied together"
+        )
+    else:
+        chain = max(float(chain_s), 0.0)
+        pole = max(float(pole_s), 0.0)
+        runner_up = max(float(runner_up_s), 0.0)
+        if pole > chain:
+            raise ValueError("pole_s cannot exceed chain_s")
+        unchanged = max(wall - max(chain, runner_up), 0.0)
+        projected_path = max(chain - pole + pole / speedup, runner_up)
+        projected = unchanged + projected_path
+
+    projected = round(max(projected, 0.0), 1)
+    multiple = round(wall / projected, 2) if projected > 0 else None
+    return CommitProjection(projected, multiple)
+
+
 def _affected_floor_p50(ctx: WallClockContext) -> float:
     """Max p50 across the finding's affected jobs (0.0 if none resolve) —
     mirrors collect_runs._affected_job_p50, so the within-workflow bound makes
@@ -388,7 +442,29 @@ def bound_measured_critical_path(value: float, ctx: WallClockContext) -> BoundRe
         _member_span = max((d for _share, checks in pops for n, d in checks
                             if n in (ctx.own_check_names & ctx.chain_members)),
                            default=0.0)
-        cap = max(0.0, min(value, ctx.chain_win_s, _member_span))
+        # The chain and member spans are independently reduced aggregates. A
+        # slow population can make the member maximum exceed the chain median,
+        # so use a coherent projection baseline without changing the existing
+        # conservative headroom cap.
+        _chain_for_projection = max(ctx.chain_p50_s, _member_span)
+        _runner_up = max(_chain_for_projection - ctx.chain_win_s, 0.0)
+        _remaining = max(_member_span - value, 0.0)
+        _speedup = (_member_span / _remaining
+                    if _remaining > 0 else float("inf"))
+        _projection = project_commit_wall(
+            _chain_for_projection,
+            _member_span,
+            _runner_up,
+            _speedup,
+            chain_s=_chain_for_projection,
+            pole_s=_member_span,
+            runner_up_s=_runner_up,
+        )
+        cap = max(0.0, min(
+            value,
+            _chain_for_projection - _projection.projected_s,
+            _member_span,
+        ))
         if cap >= round(value, 1):
             return BoundResult(round(value, 1))
         _bound_via = ("chain's headroom" if ctx.chain_win_s <= _member_span
