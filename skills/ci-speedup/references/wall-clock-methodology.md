@@ -485,7 +485,7 @@ e.g. build-dedup spends developer-minutes of *wait* to save runner-minutes of
 
 ---
 
-## 8. Joint scenarios for two concurrent checks (contract only — not yet produced)
+## 8. Joint scenarios for two concurrent checks (observations only)
 
 Two findings on two *different* concurrent checks can each be worth almost
 nothing alone and a great deal together. With A at 300s and B at 299s, cutting
@@ -621,13 +621,13 @@ rules. The collector now stamps per-observation durations for the *whole*
 confirmed gating set, plus attempt identity, runner identity and measured
 concurrency validation. It stamps nothing when the required set is unknown,
 when a check cannot map to exactly one non-matrix job execution, when the set
-contains a `needs:` relationship, or when the measured starts and overlap do
-not meet the concurrency tolerance.
+contains a `needs:` relationship or shared upstream, or when the measured
+starts and overlap do not meet the concurrency tolerance.
 
-No report renders a joint block because the artifact's `effects` list remains
-empty. The remaining gaps are listed in `MISSING_PRODUCER_EVIDENCE`: no current
-finding supplies per-observation local reductions bounded by the affected
-work, affected-work identity, stable matrix-leg identity, and a certificate
-that the fix leaves scheduling, coverage and the job set unchanged. Adapting
-aggregate savings stamps before that evidence exists would produce unsupported
-numbers.
+The report does not consume this contract yet. Separately, the artifact's
+`effects` list remains empty, so there is no supported joint claim to render.
+The remaining gaps are listed in `MISSING_PRODUCER_EVIDENCE`: no current finding
+supplies per-observation local reductions bounded by the affected work,
+affected-work identity, stable matrix-leg identity, and a certificate that the
+fix leaves scheduling, coverage and the job set unchanged. Adapting aggregate
+savings stamps before that evidence exists would produce unsupported numbers.

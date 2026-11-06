@@ -119,6 +119,8 @@ class GatingObservation:
     check_durations: Mapping[str, float]
     concurrency_validated: bool = False
     scheduling_residual_s: float = 0.0
+    check_attempts: Mapping[str, str] = field(default_factory=dict)
+    check_runners: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -191,6 +193,7 @@ REJECTION_CODES: frozenset[str] = frozenset({
     "undeclared_competitor",
     "concurrency_unvalidated",
     "scheduling_residual_exceeds_tolerance",
+    "missing_observation_identity",
     # who and what an effect claims to be
     "missing_finding_id",
     "duplicate_finding_id",
@@ -365,6 +368,14 @@ def _validate_gating(g: GatingSet) -> ScenarioRejection | None:
                 f"{', '.join(undeclared)}, which the gating set does not "
                 "declare; an undeclared check would be dropped from the gate "
                 "maximum rather than competing in it")
+        for label, identities in (("attempt", o.check_attempts),
+                                  ("runner", o.check_runners)):
+            if set(identities) != set(g.check_names) or any(
+                    not str(value).strip() for value in identities.values()):
+                return ScenarioRejection(
+                    "missing_observation_identity",
+                    f"observation {o.observation_id!r} does not carry one "
+                    f"nonblank {label} identity for every gating check")
         if not o.concurrency_validated:
             return ScenarioRejection(
                 "concurrency_unvalidated",
@@ -745,6 +756,12 @@ def load_inputs(doc: Mapping[str, Any]
                     concurrency_validated=bool(o.get("concurrency_validated")),
                     scheduling_residual_s=float(
                         o.get("scheduling_residual_s") or 0.0),
+                    check_attempts={
+                        str(k): str(v) for k, v
+                        in (o.get("check_attempts") or {}).items()},
+                    check_runners={
+                        str(k): str(v) for k, v
+                        in (o.get("check_runners") or {}).items()},
                 )
                 for o in (raw.get("observations") or ())),
         )

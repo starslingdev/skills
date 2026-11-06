@@ -3727,7 +3727,7 @@ def _joint_gating_observation(
     observation_id: str,
     check_nodes: dict[str, tuple[str, str]],
     job_rows: list[dict[str, Any]],
-    connected: Callable[[str, str, str], bool],
+    coupled: Callable[[str, str, str], bool],
 ) -> dict[str, Any] | None:
     """Build one identity-complete observation of the whole gating set.
 
@@ -3753,14 +3753,22 @@ def _joint_gating_observation(
             return None
         if not str(row.get("runner") or "").strip():
             return None
+        attempt = row.get("run_attempt")
+        try:
+            attempt_number = int(attempt)
+        except (TypeError, ValueError):
+            return None
+        if isinstance(attempt, bool) or attempt_number < 1:
+            return None
+        row = dict(row, run_attempt=attempt_number)
         selected[check] = row
 
     pairs = list(check_nodes.items())
     for index, (_left_check, (left_wf, left_node)) in enumerate(pairs):
         for _right_check, (right_wf, right_node) in pairs[index + 1:]:
             if left_wf == right_wf and (
-                    connected(left_wf, left_node, right_node)
-                    or connected(left_wf, right_node, left_node)):
+                    coupled(left_wf, left_node, right_node)
+                    or coupled(left_wf, right_node, left_node)):
                 return None
 
     starts = [float(row["started_ts"]) for row in selected.values()]
@@ -3782,7 +3790,7 @@ def _joint_gating_observation(
         "concurrency_validated": concurrency_validated,
         "scheduling_residual_s": round(residual, 3),
         "check_attempts": {
-            check: f"{row['run_id']}#attempt{row.get('run_attempt') or 1}"
+            check: f"{row['run_id']}#attempt{row['run_attempt']}"
             for check, row in sorted(selected.items())
         },
         "check_runners": {
@@ -18714,7 +18722,7 @@ def _stamp_run_context(run: dict[str, Any], jobs: list[dict[str, Any]]) -> None:
     run_created = run.get("created_at")
     ev = str(run.get("event") or "")
     rid = _run_id(run)
-    run_attempt = run.get("run_attempt") or 1
+    run_attempt = run.get("run_attempt")
     # Head repo (owner/name) of the run — a fork PR's head repo differs from the
     # audited repo, and a fork run runs colder (no repo secrets, so a secrets-gated
     # remote cache is unreachable to it). Stamped here (free —
@@ -27844,7 +27852,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         children: dict[str, set[str]] = defaultdict(set)
         for key, candidate in jobs.items():
             raw_needs = candidate.get("needs") if isinstance(candidate, dict) else []
-            needed = [raw_needs] if isinstance(raw_needs, str) else (raw_needs or [])
+            needed = ([raw_needs] if isinstance(raw_needs, str)
+                      else (raw_needs or []))
             parents[str(key)] = {str(item) for item in needed}
             for item in needed:
                 children[str(item)].add(str(key))
@@ -27861,8 +27870,34 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             seen.update(reached)
         return seen
 
+    def _needs_ancestors(workflow: str, node: str) -> set[str]:
+        jobs = (_jg or {}).get(workflow) or {}
+        reached: set[str] = set()
+        todo = [node]
+        while todo:
+            current = todo.pop()
+            candidate = jobs.get(current) or {}
+            raw_needs = (candidate.get("needs")
+                         if isinstance(candidate, dict) else [])
+            needed = [raw_needs] if isinstance(raw_needs, str) else (raw_needs or [])
+            for parent in (str(item) for item in needed):
+                if parent not in reached:
+                    reached.add(parent)
+                    todo.append(parent)
+        return reached
+
+    def _joint_nodes_coupled(workflow: str, left: str, right: str) -> bool:
+        if right in _needs_chain(workflow, left):
+            return True
+        return bool(_needs_ancestors(workflow, left)
+                    & _needs_ancestors(workflow, right))
+
     _commit_facts: list[dict[str, Any]] = []
     _joint_observations: list[dict[str, Any]] = []
+    _joint_population_complete = bool(
+        _confirmed_gate_checks is not None
+        and len(_confirmed_gate_checks) >= 2
+        and set(req_names).issubset(_confirmed_gate_checks))
     _commit_shas: list[str] = []
     _commit_checks_by_sha: dict[str, dict[str, float]] = {}
     _commit_dropped_workflows: dict[str, set[str]] = {}
@@ -27949,7 +27984,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                     "completed_ts": _completed_dt.timestamp(),
                     "node": _commit_job_node(_wf, str(_job.get("name") or "")),
                     "run_id": str(_job.get("_run_id") or ""),
-                    "run_attempt": _job.get("_run_attempt") or 1,
+                    "run_attempt": _job.get("_run_attempt"),
                     "runner": _job_runner_label(_job),
                 })
             if not _completed_here:
@@ -27980,38 +28015,42 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         _observed = (round(max(float(row["completed_ts"]) for row in _job_rows)
                            - min(_created), 3)
                      if _job_rows and _created else None)
+        _partial = bool(_missing or not _run_rows or _observed is None)
 
         _joint_nodes: dict[str, tuple[str, str]] = {}
         _commit_checks = _commit_checks_by_sha.get(_sha) or {}
-        for _check in sorted(_chain_spine):
-            if _check not in _commit_checks:
-                _joint_nodes = {}
-                break
-            _mapped = _map_check_to_job(_check, crit_by_wf,
-                                        require_developer_timing=True)
-            if _mapped is None:
-                _joint_nodes = {}
-                break
-            _mapped_wf, _mapped_job = _mapped
-            _mapped_node = _commit_job_node(_mapped_wf, _mapped_job)
-            if _mapped_node is None:
-                _joint_nodes = {}
-                break
-            _mapped_spec = (((_jg or {}).get(_mapped_wf) or {}).get(
-                _mapped_node) or {})
-            if isinstance(_mapped_spec, dict) and _mapped_spec.get("matrix"):
-                _joint_nodes = {}
-                break
-            _joint_nodes[_check] = (_mapped_wf, _mapped_node)
-        if (_confirmed_gate_checks is not None
+        if _joint_population_complete and not _partial:
+            for _check in sorted(_chain_spine):
+                if _check not in _commit_checks:
+                    _joint_nodes = {}
+                    break
+                _mapped = _map_check_to_job(_check, crit_by_wf,
+                                            require_developer_timing=True)
+                if _mapped is None:
+                    _joint_nodes = {}
+                    break
+                _mapped_wf, _mapped_job = _mapped
+                _mapped_node = _commit_job_node(_mapped_wf, _mapped_job)
+                if _mapped_node is None:
+                    _joint_nodes = {}
+                    break
+                _mapped_spec = (((_jg or {}).get(_mapped_wf) or {}).get(
+                    _mapped_node) or {})
+                if isinstance(_mapped_spec, dict) and _mapped_spec.get("matrix"):
+                    _joint_nodes = {}
+                    break
+                _joint_nodes[_check] = (_mapped_wf, _mapped_node)
+        if (_joint_population_complete
                 and len(_joint_nodes) == len(_chain_spine)):
             _joint_observation = _joint_gating_observation(
-                _sha, _joint_nodes, _job_rows,
-                lambda workflow, left, right: right in _needs_chain(workflow, left))
+                _sha, _joint_nodes, _job_rows, _joint_nodes_coupled)
             if _joint_observation is not None:
                 _joint_observations.append(_joint_observation)
+            else:
+                _joint_population_complete = False
+        elif _joint_population_complete:
+            _joint_population_complete = False
 
-        _partial = bool(_missing or not _run_rows or _observed is None)
         _fact: dict[str, Any] = {
             "sha": _sha,
             "event": _event,
@@ -28046,7 +28085,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                   if _complete_walls else None),
         "facts": _commit_facts,
     }
-    if _joint_observations:
+    if (_joint_population_complete and _joint_observations
+            and len(_joint_observations) == len(_commit_facts)):
         findings_doc[joint.JOINT_SCENARIO_INPUTS_KEY] = {
             "contract_version": joint.SCENARIO_CONTRACT_VERSION,
             "topology": joint.SUPPORTED_TOPOLOGY,
@@ -28055,8 +28095,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             "observations": _joint_observations,
             # No current finding carries per-observation local reductions,
             # affected-work identity, stable matrix identity, and the local-
-            # runtime-only certificate together. The stop-clause path stamps
-            # the measured gating observations now and invents no effect adapter.
+            # runtime-only certificate together. Measured observations are
+            # stamped without inventing an effect adapter.
             "effects": [],
         }
     _chain_facts = _stamp_chain_facts(

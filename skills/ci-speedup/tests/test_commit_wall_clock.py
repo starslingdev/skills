@@ -14,6 +14,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 import blocking_path as bp  # noqa: E402
 import collect_runs as cr  # noqa: E402
+import joint_scenario as js  # noqa: E402
 import wall_clock as wc  # noqa: E402
 
 
@@ -357,6 +358,18 @@ def test_collect_stamps_matched_joint_gating_observations_with_identity(
             "second-long": "ubuntu-latest",
         },
     }]
+    gating, effects, rejection = js.load_inputs(doc)
+    assert rejection is None
+    assert effects == ()
+    assert gating is not None
+    assert gating.observations[0].check_attempts == {
+        "first-long": "101#attempt1",
+        "second-long": "202#attempt1",
+    }
+    assert gating.observations[0].check_runners == {
+        "first-long": "ubuntu-latest",
+        "second-long": "ubuntu-latest",
+    }
     report = bp.render(doc, captured_at="2026-11-06T00:00:00Z")
     findings_path = tmp_path / "findings.json"
     report_path = tmp_path / "report.md"
@@ -389,6 +402,58 @@ def test_collect_does_not_stamp_dependent_checks_as_a_joint_observation(monkeypa
 
     doc = _collect(monkeypatch, _DependentChecksClient)
 
+    assert "joint_scenario_inputs" not in doc
+
+
+def test_collect_requires_every_configured_gate_to_be_observed(monkeypatch):
+    class _MissingRequiredGateClient(_JointObservationClient):
+        def json(self, endpoint: str, allow_missing: bool = False):
+            if endpoint == "repos/o/r/branches/main/protection/required_status_checks":
+                self.queries += 1
+                return {"contexts": [
+                    "first-long", "second-long", "never-runs"]}
+            return super().json(endpoint, allow_missing)
+
+    doc = _collect(monkeypatch, _MissingRequiredGateClient)
+
+    assert "joint_scenario_inputs" not in doc
+
+
+def test_collect_does_not_invent_a_missing_run_attempt(monkeypatch):
+    class _MissingAttemptClient(_JointObservationClient):
+        def json(self, endpoint: str, allow_missing: bool = False):
+            result = super().json(endpoint, allow_missing)
+            match = re.match(
+                r"repos/o/r/actions/workflows/(\d+)/runs\?(.*)", endpoint)
+            if (match and not re.search(r"per_page=1(?![0-9])", match.group(2))
+                    and result):
+                for run in result["workflow_runs"]:
+                    run.pop("run_attempt", None)
+            return result
+
+    doc = _collect(monkeypatch, _MissingAttemptClient)
+
+    assert "joint_scenario_inputs" not in doc
+
+
+def test_collect_withholds_joint_inputs_when_a_matching_attempt_has_no_jobs(
+        monkeypatch):
+    class _MissingRerunJobsClient(_JointObservationClient):
+        def json(self, endpoint: str, allow_missing: bool = False):
+            result = super().json(endpoint, allow_missing)
+            match = re.match(
+                r"repos/o/r/actions/workflows/(\d+)/runs\?(.*)", endpoint)
+            if (match and match.group(1) == "1"
+                    and not re.search(r"per_page=1(?![0-9])", match.group(2))):
+                missing = dict(result["workflow_runs"][0], id=303, run_attempt=2)
+                return {"workflow_runs": [result["workflow_runs"][0], missing]}
+            return result
+
+    monkeypatch.setattr(cr, "GhClient", _MissingRerunJobsClient)
+    doc = cr.collect(
+        json.loads(json.dumps(_DOC)), "o/r", max_runs=2, shallow_runs=2)
+
+    assert doc["pr_critical_path"]["commit_wall_clock"]["facts"][0]["partial"]
     assert "joint_scenario_inputs" not in doc
 
 

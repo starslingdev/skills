@@ -2789,16 +2789,16 @@ saving rather than a post-fix duration, so subtracting the stamps yields 1s.
 
 The collector stamps matched observations only when every check in the whole
 confirmed gating set maps to one concrete job execution, every execution has
-attempt and runner identity, the checks have no `needs:` relationship, and
-their measured intervals overlap within the scheduling tolerance. Unknown
-required sets, matrix jobs and incomplete observations produce no stamp.
+attempt and runner identity, the checks have no `needs:` relationship or shared
+upstream, and their measured intervals overlap within the scheduling tolerance.
+Unknown required sets, matrix jobs and incomplete observations produce no stamp.
 
-No report renders a joint block yet. The artifact deliberately carries an
-empty `effects` list because no current finding supplies all four remaining
-requirements named by `MISSING_PRODUCER_EVIDENCE`: per-observation local
-reductions, affected-work identity, stable matrix-leg identity, and a
+The report does not consume the contract yet. The artifact also deliberately
+carries an empty `effects` list because no current finding supplies all four
+remaining requirements named by `MISSING_PRODUCER_EVIDENCE`: per-observation
+local reductions, affected-work identity, stable matrix-leg identity, and a
 local-runtime-only scheduling/coverage/job-set certificate. Aggregate savings
-stamps are not adapted into effects.
+stamps are not adapted into effects, so there is no supported joint claim.
 
 The methodology is `references/wall-clock-methodology.md` §8; the tests are
 `tests/test_joint_sizing.py`, which pin the numbers and every rejection code.

@@ -29,12 +29,16 @@ BASIS = "era=e1;runner=ubuntu-latest;population=pr"
 
 
 def obs(observation_id, durations, *, basis=BASIS, validated=True, residual=0.0):
+    names = set(durations)
     return js.GatingObservation(
         observation_id=observation_id,
         basis=basis,
         check_durations=dict(durations),
         concurrency_validated=validated,
         scheduling_residual_s=residual,
+        check_attempts={name: f"{observation_id}-{name}#attempt1"
+                        for name in names},
+        check_runners={name: "ubuntu-latest" for name in names},
     )
 
 
@@ -358,6 +362,22 @@ def test_missing_competitor_in_one_observation_is_rejected():
     assert res.rejection.code == "missing_competitor"
 
 
+def test_missing_attempt_or_runner_identity_is_rejected():
+    incomplete = js.GatingObservation(
+        observation_id="r0", basis=BASIS,
+        check_durations={"A": 300.0, "B": 299.0},
+        concurrency_validated=True,
+        check_attempts={"A": "1#attempt1"},
+        check_runners={"A": "ubuntu-latest", "B": "ubuntu-latest"})
+    g = gating([incomplete])
+    res = js.evaluate_scenario(g, [
+        constant_effect("F-A", "A::s", "A", 100.0, 250.0, ["r0"]),
+        constant_effect("F-B", "B::s", "B", 100.0, 250.0, ["r0"])])
+
+    assert res.supported is False
+    assert res.rejection.code == "missing_observation_identity"
+
+
 def test_unvalidated_concurrency_is_rejected():
     rows = [obs("r0", {"A": 300.0, "B": 299.0}, validated=False),
             obs("r1", {"A": 300.0, "B": 299.0}),
@@ -617,10 +637,8 @@ def test_selection_uses_displayed_precision():
 # artifact contract: what a producer would have to stamp
 # --------------------------------------------------------------------------
 
-def test_todays_artifact_shape_reports_the_inputs_as_absent():
-    """No producer stamps the contract today. Reading a current findings doc
-    must say so explicitly rather than fabricating a scenario from the
-    aggregate stamps that happen to be present."""
+def test_an_artifact_without_joint_inputs_reports_them_as_absent():
+    """Aggregate timing fields never fabricate a joint-scenario contract."""
     doc = {
         "findings": [{"pattern": "OPT73", "affected_jobs": ["A", "B"],
                       "wall_clock_p50_s": 1.0,
@@ -647,7 +665,11 @@ def test_a_stamped_contract_round_trips_to_the_same_numbers():
                 {"observation_id": f"r{i}", "basis": BASIS,
                  "check_durations": {"A": 300.0, "B": 299.0},
                  "concurrency_validated": True,
-                 "scheduling_residual_s": 0.0} for i in range(3)],
+                 "scheduling_residual_s": 0.0,
+                 "check_attempts": {"A": f"1{i}#attempt1",
+                                    "B": f"2{i}#attempt1"},
+                 "check_runners": {"A": "ubuntu-latest",
+                                   "B": "ubuntu-latest"}} for i in range(3)],
             "effects": [
                 {"finding_id": "F-A", "workflow": ".github/workflows/ci.yml",
                  "work_id": "A::pytest", "basis": BASIS,
@@ -1028,6 +1050,11 @@ def _observed_rejection_codes():
     note(js.evaluate_scenario(gating(
         [obs("r0", {"A": 300.0, "B": 299.0}, residual=99.0)] + good[1:]),
         pair()))
+    note(js.evaluate_scenario(gating([
+        js.GatingObservation(
+            observation_id="r0", basis=BASIS,
+            check_durations={"A": 300.0, "B": 299.0},
+            concurrency_validated=True)]), pair()))
     note(js.evaluate_scenario(gating(
         [obs(f"r{i}", {"A": 300.0, "B": 299.0, "C": 290.0}) for i in range(3)],
         check_names={"A", "B"}), pair()))
@@ -1111,7 +1138,7 @@ def test_the_exported_rejection_codes_are_exactly_the_ones_the_module_emits():
 
 
 def test_the_rejection_vocabulary_size_is_pinned():
-    assert len(js.REJECTION_CODES) == 32
+    assert len(js.REJECTION_CODES) == 33
     assert all(isinstance(c, str) and c.strip() for c in js.REJECTION_CODES)
 
 
