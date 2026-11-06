@@ -169,7 +169,10 @@ def test_collect_keeps_only_the_caller_path_in_the_required_spine(monkeypatch, t
     assert bp._LAST_CLAIMS is not None
     report_path.with_name(report_path.name + ".claims.json").write_text(
         json.dumps(bp._LAST_CLAIMS.to_json()), encoding="utf-8")
-    failures = [check for check in vr.run_checks(
-        report, report_path, findings_path, skill_repo=None)
-        if not check.skipped and not check.ok and "provenance" not in check.name]
-    assert failures == [], [(check.name, check.detail) for check in failures]
+    checks = vr.run_checks(report, report_path, findings_path, skill_repo=None)
+    failures = [(check.name, check.detail) for check in checks
+                if not check.skipped and not check.ok]
+    assert failures == [(
+        "report's skill commit is HEAD or an ancestor of it (provenance)",
+        "no `skill commit` recorded in the Data sources footer",
+    )]
