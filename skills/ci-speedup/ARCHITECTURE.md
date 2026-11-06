@@ -2915,14 +2915,17 @@ consumes it:
 
 - **`_required_reachable_checks(candidates, req_names, job_graph, crit_by_wf)`** — returns
   the candidates that are required **or** a job the required work transitively `needs:`.
-  Each required check maps to a job *node* (`_check_to_job_node`): a `<caller> / <child>`
-  name resolves to the **reusable caller** job (so a required reusable child anchors the
-  whole invocation — the merge-reports-rollup pattern), and a plain check anchors its file
-  via `_map_check_to_job` then matches the job `name` template (exact, then matrix-regex).
-  The **anchors** are those required job nodes; the **reachable** set is the anchors plus
-  their downward `needs:` closure (everything an anchor depends on). A candidate is kept
-  iff required, or its node is reachable, or it's file-backed-but-unpinnable (kept, never
-  silently dropped); a fileless/external non-required check is dropped.
+  Each required check maps to a job *node* (`_check_to_job_node`). A nested
+  `<caller> / <child>` name resolves to the editable leaf job while retaining its local
+  caller path; that invocation's outer caller node becomes the anchor. A plain check anchors its
+  file via `_map_check_to_job` then matches the job `name` template (exact, then
+  matrix-regex). The **reachable** set is the anchors plus their downward `needs:` closure
+  (everything an anchor depends on). A nested candidate inherits that reachability only
+  through its caller-prefixed path. A bare check from a workflow's separate
+  `pull_request` run has no such path and keeps its own reachability, even when the same
+  leaf job also runs under a required caller. A candidate is kept iff required, or its
+  node is reachable through the applicable identity, or it's file-backed-but-unpinnable
+  (kept, never silently dropped); a fileless/external non-required check is dropped.
 - **A match-anything matrix `name:` binds nothing (no-timing binders).** A job whose `name:`
   is ENTIRELY a matrix placeholder (`${{ matrix.target }}`) expands to `^.+?$` — it matches
   *every* check-run name, so it carries no discriminating signal. The no-sampled-timing binders

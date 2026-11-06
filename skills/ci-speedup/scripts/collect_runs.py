@@ -17361,8 +17361,12 @@ def _nested_caller_path_is_reachable(
     leaves = _local_reusable_leaf_nodes(check, job_graph, caller_paths=paths)
     if leaves != {node} or not paths.get(node):
         return None
-    return any(all(caller in reachable for caller in path)
-               for path in paths[node])
+    # A reachable outer caller makes its whole local invocation path gating.
+    # Inner reusable callers need not be globally reachable on their own: they
+    # run because that outer invocation selected them.  Keeping the decision
+    # attached to the first caller also preserves the identity of a standalone
+    # run of the leaf workflow, whose bare check name has no caller path.
+    return any(bool(path) and path[0] in reachable for path in paths[node])
 
 
 def _check_to_job_node_scanned(
@@ -17433,13 +17437,21 @@ def _required_reachable_jobs(
     for r in req_names:
         node = _check_to_job_node(r, job_graph, crit_by_wf)
         if node is not None:
-            anchors.add(node)
-            # Preserve the callers' upstream needs when a required child now
-            # resolves to its editable leaf rather than only to the caller.
-            callers: set[tuple[str, str]] = set()
-            leaves = _local_reusable_leaf_nodes(r, job_graph, callers)
-            if leaves == {node}:
-                anchors.update(callers)
+            paths: dict[tuple[str, str],
+                        set[tuple[tuple[str, str], ...]]] = {}
+            leaves = _local_reusable_leaf_nodes(
+                r, job_graph, caller_paths=paths)
+            caller_paths = paths.get(node, set())
+            if leaves == {node} and caller_paths:
+                # A nested required status belongs to this invocation, not to
+                # every standalone run of the shared leaf workflow.  Anchor
+                # only each path's outer caller. Anchoring an intermediate
+                # caller would make that workflow's direct invocation inherit
+                # the outer gate. Candidates resolve the complete identity in
+                # `_nested_caller_path_is_reachable`.
+                anchors.update(path[0] for path in caller_paths if path)
+            else:
+                anchors.add(node)
     reachable: set[tuple[str, str]] = set(anchors)
     stack = list(anchors)
     while stack:
@@ -17447,13 +17459,10 @@ def _required_reachable_jobs(
         info = job_graph.get(wf, {}).get(jid, {}) or {}
         dependencies = [(wf, dep) for dep in info.get("needs", [])
                         if dep in job_graph.get(wf, {})]
-        # A required caller waits for every job in its local called workflow,
-        # including nested invocations. Keep those newly resolved leaf nodes in
-        # the same required closure; the visited set also terminates call cycles.
-        uses = info.get("uses")
-        if isinstance(uses, str) and uses.startswith("./.github/workflows/"):
-            target = uses[2:]
-            dependencies.extend((target, dep) for dep in job_graph.get(target, {}))
+        # Do not add a local called workflow's jobs as globally reachable.
+        # Their merge-gating identity is the caller-prefixed check name; the
+        # same workflow may also run directly on pull_request and publish bare
+        # checks that the caller does not gate.
         for node in dependencies:
             if node not in reachable:
                 reachable.add(node)
