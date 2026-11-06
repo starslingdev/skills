@@ -2989,6 +2989,15 @@ _NO_WEAKENING_LINES = [
     "  so and stop.",
 ]
 
+_VERIFICATION_BAR_LINES = [
+    "VERIFICATION BAR",
+    "- A scoped local run is pre-flight only. Call the change verified only after "
+    "the repository's own CI gate passes on the pushed branch, or after exactly "
+    "the commands that gate CI pass on the change.",
+    "- State the pole's observed range beside the predicted saving. Do not open a "
+    "pull request when the predicted saving is smaller than that range.",
+]
+
 
 _FIX_META: dict[str, dict[str, Any]] = {
     "cache-effective-path-mismatch": {
@@ -3890,6 +3899,7 @@ def _build_agent_prompt(leaf: dict[str, Any] | None, pole: dict[str, Any],
             "CONSTRAINTS / FAILURE MODE TO GUARD"] + constraints + [
             "", "READ FIRST"] + [f"- {d}" for d in meta["docs"]] + [
             "", *_NO_WEAKENING_LINES,
+            "", *_VERIFICATION_BAR_LINES,
             "", "DELIVER & VERIFY", f"- {meta['deliver']}"]
     return ("#### 🤖 Prompt for your coding agent\n\n```text\n"
             + _fence_body(out) + "\n```\n")
@@ -3981,6 +3991,8 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
             "step from the refreshed report.",
             "",
             *_NO_WEAKENING_LINES,
+            "",
+            *_VERIFICATION_BAR_LINES,
         ]
         return ("#### 🤖 Prompt for your coding agent\n\n```text\n"
                 + _fence_body(out) + "\n```\n")
@@ -4118,7 +4130,7 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
             f"- The `{wf}` workflow definition for {look_step}, and the tool/config it "
             "invokes (build tool, test runner, or install) - that's where its time is "
             "spent.", "",
-            *_NO_WEAKENING_LINES, "",
+            *_NO_WEAKENING_LINES, "", *_VERIFICATION_BAR_LINES, "",
             "DELIVER & VERIFY",
             f"- A change that cuts {look_step}'s wall time without dropping coverage; "
             "re-measure the step on a PR run to confirm the reduction."]
@@ -4211,6 +4223,18 @@ def _strip_rail_echo(body: str) -> str:
     return "\n".join(kept).rstrip("\n")
 
 
+def _strip_verification_bar_echo(body: str) -> str:
+    """Keep verification claims in gap-fill prompts renderer-owned.
+
+    The gap-fill body is model output. Drop every line that tries to define
+    verification, including partial or contradictory copies of the heading;
+    the canonical bar is appended after this returns. Other analysis remains.
+    """
+    lines = body.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    kept = [line for line in lines if "verif" not in line.lower()]
+    return "\n".join(kept).rstrip("\n")
+
+
 def _llm_agent_prompt(body: str, pole: dict[str, Any] | None = None) -> str:
     """Wrap an LLM-authored, log-tailored agent prompt (from the analysis JSON) in the
     same copy-paste block matched/generic prompts use, **prepending the standard
@@ -4258,8 +4282,9 @@ def _llm_agent_prompt(body: str, pole: dict[str, Any] | None = None) -> str:
     # `verify_report`'s one-rail-per-prompt count with a misleading "renderer bug"
     # message. Excise-then-append leaves exactly one canonical rail whatever the model
     # wrote, and is unchanged (idempotent) on a body already ending in that block.
-    body = _strip_rail_echo(body)
-    body = body.rstrip("\n") + "\n\n" + "\n".join(_NO_WEAKENING_LINES)
+    body = _strip_verification_bar_echo(_strip_rail_echo(body))
+    body = (body.rstrip("\n") + "\n\n" + "\n".join(_NO_WEAKENING_LINES)
+            + "\n\n" + "\n".join(_VERIFICATION_BAR_LINES))
     # The LLM-authored body is model output grounded in the repo log — it can echo a repo
     # name / log line carrying a ``` run. Fence-safe it PER-LINE (its own line breaks survive)
     # so a model-emitted stray fence can't close this ```text block.
@@ -5704,7 +5729,7 @@ def _offcategory_note_block(leaf: dict[str, Any], pole: dict[str, Any]) -> list[
                             f"(job `{pole.get('job') or pole.get('check') or ''}`)."),
                 meta["cause"], _fence_safe(str(leaf.get("config_fact", ""))), meta["look"],
                 meta["constraints"], *meta["docs"], meta["deliver"],
-                *_NO_WEAKENING_LINES, "```"]
+                *_NO_WEAKENING_LINES, "", *_VERIFICATION_BAR_LINES, "```"]
     out.append("")
     return out
 
@@ -9064,7 +9089,14 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
         # §8.1 landmine 1 — mandatory on every skip-family / trigger-scope
         # prompt, whichever framing branch built the saving line above.
         body += _PENDING_CAVEAT_LINES + [""]
-    body += _NO_WEAKENING_LINES + [
+    # The pole-range rule compares a wall-clock saving with the pole's observed timing
+    # range, so it travels only with wall-clock hand-offs; a runner-minute (bill),
+    # Tier-2 or queue-wait saving is not comparable with that range. The CI-backed
+    # verification lines apply to every prompt.
+    _bar = (_VERIFICATION_BAR_LINES if saves_wc
+            else [line for line in _VERIFICATION_BAR_LINES
+                  if not line.startswith("- State the pole's observed range")])
+    body += _NO_WEAKENING_LINES + [""] + _bar + [
         "",
         "Do: confirm the pattern at each location above, recover the intent from git",
         "history, and apply the catalog's fix recipe where it is safe. State the",
@@ -9203,7 +9235,7 @@ def _opt82_prompt(title: str, members: list[dict[str, Any]], url: str,
         "Read the catalog entry (background, fix recipe, and guardrail):",
         f"  {url}", "",
     ]
-    body += _NO_WEAKENING_LINES + [
+    body += _NO_WEAKENING_LINES + [""] + _VERIFICATION_BAR_LINES + [
         "",
         "Do: run the benchmark first and report it, recover the intent of the lint",
         "config from git history, answer the per-rule question, then apply (a)",
@@ -9513,7 +9545,8 @@ def _opt81_prompt(f: dict[str, Any], url: str,
                  _OPT81_A2_OPTION_LARGER, _OPT81_A2_OPTION_STARSLING,
                  _OPT81_A2_BENCHMARK]
     body += ["", "Read the catalog entry (background, fix recipe, and guardrail):",
-             f"  {url}", "", *_NO_WEAKENING_LINES, "", _OPT81_DISCLOSURE]
+             f"  {url}", "", *_NO_WEAKENING_LINES, "", *_VERIFICATION_BAR_LINES,
+             "", _OPT81_DISCLOSURE]
     return ["#### 🤖 Prompt for your coding agent", "", "```text",
             *[_fence_safe(l) for l in body], "```"]
 
@@ -9715,7 +9748,7 @@ def _opt83_prompt(f: dict[str, Any], url: str) -> list[str]:
             f"Runner: {_OPT83_RUNNER_CAVEAT}.",
             "",
             "Read the catalog entry (background, fix recipe, and guardrail):",
-            f"  {url}", "", *_NO_WEAKENING_LINES]
+            f"  {url}", "", *_NO_WEAKENING_LINES, "", *_VERIFICATION_BAR_LINES]
     return ["#### 🤖 Prompt for your coding agent (OPT83)", "", "```text",
             *[_fence_safe(l) for l in body], "```"]
 

@@ -937,6 +937,8 @@ unversioned and updates by reinstall from `main`.
 
 ### Changed
 
+- **2026-11-06** — Require every agent hand-off to treat scoped local runs as pre-flight evidence and call a change verified only after the repository's own CI gate or its exact gating commands pass. Wall-clock hand-offs also withhold pull requests whose predicted saving is smaller than the pole's observed range; bill-only, Tier-2 and queue-wait prompts do not compare runner-minute savings with that range.
+
 - **2026-11-03** — SKILL.md: the fast-CI "good shape" preface applies under exactly 2m 00s (the report's 🟡 tier), not "under ~2 min"; the hostile quality review is scoped to worked examples and is no longer called mandatory, since it is not a run phase and a user's run, interactive or headless, never spawns it. (#187)
 - **2026-11-03** — Document flaky-test quarantine with ownership, expiry, reporting and a product-failure guardrail; explain account capacity and explicit hosted fallback before changing runners; point mostly-idle queue waits to the single-slot resource diagnosis. (#177)
 

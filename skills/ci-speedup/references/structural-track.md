@@ -36,6 +36,7 @@ every per-finding prompt. A normal run does not construct any of this by hand
 
 - [Risk is mandatory and renders loud](#risk-is-mandatory-and-renders-loud-but-never-demotes-the-rank)
 - [Interrogate the target file's history & intent](#interrogate-the-target-files-history--intent)
+- [Verification bar](#verification-bar)
 
 ## Risk is mandatory and renders loud (but never demotes the rank)
 
@@ -76,3 +77,14 @@ prompt):** if the fix contradicts the evident intent, the agent does NOT emit it
 a quick win — it flags a **behavioral/policy change needing the owner's sign-off**
 (documenting the intent it changes) or returns an explicit "skip, here's why". The
 prompt carries this rule so the agent applies it without re-deriving it.
+
+## Verification bar
+
+A scoped local test is pre-flight evidence, not verification. A change is verified
+only when the repository's own CI gate passes on the pushed branch, or when exactly
+the commands that gate CI pass against the change. The hand-off states which path
+proved the change.
+
+The agent also states the pole's observed range beside the predicted saving. When
+the predicted saving is smaller than normal run-to-run spread, it does not open a
+pull request: the expected change is too small to distinguish from ordinary noise.
