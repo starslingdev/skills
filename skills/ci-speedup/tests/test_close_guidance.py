@@ -53,7 +53,9 @@ def test_askuserquestion_label_is_plain():
 
 def test_close_sets_honest_pick_expectation_not_a_proposal():
     close = re.sub(r"\s+", " ", _phase6())
-    assert "makes the change and verifies it" in close
+    assert "makes the change" in close
+    assert "repository's own CI gate passed" in close
+    assert "scoped local run is pre-flight only" in close
     assert "before committing or opening a PR" in close
     assert 'doesn\'t return a "proposal"' in close
 
