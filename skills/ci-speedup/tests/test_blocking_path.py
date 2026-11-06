@@ -1069,6 +1069,13 @@ def test_vitest_coverage_guidance_requires_matched_provider_timing():
     assert "re-baseline thresholds" in guidance
     assert "no provider-switch saving is credited" in guidance
 
+    architecture = (Path(__file__).resolve().parents[1] / "ARCHITECTURE.md").read_text()
+    catalog_row = next(
+        line for line in architecture.splitlines() if line.startswith("| `vitest-v8-coverage`")
+    )
+    assert "instruments every file" not in catalog_row.lower()
+    assert "measured" in catalog_row.lower()
+
 
 def test_parse_log_detects_vitest_import_bound_without_coverage():
     # No coverage, and import dominates tests -> the import-bound leaf, NOT istanbul.
