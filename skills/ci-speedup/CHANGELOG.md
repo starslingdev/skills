@@ -14,6 +14,7 @@ unversioned and updates by reinstall from `main`.
 ### Added
 
 - **2026-11-06** — Keep OPT9 compiler build-state and generated-output cache suggestions uncredited until a same-workload before/after measurement shows a net saving. Lint and format result caches retain their existing sizing.
+- **2026-11-05** — Preserve dependency-cache evidence when a job log also contains a sequential shell test loop. The newer loop detector now runs after every pre-existing log detector, so it cannot displace an established root cause.
 - **2026-11-05** — Split cache-key guidance by cache contents: dependency stores keep deterministic lockfile keys, while tool-result and build-output caches use a per-run primary key with a compatible `restore-keys` prefix so updated results can be saved after a restore.
 - **2026-11-05** — Add a partition-correctness caveat to OPT24 ("Long Test Job Without Sharding"): the shards must partition the input set exactly, the shard count must be validated wherever it is read, a documented rollback to a lower shard count must not silently defeat the new guard tests, and a result-collection step must keep every shard's failure, not just the first or last.
 - **2026-11-05** — Surface a descriptive slow-tail finding when a confirmed merge-blocking check takes at least ten minutes at p90 and at least three times its median. The finding states the affected PR share and links an example run without crediting savings; smooth distributions and checks outside the required `needs:` closure stay quiet.
