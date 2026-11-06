@@ -137,15 +137,15 @@ def test_verifier_rederives_chain_projection_from_facts(tmp_path: Path):
                 "facts": [{
                     "sha": "abc123",
                     "partial": False,
-                    "wall_s": 1080.0,
+                    "wall_s": 1140.0,
                     "slowest_job": {"name": "test", "duration_s": 900.0},
                     # Deliberately differs from chain_facts.runner_up_s. The
                     # verifier must use the chain stamp's independent path.
                     "next_longest_job": {"name": "parallel", "duration_s": 350.0},
                     "projection_3x": {
                         "job_speedup": 3.0,
-                        "projected_s": 600.0,
-                        "multiple": 1.8,
+                        "projected_s": 660.0,
+                        "multiple": 1.73,
                     },
                 }],
             },
@@ -167,7 +167,7 @@ def test_verifier_rederives_chain_projection_from_facts(tmp_path: Path):
     findings.write_text(json.dumps(doc), encoding="utf-8")
     mutant = verifier.check_chain_projection_matches_facts(findings)
     assert not mutant.ok
-    assert "780.0 != chain-derived 600.0" in mutant.detail
+    assert "780.0 != chain-derived 660.0" in mutant.detail
 
 
 def test_verifier_handles_non_utf8_findings_as_unreadable(tmp_path: Path):
