@@ -27547,6 +27547,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         return seen
 
     _commit_facts: list[dict[str, Any]] = []
+    _commit_checks_by_sha = dict(zip(_era_repr_shas, _era_per_sha_checks))
     for _sha in _era_repr_shas:
         _event = str((sha_meta.get(_sha) or {}).get("event") or "")
         _run_rows: list[tuple[str, dict[str, Any]]] = []
@@ -27565,7 +27566,12 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 if _rid:
                     _jobs_by_run[(_wf, _rid)] = _job_run
 
-        _missing: set[str] = set()
+        _expected_workflows: set[str] = set()
+        for _check_name in (_commit_checks_by_sha.get(_sha) or {}):
+            _mapped = _check_to_job_node(_check_name, _jg, crit_by_wf)
+            if _mapped is not None:
+                _expected_workflows.add(_mapped[0])
+        _missing: set[str] = _expected_workflows - {_wf for _wf, _run in _run_rows}
         _created: list[float] = []
         _job_rows: list[dict[str, Any]] = []
         for _wf, _run in _run_rows:

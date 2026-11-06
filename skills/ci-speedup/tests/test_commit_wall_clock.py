@@ -116,11 +116,12 @@ class _TwoWorkflowClient:
         return ""
 
 
-class _MissingSecondWorkflowJobsClient(_TwoWorkflowClient):
+class _MissingSecondWorkflowRunClient(_TwoWorkflowClient):
     def json(self, endpoint: str, allow_missing: bool = False):
-        if endpoint.startswith("repos/o/r/actions/runs/202/jobs"):
+        match = re.match(r"repos/o/r/actions/workflows/2/runs\?(.*)", endpoint)
+        if match and not re.search(r"per_page=1(?![0-9])", match.group(1)):
             self.queries += 1
-            return {"jobs": []}
+            return {"workflow_runs": []}
         return super().json(endpoint, allow_missing)
 
 
@@ -191,8 +192,8 @@ def test_collect_stamps_one_commit_wall_across_both_workflows_and_verifies(
     assert failures == [], [(check.name, check.detail) for check in failures]
 
 
-def test_missing_workflow_jobs_make_the_commit_partial_instead_of_shorter(monkeypatch):
-    doc = _collect(monkeypatch, _MissingSecondWorkflowJobsClient)
+def test_missing_workflow_run_makes_the_commit_partial_instead_of_shorter(monkeypatch):
+    doc = _collect(monkeypatch, _MissingSecondWorkflowRunClient)
     stamp = doc["pr_critical_path"]["commit_wall_clock"]
     fact = stamp["facts"][0]
 
