@@ -2450,6 +2450,22 @@ def _stamp_commit_queue_work(clock: dict[str, Any]) -> dict[str, Any]:
 _RUNNER_POOL_QUEUE_PATTERNS = frozenset({"OPT43", "OPT97"})
 
 
+def _commit_work_budget(clock: dict[str, Any]) -> float | None:
+    """Work a code finding may claim on the typical full wait.
+
+    Wall, queue, and work medians can come from different commits. Preserve the
+    raw work median as evidence, but also honor wall-minus-queue so a projected
+    improvement can never run below the queue the report says remains intact.
+    """
+    work = _finite_float(clock.get("work_p50_s"))
+    wall = _finite_float(clock.get("p50_s"))
+    queue = _finite_float(clock.get("queue_p50_s"))
+    candidates = [work] if work is not None and work >= 0 else []
+    if wall is not None and queue is not None and wall >= 0 and queue >= 0:
+        candidates.append(max(wall - min(queue, wall), 0.0))
+    return min(candidates) if candidates else None
+
+
 def _cap_code_findings_at_commit_work(findings: list[dict[str, Any]],
                                       work_s: float | None) -> None:
     """A code/config finding can remove work, never runner-pickup queue.
@@ -2466,10 +2482,17 @@ def _cap_code_findings_at_commit_work(findings: list[dict[str, Any]],
         credited = _finite_float(finding.get("wall_clock_p50_s"))
         if credited is None or credited <= work_s:
             continue
-        finding["wall_clock_uncapped_p50_s"] = credited
-        finding["wall_clock_p50_s"] = round(work_s, 1)
+        capped = round(work_s, 1)
+        if _finite_float(finding.get("wall_clock_uncapped_p50_s")) is None:
+            finding["wall_clock_uncapped_p50_s"] = credited
+        finding["wall_clock_p50_s"] = capped
         reason = ("capped at the per-commit work time; code and workflow changes "
                   "cannot remove runner-pickup queue")
+        steps = finding.get("wall_clock_derivation")
+        steps = list(steps) if isinstance(steps, list) else []
+        steps.append({"bound": "commit-work", "from_s": credited,
+                      "to_s": capped, "reason": reason})
+        finding["wall_clock_derivation"] = steps
         derivation = str(finding.get("derivation") or "")
         finding["derivation"] = (
             f"{derivation}; {reason}" if derivation else reason)
@@ -29321,7 +29344,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         findings_doc.pop("commit_wall_clock", None)
         _cap_code_findings_at_commit_work(
             findings_doc.get("findings") or [],
-            _finite_float(_commit_clock.get("work_p50_s")))
+            _commit_work_budget(_commit_clock))
     # Join required-check names to their workflows' PR-trigger conditionality
     # (the dead-required check's load-bearing conjunct). Additive metadata on
     # the critical path; harmless if unconsumed.

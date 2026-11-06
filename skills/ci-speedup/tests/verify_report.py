@@ -14858,6 +14858,34 @@ def check_commit_queue_work_credit(report: str, findings_path: Path | None,
         except (TypeError, ValueError):
             return None
 
+    def _queue_code_claim(text: str) -> str | None:
+        code_word = re.compile(
+            r"(?i)\b(?:code|workflow|cache|test|build|shard(?:ing)?|parallel\w*)\b")
+        queue_word = re.compile(
+            r"(?i)\b(?:runner[- ]pickup\s+)?queue(?:\s+(?:time|wait|seconds?))?\b")
+        action = (
+            r"(?:cut|cuts|cutting|reduce|reduces|reducing|reduced|remove|removes|"
+            r"removing|removed|save|saves|saving|saved|halve|halves|halving|halved|"
+            r"shorten|shortens|shortening|shortened|eliminate|eliminates|eliminating|"
+            r"eliminated)")
+        positive = re.compile(
+            rf"(?i)\b{action}\b[^.!?\n]{{0,60}}\b(?:runner[- ]pickup\s+)?queue\b"
+            rf"|\b(?:runner[- ]pickup\s+)?queue\b[^.!?\n]{{0,40}}"
+            rf"\b(?:is|gets?|would\s+be|can\s+be)\s+{action}\b")
+        denial = re.compile(
+            rf"(?i)\b(?:does\s+not|do\s+not|cannot|can't|never|won't)\b"
+            rf"[^.!?\n]{{0,50}}\b(?:claim|{action})\w*\b[^.!?\n]{{0,50}}\bqueue\b"
+            r"|\b(?:runner[- ]pickup\s+)?queue\b[^.!?\n]{0,25}"
+            r"\b(?:remains?|stays?|is|are)\b[^.!?\n]{0,15}"
+            r"\b(?:unchanged|intact|untouched|unaffected)\b"
+            r"|\b(?:work|code)\b[^.!?\n]{0,30}\bnot\s+(?:the\s+)?queue\b")
+        return next((
+            sentence.strip()
+            for sentence in re.split(r"(?<=[.!?])\s+|\n+", text)
+            if code_word.search(sentence) and queue_word.search(sentence)
+            and positive.search(sentence) and not denial.search(sentence)
+        ), None)
+
     queue_values: list[float] = []
     work_values: list[float] = []
     wall_values: list[float] = []
@@ -14923,12 +14951,21 @@ def check_commit_queue_work_credit(report: str, findings_path: Path | None,
         if wall > 0:
             share_values.append(queue / wall)
 
+    queue_claim = _queue_code_claim(report)
     if not work_values:
+        if commits and all(_as_dict(raw).get("partial") is True for raw in commits):
+            if queue_claim is not None:
+                return Check(name, False,
+                             "report says a code/config change cuts runner queue")
+            return Check(name, True, "all per-commit observations are partial",
+                         skipped=True)
         return Check(name, False, "commit-wall stamp has no complete, re-derivable observations")
     work_p50 = statistics.median(work_values)
     queue_p50 = statistics.median(queue_values)
     wall_p50 = statistics.median(wall_values)
     share_p50 = statistics.median(share_values) if share_values else 0.0
+    displayed_work = max(wall_p50 - min(queue_p50, wall_p50), 0.0)
+    credited_work = min(work_p50, displayed_work)
     for key, expected in (("work_p50_s", work_p50),
                           ("queue_p50_s", queue_p50),
                           ("p50_s", wall_p50),
@@ -14953,12 +14990,12 @@ def check_commit_queue_work_credit(report: str, findings_path: Path | None,
             saving = float(finding.get("wall_clock_p50_s"))
         except (TypeError, ValueError):
             continue
-        if saving > 0:
+        if saving > 0 and not finding.get("off_spine") and not finding.get("advisory"):
             code_savings.append(saving)
-        if saving > work_p50 + 0.11:
+        if saving > credited_work + 0.11:
             bad_credit.append(
                 f"{finding.get('id') or finding.get('pattern') or '?'} credits "
-                f"{saving:g}s above {work_p50:g}s work")
+                f"{saving:g}s above {credited_work:g}s work on the typical full wait")
 
     text_failures: list[str] = []
     if queue_p50 > 0:
@@ -14968,28 +15005,25 @@ def check_commit_queue_work_credit(report: str, findings_path: Path | None,
             text_failures.append("Bottom line omits the full per-commit wait")
         if f"~{_fmt_clock(queue_p50)} of it waiting for a runner" not in bottom:
             text_failures.append("Bottom line omits the runner-queue share")
-        if f"({share_p50:.0%})" not in bottom:
+        if f"({queue_p50 / wall_p50:.0%})" not in bottom:
             text_failures.append("Bottom line omits the runner-queue percentage")
-        saving = min(max(code_savings, default=0.0), work_p50, wall_p50)
+        if f"the remaining **~{_fmt_clock(displayed_work)}** is work" not in bottom:
+            text_failures.append("Bottom line omits the coherent work remainder")
+        saving = min(max(code_savings, default=0.0), credited_work, wall_p50)
         if saving > 0 and wall_p50 > saving:
             expected_multiple = f"{wall_p50 / (wall_p50 - saving):.2f}x"
             if expected_multiple not in bottom:
                 text_failures.append(
                     f"Bottom line omits full-wait projection {expected_multiple}")
 
-    queue_claim = re.search(
-        r"(?i)\b(?:code|workflow|cache|test|build|shard|parallel\w*)\b[^\n]{0,80}"
-        r"\b(?:cut|cuts|reduce|reduces|remove|removes|save|saves)\s+"
-        r"(?:the\s+)?(?:runner[- ]pickup\s+)?queue\b",
-        report)
-    if queue_claim:
+    if queue_claim is not None:
         text_failures.append("report says a code/config change cuts runner queue")
 
     failures = mismatches + bad_credit + text_failures
     return Check(
         name, not failures,
         "; ".join(failures[:8]) if failures else
-        f"{len(work_values)} commit(s) re-derived; code credit <= {work_p50:g}s work")
+        f"{len(work_values)} commit(s) re-derived; code credit <= {credited_work:g}s work")
 
 
 def run_checks(report, report_path, findings_path, skill_repo, clone=None):

@@ -5888,6 +5888,7 @@ def _population_typical_floor(cp: dict[str, Any]) -> float | None:
 def _toc_block(pole_wfs: list[dict[str, Any]], wf_gate: dict[str, int],
                npop: int, also_count: int | None = None,
                pr_floor: bool = False, queue_count: int = 0,
+               queue_aggregate: bool = False,
                also_on_path: bool = False,
                runner_spine_count: int = 0,
                tier2_toc: "dict[str, Any] | None" = None,
@@ -5896,8 +5897,9 @@ def _toc_block(pole_wfs: list[dict[str, Any]], wf_gate: dict[str, int],
     `#pole-N` drill-down), then a one-line "Pre-start wait" pointer when `queue_count`
     > 0, then a one-line pointer to the off-path "Also noticed" hygiene. `also_count`
     is None until the hygiene appendix is wired in (Phase 2); a 0 renders no hygiene
-    line. `queue_count` is the number of pre-start-wait findings (0 renders no wait
-    line). `pr_floor` swaps the "gate your merge" framing for the PR-floor one so the
+    line. `queue_count` is the number of pre-start-wait findings; a measured commit
+    aggregate gets its own wording through `queue_aggregate`. `pr_floor` swaps the
+    "gate your merge" framing for the PR-floor one so the
     TOC doesn't contradict the demotion banner. [] when there's nothing to list."""
     if not pole_wfs:
         return []
@@ -5947,6 +5949,10 @@ def _toc_block(pole_wfs: list[dict[str, Any]], wf_gate: dict[str, int],
         lines += [f"**⏳ Pre-start wait** — {queue_count} job{qp} wait{'' if qp else 's'} "
                   "in queue before starting (developer wall-clock the spine above doesn't "
                   "capture): [see below](#pre-start-wait).", ""]
+    elif queue_aggregate:
+        lines += ["**⏳ Pre-start wait** — runner queue measured across sampled commits "
+                  "(developer wall-clock before or between jobs): "
+                  "[see below](#pre-start-wait).", ""]
     if tier2_toc and tier2_toc.get("rows"):
         # First-class entry (owner request): the money section gets the same
         # visual weight as the poles — marker, the de-overlapped total up
@@ -9137,6 +9143,36 @@ def _opt82_prompt(title: str, members: list[dict[str, Any]], url: str,
             *[_fence_safe(l) for l in body], "```"]
 
 
+def _commit_wait_bottom_line(commit_clock: dict[str, Any],
+                             findings: list[dict[str, Any]]) -> str:
+    """Full developer wait with a coherent queue/work decomposition."""
+    wall = _num(commit_clock.get("p50_s")) or 0.0
+    queue = _num(commit_clock.get("queue_p50_s")) or 0.0
+    if wall <= 0 or queue <= 0:
+        return ""
+    queue = min(queue, wall)
+    work = wall - queue
+    saving = max((
+        (_num(f.get("wall_clock_p50_s")) or 0.0)
+        for f in findings
+        if (str(f.get("pattern") or "") not in {"OPT43", "OPT97"}
+            and not f.get("off_spine") and not f.get("advisory"))
+    ), default=0.0)
+    saving = min(max(saving, 0.0), work)
+    bottom = (
+        f"> **Bottom line.** The full developer wall is **{_clock(wall)}**: "
+        "a typical PR waits from workflow creation until the commit's last job "
+        f"finishes, including **~{_clock(queue)} of it waiting for a runner** "
+        f"({queue / wall:.0%}); the remaining **~{_clock(work)}** is work.")
+    if saving > 0 and wall > saving:
+        projected = wall - saving
+        bottom += (
+            f" The biggest credited code finding removes **~{_clock(saving)}** "
+            f"of work, reducing the full wait to **~{_clock(projected)} "
+            f"({wall / projected:.2f}x)**; it does not claim the queue seconds.")
+    return bottom
+
+
 def _queue_wait_block(findings: list[dict[str, Any]], catalog_url: str,
                       shallow_note: str = "",
                       commit_clock: dict[str, Any] | None = None) -> list[str]:
@@ -9149,8 +9185,8 @@ def _queue_wait_block(findings: list[dict[str, Any]], catalog_url: str,
     wait = [f for f in findings if _is_wait_finding(f)]
     commit_clock = commit_clock if isinstance(commit_clock, dict) else {}
     queue_p50 = _num(commit_clock.get("queue_p50_s")) or 0.0
-    work_p50 = _num(commit_clock.get("work_p50_s")) or 0.0
     wall_p50 = _num(commit_clock.get("p50_s")) or 0.0
+    work_p50 = max(wall_p50 - min(queue_p50, wall_p50), 0.0)
     if not wait and queue_p50 <= 0:
         return []
     # Disclosure parity with the hygiene appendix's "+N more … kept in the findings JSON":
@@ -9195,8 +9231,7 @@ def _queue_wait_block(findings: list[dict[str, Any]], catalog_url: str,
             "for a `needs:`-gated job the *wait-to-start* is measured from when its last "
             "needed upstream job completed, so upstream run time is never counted as queue.", ""]
     if queue_p50 > 0 and wall_p50 > 0:
-        share = (_num(commit_clock.get("queue_share_p50"))
-                 or queue_p50 / wall_p50)
+        share = queue_p50 / wall_p50
         lines += [
             f"> Across {int(commit_clock.get('n') or 0)} sampled commits, the typical "
             f"developer wait is **{_clock(wall_p50)}**: **~{_clock(queue_p50)} waiting "
@@ -11388,6 +11423,7 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
                           str(e) for e in evs)]
     no_pr_gating = bool(_wt) and not _pr_gating_wfs
     gh_never_started = ds.get("partial_kind") == "gh_unavailable"
+    _static_commit_wall = _num((cp.get("commit_wall_clock") or {}).get("p50_s")) or 0.0
 
     # Machine-readable static-only marker (an HTML comment, invisible in rendered
     # markdown). `verify_report._is_static_only` keys off THIS, not the human banner
@@ -11437,6 +11473,14 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
                 "**cloud bill** (runner-minutes), not measured developer wall-clock. "
                 "Re-run when the GitHub API is reachable again (e.g. once a rate limit "
                 "has reset) to get the measured wall-clock critical path.", ""]
+    elif _static_commit_wall > 0:
+        out += ["> [!IMPORTANT]",
+                "> **Commit-level developer wait was measured, but no per-check spine "
+                "could be ranked.** The supplied commit timing still covers workflow "
+                "creation through the last completed job, including runner-pickup "
+                "queue. The sections below show that full wait and any static findings; "
+                "individual long poles remain unavailable because no file-backed pole "
+                "was resolved.", ""]
     elif no_pr_gating:
         # Third shape (issue: false dormant banner on live shapes) — the repo may be
         # perfectly active; its CI just never gates a PR. Say THAT, own any timing we
@@ -11513,6 +11557,13 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     else:
         bottom = ["> **Bottom line.** No PR run timing was available, so this report "
                   "can't rank what a PR waits on before the merge."]
+    _commit_bottom = _commit_wait_bottom_line(
+        cp.get("commit_wall_clock") or {}, all_findings)
+    if _commit_bottom:
+        # A supplied commit wall is measured even when no individual pole could
+        # be rendered. Keep the static banner, but make its Bottom line agree
+        # with the same full-wait fact shown in the queue section.
+        bottom = [_commit_bottom]
     if also_count:
         plural = "s" if also_count != 1 else ""
         # The no-PR-gating shape has no merge wall-clock to unlock EVER (no workflow
@@ -12484,30 +12535,8 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
     _commit_clock = cp.get("commit_wall_clock") or {}
     _commit_wall = _num(_commit_clock.get("p50_s")) or 0.0
     _commit_queue = _num(_commit_clock.get("queue_p50_s")) or 0.0
-    _commit_work = _num(_commit_clock.get("work_p50_s")) or 0.0
-    if _commit_wall > 0 and _commit_queue > 0:
-        _code_saving = max((
-            (_num(f.get("wall_clock_p50_s")) or 0.0)
-            for f in all_findings
-            if (str(f.get("pattern") or "") not in {"OPT43", "OPT97"}
-                and not f.get("off_spine") and not f.get("advisory"))
-        ), default=0.0)
-        _code_saving = min(max(_code_saving, 0.0), _commit_work, _commit_wall)
-        _share = (_num(_commit_clock.get("queue_share_p50"))
-                  or _commit_queue / _commit_wall)
-        _queue_bottom = (
-            f"> **Bottom line.** The full developer wall is **{_clock(_commit_wall)}**: "
-            "a typical PR waits from "
-            "workflow creation until the commit's last job finishes, including "
-            f"**~{_clock(_commit_queue)} of it waiting for a runner** ({_share:.0%}); "
-            f"the remaining **~{_clock(_commit_work)}** is work.")
-        if _code_saving > 0 and _commit_wall > _code_saving:
-            _projected = _commit_wall - _code_saving
-            _multiple = _commit_wall / _projected
-            _queue_bottom += (
-                f" The biggest credited code finding removes **~{_clock(_code_saving)}** "
-                f"of work, reducing the full wait to **~{_clock(_projected)} "
-                f"({_multiple:.2f}x)**; it does not claim the queue seconds.")
+    _queue_bottom = _commit_wait_bottom_line(_commit_clock, all_findings)
+    if _queue_bottom:
         for _i in range(len(out) - 1, -1, -1):
             if out[_i].startswith("> **Bottom line.**"):
                 out[_i] = _queue_bottom
@@ -12573,11 +12602,8 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
     # Bottom-line blockquote above — owner UX edit 2026-07-19; nothing renders between it
     # and the Contents.)
     queue_count = sum(1 for f in all_findings if _is_wait_finding(f))
-    if queue_count == 0 and (_num((cp.get("commit_wall_clock") or {}).get(
-            "queue_p50_s")) or 0.0) > 0:
-        # The per-commit split earns the section/TOC entry even when no
-        # individual runner-pool finding crossed its detector threshold.
-        queue_count = 1
+    queue_aggregate = bool((_num((cp.get("commit_wall_clock") or {}).get(
+        "queue_p50_s")) or 0.0) > 0)
     _t2_ranked = _tier2_source_backed_ranked(all_findings, doc)
     tier2_count = len(_t2_ranked)
     tier2_toc = None
@@ -12610,7 +12636,8 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
     # Contents' first row: the frequency gate is the slowest single check AND the gate is
     # not a `needs:` chain (a chain's slowest single check is not the gate).
     _toc_lines = _toc_block(pole_wfs, wf_gate, npop, also_count, pr_floor=is_pr_floor,
-                            queue_count=queue_count, also_on_path=also_on_path,
+                            queue_count=queue_count, queue_aggregate=queue_aggregate,
+                            also_on_path=also_on_path,
                             runner_spine_count=runner_spine_count,
                             tier2_toc=tier2_toc,
                             top_is_gate=(gate_is_slowest and not chain_active))

@@ -132,6 +132,26 @@ _DOC = {
         "tier": 1,
         "realization": "direct",
         "size_note": "halving the measured work",
+    }, {
+        "id": "cap-probe",
+        "pattern": "OPT24",
+        "severity": "LOW",
+        "title": "Over-budget advisory",
+        "workflow_file": _CI,
+        "affected_jobs": ["test"],
+        "sizing_basis": "measured",
+        "wall_clock_p50_s": 900.0,
+        "wall_clock_uncapped_p50_s": 1000.0,
+        "wall_clock_derivation": [{
+            "bound": "earlier",
+            "from_s": 1000.0,
+            "to_s": 900.0,
+            "reason": "earlier bound",
+        }],
+        "runner_min_saving": 0.0,
+        "tier": 1,
+        "realization": "direct",
+        "advisory": True,
     }],
     # Supplied by the per-commit wall-clock pass. Queue/work enrichment consumes
     # these facts; it does not produce or project them.
@@ -165,6 +185,12 @@ def test_collect_includes_queue_in_commit_wait_and_verifier_guards_work_budget(
     assert clock.get("queue_p50_s") == 900.0
     assert clock.get("work_p50_s") == 390.0
     assert abs(clock.get("queue_share_p50") - 900.0 / 1290.0) < 0.000001
+    capped = next(f for f in doc["findings"] if f.get("id") == "cap-probe")
+    assert capped["wall_clock_p50_s"] == 390.0
+    assert capped["wall_clock_uncapped_p50_s"] == 1000.0
+    assert capped["wall_clock_derivation"][-1]["bound"] == "commit-work"
+    assert capped["wall_clock_derivation"][-1]["from_s"] == 900.0
+    assert capped["wall_clock_derivation"][-1]["to_s"] == 390.0
 
     report, findings_path, report_path = _write_artifacts(tmp_path, doc)
     assert "21m 30s" in report
@@ -185,6 +211,19 @@ def test_collect_includes_queue_in_commit_wait_and_verifier_guards_work_budget(
     assert check.ok is False
     assert "code-finding" in check.detail
 
+    for forbidden in (
+            "Sharding removes 5 minutes of runner queue.",
+            "Reduce queue time by changing the test code.",
+            "Sharding eliminates five minutes of runner queue."):
+        claim_check = vr.check_commit_queue_work_credit(
+            report + "\n" + forbidden, findings_path, report_path)
+        assert claim_check.ok is False
+        assert "cuts runner queue" in claim_check.detail
+    honest = vr.check_commit_queue_work_credit(
+        report + "\nSharding reduces test work while runner queue remains unchanged.",
+        findings_path, report_path)
+    assert honest.ok, honest.detail
+
 
 def test_commit_queue_split_counts_idle_queued_gaps_without_double_counting():
     fact = {
@@ -204,3 +243,106 @@ def test_commit_queue_split_counts_idle_queued_gaps_without_double_counting():
     # Queue is [0, 10] plus [20, 30]. The overlapping queued/running window
     # [15, 20] is work, and is never counted twice.
     assert split == {"queue_s": 20.0, "work_s": 20.0}
+
+
+def test_zero_queue_keeps_the_existing_report_output(monkeypatch):
+    monkeypatch.setattr(cr, "GhClient", _QueueClient)
+    zero = copy.deepcopy(_DOC)
+    for fact in zero["commit_wall_clock"]["commits"]:
+        fact["commit_wall_s"] = 390.0
+        fact["jobs"][0].update({
+            "queued_at": _iso(0),
+            "started_at": _iso(0),
+            "completed_at": _iso(390),
+        })
+    zero["commit_wall_clock"].update({"p50_s": 390.0, "p90_s": 390.0})
+
+    doc = cr.collect(zero, "o/r", max_runs=20, shallow_runs=20)
+    clock = doc["pr_critical_path"]["commit_wall_clock"]
+    assert clock["queue_p50_s"] == 0.0
+    assert clock["work_p50_s"] == 390.0
+
+    without_clock = copy.deepcopy(doc)
+    without_clock["pr_critical_path"].pop("commit_wall_clock")
+    assert bp.render(copy.deepcopy(doc)) == bp.render(without_clock)
+
+
+def test_skewed_medians_keep_projection_above_the_queue(monkeypatch, tmp_path):
+    monkeypatch.setattr(cr, "GhClient", _QueueClient)
+    doc = cr.collect(copy.deepcopy(_DOC), "o/r", max_runs=20, shallow_runs=20)
+
+    def fact(sha: str, wall: int, queue: int) -> dict:
+        return {
+            "sha": sha,
+            "commit_wall_s": float(wall),
+            "created_at": _iso(0),
+            "partial": False,
+            "jobs": [{
+                "name": "test",
+                "queued_at": _iso(0),
+                "started_at": _iso(queue),
+                "completed_at": _iso(wall),
+            }],
+        }
+
+    clock = cr._stamp_commit_queue_work({
+        "commits": [fact("a", 100, 90), fact("b", 100, 10), fact("c", 200, 20)],
+        "p50_s": 100.0,
+        "p90_s": 180.0,
+    })
+    doc["pr_critical_path"]["commit_wall_clock"] = clock
+    doc["findings"] = [
+        f for f in doc["findings"] if f.get("pattern") not in {"OPT43", "OPT97"}]
+    doc["findings"][0]["wall_clock_p50_s"] = 90.0
+    cr._cap_code_findings_at_commit_work(
+        doc["findings"], cr._commit_work_budget(clock))
+
+    report, findings_path, report_path = _write_artifacts(tmp_path, doc)
+    assert "~20s of it waiting for a runner** (20%)" in report
+    assert "remaining **~1m 20s** is work" in report
+    assert "to **~20s (5.00x)**" in report
+    assert "runner queue measured across sampled commits" in report
+    check = vr.check_commit_queue_work_credit(report, findings_path, report_path)
+    assert check.ok, check.detail
+    missing_work = report.replace(
+        "the remaining **~1m 20s** is work", "the work decomposition is omitted")
+    missing_work_check = vr.check_commit_queue_work_credit(
+        missing_work, findings_path, report_path)
+    assert missing_work_check.ok is False
+    assert "coherent work remainder" in missing_work_check.detail
+
+
+def test_partial_only_stamp_skips_and_static_report_uses_full_wait(tmp_path):
+    partial = _commit_fact("partial", 1)
+    partial["partial"] = True
+    partial_clock = cr._stamp_commit_queue_work({"commits": [partial]})
+    partial_path = tmp_path / "partial.json"
+    partial_path.write_text(json.dumps({
+        "pr_critical_path": {"commit_wall_clock": partial_clock},
+    }), encoding="utf-8")
+    partial_check = vr.check_commit_queue_work_credit("", partial_path)
+    assert partial_check.ok and partial_check.skipped
+    partial_claim = vr.check_commit_queue_work_credit(
+        "Sharding removes five minutes of runner queue.", partial_path)
+    assert partial_claim.ok is False and not partial_claim.skipped
+
+    complete_clock = cr._stamp_commit_queue_work({
+        "commits": [_commit_fact("complete", 2)],
+        "p50_s": 1290.0,
+        "p90_s": 1290.0,
+    })
+    static_doc = {
+        "repo": "o/r",
+        "findings": [],
+        "pr_critical_path": {"poles": [], "commit_wall_clock": complete_clock},
+        "data_sources": {},
+    }
+    static_report, static_path, static_report_path = _write_artifacts(
+        tmp_path / "static", static_doc)
+    assert "Commit-level developer wait was measured" in static_report
+    assert "No run history to measure" not in static_report
+    assert "No PR run timing was available" not in static_report
+    assert "> **Bottom line.** The full developer wall is **21m 30s**" in static_report
+    static_check = vr.check_commit_queue_work_credit(
+        static_report, static_path, static_report_path)
+    assert static_check.ok, static_check.detail
