@@ -13,6 +13,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-11-06** — Limit minority slow-tail findings to checks confirmed as required or reachable through a required job's `needs:` graph. A conservatively retained file-backed check whose job cannot be identified stays visible on the measured spine without being described as merge-blocking, and verification rejects a tail attached to such a check.
 - **2026-11-05** — Add a partition-correctness caveat to OPT24 ("Long Test Job Without Sharding"): the shards must partition the input set exactly, the shard count must be validated wherever it is read, a documented rollback to a lower shard count must not silently defeat the new guard tests, and a result-collection step must keep every shard's failure, not just the first or last.
 - **2026-11-05** — Surface a descriptive slow-tail finding when a confirmed merge-blocking check takes at least ten minutes at p90 and at least three times its median. The finding states the affected PR share and links an example run without crediting savings; smooth distributions and checks outside the required `needs:` closure stay quiet.
 - **2026-11-05** — Keep file-backed checks whose jobs cannot be identified visible without letting them headline over a confirmed required check or one of its `needs:` dependencies. Their role now says that merge blocking could not be confirmed; reports with an unreadable required set retain their previous ordering.

@@ -14756,6 +14756,12 @@ def check_minority_gate_tails(report: str, findings_path: Path | None = None) ->
     if not cp.get("spine_required_scoped"):
         return Check(name, False,
                      "a minority tail is stamped outside a confirmed required/needs closure")
+    required = {str(check) for check in _as_list(data.get("required_checks"))}
+    confirmed = {
+        str(pole.get("check") or "")
+        for pole in _as_list(cp.get("poles"))
+        if isinstance(pole, dict) and pole.get("required_reachable") is True
+    } | required
 
     def percentile(values: list[float], pct: float) -> float:
         values = sorted(values)
@@ -14765,6 +14771,9 @@ def check_minority_gate_tails(report: str, findings_path: Path | None = None) ->
 
     failures: list[str] = []
     for check_name, tail in stamped:
+        if check_name not in confirmed:
+            failures.append(
+                f"`{check_name}` is not confirmed required or needs-reachable")
         observations = [
             (_num(row.get("duration_s")), str(row.get("url") or ""))
             for row in _as_list(tail.get("observations"))

@@ -5152,12 +5152,15 @@ def _critical_path(jobs_per_run: list[list[dict[str, Any]]]) -> dict[str, Any]:
 def _minority_tails_for_checks(
         pr_checks: list[tuple[str, float]],
         crit_by_wf: dict[str, dict[str, Any]],
-        required_scoped: bool) -> dict[str, dict[str, Any]]:
+        confirmed_checks: "frozenset[str] | set[str]",
+) -> dict[str, dict[str, Any]]:
     """Attach sampled tails only to checks in a confirmed required closure."""
-    if not required_scoped:
+    if not confirmed_checks:
         return {}
     tails: dict[str, dict[str, Any]] = {}
     for check, _p50 in pr_checks:
+        if check not in confirmed_checks:
+            continue
         mapping = _map_check_to_job(
             check, crit_by_wf, require_developer_timing=True)
         if mapping is None:
@@ -27456,8 +27459,13 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # that descriptive evidence only after the required closure actually narrowed
     # the spine: an independent sibling outside every required `needs:` closure
     # must not acquire a merge-wait finding merely because it has a slow tail.
+    _minority_tail_confirmed = {
+        _n for _n, _p50 in pr_checks_tuple
+        if spine_required_scoped and _pole_is_required_reachable(
+            _n, req_names, _jg, crit_by_wf)
+    }
     _minority_tail_by_check = _minority_tails_for_checks(
-        pr_checks_tuple, crit_by_wf, spine_required_scoped)
+        pr_checks_tuple, crit_by_wf, _minority_tail_confirmed)
     # ENG-1 PR-N1: per-PR chain TIMING facts (data-only; nothing renders or
     # ranks on them until PR-N2). One entry per sampled repr sha — the longest
     # `needs:` chain (capped member spans, `_span_caps` — the caps the ranking
