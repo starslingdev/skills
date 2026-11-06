@@ -2216,8 +2216,8 @@ def _parse_log(text: str,
                  "rows": [("transform + import (compile/instrument/load)", compile_load,
                            None),
                           ("actual test assertions", te, None)],
-                 "blocker_note": "BIGGEST LEVER - caused by istanbul coverage "
-                                 "instrumenting every imported file",
+                 "blocker_note": "BIGGEST MEASURED PHASE - compile/instrument/load "
+                                 "dominates the summed worker time in this run",
                  "pct_of": "sum", "scale_to_step": True},
             ],
         }
@@ -2988,21 +2988,24 @@ _FIX_META: dict[str, dict[str, Any]] = {
                    "step to confirm the drop.",
     },
     "vitest-v8-coverage": {
-        "cause": "The gating `test` job runs vitest with istanbul coverage across "
-                 "every package, and the compile+instrument phase dominates the run, "
-                 "not the assertions - istanbul instruments every imported file.",
+        "cause": "The gating `test` job ran vitest with istanbul coverage across "
+                 "every package. In the measured run, compile+instrument/load took "
+                 "the dominant share of the summed worker time; the assertions did not.",
         "look": "the vitest config / coverage setup and the package test scripts - "
                 "grep for `coverage`, `provider: 'istanbul'`, `--coverage`. Check what "
                 "actually consumes the coverage output (a PR gate? a report upload?).",
         "constraints": "If coverage must gate PRs, switching provider or scoping it "
-                       "has to keep whatever consumes the output working. The v8 "
-                       "provider is much cheaper than istanbul but reports slightly "
-                       "differently - verify the consumer.",
+                       "has to keep whatever consumes the output working. Time both "
+                       "providers on the same commit before choosing one. Coverage "
+                       "figures change between providers, so re-baseline thresholds "
+                       "and verify the consumer. No provider-switch saving is credited "
+                       "without matched measurements.",
         "docs": ["Vitest coverage docs (v8 vs istanbul providers): "
                  "https://vitest.dev/guide/coverage"],
-        "deliver": "Decide whether coverage needs to gate PRs at all, and if so which "
-                   "provider fits; apply the change to the vitest config / scripts, "
-                   "verify the coverage consumer still works, and re-measure the step.",
+        "deliver": "Decide whether coverage needs to gate PRs at all. If comparing "
+                   "providers, time both on the same commit, account for changed coverage "
+                   "figures and re-baseline thresholds, verify the coverage consumer still "
+                   "works, and re-measure the step.",
     },
     # OPT78 - see references/patterns/opt78-*.md. HIGH risk: this lever buys
     # speed by letting test files SHARE a module registry, which can leak state
@@ -12546,10 +12549,59 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
                         "stages push the wall above the sum; re-run-inflated member spans "
                         "push the sum above the wall. Budget on the observed wall; use the "
                         "chain for attribution."]
+    _commit_wall_block: list[str] = []
+    _commit_wall = cp.get("commit_wall_clock") or {}
+    _commit_p50 = _num(_commit_wall.get("p50_s"))
+    _commit_p90 = _num(_commit_wall.get("p90_s"))
+    _commit_facts = [f for f in (_commit_wall.get("facts") or [])
+                     if isinstance(f, dict)]
+
+    def _commit_duration(seconds: float) -> str:
+        whole = max(0, round(seconds))
+        hours, rem = divmod(whole, 3600)
+        minutes, secs = divmod(rem, 60)
+        return (f"{hours}h {minutes:02d}m {secs:02d}s" if hours
+                else f"{minutes}m {secs:02d}s")
+
+    if _commit_p50 is not None and _commit_p90 is not None:
+        _complete_commit_facts = [f for f in _commit_facts
+                                  if _num(f.get("wall_s")) is not None]
+        _basis = (min(_complete_commit_facts,
+                      key=lambda f: abs((_num(f.get("wall_s")) or 0.0) - _commit_p50))
+                  if _complete_commit_facts else None)
+        _p4 = _basis.get("projection_4x") if isinstance(_basis, dict) else None
+        _projection_clause = ""
+        if isinstance(_p4, dict):
+            _projected = _num(_p4.get("projected_s"))
+            _multiple = _num(_p4.get("multiple"))
+            if _projected is not None and _multiple is not None:
+                _projection_clause = (
+                    " At the sampled p50 commit, a 4x speedup to its slowest job "
+                    f"projects to **{_commit_duration(_projected)}** "
+                    f"(**{_multiple:.2f}x**).")
+        _commit_wall_block.append(
+            "> **Per-commit PR wait:** p50 "
+            f"**{_commit_duration(_commit_p50)}**, p90 "
+            f"**{_commit_duration(_commit_p90)}**, from the earliest workflow run "
+            "created to the last job completed across every workflow on that commit."
+            + _projection_clause)
+    _partial_commit_facts = [f for f in _commit_facts if f.get("partial") is True]
+    if _partial_commit_facts:
+        _missing_commit_workflows = sorted({
+            str(wf) for f in _partial_commit_facts
+            for wf in (f.get("missing_workflows") or []) if wf
+        })
+        _named_missing = ", ".join(f"`{_clean_label(wf)}`"
+                                   for wf in _missing_commit_workflows)
+        _commit_wall_block.append(
+            f"> {len(_partial_commit_facts)} sampled commit(s) were partial"
+            + (f" (missing {_named_missing})" if _named_missing else "")
+            + "; their observed shorter spans were excluded from these percentiles.")
     _fold_bottom_line(
         out,
         _lead_block,
         _model_check,
+        _commit_wall_block,
         # The headline median is success-only; qualify it when the same workflow's
         # cached all-status default-branch population was materially red.
         # Match on the display label `floor_name` carries (scope-stripped), and fall
