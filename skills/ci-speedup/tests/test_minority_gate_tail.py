@@ -299,11 +299,15 @@ def test_verifier_binds_no_saving_disclosure_to_each_tail(tmp_path: Path):
     second["minority_tail"] = dict(_tail(), example_url=(
         "https://github.com/o/r/actions/runs/200013"))
     doc["pr_critical_path"]["checks"].append(second)
+    doc["required_checks"].append("affected-integration")
     report = bp.render(doc)
+    findings = tmp_path / "findings.json"
+    findings.write_text(json.dumps(doc), encoding="utf-8")
+    intact = _load_verify_report().check_minority_gate_tails(report, findings)
+    assert intact.ok and not intact.skipped, intact
+
     marker = "<!-- minority-gate-tail:affected-integration -->"
     before, after = report.split(marker, 1)
     after = after.replace("No saving is credited", "Saving is unknown", 1)
-    findings = tmp_path / "findings.json"
-    findings.write_text(json.dumps(doc), encoding="utf-8")
     check = _load_verify_report().check_minority_gate_tails(before + marker + after, findings)
     assert not check.ok
