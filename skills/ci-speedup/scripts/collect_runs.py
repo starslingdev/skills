@@ -27224,7 +27224,18 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         and not isinstance(fact.get("wall_s"), bool)
         and float(fact["wall_s"]) > 0
     ]
+    if not default_branch:
+        _push_lane_status = "default_branch_unknown"
+        _push_lane_reason = "the default branch could not be determined"
+    elif all_status_failed:
+        _push_lane_status = "run_list_incomplete"
+        _push_lane_reason = "push run-list coverage was incomplete"
+    else:
+        _push_lane_status = "complete"
+        _push_lane_reason = ""
     findings_doc["default_branch_push_lane"] = {
+        "status": _push_lane_status,
+        "status_reason": _push_lane_reason,
         "sample_cap": _DEFAULT_BRANCH_PUSH_SAMPLE_MAX,
         "sampled_push_count": len(_push_shas),
         "sampled_run_count": len(_push_run_rows),

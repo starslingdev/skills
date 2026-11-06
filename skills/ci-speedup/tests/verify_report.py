@@ -14777,6 +14777,14 @@ def check_no_rate_derived_dollars(report: str, findings_path: Path | None = None
 
 
 _VR_DEFAULT_BRANCH_PUSH_SAMPLE_MAX = 10
+_VR_PUSH_LABEL_WIDTH = 33
+
+
+def _vr_push_label(name: str) -> str:
+    """Mirror blocking_path._lbl for push-lane job-name comparisons."""
+    clean = _strip_scope(name)
+    return (clean if len(clean) <= _VR_PUSH_LABEL_WIDTH
+            else clean[:_VR_PUSH_LABEL_WIDTH - 1] + "…")
 
 
 def check_default_branch_push_lane_isolated(
@@ -14808,6 +14816,21 @@ def check_default_branch_push_lane_isolated(
             f"sample cap {cap} != pinned cap {_VR_DEFAULT_BRANCH_PUSH_SAMPLE_MAX}")
     if sampled < 0 or sampled > _VR_DEFAULT_BRANCH_PUSH_SAMPLE_MAX:
         failures.append(f"sampled_push_count {sampled} exceeds the bounded cohort")
+    status = str(lane.get("status") or "")
+    if status in {"default_branch_unknown", "run_list_incomplete"}:
+        disclosure = {
+            "default_branch_unknown": "default branch could not be determined",
+            "run_list_incomplete": "push run-list coverage was incomplete",
+        }[status]
+        if disclosure not in block:
+            failures.append(f"{status} lane lacks its coverage disclosure")
+        if "no pushes to the default branch in the window" in block.lower():
+            failures.append("unknown push coverage is rendered as a factual zero")
+        return Check(
+            name, not failures,
+            "; ".join(failures) if failures else f"{status} is disclosed, not zeroed")
+    if status != "complete":
+        failures.append(f"push lane has unknown collection status {status!r}")
     if sampled == 0:
         if "no pushes to the default branch in the window" not in block.lower():
             failures.append("an empty push cohort lacks its explicit zero line")
@@ -14851,7 +14874,7 @@ def check_default_branch_push_lane_isolated(
     next_job = _as_dict(typical.get("next_longest_job"))
     for label, job in (("slowest", slowest), ("next-longest", next_job)):
         job_name = str(job.get("name") or "")
-        if not job_name or f"`{job_name}`" not in block:
+        if not job_name or f"`{_vr_push_label(job_name)}`" not in block:
             failures.append(f"lane omits the representative {label} job")
 
     projection = next((
@@ -14878,8 +14901,6 @@ def check_default_branch_push_lane_isolated(
             if rendered not in block:
                 failures.append("lane omits its re-derived bounded projection")
 
-    bottom = next((line for line in report.splitlines()
-                   if "**Bottom line.**" in line), "")
     cp = _as_dict(data.get("pr_critical_path"))
     merge_waits = [
         value for value in (
@@ -14888,9 +14909,23 @@ def check_default_branch_push_lane_isolated(
               if isinstance(pole, dict)])
         if value is not None and value > 0
     ]
-    if (_fmt_clock(p50) in bottom
-            and (not merge_waits or all(abs(value - p50) > 0.11 for value in merge_waits))):
-        failures.append("post-merge push timing leaked into the merge-gate Bottom line")
+    lane_clock_is_distinct = (
+        not merge_waits or all(abs(value - p50) > 0.11 for value in merge_waits))
+    before_lane = report[:start] if start >= 0 else report
+    contents_at = before_lane.find("## 📋 Contents")
+    pole_at = before_lane.find('<a id="pole-')
+    headline = before_lane[:contents_at if contents_at >= 0 else len(before_lane)]
+    contents = (before_lane[contents_at:pole_at if pole_at >= 0 else len(before_lane)]
+                if contents_at >= 0 else "")
+    score_lines = "\n".join(
+        line for line in before_lane.splitlines()
+        if re.search(r"\bscore\b", line, re.IGNORECASE))
+    if lane_clock_is_distinct and _fmt_clock(p50) in headline:
+        failures.append("post-merge push timing leaked into the merge-gate headline")
+    if lane_clock_is_distinct and _fmt_clock(p50) in contents:
+        failures.append("post-merge push timing leaked into the ranked critical-path spine")
+    if lane_clock_is_distinct and _fmt_clock(p50) in score_lines:
+        failures.append("post-merge push timing leaked into a score")
     if isinstance(cp.get("default_branch_push_lane"), dict):
         failures.append("push lane is nested inside the merge-gate critical path")
 

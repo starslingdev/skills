@@ -69,10 +69,14 @@ def _push_run(run_id: int, sha: str, created_s: int, completed_s: int) -> dict:
 class _PushLaneClient:
     gave_up = False
 
-    def __init__(self, *, include_pushes: bool = True) -> None:
+    def __init__(self, *, include_pushes: bool = True,
+                 default_branch_known: bool = True,
+                 all_status_available: bool = True) -> None:
         self.queries = 0
         self.errors = 0
         self.include_pushes = include_pushes
+        self.default_branch_known = default_branch_known
+        self.all_status_available = all_status_available
         self.jobs = {100: [_job("merge-gate", 100, 0, 120)]}
         for index, sha in enumerate(_PUSH_SHAS):
             base = 10000 + index * 4000
@@ -114,6 +118,10 @@ class _PushLaneClient:
             ]}
         match = re.match(r"repos/o/r/actions/workflows/(\d+)/runs\?(.*)", endpoint)
         if match:
+            if (not self.all_status_available
+                    and "per_page=100" in match.group(2)
+                    and "status=success" not in match.group(2)):
+                return None
             if re.search(r"per_page=1(?![0-9])", match.group(2)):
                 return {"total_count": 30}
             return {"workflow_runs": self._runs(int(match.group(1)))}
@@ -127,7 +135,7 @@ class _PushLaneClient:
                 "completed_at": _iso(120),
             }]}
         if endpoint == "repos/o/r":
-            return {"default_branch": "main"}
+            return {"default_branch": "main"} if self.default_branch_known else {}
         if endpoint == "repos/o/r/rulesets?includes_parents=true":
             return []
         if endpoint == "repos/o/r/branches/main/protection/required_status_checks":
@@ -183,8 +191,13 @@ def _doc() -> dict:
     }
 
 
-def _collect(monkeypatch, *, include_pushes: bool = True) -> dict:
-    client = _PushLaneClient(include_pushes=include_pushes)
+def _collect(monkeypatch, *, include_pushes: bool = True,
+             default_branch_known: bool = True,
+             all_status_available: bool = True) -> dict:
+    client = _PushLaneClient(
+        include_pushes=include_pushes,
+        default_branch_known=default_branch_known,
+        all_status_available=all_status_available)
     monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
     return cr.collect(_doc(), "o/r", max_runs=20, shallow_runs=20)
 
@@ -234,6 +247,22 @@ def test_collect_renders_a_capped_default_branch_push_lane_and_verifies(
     check = vr.check_default_branch_push_lane_isolated(mutant, findings_path)
     assert not check.ok
 
+    isolation_mutants = [
+        report.replace(
+            "**2m 00s until all checks finish**",
+            "**35m 00s until all checks finish**", 1),
+        report.replace(
+            "- 2m 00s (the gate)",
+            "- 35m 00s (the gate)", 1),
+        report.replace(
+            "## 📋 Contents",
+            "**Merge score:** 35m 00s\n\n## 📋 Contents", 1),
+    ]
+    for isolation_mutant in isolation_mutants:
+        check = vr.check_default_branch_push_lane_isolated(
+            isolation_mutant, findings_path)
+        assert not check.ok
+
 
 def test_no_default_branch_pushes_renders_an_explicit_zero_line(monkeypatch, tmp_path: Path):
     doc = _collect(monkeypatch, include_pushes=False)
@@ -245,3 +274,41 @@ def test_no_default_branch_pushes_renders_an_explicit_zero_line(monkeypatch, tmp
     assert "no pushes to the default branch in the window" in report.lower()
     check = vr.check_default_branch_push_lane_isolated(report, findings_path)
     assert check.ok and not check.skipped
+
+
+def test_push_lane_survives_a_report_with_no_merge_poles(monkeypatch, tmp_path: Path):
+    doc = _collect(monkeypatch)
+    doc["pr_critical_path"]["poles"] = []
+
+    report, findings_path, _report_path = _write_artifacts(tmp_path, doc)
+    assert "After merge, not a merge gate" in report
+    assert "p50 **35m 00s**" in report
+    check = vr.check_default_branch_push_lane_isolated(report, findings_path)
+    assert check.ok and not check.skipped
+
+
+def test_unknown_push_discovery_is_disclosed_instead_of_rendered_as_zero(
+        monkeypatch, tmp_path: Path):
+    for kwargs, reason in (
+        ({"default_branch_known": False}, "default branch could not be determined"),
+        ({"all_status_available": False}, "push run-list coverage was incomplete"),
+    ):
+        doc = _collect(monkeypatch, **kwargs)
+        report, findings_path, _report_path = _write_artifacts(tmp_path, doc)
+
+        assert reason in report
+        assert "no pushes to the default branch in the window" not in report.lower()
+        check = vr.check_default_branch_push_lane_isolated(report, findings_path)
+        assert check.ok and not check.skipped
+
+
+def test_long_push_job_names_use_the_same_rendered_label_in_the_verifier(
+        monkeypatch, tmp_path: Path):
+    doc = _collect(monkeypatch)
+    for fact in doc["default_branch_push_lane"]["facts"]:
+        fact["slowest_job"]["name"] = "publish-image-for-every-supported-platform"
+        fact["next_longest_job"]["name"] = "verify-every-package-in-the-workspace"
+
+    report, findings_path, _report_path = _write_artifacts(tmp_path, doc)
+    check = vr.check_default_branch_push_lane_isolated(report, findings_path)
+    assert check.ok and not check.skipped, check.detail
