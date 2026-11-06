@@ -1233,6 +1233,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-11-06** — Project a speedup to a job inside a serial `needs:` chain against the whole chain. Other serialized members, queue and idle gaps remain in the projected wait, while the longest independent path caps the result; each sampled commit stamps the slowest job's chain span, and the per-commit projection, the whole-commit finding cap and the report verifier all use it, so a chained slowest job no longer adds the independent floor to the rest of its chain.
 - **2026-11-06** — Quantize estimated wall-clock savings to tenths of a second before applying physical bounds, so harmless display rounding cannot violate the cascade's strict monotonicity checks.
 
 - **2026-11-05** — Attribute each zero-saving PR to its own concurrent blocker in the per-PR sibling split, falling back to generic wording when those blockers differ or the target check did not run. A rendered split now supplements the existing headline-presence reconciliation instead of bypassing it.

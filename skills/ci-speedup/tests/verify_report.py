@@ -612,9 +612,17 @@ def check_commit_wall_clock_projection(report: str, findings_path: Path | None) 
         return Check(name, True, "legacy findings have no commit wall stamp", skipped=True)
 
     def projection(wall: float, slowest: float, next_longest: float,
-                   speedup: float) -> tuple[float, float | None]:
-        projected = round(max(
-            0.0, wall - slowest + max(slowest / speedup, next_longest)), 1)
+                   speedup: float, chain: float | None = None) -> tuple[float, float | None]:
+        # A slowest job inside a `needs:` chain keeps the rest of the chain in
+        # series: the chain path shrinks by the job's saving and is floored at
+        # the next independent path; time outside both stays.
+        if chain is not None and chain > slowest:
+            unchanged = max(wall - max(chain, next_longest), 0.0)
+            projected = round(max(0.0, unchanged + max(
+                chain - slowest + slowest / speedup, next_longest)), 1)
+        else:
+            projected = round(max(
+                0.0, wall - slowest + max(slowest / speedup, next_longest)), 1)
         return projected, (round(wall / projected, 2) if projected > 0 else None)
 
     def percentile(values: list[float], pct: float) -> float:
@@ -632,7 +640,7 @@ def check_commit_wall_clock_projection(report: str, findings_path: Path | None) 
 
     failures: list[str] = []
     facts = [f for f in (stamp.get("facts") or []) if isinstance(f, dict)]
-    complete: list[tuple[dict, float, float, float]] = []
+    complete: list[tuple[dict, float, float, float, float | None]] = []
     for index, fact in enumerate(facts):
         wall = _num(fact.get("wall_s"))
         slow = fact.get("slowest_job")
@@ -648,12 +656,17 @@ def check_commit_wall_clock_projection(report: str, findings_path: Path | None) 
             failures.append(f"complete fact {index} lacks wall/slowest timing")
             continue
         next_longest = next_longest or 0.0
-        complete.append((fact, wall, slowest, next_longest))
+        chain = _num(fact.get("slowest_chain_span_s"))
+        if chain is not None and chain < slowest:
+            failures.append(
+                f"fact {index} chain span {chain} is shorter than its slowest job {slowest}")
+            continue
+        complete.append((fact, wall, slowest, next_longest, chain))
         p4 = fact.get("projection_4x")
         if not isinstance(p4, dict):
             failures.append(f"complete fact {index} lacks projection_4x")
             continue
-        projected, cap_multiple = projection(wall, slowest, next_longest, 4.0)
+        projected, cap_multiple = projection(wall, slowest, next_longest, 4.0, chain)
         claimed_projected = _num(p4.get("projected_s"))
         claimed_multiple = _num(p4.get("multiple"))
         if claimed_projected is None or abs(claimed_projected - projected) > 0.11:
@@ -691,9 +704,9 @@ def check_commit_wall_clock_projection(report: str, findings_path: Path | None) 
             failures.append(f"p50_s {stamp.get('p50_s')!r} != {expected_p50}")
         if _num(stamp.get("p90_s")) != expected_p90:
             failures.append(f"p90_s {stamp.get('p90_s')!r} != {expected_p90}")
-        basis, wall, slowest, next_longest = min(
+        basis, wall, slowest, next_longest, chain = min(
             complete, key=lambda row: abs(row[1] - expected_p50))
-        projected, multiple = projection(wall, slowest, next_longest, 4.0)
+        projected, multiple = projection(wall, slowest, next_longest, 4.0, chain)
         expected_line = (
             "> **Per-commit PR wait:** p50 "
             f"**{duration(expected_p50)}**, p90 **{duration(expected_p90)}**, from the "
@@ -707,8 +720,8 @@ def check_commit_wall_clock_projection(report: str, findings_path: Path | None) 
     elif _num(stamp.get("p50_s")) is not None or _num(stamp.get("p90_s")) is not None:
         failures.append("empty complete population publishes commit percentiles")
 
-    max_caps = [wall - projection(wall, slowest, next_longest, float("inf"))[0]
-                for _fact, wall, slowest, next_longest in complete]
+    max_caps = [wall - projection(wall, slowest, next_longest, float("inf"), chain)[0]
+                for _fact, wall, slowest, next_longest, chain in complete]
     if max_caps:
         max_p50_saving = float(statistics.median(max_caps))
         for finding in doc.get("findings") or []:
@@ -4806,6 +4819,7 @@ def check_headline_chain_matches_stamp(report: str, findings_path: Path | None,
                  f"facts-derived headroom ~{_fmt_clock(win_bound)}"
                  + (f"; undrilled member(s) skipped: {', '.join(undrilled)}"
                     if undrilled else ""))
+
 
 
 # --- The physical-bounds invariant family (issue #25) ------------------------------------------

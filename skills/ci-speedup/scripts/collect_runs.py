@@ -27924,6 +27924,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                     "name": str(_job.get("name") or ""),
                     "workflow_file": _wf,
                     "duration_s": round(_duration, 3),
+                    "started_ts": _started_dt.timestamp(),
                     "completed_ts": _completed_dt.timestamp(),
                     "node": _commit_job_node(_wf, str(_job.get("name") or "")),
                 })
@@ -27955,6 +27956,24 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         _observed = (round(max(float(row["completed_ts"]) for row in _job_rows)
                            - min(_created), 3)
                      if _job_rows and _created else None)
+        # The slowest job's own `needs:` chain on this commit (its ancestors and
+        # descendants; other legs of its matrix run independently). Speeding the
+        # slowest job leaves the rest of that chain in series, so a projection
+        # floors the whole chain path, not the job alone, at the next path.
+        _chain_rows = ([row for row in _job_rows
+                        if _slowest is not None
+                        and row["workflow_file"] == _slowest["workflow_file"]
+                        and row.get("node") in _excluded
+                        and not _outside_slowest_chain(row)
+                        and (row.get("node") != _slowest.get("node")
+                             or row.get("name") == _slowest.get("name"))]
+                       if _slowest is not None and _slowest.get("node") is not None
+                       else [])
+        _chain_span = (round(max(float(row["completed_ts"]) for row in _chain_rows)
+                             - min(float(row["started_ts"]) for row in _chain_rows), 3)
+                       if len(_chain_rows) > 1 else None)
+        if _chain_span is not None and _slowest is not None:
+            _chain_span = max(_chain_span, float(_slowest["duration_s"]))
         _partial = bool(_missing or not _run_rows or _observed is None)
         _fact: dict[str, Any] = {
             "sha": _sha,
@@ -27969,11 +27988,15 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             **({"next_longest_job": {k: _next[k] for k in
                                      ("name", "workflow_file", "duration_s")}}
                if _next else {}),
+            **({"slowest_chain_span_s": _chain_span}
+               if _chain_span is not None else {}),
         }
         if not _partial and _slowest is not None:
+            _next_s = float(_next["duration_s"]) if _next else 0.0
             _projection = project_commit_wall(
-                float(_observed), float(_slowest["duration_s"]),
-                float(_next["duration_s"]) if _next else 0.0, 4.0)
+                float(_observed), float(_slowest["duration_s"]), _next_s, 4.0,
+                **({"chain_s": _chain_span, "pole_s": float(_slowest["duration_s"]),
+                    "runner_up_s": _next_s} if _chain_span is not None else {}))
             _fact["projection_4x"] = {
                 "job_speedup": 4.0,
                 "projected_s": _projection.projected_s,
@@ -28011,7 +28034,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                       if _chain_ctx_members else 0.0)
     _commit_ctx_facts = tuple(
         (float(f["wall_s"]), float(f["slowest_job"]["duration_s"]),
-         float((f.get("next_longest_job") or {}).get("duration_s") or 0.0))
+         float((f.get("next_longest_job") or {}).get("duration_s") or 0.0),
+         float(f.get("slowest_chain_span_s") or f["slowest_job"]["duration_s"]))
         for f in _commit_facts
         if isinstance(f.get("wall_s"), (int, float))
         and isinstance(f.get("slowest_job"), dict)
