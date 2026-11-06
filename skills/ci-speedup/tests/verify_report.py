@@ -3745,8 +3745,7 @@ def _verify_per_pr_floor_split(
         return None
     stamp = str(cp.get("critical_path_check") or "")
     bottom = next((line for line in report.splitlines() if "**Bottom line.**" in line), "")
-    bottom_match = _HEADLINE_WIN_RE.search(bottom)
-    bottom_s = _parse_clock_to_s(bottom_match.group(1)) if bottom_match else None
+    bottom_s = _headline_win_s(bottom)
     populations = _as_list(cp.get("populations"))
     completeness = _as_list(cp.get("population_check_runs_complete"))
     completion_aligned = len(completeness) == len(populations) and bool(populations)
@@ -3880,8 +3879,7 @@ def _verify_per_pr_floor_split(
                      "per-PR sibling-floor split disagrees with populations; missing: "
                      + "; ".join(missing))
     max_saving = max((row[0] for row in rows), default=0.0)
-    match = _HEADLINE_WIN_RE.search(bottom)
-    rendered = _parse_clock_to_s(match.group(1)) if match else None
+    rendered = _headline_win_s(bottom)
     if rendered is None:
         return Check(name, False, "per-PR split rendered without a parseable Bottom-line win")
     if rendered > max_saving + 0.5:
@@ -13254,12 +13252,23 @@ def check_cluster_lever_ceiling_escapes_sibling(report: str, findings_path: Path
 
 
 _HEADLINE_WIN_RE = re.compile(r"\*\*~\s*([0-9hms  ]+?)\*\*")
+_COMMIT_WORK_WIN_RE = re.compile(
+    r"biggest credited code finding[^\n]{0,240}?removes\s+\*\*~\s*"
+    r"([0-9hms  ]+?)\*\*", re.IGNORECASE)
+
+
+def _headline_win_s(bottom_line: str) -> float | None:
+    """Parse the credited win, skipping a commit Bottom line's queue clock."""
+    match = _COMMIT_WORK_WIN_RE.search(bottom_line)
+    if match is None:
+        match = _HEADLINE_WIN_RE.search(bottom_line)
+    return _parse_clock_to_s(match.group(1)) if match else None
 
 
 def _cluster_leads_bottom_line(bl: str, rendered_s: float | None, f: dict, cluster_s: float) -> bool:
     """True only when the Bottom line's crown sentence IS this cluster's: it names the cluster's
     workflow (`` `<basename>` ``) and points at its **OPT73** entry, the two facts
-    `blocking_path._cluster_headline_bottom_line` always prints, and its first `~<clock>` win is not
+    `blocking_path._cluster_headline_bottom_line` always prints, and its credited `~<clock>` win is not
     smaller than the stamped ceiling by more than the 2s whole-second rendering tolerance (smaller is
     a burial, the sibling burial guard's target). The number alone does not identify the crown:
     reading `rendered >= ceiling` as "the cluster leads" credited a chain headroom to a small demoted
@@ -13287,7 +13296,7 @@ def check_headline_consumes_stamped_cluster_ceiling(report: str, findings_path: 
     catches BOTH live reports. LOUD narrow SKIP when OPT73 findings exist but NONE carries the persisted
     `cluster_floor_lever` marker (a legacy artifact predating the #49 stamp — burial can't be verified),
     so it can never read clean on a real cluster report. Standalone; keys on
-    `findings[].cluster_floor_lever` / `wall_clock_p50_s` and the rendered `~<clock>`."""
+    `findings[].cluster_floor_lever` / `wall_clock_p50_s` and the rendered credited `~<clock>`."""
     name = "Bottom-line headline leads with the stamped cluster-floor ceiling (no burial)"
     if not findings_path:
         return Check(name, True, "no findings path", skipped=True)
@@ -13322,10 +13331,9 @@ def check_headline_consumes_stamped_cluster_ceiling(report: str, findings_path: 
     best_f, best_s = max(credited, key=lambda t: t[1])
     wf = best_f.get("workflow_file", "?")
     # The rendered Bottom line names the merge wait in bold WITHOUT a tilde and the addressable win in
-    # bold WITH a leading `~`. Parse the first `~<clock>` in the Bottom-line paragraph.
+    # bold WITH a leading `~`. Parse that credited win rather than the queue/work clocks.
     bl = next((ln for ln in report.splitlines() if "**Bottom line.**" in ln), "")
-    m = _HEADLINE_WIN_RE.search(bl)
-    rendered_s = _parse_clock_to_s(m.group(1)) if m else None
+    rendered_s = _headline_win_s(bl)
     if rendered_s is None:
         # The Bottom line renders NO addressable `~<clock>` win at all — a deliberate
         # no-single-win framing (competing-path chain / PR-floor / tiny-lever fallback),
@@ -13401,8 +13409,7 @@ def check_headline_lever_is_presence_eligible(report: str, findings_path: Path |
     # Confirm the Bottom line actually LEADS with this lever (a smaller rendered win means it was
     # buried — the sibling burial guard's target, not this one).
     bl = next((ln for ln in report.splitlines() if "**Bottom line.**" in ln), "")
-    m = _HEADLINE_WIN_RE.search(bl)
-    rendered_s = _parse_clock_to_s(m.group(1)) if m else None
+    rendered_s = _headline_win_s(bl)
     if not _cluster_leads_bottom_line(bl, rendered_s, best_f, best_s):
         return Check(name, True,
                      f"the credited cluster lever (OPT73 `{wf}`, ~{_fmt_clock(best_s)}) does not lead "
@@ -13459,7 +13466,7 @@ def check_headline_cluster_lever_on_spine(report: str, findings_path: Path | Non
     dropped/kept check sets). The stamped off-spine cluster can be the workflow's heaviest step yet
     never gate the merge — it is bill/throughput, not merge-wait — so crowning it as the typical-PR
     "biggest single measured win" (~9m08s over a 1m56s wall, 4.7x the whole wait) is the defect. Keys
-    on `findings[].cluster_floor_lever` / `off_spine` / `wall_clock_p50_s` and the rendered first
+    on `findings[].cluster_floor_lever` / `off_spine` / `wall_clock_p50_s` and the rendered credited
     `~<clock>`. LOUD narrow SKIP when the max credited cluster does not lead (correctly demoted / no
     tilde-win), so it never reads clean on an unverifiable crown."""
     name = "Bottom-line crowned cluster lever is on the merge-gating spine (not off-spine)"
@@ -13486,8 +13493,7 @@ def check_headline_cluster_lever_on_spine(report: str, findings_path: Path | Non
     best_f, best_s = max(credited, key=lambda t: t[1])
     wf = str(best_f.get("workflow_file", "") or "")
     bl = next((ln for ln in report.splitlines() if "**Bottom line.**" in ln), "")
-    m = _HEADLINE_WIN_RE.search(bl)
-    rendered_s = _parse_clock_to_s(m.group(1)) if m else None
+    rendered_s = _headline_win_s(bl)
     if not _cluster_leads_bottom_line(bl, rendered_s, best_f, best_s):
         # The max credited cluster does not LEAD the Bottom line (buried / demoted / outranked by a
         # chain or pole win the crown sentence names instead / no tilde-win) — the renderer's off-spine drop, or a genuine
@@ -15062,6 +15068,210 @@ def check_minority_gate_tails(report: str, findings_path: Path | None = None) ->
                  else f"{len(stamped)} minority gate tail(s) re-derived")
 
 
+def check_commit_queue_work_credit(report: str, findings_path: Path | None,
+                                   report_path: Path | None = None) -> Check:
+    """Queue is in the developer wait, but only runner-pool findings own it.
+
+    Re-derive queue/work from the supplied per-commit job intervals rather than
+    trusting the aggregate split. Every other finding is a code/config change,
+    so its credited seconds must fit inside work. Its projected multiple is
+    checked against the full wall, leaving runner-pickup queue unchanged.
+    """
+    name = "code findings stay within commit work and never claim runner queue"
+    if findings_path is None:
+        return Check(name, True, "no --findings to inspect", skipped=True)
+    try:
+        data = _as_dict(json.loads(findings_path.read_text(encoding="utf-8")))
+    except (OSError, ValueError) as exc:
+        return Check(name, False, f"could not read findings JSON: {exc}")
+    clock = _as_dict(_as_dict(data.get("pr_critical_path")).get("commit_wall_clock"))
+    commits = _as_list(clock.get("facts")) or _as_list(clock.get("commits"))
+    if not commits:
+        return Check(name, True, "no per-commit queue/work stamp", skipped=True)
+
+    import datetime as _queue_dt
+
+    def _ts(value: object) -> float | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            return _queue_dt.datetime.fromisoformat(
+                text.replace("Z", "+00:00")).timestamp()
+        except (TypeError, ValueError):
+            return None
+
+    def _queue_code_claim(text: str) -> str | None:
+        code_word = re.compile(
+            r"(?i)\b(?:code|workflow|cache|test|build|shard(?:ing)?|parallel\w*)\b")
+        queue_word = re.compile(
+            r"(?i)\b(?:runner[- ]pickup\s+)?queue(?:\s+(?:time|wait|seconds?))?\b")
+        action = (
+            r"(?:cut|cuts|cutting|reduce|reduces|reducing|reduced|remove|removes|"
+            r"removing|removed|save|saves|saving|saved|halve|halves|halving|halved|"
+            r"shorten|shortens|shortening|shortened|eliminate|eliminates|eliminating|"
+            r"eliminated)")
+        positive = re.compile(
+            rf"(?i)\b{action}\b[^.!?\n]{{0,60}}\b(?:runner[- ]pickup\s+)?queue\b"
+            rf"|\b(?:runner[- ]pickup\s+)?queue\b[^.!?\n]{{0,40}}"
+            rf"\b(?:is|gets?|would\s+be|can\s+be)\s+{action}\b")
+        denial = re.compile(
+            rf"(?i)\b(?:does\s+not|do\s+not|cannot|can't|never|won't)\b"
+            rf"[^.!?\n]{{0,50}}\b(?:claim|{action})\w*\b[^.!?\n]{{0,50}}\bqueue\b"
+            r"|\b(?:runner[- ]pickup\s+)?queue\b[^.!?\n]{0,25}"
+            r"\b(?:remains?|stays?|is|are)\b[^.!?\n]{0,15}"
+            r"\b(?:unchanged|intact|untouched|unaffected)\b"
+            r"|\b(?:work|code)\b[^.!?\n]{0,30}\bnot\s+(?:the\s+)?queue\b")
+        return next((
+            sentence.strip()
+            for sentence in re.split(r"(?<=[.!?])\s+|\n+", text)
+            if code_word.search(sentence) and queue_word.search(sentence)
+            and positive.search(sentence) and not denial.search(sentence)
+        ), None)
+
+    queue_values: list[float] = []
+    work_values: list[float] = []
+    wall_values: list[float] = []
+    share_values: list[float] = []
+    mismatches: list[str] = []
+    for raw in commits:
+        fact = _as_dict(raw)
+        if fact.get("partial") is True:
+            continue
+        try:
+            wall = float(fact.get("commit_wall_s")
+                         if fact.get("commit_wall_s") is not None
+                         else fact.get("wall_s"))
+        except (TypeError, ValueError):
+            continue
+        start = _ts(fact.get("created_at"))
+        if start is None or wall < 0:
+            continue
+        end = start + wall
+        queued: list[tuple[float, float]] = []
+        running: list[tuple[float, float]] = []
+        starts: list[float] = []
+        for raw_job in _as_list(fact.get("jobs")):
+            job = _as_dict(raw_job)
+            js = _ts(job.get("started_at"))
+            if js is None:
+                continue
+            js = min(max(js, start), end)
+            starts.append(js)
+            jq = _ts(job.get("queued_at") or job.get("created_at")
+                     or fact.get("created_at"))
+            if jq is not None:
+                jq = min(max(jq, start), end)
+                if js > jq:
+                    queued.append((jq, js))
+            jc = _ts(job.get("completed_at"))
+            if jc is not None:
+                jc = min(max(jc, start), end)
+                if jc > js:
+                    running.append((js, jc))
+        if starts and min(starts) > start:
+            queued.append((start, min(starts)))
+        points = sorted({start, end, *(v for iv in queued + running for v in iv)})
+        queue = 0.0
+        for left, right in zip(points, points[1:]):
+            if (right > left
+                    and any(a < right and b > left for a, b in queued)
+                    and not any(a < right and b > left for a, b in running)):
+                queue += right - left
+        queue = min(max(queue, 0.0), wall)
+        work = wall - queue
+        label = str(fact.get("sha") or "?")[:12]
+        for key, expected in (("queue_s", queue), ("work_s", work)):
+            try:
+                stamped = float(fact.get(key))
+            except (TypeError, ValueError):
+                mismatches.append(f"{label} {key} is missing/non-numeric")
+                continue
+            if abs(stamped - expected) > 0.11:
+                mismatches.append(
+                    f"{label} {key} {stamped:g}s != re-derived {expected:g}s")
+        queue_values.append(queue)
+        work_values.append(work)
+        wall_values.append(wall)
+        if wall > 0:
+            share_values.append(queue / wall)
+
+    queue_claim = _queue_code_claim(report)
+    if not work_values:
+        if commits and all(_as_dict(raw).get("partial") is True for raw in commits):
+            if queue_claim is not None:
+                return Check(name, False,
+                             "report says a code/config change cuts runner queue")
+            return Check(name, True, "all per-commit observations are partial",
+                         skipped=True)
+        return Check(name, False, "commit-wall stamp has no complete, re-derivable observations")
+    work_p50 = statistics.median(work_values)
+    queue_p50 = statistics.median(queue_values)
+    wall_p50 = statistics.median(wall_values)
+    share_p50 = statistics.median(share_values) if share_values else 0.0
+    displayed_work = max(wall_p50 - min(queue_p50, wall_p50), 0.0)
+    credited_work = min(work_p50, displayed_work)
+    for key, expected in (("work_p50_s", work_p50),
+                          ("queue_p50_s", queue_p50),
+                          ("p50_s", wall_p50),
+                          ("queue_share_p50", share_p50),
+                          ("n", float(len(work_values)))):
+        try:
+            stamped = float(clock.get(key))
+        except (TypeError, ValueError):
+            mismatches.append(f"{key} is missing/non-numeric")
+            continue
+        if abs(stamped - expected) > 0.11:
+            mismatches.append(f"{key} {stamped:g}s != re-derived {expected:g}s")
+
+    runner_pool = {"OPT43", "OPT97"}
+    findings = [f for f in _as_list(data.get("findings")) if isinstance(f, dict)]
+    bad_credit: list[str] = []
+    code_savings: list[float] = []
+    for finding in findings:
+        if str(finding.get("pattern") or "") in runner_pool:
+            continue
+        try:
+            saving = float(finding.get("wall_clock_p50_s"))
+        except (TypeError, ValueError):
+            continue
+        if (saving > 0 and not finding.get("off_spine")
+                and not finding.get("advisory") and not finding.get("spine_rare")):
+            code_savings.append(saving)
+        if saving > credited_work + 0.11:
+            bad_credit.append(
+                f"{finding.get('id') or finding.get('pattern') or '?'} credits "
+                f"{saving:g}s above {credited_work:g}s work on the typical full wait")
+
+    text_failures: list[str] = []
+    if queue_p50 > 0:
+        bottom = next((line for line in report.splitlines()
+                       if line.startswith("> **Bottom line.**")), "")
+        if _fmt_clock(wall_p50) not in bottom:
+            text_failures.append("Bottom line omits the full per-commit wait")
+        if f"~{_fmt_clock(queue_p50)} of it waiting for a runner" not in bottom:
+            text_failures.append("Bottom line omits the runner-queue share")
+        if f"({queue_p50 / wall_p50:.0%})" not in bottom:
+            text_failures.append("Bottom line omits the runner-queue percentage")
+        if f"the remaining **~{_fmt_clock(displayed_work)}** is work" not in bottom:
+            text_failures.append("Bottom line omits the coherent work remainder")
+        saving = min(max(code_savings, default=0.0), credited_work, wall_p50)
+        if saving > 0 and wall_p50 > saving:
+            expected_multiple = f"{wall_p50 / (wall_p50 - saving):.2f}x"
+            if expected_multiple not in bottom:
+                text_failures.append(
+                    f"Bottom line omits full-wait projection {expected_multiple}")
+
+    if queue_claim is not None:
+        text_failures.append("report says a code/config change cuts runner queue")
+
+    failures = mismatches + bad_credit + text_failures
+    return Check(
+        name, not failures,
+        "; ".join(failures[:8]) if failures else
+        f"{len(work_values)} commit(s) re-derived; code credit <= {credited_work:g}s work")
+
+
 def run_checks(report, report_path, findings_path, skill_repo, clone=None):
     return [
         check_primary_section_present(report, findings_path),
@@ -15101,6 +15311,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_headline_chain_matches_stamp(report, findings_path, report_path),
         check_aggregate_total_ge_largest_member(report, findings_path, report_path),
         check_headline_wait_within_makespan(report, findings_path, report_path),
+        check_commit_queue_work_credit(report, findings_path, report_path),
         check_headline_basis_excludes_fileless(report, findings_path, report_path),
         check_saving_within_measured_compute(report, findings_path),
         check_saving_carries_measured_basis(report, findings_path),
