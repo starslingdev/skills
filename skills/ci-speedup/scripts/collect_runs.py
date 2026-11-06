@@ -2511,40 +2511,47 @@ def _rank_spine_present_first(
     return order, present, n_pr, pole_freq
 
 
-def _fallback_last_jobs(
+def _fallback_job_observations(
     repr_shas: list[str],
     rep_members: dict[str, list[str]],
     jobs_per_run_by_wf: dict[str, list[list[dict[str, Any]]]],
-) -> dict[str, tuple[str, float]]:
-    """Return the slowest job for each sampled commit population.
+) -> dict[str, dict[str, tuple[float, str, str]]]:
+    """Return sampled developer-event jobs grouped by commit and name.
 
     This is used only when required-check reachability did not produce a scoped
     gate. The normal required-scoped rank remains byte-for-byte unchanged. Jobs
     from push/schedule runs are excluded: they belong to the post-merge lane, not
     the pull-request fallback.
+
+    Each observation keeps the maximum duration plus the latest-attempt interval,
+    matching the check-run population's duration and interval semantics.
     """
     member_to_rep = {
         member: rep
         for rep in repr_shas
         for member in rep_members.get(rep, [rep])
     }
-    winners: dict[str, tuple[float, float, str]] = {}
+    observations: dict[str, dict[str, tuple[float, str, str]]] = {}
     for workflow_runs in jobs_per_run_by_wf.values():
         for run_jobs in workflow_runs:
             for job in run_jobs:
                 if str(job.get("_run_event") or "") not in _DEVELOPER_EVENTS:
                     continue
                 rep = member_to_rep.get(str(job.get("_run_head_sha") or ""))
-                completed = _parse_dt(str(job.get("completed_at") or ""))
                 duration = _job_duration_s(job)
                 name = str(job.get("name") or "")
-                if rep is None or completed is None or duration is None or not name:
+                started = str(job.get("started_at") or "")
+                completed = str(job.get("completed_at") or "")
+                if (rep is None or duration is None or not name
+                        or _parse_dt(started) is None or _parse_dt(completed) is None):
                     continue
-                candidate = (round(duration, 1), completed.timestamp(), name)
-                current = winners.get(rep)
-                if current is None or candidate > current:
-                    winners[rep] = candidate
-    return {rep: (winner[2], winner[0]) for rep, winner in winners.items()}
+                row = observations.setdefault(rep, {})
+                previous = row.get(name)
+                max_duration = max(previous[0] if previous else 0.0, round(duration, 1))
+                interval = ((started, completed) if previous is None or started > previous[1]
+                            else (previous[1], previous[2]))
+                row[name] = (max_duration, interval[0], interval[1])
+    return observations
 
 
 def _run_wall_s(r: dict[str, Any]) -> float | None:
@@ -27307,22 +27314,27 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         # A fallback/unresolved spine must rank the job that actually ended each
         # sampled commit. Check-run populations can omit a producing workflow's
         # job entirely; the already-fetched job rows retain the completion fact.
-        _last_jobs = _fallback_last_jobs(repr_shas, _rep_members, jobs_per_run_by_wf)
-        if _last_jobs:
+        _job_observations = _fallback_job_observations(
+            repr_shas, _rep_members, jobs_per_run_by_wf)
+        if _job_observations:
             _known_check_names = set(pr_check_p50)
+            _missing_candidates = {
+                max(_observed, key=lambda name: (_observed[name][0], name))
+                for _observed in _job_observations.values() if _observed
+            } - _known_check_names
             _fallback_durations: dict[str, list[float]] = {}
             _completed_rows: list[dict[str, float]] = []
             for _sha, _checks in zip(repr_shas, per_sha_checks):
                 _row = dict(_checks)
-                _last = _last_jobs.get(_sha)
-                if _last is not None:
-                    _name, _duration = _last
-                    # Existing check-run candidates already have the complete
-                    # per-commit population and retain their historical rank.
-                    # Recover only a last job that population omitted entirely.
-                    if _name not in _known_check_names:
-                        _row[_name] = _duration
-                        _fallback_durations.setdefault(_name, []).append(_duration)
+                for _name in _missing_candidates:
+                    _observed = (_job_observations.get(_sha) or {}).get(_name)
+                    if _observed is None:
+                        continue
+                    _duration, _started, _completed = _observed
+                    _row[_name] = _duration
+                    _fallback_durations.setdefault(_name, []).append(_duration)
+                    sha_check_intervals.setdefault(_sha, {})[_name] = (
+                        _started, _completed)
                 _completed_rows.append(_row)
             per_sha_checks = _completed_rows
             for _name, _durations in _fallback_durations.items():

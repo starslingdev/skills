@@ -112,6 +112,23 @@ class _ReadableRequiredClient(_FallbackClient):
     required_contexts = ["test"]
 
 
+class _PartialWinnerClient(_FallbackClient):
+    def json(self, endpoint: str, allow_missing: bool = False):
+        job_match = re.match(r"repos/o/r/actions/runs/(\d+)/jobs", endpoint)
+        if job_match and 1000 <= int(job_match.group(1)) < 1012:
+            self.queries += 1
+            run_id = int(job_match.group(1))
+            return {"jobs": [_job("test", run_id, 1600)]}
+        check_match = re.match(
+            r"repos/o/r/commits/commit-(\d+)/check-runs", endpoint)
+        if check_match and int(check_match.group(1)) < 12:
+            self.queries += 1
+            return {"check_runs": [{
+                "name": "test", "started_at": _iso(0), "completed_at": _iso(1600),
+            }]}
+        return super().json(endpoint, allow_missing)
+
+
 _DOC = {
     "repo": "o/r",
     "skill_commit_sha": "installed:unversioned",
@@ -138,8 +155,10 @@ def test_fallback_crowns_the_job_that_ends_last_on_each_commit_and_verifies(
 
     assert cp["critical_path_check"] == "build-image"
     assert cp["provenance"] in {"pr_floor_fallback", "unresolved"}
-    assert next(row for row in cp["checks"] if row["name"] == "build-image")[
-        "pole_n"] == 20
+    build = next(row for row in cp["checks"] if row["name"] == "build-image")
+    assert build["present_on"] == 20
+    assert build["pole_n"] == 20
+    assert cp["chain_summary"]["makespan_p50_s"] == 1500.0
 
     report = bp.render(doc, captured_at="2026-11-06T00:00:00Z")
     findings_path = tmp_path / "findings.json"
@@ -162,3 +181,12 @@ def test_readable_required_set_keeps_required_scoped_ranking_unchanged(monkeypat
     assert cp["provenance"] == "required_scoped"
     assert cp["critical_path_check"] == "test"
     assert [row["name"] for row in cp["checks"]] == ["test"]
+
+
+def test_recovered_candidate_keeps_occurrences_where_another_job_is_slowest(monkeypatch):
+    doc = _collect(monkeypatch, _PartialWinnerClient)
+    cp = doc["pr_critical_path"]
+    build = next(row for row in cp["checks"] if row["name"] == "build-image")
+
+    assert build["present_on"] == 20
+    assert build["pole_n"] == 8
