@@ -8909,8 +8909,13 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
         # describe it falsely (it may sit ON the critical path, and it claims
         # no runner-minutes), so it gets its own body.
         return _opt82_prompt(title, members, url, locs)
+    opt9_measure = [m for m in members if m.get("opt9_measure_before_after") is True]
     prefer: dict[str, Any] | None = None
-    if wait:
+    if pat == "OPT9" and len(opt9_measure) == len(members):
+        saving = ("Saving: uncredited - compiler build-state and generated-output "
+                  "cache overhead can cancel the avoided work. Measure before and "
+                  "after on the same workload before crediting seconds.")
+    elif wait:
         saving = ("Cost: developer WALL-CLOCK wait before the job starts (queue / "
                   "wait-to-start) - NOT a runner-bill saving and NOT off the critical "
                   "path. For a `needs:`-gated job it is measured from when its last "
@@ -8970,6 +8975,12 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
             f"Where: {locs}."]
     if ev:
         body.append(f"What ci-speedup saw: {ev}")
+    if opt9_measure and len(opt9_measure) != len(members):
+        body.append(
+            "Compiler build-state and generated-output occurrences in this group "
+            "are uncredited: measure before and after on the same workload before "
+            "crediting seconds."
+        )
     if pat == "OPT25":
         # The diagnosis/next step must travel with the agent hand-off, including
         # planner knobs. Use the same member as the credited magnitude.

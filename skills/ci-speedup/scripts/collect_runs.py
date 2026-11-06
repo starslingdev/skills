@@ -5445,6 +5445,44 @@ _EPHEMERAL_RUNNER_MIN_CAVEAT = (
     "with a persisted actions/cache for that dir + a measured warm-vs-cold "
     "delta (none here), so this is config-hygiene, not a credited bill saving")
 
+# OPT9 covers two materially different cache shapes. Lint and format result
+# caches avoid reprocessing the same inputs, so their existing conservative
+# sizing remains useful. Compiler build state and generated output can cost as
+# much to restore, validate, and save as they avoid; a cache hit alone does not
+# establish a saving. Keep those findings visible, but require a measured
+# before/after comparison rather than assigning the generic OPT9 default.
+_OPT9_BUILD_STATE_RE = re.compile(
+    r"(?:\btsc\b|typescript|tsbuildinfo|--incremental\b|"
+    r"generated[ -](?:client|output|code)|\bcodegen\b|code generation)",
+    re.IGNORECASE,
+)
+_OPT9_RESULT_CACHE_RE = re.compile(
+    r"(?:\beslint\b|\bprettier\b|\bjest\b|\bvitest\b)",
+    re.IGNORECASE,
+)
+
+
+def _opt9_is_build_state(f: dict[str, Any]) -> bool:
+    if f.get("pattern") != "OPT9":
+        return False
+    tool = str(f.get("opt9_tool") or "").lower()
+    if tool == "tsc":
+        return True
+    if tool in {"eslint", "prettier", "jest", "vitest"}:
+        return False
+    title = str(f.get("title") or "")
+    if _OPT9_RESULT_CACHE_RE.search(title):
+        return False
+    if _OPT9_BUILD_STATE_RE.search(title):
+        return True
+    evidence = " ".join(
+        str(f.get(key) or "")
+        for key in ("evidence", "match_text", "fix_strategy")
+    )
+    if _OPT9_RESULT_CACHE_RE.search(evidence):
+        return False
+    return bool(_OPT9_BUILD_STATE_RE.search(evidence))
+
 # Patterns whose modeled runner-min is NOT a realizable compute saving. The
 # credited `runner_min_saving` is set to None (so the bill headline / Also-noticed
 # appendix skip it) and the modeled amount is preserved in `runner_min_unrealizable_s` so the
@@ -5728,6 +5766,20 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
     long_pole = crit.get("long_pole_p50", 0.0)
     floor = crit.get("floor_p50", 0.0)
     model = cfg["model"]
+
+    if _opt9_is_build_state(f):
+        f["wall_clock_p50_s"] = None
+        f["runner_min_saving"] = None
+        f["tier"] = 2
+        f["realization"] = "none"
+        f["opt9_measure_before_after"] = True
+        f["size_note"] = (
+            "build-state and generated-output cache costs vary with restore, "
+            "validation, and save overhead — measure before and after on the "
+            "same workload before crediting seconds"
+        )
+        return
+
     # Guardrail A — D12 serial-gate auto-demote.
     if pat in _SERIAL_GATE_PATTERNS:
         model = "wall-clock-negative"

@@ -353,9 +353,10 @@ title_template: "Tool-Specific Cache Flag Not Enabled"
   - `vitest run` WITHOUT a configured cache directory preserved in `actions/cache`
   - `jest` WITHOUT `--cache --cacheDirectory=<persisted path>`
 - Cross-check that the relevant cache directory is NOT already wrapped by `actions/cache`
-- Per-run saving is usually a large fraction of the tool's runtime on unchanged files (50-95% reduction on full incremental hit)
+- For lint and format result caches, compare the affected step before and after enabling the cache; a warm hit can avoid a large share of repeated parsing.
+- For compiler build state such as `.tsbuildinfo` and generated-client output, a cache hit does not by itself prove a saving: restore, validation, and save overhead can cancel the avoided work. Treat these as uncredited suggestions until a same-workload before/after measurement shows a net reduction.
 
-**Fix**: Add the tool's cache flag AND wrap the cache directory in `actions/cache`. Because tool-result caches change on every run, use a rolling primary key such as `<tool>-<os>-<lockfile-hash>-${{ github.sha }}` with a stable `restore-keys` prefix such as `<tool>-<os>-<lockfile-hash>-`. An exact primary-key hit is not saved again; the rolling suffix lets the updated result be saved for the next run. For Prettier: `prettier --check --cache --cache-strategy content --cache-location ./node_modules/.cache/prettier`. For ESLint: `eslint --cache --cache-location ./node_modules/.cache/eslint`. Verify the tool's cache file is gitignored.
+**Fix**: Add the tool's cache flag AND wrap the cache directory in `actions/cache`. Because tool-result caches change on every run, use a rolling primary key such as `<tool>-<os>-<lockfile-hash>-${{ github.sha }}` with a stable `restore-keys` prefix such as `<tool>-<os>-<lockfile-hash>-`. An exact primary-key hit is not saved again; the rolling suffix lets the updated result be saved for the next run. For Prettier: `prettier --check --cache --cache-strategy content --cache-location ./node_modules/.cache/prettier`. For ESLint: `eslint --cache --cache-location ./node_modules/.cache/eslint`. Verify the tool's cache file is gitignored. For compiler state and generated output, benchmark the full restore/run/save path against an uncached run on the same workload and keep the cache only when it reduces total step time.
 
 ---
 
