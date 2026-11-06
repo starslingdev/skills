@@ -61,6 +61,7 @@ EXCLUDE = "exclude"       # run/harness artifact → never a skill bug
 # classified here (so no check is ever left undisposed).
 TRIAGE_ALLOWLIST = {
     "wall-clock headline carries next gate and verification guidance": AUTO_SEED,
+    "per-commit wall-clock projections are physically bounded": AUTO_SEED,
     "primary section present (Long poles)": AUTO_SEED,                                              # check_primary_section_present
     "static-only banner matches CI shape": AUTO_SEED,                                               # check_static_only_banner_matches_ci_shape
     "headline names the wall-clock (merge-wait) axis": AUTO_SEED,                                   # check_headline_names_wall_clock
@@ -177,6 +178,7 @@ CLASS_ENUM = frozenset({
 # workflow's class routing; classifying it here is for consistency/clustering with LLM-found
 # instances of the same underlying defect shape, and for the audit trail.
 CHECK_CLASS = {
+    "per-commit wall-clock projections are physically bounded": "fabricated-or-unsupported-finding",
     "primary section present (Long poles)": "missing-phase-check",                       # a required phase section is absent
     "static-only banner matches CI shape": "fabricated-or-unsupported-finding",          # dormant-repo banner asserted at a live no-PR-gating repo / "no run timing" beside priced timed runs — the report contradicts its own data
     "headline names the wall-clock (merge-wait) axis": "ambiguous-phase-instruction",     # headline mislabels the axis it renders

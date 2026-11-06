@@ -612,11 +612,10 @@ def check_commit_wall_clock_projection(report: str, findings_path: Path | None) 
         return Check(name, True, "legacy findings have no commit wall stamp", skipped=True)
 
     def projection(wall: float, slowest: float, next_longest: float,
-                   speedup: float) -> tuple[float, float]:
+                   speedup: float) -> tuple[float, float | None]:
         projected = round(max(
             0.0, wall - slowest + max(slowest / speedup, next_longest)), 1)
-        return projected, (round(wall / projected, 2)
-                           if projected > 0 else float("inf"))
+        return projected, (round(wall / projected, 2) if projected > 0 else None)
 
     def percentile(values: list[float], pct: float) -> float:
         ordered = sorted(values)
@@ -660,9 +659,25 @@ def check_commit_wall_clock_projection(report: str, findings_path: Path | None) 
         if claimed_projected is None or abs(claimed_projected - projected) > 0.11:
             failures.append(
                 f"fact {index} projected_s {claimed_projected!r} != {projected}")
-        if claimed_multiple is None or claimed_multiple > cap_multiple + 0.001:
+        if (claimed_multiple is None or cap_multiple is None
+                or claimed_multiple > cap_multiple + 0.001):
             failures.append(
                 f"fact {index} multiple {claimed_multiple!r} exceeds {cap_multiple}")
+
+    partial = [fact for fact in facts if fact.get("partial") is True]
+    if partial:
+        missing = sorted({
+            str(workflow) for fact in partial
+            for workflow in (fact.get("missing_workflows") or []) if workflow
+        })
+        named = ", ".join(f"`{_strip_scope(workflow)}`" for workflow in missing)
+        expected_partial_line = (
+            f"> {len(partial)} sampled commit(s) were partial"
+            + (f" (missing {named})" if named else "")
+            + "; their observed shorter spans were excluded from these percentiles.")
+        if report.splitlines().count(expected_partial_line) != 1:
+            failures.append(
+                "report lacks the re-derived partial-commit count/workflow disclosure")
 
     walls = [row[1] for row in complete]
     if walls:
@@ -675,6 +690,9 @@ def check_commit_wall_clock_projection(report: str, findings_path: Path | None) 
         basis, wall, slowest, next_longest = min(
             complete, key=lambda row: abs(row[1] - expected_p50))
         projected, multiple = projection(wall, slowest, next_longest, 4.0)
+        if multiple is None:
+            failures.append("sampled p50 projection has an undefined multiple")
+            multiple = 0.0
         expected_line = (
             "> **Per-commit PR wait:** p50 "
             f"**{duration(expected_p50)}**, p90 **{duration(expected_p90)}**, from the "

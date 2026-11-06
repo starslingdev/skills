@@ -276,7 +276,7 @@ class WallClockResult:
 @dataclass(frozen=True)
 class CommitProjection:
     projected_s: float
-    multiple: float
+    multiple: float | None
 
 
 def project_commit_wall(wall_s: float, slowest_job_s: float,
@@ -294,7 +294,7 @@ def project_commit_wall(wall_s: float, slowest_job_s: float,
         raise ValueError("job_speedup must be greater than zero")
     projected = max(0.0, wall - slowest + max(slowest / speedup, next_longest))
     projected = round(projected, 1)
-    multiple = round(wall / projected, 2) if projected > 0 else float("inf")
+    multiple = round(wall / projected, 2) if projected > 0 else None
     return CommitProjection(projected, multiple)
 
 

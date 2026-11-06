@@ -27038,6 +27038,13 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # with no merge_group runs this is the identity map: one member per group, exactly
     # the pre-#58 per-sha behaviour.
     _rep_ts, _rep_members = _group_dev_shas_by_pr(sha_meta)
+    _member_check_runs: dict[str, list[dict[str, Any]]] = {}
+
+    def _checks_for_member(member_sha: str) -> list[dict[str, Any]] | None:
+        rows = _fetch_check_runs(client, repo, member_sha)
+        if rows is not None:
+            _member_check_runs[member_sha] = rows
+        return rows
 
     def _checks_for(rep_sha: str) -> dict[str, float] | None:
         # UNION the check-runs across every head_sha the PR ran on (its pull_request
@@ -27048,7 +27055,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         # failure exactly as the pre-#58 per-sha path did.
         res = _union_member_checks(
             _rep_members.get(rep_sha, [rep_sha]),
-            lambda member: _fetch_check_runs(client, repo, member))
+            _checks_for_member)
         if res is None:
             return None  # propagate the fetch failure — don't fake a partial PR
         m, iv = res
@@ -27508,18 +27515,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                     if _confirmed_gate_checks is not None else set(pr_check_p50))
 
     def _commit_job_node(workflow: str, job_name: str) -> str | None:
-        jobs = (_jg or {}).get(workflow) or {}
-        exact = [str(key) for key, spec in jobs.items()
-                 if str(key) == job_name
-                 or (isinstance(spec, dict) and str(spec.get("name") or "") == job_name)]
-        if len(exact) == 1:
-            return exact[0]
-        prefix = job_name.split(" (", 1)[0]
-        matrix = [str(key) for key, spec in jobs.items()
-                  if str(key) == prefix
-                  or (isinstance(spec, dict)
-                      and str(spec.get("name") or "") == prefix)]
-        return matrix[0] if len(matrix) == 1 else None
+        mapped = _check_to_job_node(job_name, _jg, crit_by_wf)
+        return mapped[1] if mapped is not None and mapped[0] == workflow else None
 
     def _needs_chain(workflow: str, node: str | None) -> set[str]:
         if node is None:
@@ -27547,8 +27544,18 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         return seen
 
     _commit_facts: list[dict[str, Any]] = []
-    _commit_checks_by_sha = dict(zip(_era_repr_shas, _era_per_sha_checks))
-    for _sha in _era_repr_shas:
+    _commit_shas = [member for rep in _era_repr_shas
+                    for member in _rep_members.get(rep, [rep])]
+    _commit_checks_by_sha: dict[str, dict[str, float]] = {}
+    for _sha in _commit_shas:
+        _commit_checks_by_sha[_sha] = {
+            str(row.get("name") or "?"): float(duration)
+            for row in (_member_check_runs.get(_sha) or [])
+            if (duration := _duration_s(row.get("started_at"),
+                                        row.get("completed_at"))) is not None
+            and duration > 0
+        }
+    for _sha in _commit_shas:
         _event = str((sha_meta.get(_sha) or {}).get("event") or "")
         _run_rows: list[tuple[str, dict[str, Any]]] = []
         for _wf, _runs in sampled_runs_by_wf.items():

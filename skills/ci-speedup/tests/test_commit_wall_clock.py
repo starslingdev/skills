@@ -125,6 +125,32 @@ class _MissingSecondWorkflowRunClient(_TwoWorkflowClient):
         return super().json(endpoint, allow_missing)
 
 
+class _PullRequestAndQueueClient(_TwoWorkflowClient):
+    def json(self, endpoint: str, allow_missing: bool = False):
+        match = re.match(r"repos/o/r/actions/workflows/(\d+)/runs\?(.*)", endpoint)
+        if match and not re.search(r"per_page=1(?![0-9])", match.group(2)):
+            result = super().json(endpoint, allow_missing)
+            pull_request_run = dict(
+                result["workflow_runs"][0], pull_requests=[{"number": 7}])
+            queue_run = dict(
+                pull_request_run,
+                id=int(pull_request_run["id"]) + 1000,
+                event="merge_group",
+                head_sha="queue-sha",
+                head_branch="gh-readonly-queue/main/pr-7-abc",
+                pull_requests=[],
+                created_at=_iso(120),
+                run_started_at=_iso(120),
+            )
+            return {"workflow_runs": [queue_run, pull_request_run]}
+        match = re.match(r"repos/o/r/actions/runs/(1\d{3})/jobs", endpoint)
+        if match:
+            return super().json(
+                endpoint.replace(match.group(1), str(int(match.group(1)) - 1000), 1),
+                allow_missing)
+        return super().json(endpoint, allow_missing)
+
+
 _DOC = {
     "repo": "o/r",
     "skill_commit_sha": "installed:unversioned",
@@ -172,6 +198,10 @@ def test_collect_stamps_one_commit_wall_across_both_workflows_and_verifies(
     assert fact["projection_4x"] == {
         "job_speedup": 4.0, "projected_s": 960.0, "multiple": 1.56,
     }
+    zero_projection = wc.project_commit_wall(100, 100, 0, float("inf"))
+    assert zero_projection.projected_s == 0.0
+    assert zero_projection.multiple is None
+    json.dumps({"multiple": zero_projection.multiple}, allow_nan=False)
 
     report = bp.render(doc, captured_at="2026-11-06T00:00:00Z")
     assert "Per-commit PR wait" in report
@@ -192,7 +222,8 @@ def test_collect_stamps_one_commit_wall_across_both_workflows_and_verifies(
     assert failures == [], [(check.name, check.detail) for check in failures]
 
 
-def test_missing_workflow_run_makes_the_commit_partial_instead_of_shorter(monkeypatch):
+def test_missing_workflow_run_makes_the_commit_partial_instead_of_shorter(
+        monkeypatch, tmp_path: Path):
     doc = _collect(monkeypatch, _MissingSecondWorkflowRunClient)
     stamp = doc["pr_critical_path"]["commit_wall_clock"]
     fact = stamp["facts"][0]
@@ -203,6 +234,24 @@ def test_missing_workflow_run_makes_the_commit_partial_instead_of_shorter(monkey
     assert fact["missing_workflows"] == [_SECOND]
     assert stamp["p50_s"] is None
     assert stamp["p90_s"] is None
+
+    report = bp.render(doc, captured_at="2026-11-06T00:00:00Z")
+    assert ("> 1 sampled commit(s) were partial (missing "
+            "`.github/workflows/second.yml`); their observed shorter spans were "
+            "excluded from these percentiles.") in report
+    findings_path = tmp_path / "findings.json"
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+    check = vr.check_commit_wall_clock_projection(report, findings_path)
+    assert check.ok, check
+
+
+def test_pull_request_and_merge_queue_members_each_get_a_commit_stamp(monkeypatch):
+    monkeypatch.setattr(cr, "GhClient", _PullRequestAndQueueClient)
+    doc = cr.collect(json.loads(json.dumps(_DOC)), "o/r", max_runs=2, shallow_runs=2)
+    facts = doc["pr_critical_path"]["commit_wall_clock"]["facts"]
+
+    assert {fact["sha"] for fact in facts} == {_SHA, "queue-sha"}
+    assert len(facts) == 2
 
 
 def test_verifier_rejects_a_projection_multiple_above_the_shared_cap(
