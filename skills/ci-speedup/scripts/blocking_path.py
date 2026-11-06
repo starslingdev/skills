@@ -652,8 +652,13 @@ def _pole_per_pr_floor(cp: dict[str, Any], pole_name: str,
     targets = {_floor_key(name) for name in (own_names or {pole_name})}
     rows: list[dict[str, Any]] = []
     unknown_n = 0
+    incomplete_n = 0
     total_n = 0
-    for entry in cp.get("populations") or []:
+    populations = cp.get("populations") or []
+    completeness = cp.get("population_check_runs_complete") or []
+    completion_aligned = (
+        isinstance(completeness, list) and len(completeness) == len(populations))
+    for pop_idx, entry in enumerate(populations):
         try:
             _share, checks = entry
             positive = [(str(name), float(duration)) for name, duration in checks
@@ -680,7 +685,20 @@ def _pole_per_pr_floor(cp: dict[str, Any], pole_name: str,
         siblings = [(name, duration) for name, duration in positive
                     if _floor_key(name) not in targets]
         if not siblings:
-            unknown_n += 1
+            if completion_aligned and completeness[pop_idx] is True:
+                before_s = max(own)
+                rows.append({
+                    "saving_s": before_s,
+                    "sibling": "",
+                    "floor_s": 0.0,
+                    "before_s": before_s,
+                    "target_ran": True,
+                    "single_check": True,
+                })
+            else:
+                unknown_n += 1
+                if completion_aligned:
+                    incomplete_n += 1
             continue
         sibling, floor_s = max(siblings, key=lambda item: item[1])
         before_s = max(own)
@@ -696,6 +714,8 @@ def _pole_per_pr_floor(cp: dict[str, Any], pole_name: str,
     return {
         "total_n": total_n,
         "unknown_n": unknown_n,
+        "incomplete_n": incomplete_n,
+        "completion_known": completion_aligned,
         "rows": rows,
         "max_saving_s": max((float(row["saving_s"]) for row in rows), default=0.0),
     }
@@ -826,10 +846,16 @@ def _floor_note(pole: dict[str, Any],
             rows = [row for row in (exact.get("rows") or []) if isinstance(row, dict)]
             total = int(exact.get("total_n") or 0)
             unknown_n = int(exact.get("unknown_n") or 0)
+            incomplete_n = int(exact.get("incomplete_n") or 0)
             if total <= 0 or max_saving < 0:
                 return ""
             zero = [row for row in rows if (_num(row.get("saving_s")) or 0.0) <= 0]
-            positive = [row for row in rows if (_num(row.get("saving_s")) or 0.0) > 0]
+            single = [row for row in rows
+                      if (_num(row.get("saving_s")) or 0.0) > 0
+                      and row.get("single_check") is True]
+            positive = [row for row in rows
+                        if (_num(row.get("saving_s")) or 0.0) > 0
+                        and row.get("single_check") is not True]
             clauses: list[str] = []
             if zero:
                 blockers = {_clean_label(str(row.get("sibling") or "")) for row in zero}
@@ -847,9 +873,23 @@ def _floor_note(pole: dict[str, Any],
                 for cap, count in sorted(by_cap.items()):
                     other = "the other " if zero and len(zero) + count == total else ""
                     clauses.append(f"up to {_clock(cap)} on {other}{count} of {total} PRs")
-            if unknown_n:
+            if single:
+                by_cap: dict[float, int] = {}
+                for row in single:
+                    cap = round(min(_num(row.get("saving_s")) or 0.0, max_saving), 1)
+                    by_cap[cap] = by_cap.get(cap, 0) + 1
+                for cap, count in sorted(by_cap.items()):
+                    other = "the other " if zero and len(zero) + count == total else ""
+                    clauses.append(
+                        f"up to {_clock(cap)} on {other}{count} of {total} PRs "
+                        "where it was the only check")
+            if incomplete_n:
                 clauses.append(
-                    f"unknown on {unknown_n} of {total} PRs with a missing sibling observation")
+                    f"unknown on {incomplete_n} of {total} PRs with an incomplete check-runs read")
+            legacy_unknown_n = unknown_n - incomplete_n
+            if legacy_unknown_n:
+                clauses.append(
+                    f"unknown on {legacy_unknown_n} of {total} PRs with a missing sibling observation")
             return " Per-PR split: " + "; ".join(clauses) + "." if clauses else ""
         if not isinstance(cooccur, dict) or gating_n <= 0 or max_saving < 0:
             return ""
@@ -923,6 +963,23 @@ def _floor_note(pole: dict[str, Any],
     # on its slow PRs) and counts managed checks; the addressable win is `pole − binding`, never
     # `pole − the file-backed name` (else a universal managed check between them inflates it).
     # floor_next is None when there's no FILE-BACKED floor to NAME → no coherent note.
+    exact_floor = pole.get("_per_pr_floor")
+    if (isinstance(exact_floor, dict) and pole_p > 0
+            and exact_floor.get("completion_known") is True):
+        exact_max = max(_num(exact_floor.get("max_saving_s")) or 0.0, 0.0)
+        has_unknown = int(exact_floor.get("unknown_n") or 0) > 0
+        # An aggregate sibling can be slower while this pole still gates a
+        # subset of sampled PRs. Preserve that measured split instead of
+        # suppressing the note under the aggregate non-gate guard.
+        if binding_s >= pole_p and (exact_max > 0 or has_unknown):
+            lead = (f"up to **~{_clock(exact_max)}** on the sampled PRs where this "
+                    "check gates"
+                    if exact_max > 0 else
+                    "unknown on sampled PRs whose check-runs read was incomplete")
+            return [
+                "> **What a change here can buy (wall-clock):** " + lead
+                + "; the ceiling varies by PR because the concurrent check set varies."
+                + _per_pr_split_note(exact_max, exact_floor), ""]
     if pole_p <= 0 or binding_s >= pole_p or floor_next is None:
         return []
     ch = pole.get("_chain_member")
