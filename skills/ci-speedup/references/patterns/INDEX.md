@@ -32,6 +32,7 @@ This order is also the compiled file's order; contributors see `README.md`.
 - OPT18 — All Containers Started for Single-Service Tests (MEDIUM, static) — compose up starts every service
 - OPT19 — Test Source Sleep Dominance (includes Playwright `waitForTimeout`) (HIGH, static) — fixed sleeps / waitForTimeout in tests
 - OPT20 — Unpinned Docker Image Tags (LOW, static) — docker images on :latest
+- OPT102 — Foreign-Architecture Image Compilation Runs Under Emulation (HIGH, static) — multi-platform Dockerfile compiles without a native or cross target
 ## Category 4 — Parallelization
 - OPT21 — Unnecessary `needs:` Dependencies (MEDIUM, static) — needs: on a job it does not use
 - OPT22 — Sequential Workflows via `workflow_run` (MEDIUM, static) — workflow_run chains instead of jobs

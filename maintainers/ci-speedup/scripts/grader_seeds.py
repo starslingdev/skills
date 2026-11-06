@@ -56,7 +56,7 @@ EXCLUDE = "exclude"       # run/harness artifact → never a skill bug
 # The committed, reviewable TRIAGE ALLOWLIST. Keyed by the live `verify_report.Check.name` string
 # (what `run_checks` actually yields) so the classification can be applied at runtime and the
 # "every check is classified" invariant is directly testable; the originating `check_*` function
-# name is in the trailing comment for cross-reference with spec §2-A. 73 AUTO_SEED / 1 EXCLUDE /
+# name is in the trailing comment for cross-reference with spec §2-A. 84 AUTO_SEED / 1 EXCLUDE /
 # 3 TRIAGE — a new `verify_report` check makes `test_every_check_is_classified` go red until it's
 # classified here (so no check is ever left undisposed).
 TRIAGE_ALLOWLIST = {
@@ -67,6 +67,7 @@ TRIAGE_ALLOWLIST = {
     "headline names the wall-clock (merge-wait) axis": AUTO_SEED,                                   # check_headline_names_wall_clock
     "every #pole-N / #also-noticed / #pre-start-wait / #runner-minute-reductions reference resolves to an anchor": AUTO_SEED,  # check_pole_anchors_resolve
     "RCA hands off via prompts (never prescribes a fix, never dead-ends)": AUTO_SEED,               # check_rca_hands_off_never_prescribes
+    "job-adding prompts state their runner-minute effect": AUTO_SEED,                               # check_job_adding_prompts_state_runner_minute_effect
     "agent-prompt MEASURED CAUSE never asserts timeline steps the pole doesn't render": AUTO_SEED,  # check_measured_cause_matches_rendered_timeline
     "TOC 'Also noticed' count == appendix rows + hidden pointer": AUTO_SEED,                        # check_also_noticed_count_honest
     "data basis disclosed; coverage gaps named, not silent": AUTO_SEED,                             # check_coverage_disclosed
@@ -91,6 +92,8 @@ TRIAGE_ALLOWLIST = {
     "chain headline re-derives from the stamped chain facts": AUTO_SEED,                             # check_headline_chain_matches_stamp (ENG-1 PR-N2)
     "rendered chain total is never below the largest member it sums": AUTO_SEED,                      # check_aggregate_total_ge_largest_member (issue #25/#22)
     "headline merge-wait is never above the measured makespan p50": AUTO_SEED,                        # check_headline_wait_within_makespan (issue #25/#24)
+    "default-branch push lane is isolated": AUTO_SEED,                                                # check_default_branch_push_lane_isolated
+    "code findings stay within commit work and never claim runner queue": AUTO_SEED,                  # check_commit_queue_work_credit
     "each finding's runner-minute saving is within its jobs' measured compute": AUTO_SEED,            # check_saving_within_measured_compute (issue #25)
     "every credited runner-minute saving carries a measured-basis stamp (sizing door)": AUTO_SEED,     # check_saving_carries_measured_basis (issues #43/#44/#45)
     "cluster-floor lever's ceiling floors at a NON-sibling check (not its own matrix leg)": AUTO_SEED,  # check_cluster_lever_ceiling_escapes_sibling (issue #44)
@@ -185,6 +188,7 @@ CHECK_CLASS = {
     "wall-clock headline carries next gate and verification guidance": "missing-phase-check",  # next-gate line or how-to-check block absent, or names a gate no saved floor supports
     "every #pole-N / #also-noticed / #pre-start-wait / #runner-minute-reductions reference resolves to an anchor": "missing-phase-check",  # broken cross-reference — a rendering-completeness gap
     "RCA hands off via prompts (never prescribes a fix, never dead-ends)": "prescribed-a-fix",  # exact match
+    "job-adding prompts state their runner-minute effect": "missing-phase-check",  # a required cost disclosure is absent from a job-expanding hand-off
     "agent-prompt MEASURED CAUSE never asserts timeline steps the pole doesn't render": "fabricated-or-unsupported-finding",  # a canned cause asserts a timeline shape the report contradicts
     "TOC 'Also noticed' count == appendix rows + hidden pointer": "fabricated-or-unsupported-finding",  # a rendered count not backed by the data
     "data basis disclosed; coverage gaps named, not silent": "coverage-gap-dead-end",     # exact match (the spec's own no-silent-drop framing)
@@ -209,6 +213,8 @@ CHECK_CLASS = {
     "chain headline re-derives from the stamped chain facts": "mis-ranked-lever",  # ENG-1 PR-N2: chain headline drifted from chain_facts
     "rendered chain total is never below the largest member it sums": "fabricated-or-unsupported-finding",  # issue #22: a rendered total below a member it sums is a number the data contradicts
     "headline merge-wait is never above the measured makespan p50": "estimated-not-measured",  # issue #24: a crowned/modeled wait above the MEASURED wall — the estimate overstates the measurement
+    "default-branch push lane is isolated": "mis-ranked-lever",  # post-merge timing leaking into the merge-gate headline or ranking
+    "code findings stay within commit work and never claim runner queue": "estimated-not-measured",  # a modeled code saving above measured work, or a claim against runner queue
     "each finding's runner-minute saving is within its jobs' measured compute": "estimated-not-measured",  # issue #25: a modeled saving above the job's measured compute — an estimate exceeding its physical bound
     "every credited runner-minute saving carries a measured-basis stamp (sizing door)": "estimated-not-measured",  # issues #43/#44/#45: a saving that skipped the measured sizing door (no basis / unmeasured path) — an estimate with no measured grounding
     "cluster-floor lever's ceiling floors at a NON-sibling check (not its own matrix leg)": "mis-ranked-lever",  # issue #44: a cluster lever capped by its own sibling leg renders ~15x under its true ceiling and is buried — a ranking/placement error
