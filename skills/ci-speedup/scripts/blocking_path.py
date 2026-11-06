@@ -4164,20 +4164,14 @@ def _strip_rail_echo(body: str) -> str:
 
 
 def _strip_verification_bar_echo(body: str) -> str:
-    """Keep the renderer-owned verification bar singular in gap-fill prompts."""
+    """Keep verification claims in gap-fill prompts renderer-owned.
+
+    The gap-fill body is model output. Drop every line that tries to define
+    verification, including partial or contradictory copies of the heading;
+    the canonical bar is appended after this returns. Other analysis remains.
+    """
     lines = body.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    bar_body = {line.strip() for line in _VERIFICATION_BAR_LINES[1:]}
-    kept: list[str] = []
-    i = 0
-    while i < len(lines):
-        if _VERIFICATION_BAR_LINES[0] in lines[i]:
-            i += 1
-            while i < len(lines) and (not lines[i].strip()
-                                      or lines[i].strip() in bar_body):
-                i += 1
-            continue
-        kept.append(lines[i])
-        i += 1
+    kept = [line for line in lines if "verif" not in line.lower()]
     return "\n".join(kept).rstrip("\n")
 
 

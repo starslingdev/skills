@@ -348,11 +348,11 @@ Only the delivery mechanism varies; the contract is **agent-independent.**
    the menu after saving — close naming the remaining levers in one line. No other pick
    writes the report into the working tree. **Set the honest expectation for what a pick
    does.** A pick doesn't return a "proposal": the skill investigates the real runs and
-   the file's intent and **makes the change**. **Verified** means the repository's own CI
-   gate passed on the change, on a pushed branch or via its exact commands; a scoped local
-   run is pre-flight only. It checks with the user **before committing or opening a PR** —
-   a finished, verified, uncommitted change. On their pick, run that prompt through the same
-   pause; the bill-savings pick runs the Tier-2 R-row prompts (or, with only the modeled pointer, the "Also noticed" bill prompts). **When a picked fix
+   the file's intent and **makes the change**. Before the pre-commit pause, it is **verified**
+   only when exactly the commands that gate CI pass; a scoped local run is pre-flight only.
+   If those commands require a commit or push, say verification awaits authorization. It checks
+   with the user **before committing or opening a PR**. After an authorized commit and push, the
+   repository's own CI gate passing on that branch also verifies it. On their pick, run that prompt through the same pause; the bill-savings pick runs the Tier-2 R-row prompts (or, with only the modeled pointer, the "Also noticed" bill prompts). **When a picked fix
    completes** — it lands, or the user closes it out (the completion point, *not* the
    pre-commit pause) — restate the report's remaining findings as the next-step
    question: one orienting line plus the still-open options, so remaining levers never
