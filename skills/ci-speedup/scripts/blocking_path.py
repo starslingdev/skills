@@ -3403,7 +3403,7 @@ _FIX_META: dict[str, dict[str, Any]] = {
         "docs": ["OPT88 in the ci-speedup catalog — measure in-job test concurrency "
                  "before choosing a worker count"],
         "deliver": "Run the isolated tests concurrently inside this one job with a "
-                   "measured worker cap, verify shared state is not reused, preserve the "
+                   "measured worker cap, check that shared state is not reused, preserve the "
                    "full test set and failures, and re-measure wall clock and runner minutes.",
     },
     "test-loop-serial": {
