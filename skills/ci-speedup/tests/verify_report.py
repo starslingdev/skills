@@ -14985,6 +14985,166 @@ def check_no_rate_derived_dollars(report: str, findings_path: Path | None = None
     return Check(name, True, "no rate-derived dollar tokens on the minutes surfaces")
 
 
+_VR_DEFAULT_BRANCH_PUSH_SAMPLE_MAX = 10
+_VR_PUSH_LABEL_WIDTH = 33
+
+
+def _vr_push_label(name: str) -> str:
+    """Mirror blocking_path._lbl for push-lane job-name comparisons."""
+    clean = _strip_scope(name)
+    return (clean if len(clean) <= _VR_PUSH_LABEL_WIDTH
+            else clean[:_VR_PUSH_LABEL_WIDTH - 1] + "…")
+
+
+def check_default_branch_push_lane_isolated(
+        report: str, findings_path: Path | None = None) -> Check:
+    """Re-derive the post-merge lane and keep it out of merge-gate claims."""
+    name = "default-branch push lane is isolated"
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return Check(name, True, err, skipped=True)
+    lane = _as_dict(data.get("default_branch_push_lane"))
+    if not lane:
+        return Check(name, True, "no default-branch push lane stamped", skipped=True)
+
+    failures: list[str] = []
+    marker = "<!-- ci-speedup:default-branch-push-lane -->"
+    marker_n = report.count(marker)
+    start = report.find(marker)
+    end = report.find("\n---", start + len(marker)) if start >= 0 else -1
+    block = report[start:end if end >= 0 else len(report)] if start >= 0 else ""
+    if marker_n != 1:
+        failures.append(f"push-lane marker rendered {marker_n} times, not once")
+    if "After merge, not a merge gate" not in block:
+        failures.append("the lane title does not say `After merge, not a merge gate`")
+
+    cap = int(_num(lane.get("sample_cap")) or 0)
+    sampled = int(_num(lane.get("sampled_push_count")) or 0)
+    if cap != _VR_DEFAULT_BRANCH_PUSH_SAMPLE_MAX:
+        failures.append(
+            f"sample cap {cap} != pinned cap {_VR_DEFAULT_BRANCH_PUSH_SAMPLE_MAX}")
+    if sampled < 0 or sampled > _VR_DEFAULT_BRANCH_PUSH_SAMPLE_MAX:
+        failures.append(f"sampled_push_count {sampled} exceeds the bounded cohort")
+    zero_line = "no eligible completed pushes to the default branch were sampled"
+    status = str(lane.get("status") or "")
+    if status in {"default_branch_unknown", "run_list_incomplete"}:
+        disclosure = {
+            "default_branch_unknown": "default branch could not be determined",
+            "run_list_incomplete": "push run-list coverage was incomplete",
+        }[status]
+        if disclosure not in block:
+            failures.append(f"{status} lane lacks its coverage disclosure")
+        if zero_line in block.lower():
+            failures.append("unknown push coverage is rendered as a factual zero")
+        return Check(
+            name, not failures,
+            "; ".join(failures) if failures else f"{status} is disclosed, not zeroed")
+    if status != "complete":
+        failures.append(f"push lane has unknown collection status {status!r}")
+    if sampled == 0:
+        if zero_line not in block.lower():
+            failures.append("an empty eligible push cohort lacks its explicit zero line")
+        return Check(
+            name, not failures,
+            "; ".join(failures) if failures else "zero-push lane is explicit and isolated")
+
+    facts = [
+        fact for fact in _as_list(lane.get("facts"))
+        if isinstance(fact, dict) and fact.get("partial") is not True
+        and (_num(fact.get("wall_s")) or 0) > 0
+    ]
+    if not facts:
+        unavailable = "no complete commit-wide timing fact was available" in block
+        if not unavailable:
+            failures.append("sampled pushes have neither complete facts nor a coverage line")
+        return Check(
+            name, not failures,
+            "; ".join(failures) if failures else
+            "pushes sampled; shared commit-wall facts were unavailable and disclosed")
+
+    def percentile(values: list[float], pct: float) -> float:
+        values = sorted(values)
+        k = (len(values) - 1) * pct / 100.0
+        lo, hi = int(k), min(int(k) + 1, len(values) - 1)
+        return values[lo] + (values[hi] - values[lo]) * (k - lo)
+
+    walls = [float(fact["wall_s"]) for fact in facts]
+    p50, p90 = percentile(walls, 50), percentile(walls, 90)
+    if abs((_num(lane.get("p50_s")) or 0.0) - p50) > 0.11:
+        failures.append("lane p50 stamp drifted from its complete commit facts")
+    if abs((_num(lane.get("p90_s")) or 0.0) - p90) > 0.11:
+        failures.append("lane p90 stamp drifted from its complete commit facts")
+    if f"p50 **{_fmt_clock(p50)}**" not in block:
+        failures.append("lane does not render its re-derived p50")
+    if f"p90 **{_fmt_clock(p90)}**" not in block:
+        failures.append("lane does not render its re-derived p90")
+
+    typical = min(facts, key=lambda fact: abs(float(fact["wall_s"]) - p50))
+    slowest = _as_dict(typical.get("slowest_job"))
+    next_job = _as_dict(typical.get("next_longest_job"))
+    for label, job in (("slowest", slowest), ("next-longest", next_job)):
+        job_name = str(job.get("name") or "")
+        if not job_name or f"`{_vr_push_label(job_name)}`" not in block:
+            failures.append(f"lane omits the representative {label} job")
+
+    projection = next((
+        _as_dict(value) for key, value in typical.items()
+        if str(key).startswith("projection_") and isinstance(value, dict)
+    ), {})
+    if projection:
+        speedup = _num(projection.get("job_speedup")) or 0.0
+        wall = float(typical["wall_s"])
+        slow_s = _num(slowest.get("duration_s")) or 0.0
+        next_s = _num(next_job.get("duration_s")) or 0.0
+        if speedup <= 0 or slow_s <= 0:
+            failures.append("lane projection lacks a positive speedup and slowest job")
+        else:
+            expected_s = wall - slow_s + max(slow_s / speedup, next_s)
+            expected_multiple = wall / expected_s if expected_s > 0 else 0.0
+            if abs((_num(projection.get("projected_s")) or 0.0) - expected_s) > 0.11:
+                failures.append("projected push wall drifted from the next-job floor")
+            if abs((_num(projection.get("multiple")) or 0.0) - expected_multiple) > 0.011:
+                failures.append("projected push multiple drifted from the bounded wall")
+            rendered = (
+                f"projects to **{_fmt_clock(expected_s)}** "
+                f"(**{expected_multiple:.2f}x**)")
+            if rendered not in block:
+                failures.append("lane omits its re-derived bounded projection")
+
+    cp = _as_dict(data.get("pr_critical_path"))
+    merge_waits = [
+        value for value in (
+            _num(cp.get("critical_path_s")), _num(cp.get("p50_s")),
+            *[_num(pole.get("p50_s")) for pole in _as_list(cp.get("poles"))
+              if isinstance(pole, dict)])
+        if value is not None and value > 0
+    ]
+    lane_clock_is_distinct = (
+        not merge_waits or all(abs(value - p50) > 0.11 for value in merge_waits))
+    before_lane = report[:start] if start >= 0 else report
+    contents_at = before_lane.find("## 📋 Contents")
+    pole_at = before_lane.find('<a id="pole-')
+    headline = before_lane[:contents_at if contents_at >= 0 else len(before_lane)]
+    contents = (before_lane[contents_at:pole_at if pole_at >= 0 else len(before_lane)]
+                if contents_at >= 0 else "")
+    score_lines = "\n".join(
+        line for line in before_lane.splitlines()
+        if re.search(r"\bscore\b", line, re.IGNORECASE))
+    if lane_clock_is_distinct and _fmt_clock(p50) in headline:
+        failures.append("post-merge push timing leaked into the merge-gate headline")
+    if lane_clock_is_distinct and _fmt_clock(p50) in contents:
+        failures.append("post-merge push timing leaked into the ranked critical-path spine")
+    if lane_clock_is_distinct and _fmt_clock(p50) in score_lines:
+        failures.append("post-merge push timing leaked into a score")
+    if isinstance(cp.get("default_branch_push_lane"), dict):
+        failures.append("push lane is nested inside the merge-gate critical path")
+
+    return Check(
+        name, not failures,
+        "; ".join(failures[:8]) if failures else
+        f"{len(facts)} complete push fact(s) re-derived outside the merge-gate spine")
+
+
 def check_minority_gate_tails(report: str, findings_path: Path | None = None) -> Check:
     """Re-derive every required-check tail from its stamped observations."""
     name = "minority slow tails on merge-blocking checks are re-derived"
@@ -15335,6 +15495,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_cost_spine_runner_host_split(report, findings_path),
         check_drill_log_capture_relation(report, findings_path),
         check_no_rate_derived_dollars(report, findings_path),
+        check_default_branch_push_lane_isolated(report, findings_path),
         check_minority_gate_tails(report, findings_path),
         check_opt80_tail_lines(report, findings_path),
         check_opt80_tail_withheld_reasons(report, findings_path),

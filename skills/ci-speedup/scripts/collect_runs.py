@@ -10588,6 +10588,9 @@ def _detect_opt48_failure_rate(
 # runner-minutes tier (spec §7).
 
 _COST_RUNLIST_MAX = 100  # one page of all-status runs for branch/dup grouping
+# Default-branch pushes are a separate, post-merge lane. Bound the number of
+# pushed commits whose workflow jobs we fetch so the extra API cost stays fixed.
+_DEFAULT_BRANCH_PUSH_SAMPLE_MAX = 10
 # The headline timing sample deliberately contains successful runs only. When the
 # same cached all-status page shows a materially red default branch, say so beside
 # the headline instead of letting a successful-run median read like the whole window.
@@ -27466,6 +27469,62 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             _stamp["status"] = "below_threshold"
         _success_only_timing[_wf_path] = _stamp
     findings_doc["success_only_timing_by_workflow"] = _success_only_timing
+    # Pushes to the default branch happen after merge, so sample them on their
+    # own axis. Reuse the all-status pages already fetched above to choose the
+    # latest pushed SHAs; only the bounded per-run job walks are new API calls.
+    # The supplied commit-wall facts are deliberately consumed rather than
+    # reimplemented here: they are the merge seam for the shared producer.
+    _push_runs_by_sha: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    _push_run_wf: dict[str, str] = {}
+    _push_created_by_sha: dict[str, str] = {}
+    for _push_wf, _push_runs in all_status_runs_by_wf.items():
+        for _push_run in _push_runs:
+            _push_sha = str(_push_run.get("head_sha") or "")
+            if (not _push_sha or not default_branch
+                    or _push_run.get("event") != "push"
+                    or _push_run.get("head_branch") != default_branch
+                    or _push_run.get("status") != "completed"
+                    or _push_run.get("conclusion") in {"cancelled", "skipped"}):
+                continue
+            _push_runs_by_sha[_push_sha].append(_push_run)
+            _push_run_wf[str(_push_run.get("id") or id(_push_run))] = _push_wf
+            _push_created = str(_push_run.get("created_at") or "")
+            _push_created_by_sha[_push_sha] = max(
+                _push_created_by_sha.get(_push_sha, ""), _push_created)
+    _push_shas = sorted(
+        _push_runs_by_sha,
+        key=lambda sha: (_push_created_by_sha.get(sha, ""), sha),
+        reverse=True)[:_DEFAULT_BRANCH_PUSH_SAMPLE_MAX]
+    _push_run_rows = [
+        run
+        for sha in _push_shas
+        for run in sorted(
+            _push_runs_by_sha[sha],
+            key=lambda row: (str(row.get("id") or ""),
+                             str(row.get("created_at") or "")))
+    ]
+    if not default_branch:
+        _push_lane_status = "default_branch_unknown"
+        _push_lane_reason = "the default branch could not be determined"
+    elif all_status_failed:
+        _push_lane_status = "run_list_incomplete"
+        _push_lane_reason = "push run-list coverage was incomplete"
+    else:
+        _push_lane_status = "complete"
+        _push_lane_reason = ""
+    findings_doc["default_branch_push_lane"] = {
+        "status": _push_lane_status,
+        "status_reason": _push_lane_reason,
+        "sample_cap": _DEFAULT_BRANCH_PUSH_SAMPLE_MAX,
+        "sampled_push_count": len(_push_shas),
+        "sampled_run_count": len(_push_run_rows),
+        # Timing is filled in after the shared per-commit producer below runs.
+        "job_fetch_count": 0,
+        "job_fetch_failures": 0,
+        "p50_s": None,
+        "p90_s": None,
+        "facts": [],
+    }
     # `--root` is on for EVERY run now, so every workflow's YAML comes off the working
     # tree. `_root_is_clone_of` proved it is the right REPO; this asks the other half —
     # is it the right COMMIT LINE? A clean feature branch or a stale `main` is not dirty,
@@ -28107,43 +28166,23 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             _commit_shas.append(_sha)
             _commit_checks_by_sha[_sha] = _checks
             _commit_dropped_workflows[_sha] = _dropped_wfs
-    for _sha in _commit_shas:
-        _event = str((sha_meta.get(_sha) or {}).get("event") or "")
-        _run_rows: list[tuple[str, dict[str, Any]]] = []
-        for _wf in sorted(set(sampled_runs_by_wf) | set(all_status_runs_by_wf)):
-            if _wf in _commit_dropped_workflows.get(_sha, set()):
+    _commit_jobs_by_run: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for _wf, _job_runs in jobs_per_run_by_wf.items():
+        for _job_run in _job_runs:
+            if not _job_run:
                 continue
-            _runs_by_id: dict[str, dict[str, Any]] = {}
-            for _run in [*(all_status_runs_by_wf.get(_wf) or []),
-                         *(sampled_runs_by_wf.get(_wf) or [])]:
-                _runs_by_id[str(_run.get("id") or id(_run))] = _run
-            _runs = [
-                _run for _run in _runs_by_id.values()
-                if (str(_run.get("head_sha") or "") == _sha
-                    and str(_run.get("event") or "") == _event)
-            ]
-            # A workflow can run more than once on one commit and event (a
-            # reopened PR, a re-triggered run with a new id). The developer waits
-            # on the latest one; an older run is not part of this commit's wait.
-            if _runs:
-                _run_rows.append((_wf, max(
-                    _runs, key=lambda r: (str(r.get("created_at") or ""),
-                                          str(r.get("id") or "")))))
+            _rid = str(_job_run[0].get("_run_id") or "")
+            if _rid:
+                _commit_jobs_by_run[(_wf, _rid)] = _job_run
 
-        _jobs_by_run: dict[tuple[str, str], list[dict[str, Any]]] = {}
-        for _wf, _job_runs in jobs_per_run_by_wf.items():
-            for _job_run in _job_runs:
-                if not _job_run:
-                    continue
-                _rid = str(_job_run[0].get("_run_id") or "")
-                if _rid:
-                    _jobs_by_run[(_wf, _rid)] = _job_run
-
-        _expected_workflows: set[str] = set()
-        for _check_name in (_commit_checks_by_sha.get(_sha) or {}):
-            _mapped = _check_to_job_node(_check_name, _jg, crit_by_wf)
-            if _mapped is not None:
-                _expected_workflows.add(_mapped[0])
+    def _commit_wall_fact(_sha: str, _event: str,
+                          _run_rows: list[tuple[str, dict[str, Any]]],
+                          _jobs_by_run: dict[tuple[str, str], list[dict[str, Any]]],
+                          _expected_workflows: set[str]) -> dict[str, Any]:
+        """One commit's wall clock across every workflow run on that SHA and
+        event: earliest run creation to the last job completion, with the
+        slowest job, the next-longest job outside its `needs:` chain, and the
+        shared projection. Used by the PR lane and the default-branch push lane."""
         _missing: set[str] = _expected_workflows - {_wf for _wf, _run in _run_rows}
         _created: list[float] = []
         _created_iso: dict[float, str] = {}
@@ -28266,7 +28305,37 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 "projected_s": _projection.projected_s,
                 "multiple": _projection.multiple,
             }
-        _commit_facts.append(_fact)
+        return _fact
+
+    for _sha in _commit_shas:
+        _event = str((sha_meta.get(_sha) or {}).get("event") or "")
+        _run_rows: list[tuple[str, dict[str, Any]]] = []
+        for _wf in sorted(set(sampled_runs_by_wf) | set(all_status_runs_by_wf)):
+            if _wf in _commit_dropped_workflows.get(_sha, set()):
+                continue
+            _runs_by_id: dict[str, dict[str, Any]] = {}
+            for _run in [*(all_status_runs_by_wf.get(_wf) or []),
+                         *(sampled_runs_by_wf.get(_wf) or [])]:
+                _runs_by_id[str(_run.get("id") or id(_run))] = _run
+            _runs = [
+                _run for _run in _runs_by_id.values()
+                if (str(_run.get("head_sha") or "") == _sha
+                    and str(_run.get("event") or "") == _event)
+            ]
+            # A workflow can run more than once on one commit and event. The
+            # developer waits on the latest run, not every earlier trigger.
+            if _runs:
+                _run_rows.append((_wf, max(
+                    _runs, key=lambda r: (str(r.get("created_at") or ""),
+                                          str(r.get("id") or "")))))
+
+        _expected_workflows: set[str] = set()
+        for _check_name in (_commit_checks_by_sha.get(_sha) or {}):
+            _mapped = _check_to_job_node(_check_name, _jg, crit_by_wf)
+            if _mapped is not None:
+                _expected_workflows.add(_mapped[0])
+        _commit_facts.append(_commit_wall_fact(
+            _sha, _event, _run_rows, _commit_jobs_by_run, _expected_workflows))
 
     _complete_walls = [float(f["wall_s"]) for f in _commit_facts
                        if isinstance(f.get("wall_s"), (int, float))]
@@ -28277,6 +28346,44 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                   if _complete_walls else None),
         "facts": _commit_facts,
     }
+    # The default-branch push lane uses the same per-commit builder. Its pushed
+    # commits' job lists are the lane's only new API reads: at most the runs of
+    # `_DEFAULT_BRANCH_PUSH_SAMPLE_MAX` commits, memoised with every other job read.
+    _push_lane = findings_doc.get("default_branch_push_lane") or {}
+    if _push_shas and _push_lane.get("status") == "complete":
+        _push_rows_by_sha = {
+            _sha: [(_push_run_wf.get(str(_run.get("id") or id(_run)), ""), _run)
+                   for _run in _push_runs_by_sha[_sha]]
+            for _sha in _push_shas
+        }
+        _push_to_fetch = [
+            _run for _sha in _push_shas for _wf, _run in _push_rows_by_sha[_sha]
+            if (_wf, str(_run.get("id") or "")) not in _commit_jobs_by_run
+        ]
+        _push_kept, _push_failures = _gather_run_jobs(
+            client, repo, _push_to_fetch, keep_empty=True, memo=job_memo)
+        _push_jobs_by_run = dict(_commit_jobs_by_run)
+        for _run, _jobs in _push_kept:
+            _rid = str(_run.get("id") or "")
+            _push_jobs_by_run[(_push_run_wf.get(_rid, ""), _rid)] = list(_jobs)
+        _push_facts = [
+            _commit_wall_fact(_sha, "push", _push_rows_by_sha[_sha], _push_jobs_by_run,
+                              {_wf for _wf, _run in _push_rows_by_sha[_sha]})
+            for _sha in _push_shas
+        ]
+        _push_walls = [float(f["wall_s"]) for f in _push_facts
+                       if isinstance(f.get("wall_s"), (int, float))
+                       and not isinstance(f.get("wall_s"), bool)
+                       and float(f["wall_s"]) > 0]
+        _push_lane.update({
+            "job_fetch_count": len(_push_to_fetch),
+            "job_fetch_failures": int(_push_failures),
+            "p50_s": (round(_percentile(_push_walls, 50), 3)
+                      if _push_walls else None),
+            "p90_s": (round(_percentile(_push_walls, 90), 3)
+                      if _push_walls else None),
+            "facts": _push_facts,
+        })
     _chain_facts = _stamp_chain_facts(
         _era_repr_shas, _era_per_sha_checks, _chain_spine, _span_caps, _jg,
         crit_by_wf, _era_sha_intervals)
