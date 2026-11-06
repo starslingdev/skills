@@ -404,3 +404,41 @@ def test_commit_fact_carries_the_run_start_and_job_intervals_for_the_queue_split
         ("second-long", _iso(60), _iso(1500)),
     ]
     assert all(job["workflow_file"] in (_FIRST, _SECOND) for job in jobs)
+
+
+class _RetriggeredFirstWorkflowClient(_TwoWorkflowClient):
+    """The first workflow ran twice on the same commit and event (a reopened PR or
+    a re-triggered run with a new run id): an older run three hours earlier and the
+    current one. Only the latest run per workflow is the wait for this commit."""
+
+    def json(self, endpoint: str, allow_missing: bool = False):
+        match = re.match(r"repos/o/r/actions/workflows/(\d+)/runs\?(.*)", endpoint)
+        if match and not re.search(r"per_page=1(?![0-9])", match.group(2)):
+            result = super().json(endpoint, allow_missing)
+            if match.group(1) == "1":
+                current = result["workflow_runs"][0]
+                older = dict(current, id=99, created_at=_iso(-10800),
+                             run_started_at=_iso(-10800), updated_at=_iso(-9900))
+                result["workflow_runs"] = [current, older]
+            return result
+        if endpoint.startswith("repos/o/r/actions/runs/99/jobs"):
+            self.queries += 1
+            return {"jobs": [_job("first-long", 99, -10800, -9900)]}
+        return super().json(endpoint, allow_missing)
+
+
+def test_only_the_latest_run_per_workflow_counts_toward_the_commit_wall(monkeypatch):
+    doc = _collect(monkeypatch, _RetriggeredFirstWorkflowClient)
+    fact = doc["pr_critical_path"]["commit_wall_clock"]["facts"][0]
+    assert fact["wall_s"] == 1500.0
+    assert fact["created_at"] == _iso(0)
+
+
+def test_a_job_without_its_own_queued_time_queues_from_its_run(monkeypatch):
+    """GitHub job rows can omit `created_at`; the job then queued from its own
+    run's creation, never from the commit's first run (that gap is not queue)."""
+    doc = _collect(monkeypatch)
+    fact = doc["pr_critical_path"]["commit_wall_clock"]["facts"][0]
+    queued = {job["name"]: job["created_at"] for job in fact["jobs"]}
+    assert queued["second-long"] == _iso(60)
+    assert queued["first-long"] == _iso(0)

@@ -27991,11 +27991,18 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             for _run in [*(all_status_runs_by_wf.get(_wf) or []),
                          *(sampled_runs_by_wf.get(_wf) or [])]:
                 _runs_by_id[str(_run.get("id") or id(_run))] = _run
-            _runs = list(_runs_by_id.values())
-            for _run in _runs:
+            _runs = [
+                _run for _run in _runs_by_id.values()
                 if (str(_run.get("head_sha") or "") == _sha
-                        and str(_run.get("event") or "") == _event):
-                    _run_rows.append((_wf, _run))
+                    and str(_run.get("event") or "") == _event)
+            ]
+            # A workflow can run more than once on one commit and event (a
+            # reopened PR, a re-triggered run with a new id). The developer waits
+            # on the latest one; an older run is not part of this commit's wait.
+            if _runs:
+                _run_rows.append((_wf, max(
+                    _runs, key=lambda r: (str(r.get("created_at") or ""),
+                                          str(r.get("id") or "")))))
 
         _jobs_by_run: dict[tuple[str, str], list[dict[str, Any]]] = {}
         for _wf, _job_runs in jobs_per_run_by_wf.items():
@@ -28042,7 +28049,10 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 _job_intervals.append({
                     "name": str(_job.get("name") or ""),
                     "workflow_file": _wf,
-                    "created_at": str(_job.get("created_at") or ""),
+                    # A job with no queued time of its own queued from its run's
+                    # creation, never from the commit's first run.
+                    "created_at": str(_job.get("created_at")
+                                      or _run.get("created_at") or ""),
                     "started_at": str(_job.get("started_at") or ""),
                     "completed_at": str(_job.get("completed_at") or ""),
                 })
