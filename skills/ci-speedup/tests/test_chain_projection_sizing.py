@@ -84,11 +84,38 @@ def test_serial_chain_projection_keeps_other_members_and_parallel_floor():
     assert parallel_floor.projected_s == 600.0
     assert parallel_floor.multiple == 1.8
 
+    # Sixty seconds elapsed outside the measured paths stays in the projected
+    # wait. The path falls to 600s, then the unchanged queue/gap time is added.
+    with_queue_gap = _project_chain(
+        wall_s=1140.0,
+        pole_s=900.0,
+        runner_up_s=600.0,
+        chain_s=1080.0,
+        speedup=3.0,
+    )
+    assert with_queue_gap.projected_s == 660.0
+    assert with_queue_gap.multiple == 1.73
+
 
 def test_chainless_projection_keeps_the_single_job_formula():
     projection = wc.project_commit_wall(1500.0, 1440.0, 900.0, 4.0)
     assert projection.projected_s == 960.0
     assert projection.multiple == 1.56
+
+
+def test_chain_cascade_does_not_round_the_projection_before_the_bound():
+    ctx = wc.WallClockContext(
+        pr_checks=(("test", 80.0),),
+        own_check_names=frozenset({"test"}),
+        chain_members=frozenset({"setup", "test"}),
+        chain_p50_s=100.04,
+        chain_win_s=60.0,
+    )
+
+    result = wc.bound_measured_critical_path(57.375, ctx)
+
+    assert result.value == 57.4
+    assert result.reason is None
 
 
 def test_verifier_rederives_chain_projection_from_facts(tmp_path: Path):
@@ -112,7 +139,9 @@ def test_verifier_rederives_chain_projection_from_facts(tmp_path: Path):
                     "partial": False,
                     "wall_s": 1080.0,
                     "slowest_job": {"name": "test", "duration_s": 900.0},
-                    "next_longest_job": {"name": "parallel", "duration_s": 600.0},
+                    # Deliberately differs from chain_facts.runner_up_s. The
+                    # verifier must use the chain stamp's independent path.
+                    "next_longest_job": {"name": "parallel", "duration_s": 350.0},
                     "projection_3x": {
                         "job_speedup": 3.0,
                         "projected_s": 600.0,
@@ -139,3 +168,14 @@ def test_verifier_rederives_chain_projection_from_facts(tmp_path: Path):
     mutant = verifier.check_chain_projection_matches_facts(findings)
     assert not mutant.ok
     assert "780.0 != chain-derived 600.0" in mutant.detail
+
+
+def test_verifier_handles_non_utf8_findings_as_unreadable(tmp_path: Path):
+    verifier = _load_verifier()
+    findings = tmp_path / "findings.json"
+    findings.write_bytes(b"\xff")
+
+    check = verifier.check_chain_projection_matches_facts(findings)
+
+    assert not check.ok
+    assert check.detail == "findings.json unreadable"

@@ -283,6 +283,7 @@ def project_commit_wall(
     chain_s: float | None = None,
     pole_s: float | None = None,
     runner_up_s: float | None = None,
+    round_result: bool = True,
 ) -> CommitProjection:
     """Project a whole-commit wait after speeding up its slowest job.
 
@@ -317,7 +318,9 @@ def project_commit_wall(
         projected_path = max(chain - pole + pole / speedup, runner_up)
         projected = unchanged + projected_path
 
-    projected = round(max(projected, 0.0), 1)
+    projected = max(projected, 0.0)
+    if round_result:
+        projected = round(projected, 1)
     multiple = round(wall / projected, 2) if projected > 0 else None
     return CommitProjection(projected, multiple)
 
@@ -459,13 +462,14 @@ def bound_measured_critical_path(value: float, ctx: WallClockContext) -> BoundRe
             chain_s=_chain_for_projection,
             pole_s=_member_span,
             runner_up_s=_runner_up,
+            round_result=False,
         )
         cap = max(0.0, min(
             value,
             _chain_for_projection - _projection.projected_s,
             _member_span,
         ))
-        if cap >= round(value, 1):
+        if round(cap, 1) >= round(value, 1):
             return BoundResult(round(value, 1))
         _bound_via = ("chain's headroom" if ctx.chain_win_s <= _member_span
                       else "member's own span")

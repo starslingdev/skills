@@ -4633,7 +4633,7 @@ def check_chain_projection_matches_facts(findings_path: Path | None) -> Check:
         return Check(name, True, "no findings JSON supplied", skipped=True)
     try:
         data = json.loads(findings_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return Check(name, False, "findings.json unreadable")
     cp = data.get("pr_critical_path") if isinstance(data, dict) else None
     cp = cp if isinstance(cp, dict) else {}
