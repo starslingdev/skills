@@ -13,6 +13,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-11-06** — Add OPT102 for multi-platform image builds that compile a foreign architecture under emulation. The static detector reads only local Dockerfiles and stays quiet for explicit cross-compilation or copy-only stages; the log leaf sizes only measured foreign-architecture compile seconds and explains the runner-minute tradeoff between cross-compilation and native per-architecture jobs. The catalog now contains 97 patterns.
 - **2026-11-06** — Keep Vitest coverage-provider guidance grounded in matched measurements. The report preserves the measured compile/load share, asks maintainers to time both providers on the same commit, warns that coverage thresholds need re-baselining, and credits no provider-switch saving without matched results.
 - **2026-11-06** — Keep OPT9 compiler build-state and generated-output cache suggestions uncredited until a same-workload before/after measurement shows a net saving. Lint and format result caches retain their existing sizing.
 - **2026-11-06** — Limit minority slow-tail findings to checks confirmed as required or reachable through a required job's `needs:` graph. A conservatively retained file-backed check whose job cannot be identified stays visible on the measured spine without being described as merge-blocking, and verification rejects a tail attached to such a check.

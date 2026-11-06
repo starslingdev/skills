@@ -1678,6 +1678,81 @@ def _uses(step: dict) -> str:
     return str(step.get("uses") or "")
 
 
+_OPT102_ROOT: Path | None = None
+_OPT102_COMPILE_RE = re.compile(
+    r"\b(?:go\s+build|cargo\s+build|(?:npm|pnpm|yarn)\s+(?:run\s+)?build|"
+    r"cmake\s+--build|dotnet\s+(?:build|publish)|gradle\w*\s+.*\bbuild|make(?:\s|$))",
+    re.IGNORECASE,
+)
+_OPT102_CROSS_RE = re.compile(
+    r"(?:\$BUILDPLATFORM|tonistiigi/xx|\bGO(?:ARCH|OS)\b|\bCARGO_BUILD_TARGET\b|"
+    r"(?:^|\s)--target(?:\s|=))",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _detect_opt102(doc: dict, raw: str) -> list[Hit]:
+    """Find local multi-platform image builds whose compile stage lacks a
+    build-platform pin or an explicit cross-compilation target."""
+    if _OPT102_ROOT is None:
+        return []
+    root = _OPT102_ROOT.resolve()
+    jobs = doc.get("jobs") or {}
+    if not isinstance(jobs, dict):
+        return []
+    hits: list[Hit] = []
+    for job_name, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        for step in _steps(job):
+            if not re.match(r"^docker/build-push-action@", _uses(step)):
+                continue
+            with_ = step.get("with") or {}
+            if not isinstance(with_, dict):
+                continue
+            value = with_.get("platforms")
+            if isinstance(value, list):
+                platforms = [str(item).strip().lower() for item in value]
+            else:
+                platforms = [item.strip().lower() for item in
+                             re.split(r"[,\n]", str(value or "")) if item.strip()]
+            if ("linux/amd64" not in platforms
+                    or not any(p.startswith("linux/") and p != "linux/amd64"
+                               for p in platforms)):
+                continue
+            context = str(with_.get("context") or ".").strip()
+            dockerfile = str(with_.get("file") or "Dockerfile").strip()
+            if (not context or not dockerfile or "${{" in context + dockerfile
+                    or "://" in context or context.startswith("git@")
+                    or Path(context).is_absolute() or Path(dockerfile).is_absolute()):
+                continue
+            candidate = (root / context / dockerfile).resolve()
+            try:
+                candidate.relative_to(root)
+                docker_text = candidate.read_text(encoding="utf-8", errors="replace")
+            except (ValueError, OSError):
+                continue
+            stages = re.split(r"(?im)(?=^\s*FROM\s+)", docker_text)
+            risky_stage = next((stage for stage in stages
+                                if re.match(r"(?i)^\s*FROM\s+", stage)
+                                and _OPT102_COMPILE_RE.search(stage)
+                                and not _OPT102_CROSS_RE.search(stage)), None)
+            if risky_stage is None:
+                continue
+            line = _line_of_in_job(raw, str(job_name), "docker/build-push-action@")
+            stage_head = risky_stage.splitlines()[0].strip()
+            hits.append(Hit(
+                line=line,
+                affected_jobs=[str(job_name)],
+                evidence=(f"job `{job_name}` builds {', '.join(platforms)} from "
+                          f"`{candidate.relative_to(root)}`; compile stage "
+                          f"`{stage_head}` has no build-platform or cross-target signal"),
+                match_text=str(candidate.relative_to(root)),
+                snippet=_raw_line(raw, line),
+            ))
+    return hits
+
+
 def _run(step: dict) -> str:
     r = step.get("run")
     return r if isinstance(r, str) else ""
@@ -2967,6 +3042,7 @@ _DETECTORS: dict[str, Any] = {
     "OPT45": _detect_opt45,
     "OPT62": _detect_opt62,
     "OPT63": _detect_opt63,
+    "OPT102": _detect_opt102,
 }
 
 
@@ -6338,7 +6414,8 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
 
     # Index local composite actions that run git-history ops, so OPT28 can see a
     # `git checkout origin/main` hidden inside `uses: ./.github/actions/foo`.
-    global _GIT_HISTORY_LOCAL_ACTIONS, _GIT_HISTORY_LOCAL_SCRIPTS
+    global _GIT_HISTORY_LOCAL_ACTIONS, _GIT_HISTORY_LOCAL_SCRIPTS, _OPT102_ROOT
+    _OPT102_ROOT = root
     _GIT_HISTORY_LOCAL_ACTIONS = _index_local_git_actions(root, parsed)
     _GIT_HISTORY_LOCAL_SCRIPTS = _index_local_git_scripts(root, parsed)
 

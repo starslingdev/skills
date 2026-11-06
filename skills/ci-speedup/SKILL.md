@@ -17,8 +17,8 @@ license: MIT
 
 # ci-speedup — CI Optimization Audit for GitHub Actions
 
-Audits a repository's GitHub Actions workflows against a 96-pattern
-catalog — 85 **hygiene/data-driven** patterns plus 11 **structural /
+Audits a repository's GitHub Actions workflows against a 97-pattern
+catalog — 86 **hygiene/data-driven** patterns plus 11 **structural /
 critical-path** patterns routed from the measured long pole — and
 produces a **root-cause-analysis** report with measured impact on two
 axes — developer wall-clock wait and runner-minutes (cloud bill). The
@@ -97,7 +97,7 @@ that has produced confident-but-wrong findings before; they surface as a
 
 ## Structural / critical-path findings (the high-leverage track)
 
-On real repos almost every hygiene hit (OPT1–OPT69, OPT76, OPT77, OPT79–OPT82, OPT86, OPT88–OPT91, OPT93, OPT94, OPT96 — mostly declarative)
+On real repos almost every hygiene hit (OPT1–OPT69, OPT76, OPT77, OPT79–OPT82, OPT86, OPT88–OPT91, OPT93, OPT94, OPT96–OPT98, OPT100–OPT102 — mostly declarative)
 moves **~0 developer wall-clock** — the true bottleneck is usually a check working
 as intended that is simply the slowest thing gating the merge, with no catalog
 match. The **structural track** (category 14, OPT70–OPT75, OPT78, OPT83–OPT85, OPT87) attacks that: a second
@@ -417,7 +417,7 @@ severity calibration, ≥2-pass agreement; a one-pass-only finding is cut or esc
 
 ## Pattern catalog
 
-Patterns live one per file in `references/patterns/opt<N>-*.md` (96 patterns
+Patterns live one per file in `references/patterns/opt<N>-*.md` (97 patterns
 in 14 categories, from Caching to **Structural / Critical-Path Levers**). Each
 file's frontmatter declares the id, impact tier, finding class (`static` /
 `data-driven` / `structural`), detector and fix strategy slug; structural

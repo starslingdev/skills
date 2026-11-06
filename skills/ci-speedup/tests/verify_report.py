@@ -13871,6 +13871,7 @@ _VR_LEAF_STEP_CATEGORY: dict[str, str] = {
     "playwright-parallel": "test",
     "pytest-no-xdist": "test",
     "test-loop-serial": "test",
+    "emulated-image-compile": "build",
     "cargo-test-shard": "test",
     "benchmark-serial-reruns": "test",
     "android-emulator-shard": "test",

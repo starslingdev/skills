@@ -54,7 +54,7 @@ def test_dependency_cache_leaf_keeps_precedence_over_serial_test_loop():
     assert leaf is not None and leaf["fix_key"] == "dependency-cache"
 
 
-def test_serial_test_loop_is_last_literal_leaf_in_parser_order():
+def test_emulated_image_compile_leaf_follows_serial_test_loop_in_parser_order():
     tree = ast.parse(textwrap.dedent(inspect.getsource(bp._parse_log)))
     ordered = []
     for node in ast.walk(tree):
@@ -65,7 +65,7 @@ def test_serial_test_loop_is_last_literal_leaf_in_parser_order():
                     and isinstance(value, ast.Constant) and isinstance(value.value, str)):
                 ordered.append((node.lineno, value.value))
     leaf_keys = [key for _line, key in sorted(ordered)]
-    assert leaf_keys[-1] == "test-loop-serial"
+    assert leaf_keys[-2:] == ["test-loop-serial", "emulated-image-compile"]
 
 
 def test_runner_advisory_explains_why_a_serial_loop_holds_it_back():
