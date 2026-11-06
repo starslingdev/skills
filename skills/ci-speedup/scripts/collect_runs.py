@@ -28085,8 +28085,13 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                   if _complete_walls else None),
         "facts": _commit_facts,
     }
+    _joint_runner_bases = {
+        tuple(sorted((observation.get("check_runners") or {}).items()))
+        for observation in _joint_observations
+    }
     if (_joint_population_complete and _joint_observations
-            and len(_joint_observations) == len(_commit_facts)):
+            and len(_joint_observations) == len(_commit_facts)
+            and len(_joint_runner_bases) == 1):
         findings_doc[joint.JOINT_SCENARIO_INPUTS_KEY] = {
             "contract_version": joint.SCENARIO_CONTRACT_VERSION,
             "topology": joint.SUPPORTED_TOPOLOGY,

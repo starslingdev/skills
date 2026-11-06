@@ -28,7 +28,8 @@ import joint_scenario as js  # noqa: E402
 BASIS = "era=e1;runner=ubuntu-latest;population=pr"
 
 
-def obs(observation_id, durations, *, basis=BASIS, validated=True, residual=0.0):
+def obs(observation_id, durations, *, basis=BASIS, validated=True, residual=0.0,
+        runner="ubuntu-latest"):
     names = set(durations)
     return js.GatingObservation(
         observation_id=observation_id,
@@ -38,7 +39,7 @@ def obs(observation_id, durations, *, basis=BASIS, validated=True, residual=0.0)
         scheduling_residual_s=residual,
         check_attempts={name: f"{observation_id}-{name}#attempt1"
                         for name in names},
-        check_runners={name: "ubuntu-latest" for name in names},
+        check_runners={name: runner for name in names},
     )
 
 
@@ -376,6 +377,21 @@ def test_missing_attempt_or_runner_identity_is_rejected():
 
     assert res.supported is False
     assert res.rejection.code == "missing_observation_identity"
+
+
+def test_mixed_runner_populations_are_rejected():
+    rows = [
+        obs("r0", {"A": 300.0, "B": 299.0}),
+        obs("r1", {"A": 300.0, "B": 299.0}, runner="macos-latest"),
+    ]
+    g = gating(rows)
+    oids = ["r0", "r1"]
+    res = js.evaluate_scenario(g, [
+        constant_effect("F-A", "A::s", "A", 100.0, 250.0, oids),
+        constant_effect("F-B", "B::s", "B", 100.0, 250.0, oids)])
+
+    assert res.supported is False
+    assert res.rejection.code == "mixed_runner_basis"
 
 
 def test_unvalidated_concurrency_is_rejected():
@@ -1055,6 +1071,10 @@ def _observed_rejection_codes():
             observation_id="r0", basis=BASIS,
             check_durations={"A": 300.0, "B": 299.0},
             concurrency_validated=True)]), pair()))
+    note(js.evaluate_scenario(gating([
+        obs("r0", {"A": 300.0, "B": 299.0}),
+        obs("r1", {"A": 300.0, "B": 299.0}, runner="macos-latest"),
+    ]), pair()))
     note(js.evaluate_scenario(gating(
         [obs(f"r{i}", {"A": 300.0, "B": 299.0, "C": 290.0}) for i in range(3)],
         check_names={"A", "B"}), pair()))
@@ -1138,7 +1158,7 @@ def test_the_exported_rejection_codes_are_exactly_the_ones_the_module_emits():
 
 
 def test_the_rejection_vocabulary_size_is_pinned():
-    assert len(js.REJECTION_CODES) == 33
+    assert len(js.REJECTION_CODES) == 34
     assert all(isinstance(c, str) and c.strip() for c in js.REJECTION_CODES)
 
 

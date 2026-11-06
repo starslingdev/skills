@@ -194,6 +194,7 @@ REJECTION_CODES: frozenset[str] = frozenset({
     "concurrency_unvalidated",
     "scheduling_residual_exceeds_tolerance",
     "missing_observation_identity",
+    "mixed_runner_basis",
     # who and what an effect claims to be
     "missing_finding_id",
     "duplicate_finding_id",
@@ -327,6 +328,8 @@ def _validate_gating(g: GatingSet) -> ScenarioRejection | None:
                                  "the gating set names no checks")
 
     seen: set[str] = set()
+    runners_by_check: dict[str, set[str]] = {
+        name: set() for name in g.check_names}
     for o in g.observations:
         if o.observation_id in seen:
             return ScenarioRejection(
@@ -376,6 +379,8 @@ def _validate_gating(g: GatingSet) -> ScenarioRejection | None:
                     "missing_observation_identity",
                     f"observation {o.observation_id!r} does not carry one "
                     f"nonblank {label} identity for every gating check")
+        for name, runner in o.check_runners.items():
+            runners_by_check[name].add(str(runner))
         if not o.concurrency_validated:
             return ScenarioRejection(
                 "concurrency_unvalidated",
@@ -394,6 +399,13 @@ def _validate_gating(g: GatingSet) -> ScenarioRejection | None:
                 f"observation {o.observation_id!r} has a {res}s scheduling "
                 f"residual, beyond the {CONCURRENCY_TOLERANCE_S}s tolerance; "
                 "a staggered start is not modelled by a runtime-only scenario")
+    mixed_runners = sorted(
+        name for name, runners in runners_by_check.items() if len(runners) != 1)
+    if mixed_runners:
+        return ScenarioRejection(
+            "mixed_runner_basis",
+            "observations use more than one runner basis for "
+            f"{', '.join(mixed_runners)}")
     return None
 
 
