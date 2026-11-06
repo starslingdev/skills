@@ -61,6 +61,7 @@ EXCLUDE = "exclude"       # run/harness artifact → never a skill bug
 # classified here (so no check is ever left undisposed).
 TRIAGE_ALLOWLIST = {
     "wall-clock headline carries next gate and verification guidance": AUTO_SEED,
+    "per-commit wall-clock projections are physically bounded": AUTO_SEED,
     "primary section present (Long poles)": AUTO_SEED,                                              # check_primary_section_present
     "static-only banner matches CI shape": AUTO_SEED,                                               # check_static_only_banner_matches_ci_shape
     "headline names the wall-clock (merge-wait) axis": AUTO_SEED,                                   # check_headline_names_wall_clock
@@ -88,7 +89,6 @@ TRIAGE_ALLOWLIST = {
     "headline reconciles a non-universal slowest check with the population floor": AUTO_SEED,        # check_headline_floor_presence_reconciled
     "presence-causal headline only when the slowest check is minority-present": AUTO_SEED,          # check_headline_presence_causal_only_when_minority
     "chain headline re-derives from the stamped chain facts": AUTO_SEED,                             # check_headline_chain_matches_stamp (ENG-1 PR-N2)
-    "chain projections re-derive from stamped chain facts": AUTO_SEED,                              # check_chain_projection_matches_facts
     "rendered chain total is never below the largest member it sums": AUTO_SEED,                      # check_aggregate_total_ge_largest_member (issue #25/#22)
     "headline merge-wait is never above the measured makespan p50": AUTO_SEED,                        # check_headline_wait_within_makespan (issue #25/#24)
     "each finding's runner-minute saving is within its jobs' measured compute": AUTO_SEED,            # check_saving_within_measured_compute (issue #25)
@@ -178,6 +178,7 @@ CLASS_ENUM = frozenset({
 # workflow's class routing; classifying it here is for consistency/clustering with LLM-found
 # instances of the same underlying defect shape, and for the audit trail.
 CHECK_CLASS = {
+    "per-commit wall-clock projections are physically bounded": "fabricated-or-unsupported-finding",
     "primary section present (Long poles)": "missing-phase-check",                       # a required phase section is absent
     "static-only banner matches CI shape": "fabricated-or-unsupported-finding",          # dormant-repo banner asserted at a live no-PR-gating repo / "no run timing" beside priced timed runs — the report contradicts its own data
     "headline names the wall-clock (merge-wait) axis": "ambiguous-phase-instruction",     # headline mislabels the axis it renders
@@ -206,7 +207,6 @@ CHECK_CLASS = {
     "headline reconciles a non-universal slowest check with the population floor": "mis-ranked-lever",  # a non-universal check headlined as the typical wait without the presence caveat = a critical-path framing error
     "presence-causal headline only when the slowest check is minority-present": "fabricated-or-unsupported-finding",  # headline blames the floor drop on presence the populations contradict
     "chain headline re-derives from the stamped chain facts": "mis-ranked-lever",  # ENG-1 PR-N2: chain headline drifted from chain_facts
-    "chain projections re-derive from stamped chain facts": "estimated-not-measured",  # a projected wait that contradicts the stamped serial chain overstates or understates the modeled outcome
     "rendered chain total is never below the largest member it sums": "fabricated-or-unsupported-finding",  # issue #22: a rendered total below a member it sums is a number the data contradicts
     "headline merge-wait is never above the measured makespan p50": "estimated-not-measured",  # issue #24: a crowned/modeled wait above the MEASURED wall — the estimate overstates the measurement
     "each finding's runner-minute saving is within its jobs' measured compute": "estimated-not-measured",  # issue #25: a modeled saving above the job's measured compute — an estimate exceeding its physical bound

@@ -309,6 +309,41 @@ def test_pole_not_reframed_as_hygiene_discriminator(tmp_path: Path):
     assert _tag_for(rep, F, tmp_path, findings=_double_frame_findings("test")) == "SKIP"
 
 
+def test_measured_opt32_is_the_only_new_pole_hygiene_exception(tmp_path: Path):
+    rep = _good() + _drilled_pole("test (22.x)", "ci.yml")
+    sect = _also_noticed_section("ci.yml", "test", "OPT32 - Add path filters")
+
+    def finding(*, skipped: int, rate: float, modeled: float | None = None) -> dict:
+        row = {
+            "pattern": "OPT32",
+            "runner_min_saving": None,
+            "wall_clock_p50_s": 0.0,
+            "affected_jobs": ["test"],
+            "workflow_file": ".github/workflows/ci.yml",
+            "path_filter_measurement": {
+                "sampled_prs": 60,
+                "would_skip_prs": skipped,
+                "hit_rate": rate,
+            },
+        }
+        if modeled is not None:
+            row["runner_min_unrealizable"] = True
+            row["runner_min_unrealizable_s"] = modeled
+        return {"findings": [row]}
+
+    # PASS: the exact new measured forms, including a useful zero-hit result.
+    assert _tag_for(rep + sect, _DOUBLE_FRAME, tmp_path,
+                    findings=finding(skipped=0, rate=0.0)) == "PASS"
+    assert _tag_for(rep + sect, _DOUBLE_FRAME, tmp_path,
+                    findings=finding(skipped=3, rate=0.05, modeled=49.3)) == "PASS"
+    # FAIL: an inconsistent stamp or positive result without its modeled value
+    # cannot use the exception. Other patterns remain covered by the discriminator above.
+    assert _tag_for(rep + sect, _DOUBLE_FRAME, tmp_path,
+                    findings=finding(skipped=3, rate=0.5, modeled=49.3)) == "FAIL"
+    assert _tag_for(rep + sect, _DOUBLE_FRAME, tmp_path,
+                    findings=finding(skipped=3, rate=0.05)) == "FAIL"
+
+
 def _struct_findings(*findings: dict) -> dict:
     return {"pr_critical_path": {}, "findings": list(findings)}
 
