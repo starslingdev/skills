@@ -242,10 +242,10 @@ title_template: "Cache Key Entropy Too High or Unstable"
 ```bash
 # Search for cache keys with dynamic values
 grep -rn 'actions/cache' .github/workflows/ -A 5 | grep 'key:'
-# Flag keys containing: ${{ github.run_id }}, date, timestamp, random
+# Flag ${{ github.run_id }} only without a compatible restore-keys prefix; always flag date, timestamp, random
 ```
 
-**Fix**: Use deterministic cache keys based on lockfile hashes, tool versions, and OS. Use `restore-keys` for fallback matching.
+**Fix**: Match the key shape to what is cached. Dependency download stores use a deterministic lockfile + tool-version + OS key. Tool-result and build-output caches change as the job runs, so use a rolling primary key such as `<tool>-<os>-<lockfile-hash>-${{ github.sha }}` with a stable `restore-keys` prefix such as `<tool>-<os>-<lockfile-hash>-`. An exact primary-key hit is not saved again; the rolling suffix lets the updated cache be saved while the stable prefix restores the newest compatible result.
 
 ---
 
@@ -355,7 +355,7 @@ title_template: "Tool-Specific Cache Flag Not Enabled"
 - Cross-check that the relevant cache directory is NOT already wrapped by `actions/cache`
 - Per-run saving is usually a large fraction of the tool's runtime on unchanged files (50-95% reduction on full incremental hit)
 
-**Fix**: Add the tool's cache flag AND wrap the cache directory in `actions/cache` with a stable key (hash of lockfile + tool-version). For Prettier: `prettier --check --cache --cache-strategy content --cache-location ./node_modules/.cache/prettier`. For ESLint: `eslint --cache --cache-location ./node_modules/.cache/eslint`. Verify the tool's cache file is gitignored.
+**Fix**: Add the tool's cache flag AND wrap the cache directory in `actions/cache`. Because tool-result caches change on every run, use a rolling primary key such as `<tool>-<os>-<lockfile-hash>-${{ github.sha }}` with a stable `restore-keys` prefix such as `<tool>-<os>-<lockfile-hash>-`. An exact primary-key hit is not saved again; the rolling suffix lets the updated result be saved for the next run. For Prettier: `prettier --check --cache --cache-strategy content --cache-location ./node_modules/.cache/prettier`. For ESLint: `eslint --cache --cache-location ./node_modules/.cache/eslint`. Verify the tool's cache file is gitignored.
 
 ---
 
@@ -2020,6 +2020,8 @@ title_template: "Long Test Job Without Sharding"
 **Required-checks caveat**: if the job you're sharding is a **required status check** (a merge gate — which the long pole usually is), the new shard jobs must be added to branch protection as required checks (or the ruleset equivalent), or the sharded-out test work silently stops gating merges — everything stays green while the gate no longer actually runs it. The split isn't complete until the new jobs gate the merge, and re-establishing that gating is usually an admin-only step. If the split routes the old check's work behind a `needs:` edge and an aggregator, see OPT75's [dependency-failure skip caveat](#opt75--long-pole-optimize-or-relocate-the-dominant-step) — a dependent skipped by a failed dependency reports skipped, not failed, so the aggregator must run with `always()` (not `!cancelled()`, which a cancelled run skips) and propagate every `needs.<job>.result`, and keeping the required check name on that aggregator re-gates the merge without an admin.
 
 **Wall-clock vs runner-minutes**: Sharding splits the long pole's test execution across **PARALLEL** jobs, so it lowers **wall-clock** (the critical path) but does **NOT** save runner-minutes — the same test work still runs, and more jobs add per-job fixed overhead (checkout, setup, dep install), so runner-minutes go **UP**. The two axes therefore point opposite ways: it is a **TOP Tier-1 wall-clock lever** (push it aggressively when cost is not a constraint — it directly parallelizes the long pole), but it **saves no runner-minutes** (it adds billable compute), so the bill axis shows zero. Note diminishing returns: sharding floors at the per-job fixed overhead, so it must be **stacked** with cache fixes that attack that overhead (warm build cache, dependency cache, browser-binary cache) — past a certain shard count the setup tax dominates and adding shards stops moving wall-clock. See `wall-clock-methodology.md` §7.
+
+**Partition-correctness caveat**: a sharded split is only as safe as its guards, and the failure mode is silent — everything stays green while coverage quietly drops. Whichever shape the fix takes (matrix job, in-job `parallel:` step group, or a hand-rolled background-process split), the agent's own tests must prove, not assume: (1) **the shards partition the input set exactly** — every item (page, test file, spec) is covered by exactly one shard across every valid shard count, not left out or doubled up by an off-by-one in the index math; (2) **the shard count is validated where it is read**, in every step that reads it — an empty, zero, or non-numeric count must fail the job loudly rather than silently running zero shards or one shard that claims the whole sweep; (3) **a documented rollback to a lower shard count (often 1) does not itself defeat the guard tests** — if the tests hardcode or derive their expectations from the *current* shard count instead of exercising the real script/workflow logic at an independent count, dialing the count down for an incident silently turns the new guard tests into no-ops at exactly the moment they're needed; and (4) **a result-collection step that merges per-shard verdicts keeps every failure**, not just the first or last one it sees. A split that passes functionally but fails any of these checks is a finding that found a problem, not a safe win — report it as unverified.
 
 ---
 
