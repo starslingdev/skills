@@ -2216,8 +2216,8 @@ def _parse_log(text: str,
                  "rows": [("transform + import (compile/instrument/load)", compile_load,
                            None),
                           ("actual test assertions", te, None)],
-                 "blocker_note": "BIGGEST LEVER - caused by istanbul coverage "
-                                 "instrumenting every imported file",
+                 "blocker_note": "BIGGEST MEASURED PHASE - compile/instrument/load "
+                                 "dominates the summed worker time in this run",
                  "pct_of": "sum", "scale_to_step": True},
             ],
         }
@@ -2979,21 +2979,24 @@ _FIX_META: dict[str, dict[str, Any]] = {
                    "step to confirm the drop.",
     },
     "vitest-v8-coverage": {
-        "cause": "The gating `test` job runs vitest with istanbul coverage across "
-                 "every package, and the compile+instrument phase dominates the run, "
-                 "not the assertions - istanbul instruments every imported file.",
+        "cause": "The gating `test` job ran vitest with istanbul coverage across "
+                 "every package. In the measured run, compile+instrument/load took "
+                 "the dominant share of the summed worker time; the assertions did not.",
         "look": "the vitest config / coverage setup and the package test scripts - "
                 "grep for `coverage`, `provider: 'istanbul'`, `--coverage`. Check what "
                 "actually consumes the coverage output (a PR gate? a report upload?).",
         "constraints": "If coverage must gate PRs, switching provider or scoping it "
-                       "has to keep whatever consumes the output working. The v8 "
-                       "provider is much cheaper than istanbul but reports slightly "
-                       "differently - verify the consumer.",
+                       "has to keep whatever consumes the output working. Time both "
+                       "providers on the same commit before choosing one. Coverage "
+                       "figures change between providers, so re-baseline thresholds "
+                       "and verify the consumer. No provider-switch saving is credited "
+                       "without matched measurements.",
         "docs": ["Vitest coverage docs (v8 vs istanbul providers): "
                  "https://vitest.dev/guide/coverage"],
-        "deliver": "Decide whether coverage needs to gate PRs at all, and if so which "
-                   "provider fits; apply the change to the vitest config / scripts, "
-                   "verify the coverage consumer still works, and re-measure the step.",
+        "deliver": "Decide whether coverage needs to gate PRs at all. If comparing "
+                   "providers, time both on the same commit, account for changed coverage "
+                   "figures and re-baseline thresholds, verify the coverage consumer still "
+                   "works, and re-measure the step.",
     },
     # OPT78 - see references/patterns/opt78-*.md. HIGH risk: this lever buys
     # speed by letting test files SHARE a module registry, which can leak state
@@ -8915,8 +8918,13 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
         # describe it falsely (it may sit ON the critical path, and it claims
         # no runner-minutes), so it gets its own body.
         return _opt82_prompt(title, members, url, locs)
+    opt9_measure = [m for m in members if m.get("opt9_measure_before_after") is True]
     prefer: dict[str, Any] | None = None
-    if wait:
+    if pat == "OPT9" and len(opt9_measure) == len(members):
+        saving = ("Saving: uncredited - compiler build-state and generated-output "
+                  "cache overhead can cancel the avoided work. Measure before and "
+                  "after on the same workload before crediting seconds.")
+    elif wait:
         saving = ("Cost: developer WALL-CLOCK wait before the job starts (queue / "
                   "wait-to-start) - NOT a runner-bill saving and NOT off the critical "
                   "path. For a `needs:`-gated job it is measured from when its last "
@@ -8976,6 +8984,12 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
             f"Where: {locs}."]
     if ev:
         body.append(f"What ci-speedup saw: {ev}")
+    if opt9_measure and len(opt9_measure) != len(members):
+        body.append(
+            "Compiler build-state and generated-output occurrences in this group "
+            "are uncredited: measure before and after on the same workload before "
+            "crediting seconds."
+        )
     if pat == "OPT25":
         # The diagnosis/next step must travel with the agent hand-off, including
         # planner knobs. Use the same member as the credited magnitude.
@@ -10058,6 +10072,30 @@ def _also_noticed_block(findings: list[dict[str, Any]],
         # the valueless + all-pole test below excludes exactly those, mirroring
         # `check_pole_not_reframed_as_hygiene`. A finding that also touches a NON-pole job still
         # renders (the all-pole guard keeps it), so its signal is not lost off-path.
+        if str(f.get("pattern") or "") == "OPT32":
+            measurement = f.get("path_filter_measurement")
+            if isinstance(measurement, dict):
+                sampled = measurement.get("sampled_prs")
+                skipped = measurement.get("would_skip_prs")
+                rate = measurement.get("hit_rate")
+                stamp_ok = (
+                    isinstance(sampled, int) and not isinstance(sampled, bool) and sampled > 0
+                    and isinstance(skipped, int) and not isinstance(skipped, bool)
+                    and 0 <= skipped <= sampled
+                    and isinstance(rate, (int, float)) and not isinstance(rate, bool)
+                    and math.isclose(float(rate), round(skipped / sampled, 4), abs_tol=5e-5)
+                )
+                modeled_ok = (
+                    skipped == 0
+                    or (f.get("runner_min_unrealizable") is True
+                        and (_num(f.get("runner_min_unrealizable_s")) or 0.0) > 0)
+                )
+                if stamp_ok and modeled_ok and f.get("runner_min_saving") is None:
+                    # This measured row is deliberately uncredited, but it is not
+                    # valueless: a positive hit rate renders a modeled upper bound,
+                    # while zero is itself the measured result. Keep either result
+                    # visible without letting it compete with the pole in the close.
+                    return False
         if (_num(f.get("runner_min_saving")) or 0.0) > 0 or _saves_wall_clock(f):
             return False
         # OPT82 is numberless BY DESIGN (uncredited, benchmark first), not
@@ -10171,6 +10209,11 @@ def _also_noticed_block(findings: list[dict[str, Any]],
             ev = _group_evidence(ms, prefer=driver)
         elif pat == "OPT82":
             summary_metric = "uncredited, benchmark first"
+            ev = _group_evidence(ms, compose=True)
+        elif pat == "OPT32":
+            modeled = sum(_num(m.get("runner_min_unrealizable_s")) or 0.0 for m in ms)
+            summary_metric = (f"{_fmt_runner_min(modeled)} modeled upper bound"
+                              if modeled > 0 else "no bill saving")
             ev = _group_evidence(ms, compose=True)
         else:
             summary_metric = bill
@@ -12578,10 +12621,59 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
                         "stages push the wall above the sum; re-run-inflated member spans "
                         "push the sum above the wall. Budget on the observed wall; use the "
                         "chain for attribution."]
+    _commit_wall_block: list[str] = []
+    _commit_wall = cp.get("commit_wall_clock") or {}
+    _commit_p50 = _num(_commit_wall.get("p50_s"))
+    _commit_p90 = _num(_commit_wall.get("p90_s"))
+    _commit_facts = [f for f in (_commit_wall.get("facts") or [])
+                     if isinstance(f, dict)]
+
+    def _commit_duration(seconds: float) -> str:
+        whole = max(0, round(seconds))
+        hours, rem = divmod(whole, 3600)
+        minutes, secs = divmod(rem, 60)
+        return (f"{hours}h {minutes:02d}m {secs:02d}s" if hours
+                else f"{minutes}m {secs:02d}s")
+
+    if _commit_p50 is not None and _commit_p90 is not None:
+        _complete_commit_facts = [f for f in _commit_facts
+                                  if _num(f.get("wall_s")) is not None]
+        _basis = (min(_complete_commit_facts,
+                      key=lambda f: abs((_num(f.get("wall_s")) or 0.0) - _commit_p50))
+                  if _complete_commit_facts else None)
+        _p4 = _basis.get("projection_4x") if isinstance(_basis, dict) else None
+        _projection_clause = ""
+        if isinstance(_p4, dict):
+            _projected = _num(_p4.get("projected_s"))
+            _multiple = _num(_p4.get("multiple"))
+            if _projected is not None and _multiple is not None:
+                _projection_clause = (
+                    " At the sampled p50 commit, a 4x speedup to its slowest job "
+                    f"projects to **{_commit_duration(_projected)}** "
+                    f"(**{_multiple:.2f}x**).")
+        _commit_wall_block.append(
+            "> **Per-commit PR wait:** p50 "
+            f"**{_commit_duration(_commit_p50)}**, p90 "
+            f"**{_commit_duration(_commit_p90)}**, from the earliest workflow run "
+            "created to the last job completed across every workflow on that commit."
+            + _projection_clause)
+    _partial_commit_facts = [f for f in _commit_facts if f.get("partial") is True]
+    if _partial_commit_facts:
+        _missing_commit_workflows = sorted({
+            str(wf) for f in _partial_commit_facts
+            for wf in (f.get("missing_workflows") or []) if wf
+        })
+        _named_missing = ", ".join(f"`{_clean_label(wf)}`"
+                                   for wf in _missing_commit_workflows)
+        _commit_wall_block.append(
+            f"> {len(_partial_commit_facts)} sampled commit(s) were partial"
+            + (f" (missing {_named_missing})" if _named_missing else "")
+            + "; their observed shorter spans were excluded from these percentiles.")
     _fold_bottom_line(
         out,
         _lead_block,
         _model_check,
+        _commit_wall_block,
         # The headline median is success-only; qualify it when the same workflow's
         # cached all-status default-branch population was materially red.
         # Match on the display label `floor_name` carries (scope-stripped), and fall

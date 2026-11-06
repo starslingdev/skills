@@ -597,6 +597,133 @@ def check_headline_names_wall_clock(report: str) -> Check:
                  else f"headline names no wall-clock/merge axis: {bottom[:60]!r}")
 
 
+def check_commit_wall_clock_projection(report: str, findings_path: Path | None) -> Check:
+    """Re-derive the per-commit wall and every printed slowest-job projection."""
+    name = "per-commit wall-clock projections are physically bounded"
+    if not findings_path:
+        return Check(name, True, "no findings JSON supplied", skipped=True)
+    try:
+        doc = json.loads(Path(findings_path).read_text())
+    except (OSError, ValueError, TypeError) as exc:
+        return Check(name, False, f"cannot read findings JSON: {exc}")
+    cp = doc.get("pr_critical_path") if isinstance(doc, dict) else None
+    stamp = cp.get("commit_wall_clock") if isinstance(cp, dict) else None
+    if not isinstance(stamp, dict):
+        return Check(name, True, "legacy findings have no commit wall stamp", skipped=True)
+
+    def projection(wall: float, slowest: float, next_longest: float,
+                   speedup: float) -> tuple[float, float | None]:
+        projected = round(max(
+            0.0, wall - slowest + max(slowest / speedup, next_longest)), 1)
+        return projected, (round(wall / projected, 2) if projected > 0 else None)
+
+    def percentile(values: list[float], pct: float) -> float:
+        ordered = sorted(values)
+        k = (len(ordered) - 1) * pct / 100.0
+        lo, hi = int(k), min(int(k) + 1, len(ordered) - 1)
+        return ordered[lo] + (ordered[hi] - ordered[lo]) * (k - lo)
+
+    def duration(seconds: float) -> str:
+        whole = max(0, round(seconds))
+        hours, rem = divmod(whole, 3600)
+        minutes, secs = divmod(rem, 60)
+        return (f"{hours}h {minutes:02d}m {secs:02d}s" if hours
+                else f"{minutes}m {secs:02d}s")
+
+    failures: list[str] = []
+    facts = [f for f in (stamp.get("facts") or []) if isinstance(f, dict)]
+    complete: list[tuple[dict, float, float, float]] = []
+    for index, fact in enumerate(facts):
+        wall = _num(fact.get("wall_s"))
+        slow = fact.get("slowest_job")
+        next_job = fact.get("next_longest_job") or {}
+        slowest = _num(slow.get("duration_s")) if isinstance(slow, dict) else None
+        next_longest = (_num(next_job.get("duration_s"))
+                        if isinstance(next_job, dict) else None)
+        if fact.get("partial") is True:
+            if wall is not None:
+                failures.append(f"partial fact {index} publishes wall_s {wall}")
+            continue
+        if wall is None or slowest is None:
+            failures.append(f"complete fact {index} lacks wall/slowest timing")
+            continue
+        next_longest = next_longest or 0.0
+        complete.append((fact, wall, slowest, next_longest))
+        p4 = fact.get("projection_4x")
+        if not isinstance(p4, dict):
+            failures.append(f"complete fact {index} lacks projection_4x")
+            continue
+        projected, cap_multiple = projection(wall, slowest, next_longest, 4.0)
+        claimed_projected = _num(p4.get("projected_s"))
+        claimed_multiple = _num(p4.get("multiple"))
+        if claimed_projected is None or abs(claimed_projected - projected) > 0.11:
+            failures.append(
+                f"fact {index} projected_s {claimed_projected!r} != {projected}")
+        if cap_multiple is None:
+            if claimed_multiple is not None:
+                failures.append(
+                    f"fact {index} multiple {claimed_multiple!r} must be absent "
+                    "for a zero projected wall")
+        elif claimed_multiple is None or claimed_multiple > cap_multiple + 0.001:
+            failures.append(
+                f"fact {index} multiple {claimed_multiple!r} exceeds {cap_multiple}")
+
+    partial = [fact for fact in facts if fact.get("partial") is True]
+    if partial:
+        missing = sorted({
+            str(workflow) for fact in partial
+            for workflow in (fact.get("missing_workflows") or []) if workflow
+        })
+        named = ", ".join(f"`{_strip_scope(workflow)}`" for workflow in missing)
+        expected_partial_line = (
+            f"> {len(partial)} sampled commit(s) were partial"
+            + (f" (missing {named})" if named else "")
+            + "; their observed shorter spans were excluded from these percentiles.")
+        if report.splitlines().count(expected_partial_line) != 1:
+            failures.append(
+                "report lacks the re-derived partial-commit count/workflow disclosure")
+
+    walls = [row[1] for row in complete]
+    if walls:
+        expected_p50 = round(percentile(walls, 50), 3)
+        expected_p90 = round(percentile(walls, 90), 3)
+        if _num(stamp.get("p50_s")) != expected_p50:
+            failures.append(f"p50_s {stamp.get('p50_s')!r} != {expected_p50}")
+        if _num(stamp.get("p90_s")) != expected_p90:
+            failures.append(f"p90_s {stamp.get('p90_s')!r} != {expected_p90}")
+        basis, wall, slowest, next_longest = min(
+            complete, key=lambda row: abs(row[1] - expected_p50))
+        projected, multiple = projection(wall, slowest, next_longest, 4.0)
+        expected_line = (
+            "> **Per-commit PR wait:** p50 "
+            f"**{duration(expected_p50)}**, p90 **{duration(expected_p90)}**, from the "
+            "earliest workflow run created to the last job completed across every "
+            "workflow on that commit."
+            + (" At the sampled p50 commit, a 4x speedup to its slowest job "
+               f"projects to **{duration(projected)}** (**{multiple:.2f}x**)."
+               if multiple is not None else ""))
+        if report.splitlines().count(expected_line) != 1:
+            failures.append("report lacks the re-derived per-commit wait/projection line")
+    elif _num(stamp.get("p50_s")) is not None or _num(stamp.get("p90_s")) is not None:
+        failures.append("empty complete population publishes commit percentiles")
+
+    max_caps = [wall - projection(wall, slowest, next_longest, float("inf"))[0]
+                for _fact, wall, slowest, next_longest in complete]
+    if max_caps:
+        max_p50_saving = float(statistics.median(max_caps))
+        for finding in doc.get("findings") or []:
+            if not isinstance(finding, dict):
+                continue
+            saving = _num(finding.get("wall_clock_p50_s"))
+            if saving is not None and saving > max_p50_saving + 0.11:
+                failures.append(
+                    f"finding {finding.get('id')!r} saving {saving} exceeds "
+                    f"whole-commit cap {max_p50_saving:.1f}")
+    return Check(name, not failures,
+                 "; ".join(failures[:8]) if failures
+                 else f"{len(complete)} complete commit projection(s) re-derived")
+
+
 def _headline_gate_candidates(doc: dict) -> list[tuple[str, float]]:
     """Every (label, seconds) the renderer could name as the next gate: a saved PR check at
     its p50 or bimodal slow mode, or a floor named in a finding's stamped bound derivation."""
@@ -11899,6 +12026,31 @@ def check_pole_not_reframed_as_hygiene(report: str, findings_path: Path | None) 
             # place the rules and ledger reach the reader), so it is no
             # contradiction of the pole headline. Mirror that exemption.
             continue
+        if pat == "OPT32":
+            measurement = f.get("path_filter_measurement")
+            if isinstance(measurement, dict):
+                sampled = measurement.get("sampled_prs")
+                skipped = measurement.get("would_skip_prs")
+                rate = measurement.get("hit_rate")
+                stamp_ok = (
+                    isinstance(sampled, int) and not isinstance(sampled, bool) and sampled > 0
+                    and isinstance(skipped, int) and not isinstance(skipped, bool)
+                    and 0 <= skipped <= sampled
+                    and isinstance(rate, (int, float)) and not isinstance(rate, bool)
+                    and math.isclose(float(rate), round(skipped / sampled, 4), abs_tol=5e-5)
+                )
+                modeled_ok = (
+                    skipped == 0
+                    or (f.get("runner_min_unrealizable") is True
+                        and isinstance(f.get("runner_min_unrealizable_s"), (int, float))
+                        and not isinstance(f.get("runner_min_unrealizable_s"), bool)
+                        and float(f["runner_min_unrealizable_s"]) > 0)
+                )
+                if stamp_ok and modeled_ok and f.get("runner_min_saving") is None:
+                    # A measured OPT32 row is descriptive rather than a second
+                    # credited pole lever: a positive result renders an explicitly
+                    # modeled upper bound, and zero is itself useful evidence.
+                    continue
         rm = f.get("runner_min_saving")
         rm = float(rm) if isinstance(rm, (int, float)) else 0.0
         wc = f.get("wall_clock_p50_s")
@@ -14778,6 +14930,12 @@ def check_minority_gate_tails(report: str, findings_path: Path | None = None) ->
     if not cp.get("spine_required_scoped"):
         return Check(name, False,
                      "a minority tail is stamped outside a confirmed required/needs closure")
+    required = {str(check) for check in _as_list(data.get("required_checks"))}
+    confirmed = {
+        str(pole.get("check") or "")
+        for pole in _as_list(cp.get("poles"))
+        if isinstance(pole, dict) and pole.get("required_reachable") is True
+    } | required
 
     def percentile(values: list[float], pct: float) -> float:
         values = sorted(values)
@@ -14787,6 +14945,9 @@ def check_minority_gate_tails(report: str, findings_path: Path | None = None) ->
 
     failures: list[str] = []
     for check_name, tail in stamped:
+        if check_name not in confirmed:
+            failures.append(
+                f"`{check_name}` is not confirmed required or needs-reachable")
         observations = [
             (_num(row.get("duration_s")), str(row.get("url") or ""))
             for row in _as_list(tail.get("observations"))
@@ -15041,6 +15202,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_primary_section_present(report, findings_path),
         check_static_only_banner_matches_ci_shape(report, findings_path),
         check_headline_names_wall_clock(report),
+        check_commit_wall_clock_projection(report, findings_path),
         check_headline_followup(report, findings_path),
         check_pole_anchors_resolve(report),
         check_rca_hands_off_never_prescribes(report),
