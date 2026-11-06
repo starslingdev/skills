@@ -151,6 +151,33 @@ def test_nested_caller_inherits_gate_but_standalone_run_does_not():
         "tests / unit (1)", _GRAPH) == (_SUITE, "unit")
 
 
+def test_deep_required_path_does_not_gate_an_intermediate_direct_run():
+    root = ".github/workflows/root.yml"
+    middle = ".github/workflows/middle.yml"
+    leaf = ".github/workflows/leaf.yml"
+    graph = {
+        root: {
+            "tests": {"name": "tests", "needs": [], "reusable": True,
+                      "uses": "./.github/workflows/middle.yml"},
+        },
+        middle: {
+            "shards": {"name": "shards", "needs": [], "reusable": True,
+                       "uses": "./.github/workflows/leaf.yml"},
+        },
+        leaf: {
+            "unit": {"name": "unit (${{ matrix.shard }})", "needs": [],
+                     "matrix": True, "reusable": False},
+        },
+    }
+    required = "tests / shards / unit (1)"
+    intermediate = "shards / unit (1)"
+
+    assert cr._required_reachable_checks(
+        [required, intermediate], {required}, graph, {}) == {required}
+    assert cr._pole_is_required_reachable(
+        intermediate, {required}, graph, {}) is False
+
+
 def test_collect_keeps_only_the_caller_path_in_the_required_spine(monkeypatch, tmp_path):
     monkeypatch.setattr(cr, "GhClient", _CallerGateClient)
     doc = cr.collect(json.loads(json.dumps(_DOC)), "o/r", max_runs=8, shallow_runs=8)

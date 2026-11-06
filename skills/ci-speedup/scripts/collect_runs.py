@@ -17395,14 +17395,19 @@ def _required_reachable_jobs(
     for r in req_names:
         node = _check_to_job_node(r, job_graph, crit_by_wf)
         if node is not None:
-            callers: set[tuple[str, str]] = set()
-            leaves = _local_reusable_leaf_nodes(r, job_graph, callers)
-            if leaves == {node} and callers:
+            paths: dict[tuple[str, str],
+                        set[tuple[tuple[str, str], ...]]] = {}
+            leaves = _local_reusable_leaf_nodes(
+                r, job_graph, caller_paths=paths)
+            caller_paths = paths.get(node, set())
+            if leaves == {node} and caller_paths:
                 # A nested required status belongs to this invocation, not to
                 # every standalone run of the shared leaf workflow.  Anchor
-                # the caller path; candidates resolve through that path in
+                # only each path's outer caller. Anchoring an intermediate
+                # caller would make that workflow's direct invocation inherit
+                # the outer gate. Candidates resolve the complete identity in
                 # `_nested_caller_path_is_reachable`.
-                anchors.update(callers)
+                anchors.update(path[0] for path in caller_paths if path)
             else:
                 anchors.add(node)
     reachable: set[tuple[str, str]] = set(anchors)

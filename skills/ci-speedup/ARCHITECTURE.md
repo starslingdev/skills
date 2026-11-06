@@ -2917,7 +2917,7 @@ consumes it:
   the candidates that are required **or** a job the required work transitively `needs:`.
   Each required check maps to a job *node* (`_check_to_job_node`). A nested
   `<caller> / <child>` name resolves to the editable leaf job while retaining its local
-  caller path; that invocation's caller nodes become the anchors. A plain check anchors its
+  caller path; that invocation's outer caller node becomes the anchor. A plain check anchors its
   file via `_map_check_to_job` then matches the job `name` template (exact, then
   matrix-regex). The **reachable** set is the anchors plus their downward `needs:` closure
   (everything an anchor depends on). A nested candidate inherits that reachability only
