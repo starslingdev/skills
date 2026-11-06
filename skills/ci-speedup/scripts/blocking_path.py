@@ -2801,6 +2801,19 @@ def _parse_log(text: str,
             "evidence": ev,
             "search": [":test", "BUILD SUCCESSFUL in", "maxParallelForks"],
         }
+    dependency_state = _cache_state_of_log(text, "dependency-cache")
+    if dependency_state:
+        return {
+            "fix_key": "dependency-cache",
+            "unit_label": "dependency cache restore results",
+            "magnitude": {"label": "dependency cache misses", "unit": "%",
+                          "value": dependency_state["miss_pct"]},
+            "deeper": [],
+            "evidence": [line for line in lines if _DEPENDENCY_CACHE_MISS_RE.search(line)
+                         or "Cache restored from key" in line][:3],
+            "search": ["Cache not found for input keys", "cache is not found",
+                       "Cache restored from key"],
+        }
     # --- L: one shell runner invokes many test files one after another ----------
     # This is deliberately the last catalog leaf: a more specific detector above
     # keeps precedence. Each admitted invocation needs a timestamped completion
@@ -2859,19 +2872,6 @@ def _parse_log(text: str,
             "deeper": [],
             "evidence": [x[3] for x in command_starts[:2]],
             "search": ["test loop", "parallel", "OPT88"],
-        }
-    dependency_state = _cache_state_of_log(text, "dependency-cache")
-    if dependency_state:
-        return {
-            "fix_key": "dependency-cache",
-            "unit_label": "dependency cache restore results",
-            "magnitude": {"label": "dependency cache misses", "unit": "%",
-                          "value": dependency_state["miss_pct"]},
-            "deeper": [],
-            "evidence": [line for line in lines if _DEPENDENCY_CACHE_MISS_RE.search(line)
-                         or "Cache restored from key" in line][:3],
-            "search": ["Cache not found for input keys", "cache is not found",
-                       "Cache restored from key"],
         }
     return None
 
@@ -3315,20 +3315,26 @@ _FIX_META: dict[str, dict[str, Any]] = {
         "constraints": "A persisted `.eslintcache` can mask a real lint failure if it "
                        "isn't invalidated when the rules change: a warm entry is reused "
                        "for an unchanged file even after an eslint/plugin/config bump that "
-                       "would now flag it. Key the CI cache on the lockfile + eslint config "
-                       "+ plugin versions (with a `restore-keys` fallback) so a rule change "
-                       "busts it, and keep `--cache-strategy content` if mtimes are "
-                       "unreliable in CI. Don't weaken coverage: every file eslint lints "
-                       "today must still be linted.",
+                       "would now flag it. Use a rolling primary cache key ending in "
+                       "`${{ github.sha }}`, for example "
+                       "`<tool>-<os>-<lockfile-hash>-${{ github.sha }}`, and use the matching "
+                       "stable `restore-keys` prefix `<tool>-<os>-<lockfile-hash>-`. Include "
+                       "the eslint config and plugin versions in that dependency hash. An exact key hit is "
+                       "not saved again, while the rolling key saves the updated results. "
+                       "Keep `--cache-strategy content` if mtimes are unreliable in CI. "
+                       "Don't weaken coverage: every file eslint lints today must still be "
+                       "linted.",
         "docs": ["ESLint CLI — caching (`--cache`, `--cache-location`, "
                  "`--cache-strategy`): https://eslint.org/docs/latest/use/command-line-interface#caching",
                  "actions/cache — persisting a directory across runs: "
                  "https://github.com/actions/cache"],
         "deliver": "Enable `--cache` with a stable `--cache-location` and persist the "
-                   "`.eslintcache` across CI runs (actions/cache keyed to bust on "
-                   "dependency/eslint-config changes), so warm runs only re-lint changed "
-                   "files. Verify a deliberately-introduced lint error still fails CI (the "
-                   "cache must not hide it) and re-measure the lint step.",
+                   "`.eslintcache` across CI runs with a per-run primary key such as "
+                   "`<tool>-<os>-<lockfile-hash>-${{ github.sha }}` plus the matching "
+                   "`<tool>-<os>-<lockfile-hash>-` `restore-keys` prefix, so warm runs only "
+                   "re-lint changed files and the updated cache "
+                   "is saved. Verify a deliberately-introduced lint error still fails CI "
+                   "(the cache must not hide it) and re-measure the lint step.",
     },
     "cargo-test-shard": {
         "cause": "The job runs the whole test suite through the standard `cargo test` "
@@ -5758,10 +5764,13 @@ def _select_render_poles(doc: dict[str, Any], poles: list[dict[str, Any]]) -> tu
                        for c in checks}
             n = denominator
     required = {str(c) for c in (doc.get("required_checks") or [])}
+    reachability = {str(c.get("name", "")): c.get("required_reachable") for c in checks}
     frequencies = {str(c.get("name", "")): c.get("pole_n") for c in checks}
     have_frequencies = bool(frequencies) and all(v is not None for v in frequencies.values())
 
     def typical_name(name: str) -> bool:
+        if reachability.get(name) is False:
+            return False
         if name in required:
             return True
         if have_frequencies:
@@ -5827,11 +5836,16 @@ def _gate_counts(cp: dict[str, Any]) -> tuple[dict[str, int], dict[str, int], in
     that gates almost every PR. ({}, {}, 0) when populations weren't recorded."""
     pole_count: dict[str, int] = {}
     present: dict[str, int] = {}
+    unconfirmed = {
+        str(c.get("name", "")) for c in (cp.get("checks") or [])
+        if isinstance(c, dict) and c.get("required_reachable") is False
+    }
     n = 0
     for entry in cp.get("populations") or []:
         try:
             _share, cks = entry
-            pos = [(str(nm), float(p)) for nm, p in cks if float(p) > 0]
+            pos = [(str(nm), float(p)) for nm, p in cks
+                   if float(p) > 0 and str(nm) not in unconfirmed]
         except (TypeError, ValueError):
             continue
         if not pos:
@@ -11749,6 +11763,10 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
     # and is never demoted. Keeping the SAME threshold as collect_runs keeps the rendered
     # order/labels in agreement with `critical_path_check` and the data-pass summary.
     _required_names = {str(c) for c in (doc.get("required_checks") or [])}
+    _required_reachability = {
+        str(c.get("name", "")): c.get("required_reachable")
+        for c in (cp.get("checks") or []) if isinstance(c, dict)
+    }
     # Pole FREQUENCY (times a check is the ACTUAL critical path) drives the typical/rare split,
     # keyed off the engine's stamped `checks[].pole_n` — the same signal `_rank_spine_present_first`
     # ranks by, so the rendered demotion can't disagree with `critical_path_check`. Presence>half
@@ -11774,6 +11792,8 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         # too-small sample the frequency is noise (everything typical). New findings use the
         # pole-frequency floor; findings that PREDATE `pole_n` fall back to the legacy presence
         # rule (unchanged) so old committed reports render identically.
+        if _required_reachability.get(name) is False:
+            return False
         if name in _required_names:
             return True
         if _have_pole_n:
