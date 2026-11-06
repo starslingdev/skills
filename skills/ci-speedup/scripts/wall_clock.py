@@ -27,6 +27,7 @@ monotonic-down + no-silent-shrink invariants; Step 3 adds further bounds.
 
 from __future__ import annotations
 
+import statistics
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -242,6 +243,10 @@ class WallClockContext:
     chain_members: frozenset[str] = frozenset()
     chain_p50_s: float = 0.0
     chain_win_s: float = 0.0
+    # One tuple per complete sampled commit: (whole-commit wall, slowest job,
+    # next-longest job outside the slowest job's `needs:` chain). The commit
+    # projection bound uses every tuple, then takes the median allowed saving.
+    commit_wall_facts: tuple[tuple[float, float, float], ...] = ()
     # #44 — a CLUSTER-FLOOR lever (OPT73): its fix lowers ALL of `own_check_names`
     # (the concurrent sibling legs running the shared step) in lockstep, so a
     # SIBLING leg can never be the floor that caps it — the sibling descends WITH
@@ -266,6 +271,31 @@ class WallClockResult:
     effective_s: float
     # ordered (bound_name, before, after, reason) for each bound that fired.
     derivation: list[tuple[str, float, float, str]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class CommitProjection:
+    projected_s: float
+    multiple: float | None
+
+
+def project_commit_wall(wall_s: float, slowest_job_s: float,
+                        next_longest_s: float, job_speedup: float) -> CommitProjection:
+    """Project the whole-commit wait after speeding up its slowest job.
+
+    The next-longest job outside that job's dependency chain is the physical
+    floor. Every report projection and every finding cap uses this one formula.
+    """
+    wall = max(float(wall_s), 0.0)
+    slowest = max(float(slowest_job_s), 0.0)
+    next_longest = max(float(next_longest_s), 0.0)
+    speedup = float(job_speedup)
+    if speedup <= 0:
+        raise ValueError("job_speedup must be greater than zero")
+    projected = max(0.0, wall - slowest + max(slowest / speedup, next_longest))
+    projected = round(projected, 1)
+    multiple = round(wall / projected, 2) if projected > 0 else None
+    return CommitProjection(projected, multiple)
 
 
 def _affected_floor_p50(ctx: WallClockContext) -> float:
@@ -510,6 +540,28 @@ def bound_cross_workflow(value: float, ctx: WallClockContext) -> BoundResult:
     return BoundResult(v, note or None)
 
 
+def bound_commit_projection(value: float, ctx: WallClockContext) -> BoundResult:
+    """Cap a finding at the whole-commit saving its job change can produce."""
+    if value <= 0 or not ctx.commit_wall_facts:
+        return BoundResult(round(value, 1))
+    caps: list[float] = []
+    for wall, slowest, next_longest in ctx.commit_wall_facts:
+        if wall <= 0 or slowest <= 0:
+            continue
+        remaining = max(slowest - value, 0.0)
+        speedup = slowest / remaining if remaining > 0 else float("inf")
+        projected = project_commit_wall(wall, slowest, next_longest, speedup)
+        caps.append(max(0.0, wall - projected.projected_s))
+    if not caps:
+        return BoundResult(round(value, 1))
+    cap = round(float(statistics.median(caps)), 1)
+    if cap >= round(value, 1):
+        return BoundResult(round(value, 1))
+    return BoundResult(cap, (
+        "whole-commit projection floor — after this job is shortened, the "
+        "next-longest job outside its `needs:` chain still gates the sampled commit"))
+
+
 # =============================================================================
 # Structural-lever sizing helpers
 #
@@ -615,6 +667,7 @@ Bound = Callable[[float, WallClockContext], BoundResult]
 # automatically with the cascade's invariants enforced.
 CASCADE: list[tuple[str, Bound]] = [
     ("developer-facing", bound_developer_facing),
+    ("commit-projection", bound_commit_projection),
     ("measured-critical-path", bound_measured_critical_path),
     ("cross-workflow", bound_cross_workflow),
 ]
@@ -627,7 +680,8 @@ def size_wall_clock(raw_s: float, ctx: WallClockContext,
     programming errors, not runtime conditions). Returns the effective saving
     plus the derivation chain."""
     steps = CASCADE if cascade is None else cascade
-    v = float(raw_s)
+    quantized_raw_s = round(float(raw_s), 1)
+    v = quantized_raw_s
     derivation: list[tuple[str, float, float, str]] = []
     for name, fn in steps:
         r = fn(v, ctx)
@@ -642,4 +696,4 @@ def size_wall_clock(raw_s: float, ctx: WallClockContext,
                     f"({v} -> {r.value}) without a reason")
             derivation.append((name, round(v, 1), round(r.value, 1), r.reason))
             v = r.value
-    return WallClockResult(round(float(raw_s), 1), round(v, 1), derivation)
+    return WallClockResult(quantized_raw_s, round(v, 1), derivation)

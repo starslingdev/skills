@@ -62,9 +62,11 @@ from wall_clock import (  # noqa: E402
     _concurrent_workflows,
     _resolve_job_p50,
     _wf_basename,
+    bound_commit_projection,
     bound_within_workflow, CASCADE,
     credit_detrigger,
     credit_shared_substep,
+    project_commit_wall,
     size_wall_clock,
 )
 
@@ -5206,12 +5208,15 @@ def _critical_path(jobs_per_run: list[list[dict[str, Any]]]) -> dict[str, Any]:
 def _minority_tails_for_checks(
         pr_checks: list[tuple[str, float]],
         crit_by_wf: dict[str, dict[str, Any]],
-        required_scoped: bool) -> dict[str, dict[str, Any]]:
+        confirmed_checks: "frozenset[str] | set[str]",
+) -> dict[str, dict[str, Any]]:
     """Attach sampled tails only to checks in a confirmed required closure."""
-    if not required_scoped:
+    if not confirmed_checks:
         return {}
     tails: dict[str, dict[str, Any]] = {}
     for check, _p50 in pr_checks:
+        if check not in confirmed_checks:
+            continue
         mapping = _map_check_to_job(
             check, crit_by_wf, require_developer_timing=True)
         if mapping is None:
@@ -5283,7 +5288,7 @@ _SIZING: dict[str, dict[str, Any]] = {
     "OPT17": {"model": "direct", "default_s": 30.0},
     "OPT23": {"model": "parallel-rebalance"},
     "OPT28": {"model": "direct", "default_s": 5.0},
-    "OPT32": {"model": "runner-min-only", "hit_rate": 0.3},
+    "OPT32": {"model": "runner-min-only"},
     # OPT35's STATIC fallback (residual appendix rows, when a shard matrix has no
     # failed-run history for the measured upgrade to fire) names ONE matrix job in
     # affected_jobs — so it must be sized off THAT job's own p50, never the
@@ -5485,6 +5490,44 @@ _EPHEMERAL_RUNNER_MIN_CAVEAT = (
     "with a persisted actions/cache for that dir + a measured warm-vs-cold "
     "delta (none here), so this is config-hygiene, not a credited bill saving")
 
+# OPT9 covers two materially different cache shapes. Lint and format result
+# caches avoid reprocessing the same inputs, so their existing conservative
+# sizing remains useful. Compiler build state and generated output can cost as
+# much to restore, validate, and save as they avoid; a cache hit alone does not
+# establish a saving. Keep those findings visible, but require a measured
+# before/after comparison rather than assigning the generic OPT9 default.
+_OPT9_BUILD_STATE_RE = re.compile(
+    r"(?:\btsc\b|typescript|tsbuildinfo|--incremental\b|"
+    r"generated[ -](?:client|output|code)|\bcodegen\b|code generation)",
+    re.IGNORECASE,
+)
+_OPT9_RESULT_CACHE_RE = re.compile(
+    r"(?:\beslint\b|\bprettier\b|\bjest\b|\bvitest\b)",
+    re.IGNORECASE,
+)
+
+
+def _opt9_is_build_state(f: dict[str, Any]) -> bool:
+    if f.get("pattern") != "OPT9":
+        return False
+    tool = str(f.get("opt9_tool") or "").lower()
+    if tool == "tsc":
+        return True
+    if tool in {"eslint", "prettier", "jest", "vitest"}:
+        return False
+    title = str(f.get("title") or "")
+    if _OPT9_RESULT_CACHE_RE.search(title):
+        return False
+    if _OPT9_BUILD_STATE_RE.search(title):
+        return True
+    evidence = " ".join(
+        str(f.get(key) or "")
+        for key in ("evidence", "match_text", "fix_strategy")
+    )
+    if _OPT9_RESULT_CACHE_RE.search(evidence):
+        return False
+    return bool(_OPT9_BUILD_STATE_RE.search(evidence))
+
 # Patterns whose modeled runner-min is NOT a realizable compute saving. The
 # credited `runner_min_saving` is set to None (so the bill headline / Also-noticed
 # appendix skip it) and the modeled amount is preserved in `runner_min_unrealizable_s` so the
@@ -5498,6 +5541,183 @@ _WALL_CLOCK_ONLY_NO_RUNNER_MIN = {"OPT21"}
 #           `if:` guards / an internal change-gate) and the trigger can be
 #           narrowed safely — a per-workflow judgment we don't fake.
 _RUNNER_MIN_UPPER_BOUND = {"OPT32"}
+
+_OPT32_CHANGED_FILES_MAX_PAGES = 30
+_OPT32_DEFAULT_PATHS = ("*.md", "docs/**/*.md", "LICENSE*", ".github/*.md")
+
+
+def _opt32_glob_matches(path: str, pattern: str) -> bool:
+    """Conservative GitHub-path glob subset used by the OPT32 estimator.
+
+    Unsupported constructs do not match. That can undercount a possible skip,
+    which is preferable to claiming savings for a pull request the filter would
+    still run.
+    """
+    path = path.lstrip("/")
+    pattern = pattern.strip().lstrip("/")
+    if not path or not pattern or any(c in pattern for c in "[]{}"):
+        return False
+    out = []
+    i = 0
+    while i < len(pattern):
+        c = pattern[i]
+        if c == "*":
+            if i + 1 < len(pattern) and pattern[i + 1] == "*":
+                i += 2
+                if i < len(pattern) and pattern[i] == "/":
+                    out.append("(?:.*/)?")
+                    i += 1
+                else:
+                    out.append(".*")
+                continue
+            out.append("[^/]*")
+        elif c == "?":
+            out.append("[^/]")
+        else:
+            out.append(re.escape(c))
+        i += 1
+    return re.fullmatch("".join(out), path) is not None
+
+
+def _opt32_default_path_matches(path: str) -> bool:
+    """The deliberately narrow fallback when the repository has no precedent."""
+    path = path.lstrip("/")
+    if "/" not in path and (path.endswith(".md") or path.startswith("LICENSE")):
+        return True
+    if path.startswith("docs/") and path.endswith(".md"):
+        return True
+    return (path.startswith(".github/") and path.count("/") == 1
+            and path.endswith(".md"))
+
+
+def _opt32_ignored_by_patterns(path: str, patterns: list[str]) -> bool:
+    """Apply ordered paths-ignore patterns, including conservative `!` restores."""
+    # An unsupported positive pattern merely misses a possible skip. An
+    # unsupported negative pattern is different: ignoring its restore could
+    # claim a skip that GitHub would not make, so fail the whole path closed.
+    if any(str(raw).strip().startswith("!")
+           and any(c in str(raw).strip()[1:] for c in "[]{}+\\")
+           for raw in patterns):
+        return False
+    ignored = False
+    for raw in patterns:
+        pattern = str(raw).strip()
+        negated = pattern.startswith("!")
+        if negated:
+            pattern = pattern[1:]
+        if _opt32_glob_matches(path, pattern):
+            ignored = not negated
+    return ignored
+
+
+def _opt32_repository_paths_ignore(
+    wf_docs: dict[str, dict[str, Any]],
+) -> tuple[list[str], list[str]]:
+    patterns: list[str] = []
+    sources: list[str] = []
+    for wf_path, doc in wf_docs.items():
+        on = doc.get("on") if isinstance(doc, dict) else None
+        if on is None and isinstance(doc, dict):
+            on = doc.get(True)
+        if not isinstance(on, dict):
+            continue
+        for event in ("pull_request", "pull_request_target", "push"):
+            cfg = on.get(event)
+            values = cfg.get("paths-ignore") if isinstance(cfg, dict) else None
+            if isinstance(values, str):
+                values = [values]
+            if not isinstance(values, list):
+                continue
+            usable = [str(v) for v in values if isinstance(v, str) and v.strip()]
+            if usable:
+                patterns.extend(usable)
+                sources.append(wf_path)
+    return list(dict.fromkeys(patterns)), list(dict.fromkeys(sources))
+
+
+def _opt32_changed_files(client: GhClient, repo: str, pr_number: int) -> list[str] | None:
+    """Fetch one sampled PR's changed files, bounded at GitHub's 3,000-file limit."""
+    files: list[str] = []
+    for page in range(1, _OPT32_CHANGED_FILES_MAX_PAGES + 1):
+        endpoint = f"repos/{repo}/pulls/{pr_number}/files?per_page=100"
+        if page > 1:
+            endpoint += f"&page={page}"
+        doc = client.json(endpoint)
+        if not isinstance(doc, list):
+            return None
+        for row in doc:
+            name = row.get("filename") if isinstance(row, dict) else None
+            if isinstance(name, str) and name:
+                files.append(name)
+        if len(doc) < 100:
+            return files
+    # GitHub exposes at most 3,000 files for this endpoint. A full last page
+    # therefore cannot prove the PR ended at the API ceiling; treating the
+    # prefix as complete could falsely classify a later code file as ignored.
+    return None
+
+
+def _measure_opt32_path_filters(
+    client: GhClient,
+    repo: str,
+    findings: list[dict[str, Any]],
+    sampled_runs_by_wf: dict[str, list[dict[str, Any]]],
+    wf_docs: dict[str, dict[str, Any]],
+) -> None:
+    """Measure OPT32 only from PRs already selected by the normal run sample."""
+    targets = [f for f in findings if f.get("pattern") == "OPT32"]
+    if not targets:
+        return
+    repo_patterns, pattern_sources = _opt32_repository_paths_ignore(wf_docs)
+    numbers_by_workflow = {
+        workflow: list(dict.fromkeys(
+            number for run in runs for number in [_run_pr_number(run)]
+            if isinstance(number, int)))
+        for workflow, runs in sampled_runs_by_wf.items()
+    }
+    all_numbers = list(dict.fromkeys(
+        number for finding in targets
+        for number in numbers_by_workflow.get(
+            str(finding.get("workflow_file") or ""), [])))
+    changed = {number: _opt32_changed_files(client, repo, number)
+               for number in all_numbers}
+    for finding in targets:
+        numbers = numbers_by_workflow.get(str(finding.get("workflow_file") or ""), [])
+        if not numbers or any(changed[number] is None for number in numbers):
+            continue
+        would_skip = 0
+        for number in numbers:
+            paths = changed[number] or []
+            if not paths:
+                continue
+            if repo_patterns:
+                skip = all(_opt32_ignored_by_patterns(path, repo_patterns) for path in paths)
+            else:
+                skip = all(_opt32_default_path_matches(path) for path in paths)
+            would_skip += int(skip)
+        sampled = len(numbers)
+        hit_rate = would_skip / sampled
+        source = "repository paths-ignore" if repo_patterns else "conservative defaults"
+        finding["path_filter_measurement"] = {
+            "sampled_prs": sampled,
+            "would_skip_prs": would_skip,
+            "hit_rate": round(hit_rate, 4),
+            "source": source,
+            "patterns": repo_patterns or list(_OPT32_DEFAULT_PATHS),
+            "source_workflows": pattern_sources,
+        }
+        measured = (f" Measured {would_skip} of {sampled} sampled PRs as fully "
+                    "covered by the candidate filter.")
+        if repo_patterns:
+            named = ", ".join(f"`{p}`" for p in repo_patterns)
+            workflows = ", ".join(f"`{p}`" for p in pattern_sources)
+            suffix = (f" Measured with repository `paths-ignore` from {workflows}: "
+                      f"{named}.")
+        else:
+            suffix = (" Measured with conservative documentation-only defaults: "
+                      "`*.md`, `docs/**/*.md`, `LICENSE*`, `.github/*.md`.")
+        finding["evidence"] = (str(finding.get("evidence") or "").rstrip()
+                               + measured + suffix)
 
 
 def _affected_job_p50(f: dict[str, Any], crit: dict[str, Any]) -> float:
@@ -5591,6 +5811,20 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
     long_pole = crit.get("long_pole_p50", 0.0)
     floor = crit.get("floor_p50", 0.0)
     model = cfg["model"]
+
+    if _opt9_is_build_state(f):
+        f["wall_clock_p50_s"] = None
+        f["runner_min_saving"] = None
+        f["tier"] = 2
+        f["realization"] = "none"
+        f["opt9_measure_before_after"] = True
+        f["size_note"] = (
+            "build-state and generated-output cache costs vary with restore, "
+            "validation, and save overhead — measure before and after on the "
+            "same workload before crediting seconds"
+        )
+        return
+
     # Guardrail A — D12 serial-gate auto-demote.
     if pat in _SERIAL_GATE_PATTERNS:
         model = "wall-clock-negative"
@@ -5685,7 +5919,9 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
         # sampled timings (a reusable-workflow caller, an unmappable name), we
         # do NOT substitute the long pole — we render qualitatively (omit rather
         # than fake), since we genuinely can't size the job's own cost.
-        rate = cfg.get("hit_rate", 0.0)
+        measurement = f.get("path_filter_measurement") if pat == "OPT32" else None
+        rate = (measurement.get("hit_rate", 0.0)
+                if isinstance(measurement, dict) else cfg.get("hit_rate", 0.0))
         cost_basis = cfg.get("cost_basis")
         if cfg.get("scope") == "job":
             per_run_s = _affected_job_p50(f, crit)
@@ -5740,6 +5976,13 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
                     "runner-minute (bill) only — at most the affected jobs' own "
                     f"compute × {rate_label}; re-grounded in the cost "
                     "spine's MEASURED billable compute when a spine is built")
+            elif pat == "OPT32" and isinstance(measurement, dict):
+                skipped = int(measurement.get("would_skip_prs") or 0)
+                sampled = int(measurement.get("sampled_prs") or 0)
+                f["size_note"] = (
+                    "runner-minute (bill) only — modeled upper bound from the "
+                    f"measured path-filter hit rate: {skipped} of {sampled} sampled PRs "
+                    "would skip × the workflow's measured per-run job cost × monthly volume")
             else:
                 # Most runner-min-only patterns are below the cluster floor; some
                 # (e.g. OPT12, a composite-action dedup) are wall-clock-NEUTRAL by
@@ -27079,6 +27322,13 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # with no merge_group runs this is the identity map: one member per group, exactly
     # the pre-#58 per-sha behaviour.
     _rep_ts, _rep_members = _group_dev_shas_by_pr(sha_meta)
+    _member_check_runs: dict[str, list[dict[str, Any]]] = {}
+
+    def _checks_for_member(member_sha: str) -> list[dict[str, Any]] | None:
+        rows = _fetch_check_runs(client, repo, member_sha)
+        if rows is not None:
+            _member_check_runs[member_sha] = rows
+        return rows
 
     def _checks_for(rep_sha: str) -> dict[str, float] | None:
         # UNION the check-runs across every head_sha the PR ran on (its pull_request
@@ -27089,7 +27339,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         # failure exactly as the pre-#58 per-sha path did.
         res = _union_member_checks(
             _rep_members.get(rep_sha, [rep_sha]),
-            lambda member: _fetch_check_runs(client, repo, member))
+            _checks_for_member)
         if res is None:
             return None  # propagate the fetch failure — don't fake a partial PR
         m, iv = res
@@ -27570,14 +27820,198 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # that descriptive evidence only after the required closure actually narrowed
     # the spine: an independent sibling outside every required `needs:` closure
     # must not acquire a merge-wait finding merely because it has a slow tail.
+    _minority_tail_confirmed = {
+        _n for _n, _p50 in pr_checks_tuple
+        if spine_required_scoped and _pole_is_required_reachable(
+            _n, req_names, _jg, crit_by_wf)
+    }
     _minority_tail_by_check = _minority_tails_for_checks(
-        pr_checks_tuple, crit_by_wf, spine_required_scoped)
+        pr_checks_tuple, crit_by_wf, _minority_tail_confirmed)
     # ENG-1 PR-N1: per-PR chain TIMING facts (data-only; nothing renders or
     # ranks on them until PR-N2). One entry per sampled repr sha — the longest
     # `needs:` chain (capped member spans, `_span_caps` — the caps the ranking
     # uses) plus the attempt-scoped, span-capped empirical makespan cross-check.
     _chain_spine = (set(_confirmed_gate_checks)
                     if _confirmed_gate_checks is not None else set(pr_check_p50))
+
+    def _commit_job_node(workflow: str, job_name: str) -> str | None:
+        mapped = _check_to_job_node(job_name, _jg, crit_by_wf)
+        return mapped[1] if mapped is not None and mapped[0] == workflow else None
+
+    def _needs_chain(workflow: str, node: str | None) -> set[str]:
+        if node is None:
+            return set()
+        jobs = (_jg or {}).get(workflow) or {}
+        parents: dict[str, set[str]] = {}
+        children: dict[str, set[str]] = defaultdict(set)
+        for key, candidate in jobs.items():
+            raw_needs = candidate.get("needs") if isinstance(candidate, dict) else []
+            needed = [raw_needs] if isinstance(raw_needs, str) else (raw_needs or [])
+            parents[str(key)] = {str(item) for item in needed}
+            for item in needed:
+                children[str(item)].add(str(key))
+        seen: set[str] = {node}
+        for edges in (parents, children):
+            reached = {node}
+            todo = [node]
+            while todo:
+                current = todo.pop()
+                for adjacent in edges.get(current, set()):
+                    if adjacent not in reached:
+                        reached.add(adjacent)
+                        todo.append(adjacent)
+            seen.update(reached)
+        return seen
+
+    _commit_facts: list[dict[str, Any]] = []
+    _commit_shas: list[str] = []
+    _commit_checks_by_sha: dict[str, dict[str, float]] = {}
+    _commit_dropped_workflows: dict[str, set[str]] = {}
+    _era_facts = [fact for fact in config_era_facts
+                  if fact.get("workflow_file")
+                  and fact.get("rule") != "runner_label_change"]
+    for _rep in _era_repr_shas:
+        for _sha in _rep_members.get(_rep, [_rep]):
+            _ts = str((sha_meta.get(_sha) or {}).get("ts") or "")
+            _dropped_wfs = {
+                str(fact["workflow_file"]) for fact in _era_facts
+                if _era_pr_side(_ts, fact, _sha) == "dropped"
+            }
+            _checks = {
+                str(row.get("name") or "?"): float(duration)
+                for row in (_member_check_runs.get(_sha) or [])
+                if (duration := _duration_s(row.get("started_at"),
+                                            row.get("completed_at"))) is not None
+                and duration > 0
+                and _era_check_wf_of(str(row.get("name") or "?")) not in _dropped_wfs
+            }
+            if _dropped_wfs and not any(name in _chain_spine for name in _checks):
+                continue
+            _commit_shas.append(_sha)
+            _commit_checks_by_sha[_sha] = _checks
+            _commit_dropped_workflows[_sha] = _dropped_wfs
+    for _sha in _commit_shas:
+        _event = str((sha_meta.get(_sha) or {}).get("event") or "")
+        _run_rows: list[tuple[str, dict[str, Any]]] = []
+        for _wf in sorted(set(sampled_runs_by_wf) | set(all_status_runs_by_wf)):
+            if _wf in _commit_dropped_workflows.get(_sha, set()):
+                continue
+            _runs_by_id: dict[str, dict[str, Any]] = {}
+            for _run in [*(all_status_runs_by_wf.get(_wf) or []),
+                         *(sampled_runs_by_wf.get(_wf) or [])]:
+                _runs_by_id[str(_run.get("id") or id(_run))] = _run
+            _runs = list(_runs_by_id.values())
+            for _run in _runs:
+                if (str(_run.get("head_sha") or "") == _sha
+                        and str(_run.get("event") or "") == _event):
+                    _run_rows.append((_wf, _run))
+
+        _jobs_by_run: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for _wf, _job_runs in jobs_per_run_by_wf.items():
+            for _job_run in _job_runs:
+                if not _job_run:
+                    continue
+                _rid = str(_job_run[0].get("_run_id") or "")
+                if _rid:
+                    _jobs_by_run[(_wf, _rid)] = _job_run
+
+        _expected_workflows: set[str] = set()
+        for _check_name in (_commit_checks_by_sha.get(_sha) or {}):
+            _mapped = _check_to_job_node(_check_name, _jg, crit_by_wf)
+            if _mapped is not None:
+                _expected_workflows.add(_mapped[0])
+        _missing: set[str] = _expected_workflows - {_wf for _wf, _run in _run_rows}
+        _created: list[float] = []
+        _job_rows: list[dict[str, Any]] = []
+        for _wf, _run in _run_rows:
+            _created_dt = _parse_dt(str(_run.get("created_at") or ""))
+            if _created_dt is not None:
+                _created.append(_created_dt.timestamp())
+            _rid = str(_run.get("id") or "")
+            _run_jobs = _jobs_by_run.get((_wf, _rid))
+            if not _run_jobs:
+                _missing.add(_wf)
+                continue
+            _completed_here = False
+            for _job in _run_jobs:
+                _started_dt = _parse_dt(str(_job.get("started_at") or ""))
+                _completed_dt = _parse_dt(str(_job.get("completed_at") or ""))
+                if _started_dt is None or _completed_dt is None:
+                    continue
+                _duration = _completed_dt.timestamp() - _started_dt.timestamp()
+                if _duration < 0:
+                    continue
+                _completed_here = True
+                _job_rows.append({
+                    "name": str(_job.get("name") or ""),
+                    "workflow_file": _wf,
+                    "duration_s": round(_duration, 3),
+                    "completed_ts": _completed_dt.timestamp(),
+                    "node": _commit_job_node(_wf, str(_job.get("name") or "")),
+                })
+            if not _completed_here:
+                _missing.add(_wf)
+
+        _job_rows.sort(key=lambda row: (-float(row["duration_s"]),
+                                        str(row["workflow_file"]), str(row["name"])))
+        _slowest = _job_rows[0] if _job_rows else None
+        _excluded = (_needs_chain(str(_slowest["workflow_file"]), _slowest.get("node"))
+                     if _slowest else set())
+
+        def _outside_slowest_chain(row: dict[str, Any]) -> bool:
+            if _slowest is None or row["workflow_file"] != _slowest["workflow_file"]:
+                return True
+            if row.get("node") not in _excluded:
+                return True
+            # Matrix display legs share one YAML node but execute independently.
+            # Preserve another concrete leg as a floor; a repeated attempt with
+            # the same display name is not an independent sibling.
+            node = row.get("node")
+            spec = ((_jg or {}).get(str(row["workflow_file"])) or {}).get(node) or {}
+            return bool(node == _slowest.get("node")
+                        and row.get("name") != _slowest.get("name")
+                        and isinstance(spec, dict) and spec.get("matrix"))
+
+        _next = next((row for row in _job_rows[1:]
+                      if _outside_slowest_chain(row)), None) if _slowest else None
+        _observed = (round(max(float(row["completed_ts"]) for row in _job_rows)
+                           - min(_created), 3)
+                     if _job_rows and _created else None)
+        _partial = bool(_missing or not _run_rows or _observed is None)
+        _fact: dict[str, Any] = {
+            "sha": _sha,
+            "event": _event,
+            "partial": _partial,
+            "missing_workflows": sorted(_missing),
+            "wall_s": None if _partial else _observed,
+            **({"observed_wall_s": _observed} if _observed is not None else {}),
+            **({"slowest_job": {k: _slowest[k] for k in
+                                ("name", "workflow_file", "duration_s")}}
+               if _slowest else {}),
+            **({"next_longest_job": {k: _next[k] for k in
+                                     ("name", "workflow_file", "duration_s")}}
+               if _next else {}),
+        }
+        if not _partial and _slowest is not None:
+            _projection = project_commit_wall(
+                float(_observed), float(_slowest["duration_s"]),
+                float(_next["duration_s"]) if _next else 0.0, 4.0)
+            _fact["projection_4x"] = {
+                "job_speedup": 4.0,
+                "projected_s": _projection.projected_s,
+                "multiple": _projection.multiple,
+            }
+        _commit_facts.append(_fact)
+
+    _complete_walls = [float(f["wall_s"]) for f in _commit_facts
+                       if isinstance(f.get("wall_s"), (int, float))]
+    _commit_wall_clock = {
+        "p50_s": (round(_percentile(_complete_walls, 50), 3)
+                  if _complete_walls else None),
+        "p90_s": (round(_percentile(_complete_walls, 90), 3)
+                  if _complete_walls else None),
+        "facts": _commit_facts,
+    }
     _chain_facts = _stamp_chain_facts(
         _era_repr_shas, _era_per_sha_checks, _chain_spine, _span_caps, _jg,
         crit_by_wf, _era_sha_intervals)
@@ -27597,6 +28031,13 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                       if _chain_ctx_members else 0.0)
     _chain_ctx_win = (float((_chain_summary_val or {}).get("chain_win_p50_s") or 0.0)
                       if _chain_ctx_members else 0.0)
+    _commit_ctx_facts = tuple(
+        (float(f["wall_s"]), float(f["slowest_job"]["duration_s"]),
+         float((f.get("next_longest_job") or {}).get("duration_s") or 0.0))
+        for f in _commit_facts
+        if isinstance(f.get("wall_s"), (int, float))
+        and isinstance(f.get("slowest_job"), dict)
+    )
     findings_doc["pr_critical_path"] = {
         # KEPT-side count post the #80 spine door: `sampled_pr_count` is the number of PRs whose
         # timing actually feeds the rendered chain/makespan/populations/presence — a dropped-era PR
@@ -27659,6 +28100,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         # chain, competing-path bound, signed divergence) — the verifier
         # re-derives it from `chain_facts`.
         "chain_summary": _chain_summary_val,
+        "commit_wall_clock": _commit_wall_clock,
         # Per-population check sets (one population per sampled PR that ran >=1
         # tracked check; share = 1/m). Persisted so the report's "Long poles"
         # section can show how OFTEN each check is the actual pole across sampled
@@ -28580,6 +29022,13 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     _ground_opt96(findings, drill_poles or poles, _wf_docs,
                   fetch_gaps={str(g.get("workflow_file")) for g in _sample_gaps()})
 
+    # OPT32's bill estimate is useful only when it reflects this repository's
+    # sampled pull requests. Reuse the run sample already selected above, fetch
+    # changed files for those PRs only, and stamp the measured fraction before
+    # the common sizing pass consumes it.
+    _measure_opt32_path_filters(
+        client, repo, findings, sampled_runs_by_wf, _wf_docs)
+
     # The repo's longest measured job across ALL workflows — the physical ceiling on
     # any wall-clock saving (you can't save more than the slowest run takes). Used to
     # cap OPT19, whose source-sleep total is summed statically and isn't bound to a
@@ -28642,7 +29091,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 pr_checks=pr_checks_tuple, own_check_names=own_check_names,
                 pr_check_populations=tuple(pr_check_populations),
                 chain_members=_chain_ctx_members, chain_p50_s=_chain_ctx_p50,
-                chain_win_s=_chain_ctx_win)
+                chain_win_s=_chain_ctx_win, commit_wall_facts=_commit_ctx_facts)
             _size_opt25_next_step(f, ctx)
             res = size_wall_clock(float(wc), ctx,
                                   cascade=([("within-workflow", bound_within_workflow)] + CASCADE)
@@ -28824,6 +29273,36 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 f["workflow_activity"] = act
         _o81_next = max(_o81_next, max((int(f["id"][1:]) for f in new), default=_o81_next))
         findings.extend(new)
+
+    # Structural findings are routed after the main sizing loop. Apply the
+    # shared whole-commit projection bound once more at the final findings door
+    # so those late additions cannot publish a saving above the next-job floor.
+    _commit_only_ctx = WallClockContext(commit_wall_facts=_commit_ctx_facts)
+    for _finding in findings:
+        _saving = _finding.get("wall_clock_p50_s")
+        if not isinstance(_saving, (int, float)) or _saving <= 0:
+            continue
+        if any(isinstance(step, dict) and step.get("bound") == "commit-projection"
+               for step in (_finding.get("wall_clock_derivation") or [])):
+            continue
+        _bounded = bound_commit_projection(float(_saving), _commit_only_ctx)
+        if _bounded.value >= round(float(_saving), 1):
+            continue
+        _finding.setdefault("wall_clock_uncapped_p50_s", round(float(_saving), 1))
+        _finding["wall_clock_p50_s"] = _bounded.value
+        _finding.setdefault("wall_clock_derivation", []).append({
+            "bound": "commit-projection",
+            "from_s": round(float(_saving), 1),
+            "to_s": _bounded.value,
+            "reason": _bounded.reason,
+        })
+        _previous_note = str(_finding.get("size_note") or "")
+        _finding["size_note"] = (
+            f"{_previous_note}; {_bounded.reason}" if _previous_note
+            else str(_bounded.reason or ""))
+        if _bounded.value <= 0:
+            _finding["tier"] = 2
+            _finding["realization"] = "none"
     findings_doc["findings"] = findings
 
     # encord §6 Cause 2: stamp `off_spine` on findings whose job was DROPPED from the
