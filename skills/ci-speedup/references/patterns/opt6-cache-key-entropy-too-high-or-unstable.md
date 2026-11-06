@@ -19,9 +19,9 @@ category: 1
 ```bash
 # Search for cache keys with dynamic values
 grep -rn 'actions/cache' .github/workflows/ -A 5 | grep 'key:'
-# Flag keys containing: ${{ github.run_id }}, date, timestamp, random
+# Flag ${{ github.run_id }} only without a compatible restore-keys prefix; always flag date, timestamp, random
 ```
 
-**Fix**: Match the key shape to what is cached. Dependency download stores use a deterministic lockfile + tool-version + OS key. Tool-result and build-output caches change as the job runs, so use a rolling primary key such as `<tool>-${{ runner.os }}-${{ hashFiles('**/lockfiles') }}-${{ github.sha }}` with a stable `restore-keys` prefix such as `<tool>-${{ runner.os }}-${{ hashFiles('**/lockfiles') }}-`. An exact primary-key hit is not saved again; the rolling suffix lets the updated cache be saved while the stable prefix restores the newest compatible result.
+**Fix**: Match the key shape to what is cached. Dependency download stores use a deterministic lockfile + tool-version + OS key. Tool-result and build-output caches change as the job runs, so use a rolling primary key such as `<tool>-<os>-<lockfile-hash>-${{ github.sha }}` with a stable `restore-keys` prefix such as `<tool>-<os>-<lockfile-hash>-`. An exact primary-key hit is not saved again; the rolling suffix lets the updated cache be saved while the stable prefix restores the newest compatible result.
 
 ---

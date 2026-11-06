@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import re
 from pathlib import Path
 
 
@@ -24,10 +25,13 @@ def _fix_sections() -> dict[str, str]:
     sections: dict[str, str] = {}
     for path in sorted(_PATTERNS.glob("*.md")):
         text = path.read_text(encoding="utf-8")
-        marker = "**Fix**:"
-        if marker not in text:
-            continue
-        sections[path.name] = text.split(marker, 1)[1].split("\n---", 1)[0].strip()
+        matches = list(re.finditer(r"(?m)^\*\*Fix[^\n]*", text))
+        for index, match in enumerate(matches):
+            next_fix = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+            divider = text.find("\n---", match.end(), next_fix)
+            end = divider if divider >= 0 else next_fix
+            key = path.name if index == 0 else f"{path.name}#{index + 1}"
+            sections[key] = text[match.start():end].strip()
     return sections
 
 
@@ -52,17 +56,35 @@ def _load_blocking_path():
 
 def _prompt_literals() -> dict[str, str]:
     out: dict[str, str] = {}
+
+    def target_is_prompt(node: ast.AST) -> bool:
+        if isinstance(node, ast.Name):
+            return "prompt" in node.id.lower() or node.id.lower() == "fix_hint"
+        if isinstance(node, ast.Subscript):
+            key = node.slice
+            return (isinstance(key, ast.Constant) and isinstance(key.value, str)
+                    and ("prompt" in key.value.lower() or key.value == "fix_hint"))
+        return False
+
+    def literal_text(node: ast.AST) -> str:
+        return " ".join(part.value for part in ast.walk(node)
+                        if isinstance(part, ast.Constant) and isinstance(part.value, str))
+
     for path in sorted(_SCRIPTS.glob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            if "prompt" not in node.name.lower():
-                continue
-            strings = [part.value for part in ast.walk(node)
-                       if isinstance(part, ast.Constant) and isinstance(part.value, str)]
-            if strings:
-                out[f"{path.name}:{node.name}"] = " ".join(strings)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if "prompt" in node.name.lower():
+                    out[f"{path.name}:{node.name}"] = literal_text(node)
+            elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                if node.value is not None and any(target_is_prompt(target) for target in targets):
+                    out[f"{path.name}:line-{node.lineno}"] = literal_text(node.value)
+            elif isinstance(node, ast.Dict):
+                for key, value in zip(node.keys, node.values):
+                    if (isinstance(key, ast.Constant) and isinstance(key.value, str)
+                            and ("prompt" in key.value.lower() or key.value == "fix_hint")):
+                        out[f"{path.name}:line-{node.lineno}:{key.value}"] = literal_text(value)
     return out
 
 
@@ -95,3 +117,29 @@ def test_tool_and_build_cache_guidance_uses_a_rolling_primary_key():
         lowered = text.lower()
         assert any(token in lowered for token in _ROLLING), (label, text)
         assert "restore-keys" in lowered, (label, text)
+
+
+def test_rolling_key_examples_are_safe_to_follow():
+    texts = {
+        name: text for name, text in _fix_sections().items()
+        if name.startswith(("opt6-", "opt9-"))
+    }
+    for name, text in texts.items():
+        assert "hashFiles('**/lockfiles')" not in text, (name, text)
+
+
+def test_opt6_does_not_flag_a_rolling_key_with_a_restore_prefix():
+    opt6 = (_PATTERNS / "opt6-cache-key-entropy-too-high-or-unstable.md").read_text(
+        encoding="utf-8"
+    )
+    run_id_flags = [line.lower() for line in opt6.splitlines()
+                    if "flag" in line.lower() and "github.run_id" in line]
+    assert run_id_flags, "OPT6 must explain how run-varying keys are classified"
+    assert all("restore-keys" in line for line in run_id_flags), run_id_flags
+
+
+def test_eslint_prompt_uses_the_same_prefix_for_restore_and_primary_keys():
+    bp = _load_blocking_path()
+    text = " ".join(_strings(bp._FIX_META["eslint-no-cache"]))
+    assert "<tool>-<os>-<lockfile-hash>-${{ github.sha }}" in text
+    assert "<tool>-<os>-<lockfile-hash>-" in text
