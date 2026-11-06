@@ -1,6 +1,7 @@
 """Measured path-filter hit rate for the missing-trigger-filter finding."""
 from __future__ import annotations
 
+import base64
 import json
 import re
 import subprocess
@@ -14,7 +15,7 @@ sys.path.insert(0, str(_SKILL / "scripts"))
 
 import blocking_path as bp  # noqa: E402
 import collect_runs as cr  # noqa: E402
-from test_opt81_faster_runner import _CI, _COLLECT_YAML, _Opt81Client  # noqa: E402
+from test_opt81_faster_runner import _CI, _COLLECT_YAML, _Opt81Client, _cts  # noqa: E402
 
 
 class _PathFilterClient(_Opt81Client):
@@ -46,6 +47,7 @@ def _collect(monkeypatch: pytest.MonkeyPatch, client: _PathFilterClient,
     doc = {"repo": "o/r", "findings": [{
         "id": "f1", "pattern": pattern, "workflow_file": _CI,
         "title": "Add path filters", "evidence": "pull requests run the workflow",
+        "affected_jobs": ["test"],
     }]}
     return cr.collect(doc, "o/r", max_runs=60, shallow_runs=60)
 
@@ -150,3 +152,73 @@ def test_opt32_unsupported_negative_glob_fails_closed():
     patterns = ["docs/**", "!docs/[ab]/**"]
 
     assert not cr._opt32_ignored_by_patterns("docs/a/guide.md", patterns)
+
+
+def test_opt32_rates_each_workflow_from_its_own_sampled_prs(
+        monkeypatch, tmp_path):
+    a = ".github/workflows/a.yml"
+    b = ".github/workflows/b.yml"
+
+    class TwoWorkflowClient(_PathFilterClient):
+        def json(self, endpoint, allow_missing=False):
+            self.queries += 1
+            if endpoint.startswith("repos/o/r/actions/workflows?"):
+                return {"workflows": [
+                    {"id": 1, "path": a, "name": "A"},
+                    {"id": 2, "path": b, "name": "B"},
+                ]}
+            match = re.match(r"repos/o/r/actions/workflows/([12])/runs\?(.*)", endpoint)
+            if match:
+                workflow_id = int(match.group(1))
+                if re.search(r"per_page=1(?![0-9])", match.group(2)):
+                    return {"total_count": 30}
+                offset = 0 if workflow_id == 1 else 10
+                return {"workflow_runs": [
+                    {"id": workflow_id * 100 + i, "event": "pull_request",
+                     "head_sha": f"s{workflow_id}-{i}",
+                     "created_at": _cts(i * 1000),
+                     "run_started_at": _cts(i * 1000),
+                     "updated_at": _cts(i * 1000 + 197),
+                     "conclusion": "success", "status": "completed", "run_attempt": 1,
+                     "pull_requests": [{"number": offset + i + 1}]}
+                    for i in range(10)]}
+            match = re.match(r"repos/o/r/actions/runs/([12])(\d\d)/jobs", endpoint)
+            if match:
+                i = int(match.group(2))
+                job = self._job(i)
+                job["id"] += int(match.group(1)) * 10000
+                job["run_id"] = int(match.group(1)) * 100 + i
+                return {"jobs": [job]}
+            match = re.match(r"repos/o/r/commits/s([12])-(\d+)/check-runs", endpoint)
+            if match:
+                job = self._job(int(match.group(2)))
+                return {"check_runs": [{"name": "test", "started_at": job["started_at"],
+                                         "completed_at": job["completed_at"]}]}
+            if endpoint.startswith(f"repos/o/r/contents/{a}") or endpoint.startswith(
+                    f"repos/o/r/contents/{b}"):
+                return {"content": base64.b64encode(_COLLECT_YAML.encode()).decode()}
+            if endpoint == "repos/o/r":
+                return {"default_branch": "main"}
+            match = re.fullmatch(
+                r"repos/o/r/pulls/(\d+)/files\?per_page=100(?:&page=(\d+))?", endpoint)
+            if match:
+                self.changed_file_calls += 1
+                number = int(match.group(1))
+                return [{"filename": "README.md" if number <= 10 else "src/app.py"}]
+            return None
+
+    client = TwoWorkflowClient({}, yaml=_COLLECT_YAML)
+    monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
+    doc = cr.collect({"repo": "o/r", "findings": [
+        {"id": "fa", "pattern": "OPT32", "workflow_file": a,
+         "title": "Filter A", "evidence": "A runs", "affected_jobs": ["test"]},
+        {"id": "fb", "pattern": "OPT32", "workflow_file": b,
+         "title": "Filter B", "evidence": "B runs", "affected_jobs": ["test"]},
+    ]}, "o/r", max_runs=10, shallow_runs=10)
+
+    by_workflow = {f["workflow_file"]: f for f in doc["findings"]
+                   if f.get("pattern") == "OPT32"}
+    assert by_workflow[a]["path_filter_measurement"]["hit_rate"] == 1.0
+    assert by_workflow[b]["path_filter_measurement"]["hit_rate"] == 0.0
+    assert client.changed_file_calls == 20
+    _verify_full(doc, tmp_path)

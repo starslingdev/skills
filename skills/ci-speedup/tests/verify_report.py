@@ -11886,6 +11886,31 @@ def check_pole_not_reframed_as_hygiene(report: str, findings_path: Path | None) 
             # place the rules and ledger reach the reader), so it is no
             # contradiction of the pole headline. Mirror that exemption.
             continue
+        if pat == "OPT32":
+            measurement = f.get("path_filter_measurement")
+            if isinstance(measurement, dict):
+                sampled = measurement.get("sampled_prs")
+                skipped = measurement.get("would_skip_prs")
+                rate = measurement.get("hit_rate")
+                stamp_ok = (
+                    isinstance(sampled, int) and not isinstance(sampled, bool) and sampled > 0
+                    and isinstance(skipped, int) and not isinstance(skipped, bool)
+                    and 0 <= skipped <= sampled
+                    and isinstance(rate, (int, float)) and not isinstance(rate, bool)
+                    and math.isclose(float(rate), round(skipped / sampled, 4), abs_tol=5e-5)
+                )
+                modeled_ok = (
+                    skipped == 0
+                    or (f.get("runner_min_unrealizable") is True
+                        and isinstance(f.get("runner_min_unrealizable_s"), (int, float))
+                        and not isinstance(f.get("runner_min_unrealizable_s"), bool)
+                        and float(f["runner_min_unrealizable_s"]) > 0)
+                )
+                if stamp_ok and modeled_ok and f.get("runner_min_saving") is None:
+                    # A measured OPT32 row is descriptive rather than a second
+                    # credited pole lever: a positive result renders an explicitly
+                    # modeled upper bound, and zero is itself useful evidence.
+                    continue
         rm = f.get("runner_min_saving")
         rm = float(rm) if isinstance(rm, (int, float)) else 0.0
         wc = f.get("wall_clock_p50_s")

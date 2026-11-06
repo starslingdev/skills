@@ -5572,14 +5572,20 @@ def _measure_opt32_path_filters(
     if not targets:
         return
     repo_patterns, pattern_sources = _opt32_repository_paths_ignore(wf_docs)
-    numbers = list(dict.fromkeys(
-        number
-        for runs in sampled_runs_by_wf.values()
-        for run in runs
-        for number in [_run_pr_number(run)]
-        if isinstance(number, int)))
-    changed = {number: _opt32_changed_files(client, repo, number) for number in numbers}
+    numbers_by_workflow = {
+        workflow: list(dict.fromkeys(
+            number for run in runs for number in [_run_pr_number(run)]
+            if isinstance(number, int)))
+        for workflow, runs in sampled_runs_by_wf.items()
+    }
+    all_numbers = list(dict.fromkeys(
+        number for finding in targets
+        for number in numbers_by_workflow.get(
+            str(finding.get("workflow_file") or ""), [])))
+    changed = {number: _opt32_changed_files(client, repo, number)
+               for number in all_numbers}
     for finding in targets:
+        numbers = numbers_by_workflow.get(str(finding.get("workflow_file") or ""), [])
         if not numbers or any(changed[number] is None for number in numbers):
             continue
         would_skip = 0

@@ -9979,6 +9979,30 @@ def _also_noticed_block(findings: list[dict[str, Any]],
         # the valueless + all-pole test below excludes exactly those, mirroring
         # `check_pole_not_reframed_as_hygiene`. A finding that also touches a NON-pole job still
         # renders (the all-pole guard keeps it), so its signal is not lost off-path.
+        if str(f.get("pattern") or "") == "OPT32":
+            measurement = f.get("path_filter_measurement")
+            if isinstance(measurement, dict):
+                sampled = measurement.get("sampled_prs")
+                skipped = measurement.get("would_skip_prs")
+                rate = measurement.get("hit_rate")
+                stamp_ok = (
+                    isinstance(sampled, int) and not isinstance(sampled, bool) and sampled > 0
+                    and isinstance(skipped, int) and not isinstance(skipped, bool)
+                    and 0 <= skipped <= sampled
+                    and isinstance(rate, (int, float)) and not isinstance(rate, bool)
+                    and math.isclose(float(rate), round(skipped / sampled, 4), abs_tol=5e-5)
+                )
+                modeled_ok = (
+                    skipped == 0
+                    or (f.get("runner_min_unrealizable") is True
+                        and (_num(f.get("runner_min_unrealizable_s")) or 0.0) > 0)
+                )
+                if stamp_ok and modeled_ok and f.get("runner_min_saving") is None:
+                    # This measured row is deliberately uncredited, but it is not
+                    # valueless: a positive hit rate renders a modeled upper bound,
+                    # while zero is itself the measured result. Keep either result
+                    # visible without letting it compete with the pole in the close.
+                    return False
         if (_num(f.get("runner_min_saving")) or 0.0) > 0 or _saves_wall_clock(f):
             return False
         # OPT82 is numberless BY DESIGN (uncredited, benchmark first), not
