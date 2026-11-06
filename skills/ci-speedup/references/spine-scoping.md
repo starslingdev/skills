@@ -32,6 +32,11 @@ independent slow job sharing a required workflow file but that no required job
 in `collect_runs.py`, never patched downstream. Inert on a partial/unreadable
 required read (absent ≠ not-required) and never empties the spine.
 
+Reusable-workflow reachability belongs to an invocation. A caller-prefixed nested
+check inherits a required caller's gate through that local call path. A bare check
+from the reusable workflow's own `pull_request` run does not: it has no caller path,
+so sharing the same leaf job cannot make the standalone run merge-blocking.
+
 ## PR-floor fallback (external-gate repos)
 
 When every branch-protection required check is external/managed (CLA bot,
