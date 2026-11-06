@@ -14816,6 +14816,7 @@ def check_default_branch_push_lane_isolated(
             f"sample cap {cap} != pinned cap {_VR_DEFAULT_BRANCH_PUSH_SAMPLE_MAX}")
     if sampled < 0 or sampled > _VR_DEFAULT_BRANCH_PUSH_SAMPLE_MAX:
         failures.append(f"sampled_push_count {sampled} exceeds the bounded cohort")
+    zero_line = "no eligible completed pushes to the default branch were sampled"
     status = str(lane.get("status") or "")
     if status in {"default_branch_unknown", "run_list_incomplete"}:
         disclosure = {
@@ -14824,7 +14825,7 @@ def check_default_branch_push_lane_isolated(
         }[status]
         if disclosure not in block:
             failures.append(f"{status} lane lacks its coverage disclosure")
-        if "no pushes to the default branch in the window" in block.lower():
+        if zero_line in block.lower():
             failures.append("unknown push coverage is rendered as a factual zero")
         return Check(
             name, not failures,
@@ -14832,8 +14833,8 @@ def check_default_branch_push_lane_isolated(
     if status != "complete":
         failures.append(f"push lane has unknown collection status {status!r}")
     if sampled == 0:
-        if "no pushes to the default branch in the window" not in block.lower():
-            failures.append("an empty push cohort lacks its explicit zero line")
+        if zero_line not in block.lower():
+            failures.append("an empty eligible push cohort lacks its explicit zero line")
         return Check(
             name, not failures,
             "; ".join(failures) if failures else "zero-push lane is explicit and isolated")

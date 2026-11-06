@@ -27204,9 +27204,6 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             key=lambda row: (str(row.get("id") or ""),
                              str(row.get("created_at") or "")))
     ]
-    _push_job_rows, _push_job_failures = _gather_run_jobs(
-        client, repo, _push_run_rows, keep_empty=True)
-
     _supplied_push_facts = {
         str(fact.get("sha") or ""): fact
         for fact in (_supplied_commit_wall_clock.get("facts") or [])
@@ -27239,9 +27236,11 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         "sample_cap": _DEFAULT_BRANCH_PUSH_SAMPLE_MAX,
         "sampled_push_count": len(_push_shas),
         "sampled_run_count": len(_push_run_rows),
-        "job_fetch_count": len(_push_run_rows),
-        "job_fetch_failures": _push_job_failures,
-        "job_rows_returned": len(_push_job_rows),
+        # The shared commit-wall helper will own these reads when it is wired to
+        # this bounded cohort. Until then its facts are supplied through the seam
+        # above, so issuing lane-only job requests would fetch data no code uses.
+        "job_fetch_count": 0,
+        "job_fetch_failures": 0,
         "p50_s": (round(_percentile(_push_walls, 50), 3)
                   if _push_walls else None),
         "p90_s": (round(_percentile(_push_walls, 90), 3)

@@ -92,6 +92,6 @@ Workflows triggered by a `push` to the default branch run after the merge. Their
 per-commit wall clock is reported in the **After merge, not a merge gate**
 section, with its own p50, p90 and job floor. Those values never enter the
 merge-gate Bottom line, headline, Tier 1 ranking or scores. Collection reuses
-the all-status workflow pages and bounds the additional job-list reads to the
-ten most recent pushed commits. When the window has none, the section says so
-explicitly.
+the all-status workflow pages and bounds the cohort to the ten most recent
+pushed commits; the shared commit-wide collector supplies their facts. When no
+eligible completed push is sampled, the section says so explicitly.

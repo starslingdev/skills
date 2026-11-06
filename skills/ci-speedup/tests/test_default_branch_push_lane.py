@@ -222,7 +222,7 @@ def test_collect_renders_a_capped_default_branch_push_lane_and_verifies(
     assert lane.get("sampled_push_count") == 10
     assert lane.get("sample_cap") == 10
     assert lane.get("sampled_run_count") == 20
-    assert lane.get("job_fetch_count") == 20
+    assert lane.get("job_fetch_count") == 0
     assert lane.get("job_fetch_failures") == 0
     assert [fact["sha"] for fact in lane.get("facts", [])] == list(reversed(_PUSH_SHAS))[:10]
 
@@ -271,7 +271,7 @@ def test_no_default_branch_pushes_renders_an_explicit_zero_line(monkeypatch, tmp
     assert lane.get("sampled_push_count") == 0
     assert lane.get("facts") == []
     report, findings_path, _report_path = _write_artifacts(tmp_path, doc)
-    assert "no pushes to the default branch in the window" in report.lower()
+    assert "no eligible completed pushes to the default branch were sampled" in report.lower()
     check = vr.check_default_branch_push_lane_isolated(report, findings_path)
     assert check.ok and not check.skipped
 
@@ -297,7 +297,7 @@ def test_unknown_push_discovery_is_disclosed_instead_of_rendered_as_zero(
         report, findings_path, _report_path = _write_artifacts(tmp_path, doc)
 
         assert reason in report
-        assert "no pushes to the default branch in the window" not in report.lower()
+        assert "no eligible completed pushes" not in report.lower()
         check = vr.check_default_branch_push_lane_isolated(report, findings_path)
         assert check.ok and not check.skipped
 

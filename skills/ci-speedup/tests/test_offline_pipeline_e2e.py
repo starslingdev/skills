@@ -188,8 +188,7 @@ _JOB_ID = 9001
 # Lifecycle adds one bounded GraphQL probe; this older replay has no lifecycle page.
 # OPT32 adds one changed-files page for each of the three already-sampled PRs. It
 # performs no PR discovery, and the fixture pages are short, so the exact delta is +3.
-# +10 bounded job-list reads for the ten sampled default-branch push commits.
-_GOLDEN_GH_QUERY_COUNT = 125
+_GOLDEN_GH_QUERY_COUNT = 115
 # PR-H1: `push` is UNSCOPED (no `branches:`) so the same-head_sha push+PR run
 # pair in the corpus satisfies OPT47's structural precondition (a push scoped
 # only to the default branch is excluded by design).

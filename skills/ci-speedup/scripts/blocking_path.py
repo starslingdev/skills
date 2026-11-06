@@ -11666,7 +11666,12 @@ def _default_branch_push_lane_block(doc: dict[str, Any]) -> list[str]:
             "",
         ]
     if sampled == 0:
-        return [*lines, "No pushes to the default branch in the window.", ""]
+        return [
+            *lines,
+            "No eligible completed pushes to the default branch were sampled in "
+            "the window.",
+            "",
+        ]
 
     facts = [
         fact for fact in (lane.get("facts") or [])
