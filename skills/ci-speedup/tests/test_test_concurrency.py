@@ -62,6 +62,20 @@ def _post_completion_marker_log() -> str:
     return "\n".join(lines)
 
 
+def _repeated_node_log() -> str:
+    at = datetime(2026, 11, 6, tzinfo=timezone.utc)
+    node = "tests/test_accounts.py::test_retried_account"
+    lines: list[str] = []
+    for index in range(1, 5):
+        lines += [
+            f"{_stamp(at)} START {node}",
+            f"{_stamp(at + timedelta(seconds=1))} creating schema_test_{index}",
+            f"{_stamp(at + timedelta(seconds=60))} PASS {node}",
+        ]
+        at += timedelta(seconds=60)
+    return "\n".join(lines)
+
+
 def _pole() -> dict:
     return {
         "workflow_file": ".github/workflows/ci.yml",
@@ -98,6 +112,7 @@ def test_isolated_test_leaf_rejects_varied_timers_and_missing_markers() -> None:
     assert bp._parse_log(_isolated_log(markers=False)) is None
     assert bp._parse_log(_overlapping_timestamp_log()) is None
     assert bp._parse_log(_post_completion_marker_log()) is None
+    assert bp._parse_log(_repeated_node_log()) is None
 
 
 def test_isolated_test_prompt_names_safety_and_lower_runner_minutes() -> None:
@@ -141,6 +156,25 @@ def test_machine_and_structural_prompts_state_runner_minute_effect() -> None:
     )
     assert _COST_PREFIX in structural
     assert "added jobs or machines" in structural
+
+
+def test_verifier_covers_measured_runner_prompt_cost() -> None:
+    finding = {
+        "id": "f1",
+        "pattern": "OPT81",
+        "title": "Measured runner class",
+        "workflow_file": ".github/workflows/ci.yml",
+        "evidence": "the same job ran on two repository-owned labels",
+        "faster_runner": {"half": "A1", "job": "test"},
+    }
+    prompt = "\n".join(bp._opt81_prompt(finding, "https://example.invalid/catalog"))
+    without_cost = "\n".join(
+        line for line in prompt.splitlines()
+        if not line.startswith("Runner cost effect:")
+    )
+    broken = next(check for check in vr.run_checks(without_cost, None, None, None)
+                  if check.name == _CHECK_NAME)
+    assert not broken.ok
 
 
 def test_runner_minute_prompt_check_is_registered() -> None:

@@ -2845,7 +2845,8 @@ def _parse_log(text: str,
     starts = [(i, when, m.group("file"), m.group("node"), raw)
               for i, (when, message, raw, _stamp) in enumerate(stamped_tests)
               if (m := isolated_start.match(message))]
-    if len(starts) >= 4 and len({row[2] for row in starts}) == 1:
+    if (len(starts) >= 4 and len({row[2] for row in starts}) == 1
+            and len({row[3] for row in starts}) == len(starts)):
         durations: list[float] = []
         markers: list[str] = []
         evidence: list[str] = []

@@ -14877,8 +14877,7 @@ def check_job_adding_prompts_state_runner_minute_effect(
     failures: list[str] = []
     for index, body in enumerate(blocks, 1):
         known_shard = "Pattern: OPT24 " in body or "Pattern: OPT25 " in body
-        machine = ("Option 1, a larger GitHub-hosted runner" in body
-                   or "Option 2, StarSling runners" in body)
+        machine = ("Pattern: OPT81 " in body or "Pattern: OPT81 (" in body)
         structural = ("structural catalog pattern" in body
                       or "Structural cost context:" in body)
         isolated = ("unique schema, database or prefix" in body
