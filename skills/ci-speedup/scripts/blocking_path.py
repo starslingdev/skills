@@ -3539,7 +3539,7 @@ _FIX_META: dict[str, dict[str, Any]] = {
                 "final image. Confirm the timed buildx operations belong to that stage.",
         "constraints": "Preserve every published platform, artifact contents, release "
                        "flags, tests, provenance, and manifest assembly. A BUILDPLATFORM "
-                       "change must pass the target architecture explicitly and verify "
+                       "change must pass the target architecture explicitly and confirm "
                        "the produced binary format. Size the opportunity only from the "
                        "measured foreign-architecture compile seconds.",
         "docs": ["Docker multi-platform build strategies: "
@@ -3551,7 +3551,7 @@ _FIX_META: dict[str, dict[str, Any]] = {
                    "fall. If cross-compilation is unsafe, use a native runner per "
                    "architecture and merge manifests; that cuts wall time but adds jobs "
                    "and a merge step, so runner minutes will usually stay level or rise. "
-                   "Verify each image on its native architecture and re-measure both "
+                   "Run each image on its native architecture and re-measure both "
                    "wall time and total runner minutes.",
     },
     "eslint-no-cache": {
