@@ -80,6 +80,61 @@ def test_working_tree_only_script_still_allows_shallow_advice(engines, tmp_path:
     assert score_state == "fail"
 
 
+@pytest.mark.parametrize(("run", "captured"), [
+    ("python -m pytest", "-m"),
+    ("node --version", "--version"),
+])
+def test_interpreter_options_are_not_treated_as_script_paths(
+        engines, tmp_path: Path, run: str, captured: str):
+    parsed = _case(tmp_path, run, captured, "echo clean\n")
+    (tmp_path / captured).unlink()
+    speed_flags, score_state = _verdicts(engines, tmp_path, parsed)
+    assert speed_flags is True
+    assert score_state == "fail"
+
+
+@pytest.mark.parametrize("script", [
+    'import subprocess\nsubprocess.run(["git", "rev-list", "--count", "HEAD"])\n',
+    'const { spawnSync } = require("child_process");\n'
+    'spawnSync("git", ["rev-list", "--count", "HEAD"]);\n',
+])
+def test_literal_argument_list_history_calls_keep_full_history(
+        engines, tmp_path: Path, script: str):
+    parsed = _case(tmp_path, "python scripts/check.py", "scripts/check.py", script)
+    speed_flags, score_state = _verdicts(engines, tmp_path, parsed)
+    assert speed_flags is False
+    assert score_state == "pass"
+
+
+def test_step_working_directory_selects_the_invoked_script(engines, tmp_path: Path):
+    parsed = _case(tmp_path, "bash check.sh", "check.sh", "echo clean\n")
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "check.sh").write_text(
+        "git rev-list --count HEAD\n", encoding="utf-8")
+    workflow = tmp_path / ".github" / "workflows" / "ci.yml"
+    raw = workflow.read_text(encoding="utf-8").replace(
+        "      - run: bash check.sh\n",
+        "      - run: bash check.sh\n        working-directory: tools\n")
+    workflow.write_text(raw, encoding="utf-8")
+    parsed = [(parsed[0][0], yaml.safe_load(raw), raw)]
+    speed_flags, score_state = _verdicts(engines, tmp_path, parsed)
+    assert speed_flags is False
+    assert score_state == "pass"
+
+
+@pytest.mark.parametrize("script", [
+    "# git merge-base origin/main HEAD\necho clean\n",
+    '# subprocess.run(["git", "rev-list", "HEAD"])\nprint("clean")\n',
+    '// spawnSync("git", ["rev-list", "HEAD"]);\nconsole.log("clean");\n',
+])
+def test_commented_history_command_does_not_hide_shallow_advice(
+        engines, tmp_path: Path, script: str):
+    parsed = _case(tmp_path, "./scripts/check.sh", "scripts/check.sh", script)
+    speed_flags, score_state = _verdicts(engines, tmp_path, parsed)
+    assert speed_flags is True
+    assert score_state == "fail"
+
+
 @pytest.mark.parametrize("script", [
     "git log origin/main..HEAD\n",
     "git describe --tags\n",
@@ -123,6 +178,9 @@ def test_missing_script_fails_closed(engines, tmp_path: Path):
     speed_flags, score_state = _verdicts(engines, tmp_path, parsed)
     assert speed_flags is False
     assert score_state == "pass"
+    evidence = engines[1]._practice_facts(parsed, tmp_path)[
+        "ci.checkout.shallow-clone"]["evidence"]
+    assert "could not be read" in evidence
 
 
 def test_history_operation_two_script_hops_away_is_not_followed(engines, tmp_path: Path):
@@ -146,4 +204,3 @@ def test_script_history_indexes_and_predicates_stay_in_parity(engines, tmp_path:
     speed._GIT_HISTORY_LOCAL_SCRIPTS = speed_index
     assert speed._job_needs_git_history(job, "test") is True
     assert score._job_needs_git_history(job, "test", set(), score_index) is True
-

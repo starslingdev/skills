@@ -757,17 +757,33 @@ def _has_git_history_op(text: str) -> bool:
 _FIRST_PARTY_SCRIPT_RE = re.compile(
     r"(?:^|[\n;&|])\s*(?:"
     r"(?P<direct>\./[^\s;&|]+)|"
-    r"(?:bash|python|node)\s+(?P<interpreter>(?:\./)?[^\s;&|]+)"
+    r"(?:bash|python|node)\s+(?P<interpreter>(?!-)(?:\./)?[^\s;&|]+)"
     r")(?=\s|$)",
     re.M,
 )
 _SCRIPT_GIT_HISTORY_RE = re.compile(
-    r"\bgit\s+(?:rev-list|describe|merge-base)\b|"
-    r"\bgit\s+log\b[^\n|;&]*(?:\.\.\.?|\borigin/|\brefs/|HEAD[~^]|\$[({]?[A-Za-z_0-9])|"
-    r"\bgit\s+diff\b(?:(?!\s--\s|>)[^\n|;&])*(?:\.\.\.?|\borigin/|\brefs/|HEAD[~^]|\.sha\b|\$[({]?[A-Za-z_0-9])|"
-    r"\bgit\s+fetch\b[^\n|;&]*(?:--unshallow\b|--depth(?:=|\s)|--tags\b)|"
-    r"\b(?:npx\s+|pnpm\s+|yarn\s+)?changesets?\b|"
-    r"\b(?:dorny/paths-filter|tj-actions/changed-files)\b",
+    r"(?:^|[\n;&|])\s*(?:"
+    r"git\s+(?:rev-list|describe|merge-base)\b|"
+    r"git\s+log\b[^\n|;&]*\.\.\.?|"
+    r"git\s+diff\b(?:(?!\s--\s|>)[^\n|;&])*(?:\.\.\.?|\borigin/|\brefs/|HEAD[~^]|\.sha\b|\$[({]?[A-Za-z_0-9])|"
+    r"git\s+fetch\b[^\n|;&]*(?:--unshallow\b|--depth(?:=|\s)|--tags\b)|"
+    r"(?:npx\s+|pnpm\s+|yarn\s+)?changesets?\b|"
+    r"(?:dorny/paths-filter|tj-actions/changed-files)\b"
+    r")",
+    re.I | re.M,
+)
+_SCRIPT_LITERAL_CALL_RE = re.compile(
+    r"subprocess\.(?:run|call|check_call|check_output|Popen)\s*\(\s*\[(?P<python>[^\]\n]*)\]|"
+    r"(?:spawn|spawnSync|execFile|execFileSync)\s*\(\s*['\"]git['\"]\s*,\s*\[(?P<node>[^\]\n]*)\]",
+    re.I,
+)
+_SCRIPT_LITERAL_ARG_RE = re.compile(r"(['\"])(.*?)\1")
+_SCRIPT_COMMENT_LINE_RE = re.compile(r"^\s*(?:#|//).*$", re.M)
+_SCRIPT_GIT_ARGS_RE = re.compile(
+    r"^git\s+(?:rev-list|describe|merge-base)\b|"
+    r"^git\s+log\b.*\.\.\.?|"
+    r"^git\s+diff\b(?:(?!\s--\s|>).)*(?:\.\.\.?|\borigin/|\brefs/|HEAD[~^]|\.sha\b|\$[({]?[A-Za-z_0-9])|"
+    r"^git\s+fetch\b.*(?:--unshallow\b|--depth(?:=|\s)|--tags\b)",
     re.I,
 )
 
@@ -779,9 +795,31 @@ def _first_party_script_refs(text: str) -> set[str]:
             if (ref := (match.group("direct") or match.group("interpreter")))}
 
 
-def _local_script_path(root: Path, ref: str) -> "Path | None":
+def _script_working_directory(job: dict, step: dict) -> str:
+    """The step's effective Actions working directory, relative to root."""
+    defaults = job.get("defaults")
+    run_defaults = defaults.get("run") if isinstance(defaults, dict) else None
+    inherited = (run_defaults.get("working-directory")
+                 if isinstance(run_defaults, dict) else None)
+    value = step.get("working-directory", inherited)
+    return str(value).strip() if value not in (None, "") else "."
+
+
+def _script_ref_key(ref: str, working_directory: str) -> str:
+    return ref if working_directory in ("", ".") else f"{working_directory}\0{ref}"
+
+
+def _script_key_parts(key: str) -> tuple[str, str]:
+    working_directory, separator, ref = key.partition("\0")
+    return (working_directory, ref) if separator else (".", working_directory)
+
+
+def _local_script_path(root: Path, key: str) -> "Path | None":
     """Resolve a relative script ref only when its real path stays in root."""
+    working_directory, ref = _script_key_parts(key)
     candidate = root / (ref[2:] if ref.startswith("./") else ref)
+    if working_directory != ".":
+        candidate = root / working_directory / (ref[2:] if ref.startswith("./") else ref)
     try:
         root_n = os.path.realpath(root)
         candidate_n = os.path.realpath(candidate)
@@ -792,16 +830,37 @@ def _local_script_path(root: Path, ref: str) -> "Path | None":
     return candidate
 
 
-def _local_script_needs_history(root: Path, ref: str) -> bool:
-    """Read exactly one invoked script; unreadable or external refs fail closed."""
-    path = _local_script_path(root, ref)
+def _read_local_script(root: Path, key: str) -> "str | None":
+    path = _local_script_path(root, key)
     if path is None:
-        return True
+        return None
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        return path.read_text(encoding="utf-8", errors="replace")
     except (OSError, ValueError):
+        return None
+
+
+def _has_script_git_history_op(text: str) -> bool:
+    without_comments = _SCRIPT_COMMENT_LINE_RE.sub("", text)
+    joined = _LINE_CONTINUATION_RE.sub(" ", without_comments)
+    if _SCRIPT_GIT_HISTORY_RE.search(joined):
         return True
-    return bool(_SCRIPT_GIT_HISTORY_RE.search(_LINE_CONTINUATION_RE.sub(" ", text)))
+    for match in _SCRIPT_LITERAL_CALL_RE.finditer(joined):
+        raw = match.group("python") or match.group("node") or ""
+        args = [value for _quote, value in _SCRIPT_LITERAL_ARG_RE.findall(raw)]
+        if match.group("python") is not None:
+            if not args or args.pop(0).lower() != "git":
+                continue
+        command = "git " + " ".join(args)
+        if _SCRIPT_GIT_ARGS_RE.search(command):
+            return True
+    return False
+
+
+def _local_script_needs_history(root: Path, key: str) -> bool:
+    """Read exactly one invoked script; unreadable or external refs fail closed."""
+    text = _read_local_script(root, key)
+    return text is None or _has_script_git_history_op(text)
 
 
 def _index_local_git_scripts(root: Path,
@@ -811,7 +870,10 @@ def _index_local_git_scripts(root: Path,
     for _rel, doc, _raw in parsed:
         for job in _wf_jobs(doc).values():
             for step in _job_steps(job):
-                refs.update(_first_party_script_refs(str(step.get("run") or "")))
+                working_directory = _script_working_directory(job, step)
+                refs.update(_script_ref_key(ref, working_directory)
+                            for ref in _first_party_script_refs(
+                                str(step.get("run") or "")))
     return {ref for ref in refs if _local_script_needs_history(root, ref)}
 
 
@@ -920,9 +982,11 @@ def _job_needs_git_history(job: dict, job_name: str = "",
             if _step_uses_ref(s).split("@")[0].strip() in local_history_actions:
                 return True
     if local_history_scripts:
-        for ref in _first_party_script_refs(blob):
-            if ref in local_history_scripts:
-                return True
+        for step in _job_steps(job):
+            working_directory = _script_working_directory(job, step)
+            for ref in _first_party_script_refs(str(step.get("run") or "")):
+                if _script_ref_key(ref, working_directory) in local_history_scripts:
+                    return True
     # Name-based fallback: a changeset/release/version job almost always needs
     # history even when the op lives in an invoked script. Conservative on
     # purpose — never recommend shallowing one of these.
@@ -2581,11 +2645,12 @@ def _unproven_history_links(root: Path, ref: str) -> list[str]:
 
 
 def _history_exemption_unread(root: Path, job: dict, job_name: str,
-                              local_history_actions: set[str]) -> list[str]:
+                              local_history_actions: set[str],
+                              local_history_scripts: set[str]) -> list[str]:
     """For a job `_job_needs_git_history` exempts: [] when the exemption is
     proven (a history op in the job itself, its name, or a readable local
-    action), else the unread local actions it rests on."""
-    if _job_needs_git_history(job, job_name, None):
+    action or script), else the unread local references it rests on."""
+    if _job_needs_git_history(job, job_name, None, None):
         return []
     unread: list[str] = []
     for s in _job_steps(job):
@@ -2595,6 +2660,15 @@ def _history_exemption_unread(root: Path, job: dict, job_name: str,
             if not links:
                 return []
             unread += links
+        working_directory = _script_working_directory(job, s)
+        for script_ref in _first_party_script_refs(str(s.get("run") or "")):
+            key = _script_ref_key(script_ref, working_directory)
+            if key not in local_history_scripts:
+                continue
+            text = _read_local_script(root, key)
+            if text is not None and _has_script_git_history_op(text):
+                return []
+            unread.append(script_ref)
     return list(dict.fromkeys(unread))
 
 
@@ -2930,7 +3004,8 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path,
                 if takes_full_history:
                     carved_out += 1
                     unread = _history_exemption_unread(root, job, job_name,
-                                                       local_history_actions)
+                                                       local_history_actions,
+                                                       local_history_scripts)
                     if unread:
                         carved_unread_jobs += 1
                         carved_unread += unread
