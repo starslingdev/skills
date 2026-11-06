@@ -51,6 +51,7 @@ def _job(name: str, seconds: int, run_id: int) -> dict:
 class _SingleCheckClient:
     gave_up = False
     complete_singletons = True
+    include_siblings = True
 
     def __init__(self) -> None:
         self.queries = 0
@@ -78,7 +79,7 @@ class _SingleCheckClient:
 
     def _jobs(self, run_id: int) -> list[dict]:
         jobs = [_job("pole", 600, run_id)]
-        if run_id >= 104:
+        if self.include_siblings and run_id >= 104:
             jobs.append(_job("sibling", 690, run_id))
         return jobs
 
@@ -100,7 +101,7 @@ class _SingleCheckClient:
             index = int(match.group(1)[1:]) - 1
             checks = [{"name": "pole", "started_at": _iso(0),
                        "completed_at": _iso(600)}]
-            if index >= 4:
+            if self.include_siblings and index >= 4:
                 checks.append({"name": "sibling", "started_at": _iso(0),
                                "completed_at": _iso(690)})
             total = len(checks)
@@ -122,6 +123,10 @@ class _SingleCheckClient:
 
 class _IncompleteSingletonClient(_SingleCheckClient):
     complete_singletons = False
+
+
+class _OnlyCheckClient(_SingleCheckClient):
+    include_siblings = False
 
 
 _DOC = {
@@ -302,3 +307,12 @@ def test_singleton_and_faster_sibling_ceilings_match_the_verifier(monkeypatch, t
         report, report_path, findings_path, skill_repo=None)
         if not check.skipped and not check.ok]
     assert failures == [], [(check.name, check.detail) for check in failures]
+
+
+def test_collect_sizing_credits_complete_single_workflow_prs(monkeypatch):
+    """Through collect's own cascade, not a hand-built context: every sampled
+    PR has only the finding's check, so complete reads keep the full raw saving.
+    The incomplete-read control is pinned separately against the population
+    bound, where the split is present and its unknown share can be re-derived."""
+    complete = _collect(monkeypatch, _OnlyCheckClient)["findings"][0]
+    assert complete["wall_clock_p50_s"] == 500.0
