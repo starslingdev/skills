@@ -11,6 +11,8 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
 
 ## [Unreleased]
 
+- **2026-11-05** — **Fixed**: shallow-checkout grading now sees history operations one hop inside a directly invoked first-party shell, Python, or Node script. Resolution stays inside the repository, unreadable paths fail closed, and scripts invoked by that script remain outside the bounded read.
+
 - **2026-11-03** — **Added** (OD-CS27, metadata-only): an Advisory notes section,
   rendered after the scored checks and labelled not part of the score. Its
   first note, `ci.runner.swappable`, fires when the same custom runner label is
