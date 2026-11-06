@@ -1712,7 +1712,8 @@ class GhClient:
 
 
 def _paginate(client: GhClient, path: str, key: str, *, params: str = "",
-              per_page: int = 100) -> list[Any] | None:
+              per_page: int = 100,
+              completion: dict[str, bool] | None = None) -> list[Any] | None:
     """Walk a paginated list endpoint to COMPLETION and return every item.
 
     `path` is the endpoint without a query string; `params` is any extra query
@@ -1758,7 +1759,10 @@ def _paginate(client: GhClient, path: str, key: str, *, params: str = "",
     `json()` AND a `_bump()` (the malformed/ceiling paths count their own coverage
     gaps — `json()` only counts the failures IT sees) — it adds no new surface to the
     seam every gh byte flows through."""
+    if completion is not None:
+        completion["complete"] = False
     items: list[Any] = []
+    declared_total: int | None = None
     page = 1
     while True:
         endpoint = f"{path}?per_page={per_page}"
@@ -1774,7 +1778,9 @@ def _paginate(client: GhClient, path: str, key: str, *, params: str = "",
                 logger.warning(
                     "gh paginate %s: page %d returned 502 at 100 items/page; "
                     "restarting the complete jobs walk at 30 items/page", path, page)
-                fallback = _paginate(client, path, key, params=params, per_page=30)
+                fallback = _paginate(
+                    client, path, key, params=params, per_page=30,
+                    completion=completion)
                 if fallback is not None:
                     getattr(client, "recover_failure", lambda _endpoint: None)(endpoint)
                 return fallback
@@ -1793,6 +1799,8 @@ def _paginate(client: GhClient, path: str, key: str, *, params: str = "",
             return None
         total = doc.get("total_count")
         has_total = isinstance(total, int) and not isinstance(total, bool)
+        if has_total:
+            declared_total = max(declared_total or 0, total)
         chunk = doc.get(key)
         if not isinstance(chunk, list):
             # A page-1 body whose list key isn't a LIST is malformed — full stop. The
@@ -1806,6 +1814,8 @@ def _paginate(client: GhClient, path: str, key: str, *, params: str = "",
             # a real `[]` needs no exception: it IS a list, so it falls through to the
             # normal short-page stop below and returns `[]` on its own.
             if page == 1 and has_total and total == 0:
+                if completion is not None:
+                    completion["complete"] = True
                 return []               # genuinely empty collection, not a failure
             client._bump(error=True)
             logger.warning(
@@ -1840,6 +1850,9 @@ def _paginate(client: GhClient, path: str, key: str, *, params: str = "",
                 "rather than returning a short list that looks complete",
                 path, _GH_MAX_PAGES, len(items))
             return None
+    if completion is not None:
+        completion["complete"] = (
+            declared_total is not None and len(items) >= declared_total)
     return items
 
 
@@ -4199,7 +4212,13 @@ def _gather_run_jobs(
     return kept, failures
 
 
-def _fetch_check_runs(client: GhClient, repo: str, sha: str) -> list[dict[str, Any]] | None:
+def _fetch_check_runs(
+    client: GhClient,
+    repo: str,
+    sha: str,
+    *,
+    completion: dict[str, bool] | None = None,
+) -> list[dict[str, Any]] | None:
     """ALL check-runs on a commit — the full set of checks a PR waits on,
     INCLUDING ones with no workflow file (CodeQL default setup, third-party app
     checks). This is the ground truth for the developer's wall-clock critical
@@ -4214,7 +4233,9 @@ def _fetch_check_runs(client: GhClient, repo: str, sha: str) -> list[dict[str, A
     MEASURED: better-auth/better-auth @ 6f20f44 reported `total_count = 103` and
     a single `per_page=100` page returned 100 — three checks silently missing from
     the critical-path sample, any of which could have been the merge pole."""
-    return _paginate(client, f"repos/{repo}/commits/{sha}/check-runs", "check_runs")
+    return _paginate(
+        client, f"repos/{repo}/commits/{sha}/check-runs", "check_runs",
+        completion=completion)
 
 
 # Conclusions for which GitHub has NO log to serve BECAUSE THE JOB NEVER STARTED:
@@ -4595,6 +4616,9 @@ def _segment_pr_populations(
     pr_check_p50: dict[str, float],
     job_p50_all: dict[str, float],
     job_bimodal_all: dict[str, dict[str, Any]] | None = None,
+    *,
+    per_sha_check_runs_complete: list[bool] | None = None,
+    population_completeness_out: list[bool] | None = None,
 ) -> list[PrPopulation]:
     """Return ONE population per sampled PR THAT RAN >=1 tracked check —
     (1/m, [(check, dur), ...]) for the checks that ran on that PR, where m is
@@ -4649,7 +4673,8 @@ def _segment_pr_populations(
     # per-population magnitudes are computed from the same inflation-proof values;
     # dropping empty maps keeps the share denominator honest (see docstring).
     capped: list[dict[str, float]] = []
-    for m in per_sha_checks:
+    capped_complete: list[bool] = []
+    for idx, m in enumerate(per_sha_checks):
         cm: dict[str, float] = {}
         for name, raw in m.items():
             if name not in pr_check_p50:
@@ -4659,6 +4684,10 @@ def _segment_pr_populations(
                 cm[name] = round(eff, 1)
         if cm:
             capped.append(cm)
+            capped_complete.append(bool(
+                per_sha_check_runs_complete
+                and idx < len(per_sha_check_runs_complete)
+                and per_sha_check_runs_complete[idx]))
     n = len(capped)
     if n < 6:
         return []
@@ -4683,6 +4712,8 @@ def _segment_pr_populations(
     for cm in capped:
         checks = sorted(cm.items(), key=lambda kv: -kv[1])
         pops.append((share, tuple(checks)))
+    if population_completeness_out is not None:
+        population_completeness_out.extend(capped_complete)
     return pops
 
 
@@ -17989,6 +18020,7 @@ def _apply_structural_cascade(
     crit: dict[str, Any], events_by_wf: dict[str, set[str]],
     pr_checks_tuple: tuple[tuple[str, float], ...],
     pr_check_populations: list,
+    pr_check_populations_complete: list[bool] | None = None,
     own_check_names: "frozenset[str] | None" = None,
     chain_members: frozenset = frozenset(),
     chain_p50_s: float = 0.0,
@@ -18027,6 +18059,7 @@ def _apply_structural_cascade(
         events=tuple(sorted(events_by_wf.get(wf_path) or ())),
         pr_checks=pr_checks_tuple, own_check_names=own_check_names,
         pr_check_populations=tuple(pr_check_populations),
+        pr_check_populations_complete=tuple(pr_check_populations_complete or ()),
         chain_members=chain_members, chain_p50_s=chain_p50_s,
         chain_win_s=chain_win_s, cluster_floor_lever=cluster_floor_lever)
     res = size_wall_clock(float(raw_wc), ctx)
@@ -21116,6 +21149,7 @@ def _detect_structural_candidates(
     wf_docs: "dict[str, dict[str, Any]] | None" = None,
     overlap_withheld: "list[dict[str, Any]] | None" = None,
     status_publishers: "dict[str, dict[str, Any]] | None" = None,
+    pr_check_populations_complete: list[bool] | None = None,
 ) -> list[dict[str, Any]]:
     """Route the top measured critical-path checks into STRUCTURAL candidates
     instead of the old inherent-cost dead-end. For each top check: map it to its
@@ -21400,6 +21434,7 @@ def _detect_structural_candidates(
                 _apply_structural_cascade(
                     f, raw, wf_path, crit, events_by_wf,
                     pr_checks_tuple, pr_check_populations,
+                    pr_check_populations_complete=pr_check_populations_complete,
                     own_check_names=frozenset({check_name}),
                     chain_members=chain_members,
                     chain_p50_s=chain_p50_s, chain_win_s=chain_win_s)
@@ -21439,7 +21474,8 @@ def _detect_structural_candidates(
         vol_by_wf=vol_by_wf, job_bimodal_all=job_bimodal_all, job_graph=job_graph,
         check_present=check_present, present_n_pr=present_n_pr, req_names=req_names,
         check_pole_freq=check_pole_freq, chain_members=chain_members,
-        chain_p50_s=chain_p50_s, chain_win_s=chain_win_s)
+        chain_p50_s=chain_p50_s, chain_win_s=chain_win_s,
+        pr_check_populations_complete=pr_check_populations_complete)
     # Re-number every emitted structural finding to a contiguous id block so the
     # two sub-detectors can't collide on an index.
     for k, f in enumerate(out, start=start_idx + 1):
@@ -21622,6 +21658,7 @@ def _detect_shared_substep(
     chain_members: frozenset = frozenset(),
     chain_p50_s: float = 0.0,
     chain_win_s: float = 0.0,
+    pr_check_populations_complete: list[bool] | None = None,
 ) -> list[dict[str, Any]]:
     """A step CATEGORY (normalized) that recurs across >=2 cluster jobs of one
     workflow is a cluster-FLOOR lever (OPT73): fixing it once lowers every
@@ -21835,6 +21872,7 @@ def _detect_shared_substep(
         _apply_structural_cascade(
             f, credit.wall_clock_s, wf_path, crit_wf, events_by_wf,
             pr_checks_tuple, pr_check_populations,
+            pr_check_populations_complete=pr_check_populations_complete,
             own_check_names=frozenset(jobs.keys()),
             chain_members=chain_members,
             chain_p50_s=chain_p50_s, chain_win_s=chain_win_s,
@@ -27279,10 +27317,16 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # with no merge_group runs this is the identity map: one member per group, exactly
     # the pre-#58 per-sha behaviour.
     _rep_ts, _rep_members = _group_dev_shas_by_pr(sha_meta)
+    check_runs_complete_by_sha: dict[str, bool] = {}
     _member_check_runs: dict[str, list[dict[str, Any]]] = {}
+    _member_check_runs_complete: dict[str, bool] = {}
 
     def _checks_for_member(member_sha: str) -> list[dict[str, Any]] | None:
-        rows = _fetch_check_runs(client, repo, member_sha)
+        completion: dict[str, bool] = {}
+        rows = _fetch_check_runs(
+            client, repo, member_sha, completion=completion)
+        _member_check_runs_complete[member_sha] = bool(
+            completion.get("complete"))
         if rows is not None:
             _member_check_runs[member_sha] = rows
         return rows
@@ -27294,9 +27338,12 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         # makes the whole row a coverage gap (None) — never a laundered partial row
         # (see `_union_member_checks`) — so `_select_repr_shas` counts it as a fetch
         # failure exactly as the pre-#58 per-sha path did.
-        res = _union_member_checks(
-            _rep_members.get(rep_sha, [rep_sha]),
-            _checks_for_member)
+        members = _rep_members.get(rep_sha, [rep_sha])
+        res = _union_member_checks(members, _checks_for_member)
+        check_runs_complete_by_sha[rep_sha] = (
+            res is not None
+            and all(_member_check_runs_complete.get(member, False)
+                    for member in members))
         if res is None:
             return None  # propagate the fetch failure — don't fake a partial PR
         m, iv = res
@@ -27605,6 +27652,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         _era_scope_pr_spine_sample(
             repr_shas, per_sha_checks, sha_check_intervals, _rep_ts,
             set(pr_check_p50), config_era_facts, _era_check_wf_of))
+    _era_check_runs_complete = [
+        check_runs_complete_by_sha.get(sha, False) for sha in _era_repr_shas]
     # One caps source for the ranking, the populations, AND the chain facts —
     # they must never disagree about a check's de-inflated magnitude (ENG-1 N1).
     _span_caps = _pole_caps(job_p50_all, job_bimodal_all)
@@ -27713,8 +27762,11 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # ~750s on code PRs). Each population gets its own critical path, so a check
     # that's only the pole when the gate self-skips earns its real wall-clock for
     # that population instead of being zeroed by a gate it never runs alongside.
+    pr_check_population_complete: list[bool] = []
     pr_check_populations = _segment_pr_populations(
-        _era_per_sha_checks, pr_check_p50, job_p50_all, job_bimodal_all)
+        _era_per_sha_checks, pr_check_p50, job_p50_all, job_bimodal_all,
+        per_sha_check_runs_complete=_era_check_runs_complete,
+        population_completeness_out=pr_check_population_complete)
     # Map each spine check to its producing workflow file (when it maps to a sampled job),
     # emitted per check so the renderer can tell a file-backed check from a fileless/external
     # one (a Socket/CLA bot) WITHOUT relying on whether the check happened to be drilled as a
@@ -28037,6 +28089,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             [share, [[n, p] for n, p in checks]]
             for share, checks in pr_check_populations
         ],
+        "population_check_runs_complete": pr_check_population_complete,
         # Checks excluded from the critical path as non-PR-gating (push/schedule-only
         # workflows whose check-run rode along on a sampled SHA) - recorded so the
         # exclusion is visible, never a silent drop.
@@ -29016,6 +29069,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 events=tuple(sorted(events_by_wf.get(wf_path) or ())),
                 pr_checks=pr_checks_tuple, own_check_names=own_check_names,
                 pr_check_populations=tuple(pr_check_populations),
+                pr_check_populations_complete=tuple(pr_check_population_complete),
                 chain_members=_chain_ctx_members, chain_p50_s=_chain_ctx_p50,
                 chain_win_s=_chain_ctx_win, commit_wall_facts=_commit_ctx_facts)
             _size_opt25_next_step(f, ctx)
@@ -29068,7 +29122,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         chain_members=_chain_ctx_members, chain_p50_s=_chain_ctx_p50,
         chain_win_s=_chain_ctx_win,
         wf_docs=_wf_docs, overlap_withheld=_overlap_withheld,
-        status_publishers=findings_doc.get("workflow_status_publishers"))
+        status_publishers=findings_doc.get("workflow_status_publishers"),
+        pr_check_populations_complete=pr_check_population_complete)
     # Stamped only when a lever was held back, so a repo without `parallel:`
     # groups or background steps keeps a byte-identical findings document.
     if _overlap_withheld:

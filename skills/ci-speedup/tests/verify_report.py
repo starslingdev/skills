@@ -3719,7 +3719,9 @@ def _vr_gate_counts(cp: dict) -> tuple[dict, int]:
     return present, n
 
 
-def _verify_per_pr_floor_split(name: str, report: str, cp: dict) -> Check | None:
+def _verify_per_pr_floor_split(
+    name: str, report: str, cp: dict, data: dict | None = None,
+) -> Check | None:
     """Independently re-derive a rendered per-PR sibling-floor split.
 
     Returns None when the report has no such claim. This deliberately reads
@@ -3729,6 +3731,47 @@ def _verify_per_pr_floor_split(name: str, report: str, cp: dict) -> Check | None
     if "Per-PR split:" not in report:
         return None
     stamp = str(cp.get("critical_path_check") or "")
+    bottom = next((line for line in report.splitlines() if "**Bottom line.**" in line), "")
+    bottom_match = _HEADLINE_WIN_RE.search(bottom)
+    bottom_s = _parse_clock_to_s(bottom_match.group(1)) if bottom_match else None
+    populations = _as_list(cp.get("populations"))
+    completeness = _as_list(cp.get("population_check_runs_complete"))
+    completion_aligned = len(completeness) == len(populations) and bool(populations)
+    if data is not None and bottom_s is not None and completion_aligned:
+        crowned = [
+            f for f in _as_list(_as_dict(data).get("findings"))
+            if isinstance(f, dict)
+            and abs((_num(f.get("wall_clock_p50_s")) or 0.0) - bottom_s) <= 0.5
+            and _as_list(f.get("affected_jobs"))
+        ]
+        if len(crowned) == 1:
+            finding = crowned[0]
+            workflow = str(finding.get("workflow_file") or "")
+            graph = _as_dict(_as_dict(data).get("workflow_job_graph")).get(workflow)
+            graph = _as_dict(graph)
+            sampled = [
+                str(check.get("name") or "")
+                for check in _as_list(cp.get("checks"))
+                if isinstance(check, dict) and str(check.get("name") or "")
+                and (not workflow or str(check.get("workflow_file") or "") == workflow)
+            ]
+            resolved: list[str] = []
+            for affected in _as_list(finding.get("affected_jobs")):
+                job_key = str(affected or "")
+                direct = [name for name in sampled if _cmp_name(name) == _cmp_name(job_key)]
+                if direct:
+                    resolved.extend(direct)
+                    continue
+                node = _as_dict(graph.get(job_key))
+                job_name = str(node.get("name") or job_key)
+                is_matrix = bool(node.get("matrix"))
+                resolved.extend(
+                    name for name in sampled
+                    if _vr_job_produces_check(job_name, is_matrix, name))
+            resolved = list(dict.fromkeys(resolved))
+            if resolved:
+                current = str(cp.get("critical_path_check") or "")
+                stamp = current if current in resolved else resolved[0]
     if not stamp:
         return Check(name, False, "rendered per-PR split has no critical_path_check stamp")
     target = _cmp_name(stamp)
@@ -3746,10 +3789,12 @@ def _verify_per_pr_floor_split(name: str, report: str, cp: dict) -> Check | None
             candidate = _cmp_name(str(check.get("name") or ""))
             if re.sub(r"\s*\([^)]*\)\s*$", "", candidate) == base:
                 targets.add(candidate)
-    rows: list[tuple[float, str, bool]] = []
+    rows: list[tuple[float, str, bool, bool]] = []
     unknown_n = 0
+    incomplete_n = 0
     total_n = 0
-    for entry in _as_list(cp.get("populations")):
+    completion_aligned = len(completeness) == len(populations)
+    for pop_idx, entry in enumerate(populations):
         try:
             _share, checks = entry
             positive = [(str(check), float(duration)) for check, duration in checks
@@ -3761,50 +3806,67 @@ def _verify_per_pr_floor_split(name: str, report: str, cp: dict) -> Check | None
             if positive:
                 sibling, floor_s = max(positive, key=lambda item: item[1])
                 total_n += 1
-                rows.append((0.0, sibling, False))
+                rows.append((0.0, sibling, False, False))
             continue
         total_n += 1
         siblings = [(check, duration) for check, duration in positive
                     if _cmp_name(check) not in targets]
         if not siblings:
-            unknown_n += 1
+            if completion_aligned and completeness[pop_idx] is True:
+                rows.append((max(own), "", True, True))
+            else:
+                unknown_n += 1
+                if completion_aligned:
+                    incomplete_n += 1
             continue
         sibling, floor_s = max(siblings, key=lambda item: item[1])
-        rows.append((max(max(own) - floor_s, 0.0), sibling, True))
+        rows.append((max(max(own) - floor_s, 0.0), sibling, True, False))
     if total_n <= 0:
         return Check(name, False,
                      "rendered per-PR split has no usable population containing its pole")
     expected: list[str] = []
-    zero = [(saving, sibling, target_ran)
-            for saving, sibling, target_ran in rows if saving <= 0]
-    positive = [(saving, sibling, target_ran)
-                for saving, sibling, target_ran in rows if saving > 0]
+    zero = [row for row in rows if row[0] <= 0]
+    single = [row for row in rows if row[0] > 0 and row[3]]
+    positive = [row for row in rows if row[0] > 0 and not row[3]]
     if zero:
-        blockers = {_strip_scope(sibling) for _saving, sibling, _target_ran in zero}
+        blockers = {_strip_scope(sibling) for _saving, sibling, _target_ran, _single in zero}
         blockers.discard("")
         where = (f" where `{next(iter(blockers))}` runs"
-                 if len(blockers) == 1 and all(target_ran for *_rest, target_ran in zero)
+                 if len(blockers) == 1 and all(row[2] for row in zero)
                  else " where another check runs longer")
         expected.append(f"0 on {len(zero)} of {total_n} PRs{where}")
     if positive:
         by_cap: dict[float, int] = {}
-        for saving, _sibling, _target_ran in positive:
+        for saving, _sibling, _target_ran, _single in positive:
             cap = round(saving, 1)
             by_cap[cap] = by_cap.get(cap, 0) + 1
         for cap, count in sorted(by_cap.items()):
             other = "the other " if zero and len(zero) + count == total_n else ""
             expected.append(
                 f"up to {_fmt_clock(cap)} on {other}{count} of {total_n} PRs")
-    if unknown_n:
+    if single:
+        by_cap: dict[float, int] = {}
+        for saving, _sibling, _target_ran, _single in single:
+            cap = round(saving, 1)
+            by_cap[cap] = by_cap.get(cap, 0) + 1
+        for cap, count in sorted(by_cap.items()):
+            other = "the other " if zero and len(zero) + count == total_n else ""
+            expected.append(
+                f"up to {_fmt_clock(cap)} on {other}{count} of {total_n} PRs "
+                "where it was the only check")
+    if incomplete_n:
         expected.append(
-            f"unknown on {unknown_n} of {total_n} PRs with a missing sibling observation")
+            f"unknown on {incomplete_n} of {total_n} PRs with an incomplete check-runs read")
+    legacy_unknown_n = unknown_n - incomplete_n
+    if legacy_unknown_n:
+        expected.append(
+            f"unknown on {legacy_unknown_n} of {total_n} PRs with a missing sibling observation")
     missing = [claim for claim in expected if claim not in report]
     if missing:
         return Check(name, False,
                      "per-PR sibling-floor split disagrees with populations; missing: "
                      + "; ".join(missing))
-    max_saving = max((saving for saving, _sibling, _target_ran in rows), default=0.0)
-    bottom = next((line for line in report.splitlines() if "**Bottom line.**" in line), "")
+    max_saving = max((row[0] for row in rows), default=0.0)
     match = _HEADLINE_WIN_RE.search(bottom)
     rendered = _parse_clock_to_s(match.group(1)) if match else None
     if rendered is None:
@@ -4293,7 +4355,7 @@ def check_headline_floor_presence_reconciled(report: str, findings_path: Path | 
     except (OSError, json.JSONDecodeError):
         return Check(name, True, "findings unreadable", skipped=True)
     cp = _as_dict(_as_dict(data).get("pr_critical_path"))
-    split_check = _verify_per_pr_floor_split(name, report, cp)
+    split_check = _verify_per_pr_floor_split(name, report, cp, data)
     if split_check is not None and not split_check.ok:
         return split_check
 
@@ -13418,7 +13480,7 @@ def check_headline_cluster_lever_on_spine(report: str, findings_path: Path | Non
         # burial (the sibling guard's target). Not this guard's crown to judge → LOUD narrow skip
         # (L8: never read clean on an unverifiable crown).
         split_check = _verify_per_pr_floor_split(
-            name, report, _as_dict(data.get("pr_critical_path")))
+            name, report, _as_dict(data.get("pr_critical_path")), data)
         if split_check is not None:
             if best_f.get("off_spine") is True:
                 return Check(name, False,
