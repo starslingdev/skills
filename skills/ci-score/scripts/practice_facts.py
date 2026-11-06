@@ -648,7 +648,10 @@ def _step_uses(step: dict) -> tuple[str, str] | None:
 # `_HISTORY_JOB_NAME_RE`, `_LINE_CONTINUATION_RE`, `_has_git_history_op`,
 # `_NESTED_LOCAL_USES_RE`, `_MAX_LOCAL_ACTION_DEPTH`, `_local_ref_path`,
 # `_read_local_history_file`, `_local_action_needs_history`,
-# `_index_local_git_actions` and `_job_needs_git_history`. What follows is a
+# `_index_local_git_actions`, `_FIRST_PARTY_SCRIPT_RE`,
+# `_SCRIPT_GIT_HISTORY_RE`, `_first_party_script_refs`, `_local_script_path`,
+# `_local_script_needs_history`, `_index_local_git_scripts` and
+# `_job_needs_git_history`. What follows is a
 # deliberate VERBATIM COPY of that predicate, not an import.
 # `_LOCAL_USES_PREFIXES` and `_is_local_uses` are duplicated separately (they
 # sit with the pinning helpers above, not in this block), copied from the same
@@ -747,6 +750,71 @@ def _has_git_history_op(text: str) -> bool:
     return bool(_GIT_HISTORY_RE.search(_LINE_CONTINUATION_RE.sub(" ", text)))
 
 
+# One deliberately bounded hop into a first-party script invoked directly by a
+# workflow run step. This is narrower than `_GIT_HISTORY_RE`: prose and
+# working-tree-only commands inside a general-purpose script must not make a
+# full-history checkout look load-bearing.
+_FIRST_PARTY_SCRIPT_RE = re.compile(
+    r"(?:^|[\n;&|])\s*(?:"
+    r"(?P<direct>\./[^\s;&|]+)|"
+    r"(?:bash|python|node)\s+(?P<interpreter>(?:\./)?[^\s;&|]+)"
+    r")(?=\s|$)",
+    re.M,
+)
+_SCRIPT_GIT_HISTORY_RE = re.compile(
+    r"\bgit\s+(?:rev-list|describe|merge-base)\b|"
+    r"\bgit\s+log\b[^\n|;&]*(?:\.\.\.?|\borigin/|\brefs/|HEAD[~^]|\$[({]?[A-Za-z_0-9])|"
+    r"\bgit\s+diff\b(?:(?!\s--\s|>)[^\n|;&])*(?:\.\.\.?|\borigin/|\brefs/|HEAD[~^]|\.sha\b|\$[({]?[A-Za-z_0-9])|"
+    r"\bgit\s+fetch\b[^\n|;&]*(?:--unshallow\b|--depth(?:=|\s)|--tags\b)|"
+    r"\b(?:npx\s+|pnpm\s+|yarn\s+)?changesets?\b|"
+    r"\b(?:dorny/paths-filter|tj-actions/changed-files)\b",
+    re.I,
+)
+
+
+def _first_party_script_refs(text: str) -> set[str]:
+    """Return direct, relative script operands from a workflow `run:` block."""
+    joined = _LINE_CONTINUATION_RE.sub(" ", text)
+    return {ref.strip("'\"") for match in _FIRST_PARTY_SCRIPT_RE.finditer(joined)
+            if (ref := (match.group("direct") or match.group("interpreter")))}
+
+
+def _local_script_path(root: Path, ref: str) -> "Path | None":
+    """Resolve a relative script ref only when its real path stays in root."""
+    candidate = root / (ref[2:] if ref.startswith("./") else ref)
+    try:
+        root_n = os.path.realpath(root)
+        candidate_n = os.path.realpath(candidate)
+        if os.path.commonpath([root_n, candidate_n]) != root_n:
+            return None
+    except ValueError:
+        return None
+    return candidate
+
+
+def _local_script_needs_history(root: Path, ref: str) -> bool:
+    """Read exactly one invoked script; unreadable or external refs fail closed."""
+    path = _local_script_path(root, ref)
+    if path is None:
+        return True
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except (OSError, ValueError):
+        return True
+    return bool(_SCRIPT_GIT_HISTORY_RE.search(_LINE_CONTINUATION_RE.sub(" ", text)))
+
+
+def _index_local_git_scripts(root: Path,
+                             parsed: list[tuple[str, dict, str]]) -> set[str]:
+    """Index invoked first-party scripts that directly need git history."""
+    refs: set[str] = set()
+    for _rel, doc, _raw in parsed:
+        for job in _wf_jobs(doc).values():
+            for step in _job_steps(job):
+                refs.update(_first_party_script_refs(str(step.get("run") or "")))
+    return {ref for ref in refs if _local_script_needs_history(root, ref)}
+
+
 def _step_uses_ref(step: dict) -> str:
     """The raw `uses:` string (local `./...` / `$/...` refs included, unlike
     `_step_uses`, which is scoped to remote actions)."""
@@ -837,7 +905,8 @@ def _index_local_git_actions(root: Path,
 
 
 def _job_needs_git_history(job: dict, job_name: str = "",
-                           local_history_actions: set[str] | None = None) -> bool:
+                           local_history_actions: set[str] | None = None,
+                           local_history_scripts: set[str] | None = None) -> bool:
     """True when shallowing this job's checkout would break it."""
     blob = "\n".join(str(s.get("run") or "") for s in _job_steps(job))
     uses_blob = "\n".join(_step_uses_ref(s) for s in _job_steps(job))
@@ -849,6 +918,10 @@ def _job_needs_git_history(job: dict, job_name: str = "",
     if local_history_actions:
         for s in _job_steps(job):
             if _step_uses_ref(s).split("@")[0].strip() in local_history_actions:
+                return True
+    if local_history_scripts:
+        for ref in _first_party_script_refs(blob):
+            if ref in local_history_scripts:
                 return True
     # Name-based fallback: a changeset/release/version job almost always needs
     # history even when the op lives in an invoked script. Conservative on
@@ -2799,6 +2872,7 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path,
     # per-JOB, not per-workflow: a second job in the same file that takes full
     # history for nothing is still a real finding.
     local_history_actions = _index_local_git_actions(root, parsed)
+    local_history_scripts = _index_local_git_scripts(root, parsed)
     offenders = []
     carved_out = 0   # PR-gating jobs that take full history AND need it
     off_pr_path = 0  # jobs whose own `if:` can never be true on a pull request
@@ -2851,7 +2925,8 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path,
                     off_pr_steps += 1
                 continue
             takes_full_history = "0" in live
-            if _job_needs_git_history(job, job_name, local_history_actions):
+            if _job_needs_git_history(job, job_name, local_history_actions,
+                                      local_history_scripts):
                 if takes_full_history:
                     carved_out += 1
                     unread = _history_exemption_unread(root, job, job_name,
