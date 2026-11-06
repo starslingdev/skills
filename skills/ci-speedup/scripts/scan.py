@@ -1685,7 +1685,8 @@ _OPT102_COMPILE_RE = re.compile(
     re.IGNORECASE,
 )
 _OPT102_CROSS_RE = re.compile(
-    r"(?:\$BUILDPLATFORM|tonistiigi/xx|\bGO(?:ARCH|OS)\b|\bCARGO_BUILD_TARGET\b|"
+    r"(?:\$(?:\{BUILDPLATFORM\}|BUILDPLATFORM)|tonistiigi/xx|"
+    r"\bGO(?:ARCH|OS)\b|\bCARGO_BUILD_TARGET\b|"
     r"(?:^|\s)--target(?:\s|=))",
     re.IGNORECASE | re.MULTILINE,
 )
@@ -1722,25 +1723,70 @@ def _detect_opt102(doc: dict, raw: str) -> list[Hit]:
                 continue
             context = str(with_.get("context") or ".").strip()
             dockerfile = str(with_.get("file") or "Dockerfile").strip()
-            if (not context or not dockerfile or "${{" in context + dockerfile
+            target = str(with_.get("target") or "").strip()
+            if (not context or not dockerfile or "${{" in context + dockerfile + target
                     or "://" in context or context.startswith("git@")
                     or Path(context).is_absolute() or Path(dockerfile).is_absolute()):
                 continue
-            candidate = (root / context / dockerfile).resolve()
+            candidate = (root / dockerfile if "file" in with_
+                         else root / context / dockerfile).resolve()
             try:
                 candidate.relative_to(root)
                 docker_text = candidate.read_text(encoding="utf-8", errors="replace")
             except (ValueError, OSError):
                 continue
-            stages = re.split(r"(?im)(?=^\s*FROM\s+)", docker_text)
-            risky_stage = next((stage for stage in stages
-                                if re.match(r"(?i)^\s*FROM\s+", stage)
-                                and _OPT102_COMPILE_RE.search(stage)
-                                and not _OPT102_CROSS_RE.search(stage)), None)
+            raw_stages = [stage for stage in
+                          re.split(r"(?im)(?=^\s*FROM\s+)", docker_text)
+                          if re.match(r"(?i)^\s*FROM\s+", stage)]
+            stages: list[tuple[str, str, set[str]]] = []
+            aliases: dict[str, int] = {}
+            for index, stage in enumerate(raw_stages):
+                clean = "\n".join(line for line in stage.splitlines()
+                                  if not line.lstrip().startswith("#"))
+                header = clean.splitlines()[0].strip()
+                header_match = re.match(
+                    r"(?i)^FROM(?:\s+--\S+)*\s+(\S+)(?:\s+AS\s+(\S+))?", header)
+                if not header_match:
+                    continue
+                refs = {header_match.group(1)}
+                refs.update(re.findall(
+                    r"(?im)^\s*COPY\b[^\n]*?--from=([^\s]+)", clean))
+                stages.append((header, clean, refs))
+                if header_match.group(2):
+                    aliases[header_match.group(2).lower()] = index
+            if not stages:
+                continue
+            if target:
+                selected = aliases.get(target.lower())
+                if selected is None:
+                    continue
+            else:
+                selected = len(stages) - 1
+            reachable: set[int] = set()
+            pending = [selected]
+            while pending:
+                index = pending.pop()
+                if index in reachable or index >= len(stages):
+                    continue
+                reachable.add(index)
+                for ref in stages[index][2]:
+                    ref_index = (int(ref) if ref.isdigit() and int(ref) < len(stages)
+                                 else aliases.get(ref.lower()))
+                    if ref_index is not None:
+                        pending.append(ref_index)
+            risky_stage = None
+            for index in sorted(reachable):
+                header, clean, _refs = stages[index]
+                runs = re.findall(
+                    r"(?ims)^\s*RUN\s+(.+?)(?=^\s*[A-Z][A-Z0-9]*\s+|\Z)", clean)
+                if (any(_OPT102_COMPILE_RE.search(run) for run in runs)
+                        and not _OPT102_CROSS_RE.search(clean)):
+                    risky_stage = (header, clean)
+                    break
             if risky_stage is None:
                 continue
             line = _line_of_in_job(raw, str(job_name), "docker/build-push-action@")
-            stage_head = risky_stage.splitlines()[0].strip()
+            stage_head = risky_stage[0]
             hits.append(Hit(
                 line=line,
                 affected_jobs=[str(job_name)],

@@ -2883,17 +2883,16 @@ def _parse_log(text: str,
         r"cmake\s+--build|dotnet\s+(?:build|publish)|gradle\w*\s+.*\bbuild|"
         r"make(?:\s|$))", re.IGNORECASE)
     operations: dict[str, tuple[str, str]] = {}
+    durations: list[tuple[str, float, str, str]] = []
     for line in lines:
         match = re.search(r"#(\d+)\s+\[linux/([^\s\]]+)[^\]]*\]\s+RUN\s+(.+)", line)
         if match and compile_re.search(match.group(3)):
             operations[match.group(1)] = (match.group(2).lower(), line)
-    durations: list[tuple[str, float, str, str]] = []
-    for line in lines:
-        match = re.search(r"#(\d+)\s+DONE\s+([\d.]+)s\b", line)
-        if not match or match.group(1) not in operations:
             continue
-        arch, header = operations[match.group(1)]
-        durations.append((arch, float(match.group(2)), header, line))
+        done = re.search(r"#(\d+)\s+DONE\s+([\d.]+)s\b", line)
+        if done and done.group(1) in operations:
+            arch, header = operations.pop(done.group(1))
+            durations.append((arch, float(done.group(2)), header, line))
     native = sum(seconds for arch, seconds, _header, _done in durations
                  if arch in {"amd64", "x86_64"})
     emulated = sum(seconds for arch, seconds, _header, _done in durations
