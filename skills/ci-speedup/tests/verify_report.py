@@ -14825,6 +14825,173 @@ def check_minority_gate_tails(report: str, findings_path: Path | None = None) ->
                  else f"{len(stamped)} minority gate tail(s) re-derived")
 
 
+def check_commit_queue_work_credit(report: str, findings_path: Path | None,
+                                   report_path: Path | None = None) -> Check:
+    """Queue is in the developer wait, but only runner-pool findings own it.
+
+    Re-derive queue/work from the supplied per-commit job intervals rather than
+    trusting the aggregate split. Every other finding is a code/config change,
+    so its credited seconds must fit inside work. Its projected multiple is
+    checked against the full wall, leaving runner-pickup queue unchanged.
+    """
+    name = "code findings stay within commit work and never claim runner queue"
+    if findings_path is None:
+        return Check(name, True, "no --findings to inspect", skipped=True)
+    try:
+        data = _as_dict(json.loads(findings_path.read_text(encoding="utf-8")))
+    except (OSError, ValueError) as exc:
+        return Check(name, False, f"could not read findings JSON: {exc}")
+    clock = _as_dict(_as_dict(data.get("pr_critical_path")).get("commit_wall_clock"))
+    commits = _as_list(clock.get("commits"))
+    if not commits:
+        return Check(name, True, "no per-commit queue/work stamp", skipped=True)
+
+    import datetime as _queue_dt
+
+    def _ts(value: object) -> float | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            return _queue_dt.datetime.fromisoformat(
+                text.replace("Z", "+00:00")).timestamp()
+        except (TypeError, ValueError):
+            return None
+
+    queue_values: list[float] = []
+    work_values: list[float] = []
+    wall_values: list[float] = []
+    share_values: list[float] = []
+    mismatches: list[str] = []
+    for raw in commits:
+        fact = _as_dict(raw)
+        if fact.get("partial") is True:
+            continue
+        try:
+            wall = float(fact.get("commit_wall_s"))
+        except (TypeError, ValueError):
+            continue
+        start = _ts(fact.get("created_at"))
+        if start is None or wall < 0:
+            continue
+        end = start + wall
+        queued: list[tuple[float, float]] = []
+        running: list[tuple[float, float]] = []
+        starts: list[float] = []
+        for raw_job in _as_list(fact.get("jobs")):
+            job = _as_dict(raw_job)
+            js = _ts(job.get("started_at"))
+            if js is None:
+                continue
+            js = min(max(js, start), end)
+            starts.append(js)
+            jq = _ts(job.get("queued_at") or job.get("created_at")
+                     or fact.get("created_at"))
+            if jq is not None:
+                jq = min(max(jq, start), end)
+                if js > jq:
+                    queued.append((jq, js))
+            jc = _ts(job.get("completed_at"))
+            if jc is not None:
+                jc = min(max(jc, start), end)
+                if jc > js:
+                    running.append((js, jc))
+        if starts and min(starts) > start:
+            queued.append((start, min(starts)))
+        points = sorted({start, end, *(v for iv in queued + running for v in iv)})
+        queue = 0.0
+        for left, right in zip(points, points[1:]):
+            if (right > left
+                    and any(a < right and b > left for a, b in queued)
+                    and not any(a < right and b > left for a, b in running)):
+                queue += right - left
+        queue = min(max(queue, 0.0), wall)
+        work = wall - queue
+        label = str(fact.get("sha") or "?")[:12]
+        for key, expected in (("queue_s", queue), ("work_s", work)):
+            try:
+                stamped = float(fact.get(key))
+            except (TypeError, ValueError):
+                mismatches.append(f"{label} {key} is missing/non-numeric")
+                continue
+            if abs(stamped - expected) > 0.11:
+                mismatches.append(
+                    f"{label} {key} {stamped:g}s != re-derived {expected:g}s")
+        queue_values.append(queue)
+        work_values.append(work)
+        wall_values.append(wall)
+        if wall > 0:
+            share_values.append(queue / wall)
+
+    if not work_values:
+        return Check(name, False, "commit-wall stamp has no complete, re-derivable observations")
+    work_p50 = statistics.median(work_values)
+    queue_p50 = statistics.median(queue_values)
+    wall_p50 = statistics.median(wall_values)
+    share_p50 = statistics.median(share_values) if share_values else 0.0
+    for key, expected in (("work_p50_s", work_p50),
+                          ("queue_p50_s", queue_p50),
+                          ("p50_s", wall_p50),
+                          ("queue_share_p50", share_p50),
+                          ("n", float(len(work_values)))):
+        try:
+            stamped = float(clock.get(key))
+        except (TypeError, ValueError):
+            mismatches.append(f"{key} is missing/non-numeric")
+            continue
+        if abs(stamped - expected) > 0.11:
+            mismatches.append(f"{key} {stamped:g}s != re-derived {expected:g}s")
+
+    runner_pool = {"OPT43", "OPT97"}
+    findings = [f for f in _as_list(data.get("findings")) if isinstance(f, dict)]
+    bad_credit: list[str] = []
+    code_savings: list[float] = []
+    for finding in findings:
+        if str(finding.get("pattern") or "") in runner_pool:
+            continue
+        try:
+            saving = float(finding.get("wall_clock_p50_s"))
+        except (TypeError, ValueError):
+            continue
+        if saving > 0:
+            code_savings.append(saving)
+        if saving > work_p50 + 0.11:
+            bad_credit.append(
+                f"{finding.get('id') or finding.get('pattern') or '?'} credits "
+                f"{saving:g}s above {work_p50:g}s work")
+
+    text_failures: list[str] = []
+    if queue_p50 > 0:
+        bottom = next((line for line in report.splitlines()
+                       if line.startswith("> **Bottom line.**")), "")
+        if _fmt_clock(wall_p50) not in bottom:
+            text_failures.append("Bottom line omits the full per-commit wait")
+        if f"~{_fmt_clock(queue_p50)} of it waiting for a runner" not in bottom:
+            text_failures.append("Bottom line omits the runner-queue share")
+        if f"({share_p50:.0%})" not in bottom:
+            text_failures.append("Bottom line omits the runner-queue percentage")
+        saving = min(max(code_savings, default=0.0), work_p50, wall_p50)
+        if saving > 0 and wall_p50 > saving:
+            expected_multiple = f"{wall_p50 / (wall_p50 - saving):.2f}x"
+            if expected_multiple not in bottom:
+                text_failures.append(
+                    f"Bottom line omits full-wait projection {expected_multiple}")
+
+    queue_claim = re.search(
+        r"(?i)\b(?:code|workflow|cache|test|build|shard|parallel\w*)\b[^\n]{0,80}"
+        r"\b(?:cut|cuts|reduce|reduces|remove|removes|save|saves)\s+"
+        r"(?:the\s+)?(?:runner[- ]pickup\s+)?queue\b",
+        report)
+    if queue_claim:
+        text_failures.append("report says a code/config change cuts runner queue")
+
+    failures = mismatches + bad_credit + text_failures
+    return Check(
+        name, not failures,
+        "; ".join(failures[:8]) if failures else
+        f"{len(work_values)} commit(s) re-derived; code credit <= {work_p50:g}s work")
+
+
 def run_checks(report, report_path, findings_path, skill_repo, clone=None):
     return [
         check_primary_section_present(report, findings_path),
@@ -14863,6 +15030,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_headline_chain_matches_stamp(report, findings_path, report_path),
         check_aggregate_total_ge_largest_member(report, findings_path, report_path),
         check_headline_wait_within_makespan(report, findings_path, report_path),
+        check_commit_queue_work_credit(report, findings_path, report_path),
         check_headline_basis_excludes_fileless(report, findings_path, report_path),
         check_saving_within_measured_compute(report, findings_path),
         check_saving_carries_measured_basis(report, findings_path),

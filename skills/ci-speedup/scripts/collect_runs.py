@@ -2349,6 +2349,134 @@ def _pr_makespan(intervals: "dict[str, tuple[str, str]]",
     return round(max(ends) - min(starts), 3)
 
 
+def _commit_queue_work_split(commit_fact: dict[str, Any]) -> dict[str, float]:
+    """Split one supplied per-commit wall into runner queue and work seconds.
+
+    The per-commit wall-clock producer owns which runs/jobs belong to the SHA,
+    its earliest run creation, final job completion, slowest/next-longest jobs,
+    and partial-coverage stamp. This consumer adds only the queue/work split.
+
+    Queue is time when at least one job was eligible and waiting for a runner
+    while no job on the commit was running. That includes the initial
+    run-created -> first-job-started wait and later idle queued gaps. A queued
+    interval that overlaps another running job is work, not queue. ``work_s``
+    is the rest of the developer's per-commit wall, so the two always reconcile
+    to ``commit_wall_s`` rather than summing concurrent job durations.
+    """
+    wall_s = _finite_float(commit_fact.get("commit_wall_s"))
+    wall_start = _parse_dt(str(commit_fact.get("created_at") or ""))
+    jobs = [j for j in (commit_fact.get("jobs") or []) if isinstance(j, dict)]
+    if wall_s is None or wall_s < 0 or wall_start is None or not jobs:
+        return {}
+    start = wall_start.timestamp()
+    end = start + wall_s
+    queued: list[tuple[float, float]] = []
+    running: list[tuple[float, float]] = []
+    starts: list[float] = []
+    for job in jobs:
+        js = _parse_dt(str(job.get("started_at") or ""))
+        jc = _parse_dt(str(job.get("completed_at") or ""))
+        jq = _parse_dt(str(job.get("queued_at") or job.get("created_at")
+                           or commit_fact.get("created_at") or ""))
+        if js is None:
+            continue
+        js_s = min(max(js.timestamp(), start), end)
+        starts.append(js_s)
+        if jq is not None:
+            jq_s = min(max(jq.timestamp(), start), end)
+            if js_s > jq_s:
+                queued.append((jq_s, js_s))
+        if jc is not None:
+            jc_s = min(max(jc.timestamp(), start), end)
+            if jc_s > js_s:
+                running.append((js_s, jc_s))
+
+    # The wall begins when the earliest run is created, so its initial wait is
+    # queue even if the job object itself was materialized a little later.
+    if starts and min(starts) > start:
+        queued.append((start, min(starts)))
+
+    points = sorted({start, end, *(v for iv in queued + running for v in iv)})
+    queue_s = 0.0
+    for left, right in zip(points, points[1:]):
+        if right <= left:
+            continue
+        is_queued = any(a < right and b > left for a, b in queued)
+        is_running = any(a < right and b > left for a, b in running)
+        if is_queued and not is_running:
+            queue_s += right - left
+    queue_s = min(max(queue_s, 0.0), wall_s)
+    return {"queue_s": round(queue_s, 3),
+            "work_s": round(wall_s - queue_s, 3)}
+
+
+def _stamp_commit_queue_work(clock: dict[str, Any]) -> dict[str, Any]:
+    """Enrich supplied commit-wall facts with per-commit and p50/p90 splits.
+
+    Partial commits stay visible, but do not lower the aggregate split: the
+    foundation already says their workflow coverage is incomplete.
+    """
+    out = copy.deepcopy(clock)
+    complete: list[dict[str, Any]] = []
+    stamped: list[dict[str, Any]] = []
+    for raw in out.get("commits") or []:
+        if not isinstance(raw, dict):
+            continue
+        fact = dict(raw)
+        split = _commit_queue_work_split(fact)
+        if split:
+            fact.update(split)
+            if fact.get("partial") is not True:
+                complete.append(fact)
+        stamped.append(fact)
+    out["commits"] = stamped
+    if not complete:
+        return out
+    queue = [float(f["queue_s"]) for f in complete]
+    work = [float(f["work_s"]) for f in complete]
+    walls = [float(f.get("commit_wall_s") or 0.0) for f in complete]
+    shares = [q / wall for q, wall in zip(queue, walls) if wall > 0]
+    out.update({
+        "n": len(complete),
+        "queue_p50_s": round(statistics.median(queue), 3),
+        "queue_p90_s": round(_percentile(queue, 90), 3),
+        "work_p50_s": round(statistics.median(work), 3),
+        "work_p90_s": round(_percentile(work, 90), 3),
+        "queue_share_p50": round(statistics.median(shares), 6) if shares else 0.0,
+    })
+    return out
+
+
+_RUNNER_POOL_QUEUE_PATTERNS = frozenset({"OPT43", "OPT97"})
+
+
+def _cap_code_findings_at_commit_work(findings: list[dict[str, Any]],
+                                      work_s: float | None) -> None:
+    """A code/config finding can remove work, never runner-pickup queue.
+
+    Runner-pool findings are the only queue-owning patterns. All other credited
+    wall-clock seconds are capped at the supplied per-commit work budget. The
+    uncapped value and reason remain in the artifact for auditability.
+    """
+    if work_s is None or work_s < 0:
+        return
+    for finding in findings:
+        if str(finding.get("pattern") or "") in _RUNNER_POOL_QUEUE_PATTERNS:
+            continue
+        credited = _finite_float(finding.get("wall_clock_p50_s"))
+        if credited is None or credited <= work_s:
+            continue
+        finding["wall_clock_uncapped_p50_s"] = credited
+        finding["wall_clock_p50_s"] = round(work_s, 1)
+        reason = ("capped at the per-commit work time; code and workflow changes "
+                  "cannot remove runner-pickup queue")
+        derivation = str(finding.get("derivation") or "")
+        finding["derivation"] = (
+            f"{derivation}; {reason}" if derivation else reason)
+        note = str(finding.get("size_note") or "")
+        finding["size_note"] = f"{note}; {reason}" if note else reason
+
+
 def _check_presence(per_sha_checks: list[dict[str, float]],
                     candidates: "set[str] | frozenset[str]") -> tuple[dict[str, int], int]:
     """Per candidate check, how many sampled PRs it actually ran on, and the denominator
@@ -29172,6 +29300,19 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # so sort to a serializable list.
     findings_doc["events_by_wf"] = {
         _wf: sorted(_evs) for _wf, _evs in events_by_wf.items()}
+    # The per-commit wall-clock pass owns this stamp's producer. Accept both the
+    # top-level handoff and its final `pr_critical_path` location so callers can
+    # enrich an in-progress document without copying the producer here.
+    _commit_clock = findings_doc["pr_critical_path"].get("commit_wall_clock")
+    if not isinstance(_commit_clock, dict):
+        _commit_clock = findings_doc.get("commit_wall_clock")
+    if isinstance(_commit_clock, dict):
+        _commit_clock = _stamp_commit_queue_work(_commit_clock)
+        findings_doc["pr_critical_path"]["commit_wall_clock"] = _commit_clock
+        findings_doc.pop("commit_wall_clock", None)
+        _cap_code_findings_at_commit_work(
+            findings_doc.get("findings") or [],
+            _finite_float(_commit_clock.get("work_p50_s")))
     # Join required-check names to their workflows' PR-trigger conditionality
     # (the dead-required check's load-bearing conjunct). Additive metadata on
     # the critical path; harmless if unconsumed.

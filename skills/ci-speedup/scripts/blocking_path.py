@@ -9138,15 +9138,20 @@ def _opt82_prompt(title: str, members: list[dict[str, Any]], url: str,
 
 
 def _queue_wait_block(findings: list[dict[str, Any]], catalog_url: str,
-                      shallow_note: str = "") -> list[str]:
+                      shallow_note: str = "",
+                      commit_clock: dict[str, Any] | None = None) -> list[str]:
     """Pre-start WALL-CLOCK wait (queue time). A PR waits in queue before its jobs
     start running — developer wall-clock the critical-path spine (job start → finish)
     doesn't capture, and NOT a runner-minute saving — so it gets its own section rather
     than the bill-savings appendix. Grouped by pattern; each a `<details>` with the
     worst-queued jobs ranked by P90 wait, evidence, the catalog fix recipe, and an agent
-    prompt. [] when there's no queue-wait finding."""
+    prompt. [] when neither a queue-wait finding nor a commit queue split exists."""
     wait = [f for f in findings if _is_wait_finding(f)]
-    if not wait:
+    commit_clock = commit_clock if isinstance(commit_clock, dict) else {}
+    queue_p50 = _num(commit_clock.get("queue_p50_s")) or 0.0
+    work_p50 = _num(commit_clock.get("work_p50_s")) or 0.0
+    wall_p50 = _num(commit_clock.get("p50_s")) or 0.0
+    if not wait and queue_p50 <= 0:
         return []
     # Disclosure parity with the hygiene appendix's "+N more … kept in the findings JSON":
     # `_is_wait_finding` drops queue findings whose floor-capped savable wait is 0 (queue
@@ -9171,14 +9176,33 @@ def _queue_wait_block(findings: list[dict[str, Any]], catalog_url: str,
                     key=lambda kv: -max((_num(m.get("wall_clock_p50_s")) or 0)
                                         for m in kv[1]))
     lines = ['<a id="pre-start-wait"></a>', "",
-             "## ⏳ Pre-start wait (queue time)", "",
-             "> Time a PR waits in queue **before its jobs start running** — developer "
-             "wall-clock the critical-path spine above does **not** capture (the spine "
-             "measures each job from start to finish). Usually runner-pool saturation or "
-             "a restrictive concurrency group. Ranked by savable wait (the floor-capped "
-             "addressable part; each finding's evidence quotes the raw P90 queue). **Note:** "
-             "for a `needs:`-gated job the *wait-to-start* is measured from when its last "
-             "needed upstream job completed, so upstream run time is never counted as queue.", ""]
+             "## ⏳ Pre-start wait (queue time)", ""]
+    if queue_p50 > 0:
+        lines += [
+            "> Runner-pickup time is developer wait, separate from the work jobs perform. "
+            "Usually it points to runner-pool saturation or a restrictive concurrency group. "
+            "Queue findings below are ranked by savable wait (the floor-capped addressable "
+            "part; each finding's evidence quotes the raw P90 queue). **Note:** for a "
+            "`needs:`-gated job the *wait-to-start* is measured from when its last needed "
+            "upstream job completed, so upstream run time is never counted as queue.", ""]
+    else:
+        lines += [
+            "> Time a PR waits in queue **before its jobs start running** — developer "
+            "wall-clock the critical-path spine above does **not** capture (the spine "
+            "measures each job from start to finish). Usually runner-pool saturation or "
+            "a restrictive concurrency group. Ranked by savable wait (the floor-capped "
+            "addressable part; each finding's evidence quotes the raw P90 queue). **Note:** "
+            "for a `needs:`-gated job the *wait-to-start* is measured from when its last "
+            "needed upstream job completed, so upstream run time is never counted as queue.", ""]
+    if queue_p50 > 0 and wall_p50 > 0:
+        share = (_num(commit_clock.get("queue_share_p50"))
+                 or queue_p50 / wall_p50)
+        lines += [
+            f"> Across {int(commit_clock.get('n') or 0)} sampled commits, the typical "
+            f"developer wait is **{_clock(wall_p50)}**: **~{_clock(queue_p50)} waiting "
+            f"for a runner** ({share:.0%}) and **~{_clock(work_p50)} of work**.",
+            "",
+        ]
     if shallow_note:
         lines += [f"> ⚠️ _{shallow_note}_", ""]
     if dropped:
@@ -11291,7 +11315,9 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     tier2_lines = _tier2_block(all_findings, catalog_url, cs, doc)
     also_lines, also_count, _also_on_path = _also_noticed_block(
         all_findings, catalog_url, doc=doc)
-    queue_lines = _queue_wait_block(all_findings, catalog_url)
+    queue_lines = _queue_wait_block(
+        all_findings, catalog_url,
+        commit_clock=(doc.get("pr_critical_path") or {}).get("commit_wall_clock"))
     # `scan_incomplete` means a workflow file could NOT be scanned — an unscanned
     # file must never read as clean, so a populated coverage gap is itself something
     # to report even with zero findings. Only the truly-empty case (no findings AND
@@ -11702,7 +11728,9 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
     # Pre-start wall-clock wait (queue time) — its own section, ABOVE the runner-minute
     # hygiene appendix, because it IS developer wall-clock (the spine just doesn't see
     # the pre-start portion).
-    queue_lines = _queue_wait_block(all_findings, catalog_url, shallow_note)
+    queue_lines = _queue_wait_block(
+        all_findings, catalog_url, shallow_note,
+        commit_clock=cp.get("commit_wall_clock"))
     runner_spine_count = _runner_minute_spine_row_count(doc)
     tier2_lines = _tier2_block(all_findings, catalog_url, cs, doc)
 
@@ -12447,6 +12475,43 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         out += [f"> **Bottom line.** A typical PR waits **{merge_dur}** for all checks "
                 "to finish; the per-pole drill-downs below trace where that time goes.",
                 ""]
+    # A developer waits from the first workflow's creation until the commit's
+    # last job completes. When the collector supplies that per-commit wall and
+    # its queue/work split, lead with the full wait. Code/config findings may
+    # remove work only; their speedup multiple is therefore stated on the full
+    # wait, with runner-pickup queue left intact. Legacy artifacts and zero-queue
+    # commits keep the existing Bottom line byte-for-byte.
+    _commit_clock = cp.get("commit_wall_clock") or {}
+    _commit_wall = _num(_commit_clock.get("p50_s")) or 0.0
+    _commit_queue = _num(_commit_clock.get("queue_p50_s")) or 0.0
+    _commit_work = _num(_commit_clock.get("work_p50_s")) or 0.0
+    if _commit_wall > 0 and _commit_queue > 0:
+        _code_saving = max((
+            (_num(f.get("wall_clock_p50_s")) or 0.0)
+            for f in all_findings
+            if (str(f.get("pattern") or "") not in {"OPT43", "OPT97"}
+                and not f.get("off_spine") and not f.get("advisory"))
+        ), default=0.0)
+        _code_saving = min(max(_code_saving, 0.0), _commit_work, _commit_wall)
+        _share = (_num(_commit_clock.get("queue_share_p50"))
+                  or _commit_queue / _commit_wall)
+        _queue_bottom = (
+            f"> **Bottom line.** The full developer wall is **{_clock(_commit_wall)}**: "
+            "a typical PR waits from "
+            "workflow creation until the commit's last job finishes, including "
+            f"**~{_clock(_commit_queue)} of it waiting for a runner** ({_share:.0%}); "
+            f"the remaining **~{_clock(_commit_work)}** is work.")
+        if _code_saving > 0 and _commit_wall > _code_saving:
+            _projected = _commit_wall - _code_saving
+            _multiple = _commit_wall / _projected
+            _queue_bottom += (
+                f" The biggest credited code finding removes **~{_clock(_code_saving)}** "
+                f"of work, reducing the full wait to **~{_clock(_projected)} "
+                f"({_multiple:.2f}x)**; it does not claim the queue seconds.")
+        for _i in range(len(out) - 1, -1, -1):
+            if out[_i].startswith("> **Bottom line.**"):
+                out[_i] = _queue_bottom
+                break
     # Owner UX edit (2026-07-19): TOP MATTER = metadata table → ONE Bottom-line blockquote
     # → Contents, nothing else. Everything that used to render as its own blockquote between
     # the headline and the Contents FOLDS into the single Bottom-line quote (via
@@ -12461,7 +12526,10 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
     #   • the "After the gate" runner-minute line (`_tier2_bottom_line`).
     # The bill-scope methodology note was MOVED down into 🗄️ Data sources (see
     # `_bill_scope_era_note`) — it sizes total compute, not the headline.
-    _lead_block = ["> " + lead] if lead.strip() else []
+    _lead_block = [(
+        "> **Work-only drill:** " + lead
+        if _commit_wall > 0 and _commit_queue > 0 else "> " + lead
+    )] if lead.strip() else []
     _model_check = []
     # Reuse the already-`_num`-parsed `_dvg` (never a bare `float()` on the raw field: a persisted /
     # externally-supplied summary can carry a non-numeric `divergence_pct` that would crash the render).
@@ -12505,6 +12573,11 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
     # Bottom-line blockquote above — owner UX edit 2026-07-19; nothing renders between it
     # and the Contents.)
     queue_count = sum(1 for f in all_findings if _is_wait_finding(f))
+    if queue_count == 0 and (_num((cp.get("commit_wall_clock") or {}).get(
+            "queue_p50_s")) or 0.0) > 0:
+        # The per-commit split earns the section/TOC entry even when no
+        # individual runner-pool finding crossed its detector threshold.
+        queue_count = 1
     _t2_ranked = _tier2_source_backed_ranked(all_findings, doc)
     tier2_count = len(_t2_ranked)
     tier2_toc = None
