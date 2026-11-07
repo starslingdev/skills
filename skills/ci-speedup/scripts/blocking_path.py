@@ -3130,7 +3130,8 @@ _NO_WEAKENING_LINES = [
 
 _CONCURRENCY_ORDER_LINE = (
     "Concurrency order: First use OPT88 to measure and fill the existing job's idle "
-    "cores; only then add shards or jobs; concurrent workers do not share an external server."
+    "cores; only then add shards or jobs. Before adding workers, verify that they "
+    "cannot interfere through a shared external server."
 )
 _SHARD_RUNNER_MINUTE_LINE = (
     "Runner-minute effect: With safe in-job concurrency, runner minutes go down because "

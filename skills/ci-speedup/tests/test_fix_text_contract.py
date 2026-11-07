@@ -41,7 +41,8 @@ def test_multi_job_cache_and_concurrency_guidance_carry_their_conditions():
     assert "use `shared-key`" not in opt61
     assert "compilation mode" in opt61
     assert "save-if" in opt61
-    assert "do not share an external server" in bp._CONCURRENCY_ORDER_LINE
+    assert "verify that they cannot interfere through a shared external server" in (
+        bp._CONCURRENCY_ORDER_LINE)
 
 
 def test_opt88_lists_the_common_worker_count_traps():

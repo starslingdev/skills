@@ -2167,7 +2167,7 @@ Common settings can leave cores idle, but each is evidence to measure rather tha
 | `pytest -n auto` | xdist resolves `auto` from physical cores | Is that physical-core count the best point for this suite's CPU, memory and shared services? |
 | Maven without `-T` | Reactor modules are built without Maven's parallel reactor | Are modules independent enough for a measured `-T` setting? |
 | CTest without `-j` | Tests run without CTest's explicit parallel level | Which measured parallel level preserves fixtures, resource locks and failures? |
-| `go test -p` / `go test -parallel` | `-p` caps concurrently built test binaries; `-parallel` caps tests inside each binary | Which combination uses the runner without exhausting memory or sharing process-global state? |
+| `go test -p` / `go test -parallel` | `-p` caps test binaries built and run concurrently; `-parallel` caps only tests in a binary that call `t.Parallel()` and does not parallelize ordinary tests | Which combination uses the runner without exhausting memory or sharing process-global state? |
 | Rust doctest | Doctest binaries have concurrency and compilation costs distinct from the main test harness | Does measuring doctest separately expose a different safe cap? |
 | gtest | A gtest binary may still be serial even when several binaries run concurrently | Should the harness parallelize binaries, cases, or both? |
 | Static analysis tool | An analysis tool may have its own worker flag and memory ceiling | Does its configured worker count match the runner rather than the build tool's setting? |
