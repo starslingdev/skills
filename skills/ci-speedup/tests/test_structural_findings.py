@@ -3061,6 +3061,36 @@ def test_fetch_required_checks_complete_when_all_rulesets_read():
     assert rc.names == frozenset({"build"})
     assert rc.complete is True
     assert rc.classic_read is False
+    assert rc.rulesets_read is True
+    assert rc.advice_complete is False
+
+
+def test_fetch_required_checks_needs_a_readable_ruleset_list_for_advice():
+    client = _FakeRulesetClient({
+        "branches/main/protection/required_status_checks": {"contexts": []},
+    })
+    rc = cr._fetch_required_checks(client, "demo/demo", "main")
+
+    assert rc is not None
+    assert rc.complete is True  # the merge-spine compatibility signal is unchanged
+    assert rc.classic_read is True
+    assert rc.rulesets_read is False
+    assert rc.advice_complete is False
+
+
+def test_fetch_required_checks_rejects_unexpected_classic_payload_shape():
+    client = _FakeRulesetClient({
+        "rulesets?includes_parents": [{"id": 1}],
+        "rulesets/1": _RULE_BUILD,
+        "branches/main/protection/required_status_checks": {
+            "message": "unexpected response",
+        },
+    })
+    rc = cr._fetch_required_checks(client, "demo/demo", "main")
+
+    assert rc is not None
+    assert rc.classic_read is False
+    assert rc.rulesets_read is True
     assert rc.advice_complete is False
 
 

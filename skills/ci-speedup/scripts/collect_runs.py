@@ -8353,11 +8353,12 @@ class RequiredChecks:
     names: frozenset[str]
     complete: bool
     classic_read: bool = True
+    rulesets_read: bool = True
 
     @property
     def advice_complete(self) -> bool:
         """Whether absence can authorize moving a check off the PR path."""
-        return self.complete and self.classic_read
+        return self.complete and self.classic_read and self.rulesets_read
 
 
 def _ruleset_ref_in_scope(detail: dict[str, Any], branch: str | None) -> bool:
@@ -8456,6 +8457,7 @@ def _fetch_required_checks(
     # Rulesets (the modern mechanism) — readable without admin on many repos.
     rulesets = client.json(f"repos/{repo}/rulesets?includes_parents=true",
                            allow_missing=True)
+    rulesets_read = isinstance(rulesets, list)
     if isinstance(rulesets, list):
         for rs in rulesets:
             rid = rs.get("id") if isinstance(rs, dict) else None
@@ -8509,7 +8511,12 @@ def _fetch_required_checks(
         prot = client.json(
             f"repos/{repo}/branches/{branch}/protection/required_status_checks",
             allow_missing=True)
-        if isinstance(prot, dict):
+        classic_shape_readable = (
+            isinstance(prot, dict)
+            and (isinstance(prot.get("contexts"), list)
+                 or isinstance(prot.get("checks"), list)
+                 or isinstance(prot.get("strict"), bool)))
+        if classic_shape_readable:
             classic_read = True
             if isinstance(prot.get("strict"), bool):
                 strict_values.append(prot["strict"])
@@ -8532,7 +8539,8 @@ def _fetch_required_checks(
                             complete=complete and isinstance(rulesets, list))
     if not found_any and complete:
         return None
-    return RequiredChecks(frozenset(names), complete, classic_read)
+    return RequiredChecks(
+        frozenset(names), complete, classic_read, rulesets_read)
 
 
 _OPT98_MIN_MERGES_PER_DAY = 30      # C1: below this the up-to-date rule is cheap
@@ -27637,6 +27645,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         required_checks.complete if required_checks is not None else False)
     findings_doc["required_checks_classic_read"] = (
         required_checks.classic_read if required_checks is not None else False)
+    findings_doc["required_checks_rulesets_read"] = (
+        required_checks.rulesets_read if required_checks is not None else False)
     findings_doc["required_checks_advice_complete"] = (
         required_checks.advice_complete if required_checks is not None else False)
 
