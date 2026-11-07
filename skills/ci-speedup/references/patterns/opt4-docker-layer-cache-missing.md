@@ -22,6 +22,17 @@ grep -rn 'docker build\|docker compose build' .github/workflows/
 grep -rn 'docker/build-push-action' .github/workflows/
 ```
 
-**Fix**: Use `docker/build-push-action` with `cache-from: type=gha` and `cache-to: type=gha,mode=max`, or use `docker compose build` with BuildKit cache mounts.
+**Fix**: Use `docker/build-push-action` with `cache-from: type=gha` and
+`cache-to: type=gha,mode=min` by default, or use `docker compose build` with
+BuildKit cache mounts. Use `mode=max` only when intermediate stages are reused
+and a measured export fits the job's time and size budget. If `COPY . .` or
+`ADD . .` comes before the slow compile, copy dependency manifests first, use
+`RUN --mount=type=cache`, or build natively/cross-compile; exporting that
+invalidated layer will not make it reusable. Measure the export step and confirm
+the intended layers print `CACHED` on a later run.
+
+**Scope**: In a tags-only workflow, a GitHub Actions cache export is scoped to
+that tag ref; no later tag can restore this. Do not add the export there unless
+the same ref will run again and consume it.
 
 ---

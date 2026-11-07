@@ -39,6 +39,15 @@ inheritance called out where it appears: the 0.25 hit-share floor in step 6 is
 the shared cache tail floor (`_CACHE_TAIL_MIN_FRAC`), which the whole cache
 family reads, so retuning it there moves this gate too.
 
+The BuildKit arm uses the same bounded log-probe wave. It reports an export only
+when at least two sampled runs from one branch each spend at least 60 seconds in
+`exporting to GitHub Actions Cache`, and the slowest cacheable layer never prints
+`CACHED`. One observed hit on that layer suppresses the finding. The measured
+export p50 is the cost; the fix is to drop the export, use `mode=min`, or reorder
+the Dockerfile so the slow layer can actually hit. A tag-only workflow also says
+that no later tag can restore this export, because GitHub cache access is scoped
+to the ref that created it.
+
 1. From the **workflow file** (never from the observed step list), the job must
    declare exactly **one** cache-restore step — `actions/cache`,
    `actions/cache/restore`, or an `owner/setup-*` action whose cache input

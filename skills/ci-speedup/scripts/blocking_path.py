@@ -1682,6 +1682,9 @@ _PARTIAL_MISS_FLOOR_PCT = 40.0
 # seconds, and on the number of work-bearing (RUN/FROM/COPY/ADD) steps that ran cold.
 _BUILDX_COLD_WALL_FLOOR_S = 60.0
 _BUILDX_MIN_WORK_STEPS = 2
+_BUILDX_COMPILE_OPERATION_RE = re.compile(
+    r"\b(?:cargo|go)\s+build\b|\bcmake\s+--build\b|\bdotnet\s+(?:build|publish)\b|"
+    r"\b(?:npm|pnpm|yarn)\s+(?:run\s+)?build\b|\bmake(?:\s|$)", re.IGNORECASE)
 
 # A pytest run with `pytest-xdist` INSTALLED (in the plugin banner) but NO `-n`/
 # `--numprocesses` on the invocation runs every test serially on one worker — the
@@ -2200,6 +2203,58 @@ def _cache_path_leaf(cache_path_sample: dict[str, Any] | None) -> dict[str, Any]
             "config_fact": " ".join(context)}
 
 
+def _emulated_image_compile_leaf(lines: list[str]) -> dict[str, Any] | None:
+    """Measure foreign-platform compile work before generic BuildKit cache advice."""
+    compile_re = re.compile(
+        r"\b(?:go\s+build|cargo\s+build|(?:npm|pnpm|yarn)\s+(?:run\s+)?build|"
+        r"cmake\s+--build|dotnet\s+(?:build|publish)|gradle\w*\s+.*\bbuild|"
+        r"make(?:\s|$))", re.IGNORECASE)
+    operations: dict[str, tuple[str, str]] = {}
+    durations: list[tuple[str, float, str, str]] = []
+    for line in lines:
+        match = re.search(r"#(\d+)\s+\[linux/([^\s\]]+)[^\]]*\]\s+RUN\s+(.+)", line)
+        if match and compile_re.search(match.group(3)):
+            operations[match.group(1)] = (match.group(2).lower(), line)
+            continue
+        done = re.search(r"#(\d+)\s+DONE\s+([\d.]+)s\b", line)
+        if done and done.group(1) in operations:
+            arch, header = operations.pop(done.group(1))
+            durations.append((arch, float(done.group(2)), header, line))
+    native = sum(seconds for arch, seconds, _header, _done in durations
+                 if arch in {"amd64", "x86_64"})
+    emulated = sum(seconds for arch, seconds, _header, _done in durations
+                   if arch not in {"amd64", "x86_64"})
+    total = native + emulated
+    if native <= 0 or emulated <= 0 or emulated / total < 0.50:
+        return None
+    share = round(100 * emulated / total)
+    leaf: dict[str, Any] = {
+        "fix_key": "emulated-image-compile",
+        "unit_label": (f"native compile {native:g}s; foreign-architecture compile "
+                       f"{emulated:g}s ({share}% of measured compile time)"),
+        "magnitude": {"label": "emulated compile seconds", "unit": "s",
+                      "value": round(emulated, 3)},
+        "deeper": [{
+            "rows": [("native linux/amd64 compile", native, None),
+                     ("foreign-architecture compile", emulated, None)],
+            "blocker_note": (f"foreign-architecture work is {share}% of measured "
+                             "compile time"),
+            "pct_of": "sum",
+        }],
+        "evidence": [item for _arch, _seconds, header, done in durations
+                     for item in (header, done)][:6],
+        "search": ["docker/build-push-action", "BUILDPLATFORM", "TARGETARCH"],
+    }
+    if re.search(r"(?:docker\s+buildx\s+build\b[^\n]*|build-push-action[^\n]*)"
+                 r".*(?:^|\s)--no-cache(?:\s|$)", "\n".join(lines), re.MULTILINE):
+        leaf["config_fact"] = (
+            "The measured build command explicitly includes `--no-cache`; treat that "
+            "flag as an intentional cache bypass to confirm, and do not infer layer-cache "
+            "advice from this run."
+        )
+    return leaf
+
+
 def _parse_log(text: str,
                iso: dict[str, Any] | None = None,
                cache_path_sample: dict[str, Any] | None = None) -> dict[str, Any] | None:
@@ -2585,6 +2640,13 @@ def _parse_log(text: str,
                 "search": ["cache miss, executing", "Cached:"],
             }
 
+    # --- E0: foreign-platform compilation outranks generic cache advice --------
+    # A layer cache cannot remove an emulated compile whose inputs really changed.
+    # Route that measured dominant cause first, including explicit --no-cache runs.
+    emulated_leaf = _emulated_image_compile_leaf(lines)
+    if emulated_leaf is not None:
+        return emulated_leaf
+
     # --- E: docker buildx build with NO persistent BuildKit cache RESTORE ------
     # A `docker/build-push-action` / `docker buildx build` step that recompiles every
     # run because nothing is RESTORED: the command imports no cache (no `--cache-from`
@@ -2644,7 +2706,19 @@ def _parse_log(text: str,
         if (cached == 0 and len(work_steps) >= _BUILDX_MIN_WORK_STEPS
                 and cold_wall >= _BUILDX_COLD_WALL_FLOOR_S):
             work_steps.sort(key=lambda w: -w[0])
-            slow_secs, slow_stage, _slow_kind, slow_n = work_steps[0]
+            slow_secs, slow_stage, slow_kind, slow_n = work_steps[0]
+            slow_header_pos = next(
+                (i for i, (n, _stage, _kind, _rest) in enumerate(work_headers)
+                 if n == slow_n), len(work_headers))
+            slow_rest = next((rest for n, _stage, _kind, rest in work_headers
+                              if n == slow_n), "")
+            slow_stage_base = slow_stage.split()[0] if slow_stage else ""
+            whole_context_before_slowest = any(
+                i < slow_header_pos and kind in {"COPY", "ADD"}
+                and stage.split()[0] == slow_stage_base
+                and re.search(r"(?:^|\s)\.\s+\.\s*$", rest.strip())
+                for i, (_n, stage, kind, rest) in enumerate(work_headers)
+            ) and slow_kind == "RUN" and bool(_BUILDX_COMPILE_OPERATION_RE.search(slow_rest))
             # ALWAYS quote the slowest cold layer's header + DONE - the single pair the
             # BIGGEST-LEVER magnitude (slow_secs / cold_wall) is computed from - adjacent
             # and verbatim, so the evidence substantiates the headline %. A blind
@@ -2674,7 +2748,7 @@ def _parse_log(text: str,
                 # denominator and inflate every shown share (disagreeing with magnitude).
                 tail = sum(secs for secs, _s, _k, _n in work_steps[6:])
                 rows.append((f"…{len(work_steps) - 6} more cold layers", tail, None))
-            return {
+            leaf = {
                 "fix_key": "buildx-no-cache",
                 "unit_label": f"docker buildx rebuilds {len(work_steps)} layers from "
                               "scratch every run "
@@ -2697,6 +2771,9 @@ def _parse_log(text: str,
                 "evidence": ev,
                 "search": ["docker buildx build", "DONE", "--mount=type=cache"],
             }
+            if whole_context_before_slowest:
+                leaf["whole_context_before_slowest"] = True
+            return leaf
 
     # --- F: serial pytest with pytest-xdist INSTALLED but not switched on -------
     # pytest prints its loaded plugins (`plugins: …, xdist-2.5.0, …`), the collected
@@ -3092,46 +3169,6 @@ def _parse_log(text: str,
             "evidence": [x[3] for x in command_starts[:2]],
             "search": ["test loop", "parallel", "OPT88"],
         }
-    # --- M: a multi-platform image compiles its foreign architecture under emulation
-    compile_re = re.compile(
-        r"\b(?:go\s+build|cargo\s+build|(?:npm|pnpm|yarn)\s+(?:run\s+)?build|"
-        r"cmake\s+--build|dotnet\s+(?:build|publish)|gradle\w*\s+.*\bbuild|"
-        r"make(?:\s|$))", re.IGNORECASE)
-    operations: dict[str, tuple[str, str]] = {}
-    durations: list[tuple[str, float, str, str]] = []
-    for line in lines:
-        match = re.search(r"#(\d+)\s+\[linux/([^\s\]]+)[^\]]*\]\s+RUN\s+(.+)", line)
-        if match and compile_re.search(match.group(3)):
-            operations[match.group(1)] = (match.group(2).lower(), line)
-            continue
-        done = re.search(r"#(\d+)\s+DONE\s+([\d.]+)s\b", line)
-        if done and done.group(1) in operations:
-            arch, header = operations.pop(done.group(1))
-            durations.append((arch, float(done.group(2)), header, line))
-    native = sum(seconds for arch, seconds, _header, _done in durations
-                 if arch in {"amd64", "x86_64"})
-    emulated = sum(seconds for arch, seconds, _header, _done in durations
-                   if arch not in {"amd64", "x86_64"})
-    total = native + emulated
-    if native > 0 and emulated > 0 and emulated / total >= 0.50:
-        share = round(100 * emulated / total)
-        return {
-            "fix_key": "emulated-image-compile",
-            "unit_label": (f"native compile {native:g}s; foreign-architecture compile "
-                           f"{emulated:g}s ({share}% of measured compile time)"),
-            "magnitude": {"label": "emulated compile seconds", "unit": "s",
-                          "value": round(emulated, 3)},
-            "deeper": [{
-                "rows": [("native linux/amd64 compile", native, None),
-                         ("foreign-architecture compile", emulated, None)],
-                "blocker_note": (f"foreign-architecture work is {share}% of measured "
-                                 "compile time"),
-                "pct_of": "sum",
-            }],
-            "evidence": [item for _arch, _seconds, header, done in durations
-                         for item in (header, done)][:6],
-            "search": ["docker/build-push-action", "BUILDPLATFORM", "TARGETARCH"],
-        }
     return dependency_hit_leaf
 
 
@@ -3465,13 +3502,15 @@ _FIX_META: dict[str, dict[str, Any]] = {
                  "docker/build-push-action cache inputs: "
                  "https://github.com/docker/build-push-action#cache"],
         "deliver": "Persist the BuildKit layer cache (and the `--mount=type=cache` "
-                   "mounts) across runs by wiring BOTH a `--cache-from` import and a "
-                   "`--cache-to` export (gha / registry / local) - so unchanged layers "
-                   "restore instead of rebuilding cold; if a `--cache-to` is already "
-                   "present, the fix is just the missing `--cache-from`. Confirm those "
-                   "layers log as `CACHED` (or the mount warm-starts) on a second run and "
-                   "re-measure the step. Don't serve stale artifacts: scope the cache key "
-                   "to the Dockerfile + pinned versions.",
+                   "mounts) across runs by wiring BOTH a `--cache-from type=gha` import "
+                   "and a `--cache-to type=gha,mode=min` export by default, so unchanged "
+                   "final-stage layers restore instead of rebuilding cold. Use `mode=max` "
+                   "only when intermediate stages are reused and the measured export time "
+                   "and size fit the job's budget; measure the export step on repeated "
+                   "runs. If an export is already present, add only the missing import. "
+                   "Confirm the target layers log as `CACHED` (or the mount warm-starts) "
+                   "on a second run. Don't serve stale artifacts: scope inputs to the "
+                   "Dockerfile + pinned versions.",
     },
     "install-lifecycle-build": {
         "cause": "The dependency-install step runs a BUILD, because the root "
@@ -4105,6 +4144,28 @@ def _build_agent_prompt(leaf: dict[str, Any] | None, pole: dict[str, Any],
             pole, candidates, run_url, repo, sha, gate_count, npop, timeline,
             structural, data_driven, cs=cs, cross_run_rendered=cross_run_rendered,
             opt79=opt79, opt82=opt82)
+    meta = dict(meta)
+    if (str((leaf or {}).get("fix_key") or "") == "buildx-no-cache"
+            and (leaf or {}).get("whole_context_before_slowest") is True):
+        meta.update({
+            "cause": (
+                "The whole build context is copied before the slowest cold compile "
+                "layer. Any source change invalidates that layer, so a layer export "
+                "cannot make the measured compile reusable."
+            ),
+            "look": (
+                "`{wf}` and its Dockerfile — inspect the whole-context `COPY . .` or "
+                "`ADD . .` before the measured compile, then identify the dependency "
+                "manifests and compiler caches that can be isolated from source churn."
+            ),
+            "deliver": (
+                "Copy dependency manifests first and install dependencies before copying "
+                "the changing source tree; use `RUN --mount=type=cache` for compiler and "
+                "package-manager state. If the compile still dominates, build natively "
+                "or cross-compile outside emulation. Rebuild after a source-only change "
+                "and re-measure the compile layer."
+            ),
+        })
     wf = _wf_base(pole.get("workflow_file", ""))
     check = _clean_label(str(pole.get("check", "")))
     dur = _clock(_num(pole.get("p50_s")))
