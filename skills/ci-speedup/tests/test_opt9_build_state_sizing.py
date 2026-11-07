@@ -94,7 +94,7 @@ def _verify_full(doc: dict, tmp_path: Path) -> str:
     return report_path.read_text(encoding="utf-8")
 
 
-def test_build_state_is_uncredited_while_eslint_keeps_existing_sizing(
+def test_opt9_cache_shapes_stay_uncredited_without_the_cache_guard_inputs(
         monkeypatch, tmp_path):
     doc = _collect(monkeypatch)
     by_id = {finding["id"]: finding for finding in doc["findings"]}
@@ -108,70 +108,18 @@ def test_build_state_is_uncredited_while_eslint_keeps_existing_sizing(
         assert finding["opt9_measure_before_after"] is True
         assert "measure before and after" in finding["size_note"].lower()
 
-    eslint = by_id["f3"]
-    assert {
-        key: eslint.get(key)
-        for key in (
-            "wall_clock_p50_s",
-            "runner_min_saving",
-            "tier",
-            "realization",
-            "runner_min_unrealizable_s",
-            "runner_min_unrealizable",
-            "size_note",
-            "runner_min_note",
-            "sizing_basis",
-        )
-    } == {
-        "wall_clock_p50_s": 15.0,
-        "runner_min_saving": None,
-        "tier": 1,
-        "realization": "direct",
-        "runner_min_unrealizable_s": 75.0,
-        "runner_min_unrealizable": True,
-        "size_note": (
-            "ephemeral-runner caveat — this saving assumes a warm local cache, "
-            "which GitHub-hosted/ephemeral runners don't have; verify a "
-            "warm-vs-cold step-time delta before claiming wall-clock (OPT8 guardrail)"
-        ),
-        "runner_min_note": (
-            "runner-minute saving is ALSO unproven on ephemeral runners — the "
-            "cache writes to a working-dir path the next runner discards; "
-            "realizable only with a persisted actions/cache for that dir + a "
-            "measured warm-vs-cold delta (none here), so this is config-hygiene, "
-            "not a credited bill saving"
-        ),
-        "sizing_basis": "modeled",
-    }
-
-    vitest = by_id["f4"]
-    assert {
-        key: vitest.get(key)
-        for key in (
-            "wall_clock_p50_s",
-            "runner_min_saving",
-            "tier",
-            "realization",
-            "runner_min_unrealizable_s",
-            "runner_min_unrealizable",
-            "size_note",
-            "runner_min_note",
-            "sizing_basis",
-        )
-    } == {
-        key: eslint.get(key)
-        for key in (
-            "wall_clock_p50_s",
-            "runner_min_saving",
-            "tier",
-            "realization",
-            "runner_min_unrealizable_s",
-            "runner_min_unrealizable",
-            "size_note",
-            "runner_min_note",
-            "sizing_basis",
-        )
-    }
+    for finding_id in ("f3", "f4"):
+        finding = by_id[finding_id]
+        assert finding["wall_clock_p50_s"] is None
+        assert finding["runner_min_saving"] is None
+        assert finding["tier"] == 2
+        assert finding["realization"] == "none"
+        assert finding["runner_min_unrealizable_s"] == 75.0
+        assert finding["runner_min_unrealizable"] is True
+        assert finding["sizing_basis"] == "modeled"
+        assert "ephemeral-runner caveat" in finding["size_note"]
+        assert "cache saving uncredited" in finding["size_note"]
+        assert finding["cache_sizing_guard"]["status"] == "not_measured"
 
     report = _verify_full(doc, tmp_path)
     assert "measure before and after" in report.lower()

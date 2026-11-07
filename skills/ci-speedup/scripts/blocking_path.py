@@ -1864,6 +1864,12 @@ _DEPENDENCY_CACHE_MISS_RE = re.compile(
     r"Cache not found for input keys|\bcache is not found\b", re.I)
 _DEPENDENCY_CACHE_SAVED_RE = re.compile(
     r"Cache saved successfully|Cache saved with (?:the )?key")
+_CACHE_SIZE_RE = re.compile(
+    r"(?:cache|archive)\s+size\s*:\s*~?([0-9]+(?:\.[0-9]+)?)\s*(B|KB|MB|GB)\b", re.I)
+_CACHE_RESTORE_SECONDS_RE = re.compile(
+    r"cache\s+restored\s+in\s+([0-9]+(?:\.[0-9]+)?)\s*(?:s|sec(?:ond)?s?)\b", re.I)
+_CACHE_SAVE_SECONDS_RE = re.compile(
+    r"cache\s+saved\s+in\s+([0-9]+(?:\.[0-9]+)?)\s*(?:s|sec(?:ond)?s?)\b", re.I)
 # Leaves that record an observation, not a root cause: a restore line appears in
 # nearly every job log, so it never closes a coverage gap (phase 4a gap-fill and
 # capture still run) and never holds back the runner advisory. OPT101's cache
@@ -1889,14 +1895,51 @@ def _cache_state_of_log(text: str | None, fix_key: str | None) -> dict[str, Any]
         return None
     lines = _clean_log(text)
     joined = "\n".join(lines)
+    def _transfer() -> dict[str, float]:
+        out: dict[str, float] = {}
+        sizes = []
+        units = {"B": 1 / 1024 ** 3, "KB": 1 / 1024 ** 2,
+                 "MB": 1 / 1024, "GB": 1}
+        for match in _CACHE_SIZE_RE.finditer(joined):
+            sizes.append(float(match.group(1)) * units[match.group(2).upper()])
+        if sizes:
+            out["cache_size_gb"] = round(sum(sizes), 6)
+        restores = [float(m.group(1)) for m in _CACHE_RESTORE_SECONDS_RE.finditer(joined)]
+        saves = [float(m.group(1)) for m in _CACHE_SAVE_SECONDS_RE.finditer(joined)]
+        if restores:
+            out["restore_s"] = sum(restores)
+        if saves:
+            out["save_s"] = sum(saves)
+        # BuildKit reports cache import/export as numbered progress vertices,
+        # followed by `#N DONE 12.3s` rather than actions/cache's prose.
+        vertices: dict[str, str] = {}
+        buildkit: dict[str, list[float]] = {"restore_s": [], "save_s": []}
+        for line in lines:
+            start = re.search(r"^#(\d+)\s+(.+)$", line)
+            if start:
+                label = start.group(2).lower()
+                if "importing cache" in label:
+                    vertices[start.group(1)] = "restore_s"
+                elif "exporting cache" in label or "preparing build cache for export" in label:
+                    vertices[start.group(1)] = "save_s"
+            done = re.search(r"^#(\d+)\s+DONE\s+([0-9]+(?:\.[0-9]+)?)s\b", line, re.I)
+            if done and done.group(1) in vertices:
+                buildkit[vertices[done.group(1)]].append(float(done.group(2)))
+        for key, measured in buildkit.items():
+            if measured:
+                out[key] = out.get(key, 0.0) + sum(measured)
+        return out
+
+    def _with_transfer(state: dict[str, Any]) -> dict[str, Any]:
+        return {**state, **_transfer()}
     if fix_key == "dependency-cache":
         misses = sum(bool(_DEPENDENCY_CACHE_MISS_RE.search(line)) for line in lines)
         hits = sum("Cache restored from key" in line for line in lines)
         if not hits + misses:
             return None
-        return {"miss_pct": 100.0 * misses / (hits + misses),
+        return _with_transfer({"miss_pct": 100.0 * misses / (hits + misses),
                 "cold": hits == 0, "remote_off": False, "restore_count": hits + misses,
-                "saved": any(_DEPENDENCY_CACHE_SAVED_RE.search(line) for line in lines)}
+                "saved": any(_DEPENDENCY_CACHE_SAVED_RE.search(line) for line in lines)})
     if fix_key in ("turbo-remote-cache", "turbo-partial-cache", "install-lifecycle-build"):
         # For the install-lifecycle leaf, measure the miss rate from the SAME install-step section
         # `_parse_log`'s detector fired on — NOT the whole log. Otherwise a later explicit
@@ -1915,8 +1958,8 @@ def _cache_state_of_log(text: str | None, fix_key: str | None) -> dict[str, Any]
             _cmd, _s, _e, _hit, _total, _secs, _cidx = sec
             _miss = (100.0 * (_total - _hit) / _total) if _total else 0.0
             _ro = "Remote caching disabled" in "\n".join(lines[_s:_e])
-            return {"miss_pct": round(_miss, 2),
-                    "cold": _ro or (_total > 0 and _hit == 0), "remote_off": _ro}
+            return _with_transfer({"miss_pct": round(_miss, 2),
+                    "cold": _ro or (_total > 0 and _hit == 0), "remote_off": _ro})
         lo, hi = 0, len(lines)
         blocks: list[tuple[int, int, float | None]] = []
         for _i in range(lo, hi):
@@ -1939,23 +1982,23 @@ def _cache_state_of_log(text: str | None, fix_key: str | None) -> dict[str, Any]
             # on a sampled run would stamp it 100% cold and drag the cross-run median toward
             # churn/cold. Only a summary-less log with a real burst of misses counts as cold here.
             if remote_off or activity > 5:
-                return {"miss_pct": 100.0, "cold": True, "remote_off": remote_off}
+                return _with_transfer({"miss_pct": 100.0, "cold": True, "remote_off": remote_off})
             return None
         timed = [b for b in blocks if b[2] is not None]
         hit, total, _ = (max(timed, key=lambda b: b[2]) if timed
                          else max(blocks, key=lambda b: b[1] - b[0]))
         rebuilt = total - hit
         miss_pct = (100.0 * rebuilt / total) if total else 0.0
-        return {"miss_pct": round(miss_pct, 2),
+        return _with_transfer({"miss_pct": round(miss_pct, 2),
                 "cold": remote_off or (total > 0 and hit == 0),
-                "remote_off": remote_off}
+                "remote_off": remote_off})
     if fix_key == "buildx-no-cache":
         work = len(re.findall(r"#\d+ \[[^\]]+\] (?:RUN|FROM|COPY|ADD) ", joined))
         if work == 0:
             return None
         cached = len(re.findall(r"^\s*#\d+ CACHED\b", joined, re.MULTILINE))
-        return {"miss_pct": round(100.0 * max(work - cached, 0) / work, 2),
-                "cold": cached == 0, "remote_off": False}
+        return _with_transfer({"miss_pct": round(100.0 * max(work - cached, 0) / work, 2),
+                "cold": cached == 0, "remote_off": False})
     return None
 
 
@@ -8328,6 +8371,31 @@ def _opt80_tail_for(pole: dict[str, Any],
     return out
 
 
+def _cache_sizing_guard_block(doc: dict[str, Any] | None) -> list[str]:
+    """Show cache opportunities whose budget, lifetime or transfer math was checked."""
+    rows = []
+    for finding in ((doc or {}).get("findings") or []):
+        guard = finding.get("cache_sizing_guard") if isinstance(finding, dict) else None
+        if not isinstance(guard, dict):
+            continue
+        checks = guard.get("checks") if isinstance(guard.get("checks"), dict) else {}
+        details = [str(v.get("detail")) for v in checks.values()
+                   if isinstance(v, dict) and v.get("status") != "passed" and v.get("detail")]
+        if guard.get("status") == "passed":
+            details = ["all three cache sizing checks passed"]
+        rows.append((str(finding.get("title") or finding.get("pattern") or "Cache opportunity"),
+                     str(guard.get("status") or "not_measured"), details))
+    if not rows:
+        return []
+    out = ["---", "", "## Cache sizing checks", ""]
+    for title, status, details in rows:
+        label = "credited" if status == "passed" else "check this - uncredited"
+        out += [f"- **{_clean_label(title)}** - {label}: "
+                + "; ".join(_clean_label(detail) for detail in details)]
+    out.append("")
+    return out
+
+
 def _opt80_tail_count_sentence(axis: dict[str, Any]) -> str:
     """What "one run in N" stands on, from the stamped counts: m of n sampled
     runs were slow, L of their logs were read - k show the stall, u could not
@@ -11767,6 +11835,7 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     # report collapsed to the one-line no-critical-path note, which is exactly
     # the silence this block exists to break.
     uncredited_lines = _opt79_uncredited_block(doc)
+    cache_guard_lines = _cache_sizing_guard_block(doc)
     opt79_off_pole = _opt79_off_pole_block(all_findings, catalog_url, drilled=False)
     # A candidate any pattern held back is disclosed in the Data sources footer;
     # collapsing to the one-line note would drop the footer with it and let
@@ -11786,6 +11855,7 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     parallel_n = parallel_steps_used(doc.get("parallel_steps"))
     if (not tier2_lines and not also_lines and not queue_lines
             and not incomplete and not broken and not uncredited_lines
+            and not cache_guard_lines
             and not withheld_n and not opt79_off_pole and not opt81_n
             and not parallel_n):
         return ""  # nothing static to say — caller keeps the one-line note
@@ -11998,6 +12068,7 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
         out += ["---", "", *_o84_lines]
     if also_lines:
         out += ["---", "", *also_lines]
+    out += cache_guard_lines
     # Measured net-negative caches that could not be PRICED (three cases: the
     # slowest job, or one tied with it, of a workflow no PR runs; a PR workflow's
     # slowest job the pole arm declined; a PR-workflow job `needs:`-chained to the
@@ -14268,6 +14339,7 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         # (§5.5/G15; `check_cost_spine_shallow_disclosed` re-derives it from
         # `data_sources`, so dropping this line is a verify FAIL, not a style choice).
         out += ["---", "", f"> ⚠️ _{shallow_note}_", ""]
+    out += _cache_sizing_guard_block(doc)
     # Measured net-negative caches that could not be PRICED (three cases: the
     # slowest job, or one tied with it, of a workflow no PR runs; a PR workflow's
     # slowest job the pole arm declined; a PR-workflow job `needs:`-chained to the

@@ -13,6 +13,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-11-07** — Gate cache savings on repository capacity, sampled key invalidation, and net restore/save economics. The collector reads repository cache usage once, reuses sampled PR changed files, multiplies cache size across saving copies, and leaves failed or unreadable checks visible but uncredited.
 - **2026-11-07** — Correct fix guidance for pytest workers, persisted ESLint caches, multi-job build caches, in-job concurrency controls, and change-selected test coverage. The catalog now requires measured safety evidence before reducing the pre-merge test set and lists common tool-specific worker controls that must be measured independently.
 - **2026-11-07** — Exclude commits containing a workflow re-run from per-commit PR wait percentiles, and name each re-run workflow in the partial-sample disclosure so time before the re-run was requested cannot inflate the reported CI wait.
 - **2026-11-07** — Keep shallow-checkout advice from breaking jobs whose first-party scripts read history through command substitution, shell conditions, quoted child-process calls, parent revisions, common interpreter and wrapper forms, workflow-level working directories, Make recipes, or Snapcraft overrides. Parent-only reads now recommend the bounded checkout depth they require, and oversized or unreadable scripts continue to fail closed.

@@ -205,13 +205,10 @@ def test_the_methodology_states_its_storage_boundary():
     """
     text = (_SKILL_DIR / "references" / "savings-methodology.md").read_text(
         encoding="utf-8")
-    assert "Storage is deliberately out of scope" in text, (
-        "savings-methodology.md no longer states that storage is out of scope "
-        "— the two-axis denomination is back to being implied, and a reader "
-        "cannot tell an omission from a decision")
-    assert "sized in\ngigabytes" in text or "sized in gigabytes" in text, (
+    assert "Storage is not a third saving axis" in text, (
+        "savings-methodology.md no longer states the two-axis storage boundary")
+    assert "ranked in gigabytes" in text, (
         "savings-methodology.md dropped the 'no finding is sized in gigabytes' "
         "half of the storage boundary")
-    assert "netted the other way" in text, (
-        "savings-methodology.md dropped the direction a user actually asks "
-        "about: storage a fix ADDS is not subtracted from the minutes it saves")
+    assert "admission guard for cache findings" in text, (
+        "savings-methodology.md dropped the cache-capacity admission boundary")

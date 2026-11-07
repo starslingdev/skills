@@ -1079,5 +1079,6 @@ def test_collect_grounds_opt96_before_sizing_within_its_workflow(tmp_path, monke
     assert [f["id"] for f in seen["opt96"]] == ["f9"]
     [f] = [f for f in doc["findings"] if f.get("pattern") == "OPT96"]
     assert f["cache_dist"]["static_confirmed"] is True
-    assert f["wall_clock_p50_s"] is not None
-    assert 0 < f["wall_clock_p50_s"] <= 1410, "bounded by the workflow's own wall"
+    assert f["wall_clock_p50_s"] is None
+    assert f["cache_sizing_guard"]["status"] == "not_measured"
+    assert "not measured" in f["size_note"]

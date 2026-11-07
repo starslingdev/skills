@@ -7,13 +7,10 @@ two different things; a finding can be large on one and zero (or negative) on
 the other.
 
 Those two axes are the whole denomination: **runner minutes and wall-clock
-seconds**. **Storage is deliberately out of scope** — artifact and cache
-storage is a separate line on the GitHub bill, governed by `retention-days`
-and cache eviction rather than by how long a job runs, so no finding here is
-sized in gigabytes and no saving claimed here reduces a storage charge. Nor is
-storage netted the other way: a fix that adds a cache or an artifact hand-off
-increases storage and cache-eviction pressure, and that cost is not subtracted
-from the minutes it saves.
+seconds**. Storage is not a third saving axis: no finding is ranked in gigabytes
+and no timing saving is presented as a reduction in storage charges. Cache
+capacity is still an admission guard for cache findings, because an entry that
+cannot survive repository eviction cannot deliver the timing saving.
 
 The report **ranks the findings table and drives the headline** on the
 **wall-clock axis** (developer wait — see `wall-clock-methodology.md` §1); the
@@ -198,6 +195,19 @@ credited billable minutes from structured per-sample rounding evidence.
 > runs during `pnpm install` — the fix is `--ignore-scripts` + an explicit cached step, not a
 > cache key). The report's cache-context caveat + `<!-- ci-speedup:cache-context -->` marker
 > carry this; don't override it.
+
+> **Cache-saving admission guard.** Credit a cache finding only when all three
+> checks pass. First, the proposed entry must fit beside active repository cache
+> usage under the default 10 GB budget, multiplied by every matrix leg and ref
+> that saves its own copy. Usage already within 10% of that budget means eviction
+> is active; usage far above it means an owner raised the limit, so the limit is
+> unknown rather than failed. A missing cache size is not measured. Second,
+> measure how often sampled PRs change the key's `hashFiles` inputs; rolling SHA
+> keys and compiler caches instead need a printed hit rate or warm-run spread.
+> Third, require positive net time on a sampled edited PR:
+> `hit_rate × avoided_time − restore_time − (1 − hit_rate) × save_time > 0`.
+> BuildKit uses import plus export time. An unreadable input fails closed as
+> **not measured**, and a failed or unmeasured check makes the saving uncredited.
 - `invocations_30d` is the number of times the step ran in 30 days. For matrix
   jobs that's `matrix_size × total_30d_runs`. For single-instance jobs it's
   `total_30d_runs`.
