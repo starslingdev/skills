@@ -207,6 +207,26 @@ class _FailedWorkflowRunClient(_TwoWorkflowClient):
         return super().json(endpoint, allow_missing)
 
 
+class _RerunWorkflowClient(_TwoWorkflowClient):
+    def json(self, endpoint: str, allow_missing: bool = False):
+        match = re.match(r"repos/o/r/actions/workflows/(\d+)/runs\?(.*)", endpoint)
+        if match and not re.search(r"per_page=1(?![0-9])", match.group(2)):
+            result = super().json(endpoint, allow_missing)
+            run = result["workflow_runs"][0]
+            run["run_attempt"] = 2 if match.group(1) == "2" else 1
+            if match.group(1) == "2":
+                run.update({
+                    "created_at": _iso(3000),
+                    "run_started_at": _iso(3000),
+                    "updated_at": _iso(4500),
+                })
+            return result
+        if endpoint.startswith("repos/o/r/actions/runs/202/jobs"):
+            self.queries += 1
+            return {"jobs": [_job("second-long", 202, 3000, 4500)]}
+        return super().json(endpoint, allow_missing)
+
+
 class _ZeroWallClient(_TwoWorkflowClient):
     def json(self, endpoint: str, allow_missing: bool = False):
         match = re.match(r"repos/o/r/actions/workflows/(\d+)/runs\?(.*)", endpoint)
@@ -513,6 +533,33 @@ def test_missing_workflow_run_makes_the_commit_partial_instead_of_shorter(
     findings_path.write_text(json.dumps(doc), encoding="utf-8")
     check = vr.check_commit_wall_clock_projection(report, findings_path)
     assert check.ok, check
+
+
+def test_rerun_workflow_makes_commit_partial_and_is_disclosed(
+        monkeypatch, tmp_path: Path):
+    doc = _collect(monkeypatch, _RerunWorkflowClient)
+    stamp = doc["pr_critical_path"]["commit_wall_clock"]
+    fact = stamp["facts"][0]
+
+    assert fact["partial"] is True
+    assert fact["rerun_workflows"] == [_SECOND]
+    assert fact["wall_s"] is None
+    assert stamp["p50_s"] is None
+    assert stamp["p90_s"] is None
+
+    report = bp.render(doc, captured_at="2026-11-07T00:00:00Z")
+    assert "(re-run `.github/workflows/second.yml`)" in report
+    findings_path = tmp_path / "findings.json"
+    report_path = tmp_path / "report.md"
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+    report_path.write_text(report, encoding="utf-8")
+    assert bp._LAST_CLAIMS is not None
+    report_path.with_name(report_path.name + ".claims.json").write_text(
+        json.dumps(bp._LAST_CLAIMS.to_json()), encoding="utf-8")
+    failures = [check for check in vr.run_checks(
+        report, report_path, findings_path, skill_repo=None)
+        if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
 
 
 def test_pull_request_and_merge_queue_members_each_get_a_commit_stamp(monkeypatch):

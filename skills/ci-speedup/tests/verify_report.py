@@ -652,6 +652,8 @@ def check_commit_wall_clock_projection(report: str, findings_path: Path | None) 
             if wall is not None:
                 failures.append(f"partial fact {index} publishes wall_s {wall}")
             continue
+        if fact.get("rerun_workflows"):
+            failures.append(f"complete fact {index} includes a re-run workflow")
         if wall is None or slowest is None:
             failures.append(f"complete fact {index} lacks wall/slowest timing")
             continue
@@ -688,9 +690,19 @@ def check_commit_wall_clock_projection(report: str, findings_path: Path | None) 
             for workflow in (fact.get("missing_workflows") or []) if workflow
         })
         named = ", ".join(f"`{_strip_scope(workflow)}`" for workflow in missing)
+        reruns = sorted({
+            str(workflow) for fact in partial
+            for workflow in (fact.get("rerun_workflows") or []) if workflow
+        })
+        named_reruns = ", ".join(f"`{_strip_scope(workflow)}`" for workflow in reruns)
+        reasons = []
+        if named:
+            reasons.append(f"missing {named}")
+        if named_reruns:
+            reasons.append(f"re-run {named_reruns}")
         expected_partial_line = (
             f"> {len(partial)} sampled commit(s) were partial"
-            + (f" (missing {named})" if named else "")
+            + (f" ({'; '.join(reasons)})" if reasons else "")
             + "; their observed shorter spans were excluded from these percentiles.")
         if report.splitlines().count(expected_partial_line) != 1:
             failures.append(
