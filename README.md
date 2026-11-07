@@ -2,7 +2,7 @@
 
 # StarSling Skills
 
-Agent skills from StarSling, for optimizing your GitHub Actions.
+Agent skills for faster, safer, and easier-to-debug GitHub Actions.
 
 [![skills.sh](https://skills.sh/b/starslingdev/skills)](https://skills.sh/starslingdev/skills)
 
@@ -14,268 +14,257 @@ Agent skills from StarSling, for optimizing your GitHub Actions.
 npx skills add starslingdev/skills
 ```
 
-Pick the skills you want and your agent (Claude Code, Codex, Cursor, …). Add
-`-g` to install for every project instead of just this one. Each section below
-gives the one-line command for that skill on its own.
+Choose the skills and agent you want when prompted. Add `-g` to install them
+for every project instead of only the current one, or use a skill-specific
+command from the sections below.
 
-| Skill | What it answers | Source |
+## Choose a skill
+
+| Skill | Use it when you want to… | Coverage | Reads | Skill file |
+|---|---|---|---|---|
+| 🏎️ [**ci-speedup**](#ci-speedup) | Find what is slowing CI down or wasting runner-minutes | 90+ optimization patterns | Local workflows and GitHub run history | [Open `SKILL.md`](skills/ci-speedup/SKILL.md) |
+| 📋 [**ci-score**](#ci-score) | Grade CI configuration against best practices | 10+ configuration checks | Local checkout | [Open `SKILL.md`](skills/ci-score/SKILL.md) |
+| 🔒 [**ci-secure**](#ci-secure) | Find critical, exploitable GitHub Actions attack paths | 10+ critical attack vectors | Local workflows; optional GitHub API checks | [Open `SKILL.md`](skills/ci-secure/SKILL.md) |
+| 🛰️ [**sling**](#sling) | Understand usage, performance, billing, and CI activity across your StarSling account | 15+ account and CI commands | Your StarSling account | [Open `SKILL.md`](skills/sling/SKILL.md) |
+
+The first three audit a repository. They produce a report, then offer to fix
+the findings you select or save the report as Markdown. Fixes stay in your
+working tree for review: the skills do not commit, push, or open a pull request
+unless you explicitly ask.
+
+`sling` is different: it requires a StarSling account and gives you the
+operational view of that account—usage, performance, billing, runs, failures,
+runner capacity, and more. It reads the CI data StarSling already collects
+rather than auditing workflow files in a checkout. The CLI is read-only;
+requests that change CI state are routed to the GitHub CLI.
+
+## Requirements and data handling
+
+| Skill | Requirements | Network and data handling |
 |---|---|---|
-| 🏎️ [**ci-speedup**](#ci-speedup) | Why is my CI slow? | [`skills/ci-speedup/`](skills/ci-speedup/) |
-| 📋 [**ci-score**](#ci-score) | Is my CI config following best practices? | [`skills/ci-score/`](skills/ci-score/) |
-| 🔒 [**ci-secure**](#ci-secure) | Can someone attack me through my CI? | [`skills/ci-secure/`](skills/ci-secure/) |
-| 🛰️ [**sling**](#sling) | Why did *this* run fail, and what did it cost? | [`skills/sling/`](skills/sling/) |
+| `ci-speedup` | Python 3.9+, PyYAML, authenticated `gh` | Reads GitHub run history through the GitHub API |
+| `ci-score` | Python 3.9+, PyYAML | Fully offline |
+| `ci-secure` | Python 3.9+, PyYAML; `gh` optional | Runs locally; `gh` enables four additional checks |
+| `sling` | StarSling account, `sling` CLI, login, and StarSling GitHub App | Queries your account through StarSling's control plane |
 
-The first three audit a checkout and end the same way: your agent offers to
-fix the findings you pick, or to just save the full report as markdown.
-`sling` is the odd one out — it answers questions about live runs instead
-of auditing files. Fixes land in your working tree for
-you to review, and nothing is ever committed, pushed, or opened as a PR.
-
-The three audit skills — `ci-speedup`, `ci-score`, `ci-secure` — run from a
-local checkout and need **`python3` 3.9+** and **PyYAML** (`pip install
-pyyaml`). `ci-speedup` also needs **`gh auth login`**, because it reads your
-run history over the GitHub API. What they read stays on your machine:
-**nothing is sent to StarSling**, and nothing is sent to any third party
-([data handling](SECURITY.md)). **`sling` is the exception by design**: it
-queries StarSling's control plane for the CI data StarSling already collects —
-sending the org, repo and run identifiers you ask about — and stores a
-credential at `~/.config/sling/credentials`.
+The repository-audit skills do not send audit results or repository contents
+to StarSling. `sling` sends the organization, repository, and run identifiers
+you ask about and stores its credential at `~/.config/sling/credentials`. See
+the full [data-handling policy](SECURITY.md).
 
 ---
 
 ## ci-speedup
 
-🏎️ **Measures what actually makes your CI slow, from your own run history.**
+🏎️ **Measure what actually makes CI slow, using your own run history.**
+
+**[Open the ci-speedup skill file →](skills/ci-speedup/SKILL.md)**
 
 ```bash
 npx skills add starslingdev/skills --skill ci-speedup
 ```
 
-Or paste this into your agent:
+Invoke it as `/ci-speedup` (`$ci-speedup` in Codex), or ask: *“Why is my CI
+slow?”*
 
-```text
-Run `npx skills add starslingdev/skills --skill ci-speedup` to install or
-update the ci-speedup skill.
-```
+`ci-speedup` reports two separate measures:
 
-Then invoke it by name (**`/ci-speedup`**, or `$ci-speedup` in Codex), or just
-ask *"why is my CI slow?"*
+- **Developer wall-clock wait:** the merge-gating critical path, which findings
+  are ranked by.
+- **Runner-minutes:** the compute bill and capacity consumed.
 
-It reports two axes, never blended: **developer wall-clock wait** (the
-merge-gating critical path, and the axis findings rank on, because it is what
-engineers feel) and **runner-minutes** (the bill). The numbers come from real
-runs: per-job P50/P95 sampled over the `gh` API, with the critical path
-re-derived from your actual job graph, then matched against a
-[catalog](skills/ci-speedup/references/optimization-patterns.md) of 70+ patterns.
+The numbers come from real runs. The skill samples per-job P50/P95 timing via
+the GitHub API, reconstructs the actual job graph and critical path, and checks
+the result against a catalog of [90+ optimization
+patterns](skills/ci-speedup/references/optimization-patterns.md) spanning
+hygiene, data-driven detection, and structural critical-path analysis.
 
-**It diagnoses; it does not prescribe.** A generic tool can't tell deliberate
-from wasteful, so each finding ships a ready-to-paste prompt handing the root
-cause to your own agent, which reads the logs and git history before changing
-anything.
+It diagnoses rather than prescribing a generic fix. Each finding includes a
+ready-to-paste prompt for an agent that can inspect the relevant logs, history,
+and repository context before changing anything.
 
-Example reports from real runs:
-[`pallets/flask`](examples/pallets-flask/ci-speedup-findings-report.md) and
-[`microsoft/playwright`](examples/microsoft-playwright/ci-speedup-findings-report.md).
+**Examples:** [pallets/flask](examples/pallets-flask/ci-speedup-findings-report.md)
+· [microsoft/playwright](examples/microsoft-playwright/ci-speedup-findings-report.md)
 
-**Read the skill:** [SKILL.md](skills/ci-speedup/SKILL.md) — what it does, step by step ·
-[ARCHITECTURE.md](skills/ci-speedup/ARCHITECTURE.md) — how the pipeline fits together ·
-[CHANGELOG.md](skills/ci-speedup/CHANGELOG.md)
-**The catalog and the methods:** [optimization-patterns.md](skills/ci-speedup/references/optimization-patterns.md) — all 70+ patterns ·
-[wall-clock-methodology.md](skills/ci-speedup/references/wall-clock-methodology.md) — how the merge-gating critical path is derived ·
-[savings-methodology.md](skills/ci-speedup/references/savings-methodology.md) — how every number is sized
-**Everything else:** [`skills/ci-speedup/`](skills/ci-speedup/) · Learn more: [starsling.dev/ci-speedup](https://starsling.dev/ci-speedup)
+**Reference:** [Architecture](skills/ci-speedup/ARCHITECTURE.md) ·
+[Catalog](skills/ci-speedup/references/optimization-patterns.md) ·
+[Wall-clock methodology](skills/ci-speedup/references/wall-clock-methodology.md) ·
+[Savings methodology](skills/ci-speedup/references/savings-methodology.md) ·
+[Changelog](skills/ci-speedup/CHANGELOG.md) ·
+[All files](skills/ci-speedup/) ·
+[Website](https://starsling.dev/ci-speedup)
 
 ---
 
 ## ci-score
 
-📋 **Grades your CI configuration against best practices, and hands back the
-fixes.**
+📋 **Grade CI configuration against best practices and get a ranked fix for
+every gap.**
+
+**[Open the ci-score skill file →](skills/ci-score/SKILL.md)**
 
 ```bash
 npx skills add starslingdev/skills --skill ci-score
 ```
 
-Or paste this into your agent:
+Invoke it as `/ci-score` (`$ci-score` in Codex), or ask: *“Grade my CI.”* It
+runs fully offline.
 
-```text
-Run `npx skills add starslingdev/skills --skill ci-score` to install or
-update the ci-score skill.
-```
+The score covers 10+ configuration checks, including caching, shallow
+checkout, sharding, concurrency cancellation, path filters, timeouts, action
+pinning, and OIDC scoping. The score is checks passed divided by checks
+applicable; every failed check gets one ranked fix.
 
-Then invoke it by name (**`/ci-score`**, or `$ci-score` in Codex), or just ask
-*"grade my CI"*. Runs fully offline.
+It measures **best-practice adherence, not speed**, and it is **not a security
+audit**. A small subset of checks is security-adjacent, but the score makes no broader
+security claim.
 
-Eleven configuration facts (caching, shallow checkout, sharding, concurrency
-cancellation, path filters, timeouts, action pinning, OIDC scoping and more),
-each checkable in your own workflow YAML in under a minute. The score is checks
-passed over checks applicable; every failed check gets one ranked fix.
+**Example:** [pallets/flask](examples/pallets-flask/ci-score-report.md), scoring
+89/100.
 
-**It measures adherence, not speed**, and it is **not a security audit**: two
-of the eleven checks are security-adjacent, and it claims nothing further.
-
-Example report from a real run:
-[`pallets/flask`](examples/pallets-flask/ci-score-report.md), scoring 89/100.
-
-**Read the skill:** [SKILL.md](skills/ci-score/SKILL.md) — what it does, step by step ·
-[CHANGELOG.md](skills/ci-score/CHANGELOG.md)
-**The rubric:** [ci-score-methodology.md](skills/ci-score/references/ci-score-methodology.md) — what each check asks and why ·
-[ci-score-spec.json](skills/ci-score/references/ci-score-spec.json) — the eleven checks, machine-readable
-**Everything else:** [`skills/ci-score/`](skills/ci-score/) · Learn more: [starsling.dev/ci-score](https://starsling.dev/ci-score)
+**Reference:** [Methodology](skills/ci-score/references/ci-score-methodology.md)
+· [Machine-readable rubric](skills/ci-score/references/ci-score-spec.json) ·
+[Changelog](skills/ci-score/CHANGELOG.md) · [All files](skills/ci-score/) ·
+[Website](https://starsling.dev/ci-score)
 
 ---
 
 ## ci-secure
 
-🔒 **Finds ten critical attack vectors an outsider could exploit, and fixes
-them.**
+🔒 **Find 10+ critical GitHub Actions attack vectors and fix the findings you
+select.**
+
+**[Open the ci-secure skill file →](skills/ci-secure/SKILL.md)**
 
 ```bash
 npx skills add starslingdev/skills --skill ci-secure
 ```
 
-Or paste this into your agent:
+Invoke it as `/ci-secure` (`$ci-secure` in Codex), or ask: *“Is my CI
+secure?”*
 
-```text
-Run `npx skills add starslingdev/skills --skill ci-secure` to install or
-update the ci-secure skill.
-```
-
-Then invoke it by name (**`/ci-secure`**, or `$ci-secure` in Codex), or just
-ask *"is my CI secure?"*
-
-It scans for the [ten critical attack
+The scanner checks for [10+ critical attack
 vectors](skills/ci-secure/references/security-patterns.md): template injection,
-fork code run with privileges, cache poisoning, impostor action SHAs, secret
-dumps, `$GITHUB_ENV` hijack, write tokens on untrusted triggers, credentials in
-caches and artifacts, unverified remote code execution, and install scripts
-running beside secrets. Each finding names the file and line, quotes your own
-workflow, and says in plain English **what an attacker could do**. It then
-offers to fix the ones you pick, leaving the diff in your tree. It never
-commits, pushes, or opens a PR.
+privileged execution of fork code, cache poisoning, impostor action SHAs,
+secret dumps, `$GITHUB_ENV` hijacking, write tokens on untrusted triggers,
+credentials in caches and artifacts, unverified remote-code execution, and
+dependency install scripts running beside secrets.
 
-**Deliberately not comprehensive, and no security score.** Ten closed-set
-vectors, each a full outsider → compromise chain with a real incident behind it
-([why these ten](skills/ci-secure/references/why-these-ten.md)). **Zero findings
-is a first-class result**, and a check that could not run says *did not run*,
-never "pass".
+Each finding names the file and line, quotes the workflow, and explains what an
+attacker could do. Zero findings is a first-class result. A check that could
+not run is reported as *did not run*, never as a pass.
 
-Example reports from real runs over one workflow file in
-`snowflakedb/snowflake-connector-net`, scanned at two commits:
-[3 findings before the vendor's
-fix](examples/snowflakedb-snowflake-connector-net/ci-secure-report-4a1b8ce.md),
-and [0 findings
-after](examples/snowflakedb-snowflake-connector-net/ci-secure-report-1dc7766.md).
+This is deliberately **not a comprehensive security audit** and does not
+produce a security score. The closed set contains exploit chains with a real
+incident behind each one; see [how the vectors are selected](skills/ci-secure/references/why-these-ten.md).
+
+**Examples:** the same `snowflakedb/snowflake-connector-net` workflow at two
+commits — [3 findings before the fix](examples/snowflakedb-snowflake-connector-net/ci-secure-report-4a1b8ce.md)
+and [0 findings after](examples/snowflakedb-snowflake-connector-net/ci-secure-report-1dc7766.md).
 
 ### ci-secure CI check
 
-A scan says what is wrong today. The CI check runs the same engine on every
-pull request, so the findings do not come back. Paste this:
+The optional CI check runs the same engine on every pull request so fixed
+findings do not return. Ask your agent to install it:
 
 ```text
 Run `npx skills add starslingdev/skills --skill ci-secure` to install or
 update the ci-secure skill, then install ci-secure as a CI check in this repo.
 ```
 
-It is **vendored, never fetched**: the engine, the gate and the licence are
-copied into your repository, so the code judging your PRs is code you can read
-and it cannot change underneath you. It is two files plus the engine:
-[`scaffold/gate.py`](skills/ci-secure/scaffold/gate.py), which decides pass or
-fail, and [`scaffold/ci-secure.yml`](skills/ci-secure/scaffold/ci-secure.yml),
-the workflow that runs it. [`scripts/vendor.py`](skills/ci-secure/scripts/vendor.py)
-is what copies them in. Because that writes into your working
-tree, the skill says exactly what it will write and asks for a yes first, works
-on a branch as one setup PR, and never pushes without asking.
+The check is vendored, not fetched at runtime. Its engine, gate, and license
+are copied into the repository, making the code that judges a pull request
+readable and stable. The setup starts in advisory mode; remove `--advisory` and
+make the check required when you are ready for it to block merges.
 
-It ships in `--advisory` mode, so it does not affect your merge path on day
-one. It becomes blocking when you drop `--advisory` and add the check to your
-repository's required checks.
+**CI-check implementation:** [Gate](skills/ci-secure/scaffold/gate.py) ·
+[Workflow](skills/ci-secure/scaffold/ci-secure.yml) ·
+[Vendor script](skills/ci-secure/scripts/vendor.py) ·
+[Setup guide](skills/ci-secure/references/ci-gate.md)
 
-**Read the skill:** [SKILL.md](skills/ci-secure/SKILL.md) — what it does, step by step ·
-[CHANGELOG.md](skills/ci-secure/CHANGELOG.md)
-**The vectors and the scope:** [security-patterns.md](skills/ci-secure/references/security-patterns.md) — all ten attack chains ·
-[why-these-ten.md](skills/ci-secure/references/why-these-ten.md) — the selection criterion, and what was rejected ·
-[security-facts.md](skills/ci-secure/references/security-facts.md) — the pass/fail config checks ·
-[ci-gate.md](skills/ci-secure/references/ci-gate.md) — running it as a CI check ·
-[troubleshooting.md](skills/ci-secure/references/troubleshooting.md)
-**Everything else:** [`skills/ci-secure/`](skills/ci-secure/) · Learn more: [starsling.dev/ci-secure](https://starsling.dev/ci-secure)
+**Reference:** [Attack vectors](skills/ci-secure/references/security-patterns.md)
+· [Selection criteria](skills/ci-secure/references/why-these-ten.md) ·
+[Configuration checks](skills/ci-secure/references/security-facts.md) ·
+[Troubleshooting](skills/ci-secure/references/troubleshooting.md) ·
+[Changelog](skills/ci-secure/CHANGELOG.md) · [All files](skills/ci-secure/) ·
+[Website](https://starsling.dev/ci-secure)
 
 ---
 
 ## sling
 
-🛰️ **Answers questions about one live CI run — and knows when to reach for
-`gh` instead.**
+🛰️ **Understand usage, performance, billing, and CI activity across your
+StarSling account.**
+
+**[Open the sling skill file →](skills/sling/SKILL.md)**
 
 ```bash
 npx skills add starslingdev/skills --skill sling
 ```
 
-Or paste this into your agent:
+Invoke it as `/sling` (`$sling` in Codex), or ask: *“What is driving our
+StarSling bill?”*, *“How is runner performance trending?”*, or *“Why did this
+job fail?”*
 
-```text
-Run `npx skills add starslingdev/skills --skill sling` to install or
-update the sling skill.
-```
+Unlike the repository-audit skills, `sling` requires a StarSling account. The
+skill drives StarSling's read-only [`sling`
+CLI](https://docs.starsling.dev/sling-cli), the agent-first interface to that
+account. Its 15+ commands cover:
 
-Then invoke it by name (**`/sling`**, or `$sling` in Codex), or just
-ask *"why did this job fail?"*
+- **Usage:** attribute runner-minutes and cost by repository, workflow, job,
+  label, or day.
+- **Performance:** decompose wall-clock time, compare lifecycle phases, and
+  rank time or cost hotspots with trends.
+- **Billing:** inspect the current period, month-end projection, credits,
+  per-label line items, and finalized invoice history.
+- **CI activity:** find runs and jobs, diagnose failures, and retrieve only the
+  relevant log lines.
+- **Account and capacity:** work across your organizations and compare the
+  runner sizes, specifications, and prices available to you.
 
-The skill is named after the CLI it drives. The other three skills read your
-workflow files; this one reads your **live CI**, through
-[`sling`](https://docs.starsling.dev/sling-cli), StarSling's read-only CLI: why a job failed (classified server-side, no LLM in the loop),
-where a run's wall-clock actually went, only the log lines that matter, and
-what your runner minutes cost, broken down by repo, workflow, or label.
+The routing is part of the skill:
 
-**The routing is the point.** `sling` is read-only, so an agent that only
-knows `sling` will invent a `sling rerun` that does not exist, and an agent
-that only knows `gh` will download a whole transcript to grep it. The skill
-carries the table that decides which tool answers which ask — reads about a
-run, a job, or spend go to `sling`; anything that changes state (re-run,
-cancel, trigger, enable, disable, download an artifact) goes to `gh` — plus
-the exit-code handling and the `--agent` JSON shapes for every command,
-[read off the binary rather than the docs](skills/sling/references/command-reference.md).
+- Account reads—usage, billing, runner performance and capacity, runs, jobs,
+  and failures—go to `sling`.
+- State changes—rerun, cancel, trigger, enable, disable, or artifact
+  download—go to `gh`.
+- Repository-wide workflow audits go to `ci-speedup`, `ci-score`, or
+  `ci-secure`.
 
-It needs three things, and the skill checks all three before answering: the
-`sling` CLI installed, you signed in (a browser step it hands back to you),
-and the [StarSling GitHub App](https://github.com/apps/starslingdev) installed
-on the organization whose CI you are asking about — that last one is what
-StarSling reads your runs from, and without it a perfectly valid login sees
-nothing. Organizations only; the app installs on a personal repository but
-StarSling never picks up its jobs. Everything the skill does is a read, unless
-you ask for a state change and it tells you before making it.
+Before answering, the skill checks that the CLI is installed, you are signed
+in to your StarSling account, and the [StarSling GitHub
+App](https://github.com/apps/starslingdev) is installed for the organization
+whose data you want to inspect. The service currently supports organizations,
+not personal repositories.
 
-**Read the skill:** [SKILL.md](skills/sling/SKILL.md) — the routing table, the preflight, the gotchas ·
-[CHANGELOG.md](skills/sling/CHANGELOG.md)
-**The commands:** [command-reference.md](skills/sling/references/command-reference.md) — every flag and JSON shape, read off the binary ·
-[gh-fallback.md](skills/sling/references/gh-fallback.md) — what `gh` does that `sling` cannot ·
-[command-surface.json](skills/sling/references/command-surface.json) — the complete command list, machine-readable
-**Everything else:** [`skills/sling/`](skills/sling/) · Learn more: [docs.starsling.dev/sling-cli](https://docs.starsling.dev/sling-cli)
+**Reference:** [Verified command reference](skills/sling/references/command-reference.md)
+· [GitHub CLI fallback](skills/sling/references/gh-fallback.md) ·
+[Machine-readable command surface](skills/sling/references/command-surface.json)
+· [Changelog](skills/sling/CHANGELOG.md) · [All files](skills/sling/) ·
+[CLI documentation](https://docs.starsling.dev/sling-cli)
 
 ---
 
 ## For maintainers
 
-Maintainer-only infrastructure lives **outside** the installable skill trees,
-under `maintainers/`, so the `skills` CLI never copies it into an install:
+Maintainer-only infrastructure lives outside the installable skill trees, so
+the `skills` CLI never copies it into an installation:
 
-- [`maintainers/ci-speedup/`](maintainers/ci-speedup/): the self-improvement
-  loops, which run locally via Claude Code and never as a GitHub Action.
-  See [MAINTAINERS.md](maintainers/ci-speedup/MAINTAINERS.md).
-- [`maintainers/ci-score/`](maintainers/ci-score/): maintainer notes for
-  ci-score, including what was deliberately left out of the shipped skill.
-  See [MAINTAINERS.md](maintainers/ci-score/MAINTAINERS.md).
-- [`maintainers/ci-secure/`](maintainers/ci-secure/): the disclosure rule for
-  findings from a scan of a repository you do not own, and the guard that
-  enforces it. See [MAINTAINERS.md](maintainers/ci-secure/MAINTAINERS.md).
-- [`maintainers/skills-registry-security/`](maintainers/skills-registry-security/):
-  triage for a failing registry security audit, answering whether a finding
-  describes the skill as it is today or a stale copy.
-  See [README.md](maintainers/skills-registry-security/README.md).
+- [`maintainers/ci-speedup/`](maintainers/ci-speedup/) — self-improvement loops
+  that run locally; see its [maintainer guide](maintainers/ci-speedup/MAINTAINERS.md).
+- [`maintainers/ci-score/`](maintainers/ci-score/) — maintainer notes and
+  deliberately excluded checks; see its [maintainer guide](maintainers/ci-score/MAINTAINERS.md).
+- [`maintainers/ci-secure/`](maintainers/ci-secure/) — disclosure policy and
+  enforcement for scans of third-party repositories; see its [maintainer
+  guide](maintainers/ci-secure/MAINTAINERS.md).
+- [`maintainers/skills-registry-security/`](maintainers/skills-registry-security/)
+  — triage for registry security-audit failures; see its
+  [README](maintainers/skills-registry-security/README.md).
 
-This repo's CI runs on [StarSling Runners](https://starsling.dev/). Fork PRs run
-the identical suite on GitHub-hosted runners, so untrusted code never executes
-on the self-hosted ones. See [CONTRIBUTING.md](CONTRIBUTING.md).
+This repository's internal CI runs on [StarSling
+Runners](https://starsling.dev/). Fork pull requests run the same suite on
+GitHub-hosted runners, so untrusted code does not execute on self-hosted
+runners. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
