@@ -62,6 +62,27 @@ COPY --from=build /out/server /server
     assert "OPT102" in patterns
 
 
+def test_static_hit_carries_its_release_lane(tmp_path: Path):
+    _write_build(
+        tmp_path,
+        """FROM golang:1.23 AS build
+RUN go build -o /out/server ./cmd/server
+""",
+    )
+    workflow = tmp_path / ".github" / "workflows" / "build.yml"
+    workflow.write_text(
+        workflow.read_text(encoding="utf-8").replace("on: push", "on: release"),
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [sys.executable, str(_SCAN_SCRIPT), "--root", str(tmp_path)],
+        capture_output=True, text=True, check=True)
+    finding = next(
+        row for row in json.loads(result.stdout)["findings"]
+        if row["pattern"] == "OPT102")
+    assert finding["workflow_lanes"] == ["release"]
+
+
 def test_opt102_accepts_explicit_cross_compile(tmp_path: Path):
     patterns = _write_build(
         tmp_path,

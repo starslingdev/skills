@@ -4034,6 +4034,15 @@ def _volume_endpoint(repo: str, wf_id: int, created_before: str | None,
             f"?per_page=1{ev}&created={created}")
 
 
+def _push_volume_endpoint(repo: str, wf_id: int, default_branch: str,
+                          created_before: str | None) -> str:
+    """30-day default-branch push count used when the cached page is truncated."""
+    since_iso, upper = _window_30d(created_before)
+    created = f"{since_iso}..{upper}" if upper else f">={since_iso}"
+    return (f"repos/{repo}/actions/workflows/{wf_id}/runs"
+            f"?per_page=1&event=push&branch={default_branch}&created={created}")
+
+
 def _run_list_endpoint(repo: str, wf_id: int, max_runs: int,
                        created_before: str | None, *,
                        status: str | None = None, event: str | None = None) -> str:
@@ -10669,6 +10678,7 @@ _COST_RUNLIST_MAX = 100  # one page of all-status runs for branch/dup grouping
 # Default-branch pushes are a separate, post-merge lane. Bound the number of
 # pushed commits whose workflow jobs we fetch so the extra API cost stays fixed.
 _DEFAULT_BRANCH_PUSH_SAMPLE_MAX = 10
+_PUSH_LANE_RARE_PER_30D = 8
 # The headline timing sample deliberately contains successful runs only. When the
 # same cached all-status page shows a materially red default branch, say so beside
 # the headline instead of letting a successful-run median read like the whole window.
@@ -27575,6 +27585,63 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         _push_runs_by_sha,
         key=lambda sha: (_push_created_by_sha.get(sha, ""), sha),
         reverse=True)[:_DEFAULT_BRANCH_PUSH_SAMPLE_MAX]
+    _push_window_end = (
+        _parse_dt(_normalize_pin(created_before)) if created_before
+        else _unpinned_now())
+    _push_window_start = (
+        _push_window_end - _dt.timedelta(days=30)
+        if _push_window_end is not None else None)
+    _push_dates = [
+        parsed
+        for runs in all_status_runs_by_wf.values()
+        for run in runs
+        if (run.get("event") == "push"
+            and run.get("head_branch") == default_branch)
+        for parsed in [_parse_dt(str(run.get("created_at") or ""))]
+        if parsed is not None
+    ]
+    _recent_push_shas = {
+        str(run.get("head_sha") or "")
+        for runs in all_status_runs_by_wf.values()
+        for run in runs
+        for parsed in [_parse_dt(str(run.get("created_at") or ""))]
+        if (run.get("event") == "push"
+            and run.get("head_branch") == default_branch
+            and run.get("head_sha")
+            and parsed is not None
+            and _push_window_start is not None
+            and _push_window_start <= parsed <= _push_window_end)
+    }
+    _pushes_30d = len(_recent_push_shas)
+    # A full all-status page whose oldest row is still inside the window cannot
+    # prove the 30-day count. Pay for one count-only probe for that workflow.
+    # Different workflows generally see the same pushed commits, so take the
+    # maximum probe rather than summing duplicate workflow runs; the distinct
+    # SHAs already present on the cached pages remain the lower bound.
+    _push_count_probes: list[int] = []
+    if default_branch and _push_window_start is not None:
+        for _push_wf, _push_runs in all_status_runs_by_wf.items():
+            _dated = [
+                parsed for row in _push_runs
+                for parsed in [_parse_dt(str(row.get("created_at") or ""))]
+                if parsed is not None
+            ]
+            if (len(_push_runs) < _COST_RUNLIST_MAX or not _dated
+                    or min(_dated) < _push_window_start):
+                continue
+            _wf = wf_by_path.get(_push_wf) or {}
+            _wf_id = _wf.get("id")
+            if _wf_id is None:
+                continue
+            _probe = client.json(_push_volume_endpoint(
+                repo, _wf_id, default_branch, created_before))
+            if isinstance(_probe, dict) and isinstance(_probe.get("total_count"), int):
+                _push_count_probes.append(int(_probe["total_count"]))
+    if _push_count_probes:
+        _pushes_30d = max(_pushes_30d, max(_push_count_probes))
+    _window_span_days = (
+        int((_push_window_end - min(_push_dates)).total_seconds() // 86400)
+        if _push_dates and _push_window_end is not None else 0)
     _push_run_rows = [
         run
         for sha in _push_shas
@@ -27598,6 +27665,10 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         "sample_cap": _DEFAULT_BRANCH_PUSH_SAMPLE_MAX,
         "sampled_push_count": len(_push_shas),
         "sampled_run_count": len(_push_run_rows),
+        "pushes_30d": _pushes_30d,
+        "window_span_days": _window_span_days,
+        "frequency_probe_count": len(_push_count_probes),
+        "rare": _pushes_30d < _PUSH_LANE_RARE_PER_30D,
         # Timing is filled in after the shared per-commit producer below runs.
         "job_fetch_count": 0,
         "job_fetch_failures": 0,
@@ -29656,6 +29727,21 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         act = activity_by_wf.get(wf_path)
         if act is not None:
             f["workflow_activity"] = act
+        _lanes = {
+            str(lane) for lane in (f.get("workflow_lanes") or []) if str(lane)
+        }
+        if (_lanes
+                and not (_lanes & {"pull_request", "pull_request_target", "merge_group"})
+                and _lanes <= {"release", "workflow_dispatch", "repository_dispatch",
+                               "schedule", "push"}):
+            f["non_pr_lane"] = True
+            _lane_wall = f.get("wall_clock_p50_s")
+            if (isinstance(_lane_wall, (int, float))
+                    and not isinstance(_lane_wall, bool) and _lane_wall > 0):
+                f["wall_clock_uncapped_p50_s"] = f["wall_clock_p50_s"]
+                f["wall_clock_p50_s"] = 0.0
+                f["tier"] = 2
+                f["realization"] = "none"
 
     # ---- STRUCTURAL / critical-path findings (the second, non-catalog-bound
     # track). Routed from the measured critical path AFTER hygiene sizing, so a

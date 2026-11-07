@@ -15043,6 +15043,17 @@ def check_default_branch_push_lane_isolated(
             "; ".join(failures) if failures else f"{status} is disclosed, not zeroed")
     if status != "complete":
         failures.append(f"push lane has unknown collection status {status!r}")
+    pushes_30d = int(_num(lane.get("pushes_30d")) or 0)
+    push_word = "push" if pushes_30d == 1 else "pushes"
+    frequency_line = (
+        f"{pushes_30d} {push_word} to the default branch in the last 30 days")
+    if frequency_line not in block:
+        failures.append("push lane omits its 30-day default-branch frequency")
+    rare = lane.get("rare") is True
+    if rare != (pushes_30d < 8):
+        failures.append("push lane rare stamp disagrees with its 30-day frequency")
+    if rare and "rare" not in block.lower():
+        failures.append("rare push lane lacks its uncredited disclosure")
     if sampled == 0:
         if zero_line not in block.lower():
             failures.append("an empty eligible push cohort lacks its explicit zero line")
@@ -15140,6 +15151,30 @@ def check_default_branch_push_lane_isolated(
         failures.append("post-merge push timing leaked into a score")
     if isinstance(cp.get("default_branch_push_lane"), dict):
         failures.append("push lane is nested inside the merge-gate critical path")
+
+    for details in re.findall(
+            r"<details>\s*<summary><strong>OPT\d+\b.*?</details>",
+            report, re.DOTALL):
+        if "**Where:**" in details and "**Activity:**" not in details:
+            failures.append("a finding group omits its workflow activity")
+            break
+
+    non_pr_events = {
+        "release", "workflow_dispatch", "repository_dispatch", "schedule", "push"
+    }
+    for finding in _as_list(data.get("findings")):
+        if not isinstance(finding, dict):
+            continue
+        lanes = sorted({str(value) for value in _as_list(finding.get("workflow_lanes"))})
+        if not lanes or not set(lanes) <= non_pr_events:
+            continue
+        wall = _num(finding.get("wall_clock_p50_s")) or 0.0
+        if wall > 0:
+            failures.append("a non-PR lane finding retains merge-gate wall-clock credit")
+        if len(lanes) == 1:
+            label = lanes[0].replace("_", " ") + " lane only"
+            if label not in report:
+                failures.append(f"report omits the static finding's {label} tag")
 
     return Check(
         name, not failures,

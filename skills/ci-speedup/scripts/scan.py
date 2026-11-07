@@ -6441,6 +6441,7 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
             scan_incomplete.append({"path": rel, "reason": "top-level is not a mapping"})
             continue
         parsed.append((rel, doc, raw))
+    workflow_lanes = _declared_triggers(parsed)
 
     # What the step walker read inside GitHub Actions `parallel:` groups, and
     # the control steps it skipped. A malformed group (`MALFORMED_KINDS`: not a
@@ -6517,6 +6518,7 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
             for hit in hits:
                 finding_idx += 1
                 f = _emit(entry, hit, rel, finding_idx)
+                f["workflow_lanes"] = workflow_lanes.get(rel, [])
                 if entry.pattern == "OPT9" and "#" in hit.match_text:
                     # The detector owns the tool identity. Keep it separate from
                     # the job name and command prose so downstream sizing cannot
@@ -6543,6 +6545,7 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
             continue
         finding_idx += 1
         f = _emit(entry, hit, wf, finding_idx)
+        f["workflow_lanes"] = workflow_lanes.get(wf, [])
         if hit.snippet:
             f["evidence_snippet"] = hit.snippet
         if pat == "OPT96":
@@ -6603,7 +6606,7 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
         "scan_incomplete": scan_incomplete,
         # Declared `on:` events per scanned workflow. Available to any
         # trigger-scope consumer; additive, harmless if unconsumed.
-        "workflow_triggers": _declared_triggers(parsed),
+        "workflow_triggers": workflow_lanes,
         # Per-workflow PR-trigger conditionality (unconditional / path_scoped /
         # branch_scoped / merge_group_scoped / not_pr_triggered). Joined against
         # the required-check list by collect_runs into

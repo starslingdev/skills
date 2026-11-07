@@ -9620,6 +9620,32 @@ def _queue_wait_block(findings: list[dict[str, Any]], catalog_url: str,
                   f"<summary><strong>{pat} - {title}</strong> · worst savable wait "
                   f"{_clock(worst)} · {_sev_of(ms)} · {occ}</summary>", "",
                   f"**Where:** {locs}"]
+        activities = [
+            m.get("workflow_activity") for m in ms
+            if isinstance(m.get("workflow_activity"), dict)
+        ]
+        measured_activities = [
+            a for a in activities if isinstance(a.get("runs_30d"), int)
+        ]
+        if measured_activities:
+            runs = sum(int(a["runs_30d"]) for a in measured_activities)
+            latest = max((str(a.get("last_run") or "")[:10]
+                          for a in measured_activities), default="")
+            recent = f" · most recent {latest}" if latest else ""
+            lines.append(f"**Activity:** {runs} runs in 30 days{recent}.")
+        else:
+            lines.append("**Activity:** not measured.")
+        lanes = sorted({
+            str(lane)
+            for m in ms for lane in (m.get("workflow_lanes") or []) if str(lane)
+        })
+        if lanes:
+            label = ", ".join(lanes).replace("_", " ")
+            suffix = " lane only" if len(lanes) == 1 else " lanes"
+            lane_line = f"**Lane:** {label}{suffix}."
+            if all(m.get("non_pr_lane") is True for m in ms):
+                lane_line = lane_line[:-1] + "; no merge-gate wall-clock credit."
+            lines.append(lane_line)
         if ev:
             lines.append(f"**Evidence:** {_flatten_cell(ev)}")
         lines += [f"**Catalog (background + fix recipe):** {url}", "",
@@ -10566,6 +10592,32 @@ def _also_noticed_block(findings: list[dict[str, Any]],
                   f"<summary><strong>{pat} - {title}</strong> · {summary_metric} · "
                   f"{_sev_of(ms)} · {occ}</summary>", "",
                   f"**Where:** {locs}"]
+        activities = [
+            m.get("workflow_activity") for m in ms
+            if isinstance(m.get("workflow_activity"), dict)
+        ]
+        measured_activities = [
+            a for a in activities if isinstance(a.get("runs_30d"), int)
+        ]
+        if measured_activities:
+            runs = sum(int(a["runs_30d"]) for a in measured_activities)
+            latest = max((str(a.get("last_run") or "")[:10]
+                          for a in measured_activities), default="")
+            recent = f" · most recent {latest}" if latest else ""
+            lines.append(f"**Activity:** {runs} runs in 30 days{recent}.")
+        else:
+            lines.append("**Activity:** not measured.")
+        lanes = sorted({
+            str(lane)
+            for m in ms for lane in (m.get("workflow_lanes") or []) if str(lane)
+        })
+        if lanes:
+            label = ", ".join(lanes).replace("_", " ")
+            suffix = " lane only" if len(lanes) == 1 else " lanes"
+            lane_line = f"**Lane:** {label}{suffix}."
+            if all(m.get("non_pr_lane") is True for m in ms):
+                lane_line = lane_line[:-1] + "; no merge-gate wall-clock credit."
+            lines.append(lane_line)
         has_source_unbacked_tier2 = any(_source_unbacked_tier2_here(m) for m in ms)
         # PR-P1 (D3-rev1's accounting condition): a demoted MEASURED finding names its
         # reason class here, and certificate-carrying ones render their proof class —
@@ -12101,6 +12153,17 @@ def _default_branch_push_lane_block(doc: dict[str, Any]) -> list[str]:
             *lines,
             "Push timing could not be measured because push run-list coverage was "
             "incomplete.",
+            "",
+        ]
+    pushes_30d = int(_num(lane.get("pushes_30d")) or 0)
+    push_word = "push" if pushes_30d == 1 else "pushes"
+    lines += [
+        f"{pushes_30d} {push_word} to the default branch in the last 30 days.",
+        "",
+    ]
+    if lane.get("rare") is True:
+        lines += [
+            "This is a **rare** lane, so its findings are left uncredited.",
             "",
         ]
     if sampled == 0:
