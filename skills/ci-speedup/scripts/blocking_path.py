@@ -2209,7 +2209,8 @@ def _emulated_image_compile_leaf(lines: list[str]) -> dict[str, Any] | None:
         r"\b(?:go\s+(?:build|install)|xx-go\b|cargo\s+(?:build|install)|"
         r"cargo\s+chef\s+cook|xx-cargo\b|(?:npm|pnpm|yarn)\s+(?:run\s+)?build|"
         r"cmake\s+(?:--build|-G)|ninja(?:\s|$)|meson\s+compile|node-gyp\b|"
-        r"pip\s+wheel\b|(?:\./)?mvnw?\s|dotnet\s+(?:build|publish)|"
+        r"pip\s+wheel\b|(?:\./)?mvnw?\b[^\n;&|]*\b(?:compile|package|install)\b|"
+        r"dotnet\s+(?:build|publish)|"
         r"gradle\w*\s+.*\bbuild|make(?:\s|$))", re.IGNORECASE)
     source_install_re = re.compile(
         r"(?:SKIP\w*PREBUILT\w*\s*=\s*(?:1|true)|"
@@ -2262,7 +2263,11 @@ def _emulated_image_compile_leaf(lines: list[str]) -> dict[str, Any] | None:
                            if arch not in {"amd64", "x86_64"} and kind == "install")
     emulated = emulated_compile + emulated_install
     total = native + emulated
-    if emulated <= 0 or (native > 0 and emulated / total < 0.50):
+    x64_builder = bool(re.search(
+        r"(?:runner\s+architecture|runner_arch|architecture)\s*[:=]\s*"
+        r"(?:x64|amd64|x86_64)\b", "\n".join(lines), re.IGNORECASE))
+    if (emulated <= 0 or (native <= 0 and not x64_builder)
+            or (native > 0 and emulated / total < 0.50)):
         return None
     share = round(100 * emulated / total)
     rows = []

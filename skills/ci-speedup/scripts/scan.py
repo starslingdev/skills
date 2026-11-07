@@ -1764,7 +1764,8 @@ _OPT102_COMPILE_RE = re.compile(
     r"\b(?:go\s+(?:build|install)|xx-go\b|cargo\s+(?:build|install)|"
     r"cargo\s+chef\s+cook|xx-cargo\b|(?:npm|pnpm|yarn)\s+(?:run\s+)?build|"
     r"cmake\s+(?:--build|-G)|ninja(?:\s|$)|meson\s+compile|node-gyp\b|"
-    r"pip\s+wheel\b|(?:\./)?mvnw?\s|dotnet\s+(?:build|publish)|"
+    r"pip\s+wheel\b|(?:\./)?mvnw?\b[^\n;&|]*\b(?:compile|package|install)\b|"
+    r"dotnet\s+(?:build|publish)|"
     r"gradle\w*\s+.*\bbuild|make(?:\s|$))",
     re.IGNORECASE,
 )
@@ -1815,6 +1816,11 @@ def _opt102_matrix_legs(job: dict) -> list[dict[str, str]]:
         return []
     axes = [(str(key), [str(v) for v in value]) for key, value in matrix.items()
             if key not in {"include", "exclude"} and isinstance(value, list) and value]
+    combinations = 1
+    for _key, values in axes:
+        combinations *= len(values)
+        if combinations > 256:
+            return []
     legs = [{}] if axes else []
     for key, values in axes:
         legs = [{**leg, key: value} for leg in legs for value in values]
@@ -1827,6 +1833,8 @@ def _opt102_matrix_legs(job: dict) -> list[dict[str, str]]:
                            for row in omitted)]
     include = matrix.get("include")
     if isinstance(include, list):
+        if len(include) > 256:
+            return []
         if not axes:
             return [{str(k): str(v) for k, v in row.items()}
                     for row in include if isinstance(row, dict)]
@@ -1865,17 +1873,25 @@ def _opt102_resolve(value: Any, *, env: dict[str, str], matrix: dict[str, str],
 
 def _opt102_x64_runner(value: Any, matrix: dict[str, str]) -> tuple[bool, str]:
     raw = str(value or "")
+    conditional = re.fullmatch(
+        r"\s*\$\{\{\s*matrix\.([\w-]+)\s*&&\s*['\"]([^'\"]+)['\"]\s*"
+        r"\|\|\s*['\"]([^'\"]+)['\"]\s*\}\}\s*", raw)
+    if conditional:
+        condition = matrix.get(conditional.group(1))
+        if condition is None:
+            return False, ""
+        truthy = str(condition).strip().lower() not in {"", "0", "false", "null"}
+        resolved = conditional.group(2) if truthy else conditional.group(3)
+        low = resolved.lower()
+        hosted = low in {"ubuntu-latest", "ubuntu-24.04", "ubuntu-22.04", "ubuntu-20.04"}
+        note = " (hosted x64 fallback of the runs-on expression)" if not truthy else ""
+        return hosted and "arm" not in low, note
     resolved = _opt102_resolve(raw, env={}, matrix=matrix, inputs={}, outputs={})
-    note = ""
-    if resolved is None and "||" in raw:
-        fallback = re.search(r"\|\|\s*['\"]?([^'\"\s}]+)", raw)
-        resolved = fallback.group(1) if fallback else None
-        note = " (hosted x64 fallback of the runs-on expression)" if resolved else ""
     if not resolved:
         return False, ""
     low = resolved.lower()
     hosted = low in {"ubuntu-latest", "ubuntu-24.04", "ubuntu-22.04", "ubuntu-20.04"}
-    return hosted and "arm" not in low, note
+    return hosted and "arm" not in low, ""
 
 
 _OPT102_DOCKERFILE_INSTRUCTIONS = {
@@ -1977,11 +1993,13 @@ def _opt102_risky_stage(candidate: Path, target: str) -> tuple[str, str] | None:
                 flag = _opt102_source_flag(body)
                 if flag is not None:
                     source_install = flag
-            elif keyword == "RUN" and (_OPT102_COMPILE_RE.search(body)
-                                       or (source_install and re.search(
-                                           r"\bnpm\s+(?:ci|install)\b", body, re.I))):
-                risky = True
-                break
+            elif keyword == "RUN":
+                inline_source = _opt102_source_flag(body) is True
+                if (_OPT102_COMPILE_RE.search(body)
+                        or ((source_install or inline_source) and re.search(
+                            r"\bnpm\s+(?:ci|install)\b", body, re.I))):
+                    risky = True
+                    break
         if risky and not on_build_platform[index]:
             return header, clean
     return None
@@ -2077,9 +2095,20 @@ def _detect_opt102(doc: dict, raw: str) -> list[Hit]:
                 config: dict[str, Any] | None = None
                 marker = "docker/build-push-action@"
                 if uses_action:
-                    config = dict(step.get("with") or {}) if isinstance(step.get("with"), dict) else {}
+                    with_ = step.get("with") or {}
+                    config = ({str(key): value for key, value in with_.items()
+                               if str(key) in {"context", "file", "platforms", "target"}}
+                              if isinstance(with_, dict) else {})
                 elif raw_build:
                     config = _opt102_raw_build_config(run, raw_build)
+                    defaults = job.get("defaults") or {}
+                    run_defaults = (defaults.get("run") or {}
+                                    if isinstance(defaults, dict) else {})
+                    working_directory = (step.get("working-directory")
+                                         or (run_defaults.get("working-directory")
+                                             if isinstance(run_defaults, dict) else None)
+                                         or ".")
+                    config["working_directory"] = working_directory
                     marker = "docker build"
                 if config is not None:
                     resolved = {}
@@ -2105,11 +2134,15 @@ def _detect_opt102(doc: dict, raw: str) -> list[Hit]:
                             context = str(resolved.get("context") or ".")
                             dockerfile = str(resolved.get("file") or "Dockerfile")
                             target = str(resolved.get("target") or "")
-                            if (context and dockerfile and "://" not in context
+                            working_directory = str(resolved.get("working_directory") or ".")
+                            if (context and dockerfile and working_directory
+                                    and "://" not in context
                                     and not Path(context).is_absolute()
-                                    and not Path(dockerfile).is_absolute()):
-                                candidate = (root / dockerfile if "file" in resolved
-                                             else root / context / dockerfile).resolve()
+                                    and not Path(dockerfile).is_absolute()
+                                    and not Path(working_directory).is_absolute()):
+                                base = (root / working_directory).resolve()
+                                candidate = (base / dockerfile if "file" in resolved
+                                             else base / context / dockerfile).resolve()
                                 try:
                                     candidate.relative_to(root)
                                 except ValueError:

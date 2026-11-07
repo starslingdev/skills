@@ -11,6 +11,7 @@ _SKILL_DIR = Path(__file__).resolve().parents[1]
 _SCAN_SCRIPT = _SKILL_DIR / "scripts" / "scan.py"
 sys.path.insert(0, str(_SKILL_DIR / "scripts"))
 import blocking_path as bp  # noqa: E402
+import scan as scan_module  # noqa: E402
 
 
 def _scan(root: Path) -> list[dict]:
@@ -368,6 +369,30 @@ jobs:
     assert "app/Dockerfile" in hit["evidence"]
 
 
+def test_opt102_raw_build_respects_working_directory_and_target(tmp_path: Path):
+    wf = tmp_path / ".github/workflows/build.yml"
+    wf.parent.mkdir(parents=True)
+    wf.write_text("""on: push
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - run: docker build --platform linux/arm64 --target compile .
+""", encoding="utf-8")
+    app = tmp_path / "app"
+    app.mkdir()
+    (app / "Dockerfile").write_text("""FROM golang:1.23 AS compile
+RUN go build -o /server ./cmd/server
+FROM scratch AS runtime
+COPY --from=compile /server /server
+""", encoding="utf-8")
+    hit = next(f for f in _scan(tmp_path) if f["pattern"] == "OPT102")
+    assert "app/Dockerfile" in hit["evidence"]
+
+
 def test_opt102_raw_build_resolves_earlier_step_output(tmp_path: Path):
     wf = tmp_path / ".github/workflows/build.yml"
     wf.parent.mkdir(parents=True)
@@ -436,6 +461,13 @@ jobs:
     assert "linux/arm64" not in hits[0]["evidence"]
 
 
+def test_opt102_matrix_expansion_is_bounded():
+    job = {"strategy": {"matrix": {
+        f"axis{index}": list(range(10)) for index in range(4)
+    }}}
+    assert scan_module._opt102_matrix_legs(job) == []
+
+
 def test_opt102_reusable_caller_resolves_dockerfile_input(tmp_path: Path):
     wd = tmp_path / ".github/workflows"
     wd.mkdir(parents=True)
@@ -463,6 +495,24 @@ jobs:
     dockerfile = tmp_path / "docker/release.Dockerfile"
     dockerfile.parent.mkdir()
     dockerfile.write_text("FROM golang:1.23\nRUN go build ./...\n", encoding="utf-8")
+    assert any(f["pattern"] == "OPT102" for f in _scan(tmp_path))
+
+
+def test_opt102_ignores_unrelated_dynamic_action_inputs(tmp_path: Path):
+    wf = tmp_path / ".github/workflows/build.yml"
+    wf.parent.mkdir(parents=True)
+    wf.write_text("""on: push
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/build-push-action@v6
+        with:
+          platforms: linux/arm64
+          tags: registry.example/image:${{ github.sha }}
+""", encoding="utf-8")
+    (tmp_path / "Dockerfile").write_text(
+        "FROM golang:1.23\nRUN go build ./...\n", encoding="utf-8")
     assert any(f["pattern"] == "OPT102" for f in _scan(tmp_path))
 
 
@@ -516,6 +566,20 @@ RUN npm ci
     assert "OPT102" not in patterns
 
 
+def test_opt102_inline_source_npm_install_is_detected(tmp_path: Path):
+    patterns = _write_build(tmp_path, """FROM node:22
+RUN npm_config_build_from_source=true npm ci
+""", platforms="linux/arm64")
+    assert "OPT102" in patterns
+
+
+def test_opt102_maven_dependency_prefetch_stays_silent(tmp_path: Path):
+    patterns = _write_build(tmp_path, """FROM maven:3
+RUN mvn dependency:go-offline
+""", platforms="linux/arm64")
+    assert "OPT102" not in patterns
+
+
 def test_opt102_build_action_keeps_sequence_platform_inputs(tmp_path: Path):
     wf = tmp_path / ".github/workflows/build.yml"
     wf.parent.mkdir(parents=True)
@@ -560,8 +624,27 @@ jobs:
     assert "hosted x64 fallback" in hit["evidence"]
 
 
+def test_opt102_runs_on_expression_selects_native_arm_branch(tmp_path: Path):
+    wf = tmp_path / ".github/workflows/build.yml"
+    wf.parent.mkdir(parents=True)
+    wf.write_text("""on: push
+jobs:
+  image:
+    strategy:
+      matrix:
+        arm: [true]
+    runs-on: ${{ matrix.arm && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    steps:
+      - run: docker buildx build --platform linux/arm64 .
+""", encoding="utf-8")
+    (tmp_path / "Dockerfile").write_text(
+        "FROM golang:1.23\nRUN go build -o /server ./cmd/server\n", encoding="utf-8")
+    assert not any(f["pattern"] == "OPT102" for f in _scan(tmp_path))
+
+
 def test_buildx_log_sums_chef_and_foreign_only_compile():
-    log = """#10 [linux/arm64 2/4] RUN cargo chef cook --release
+    log = """Runner Architecture: X64
+#10 [linux/arm64 2/4] RUN cargo chef cook --release
 #10 DONE 120.0s
 #11 [linux/arm64 3/4] RUN cargo build --release
 #11 DONE 180.0s
@@ -571,8 +654,26 @@ def test_buildx_log_sums_chef_and_foreign_only_compile():
     assert leaf["magnitude"]["value"] == 300.0
 
 
+def test_buildx_log_foreign_only_needs_x64_builder_evidence():
+    log = """Runner Architecture: ARM64
+#10 [linux/arm64 2/2] RUN cargo build --release
+#10 DONE 180.0s
+"""
+    assert bp._parse_log(log) is None
+
+
+def test_buildx_log_maven_dependency_prefetch_stays_silent():
+    log = """#10 [linux/amd64 2/2] RUN mvn dependency:go-offline
+#10 DONE 10.0s
+#11 [linux/arm64 2/2] RUN mvn dependency:go-offline
+#11 DONE 90.0s
+"""
+    assert bp._parse_log(log) is None
+
+
 def test_buildx_log_names_source_install_as_emulated_install():
-    log = """#12 [linux/arm64 2/2] RUN npm_config_build_from_source=true npm ci
+    log = """Runner Architecture: X64
+#12 [linux/arm64 2/2] RUN npm_config_build_from_source=true npm ci
 #12 DONE 75.0s
 """
     leaf = bp._parse_log(log)
@@ -583,7 +684,8 @@ def test_buildx_log_names_source_install_as_emulated_install():
 
 
 def test_buildx_log_carries_stage_source_flag_to_npm_install():
-    log = """#11 [linux/arm64 1/2] ENV npm_config_build_from_source=true
+    log = """Runner Architecture: X64
+#11 [linux/arm64 1/2] ENV npm_config_build_from_source=true
 #11 DONE 0.0s
 #12 [linux/arm64 2/2] RUN npm ci
 #12 DONE 75.0s
