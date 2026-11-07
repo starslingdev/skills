@@ -2887,8 +2887,9 @@ def _parse_log(text: str,
             "search": [":test", "BUILD SUCCESSFUL in", "maxParallelForks"],
         }
     dependency_state = _cache_state_of_log(text, "dependency-cache")
+    dependency_hit_leaf = None
     if dependency_state:
-        return {
+        dependency_hit_leaf = {
             "fix_key": "dependency-cache",
             "unit_label": "dependency cache restore results",
             "magnitude": {"label": "dependency cache misses", "unit": "%",
@@ -2899,6 +2900,8 @@ def _parse_log(text: str,
             "search": ["Cache not found for input keys", "cache is not found",
                        "Cache restored from key"],
         }
+    if dependency_state and dependency_state["miss_pct"] > 0:
+        return dependency_hit_leaf
     # --- L: isolated tests in one file wait on the same fixed timer ------------
     # This is narrower than the shell-loop detector below. Four tests in ONE file
     # must each carry an explicit, distinct schema/database/prefix marker inside
@@ -3073,7 +3076,7 @@ def _parse_log(text: str,
                          for item in (header, done)][:6],
             "search": ["docker/build-push-action", "BUILDPLATFORM", "TARGETARCH"],
         }
-    return None
+    return dependency_hit_leaf
 
 
 # --------------------------------------------------------------------------- #
