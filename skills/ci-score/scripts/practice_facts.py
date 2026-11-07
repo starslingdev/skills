@@ -755,14 +755,17 @@ def _has_git_history_op(text: str) -> bool:
 # working-tree-only commands inside a general-purpose script must not make a
 # full-history checkout look load-bearing.
 _FIRST_PARTY_SCRIPT_RE = re.compile(
-    r"(?:^|[\n;&|])\s*(?:"
-    r"(?P<direct>\./[^\s;&|]+)|"
-    r"(?:bash|python|node)\s+(?P<interpreter>(?!-)(?:\./)?[^\s;&|]+)"
-    r")(?=\s|$)",
+    r"(?:^|[\n;&|])\s*(?:(?:if|then|while|until|!|exec|time|sudo|env)\s+|"
+    r"[A-Za-z_][A-Za-z_0-9]*=[^\s;&|]+\s+)*(?:"
+    r"(?P<direct>(?:\./|\$GITHUB_WORKSPACE/|\$\{\{\s*github\.workspace\s*\}\}/)[^\s;&|]+)|"
+    r"(?:bash|sh|python(?:\d+(?:\.\d+)?)?|node)"
+    r"(?!\s+-(?:m|c)\b)(?:\s+-(?!-?(?:m|c)\b)\S+)*\s+"
+    r"(?P<interpreter>(?!-)(?:\./)?[^\s;&|]+)"
+    r")(?=[\s;&|]|$)",
     re.M,
 )
 _SCRIPT_GIT_HISTORY_RE = re.compile(
-    r"(?:^|[\n;&|])\s*(?:"
+    r"(?:^|[\n;&|(`]|\b(?:if|then|while|until)\s+)\s*[@+-]?\s*(?:shell\s+)?(?:"
     r"git\s+(?:rev-list|describe|merge-base)\b|"
     r"git\s+log\b[^\n|;&]*\.\.\.?|"
     r"git\s+diff\b(?:(?!\s--\s|>)[^\n|;&])*(?:\.\.\.?|\borigin/|\brefs/|HEAD[~^]|\.sha\b|\$[({]?[A-Za-z_0-9])|"
@@ -771,6 +774,11 @@ _SCRIPT_GIT_HISTORY_RE = re.compile(
     r"(?:dorny/paths-filter|tj-actions/changed-files)\b"
     r")",
     re.I | re.M,
+)
+_SCRIPT_SHELL_CALL_RE = re.compile(
+    r"(?:execSync|exec|os\.system|subprocess\.(?:run|call|check_call|"
+    r"check_output|Popen))\s*\(\s*(['\"])(?P<command>git\s+.*?)\1",
+    re.I,
 )
 _SCRIPT_LITERAL_CALL_RE = re.compile(
     r"subprocess\.(?:run|call|check_call|check_output|Popen)\s*\(\s*\[(?P<python>[^\]\n]*)\]|"
@@ -786,26 +794,54 @@ _SCRIPT_GIT_ARGS_RE = re.compile(
     r"^git\s+fetch\b.*(?:--unshallow\b|--depth(?:=|\s)|--tags\b)",
     re.I,
 )
+_SCRIPT_MAX_BYTES = 1024 * 1024
+_MAKE_CALL_RE = re.compile(r"(?:^|[\n;&|])\s*(?:env\s+)?make(?:\s|$)", re.M)
+_SNAPCRAFT_CALL_RE = re.compile(r"(?:^|[\n;&|])\s*snapcraft(?:\s|$)", re.M)
+_BUILD_TOOL_SCRIPT_REFS = {"Makefile", "snap/snapcraft.yaml"}
+_SCRIPT_PARENT_REF_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:HEAD|[A-Za-z0-9_./-]+)"
+    r"(?P<chain>(?:~\d+|\^\d*)+)",
+    re.I,
+)
+_SCRIPT_PARENT_PART_RE = re.compile(r"~(\d+)|\^(\d*)")
 
 
 def _first_party_script_refs(text: str) -> set[str]:
     """Return direct, relative script operands from a workflow `run:` block."""
     joined = _LINE_CONTINUATION_RE.sub(" ", text)
-    return {ref.strip("'\"") for match in _FIRST_PARTY_SCRIPT_RE.finditer(joined)
+    refs = {ref.strip("'\"") for match in _FIRST_PARTY_SCRIPT_RE.finditer(joined)
             if (ref := (match.group("direct") or match.group("interpreter")))}
+    normalized = set()
+    for ref in refs:
+        ref = re.sub(r"^\$GITHUB_WORKSPACE/", "$/", ref)
+        ref = re.sub(r"^\$\{\{\s*github\.workspace\s*\}\}/", "$/", ref)
+        normalized.add(ref)
+    if _MAKE_CALL_RE.search(joined):
+        normalized.add("Makefile")
+    if _SNAPCRAFT_CALL_RE.search(joined):
+        normalized.add("snap/snapcraft.yaml")
+    return normalized
 
 
-def _script_working_directory(job: dict, step: dict) -> str:
+def _script_working_directory(job: dict, step: dict,
+                              workflow: dict | None = None) -> str:
     """The step's effective Actions working directory, relative to root."""
     defaults = job.get("defaults")
     run_defaults = defaults.get("run") if isinstance(defaults, dict) else None
+    workflow_defaults = workflow.get("defaults") if isinstance(workflow, dict) else None
+    workflow_run = (workflow_defaults.get("run")
+                    if isinstance(workflow_defaults, dict) else None)
+    workflow_inherited = (workflow_run.get("working-directory")
+                          if isinstance(workflow_run, dict) else None)
     inherited = (run_defaults.get("working-directory")
-                 if isinstance(run_defaults, dict) else None)
+                 if isinstance(run_defaults, dict) else workflow_inherited)
     value = step.get("working-directory", inherited)
     return str(value).strip() if value not in (None, "") else "."
 
 
 def _script_ref_key(ref: str, working_directory: str) -> str:
+    if ref.startswith("$/"):
+        return ref
     return ref if working_directory in ("", ".") else f"{working_directory}\0{ref}"
 
 
@@ -817,8 +853,9 @@ def _script_key_parts(key: str) -> tuple[str, str]:
 def _local_script_path(root: Path, key: str) -> "Path | None":
     """Resolve a relative script ref only when its real path stays in root."""
     working_directory, ref = _script_key_parts(key)
-    candidate = root / (ref[2:] if ref.startswith("./") else ref)
-    if working_directory != ".":
+    root_relative = ref.startswith("$/")
+    candidate = root / (ref[2:] if ref.startswith(("./", "$/")) else ref)
+    if working_directory != "." and not root_relative:
         candidate = root / working_directory / (ref[2:] if ref.startswith("./") else ref)
     try:
         root_n = os.path.realpath(root)
@@ -835,6 +872,8 @@ def _read_local_script(root: Path, key: str) -> "str | None":
     if path is None:
         return None
     try:
+        if path.stat().st_size > _SCRIPT_MAX_BYTES:
+            return None
         return path.read_text(encoding="utf-8", errors="replace")
     except (OSError, ValueError):
         return None
@@ -845,6 +884,9 @@ def _has_script_git_history_op(text: str) -> bool:
     joined = _LINE_CONTINUATION_RE.sub(" ", without_comments)
     if _SCRIPT_GIT_HISTORY_RE.search(joined):
         return True
+    for match in _SCRIPT_SHELL_CALL_RE.finditer(joined):
+        if _SCRIPT_GIT_ARGS_RE.search(match.group("command")):
+            return True
     for match in _SCRIPT_LITERAL_CALL_RE.finditer(joined):
         raw = match.group("python") or match.group("node") or ""
         args = [value for _quote, value in _SCRIPT_LITERAL_ARG_RE.findall(raw)]
@@ -855,6 +897,18 @@ def _has_script_git_history_op(text: str) -> bool:
         if _SCRIPT_GIT_ARGS_RE.search(command):
             return True
     return False
+
+
+def _script_parent_depth(text: str) -> int:
+    """Smallest checkout depth that contains every parent-only operand."""
+    without_comments = _SCRIPT_COMMENT_LINE_RE.sub("", text)
+    distances = []
+    for match in _SCRIPT_PARENT_REF_RE.finditer(without_comments):
+        distance = 0
+        for tilde, caret in _SCRIPT_PARENT_PART_RE.findall(match.group("chain")):
+            distance += int(tilde or caret or "1")
+        distances.append(distance)
+    return max(distances, default=0) + 1 if distances else 0
 
 
 def _local_script_needs_history(root: Path, key: str) -> bool:
@@ -870,11 +924,22 @@ def _index_local_git_scripts(root: Path,
     for _rel, doc, _raw in parsed:
         for job in _wf_jobs(doc).values():
             for step in _job_steps(job):
-                working_directory = _script_working_directory(job, step)
-                refs.update(_script_ref_key(ref, working_directory)
-                            for ref in _first_party_script_refs(
-                                str(step.get("run") or "")))
-    return {ref for ref in refs if _local_script_needs_history(root, ref)}
+                working_directory = _script_working_directory(job, step, doc)
+                for ref in _first_party_script_refs(str(step.get("run") or "")):
+                    refs.add(_script_ref_key(ref, working_directory))
+    refs = {ref for ref in refs
+            if (_script_key_parts(ref)[1] not in _BUILD_TOOL_SCRIPT_REFS
+                or ((_local_script_path(root, ref) or Path()).is_file()))}
+    history_refs = {ref for ref in refs if _local_script_needs_history(root, ref)}
+    # ci-score's fix recipe is static and says to remove fetch-depth: 0. Until
+    # it can print a per-job bounded depth, keep parent-only reads exempt so its
+    # advice cannot break the job. ci-speedup carries the bounded recommendation.
+    history_refs.update(
+        ref for ref in refs
+        if (text := _read_local_script(root, ref)) is not None
+        and _script_parent_depth(text)
+    )
+    return history_refs
 
 
 def _step_uses_ref(step: dict) -> str:
@@ -968,7 +1033,8 @@ def _index_local_git_actions(root: Path,
 
 def _job_needs_git_history(job: dict, job_name: str = "",
                            local_history_actions: set[str] | None = None,
-                           local_history_scripts: set[str] | None = None) -> bool:
+                           local_history_scripts: set[str] | None = None,
+                           workflow: dict | None = None) -> bool:
     """True when shallowing this job's checkout would break it."""
     blob = "\n".join(str(s.get("run") or "") for s in _job_steps(job))
     uses_blob = "\n".join(_step_uses_ref(s) for s in _job_steps(job))
@@ -983,7 +1049,7 @@ def _job_needs_git_history(job: dict, job_name: str = "",
                 return True
     if local_history_scripts:
         for step in _job_steps(job):
-            working_directory = _script_working_directory(job, step)
+            working_directory = _script_working_directory(job, step, workflow)
             for ref in _first_party_script_refs(str(step.get("run") or "")):
                 if _script_ref_key(ref, working_directory) in local_history_scripts:
                     return True
@@ -2646,11 +2712,12 @@ def _unproven_history_links(root: Path, ref: str) -> list[str]:
 
 def _history_exemption_unread(root: Path, job: dict, job_name: str,
                               local_history_actions: set[str],
-                              local_history_scripts: set[str]) -> list[str]:
+                              local_history_scripts: set[str],
+                              workflow: dict | None = None) -> list[str]:
     """For a job `_job_needs_git_history` exempts: [] when the exemption is
     proven (a history op in the job itself, its name, or a readable local
     action or script), else the unread local references it rests on."""
-    if _job_needs_git_history(job, job_name, None, None):
+    if _job_needs_git_history(job, job_name, None, None, workflow):
         return []
     unread: list[str] = []
     for s in _job_steps(job):
@@ -2660,7 +2727,7 @@ def _history_exemption_unread(root: Path, job: dict, job_name: str,
             if not links:
                 return []
             unread += links
-        working_directory = _script_working_directory(job, s)
+        working_directory = _script_working_directory(job, s, workflow)
         for script_ref in _first_party_script_refs(str(s.get("run") or "")):
             key = _script_ref_key(script_ref, working_directory)
             if key not in local_history_scripts:
@@ -3000,12 +3067,12 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path,
                 continue
             takes_full_history = "0" in live
             if _job_needs_git_history(job, job_name, local_history_actions,
-                                      local_history_scripts):
+                                      local_history_scripts, doc):
                 if takes_full_history:
                     carved_out += 1
                     unread = _history_exemption_unread(root, job, job_name,
                                                        local_history_actions,
-                                                       local_history_scripts)
+                                                       local_history_scripts, doc)
                     if unread:
                         carved_unread_jobs += 1
                         carved_unread += unread
