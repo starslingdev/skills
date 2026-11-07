@@ -12468,9 +12468,9 @@ def _default_branch_push_lane_block(doc: dict[str, Any]) -> list[str]:
         dominant = str(drill.get("dominant_step") or "")
         if dominant:
             lines += [f"**Dominant step:** `{_flatten_cell(dominant)}`.", ""]
-        pattern = str(drill.get("pattern") or "")
-        if pattern:
-            lines += [f"**Catalog route:** {pattern}.", ""]
+        route = str(drill.get("catalog_route") or drill.get("pattern") or "")
+        if route:
+            lines += [f"**Catalog route:** {route}.", ""]
         elif drill.get("catalog_status") == "log_unavailable":
             lines += ["**Catalog route:** the representative log was unavailable.", ""]
         else:

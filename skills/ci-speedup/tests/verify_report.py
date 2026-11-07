@@ -15420,23 +15420,53 @@ def check_default_branch_push_lane_isolated(
         if drill_job != slow_name or drill_wf != slow_wf:
             failures.append("push drill does not belong to the representative slowest job")
         pattern = str(drill.get("pattern") or "")
-        if pattern:
-            if f"**Catalog route:** {pattern}." not in block:
+        route = str(drill.get("catalog_route") or pattern)
+        if route:
+            if f"**Catalog route:** {route}." not in block:
                 failures.append("push drill omits its catalog route")
-            finding_id = str(drill.get("finding_id") or "")
-            finding = next((
+            finding_ids = {
+                str(value) for value in _as_list(drill.get("finding_ids")) if str(value)
+            }
+            if not finding_ids and drill.get("finding_id"):
+                finding_ids.add(str(drill["finding_id"]))
+            push_findings = [
                 row for row in _as_list(data.get("findings"))
                 if isinstance(row, dict)
-                and (str(row.get("id") or "") == finding_id
-                     or (row.get("pattern") == pattern
-                         and str(row.get("workflow_file") or "") == drill_wf
-                         and drill_job in {
-                             str(job) for job in _as_list(row.get("affected_jobs"))
-                         }))
-            ), None)
-            if finding is None:
-                failures.append("push drill names a pattern without a matching finding")
-            else:
+                and str(row.get("id") or "") in finding_ids
+            ]
+            if len(push_findings) != len(finding_ids):
+                failures.append("push drill finding ids do not resolve uniquely")
+            if pattern:
+                drill_aliases = {drill_job, _matrix_base(_cmp_name(drill_job))}
+                workflow_jobs = _as_dict(
+                    _as_dict(data.get("workflow_job_graph")).get(drill_wf))
+                for job_id, info in workflow_jobs.items():
+                    declared_name = str(_as_dict(info).get("name") or job_id)
+                    if (_matrix_base(_cmp_name(declared_name))
+                            == _matrix_base(_cmp_name(drill_job))):
+                        drill_aliases.update({str(job_id), declared_name})
+                routed_ids = {
+                    str(row.get("id") or "")
+                    for row in _as_list(data.get("findings"))
+                    if isinstance(row, dict)
+                    and row.get("lane") == "push"
+                    and row.get("pattern") == pattern
+                    and str(row.get("workflow_file") or "") == drill_wf
+                    and any(
+                        str(job) in drill_aliases
+                        or _matrix_base(_cmp_name(str(job))) in {
+                            _matrix_base(_cmp_name(alias)) for alias in drill_aliases
+                        }
+                        for job in _as_list(row.get("affected_jobs")))
+                }
+                if finding_ids != routed_ids:
+                    failures.append(
+                        "push drill does not bind every matching lane finding")
+            for finding in push_findings:
+                if pattern and finding.get("pattern") != pattern:
+                    failures.append("push drill finding disagrees with its catalog pattern")
+                if str(finding.get("workflow_file") or "") != drill_wf:
+                    failures.append("push drill finding belongs to another workflow")
                 if finding.get("lane") != "push":
                     failures.append("push-lane finding lacks `lane: push`")
                 if (_num(finding.get("wall_clock_p50_s")) or 0.0) != 0.0:
@@ -15449,7 +15479,16 @@ def check_default_branch_push_lane_isolated(
                 if abs((_num(stamped_projection.get("projected_s")) or 0.0)
                        - expected_projected) > 0.11:
                     failures.append("push finding projection drifted from the shared helper")
-                expected_credit = 0.0 if rare else expected_potential
+                magnitude = _as_dict(_as_dict(drill.get("leaf")).get("magnitude"))
+                expected_cause = (
+                    _num(magnitude.get("value"))
+                    if magnitude.get("unit") == "s" else expected_potential)
+                expected_cause = (expected_cause if expected_cause is not None
+                                  else expected_potential)
+                if abs((_num(stamped_projection.get("cause_ceiling_s")) or 0.0)
+                       - expected_cause) > 0.11:
+                    failures.append("push finding cause ceiling drifted from measured work")
+                expected_credit = 0.0 if rare else min(expected_potential, expected_cause)
                 if abs((_num(stamped_projection.get("credited_s")) or 0.0)
                        - expected_credit) > 0.11:
                     failures.append("push finding credit disagrees with lane frequency")
@@ -15488,14 +15527,22 @@ def check_default_branch_push_lane_isolated(
         if re.search(r"\bscore\b", line, re.IGNORECASE))
     tier1_sections = re.findall(
         r"(?ims)^##[^\n]*Tier\s*1[^\n]*\n(.*?)(?=^##\s|\Z)", before_lane)
-    if any(re.search(r"push[- ]lane finding", section, re.IGNORECASE)
-           for section in tier1_sections):
-        failures.append("post-merge push finding leaked into Tier 1")
     push_patterns = {
         str(finding.get("pattern") or "")
         for finding in _as_list(data.get("findings"))
         if isinstance(finding, dict) and finding.get("lane") == "push"
     }
+    push_only_patterns = {
+        pattern for pattern in push_patterns if pattern and all(
+            not isinstance(finding, dict)
+            or finding.get("pattern") != pattern
+            or finding.get("lane") == "push"
+            for finding in _as_list(data.get("findings")))
+    }
+    if any(
+            re.search(rf"\b{re.escape(pattern)}\b", section)
+            for section in tier1_sections for pattern in push_only_patterns):
+        failures.append("post-merge push finding leaked into Tier 1")
     bottom_line = next(
         (line for line in headline.splitlines() if "**Bottom line.**" in line), "")
     if any(pattern and pattern in bottom_line for pattern in push_patterns):

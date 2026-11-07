@@ -44,6 +44,7 @@ class FixtureClient:
         self.queries = 0
         self.errors = 0
         self.job_reads: dict[str, int] = {}
+        self.log_reads: dict[str, int] = {}
 
     def available(self) -> bool:
         return not self.gave_up
@@ -129,7 +130,9 @@ class FixtureClient:
         self.queries += 1
         match = re.search(r"/actions/jobs/(\d+)/logs$", endpoint)
         if match:
-            return self.recorded.get("logs", {}).get(match.group(1), "")
+            job_id = match.group(1)
+            self.log_reads[job_id] = self.log_reads.get(job_id, 0) + 1
+            return self.recorded.get("logs", {}).get(job_id, "")
         return ""
 
 
@@ -193,6 +196,7 @@ def run_fixture(path: Path, monkeypatch, tmp_path: Path) -> tuple[dict, str, lis
         json.dumps(bp._LAST_CLAIMS.to_json()), encoding="utf-8")
     checks = vr.run_checks(report, report_path, findings_path, skill_repo=None)
     doc["_fixture_job_reads"] = dict(client.job_reads)
+    doc["_fixture_log_reads"] = dict(client.log_reads)
     return doc, report, checks
 
 
@@ -415,6 +419,9 @@ def test_default_branch_image_is_drilled_and_kept_out_of_merge_claims(
     assert projection["credited_s"] == 0.0  # three pushes in 30 days is rare
     assert doc["default_branch_push_lane"]["drill"]["dominant_step"] == (
         "Build multi-platform image")
+    assert doc["_fixture_log_reads"]["1101"] == 1
+    assert not ({"1102", "1201", "1202", "1301", "1302"}
+                & set(doc["_fixture_log_reads"]))
     assert "changes the wait after merge, not the merge gate" in finding["agent_prompt"]
     assert "OPT102" in report
     bottom = next(line for line in report.splitlines() if "**Bottom line.**" in line)
@@ -431,6 +438,88 @@ def test_default_branch_image_is_drilled_and_kept_out_of_merge_claims(
         "**Bottom line.**", "**Bottom line.** OPT102 push-lane finding;", 1)
     assert not vr.check_default_branch_push_lane_isolated(
         bottom_mutant, tmp_path / "default-branch-image" / "findings.json").ok
+
+
+def test_push_drill_isolates_every_match_without_erasing_a_pr_match(
+        monkeypatch, tmp_path):
+    source = FIXTURE_ROOT / "default-branch-image"
+    fixture = tmp_path / "mixed-lane-image"
+    shutil.copytree(source, fixture)
+    workflow = fixture / "workflows" / "ci.yml"
+    workflow.write_text(
+        workflow.read_text(encoding="utf-8").replace(
+            "  build-image:\n    runs-on:",
+            "  build-image:\n    name: Publish image\n    runs-on:").replace(
+            "on:\n  push:", "on:\n  pull_request:\n  push:"),
+        encoding="utf-8")
+    with workflow.open("a", encoding="utf-8") as handle:
+        handle.write(
+            "\n# A second public build site in the same measured job.\n"
+            "# The scanner must keep both lane-specific findings isolated.\n")
+    workflow.write_text(
+        workflow.read_text(encoding="utf-8").replace(
+            "      - uses: docker/build-push-action@v6\n"
+            "        with:\n"
+            "          platforms: linux/arm64\n",
+            "      - uses: docker/build-push-action@v6\n"
+            "        with:\n"
+            "          platforms: linux/arm64\n"
+            "      - uses: docker/build-push-action@v6\n"
+            "        with:\n"
+            "          platforms: linux/arm64\n"
+            "          file: Dockerfile.second\n"),
+        encoding="utf-8")
+    shutil.copy2(fixture / "Dockerfile", fixture / "Dockerfile.second")
+    responses_path = fixture / "responses.json"
+    responses = json.loads(responses_path.read_text(encoding="utf-8"))
+    for jobs in responses["jobs"].values():
+        for job in jobs:
+            if job.get("name") == "build-image":
+                job["name"] = "Publish image"
+    responses_path.write_text(json.dumps(responses), encoding="utf-8")
+
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    doc, _report, checks = run_fixture(fixture, monkeypatch, run_root)
+    opt102 = [row for row in doc["findings"] if row.get("pattern") == "OPT102"]
+    merge_findings = [row for row in opt102 if row.get("lane") != "push"]
+    push_findings = [row for row in opt102 if row.get("lane") == "push"]
+
+    assert len(merge_findings) == 2
+    assert len(push_findings) == 2
+    assert all(row["wall_clock_p50_s"] == 0.0 for row in push_findings)
+    assert all(row.get("non_pr_lane") is not True for row in merge_findings)
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+
+
+def test_push_drill_keeps_log_only_and_non_opt102_routes_valid(
+        monkeypatch, tmp_path):
+    source = FIXTURE_ROOT / "default-branch-image"
+    fixture = tmp_path / "log-only-image"
+    shutil.copytree(source, fixture)
+    (fixture / "Dockerfile").write_text(
+        "FROM alpine:3.22\nRUN echo prebuilt\n", encoding="utf-8")
+    real_parse = bp._parse_log
+
+    def non_opt102_route(text, *args, **kwargs):
+        if "linux/arm64" in text:
+            return {"fix_key": "eslint-no-cache"}
+        return real_parse(text, *args, **kwargs)
+
+    monkeypatch.setattr(bp, "_parse_log", non_opt102_route)
+    run_root = tmp_path / "run-log-only"
+    run_root.mkdir()
+    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
+    drill = doc["default_branch_push_lane"]["drill"]
+
+    assert drill["catalog_status"] == "matched"
+    assert drill["catalog_route"] == "eslint-no-cache"
+    assert drill["finding_ids"] == []
+    assert "**Catalog route:** eslint-no-cache." in report
+    assert "no pattern matched" not in report.lower()
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
 
 
 @pytest.mark.parametrize(
