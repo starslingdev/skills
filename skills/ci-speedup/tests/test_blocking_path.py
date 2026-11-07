@@ -8504,6 +8504,20 @@ def test_unknown_required_status_requires_confirmation_without_route():
     assert "may be moved off the PR trigger" not in prompt
 
 
+def test_unread_classic_protection_requires_confirmation_without_route():
+    doc = _advisory_pole_doc(True)
+    doc["required_checks"] = ["lint"]
+    doc["required_checks_complete"] = True
+    doc["required_checks_advice_complete"] = False
+
+    md = bp.render(doc, {}, {}, {}, "2026-09-02T00:00:00Z", {})
+    prompt = _pole_section(md, "e2e").split(
+        "#### 🤖 Prompt for your coding agent", 1)[1]
+
+    assert "confirm it is not a required check" in prompt
+    assert "OPT71 recipe (c)" not in prompt
+
+
 def test_llm_gap_fill_keeps_advisory_route_when_body_repeats_declaration():
     prompt = bp._llm_agent_prompt(
         "The job sets `continue-on-error: true`; inspect its expensive setup.",

@@ -8352,6 +8352,12 @@ class RequiredChecks:
     an unreadable ruleset is never mistaken for an OPT71 de-trigger candidate."""
     names: frozenset[str]
     complete: bool
+    classic_read: bool = True
+
+    @property
+    def advice_complete(self) -> bool:
+        """Whether absence can authorize moving a check off the PR path."""
+        return self.complete and self.classic_read
 
 
 def _ruleset_ref_in_scope(detail: dict[str, Any], branch: str | None) -> bool:
@@ -8444,6 +8450,7 @@ def _fetch_required_checks(
     strict_values: list[bool] = []
     merge_queue = False
     classic_strict_read = False
+    classic_read = False
     found_any = False
     complete = True
     # Rulesets (the modern mechanism) — readable without admin on many repos.
@@ -8503,6 +8510,7 @@ def _fetch_required_checks(
             f"repos/{repo}/branches/{branch}/protection/required_status_checks",
             allow_missing=True)
         if isinstance(prot, dict):
+            classic_read = True
             if isinstance(prot.get("strict"), bool):
                 strict_values.append(prot["strict"])
                 classic_strict_read = True
@@ -8524,7 +8532,7 @@ def _fetch_required_checks(
                             complete=complete and isinstance(rulesets, list))
     if not found_any and complete:
         return None
-    return RequiredChecks(frozenset(names), complete)
+    return RequiredChecks(frozenset(names), complete, classic_read)
 
 
 _OPT98_MIN_MERGES_PER_DAY = 30      # C1: below this the up-to-date rule is cheap
@@ -21523,7 +21531,7 @@ def _detect_structural_candidates(
             req_status = "unknown"
         elif check_name in reachable_required:
             req_status = "required"
-        elif required_checks.complete and not reach_unresolved:
+        elif required_checks.advice_complete and not reach_unresolved:
             req_status = "not-required"
         else:
             req_status = "unknown"
@@ -27627,6 +27635,10 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         sorted(required_checks.names) if required_checks is not None else None)
     findings_doc["required_checks_complete"] = (
         required_checks.complete if required_checks is not None else False)
+    findings_doc["required_checks_classic_read"] = (
+        required_checks.classic_read if required_checks is not None else False)
+    findings_doc["required_checks_advice_complete"] = (
+        required_checks.advice_complete if required_checks is not None else False)
 
     import pr_lifecycle
     findings_doc["pr_lifecycle"] = pr_lifecycle.collect(

@@ -316,3 +316,74 @@ def test_real_collection_times_the_push_lane_without_supplied_facts(
     checks = vr.run_checks(report, report_path, findings_path, skill_repo=None)
     failures = [check for check in checks if not check.skipped and not check.ok]
     assert failures == [], [(check.name, check.detail) for check in failures]
+
+
+def test_unread_classic_protection_keeps_advisory_route_unconfirmed(
+        monkeypatch, tmp_path: Path):
+    class RulesetOnlyClient(_PushLaneClient):
+        def __init__(self, classic):
+            super().__init__()
+            self.classic = classic
+
+        def json(self, endpoint: str, allow_missing: bool = False):
+            if endpoint == "repos/o/r/rulesets?includes_parents=true":
+                self.queries += 1
+                return [{"id": 9}]
+            if endpoint == "repos/o/r/rulesets/9":
+                self.queries += 1
+                return {
+                    "enforcement": "active",
+                    "target": "branch",
+                    "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"]}},
+                    "rules": [{
+                        "type": "required_status_checks",
+                        "parameters": {
+                            "required_status_checks": [{"context": "lint"}],
+                        },
+                    }],
+                }
+            if endpoint == "repos/o/r/branches/main/protection/required_status_checks":
+                self.queries += 1
+                return self.classic
+            return super().json(endpoint, allow_missing=allow_missing)
+
+    source = _doc()
+    source["workflow_job_graph"][_GATE]["merge-gate"]["continue_on_error"] = True
+    client = RulesetOnlyClient(None)
+    monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
+    doc = cr.collect(
+        source, "o/r", max_runs=20, shallow_runs=20,
+        created_before="2026-01-02T00:00:00Z")
+
+    assert doc["required_checks"] == ["lint"]
+    assert doc["required_checks_complete"] is True
+    assert doc["required_checks_classic_read"] is False
+    assert doc["required_checks_advice_complete"] is False
+    assert not [row for row in doc["findings"] if row.get("pattern") == "OPT71"]
+
+    report, findings_path, report_path = _write_artifacts(tmp_path, doc)
+    assert "confirm it is not a required check" in report
+    assert "OPT71 recipe (c)" not in report
+    checks = vr.run_checks(report, report_path, findings_path, skill_repo=None)
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+
+    control_source = _doc()
+    control_source["workflow_job_graph"][_GATE]["merge-gate"]["continue_on_error"] = True
+    control_client = RulesetOnlyClient({"contexts": []})
+    monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: control_client)
+    control = cr.collect(
+        control_source, "o/r", max_runs=20, shallow_runs=20,
+        created_before="2026-01-02T00:00:00Z")
+    assert control["required_checks_classic_read"] is True
+    assert control["required_checks_advice_complete"] is True
+    (tmp_path / "control").mkdir()
+    control_report, control_findings_path, control_report_path = _write_artifacts(
+        tmp_path / "control", control)
+    assert "OPT71 recipe (c)" in control_report
+    control_checks = vr.run_checks(
+        control_report, control_report_path, control_findings_path, skill_repo=None)
+    control_failures = [
+        check for check in control_checks if not check.skipped and not check.ok]
+    assert control_failures == [
+    ], [(check.name, check.detail) for check in control_failures]

@@ -3060,6 +3060,8 @@ def test_fetch_required_checks_complete_when_all_rulesets_read():
     assert rc is not None
     assert rc.names == frozenset({"build"})
     assert rc.complete is True
+    assert rc.classic_read is False
+    assert rc.advice_complete is False
 
 
 def test_fetch_required_checks_unknown_branch_marks_incomplete():
@@ -3091,6 +3093,16 @@ def test_partial_required_read_never_asserts_not_required():
     statuses = {f.get("required_status") for f in out}
     assert "not-required" not in statuses
     assert "unknown" in statuses
+    assert not [f for f in out if f["pattern"] == "OPT71"]
+
+
+def test_classic_unread_required_set_never_routes_opt71():
+    required = cr.RequiredChecks(
+        frozenset({"lint"}), complete=True, classic_read=False)
+    out = _scenario(required=required)
+
+    assert out
+    assert "unknown" in {f.get("required_status") for f in out}
     assert not [f for f in out if f["pattern"] == "OPT71"]
 
 
