@@ -13,6 +13,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-11-07** — Exclude commits containing a workflow re-run from per-commit PR wait percentiles, and name each re-run workflow in the partial-sample disclosure so time before the re-run was requested cannot inflate the reported CI wait.
 - **2026-11-07** — Keep shallow-checkout advice from breaking jobs whose first-party scripts read history through command substitution, shell conditions, quoted child-process calls, parent revisions, common interpreter and wrapper forms, workflow-level working directories, Make recipes, or Snapcraft overrides. Parent-only reads now recommend the bounded checkout depth they require, and oversized or unreadable scripts continue to fail closed.
 - **2026-11-06** — Stamp matched whole-gating-set observations for future joint-scenario sizing only when every confirmed required check maps to one independent, concurrent job execution with attempt and runner identity. Joint effects remain empty because no current finding supplies per-observation local reductions, affected-work and matrix identity, and an unchanged scheduling/coverage/job-set certificate together.
 - **2026-11-06** — Route a job declared with literal job-level `continue-on-error: true` to OPT71's advisory-async recipe only when a complete required-check read excludes its check. The prompt first asks whether the job should gate, keeps required and unknown-status jobs on the PR path, and never deletes the advisory job or removes its declaration during the move.

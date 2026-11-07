@@ -13115,10 +13115,21 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         })
         _named_missing = ", ".join(f"`{_clean_label(wf)}`"
                                    for wf in _missing_commit_workflows)
+        _rerun_commit_workflows = sorted({
+            str(wf) for f in _partial_commit_facts
+            for wf in (f.get("rerun_workflows") or []) if wf
+        })
+        _named_reruns = ", ".join(f"`{_clean_label(wf)}`"
+                                  for wf in _rerun_commit_workflows)
+        _partial_reasons = []
+        if _named_missing:
+            _partial_reasons.append(f"missing {_named_missing}")
+        if _named_reruns:
+            _partial_reasons.append(f"re-run {_named_reruns}")
         _commit_wall_block.append(
             f"> {len(_partial_commit_facts)} sampled commit(s) were partial"
-            + (f" (missing {_named_missing})" if _named_missing else "")
-            + "; their observed shorter spans were excluded from these percentiles.")
+            + (f" ({'; '.join(_partial_reasons)})" if _partial_reasons else "")
+            + "; their observed spans were excluded from these percentiles.")
     _fold_bottom_line(
         out,
         _lead_block,
