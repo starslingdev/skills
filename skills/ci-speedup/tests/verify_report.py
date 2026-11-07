@@ -7634,6 +7634,7 @@ _VR_OPT79_UNCREDITED_DOC_KEY = "opt79_uncredited_pole_caches"
 # workflow that gates pull requests) and its pre-cascade sizing block — both
 # pinned identical to collect_runs' `_OPT79_POLE_KIND` / `_OPT79_POLE_SIZING_KEYS`.
 _VR_OPT79_POLE_KIND = "opt79_pole_net_negative_cache"
+_VR_OPT79_BUILDKIT_KIND = "opt79_buildkit_export"
 # OPT79's second runner-minute proof: a job at or above the cluster floor that
 # is strictly shorter than the workflow's long pole, margin long_pole_p50 -
 # job_p50. Pinned identical to collect_runs' `_OPT79_PROOF_BELOW_LONG_POLE`.
@@ -8630,6 +8631,32 @@ def _opt79_finding_rederived(f: dict, data: dict) -> list[str]:
     included, runs in the Tier-2 pass). A finding WITHOUT one must be the
     pole arm, re-derived by `_opt79_pole_finding_rederived`. There is no third
     shape: an OPT79 finding that is neither is a contract violation."""
+    cn = _as_dict(f.get("cache_net_negative"))
+    if cn.get("kind") == _VR_OPT79_BUILDKIT_KIND:
+        problems: list[str] = []
+        rows = [row for row in _as_list(cn.get("runs")) if isinstance(row, dict)]
+        minimum = cn.get("minimum_runs")
+        floor = _num(cn.get("floor_s"))
+        branch = str(cn.get("branch") or "")
+        exports = [_num(row.get("export_s")) for row in rows]
+        if not isinstance(minimum, int) or minimum < 2 or len(rows) < minimum:
+            problems.append("BuildKit export evidence has fewer than two same-branch runs")
+        if not branch:
+            problems.append("BuildKit export evidence has no branch")
+        if floor is None or floor < 60:
+            problems.append("BuildKit export floor is below 60s")
+        if any(value is None or value < (floor or 60) for value in exports):
+            problems.append("a BuildKit export row is below the stamped floor")
+        if any(row.get("slowest_layer_cached") is not False for row in rows):
+            problems.append("a BuildKit export row does not prove the slowest layer missed")
+        if exports and all(value is not None for value in exports):
+            want = round(float(statistics.median(exports)), 1)
+            got = _num(cn.get("export_p50_s"))
+            if got is None or abs(got - want) > 0.11:
+                problems.append(f"BuildKit export p50 {got!r} != re-derived {want!r}")
+        if _num(f.get("wall_clock_p50_s")) != 0:
+            problems.append("BuildKit export finding must not claim merge-gate wall-clock")
+        return problems
     cert = f.get("tier2_neutrality")
     if cert:
         out: list[str] = []

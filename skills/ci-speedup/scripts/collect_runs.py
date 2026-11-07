@@ -19313,6 +19313,7 @@ def _stamp_run_context(run: dict[str, Any], jobs: list[dict[str, Any]]) -> None:
     # (free — already on the run object) so `_stamp_pole_repr_run_era` can content-classify a
     # drilled representative run's config era (issue #77), not just timestamp it.
     head_sha = str(run.get("head_sha") or "")
+    head_branch = str(run.get("head_branch") or "")
     pr_number = _run_pr_number(run)
     for job in jobs:
         job["_run_created_at"] = run_created
@@ -19321,6 +19322,7 @@ def _stamp_run_context(run: dict[str, Any], jobs: list[dict[str, Any]]) -> None:
         job["_run_attempt"] = run_attempt
         job["_run_head_repo"] = head_repo
         job["_run_head_sha"] = head_sha
+        job["_run_head_branch"] = head_branch
         job["_run_pr_number"] = pr_number
 
 
@@ -24114,6 +24116,73 @@ _OPT79_POLE_SIZING_KEYS = (
 # 0s), so it is an uncredited row, never a pole finding. Pinned equal to
 # `verify_report._VR_OPT79_POLE_MIN_HEADROOM_S` by a coupling test.
 _OPT79_POLE_MIN_HEADROOM_S = 1.0
+_OPT79_BUILDKIT_KIND = "opt79_buildkit_export"
+_OPT79_BUILDKIT_EXPORT_FLOOR_S = 60.0
+_OPT79_BUILDKIT_MIN_RUNS = 2
+
+
+def _opt79_buildkit_export_jobs(wf_doc: dict[str, Any] | None) -> set[str]:
+    """Runtime job base names that export a BuildKit cache."""
+    jobs = (wf_doc or {}).get("jobs")
+    if not isinstance(jobs, dict):
+        return set()
+    out: set[str] = set()
+    for key, spec in jobs.items():
+        if not isinstance(spec, dict):
+            continue
+        exports = False
+        for leaf in job_walk(spec).leaves:
+            step = leaf.step
+            if not isinstance(step, dict):
+                continue
+            uses = str(step.get("uses") or "").lower()
+            with_in = step.get("with") if isinstance(step.get("with"), dict) else {}
+            run = str(step.get("run") or "")
+            if ("docker/build-push-action" in uses and with_in.get("cache-to")) \
+                    or ("docker buildx build" in run and "--cache-to" in run):
+                exports = True
+                break
+        if exports:
+            declared = spec.get("name")
+            out.add(_matrix_base_name(str(declared or key)))
+    return out
+
+
+def _opt79_buildkit_export_measurement(log: str) -> tuple[float, str, bool] | None:
+    """(export seconds, slowest layer description, slowest layer cached)."""
+    export_ids = {
+        match.group(1) for match in _re.finditer(
+            r"^\s*#(\d+)\s+(?:exporting cache to|exporting to GitHub Actions Cache)",
+            log, _re.IGNORECASE | _re.MULTILINE)
+    }
+    done = {m.group(1): float(m.group(2)) for m in _re.finditer(
+        r"^\s*#(\d+)\s+DONE\s+([\d.]+)s\b", log, _re.MULTILINE)}
+    exports = [done[n] for n in export_ids if n in done]
+    if not exports:
+        return None
+    layers: list[tuple[float, str, str]] = []
+    for match in _re.finditer(
+            r"^\s*#(\d+)\s+\[([^\]]+)\]\s+(RUN|FROM|COPY|ADD)\s+(.+)$",
+            log, _re.MULTILINE):
+        number = match.group(1)
+        if number in done:
+            layers.append((done[number], number,
+                           f"{match.group(2)} {match.group(3)} {match.group(4)}"))
+    if not layers:
+        return None
+    _seconds, slow_id, description = max(layers)
+    cached = bool(_re.search(rf"^\s*#{_re.escape(slow_id)}\s+CACHED\b",
+                             log, _re.MULTILINE))
+    return max(exports), description, cached
+
+
+def _opt79_tags_only(wf_doc: dict[str, Any] | None) -> bool:
+    on = _wf_on(wf_doc or {})
+    if not isinstance(on, dict) or set(str(k) for k in on) != {"push"}:
+        return False
+    push = on.get("push")
+    return isinstance(push, dict) and bool(push.get("tags") or push.get("tags-ignore")) \
+        and not bool(push.get("branches") or push.get("branches-ignore"))
 # WHY a workflow's long pole on a pull-request workflow is an uncredited row
 # rather than the credited pole finding. Every such row names one of these on
 # `uncredited_reason`; the renderer states each in plain English
@@ -25061,6 +25130,7 @@ def _opt79_log_plan(
     handing runs over oldest-first cannot silently change which occurrences the
     comparison is built from."""
     out: list[tuple[float, str, dict[str, Any]]] = []
+    planned_ids: set[Any] = set()
     for name, block in _opt79_candidates(wf_path, jobs_per_run, crit, wf_doc,
                                          package_json=package_json):
         p50 = float(block.get("job_p50_s") or 0.0)
@@ -25079,7 +25149,24 @@ def _opt79_log_plan(
                              "sampled run", wf_path, name)
                 continue
             out.append((p50, wf_path, job))
+            planned_ids.add(job.get("id"))
             picked += 1
+    # BuildKit export-cost evidence uses the same bounded OPT79 probe wave. It is
+    # selected from workflow commands, then measured only from returned logs.
+    for name in _opt79_buildkit_export_jobs(wf_doc):
+        occurrences = [
+            job for run_jobs in jobs_per_run for job in run_jobs
+            if _matrix_base_name(str(job.get("name") or "")) == name
+            and _job_has_log(job) and job.get("id")
+        ]
+        durations = [_job_duration_s(job) for job in occurrences]
+        p50 = _percentile([value for value in durations if value is not None], 50) \
+            if any(value is not None for value in durations) else 0.0
+        for job in occurrences[:_OPT79_LOG_PROBE_MAX]:
+            if job.get("id") in planned_ids:
+                continue
+            out.append((float(p50), wf_path, job))
+            planned_ids.add(job.get("id"))
     return out
 
 
@@ -25320,6 +25407,98 @@ def _opt79_hit_share_clause(hit_share: float, hits: int, read: int) -> str:
     runs included), rendered whole-percent."""
     return (f"on the {hit_share * 100:.0f}% of sampled runs where the cache hit "
             f"({hits} of {read} runs read)")
+
+
+def _detect_opt79_buildkit_export(
+    wf_path: str,
+    jobs_per_run: list[list[dict[str, Any]]],
+    wf_doc: dict[str, Any] | None,
+    monthly_volume: int | None,
+    start_idx: int,
+    logs_by_job_id: dict[Any, str] | None,
+) -> list[dict[str, Any]]:
+    """BuildKit exports that cost at least a minute and never warm the slow layer."""
+    logs = logs_by_job_id or {}
+    out: list[dict[str, Any]] = []
+    for base in sorted(_opt79_buildkit_export_jobs(wf_doc)):
+        by_branch: "defaultdict[str, list[dict[str, Any]]]" = defaultdict(list)
+        saw_cached_slowest = False
+        for run_jobs in jobs_per_run:
+            job = next((item for item in run_jobs
+                        if _matrix_base_name(str(item.get("name") or "")) == base), None)
+            if job is None:
+                continue
+            log = logs.get(job.get("id"))
+            if not log:
+                continue
+            measured = _opt79_buildkit_export_measurement(log)
+            if measured is None:
+                continue
+            export_s, slow_layer, cached = measured
+            if cached:
+                saw_cached_slowest = True
+                continue
+            branch = str(job.get("_run_head_branch") or "")
+            if branch and export_s >= _OPT79_BUILDKIT_EXPORT_FLOOR_S:
+                by_branch[branch].append({
+                    "job_id": job.get("id"),
+                    "job_url": str(job.get("html_url") or ""),
+                    "export_s": round(export_s, 1),
+                    "slowest_layer": slow_layer,
+                    "slowest_layer_cached": False,
+                })
+        if saw_cached_slowest:
+            continue
+        eligible = [(branch, rows) for branch, rows in by_branch.items()
+                    if len(rows) >= _OPT79_BUILDKIT_MIN_RUNS]
+        if not eligible:
+            continue
+        branch, rows = max(eligible, key=lambda item: len(item[1]))
+        export_p50 = round(float(_stats.median(row["export_s"] for row in rows)), 1)
+        sampled = sum(1 for run_jobs in jobs_per_run if any(
+            _matrix_base_name(str(job.get("name") or "")) == base for job in run_jobs))
+        effective = (_effective_volume(monthly_volume, len(rows), sampled)
+                     if monthly_volume and sampled else None)
+        runner_minutes = (round(export_p50 * effective / 60.0, 1)
+                          if effective is not None else 0.0)
+        scope = (" This workflow runs only for tag pushes; no later tag can restore "
+                 "this GitHub Actions cache export." if _opt79_tags_only(wf_doc) else "")
+        evidence = (
+            f"`{base}` spent a p50 {export_p50:.0f}s exporting its BuildKit cache "
+            f"across {len(rows)} sampled run(s) on branch `{branch}`, while the "
+            f"slowest build layer never logged `CACHED`.{scope}"
+        )
+        finding = _new_finding(
+            "OPT79", "MEDIUM", "BuildKit Cache Export Costs More Than It Saves",
+            wf_path, base, evidence, "cache-costs-more-than-it-saves",
+            "opt79--a-cache-that-costs-more-than-it-saves", start_idx + len(out) + 1,
+            wc_p50=0.0, rm=runner_minutes,
+            size_note=("measured BuildKit cache export time; drop the export, use "
+                       "`mode=min`, or reorder layers so the slow layer can hit"),
+            realization="direct",
+            measured_evidence={
+                "summary": evidence,
+                "table": {"headers": ["Run", "Export", "Slowest layer", "Cached"],
+                          "rows": [[row["job_url"] or str(row["job_id"]),
+                                    f"{row['export_s']:.0f}s", row["slowest_layer"], "no"]
+                                   for row in rows]},
+                "note": ("Export duration and the slowest layer's cache status come "
+                         "from each run's BuildKit log."),
+            })
+        finding["cache_net_negative"] = {
+            "kind": _OPT79_BUILDKIT_KIND,
+            "branch": branch,
+            "export_p50_s": export_p50,
+            "floor_s": _OPT79_BUILDKIT_EXPORT_FLOOR_S,
+            "minimum_runs": _OPT79_BUILDKIT_MIN_RUNS,
+            "runs": rows,
+            "sampled_runs": sampled,
+            "monthly_volume": monthly_volume,
+            "effective_monthly_runs": effective,
+            "tags_only": _opt79_tags_only(wf_doc),
+        }
+        out.append(finding)
+    return out
 
 
 def _detect_opt79_net_negative_cache(
@@ -29853,6 +30032,12 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             # The events this workflow's sampled runs carried: whether a pull
             # request waits on it is read from these, not the declared trigger.
             sampled_events=events_by_wf.get(wf_path))
+        next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
+        findings.extend(new)
+
+        new = _detect_opt79_buildkit_export(
+            wf_path, jobs_per_run, _wf_docs.get(wf_path, {}), opt65_monthly,
+            next_id, logs_by_job_id=opt79_logs)
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
 

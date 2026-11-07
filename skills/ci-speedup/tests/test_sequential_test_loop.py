@@ -1,10 +1,8 @@
 """Detection and runner-advisory handling for sequential shell test loops."""
 from __future__ import annotations
 
-import ast
 import inspect
 import sys
-import textwrap
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -64,18 +62,10 @@ def test_cache_hit_alone_remains_a_dependency_cache_observation():
     assert leaf is not None and leaf["fix_key"] == "dependency-cache"
 
 
-def test_emulated_image_compile_leaf_follows_serial_test_loop_in_parser_order():
-    tree = ast.parse(textwrap.dedent(inspect.getsource(bp._parse_log)))
-    ordered = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Return) or not isinstance(node.value, ast.Dict):
-            continue
-        for key, value in zip(node.value.keys, node.value.values):
-            if (isinstance(key, ast.Constant) and key.value == "fix_key"
-                    and isinstance(value, ast.Constant) and isinstance(value.value, str)):
-                ordered.append((node.lineno, value.value))
-    leaf_keys = [key for _line, key in sorted(ordered)]
-    assert leaf_keys[-2:] == ["test-loop-serial", "emulated-image-compile"]
+def test_emulated_image_compile_leaf_precedes_generic_buildx_cache_advice():
+    source = inspect.getsource(bp._parse_log)
+    assert source.index("_emulated_image_compile_leaf(lines)") < source.index(
+        "# --- E: docker buildx build with NO persistent BuildKit cache RESTORE")
 
 
 def test_runner_advisory_explains_why_a_serial_loop_holds_it_back():

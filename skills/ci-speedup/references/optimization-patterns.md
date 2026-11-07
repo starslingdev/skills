@@ -185,7 +185,18 @@ grep -rn 'docker build\|docker compose build' .github/workflows/
 grep -rn 'docker/build-push-action' .github/workflows/
 ```
 
-**Fix**: Use `docker/build-push-action` with `cache-from: type=gha` and `cache-to: type=gha,mode=max`, or use `docker compose build` with BuildKit cache mounts.
+**Fix**: Use `docker/build-push-action` with `cache-from: type=gha` and
+`cache-to: type=gha,mode=min` by default, or use `docker compose build` with
+BuildKit cache mounts. Use `mode=max` only when intermediate stages are reused
+and a measured export fits the job's time and size budget. If `COPY . .` or
+`ADD . .` comes before the slow compile, copy dependency manifests first, use
+`RUN --mount=type=cache`, or build natively/cross-compile; exporting that
+invalidated layer will not make it reusable. Measure the export step and confirm
+the intended layers print `CACHED` on a later run.
+
+**Scope**: In a tags-only workflow, a GitHub Actions cache export is scoped to
+that tag ref; no later tag can restore this. Do not add the export there unless
+the same ref will run again and consume it.
 
 ---
 
@@ -401,6 +412,15 @@ named here are the detector's own, not restatements of them — with one
 inheritance called out where it appears: the 0.25 hit-share floor in step 6 is
 the shared cache tail floor (`_CACHE_TAIL_MIN_FRAC`), which the whole cache
 family reads, so retuning it there moves this gate too.
+
+The BuildKit arm uses the same bounded log-probe wave. It reports an export only
+when at least two sampled runs from one branch each spend at least 60 seconds in
+`exporting to GitHub Actions Cache`, and the slowest cacheable layer never prints
+`CACHED`. One observed hit on that layer suppresses the finding. The measured
+export p50 is the cost; the fix is to drop the export, use `mode=min`, or reorder
+the Dockerfile so the slow layer can actually hit. A tag-only workflow also says
+that no later tag can restore this export, because GitHub cache access is scoped
+to the ref that created it.
 
 1. From the **workflow file** (never from the observed step list), the job must
    declare exactly **one** cache-restore step — `actions/cache`,
