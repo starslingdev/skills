@@ -34,6 +34,6 @@ grep -rn 'actions/cache\|rust-cache\|sccache\|setup-node.*cache\|setup-go.*cache
 grep -rn 'cargo \|pip install\|uv sync\|go build\|mvn \|gradle\|cmake\|make ' /tmp/workflows/
 ```
 
-**Fix**: Add the ecosystem-appropriate caching action. For multi-job workflows, use `shared-key` or equivalent to avoid N separate caches.
+**Fix**: Add the ecosystem-appropriate caching action. In multi-job workflows, use one key per compilation mode so incompatible artifacts cannot overwrite or restore each other. Give only one job permission to save each mode's cache, such as with a `save-if` condition; the other jobs restore it without racing to publish separate entries.
 
 ---

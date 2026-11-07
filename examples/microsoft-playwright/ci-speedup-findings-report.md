@@ -22,7 +22,7 @@ not measured: lifecycle data was not collected
 >
 > **`.github/workflows/publish_release.yml` changed ~114 days ago - narrowed to the current configuration.** This audit measures only the 14 runs since that change; the 6 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
-> **`.github/workflows/tests_bidi.yml` changed ~118 days ago - narrowed to the current configuration.** This audit measures only the 8 runs since that change; the 12 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/tests_bidi.yml` changed ~119 days ago - narrowed to the current configuration.** This audit measures only the 8 runs since that change; the 12 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
 > **`.github/workflows/tests_secondary.yml` changed ~126 days ago - narrowed to the current configuration.** This audit measures only the 18 runs since that change; the 2 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
@@ -939,7 +939,7 @@ investigate it in the repo and apply a safe change.
 Pattern: OPT24 - Long Test Job Without Sharding.
 Where: tests_primary.yml (Installation Test ubuntu-latest); tests_primary.yml (Installation Test windows-latest); tests_primary.yml (Installation Test macos-latest); tests_secondary.yml (time test runner - realtime); tests_secondary.yml (Test chrome on ubuntu-22.04); tests_secondary.yml (Test chrome-beta on ubuntu-22.04); tests_secondary.yml (time test runner - frozen); tests_secondary.yml (Test chrome on macos-latest); +1 more (see findings JSON).
 What ci-speedup saw: job `Test chrome on macos-latest` p50 3573s over 4 runs, no shard axis observed (job names lack a `shard` / `partition` matrix marker)
-Concurrency order: First use OPT88 to measure and fill the existing job's idle cores; only then add shards or jobs.
+Concurrency order: First use OPT88 to measure and fill the existing job's idle cores; only then add shards or jobs. Before adding workers, confirm that they cannot interfere through a shared external server.
 Runner-minute effect: With safe in-job concurrency, runner minutes go down because the same job finishes sooner; extra shard jobs repeat checkout and setup and bill each job, so a saturated runner buys more wall-clock speed only by spending runner minutes.
 Saving: developer WALL-CLOCK (~6m 51s) - this job is a long pole ON the merge-gating critical path, so its catalog fix shortens the merge wait. NOT a runner-bill cut, and NOT off the critical path.
 
@@ -994,7 +994,7 @@ investigate it in the repo and apply a safe change.
 Pattern: OPT25 - Matrix Leg Imbalance.
 Where: tests_components.yml (- Node.js 20); tests_secondary.yml (Windows).
 What ci-speedup saw: leg `Windows (firefox)` median 4377s vs `Windows (chromium)` 1598s - 2.7× imbalance over 3 sampled runs (heterogeneous legs - split the slow leg, don't rebalance)
-Concurrency order: First use OPT88 to measure and fill the existing job's idle cores; only then add shards or jobs.
+Concurrency order: First use OPT88 to measure and fill the existing job's idle cores; only then add shards or jobs. Before adding workers, confirm that they cannot interfere through a shared external server.
 Runner-minute effect: With safe in-job concurrency, runner minutes go down because the same job finishes sooner; extra shard jobs repeat checkout and setup and bill each job, so a saturated runner buys more wall-clock speed only by spending runner minutes.
 Saving: developer WALL-CLOCK (~3m 21s) - this job is a long pole ON the merge-gating critical path, so its catalog fix shortens the merge wait. NOT a runner-bill cut, and NOT off the critical path.
 
@@ -1558,7 +1558,7 @@ failure mode and how you have guarded it before shipping.
 
 | Source | Coverage | Used for |
 | --- | --- | --- |
-| ci-speedup static scan (skill commit `2f048be`, scripts tree `463d800`) | All `.github/workflows/*.yml` under the analyzed tree (3827650) | Static pattern detection (full OPT catalog) |
+| ci-speedup static scan (skill commit `2f048be`, scripts tree `cbb5a93-dirty`) | All `.github/workflows/*.yml` under the analyzed tree (3827650) | Static pattern detection (full OPT catalog) |
 | gh runs/jobs API (timestamps) | 161 runs / 1630 jobs sampled | Critical-path + per-step P50 |
 | job logs | not run | Sampled only for a slow pole worth log-level inspection |
 | workflow YAML | 18 from the analyzed checkout | `on:` triggers, matrix/shard axes, job timeouts (detector inputs) |

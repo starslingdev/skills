@@ -11,6 +11,8 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
 
 ## [Unreleased]
 
+- **2026-11-07** — **Fixed**: shallow-checkout grading now follows common shell, interpreter, wrapper, workspace-path, Make and Snapcraft forms into one first-party file, and recognizes history reads inside command substitutions, conditions and quoted child-process calls. Parent-only reads stay exempt because the score's static fix recipe cannot yet print their bounded required depth.
+
 - **2026-11-05** — **Fixed**: shallow-checkout grading now sees history operations one hop inside a directly invoked first-party shell, Python, or Node script. Resolution stays inside the repository, unreadable paths fail closed, and scripts invoked by that script remain outside the bounded read.
 
 - **2026-11-03** — **Added** (OD-CS27, metadata-only): an Advisory notes section,
