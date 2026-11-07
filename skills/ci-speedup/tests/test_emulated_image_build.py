@@ -107,6 +107,15 @@ def test_opt102_keeps_compile_tools_at_command_positions(tmp_path: Path):
     )
     assert "OPT102" in env_patterns
 
+    cache_mount = tmp_path / "cache-mount"
+    cache_mount.mkdir()
+    mount_patterns = _write_build(
+        cache_mount,
+        "FROM rust:1.82\n"
+        "RUN --mount=type=cache,target=/root/.cargo cargo build --release\n",
+    )
+    assert "OPT102" in mount_patterns
+
 
 def test_emulated_leaf_ignores_build_tool_package_arguments():
     log = """#1 [linux/amd64 build 1/1] RUN apt-get install -y make
@@ -115,6 +124,14 @@ def test_emulated_leaf_ignores_build_tool_package_arguments():
 #2 DONE 90.0s
 """
     assert bp._emulated_image_compile_leaf(log.splitlines()) is None
+
+    mount_log = """#1 [linux/amd64 build 1/1] RUN --mount=type=cache,target=/root/.cargo cargo build --release
+#1 DONE 10.0s
+#2 [linux/arm64 build 1/1] RUN --mount=type=cache,target=/root/.cargo cargo build --release
+#2 DONE 90.0s
+"""
+    leaf = bp._emulated_image_compile_leaf(mount_log.splitlines())
+    assert leaf is not None and leaf["fix_key"] == "emulated-image-compile"
 
 
 def test_static_hit_carries_its_release_lane(tmp_path: Path):
