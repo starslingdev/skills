@@ -13884,7 +13884,7 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         # quantity - it restates one scanned YAML fact - so it has no comparator to bind.
         _adv_required_status = _advisory_required_status(
             p, doc.get("required_checks"),
-            doc.get("required_checks_complete") is True)
+            doc.get("required_checks_advice_complete") is True)
         _adv = _advisory_job_line(
             p, doc.get("workflow_job_graph"), _adv_required_status)
         if _adv:

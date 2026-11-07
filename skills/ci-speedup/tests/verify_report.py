@@ -5618,6 +5618,36 @@ def _load_findings_doc(findings_path: Path | None) -> tuple[dict, str | None]:
     return _as_dict(data), None
 
 
+def check_required_check_advice_proof(report: str, findings_path: Path | None) -> Check:
+    """Advice that removes a check from the PR path requires both protection reads.
+
+    Re-derive the combined authorization bit from the independent source stamps. A
+    missing stamp is unknown, never permission; this also keeps older findings
+    artifacts fail closed when rendered by a newer skill.
+    """
+    name = "required-check advice is backed by both protection reads"
+    data, error = _load_findings_doc(findings_path)
+    if error:
+        return Check(name, True, error, skipped=True)
+    expected = (
+        data.get("required_checks_complete") is True
+        and data.get("required_checks_rulesets_read") is True
+        and data.get("required_checks_classic_read") is True)
+    stamped = data.get("required_checks_advice_complete")
+    if (stamped is True) != expected:
+        return Check(
+            name, False,
+            "required_checks_advice_complete does not equal the conjunction of "
+            "complete, rulesets-read, and classic-read evidence")
+    if not expected and "OPT71 recipe (c)" in report:
+        return Check(
+            name, False,
+            "the report authorizes the off-PR recipe without both protection reads")
+    return Check(
+        name, True,
+        "the combined advice stamp and rendered route agree with both source reads")
+
+
 # Twin of collect_runs._OPT64_MIN_RETRIED_RUNS / blocking_path._OPT64_MIN_RETRIED_RUNS
 # (test_opt64_minimum_sample.py pins all three equal). Re-derived here from the
 # findings JSON, never read from the report.
@@ -15516,6 +15546,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_also_noticed_count_honest(report),
         check_coverage_disclosed(report, findings_path),
         check_run_list_gaps_named(report, findings_path),
+        check_required_check_advice_proof(report, findings_path),
         check_prefetch_plan_consumed(report, findings_path),
         check_cost_spine_shallow_disclosed(report, findings_path),
         check_date_matches_filename(report, report_path),
