@@ -128,15 +128,31 @@ def _add_tier2_spine(doc):
 
 def test_gating_note_says_dont_reprobe_when_none_readable():
     s = build_summary(_doc())
-    assert "do NOT re-probe gh" in s
-    assert "rulesets + branch protection" in s
+    assert "NONE confirmed" in s
+    assert "at least one source was unavailable" in s
 
 
 def test_gating_note_lists_required_checks_when_present():
     s = build_summary(_doc(required_checks=["ci / build", "ci / test"],
-                           required_checks_complete=True))
+                           required_checks_complete=True,
+                           required_checks_rulesets_read=True,
+                           required_checks_classic_read=True,
+                           required_checks_advice_complete=True))
     assert "ci / build" in s and "ci / test" in s
     assert "do NOT re-probe gh" not in s
+
+
+def test_gating_note_discloses_partial_protection_sources():
+    s = build_summary(_doc(
+        required_checks=["ci / build"],
+        required_checks_complete=True,
+        required_checks_rulesets_read=True,
+        required_checks_classic_read=False,
+        required_checks_advice_complete=False))
+
+    assert "ci / build" in s
+    assert "At least one protection source was unavailable" in s
+    assert "already resolved from rulesets + branch protection" not in s
 
 
 def test_pr_floor_fallback_note_states_the_demotion():
