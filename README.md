@@ -22,10 +22,10 @@ command from the sections below.
 
 | Skill | Use it when you want to… | Coverage | Reads | Skill file |
 |---|---|---|---|---|
-| 🏎️ [**ci-speedup**](#ci-speedup) | Find what is slowing CI down or wasting runner-minutes | 90+ optimization patterns | Local workflows and GitHub run history | [Open `SKILL.md`](skills/ci-speedup/SKILL.md) |
-| 📋 [**ci-score**](#ci-score) | Grade CI configuration against best practices | 10+ configuration checks | Local checkout | [Open `SKILL.md`](skills/ci-score/SKILL.md) |
-| 🔒 [**ci-secure**](#ci-secure) | Find critical, exploitable GitHub Actions attack paths | 10+ critical attack vectors | Local workflows; optional GitHub API checks | [Open `SKILL.md`](skills/ci-secure/SKILL.md) |
-| 🛰️ [**sling**](#sling) | Understand usage, performance, billing, and CI activity across your StarSling account | 15+ account and CI commands | Your StarSling account | [Open `SKILL.md`](skills/sling/SKILL.md) |
+| 🏎️ [**ci&#8209;speedup**](#ci-speedup) | Find what is slowing CI down or wasting runner-minutes | 90+ optimization patterns | Local workflows and GitHub run history | [`SKILL.md`](skills/ci-speedup/SKILL.md) |
+| 📋 [**ci&#8209;score**](#ci-score) | Grade CI configuration against best practices | 10+ configuration checks | Local checkout | [`SKILL.md`](skills/ci-score/SKILL.md) |
+| 🔒 [**ci&#8209;secure**](#ci-secure) | Find critical, exploitable GitHub Actions attack paths | 10+ critical attack vectors | Local workflows; optional GitHub API checks | [`SKILL.md`](skills/ci-secure/SKILL.md) |
+| 🛰️ [**sling**](#sling) | Understand usage, performance, billing, and CI activity across your StarSling account | 15+ account and CI commands | Your StarSling account | [`SKILL.md`](skills/sling/SKILL.md) |
 
 The first three audit a repository. They produce a report, then offer to fix
 the findings you select or save the report as Markdown. Fixes stay in your
@@ -42,9 +42,9 @@ requests that change CI state are routed to the GitHub CLI.
 
 | Skill | Requirements | Network and data handling |
 |---|---|---|
-| `ci-speedup` | Python 3.9+, PyYAML, authenticated `gh` | Reads GitHub run history through the GitHub API |
-| `ci-score` | Python 3.9+, PyYAML | Fully offline |
-| `ci-secure` | Python 3.9+, PyYAML; `gh` optional | Runs locally; `gh` enables four additional checks |
+| <code>ci&#8209;speedup</code> | Python 3.9+, PyYAML, authenticated `gh` | Reads GitHub run history through the GitHub API |
+| <code>ci&#8209;score</code> | Python 3.9+, PyYAML | Fully offline |
+| <code>ci&#8209;secure</code> | Python 3.9+, PyYAML; `gh` optional | Runs locally; `gh` enables four additional checks |
 | `sling` | StarSling account, `sling` CLI, login, and StarSling GitHub App | Queries your account through StarSling's control plane |
 
 The repository-audit skills do not send audit results or repository contents
