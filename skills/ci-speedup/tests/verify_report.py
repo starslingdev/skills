@@ -15125,6 +15125,49 @@ def check_default_branch_push_lane_isolated(
     if "After merge, not a merge gate" not in block:
         failures.append("the lane title does not say `After merge, not a merge gate`")
 
+    # Finding invariants are independent of whether push timing was available.
+    # Keep them ahead of every coverage/no-fact return below.
+    finding_details = re.findall(
+        r"<details>\s*<summary><strong>OPT\d+\b.*?</details>",
+        report, re.DOTALL)
+    for details in finding_details:
+        if "**Where:**" in details and "**Activity:**" not in details:
+            failures.append("a finding group omits its workflow activity")
+            break
+
+    non_pr_events = {
+        "release", "workflow_dispatch", "repository_dispatch", "schedule", "push", "tag"
+    }
+    lane_groups: dict[str, set[str]] = {}
+    for finding in _as_list(data.get("findings")):
+        if not isinstance(finding, dict):
+            continue
+        lanes = sorted({str(value) for value in _as_list(finding.get("workflow_lanes"))})
+        if not lanes or not set(lanes) <= non_pr_events:
+            continue
+        push_scopes = {
+            str(value) for value in _as_list(finding.get("workflow_push_scopes"))
+        }
+        if ("push" in lanes
+                and (not push_scopes
+                     or not push_scopes <= {"tag_only", "default_branch_only"})):
+            continue
+        wall = _num(finding.get("wall_clock_p50_s")) or 0.0
+        if wall > 0:
+            failures.append("a non-PR lane finding retains merge-gate wall-clock credit")
+        lane_groups.setdefault(str(finding.get("pattern") or ""), set()).update(lanes)
+    for pattern, lanes in lane_groups.items():
+        ordered = sorted(lanes)
+        label = ", ".join(ordered).replace("_", " ")
+        label += " lane only" if len(ordered) == 1 else " lanes"
+        matching_groups = [
+            details for details in finding_details
+            if (not pattern or f"<strong>{pattern} -" in details)
+        ]
+        if not any(label in details for details in matching_groups):
+            failures.append(
+                f"report omits the static finding group's {label} tag")
+
     cap = int(_num(lane.get("sample_cap")) or 0)
     sampled = int(_num(lane.get("sampled_push_count")) or 0)
     if cap != _VR_DEFAULT_BRANCH_PUSH_SAMPLE_MAX:
@@ -15147,7 +15190,22 @@ def check_default_branch_push_lane_isolated(
             name, not failures,
             "; ".join(failures) if failures else f"{status} is disclosed, not zeroed")
     if status != "complete":
-        failures.append(f"push lane has unknown collection status {status!r}")
+        if status != "frequency_incomplete":
+            failures.append(f"push lane has unknown collection status {status!r}")
+    pushes_30d = int(_num(lane.get("pushes_30d")) or 0)
+    push_word = "push" if pushes_30d == 1 else "pushes"
+    frequency_line = ((f"At least {pushes_30d} {push_word} to the default branch"
+                       if status == "frequency_incomplete" else
+                       f"{pushes_30d} {push_word} to the default branch in the last 30 days"))
+    if frequency_line not in block:
+        failures.append("push lane omits its 30-day default-branch frequency")
+    rare = lane.get("rare") is True
+    if status == "frequency_incomplete" and rare:
+        failures.append("an incomplete push frequency is marked rare")
+    elif status == "complete" and rare != (pushes_30d < 8):
+        failures.append("push lane rare stamp disagrees with its 30-day frequency")
+    if rare and "rare" not in block.lower():
+        failures.append("rare push lane lacks its uncredited disclosure")
     if sampled == 0:
         if zero_line not in block.lower():
             failures.append("an empty eligible push cohort lacks its explicit zero line")

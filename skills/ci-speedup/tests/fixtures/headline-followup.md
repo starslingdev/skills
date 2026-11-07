@@ -125,6 +125,7 @@ DELIVER & VERIFY
 <summary><strong>OPT25 - Shard imbalance</strong> · ~4m 10s wall-clock · MEDIUM · 1 across 1 wf</summary>
 
 **Where:** `test.yml` (tests)
+**Activity:** not measured.
 **Wall-clock:** unlike the other findings in this section, this one **sits ON the merge-gating critical path** (a long pole) - its catalog fix **cuts developer wall-clock**, it is not a bill-only cleanup. See the spine above and this pattern's catalog recipe below for the remedy.
 **Evidence:** One shard gates the matrix.
 **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/abcdef1234567890/skills/ci-speedup/references/optimization-patterns.md
