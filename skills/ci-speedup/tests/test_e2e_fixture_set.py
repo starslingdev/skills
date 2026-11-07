@@ -423,6 +423,8 @@ def test_default_branch_image_is_drilled_and_kept_out_of_merge_claims(
     assert not ({"1102", "1201", "1202", "1301", "1302"}
                 & set(doc["_fixture_log_reads"]))
     assert "changes the wait after merge, not the merge gate" in finding["agent_prompt"]
+    assert "Build platform-independent output once" in finding["agent_prompt"]
+    assert "confirm the buildx builder has no native node" in finding["agent_prompt"]
     assert "OPT102" in report
     bottom = next(line for line in report.splitlines() if "**Bottom line.**" in line)
     assert "after merge" not in bottom.lower()
@@ -493,6 +495,44 @@ def test_push_drill_isolates_every_match_without_erasing_a_pr_match(
     assert failures == [], [(check.name, check.detail) for check in failures]
 
 
+def test_push_drill_credits_a_non_rare_lane_through_the_full_pipeline(
+        monkeypatch, tmp_path):
+    fixture = tmp_path / "non-rare-default-branch-image"
+    shutil.copytree(FIXTURE_ROOT / "default-branch-image", fixture)
+    responses_path = fixture / "responses.json"
+    responses = json.loads(responses_path.read_text(encoding="utf-8"))
+    template_run = responses["workflows"][0]["runs"][0]
+    template_jobs = responses["jobs"][str(template_run["id"])]
+    template_log = responses["logs"][str(template_jobs[0]["id"])]
+    runs = []
+    for index in range(12):
+        run = dict(template_run, id=3000 + index, head_sha=f"push-{index}")
+        jobs = json.loads(json.dumps(template_jobs))
+        for offset, job in enumerate(jobs):
+            job["id"] = 4000 + index * 10 + offset
+        runs.append(run)
+        responses["jobs"][str(run["id"])] = jobs
+        responses["logs"][str(jobs[0]["id"])] = template_log
+    responses["workflows"][0]["runs"] = runs
+    responses_path.write_text(json.dumps(responses), encoding="utf-8")
+
+    run_root = tmp_path / "run-non-rare"
+    run_root.mkdir()
+    doc, _report, checks = run_fixture(
+        fixture, monkeypatch, run_root)
+    drill = doc["default_branch_push_lane"]["drill"]
+    finding = next(
+        row for row in doc["findings"]
+        if row.get("pattern") == "OPT102" and row.get("lane") == "push")
+
+    assert doc["default_branch_push_lane"]["rare"] is False
+    assert drill["catalog_route"] == "OPT102"
+    assert drill["finding_id"] == finding["id"]
+    assert finding["push_lane_projection"]["credited_s"] > 0
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+
+
 def test_push_drill_keeps_log_only_and_non_opt102_routes_valid(
         monkeypatch, tmp_path):
     source = FIXTURE_ROOT / "default-branch-image"
@@ -514,10 +554,57 @@ def test_push_drill_keeps_log_only_and_non_opt102_routes_valid(
     drill = doc["default_branch_push_lane"]["drill"]
 
     assert drill["catalog_status"] == "matched"
-    assert drill["catalog_route"] == "eslint-no-cache"
+    assert drill["catalog_route"] == "OPT9"
     assert drill["finding_ids"] == []
-    assert "**Catalog route:** eslint-no-cache." in report
+    assert "**Catalog route:** OPT9." in report
+    assert "Enable `--cache` with a stable `--cache-location`" in drill["agent_prompt"]
     assert "no pattern matched" not in report.lower()
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+
+
+def test_push_drill_attaches_dependency_cache_recipe_and_push_finding(
+        monkeypatch, tmp_path):
+    fixture = tmp_path / "dependency-cache-push"
+    shutil.copytree(FIXTURE_ROOT / "default-branch-image", fixture)
+    (fixture / "Dockerfile").unlink()
+    (fixture / "requirements.txt").write_text("pytest\n", encoding="utf-8")
+    (fixture / "workflows" / "ci.yml").write_text(
+        """name: Build
+on: [pull_request, push]
+jobs:
+  build-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/cache@v4
+        if: github.event_name == 'pull_request'
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ hashFiles('requirements.txt') }}
+      - run: pip install -r requirements.txt
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make verify
+""", encoding="utf-8")
+    responses_path = fixture / "responses.json"
+    responses = json.loads(responses_path.read_text(encoding="utf-8"))
+    cache_log = "Cache not found for input keys: pip-deadbeef\n"
+    responses["logs"] = {key: cache_log for key in ("1101", "1201", "1301")}
+    responses_path.write_text(json.dumps(responses), encoding="utf-8")
+
+    run_root = tmp_path / "run-dependency-cache"
+    run_root.mkdir()
+    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
+    drill = doc["default_branch_push_lane"]["drill"]
+    finding = next(
+        row for row in doc["findings"]
+        if row.get("pattern") == "OPT96" and row.get("lane") == "push")
+
+    assert drill["catalog_route"] == "OPT96"
+    assert drill["finding_id"] == finding["id"]
+    assert "Seed the same cache" in drill["agent_prompt"]
+    assert "**Catalog route:** OPT96." in report
     failures = [check for check in checks if not check.skipped and not check.ok]
     assert failures == [], [(check.name, check.detail) for check in failures]
 

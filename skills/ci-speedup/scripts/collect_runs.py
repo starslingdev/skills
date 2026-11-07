@@ -29531,8 +29531,24 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 _push_leaf = bp._parse_log(
                     _push_log or "", findings_doc.get("test_runner_isolation"))
                 _leaf_fix_key = str((_push_leaf or {}).get("fix_key") or "")
+                # The numbered catalog routes that can also have a static/data-driven
+                # finding on this job. Other recognised leaves still carry their full
+                # `_FIX_META` recipe below; they simply have no separate finding to attach.
                 _leaf_pattern = {
+                    "cache-effective-path-mismatch": "OPT101",
+                    "dependency-cache": "OPT96",
+                    "turbo-remote-cache": "OPT3",
+                    "turbo-partial-cache": "OPT3",
+                    "buildx-no-cache": "OPT4",
+                    "eslint-no-cache": "OPT9",
+                    "playwright-parallel": "OPT24",
+                    "pytest-no-xdist": "OPT24",
+                    "test-isolated-serial": "OPT24",
+                    "test-loop-serial": "OPT24",
                     "emulated-image-compile": "OPT102",
+                    "cargo-test-shard": "OPT24",
+                    "android-emulator-shard": "OPT24",
+                    "gradle-test-parallelism": "OPT88",
                 }.get(_leaf_fix_key)
                 _push_job_aliases = {
                     _push_job_name, _matrix_base_name(_push_job_name),
@@ -29610,6 +29626,15 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                        if _evidence_lines else "")
                     + (f"Constraints: {_recipe.get('constraints')}\n"
                        if _recipe.get("constraints") else "")
+                    + (f"Read first:\n- " + "\n- ".join(
+                        str(doc) for doc in (_recipe.get("docs") or [])) + "\n"
+                       if _recipe.get("docs") else "")
+                    + (f"Deliver and verify: {_recipe.get('deliver')}\n"
+                       if _recipe.get("deliver") else "")
+                    + ("Before treating the measured foreign-platform time as "
+                       "emulation, confirm the buildx builder has no native node "
+                       "for that platform with `docker buildx inspect`.\n"
+                       if _leaf_fix_key == "emulated-image-compile" else "")
                     + "This changes the wait after merge, not the merge gate. Preserve "
                       "the job's outputs and verification, apply the catalog guardrails, "
                       "and re-measure the full default-branch push.\n"
