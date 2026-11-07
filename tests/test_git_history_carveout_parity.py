@@ -159,7 +159,8 @@ def test_the_copied_patterns_are_character_identical(sides):
                  "_SCRIPT_GIT_HISTORY_RE", "_SCRIPT_LITERAL_CALL_RE",
                  "_SCRIPT_SHELL_CALL_RE",
                  "_SCRIPT_LITERAL_ARG_RE", "_SCRIPT_COMMENT_LINE_RE",
-                 "_SCRIPT_GIT_ARGS_RE", "_SCRIPT_PARENT_REF_RE"):
+                 "_SCRIPT_GIT_ARGS_RE", "_SCRIPT_PARENT_REF_RE",
+                 "_SCRIPT_PARENT_PART_RE"):
         a, b = getattr(speed, name), getattr(score, name)
         assert a.pattern == b.pattern, f"{name} pattern text diverged"
         assert a.flags == b.flags, f"{name} flags diverged"

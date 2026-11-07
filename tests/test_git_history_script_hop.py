@@ -211,13 +211,17 @@ def test_history_idioms_inside_scripts_keep_full_history(
     ("git rev-parse HEAD^\n", 2),
     ("git show HEAD~2:pyproject.toml\n", 3),
     ("pnpm ls --filter '...[HEAD^1]'\n", 2),
+    ("git rev-parse HEAD^^\n", 3),
+    ("git show HEAD~1~1:pyproject.toml\n", 3),
 ])
 def test_parent_only_history_read_recommends_bounded_depth(
         engines, tmp_path: Path, script: str, depth: int):
     parsed = _case(tmp_path, "./scripts/check.sh", "scripts/check.sh", script)
     speed_flags, score_state = _verdicts(engines, tmp_path, parsed)
     assert speed_flags is True
-    assert score_state == "fail"
+    # ci-score's fix recipe is static, so it safely exempts a bounded parent
+    # read until it can print the required depth. ci-speedup prints the depth.
+    assert score_state == "pass"
     finding = next(f for f in engines[0].scan(
         tmp_path, CATALOG, default_branch="main")["findings"]
                    if f.get("pattern") == "OPT28")
@@ -269,6 +273,77 @@ def test_make_target_recipe_history_read_keeps_full_history(engines, tmp_path: P
         "VERSION := $(shell git describe --tags)\nrelease:\n\t@echo $(VERSION)\n",
         encoding="utf-8")
     assert _verdicts(engines, tmp_path, parsed) == (False, "pass")
+
+
+def test_quiet_make_recipe_history_read_keeps_full_history(engines, tmp_path: Path):
+    parsed = _case(tmp_path, "make check", "unused", "echo clean\n")
+    (tmp_path / "Makefile").write_text(
+        "check:\n\t@git describe --tags\n", encoding="utf-8")
+    assert _verdicts(engines, tmp_path, parsed) == (False, "pass")
+
+
+@pytest.mark.parametrize("run", [
+    "$GITHUB_WORKSPACE/scripts/check.sh",
+    "${{ github.workspace }}/scripts/check.sh",
+])
+def test_workspace_root_path_ignores_working_directory(
+        engines, tmp_path: Path, run: str):
+    parsed = _case(tmp_path, run, "scripts/check.sh", "git describe --tags\n")
+    (tmp_path / "tools" / "scripts").mkdir(parents=True)
+    (tmp_path / "tools" / "scripts" / "check.sh").write_text(
+        "echo clean\n", encoding="utf-8")
+    workflow = tmp_path / ".github" / "workflows" / "ci.yml"
+    raw = workflow.read_text(encoding="utf-8").replace(
+        "      - run:", "      - run:", 1).replace(
+        f"      - run: {run}\n", f"      - run: {run}\n        working-directory: tools\n")
+    workflow.write_text(raw, encoding="utf-8")
+    parsed = [(parsed[0][0], yaml.safe_load(raw), raw)]
+    assert _verdicts(engines, tmp_path, parsed) == (False, "pass")
+
+
+def test_parent_depths_for_same_relative_path_stay_separate(
+        engines, tmp_path: Path):
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "check.sh").write_text(
+        "git show HEAD~4:file\n", encoding="utf-8")
+    (tmp_path / "tools" / "scripts").mkdir(parents=True)
+    (tmp_path / "tools" / "scripts" / "check.sh").write_text(
+        "git show HEAD~1:file\n", encoding="utf-8")
+    root_raw = """name: Root
+on: pull_request
+jobs:
+  root-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: ./scripts/check.sh
+"""
+    tools_raw = """name: Tools
+on: pull_request
+jobs:
+  tools-check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: ./scripts/check.sh
+"""
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "root.yml").write_text(root_raw, encoding="utf-8")
+    (workflows / "tools.yml").write_text(tools_raw, encoding="utf-8")
+    findings = [f for f in engines[0].scan(
+        tmp_path, CATALOG, default_branch="main")["findings"]
+                if f.get("pattern") == "OPT28"]
+    by_job = {f["affected_jobs"][0]: f["evidence"] for f in findings}
+    assert "fetch-depth: 5" in by_job["root-check"]
+    assert "fetch-depth: 2" in by_job["tools-check"]
 
 
 def test_snapcraft_override_history_read_keeps_full_history(engines, tmp_path: Path):

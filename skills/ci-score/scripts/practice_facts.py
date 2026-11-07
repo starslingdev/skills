@@ -765,7 +765,7 @@ _FIRST_PARTY_SCRIPT_RE = re.compile(
     re.M,
 )
 _SCRIPT_GIT_HISTORY_RE = re.compile(
-    r"(?:^|[\n;&|(`]|\b(?:if|then|while|until)\s+)\s*(?:shell\s+)?(?:"
+    r"(?:^|[\n;&|(`]|\b(?:if|then|while|until)\s+)\s*[@+-]?\s*(?:shell\s+)?(?:"
     r"git\s+(?:rev-list|describe|merge-base)\b|"
     r"git\s+log\b[^\n|;&]*\.\.\.?|"
     r"git\s+diff\b(?:(?!\s--\s|>)[^\n|;&])*(?:\.\.\.?|\borigin/|\brefs/|HEAD[~^]|\.sha\b|\$[({]?[A-Za-z_0-9])|"
@@ -799,10 +799,11 @@ _MAKE_CALL_RE = re.compile(r"(?:^|[\n;&|])\s*(?:env\s+)?make(?:\s|$)", re.M)
 _SNAPCRAFT_CALL_RE = re.compile(r"(?:^|[\n;&|])\s*snapcraft(?:\s|$)", re.M)
 _BUILD_TOOL_SCRIPT_REFS = {"Makefile", "snap/snapcraft.yaml"}
 _SCRIPT_PARENT_REF_RE = re.compile(
-    r"(?<![A-Za-z0-9_])(?:HEAD|[A-Za-z0-9_./-]+)(?:~(?P<tilde>\d+)|"
-    r"\^(?P<caret>\d*))",
+    r"(?<![A-Za-z0-9_])(?:HEAD|[A-Za-z0-9_./-]+)"
+    r"(?P<chain>(?:~\d+|\^\d*)+)",
     re.I,
 )
+_SCRIPT_PARENT_PART_RE = re.compile(r"~(\d+)|\^(\d*)")
 
 
 def _first_party_script_refs(text: str) -> set[str]:
@@ -812,8 +813,8 @@ def _first_party_script_refs(text: str) -> set[str]:
             if (ref := (match.group("direct") or match.group("interpreter")))}
     normalized = set()
     for ref in refs:
-        ref = re.sub(r"^\$GITHUB_WORKSPACE/", "./", ref)
-        ref = re.sub(r"^\$\{\{\s*github\.workspace\s*\}\}/", "./", ref)
+        ref = re.sub(r"^\$GITHUB_WORKSPACE/", "$/", ref)
+        ref = re.sub(r"^\$\{\{\s*github\.workspace\s*\}\}/", "$/", ref)
         normalized.add(ref)
     if _MAKE_CALL_RE.search(joined):
         normalized.add("Makefile")
@@ -839,6 +840,8 @@ def _script_working_directory(job: dict, step: dict,
 
 
 def _script_ref_key(ref: str, working_directory: str) -> str:
+    if ref.startswith("$/"):
+        return ref
     return ref if working_directory in ("", ".") else f"{working_directory}\0{ref}"
 
 
@@ -850,8 +853,9 @@ def _script_key_parts(key: str) -> tuple[str, str]:
 def _local_script_path(root: Path, key: str) -> "Path | None":
     """Resolve a relative script ref only when its real path stays in root."""
     working_directory, ref = _script_key_parts(key)
-    candidate = root / (ref[2:] if ref.startswith("./") else ref)
-    if working_directory != ".":
+    root_relative = ref.startswith("$/")
+    candidate = root / (ref[2:] if ref.startswith(("./", "$/")) else ref)
+    if working_directory != "." and not root_relative:
         candidate = root / working_directory / (ref[2:] if ref.startswith("./") else ref)
     try:
         root_n = os.path.realpath(root)
@@ -900,8 +904,10 @@ def _script_parent_depth(text: str) -> int:
     without_comments = _SCRIPT_COMMENT_LINE_RE.sub("", text)
     distances = []
     for match in _SCRIPT_PARENT_REF_RE.finditer(without_comments):
-        raw = match.group("tilde") or match.group("caret") or "1"
-        distances.append(int(raw))
+        distance = 0
+        for tilde, caret in _SCRIPT_PARENT_PART_RE.findall(match.group("chain")):
+            distance += int(tilde or caret or "1")
+        distances.append(distance)
     return max(distances, default=0) + 1 if distances else 0
 
 
@@ -925,6 +931,14 @@ def _index_local_git_scripts(root: Path,
             if (_script_key_parts(ref)[1] not in _BUILD_TOOL_SCRIPT_REFS
                 or ((_local_script_path(root, ref) or Path()).is_file()))}
     history_refs = {ref for ref in refs if _local_script_needs_history(root, ref)}
+    # ci-score's fix recipe is static and says to remove fetch-depth: 0. Until
+    # it can print a per-job bounded depth, keep parent-only reads exempt so its
+    # advice cannot break the job. ci-speedup carries the bounded recommendation.
+    history_refs.update(
+        ref for ref in refs
+        if (text := _read_local_script(root, ref)) is not None
+        and _script_parent_depth(text)
+    )
     return history_refs
 
 
