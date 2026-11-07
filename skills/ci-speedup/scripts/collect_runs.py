@@ -22646,11 +22646,119 @@ def _job_needs_relations(doc: dict[str, Any], target_base: str) -> dict[str, str
     return rel
 
 
+_OPT24_CARGO_COMPILE_RE = _re.compile(
+    r"Finished\s+(?:`[^`]+`\s+profile|[^\n]*?target\(s\))[^\n]*?\bin\s+"
+    r"((?:\d+(?:\.\d+)?\s*[hms]\s*)+)",
+    _re.IGNORECASE,
+)
+_OPT24_LOG_TS_RE = _re.compile(
+    r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z)\s+"
+)
+
+
+def _opt24_duration_seconds(text: str) -> float | None:
+    """Parse Cargo's compact duration (`1h 2m 3.4s`) without guessing units."""
+    parts = _re.findall(r"(\d+(?:\.\d+)?)\s*([hms])", text, _re.IGNORECASE)
+    if not parts:
+        return None
+    scale = {"h": 3600.0, "m": 60.0, "s": 1.0}
+    return sum(float(value) * scale[unit.lower()] for value, unit in parts)
+
+
+def _opt24_log_timestamp(line: str) -> float | None:
+    match = _OPT24_LOG_TS_RE.match(line)
+    if not match:
+        return None
+    try:
+        parsed = _parse_dt(match.group(1))
+        return parsed.timestamp() if parsed is not None else None
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def _opt24_job_commands(wf_doc: dict[str, Any] | None, base: str) -> str:
+    jobs = (wf_doc or {}).get("jobs")
+    if not isinstance(jobs, dict):
+        return ""
+    commands: list[str] = []
+    for key, spec in jobs.items():
+        if not isinstance(spec, dict):
+            continue
+        declared = spec.get("name")
+        rendered = str(declared) if isinstance(declared, str) and "${{" not in declared else str(key)
+        if _matrix_base_name(rendered) != base and str(key) != base:
+            continue
+        for step in spec.get("steps") or []:
+            if isinstance(step, dict) and isinstance(step.get("run"), str):
+                commands.append(step["run"])
+    return "\n".join(commands)
+
+
+def _opt24_compiled_kind(log: str, wf_doc: dict[str, Any] | None, base: str) -> str | None:
+    evidence = f"{_opt24_job_commands(wf_doc, base)}\n{log}".lower()
+    checks = (
+        ("cargo", r"\bcargo\s+(?:test|nextest)\b"),
+        ("go", r"\bgo\s+test\b"),
+        ("gradle", r"(?:^|[\s/])(?:gradle|gradlew)(?:\s|$)"),
+        ("cibuildwheel", r"\bcibuildwheel\b"),
+    )
+    return next((kind for kind, pattern in checks if _re.search(pattern, evidence)), None)
+
+
+def _opt24_pre_test_floor(log: str, compiled_kind: str | None) -> float | None:
+    """Measured in-step compile floor, preferring Cargo's own duration.
+
+    When a tool does not print a compile duration, timestamped job logs can still
+    measure the gap from the test command to the first test-result line. Untimestamped
+    output is unknown and therefore cannot support sharding credit for a compiled step.
+    """
+    if compiled_kind == "cargo":
+        match = _OPT24_CARGO_COMPILE_RE.search(log)
+        if match:
+            return _opt24_duration_seconds(match.group(1))
+    command_re = _re.compile(
+        r"(?:\bcargo\s+(?:test|nextest)\b|\bgo\s+test\b|"
+        r"(?:^|[\s/])(?:gradle|gradlew)(?:\s|$)|\bcibuildwheel\b)",
+        _re.IGNORECASE,
+    )
+    result_re = _re.compile(
+        r"(?:test result:|\bok\s+\S+|tests?\s+(?:passed|failed)|\bpassed\b)",
+        _re.IGNORECASE,
+    )
+    started: float | None = None
+    for line in log.splitlines():
+        stamp = _opt24_log_timestamp(line)
+        if stamp is None:
+            continue
+        if started is None and command_re.search(line):
+            started = stamp
+            continue
+        if started is not None and result_re.search(line):
+            gap = stamp - started
+            return gap if gap > 0 else None
+    return None
+
+
+def _opt24_floor_label(seconds: float) -> str:
+    whole = max(0, round(seconds))
+    hours, rem = divmod(whole, 3600)
+    minutes, secs = divmod(rem, 60)
+    parts = []
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}m")
+    if secs or not parts:
+        parts.append(f"{secs}s")
+    return " ".join(parts)
+
+
 def _detect_opt24_long_test_no_sharding(
     wf_path: str, jobs_per_run: list[list[dict[str, Any]]], start_idx: int,
     monthly_volume: int | None = None, sharded_bases: "set[str] | None" = None,
     wf_doc: "dict[str, Any] | None" = None,
     overlap_withheld: "list[dict[str, Any]] | None" = None,
+    logs_by_job_id: "dict[Any, str] | None" = None,
 ) -> list[dict[str, Any]]:
     """Long test jobs with no sharding — catalog body OPT24.
 
@@ -22771,9 +22879,36 @@ def _detect_opt24_long_test_no_sharding(
         # payload (never more than half the whole job). Falls back to p50/2 only
         # when there are no step timings to decompose.
         wc = round(p50 / 2.0, 1)
+        shardable = p50
         if decomp is not None and decomp["payload_s"] > 0:
             shardable = min(decomp["payload_s"], p50)
             wc = round(shardable / 2.0, 1)
+        base_log = next((str((logs_by_job_id or {}).get(j.get("id")) or "")
+                         for j in inst_by_base.get(base, [])
+                         if (logs_by_job_id or {}).get(j.get("id"))), "")
+        compiled_kind = _opt24_compiled_kind(base_log, wf_doc, base)
+        pre_test_floor = _opt24_pre_test_floor(base_log, compiled_kind)
+        compile_note = ""
+        measure_first = compiled_kind is not None and pre_test_floor is None
+        if pre_test_floor is not None:
+            pre_test_floor = min(pre_test_floor, shardable)
+            shardable = max(0.0, shardable - pre_test_floor)
+            wc = round(shardable / 2.0, 1)
+            if wc <= 5.0:
+                wc = 0.0
+            floor_label = _opt24_floor_label(pre_test_floor)
+            compile_note = (
+                f"Measured pre-test compile floor: {floor_label}; every shard "
+                f"repeats it, leaving about {_opt24_floor_label(shardable)} of "
+                "shardable test work in this step."
+            )
+        elif measure_first:
+            wc = 0.0
+            compile_note = (
+                f"This {compiled_kind} test step has no measurable pre-test compile "
+                "split. Measure that repeated floor before choosing a shard count; no saving "
+                "is credited yet."
+            )
         p95 = _percentile(durs, 95)
         slow_d, slow_url = max(samples, key=lambda du: du[0])
         # Rank every job in the workflow by P50 so the evidence shows WHY
@@ -22899,20 +23034,30 @@ def _detect_opt24_long_test_no_sharding(
                 note=("The link opens the slowest observed run's job log. Sharding "
                       "splits this work across parallel jobs, cutting the critical "
                       f"path by ~{wc:.0f}s (does not reduce runner-minutes)."))
+        if compile_note:
+            me["note"] = f"{me['note']} {compile_note}"
         # `wc_eff` is `wc` for a single-job workflow and the genuine pole; it is 0 when
         # a longer concurrent sibling means sharding saves no wall-clock. The size_note
         # must not claim "the long pole" for a non-pole finding (it survives into the
         # report via the "measured" sizing model's setdefault).
         wc_final = wc if not siblings else wc_eff
-        size_note = ("sharding parallelizes the long pole — saves wall-clock, does NOT "
-                     "save runner-min (more jobs, more setup tax)") if (
+        size_note = ("sharding parallelizes the long pole after subtracting work every "
+                     "shard repeats; added shards add roughly (N−1) × the pre-test floor "
+                     "in runner minutes") if (
                          not siblings or is_global_pole) else (
             "a longer concurrent job gates the run, so sharding this one saves ~0 "
             "wall-clock until that job is addressed; no runner-min saving either")
-        out.append(_new_finding(
-            "OPT24", "HIGH", "Long Test Job Without Sharding", wf_path, base,
+        if measure_first:
+            size_note = compile_note
+        evidence_text = (
             f"job `{base}` p50 {p50:.0f}s over {len(samples)} runs, no shard "
-            "axis observed (job names lack a `shard` / `partition` matrix marker)",
+            "axis observed (job names lack a `shard` / `partition` matrix marker)"
+        )
+        if compile_note:
+            evidence_text += f"; {compile_note}"
+        finding = _new_finding(
+            "OPT24", "HIGH", "Long Test Job Without Sharding", wf_path, base,
+            evidence_text,
             "long-test-job-without-sharding",
             "opt24--long-test-job-without-sharding", idx,
             wc_p50=wc_final, rm=0.0,
@@ -22920,8 +23065,43 @@ def _detect_opt24_long_test_no_sharding(
             # A zeroed `wc_final` (a longer/tied concurrent sibling gates the run) isn't a
             # realizable wall-clock win — mirror OPT25 and label it `none`, not `direct`.
             realization=("direct" if wc_final > 0 else "none"), measured_evidence=me,
-        ))
+        )
+        if pre_test_floor is not None:
+            finding["pre_test_floor_s"] = round(pre_test_floor, 1)
+            finding["shardable_test_s"] = round(shardable, 1)
+        elif measure_first:
+            finding["pre_test_floor_unmeasured"] = True
+        out.append(finding)
     return out
+
+
+def _opt24_representative_log_jobs(
+    jobs_per_run: list[list[dict[str, Any]]], findings: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """One median-representative log probe for each measured OPT24 candidate."""
+    selected: list[dict[str, Any]] = []
+    seen: set[Any] = set()
+    for finding in findings:
+        jobs = finding.get("affected_jobs") or []
+        base = str(jobs[0]) if jobs else ""
+        candidates = [
+            (duration, job)
+            for run_jobs in jobs_per_run
+            for job in run_jobs
+            if _matrix_base_name(str(job.get("name") or "")) == base
+            and (duration := _job_duration_s(job)) is not None
+            and duration > 0
+            and _job_has_log(job)
+        ]
+        if not candidates:
+            continue
+        target = _percentile([duration for duration, _job in candidates], 50)
+        job = min(candidates, key=lambda pair: abs(pair[0] - target))[1]
+        job_id = job.get("id")
+        if job_id is not None and job_id not in seen:
+            seen.add(job_id)
+            selected.append(job)
+    return selected
 
 
 # Declared triggers that mean "a developer waits on this workflow to merge a PR".
@@ -29343,6 +29523,35 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             f"OPT79 not evaluated: 0 of {_n} cache-probe job log(s) for this "
             "workflow returned content")
 
+    # OPT24 must distinguish shardable test execution from a compile performed inside
+    # the same test step. Select one median-representative job only after the duration
+    # detector's cheap gates pass, then fetch all selected logs in one wave. A compiled
+    # step whose probe is absent or does not expose a measurable split is left visible
+    # but uncredited; unknown never becomes an assumed-zero compile floor.
+    _opt24_probe_jobs: list[dict[str, Any]] = []
+    for _wf_path, _jobs_per_run in jobs_per_run_by_wf.items():
+        if not _jobs_per_run:
+            continue
+        _provisional = _detect_opt24_long_test_no_sharding(
+            _wf_path, _jobs_per_run, 0, vol_by_wf.get(_wf_path),
+            sharded_bases=_sharded_bases(_wf_docs.get(_wf_path, {})),
+            wf_doc=_wf_docs.get(_wf_path, {}))
+        _opt24_probe_jobs.extend(
+            _opt24_representative_log_jobs(_jobs_per_run, _provisional))
+    _prefetch_text(client, [
+        _job_log_endpoint(repo, _job["id"])
+        for _job in _opt24_probe_jobs if _job.get("id") is not None
+    ])
+    opt24_logs: dict[Any, str] = {}
+    for _job in _opt24_probe_jobs:
+        _text = _fetch_job_log(client, repo, _job)
+        if _text:
+            opt24_logs[_job.get("id")] = _text
+    _opt24_probe_stamp = {
+        "planned": len(_opt24_probe_jobs),
+        "returned": len(opt24_logs),
+    }
+
     next_id = max((int(f["id"][1:]) for f in findings if f.get("id", "").startswith("f") and f["id"][1:].isdigit()), default=0)
     # OPT98 reuses the rule reader and cached run pages. Only a readable strict
     # rule with no visible queue pays for one merged-PR count (and, at volume,
@@ -29395,7 +29604,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             wf_path, jobs_per_run, next_id, monthly,
             sharded_bases=_sharded_bases(_wf_docs.get(wf_path, {})),
             wf_doc=_wf_docs.get(wf_path, {}),
-            overlap_withheld=_overlap_withheld)
+            overlap_withheld=_overlap_withheld,
+            logs_by_job_id=opt24_logs)
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
 
@@ -30319,6 +30529,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         # passed, so without this the provenance table could say no job logs
         # were read in a report that quotes them.
         "cache_probe_logs": _opt79_probe_stamp,
+        # One representative log per measured unsharded-test candidate. These reads
+        # separate repeated in-step compilation from shardable test execution.
+        "shard_compile_probe_logs": _opt24_probe_stamp,
         # Whether the cache-cost comparison needed the repo-root package.json
         # (setup-node v5+'s automatic cache), where it came from, and whether it
         # parsed. `readable: false` means every job that needed it was withheld

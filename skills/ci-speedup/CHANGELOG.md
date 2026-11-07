@@ -13,6 +13,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-11-07** — Exclude compilation performed inside a test step from OPT24's sharding credit. Cargo's measured compile duration, or the timestamped gap before the first test result, becomes a repeated pre-test floor; compiled test steps without a measurable split stay visible but uncredited, and shard prompts include the repeated runner-minute cost.
 - **2026-11-07** — Keep serial test-loop and emulated-image findings visible when the same job also restores a dependency cache. A cache miss retains precedence; a hit-only restore becomes the fallback observation after the more specific log detectors run.
 - **2026-11-07** — Gate cache savings on repository capacity, sampled key invalidation, and net restore/save economics. The collector reads repository cache usage once, reuses sampled PR changed files, multiplies cache size across saving copies, and leaves failed or unreadable checks visible but uncredited.
 - **2026-11-07** — Correct fix guidance for pytest workers, persisted ESLint caches, multi-job build caches, in-job concurrency controls, and change-selected test coverage. The catalog now requires measured safety evidence before reducing the pre-merge test set and lists common tool-specific worker controls that must be measured independently.

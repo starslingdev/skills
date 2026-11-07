@@ -2785,6 +2785,16 @@ def _parse_log(text: str,
     # splitting the heavy binary) would move off the critical path. Fires only when the
     # suite is genuinely large (enough binaries) AND the serial wall is worth sharding
     # (floor), so a small crate's quick test run stays clean.
+    cargo_compile_s: float | None = None
+    for l in lines:
+        if match := re.search(
+                r"Finished\s+(?:`[^`]+`\s+profile|[^\n]*?target\(s\))[^\n]*?\bin\s+"
+                r"((?:\d+(?:\.\d+)?\s*[hms]\s*)+)", l, re.IGNORECASE):
+            parts = re.findall(r"(\d+(?:\.\d+)?)\s*([hms])", match.group(1), re.IGNORECASE)
+            scale = {"h": 3600.0, "m": 60.0, "s": 1.0}
+            cargo_compile_s = sum(float(value) * scale[unit.lower()]
+                                  for value, unit in parts)
+            break
     cargo_bins: list[tuple[str, float]] = []
     cur_bin: str | None = None
     for l in lines:
@@ -2814,7 +2824,7 @@ def _parse_log(text: str,
                   if re.search(r"^\s*Running\s+.+\(target/", l)][:1]
             ev += [l.strip() for l in lines
                    if re.search(r"test result: ok\..*finished in [\d.]+s", l)][:2]
-            return {
+            leaf = {
                 "fix_key": "cargo-test-shard",
                 "unit_label": f"{len(cargo_bins)} `cargo test` binaries run serially in "
                               "one job (slowest first)",
@@ -2834,6 +2844,9 @@ def _parse_log(text: str,
                 "evidence": ev,
                 "search": ["test result: ok.", "finished in", "Running"],
             }
+            if cargo_compile_s is not None:
+                leaf["pre_test_floor_s"] = round(cargo_compile_s, 2)
+            return leaf
 
     # --- I: a benchmark/perf step that reruns its whole op suite N times serially --
     # A benchmark harness invoked with a repeated-iterations flag (`--runs N`, plus the
@@ -3181,9 +3194,9 @@ _CONCURRENCY_ORDER_LINE = (
 )
 _SHARD_RUNNER_MINUTE_LINE = (
     "Runner-minute effect: With safe in-job concurrency, runner minutes go down because "
-    "the same job finishes sooner; extra shard jobs repeat checkout and setup and bill "
-    "each job, so a saturated runner buys more wall-clock speed only by spending runner "
-    "minutes."
+    "the same job finishes sooner. Extra shard jobs repeat checkout and setup and bill "
+    "each job; N shards also add roughly (N−1) × the measured pre-test floor in runner "
+    "minutes. Measure compile and setup before adding jobs."
 )
 _MACHINE_RUNNER_MINUTE_LINE = (
     "Runner cost effect: A faster machine can reduce elapsed runner minutes, while "
@@ -3679,7 +3692,10 @@ _FIX_META: dict[str, dict[str, Any]] = {
                 "`test result: ok. … finished in <secs>s` to see which binaries are heavy, "
                 "and check whether the tests share one external resource (a single DB / "
                 "server / fixed port) - the usual reason the suite is kept serial.",
-        "constraints": "Tests sharded across runners must stay ISOLATED: if the heavy "
+        "constraints": "Subtract compilation and other pre-test work from the shardable "
+                       "payload: every shard repeats that floor, adding roughly (N−1) × "
+                       "the floor in runner minutes. Tests sharded across runners must "
+                       "stay ISOLATED: if the heavy "
                        "binaries share one stateful backend (a single Postgres/DB, a "
                        "fixed port, a temp dir), each shard needs its OWN fresh instance "
                        "or they'll bleed state and flake (or false-pass). Recover why the "
@@ -4169,6 +4185,12 @@ def _build_agent_prompt(leaf: dict[str, Any] | None, pole: dict[str, Any],
                 f"- {addr}", ""]
 
     constraints = [f"- {meta['constraints']}"]
+    if fix_key == "cargo-test-shard" and _num(leaf.get("pre_test_floor_s")) is not None:
+        _floor = float(leaf["pre_test_floor_s"])
+        constraints.append(
+            f"- Measured pre-test compile floor: {_clock(_floor)}. Every added shard "
+            "repeats that floor; partition only the test work after it and include the "
+            "repeated compile in the runner-minute comparison.")
     # A cache pole whose measured distribution demotes it (miss-tail / mostly-warm) carries
     # the context the agent must not re-derive wrong: the cache mostly hits, so the win is on
     # the miss-heavy tail, and a fork/cold benchmark would overstate it.
