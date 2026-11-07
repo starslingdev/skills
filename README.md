@@ -22,10 +22,10 @@ command from the sections below.
 
 | Skill | Use it when you want to… | Coverage | Reads | Skill file |
 |---|---|---|---|---|
-| 🏎️ [**ci&#8209;speedup**](#ci-speedup) | Find what is slowing CI down or wasting runner-minutes | 90+ optimization patterns | Local workflows and GitHub run history | [`SKILL.md`](skills/ci-speedup/SKILL.md) |
-| 📋 [**ci&#8209;score**](#ci-score) | Grade CI configuration against best practices | 10+ configuration checks | Local checkout | [`SKILL.md`](skills/ci-score/SKILL.md) |
-| 🔒 [**ci&#8209;secure**](#ci-secure) | Find critical, exploitable GitHub Actions attack paths | 10+ critical attack vectors | Local workflows; optional GitHub API checks | [`SKILL.md`](skills/ci-secure/SKILL.md) |
-| 🛰️ [**sling**](#sling) | Understand usage, performance, billing, and CI activity across your StarSling account | 15+ account and CI commands | Your StarSling account | [`SKILL.md`](skills/sling/SKILL.md) |
+| 🏎️&#160;[**ci&#8209;speedup**](#ci-speedup) | Find what is slowing CI down or wasting runner-minutes | 90+ optimization patterns | Local workflows and GitHub run history | [`SKILL.md`](skills/ci-speedup/SKILL.md) |
+| 📋&#160;[**ci&#8209;score**](#ci-score) | Grade CI configuration against best practices | 10+ configuration checks | Local checkout | [`SKILL.md`](skills/ci-score/SKILL.md) |
+| 🔒&#160;[**ci&#8209;secure**](#ci-secure) | Find critical, exploitable GitHub Actions attack paths | 10+ critical attack vectors | Local workflows; optional GitHub API checks | [`SKILL.md`](skills/ci-secure/SKILL.md) |
+| 💫&#160;[**sling**](#sling) | Understand usage, performance, billing, and CI activity across your StarSling account | 15+ account and CI commands | Your StarSling account | [`SKILL.md`](skills/sling/SKILL.md) |
 
 The first three audit a repository. They produce a report, then offer to fix
 the findings you select or save the report as Markdown. Fixes stay in your
@@ -193,7 +193,7 @@ make the check required when you are ready for it to block merges.
 
 ## sling
 
-🛰️ **Understand usage, performance, billing, and CI activity across your
+💫 **Understand usage, performance, billing, and CI activity across your
 StarSling account.**
 
 **[Open the sling skill file →](skills/sling/SKILL.md)**
