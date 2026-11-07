@@ -11,9 +11,8 @@ it (typical-first tiering) and rendered `Doctest`. `Doctest` then had no capture
 and `blocking_path._match_key`'s exact-workflow-stem rule (`python`) bound its drill to
 the sibling pydantic1x bundle — the wrong job's evidence.
 
-The fix makes `collect_runs._order_drill_matrices` tier typical-first then rare (by
-impact), EXACTLY as `blocking_path.render` orders the poles it renders, so the captured
-set equals the rendered set.
+The collector and renderer now share the same pole selector, including actual gate
+frequency, required checks, and impact within typical/rare tiers.
 
 Run from the repo root:
 
@@ -24,9 +23,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from blocking_path import _match_key, _pole_owner_keys
+from blocking_path import _match_key, _pole_owner_keys, _select_render_poles
 from collect_runs import (
-    _order_drill_matrices,
     _RARE_PRESENCE_FRAC,
     _RARE_PRESENCE_MIN_PR,
 )
@@ -175,10 +173,21 @@ def _is_typical(check: str) -> bool:
     return _PRESENT.get(check, 0) > _NPOP * _RARE_PRESENCE_FRAC
 
 
+def _selected_matrices(required=()):
+    poles = [{"check": name, "job": name, "workflow_file": ".github/workflows/ci.yml",
+              "p50_s": median, "bimodal": {"high_p50_s": _BIMODAL_SLOW.get(name, 0)}}
+             for name, median in _MATRICES]
+    doc = {"required_checks": list(required), "pr_critical_path": {
+        "check_present_n_pr": _NPOP,
+        "checks": [{"name": name, "present_on": count} for name, count in _PRESENT.items()]}}
+    selected, _ = _select_render_poles(doc, poles)
+    return [(p["check"], p["p50_s"]) for p in selected]
+
+
 def test_rare_high_impact_pole_demoted_below_typical_in_drill_order():
     """The TYPICAL Doctest pole is drilled as #2 — the same pole the renderer shows —
     NOT the rare-but-high-impact aarch64 build leg. This is the renderer's tiering."""
-    ordered = _order_drill_matrices(_MATRICES, _impact, _is_typical)
+    ordered = _selected_matrices()
     top2 = [c for c, _ in ordered[:2]]
     assert top2 == ["pydantic1x", "Doctest"], top2
     assert "build - aarch64-apple-darwin" not in top2
@@ -189,33 +198,17 @@ def test_rare_high_impact_pole_demoted_below_typical_in_drill_order():
 def test_gate_always_leads_regardless_of_rest_impact():
     """The present-first gate (matrices[0]) stays #1 even if a later matrix has higher
     impact — the renderer's gate_rep is likewise the head of the typical-first order."""
-    ordered = _order_drill_matrices(_MATRICES, _impact, _is_typical)
+    ordered = _selected_matrices()
     assert ordered[0] == _GATE
-
-
-def _is_typical_with_required(req_names):
-    """Mirror the PRODUCTION `_is_typical_check` short-circuit: a REQUIRED check is always typical,
-    even if rare by presence (it gates merges, so the renderer never demotes it). The plain
-    `_is_typical` above omits this branch, so without this the `req_names` short-circuit baked into
-    `_order_drill_matrices`'s real call-site closure would be unguarded — a regression dropping it
-    could demote a required-but-rare pole below an optional one and reopen the parity bug."""
-    def f(check):
-        if check in req_names:
-            return True
-        if _NPOP < _RARE_PRESENCE_MIN_PR:
-            return True
-        return _PRESENT.get(check, 0) > _NPOP * _RARE_PRESENCE_FRAC
-    return f
 
 
 def test_required_but_rare_check_stays_typical_in_drill_order():
     # The aarch64 build leg is rare by presence (8/20 <= 0.5) but here it is REQUIRED. The renderer
     # keeps required checks typical, so the capture order must too — otherwise a merge-gating pole is
     # demoted below an optional one and loses drill/render parity (the exact class this PR fixes).
-    is_typical = _is_typical_with_required({"build - aarch64-apple-darwin"})
-    ordered = _order_drill_matrices(_MATRICES, _impact, is_typical)
+    ordered = _selected_matrices({"build - aarch64-apple-darwin"})
     names = [c for c, _ in ordered]
-    assert names[0] == "pydantic1x"                              # gate still leads
+    assert names[0] == "build - aarch64-apple-darwin"  # required gate leads
     assert names[-1] != "build - aarch64-apple-darwin", names    # NOT demoted to the rare bottom
     # Required → typical, and (highest impact) it drills ahead of the lower-impact Doctest.
     assert names.index("build - aarch64-apple-darwin") < names.index("Doctest"), names

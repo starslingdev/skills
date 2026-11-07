@@ -1,8 +1,9 @@
 # Structural / critical-path track — risk model & intent interrogation
 
 Depth for the structural finding class (catalog category 14, OPT70–OPT75 plus
-OPT78, OPT83 and OPT84) — the findings routed from the measured critical path rather than a YAML
-match. OPT83 is a finding dict (risk, guardrail and rollout on the record)
+OPT78, OPT83, OPT84, OPT85 and OPT87) — the findings routed from the measured critical path rather than a YAML
+match. OPT74, OPT85 and OPT87 have no router yet: they emit no finding,
+prompt or `Risk` row, and their catalog entries are applied by hand. OPT83 is a finding dict (risk, guardrail and rollout on the record)
 rendered as its own card at the pole, uncredited: it does not rank in the
 findings table or get a `Risk` row, and its prompt carries an independence
 re-check rather than the history/intent interrogation below. Its gates fail
@@ -35,6 +36,7 @@ every per-finding prompt. A normal run does not construct any of this by hand
 
 - [Risk is mandatory and renders loud](#risk-is-mandatory-and-renders-loud-but-never-demotes-the-rank)
 - [Interrogate the target file's history & intent](#interrogate-the-target-files-history--intent)
+- [Verification bar](#verification-bar)
 
 ## Risk is mandatory and renders loud (but never demotes the rank)
 
@@ -75,3 +77,14 @@ prompt):** if the fix contradicts the evident intent, the agent does NOT emit it
 a quick win — it flags a **behavioral/policy change needing the owner's sign-off**
 (documenting the intent it changes) or returns an explicit "skip, here's why". The
 prompt carries this rule so the agent applies it without re-deriving it.
+
+## Verification bar
+
+A scoped local test is pre-flight evidence, not verification. A change is verified
+only when the repository's own CI gate passes on the pushed branch, or when exactly
+the commands that gate CI pass against the change. The hand-off states which path
+proved the change.
+
+The agent also states the pole's observed range beside the predicted saving. When
+the predicted saving is smaller than normal run-to-run spread, it does not open a
+pull request: the expected change is too small to distinguish from ordinary noise.

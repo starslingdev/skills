@@ -79,7 +79,8 @@ _FIX_TABLE: dict[str, dict[str, str]] = {
                    "enable the setup action's cache input (e.g.\n"
                    "- uses: actions/setup-node@<sha>\n"
                    "  with: {cache: npm}\n"
-                   ") or add an actions/cache step keyed on the lockfile. If the\n"
+                   "; for astral-sh/setup-uv, add `enable-cache: true`)\n"
+                   "or add an actions/cache step keyed on the lockfile. If the\n"
                    "deps are installed inline with no manifest, add the manifest\n"
                    "first, then key the cache on it"),
     },
@@ -497,6 +498,22 @@ def _render_header(doc: dict[str, Any]) -> list[str]:
     return lines + [""]
 
 
+def _render_advisories(doc: dict[str, Any]) -> list[str]:
+    notes = doc.get("advisory_notes") or []
+    if not notes:
+        return []
+    lines = ["## Advisory notes", "", "These notes are not part of the score.", ""]
+    for note in notes:
+        if note.get("advisory_id") != "ci.runner.swappable":
+            continue
+        label = _md_name(note.get("label", ""))
+        lines += [f"- **Runner choice (`ci.runner.swappable`):** {label} is hard-coded in "
+                  f"{note.get('job_count', 0)} jobs. Use one repository variable per runner class, "
+                  "for example `runs-on: ${{ vars.RUNNER_LINUX }}`, so switching runners "
+                  "needs one setting change. Keep separate variables for different runner classes."]
+    return lines + [""]
+
+
 def render_report(doc: dict[str, Any], registry: dict[str, Any]) -> str:
     """The full report, from the findings document ONLY (single-stamp rule:
     the card renders the stamp; recommendations rank the stamp's FAILs;
@@ -526,12 +543,15 @@ def render_report(doc: dict[str, Any], registry: dict[str, Any]) -> str:
         return "\n".join(lines) + "\n"
 
     if not fails:
+        lines += _render_advisories(doc)
         lines += ["## Recommendations", "",
                   "Every applicable check passes — nothing to recommend. "
                   "(Re-run after CI changes; the practices above are the "
-                  "full v0.1.4 rubric.)", ""]
+                  "full v0.1.6 rubric.)", ""]
         lines += _render_appendix(registry)
         return "\n".join(lines) + "\n"
+
+    lines += _render_advisories(doc)
 
     registry_order = {c["check_id"]: i for i, c in enumerate(registry["checks"])}
     ranked = sorted(fails, key=lambda c: _rank_key(str(c.get("check_id")), registry_order))

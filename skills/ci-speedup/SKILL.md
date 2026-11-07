@@ -17,8 +17,8 @@ license: MIT
 
 # ci-speedup — CI Optimization Audit for GitHub Actions
 
-Audits a repository's GitHub Actions workflows against an 82-pattern
-catalog — 73 **hygiene/data-driven** patterns plus 9 **structural /
+Audits a repository's GitHub Actions workflows against a 97-pattern
+catalog — 86 **hygiene/data-driven** patterns plus 11 **structural /
 critical-path** patterns routed from the measured long pole — and
 produces a **root-cause-analysis** report with measured impact on two
 axes — developer wall-clock wait and runner-minutes (cloud bill). The
@@ -77,7 +77,7 @@ detector, the agent writes a **log-grounded, clearly-labelled** root-cause readi
 (verbatim log lines, framed as a lead to verify) — a breakdown + fix prompt instead
 of a dead-end, never touching detection, ranking, or measured magnitudes.
 
-`scripts/scan.py` parses `references/optimization-patterns.md` and runs its
+`scripts/scan.py` parses `references/patterns/*.md` and runs its
 registered detectors against the repo — five deterministic flavors (per-file
 bespoke, declarative `match:`/`yaml_path:`, cross-workflow, repo-file,
 source-grep; `ARCHITECTURE.md`). `scripts/collect_runs.py` then adds the
@@ -97,13 +97,13 @@ that has produced confident-but-wrong findings before; they surface as a
 
 ## Structural / critical-path findings (the high-leverage track)
 
-On real repos almost every hygiene hit (OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81, OPT82 — mostly declarative)
+On real repos almost every hygiene hit (OPT1–OPT69, OPT76, OPT77, OPT79–OPT82, OPT86, OPT88–OPT91, OPT93, OPT94, OPT96–OPT98, OPT100–OPT102 — mostly declarative)
 moves **~0 developer wall-clock** — the true bottleneck is usually a check working
 as intended that is simply the slowest thing gating the merge, with no catalog
-match. The **structural track** (category 14, OPT70–OPT75 plus OPT78, OPT83 and OPT84) attacks that: a second
+match. The **structural track** (category 14, OPT70–OPT75, OPT78, OPT83–OPT85, OPT87) attacks that: a second
 finding class **routed from the measured critical path** in `collect_runs.py` (the
 long-pole job decomposed to steps, required checks cross-referenced, shared cluster
-work detected; OPT78 via a config-gated vitest log leaf), not a YAML match — still
+work detected; OPT78 via a config-gated vitest log leaf; OPT74/85/87 have no router yet), not a YAML match — still
 catalog OPT-ids. Routing + risk model: `ARCHITECTURE.md` §11.
 
 ### Risk & intent are mandatory (baked into every structural prompt)
@@ -125,14 +125,14 @@ quick win (OPT78 stamps HIGH on its drill-down). Details + intent-recovery comma
 ## Phases
 
 **Interaction contract (phases 1 and 6).** Both user-facing questions are a **single
-structured question** — one question, one page, fixed-order options, nothing open-ended,
+structured question** — one question, one page, fixed-order options (always **≥2 options** unless a step below drops one by name), nothing open-ended,
 no machinery narration — **via your platform's structured-question tool where one exists**:
 `AskUserQuestion` on Claude Code; on Codex, its built-in user-input request tool
-(`request_user_input` / `tool/requestUserInput`, experimental — call it when exposed). Only with **no** such tool, ask the **same** question
-as **one plain message** — same options, same order, same ≤4-option fold, phase 6's save
-option still **last** and verbatim (`None, just save the report (.md)`), no re-offer after
+(`request_user_input` / `tool/requestUserInput`, experimental — call it when exposed, **and ALSO end your plain message with the same question** as a numbered option list, same options, same order, sent before the call: an experimental tool can silently fail to render or never return — live Codex run 2026-10-29). With **no** such tool (or a failed call), that plain message alone asks it
+— same options, same order, same ≤4-option fold, phase 6's save option still **last** and verbatim (`None, just save the report (.md)`), no re-offer after
 a save pick, the default one keystroke ("Reply **y** to audit <owner/repo>, or name a
-different repo/path"). Only the delivery mechanism varies; the contract is **agent-independent.**
+different repo/path"). **Never say you are waiting on a choice unless its options are visible in your own last message.**
+Only the delivery mechanism varies; the contract is **agent-independent.**
 
 1. **Pick repo — default to the current repo, but confirm first.** But FIRST, the
    gh gate: if `gh` isn't installed or `gh auth status` fails (sandboxed agent
@@ -177,8 +177,8 @@ different repo/path"). Only the delivery mechanism varies; the contract is **age
    hygiene figures approximate (flagged). `run.py` then prints a **data-pass summary**
    to stdout — the gating resolution (required checks, **already resolved from rulesets
    + branch protection**: a fileless/managed check like `Claude Code Review` is flagged
-   auto-demoted, an empty set means none are declared), the addressable long poles, and
-   the **exact `blocking_path.py` render command** with per-pole bindings pre-filled.
+   auto-demoted, an empty set means none are declared), the addressable long poles, the gh
+   API call count, and the **exact `blocking_path.py` render command** with per-pole bindings pre-filled.
    **Act on that summary.** Do NOT re-query gh for branch protection / rulesets (the
    data pass did it — read `required_checks`), manually verify a fileless check's
    gating, or hand-spelunk `findings.json` with `python -c` — it's all in the summary.
@@ -212,8 +212,8 @@ different repo/path"). Only the delivery mechanism varies; the contract is **age
    delete; don't auto-commit it or edit their `.gitignore`). Remember this internal
    path — the phase-6 "save the full report" option copies from it.
    - **4a. LLM gap-fill for coverage-gap poles (mandatory when present).**
-     A drilled pole whose captured log matched **no catalog detector** renders
-     the marker "no drill-down available" and would otherwise dead-end — a
+     A drilled pole whose log matched **no catalog detector** (or only generic OPT75/71)
+     renders the marker "no drill-down available" and would otherwise dead-end — a
      *product failure*. So **you (the agent running the skill) fill the gap**: for
      each such pole read its captured log (`data_bundle.logs[].file` under
      `logs_dir`) + the step timeline, work out what eats the dominant step's time,
@@ -302,8 +302,8 @@ different repo/path"). Only the delivery mechanism varies; the contract is **age
    slowest check gating your merge* (or just say "check"); "runner-minutes" →
    *cloud CI billing minutes*. Avoid "lever" and "critical path" in the chat
    entirely — the whole close reads like a plain sentence to a PM.
-   **Open with the measured result** — lead with the biggest lever: the slowest
-   check gating the merge and its developer-wait cost, in plain words.
+   **Open with the measured result** — lead with the slowest check gating the merge
+   and its developer-wait cost; never call a bill finding the largest saving.
    **Era disclosures lead even earlier**: when the report's top matter shows a
    config-era ⚠️, say it before any number — narrowed ("measures only the N runs
    since <workflow> changed <when>"); disclosed_pre (headline measures the PREVIOUS
@@ -312,7 +312,7 @@ different repo/path"). Only the delivery mechanism varies; the contract is **age
    PROVISIONAL: the new config on too few post-change runs — "treat as provisional;
    re-audit"). Never present a retired-era or provisional number as current (live
    miss 2026-07-30). **Fast-CI preface (owner UX):** when that merge-wait figure is
-   under ~2 min AND carries no such era caveat, open by saying their CI is in good
+   under 2m 00s (the report's 🟡 tier; 2m 00s+ is 🟠) AND carries no such era caveat, open by saying their CI is in good
    shape — nothing to change unless a finding is a cheap, glaring easy win — then the
    same options, menu unchanged. Then state
    each gating long pole as one plain finding — the check it gates, its measured
@@ -348,11 +348,11 @@ different repo/path"). Only the delivery mechanism varies; the contract is **age
    the menu after saving — close naming the remaining levers in one line. No other pick
    writes the report into the working tree. **Set the honest expectation for what a pick
    does.** A pick doesn't return a "proposal": the skill investigates the real runs and
-   the file's intent, **makes the change and verifies it**, then checks with the user
-   **before committing or opening a PR** (the real stop point) — a finished, verified,
-   uncommitted change. On their pick, run that pole's agent prompt verbatim through
-   that same pause; the bill-savings pick runs the Tier-2 R-row prompts (or, with only
-   the modeled pointer, the "Also noticed" bill prompts). **When a picked fix
+   the file's intent and **makes the change**; it is **verified** only when exactly the commands
+   that gate CI pass (a scoped local run is pre-flight only; if they need a commit or push, say
+   verification awaits authorization; after an authorized push, the repository's own CI gate
+   passing on that branch also verifies it). It checks with the user **before committing or opening a PR**. On their pick, run that pole's agent prompt verbatim through that same pause; the
+   bill-savings pick runs the Tier-2 R-row prompts (or, with only the modeled pointer, the "Also noticed" bill prompts). **When a picked fix
    completes** — it lands, or the user closes it out (the completion point, *not* the
    pre-commit pause) — restate the report's remaining findings as the next-step
    question: one orienting line plus the still-open options, so remaining levers never
@@ -388,7 +388,7 @@ dropped (never reframed into a softer finding):
    **OPT49/slow-setup and OPT51/install-ratio were CUT** — a duration/ratio never
    proves a cold cache (criterion 2); the verified slow-setup signal lives with
    OPT3/5/8/9 and OPT73. Rationale: the ⚠️ CUT notes in
-   [references/optimization-patterns.md](references/optimization-patterns.md).)
+   [references/patterns/](references/patterns/INDEX.md).)
 2. **Positive instance evidence** — proof the defect actually costs time on
    *this* repo: the cacheable step ran uncached with measurable cost, the
    long leg measurably gates the matrix, etc. The *absence* of a signal
@@ -405,29 +405,29 @@ dropped (never reframed into a softer finding):
    Actions failure-rate dashboard),
    not individual runs. OPT48 is the canonical example.
 
-## Quality review (mandatory before trusting a report)
+## Quality review (for worked examples; not a run phase)
 
-A report is not trusted until hostile, **independent** subagents re-derive
-every finding against the real repo clone (assume each finding is WRONG until
-proven), per `references/adversarial-review-rubric.md` — which checks not just
-"is the claim true" but **actionability** (a real, addressable CI-config cause,
-not "fix your code"), **evidence-verifies-the-headline-claim** (aggregate, not
-cherry-picked), causal sizing, severity calibration, and ≥2-pass independent
-agreement. A finding only one pass would defend is cut or escalated, not kept.
+Not one of the six phases: a user's run, interactive or headless, never spawns it (the
+phase-5 gate is the per-run check). Before a report ships as a worked example, hostile,
+**independent** subagents re-derive every finding against the real repo clone (assume
+each finding is WRONG until proven), per `references/adversarial-review-rubric.md`:
+**actionability** (a real, addressable CI-config cause, not "fix your code"),
+**evidence-verifies-the-headline-claim** (aggregate, not cherry-picked), causal sizing,
+severity calibration, ≥2-pass agreement; a one-pass-only finding is cut or escalated.
 
 ## Pattern catalog
 
-`references/optimization-patterns.md` declares all 82 patterns across 14
-categories (Caching, Redundancy, Docker, Parallelization, Actions and
-Checkout, Conditional Execution, Trigger and Scope, Release Workflow, Queue
-Times and Concurrency, Timing Anomalies, Stack-Specific, Build Caching,
-Hidden Failures and Dead Config, **Structural / Critical-Path Levers**). Each
-entry's METADATA block declares the pattern id, impact tier, finding class
-(`static` / `data-driven` / `structural`), detector type, and fix strategy
-slug; structural entries add a `risk` rating + mandatory guardrail/rollout.
+Patterns live one per file in `references/patterns/opt<N>-*.md` (97 patterns
+in 14 categories, from Caching to **Structural / Critical-Path Levers**). Each
+file's frontmatter declares the id, impact tier, finding class (`static` /
+`data-driven` / `structural`), detector and fix strategy slug; structural
+entries add a `risk` rating + mandatory guardrail/rollout. When a finding,
+prompt or review names `OPT<N>`, read that one file in full; read
+`references/patterns/INDEX.md` only to find which pattern covers a stack.
+Never open `references/optimization-patterns.md`: it is the generated public copy.
 
 Adding or cutting a pattern (catalog entry + detector registration, coverage
-bookkeeping, the intentionally-cut OPT49/50/51 / router-less OPT74 and OPT78 cases) is a
+bookkeeping, the intentionally-cut OPT49/50/51 / router-less OPT74, OPT78, OPT85 and OPT87 cases) is a
 contributor task — `maintainers/ci-speedup/MAINTAINERS.md` (source checkout
 only) § Adding a pattern to the catalog.
 
@@ -441,11 +441,11 @@ Reference docs (read on demand — each links one level deep from here; outside 
 - [references/savings-methodology.md](references/savings-methodology.md) —
   two-axis sizing: Δ wall-clock ranks; measured runner-minute findings promote; modeled residuals stay in "Also noticed".
   Measured compute counts completed job runs (timed-out, cancelled, and failed runs at or past the 6-hour timeout excluded, named in the spine footnote): modeled savings are capped at it; measured and failure-waste savings are checked against every sampled run.
-- [references/optimization-patterns.md](references/optimization-patterns.md) — the pattern catalog (every OPT-id).
+- [references/patterns/INDEX.md](references/patterns/INDEX.md) — the pattern index (every OPT-id; one file per pattern).
 - [references/spine-scoping.md](references/spine-scoping.md) — which checks
   form the spine (required-scoping, PR-floor fallback, one-path demotion).
 - [references/structural-track.md](references/structural-track.md) — the
-  OPT70–75, OPT78, OPT83 and OPT84 risk model + intent interrogation for structural prompts.
+  OPT70–75, OPT78, OPT83–85, OPT87 risk model + intent interrogation for structural prompts.
 - [references/gap-fill.md](references/gap-fill.md) — the coverage-gap
   fallback (4a/4b/4c) for poles the catalog can't analyse.
 - [references/adversarial-review-rubric.md](references/adversarial-review-rubric.md) — the hostile-review contract ("Quality review").
@@ -498,8 +498,8 @@ The scannable rule list; each is detailed in the section named in parentheses.
   "sampled 0/20 PRs", "found no drill logs", "the spine is empty", or "I couldn't X, so
   let me Y". A genuine coverage limit is stated once by the report's banners, not narrated.
 - **Emit a finding whose pattern id is not in the catalog** — both tracks emit only
-  catalog-declared OPT-ids (structural OPT70–75, OPT78, OPT83, OPT84 are *routed* from the
-  critical path but still catalog-declared).
+  catalog-declared OPT-ids (structural OPT70–73, OPT75, OPT78, OPT83, OPT84 are *routed* from the
+  critical path but still catalog-declared; router-less OPT74/85/87 are never emitted).
 - **Emit a generic "slow step" finding** — a step taking N seconds is an observation;
   every finding names a specific root cause ("admission gate").
 - **Present a structural change as a safe quick win** — each states its `risk`,

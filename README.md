@@ -35,8 +35,8 @@ unless you explicitly ask.
 `sling` is different: it requires a StarSling account and gives you the
 operational view of that account—usage, performance, billing, runs, failures,
 runner capacity, and more. It reads the CI data StarSling already collects
-rather than auditing workflow files in a checkout. The CLI is read-only;
-requests that change CI state are routed to the GitHub CLI.
+rather than auditing workflow files in a checkout. It does not change GitHub
+or CI state; requests that do are routed to the GitHub CLI.
 
 ## Requirements and data handling
 
@@ -167,6 +167,11 @@ and [0 findings after](examples/snowflakedb-snowflake-connector-net/ci-secure-re
 The optional CI check runs the same engine on every pull request so fixed
 findings do not return. Ask your agent to install it:
 
+**This repository uses it.** See
+[`.github/workflows/ci-secure-check.yml`](.github/workflows/ci-secure-check.yml),
+which scans this repository's own workflows and publishes the stable
+`ci-secure` verdict used by branch protection.
+
 ```text
 Run `npx skills add starslingdev/skills --skill ci-secure` to install or
 update the ci-secure skill, then install ci-secure as a CI check in this repo.
@@ -207,9 +212,9 @@ StarSling bill?”*, *“How is runner performance trending?”*, or *“Why did
 job fail?”*
 
 Unlike the repository-audit skills, `sling` requires a StarSling account. The
-skill drives StarSling's read-only [`sling`
-CLI](https://docs.starsling.dev/sling-cli), the agent-first interface to that
-account. Its 15+ commands cover:
+skill drives StarSling's [`sling` CLI](https://docs.starsling.dev/sling-cli),
+the agent-first interface to that account, read-only against GitHub and CI.
+Its 15+ commands cover:
 
 - **Usage:** attribute runner-minutes and cost by repository, workflow, job,
   label, or day.

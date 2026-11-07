@@ -1,5 +1,9 @@
 # microsoft/playwright - why is the merge slow?
 
+**Where your PRs' time goes**
+
+not measured: lifecycle data was not collected
+
 | Repository | `microsoft/playwright` |
 | :--- | :--- |
 | **Audited commit** | [`3827650`](https://github.com/microsoft/playwright/commit/3827650d171cc1b035cbefb7e00bf5948d6809df) - file & line references are anchored to this tree |
@@ -12,17 +16,27 @@
 >
 > **41m 12s until all checks finish** - the slowest check a typical PR waits on is `Windows (firefox)` (~72m 57s), but it ran on only 4/20 sampled PRs, so a typical PR finishes in 41m 12s; `ubuntu-22.04 (webkit - Node.js 20)` is the check most PRs gate on (drilled below). (`Test chrome on macos-latest` is slower (~59m 33s) but it ran on only 5/20 sampled PRs - it looks opt-in / conditional (e.g. label-gated), so a typical PR doesn't wait on it and its time is throughput/cost, not merge-wait; unless it's a *required* status check it isn't the gate here. See its long pole below.) 
 >
-> **⚠️ `.github/workflows/tests_webview_simulator.yml` changed ~79 days ago - this audit measures ONLY the new configuration on a thin sample.** Only 1 sampled run have run on the new configuration (the gate-bearing PRs are all post-change, so there is no pre-change gate run to measure the old config) - treat these numbers as provisional; re-run as post-change history accumulates for stable numbers.
+> **⚠️ `.github/workflows/tests_webview_simulator.yml` changed ~122 days ago - this audit measures ONLY the new configuration on a thin sample.** Only 1 sampled run have run on the new configuration (the gate-bearing PRs are all post-change, so there is no pre-change gate run to measure the old config) - treat these numbers as provisional; re-run as post-change history accumulates for stable numbers.
 >
-> **`.github/workflows/fix-flakes.yml` changed ~69 days ago - narrowed to the current configuration.** This audit measures only the 11 runs since that change; the 8 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/fix-flakes.yml` changed ~112 days ago - narrowed to the current configuration.** This audit measures only the 11 runs since that change; the 8 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
-> **`.github/workflows/publish_release.yml` changed ~71 days ago - narrowed to the current configuration.** This audit measures only the 14 runs since that change; the 6 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/publish_release.yml` changed ~114 days ago - narrowed to the current configuration.** This audit measures only the 14 runs since that change; the 6 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
-> **`.github/workflows/tests_bidi.yml` changed ~76 days ago - narrowed to the current configuration.** This audit measures only the 8 runs since that change; the 12 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/tests_bidi.yml` changed ~118 days ago - narrowed to the current configuration.** This audit measures only the 8 runs since that change; the 12 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
-> **`.github/workflows/tests_secondary.yml` changed ~83 days ago - narrowed to the current configuration.** This audit measures only the 18 runs since that change; the 2 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/tests_secondary.yml` changed ~126 days ago - narrowed to the current configuration.** This audit measures only the 18 runs since that change; the 2 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
-> **After the gate.** 73,441 min/mo of wall-clock-neutral runner minutes is recoverable (10 neutral findings; none can slow a merge).
+> **What gates next:** After this fix, CI is gated by `tests_mcp.yml / windows-latest - firefox` at ~2415 s.
+> This projection assumes the full headline saving is realized; a smaller fix may leave the current gate in place.
+>
+> **How to check it worked**
+>
+> - **Measure:** time from the push's first job created to the last job finished, across **all** workflows the push triggers.
+> - **Runs:** at least 2 before and 2 after, plus one unchanged rerun as a noise control.
+> - **Don't** sum workflow durations, and don't average per-job ratios. Both hide a gain on the one workflow that gates.
+> - **Caches:** judge cache-touching fixes on the second run after the change.
+>
+> **After the gate.** 73,029 min/mo of wall-clock-neutral runner minutes is recoverable (5 neutral findings; none can slow a merge).
 
 ## 📋 Contents
 
@@ -36,20 +50,15 @@
 
 **⏳ Pre-start wait** - 41 jobs wait in queue before starting (developer wall-clock the spine above doesn't capture): [see below](#pre-start-wait).
 
-**💸 Runner-minute reductions** - ~73,441 min/mo of measured, merge-safe runner-minute savings, backed by a 133-row cost spine: [section](#runner-minute-reductions).
+**💸 Runner-minute reductions** - ~73,029 min/mo of measured, merge-safe runner-minute savings, backed by a 12-row cost spine (+121 more runner-minute rows hidden): [section](#runner-minute-reductions).
 
 1. 🟢 [Superseded Runs Not Cancelled](#r-1) - 71,644 min/mo
 2. 🟢 [Superseded Runs Not Cancelled](#r-2) - 1,072 min/mo
-3. 🟢 [Repeated Workflow Attempts From Same…](#r-3) - 268 min/mo
-4. 🟢 [Superseded Runs Not Cancelled](#r-4) - 159 min/mo
-5. 🟢 [Superseded Runs Not Cancelled](#r-5) - 141 min/mo
-6. 🟢 [Repeated Workflow Attempts From Same…](#r-6) - 82 min/mo
-7. 🟢 [Repeated Workflow Attempts From Same…](#r-7) - 54 min/mo
-8. 🟢 [Cron Schedule Too Frequent](#r-8) - 13 min/mo
-9. 🟢 [Repeated Workflow Attempts From Same…](#r-9) - 8 min/mo
-10. 🟢 [Repeated Workflow Attempts From Same…](#r-10) - 0.7 min/mo
+3. 🟢 [Superseded Runs Not Cancelled](#r-3) - 159 min/mo
+4. 🟢 [Superseded Runs Not Cancelled](#r-4) - 141 min/mo
+5. 🟢 [Cron Schedule Too Frequent](#r-5) - 13 min/mo
 
-**🧹 Also noticed** - 16 findings (mostly off-path runner-minute savings; **one or more flagged DO sit on the critical path** and cut wall-clock): [see below](#also-noticed).
+**🧹 Also noticed** - 15 findings (mostly off-path runner-minute savings; **one or more flagged DO sit on the critical path** and cut wall-clock): [see below](#also-noticed).
 
 <a id="long-pole-map"></a>
 
@@ -87,7 +96,7 @@ Each ◀ marks the blocker the next level opens. Long pole 1 below drills the ma
 
 **The check most PRs gate on.** A typical PR waits on this most often; the slowest concurrent check is `Windows (firefox)` (~72m 57s).
 
-> **What a change here can buy (wall-clock):** this job's matrix legs run in parallel, so speeding **this one leg** saves only ~1m 06s (the next leg, `windows-latest - firefox`, is 40m 15s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `windows-latest - firefox` (40m 15s), for up to **~1m 06s** of merge wait.
+> **What a change here can buy (wall-clock):** this job's matrix legs run in parallel, so speeding **this one leg** saves only ~1m 06s (the next leg, `windows-latest - firefox`, is 40m 15s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `windows-latest - firefox` (40m 15s), for up to **~1m 06s** of merge wait. Per-PR split: 0 on 13 of 20 PRs where another check runs longer; up to 39s on 1 of 20 PRs; up to 48s on 1 of 20 PRs; up to 1m 06s on 5 of 20 PRs.
 
 ```text
 Where the job's ~41m 21s goes - every step, slowest first; they run in sequence and roughly add up to the job:
@@ -123,14 +132,16 @@ THE GATE
 - Workflow `tests_primary.yml`, job `ubuntu-22.04 (webkit - Node.js 20)`.
 - Slowest check a typical PR waits on: P50 41m 21s; its workflow `tests_primary.yml` gates 7/20 sampled PRs.
 
+Runner-minute effect: If the structural fix moves work to added jobs or machines, duplicated checkout and setup raise runner minutes; moving the same work without duplication is roughly level, and removing measured work lowers them.
+
 WHERE THE TIME GOES
 - The job's time is dominated by the `Run ./.github/actions/run-test` step: ~41m 14s (100% of the job wall), from the sampled per-step decomposition (no single-run timeline was captured for this job).
 
 STRUCTURAL CATALOG PATTERN MATCHED
-- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log (the Audit link) to see exactly what inside it the lever reshapes.
+- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log in a recent pull-request run of this job (no direct log link is shown here) to see exactly what inside it the lever reshapes.
 
 WHAT'S ADDRESSABLE (wall-clock ceiling - don't over-promise)
-- this job's matrix legs run in parallel, so speeding this one leg saves only ~1m 06s (the next leg, `windows-latest - firefox`, is 40m 15s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `windows-latest - firefox` (40m 15s), for up to ~1m 06s of merge wait.
+- this job's matrix legs run in parallel, so speeding this one leg saves only ~1m 06s (the next leg, `windows-latest - firefox`, is 40m 15s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `windows-latest - firefox` (40m 15s), for up to ~1m 06s of merge wait. Per-PR split: 0 on 13 of 20 PRs where another check runs longer; up to 39s on 1 of 20 PRs; up to 48s on 1 of 20 PRs; up to 1m 06s on 5 of 20 PRs.
 
 WHERE TO LOOK
 - The `tests_primary.yml` workflow definition for the dominant step, and the tool/config it invokes (build tool, test runner, or install) - that's where its time is spent.
@@ -155,6 +166,10 @@ NEVER BUY SPEED BY CHECKING LESS
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
 
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+- State the pole's observed range beside the predicted saving. Do not open a pull request when the predicted saving is smaller than that range.
+
 DELIVER & VERIFY
 - A change that cuts the dominant step's wall time without dropping coverage; re-measure the step on a PR run to confirm the reduction.
 ```
@@ -166,7 +181,7 @@ DELIVER & VERIFY
 
 _Runs concurrently - becomes the gate once the slower checks above it drop below 72m 57s._
 
-> **What a change here can buy (wall-clock):** this job's matrix legs run in parallel, so speeding **this one leg** saves only ~13m 24s (the next leg, `Test chrome on macos-latest`, is 59m 33s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `Test chrome on macos-latest` (59m 33s), for up to **~13m 24s** of merge wait.
+> **What a change here can buy (wall-clock):** this job's matrix legs run in parallel, so speeding **this one leg** saves only ~13m 24s (the next leg, `Test chrome on macos-latest`, is 59m 33s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `Test chrome on macos-latest` (59m 33s), for up to **~13m 24s** of merge wait. Per-PR split: 0 on 16 of 20 PRs where another check runs longer; up to 13m 24s on 2 of 20 PRs; up to 15m 47s on 1 of 20 PRs; up to 20m 34s on 1 of 20 PRs.
 
 ```text
 Where the job's ~72m 57s goes - every step, slowest first; they run in sequence and roughly add up to the job:
@@ -200,14 +215,16 @@ THE GATE
 - Workflow `tests_secondary.yml`, job `Windows (firefox)`.
 - Slowest check a typical PR waits on: P50 72m 57s; its workflow `tests_secondary.yml` gates 5/20 sampled PRs.
 
+Runner-minute effect: If the structural fix moves work to added jobs or machines, duplicated checkout and setup raise runner minutes; moving the same work without duplication is roughly level, and removing measured work lowers them.
+
 WHERE THE TIME GOES
 - The job's time is dominated by the `Run ./.github/actions/run-test` step: ~72m 46s (100% of the job wall), from the sampled per-step decomposition (no single-run timeline was captured for this job).
 
 STRUCTURAL CATALOG PATTERN MATCHED
-- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log (the Audit link) to see exactly what inside it the lever reshapes.
+- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log in a recent pull-request run of this job (no direct log link is shown here) to see exactly what inside it the lever reshapes.
 
 WHAT'S ADDRESSABLE (wall-clock ceiling - don't over-promise)
-- this job's matrix legs run in parallel, so speeding this one leg saves only ~13m 24s (the next leg, `Test chrome on macos-latest`, is 59m 33s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `Test chrome on macos-latest` (59m 33s), for up to ~13m 24s of merge wait.
+- this job's matrix legs run in parallel, so speeding this one leg saves only ~13m 24s (the next leg, `Test chrome on macos-latest`, is 59m 33s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `Test chrome on macos-latest` (59m 33s), for up to ~13m 24s of merge wait. Per-PR split: 0 on 16 of 20 PRs where another check runs longer; up to 13m 24s on 2 of 20 PRs; up to 15m 47s on 1 of 20 PRs; up to 20m 34s on 1 of 20 PRs.
 
 WHERE TO LOOK
 - The `tests_secondary.yml` workflow definition for the dominant step, and the tool/config it invokes (build tool, test runner, or install) - that's where its time is spent.
@@ -232,6 +249,10 @@ NEVER BUY SPEED BY CHECKING LESS
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
 
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+- State the pole's observed range beside the predicted saving. Do not open a pull request when the predicted saving is smaller than that range.
+
 DELIVER & VERIFY
 - A change that cuts the dominant step's wall time without dropping coverage; re-measure the step on a PR run to confirm the reduction.
 ```
@@ -243,7 +264,7 @@ DELIVER & VERIFY
 
 _Runs concurrently behind `Windows (firefox)` (72m 57s); it becomes the gate only once every slower concurrent check drops below 40m 15s._
 
-> **What a change here can buy (wall-clock):** this job's matrix legs run in parallel, so speeding **this one leg** saves only ~8m 24s (the next leg, `macos-latest - firefox`, is 31m 51s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `macos-latest - chromium` (20m 14s), for up to **~20m 00s** of merge wait.
+> **What a change here can buy (wall-clock):** this job's matrix legs run in parallel, so speeding **this one leg** saves only ~8m 24s (the next leg, `macos-latest - firefox`, is 31m 51s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `macos-latest - chromium` (20m 14s), for up to **~20m 00s** of merge wait. Per-PR split: 0 on 14 of 20 PRs where another check runs longer; up to 20s on 1 of 20 PRs; up to 1m 28s on 1 of 20 PRs; up to 3m 10s on 1 of 20 PRs; up to 20m 04s on 1 of 20 PRs; up to 20m 08s on 1 of 20 PRs; up to 20m 18s on 1 of 20 PRs.
 
 ```text
 Where the job's ~40m 15s goes - every step, slowest first; they run in sequence and roughly add up to the job:
@@ -277,14 +298,16 @@ THE GATE
 - Workflow `tests_mcp.yml`, job `windows-latest - firefox`.
 - Slowest check a typical PR waits on: P50 40m 15s; its workflow `tests_mcp.yml` gates 6/20 sampled PRs.
 
+Runner-minute effect: If the structural fix moves work to added jobs or machines, duplicated checkout and setup raise runner minutes; moving the same work without duplication is roughly level, and removing measured work lowers them.
+
 WHERE THE TIME GOES
 - The job's time is dominated by the `Run ./.github/actions/run-test` step: ~40m 04s (100% of the job wall), from the sampled per-step decomposition (no single-run timeline was captured for this job).
 
 STRUCTURAL CATALOG PATTERN MATCHED
-- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log (the Audit link) to see exactly what inside it the lever reshapes.
+- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log in a recent pull-request run of this job (no direct log link is shown here) to see exactly what inside it the lever reshapes.
 
 WHAT'S ADDRESSABLE (wall-clock ceiling - don't over-promise)
-- this job's matrix legs run in parallel, so speeding this one leg saves only ~8m 24s (the next leg, `macos-latest - firefox`, is 31m 51s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `macos-latest - chromium` (20m 14s), for up to ~20m 00s of merge wait.
+- this job's matrix legs run in parallel, so speeding this one leg saves only ~8m 24s (the next leg, `macos-latest - firefox`, is 31m 51s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `macos-latest - chromium` (20m 14s), for up to ~20m 00s of merge wait. Per-PR split: 0 on 14 of 20 PRs where another check runs longer; up to 20s on 1 of 20 PRs; up to 1m 28s on 1 of 20 PRs; up to 3m 10s on 1 of 20 PRs; up to 20m 04s on 1 of 20 PRs; up to 20m 08s on 1 of 20 PRs; up to 20m 18s on 1 of 20 PRs.
 
 WHERE TO LOOK
 - The `tests_mcp.yml` workflow definition for the dominant step, and the tool/config it invokes (build tool, test runner, or install) - that's where its time is spent.
@@ -309,6 +332,10 @@ NEVER BUY SPEED BY CHECKING LESS
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
 
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+- State the pole's observed range beside the predicted saving. Do not open a pull request when the predicted saving is smaller than that range.
+
 DELIVER & VERIFY
 - A change that cuts the dominant step's wall time without dropping coverage; re-measure the step on a PR run to confirm the reduction.
 ```
@@ -320,7 +347,7 @@ DELIVER & VERIFY
 
 **Rarely the merge gate - the actual slowest check a PR waits on, on only 1/20 sampled PRs.** Present on 5/20 PRs, but a slower concurrent check almost always gates ahead of it, so its 59m 33s is throughput/cost, not merge-wait. Speeding it helps only the PRs where it IS the pole - it won't move typical merge-wait.
 
-> **What a change here can buy (wall-clock):** this job's matrix legs run in parallel, so speeding **this one leg** saves only ~13m 32s (the next leg, `Test msedge on windows-latest`, is 46m 01s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `Test msedge on windows-latest` (46m 01s), for up to **~13m 32s** of merge wait.
+> **What a change here can buy (wall-clock):** this job's matrix legs run in parallel, so speeding **this one leg** saves only ~13m 32s (the next leg, `Test msedge on windows-latest`, is 46m 01s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `Test msedge on windows-latest` (46m 01s), for up to **~13m 32s** of merge wait. Per-PR split: 0 on 19 of 20 PRs where another check runs longer; up to 13m 32s on the other 1 of 20 PRs.
 
 ```text
 Where the job's ~59m 33s goes - every step, slowest first; they run in sequence and roughly add up to the job:
@@ -355,14 +382,16 @@ THE GATE
 - Workflow `tests_secondary.yml`, job `Test chrome on macos-latest`.
 - Rarely the merge pole - the actual slowest check a PR waits on, on only 1/20 sampled PRs (present on 5/20): P50 59m 33s. A slower concurrent check usually gates ahead, so speeding it helps only the PRs where it IS the pole, not typical merge-wait.
 
+Runner-minute effect: If the structural fix moves work to added jobs or machines, duplicated checkout and setup raise runner minutes; moving the same work without duplication is roughly level, and removing measured work lowers them.
+
 WHERE THE TIME GOES
 - The job's time is dominated by the `Run ./.github/actions/run-test` step: ~59m 21s (100% of the job wall), from the sampled per-step decomposition (no single-run timeline was captured for this job).
 
 STRUCTURAL CATALOG PATTERN MATCHED
-- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log (the Audit link) to see exactly what inside it the lever reshapes.
+- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log in a recent pull-request run of this job (no direct log link is shown here) to see exactly what inside it the lever reshapes.
 
 WHAT'S ADDRESSABLE (wall-clock ceiling - don't over-promise)
-- this job's matrix legs run in parallel, so speeding this one leg saves only ~13m 32s (the next leg, `Test msedge on windows-latest`, is 46m 01s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `Test msedge on windows-latest` (46m 01s), for up to ~13m 32s of merge wait.
+- this job's matrix legs run in parallel, so speeding this one leg saves only ~13m 32s (the next leg, `Test msedge on windows-latest`, is 46m 01s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `Test msedge on windows-latest` (46m 01s), for up to ~13m 32s of merge wait. Per-PR split: 0 on 19 of 20 PRs where another check runs longer; up to 13m 32s on the other 1 of 20 PRs.
 
 WHERE TO LOOK
 - The `tests_secondary.yml` workflow definition for the dominant step, and the tool/config it invokes (build tool, test runner, or install) - that's where its time is spent.
@@ -387,6 +416,10 @@ NEVER BUY SPEED BY CHECKING LESS
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
 
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+- State the pole's observed range beside the predicted saving. Do not open a pull request when the predicted saving is smaller than that range.
+
 DELIVER & VERIFY
 - A change that cuts the dominant step's wall time without dropping coverage; re-measure the step on a PR run to confirm the reduction.
 ```
@@ -397,8 +430,6 @@ DELIVER & VERIFY
 ## 🔴 Long pole 5: `tests_secondary.yml` ▸ `Test msedge on windows-latest` - 46m 01s
 
 **Rarely the merge gate - the actual slowest check a PR waits on, on only 0/20 sampled PRs.** Present on 5/20 PRs, but a slower concurrent check almost always gates ahead of it, so its 46m 01s is throughput/cost, not merge-wait. Speeding it helps only the PRs where it IS the pole - it won't move typical merge-wait.
-
-> **What a change here can buy (wall-clock):** this job's matrix legs run in parallel, so speeding **this one leg** saves only ~4m 40s (the next leg, `ubuntu-22.04 (webkit - Node.js 20)`, is 41m 21s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `ubuntu-22.04 (webkit - Node.js 20)` (41m 21s), for up to **~4m 40s** of merge wait.
 
 ```text
 Where the job's ~46m 01s goes - every step, slowest first; they run in sequence and roughly add up to the job:
@@ -433,14 +464,13 @@ THE GATE
 - Workflow `tests_secondary.yml`, job `Test msedge on windows-latest`.
 - Rarely the merge pole - the actual slowest check a PR waits on, on only 0/20 sampled PRs (present on 5/20): P50 46m 01s. A slower concurrent check usually gates ahead, so speeding it helps only the PRs where it IS the pole, not typical merge-wait.
 
+Runner-minute effect: If the structural fix moves work to added jobs or machines, duplicated checkout and setup raise runner minutes; moving the same work without duplication is roughly level, and removing measured work lowers them.
+
 WHERE THE TIME GOES
 - The job's time is dominated by the `Run ./.github/actions/run-test` step: ~45m 48s (100% of the job wall), from the sampled per-step decomposition (no single-run timeline was captured for this job).
 
 STRUCTURAL CATALOG PATTERN MATCHED
-- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log (the Audit link) to see exactly what inside it the lever reshapes.
-
-WHAT'S ADDRESSABLE (wall-clock ceiling - don't over-promise)
-- this job's matrix legs run in parallel, so speeding this one leg saves only ~4m 40s (the next leg, `ubuntu-22.04 (webkit - Node.js 20)`, is 41m 21s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `ubuntu-22.04 (webkit - Node.js 20)` (41m 21s), for up to ~4m 40s of merge wait.
+- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log in a recent pull-request run of this job (no direct log link is shown here) to see exactly what inside it the lever reshapes.
 
 WHERE TO LOOK
 - The `tests_secondary.yml` workflow definition for the dominant step, and the tool/config it invokes (build tool, test runner, or install) - that's where its time is spent.
@@ -465,6 +495,10 @@ NEVER BUY SPEED BY CHECKING LESS
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
 
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+- State the pole's observed range beside the predicted saving. Do not open a pull request when the predicted saving is smaller than that range.
+
 DELIVER & VERIFY
 - A change that cuts the dominant step's wall time without dropping coverage; re-measure the step on a PR run to confirm the reduction.
 ```
@@ -476,7 +510,7 @@ DELIVER & VERIFY
 
 ## ⏳ Pre-start wait (queue time)
 
-> Time a PR waits in queue **before its jobs start running** - developer wall-clock the critical-path spine above does **not** capture (the spine measures each job from start to finish). Usually runner-pool saturation or a restrictive concurrency group. Ranked by savable wait (the floor-capped addressable part; each finding's evidence quotes the raw P90 queue). **Note:** for a `needs:`-gated job this is *wait-to-start* - it includes the gating job's run time, so the savable part is bounded by the gating job's own fix.
+> Time a PR waits in queue **before its jobs start running** - developer wall-clock the critical-path spine above does **not** capture (the spine measures each job from start to finish). Usually runner-pool saturation or a restrictive concurrency group. Ranked by savable wait (the floor-capped addressable part; each finding's evidence quotes the raw P90 queue). **Note:** for a `needs:`-gated job the *wait-to-start* is measured from when its last needed upstream job completed, so upstream run time is never counted as queue.
 
 > ⚠️ _Approximate: computed across all workflows, but 9 capped workflow(s) still use the shallow 10-run job sample for finding/queue values; 8 runner-minute source workflow(s) still use a shallow 10-run cost-spine sample. Figures can shift run-to-run; re-run with `--shallow-runs 20` to confirm exact values._
 
@@ -498,7 +532,7 @@ investigate it in the repo and apply a safe change.
 Pattern: OPT43 - Excessive Queue Time.
 Where: tests_mcp.yml (windows-latest - msedge); tests_mcp.yml (ubuntu-latest - firefox); tests_mcp.yml (macos-latest - chrome); tests_mcp.yml (macos-latest - chromium); tests_mcp.yml (ubuntu-latest - chromium); tests_mcp.yml (macos-latest - webkit); tests_mcp.yml (windows-latest - firefox); tests_mcp.yml (windows-latest - chromium); +33 more (see findings JSON).
 What ci-speedup saw: job `windows-latest - msedge` P90 queue 4396s over 8 runs (threshold 60s for PR workflows)
-Cost: developer WALL-CLOCK wait before the job starts (queue / wait-to-start) - NOT a runner-bill saving and NOT off the critical path. For a `needs:`-gated job this span includes the gating job's own run time, so the savable part is bounded by the gating job's own fix.
+Cost: developer WALL-CLOCK wait before the job starts (queue / wait-to-start) - NOT a runner-bill saving and NOT off the critical path. For a `needs:`-gated job it is measured from when its last needed upstream job completed, so upstream run time is not counted.
 
 Read the catalog entry (background, fix recipe, and guardrail):
   https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt43--excessive-queue-time
@@ -523,6 +557,9 @@ NEVER BUY SPEED BY CHECKING LESS
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
 
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
 failure mode and how you have guarded it before shipping.
@@ -541,7 +578,7 @@ failure mode and how you have guarded it before shipping.
 
 All figures are runner-minutes; multiply by your runner's per-minute rate to get dollars.
 
-| Workflow | Job | Runner | Event | Status | Attempt | Volume | Raw min/mo | Billable min/mo | Share |
+| Workflow | Job | Runner | Event | Status | Attempt | Volume | Raw min/mo | Rounded-up min/mo | Share |
 | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: |
 | .github/workflows/tests_mcp.yml | windows-latest - firefox | windows-latest | all-events | success | latest | all-status | 34713.000 | 35112.000 | 3.500% |
 | .github/workflows/tests_primary.yml | ubuntu-22.04 (webkit - Node.js 20) | ubuntu-22.04 | all-events | success | latest | all-status | 31765.092 | 32209.200 | 3.200% |
@@ -556,10 +593,13 @@ All figures are runner-minutes; multiply by your runner's per-minute rate to get
 | .github/workflows/tests_mcp.yml | windows-latest - chromium | windows-latest | all-events | success | latest | all-status | 20340.600 | 20790.000 | 2.100% |
 | .github/workflows/tests_mcp.yml | ubuntu-latest - firefox | ubuntu-latest | all-events | success | latest | all-status | 19838.000 | 20244.000 | 2.000% |
 | Total |  |  |  |  |  |  | 987431.780 | 1013124.508 | 100.000% |
+
 +121 more runner-minute rows hidden
 
+Rounded-up min/mo rounds each job up to a whole minute, the way per-minute runner billing counts it. 998471.212 of the 1013124.508 min/mo ran on GitHub-hosted runner labels and 14653.296 on labels not recognised as GitHub-hosted (`playwright-x64-ubuntu24-64-core`). A GitHub larger runner with a custom name is not recognised and counts here too. GitHub bills only the runners it hosts, so minutes on a self-hosted or third-party runner are not on the GitHub bill.
+
 > These findings cut wall-clock-neutral runner spend without touching your merge gate; each R-numbered finding carries a machine-derived proof it cannot slow a PR.
-> **73,441 min/mo credited after de-overlap** (naive sum 73,441 min/mo; 10 neutral findings; not promoted: 3 measured item(s) (3 without source rows) · 8 modeled item(s) · 6 structural shared-step item(s); see Also noticed). All figures are runner-minutes; multiply by your runner's per-minute rate to get dollars.
+> **73,029 min/mo credited after de-overlap** (naive sum 73,029 min/mo; 5 neutral findings; not promoted: 2 measured item(s) (2 without source rows) · 8 modeled item(s) · 6 structural shared-step item(s); see Also noticed). All figures are runner-minutes; multiply by your runner's per-minute rate to get dollars.
 
 <!-- ci-speedup:tier2-finding id=f114 pattern=OPT46 -->
 <a id="r-1"></a>
@@ -578,7 +618,7 @@ _Superseded = a run a NEWER run started before it finished - measured by timesta
 
 - **What ci-speedup measured:** 54 run(s) across 5 branch(es) were superseded (a newer run started before they finished) in the sampled window; ~71644-167291 runner-min/mo of cancellable-remainder compute - the lower figure credits only the 67% mean remainder each superseded run would have burned AFTER its successor started, not the whole run (mean over 4 timed run(s); ×3.36 to the 30d volume (336 runs); 100-run recent slice (not a full 30d census)). Superseded attribution is INFERENCE - the API marks no run 'cancelled-by-concurrency'. (sensitivity range: 71,644 min/mo to 167,291 min/mo)
 - **Why this can't slow your merge:** machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (superseded runs: same head_branch, a newer run started before this one finished (timestamp overlap); cancellation cause is inference).
-- **Source block:** `runner_minute_spine` matched 29 rows for `.github/workflows/tests_secondary.yml`; current measured cost spine for those rows is 263103.875 raw min/mo, 267586.928 billable min/mo.
+- **Source block:** `runner_minute_spine` matched 29 rows for `.github/workflows/tests_secondary.yml`; current measured cost spine for those rows is 263103.875 raw min/mo, 267586.928 rounded-up min/mo. The saving is credited in raw minutes; the rounded-up figure rounds each job up to a whole minute.
 - **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt46--superseded-runs-not-cancelled-missing-concurrency-or-cancel-in-progress-false
 
 #### 🤖 Prompt for your coding agent
@@ -615,6 +655,9 @@ NEVER BUY SPEED BY CHECKING LESS
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
 
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
 failure mode and how you have guarded it before shipping.
@@ -637,7 +680,7 @@ _Superseded = a run a NEWER run started before it finished - measured by timesta
 
 - **What ci-speedup measured:** 7 run(s) across 3 branch(es) were superseded (a newer run started before they finished) in the sampled window; ~1072-11922 runner-min/mo of cancellable-remainder compute - the lower figure credits only the 73% mean remainder each superseded run would have burned AFTER its successor started, not the whole run (mean over 4 timed run(s); ×7.78 to the 30d volume (778 runs); 100-run recent slice (not a full 30d census)). Superseded attribution is INFERENCE - the API marks no run 'cancelled-by-concurrency'. (sensitivity range: 1,072 min/mo to 11,922 min/mo)
 - **Why this can't slow your merge:** machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (superseded runs: same head_branch, a newer run started before this one finished (timestamp overlap); cancellation cause is inference).
-- **Source block:** `runner_minute_spine` matched 5 rows for `.github/workflows/tests_components.yml`; current measured cost spine for those rows is 21636.828 raw min/mo, 23534.500 billable min/mo.
+- **Source block:** `runner_minute_spine` matched 5 rows for `.github/workflows/tests_components.yml`; current measured cost spine for those rows is 21636.828 raw min/mo, 23534.500 rounded-up min/mo. The saving is credited in raw minutes; the rounded-up figure rounds each job up to a whole minute.
 - **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt46--superseded-runs-not-cancelled-missing-concurrency-or-cancel-in-progress-false
 
 #### 🤖 Prompt for your coding agent
@@ -674,69 +717,8 @@ NEVER BUY SPEED BY CHECKING LESS
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
 
-Do: confirm the pattern at each location above, recover the intent from git
-history, and apply the catalog's fix recipe where it is safe. State the
-failure mode and how you have guarded it before shipping.
-```
-
-<!-- ci-speedup:tier2-finding id=f115 pattern=OPT64 -->
-<a id="r-3"></a>
-
-## 🟢 Runner saving 3: `tests_webview_simulator.yml` - 268 min/mo
-
-**The #3 merge-safe runner-minute saving measured on this repo, by size.**
-
-| Run | Latest attempt | Dominant failing job | Prior attempts | Prior attempt compute min | Dominant failure min |
-| --- | --- | --- | --- | --- | --- |
-| `28560703032` | 2 | `WebView on iOS Simulator (4/4)` | 1 | 65.7 | 21.8 |
-| `28555153022` | 3 | `WebView on iOS Simulator (4/4)` | 2 | 155.0 | 50.0 |
-| `28470726784` | 2 | `WebView on iOS Simulator (4/4)` | 1 | 69.1 | 27.2 |
-| `28412462737` | 4 | `WebView on iOS Simulator (4/4)` | 3 | 203.8 | 65.0 |
-| `27986856884` | 2 | `WebView on iOS Simulator (4/4)` | 1 | 62.1 | 26.4 |
-| `27973339667` | 2 | `WebView on iOS Simulator (4/4)` | 1 | 66.5 | 30.5 |
-
-_Measured from GitHub jobs API `filter=all` minus `filter=latest` for workflow runs whose run_attempt > 1. The finding is emitted only when each credited prior attempt has the same unique dominant failed/timed-out job and that dominant failing job appears in the latest attempt; ambiguous ties, mixed-cause attempts, and retry-only volume are withheld._
-
-**💸 Bill root-cause - OPT64 · Repeated Workflow Attempts From Same Failing Job** - risk **LOW**
-
-- **What ci-speedup measured:** 6 sampled run_attempt>1 workflow run(s) had prior-attempt jobs present in `filter=all` but absent from `filter=latest`; the unique dominant failing job was `WebView on iOS Simulator (4/4)` (9 failed/timed-out prior-attempt job(s), 221.0 failed min) and it appeared again in the latest attempt. ~268 runner-min/mo of prior-attempt compute (43/30d ÷ 100 sampled all-status run(s)).
-- **Why this can't slow your merge:** machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `WebView on iOS Simulator (4/4)` identifies the retry cause, so prior-attempt compute is post-completion waste).
-- **Source block:** `runner_minute_spine` matched 4 prior-attempt rows for `.github/workflows/tests_webview_simulator.yml`; current measured cost spine for those rows is 403.203 raw min/mo, 415.807 billable min/mo.
-- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
-
-#### 🤖 Prompt for your coding agent
-
-```text
-ci-speedup measured the pattern below but does NOT prescribe the fix -
-investigate it in the repo and apply a safe change.
-
-Pattern: OPT64 - Repeated Workflow Attempts From Same Failing Job.
-Where: tests_webview_simulator.yml.
-What ci-speedup saw: 6 sampled run_attempt>1 workflow run(s) had prior-attempt jobs present in `filter=all` but absent from `filter=latest`; the unique dominant failing job was `WebView on iOS Simulator (4/4)` (9 failed/timed-out prior-attempt job(s), 221.0 failed min) and it appeared again in the latest attempt. ~268 runner-min/mo of prior-attempt compute (43/30d ÷ 100 sampled all-status run(s)).
-Saving: 268 min/mo of runner capacity - a bill/capacity reduction, not a merge-wait cut. Neutrality certificate: `post_completion_waste` - compute burned after the run signal is already decided (run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `WebView on iOS Simulator (4/4)` identifies the retry cause, so prior-attempt compute is post-completion waste).
-
-Read the catalog entry (background, fix recipe, and guardrail):
-  https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
-
-NEVER BUY SPEED BY CHECKING LESS
-- The commit that merges must still be verified by exactly what verifies
-  it today. Unless the finding above IS that reduction, do not: delete or
-  narrow matrix legs so fewer configurations are tested; add
-  `continue-on-error`, `|| true`, or any other exit-code suppression;
-  narrow or remove a required status check, or change a job so a required
-  check stops reporting; skip tests behind a path/branch filter that do
-  cover the change; or cut test counts, timeouts, or retries in a way
-  that weakens the signal rather than the cost.
-- Not running a check against a change it cannot fail on is NOT checking
-  less, and several catalog fixes work exactly that way: a `paths:` /
-  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
-  selection. Those stay in bounds as long as the commit that merges is
-  still verified by every check its own change could fail - follow the
-  guardrail on the catalog recipe where this prompt links one, because
-  that is the half it exists to protect.
-- A pipeline that finishes sooner because it verifies less is a
-  regression, not a win. If that is the only way to make this faster, say
-  so and stop.
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -744,11 +726,11 @@ failure mode and how you have guarded it before shipping.
 ```
 
 <!-- ci-speedup:tier2-finding id=f42 pattern=OPT46 -->
-<a id="r-4"></a>
+<a id="r-3"></a>
 
-## 🟢 Runner saving 4: `infra.yml` - 159 min/mo
+## 🟢 Runner saving 3: `infra.yml` - 159 min/mo
 
-**The #4 merge-safe runner-minute saving measured on this repo, by size.**
+**The #3 merge-safe runner-minute saving measured on this repo, by size.**
 
 | Workflow | Overlapping (raced) runs | Mean compute/run (timed basis) | Reclaimable remainder (mean per run) | Reclaimable runner-min/mo (range) |
 | --- | --- | --- | --- | --- |
@@ -760,7 +742,7 @@ _Superseded = a run a NEWER run started before it finished - measured by timesta
 
 - **What ci-speedup measured:** 7 run(s) across 5 branch(es) were superseded (a newer run started before they finished) in the sampled window; ~159-2378 runner-min/mo of cancellable-remainder compute - the lower figure credits only the 56% mean remainder each superseded run would have burned AFTER its successor started, not the whole run (mean over 6 timed run(s); ×8.75 to the 30d volume (875 runs); 100-run recent slice (not a full 30d census)). Superseded attribution is INFERENCE - the API marks no run 'cancelled-by-concurrency'. (sensitivity range: 159 min/mo to 2,378 min/mo)
 - **Why this can't slow your merge:** machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (superseded runs: same head_branch, a newer run started before this one finished (timestamp overlap); cancellation cause is inference).
-- **Source block:** `runner_minute_spine` matched 2 rows for `.github/workflows/infra.yml`; current measured cost spine for those rows is 4086.979 raw min/mo, 5250.000 billable min/mo.
+- **Source block:** `runner_minute_spine` matched 2 rows for `.github/workflows/infra.yml`; current measured cost spine for those rows is 4086.979 raw min/mo, 5250.000 rounded-up min/mo. The saving is credited in raw minutes; the rounded-up figure rounds each job up to a whole minute.
 - **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt46--superseded-runs-not-cancelled-missing-concurrency-or-cancel-in-progress-false
 
 #### 🤖 Prompt for your coding agent
@@ -797,17 +779,20 @@ NEVER BUY SPEED BY CHECKING LESS
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
 
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
 failure mode and how you have guarded it before shipping.
 ```
 
 <!-- ci-speedup:tier2-finding id=f46 pattern=OPT46 -->
-<a id="r-5"></a>
+<a id="r-4"></a>
 
-## 🟢 Runner saving 5: `tests_bidi.yml` - 141 min/mo
+## 🟢 Runner saving 4: `tests_bidi.yml` - 141 min/mo
 
-**The #5 merge-safe runner-minute saving measured on this repo, by size.**
+**The #4 merge-safe runner-minute saving measured on this repo, by size.**
 
 | Workflow | Overlapping (raced) runs | Mean compute/run (timed basis) | Reclaimable remainder (mean per run) | Reclaimable runner-min/mo (range) |
 | --- | --- | --- | --- | --- |
@@ -819,7 +804,7 @@ _Superseded = a run a NEWER run started before it finished - measured by timesta
 
 - **What ci-speedup measured:** 9 run(s) across 4 branch(es) were superseded (a newer run started before they finished) in the sampled window; ~141-1821 runner-min/mo of cancellable-remainder compute - the lower figure credits only the 64% mean remainder each superseded run would have burned AFTER its successor started, not the whole run (mean over 8 timed run(s); ×0.68 to the 30d volume (68 runs); 100-run recent slice (not a full 30d census)). Superseded attribution is INFERENCE - the API marks no run 'cancelled-by-concurrency'. (sensitivity range: 141 min/mo to 1,821 min/mo)
 - **Why this can't slow your merge:** machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (superseded runs: same head_branch, a newer run started before this one finished (timestamp overlap); cancellation cause is inference).
-- **Source block:** `runner_minute_spine` matched 1 row for `.github/workflows/tests_bidi.yml`; current measured cost spine for those rows is 2354.941 raw min/mo, 2391.356 billable min/mo.
+- **Source block:** `runner_minute_spine` matched 1 row for `.github/workflows/tests_bidi.yml`; current measured cost spine for those rows is 2354.941 raw min/mo, 2391.356 rounded-up min/mo. The saving is credited in raw minutes; the rounded-up figure rounds each job up to a whole minute.
 - **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt46--superseded-runs-not-cancelled-missing-concurrency-or-cancel-in-progress-false
 
 #### 🤖 Prompt for your coding agent
@@ -856,126 +841,8 @@ NEVER BUY SPEED BY CHECKING LESS
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
 
-Do: confirm the pattern at each location above, recover the intent from git
-history, and apply the catalog's fix recipe where it is safe. State the
-failure mode and how you have guarded it before shipping.
-```
-
-<!-- ci-speedup:tier2-finding id=f116 pattern=OPT64 -->
-<a id="r-6"></a>
-
-## 🟢 Runner saving 6: `tests_webview_simulator.yml` - 82 min/mo
-
-**The #6 merge-safe runner-minute saving measured on this repo, by size.**
-
-| Run | Latest attempt | Dominant failing job | Prior attempts | Prior attempt compute min | Dominant failure min |
-| --- | --- | --- | --- | --- | --- |
-| `28043360084` | 2 | `WebView on iOS Simulator (3/4)` | 1 | 88.1 | 20.2 |
-| `27850434623` | 2 | `WebView on iOS Simulator (3/4)` | 1 | 44.2 | 9.1 |
-| `27849871516` | 2 | `WebView on iOS Simulator (3/4)` | 1 | 57.9 | 16.9 |
-
-_Measured from GitHub jobs API `filter=all` minus `filter=latest` for workflow runs whose run_attempt > 1. The finding is emitted only when each credited prior attempt has the same unique dominant failed/timed-out job and that dominant failing job appears in the latest attempt; ambiguous ties, mixed-cause attempts, and retry-only volume are withheld._
-
-**💸 Bill root-cause - OPT64 · Repeated Workflow Attempts From Same Failing Job** - risk **LOW**
-
-- **What ci-speedup measured:** 3 sampled run_attempt>1 workflow run(s) had prior-attempt jobs present in `filter=all` but absent from `filter=latest`; the unique dominant failing job was `WebView on iOS Simulator (3/4)` (3 failed/timed-out prior-attempt job(s), 46.1 failed min) and it appeared again in the latest attempt. ~82 runner-min/mo of prior-attempt compute (43/30d ÷ 100 sampled all-status run(s)).
-- **Why this can't slow your merge:** machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `WebView on iOS Simulator (3/4)` identifies the retry cause, so prior-attempt compute is post-completion waste).
-- **Source block:** `runner_minute_spine` matched 4 prior-attempt rows for `.github/workflows/tests_webview_simulator.yml`; current measured cost spine for those rows is 403.203 raw min/mo, 415.807 billable min/mo.
-- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
-
-#### 🤖 Prompt for your coding agent
-
-```text
-ci-speedup measured the pattern below but does NOT prescribe the fix -
-investigate it in the repo and apply a safe change.
-
-Pattern: OPT64 - Repeated Workflow Attempts From Same Failing Job.
-Where: tests_webview_simulator.yml.
-What ci-speedup saw: 3 sampled run_attempt>1 workflow run(s) had prior-attempt jobs present in `filter=all` but absent from `filter=latest`; the unique dominant failing job was `WebView on iOS Simulator (3/4)` (3 failed/timed-out prior-attempt job(s), 46.1 failed min) and it appeared again in the latest attempt. ~82 runner-min/mo of prior-attempt compute (43/30d ÷ 100 sampled all-status run(s)).
-Saving: 82 min/mo of runner capacity - a bill/capacity reduction, not a merge-wait cut. Neutrality certificate: `post_completion_waste` - compute burned after the run signal is already decided (run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `WebView on iOS Simulator (3/4)` identifies the retry cause, so prior-attempt compute is post-completion waste).
-
-Read the catalog entry (background, fix recipe, and guardrail):
-  https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
-
-NEVER BUY SPEED BY CHECKING LESS
-- The commit that merges must still be verified by exactly what verifies
-  it today. Unless the finding above IS that reduction, do not: delete or
-  narrow matrix legs so fewer configurations are tested; add
-  `continue-on-error`, `|| true`, or any other exit-code suppression;
-  narrow or remove a required status check, or change a job so a required
-  check stops reporting; skip tests behind a path/branch filter that do
-  cover the change; or cut test counts, timeouts, or retries in a way
-  that weakens the signal rather than the cost.
-- Not running a check against a change it cannot fail on is NOT checking
-  less, and several catalog fixes work exactly that way: a `paths:` /
-  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
-  selection. Those stay in bounds as long as the commit that merges is
-  still verified by every check its own change could fail - follow the
-  guardrail on the catalog recipe where this prompt links one, because
-  that is the half it exists to protect.
-- A pipeline that finishes sooner because it verifies less is a
-  regression, not a win. If that is the only way to make this faster, say
-  so and stop.
-
-Do: confirm the pattern at each location above, recover the intent from git
-history, and apply the catalog's fix recipe where it is safe. State the
-failure mode and how you have guarded it before shipping.
-```
-
-<!-- ci-speedup:tier2-finding id=f117 pattern=OPT64 -->
-<a id="r-7"></a>
-
-## 🟢 Runner saving 7: `tests_webview_simulator.yml` - 54 min/mo
-
-**The #7 merge-safe runner-minute saving measured on this repo, by size.**
-
-| Run | Latest attempt | Dominant failing job | Prior attempts | Prior attempt compute min | Dominant failure min |
-| --- | --- | --- | --- | --- | --- |
-| `29045183195` | 2 | `WebView on iOS Simulator (2/4)` | 1 | 65.3 | 20.2 |
-| `28843490162` | 2 | `WebView on iOS Simulator (2/4)` | 1 | 59.9 | 24.4 |
-
-_Measured from GitHub jobs API `filter=all` minus `filter=latest` for workflow runs whose run_attempt > 1. The finding is emitted only when each credited prior attempt has the same unique dominant failed/timed-out job and that dominant failing job appears in the latest attempt; ambiguous ties, mixed-cause attempts, and retry-only volume are withheld._
-
-**💸 Bill root-cause - OPT64 · Repeated Workflow Attempts From Same Failing Job** - risk **LOW**
-
-- **What ci-speedup measured:** 2 sampled run_attempt>1 workflow run(s) had prior-attempt jobs present in `filter=all` but absent from `filter=latest`; the unique dominant failing job was `WebView on iOS Simulator (2/4)` (2 failed/timed-out prior-attempt job(s), 44.6 failed min) and it appeared again in the latest attempt. ~54 runner-min/mo of prior-attempt compute (43/30d ÷ 100 sampled all-status run(s)).
-- **Why this can't slow your merge:** machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `WebView on iOS Simulator (2/4)` identifies the retry cause, so prior-attempt compute is post-completion waste).
-- **Source block:** `runner_minute_spine` matched 4 prior-attempt rows for `.github/workflows/tests_webview_simulator.yml`; current measured cost spine for those rows is 403.203 raw min/mo, 415.807 billable min/mo.
-- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
-
-#### 🤖 Prompt for your coding agent
-
-```text
-ci-speedup measured the pattern below but does NOT prescribe the fix -
-investigate it in the repo and apply a safe change.
-
-Pattern: OPT64 - Repeated Workflow Attempts From Same Failing Job.
-Where: tests_webview_simulator.yml.
-What ci-speedup saw: 2 sampled run_attempt>1 workflow run(s) had prior-attempt jobs present in `filter=all` but absent from `filter=latest`; the unique dominant failing job was `WebView on iOS Simulator (2/4)` (2 failed/timed-out prior-attempt job(s), 44.6 failed min) and it appeared again in the latest attempt. ~54 runner-min/mo of prior-attempt compute (43/30d ÷ 100 sampled all-status run(s)).
-Saving: 54 min/mo of runner capacity - a bill/capacity reduction, not a merge-wait cut. Neutrality certificate: `post_completion_waste` - compute burned after the run signal is already decided (run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `WebView on iOS Simulator (2/4)` identifies the retry cause, so prior-attempt compute is post-completion waste).
-
-Read the catalog entry (background, fix recipe, and guardrail):
-  https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
-
-NEVER BUY SPEED BY CHECKING LESS
-- The commit that merges must still be verified by exactly what verifies
-  it today. Unless the finding above IS that reduction, do not: delete or
-  narrow matrix legs so fewer configurations are tested; add
-  `continue-on-error`, `|| true`, or any other exit-code suppression;
-  narrow or remove a required status check, or change a job so a required
-  check stops reporting; skip tests behind a path/branch filter that do
-  cover the change; or cut test counts, timeouts, or retries in a way
-  that weakens the signal rather than the cost.
-- Not running a check against a change it cannot fail on is NOT checking
-  less, and several catalog fixes work exactly that way: a `paths:` /
-  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
-  selection. Those stay in bounds as long as the commit that merges is
-  still verified by every check its own change could fail - follow the
-  guardrail on the catalog recipe where this prompt links one, because
-  that is the half it exists to protect.
-- A pipeline that finishes sooner because it verifies less is a
-  regression, not a win. If that is the only way to make this faster, say
-  so and stop.
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -983,11 +850,11 @@ failure mode and how you have guarded it before shipping.
 ```
 
 <!-- ci-speedup:tier2-finding id=f44 pattern=OPT36 -->
-<a id="r-8"></a>
+<a id="r-5"></a>
 
-## 🟢 Runner saving 8: `publish_release.yml` - 13 min/mo
+## 🟢 Runner saving 5: `publish_release.yml` - 13 min/mo
 
-**The #8 merge-safe runner-minute saving measured on this repo, by size.**
+**The #5 merge-safe runner-minute saving measured on this repo, by size.**
 
 | Workflow | Consecutive same-head_sha schedule runs | Mean compute/run | Credited runner-min/mo |
 | --- | --- | --- | --- |
@@ -999,7 +866,7 @@ _Schedule burn is counted only on event=schedule runs whose head_sha repeats con
 
 - **What ci-speedup measured:** 18 scheduled run(s) in 12 consecutive same-head_sha group(s) re-ran without a code change in the sampled schedule slice (18% of 100 schedule run(s)); ~13 runner-min/mo of schedule-event compute (mean over 20 timed run(s); ×0.30 to the 30d volume (30 runs); 100-run recent slice (not a full 30d census)).
 - **Why this can't slow your merge:** machine-derived proof: `non_pr_event` - `schedule` runs do not gate a PR merge (event=schedule subset only; consecutive same-head_sha schedule runs; schedule is not a developer PR/merge event).
-- **Source block:** `runner_minute_spine` matched 2 rows for `.github/workflows/publish_release.yml`; current measured cost spine for those rows is 104.943 raw min/mo, 140.600 billable min/mo.
+- **Source block:** `runner_minute_spine` matched 2 rows for `.github/workflows/publish_release.yml`; current measured cost spine for those rows is 104.943 raw min/mo, 140.600 rounded-up min/mo. The saving is credited in raw minutes; the rounded-up figure rounds each job up to a whole minute.
 - **Guardrail:** Confirm the cron cadence is not an operational SLA; prefer widening the interval only for cleanup/triage/build jobs where delayed execution is acceptable.
 - **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt36--cron-schedule-too-frequent
 
@@ -1037,123 +904,8 @@ NEVER BUY SPEED BY CHECKING LESS
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
 
-Do: confirm the pattern at each location above, recover the intent from git
-history, and apply the catalog's fix recipe where it is safe. State the
-failure mode and how you have guarded it before shipping.
-```
-
-<!-- ci-speedup:tier2-finding id=f49 pattern=OPT64 -->
-<a id="r-9"></a>
-
-## 🟢 Runner saving 9: `tests_docker_changes.yml` - 8 min/mo
-
-**The #9 merge-safe runner-minute saving measured on this repo, by size.**
-
-| Run | Latest attempt | Dominant failing job | Prior attempts | Prior attempt compute min | Dominant failure min |
-| --- | --- | --- | --- | --- | --- |
-| `26806344641` | 2 | `test_linux_docker / Docker noble amd64` | 1 | 16.8 | 1.4 |
-
-_Measured from GitHub jobs API `filter=all` minus `filter=latest` for workflow runs whose run_attempt > 1. The finding is emitted only when each credited prior attempt has the same unique dominant failed/timed-out job and that dominant failing job appears in the latest attempt; ambiguous ties, mixed-cause attempts, and retry-only volume are withheld._
-
-**💸 Bill root-cause - OPT64 · Repeated Workflow Attempts From Same Failing Job** - risk **LOW**
-
-- **What ci-speedup measured:** 1 sampled run_attempt>1 workflow run(s) had prior-attempt jobs present in `filter=all` but absent from `filter=latest`; the unique dominant failing job was `test_linux_docker / Docker noble amd64` (1 failed/timed-out prior-attempt job(s), 1.4 failed min) and it appeared again in the latest attempt. ~8 runner-min/mo of prior-attempt compute (11/30d ÷ 24 sampled all-status run(s)).
-- **Why this can't slow your merge:** machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `test_linux_docker / Docker noble amd64` identifies the retry cause, so prior-attempt compute is post-completion waste).
-- **Source block:** `runner_minute_spine` matched 4 prior-attempt rows for `.github/workflows/tests_docker_changes.yml`; current measured cost spine for those rows is 7.715 raw min/mo, 8.251 billable min/mo.
-- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
-
-#### 🤖 Prompt for your coding agent
-
-```text
-ci-speedup measured the pattern below but does NOT prescribe the fix -
-investigate it in the repo and apply a safe change.
-
-Pattern: OPT64 - Repeated Workflow Attempts From Same Failing Job.
-Where: tests_docker_changes.yml.
-What ci-speedup saw: 1 sampled run_attempt>1 workflow run(s) had prior-attempt jobs present in `filter=all` but absent from `filter=latest`; the unique dominant failing job was `test_linux_docker / Docker noble amd64` (1 failed/timed-out prior-attempt job(s), 1.4 failed min) and it appeared again in the latest attempt. ~8 runner-min/mo of prior-attempt compute (11/30d ÷ 24 sampled all-status run(s)).
-Saving: 8 min/mo of runner capacity - a bill/capacity reduction, not a merge-wait cut. Neutrality certificate: `post_completion_waste` - compute burned after the run signal is already decided (run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `test_linux_docker / Docker noble amd64` identifies the retry cause, so prior-attempt compute is post-completion waste).
-
-Read the catalog entry (background, fix recipe, and guardrail):
-  https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
-
-NEVER BUY SPEED BY CHECKING LESS
-- The commit that merges must still be verified by exactly what verifies
-  it today. Unless the finding above IS that reduction, do not: delete or
-  narrow matrix legs so fewer configurations are tested; add
-  `continue-on-error`, `|| true`, or any other exit-code suppression;
-  narrow or remove a required status check, or change a job so a required
-  check stops reporting; skip tests behind a path/branch filter that do
-  cover the change; or cut test counts, timeouts, or retries in a way
-  that weakens the signal rather than the cost.
-- Not running a check against a change it cannot fail on is NOT checking
-  less, and several catalog fixes work exactly that way: a `paths:` /
-  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
-  selection. Those stay in bounds as long as the commit that merges is
-  still verified by every check its own change could fail - follow the
-  guardrail on the catalog recipe where this prompt links one, because
-  that is the half it exists to protect.
-- A pipeline that finishes sooner because it verifies less is a
-  regression, not a win. If that is the only way to make this faster, say
-  so and stop.
-
-Do: confirm the pattern at each location above, recover the intent from git
-history, and apply the catalog's fix recipe where it is safe. State the
-failure mode and how you have guarded it before shipping.
-```
-
-<!-- ci-speedup:tier2-finding id=f43 pattern=OPT64 -->
-<a id="r-10"></a>
-
-## 🟢 Runner saving 10: `publish_release.yml` - 0.7 min/mo
-
-**The #10 merge-safe runner-minute saving measured on this repo, by size.**
-
-| Run | Latest attempt | Dominant failing job | Prior attempts | Prior attempt compute min | Dominant failure min |
-| --- | --- | --- | --- | --- | --- |
-| `28022804749` | 2 | `publish NPM and driver` | 1 | 1.9 | 1.0 |
-
-_Measured from GitHub jobs API `filter=all` minus `filter=latest` for workflow runs whose run_attempt > 1. The finding is emitted only when each credited prior attempt has the same unique dominant failed/timed-out job and that dominant failing job appears in the latest attempt; ambiguous ties, mixed-cause attempts, and retry-only volume are withheld._
-
-**💸 Bill root-cause - OPT64 · Repeated Workflow Attempts From Same Failing Job** - risk **LOW**
-
-- **What ci-speedup measured:** 1 sampled run_attempt>1 workflow run(s) had prior-attempt jobs present in `filter=all` but absent from `filter=latest`; the unique dominant failing job was `publish NPM and driver` (1 failed/timed-out prior-attempt job(s), 1.0 failed min) and it appeared again in the latest attempt. ~1 runner-min/mo of prior-attempt compute (38/30d ÷ 100 sampled all-status run(s)).
-- **Why this can't slow your merge:** machine-derived proof: `post_completion_waste` - compute burned after the run signal is already decided (run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `publish NPM and driver` identifies the retry cause, so prior-attempt compute is post-completion waste).
-- **Source block:** `runner_minute_spine` matched 2 prior-attempt rows for `.github/workflows/publish_release.yml`; current measured cost spine for those rows is 0.729 raw min/mo, 1.140 billable min/mo.
-- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
-
-#### 🤖 Prompt for your coding agent
-
-```text
-ci-speedup measured the pattern below but does NOT prescribe the fix -
-investigate it in the repo and apply a safe change.
-
-Pattern: OPT64 - Repeated Workflow Attempts From Same Failing Job.
-Where: publish_release.yml.
-What ci-speedup saw: 1 sampled run_attempt>1 workflow run(s) had prior-attempt jobs present in `filter=all` but absent from `filter=latest`; the unique dominant failing job was `publish NPM and driver` (1 failed/timed-out prior-attempt job(s), 1.0 failed min) and it appeared again in the latest attempt. ~1 runner-min/mo of prior-attempt compute (38/30d ÷ 100 sampled all-status run(s)).
-Saving: 0.7 min/mo of runner capacity - a bill/capacity reduction, not a merge-wait cut. Neutrality certificate: `post_completion_waste` - compute burned after the run signal is already decided (run_attempt>1: `filter=all` exposes prior-attempt jobs, `filter=latest` is the superseding latest attempt; the dominant failing job `publish NPM and driver` identifies the retry cause, so prior-attempt compute is post-completion waste).
-
-Read the catalog entry (background, fix recipe, and guardrail):
-  https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
-
-NEVER BUY SPEED BY CHECKING LESS
-- The commit that merges must still be verified by exactly what verifies
-  it today. Unless the finding above IS that reduction, do not: delete or
-  narrow matrix legs so fewer configurations are tested; add
-  `continue-on-error`, `|| true`, or any other exit-code suppression;
-  narrow or remove a required status check, or change a job so a required
-  check stops reporting; skip tests behind a path/branch filter that do
-  cover the change; or cut test counts, timeouts, or retries in a way
-  that weakens the signal rather than the cost.
-- Not running a check against a change it cannot fail on is NOT checking
-  less, and several catalog fixes work exactly that way: a `paths:` /
-  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
-  selection. Those stay in bounds as long as the commit that merges is
-  still verified by every check its own change could fail - follow the
-  guardrail on the catalog recipe where this prompt links one, because
-  that is the half it exists to protect.
-- A pipeline that finishes sooner because it verifies less is a
-  regression, not a win. If that is the only way to make this faster, say
-  so and stop.
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -1187,6 +939,8 @@ investigate it in the repo and apply a safe change.
 Pattern: OPT24 - Long Test Job Without Sharding.
 Where: tests_primary.yml (Installation Test ubuntu-latest); tests_primary.yml (Installation Test windows-latest); tests_primary.yml (Installation Test macos-latest); tests_secondary.yml (time test runner - realtime); tests_secondary.yml (Test chrome on ubuntu-22.04); tests_secondary.yml (Test chrome-beta on ubuntu-22.04); tests_secondary.yml (time test runner - frozen); tests_secondary.yml (Test chrome on macos-latest); +1 more (see findings JSON).
 What ci-speedup saw: job `Test chrome on macos-latest` p50 3573s over 4 runs, no shard axis observed (job names lack a `shard` / `partition` matrix marker)
+Concurrency order: First use OPT88 to measure and fill the existing job's idle cores; only then add shards or jobs.
+Runner-minute effect: With safe in-job concurrency, runner minutes go down because the same job finishes sooner; extra shard jobs repeat checkout and setup and bill each job, so a saturated runner buys more wall-clock speed only by spending runner minutes.
 Saving: developer WALL-CLOCK (~6m 51s) - this job is a long pole ON the merge-gating critical path, so its catalog fix shortens the merge wait. NOT a runner-bill cut, and NOT off the critical path.
 
 Read the catalog entry (background, fix recipe, and guardrail):
@@ -1212,6 +966,10 @@ NEVER BUY SPEED BY CHECKING LESS
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
 
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+- State the pole's observed range beside the predicted saving. Do not open a pull request when the predicted saving is smaller than that range.
+
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
 failure mode and how you have guarded it before shipping.
@@ -1236,6 +994,8 @@ investigate it in the repo and apply a safe change.
 Pattern: OPT25 - Matrix Leg Imbalance.
 Where: tests_components.yml (- Node.js 20); tests_secondary.yml (Windows).
 What ci-speedup saw: leg `Windows (firefox)` median 4377s vs `Windows (chromium)` 1598s - 2.7× imbalance over 3 sampled runs (heterogeneous legs - split the slow leg, don't rebalance)
+Concurrency order: First use OPT88 to measure and fill the existing job's idle cores; only then add shards or jobs.
+Runner-minute effect: With safe in-job concurrency, runner minutes go down because the same job finishes sooner; extra shard jobs repeat checkout and setup and bill each job, so a saturated runner buys more wall-clock speed only by spending runner minutes.
 Saving: developer WALL-CLOCK (~3m 21s) - this job is a long pole ON the merge-gating critical path, so its catalog fix shortens the merge wait. NOT a runner-bill cut, and NOT off the critical path.
 
 Read the catalog entry (background, fix recipe, and guardrail):
@@ -1260,6 +1020,10 @@ NEVER BUY SPEED BY CHECKING LESS
 - A pipeline that finishes sooner because it verifies less is a
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
+
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+- State the pole's observed range beside the predicted saving. Do not open a pull request when the predicted saving is smaller than that range.
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -1309,6 +1073,9 @@ NEVER BUY SPEED BY CHECKING LESS
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
 
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
 failure mode and how you have guarded it before shipping.
@@ -1357,6 +1124,9 @@ NEVER BUY SPEED BY CHECKING LESS
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
 
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
 failure mode and how you have guarded it before shipping.
@@ -1404,6 +1174,9 @@ NEVER BUY SPEED BY CHECKING LESS
 - A pipeline that finishes sooner because it verifies less is a
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
+
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -1454,54 +1227,8 @@ NEVER BUY SPEED BY CHECKING LESS
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
 
-Do: confirm the pattern at each location above, recover the intent from git
-history, and apply the catalog's fix recipe where it is safe. State the
-failure mode and how you have guarded it before shipping.
-```
-
-</details>
-
-<details>
-<summary><strong>OPT64 - Repeated Workflow Attempts From Same Failing Job</strong> · 2,451 min/mo · LOW · 1 across 1 wf</summary>
-
-**Where:** `tests_mcp.yml`
-**Tier-2 note:** measured wall-clock-neutral instances of this same pattern are promoted above; this appendix row shows only the remaining modeled, uncertified, or source-unbacked instance(s).
-**Evidence:** 1 sampled run_attempt>1 workflow run(s) had prior-attempt jobs present in `filter=all` but absent from `filter=latest`; the unique dominant failing job was `ubuntu-latest - chrome` (1 failed/timed-out prior-attempt job(s), 15.8 failed min) and it appeared again in the latest attempt. ~2451 runner-min/mo of prior-attempt compute (840/30d ÷ 100 sampled all-status run(s)).
-**Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
-
-#### 🤖 Prompt for your coding agent
-
-```text
-ci-speedup measured the pattern below but does NOT prescribe the fix -
-investigate it in the repo and apply a safe change.
-
-Pattern: OPT64 - Repeated Workflow Attempts From Same Failing Job.
-Where: tests_mcp.yml.
-What ci-speedup saw: 1 sampled run_attempt>1 workflow run(s) had prior-attempt jobs present in `filter=all` but absent from `filter=latest`; the unique dominant failing job was `ubuntu-latest - chrome` (1 failed/timed-out prior-attempt job(s), 15.8 failed min) and it appeared again in the latest attempt. ~2451 runner-min/mo of prior-attempt compute (840/30d ÷ 100 sampled all-status run(s)).
-Saving: ~2,451 runner-min/mo - off the merge-gating critical path, so ~0 developer wall-clock (a cloud-bill cut, not a merge-wait cut).
-
-Read the catalog entry (background, fix recipe, and guardrail):
-  https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt64--repeated-workflow-attempts-from-same-failing-job
-
-NEVER BUY SPEED BY CHECKING LESS
-- The commit that merges must still be verified by exactly what verifies
-  it today. Unless the finding above IS that reduction, do not: delete or
-  narrow matrix legs so fewer configurations are tested; add
-  `continue-on-error`, `|| true`, or any other exit-code suppression;
-  narrow or remove a required status check, or change a job so a required
-  check stops reporting; skip tests behind a path/branch filter that do
-  cover the change; or cut test counts, timeouts, or retries in a way
-  that weakens the signal rather than the cost.
-- Not running a check against a change it cannot fail on is NOT checking
-  less, and several catalog fixes work exactly that way: a `paths:` /
-  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
-  selection. Those stay in bounds as long as the commit that merges is
-  still verified by every check its own change could fail - follow the
-  guardrail on the catalog recipe where this prompt links one, because
-  that is the half it exists to protect.
-- A pipeline that finishes sooner because it verifies less is a
-  regression, not a win. If that is the only way to make this faster, say
-  so and stop.
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -1550,6 +1277,9 @@ NEVER BUY SPEED BY CHECKING LESS
 - A pipeline that finishes sooner because it verifies less is a
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
+
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -1600,6 +1330,9 @@ NEVER BUY SPEED BY CHECKING LESS
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
 
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
 failure mode and how you have guarded it before shipping.
@@ -1647,6 +1380,9 @@ NEVER BUY SPEED BY CHECKING LESS
 - A pipeline that finishes sooner because it verifies less is a
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
+
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -1696,6 +1432,9 @@ NEVER BUY SPEED BY CHECKING LESS
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
 
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
 failure mode and how you have guarded it before shipping.
@@ -1744,6 +1483,60 @@ NEVER BUY SPEED BY CHECKING LESS
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
 
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+
+Do: confirm the pattern at each location above, recover the intent from git
+history, and apply the catalog's fix recipe where it is safe. State the
+failure mode and how you have guarded it before shipping.
+```
+
+</details>
+
+<details>
+<summary><strong>OPT1 - Unnecessary Tool Install</strong> · 11 min/mo · MEDIUM · 2 across 2 wf</summary>
+
+**Where:** `copilot-setup-steps.yml:17` (copilot-setup-steps), `fix-flakes.yml:155` (fix)
+**Evidence:** job `copilot-setup-steps` installs Playwright browsers but no step runs `playwright test` or any package script that could (same step also matched OPT2 'uncached download'; reconciled to removal - caching an unused install is moot, so the saving is credited once here); job `fix` installs Playwright browsers but no step runs `playwright test` or any package script that could (same step also matched OPT2 'uncached download'; reconciled to removal - caching an unused install is moot, so the saving is credited once here)
+**Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt1--unnecessary-tool-install
+
+#### 🤖 Prompt for your coding agent
+
+```text
+ci-speedup measured the pattern below but does NOT prescribe the fix -
+investigate it in the repo and apply a safe change.
+
+Pattern: OPT1 - Unnecessary Tool Install.
+Where: copilot-setup-steps.yml:17 (copilot-setup-steps); fix-flakes.yml:155 (fix).
+What ci-speedup saw: job `copilot-setup-steps` installs Playwright browsers but no step runs `playwright test` or any package script that could (same step also matched OPT2 'uncached download'; reconciled to removal - caching an unused install is moot, so the saving is credited once here); job `fix` installs Playwright browsers but no step runs `playwright test` or any package script that could (same step also matched OPT2 'uncached download'; reconciled to removal - caching an unused install is moot, so the saving is credited once here)
+Saving: ~11 runner-min/mo - off the merge-gating critical path, so ~0 developer wall-clock (a cloud-bill cut, not a merge-wait cut).
+
+Read the catalog entry (background, fix recipe, and guardrail):
+  https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt1--unnecessary-tool-install
+
+NEVER BUY SPEED BY CHECKING LESS
+- The commit that merges must still be verified by exactly what verifies
+  it today. Unless the finding above IS that reduction, do not: delete or
+  narrow matrix legs so fewer configurations are tested; add
+  `continue-on-error`, `|| true`, or any other exit-code suppression;
+  narrow or remove a required status check, or change a job so a required
+  check stops reporting; skip tests behind a path/branch filter that do
+  cover the change; or cut test counts, timeouts, or retries in a way
+  that weakens the signal rather than the cost.
+- Not running a check against a change it cannot fail on is NOT checking
+  less, and several catalog fixes work exactly that way: a `paths:` /
+  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
+  selection. Those stay in bounds as long as the commit that merges is
+  still verified by every check its own change could fail - follow the
+  guardrail on the catalog recipe where this prompt links one, because
+  that is the half it exists to protect.
+- A pipeline that finishes sooner because it verifies less is a
+  regression, not a win. If that is the only way to make this faster, say
+  so and stop.
+
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
 failure mode and how you have guarded it before shipping.
@@ -1752,7 +1545,7 @@ failure mode and how you have guarded it before shipping.
 </details>
 
 > [!TIP]
-> **+4 more hygiene pattern(s) (24 occurrence(s)) not shown** - lower bill saving, kept in the findings JSON so nothing is dropped.
+> **+3 more hygiene pattern(s) (22 occurrence(s)) not shown** - lower bill saving, kept in the findings JSON so nothing is dropped.
 
 ## 🗄️ Data sources
 
@@ -1765,7 +1558,7 @@ failure mode and how you have guarded it before shipping.
 
 | Source | Coverage | Used for |
 | --- | --- | --- |
-| ci-speedup static scan (skill commit `2f048be`, scripts tree `fc0b219`) | All `.github/workflows/*.yml` under the analyzed tree (3827650) | Static pattern detection (full OPT catalog) |
+| ci-speedup static scan (skill commit `2f048be`, scripts tree `463d800`) | All `.github/workflows/*.yml` under the analyzed tree (3827650) | Static pattern detection (full OPT catalog) |
 | gh runs/jobs API (timestamps) | 161 runs / 1630 jobs sampled | Critical-path + per-step P50 |
 | job logs | not run | Sampled only for a slow pole worth log-level inspection |
 | workflow YAML | 18 from the analyzed checkout | `on:` triggers, matrix/shard axes, job timeouts (detector inputs) |

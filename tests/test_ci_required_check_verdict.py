@@ -144,7 +144,7 @@ def test_suite_jobs_split_by_fork_and_runner():
     # step is `echo ok`, or is skipped, still reports success and goes green.
     for job_id, job in (("test-self", self_hosted), ("test-fork", fork)):
         last = job["steps"][-1]
-        assert last.get("run", "").strip() == "pytest -v", (
+        assert last.get("run", "").strip() == "pytest -v -n 4 --dist worksteal", (
             f"{job_id}'s last step must be the suite itself, got {last!r}")
         assert "if" not in last, (
             f"{job_id}'s suite step must not carry a step-level `if:` — it would "

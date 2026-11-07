@@ -92,6 +92,14 @@ def test_capture_fires_is_the_renderers_ground_truth(tmp_path: Path):
     assert pending.fires() is None
 
 
+def test_a_cache_restore_line_does_not_promote_a_pending_capture(tmp_path: Path):
+    # A restore line sits in nearly every job log. It is an observation, not a
+    # root-cause detector, so it must neither mark a gap promoted nor let
+    # `verify` pass a gap the drafted detector never closed.
+    _capture(tmp_path, "Z-r__cache", "Cache restored from key: deps-linux-abc\n" + _PENDING_LOG)
+    assert dd.Capture(tmp_path / "Z-r__cache").fires() is None
+
+
 def test_list_classifies_pending_vs_promoted(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(dd, "_GAPS_ROOT", tmp_path)
     _capture(tmp_path, "Z-r__promoted", _PROMOTED_LOG)

@@ -62,9 +62,11 @@ from wall_clock import (  # noqa: E402
     _concurrent_workflows,
     _resolve_job_p50,
     _wf_basename,
-    bound_within_workflow,
+    bound_commit_projection,
+    bound_within_workflow, CASCADE,
     credit_detrigger,
     credit_shared_substep,
+    project_commit_wall,
     size_wall_clock,
 )
 
@@ -73,6 +75,7 @@ from wall_clock import (  # noqa: E402
 # `wait-all:` / `cancel:` control steps are skipped. (The RUN-DATA side — the
 # jobs API's `steps` with timestamps — is a different list and is not walked.)
 from workflow_steps import is_group_step, job_walk  # noqa: E402
+import joint_scenario as joint  # noqa: E402
 
 
 # =============================================================================
@@ -699,6 +702,9 @@ def _classify_gh_failure(stderr: str, status: int | None = None,
                        coverage gap (the data exists, we were blocked from it) —
                        loud even on an `allow_missing` endpoint.
       `server_error` — 5xx. RETRYABLE (transient); same coverage-gap rule.
+      `auth`         — 401, or a 403 whose response says the credential is bad,
+                       expired, or needs authentication. A repeated auth failure
+                       after successful calls means the token stopped working.
       `not_found`    — 404. The `allow_missing` contract's intended case.
       `forbidden`    — a 403 that is NOT a rate limit (no admin on the audited
                        repo). Also an `allow_missing` case, never retried.
@@ -736,6 +742,14 @@ def _classify_gh_failure(stderr: str, status: int | None = None,
             return "rate_limit"
     if status == 429 or limited:
         return "rate_limit"
+    if status == 401:
+        return "auth"
+    if status == 403 and (
+            "bad credentials" in s
+            or "requires authentication" in s
+            or "token expired" in s
+            or "token has expired" in s):
+        return "auth"
     if status == 404:
         return "not_found"
     if status == 403:
@@ -805,13 +819,25 @@ class GhClient:
         # `_lock` (the fetch pool shares one client, so one worker's give-up must stop
         # the others too).
         self._gave_up = False
+        self._had_successful_invoke = False
+        self._consecutive_auth_failures = 0
+        self.auth_interrupted = False
+        self.job_fetch_count = 0
+        self.job_fetch_failed_count = 0
         self._giveups = 0
         self._backoff_spent = 0.0
+        # Final HTTP status for a failed endpoint, keyed rather than global because
+        # pooled workers fail independently. Pagination uses this only for the
+        # jobs-endpoint 502 fallback; every other failure keeps the ordinary loud-gap
+        # path. Cleared when the same endpoint later succeeds.
+        self._failure_status_by_endpoint: dict[str, int | None] = {}
         # Deterministic offline replay/record — see `_fixture_name` above. Read
         # once here (not re-checked per call) so a run's mode is fixed for its
         # lifetime. Both unset (the default) is byte-identical to the live path
         # that existed before this seam: neither branch below is ever taken.
         self._fixtures_dir = os.environ.get("CI_SPEEDUP_GH_FIXTURES") or None
+        # Why `available()` last returned False (gh's first stderr line), or None.
+        self.probe_failure: str | None = None
         self._record_dir = os.environ.get("CI_SPEEDUP_GH_RECORD") or None
         # Record-mode collision guard: fixture filename -> the endpoint that
         # first wrote it this session. `_fixture_name` is lossy (see its
@@ -836,6 +862,35 @@ class GhClient:
             self.queries += int(query)
             self.errors += int(error)
 
+    def record_job_fetch(self, failed: bool) -> None:
+        """Count logical run-job fetches, not pages, retries or memo hits.
+
+        Queued fetches skipped by the breaker still failed to supply their data.
+        """
+        with self._lock:
+            self.job_fetch_count += 1
+            self.job_fetch_failed_count += int(failed)
+
+    def _remember_failure_status(self, endpoint: str, status: int | None) -> None:
+        with self._lock:
+            self._failure_status_by_endpoint[endpoint] = status
+
+    def _clear_failure_status(self, endpoint: str) -> None:
+        with self._lock:
+            self._failure_status_by_endpoint.pop(endpoint, None)
+
+    def failure_status(self, endpoint: str) -> int | None:
+        """Final HTTP status from this endpoint's latest failed live request."""
+        with self._lock:
+            return self._failure_status_by_endpoint.get(endpoint)
+
+    def recover_failure(self, endpoint: str) -> None:
+        """Remove a counted endpoint failure after its complete fallback succeeds."""
+        with self._lock:
+            if endpoint in self._failure_status_by_endpoint:
+                self.errors = max(0, self.errors - 1)
+                del self._failure_status_by_endpoint[endpoint]
+
     @property
     def gave_up(self) -> bool:
         """True once the global breaker tripped: the client is DONE talking to gh for
@@ -849,12 +904,16 @@ class GhClient:
             already = self._gave_up
             self._gave_up = True
         if not already:
-            logger.warning(
-                "gh: GIVING UP on the whole gh pass — %s. Every remaining call will "
-                "fail immediately (no backoff). A sustained block cannot be waited "
-                "out inside a useful wall-clock, so the audit aborts with a DISCLOSED "
-                "coverage gap rather than hanging for hours and then rendering a "
-                "confident report off whatever survived.", why)
+            self._warn_giving_up(why)
+
+    @staticmethod
+    def _warn_giving_up(why: str) -> None:
+        logger.warning(
+            "gh: GIVING UP on the whole gh pass — %s. Every remaining call will "
+            "fail immediately (no backoff). A sustained block cannot be waited "
+            "out inside a useful wall-clock, so the audit aborts with a DISCLOSED "
+            "coverage gap rather than hanging for hours and then rendering a "
+            "confident report off whatever survived.", why)
 
     def _note_giveup(self, kind: str) -> None:
         """One endpoint just burned its whole attempt budget against a RETRYABLE
@@ -1263,6 +1322,10 @@ class GhClient:
             quietly shrinks its sample and still renders a confident, WRONG report.
           - 5xx, and a TIMEOUT (the data exists; we just didn't get it — the same
             meaning as a 5xx): retried with 1s/2s/4s + jitter.
+          - auth rejection (401, or an auth-shaped 403): never retried per endpoint.
+            After a successful call, three consecutive auth rejections trip the
+            global breaker: the token stopped working, so trying more queued
+            endpoints cannot recover it.
           - Exhausting the retries on any of those is a REAL COVERAGE GAP: it
             counts toward `errors` (tripping the report's partial-coverage banner)
             EVEN on an `allow_missing` endpoint. `allow_missing` means "a 404
@@ -1296,6 +1359,9 @@ class GhClient:
             # replay short-circuits in `_json_live`/`_text_live` and never reaches here — so
             # the governor is acquired once per real subprocess and never in offline tests.
             self._governor.acquire(_route_key(endpoint))
+            if self.gave_up:
+                self._bump(error=True)
+                return None
             headers: dict[str, str] = {}
             status: int | None = None
             try:
@@ -1329,6 +1395,8 @@ class GhClient:
                         capture_output=True, text=True, timeout=timeout,
                     )
             except FileNotFoundError as e:      # gh isn't installed — retrying can't help
+                with self._lock:
+                    self._consecutive_auth_failures = 0
                 if not allow_missing:
                     self._bump(error=True)
                     print(f"gh error: {e}", file=sys.stderr)
@@ -1336,6 +1404,8 @@ class GhClient:
             except subprocess.TimeoutExpired as e:
                 kind, stderr, r = "server_error", f"timed out after {timeout}s: {e}", None
             except (OSError, UnicodeDecodeError) as e:
+                with self._lock:
+                    self._consecutive_auth_failures = 0
                 # WAVE-SAFETY (the parallel pass runs `_invoke` on the shared pool's
                 # threads): SPAWNING the subprocess is itself an OS operation that can fail
                 # for reasons other than "gh isn't installed" (`FileNotFoundError`, caught
@@ -1357,10 +1427,21 @@ class GhClient:
                 if r.returncode == 0:
                     # A success means the failure (if any) was transient — don't let two
                     # unlucky calls spread across a healthy audit trip the breaker.
+                    self._clear_failure_status(endpoint)
                     self._note_success()
+                    with self._lock:
+                        self._had_successful_invoke = True
+                        self._consecutive_auth_failures = 0
                     return body
                 stderr = (r.stderr or "").strip()
-                kind = _classify_gh_failure(stderr, status, headers)
+                # GitHub puts auth diagnostics in the JSON response body on some
+                # 403s, while gh's stderr can be only "HTTP 403". Classification
+                # needs both pieces of the same failed response; logging below still
+                # uses stderr so a response body is not sprayed into logs.
+                kind = _classify_gh_failure("\n".join((stderr, body)), status, headers)
+            if kind != "auth":
+                with self._lock:
+                    self._consecutive_auth_failures = 0
             if kind in ("rate_limit", "server_error"):
                 if attempt < _GH_MAX_ATTEMPTS:
                     if kind == "rate_limit":
@@ -1380,6 +1461,7 @@ class GhClient:
                         _GH_MAX_ATTEMPTS, wait, stderr[:200])
                     continue
                 self._bump(error=True)
+                self._remember_failure_status(endpoint, status)
                 logger.warning(
                     "gh api %s: %s — GAVE UP after %d attempts. This is a REAL "
                     "COVERAGE GAP (the data exists; we were blocked from it), not "
@@ -1390,14 +1472,76 @@ class GhClient:
                 # case is the most expensive of the three (a full `timeout` per
                 # attempt), so gating this on `rate_limit` left the worst case with no
                 # terminal condition at all.
-                self._note_giveup(kind)
+                smaller_jobs_fallback = (
+                    kind == "server_error"
+                    and status == 502
+                    and "/actions/runs/" in endpoint
+                    and endpoint.split("?", 1)[0].endswith("/jobs")
+                    and "per_page=100" in endpoint
+                )
+                if not smaller_jobs_fallback:
+                    self._note_giveup(kind)
+                return None
+            if kind == "auth":
+                # `allow_missing` means a resource may legitimately be absent; it
+                # never means a broken credential is optional. Count every planned
+                # fetch, including calls short-circuited after the breaker opens, so
+                # the report states the full sample gap without continuing to hit gh.
+                self._bump(error=True)
+                self._remember_failure_status(endpoint, status)
+                first_stop = False
+                with self._lock:
+                    if self._had_successful_invoke:
+                        self._consecutive_auth_failures += 1
+                    auth_failures = self._consecutive_auth_failures
+                    if auth_failures >= 3:
+                        # Decide the stop under the lock, so no queued worker slips
+                        # another call in, and say why exactly once.
+                        first_stop = not self._gave_up
+                        self.auth_interrupted = True
+                        self._gave_up = True
+                if first_stop:
+                    self._warn_giving_up(
+                        f"{auth_failures} consecutive authentication failures after "
+                        "successful GitHub API calls; the token stopped working "
+                        "partway through")
+                logger.warning(
+                    "gh api %s: authentication failed — counted as a coverage gap: %s",
+                    endpoint, stderr[:200])
                 return None
             if not allow_missing:
                 self._bump(error=True)
-                logger.debug("gh api %s failed (rc=%s, %s): %s",
-                             endpoint, r.returncode, kind, stderr[:200])
+            self._remember_failure_status(endpoint, status)
+            logger.debug("gh api %s failed (rc=%s, %s): %s",
+                         endpoint, r.returncode, kind, stderr[:200])
             return None
         return None                                             # pragma: no cover
+
+    def graphql(self, query: str) -> Any:
+        """One read-only GraphQL request. No retries: lifecycle has a hard call cap."""
+        import hashlib
+        key = "graphql/lifecycle/" + hashlib.sha256(query.encode()).hexdigest()
+        self._bump(query=True)
+        if self._fixtures_dir:
+            return self._replay_json(key, True)
+        if self.gave_up:
+            return None
+        self._sleep_until_unblocked()
+        self._governor.acquire("graphql")
+        try:
+            result = subprocess.run(_gh_argv("graphql") + ["-f", "query=" + query],
+                                    capture_output=True, text=True, timeout=60)
+            if result.returncode:
+                return None
+            _, _, body = _split_headers_body(result.stdout or "")
+            data = json.loads(_strip_terminal_escapes(body))
+            if not isinstance(data, dict) or data.get("errors"):
+                return None
+            if self._record_dir:
+                self._record(key, "json", json.dumps(data))
+            return data
+        except (OSError, UnicodeDecodeError, subprocess.TimeoutExpired, json.JSONDecodeError):
+            return None
 
     def json(self, endpoint: str, allow_missing: bool = False) -> Any:
         """Run `gh api <endpoint>` and parse JSON. Returns None on failure.
@@ -1510,17 +1654,26 @@ class GhClient:
             r = subprocess.run(
                 ["gh", "auth", "status"], capture_output=True, text=True, timeout=10,
             )
-            return r.returncode == 0
-        except (OSError, subprocess.TimeoutExpired):
+        except (OSError, subprocess.TimeoutExpired) as e:
+            self.probe_failure = f"`gh auth status` could not run: {e}"
             return False
+        if r.returncode == 0:
+            return True
+        # Keep the probe's own words: a sandboxed / offline shell and a logged-out gh
+        # both land here, and only gh's message tells them apart.
+        first = _gh_probe_error_line(f"{r.stderr or ''}\n{r.stdout or ''}")
+        self.probe_failure = (f"`gh auth status` exited {r.returncode}"
+                              + (f": {first}" if first else ""))
+        return False
 
     def diagnose_unavailability(self) -> str:
         """Called only when `available()` is False, to say WHY — the two causes are
         OPPOSITE and must not be conflated:
 
-          * ``"absent"`` — the gh binary is missing OR no token is configured. The gh
-            pass genuinely cannot run; a static-scan-only report is the honest fallback
-            (`gh_unavailable`), and its empty spine may legitimately read as a quiet repo.
+          * ``"absent"`` — the gh binary is missing OR no token is readable (logged out,
+            or a sandboxed shell with no keychain access). The gh pass cannot run; a
+            static-scan-only report is the honest fallback (`gh_unavailable`) — but its
+            empty spine says nothing about the repo, since nothing was measured.
           * ``"api_blocked"`` — gh IS installed and a token IS configured, but the
             `available()` probe still failed: the credential check did NOT come back
             clean. That covers a rate-limit / secondary-limit block, a transport / 5xx
@@ -1560,7 +1713,8 @@ class GhClient:
 
 
 def _paginate(client: GhClient, path: str, key: str, *, params: str = "",
-              per_page: int = 100) -> list[Any] | None:
+              per_page: int = 100,
+              completion: dict[str, bool] | None = None) -> list[Any] | None:
     """Walk a paginated list endpoint to COMPLETION and return every item.
 
     `path` is the endpoint without a query string; `params` is any extra query
@@ -1606,7 +1760,10 @@ def _paginate(client: GhClient, path: str, key: str, *, params: str = "",
     `json()` AND a `_bump()` (the malformed/ceiling paths count their own coverage
     gaps — `json()` only counts the failures IT sees) — it adds no new surface to the
     seam every gh byte flows through."""
+    if completion is not None:
+        completion["complete"] = False
     items: list[Any] = []
+    declared_total: int | None = None
     page = 1
     while True:
         endpoint = f"{path}?per_page={per_page}"
@@ -1616,6 +1773,18 @@ def _paginate(client: GhClient, path: str, key: str, *, params: str = "",
             endpoint += f"&page={page}"
         doc = client.json(endpoint)
         if doc is None:
+            failure_status = getattr(client, "failure_status", lambda _endpoint: None)
+            if (per_page == 100 and key == "jobs" and failure_status(endpoint) == 502
+                    and "/actions/runs/" in path and path.endswith("/jobs")):
+                logger.warning(
+                    "gh paginate %s: page %d returned 502 at 100 items/page; "
+                    "restarting the complete jobs walk at 30 items/page", path, page)
+                fallback = _paginate(
+                    client, path, key, params=params, per_page=30,
+                    completion=completion)
+                if fallback is not None:
+                    getattr(client, "recover_failure", lambda _endpoint: None)(endpoint)
+                return fallback
             logger.warning(
                 "gh paginate %s: page %d failed — abandoning the whole fetch "
                 "(%d item(s) already read) rather than returning a silently "
@@ -1631,6 +1800,8 @@ def _paginate(client: GhClient, path: str, key: str, *, params: str = "",
             return None
         total = doc.get("total_count")
         has_total = isinstance(total, int) and not isinstance(total, bool)
+        if has_total:
+            declared_total = max(declared_total or 0, total)
         chunk = doc.get(key)
         if not isinstance(chunk, list):
             # A page-1 body whose list key isn't a LIST is malformed — full stop. The
@@ -1644,6 +1815,8 @@ def _paginate(client: GhClient, path: str, key: str, *, params: str = "",
             # a real `[]` needs no exception: it IS a list, so it falls through to the
             # normal short-page stop below and returns `[]` on its own.
             if page == 1 and has_total and total == 0:
+                if completion is not None:
+                    completion["complete"] = True
                 return []               # genuinely empty collection, not a failure
             client._bump(error=True)
             logger.warning(
@@ -1678,6 +1851,9 @@ def _paginate(client: GhClient, path: str, key: str, *, params: str = "",
                 "rather than returning a short list that looks complete",
                 path, _GH_MAX_PAGES, len(items))
             return None
+    if completion is not None:
+        completion["complete"] = (
+            declared_total is not None and len(items) >= declared_total)
     return items
 
 
@@ -1691,12 +1867,58 @@ def _paginate(client: GhClient, path: str, key: str, *, params: str = "",
 # report contradicting its own disclosure and downgrading a total collection failure
 # to a rounding error.
 _PARTIAL_STATIC_ONLY = "static_only"            # no --repo: the gh pass never ran
-_PARTIAL_GH_UNAVAILABLE = "gh_unavailable"      # gh missing / not authenticated
+_PARTIAL_GH_UNAVAILABLE = "gh_unavailable"      # gh pass could not start (no gh / token)
 _PARTIAL_COLLECTION_FAILED = "collection_failed"  # NOTHING was measured (whole-repo gap)
 _PARTIAL_WORKFLOW_MISSING = "workflow_missing"  # >=1 workflow dropped out of the sample
 _PARTIAL_SAMPLE_THINNED = "sample_thinned"      # some calls failed; the sample is thinner
 # Only this kind may be rendered as a minor caveat. Everything else is a hole.
 _PARTIAL_MINOR_KINDS = frozenset({_PARTIAL_SAMPLE_THINNED})
+
+
+_GH_HOST_LINE = re.compile(r"^[A-Za-z0-9.-]+(:\d+)?$")
+
+
+def _gh_probe_error_line(text: str) -> str:
+    """The line of `gh auth status` output that carries its error. gh prints each host
+    on a bare line (`github.com`) ABOVE an indented, status-glyph-marked error, so the
+    first non-blank line is usually just the host name: skip host lines and drop the
+    leading `X` / `✗` / `!` glyph. Prefer a marked failure over a successful
+    account listed earlier when gh checks multiple hosts or accounts."""
+    lines = [ln.strip() for ln in text.splitlines()]
+    # A failure glyph first, then a warning: gh prints `!` notes (e.g. missing token
+    # scopes) under accounts that logged in fine, which may be listed before the failure.
+    for marks in ("X✗×", "!"):
+        for s in lines:
+            if re.match(rf"^[{marks}]\s+", s):
+                return re.sub(rf"^[{marks}]\s+", "", s)
+    for s in lines:
+        if not s or _GH_HOST_LINE.match(s) or s.startswith(("✓", "-")):
+            continue
+        return s
+    return ""
+
+
+_GH_SANDBOX_HINT = ("If `gh auth status` succeeds in a normal terminal, this shell is "
+                    "likely sandboxed or has no network access — retry the audit with "
+                    "network / host access.")
+
+
+def _gh_unavailable_reason(probe_failure: str | None) -> str:
+    """The `gh_unavailable` reason: the probe's own failure, plus the cause it most often
+    hides. A sandboxed / no-network shell fails `gh auth status` (and, with no keychain,
+    `gh auth token`) even when gh works in the user's terminal — so never assert "not
+    authenticated" as THE cause, and never imply a retry would reproduce it."""
+    probe = (probe_failure or "`gh auth status` failed").rstrip(".")
+    return (f"gh data pass could not start: {probe}. gh may be missing or logged out — "
+            "or this shell is sandboxed / has no network access (gh works in a normal "
+            "terminal but not here). If `gh auth status` succeeds elsewhere, retry the "
+            "audit with network / host access.")
+
+
+# The breaker's generic cause. An auth interruption names its own cause instead
+# (`_stamp_auth_interruption`), so the banner never blames a dead token on rate limits.
+_GENERIC_ABORT_CAUSE = ("after repeated GitHub API failures (rate-limit blocks, "
+                        "server errors, or timeouts)")
 
 
 def _partial_reason(errors: int,
@@ -1726,9 +1948,9 @@ def _partial_reason(errors: int,
     parts = []
     if gave_up:
         parts.append(
-            "collection was ABORTED after repeated GitHub API failures (rate-limit "
-            "blocks, server errors, or timeouts), so the gh pass is INCOMPLETE — "
-            "whatever was measured before the abort is not a full picture of the repo")
+            "collection was ABORTED " + _GENERIC_ABORT_CAUSE + ", so the gh pass is "
+            "INCOMPLETE — whatever was measured before the abort is not a full "
+            "picture of the repo")
     if errors:
         parts.append(f"{errors} gh API call(s) failed during collection")
     if gaps:
@@ -1752,6 +1974,26 @@ def _partial_kind(errors: int,
     if errors:
         return _PARTIAL_SAMPLE_THINNED
     return None
+
+
+def _stamp_auth_interruption(ds: dict[str, Any], client: GhClient) -> None:
+    """Preserve the cause and logical job-fetch counts on every collector exit."""
+    if getattr(client, "auth_interrupted", False) is not True:
+        return
+    total = client.job_fetch_count
+    failed = client.job_fetch_failed_count
+    ds.update({
+        "auth_interrupted": True,
+        "job_fetch_count": total,
+        "job_fetch_failed_count": failed,
+        "partial_kind": _PARTIAL_COLLECTION_FAILED,
+    })
+    reason = ("the GitHub token stopped working partway through; "
+              f"{failed} of {total} job fetches failed (including queued fetches "
+              "skipped after collection stopped)")
+    rest = str(ds.get("partial_reason") or "").replace(
+        " " + _GENERIC_ABORT_CAUSE, "")
+    ds["partial_reason"] = reason + ("; " + rest if rest else "")
 
 
 # =============================================================================
@@ -2123,6 +2365,163 @@ def _pr_makespan(intervals: "dict[str, tuple[str, str]]",
     return round(max(ends) - min(starts), 3)
 
 
+def _commit_queue_work_split(commit_fact: dict[str, Any]) -> dict[str, float]:
+    """Split one supplied per-commit wall into runner queue and work seconds.
+
+    The per-commit wall-clock producer owns which runs/jobs belong to the SHA,
+    its earliest run creation, final job completion, slowest/next-longest jobs,
+    and partial-coverage stamp. This consumer adds only the queue/work split.
+
+    Queue is time when at least one job was eligible and waiting for a runner
+    while no job on the commit was running. That includes the initial
+    run-created -> first-job-started wait and later idle queued gaps. A queued
+    interval that overlaps another running job is work, not queue. ``work_s``
+    is the rest of the developer's per-commit wall, so the two always reconcile
+    to ``commit_wall_s`` rather than summing concurrent job durations.
+    """
+    wall_s = _finite_float(commit_fact.get("commit_wall_s"))
+    if wall_s is None:
+        # The per-commit producer stamps its complete wall as `wall_s`.
+        wall_s = _finite_float(commit_fact.get("wall_s"))
+    wall_start = _parse_dt(str(commit_fact.get("created_at") or ""))
+    jobs = [j for j in (commit_fact.get("jobs") or []) if isinstance(j, dict)]
+    if wall_s is None or wall_s < 0 or wall_start is None or not jobs:
+        return {}
+    start = wall_start.timestamp()
+    end = start + wall_s
+    queued: list[tuple[float, float]] = []
+    running: list[tuple[float, float]] = []
+    starts: list[float] = []
+    for job in jobs:
+        js = _parse_dt(str(job.get("started_at") or ""))
+        jc = _parse_dt(str(job.get("completed_at") or ""))
+        jq = _parse_dt(str(job.get("queued_at") or job.get("created_at")
+                           or commit_fact.get("created_at") or ""))
+        if js is None:
+            continue
+        js_s = min(max(js.timestamp(), start), end)
+        starts.append(js_s)
+        if jq is not None:
+            jq_s = min(max(jq.timestamp(), start), end)
+            if js_s > jq_s:
+                queued.append((jq_s, js_s))
+        if jc is not None:
+            jc_s = min(max(jc.timestamp(), start), end)
+            if jc_s > js_s:
+                running.append((js_s, jc_s))
+
+    # The wall begins when the earliest run is created, so its initial wait is
+    # queue even if the job object itself was materialized a little later.
+    if starts and min(starts) > start:
+        queued.append((start, min(starts)))
+
+    points = sorted({start, end, *(v for iv in queued + running for v in iv)})
+    queue_s = 0.0
+    for left, right in zip(points, points[1:]):
+        if right <= left:
+            continue
+        is_queued = any(a < right and b > left for a, b in queued)
+        is_running = any(a < right and b > left for a, b in running)
+        if is_queued and not is_running:
+            queue_s += right - left
+    queue_s = min(max(queue_s, 0.0), wall_s)
+    return {"queue_s": round(queue_s, 3),
+            "work_s": round(wall_s - queue_s, 3)}
+
+
+def _stamp_commit_queue_work(clock: dict[str, Any]) -> dict[str, Any]:
+    """Enrich supplied commit-wall facts with per-commit and p50/p90 splits.
+
+    Partial commits stay visible, but do not lower the aggregate split: the
+    foundation already says their workflow coverage is incomplete.
+    """
+    out = copy.deepcopy(clock)
+    complete: list[dict[str, Any]] = []
+    stamped: list[dict[str, Any]] = []
+    # The per-commit producer publishes `facts`; `commits` is the earlier
+    # hand-off name. Enrich whichever list the stamp carries, in place.
+    key = "facts" if isinstance(out.get("facts"), list) else "commits"
+    for raw in out.get(key) or []:
+        if not isinstance(raw, dict):
+            continue
+        fact = dict(raw)
+        split = _commit_queue_work_split(fact)
+        if split:
+            fact.update(split)
+            if fact.get("partial") is not True:
+                complete.append(fact)
+        stamped.append(fact)
+    out[key] = stamped
+    if not complete:
+        return out
+    queue = [float(f["queue_s"]) for f in complete]
+    work = [float(f["work_s"]) for f in complete]
+    walls = [float(f.get("commit_wall_s") or f.get("wall_s") or 0.0) for f in complete]
+    shares = [q / wall for q, wall in zip(queue, walls) if wall > 0]
+    out.update({
+        "n": len(complete),
+        "queue_p50_s": round(statistics.median(queue), 3),
+        "queue_p90_s": round(_percentile(queue, 90), 3),
+        "work_p50_s": round(statistics.median(work), 3),
+        "work_p90_s": round(_percentile(work, 90), 3),
+        "queue_share_p50": round(statistics.median(shares), 6) if shares else 0.0,
+    })
+    return out
+
+
+_RUNNER_POOL_QUEUE_PATTERNS = frozenset({"OPT43", "OPT97"})
+
+
+def _commit_work_budget(clock: dict[str, Any]) -> float | None:
+    """Work a code finding may claim on the typical full wait.
+
+    Wall, queue, and work medians can come from different commits. Preserve the
+    raw work median as evidence, but also honor wall-minus-queue so a projected
+    improvement can never run below the queue the report says remains intact.
+    """
+    work = _finite_float(clock.get("work_p50_s"))
+    wall = _finite_float(clock.get("p50_s"))
+    queue = _finite_float(clock.get("queue_p50_s"))
+    candidates = [work] if work is not None and work >= 0 else []
+    if wall is not None and queue is not None and wall >= 0 and queue >= 0:
+        candidates.append(max(wall - min(queue, wall), 0.0))
+    return min(candidates) if candidates else None
+
+
+def _cap_code_findings_at_commit_work(findings: list[dict[str, Any]],
+                                      work_s: float | None) -> None:
+    """A code/config finding can remove work, never runner-pickup queue.
+
+    Runner-pool findings are the only queue-owning patterns. All other credited
+    wall-clock seconds are capped at the supplied per-commit work budget. The
+    uncapped value and reason remain in the artifact for auditability.
+    """
+    if work_s is None or work_s < 0:
+        return
+    for finding in findings:
+        if str(finding.get("pattern") or "") in _RUNNER_POOL_QUEUE_PATTERNS:
+            continue
+        credited = _finite_float(finding.get("wall_clock_p50_s"))
+        if credited is None or credited <= work_s:
+            continue
+        capped = round(work_s, 1)
+        if _finite_float(finding.get("wall_clock_uncapped_p50_s")) is None:
+            finding["wall_clock_uncapped_p50_s"] = credited
+        finding["wall_clock_p50_s"] = capped
+        reason = ("capped at the per-commit work time; code and workflow changes "
+                  "cannot remove runner-pickup queue")
+        steps = finding.get("wall_clock_derivation")
+        steps = list(steps) if isinstance(steps, list) else []
+        steps.append({"bound": "commit-work", "from_s": credited,
+                      "to_s": capped, "reason": reason})
+        finding["wall_clock_derivation"] = steps
+        derivation = str(finding.get("derivation") or "")
+        finding["derivation"] = (
+            f"{derivation}; {reason}" if derivation else reason)
+        note = str(finding.get("size_note") or "")
+        finding["size_note"] = f"{note}; {reason}" if note else reason
+
+
 def _check_presence(per_sha_checks: list[dict[str, float]],
                     candidates: "set[str] | frozenset[str]") -> tuple[dict[str, int], int]:
     """Per candidate check, how many sampled PRs it actually ran on, and the denominator
@@ -2242,6 +2641,7 @@ def _rank_spine_present_first(
     per_sha_checks: list[dict[str, float]],
     req_names: "frozenset[str] | set[str]",
     caps: dict[str, float] | None = None,
+    confirmed_gate_checks: "frozenset[str] | set[str] | None" = None,
 ) -> tuple[tuple[tuple[str, float], ...], dict[str, int], int, dict[str, int]]:
     """Order the merge-wait spine so checks that ACTUALLY gate the merge — the slowest job a PR
     waits on, on at least `_POLE_RECUR_FLOOR` sampled PRs — rank ABOVE one-path outliers, each
@@ -2258,14 +2658,24 @@ def _rank_spine_present_first(
     PRs. Ranking by how often a check is the real critical path picks the recurring gates a
     developer actually waits on (validated on expo: playwright-windows/android-build lead;
     check-packages, the actual pole on 0/20 PRs, drops out of the headline)."""
-    present, n_pr = _check_presence(per_sha_checks, set(pr_check_p50))
-    pole_freq = _pole_frequencies(per_sha_checks, set(pr_check_p50), caps)
+    all_checks = set(pr_check_p50)
+    present, n_pr = _check_presence(per_sha_checks, all_checks)
+    # Once required reachability has been resolved, an unpinnable conservative keep is not
+    # evidence about which check blocked merging. Keep it in the spine for disclosure, but
+    # compute recurrence only among checks confirmed required/needs-reachable. None means
+    # reachability was unreadable and preserves the historical basis exactly.
+    gate_checks = (all_checks if confirmed_gate_checks is None
+                   else all_checks & set(confirmed_gate_checks))
+    gate_freq = _pole_frequencies(per_sha_checks, gate_checks, caps)
+    pole_freq = {c: gate_freq.get(c, 0) for c in all_checks}
     tier_ok = n_pr >= _RARE_PRESENCE_MIN_PR
 
     def is_rare(c: str) -> bool:
         # Rare == not a recurring actual gate: the slowest job on FEWER than the floor of sampled
         # PRs. Required checks gate by definition (exempt). Below the min-sample floor the
         # frequency is noise, so demote nothing (plain p50 order).
+        if confirmed_gate_checks is not None and c not in confirmed_gate_checks:
+            return True
         return bool(tier_ok and c not in req_names
                     and pole_freq.get(c, 0) < _POLE_RECUR_FLOOR)
 
@@ -2274,35 +2684,47 @@ def _rank_spine_present_first(
     return order, present, n_pr, pole_freq
 
 
-def _order_drill_matrices(
-    matrices: "list[tuple[str, float]]",
-    impact: "Callable[[str, float], float]",
-    is_typical: "Callable[[str], bool]",
-) -> "list[tuple[str, float]]":
-    """Order the mappable job matrices for drill-bundle CAPTURE exactly as
-    ``blocking_path.render`` orders the poles it RENDERS: the gate (the slowest-median
-    typical matrix, already first in the present-first spine) leads, then the remaining
-    TYPICAL matrices by impact, then the rare/opt-in ones by impact.
+def _fallback_job_observations(
+    repr_shas: list[str],
+    rep_members: dict[str, list[str]],
+    jobs_per_run_by_wf: dict[str, list[list[dict[str, Any]]]],
+) -> dict[str, dict[str, tuple[float, str, str]]]:
+    """Return sampled developer-event jobs grouped by commit and name.
 
-    Keeping this identical to the renderer is load-bearing: the captured (drilled) pole
-    set must equal the rendered pole set. A flat impact sort here pulls a rare-but-slow
-    conditional pole (e.g. a path-filtered `build` leg present on a minority of PRs, but
-    long when it runs) above a TYPICAL pole — so capture drills the rare one while the
-    renderer demotes it and renders the typical pole instead. That typical pole then has
-    no captured log, and ``_match_key``'s exact-workflow-stem rule binds it to a SIBLING
-    pole's bundle (a same-workflow drill), making the report show the wrong job's
-    timeline/magnitudes. Tiering here keeps every rendered pole's own log captured.
-    ``is_typical`` MUST encode the same `_RARE_PRESENCE_*` / required-check rule the
-    renderer uses, so the two never disagree about which pole is the rare one."""
-    if not matrices:
-        return []
-    gate = matrices[0]
-    rest = matrices[1:]
-    rest_typ = sorted((m for m in rest if is_typical(m[0])),
-                      key=lambda m: -impact(m[0], m[1]))
-    rest_rare = sorted((m for m in rest if not is_typical(m[0])),
-                       key=lambda m: -impact(m[0], m[1]))
-    return [gate, *rest_typ, *rest_rare]
+    This is used only when required-check reachability did not produce a scoped
+    gate. The normal required-scoped rank remains byte-for-byte unchanged. Jobs
+    from push/schedule runs are excluded: they belong to the post-merge lane, not
+    the pull-request fallback.
+
+    Each observation keeps the maximum duration plus the latest-attempt interval,
+    matching the check-run population's duration and interval semantics.
+    """
+    member_to_rep = {
+        member: rep
+        for rep in repr_shas
+        for member in rep_members.get(rep, [rep])
+    }
+    observations: dict[str, dict[str, tuple[float, str, str]]] = {}
+    for workflow_runs in jobs_per_run_by_wf.values():
+        for run_jobs in workflow_runs:
+            for job in run_jobs:
+                if str(job.get("_run_event") or "") not in _DEVELOPER_EVENTS:
+                    continue
+                rep = member_to_rep.get(str(job.get("_run_head_sha") or ""))
+                duration = _job_duration_s(job)
+                name = str(job.get("name") or "")
+                started = str(job.get("started_at") or "")
+                completed = str(job.get("completed_at") or "")
+                if (rep is None or duration is None or not name
+                        or _parse_dt(started) is None or _parse_dt(completed) is None):
+                    continue
+                row = observations.setdefault(rep, {})
+                previous = row.get(name)
+                max_duration = max(previous[0] if previous else 0.0, round(duration, 1))
+                interval = ((started, completed) if previous is None or started > previous[1]
+                            else (previous[1], previous[2]))
+                row[name] = (max_duration, interval[0], interval[1])
+    return observations
 
 
 def _run_wall_s(r: dict[str, Any]) -> float | None:
@@ -2812,6 +3234,7 @@ def _era_resolve_thin_flip(
         check_wf_of: "Callable[[str], str | None]",
         sampled_runs_by_wf: dict[str, list[dict[str, Any]]],
         redrill: "Callable[[str, list[dict[str, Any]]], None]",
+        jobs_per_run_by_wf: dict[str, list[list[dict[str, Any]]]] | None = None,
 ) -> list[str]:
     """Decide the `disclosed_pre` → `post_only_thin` flip PRE-DRILL and re-drill the flipped
     workflow's spine from its POST runs (issue #74, owner-adjudicated direction (a): the timing
@@ -2835,6 +3258,75 @@ def _era_resolve_thin_flip(
     Returns the flipped workflow files (for logging / stamping). Non-straddling / non-`disclosed_pre`
     facts are untouched, so this is a pure no-op when nothing flips (byte-identity)."""
     flipped: list[str] = []
+
+    # A gate can change runners without changing the workflow file (for example, a repository or
+    # organization variable behind `runs-on`).  That is still a measurement-era boundary: mixing
+    # the two runner populations is honest only when the report names the split.  Detect the narrow,
+    # high-confidence shape here, after job collection: exactly two non-empty labels with one
+    # chronological transition for the same sampled gate.  It is disclosure-only; unlike a
+    # workflow-content era it does not partition the sample.
+    jobs_per_run_by_wf = jobs_per_run_by_wf or {}
+    existing_content_wfs = {
+        str(f.get("workflow_file") or "") for f in config_era_facts
+        if f.get("rule") != "runner_label_change"
+    }
+    gate_names_by_wf: dict[str, set[str]] = {}
+    for checks in per_sha_checks:
+        for check_name in checks:
+            wf = check_wf_of(check_name)
+            if wf:
+                gate_names_by_wf.setdefault(str(wf), set()).add(str(check_name))
+    for wf, gate_names in gate_names_by_wf.items():
+        if wf in existing_content_wfs:
+            continue  # a literal workflow edit already supplies the configuration-era disclosure
+        retained_by_run: dict[str, list[dict[str, Any]]] = {}
+        for run_jobs in jobs_per_run_by_wf.get(wf, []):
+            for job in run_jobs:
+                rid = str(job.get("_run_id") or "")
+                if rid:
+                    retained_by_run.setdefault(rid, []).append(job)
+        runs = sorted(sampled_runs_by_wf.get(wf, []),
+                      key=lambda r: str(r.get("created_at") or ""))
+        for gate_name in sorted(gate_names):
+            gate_tokens = _struct_toks(gate_name)
+            observations: list[tuple[str, str]] = []
+            job_display = ""
+            for run in runs:
+                embedded = run.get("jobs")
+                run_jobs = (embedded if isinstance(embedded, list)
+                            else retained_by_run.get(_run_id(run), []))
+                matches = [j for j in run_jobs if isinstance(j, dict)
+                           and _struct_toks(str(j.get("name") or "")) == gate_tokens]
+                labels = {_job_runner_label(j) for j in matches if _job_runner_label(j)}
+                if len(labels) != 1:
+                    continue
+                label = next(iter(labels))
+                job_display = str(matches[0].get("name") or gate_name)
+                observations.append((str(run.get("created_at") or ""), label))
+            if len(observations) < 2:
+                continue
+            groups: list[tuple[str, int, str]] = []
+            for ts, label in observations:
+                if groups and groups[-1][0] == label:
+                    old_label, count, start = groups[-1]
+                    groups[-1] = (old_label, count + 1, start)
+                else:
+                    groups.append((label, 1, ts))
+            if len(groups) != 2 or groups[0][0] == groups[1][0]:
+                continue
+            config_era_facts.append({
+                "workflow_file": wf,
+                "job": job_display,
+                "boundary": groups[1][2],
+                "kept_era": "all",
+                "rule": "runner_label_change",
+                "disclosure_only": True,
+                "runner_label_counts": [
+                    {"label": groups[0][0], "count": groups[0][1]},
+                    {"label": groups[1][0], "count": groups[1][1]},
+                ],
+            })
+
     if not config_era_facts:
         return flipped
     indexed = list(zip(repr_shas, per_sha_checks))
@@ -2905,7 +3397,8 @@ def _stamp_pole_repr_run_era(
     if not config_era_facts:
         return
     fact_by_wf = {str(f.get("workflow_file")): f
-                  for f in config_era_facts if f.get("workflow_file")}
+                  for f in config_era_facts
+                  if f.get("workflow_file") and f.get("rule") != "runner_label_change"}
     for p in poles:
         wf = str(p.get("workflow_file") or "")
         job = str(p.get("job") or "")
@@ -2972,11 +3465,13 @@ def _era_scope_enumeration(
     `verify_report.check_era_enumeration_bound` reads: no rendered pole/check may be a member of any
     era's `other_era_checks` (a check absent from the kept era). One report describes ONE
     configuration and names what the other configuration adds/removes."""
-    if not config_era_facts:
+    content_facts = [f for f in config_era_facts
+                     if f.get("rule") != "runner_label_change"]
+    if not content_facts:
         return pr_check_p50
     indexed = list(zip(repr_shas, per_sha_checks))
     to_drop: set[str] = set()
-    for fact in config_era_facts:
+    for fact in content_facts:
         wf = fact.get("workflow_file")
         if not wf:
             continue
@@ -3077,6 +3572,8 @@ def _era_stamp_spine_relevance(
     implies a non-empty enumeration set), so `verify_report`'s integrity arm needs no change. Mutates
     the facts in place."""
     for fact in config_era_facts:
+        if fact.get("rule") == "runner_label_change":
+            continue
         wf = fact.get("workflow_file")
         if not wf:
             continue
@@ -3146,7 +3643,8 @@ def _era_scope_pr_spine_sample(
     dropped-era makespan."""
     if not config_era_facts:
         return repr_shas, per_sha_checks, sha_intervals, 0
-    facts = [f for f in config_era_facts if f.get("workflow_file")]
+    facts = [f for f in config_era_facts
+             if f.get("workflow_file") and f.get("rule") != "runner_label_change"]
     if not facts:
         return repr_shas, per_sha_checks, sha_intervals, 0
     kept_shas: list[str] = []
@@ -3436,6 +3934,83 @@ def _job_runner_label(job: dict[str, Any]) -> str:
     `ubuntu-latest`, `ubuntu-24.04-arm`). Empty when absent."""
     labels = job.get("labels") or []
     return " ".join(sorted(str(x) for x in labels)) if labels else ""
+
+
+def _joint_gating_observation(
+    observation_id: str,
+    check_nodes: dict[str, tuple[str, str]],
+    job_rows: list[dict[str, Any]],
+    coupled: Callable[[str, str, str], bool],
+) -> dict[str, Any] | None:
+    """Build one identity-complete observation of the whole gating set.
+
+    This is deliberately stricter than the ordinary spine. Every check must
+    resolve to exactly one concrete job execution with a run attempt and runner
+    identity. Matrix expansions, same-name collisions, missing runner labels,
+    and any ``needs:`` connection make the observation unusable for the v1
+    independent-concurrent calculator rather than being guessed through.
+    """
+    if len(check_nodes) < 2:
+        return None
+
+    selected: dict[str, dict[str, Any]] = {}
+    for check, (workflow, node) in sorted(check_nodes.items()):
+        matches = [
+            row for row in job_rows
+            if row.get("workflow_file") == workflow and row.get("node") == node
+        ]
+        if len(matches) != 1:
+            return None
+        row = matches[0]
+        if not str(row.get("run_id") or "").strip():
+            return None
+        if not str(row.get("runner") or "").strip():
+            return None
+        attempt = row.get("run_attempt")
+        try:
+            attempt_number = int(attempt)
+        except (TypeError, ValueError):
+            return None
+        if isinstance(attempt, bool) or attempt_number < 1:
+            return None
+        row = dict(row, run_attempt=attempt_number)
+        selected[check] = row
+
+    pairs = list(check_nodes.items())
+    for index, (_left_check, (left_wf, left_node)) in enumerate(pairs):
+        for _right_check, (right_wf, right_node) in pairs[index + 1:]:
+            if left_wf == right_wf and (
+                    coupled(left_wf, left_node, right_node)
+                    or coupled(left_wf, right_node, left_node)):
+                return None
+
+    starts = [float(row["started_ts"]) for row in selected.values()]
+    ends = [float(row["completed_ts"]) for row in selected.values()]
+    residual = max(starts) - min(starts)
+    overlap = max(starts) < min(ends)
+    concurrency_validated = bool(
+        overlap and residual <= joint.CONCURRENCY_TOLERANCE_S)
+    if not concurrency_validated:
+        return None
+
+    return {
+        "observation_id": observation_id,
+        "basis": "job_started_at_to_completed_at",
+        "check_durations": {
+            check: float(row["duration_s"])
+            for check, row in sorted(selected.items())
+        },
+        "concurrency_validated": concurrency_validated,
+        "scheduling_residual_s": round(residual, 3),
+        "check_attempts": {
+            check: f"{row['run_id']}#attempt{row['run_attempt']}"
+            for check, row in sorted(selected.items())
+        },
+        "check_runners": {
+            check: str(row["runner"])
+            for check, row in sorted(selected.items())
+        },
+    }
 
 
 # -----------------------------------------------------------------------------
@@ -3731,6 +4306,9 @@ def _fetch_run_jobs(client: GhClient, repo: str,
     `_JobsPayload`'s docstring prescribes for a paginated fetcher, and every
     attempt-scoped truncation guard downstream becomes a no-op."""
     items = _paginate(client, f"repos/{repo}/actions/runs/{run_id}/jobs", "jobs")
+    record = getattr(client, "record_job_fetch", None)
+    if callable(record):
+        record(items is None)
     if items is None:
         return None
     return _JobsPayload(items, truncated=False)
@@ -3749,6 +4327,9 @@ def _fetch_run_jobs_filtered(client: GhClient, repo: str, run_id: int,
     """
     items = _paginate(client, f"repos/{repo}/actions/runs/{run_id}/jobs", "jobs",
                       params=f"filter={filter_value}")
+    record = getattr(client, "record_job_fetch", None)
+    if callable(record):
+        record(items is None)
     if items is None:
         return None
     return _JobsPayload(items, truncated=False)
@@ -3909,7 +4490,13 @@ def _gather_run_jobs(
     return kept, failures
 
 
-def _fetch_check_runs(client: GhClient, repo: str, sha: str) -> list[dict[str, Any]] | None:
+def _fetch_check_runs(
+    client: GhClient,
+    repo: str,
+    sha: str,
+    *,
+    completion: dict[str, bool] | None = None,
+) -> list[dict[str, Any]] | None:
     """ALL check-runs on a commit — the full set of checks a PR waits on,
     INCLUDING ones with no workflow file (CodeQL default setup, third-party app
     checks). This is the ground truth for the developer's wall-clock critical
@@ -3924,7 +4511,9 @@ def _fetch_check_runs(client: GhClient, repo: str, sha: str) -> list[dict[str, A
     MEASURED: better-auth/better-auth @ 6f20f44 reported `total_count = 103` and
     a single `per_page=100` page returned 100 — three checks silently missing from
     the critical-path sample, any of which could have been the merge pole."""
-    return _paginate(client, f"repos/{repo}/commits/{sha}/check-runs", "check_runs")
+    return _paginate(
+        client, f"repos/{repo}/commits/{sha}/check-runs", "check_runs",
+        completion=completion)
 
 
 # Conclusions for which GitHub has NO log to serve BECAUSE THE JOB NEVER STARTED:
@@ -4019,8 +4608,17 @@ def _select_repr_shas(
     fetch_checks: Callable[[str], dict[str, float] | None],
     req_names: frozenset[str],
     target: int,
+    repo_published: frozenset[str] = frozenset(),
 ) -> tuple[list[str], list[dict[str, float]], dict[str, list[float]], dict[str, Any]]:
     """Pick up to `target` PR head-SHAs for the measured critical path.
+
+    REPO-PUBLISHED status (issue #119): a required context the repo posts itself
+    (`repo_published`, from `_repo_published_required` — an in-repo aggregate `All CI`
+    status) is never a check-run either, but it is not an outside gate. When one is
+    unobservable, the observable-subset re-selection below runs even if NOTHING else
+    required was observed (every recent PR then qualifies), so the suite is never
+    promoted to the external-gate fallback on its account. Those names are reported in
+    `required_checks_repo_published`, apart from `required_checks_unobservable`.
 
     Walks candidates NEWEST-FIRST (by their most-recent run timestamp in
     `sha_ts`), fetches each one's `{check_name: duration}` via `fetch_checks`,
@@ -4143,12 +4741,15 @@ def _select_repr_shas(
     # unsatisfiable promotion below (PR-floor fallback, unchanged); a fully-observable
     # suite that's merely short is also left as-is (a genuinely partial-suite repo).
     required_checks_unobservable: list[str] = []
+    required_checks_repo_published: list[str] = []
     if req_names and len(repr_shas) < target and fb_per_sha:
         observed: set[str] = set().union(*(set(fm) for fm in fb_per_sha))
         req_observable = set(req_names) & observed
         req_unobservable = set(req_names) - observed
-        if req_observable and req_unobservable:
-            required_checks_unobservable = sorted(req_unobservable)
+        unobs_published = req_unobservable & set(repo_published)
+        if req_unobservable and (req_observable or unobs_published):
+            required_checks_repo_published = sorted(unobs_published)
+            required_checks_unobservable = sorted(req_unobservable - unobs_published)
             repr_shas, per_sha_checks, check_durs = [], [], {}
             for sha, fm in zip(fb_shas, fb_per_sha):
                 if req_observable <= set(fm):
@@ -4168,6 +4769,7 @@ def _select_repr_shas(
         # AND "excluded as unobservable"), which would otherwise be a contradictory state
         # (`required_suite_scoped=False` alongside a populated unobservable list).
         required_checks_unobservable = []
+        required_checks_repo_published = []
     sample_diag = {
         "target": target,
         "kept": len(repr_shas),
@@ -4183,6 +4785,10 @@ def _select_repr_shas(
         # the report can name what was scoped out, never silently treated as satisfied.
         "required_checks_unobservable": required_checks_unobservable,
     }
+    if required_checks_repo_published:
+        # Required statuses the repo posts itself (issue #119): unobservable as check-runs
+        # too, but NOT an outside gate. Stamped only when present (byte-identical otherwise).
+        sample_diag["required_checks_repo_published"] = required_checks_repo_published
     # The walk now pursues the full target past the old `max(target*3, target+8)`
     # cap, so a rejection-heavy window can issue many more check-run fetches than the
     # kept count implies. Surface that cost when it exceeds the old cap so a slow run
@@ -4246,6 +4852,8 @@ def _sampling_provenance_fields(sample_diag: dict[str, Any]) -> dict[str, Any]:
             sample_diag.get("required_suite_unsatisfiable", False),
         "required_checks_unobservable":
             sample_diag.get("required_checks_unobservable", []),
+        **({"required_checks_repo_published": sample_diag["required_checks_repo_published"]}
+           if sample_diag.get("required_checks_repo_published") else {}),
     }
 
 
@@ -4286,6 +4894,9 @@ def _segment_pr_populations(
     pr_check_p50: dict[str, float],
     job_p50_all: dict[str, float],
     job_bimodal_all: dict[str, dict[str, Any]] | None = None,
+    *,
+    per_sha_check_runs_complete: list[bool] | None = None,
+    population_completeness_out: list[bool] | None = None,
 ) -> list[PrPopulation]:
     """Return ONE population per sampled PR THAT RAN >=1 tracked check —
     (1/m, [(check, dur), ...]) for the checks that ran on that PR, where m is
@@ -4340,7 +4951,8 @@ def _segment_pr_populations(
     # per-population magnitudes are computed from the same inflation-proof values;
     # dropping empty maps keeps the share denominator honest (see docstring).
     capped: list[dict[str, float]] = []
-    for m in per_sha_checks:
+    capped_complete: list[bool] = []
+    for idx, m in enumerate(per_sha_checks):
         cm: dict[str, float] = {}
         for name, raw in m.items():
             if name not in pr_check_p50:
@@ -4350,6 +4962,10 @@ def _segment_pr_populations(
                 cm[name] = round(eff, 1)
         if cm:
             capped.append(cm)
+            capped_complete.append(bool(
+                per_sha_check_runs_complete
+                and idx < len(per_sha_check_runs_complete)
+                and per_sha_check_runs_complete[idx]))
     n = len(capped)
     if n < 6:
         return []
@@ -4374,6 +4990,8 @@ def _segment_pr_populations(
     for cm in capped:
         checks = sorted(cm.items(), key=lambda kv: -kv[1])
         pops.append((share, tuple(checks)))
+    if population_completeness_out is not None:
+        population_completeness_out.extend(capped_complete)
     return pops
 
 
@@ -4441,6 +5059,39 @@ def _bimodal_split(durs: list[float], *, min_n: int = 8, min_frac: float = 0.30,
         return None  # a sub-minute "slow" mode isn't a meaningful gate (e.g. 2s->4s)
     return {"n": n, "slow_n": len(high), "slow_frac": round(len(high) / n, 2),
             "low_p50_s": round(lo_med, 1), "high_p50_s": round(hi_med, 1)}
+
+
+def _minority_gate_tail(observations: list[tuple[float, str]]) -> dict[str, Any] | None:
+    """Describe a large slow tail without turning it into a savings claim.
+
+    The p50/p90 rule is deliberately separate from `_bimodal_split`: a 15% tail
+    is too small for that helper's two-population floor, but it can still be the
+    real merge wait on those PRs.  Keep every observation so the report verifier
+    can independently re-derive the quantiles, share, and example link.
+    """
+    rows = [(float(d), str(url or "")) for d, url in observations if d > 0]
+    if not rows:
+        return None
+    durations = [d for d, _url in rows]
+    p50 = _percentile(durations, 50)
+    p90 = _percentile(durations, 90)
+    if p90 < 600.0 or p90 < 3.0 * p50:
+        return None
+    slow = [(d, url) for d, url in rows if d >= p90]
+    example = next((url for _d, url in slow if url), "")
+    if not slow or not example:
+        return None
+    return {
+        "n": len(rows),
+        "p50_s": round(p50, 1),
+        "p90_s": round(p90, 1),
+        "tail_n": len(slow),
+        "tail_share_pct": round(100.0 * len(slow) / len(rows), 1),
+        "example_url": example,
+        "observations": [
+            {"duration_s": round(d, 1), "url": url} for d, url in rows
+        ],
+    }
 
 
 # =============================================================================
@@ -4700,7 +5351,8 @@ def _pole_timing_spread(check: str, workflow_file: str, job: str,
     # it. Named so the range is never read as describing the current configuration when
     # the spine door retained the other era's runs.
     era = next((str(f.get("kept_era") or "") for f in (config_era_facts or [])
-                if str(f.get("workflow_file") or "") == workflow_file), "")
+                if str(f.get("workflow_file") or "") == workflow_file
+                and f.get("rule") != "runner_label_change"), "")
     observations = [j for run in (jobs_per_run_by_wf.get(workflow_file) or [])
                     for j in run if str(j.get("name", "")) == job]
     return _timing_spread(observations, check=check, workflow_file=workflow_file,
@@ -4725,6 +5377,11 @@ def _critical_path(jobs_per_run: list[list[dict[str, Any]]]) -> dict[str, Any]:
     different runners are each measured correctly."""
     # name -> runner_label -> [durations]
     by_job_runner: dict[str, dict[str, list[float]]] = {}
+    # name -> sampled PR identity -> (run timestamp, duration, example URL).
+    # A workflow sample can contain several commits from one PR. The rendered
+    # tail claims a share of PRs, so retain only that PR's newest sampled run.
+    by_job_pr_observation: dict[str, dict[str, tuple[str, float, str]]] = {}
+    anonymous_observation = 0
     for run_jobs in jobs_per_run:
         for j in run_jobs:
             d = _job_duration_s(j)
@@ -4733,11 +5390,30 @@ def _critical_path(jobs_per_run: list[list[dict[str, Any]]]) -> dict[str, Any]:
             name = str(j.get("name", "?"))
             label = _job_runner_label(j) or "?"
             by_job_runner.setdefault(name, {}).setdefault(label, []).append(d)
+            pr_number = j.get("_run_pr_number")
+            head_sha = str(j.get("_run_head_sha") or "")
+            run_id = str(j.get("_run_id") or "")
+            if isinstance(pr_number, int):
+                sample_id = f"pr:{pr_number}"
+            elif head_sha:
+                sample_id = f"sha:{head_sha}"
+            elif run_id:
+                sample_id = f"run:{run_id}"
+            else:
+                anonymous_observation += 1
+                sample_id = f"observation:{anonymous_observation}"
+            timestamp = str(j.get("_run_created_at") or "")
+            prior = by_job_pr_observation.setdefault(name, {}).get(sample_id)
+            observation = (timestamp, d, str(j.get("html_url") or ""))
+            if prior is None or timestamp > prior[0] or (
+                    timestamp == prior[0] and d > prior[1]):
+                by_job_pr_observation[name][sample_id] = observation
 
     job_p50: dict[str, float] = {}
     job_p95: dict[str, float] = {}
     job_runner: dict[str, str] = {}
     job_bimodal: dict[str, dict[str, Any]] = {}
+    job_minority_tail: dict[str, dict[str, Any]] = {}
     for name, by_runner in by_job_runner.items():
         # This job's dominant runner = the one it ran on most (most samples).
         dominant = max(sorted(by_runner), key=lambda r: len(by_runner[r]))
@@ -4749,6 +5425,16 @@ def _critical_path(jobs_per_run: list[list[dict[str, Any]]]) -> dict[str, Any]:
         bi = _bimodal_split(by_runner[dominant])
         if bi is not None:
             job_bimodal[name] = bi
+        # The claim is a share of sampled PRs on which the check ran, so its
+        # denominator spans runner-label eras. Keep representative ranking
+        # dominant-runner scoped, but do not hide a slow minority merely because
+        # those PRs used another runner label.
+        tail = _minority_gate_tail([
+            (duration, url)
+            for _timestamp, duration, url in by_job_pr_observation[name].values()
+        ])
+        if tail is not None:
+            job_minority_tail[name] = tail
     # Each job's LONGEST sampled run, across every runner it ran on: the bound on any one
     # step of that job. A step's p50 is taken over the runs it ran in, so a conditional
     # step can legitimately exceed the job's all-runs p50, but never the job's longest
@@ -4774,6 +5460,7 @@ def _critical_path(jobs_per_run: list[list[dict[str, Any]]]) -> dict[str, Any]:
         "job_p50": job_p50,
         "job_max": job_max,
         "job_bimodal": job_bimodal,
+        "job_minority_tail": job_minority_tail,
         # Per-job dominant runner label string (job name -> sorted labels, e.g.
         # "ubuntu-latest"): the population each job's p50 above describes. Read by
         # OPT65's same-runner rounding check, the billed-runner lookup, and OPT81
@@ -4782,6 +5469,30 @@ def _critical_path(jobs_per_run: list[list[dict[str, Any]]]) -> dict[str, Any]:
         # The long-pole job's runner — the population that gates the wait.
         "runner_scope": lp_runner if lp_runner and lp_runner != "?" else "all-runners",
     }
+
+
+def _minority_tails_for_checks(
+        pr_checks: list[tuple[str, float]],
+        crit_by_wf: dict[str, dict[str, Any]],
+        confirmed_checks: "frozenset[str] | set[str]",
+) -> dict[str, dict[str, Any]]:
+    """Attach sampled tails only to checks in a confirmed required closure."""
+    if not confirmed_checks:
+        return {}
+    tails: dict[str, dict[str, Any]] = {}
+    for check, _p50 in pr_checks:
+        if check not in confirmed_checks:
+            continue
+        mapping = _map_check_to_job(
+            check, crit_by_wf, require_developer_timing=True)
+        if mapping is None:
+            continue
+        workflow, job = mapping
+        tail = ((crit_by_wf.get(workflow, {}).get("job_minority_tail") or {})
+                .get(job))
+        if isinstance(tail, dict):
+            tails[check] = tail
+    return tails
 
 
 # =============================================================================
@@ -4843,7 +5554,7 @@ _SIZING: dict[str, dict[str, Any]] = {
     "OPT17": {"model": "direct", "default_s": 30.0},
     "OPT23": {"model": "parallel-rebalance"},
     "OPT28": {"model": "direct", "default_s": 5.0},
-    "OPT32": {"model": "runner-min-only", "hit_rate": 0.3},
+    "OPT32": {"model": "runner-min-only"},
     # OPT35's STATIC fallback (residual appendix rows, when a shard matrix has no
     # failed-run history for the measured upgrade to fire) names ONE matrix job in
     # affected_jobs — so it must be sized off THAT job's own p50, never the
@@ -4869,7 +5580,9 @@ _SIZING: dict[str, dict[str, Any]] = {
     "OPT24": {"model": "measured"},
     "OPT25": {"model": "measured"},
     "OPT43": {"model": "measured"},
+    "OPT97": {"model": "measured"},
     "OPT48": {"model": "measured"},
+    "OPT100": {"model": "measured"},
     "OPT49": {"model": "measured"},
     "OPT50": {"model": "measured"},
     "OPT51": {"model": "measured"},
@@ -5043,6 +5756,44 @@ _EPHEMERAL_RUNNER_MIN_CAVEAT = (
     "with a persisted actions/cache for that dir + a measured warm-vs-cold "
     "delta (none here), so this is config-hygiene, not a credited bill saving")
 
+# OPT9 covers two materially different cache shapes. Lint and format result
+# caches avoid reprocessing the same inputs, so their existing conservative
+# sizing remains useful. Compiler build state and generated output can cost as
+# much to restore, validate, and save as they avoid; a cache hit alone does not
+# establish a saving. Keep those findings visible, but require a measured
+# before/after comparison rather than assigning the generic OPT9 default.
+_OPT9_BUILD_STATE_RE = re.compile(
+    r"(?:\btsc\b|typescript|tsbuildinfo|--incremental\b|"
+    r"generated[ -](?:client|output|code)|\bcodegen\b|code generation)",
+    re.IGNORECASE,
+)
+_OPT9_RESULT_CACHE_RE = re.compile(
+    r"(?:\beslint\b|\bprettier\b|\bjest\b|\bvitest\b)",
+    re.IGNORECASE,
+)
+
+
+def _opt9_is_build_state(f: dict[str, Any]) -> bool:
+    if f.get("pattern") != "OPT9":
+        return False
+    tool = str(f.get("opt9_tool") or "").lower()
+    if tool == "tsc":
+        return True
+    if tool in {"eslint", "prettier", "jest", "vitest"}:
+        return False
+    title = str(f.get("title") or "")
+    if _OPT9_RESULT_CACHE_RE.search(title):
+        return False
+    if _OPT9_BUILD_STATE_RE.search(title):
+        return True
+    evidence = " ".join(
+        str(f.get(key) or "")
+        for key in ("evidence", "match_text", "fix_strategy")
+    )
+    if _OPT9_RESULT_CACHE_RE.search(evidence):
+        return False
+    return bool(_OPT9_BUILD_STATE_RE.search(evidence))
+
 # Patterns whose modeled runner-min is NOT a realizable compute saving. The
 # credited `runner_min_saving` is set to None (so the bill headline / Also-noticed
 # appendix skip it) and the modeled amount is preserved in `runner_min_unrealizable_s` so the
@@ -5056,6 +5807,183 @@ _WALL_CLOCK_ONLY_NO_RUNNER_MIN = {"OPT21"}
 #           `if:` guards / an internal change-gate) and the trigger can be
 #           narrowed safely — a per-workflow judgment we don't fake.
 _RUNNER_MIN_UPPER_BOUND = {"OPT32"}
+
+_OPT32_CHANGED_FILES_MAX_PAGES = 30
+_OPT32_DEFAULT_PATHS = ("*.md", "docs/**/*.md", "LICENSE*", ".github/*.md")
+
+
+def _opt32_glob_matches(path: str, pattern: str) -> bool:
+    """Conservative GitHub-path glob subset used by the OPT32 estimator.
+
+    Unsupported constructs do not match. That can undercount a possible skip,
+    which is preferable to claiming savings for a pull request the filter would
+    still run.
+    """
+    path = path.lstrip("/")
+    pattern = pattern.strip().lstrip("/")
+    if not path or not pattern or any(c in pattern for c in "[]{}"):
+        return False
+    out = []
+    i = 0
+    while i < len(pattern):
+        c = pattern[i]
+        if c == "*":
+            if i + 1 < len(pattern) and pattern[i + 1] == "*":
+                i += 2
+                if i < len(pattern) and pattern[i] == "/":
+                    out.append("(?:.*/)?")
+                    i += 1
+                else:
+                    out.append(".*")
+                continue
+            out.append("[^/]*")
+        elif c == "?":
+            out.append("[^/]")
+        else:
+            out.append(re.escape(c))
+        i += 1
+    return re.fullmatch("".join(out), path) is not None
+
+
+def _opt32_default_path_matches(path: str) -> bool:
+    """The deliberately narrow fallback when the repository has no precedent."""
+    path = path.lstrip("/")
+    if "/" not in path and (path.endswith(".md") or path.startswith("LICENSE")):
+        return True
+    if path.startswith("docs/") and path.endswith(".md"):
+        return True
+    return (path.startswith(".github/") and path.count("/") == 1
+            and path.endswith(".md"))
+
+
+def _opt32_ignored_by_patterns(path: str, patterns: list[str]) -> bool:
+    """Apply ordered paths-ignore patterns, including conservative `!` restores."""
+    # An unsupported positive pattern merely misses a possible skip. An
+    # unsupported negative pattern is different: ignoring its restore could
+    # claim a skip that GitHub would not make, so fail the whole path closed.
+    if any(str(raw).strip().startswith("!")
+           and any(c in str(raw).strip()[1:] for c in "[]{}+\\")
+           for raw in patterns):
+        return False
+    ignored = False
+    for raw in patterns:
+        pattern = str(raw).strip()
+        negated = pattern.startswith("!")
+        if negated:
+            pattern = pattern[1:]
+        if _opt32_glob_matches(path, pattern):
+            ignored = not negated
+    return ignored
+
+
+def _opt32_repository_paths_ignore(
+    wf_docs: dict[str, dict[str, Any]],
+) -> tuple[list[str], list[str]]:
+    patterns: list[str] = []
+    sources: list[str] = []
+    for wf_path, doc in wf_docs.items():
+        on = doc.get("on") if isinstance(doc, dict) else None
+        if on is None and isinstance(doc, dict):
+            on = doc.get(True)
+        if not isinstance(on, dict):
+            continue
+        for event in ("pull_request", "pull_request_target", "push"):
+            cfg = on.get(event)
+            values = cfg.get("paths-ignore") if isinstance(cfg, dict) else None
+            if isinstance(values, str):
+                values = [values]
+            if not isinstance(values, list):
+                continue
+            usable = [str(v) for v in values if isinstance(v, str) and v.strip()]
+            if usable:
+                patterns.extend(usable)
+                sources.append(wf_path)
+    return list(dict.fromkeys(patterns)), list(dict.fromkeys(sources))
+
+
+def _opt32_changed_files(client: GhClient, repo: str, pr_number: int) -> list[str] | None:
+    """Fetch one sampled PR's changed files, bounded at GitHub's 3,000-file limit."""
+    files: list[str] = []
+    for page in range(1, _OPT32_CHANGED_FILES_MAX_PAGES + 1):
+        endpoint = f"repos/{repo}/pulls/{pr_number}/files?per_page=100"
+        if page > 1:
+            endpoint += f"&page={page}"
+        doc = client.json(endpoint)
+        if not isinstance(doc, list):
+            return None
+        for row in doc:
+            name = row.get("filename") if isinstance(row, dict) else None
+            if isinstance(name, str) and name:
+                files.append(name)
+        if len(doc) < 100:
+            return files
+    # GitHub exposes at most 3,000 files for this endpoint. A full last page
+    # therefore cannot prove the PR ended at the API ceiling; treating the
+    # prefix as complete could falsely classify a later code file as ignored.
+    return None
+
+
+def _measure_opt32_path_filters(
+    client: GhClient,
+    repo: str,
+    findings: list[dict[str, Any]],
+    sampled_runs_by_wf: dict[str, list[dict[str, Any]]],
+    wf_docs: dict[str, dict[str, Any]],
+) -> None:
+    """Measure OPT32 only from PRs already selected by the normal run sample."""
+    targets = [f for f in findings if f.get("pattern") == "OPT32"]
+    if not targets:
+        return
+    repo_patterns, pattern_sources = _opt32_repository_paths_ignore(wf_docs)
+    numbers_by_workflow = {
+        workflow: list(dict.fromkeys(
+            number for run in runs for number in [_run_pr_number(run)]
+            if isinstance(number, int)))
+        for workflow, runs in sampled_runs_by_wf.items()
+    }
+    all_numbers = list(dict.fromkeys(
+        number for finding in targets
+        for number in numbers_by_workflow.get(
+            str(finding.get("workflow_file") or ""), [])))
+    changed = {number: _opt32_changed_files(client, repo, number)
+               for number in all_numbers}
+    for finding in targets:
+        numbers = numbers_by_workflow.get(str(finding.get("workflow_file") or ""), [])
+        if not numbers or any(changed[number] is None for number in numbers):
+            continue
+        would_skip = 0
+        for number in numbers:
+            paths = changed[number] or []
+            if not paths:
+                continue
+            if repo_patterns:
+                skip = all(_opt32_ignored_by_patterns(path, repo_patterns) for path in paths)
+            else:
+                skip = all(_opt32_default_path_matches(path) for path in paths)
+            would_skip += int(skip)
+        sampled = len(numbers)
+        hit_rate = would_skip / sampled
+        source = "repository paths-ignore" if repo_patterns else "conservative defaults"
+        finding["path_filter_measurement"] = {
+            "sampled_prs": sampled,
+            "would_skip_prs": would_skip,
+            "hit_rate": round(hit_rate, 4),
+            "source": source,
+            "patterns": repo_patterns or list(_OPT32_DEFAULT_PATHS),
+            "source_workflows": pattern_sources,
+        }
+        measured = (f" Measured {would_skip} of {sampled} sampled PRs as fully "
+                    "covered by the candidate filter.")
+        if repo_patterns:
+            named = ", ".join(f"`{p}`" for p in repo_patterns)
+            workflows = ", ".join(f"`{p}`" for p in pattern_sources)
+            suffix = (f" Measured with repository `paths-ignore` from {workflows}: "
+                      f"{named}.")
+        else:
+            suffix = (" Measured with conservative documentation-only defaults: "
+                      "`*.md`, `docs/**/*.md`, `LICENSE*`, `.github/*.md`.")
+        finding["evidence"] = (str(finding.get("evidence") or "").rstrip()
+                               + measured + suffix)
 
 
 def _affected_job_p50(f: dict[str, Any], crit: dict[str, Any]) -> float:
@@ -5149,6 +6077,20 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
     long_pole = crit.get("long_pole_p50", 0.0)
     floor = crit.get("floor_p50", 0.0)
     model = cfg["model"]
+
+    if _opt9_is_build_state(f):
+        f["wall_clock_p50_s"] = None
+        f["runner_min_saving"] = None
+        f["tier"] = 2
+        f["realization"] = "none"
+        f["opt9_measure_before_after"] = True
+        f["size_note"] = (
+            "build-state and generated-output cache costs vary with restore, "
+            "validation, and save overhead — measure before and after on the "
+            "same workload before crediting seconds"
+        )
+        return
+
     # Guardrail A — D12 serial-gate auto-demote.
     if pat in _SERIAL_GATE_PATTERNS:
         model = "wall-clock-negative"
@@ -5243,7 +6185,9 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
         # sampled timings (a reusable-workflow caller, an unmappable name), we
         # do NOT substitute the long pole — we render qualitatively (omit rather
         # than fake), since we genuinely can't size the job's own cost.
-        rate = cfg.get("hit_rate", 0.0)
+        measurement = f.get("path_filter_measurement") if pat == "OPT32" else None
+        rate = (measurement.get("hit_rate", 0.0)
+                if isinstance(measurement, dict) else cfg.get("hit_rate", 0.0))
         cost_basis = cfg.get("cost_basis")
         if cfg.get("scope") == "job":
             per_run_s = _affected_job_p50(f, crit)
@@ -5298,6 +6242,13 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
                     "runner-minute (bill) only — at most the affected jobs' own "
                     f"compute × {rate_label}; re-grounded in the cost "
                     "spine's MEASURED billable compute when a spine is built")
+            elif pat == "OPT32" and isinstance(measurement, dict):
+                skipped = int(measurement.get("would_skip_prs") or 0)
+                sampled = int(measurement.get("sampled_prs") or 0)
+                f["size_note"] = (
+                    "runner-minute (bill) only — modeled upper bound from the "
+                    f"measured path-filter hit rate: {skipped} of {sampled} sampled PRs "
+                    "would skip × the workflow's measured per-run job cost × monthly volume")
             else:
                 # Most runner-min-only patterns are below the cluster floor; some
                 # (e.g. OPT12, a composite-action dedup) are wall-clock-NEUTRAL by
@@ -7472,6 +8423,7 @@ def _ruleset_ref_in_scope(detail: dict[str, Any], branch: str | None) -> bool:
 
 def _fetch_required_checks(
     client: "GhClient", repo: str, branch: str | None = "main",
+    *, branch_rules: dict[str, Any] | None = None,
 ) -> RequiredChecks | None:
     """The repo's REQUIRED status-check contexts, from rulesets + classic branch
     protection. Returns a `RequiredChecks` (names + completeness), or None when
@@ -7489,6 +8441,9 @@ def _fetch_required_checks(
 
     Repo-agnostic: driven entirely off the GitHub API, no hardcoded names."""
     names: set[str] = set()
+    strict_values: list[bool] = []
+    merge_queue = False
+    classic_strict_read = False
     found_any = False
     complete = True
     # Rulesets (the modern mechanism) — readable without admin on many repos.
@@ -7521,7 +8476,12 @@ def _fetch_required_checks(
             for rule in detail.get("rules") or []:
                 if not isinstance(rule, dict):
                     continue
+                if rule.get("type") == "merge_queue":
+                    merge_queue = True
                 if rule.get("type") == "required_status_checks":
+                    policy = (rule.get("parameters") or {}).get("strict_required_status_checks_policy")
+                    if isinstance(policy, bool):
+                        strict_values.append(policy)
                     found_any = True
                     params = rule.get("parameters") or {}
                     for c in params.get("required_status_checks") or []:
@@ -7543,6 +8503,9 @@ def _fetch_required_checks(
             f"repos/{repo}/branches/{branch}/protection/required_status_checks",
             allow_missing=True)
         if isinstance(prot, dict):
+            if isinstance(prot.get("strict"), bool):
+                strict_values.append(prot["strict"])
+                classic_strict_read = True
             found_any = True
             for c in prot.get("contexts") or []:
                 names.add(str(c))
@@ -7551,9 +8514,361 @@ def _fetch_required_checks(
                     names.add(str(c["context"]))
     else:
         complete = False
+    if branch_rules is not None:
+        # GitHub enforces the stricter source, so ANY readable "on" is on. "Off" is
+        # known only when classic protection was actually read: a non-admin gets a
+        # 404 there even when it requires up-to-date branches, so a ruleset that
+        # says off next to an unread classic rule stays UNKNOWN (disclosed).
+        strict = True if any(strict_values) else (False if classic_strict_read else None)
+        branch_rules.update(strict=strict, merge_queue=merge_queue,
+                            complete=complete and isinstance(rulesets, list))
     if not found_any and complete:
         return None
     return RequiredChecks(frozenset(names), complete)
+
+
+_OPT98_MIN_MERGES_PER_DAY = 30      # C1: below this the up-to-date rule is cheap
+_OPT98_MIN_RUNS = 15                # C2: successful first-attempt runs per event (as OPT97)
+_OPT98_REPROVE_RATIO = .8           # C2: queue median at least this share of the PR median
+_OPT98_DIFFERENT_RATIO = 1.5        # C2: above this the queue runs different work, not the same
+_OPT98_CHURN_SAMPLE = 30            # C1: merged-PR timelines read, at most
+_OPT98_WINDOW_DAYS = 30             # C1: complete UTC days counted before the pin
+# Affected-only execution (the OPT70 signals) and build/remote-cache reuse, in a
+# command, an action input or an env name/value. Any one settles the workflow as
+# already scoped: it is not re-proving the whole suite.
+_OPT98_SCOPED_RE = _re.compile(
+    r"\bnx\s+affected\b|--filter[= ]?['\"]?[^\s'\"]*\[|\bturbo\b[^\n]*--affected\b"
+    r"|--changed(?:Since)?\b|--only-?changed\b|\bgit\s+diff\b[^\n]*--name-only"
+    r"|--remote[-_]cache|--disk[-_]cache|--build-cache\b|\bs?ccache\b"
+    r"|\bTURBO_(?:TOKEN|API|REMOTE\w*)\b|\bNX_CLOUD\w*", _re.I)
+_OPT98_SCOPED_ACTION_RE = _re.compile(
+    r"nx-set-shas|paths-filter|changed-files|cache|setup-gradle|gradle-build-action", _re.I)
+# Paths a dependency-only `actions/cache` restores; anything else is a build cache.
+_OPT98_DEP_CACHE_RE = _re.compile(
+    r"node_modules|\.npm\b|pnpm|yarn|\.cache/pip\b|pip-cache|pypoetry|\.cache/uv\b|(?:^|/)\.?venv\b"
+    r"|go/pkg/mod|\.cargo/(?:registry|git)\b|\.m2\b|ms-playwright|\.bun/install|vendor/bundle"
+    r"|\.nuget/packages|composer", _re.I)
+# Context that differs between a pull_request run and a merge_group run.
+_OPT98_EVENT_RE = _re.compile(
+    r"github\.event_name|github\.event\.|github\.(?:base_ref|head_ref|ref_name|ref)\b"
+    r"|merge_group|pull_request|\bGITHUB_(?:EVENT_NAME|EVENT_PATH|BASE_REF|HEAD_REF|REF_NAME|REF)\b")
+
+
+def _opt98_text(value: Any) -> str:
+    if value is None:
+        return ''
+    if isinstance(value, (str, int, float, bool)):
+        return str(value)
+    # YAML yields dates and non-string keys; text only feeds regex searches.
+    return json.dumps(value, default=str)
+
+
+def _opt98_mapping(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise TypeError('mapping expected')
+    return value
+
+
+def _opt98_static_scope(doc: dict[str, Any]) -> tuple[str, list[str], str]:
+    """(status, jobs, reason) for one workflow, statically.
+
+    status: 'none' (no merge_group trigger), 'queue_only' (merge_group without
+    pull_request: nothing is re-proven), 'scoped' (affected-only execution or a
+    build/remote cache restore somewhere), 'unknown' (work could differ between
+    the two events, or lives where it isn't read; `reason` names it) or 'full'
+    (the same jobs run on both events, unscoped). Expressions in places that
+    don't select work (names, concurrency, runner labels, secrets) don't count.
+    Package scripts and third-party actions are not read; the measured
+    queue/PR ratio is the second proof. Raises on a malformed document.
+    """
+    events = _wf_on(doc)
+    if not isinstance(events, (str, dict, list)):
+        raise ValueError('unreadable workflow triggers')
+    if not _on_has_event(events, 'merge_group'):
+        return 'none', [], ''
+    if not _on_has_event(events, 'pull_request'):
+        return 'queue_only', [], ''
+    jobs = doc.get('jobs')
+    if not isinstance(jobs, dict) or not jobs:
+        raise ValueError('unreadable jobs')
+    wf_env = _opt98_mapping(doc.get('env'))
+    unknown: list[str] = []
+    if _OPT98_SCOPED_RE.search(_opt98_text(wf_env)):
+        return 'scoped', [], 'workflow env'
+    if _OPT98_EVENT_RE.search(_opt98_text(list(wf_env.values()))):
+        unknown.append('event-dependent workflow env')
+    for jid, job in jobs.items():
+        if not isinstance(job, dict):
+            raise ValueError('unreadable job')
+        if job.get('uses'):
+            unknown.append(f'job `{jid}` calls a reusable workflow')
+            continue
+        job_env = _opt98_mapping(job.get('env'))
+        cond = _opt98_text(job.get('if'))
+        if _OPT98_EVENT_RE.search(cond):
+            unknown.append(f'event-dependent condition on job `{jid}`')
+        elif 'needs.' in cond:
+            unknown.append(f"job `{jid}` runs only on another job's output")
+        strategy = _opt98_text(job.get('strategy'))
+        if '${{' in strategy and (_OPT98_EVENT_RE.search(strategy) or _re.search(r'needs\.|fromJSON', strategy, _re.I)):
+            unknown.append(f'generated matrix on job `{jid}`')
+        if _OPT98_SCOPED_RE.search(_opt98_text(job_env)):
+            return 'scoped', [], f'job `{jid}` env'
+        work = [_opt98_text(list(job_env.values()))]
+        for step in job.get('steps') or []:
+            if not isinstance(step, dict) or not ('run' in step or 'uses' in step):
+                unknown.append(f'unrecognized step shape in job `{jid}`')
+                continue
+            action = str(step.get('uses') or '').split('@')[0].strip()
+            with_ = _opt98_mapping(step.get('with'))
+            step_env = _opt98_mapping(step.get('env'))
+            run = _opt98_text(step.get('run'))
+            if action.startswith('./'):
+                unknown.append(f'job `{jid}` uses local action `{action}`, not read')
+            if action.lower() in ('actions/cache', 'actions/cache/restore'):
+                paths = with_.get('path')
+                lines = [ln.strip() for ln in (paths if isinstance(paths, list) else str(paths or '').splitlines())
+                         if str(ln).strip()]
+                if not lines or not all(_OPT98_DEP_CACHE_RE.search(str(ln)) for ln in lines):
+                    return 'scoped', [], f'job `{jid}` restores a build cache'
+            elif action and _OPT98_SCOPED_ACTION_RE.search(action):
+                return 'scoped', [], f'job `{jid}` uses `{action}`'
+            if _OPT98_SCOPED_RE.search(' '.join((run, _opt98_text(with_), _opt98_text(step_env)))):
+                return 'scoped', [], f'job `{jid}` scopes or caches its work'
+            if _OPT98_EVENT_RE.search(_opt98_text(step.get('if'))):
+                unknown.append(f'event-dependent condition on job `{jid}`')
+            inputs = '' if action.lower() == 'actions/checkout' else _opt98_text(with_)
+            work.append(' '.join((run, inputs, _opt98_text(list(step_env.values())))))
+        if _OPT98_EVENT_RE.search(' '.join(work)):
+            unknown.append(f'event-dependent command or input in job `{jid}`')
+    if unknown:
+        return 'unknown', [], '; '.join(dict.fromkeys(unknown))
+    return 'full', sorted(str(k) for k in jobs), ''
+
+
+def _opt98_full_suite(doc: dict[str, Any]) -> list[str]:
+    """The jobs a workflow runs unscoped on both pull_request and merge_group, or []."""
+    status, jobs, _reason = _opt98_static_scope(doc)
+    return jobs if status == 'full' else []
+
+
+def _opt98_merge_volume(client: 'GhClient', repo: str, since: str,
+                        until: str, *, branch: str | None = None) -> dict[str, Any]:
+    """One REST search; total_count measures the fixed inclusive date window.
+
+    The most recently updated 100 merged PR identities are only the churn sample, never the
+    rate denominator. Search truncation/incompleteness is disclosed, not guessed.
+    """
+    from urllib.parse import quote
+    if not branch:
+        return {'reason': 'merge-count branch not readable'}
+    query = quote(f'repo:{repo} is:pr is:merged base:{json.dumps(branch)} merged:{since}..{until}', safe='')
+    data = client.json(f'search/issues?q={query}&sort=updated&order=desc&per_page=100', allow_missing=True)
+    if not isinstance(data, dict) or not isinstance(data.get('total_count'), int):
+        return {'reason': 'merged PR search not readable'}
+    if data.get('incomplete_results') is not False:
+        return {'reason': 'merged PR search incomplete'}
+    start, end = _parse_dt(since), _parse_dt(until)
+    if start is None or end is None or end < start:
+        return {'reason': 'merged PR window invalid'}
+    days = (end - start).days + 1
+    return {'merges_per_day': data['total_count'] / days, 'merged_count': data['total_count'],
+            'window_days': days, 'since': since, 'until': until,
+            'sampled_merged_prs': [row['number'] for row in data.get('items', [])
+                                  if isinstance(row, dict) and isinstance(row.get('number'), int)]}
+
+
+def _opt98_rebase_churn(client: 'GhClient', repo: str, numbers: list[Any]) -> dict[str, Any]:
+    """How many sampled merged PRs were brought up to date after opening.
+
+    One timeline page per PR, at most `_OPT98_CHURN_SAMPLE` PRs. A two-parent
+    commit is the base merged in (GitHub's "Update branch"); a head force-push is
+    a rebase (or an amend). Run pages can't answer this: GitHub empties a run's
+    `pull_requests[]` once the PR merges (forks never carry it), and its base SHA
+    is the base NOW, not at run time. A timeline over one page is read to its
+    first page, so the count is a lower bound.
+    """
+    sample = [n for n in numbers if isinstance(n, int)][:_OPT98_CHURN_SAMPLE]
+    out = {'sampled': 0, 'unreadable': 0, 'merged_base': 0, 'force_pushed': 0,
+           'updated': 0, 'truncated': 0}
+    for number in sample:
+        events = client.json(f'repos/{repo}/issues/{number}/timeline?per_page=100', allow_missing=True)
+        if not isinstance(events, list):
+            out['unreadable'] += 1
+            continue
+        out['sampled'] += 1
+        out['truncated'] += len(events) >= 100
+        rows = [e for e in events if isinstance(e, dict)]
+        merged = any(e.get('event') == 'committed' and len(e.get('parents') or []) > 1 for e in rows)
+        forced = any(e.get('event') == 'head_ref_force_pushed' for e in rows)
+        out['merged_base'] += merged
+        out['force_pushed'] += forced
+        out['updated'] += merged or forced
+    if not out['sampled']:
+        out['reason'] = 'no merged PR timeline was readable' if sample else 'no merged PR identities'
+    return out
+
+
+def _opt98_queue_runs(runs_by_workflow: dict[str, Any]) -> list[str]:
+    """Workflows with a cached merge_group run: a queue exists even when its
+    workflow file was not sampled or the ruleset was not readable."""
+    return sorted(str(path) for path, runs in (runs_by_workflow or {}).items()
+                  if any(isinstance(r, dict) and r.get('event') == 'merge_group' for r in runs or []))
+
+
+def _opt98_collect_volume(client: 'GhClient', repo: str, branch: str | None,
+                          rules: dict[str, Any], wf_docs: dict[str, Any],
+                          runs_by_workflow: dict[str, Any], created_before: str | None
+                          ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """(volume, churn) for the up-to-date case, paid for only when it can fire.
+
+    A readable strict rule with no visible queue (ruleset, workflow trigger or
+    cached merge_group run) buys one merged-PR search over the 30 complete UTC
+    days before the pin; at 30 merges a day or more, at most 30 timeline reads.
+    """
+    if not (rules.get('strict') is True and rules.get('complete') is True
+            and not rules.get('merge_queue') and not _opt82_merge_group_workflows(wf_docs)
+            and not _opt98_queue_runs(runs_by_workflow)):
+        return {}, None
+    end = _parse_dt(_normalize_pin(created_before)) if created_before else _unpinned_now()
+    if end is None:
+        return {'reason': 'merged PR window not readable: the date pin did not parse'}, None
+    until = (end - _dt.timedelta(days=1)).date()
+    since = until - _dt.timedelta(days=_OPT98_WINDOW_DAYS - 1)
+    volume = _opt98_merge_volume(client, repo, str(since), str(until), branch=branch)
+    churn = None
+    if volume.get('merges_per_day', 0) >= _OPT98_MIN_MERGES_PER_DAY:
+        churn = _opt98_rebase_churn(client, repo, volume.get('sampled_merged_prs') or [])
+    return volume, churn
+
+
+def _opt98_churn_sentence(churn: dict[str, Any] | None) -> tuple[str, float | None]:
+    if not churn or not churn.get('sampled'):
+        reason = (churn or {}).get('reason', 'merged PR timelines were not read')
+        return f'Rebase-churn share not measured: {reason}.', None
+    n, updated = churn['sampled'], churn['updated']
+    share = updated / n
+    text = (f"{updated} of {n} sampled merged PRs ({share:.0%}) were brought up to date after opening "
+            f"({churn['merged_base']} merged the base branch in, {churn['force_pushed']} force-pushed; "
+            "a force-push can also be an amend); each update re-runs required CI.")
+    if churn.get('unreadable'):
+        text += f" {churn['unreadable']} timeline(s) not readable."
+    if churn.get('truncated'):
+        text += f" {churn['truncated']} timeline(s) longer than one page: a lower bound."
+    return text, share
+
+
+def _detect_opt98_merge_queue(*, workflows: dict[str, Any],
+                             runs_by_workflow: dict[str, Any],
+                             branch_rules: dict[str, Any], volume: dict[str, Any],
+                             start_id: int, churn: dict[str, Any] | None = None,
+                             ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Report two independent, uncredited causes of repeated merge validation.
+
+    `info` carries every reason a case was not settled; `info['status']` is
+    'measured' (nothing withheld), 'partial' or 'not_measured' (nothing settled).
+    """
+    info: dict[str, Any] = {}
+    findings: list[dict[str, Any]] = []
+    readable = branch_rules.get('complete') is True and isinstance(branch_rules.get('strict'), bool)
+    if not readable:
+        info['branch_rule'] = 'branch rule not readable'
+    if volume.get('reason'):
+        info['merged_prs'] = volume['reason']
+    queue_workflows: list[str] = []
+    static: dict[str, tuple[str, list[str], str]] = {}
+    for path, doc in workflows.items():
+        try:
+            if not isinstance(doc, dict):
+                raise ValueError('unreadable workflow')
+            static[path] = _opt98_static_scope(doc)
+        except (TypeError, AttributeError, ValueError):
+            info.setdefault('unreadable_workflows', []).append(path)
+            continue
+        if static[path][0] != 'none':
+            queue_workflows.append(path)
+    queue_present = bool(branch_rules.get('merge_queue') or queue_workflows
+                         or _opt98_queue_runs(runs_by_workflow))
+    c1_settled = False
+    if readable and (not branch_rules['strict'] or queue_present):
+        c1_settled = True
+    elif readable and not info.get('unreadable_workflows'):
+        if 'merges_per_day' not in volume:
+            info.setdefault('merged_prs', 'merged PR count not fetched')
+        else:
+            c1_settled = True
+    if c1_settled and branch_rules['strict'] and not queue_present \
+            and volume['merges_per_day'] >= _OPT98_MIN_MERGES_PER_DAY:
+        churn_text, share = _opt98_churn_sentence(churn)
+        evidence = (f"Require up to date is enabled without a merge queue; {volume['merges_per_day']:.1f} "
+                    f"merged PRs/day over {volume.get('window_days', _OPT98_WINDOW_DAYS)} days. {churn_text}")
+        f = _new_finding('OPT98', 'MEDIUM', 'Up-to-date rule repeats validation at high volume',
+                         '', '', evidence, 'merge-queue-reproving',
+                         'opt98--the-merge-queue-re-proves-what-is-already-proven', start_id + 1,
+                         size_note='Uncredited: rebase churn is observed, not a modeled saving.')
+        f['sizing_basis'] = 'measured'
+        f['merge_queue'] = {'case': 'strict', **volume, 'rebase_churn_share': share,
+                            'churn': dict(churn or {})}
+        findings.append(f)
+    c2_settled = False
+    for path, (status, jobs, reason) in static.items():
+        if status == 'unknown':
+            info.setdefault('static_unknown', []).append(f'{path} ({reason})')
+            continue
+        if status != 'full':
+            c2_settled = c2_settled or status in ('scoped', 'queue_only')
+            continue
+        durations: dict[str, list[float]] = {'pull_request': [], 'merge_group': []}
+        for run in runs_by_workflow.get(path) or []:
+            event = run.get('event')
+            if event not in durations or run.get('conclusion') != 'success' or run.get('run_attempt', 1) != 1:
+                continue
+            start, end = _parse_dt(run.get('run_started_at')), _parse_dt(run.get('updated_at'))
+            if start is not None and end is not None and end > start:
+                durations[event].append((end - start).total_seconds())
+        n_pr, n_queue = len(durations['pull_request']), len(durations['merge_group'])
+        if not n_pr or not n_queue:
+            info.setdefault('unmeasured_workflows', []).append(path)
+            continue
+        if min(n_pr, n_queue) < _OPT98_MIN_RUNS:
+            info.setdefault('thin_samples', []).append(
+                f'{path} (queue {n_queue} and PR {n_pr} successful first-attempt runs; '
+                f'{_OPT98_MIN_RUNS} each needed)')
+            continue
+        c2_settled = True
+        pr, queue = (_percentile(durations[k], 50) for k in ('pull_request', 'merge_group'))
+        ratio = queue / pr
+        if ratio < _OPT98_REPROVE_RATIO:
+            continue
+        if ratio > _OPT98_DIFFERENT_RATIO:
+            info.setdefault('pr_runs_differ', []).append(
+                f'{path} (queue median {queue:.0f}s is {ratio:.1f}x the PR median {pr:.0f}s)')
+            continue
+        job_list = ', '.join(f'`{j}`' for j in jobs)
+        evidence = (f'`{path}` runs the same jobs {job_list} for pull_request and merge_group without '
+                    'affected-only execution or a build-cache restore; '
+                    f'queue median {queue:.1f}s ({n_queue} runs), PR median {pr:.1f}s ({n_pr} runs). '
+                    'Package scripts and third-party actions were not read; the matching medians are the measured proof.')
+        f = _new_finding('OPT98', 'MEDIUM', 'The merge queue re-proves the full suite', path, '', evidence,
+                         'merge-queue-reproving', 'opt98--the-merge-queue-re-proves-what-is-already-proven',
+                         start_id + len(findings) + 1, size_note='Uncredited: affected-only savings are not modeled.')
+        f['sizing_basis'] = 'measured'
+        f['affected_jobs'] = list(jobs)
+        f['merge_queue'] = {'case': 'reproving', 'queue_median_s': queue, 'pr_median_s': pr,
+                            'queue_samples': n_queue, 'pr_samples': n_pr}
+        f['guardrail'] = 'Keep every required check on the merged result; never drop checks. Scope relative to the queue base with full fallback on resolution errors.'
+        findings.append(f)
+    pending = any(info.get(k) for k in ('branch_rule', 'merged_prs', 'unreadable_workflows',
+                                        'static_unknown', 'unmeasured_workflows', 'thin_samples'))
+    if not pending:
+        info['status'] = 'measured'
+    elif c1_settled or c2_settled:
+        info['status'] = 'partial'
+    else:
+        info['status'] = 'not_measured'
+    return findings, info
 
 
 def _matrix_base_name(job_name: str) -> str:
@@ -7918,8 +9233,8 @@ _STRUCTURAL_META: dict[str, dict[str, Any]] = {
             "needs: edge alone orders jobs, it does not gate merges, so the "
             "required check goes green while the moved work failed. The route "
             "that needs no admin: keep the REQUIRED CHECK NAME on a verdict job "
-            "that needs: the relocated jobs, runs with always() (or "
-            "!cancelled()) and exits non-zero unless every `needs.<job>.result` "
+            "that needs: the relocated jobs, runs with always() (not "
+            "!cancelled(), which a cancelled run skips) and exits non-zero unless every `needs.<job>.result` "
             "is success, treating failure, cancelled and skipped alike as a fail - "
             "a dependent skipped by a FAILED dependency reports skipped rather "
             "than failed, so always() WITHOUT propagating the results still "
@@ -8018,9 +9333,131 @@ def _new_structural_finding(
     return out
 
 
+def _opt25_family(variant: str) -> str | None:
+    """Named numbered families only; bare indices retain the legacy diagnosis.
+
+    Keep every other axis intact, so platforms/configurations never mix.
+    """
+    parts = [part.strip() for part in variant.split(",")]
+    candidates = []
+    for i, part in enumerate(parts):
+        # Recognizable platform/runtime versions are distinct configurations,
+        # even when their spelling resembles a numbered family. Do not impose
+        # a starting index: sampled shard families may be one-based or partial.
+        if _re.fullmatch(
+                r"(?:ubuntu|macos|windows|node(?:js)?|python|go|ruby|java|jdk|dotnet|rust)"
+                r"[ _.-]*v?\d+(?:[._-]\d+)*", part, _re.IGNORECASE):
+            continue
+        match = _re.fullmatch(r"(.*?[A-Za-z][\w .-]*?)[ _-]*\d+[ _-]*", part)
+        if not match:
+            continue
+        prefix = match.group(1).rstrip(" _-")
+        # 'shard 1' carries an index but no named family such as 'large'.
+        if prefix.lower() in {"shard", "partition"}:
+            continue
+        candidates.append((i, prefix))
+    marked = [(i, prefix) for i, prefix in candidates
+              if _re.search(r"\b(?:shard|partition)\b", parts[i], _re.IGNORECASE)]
+    candidates = marked or candidates
+    if len(candidates) != 1:
+        return None
+    i, prefix = candidates[0]
+    parts[i] = prefix
+    return ", ".join(parts)
+
+
+def _opt25_planner_knobs(base: str, workflow_doc: dict[str, Any]) -> list[str]:
+    """Follow matrix -> job output -> producing step, never execute repo code."""
+    import shlex
+
+    jobs = workflow_doc.get("jobs") or {}
+    if not isinstance(jobs, dict):
+        return []
+    matches = [job for key, job in jobs.items() if isinstance(job, dict)
+               and (str(job.get("name", key)) == base
+                    or ("${{" in str(job.get("name", ""))
+                        and _matrix_base_name(str(job["name"])) == base))]
+    if len(matches) != 1:
+        return []
+    strategy = matches[0].get("strategy") or {}
+    matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
+    producer = _re.fullmatch(
+        r"\s*\$\{\{\s*fromJSON\(\s*needs\.([\w-]+)\.outputs\.([\w-]+)\s*\)\s*\}\}\s*",
+        matrix or "") if isinstance(matrix, str) else None
+    if not producer:
+        return []
+    job = jobs.get(producer[1]) or {}
+    if not isinstance(job, dict):
+        return []
+    outputs = job.get("outputs") or {}
+    expression = outputs.get(producer[2], "") if isinstance(outputs, dict) else ""
+    step_ref = _re.fullmatch(
+        r"\s*\$\{\{\s*steps\.([\w-]+)\.outputs\.[\w-]+\s*\}\}\s*", str(expression))
+    if not step_ref:
+        return []
+    knobs = []
+    for step in job.get("steps") or []:
+        if not isinstance(step, dict) or step.get("id") != step_ref[1]:
+            continue
+        run = step.get("run")
+        if not isinstance(run, str):
+            continue
+        # Join shell line continuations so `--split-shards \` + `6` stays one flag.
+        run = _re.sub(r"\\\r?\n", " ", run)
+        try:
+            # Shell output assignments commonly wrap the planner in $(...).
+            # Parse literal command substitutions separately, without executing
+            # them; quoted assignments otherwise hide flags in one shell token.
+            source_lexer = shlex.shlex(run, posix=False, punctuation_chars="();&|<>")
+            source_lexer.whitespace_split = True
+            substitutions = [inner for token in source_lexer
+                             if not token.startswith("'")
+                             for inner in _re.findall(r"\$\(([^()]*)\)", token)]
+            tokens = []
+            for command in [run, *substitutions]:
+                lexer = shlex.shlex(command, posix=True, punctuation_chars="();&|<>")
+                lexer.whitespace_split = True
+                tokens.extend(list(lexer))
+        except ValueError:
+            continue
+        for i, token in enumerate(tokens):
+            flag, sep, value = token.partition("=")
+            if not _re.fullmatch(r"--(?:shards|split-shards|[\w-]+-target-seconds|shard-count)", flag):
+                continue
+            if not sep:
+                value = tokens[i + 1] if i + 1 < len(tokens) else ""
+            if _re.fullmatch(r"\d+(?:\.\d+)?", value) and float(value) > 0:
+                knob = f"{flag} {value}"
+                if knob not in knobs:
+                    knobs.append(knob)
+    return knobs
+
+
+def _size_opt25_next_step(finding: dict[str, Any], ctx: WallClockContext) -> None:
+    """A sequential ceiling, never added to the first-step saving or totals."""
+    step = finding.get("next_step")
+    if finding.get("pattern") != "OPT25" or not isinstance(step, dict):
+        return
+    if not ctx.concurrent and not ctx.pr_checks:
+        return  # no measured cross-workflow floor: keep guidance qualitative
+    from dataclasses import replace
+    result = size_wall_clock(step["combined_raw_ceiling_s"],
+                             replace(ctx, affected_jobs=tuple(step["family_jobs"])))
+    first = size_wall_clock(float(finding.get("wall_clock_p50_s") or 0), ctx).effective_s
+    additional = round(max(0.0, result.effective_s - first), 1)
+    step["combined_wall_clock_ceiling_s"] = result.effective_s
+    step["additional_wall_clock_ceiling_s"] = additional
+    step["derivation"] = [dict(bound=b, from_s=a, to_s=c, reason=why)
+                          for b, a, c, why in result.derivation]
+    finding["measured_evidence"]["note"] += (
+        f" The combined split-and-shard-count ceiling is ~{result.effective_s:.0f}s "
+        f"of wall-clock, at most ~{additional:.0f}s beyond the first step, "
+        "capped by the existing cross-workflow floor; this is not an extra credited saving.")
+
+
 def _detect_opt25_shard_imbalance(
     wf_path: str, jobs_per_run: list[list[dict[str, Any]]], start_idx: int,
-    crit: dict[str, Any],
+    crit: dict[str, Any], workflow_doc: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Shard durations per matrix base name across runs; flag if max/min > 3
     (or > 2 if the slow shard sits on the workflow's long pole). Catalog body
@@ -8067,18 +9504,43 @@ def _detect_opt25_shard_imbalance(
             continue
         medians = {n: _stats.median([d for d, _ in ds]) for n, ds in shards.items()}
         ranked = sorted(medians, key=medians.get, reverse=True)
+        # Scope the diagnosis to the slowest leg's named family. Unstructured
+        # matrices retain the existing homogeneous/heterogeneous behavior.
+        all_medians = medians
+        # Only an explicit shard/partition axis makes numbered variants shard
+        # families; `postgres-14` or `Node.js 20` are distinct configurations.
+        families = ({n: _opt25_family(n[len(base):].strip().strip("()"))
+                     for n in medians if _matrix_base_name(n) == base}
+                    if base_sharded.get(base, False) else {})
+        family = families.get(ranked[0])
+        members = {n: d for n, d in medians.items() if families.get(n) == family}
+        if family is not None and len(members) >= 2:
+            medians = members
+            shards = {n: shards[n] for n in medians}
+            ranked = sorted(medians, key=medians.get, reverse=True)
+        elif family is not None:
+            # A missing peer is missing evidence, not permission to pool families.
+            continue
         slow_name, fast_name = ranked[0], ranked[-1]
         slow, fast = medians[slow_name], medians[fast_name]
         second = medians[ranked[1]]  # next-slowest leg = the new pole after a fix
+        # A slower leg of ANOTHER family in the same matrix still gates it after
+        # the fix, so it floors the saving too (legacy matrices: no outside legs).
+        outside_name = max((n for n in all_medians if n not in medians),
+                           key=all_medians.get, default=None)
+        outside_s = all_medians[outside_name] if outside_name is not None else 0.0
+        floor_name, floor_s = ((outside_name, outside_s) if outside_s > second
+                               else (ranked[1], second))
         if fast <= 0:
             continue
         ratio = slow / fast
         # Threshold from catalog: >3x normally, >2x if slow shard is the long pole.
         thresh = 2.0 if slow >= 0.9 * long_pole else 3.0
-        if ratio <= thresh:
+        atomic = family is not None and slow >= 1.6 * second
+        if ratio <= thresh and not atomic:
             continue
         idx += 1
-        is_sharded = base_sharded.get(base, False)
+        is_sharded = family is not None or base_sharded.get(base, False)
         n_samples = sum(len(v) for v in shards.values())
         # Build the run-cited evidence table: every leg, slowest→fastest, each
         # linking to the actual job log of its worst observed run.
@@ -8089,10 +9551,10 @@ def _detect_opt25_shard_imbalance(
             shown = f"[{worst_d:.0f}s]({worst_url})" if worst_url else f"{worst_d:.0f}s"
             rows.append([f"`{leg}`", f"{medians[leg]:.0f}s", str(len(samples)), shown])
         leg_word = "shard" if is_sharded else "leg"
-        if is_sharded:
+        if is_sharded and not atomic:
             # Homogeneous suite: tests are interchangeable, so rebalance toward
             # the mean (achievable by redistributing test files / timing-split).
-            balanced = sum(medians.values()) / len(medians)
+            balanced = max(sum(medians.values()) / len(medians), outside_s)
             wc = round(max(slow - balanced, 0.0), 1)
             wc, cap_note = _cap_wall_clock(wc, slow_name, crit)
             title = "Shard Imbalance"
@@ -8110,7 +9572,7 @@ def _detect_opt25_shard_imbalance(
             # Heterogeneous matrix: legs do different work and can't be
             # rebalanced. Splitting the slow leg in two floors at the
             # NEXT-slowest leg, which becomes the new long pole.
-            wc = round(max(slow - max(slow / 2.0, second), 0.0), 1)
+            wc = round(max(slow - max(slow / 2.0, floor_s), 0.0), 1)
             wc, cap_note = _cap_wall_clock(wc, slow_name, crit)
             title = "Matrix Leg Imbalance"
             summary = (f"Across {n_samples} sampled `{base}` runs, the slowest leg "
@@ -8127,6 +9589,39 @@ def _detect_opt25_shard_imbalance(
                     f"lower.")
             size_note = (f"split the slow leg `{slow_name}`; saving (~{wc:.0f}s) is "
                          f"bounded by the next-slowest leg ({second:.0f}s)")
+        next_step = None
+        if family is not None:
+            rule = "atomic-unit" if atomic else "plain-imbalance"
+            summary = (f"Family `{family}`; {rule} rule: slow/second = "
+                       f"{slow / second:.2f}x (atomic-unit cutoff 1.6x); "
+                       f"family mean {sum(medians.values()) / len(medians):.0f}s. " + summary)
+        if atomic:
+            title = "Oversized Test or File in Shard Family"
+            summary = (f"Family `{family}`; atomic-unit rule: slow/second = "
+                       f"{slow / second:.2f}x >= 1.6x. `{slow_name}` takes "
+                       f"{slow:.0f}s; next-slowest `{ranked[1]}` takes {second:.0f}s.")
+            note = ("The slow shard is one oversized test or file that the splitter "
+                    "can't spread under the atomic-unit heuristic. Inspect its test timings "
+                    "to confirm, then split the slow test itself (subtests or a "
+                    "table-driven partition, or split the file). Adding shards or timing "
+                    f"data won't help that indivisible unit. Floors at `{floor_name}` "
+                    f"({floor_s:.0f}s), or the split half ({slow / 2:.0f}s), whichever is higher.")
+            size_note = f"split the slow test or file; modeled saving ~{wc:.0f}s"
+            rest = [medians[n] for n in ranked[1:]]
+            plateau = _stats.median(rest)
+            if len(rest) >= 2 and second >= slow / 2 and all(
+                    0.85 * plateau <= d <= 1.15 * plateau for d in rest):
+                knobs = _opt25_planner_knobs(base, workflow_doc or {})
+                planner = ", ".join(f"`{knob}`" for knob in knobs) or "the repo's matrix planner"
+                note += (f" Then raise this family's shard count. Its legs plateau at "
+                         f"~{plateau:.0f}s, so the planner's target is the floor. "
+                         f"Inspect {planner} for the knob to turn.")
+                outside = max((d for n, d in all_medians.items() if n not in medians), default=0.0)
+                outside = max(outside, max((d for n, d in (crit.get("job_p50") or {}).items()
+                                            if n not in medians), default=0.0))
+                next_step = {"family": family, "plateau_s": plateau,
+                             "family_jobs": list(medians), "planner_knobs": knobs,
+                             "combined_raw_ceiling_s": max(0.0, slow - max(slow / 2, outside))}
         me = {
             "summary": summary,
             "table": {"headers": [leg_word.capitalize(), "Median", "Samples",
@@ -8148,6 +9643,12 @@ def _detect_opt25_shard_imbalance(
             wc_p50=wc, rm=None, size_note=size_note,
             realization=("direct" if wc > 0 else "none"), measured_evidence=me,
         ))
+        if family is not None:
+            out[-1]["shard_family"] = family
+            out[-1]["evidence"] = summary
+            out[-1]["measured_signal"] = summary
+        if next_step is not None:
+            out[-1]["next_step"] = next_step
     return out
 
 
@@ -8155,21 +9656,23 @@ def _detect_opt43_queue_time(
     wf_path: str, jobs_per_run: list[list[dict[str, Any]]], start_idx: int,
     is_pr_workflow: bool,
     all_status_runs: list[dict[str, Any]] | None = None,
+    job_graph: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """P90 wait-to-start per job across runs; flag >60s PR / >120s release. Catalog body OPT43.
+    """P90 queue per job across runs; flag >60s PR / >120s release. Catalog body OPT43.
 
-    Wait = job `started_at` − the RUN's `created_at` (the trigger), tagged onto each job
-    as `_run_created_at` by `_accumulate_jobs`. Anchoring on the run's created_at — not
-    the job's — is the load-bearing choice: GitHub stamps a GATED job's own `created_at`
-    when its `needs:` dependency RESOLVES, so `started − job.created` sees only this
-    job's own runner pickup and HIDES everything the developer waited on upstream — the
-    gating job(s)' queue AND run time (~4m vs an ~18m real wait-to-start on one measured
-    repo). The run trigger captures that full pre-start wait the developer experiences.
-    CAVEAT: for a gated job this number therefore includes the
-    gating job's RUN time, so it is wall-clock time-to-start, not pure queue — the note
-    + size_note say so, and the realized saving is bounded by the gating job's own fix.
-    Falls back to the job's `created_at` only when the run trigger time is absent (older
-    data / direct unit calls)."""
+    Queue = job `started_at` − the moment the job became RUNNABLE. For an entry job
+    (no `needs:`) that is the RUN's `created_at` (the trigger, tagged onto each job as
+    `_run_created_at` by `_accumulate_jobs`). For a `needs:`-gated job it is the
+    latest `completed_at` of its needed upstream jobs in the SAME run, resolved
+    through `job_graph` (this workflow's scanned `{job_id: {name, needs, …}}`).
+    Measuring a gated job from the trigger instead would charge the upstream jobs'
+    RUN time as queue (a verdict that starts 3s after a 4m32s pytest job read
+    "P90 queue 334s") and double-count the upstream job's own long-pole fix.
+    With `job_graph` in hand, a sample whose runnable time is unknowable — the job
+    maps to no graph node, or a needed upstream has no completion in the run — is
+    EXCLUDED, never credited. Skipped jobs never ran on a runner and are skipped.
+    Without `job_graph` (direct unit calls) the trigger anchor stands, falling back
+    to the job's `created_at` only when the trigger time is absent."""
     # Run windows for the sibling-overlap attribution below: a queued job
     # whose wait overlapped ANOTHER in-flight run of the SAME workflow is
     # plausibly self-inflicted (a concurrency group would have prevented the
@@ -8187,26 +9690,110 @@ def _detect_opt43_queue_time(
         if w_start and w_end and w_end > w_start:
             run_windows.append((_run_id(r), w_start, w_end))
 
-    by_job: dict[str, list[tuple[float, str, int]]] = {}
+    def _node_of(name: str) -> str | None:
+        """This workflow's job id producing the sampled job `name` (exact display
+        name → matrix template → static matrix leg → reusable `<caller> / <child>`),
+        or None when no node of `job_graph` produces it."""
+        exact = [jid for jid, info in (job_graph or {}).items()
+                 if (info.get("name") or jid) == name]
+        if exact:
+            return exact[0] if len(exact) == 1 else None
+        # Reusable `<caller> / <child>` BEFORE templates: a leading-placeholder
+        # template (`${{ matrix.v }} / build`) would otherwise capture the child
+        # and hand it the wrong node's `needs`.
+        for jid, info in (job_graph or {}).items():
+            nm = info.get("name") or jid
+            if info.get("reusable") and name.startswith(nm + " / "):
+                return jid
+        matches = []
+        for jid, info in (job_graph or {}).items():
+            nm = info.get("name") or jid
+            if ((not _name_template_is_degenerate(nm) and _name_template_regex(nm).match(name))
+                    or _static_matrix_leg_match(nm, bool(info.get("matrix")), name)):
+                matches.append(jid)
+        if matches:
+            return matches[0] if len(matches) == 1 else None
+        # A placeholder-only `name:` (`${{ matrix.os }}`) matches anything, so the
+        # passes above skip it. The candidate set here is this workflow's OWN
+        # runtime jobs, so a leftover job comes from one of those nodes; when they
+        # all share one `needs` set, which one does not change the runnable time.
+        degen = [jid for jid, info in (job_graph or {}).items()
+                 if not info.get("reusable")
+                 and _name_template_is_degenerate(info.get("name") or jid)]
+        if degen and len({tuple(sorted(job_graph[jid].get("needs") or []))
+                          for jid in degen}) == 1:
+            return degen[0]
+        return None
+
+    by_job: dict[str, list[tuple[float, str, int, Any, Any]]] = {}
     for run_idx, run_jobs in enumerate(jobs_per_run):
+        nodes = {id(j): _node_of(str(j.get("name", ""))) for j in run_jobs} if job_graph else {}
+        # A reusable call's children (`<caller> / <child>`) all map to the CALLER's
+        # node, whose `needs` say nothing about the children's own `needs` inside
+        # the called workflow. Only the earliest-started child of each call is
+        # known to be runnable when the call was; later children may be gated on
+        # a sibling child, so they are excluded rather than credited.
+        first_child: dict[str, tuple[Any, int]] = {}
         for j in run_jobs:
+            node = nodes.get(id(j))
+            if (node is None or not job_graph[node].get("reusable")
+                    or str(j.get("conclusion") or "").lower() == "skipped"):
+                continue
+            st = _parse_dt(j.get("started_at"))
+            if st is None:
+                continue
+            cur = first_child.get(node)
+            if cur is None or st < cur[0]:
+                first_child[node] = (st, id(j))
+        for j in run_jobs:
+            if str(j.get("conclusion") or "").lower() == "skipped":
+                continue  # never ran on a runner: no queue to measure
             name = str(j.get("name", ""))
-            q = _duration_s(j.get("_run_created_at") or j.get("created_at"),
-                            j.get("started_at"))
+            runnable = j.get("_run_created_at") or j.get("created_at")
+            if job_graph:
+                node = nodes.get(id(j))
+                if node is None:
+                    continue  # can't tell entry from gated: exclude, never credit
+                if (job_graph[node].get("reusable")
+                        and (first_child.get(node) or (None, None))[1] != id(j)):
+                    continue  # a later reusable child: its own `needs` are unseen
+                needs = list(job_graph[node].get("needs") or [])
+                if needs:
+                    # A gated job becomes runnable when its LAST needed upstream
+                    # completes; time before that is the upstream RUNNING, not queue.
+                    ends: list[Any] = []
+                    for need in needs:
+                        done = [_parse_dt(u.get("completed_at")) for u in run_jobs
+                                if nodes.get(id(u)) == need]
+                        if not done or not all(done):
+                            ends = []
+                            break  # upstream completion unknown: exclude the sample
+                        ends.append(max(done))
+                    if not ends:
+                        continue
+                    runnable = max(ends).isoformat()
+            q = _duration_s(runnable, j.get("started_at"))
             if q is not None and q >= 0:
                 by_job.setdefault(name, []).append(
-                    (q, str(j.get("html_url") or ""), run_idx))
+                    (q, str(j.get("html_url") or ""), run_idx,
+                     _parse_dt(runnable), _parse_dt(j.get("started_at"))))
+            elif q is not None and job_graph and q > -5:
+                # second-granularity stamps: a verdict picked up the same second its
+                # upstream completed can read a hair negative — that is ~0 queue.
+                by_job.setdefault(name, []).append(
+                    (0.0, str(j.get("html_url") or ""), run_idx,
+                     _parse_dt(j.get("started_at")), _parse_dt(j.get("started_at"))))
 
-    def _sibling_overlap_ratio(samples: list[tuple[float, str, int]]) -> float | None:
+    def _sibling_overlap_ratio(samples: list[tuple[float, str, int, Any, Any]]) -> float | None:
         """Share of queued samples whose queue interval overlapped an in-flight
         sibling run of this workflow (windows from the ALL-STATUS slice; a
         sibling is any OTHER run, so the sampled run's own window is excluded
-        by identity of its start). None when nothing is computable — and None
+        by run ID). None when nothing is computable — and None
         MUST stay None downstream: no attribution is never an exoneration."""
         if not run_windows:
             return None
         checked = overlapped = 0
-        for _q, _url, run_idx in samples:
+        for _q, _url, run_idx, q_start, q_end in samples:
             jobs = jobs_per_run[run_idx]
             # Self-exclusion is by RUN ID, never by timestamp equality: the
             # window starts at run_started_at while the queue interval starts
@@ -8216,11 +9803,8 @@ def _detect_opt43_queue_time(
             own_ids = {str(j.get("run_id")) for j in jobs if j.get("run_id") is not None}
             if not own_ids:
                 continue  # can't identify the run: unattributable, not a vote
-            q_starts = [_parse_dt(j.get("_run_created_at") or j.get("created_at"))
-                        for j in jobs]
-            q_ends = [_parse_dt(j.get("started_at")) for j in jobs]
-            q_start = min((s for s in q_starts if s), default=None)
-            q_end = max((e for e in q_ends if e), default=None)
+            # Use this job's measured runnable-to-start interval, never the
+            # workflow span (which includes upstream execution and other jobs).
             if not (q_start and q_end) or q_end <= q_start:
                 continue
             checked += 1
@@ -8237,11 +9821,11 @@ def _detect_opt43_queue_time(
     for job_name, samples in by_job.items():
         if len(samples) < 3:
             continue
-        qs = [q for q, _url, _ri in samples]
+        qs = [sample[0] for sample in samples]
         p90 = _percentile(qs, 90)
         if p90 > threshold:
             idx += 1
-            worst_q, worst_url, _worst_ri = max(samples, key=lambda qu: qu[0])
+            worst_q, worst_url, *_ = max(samples, key=lambda qu: qu[0])
             kind = "PR" if is_pr_workflow else "release/scheduled"
             overlap = _sibling_overlap_ratio(samples)
             if overlap is None:
@@ -8268,19 +9852,19 @@ def _detect_opt43_queue_time(
                 summary=(f"job `{job_name}` waited P90 {p90:.0f}s in queue over "
                          f"{len(samples)} sampled runs (threshold {threshold:.0f}s "
                          f"for {kind} workflows)."),
-                note="Wait-to-start (run trigger → job started) is developer wait "
-                     "before this job runs. For a job gated by `needs:` it spans the "
-                     "gating job(s)' own queue AND run time — so the savable portion is "
-                     "whatever the gating job's own fix removes, not necessarily the "
-                     "whole number. The link opens the worst-queued run.")
+                note="Queue = time from when the job became runnable (the run "
+                     "trigger, or for a `needs:`-gated job the moment its last needed "
+                     "upstream job completed) to when it started on a runner — "
+                     "developer wait that no step of the job itself causes. The link "
+                     "opens the worst-queued run.")
             f = _new_finding(
                 "OPT43", "MEDIUM", "Excessive Queue Time", wf_path, job_name,
                 f"job `{job_name}` P90 queue {p90:.0f}s over {len(samples)} runs "
                 f"(threshold {threshold:.0f}s for {kind} workflows)",
                 "excessive-queue-time", "opt43--excessive-queue-time", idx,
                 wc_p50=round(p90, 1), rm=None,
-                size_note="wall-clock wait before the job starts (a gated job's "
-                          "number includes the gating job(s) it waits on)",
+                size_note="wall-clock wait between the job becoming runnable and "
+                          "starting (upstream `needs:` run time excluded)",
                 realization="direct", measured_evidence=me,
             )
             # Structured cause attribution (config-controllable causes vs
@@ -8291,6 +9875,724 @@ def _detect_opt43_queue_time(
                 f["queue_cause_note"] = cause_note
             out.append(f)
     return out
+
+
+def _opt97_runner_inventory(client, repo):
+    """One optional page; incomplete/denied inventory never proves uniqueness."""
+    doc = client.json(f"repos/{repo}/actions/runners?per_page=100", allow_missing=True)
+    if not isinstance(doc, dict) or not isinstance(doc.get("runners"), list):
+        return None
+    count = doc.get("total_count")
+    return doc["runners"] if isinstance(count, int) and count == len(doc["runners"]) else None
+
+
+def _opt97_rank_correlation(xs: list[float], ys: list[float]) -> float:
+    """Spearman correlation with average ranks for ties; constants imply zero."""
+    def ranks(values):
+        ordered = sorted(range(len(values)), key=values.__getitem__)
+        result = [0.0] * len(values)
+        i = 0
+        while i < len(ordered):
+            end = i + 1
+            while end < len(ordered) and values[ordered[end]] == values[ordered[i]]:
+                end += 1
+            for pos in range(i, end):
+                result[ordered[pos]] = (i + end - 1) / 2
+            i = end
+        return result
+    a, b = ranks(xs), ranks(ys)
+    if not a:
+        return 0.0
+    ma, mb = statistics.mean(a), statistics.mean(b)
+    covariance = sum((x - ma) * (y - mb) for x, y in zip(a, b))
+    denominator = (sum((x - ma) ** 2 for x in a) * sum((y - mb) ** 2 for y in b)) ** .5
+    return covariance / denominator if denominator else 0.0
+
+
+def _opt97_job(doc: dict[str, Any], name: str) -> tuple[str, dict[str, Any]] | None:
+    """Resolve only an unambiguous job; unseen reusable children are excluded."""
+    jobs = doc.get("jobs") or {}
+    candidates = [(str(jid), job) for jid, job in jobs.items() if isinstance(job, dict)
+                  and not job.get("uses") and (str(job.get("name") or jid) == name
+                  or (not _name_template_is_degenerate(str(job.get("name") or jid))
+                      and _name_template_regex(str(job.get("name") or jid)).fullmatch(name))
+                  or _static_matrix_leg_match(str(job.get("name") or jid),
+                                              bool((job.get("strategy") or {}).get("matrix"))
+                                              if isinstance(job.get("strategy") or {}, dict) else False, name))]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+# A group key naming any of these differs per ref, PR, commit or run, so it never
+# makes unrelated PRs wait on each other. Anything else is shared across PRs.
+_OPT97_SCOPED_GROUP = re.compile(
+    r"github\.(?:ref|head_ref|sha|run_id|run_number|event\.number"
+    r"|event\.pull_request\.(?:number|head\.(?:ref|sha)))")
+
+
+def _opt97_global_group(doc: dict[str, Any], job: dict[str, Any],
+                        wf_path: str = "") -> tuple[str | None, str | None, str | None]:
+    """(comparison key, display text, level) of a one-at-a-time group shared across
+    PRs, else (None, None, level). A job-level `concurrency:` replaces the
+    workflow-level one. The string form is a group name; an omitted
+    `cancel-in-progress` is false (GitHub's default)."""
+    level = "job" if "concurrency" in job else "workflow"
+    config = job.get("concurrency") if level == "job" else doc.get("concurrency")
+    if isinstance(config, str):
+        group, cancel = config, False
+    elif isinstance(config, dict):
+        group, cancel = config.get("group"), config.get("cancel-in-progress", False)
+    else:
+        return None, None, None
+    if (cancel is not False or not isinstance(group, str) or not group.strip()
+            or _OPT97_SCOPED_GROUP.search(group)):
+        return None, None, level
+    key = group.strip().lower()  # GitHub concurrency groups are case-insensitive.
+    if "${{" in key:
+        # `${{ github.workflow }}` and inputs resolve per workflow: compare the
+        # unresolved text only within the workflow that wrote it.
+        key = f"{wf_path}::{key}"
+    return key, group.strip(), level
+
+
+def _opt97_intervals(wf_path, run, doc):
+    """Every non-skipped job of one run with its readiness anchor.
+
+    `ready` is when the job could first take a runner: the run's created_at for an
+    entry job held by a workflow-level global group (its jobs are created only when
+    the group frees), else the job's created_at, moved past the last needed
+    upstream completion. None when an upstream completion is unknown. Unresolved
+    jobs (no single YAML job) keep their created_at and carry no group."""
+    resolved = {id(j): _opt97_job(doc, str(j.get("name", ""))) for j in run}
+    out = []
+    for j in run:
+        if j.get("conclusion") == "skipped":
+            continue
+        match = resolved[id(j)]
+        group = group_text = None
+        ready = _parse_dt(j.get("created_at") or j.get("_run_created_at"))
+        if match is not None:
+            group, group_text, level = _opt97_global_group(doc, match[1], wf_path)
+            if group and level == "workflow" and int(j.get("run_attempt") or 1) == 1:
+                # A run held by a workflow-level group creates its jobs only when
+                # the group frees, so the wait precedes the job's created_at. A
+                # re-run keeps the first attempt's created_at: never use it there.
+                ready = _parse_dt(j.get("_run_created_at")) or ready
+            needs = match[1].get("needs") or []
+            needs = [needs] if isinstance(needs, str) else needs
+            ends = []
+            for need in needs:
+                upstream = [_parse_dt(u.get("completed_at")) for u in run
+                            if resolved[id(u)] and resolved[id(u)][0] == need]
+                if not upstream or not all(upstream):
+                    ends = []
+                    break
+                ends.append(max(upstream))
+            if needs:
+                # Job creation can precede upstream completion. Readiness cannot.
+                ready = max([*ends, *([ready] if ready else [])]) if ends else None
+        out.append({"job": j, "match": match, "ready": ready, "group": group,
+                    "group_text": group_text,
+                    "labels": tuple(sorted(str(x) for x in j.get("labels") or [] if x)),
+                    "start": _parse_dt(j.get("started_at")),
+                    "end": _parse_dt(j.get("completed_at"))})
+    return out
+
+
+def _opt97_samples(wf_path, jobs_per_run, doc, unresolved: list | None = None):
+    """Valid runnable-to-start intervals, excluding upstream execution.
+    `unresolved` ([unresolved, total]) counts sampled jobs that resolve to no
+    single YAML job (reusable children, ambiguous names) out of all non-skipped."""
+    rows = []
+    for run in jobs_per_run:
+        for iv in _opt97_intervals(wf_path, run, doc):
+            if unresolved is not None:
+                unresolved[1] += 1
+            if iv["match"] is None:
+                if unresolved is not None:
+                    unresolved[0] += 1
+                continue
+            created, start, end = iv["ready"], iv["start"], iv["end"]
+            if not created or not start or not end or not created <= start < end:
+                continue
+            rows.append({"workflow": wf_path, "job": iv["job"], "run": run,
+                         "node": iv["match"][0], "config": iv["match"][1],
+                         "labels": iv["labels"], "group": iv["group"],
+                         "group_text": iv["group_text"],
+                         "created": created, "start": start, "end": end,
+                         "queue": (start - created).total_seconds(),
+                         "runtime": (end - start).total_seconds()})
+    return rows
+
+
+def _opt97_competitors(wf_path, run, doc):
+    """In-flight intervals of one run's jobs: from readiness to completion; a job
+    that has not completed is still in flight (end None). A job whose upstream
+    has not completed is not yet competing, unless it already started."""
+    rows = []
+    for iv in _opt97_intervals(wf_path, run, doc):
+        created = iv["ready"] or iv["start"]
+        if created is None:
+            continue
+        rows.append({"id": iv["job"].get("id"), "labels": iv["labels"],
+                     "group": iv["group"], "created": created, "end": iv["end"]})
+    return rows
+
+
+def _opt97_inflight(row, labels, rivals) -> int:
+    """Competing jobs in flight when `row` became runnable: same exact label set,
+    or the same global group. A job created at the same instant does not count."""
+    at = row["created"]
+    return sum(1 for r in rivals
+               if r["created"] < at and (r["end"] is None or at < r["end"])
+               and ((labels and r["labels"] == labels)
+                    or (row["group"] and r["group"] == row["group"])))
+
+
+# The dense competition read: at most this many run-list pages (100 runs each)
+# and this many job lists per population. Hitting either cap means the
+# competition was not measured, never that it was small.
+_OPT97_DENSE_RUN_PAGES = 3
+_OPT97_DENSE_JOB_RUNS = 60
+# How far before the first sampled job a competing run may have been created and
+# still be in flight.
+_OPT97_DENSE_LOOKBACK = _dt.timedelta(hours=3)
+
+
+def _opt97_can_share(doc, labels, group, wf_path) -> bool:
+    """Whether any job of a workflow could use the same runners or group. Unknown
+    workflows, reusable calls and dynamic `runs-on` cannot be ruled out."""
+    jobs = doc.get("jobs") if isinstance(doc, dict) else None
+    if not isinstance(jobs, dict):
+        return True
+    want = {str(x).lower() for x in labels}
+    for job in jobs.values():
+        if not isinstance(job, dict):
+            continue
+        if job.get("uses"):
+            return True
+        if group and _opt97_global_group(doc, job, wf_path)[0] == group:
+            return True
+        runs_on = job.get("runs-on")
+        runs_on = [runs_on] if isinstance(runs_on, str) else runs_on
+        if not isinstance(runs_on, list) or any("${{" in str(x) for x in runs_on):
+            return True
+        if {str(x).lower() for x in runs_on} == want:  # runs-on is never empty
+            return True
+    return False
+
+
+def _opt97_dense_competition(client, repo, labels, group, lo, hi, *, workflow_docs,
+                             known_runs, stats, cache):
+    """Every run (any status) created in [lo, hi], and the jobs of those whose
+    workflow could share the runners or group: `(rivals, None)`, or
+    `(None, reason)` when the read failed or hit a cap. The newest-success sample
+    sees a small fraction of competing jobs, so counts come from here only."""
+    stats["populations"] += 1
+    fmt = "%Y-%m-%dT%H:%M:%SZ"
+    window = (f"{lo.astimezone(_dt.timezone.utc).strftime(fmt)}.."
+              f"{hi.astimezone(_dt.timezone.utc).strftime(fmt)}")
+    runs = []
+    for page in range(1, _OPT97_DENSE_RUN_PAGES + 1):
+        endpoint = f"repos/{repo}/actions/runs?created={window}&per_page=100&page={page}"
+        if endpoint not in cache:
+            stats["run_pages"] += 1
+            cache[endpoint] = client.json(endpoint, allow_missing=True)
+        body = cache[endpoint]
+        batch = body.get("workflow_runs") if isinstance(body, dict) else None
+        if not isinstance(batch, list):
+            return None, "the run list could not be read"
+        runs.extend(r for r in batch if isinstance(r, dict))
+        if len(batch) < 100:
+            break
+    else:
+        return None, f"more than {_OPT97_DENSE_RUN_PAGES * 100} runs in the window"
+    sharing = []
+    for run in runs:
+        path = str(run.get("path") or "").split("@")[0]
+        if _opt97_can_share(workflow_docs.get(path), labels, group, path):
+            sharing.append((path, run))
+    if sum(1 for _, run in sharing if str(run.get("id")) not in known_runs) > _OPT97_DENSE_JOB_RUNS:
+        return None, f"more than {_OPT97_DENSE_JOB_RUNS} runs could share the runners"
+    rivals = []
+    for path, run in sharing:
+        jobs = known_runs.get(str(run.get("id")))
+        if jobs is None:
+            endpoint = f"repos/{repo}/actions/runs/{run.get('id')}/jobs?per_page=100"
+            if endpoint not in cache:
+                stats["job_lists"] += 1
+                cache[endpoint] = client.json(endpoint, allow_missing=True)
+                record = getattr(client, "record_job_fetch", None)
+                if callable(record):
+                    record(not isinstance(cache[endpoint], dict))
+            body = cache[endpoint]
+            jobs = body.get("jobs") if isinstance(body, dict) else None
+            if not isinstance(jobs, list):
+                return None, "a job list could not be read"
+            total = body.get("total_count")
+            if isinstance(total, int) and total > len(jobs):
+                return None, "a run has more than 100 jobs"
+            jobs = [dict(j) for j in jobs if isinstance(j, dict)]
+            _stamp_run_context(run, jobs)
+        rivals.extend(_opt97_competitors(path, jobs, workflow_docs.get(path) or {}))
+    return rivals, None
+
+
+def _opt97_hints(samples, labels, runner_inventory):
+    """Static hints naming the likely one-at-a-time resource."""
+    hints = []
+    if samples[0]["group"]:
+        hints.append(f"global concurrency group `{samples[0]['group_text']}`")
+    if runner_inventory is not None:
+        # The inventory is the repository's own runner list. Organization
+        # runners serving the same label are not visible to it.
+        for label in labels:
+            matches = sum(1 for runner in runner_inventory
+                          if label in {str(x.get('name', '')) if isinstance(x, dict) else str(x)
+                                       for x in runner.get('labels', [])})
+            if matches == 1:
+                hints.append(f"label `{label}` has one repo-level runner "
+                             "(org runners not visible)")
+    for step in samples[0]["config"].get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        text = str(step.get("uses", "")) + " " + str(step.get("run", ""))
+        for token in ("android-emulator-runner", "xcrun simctl", "adb"):
+            if re.search(r"(?<![\w-])" + re.escape(token) + r"(?![\w-])", text):
+                hints.append(f"device step `{step.get('name') or token}`")
+    return list(dict.fromkeys(hints))
+
+
+def _detect_opt97_single_slot_queue(
+    wf_path: str, jobs_per_run: list[list[dict[str, Any]]], start_idx: int,
+    wf_doc: dict[str, Any], *, all_jobs_by_wf=None, workflow_docs=None,
+    baseline_queue_s: float | None = None, merge_gating_jobs: set[str] | None = None,
+    runner_inventory: list[dict[str, Any]] | None = None, notes: list | None = None,
+    competition=None,
+) -> list[dict[str, Any]]:
+    """Queue follows contention, but execution does not: a capacity hypothesis.
+
+    Per job and exact runner-label set. A population whose queue meets the
+    thresholds is evaluated only on a self-hosted label set or with a static hint
+    (global group, one repo-level runner, device step); on hosted runners an
+    account's concurrent-job limit raises queue and in-flight together, so that
+    queue stays with OPT43. In-flight counts come only from `competition(labels,
+    group, lo, hi)`, a dense read of every run in the window; without it, or when
+    it fails or is capped, the population is noted "competition not measured"
+    and never fires. Baseline is the P10 runnable queue of the OTHER sampled
+    jobs; with none, no wall-clock credit. Never a utilization claim.
+    """
+    unresolved = [0, 0]
+    own = _opt97_samples(wf_path, jobs_per_run, wf_doc, unresolved)
+    if unresolved[0] and notes is not None:
+        notes.append({"workflow_file": wf_path, "reason": "unresolved jobs",
+                      "unresolved": unresolved[0], "jobs": unresolved[1]})
+    docs = {**(workflow_docs or {}), wf_path: wf_doc}
+    pool = []
+    for path, runs in (all_jobs_by_wf or {wf_path: jobs_per_run}).items():
+        pool.extend(_opt97_samples(path, runs, docs.get(path, {})))
+    populations = {}
+    for row in own:
+        populations.setdefault((row["job"].get("name", ""), row["labels"]), []).append(row)
+    out = []
+    for (name, labels), samples in populations.items():
+        queues = [r["queue"] for r in samples]
+        median, p90 = statistics.median(queues), _percentile(queues, 90)
+        if median < 60 or p90 < 300:
+            continue  # no queue worth explaining: never noted
+        hints = _opt97_hints(samples, labels, runner_inventory)
+        if "self-hosted" not in {x.lower() for x in labels} and not hints:
+            continue  # hosted pool: an account's job limit explains this; OPT43 keeps it
+        note = {"workflow_file": wf_path, "job": name, "labels": list(labels),
+                "samples": len(samples)}
+        if len(samples) < 15:
+            if notes is not None:
+                notes.append({**note, "reason": "too few samples"})
+            continue
+        created = [r["created"] for r in samples]
+        rivals, why = (competition(labels, samples[0]["group"],
+                                   min(created) - _OPT97_DENSE_LOOKBACK, max(created))
+                       if competition is not None else (None, "no competition read"))
+        if rivals is None:
+            if notes is not None:
+                notes.append({**note, "reason": "competition not measured", "detail": why})
+            continue
+        counts = [_opt97_inflight(row, labels, rivals) for row in samples]
+        queue_rho = _opt97_rank_correlation(queues, counts)
+        runtime_rho = _opt97_rank_correlation([r["runtime"] for r in samples], counts)
+        if queue_rho < .6 or abs(runtime_rho) >= .3:
+            continue
+        resource = '; '.join(hints) or 'runner label set `' + ', '.join(labels) + '` (slot count unknown)'
+        evidence = (f"job `{name}` median queue {median:.0f}s, P90 {p90:.0f}s across {len(samples)} samples; "
+                    f"queue/in-flight rank correlation {queue_rho:.2f}, run-time/in-flight {runtime_rho:.2f} "
+                    f"(in-flight counted from {len(rivals)} jobs of every run in the window). "
+                    f"Likely resource: {resource}. Consistent with a one-at-a-time capacity limit; "
+                    "runner utilization was not measured.")
+        baseline = baseline_queue_s
+        if baseline is None:
+            others = [r["queue"] for r in pool
+                      if not (r["workflow"] == wf_path and r["job"].get("name", "") == name
+                              and r["labels"] == labels)]
+            baseline = _percentile(others, 10) if others else None
+        gating = merge_gating_jobs is not None and samples[0]["node"] in merge_gating_jobs
+        recoverable = []
+        for row in samples:
+            finishes = [(job, _parse_dt(job.get("completed_at"))) for job in row["run"]
+                        if job.get("conclusion") != "skipped"]
+            if baseline is None or any(end is None for _, end in finishes):
+                recoverable.append(0.0)
+                continue
+            reduction = max(0.0, row["queue"] - baseline)
+            before = max(end.timestamp() for _, end in finishes)
+            after = max(end.timestamp() - (reduction if job is row["job"] else 0.0)
+                        for job, end in finishes)
+            recoverable.append(max(0.0, before - after))
+        # Each sample's reduction is at most its queue above baseline, so the
+        # median is at most the median excess queue.
+        credited = statistics.median(recoverable) if gating else 0.0
+        if baseline is None:
+            size_note = "repository baseline unavailable (no other sampled jobs); no wall-clock credit"
+        else:
+            size_note = (f"median queue above repository baseline ({baseline:.1f}s, P10 of other sampled jobs); "
+                         + ('bounded by same-run job finish times including queue; existing floors still apply'
+                            if gating else 'merge-gating status not established; no wall-clock credit'))
+        f = _new_finding('OPT97', 'MEDIUM', 'Queue Caused by a One-at-a-Time Resource',
+                         wf_path, name, evidence, 'single-slot-queue',
+                         'opt97--queue-caused-by-a-one-at-a-time-resource', start_idx + len(out) + 1,
+                         wc_p50=round(credited, 1), rm=None, size_note=size_note,
+                         realization='direct', measured_evidence=_measured_evidence(
+                             ['Job', 'Median queue', 'P90 queue', 'Samples', 'Example job'],
+                             [[name, f'{median:.0f}s', f'{p90:.0f}s', str(len(samples)),
+                               _link(samples[-1]['queue'], str(samples[-1]['job'].get('html_url') or ''))]],
+                             evidence))
+        f['single_slot_queue'] = {'queue_p50_s': median, 'queue_p90_s': p90,
+                                 'baseline_queue_s': baseline, 'samples': len(samples),
+                                 'queue_rank_correlation': queue_rho, 'runtime_rank_correlation': runtime_rho,
+                                 'inflight_counts': counts, 'competing_jobs_read': len(rivals),
+                                 'labels': list(labels), 'hints': hints,
+                                 'runner_inventory': 'readable' if runner_inventory is not None else 'unknown'}
+        out.append(f)
+    return out
+
+
+def _merge_opt97_findings(findings, new, wf_doc):
+    """Measured capacity evidence replaces the same workflow's same-job OPT43
+    finding. OPT44 is accepted too, but no OPT44 detector exists today, so in
+    production only OPT43 is ever merged. A finding that also names other jobs,
+    or another workflow's finding, is kept."""
+    for measured in new:
+        related = set()
+        for old in list(findings):
+            if old.get('pattern') not in {'OPT43', 'OPT44'} or old.get('workflow_file') != measured['workflow_file']:
+                continue
+            jobs = set(old.get('affected_jobs') or [])
+            names = set(measured['affected_jobs'])
+            for name in measured['affected_jobs']:
+                match = _opt97_job(wf_doc, name)
+                if match:
+                    names.add(match[0])
+            if jobs and jobs <= names:
+                findings.remove(old)
+                related.add(old['pattern'])
+        measured['related_patterns'] = sorted(related)
+        findings.append(measured)
+
+
+def _opt100_failed_step(job: dict[str, Any]) -> dict[str, Any] | None:
+    """The job's first failed step, or None when no step recorded a failure."""
+    steps = sorted((s for s in job.get("steps") or []
+                    if s.get("conclusion") in {"failure", "timed_out"}),
+                   key=lambda s: s.get("number", 0))
+    return steps[0] if steps else None
+
+
+def _fetch_job_annotations(client: GhClient, repo: str,
+                           job: dict[str, Any]) -> list[str] | None:
+    """Failure-level annotation messages on a job's check run, or None if unreadable.
+
+    A job's id is its check-run id. A lost runner leaves no failed step and often
+    no log; the runner's own failure annotation is the only record of why. One
+    governed call per such job replaces the log fetch it would otherwise make."""
+    jid = job.get("id")
+    if not jid:
+        return None
+    data = client.json(f"repos/{repo}/check-runs/{jid}/annotations?per_page=50",
+                       allow_missing=True)
+    if not isinstance(data, list):
+        return None
+    return [str(a.get("message") or "") for a in data
+            if isinstance(a, dict) and a.get("annotation_level") == "failure"]
+
+
+def _opt100_annotation_class(messages: list[str]) -> str | None:
+    """Classify runner failure annotations as the runner's own `##[error]` lines.
+    No step name is supplied, so network signatures never apply here."""
+    from blocking_path import _classify_infra_failure
+    return _classify_infra_failure(
+        "\n".join("##[error]" + " ".join(m.split()) for m in messages), "")
+
+
+def _opt100_job_class(job: dict[str, Any], log: str) -> str | None:
+    """Only the first failed step can explain the failure; absent timing is unknown."""
+    from blocking_path import _classify_infra_failure
+    step = _opt100_failed_step(job)
+    if step is None:
+        return None
+    start, end = _parse_dt(step.get("started_at")), _parse_dt(step.get("completed_at"))
+    if start is None or end is None:
+        return None
+    # Step completion is truncated to whole seconds while the runner's own exit
+    # line is stamped after it, so the window runs one second past the recorded
+    # end and closes at that step's first exit line instead.
+    limit = end + _dt.timedelta(seconds=1)
+    lines = []
+    for line in log.splitlines():
+        # GitHub stamps seven fractional digits; the shared OPT80 parser
+        # truncates them where `datetime.fromisoformat` (3.9/3.10) rejects them.
+        record = _opt80_log_line(line)
+        if record is None:
+            continue
+        when, body = record
+        if start <= when < limit:
+            lines.append(body)
+            if body.startswith("##[error]Process completed with exit code"):
+                break
+    return _classify_infra_failure("\n".join(lines), str(step.get("name") or ""))
+
+
+def _opt100_failure_possible(runs: list[dict[str, Any]]) -> bool:
+    """Cheap upper bound on failures per job, counting possible prior attempts."""
+    return sum(max(0, int(r.get("run_attempt") or 1) - 1)
+               + (r.get("conclusion") in {"failure", "timed_out"}) for r in runs) >= 5
+
+
+def _opt100_gating_names(jobs: list[dict[str, Any]], graph: dict[str, Any],
+                         gating: dict[str, Any]) -> set[str]:
+    """Resolve observed display/matrix names only when one YAML job matches."""
+    names = set()
+    for job in jobs:
+        name = str(job.get("name") or "")
+        matches = [key for key, node in graph.items()
+                   if _opt80_check_names_job(name, key, node)]
+        if len(matches) == 1 and matches[0] in gating:
+            names.add(name)
+    return names
+
+
+def _collect_opt100(client: GhClient, repo: str, wf_path: str,
+                    jobs: list[dict[str, Any]], gating_jobs: set[str] | None,
+                    start_idx: int, *, complete_population: bool = True,
+                    monthly_volume: int | None = None, sample_denominator: int | None = None,
+                    prior_attempt_failures: int = 0, crit: dict[str, Any] | None = None
+                    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Fetch each failed gating job log once; keep raw text out of findings."""
+    if not complete_population or prior_attempt_failures:
+        return [], {"incomplete_job_population": True, "unreadable_logs": 0}
+    from collections import Counter
+    failures = Counter(j.get("name") for j in jobs if j.get("conclusion") in {"failure", "timed_out"})
+    targets = {j["id"]: j for j in jobs if j.get("id") is not None
+               and failures[j.get("name")] >= 5
+               and j.get("name") in (gating_jobs or set())
+               and j.get("conclusion") in {"failure", "timed_out"}}
+    logs: dict[Any, str | None] = {}
+    annotations: dict[Any, list[str] | None] = {}
+    for jid, j in targets.items():
+        # A failed job with no failed step (a lost runner) is read from its
+        # check-run annotations instead of a log it usually does not have.
+        if _opt100_failed_step(j) is None:
+            annotations[jid] = _fetch_job_annotations(client, repo, j)
+        else:
+            logs[jid] = _fetch_job_log(client, repo, j)
+    return _detect_opt100_infra_faults(wf_path, jobs, logs, gating_jobs, start_idx,
+                                      monthly_volume=monthly_volume, sample_denominator=sample_denominator,
+                                      crit=crit, annotations=annotations)
+
+
+def _opt100_workflow_pass(
+    client: GhClient, repo: str, wf_path: str, *,
+    all_runs: list[dict[str, Any]] | None,
+    attempt_samples: list[tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]],
+    attempt_errors: int, gate: dict[str, Any] | None, graph: dict[str, Any],
+    job_memo: dict[Any, Any], monthly: int | None, crit: dict[str, Any] | None,
+    next_id: int,
+) -> tuple[list[dict[str, Any]], str | None, int]:
+    """One workflow's OPT100 pass, then OPT64 over the retries OPT100 did not claim.
+
+    Returns (findings, skip reason or None, job-page fetch errors). OPT100 is
+    reported as not evaluated only when no finding fired and what could not be
+    read (job pages, failed-job logs, the merge gate) leaves the verdict open."""
+    findings: list[dict[str, Any]] = []
+    skip: str | None = None
+    errors = 0
+    claimed: set[Any] = set()
+    if all_runs is not None and gate and _opt100_failure_possible(all_runs):
+        kept, errors = _gather_run_jobs(client, repo, all_runs, memo=job_memo)
+        jobs: list[dict[str, Any]] = []
+        for run, run_jobs in kept:
+            _stamp_run_context(run, run_jobs)
+            jobs.extend(run_jobs)
+        for run, all_jobs, _latest in attempt_samples:
+            _stamp_run_context(run, all_jobs)
+            jobs.extend(all_jobs)
+        new, notes = _collect_opt100(client, repo, wf_path, jobs,
+                                     _opt100_gating_names(jobs, graph, gate), next_id,
+                                     complete_population=not errors,
+                                     monthly_volume=monthly, sample_denominator=len(all_runs),
+                                     prior_attempt_failures=attempt_errors, crit=crit)
+        if new:
+            claimed = {rid for f in new for rid in f["infra_failures"]["retry_run_ids"]}
+        elif notes.get("incomplete_job_population"):
+            skip = "some job pages were unreadable, so failed jobs could not be counted"
+        elif notes.get("undetermined"):
+            skip = ("; ".join(notes["undetermined_jobs"])
+                    + "; the unread logs could change the verdict")
+        findings.extend(new)
+        next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
+    elif all_runs is None or gate is None:
+        skip = "all-status jobs or the merge-gating job set could not be read"
+    if attempt_samples and all_runs is not None:
+        # One full retry cannot be charged to both failure families.
+        findings.extend(_detect_opt64_rerun_attempt_waste(
+            wf_path, [x for x in attempt_samples if _run_id(x[0]) not in claimed],
+            monthly, len(all_runs), next_id))
+    return findings, skip, errors
+
+
+def _detect_opt100_infra_faults(
+    wf_path: str, jobs: list[dict[str, Any]], logs: dict[Any, str],
+    gating_jobs: set[str] | None, start_idx: int, *,
+    monthly_volume: int | None = None, sample_denominator: int | None = None,
+    crit: dict[str, Any] | None = None,
+    annotations: dict[Any, list[str] | None] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Infra share uses every sampled failure as denominator, including unread logs.
+
+    A failed job with no failed step is classified from its failure annotations
+    (`annotations`, keyed by job id); a job whose log or annotations could not be
+    read counts as unreadable.
+
+    Retry compute is credited once, and only for a subsequent sampled attempt of
+    the same run whose sole failed job was this infra-class job. This avoids
+    claiming that a retry caused by several failures can be eliminated twice.
+    Monthly credit uses the same all-status scaling basis as repeated attempts.
+    Raw sample minutes remain separately stamped for verification.
+    """
+    from collections import Counter
+    notes: dict[str, Any] = {"unreadable_logs": 0, "gating_unknown": gating_jobs is None,
+                             "undetermined": False, "undetermined_jobs": []}
+    if not gating_jobs:
+        return [], notes
+    unique = {j["id"]: j for j in jobs if j.get("id") is not None}
+    jobs = list(unique.values())
+    out = []
+    run_id = lambda j: j.get("_run_id", j.get("run_id"))
+    attempt = lambda j: int(j.get("run_attempt") or 1)
+    for name in sorted(gating_jobs):
+        population = [j for j in jobs if j.get("name") == name]
+        failed = [j for j in population if j.get("conclusion") in {"failure", "timed_out"}]
+        if len(failed) < 5:
+            continue
+        classified, unreadable = [], 0
+        for j in failed:
+            if _opt100_failed_step(j) is None:
+                messages = (annotations or {}).get(j["id"])
+                if messages is None:
+                    unreadable += 1
+                else:
+                    classified.append((j, _opt100_annotation_class(messages)))
+            elif logs.get(j["id"]):
+                classified.append((j, _opt100_job_class(j, logs[j["id"]])))
+            else:
+                unreadable += 1
+        notes["unreadable_logs"] += unreadable
+        infra = [(j, kind) for j, kind in classified if kind]
+        if len(infra) < 5 or len(infra) / len(failed) < .2:
+            # Withheld. The verdict is settled only if the unread logs, all
+            # matching, still could not reach both floors.
+            could = len(infra) + unreadable
+            if unreadable and could >= 5 and could / len(failed) >= .2:
+                notes["undetermined"] = True
+                notes["undetermined_jobs"].append(
+                    f"`{name}`: {unreadable} of {len(failed)} failed-job logs unreadable")
+            continue
+        classes = dict(Counter(kind for _, kind in infra))
+        runner_counts = Counter(str(j.get("runner_name")) for j, _ in infra
+                                if j.get("runner_name") and "self-hosted" in j.get("labels", []))
+        degraded = next((n for n, count in runner_counts.most_common(1)
+                         if count >= 5 and count / len(infra) >= .8), None)
+        rerun_seconds, delays, claimed = 0.0, [], set()
+        for j, _ in infra:
+            rid, a = run_id(j), attempt(j)
+            if rid is None:
+                continue
+            same_attempt_failures = [x for x in jobs if run_id(x) == rid and attempt(x) == a
+                                     and x.get("conclusion") in {"failure", "timed_out"}]
+            prior_successes = {(x.get("name"), x.get("started_at"), x.get("completed_at"))
+                               for x in jobs if run_id(x) == rid and attempt(x) <= a
+                               and x.get("conclusion") == "success"
+                               and x.get("started_at") and x.get("completed_at")}
+            # Only work that ran in the failed attempt and ran again is repeated
+            # work; a downstream job skipped behind the failure would run anyway.
+            ran = {x.get("name") for x in jobs if run_id(x) == rid and attempt(x) == a
+                   and x.get("conclusion") not in (None, "skipped") and _job_started(x)}
+            retry = [x for x in jobs if run_id(x) == rid and attempt(x) == a + 1
+                     and x.get("name") in ran
+                     and (x.get("name"), x.get("started_at"), x.get("completed_at"))
+                     not in prior_successes]
+            if len(same_attempt_failures) != 1 or not retry or (rid, a + 1) in claimed:
+                continue
+            claimed.add((rid, a + 1))
+            rerun_seconds += sum(_job_compute_s(x) for x in retry)
+            retry_starts = [_parse_dt(x.get("started_at")) for x in retry]
+            retry_starts = [x for x in retry_starts if x is not None]
+            end = _parse_dt(j.get("completed_at"))
+            if end is not None and retry_starts:
+                delays.append(max(0.0, (min(retry_starts) - end).total_seconds()))
+        flaky = any(not kind and any(
+            x.get("conclusion") == "success" and run_id(x) == run_id(j)
+            and attempt(x) > attempt(j) for x in population) for j, kind in classified)
+        prompt = ("Investigate the first failing step with sling and recover the workflow's history and intent. "
+                  "Evaluate at most 2 attempts with short backoff for classified infrastructure failures only; "
+                  "never retry test assertions. Count retries so increases stay visible. "
+                  "Preserve every required check and flag policy changes for owner sign-off.")
+        if degraded:
+            prompt += f" Investigate whether runner `{degraded}` should stop receiving jobs while degraded."
+        if flaky:
+            prompt += " Same-commit fail-then-pass also occurred without an infra signature; consult OPT48's quarantine recipe."
+        scale = monthly_volume / sample_denominator if monthly_volume and sample_denominator else None
+        delay = _stats.median(delays) if delays else 0.0
+        rate = len(infra) / len(population)
+        wc, cap_note = _cap_wall_clock(delay * rate, name,
+                                       crit if crit is not None else _critical_path([[j] for j in jobs]))
+        monthly_note = (f"monthly scale {scale:.3g} yields {rerun_seconds / 60 * scale:.1f} runner-min/mo. "
+                        if scale is not None else "monthly volume unavailable; no monthly credit. ")
+        evidence = (f"{len(infra)} of {len(failed)} sampled failed jobs ({len(infra)/len(failed):.0%}) "
+                    f"matched first-failed-step infrastructure signatures: "
+                    + ", ".join(f"{k}: {v}" for k, v in sorted(classes.items()))
+                    + (f"; {unreadable} of {len(failed)} failed-job logs unreadable" if unreadable else "")
+                    + f". Sampled subsequent full attempts consumed {rerun_seconds / 60:.1f} runner-minutes; "
+                     + monthly_note + prompt)
+        title = "Infrastructure Faults Fail the Whole Run"
+        f = _new_finding("OPT100", "MEDIUM", title, wf_path, name, evidence,
+                         "infra-fault-retries", _catalog_anchor("OPT100", title), start_idx + len(out) + 1,
+                         wc_p50=wc, rm=(rerun_seconds / 60 * scale if scale is not None else (0.0 if not rerun_seconds else None)),
+                         size_note="Observed subsequent-attempt compute scaled by all-status monthly volume/sample count; raw sample minutes retained separately. Wall-clock remains subject to the existing floors.",
+                         measured_evidence=_measured_evidence(
+                             ["Class", "Failures", "Sampled job logs"],
+                             [[k, str(v), ", ".join(
+                                 f"[job]({j['html_url']})" for j, kind in infra
+                                 if kind == k and j.get("html_url"))]
+                              for k, v in sorted(classes.items())], evidence))
+        f["sizing_basis"] = "measured"
+        f["agent_prompt"] = prompt
+        f["infra_failures"] = {"classes": classes, "failed_jobs": len(failed),
+                               "infra_jobs": len(infra), "sampled_jobs": len(population),
+                               "unreadable_logs": unreadable,
+                               "degraded_runner": degraded, "flakes_observed": flaky,
+                               "rerun_delay_p50_s": delay, "retry_attempts": len(claimed),
+                               "sampled_rerun_minutes": rerun_seconds / 60, "monthly_scale": scale,
+                               "retry_run_ids": sorted({rid for rid, _ in claimed}), "wall_clock_cap_note": cap_note}
+        out.append(f)
+    return out, notes
 
 
 def _detect_opt48_failure_rate(
@@ -8364,6 +10666,14 @@ def _detect_opt48_failure_rate(
 # runner-minutes tier (spec §7).
 
 _COST_RUNLIST_MAX = 100  # one page of all-status runs for branch/dup grouping
+# Default-branch pushes are a separate, post-merge lane. Bound the number of
+# pushed commits whose workflow jobs we fetch so the extra API cost stays fixed.
+_DEFAULT_BRANCH_PUSH_SAMPLE_MAX = 10
+# The headline timing sample deliberately contains successful runs only. When the
+# same cached all-status page shows a materially red default branch, say so beside
+# the headline instead of letting a successful-run median read like the whole window.
+_SUCCESS_ONLY_CAVEAT_MIN_RUNS = 10
+_SUCCESS_ONLY_CAVEAT_FAILURE_RATE = 0.20
 _MIN_TIMED_RUNS = 3  # a per-run compute mean needs ≥3 timed runs to be stable
 # Deliberately BROAD: this is the safety carve-out for run-cancellation fixes,
 # so a false positive (skip a real finding) is acceptable but a false negative
@@ -9915,7 +12225,7 @@ def _detect_opt77_repeated_setup_across_small_jobs(
             "status check, update branch protection to require the consolidated "
             "check — otherwise the work silently stops gating merges. If the "
             "consolidation introduces a `needs:` edge, the dependent must run with "
-            "always() (or !cancelled()) and fail explicitly, because a job skipped "
+            "always() (not !cancelled(), which a cancelled run skips) and fail explicitly, because a job skipped "
             "because its dependency failed reports as skipped, not failed. Never "
             "consolidate a job that can sit on the merge gate, never reduce what CI "
             "verifies, and run the collapsed tasks concurrently inside the new job.")
@@ -9939,7 +12249,7 @@ def _detect_opt77_repeated_setup_across_small_jobs(
 # `_VR_OPT80_*` twin in `tests/verify_report.py`, which re-derives on ITS copy
 # and compares the stamped value to it; `test_opt80_verifier_constants_stay_
 # coupled_to_the_engine` fails if the two drift. Each is also WRITTEN OUT in
-# `references/optimization-patterns.md` under "### OPT80" — detection heuristic
+# `references/patterns/opt80-*.md` (compiled into the catalog) — heuristic
 # clauses 2, 3 and 5, and the probe cap named in clause 5 — so moving one here
 # means moving it in the verifier AND in that catalog entry, or the report
 # describes bounds it did not use.
@@ -10583,6 +12893,7 @@ def _opt80_merge_gating_jobs(
     job_graph: dict[str, dict[str, dict[str, Any]]] | None,
     crit_by_wf: dict[str, dict[str, Any]],
     workflow_names: dict[str, Any] | None = None,
+    status_publishers: "dict[str, dict[str, Any]] | None" = None,
 ) -> dict[str, dict[str, Any]] | None:
     """The YAML jobs of `wf_path` a merge waits on, `{job_key: evidence}`, or None
     when that cannot be known. A job is merge-gating when its check is REQUIRED,
@@ -10593,7 +12904,10 @@ def _opt80_merge_gating_jobs(
     every match.
 
     None (unknown) whenever the required set is unread, partial or empty, or the
-    workflow has no job graph: the slowest job of a pull-request workflow is NOT
+    workflow has no job graph, or a required context is one the repo publishes
+    itself and names no job (`_required_reachability_unresolved`, issue #119: an
+    in-repo `All CI` aggregate waits on jobs no `needs:` edge records, so "the
+    merge does not wait on this job" cannot be claimed). The slowest job of a pull-request workflow is NOT
     assumed to gate the merge (a slow non-required benchmark beside a required
     fast `test` is the case this exists for). The evidence names the required
     check and job, so the self-check re-derives it from `required_checks` and
@@ -10603,6 +12917,9 @@ def _opt80_merge_gating_jobs(
         return None
     jobs = job_graph.get(wf_path) or {}
     if not jobs:
+        return None
+    if _required_reachability_unresolved(required_checks.names, crit_by_wf,
+                                         job_graph, status_publishers):
         return None
     out: dict[str, dict[str, Any]] = {}
     anchors: list[tuple[str, str]] = []
@@ -12606,8 +14923,8 @@ def _detect_opt81_runner_size_advisory(
 # separately measured; `ceiling_basis` says which), and its prompt asks for
 # the benchmark first. There is deliberately no `_SIZING` row for OPT82.
 #
-# Every catalog fact this mirrors lives in `references/optimization-patterns.md`
-# under "### OPT82"; the verifier's check is
+# Every catalog fact this mirrors lives in `references/patterns/opt82-*.md`
+# (compiled into the catalog); the verifier's check is
 # `verify_report.check_opt82_type_aware_lint_uncredited`.
 _OPT82_MIN_LINT_P50_S = 60.0
 # The findings-doc key the collector writes OPT82's WITHHELD candidates under
@@ -13774,6 +16091,43 @@ def _opt82_rules_catalog() -> dict[str, dict[str, Any]]:
     return _OPT82_RULES_CACHE
 
 
+# Fewest sampled retried runs, all charged to the same dominant failing job,
+# before OPT64 ranks a saving. One retry is an anecdote that the monthly scale
+# then multiplies (one 5-minute retry in a 100-run sample reads as ~8 min/mo);
+# two can still be one bad afternoon. Three matches `_MIN_TIMED_RUNS`, this
+# file's floor for a stable per-run figure. Twins: blocking_path.py and
+# tests/verify_report.py hold the same value, so a legacy findings.json is held
+# to it at render and verify time too (test_opt64_minimum_sample.py pins all three).
+_OPT64_MIN_RETRIED_RUNS = 3
+
+
+def _opt64_hold_reason(job: str, retried: int, passed_on_retry: int,
+                       unsettled_on_retry: int = 0) -> str | None:
+    """Why an OPT64 group is advisory instead of ranked, or None when it ranks.
+
+    A dominant job that failed and then PASSED on the retry is a flaky-test
+    signal (SKILL.md admission rule 3): its remedy is de-flaking, not a CI-config
+    change, whatever the count. A retry with no failing outcome yet (still
+    running, cancelled, skipped) may still pass, so it holds the group too.
+    Otherwise the group needs the minimum sample."""
+    runs = f"{retried} retried run{'s' if retried != 1 else ''}"
+    reasons = [f"this rests on {runs}"]
+    if passed_on_retry > 0:
+        reasons.append(
+            f"in {passed_on_retry} of {runs} `{job}` passed on the retry (the same run, "
+            "so the same commit): a flaky-test signal whose remedy is de-flaking the "
+            "job, not a CI-config change (see OPT48)")
+    elif unsettled_on_retry > 0:
+        reasons.append(
+            f"in {unsettled_on_retry} of {runs} `{job}` had not finished its retry with "
+            "a failure (still running, cancelled or skipped), so it may yet pass")
+    elif retried < _OPT64_MIN_RETRIED_RUNS:
+        reasons[0] += f"; a ranked saving needs at least {_OPT64_MIN_RETRIED_RUNS}"
+    else:
+        return None
+    return "; ".join(reasons)
+
+
 def _detect_opt64_rerun_attempt_waste(
     wf_path: str,
     attempt_samples: list[tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]],
@@ -13786,7 +16140,9 @@ def _detect_opt64_rerun_attempt_waste(
     GitHub's default jobs endpoint hides prior attempts. This detector compares
     `filter=all` with `filter=latest`, credits only the prior-attempt job delta,
     and emits only when a unique dominant failed/timed-out job from those prior
-    attempts is still present in the latest attempt.
+    attempts is still present in the latest attempt. A group below
+    `_OPT64_MIN_RETRIED_RUNS`, or whose job passed on a retry, is emitted
+    advisory with no credit (`_opt64_hold_reason`).
     """
     if not monthly_volume or monthly_volume <= 0 or sample_denominator <= 0:
         return []
@@ -13801,7 +16157,9 @@ def _detect_opt64_rerun_attempt_waste(
         prior_jobs = _prior_attempt_jobs(run, all_jobs, latest_jobs)
         if not prior_jobs:
             continue
-        prior_s = sum(_job_compute_s(j) for j in prior_jobs)
+        latest_ids = {_job_id(j) for j in latest_jobs if _job_id(j)}
+        prior_s = sum(_job_compute_s(j) for j in prior_jobs
+                      if not _job_id(j) or _job_id(j) not in latest_ids)
         if prior_s <= 0:
             continue
         dominant = _dominant_prior_failing_job(prior_jobs, latest_jobs)
@@ -13816,12 +16174,24 @@ def _detect_opt64_rerun_attempt_waste(
         rid = _run_id(run)
         bucket = by_job.setdefault(key, {
             "waste_s": 0.0, "failure_s": 0.0, "occurrences": 0,
-            "failures": 0, "run_ids": [], "rows": [],
+            "failures": 0, "run_ids": [], "rows": [], "passed_on_retry": 0,
+            "unsettled_on_retry": 0,
         })
         bucket["waste_s"] += prior_s
         bucket["failure_s"] += fail_s
         bucket["occurrences"] += 1
         bucket["failures"] += fail_n
+        # A re-run attempt re-runs the SAME run, so the same commit: a dominant
+        # job that failed and then passed here is a flaky-test signal. Only a
+        # retry that failed again counts toward a ranked saving; one still
+        # running (no conclusion) or cancelled/skipped may yet pass.
+        retry_outcomes = {str(j.get("conclusion") or "").lower()
+                          for j in latest_jobs if _attempt_job_key(j) == key
+                          and _job_run_attempt(j) == latest_attempt}
+        if "success" in retry_outcomes:
+            bucket["passed_on_retry"] += 1
+        elif not retry_outcomes or not retry_outcomes <= _FAIL_FAST_FAILURE_CONCLUSIONS:
+            bucket["unsettled_on_retry"] += 1
         if rid:
             bucket["run_ids"].append(rid)
         bucket["rows"].append([
@@ -13837,7 +16207,6 @@ def _detect_opt64_rerun_attempt_waste(
         return []
 
     scale = float(monthly_volume) / float(sample_denominator)
-    basis = f"{monthly_volume}/30d ÷ {sample_denominator} sampled all-status run(s)"
     title = "Repeated Workflow Attempts From Same Failing Job"
     out: list[dict[str, Any]] = []
     for key, bucket in sorted(by_job.items(), key=lambda kv: (-kv[1]["waste_s"], kv[0])):
@@ -13848,13 +16217,25 @@ def _detect_opt64_rerun_attempt_waste(
         occurrence_n = int(bucket["occurrences"])
         failure_n = int(bucket["failures"])
         failure_min = float(bucket["failure_s"]) / 60.0
-        evidence = (
+        passed_n = int(bucket["passed_on_retry"])
+        unsettled_n = int(bucket["unsettled_on_retry"])
+        hold = _opt64_hold_reason(key, occurrence_n, passed_n, unsettled_n)
+        basis = (f"{monthly_volume} runs in 30 days; {sample_denominator} sampled "
+                 f"(any status), of which {occurrence_n} were retried after this "
+                 "job failed")
+        head = (
             f"{occurrence_n} sampled run_attempt>1 workflow run(s) had prior-attempt "
             f"jobs present in `filter=all` but absent from `filter=latest`; the "
             f"unique dominant failing job was `{key}` ({failure_n} failed/timed-out "
             f"prior-attempt job(s), {failure_min:.1f} failed min) and it appeared "
-            f"again in the latest attempt. ~{credited:.0f} runner-min/mo of "
-            f"prior-attempt compute ({basis}).")
+            f"again in the latest attempt")
+        if hold:
+            evidence = (f"{head}. Their prior attempts used {prior_min:.1f} runner-min "
+                        f"({basis}). Advisory, no saving credited: {hold}.")
+        else:
+            evidence = (f"{head}, and failed again on every retry. Their prior attempts "
+                        f"used {prior_min:.1f} runner-min, ~{credited:.0f} runner-min/mo "
+                        f"scaled to the workflow's volume ({basis}).")
         me = _measured_evidence(
             ["Run", "Latest attempt", "Dominant failing job", "Prior attempts",
              "Prior attempt compute min", "Dominant failure min"],
@@ -13870,8 +16251,9 @@ def _detect_opt64_rerun_attempt_waste(
             "OPT64", "LOW", title, wf_path, "", evidence,
             "repeated-workflow-attempts-from-same-failing-job",
             _catalog_anchor("OPT64", title), start_idx + len(out) + 1,
-            wc_p50=0.0, rm=credited,
-            size_note=("runner-minute (bill) only — prior workflow attempts are "
+            wc_p50=0.0, rm=None if hold else credited,
+            size_note=(f"advisory, uncredited: {hold}" if hold else
+                       "runner-minute (bill) only — prior workflow attempts are "
                        "superseded by the latest attempt's signal."),
             realization="none", measured_evidence=me)
         f["sizing_basis"] = "measured"
@@ -13879,6 +16261,18 @@ def _detect_opt64_rerun_attempt_waste(
             f"run_attempt>1 prior-attempt job delta from filter=all minus "
             f"filter=latest; dominant failing job `{key}` present in latest "
             f"attempt ({prior_min:.1f} sampled prior-attempt min; scale {scale:.3g})")
+        f["rerun_sample"] = {
+            "retried_runs": occurrence_n, "passed_on_retry": passed_n,
+            "unsettled_on_retry": unsettled_n,
+            "min_retried_runs": _OPT64_MIN_RETRIED_RUNS,
+            "runs_30d": int(monthly_volume), "sampled_runs": int(sample_denominator)}
+        f["rerun_dominant_job"] = key
+        if hold:
+            # Admission rule 3 (as OPT48): kept in the findings JSON, excluded
+            # from the ranked findings and the report, never a saving.
+            f["advisory"] = True
+            out.append(f)
+            continue
         f["tier2_neutrality"] = {
             "proof": "post_completion_waste",
             "margin_s": None,
@@ -13887,7 +16281,6 @@ def _detect_opt64_rerun_attempt_waste(
                     f"dominant failing job `{key}` identifies the retry cause, so "
                     "prior-attempt compute is post-completion waste"),
         }
-        f["rerun_dominant_job"] = key
         out.append(f)
     return out
 
@@ -14920,7 +17313,7 @@ def _job_name_scope_prefixed(check_name: str, job_name: str) -> bool:
 # `_detect_structural_candidates` asks "did a hygiene fix already MATERIALLY
 # shorten this pole's RUN time?", and a queue-time saving answers a different
 # question, leaving the real OPT75/etc lever wrongly hidden on the headline gate.
-_PRESTART_AXIS_PATTERNS = frozenset({"OPT43"})
+_PRESTART_AXIS_PATTERNS = frozenset({"OPT43", "OPT97"})
 
 
 def _build_covered_job_savings(
@@ -15415,7 +17808,91 @@ def _check_to_workflow_file_static(
                     or _static_matrix_leg_match(nm, info.get("matrix"), check)):
                 hits.add(wf)
                 break
-    return next(iter(hits)) if len(hits) == 1 else None
+    if hits:
+        return next(iter(hits)) if len(hits) == 1 else None
+
+    nested = _local_reusable_leaf_nodes(check, job_graph)
+    files = {wf for wf, _ in nested}
+    return next(iter(files)) if len(files) == 1 else None
+
+
+def _local_reusable_leaf_nodes(
+    check: str, job_graph: dict[str, dict[str, dict[str, Any]]],
+    callers: set[tuple[str, str]] | None = None,
+    caller_paths: (dict[tuple[str, str],
+                        set[tuple[tuple[str, str], ...]]] | None) = None,
+) -> set[tuple[str, str]]:
+    """Follow only scanned local call edges; never borrow an unrelated leaf.
+
+    Each recursive hop consumes a caller prefix. A per-path file set rejects
+    cycles, and sixteen calls bounds malformed or adversarial workflow graphs.
+    Remote calls have no editable local leaf and deliberately remain unresolved.
+    """
+    found: set[tuple[str, str]] = set()
+
+    def matches(wf: str, name: str, info: dict[str, Any], value: str) -> bool:
+        return (name == value
+                or (not _name_template_is_degenerate(name)
+                    and not (_name_template_leads_with_placeholder(name)
+                             and _reusable_caller_claims(
+                                 value, {wf: job_graph.get(wf, {})}))
+                    and bool(_name_template_regex(name).fullmatch(value)))
+                or _static_matrix_leg_match(name, info.get("matrix"), value))
+
+    def walk(wf: str, remaining: str, seen: frozenset[str], depth: int,
+             path: tuple[tuple[str, str], ...] = ()) -> None:
+        if wf in seen or depth > 16:
+            return
+        for jid, info in job_graph.get(wf, {}).items():
+            name = str(info.get("name") or jid)
+            if not info.get("reusable"):
+                if depth and matches(wf, name, info, remaining):
+                    found.add((wf, jid))
+                    if callers is not None:
+                        callers.update(path)
+                    if caller_paths is not None:
+                        caller_paths.setdefault((wf, jid), set()).add(path)
+                continue
+            uses = info.get("uses")
+            if not isinstance(uses, str) or not uses.startswith("./.github/workflows/"):
+                continue
+            target = uses[2:]
+            if target not in job_graph:
+                continue
+            parts = remaining.split(" / ")
+            for cut in range(1, len(parts)):
+                if matches(wf, name, info, " / ".join(parts[:cut])):
+                    walk(target, " / ".join(parts[cut:]), seen | {wf}, depth + 1,
+                         path + ((wf, jid),))
+
+    for wf in job_graph:
+        walk(wf, check, frozenset(), 0)
+    return found
+
+
+def _nested_caller_path_is_reachable(
+    check: str, node: tuple[str, str], reachable: set[tuple[str, str]],
+    job_graph: dict[str, dict[str, dict[str, Any]]],
+) -> bool | None:
+    """Whether a nested check's own caller chain is merge-blocking.
+
+    Two callers may invoke the same leaf workflow.  The editable leaf node is
+    shared, but required-check identity is not: an optional caller must not
+    become required merely because a required caller reaches the same leaf.
+    ``None`` means the check did not resolve through a nested caller path.
+    """
+    paths: dict[tuple[str, str], set[tuple[tuple[str, str], ...]]] = {}
+    leaves = _local_reusable_leaf_nodes(check, job_graph, caller_paths=paths)
+    if leaves != {node} or not paths.get(node):
+        return None
+    # A reachable outer caller makes its whole local invocation path gating.
+    # Inner reusable callers need not be globally reachable on their own: they
+    # run because that outer invocation selected them.  Keeping the decision
+    # attached to the first caller also preserves the identity of a standalone
+    # run of the leaf workflow, whose bare check name has no caller path.
+    return any(bool(path) and path[0] in reachable for path in paths[node])
+
+
 def _check_to_job_node_scanned(
     check: str, job_graph: dict[str, dict[str, dict[str, Any]]],
 ) -> tuple[str, str] | None:
@@ -15464,9 +17941,11 @@ def _check_to_job_node_scanned(
                           and _reusable_caller_claims(check, job_graph))
                  and _name_template_regex(info.get("name") or jid).match(check))
                 or _static_matrix_leg_match(info.get("name") or jid, info.get("matrix"), check))]
-    if not tmpl or len({wf for wf, _ in tmpl}) > 1:
-        return None
-    return tmpl[0]
+    if tmpl:
+        return tmpl[0] if len({wf for wf, _ in tmpl}) == 1 else None
+
+    nested = _local_reusable_leaf_nodes(check, job_graph)
+    return next(iter(nested)) if len(nested) == 1 else None
 
 
 def _required_reachable_jobs(
@@ -15482,14 +17961,34 @@ def _required_reachable_jobs(
     for r in req_names:
         node = _check_to_job_node(r, job_graph, crit_by_wf)
         if node is not None:
-            anchors.add(node)
+            paths: dict[tuple[str, str],
+                        set[tuple[tuple[str, str], ...]]] = {}
+            leaves = _local_reusable_leaf_nodes(
+                r, job_graph, caller_paths=paths)
+            caller_paths = paths.get(node, set())
+            if leaves == {node} and caller_paths:
+                # A nested required status belongs to this invocation, not to
+                # every standalone run of the shared leaf workflow.  Anchor
+                # only each path's outer caller. Anchoring an intermediate
+                # caller would make that workflow's direct invocation inherit
+                # the outer gate. Candidates resolve the complete identity in
+                # `_nested_caller_path_is_reachable`.
+                anchors.update(path[0] for path in caller_paths if path)
+            else:
+                anchors.add(node)
     reachable: set[tuple[str, str]] = set(anchors)
     stack = list(anchors)
     while stack:
         wf, jid = stack.pop()
-        for dep in (job_graph.get(wf, {}).get(jid, {}) or {}).get("needs", []):
-            node = (wf, dep)
-            if dep in job_graph.get(wf, {}) and node not in reachable:
+        info = job_graph.get(wf, {}).get(jid, {}) or {}
+        dependencies = [(wf, dep) for dep in info.get("needs", [])
+                        if dep in job_graph.get(wf, {})]
+        # Do not add a local called workflow's jobs as globally reachable.
+        # Their merge-gating identity is the caller-prefixed check name; the
+        # same workflow may also run directly on pull_request and publish bare
+        # checks that the caller does not gate.
+        for node in dependencies:
+            if node not in reachable:
                 reachable.add(node)
                 stack.append(node)
     return reachable
@@ -15517,8 +18016,33 @@ def _pole_is_required_reachable(
     if pole_check in req_names:
         return True
     node = _check_to_job_node(pole_check, job_graph, crit_by_wf)
-    return node is not None and node in _required_reachable_jobs(
-        req_names, job_graph, crit_by_wf)
+    if node is None:
+        return False
+    reachable = _required_reachable_jobs(req_names, job_graph, crit_by_wf)
+    nested = _nested_caller_path_is_reachable(
+        pole_check, node, reachable, job_graph)
+    return nested if nested is not None else node in reachable
+
+
+def _stamp_pole_required_reachability(
+    poles: list[dict[str, Any]],
+    spine_required_scoped: bool,
+    req_names: "frozenset[str] | set[str]",
+    job_graph: dict[str, dict[str, dict[str, Any]]] | None,
+    crit_by_wf: dict[str, dict[str, Any]],
+) -> None:
+    """Stamp whether each retained pole is confirmed to block merging.
+
+    The stamp is intentionally absent when required-check reachability was unreadable or
+    did not narrow the spine. In that state the renderer preserves its historical order
+    instead of guessing. A False stamp identifies the conservative cat-3 keep: visible,
+    but ranked after every pole confirmed through the required/needs graph.
+    """
+    if not spine_required_scoped or not req_names or not job_graph:
+        return
+    for pole in poles:
+        pole["required_reachable"] = _pole_is_required_reachable(
+            str(pole.get("check") or ""), req_names, job_graph, crit_by_wf)
 
 
 def _required_reachable_checks(
@@ -15561,7 +18085,8 @@ def _required_reachable_checks(
             continue
         node = _check_to_job_node(c, job_graph, crit_by_wf)
         if node is not None:
-            if node in reachable:
+            nested = _nested_caller_path_is_reachable(c, node, reachable, job_graph)
+            if nested is True or (nested is None and node in reachable):
                 kept.add(c)
         elif _workflows_matching_check(c, crit_by_wf):
             # File-backed but unpinnable to a job id — keep (never silently drop a
@@ -15578,11 +18103,58 @@ def _required_reachable_checks(
     return kept
 
 
+def _repo_published_required(
+    req_names: "frozenset[str] | set[str]",
+    status_publishers: "dict[str, dict[str, Any]] | None",
+) -> frozenset[str]:
+    """The required contexts this repo PUBLISHES ITSELF (issue #119): a workflow that
+    posts commit statuses (scan.py's `workflow_status_publishers` — its YAML, a local
+    action, or a repo-local script it runs calls the statuses API) posts exactly this
+    context as a literal, or (when a publisher builds its context at run time) holds
+    exactly this name as a string literal. Such a context (an in-repo `All CI`
+    aggregate) names no job and has no `needs:` edge to the tests it waits on, so a
+    job-name mismatch alone must not prove it is an outside gate. A name that merely
+    appears in a publisher (a title, a comment, the checks an aggregator waits on) is
+    not matched: a false match would un-scope a correctly scoped gate. Which jobs the
+    publisher waits on is not traced."""
+    if not req_names or not isinstance(status_publishers, dict) or not status_publishers:
+        return frozenset()
+    posted: set[str] = set()
+    for p in status_publishers.values():
+        if not isinstance(p, dict):
+            continue
+        for key in ("contexts", "names"):
+            vals = p.get(key)
+            if isinstance(vals, list):
+                posted.update(str(v).strip() for v in vals)
+    return frozenset(r for r in req_names if str(r).strip() in posted)
+
+
+def _required_reachability_unresolved(
+    req_names: "frozenset[str] | set[str]",
+    crit_by_wf: dict[str, dict[str, Any]],
+    job_graph: dict[str, dict[str, dict[str, Any]]] | None,
+    status_publishers: "dict[str, dict[str, Any]] | None",
+) -> bool:
+    """True when some required context names no job here but the repo publishes it
+    itself (`_repo_published_required`). Its real inputs are unknown, so the `needs:`
+    reachability from the OTHER required checks is incomplete: neither "all external"
+    nor "not required" can be claimed. The scoper and the structural not-required
+    stamp both read this one test, so they never disagree. The PR-floor fallback
+    (`_required_suite_all_external`) checks `_repo_published_required` directly; it
+    only matters when no required check names a job, and then every published name
+    names no job either, so it agrees with this test."""
+    published = _repo_published_required(req_names, status_publishers)
+    return any(_check_to_job_node(r, job_graph or {}, crit_by_wf) is None
+               for r in published)
+
+
 def _required_suite_all_external(
     required_checks: "RequiredChecks | None",
     req_names: "frozenset[str] | set[str]",
     crit_by_wf: dict[str, dict[str, Any]],
     job_graph: dict[str, dict[str, dict[str, Any]]] | None,
+    status_publishers: "dict[str, dict[str, Any]] | None" = None,
 ) -> bool:
     """True when a COMPLETE, non-empty required suite resolved but NOT ONE required check
     anchors a file-backed job in this repo — every required check is external/managed (a
@@ -15599,9 +18171,15 @@ def _required_suite_all_external(
     Needs a job graph to tell external from file-backed; without one we can't prove
     external, so return False (conservative — leaves the spine as an unresolved best guess
     rather than over-claiming a PR-floor). Shares `_check_to_job_node` with the scoper, so
-    the two never disagree on which case a repo is in."""
+    the two never disagree on which case a repo is in.
+
+    A required context the repo publishes itself (`_repo_published_required`, issue
+    #119) is never counted external: a context-to-job-name mismatch is not proof of
+    an outside gate, so the suite stays unresolved instead of demoted to a PR-floor."""
     if not (required_checks is not None and required_checks.complete
             and req_names and job_graph):
+        return False
+    if _repo_published_required(req_names, status_publishers):
         return False
     return not any(
         _check_to_job_node(r, job_graph, crit_by_wf) is not None for r in req_names)
@@ -15614,6 +18192,7 @@ def _scope_spine_to_required(
     crit_by_wf: dict[str, dict[str, Any]],
     job_graph: dict[str, dict[str, dict[str, Any]]] | None,
     required_suite_unsatisfiable: bool,
+    status_publishers: "dict[str, dict[str, Any]] | None" = None,
 ) -> tuple[dict[str, float], list[str], bool]:
     """Restrict the critical-path spine to merge-blocking (required-reachable) checks,
     returning (kept_p50, dropped_sorted, scoped). The pole is the slowest thing on the spine,
@@ -15642,6 +18221,10 @@ def _scope_spine_to_required(
         is the designed handler for that external-gate case (it renders the file-backed
         floor + a demotion banner); scoping here would drop the very file-backed work the
         fallback then re-surfaces, contradicting it. Stay inert and let the fallback own it.
+      - **a required context the repo publishes itself names no job** (issue #119: an
+        in-repo aggregate status that waits on the tests with no `needs:` edge) → the
+        reachability from the other required checks is incomplete, so dropping a check
+        could drop a real gate. Stay inert; the pole is an unresolved best guess.
     Also never empties the spine on an over-tight match (`if not keep`).
 
     With no usable job graph (a degraded scan, or a findings doc predating the
@@ -15655,6 +18238,8 @@ def _scope_spine_to_required(
     # anything; an all-external required set (no required check maps to a workflow job)
     # belongs to the PR-floor fallback, not this filter.
     if not any(_check_to_job_node(r, job_graph, crit_by_wf) is not None for r in req_names):
+        return pr_check_p50, [], False
+    if _required_reachability_unresolved(req_names, crit_by_wf, job_graph, status_publishers):
         return pr_check_p50, [], False
     keep = _required_reachable_checks(pr_check_p50, req_names, job_graph, crit_by_wf)
     if not keep:
@@ -15716,6 +18301,7 @@ def _apply_structural_cascade(
     crit: dict[str, Any], events_by_wf: dict[str, set[str]],
     pr_checks_tuple: tuple[tuple[str, float], ...],
     pr_check_populations: list,
+    pr_check_populations_complete: list[bool] | None = None,
     own_check_names: "frozenset[str] | None" = None,
     chain_members: frozenset = frozenset(),
     chain_p50_s: float = 0.0,
@@ -15754,6 +18340,7 @@ def _apply_structural_cascade(
         events=tuple(sorted(events_by_wf.get(wf_path) or ())),
         pr_checks=pr_checks_tuple, own_check_names=own_check_names,
         pr_check_populations=tuple(pr_check_populations),
+        pr_check_populations_complete=tuple(pr_check_populations_complete or ()),
         chain_members=chain_members, chain_p50_s=chain_p50_s,
         chain_win_s=chain_win_s, cluster_floor_lever=cluster_floor_lever)
     res = size_wall_clock(float(raw_wc), ctx)
@@ -15806,9 +18393,14 @@ def _structural_raw_estimate(
 # this depth, never structurally analyzed" — a check beyond this depth with no
 # lever is NOT proven inherent, it just wasn't examined.
 _STRUCTURAL_TOP_N = 5
-# Distinct job matrices the report drills (gate + next distinct by impact); matches
-# blocking_path._TOP_WORKFLOWS. Their gates are always decomposed + logged.
-_DRILL_DISTINCT_MATRICES = 2
+# Distinct job matrices the report drills (gate + next distinct by impact). MUST equal
+# blocking_path._TOP_WORKFLOWS, the number of poles the report renders: every rendered pole
+# gets its own captured log, step timeline, Audit link and cross-run check (SKILL.md 5a).
+# At 2 vs the renderer's 5, a third gating job rendered with no log while its prompt
+# pointed at an Audit link that was not there. Cost: one log fetch per extra pole plus
+# its magnitude probe (~2 fetches, more only on a wide spread), at most 3 extra poles.
+# Pinned by test_undrilled_pole_audit_link.py::test_drill_cap_equals_the_render_cap.
+_DRILL_DISTINCT_MATRICES = 5
 
 # Adaptive 2-pass run sampling. The dominant gh cost is one `GET /runs/{id}/jobs`
 # per sampled run; sampling all workflows at full --max-runs is wasteful because a
@@ -16360,15 +18952,13 @@ def _clone_jobs_per_run_by_wf(
 
 
 def _stamp_run_context(run: dict[str, Any], jobs: list[dict[str, Any]]) -> None:
-    # Tag each job with the RUN's created_at (trigger time). OPT43 wait-to-start is
-    # measured from the trigger, not the job's own `created_at`: GitHub stamps a
-    # GATED job's `created_at` when its `needs:` dependency resolves, so
-    # `started - job.created` sees only this job's own pickup and HIDES the upstream
-    # gating cost (the gating job's queue + run time) the developer also waited on.
-    # OPT43 reads `_run_created_at` (see its docstring for the not-pure-queue caveat).
+    # Tag each job with the RUN's created_at (trigger time) — OPT43's runnable-time
+    # anchor for an ENTRY job. A `needs:`-gated job is instead measured from its last
+    # needed upstream's completion (see `_detect_opt43_queue_time`).
     run_created = run.get("created_at")
     ev = str(run.get("event") or "")
     rid = _run_id(run)
+    run_attempt = run.get("run_attempt")
     # Head repo (owner/name) of the run — a fork PR's head repo differs from the
     # audited repo, and a fork run runs colder (no repo secrets, so a secrets-gated
     # remote cache is unreachable to it). Stamped here (free —
@@ -16379,12 +18969,15 @@ def _stamp_run_context(run: dict[str, Any], jobs: list[dict[str, Any]]) -> None:
     # (free — already on the run object) so `_stamp_pole_repr_run_era` can content-classify a
     # drilled representative run's config era (issue #77), not just timestamp it.
     head_sha = str(run.get("head_sha") or "")
+    pr_number = _run_pr_number(run)
     for job in jobs:
         job["_run_created_at"] = run_created
         job["_run_event"] = ev
         job["_run_id"] = rid
+        job["_run_attempt"] = run_attempt
         job["_run_head_repo"] = head_repo
         job["_run_head_sha"] = head_sha
+        job["_run_pr_number"] = pr_number
 
 
 def _crit_for(
@@ -18724,6 +21317,87 @@ def _collapse_pr_floor_siblings(
             if not (p.get("workflow_file") and p.get("job")) or id(p) in kept]
 
 
+# The aggregation-gate (success-sink / verdict job) trivial threshold. Kept equal to
+# `blocking_path._AGG_GATE_TRIVIAL_S`, the renderer's copy of the same shape test.
+_AGG_GATE_TRIVIAL_S = 30.0
+
+
+def _agg_job_name_produces(job_name: str, is_matrix: bool, check: str) -> bool:
+    """True iff a job whose display `name:` is `job_name` produces the check-run `check`:
+    the exact name, a `${{ }}` name template, or a static matrix job's `Name (leg…)` legs.
+    Mirrors `blocking_path._agg_job_produces_check`; an all-placeholder template never
+    matches (it would bind any check)."""
+    if not job_name:
+        return False
+    if job_name == check:
+        return True
+    if "${{" in job_name:
+        parts = re.split(r"\$\{\{.*?\}\}", job_name)
+        if not any(p.strip() for p in parts):
+            return False
+        return bool(re.match("^" + ".+?".join(re.escape(p) for p in parts) + "$", check))
+    if is_matrix:
+        return bool(re.match("^" + re.escape(job_name) + r"(?: \(.*\))?$", check))
+    return False
+
+
+def _is_aggregation_gate_check(
+        check_name: str, check_p50: float, wf_path: str,
+        decomp: dict[str, Any] | None,
+        job_graph: dict[str, dict[str, dict[str, Any]]] | None,
+        measured_checks: "set[str] | frozenset[str]") -> bool:
+    """Is `check_name` a success-aggregation (verdict) job: the trivial sink that exists
+    only to `needs:` the real jobs so one check can be the required status check?
+
+    The same structural test the renderer applies (`blocking_path._agg_gate_shape`):
+    (a) its P50 is at most `_AGG_GATE_TRIVIAL_S`; (b) its job is a terminal node whose
+    transitive `needs:` closure holds >= 2 jobs and covers every non-terminal job in its
+    workflow; (c) no sampled step of its own exceeds the trivial threshold; (d) at least
+    one upstream job produces a measured check. Duration alone never matches: a real 3s
+    lint job with no `needs:` fails (b).
+
+    Such a check's wait IS its `needs:` upstream, so routing a "speed up this step" lever
+    to it is inert advice (there is nothing inside a verdict step to speed up, and moving
+    it off the PR path defeats the reason it exists). The structural router skips it; its
+    upstream members carry their own levers. Build-dominated work is exempt:
+    it carries the specific OPT70/OPT72 lever the renderer also preserves."""
+    if check_p50 > _AGG_GATE_TRIVIAL_S:
+        return False
+    # Preserve the renderer's specific-lever exemption: build-dominated work
+    # routes to OPT70/OPT72 even when the terminal job takes under 30 seconds.
+    if decomp is not None and decomp.get("dominant_category") == "build":
+        return False
+    jobs = (job_graph or {}).get(wf_path) or {}
+    if not isinstance(jobs, dict) or not jobs:
+        return False
+    cands = [k for k, m in jobs.items()
+             if _agg_job_name_produces(str((m or {}).get("name") or k),
+                                       bool((m or {}).get("matrix")), check_name)]
+    if len(cands) != 1:
+        return False
+    jid = cands[0]
+    needs_of = {k: [str(n) for n in ((m or {}).get("needs") or [])] for k, m in jobs.items()}
+    depended_on = {n for ns in needs_of.values() for n in ns}
+    if jid in depended_on:
+        return False
+    closure: set[str] = set()
+    frontier = list(needs_of.get(jid) or [])
+    while frontier:
+        n = frontier.pop()
+        if n in closure or n not in jobs:
+            continue
+        closure.add(n)
+        frontier.extend(needs_of.get(n) or [])
+    if len(closure) < 2 or not {k for k in jobs if k in depended_on} <= closure:
+        return False
+    if decomp is not None and any(float(p or 0.0) > _AGG_GATE_TRIVIAL_S
+                                  for _n, _c, p in (decomp.get("steps") or [])):
+        return False
+    return any(_agg_job_name_produces(str((jobs.get(j) or {}).get("name") or j),
+                                      bool((jobs.get(j) or {}).get("matrix")), m)
+               for j in closure for m in measured_checks if m != check_name)
+
+
 # VERBATIM-SYNC INVARIANT: the body of this function MUST match `_wf_is_file_backed` in
 # skills/ci-speedup/tests/verify_report.py EXACTLY (a source-equality test pins it). The structural
 # admission gate DROPS a name-inferred file-backed lever here; verify_report's invariant FLAGS one in a
@@ -18757,6 +21431,8 @@ def _detect_structural_candidates(
     triaged_fast_workflows: "set[str] | list[str] | None" = None,
     wf_docs: "dict[str, dict[str, Any]] | None" = None,
     overlap_withheld: "list[dict[str, Any]] | None" = None,
+    status_publishers: "dict[str, dict[str, Any]] | None" = None,
+    pr_check_populations_complete: list[bool] | None = None,
 ) -> list[dict[str, Any]]:
     """Route the top measured critical-path checks into STRUCTURAL candidates
     instead of the old inherent-cost dead-end. For each top check: map it to its
@@ -18791,6 +21467,10 @@ def _detect_structural_candidates(
     req_names = required_checks.names if required_checks is not None else frozenset()
     reachable_required = _required_reachable_checks(
         [n for n, _ in pr_checks_tuple], req_names, job_graph, crit_by_wf)
+    # A required status the repo publishes itself, naming no job (issue #119), may wait
+    # on any check with no `needs:` edge: not-required is then unprovable — UNKNOWN.
+    reach_unresolved = _required_reachability_unresolved(
+        req_names, crit_by_wf, job_graph, status_publishers)
 
     # ---- 1. Top-N critical-path checks → per-check structural lever ----
     for check_name, check_p50 in pr_checks_tuple[:top_n]:
@@ -18812,6 +21492,11 @@ def _detect_structural_candidates(
             # category and misroutes (e.g. OPT75 instead of OPT72 for a cold build).
             decomp = _measured_decomposition(_decompose_job_steps(
                 job_inst, bimodal=job_bimodal_all.get(check_name)))
+            # A verdict / aggregation job's wait IS its `needs:` upstream: no lever of its
+            # own, so route nothing to it (its upstream members are routed on their own).
+            if _is_aggregation_gate_check(check_name, check_p50, wf_path, decomp,
+                                          job_graph, set(all_check_p50)):
+                continue
             # Skip the structural lever ONLY if a hygiene fix already MATERIALLY
             # shortened this pole (>= half its measured p50). A trivial cache (e.g.
             # a 2s Playwright download on a 342s pole) must NOT suppress the
@@ -18838,7 +21523,7 @@ def _detect_structural_candidates(
             req_status = "unknown"
         elif check_name in reachable_required:
             req_status = "required"
-        elif required_checks.complete:
+        elif required_checks.complete and not reach_unresolved:
             req_status = "not-required"
         else:
             req_status = "unknown"
@@ -19000,6 +21685,10 @@ def _detect_structural_candidates(
                 evidence, me, assumption, decomp=decomp, required_status=req_status,
                 affected_jobs=([check_name] if mapping is None else None),
             )
+            if pat == "OPT72" and mapping is not None:
+                # Preserve every sampled runner, including missing labels; a mixed
+                # or unknown population cannot support Windows-only guidance.
+                f["runner_labels"] = [j.get("labels") or [] for j in job_inst]
             # Disambiguate per-check rows: append the target check so two levers on
             # different checks (or the speed-up + de-scope on one) read distinctly.
             f["title"] = f"{_STRUCTURAL_META[pat]['title']} — `{check_name}`"
@@ -19028,6 +21717,7 @@ def _detect_structural_candidates(
                 _apply_structural_cascade(
                     f, raw, wf_path, crit, events_by_wf,
                     pr_checks_tuple, pr_check_populations,
+                    pr_check_populations_complete=pr_check_populations_complete,
                     own_check_names=frozenset({check_name}),
                     chain_members=chain_members,
                     chain_p50_s=chain_p50_s, chain_win_s=chain_win_s)
@@ -19067,7 +21757,8 @@ def _detect_structural_candidates(
         vol_by_wf=vol_by_wf, job_bimodal_all=job_bimodal_all, job_graph=job_graph,
         check_present=check_present, present_n_pr=present_n_pr, req_names=req_names,
         check_pole_freq=check_pole_freq, chain_members=chain_members,
-        chain_p50_s=chain_p50_s, chain_win_s=chain_win_s)
+        chain_p50_s=chain_p50_s, chain_win_s=chain_win_s,
+        pr_check_populations_complete=pr_check_populations_complete)
     # Re-number every emitted structural finding to a contiguous id block so the
     # two sub-detectors can't collide on an index.
     for k, f in enumerate(out, start=start_idx + 1):
@@ -19250,6 +21941,7 @@ def _detect_shared_substep(
     chain_members: frozenset = frozenset(),
     chain_p50_s: float = 0.0,
     chain_win_s: float = 0.0,
+    pr_check_populations_complete: list[bool] | None = None,
 ) -> list[dict[str, Any]]:
     """A step CATEGORY (normalized) that recurs across >=2 cluster jobs of one
     workflow is a cluster-FLOOR lever (OPT73): fixing it once lowers every
@@ -19463,6 +22155,7 @@ def _detect_shared_substep(
         _apply_structural_cascade(
             f, credit.wall_clock_s, wf_path, crit_wf, events_by_wf,
             pr_checks_tuple, pr_check_populations,
+            pr_check_populations_complete=pr_check_populations_complete,
             own_check_names=frozenset(jobs.keys()),
             chain_members=chain_members,
             chain_p50_s=chain_p50_s, chain_win_s=chain_win_s,
@@ -19991,6 +22684,24 @@ def _workflows_are_dirty(root: "Path | None") -> bool:
     return bool(out)
 
 
+def _detached_head_matches_default(root: "Path", default_branch: str) -> bool:
+    """Is a DETACHED HEAD exactly the default branch's tip?
+
+    `git worktree add --detach` (and CI jobs that check out a bare SHA) leave a detached
+    HEAD at `origin/<default>`; that is not skew. Compared against `origin/<default>` when
+    fetched (the branch the sampled runs came from), else the local `<default>`. Only the
+    exact commit counts: detectors also read files outside `.github/workflows` (local
+    composite actions, package.json), and an attached `main` behind `origin/main` already
+    warns, so an identical workflows tree is not proof of no skew. No ref to compare
+    against -> False: keep the warning."""
+    head = _git_out(root, "rev-parse", "HEAD")
+    for ref in (f"refs/remotes/origin/{default_branch}", f"refs/heads/{default_branch}"):
+        tip = _git_out(root, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
+        if tip:
+            return bool(head) and head == tip
+    return False
+
+
 def _root_branch_skew(root: "Path | None",
                       default_branch: str | None) -> dict[str, Any] | None:
     """Is the checkout we're about to parse workflow YAML from on a DIFFERENT commit
@@ -20014,7 +22725,7 @@ def _root_branch_skew(root: "Path | None",
 
     What we can see, cheaply and offline:
       * the checked-out branch differs from the repo's default branch (incl. a detached
-        HEAD), or
+        HEAD that is not exactly the default tip — see `_detached_head_matches_default`), or
       * it IS the default branch but the local tracking ref `origin/<default>` shows the
         checkout is behind (stale) or ahead (unpushed local commits).
     A checkout with no `origin/<default>` ref (never fetched, a shallow tarball) can't
@@ -20025,6 +22736,8 @@ def _root_branch_skew(root: "Path | None",
     if not branch:
         return None
     if branch == "HEAD":
+        if _detached_head_matches_default(root, default_branch):
+            return None                   # CI / worktree checkout of the default tip
         return {"branch": None, "default_branch": default_branch,
                 "reason": "the checkout is on a DETACHED HEAD, not the default branch "
                           f"`{default_branch}`"}
@@ -20525,6 +23238,11 @@ _CACHE_PUSH_PROBE_MAX = 3
 # keep the finding's lever framing. Parallels `blocking_path._PARTIAL_MISS_FLOOR_PCT`'s
 # "most PRs touch few packages" rationale — a quarter of runs paying the miss is real.
 _CACHE_TAIL_MIN_FRAC = 0.25
+# Per-leaf partial-miss floor override. A dependency cache restores one key per
+# job, so at least half the sampled PR runs missing is the confirmation bar.
+# Mirrored by verify_report `_VR_CACHE_FLOOR_BY_FIX_KEY` (coupling test).
+_DEPENDENCY_CACHE_FLOOR_PCT = 50.0
+_CACHE_FLOOR_BY_FIX_KEY: dict[str, float] = {"dependency-cache": _DEPENDENCY_CACHE_FLOOR_PCT}
 # `_CACHE_COLD_MISS_PCT` — a per-run miss rate at/above this is "effectively 0 cached"
 # (a genuinely cold run), the case where a broad cache claim is legitimate. Kept just
 # under 100 so a lone restored package doesn't demote an otherwise-cold run.
@@ -20533,7 +23251,7 @@ _CACHE_COLD_MISS_PCT = 99.5
 # Mirror of `blocking_path._CACHE_LEAF_KEYS` (kept coupled by a self-test).
 _CACHE_LEAF_KEYS = frozenset({
     "turbo-remote-cache", "turbo-partial-cache", "buildx-no-cache",
-    "install-lifecycle-build",
+    "install-lifecycle-build", "dependency-cache",
 })
 
 # =============================================================================
@@ -23066,6 +25784,12 @@ def _dominant_step_sample(
             "this_run": round(this_run, 1), "escalated": False, "values": values}
 
 
+# Leaves that report the SAME magnitude (turbo's "% of tasks rebuilt", whether the
+# remote cache was off or partly warm in that run) compare across runs as one.
+_MAG_LEAF_FAMILY: dict[str, str] = {"turbo-remote-cache": "turbo",
+                                    "turbo-partial-cache": "turbo"}
+
+
 def _magnitude_sample(
     bp: Any, client: "GhClient", repo: str, qual: list[tuple[float, dict[str, Any]]],
     repr_job: dict[str, Any], repr_log: str, k_probe: int = 3, k_max: int = 8,
@@ -23106,6 +25830,16 @@ def _magnitude_sample(
         return None  # categorical-only finding (e.g. sequential playwright)
     primary_unit = mag.get("unit")
 
+    def _same_leaf_magnitude(leaf: dict[str, Any] | None) -> dict[str, Any] | None:
+        # A sibling's number counts only when the SAME detector fired on it. A
+        # sibling whose turbo miss fell below its floor can fall through to the
+        # dependency-cache leaf (a % too), and a seconds-unit leaf measures
+        # something else entirely: neither belongs in this cross-run sample.
+        if not leaf or (_MAG_LEAF_FAMILY.get(leaf.get("fix_key"), leaf.get("fix_key"))
+                        != _MAG_LEAF_FAMILY.get(primary.get("fix_key"), primary.get("fix_key"))):
+            return None
+        return leaf.get("magnitude")
+
     parsed: dict[Any, float | None] = {}
     states: dict[Any, Any] = {}   # jid -> cache_state (only populated when state_fn set)
     units: dict[Any, Any] = {}    # jid -> the run's own magnitude unit (for unit consistency)
@@ -23121,7 +25855,7 @@ def _magnitude_sample(
         log = (repr_log if jid == repr_job.get("id")
                else _fetch_job_log(client, repo, j))
         leaf = bp._parse_log(log, iso) if log else None
-        v = (leaf or {}).get("magnitude")
+        v = _same_leaf_magnitude(leaf)
         parsed[jid] = v["value"] if v and v.get("value") is not None else None
         units[jid] = (v or {}).get("unit")
         _record_state(jid, log)
@@ -23149,7 +25883,7 @@ def _magnitude_sample(
                     lambda j: (j.get("id"), _fetch_job_log(client, repo, j)),
                     chunk):
                 leaf = bp._parse_log(log, iso) if log else None
-                v = (leaf or {}).get("magnitude")
+                v = _same_leaf_magnitude(leaf)
                 parsed[jid] = v["value"] if v and v.get("value") is not None else None
                 units[jid] = (v or {}).get("unit")
                 _record_state(jid, log)
@@ -23196,6 +25930,9 @@ def _magnitude_sample(
                 entry["fork"] = bool(hr) and hr.lower() != repo.lower()
                 entry["duration_s"] = round(_job_duration_s(j) or 0.0, 1)
                 entry["cache_state"] = states.get(jid)
+                if primary.get("fix_key") == "dependency-cache":
+                    entry["install_steps"] = {name: seconds for name, seconds in _step_durations(j)
+                                              if _step_category(name) == "install"}
             values.append(entry)
 
     values: list[dict[str, Any]] = []
@@ -23289,7 +26026,7 @@ def _cache_distribution(
     push (default-branch) probe, plus the re-derivable `verdict`. Only called for a
     cache leaf, so its fetches (≤ `_CACHE_PUSH_PROBE_MAX` push logs) are the targeted
     escalation, not paid on every audit."""
-    floor_pct = bp._PARTIAL_MISS_FLOOR_PCT
+    floor_pct = _CACHE_FLOOR_BY_FIX_KEY.get(fix_key, bp._PARTIAL_MISS_FLOOR_PCT)
 
     def _miss(v: dict[str, Any]) -> float | None:
         st = v.get("cache_state") if isinstance(v.get("cache_state"), dict) else {}
@@ -23356,7 +26093,10 @@ def _cache_distribution(
         # either. `_job_has_log` keeps it out of both tallies AND out of the prefetch plan
         # (so no log is parked that the walk never consumes).
         job = next((j for j in run_jobs
-                    if str(j.get("name", "")) == job_name and _job_has_log(j)), None)
+                    if str(j.get("name", "")) == job_name and _job_has_log(j)
+                    # A dependency save runs in the job's post step: only a job that
+                    # ran to completion can show whether it saved.
+                    and (fix_key != "dependency-cache" or _dep_job_completed(j))), None)
         if job and job.get("id"):
             probe_jobs.append(job)
     # LEVER 3: fan the (≤ cap) probe logs out in one wave; the walk reads them from the
@@ -23375,6 +26115,8 @@ def _cache_distribution(
         if st and isinstance(st.get("miss_pct"), (int, float)):
             push_vals.append({"run_url": str(job.get("html_url", "")).split("/job/")[0],
                               "value": round(float(st["miss_pct"]), 2)})
+            if fix_key == "dependency-cache":
+                push_vals[-1]["saved"] = st.get("saved")
     if not push_runs:
         push, push_reason = None, "no push runs sampled for this workflow"
     elif push_matched == 0:
@@ -23391,12 +26133,252 @@ def _cache_distribution(
     verdict = _cache_verdict(pr_values, tail, floor_pct=floor_pct,
                              tail_min_frac=_CACHE_TAIL_MIN_FRAC,
                              cold_pct=_CACHE_COLD_MISS_PCT)
-    return {
+    result = {
         "fix_key": fix_key, "metric": "miss_pct", "floor_pct": floor_pct,
         "tail_min_frac": _CACHE_TAIL_MIN_FRAC,
         "pr": pr, "tail": tail, "push": push, "push_reason": push_reason,
         "verdict": verdict, "push_logs_fetched": push_fetched,
     }
+    if fix_key == "dependency-cache":
+        samples = [v for v in pr_values if not v.get("fork") and _miss(v) is not None]
+        miss_share = (statistics.mean(_miss(v) for v in samples) / 100.0
+                      if samples else 0.0)
+        # A push run that restored anything proves the default branch already
+        # holds this cache, so only full misses with no save confirm the gap. A
+        # push run whose job state cannot be verified (queued, in progress,
+        # cancelled, or a display name that only resembles the pole's) is
+        # unknown: it never counts as "did not save".
+        states = [_dep_push_run_state(run_jobs, job_name) for run_jobs in push_runs]
+        ran_sample = (bool(push_vals) and not push_errors and len(push_vals) == push_matched
+                      and all(v.get("saved") is False and v.get("value") == 100
+                              for v in push_vals))
+        never_ran = (bool(states) and push_matched == 0
+                     and all(s == "absent" for s in states))
+        no_push_save = ran_sample or never_ran
+        result["push_unknown_runs"] = sum(1 for s in states if s == "unknown")
+        result["confirmed"] = bool(pr["upstream_median"] is not None
+                                   and pr["upstream_median"] >= floor_pct and no_push_save)
+        result["recommendation"] = ("check this" if miss_share < _CACHE_TAIL_MIN_FRAC
+                                    or not result["confirmed"] else "seed the default-branch cache")
+        result["sizing"] = _dependency_cache_sizing(samples, miss_share)
+    return result
+
+
+def _dep_job_completed(job: dict[str, Any]) -> bool:
+    """A job that ran to completion (its post-step cache save had its chance)."""
+    return str(job.get("conclusion") or "").strip().lower() in ("success", "failure")
+
+
+def _dep_push_run_state(run_jobs: list[dict[str, Any]], job_name: str) -> str:
+    """One push run, for the pole's job: "ran" (completed), "absent" (provably
+    did not run: no such job in a finished run, or GitHub skipped it) or
+    "unknown" (queued, in progress, cancelled, or only a similar name)."""
+    jobs = [j for j in (run_jobs or []) if isinstance(j, dict)]
+    exact = [j for j in jobs if str(j.get("name", "")) == job_name]
+    if exact:
+        if any(_dep_job_completed(j) for j in exact):
+            return "ran"
+        if all(str(j.get("conclusion") or "").strip().lower() == "skipped" for j in exact):
+            return "absent"
+        return "unknown"
+    similar = any(str(j.get("name", "")).startswith(job_name + " (")
+                  or str(j.get("name", "")).endswith(" / " + job_name)
+                  or str(j.get("name", "")).startswith(job_name + " / ")
+                  for j in jobs)
+    if similar or any(not str(j.get("conclusion") or "").strip() for j in jobs):
+        return "unknown"
+    return "absent"
+
+
+def _dependency_cache_sizing(samples: list[dict[str, Any]], miss_share: float) -> dict[str, Any]:
+    """Price matching install steps from hits and misses, without extra log calls."""
+    misses: dict[str, list[float]] = {}
+    hits: dict[str, list[float]] = {}
+    for sample in samples:
+        state = sample.get("cache_state") or {}
+        if state.get("restore_count", 1) != 1:
+            continue
+        rate = state.get("miss_pct")
+        # Mixed outcomes cannot identify which cache caused an install's cost.
+        target = misses if rate == 100 else hits if rate == 0 else None
+        if target is not None:
+            for name, seconds in (sample.get("install_steps") or {}).items():
+                target.setdefault(name, []).append(seconds)
+    if not misses:
+        return {"credited": False, "reason": "no timed install on a cache miss"}
+    name = max(misses, key=lambda n: statistics.median(misses[n]))
+    miss_time = statistics.median(misses[name])
+    result = {"step": name, "miss_time_s": miss_time, "miss_share": miss_share,
+              "credited": False}
+    if not hits.get(name):
+        result["reason"] = "no hit sample for the same install step"
+        return result
+    hit_time = statistics.median(hits[name])
+    result.update({"hit_time_s": hit_time, "credited": True,
+                   "saving_s": max(0.0, miss_time - hit_time) * miss_share})
+    return result
+
+
+def _opt96_job_display_matches(display: str, job: str) -> bool:
+    return job == display or job.startswith(display + " (")
+
+
+def _opt96_pole_matches(finding: dict[str, Any], pole: dict[str, Any],
+                        wf_docs: dict[str, Any] | None = None) -> bool:
+    """True when an OPT96 finding (YAML job ids) names the measured pole's job.
+    A pole carries the job's display name: its `name:` or a matrix leg of it,
+    resolved through the workflow YAML; an unnamed job's display is its id. A
+    reader inside a reusable workflow runs under its caller: the pole is the
+    caller's workflow and its job reads `caller job / callee job`."""
+    wf = str(pole.get("workflow_file") or "")
+    job = str(pole.get("job") or "")
+    if not wf or not job:
+        return False
+    ids = [str(j) for j in (finding.get("affected_jobs") or [])]
+    if _wf_basename(wf) == _wf_basename(str(finding.get("workflow_file") or "")):
+        if job in ids:
+            return True
+        doc = (wf_docs or {}).get(wf) if isinstance(wf_docs, dict) else None
+        jobs = doc.get("jobs") if isinstance(doc, dict) else None
+        hit = _opt83_match_yaml_job(jobs, job) if isinstance(jobs, dict) else None
+        if hit is not None and hit[0] in ids:
+            return True
+    parts = [p.strip() for p in job.split(" / ")]
+    for caller in finding.get("callers") or []:
+        if not isinstance(caller, dict) or len(parts) < 2:
+            continue
+        if _wf_basename(wf) != _wf_basename(str(caller.get("workflow_file") or "")):
+            continue
+        chain = [str(j) for j in caller.get("jobs") or []]
+        if not chain:
+            continue
+        doc = (wf_docs or {}).get(wf) if isinstance(wf_docs, dict) else None
+        jobs = doc.get("jobs") if isinstance(doc, dict) else None
+        head = parts[0]
+        hit = _opt83_match_yaml_job(jobs, head) if isinstance(jobs, dict) else None
+        if head != chain[0] and (hit is None or hit[0] != chain[0]):
+            continue
+        callee = str(caller.get("callee_name") or "")
+        if parts[-1] in ids or (callee and _opt96_job_display_matches(callee, parts[-1])):
+            return True
+    return False
+
+
+# Workflow triggers that run on the default branch: a workflow with none of
+# them has no push bucket to probe, so the static finding supplies the writer.
+_OPT96_SEED_TRIGGERS = frozenset({"push", "schedule", "workflow_run", "repository_dispatch"})
+
+
+def _opt96_workflow_triggers(doc: Any) -> set[str] | None:
+    if not isinstance(doc, dict):
+        return None
+    on = doc.get("on", doc.get(True))
+    if isinstance(on, str):
+        return {on}
+    if isinstance(on, list):
+        return {str(x) for x in on}
+    if isinstance(on, dict):
+        return {str(k) for k in on}
+    return None
+
+
+def _opt96_check_default_branch(findings_doc: dict[str, Any], gh_default: str | None) -> None:
+    """Cross-check the default branch the scan used against GitHub's. On a
+    mismatch every OPT96 finding is demoted to unconfirmed, and the mismatch is
+    disclosed in `opt96_unresolved`."""
+    stamp = findings_doc.get("opt96_default_branch")
+    if not gh_default or not isinstance(stamp, dict):
+        return
+    used = stamp.get("name")
+    if used == gh_default or (not used and gh_default in ("main", "master")):
+        return
+    scanned = f"`{used}`" if used else "main/master (assumed)"
+    note = f"the scan read default branch {scanned}, but GitHub reports `{gh_default}`"
+    held = findings_doc.setdefault("opt96_unresolved", [])
+    for f in findings_doc.get("findings") or []:
+        if f.get("pattern") != "OPT96":
+            continue
+        f["opt96_branch_mismatch"] = note
+        jobs = f.get("affected_jobs") or [None]
+        held.append({"workflow_file": f.get("workflow_file"), "job": jobs[0],
+                     "family": f.get("match_text"),
+                     "reason": f"{note}, so this finding is unconfirmed"})
+
+
+def _opt96_unconfirmed_reason(candidates: list[dict[str, Any]]) -> str:
+    if not candidates:
+        return "no matching pole"
+    probes = [str(p.get("opt96_probe") or "") for p in candidates]
+    other = next((p for p in probes if p.startswith("other-leaf:")), None)
+    if other:
+        return f"another detector (`{other.split(':', 1)[1]}`) took precedence"
+    if any(p == "no-restore-line" for p in probes):
+        return "confirmation failed: the sampled log shows no cache restore"
+    return "pole log not fetched"
+
+
+def _ground_opt96(findings: list[dict[str, Any]], poles: list[dict[str, Any]],
+                  wf_docs: dict[str, Any] | None = None,
+                  fetch_gaps: "set[str] | None" = None) -> None:
+    """Ground static reachability candidates before the ordinary savings cascade.
+    `fetch_gaps` is the set of workflow files whose run or job lists failed to
+    download: their missing push bucket is not evidence of anything."""
+    for finding in findings:
+        if finding.get("pattern") != "OPT96":
+            continue
+        finding.update({"sizing_basis": "measured", "wall_clock_p50_s": None,
+                        "runner_min_saving": None, "tier": 2, "realization": "none"})
+        candidates = [p for p in poles if _opt96_pole_matches(finding, p, wf_docs)]
+        pole = next((p for p in candidates
+                     if (p.get("cache_dist") or {}).get("fix_key") == "dependency-cache"), None)
+        if pole is None:
+            finding["size_note"] = (f"check this: {_opt96_unconfirmed_reason(candidates)}; "
+                                    "savings uncredited")
+            continue
+        cd = pole["cache_dist"]
+        cd["static_confirmed"] = True
+        finding["cache_dist"] = cd
+        sizing = cd.get("sizing") or {}
+        pr = cd.get("pr") or {}
+        wf = str(pole.get("workflow_file") or "")
+        triggers = _opt96_workflow_triggers((wf_docs or {}).get(wf))
+        reason = None
+        if cd.get("push_reason") == "no push runs sampled for this workflow":
+            # A PR-only workflow has no push bucket: the static reachability
+            # proof supplies the absent writer. A workflow that DOES run on the
+            # default branch, or whose run list failed to download, only lacks
+            # a sample, and a missing sample proves nothing.
+            pr_only = (triggers is not None and not (triggers & _OPT96_SEED_TRIGGERS)
+                       and wf not in (fetch_gaps or set()))
+            if (pr_only and pr.get("upstream_n", 0) >= 2
+                    and (pr.get("upstream_median") or 0) >= _DEPENDENCY_CACHE_FLOOR_PCT):
+                cd["confirmed"] = True
+                cd["recommendation"] = "seed the default-branch cache"
+            elif not pr_only:
+                reason = "push probe unavailable"
+        elif not cd.get("confirmed") and (
+                (cd.get("push") is None and cd.get("push_reason")
+                 and "fetch" in str(cd.get("push_reason")))
+                or cd.get("push_unknown_runs")):
+            reason = "push probe unavailable"
+        if finding.get("opt96_branch_mismatch"):
+            reason = finding["opt96_branch_mismatch"]
+            cd["confirmed"] = False
+            cd["recommendation"] = "check this"
+        if not cd.get("confirmed"):
+            cd["recommendation"] = "check this"
+            reason = reason or "confirmation failed"
+        note = cd.get("recommendation", "check this")
+        if reason:
+            note += f": {reason}"
+        if sizing.get("step"):
+            note += f"; `{sizing['step']}` takes {sizing['miss_time_s']:g}s on a cache miss"
+        finding["size_note"] = note
+        if not cd.get("confirmed") or not sizing.get("credited"):
+            finding["size_note"] += "; savings uncredited"
+            continue
+        finding.update({"wall_clock_p50_s": sizing["saving_s"],
+                        "tier": 1, "realization": "direct"})
 
 
 def _as_list_local(v: object) -> list:
@@ -23417,11 +26399,61 @@ def _as_dict_local(v: object) -> dict:
 _NOOP_FLOOR_S = 30.0
 
 
+def _cache_path_sample(client, repo: str, jobs: list, facts: list,
+                       known: dict | None = None) -> dict:
+    """N01: every sampled successful job reaching this cache's save post-step.
+    No duration floor, bounded magnitude probe, or failed-run evidence may shrink
+    this denominator. Missing logs/ambiguous steps withhold, never imply warning.
+    """
+    import blocking_path as bp
+    # One pass over jobs, every fact checked while that job's log is loaded, then
+    # the log is released: memory stays one log wide however many runs warn.
+    state = [{"evidence": [], "runs": 0, "valid": True} for _ in facts]
+    for job in jobs:
+        if job.get("conclusion") != "success":
+            continue
+        live = [i for i, s in enumerate(state) if s["valid"]]
+        if not live:
+            break
+        if not isinstance(job.get("steps"), list) or not job["steps"]:
+            for i in live:
+                state[i]["valid"] = False
+            break
+        reached = {}
+        for i in live:
+            matches = [step for step in job["steps"]
+                       if isinstance(step, dict)
+                       and step.get("name") == "Post " + facts[i]["step"]
+                       and step.get("conclusion") != "skipped"]
+            if len(matches) > 1:
+                state[i]["valid"] = False
+            elif matches:
+                reached[i] = matches[0]
+        if not reached:
+            continue
+        # `known`: logs already in hand (the drilled one), never downloaded twice.
+        text = (known or {}).get(job.get("id"))
+        if text is None:
+            text = _fetch_job_log(client, repo, job)
+        hits = bp._cache_path_warnings(text or "", reached)
+        for i in reached:
+            state[i]["runs"] += 1
+            if i in hits:
+                state[i]["evidence"].append(hits[i])
+            else:
+                state[i]["valid"] = False
+    return {"admitted": [dict(fact, runs=s["runs"], evidence=s["evidence"])
+                         for fact, s in zip(facts, state) if s["valid"] and s["runs"]]}
+
+
 def _persist_pole_logs(
     client: "GhClient", repo: str, poles: list[dict[str, Any]],
     jobs_per_run_by_wf: dict[str, list], data_dir: "Path", mag_runs: int = 3,
     events_jobs_by_wf: dict[str, dict[str, list]] | None = None,
     iso: dict[str, Any] | None = None,
+    opt96_findings: list[dict[str, Any]] | None = None,
+    wf_docs: dict[str, Any] | None = None,
+    cache_effective_paths: dict | None = None,
 ) -> list[dict[str, Any]]:
     """Capture the long-pole jobs' raw logs ONCE into a local data bundle, so the
     report (and the fix-agent it hands off to) can read the step's INTERNAL timing
@@ -23566,6 +26598,10 @@ def _persist_pole_logs(
 
     for p, wf, job, qual, repr_dur, repr_job, jid in drills:
         log = _fetch_job_log(client, repo, repr_job)
+        _opt96_named = any(_opt96_pole_matches(f, p, wf_docs) for f in (opt96_findings or [])
+                           if f.get("pattern") == "OPT96")
+        if _opt96_named and not log:
+            p["opt96_probe"] = "log-not-fetched"
         if not log:
             logger.warning("no log captured for pole job %r (id=%s) - fetch returned "
                            "empty; this pole will render without a drill-down", job, jid)
@@ -23603,16 +26639,38 @@ def _persist_pole_logs(
         # vs push and fork vs upstream, so the renderer can't frame a mostly-warm cache
         # as a top miss/churn lever off the single (slow-mode) drilled run. `state_fn`
         # annotates the SAME logs `_magnitude_sample` already fetches (no PR-bucket cost).
+        facts = ((cache_effective_paths or {}).get(wf) or {}).get(job, [])
+        # A failed drilled run never reached the save, so it cannot gate the sample.
+        if facts and (bp._CACHE_PATH_WARNING in log or repr_job.get("conclusion") != "success"):
+            all_jobs = [j for run in jobs_per_run_by_wf.get(wf, []) for j in run
+                        if str(j.get("name", "")) == job]
+            p["cache_path_sample"] = _cache_path_sample(client, repo, all_jobs, facts,
+                                                        known={repr_job.get("id"): log})
         leaf0 = bp._parse_log(log, iso) or {}
         _cache_fk = leaf0.get("fix_key") if leaf0.get("fix_key") in _CACHE_LEAF_KEYS else None
+        # A restore line sits in nearly every job log. Sample dependency-cache
+        # outcomes (sibling logs + the push probe) only for a job a static OPT96
+        # finding names; any other pole keeps its previous drill and fetch count.
+        _dep_unclaimed = _cache_fk == "dependency-cache" and not _opt96_named
+        if _dep_unclaimed:
+            _cache_fk = None
+        if _opt96_named and leaf0.get("fix_key") != "dependency-cache":
+            # Why an OPT96 finding naming this pole stays unconfirmed.
+            p["opt96_probe"] = (f"other-leaf:{leaf0['fix_key']}" if leaf0.get("fix_key")
+                                else "no-restore-line")
         _state_fn = (lambda lg, _fk=_cache_fk: bp._cache_state_of_log(lg, _fk)) if _cache_fk else None
         mag_fn: str | None = None
-        mag = _magnitude_sample(bp, client, repo, qual, repr_job, log, mag_runs,
-                                state_fn=_state_fn, iso=iso)
+        mag = (None if _dep_unclaimed else
+               _magnitude_sample(bp, client, repo, qual, repr_job, log, mag_runs,
+                                 state_fn=_state_fn, iso=iso))
         if _cache_fk and mag:
             p["cache_dist"] = _cache_distribution(
                 bp, client, repo, _cache_fk, mag, qual, p,
                 events_jobs_by_wf or {}, _state_fn)
+        if _cache_fk == "dependency-cache":
+            # Restore outcomes live in cache_dist only. The pole's magnitude stays
+            # the dominant step's wall time, which `_mag_line` describes honestly.
+            mag = None
         if not mag:
             mag = _dominant_step_sample(timeline, qual, repr_job)
         if mag:
@@ -23646,6 +26704,14 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             data_dir: "Path | None" = None,
             shallow_runs: int = _SHALLOW_RUNS,
             root: "Path | None" = None) -> dict[str, Any]:
+    # Preserve an upstream per-commit handoff before this pass rebuilds
+    # `pr_critical_path`. The queue/work consumer accepts either location, and
+    # must not make nested callers move the stamp to a temporary top-level key.
+    _incoming_commit_clock = (
+        (findings_doc.get("pr_critical_path") or {}).get("commit_wall_clock")
+        if isinstance(findings_doc.get("pr_critical_path"), dict) else None)
+    if not isinstance(_incoming_commit_clock, dict):
+        _incoming_commit_clock = findings_doc.get("commit_wall_clock")
     # One unpinned 30-day window per RUN (not per interpreter): a harness that collects
     # several repos in one process must not measure the later ones against the first
     # call's clock. See `_reset_unpinned_now`.
@@ -23689,24 +26755,29 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         # mid-collection abort (`gave_up`) already uses — so the coverage banner and
         # `_measurement_is_broken` announce the hole instead of hiding it.
         if client.diagnose_unavailability() == "api_blocked":
+            # A sandboxed shell that can still read gh's stored token lands HERE, not on
+            # `gh_unavailable` — so this reason names that cause and gh's own words too.
+            _probe = getattr(client, "probe_failure", None)
             findings_doc["data_sources"] = {
                 "tiers_run": [], "gh_available": True,
                 "gh_query_count": client.queries, "gh_error_count": client.errors,
                 "partial_reason": (
                     "gh is installed and a token is configured, but the GitHub API "
-                    "REFUSED the collection before any run could be sampled (a rate-limit "
-                    "/ secondary-limit block, a transport error, or an expired / revoked "
-                    "/ insufficiently-scoped token) — so NO CI data was measured. This "
+                    "REFUSED the collection before any run could be sampled "
+                    + (f"({_probe.rstrip('.')}) " if _probe else "")
+                    + "— a rate-limit / secondary-limit block, a transport error, an "
+                    "expired / revoked / insufficiently-scoped token, or a sandboxed / "
+                    "offline shell — so NO CI data was measured. This "
                     "report is static-scan-only and is NOT a trustworthy CI audit; re-run "
                     "once the block clears — wait out a rate limit, or re-authenticate "
-                    "gh (`gh auth status`) if the token is invalid."),
+                    "gh (`gh auth status`) if the token is invalid. " + _GH_SANDBOX_HINT),
                 "partial_kind": _PARTIAL_COLLECTION_FAILED,
                 "run_list_fetch_failures": [], "job_fetch_failures": [],
             }
             return findings_doc
         findings_doc["data_sources"] = {
             "tiers_run": [], "gh_available": False,
-            "partial_reason": "gh CLI not available or not authenticated",
+            "partial_reason": _gh_unavailable_reason(getattr(client, "probe_failure", None)),
             "partial_kind": _PARTIAL_GH_UNAVAILABLE,
             "run_list_fetch_failures": [], "job_fetch_failures": [],
         }
@@ -23870,6 +26941,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 client.errors, _sample_gaps(), gave_up=True),
             "partial_kind": _PARTIAL_COLLECTION_FAILED,
         }
+        _stamp_auth_interruption(findings_doc["data_sources"], client)
         return findings_doc
     # Fetch failures in job samples that feed `runner_minute_spine` rows. Keep this
     # narrower than `jobs_fetch_failures`, which also includes detector-only probes.
@@ -24431,6 +27503,108 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # the FULL required suite. None when unreadable (no admin / no protection).
     repo_info = client.json(f"repos/{repo}")
     default_branch = (repo_info or {}).get("default_branch")
+    # The timing sample above is success-only. Reuse its already-fetched all-status
+    # page to stamp whether that successful-run median needs a failure-rate caveat;
+    # this is data already in hand, never another API call. Scope to completed runs on
+    # the repository's default branch and to the non-PR events that exercise that
+    # branch. Cancelled/skipped runs are neither successes nor failures here and stay
+    # out of both sides of the denominator.
+    _success_only_timing: dict[str, dict[str, Any]] = {}
+    for _wf_path, _all_runs in all_status_runs_by_wf.items():
+        _eligible_runs = [
+            _run for _run in _all_runs
+            if default_branch
+            and _run.get("status") == "completed"
+            and _run.get("head_branch") == default_branch
+            and _run.get("event") in {"push", "schedule", "workflow_dispatch"}
+            and _run.get("conclusion") not in {"cancelled", "skipped"}
+        ]
+        _failed_runs = [
+            _run for _run in _eligible_runs
+            if _run.get("conclusion") in {"failure", "timed_out"}
+        ]
+        _eligible_n = len(_eligible_runs)
+        _failed_n = len(_failed_runs)
+        _failure_rate = (_failed_n / _eligible_n) if _eligible_n else 0.0
+        _stamp: dict[str, Any] = {
+            "eligible_runs": _eligible_n,
+            "failed_runs": _failed_n,
+            "failure_pct": round(100 * _failure_rate),
+        }
+        if not default_branch:
+            _stamp.update({
+                "status": "default_branch_unknown",
+                "reason": ("default branch unknown: the repository read did not "
+                           "return it, so no default-branch runs could be counted"),
+            })
+        elif _eligible_n < _SUCCESS_ONLY_CAVEAT_MIN_RUNS:
+            _stamp.update({
+                "status": "too_few_runs",
+                "reason": (f"too few runs: {_eligible_n} eligible default-branch runs; "
+                           f"need at least {_SUCCESS_ONLY_CAVEAT_MIN_RUNS}"),
+            })
+        elif _failure_rate >= _SUCCESS_ONLY_CAVEAT_FAILURE_RATE:
+            _stamp["status"] = "caveat"
+        else:
+            _stamp["status"] = "below_threshold"
+        _success_only_timing[_wf_path] = _stamp
+    findings_doc["success_only_timing_by_workflow"] = _success_only_timing
+    # Pushes to the default branch happen after merge, so sample them on their
+    # own axis. Reuse the all-status pages already fetched above to choose the
+    # latest pushed SHAs; only the bounded per-run job walks are new API calls.
+    # The supplied commit-wall facts are deliberately consumed rather than
+    # reimplemented here: they are the merge seam for the shared producer.
+    _push_runs_by_sha: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    _push_run_wf: dict[str, str] = {}
+    _push_created_by_sha: dict[str, str] = {}
+    for _push_wf, _push_runs in all_status_runs_by_wf.items():
+        for _push_run in _push_runs:
+            _push_sha = str(_push_run.get("head_sha") or "")
+            if (not _push_sha or not default_branch
+                    or _push_run.get("event") != "push"
+                    or _push_run.get("head_branch") != default_branch
+                    or _push_run.get("status") != "completed"
+                    or _push_run.get("conclusion") in {"cancelled", "skipped"}):
+                continue
+            _push_runs_by_sha[_push_sha].append(_push_run)
+            _push_run_wf[str(_push_run.get("id") or id(_push_run))] = _push_wf
+            _push_created = str(_push_run.get("created_at") or "")
+            _push_created_by_sha[_push_sha] = max(
+                _push_created_by_sha.get(_push_sha, ""), _push_created)
+    _push_shas = sorted(
+        _push_runs_by_sha,
+        key=lambda sha: (_push_created_by_sha.get(sha, ""), sha),
+        reverse=True)[:_DEFAULT_BRANCH_PUSH_SAMPLE_MAX]
+    _push_run_rows = [
+        run
+        for sha in _push_shas
+        for run in sorted(
+            _push_runs_by_sha[sha],
+            key=lambda row: (str(row.get("id") or ""),
+                             str(row.get("created_at") or "")))
+    ]
+    if not default_branch:
+        _push_lane_status = "default_branch_unknown"
+        _push_lane_reason = "the default branch could not be determined"
+    elif all_status_failed:
+        _push_lane_status = "run_list_incomplete"
+        _push_lane_reason = "push run-list coverage was incomplete"
+    else:
+        _push_lane_status = "complete"
+        _push_lane_reason = ""
+    findings_doc["default_branch_push_lane"] = {
+        "status": _push_lane_status,
+        "status_reason": _push_lane_reason,
+        "sample_cap": _DEFAULT_BRANCH_PUSH_SAMPLE_MAX,
+        "sampled_push_count": len(_push_shas),
+        "sampled_run_count": len(_push_run_rows),
+        # Timing is filled in after the shared per-commit producer below runs.
+        "job_fetch_count": 0,
+        "job_fetch_failures": 0,
+        "p50_s": None,
+        "p90_s": None,
+        "facts": [],
+    }
     # `--root` is on for EVERY run now, so every workflow's YAML comes off the working
     # tree. `_root_is_clone_of` proved it is the right REPO; this asks the other half —
     # is it the right COMMIT LINE? A clean feature branch or a stale `main` is not dirty,
@@ -24447,11 +27621,17 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             workflow_yaml_skew["reason"], default_branch)
     # Repo visibility — recorded as informational metadata on the cost spine.
     findings_doc["repo_visibility"] = _derive_repo_visibility(repo_info)
-    required_checks = _fetch_required_checks(client, repo, default_branch)
+    _opt98_rules: dict[str, Any] = {}
+    required_checks = _fetch_required_checks(client, repo, default_branch, branch_rules=_opt98_rules)
     findings_doc["required_checks"] = (
         sorted(required_checks.names) if required_checks is not None else None)
     findings_doc["required_checks_complete"] = (
         required_checks.complete if required_checks is not None else False)
+
+    import pr_lifecycle
+    findings_doc["pr_lifecycle"] = pr_lifecycle.collect(
+        getattr(client, "graphql", lambda query: None), repo,
+        sorted(required_checks.names) if required_checks is not None and required_checks.complete else None)
 
     # MEASURED CRITICAL PATH — fetch the full check-run set for the 20 most recent
     # PRs that ran the FULL CI suite (their check-runs include every required
@@ -24484,6 +27664,19 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # with no merge_group runs this is the identity map: one member per group, exactly
     # the pre-#58 per-sha behaviour.
     _rep_ts, _rep_members = _group_dev_shas_by_pr(sha_meta)
+    check_runs_complete_by_sha: dict[str, bool] = {}
+    _member_check_runs: dict[str, list[dict[str, Any]]] = {}
+    _member_check_runs_complete: dict[str, bool] = {}
+
+    def _checks_for_member(member_sha: str) -> list[dict[str, Any]] | None:
+        completion: dict[str, bool] = {}
+        rows = _fetch_check_runs(
+            client, repo, member_sha, completion=completion)
+        _member_check_runs_complete[member_sha] = bool(
+            completion.get("complete"))
+        if rows is not None:
+            _member_check_runs[member_sha] = rows
+        return rows
 
     def _checks_for(rep_sha: str) -> dict[str, float] | None:
         # UNION the check-runs across every head_sha the PR ran on (its pull_request
@@ -24492,9 +27685,12 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         # makes the whole row a coverage gap (None) — never a laundered partial row
         # (see `_union_member_checks`) — so `_select_repr_shas` counts it as a fetch
         # failure exactly as the pre-#58 per-sha path did.
-        res = _union_member_checks(
-            _rep_members.get(rep_sha, [rep_sha]),
-            lambda member: _fetch_check_runs(client, repo, member))
+        members = _rep_members.get(rep_sha, [rep_sha])
+        res = _union_member_checks(members, _checks_for_member)
+        check_runs_complete_by_sha[rep_sha] = (
+            res is not None
+            and all(_member_check_runs_complete.get(member, False)
+                    for member in members))
         if res is None:
             return None  # propagate the fetch failure — don't fake a partial PR
         m, iv = res
@@ -24502,7 +27698,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         return m
 
     repr_shas, per_sha_checks, check_durs, sample_diag = _select_repr_shas(
-        _rep_ts, _checks_for, req_names, _REPR_PR_TARGET)
+        _rep_ts, _checks_for, req_names, _REPR_PR_TARGET,
+        repo_published=_repo_published_required(
+            req_names, findings_doc.get("workflow_status_publishers")))
     # Config-era thin-flip (issue #74, direction (a): the timing spine flips WITH the rule). Now that
     # the PR gate sample (`per_sha_checks`) is in hand we can tell whether a `disclosed_pre` straddle's
     # kept PRE era actually produced a gate-bearing check IN THE SAMPLE. When it did not (the gate PRs
@@ -24566,7 +27764,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         events_jobs_by_wf[wf] = jbe
 
     _era_resolve_thin_flip(config_era_facts, repr_shas, per_sha_checks, _rep_ts,
-                           _era_check_wf_of, sampled_runs_by_wf, _era_redrill)
+                           _era_check_wf_of, sampled_runs_by_wf, _era_redrill,
+                           jobs_per_run_by_wf)
     # Reliable per-job execution times from the jobs API (runner-scoped, no
     # queue), across all sampled workflows. A check-run's started→completed span
     # can be inflated by queue waits and re-runs (e.g. an 80s `Integration test`
@@ -24706,11 +27905,43 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     pr_check_p50, dropped_non_required, spine_required_scoped = _scope_spine_to_required(
         pr_check_p50, required_checks, req_names, crit_by_wf,
         findings_doc.get("workflow_job_graph"),
-        bool(sample_diag.get("required_suite_unsatisfiable")))
+        bool(sample_diag.get("required_suite_unsatisfiable")),
+        status_publishers=findings_doc.get("workflow_status_publishers"))
     if dropped_non_required:
         logger.info("critical path: dropped %d non-required (non-merge-gating) "
                     "check(s): %s", len(dropped_non_required),
                     dropped_non_required[:8])
+    if not spine_required_scoped:
+        # A fallback/unresolved spine must rank the job that actually ended each
+        # sampled commit. Check-run populations can omit a producing workflow's
+        # job entirely; the already-fetched job rows retain the completion fact.
+        _job_observations = _fallback_job_observations(
+            repr_shas, _rep_members, jobs_per_run_by_wf)
+        if _job_observations:
+            _known_check_names = set(pr_check_p50)
+            _missing_candidates = {
+                max(_observed, key=lambda name: (_observed[name][0], name))
+                for _observed in _job_observations.values() if _observed
+            } - _known_check_names
+            _fallback_durations: dict[str, list[float]] = {}
+            _completed_rows: list[dict[str, float]] = []
+            for _sha, _checks in zip(repr_shas, per_sha_checks):
+                _row = dict(_checks)
+                for _name in _missing_candidates:
+                    _observed = (_job_observations.get(_sha) or {}).get(_name)
+                    if _observed is None:
+                        continue
+                    _duration, _started, _completed = _observed
+                    _row[_name] = _duration
+                    _fallback_durations.setdefault(_name, []).append(_duration)
+                    sha_check_intervals.setdefault(_sha, {})[_name] = (
+                        _started, _completed)
+                _completed_rows.append(_row)
+            per_sha_checks = _completed_rows
+            for _name, _durations in _fallback_durations.items():
+                if _name not in pr_check_p50:
+                    pr_check_p50[_name] = round(_percentile(_durations, 50), 1)
+                    check_timing_source[_name] = "workflow_jobs"
     # Config-era enumeration binding (issue #69). #66/#68 scoped the SPINE RUNS to one era, but
     # the CHECK SET was still enumerated from the raw PR sample — so a disclosed_pre report leaked
     # post-era-only checks (the NEW config's `guard shard N/4` jobs, carried by 2 post-change PRs)
@@ -24767,6 +27998,19 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     pr_check_p50, _fileless_check_p50 = _partition_fileless_checks(
         pr_check_p50, check_timing_source, crit_by_wf,
         findings_doc.get("workflow_job_graph"))
+    # A literal required status is confirmed merge-blocking even when an external publisher gives
+    # it no workflow file to drill. In a required-scoped spine, retain that measured status in the
+    # crown basis; the fileless exclusion still applies to every unconfirmed app/label check.
+    if spine_required_scoped:
+        _required_fileless = {
+            name: span for name, span in _fileless_check_p50.items() if name in req_names
+        }
+        if _required_fileless:
+            pr_check_p50.update(_required_fileless)
+            _fileless_check_p50 = {
+                name: span for name, span in _fileless_check_p50.items()
+                if name not in _required_fileless
+            }
     if _fileless_check_p50:
         logger.info(
             "critical path: excluded %d fileless/managed check(s) from the headline/makespan "
@@ -24786,11 +28030,20 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         _era_scope_pr_spine_sample(
             repr_shas, per_sha_checks, sha_check_intervals, _rep_ts,
             set(pr_check_p50), config_era_facts, _era_check_wf_of))
+    _era_check_runs_complete = [
+        check_runs_complete_by_sha.get(sha, False) for sha in _era_repr_shas]
     # One caps source for the ranking, the populations, AND the chain facts —
     # they must never disagree about a check's de-inflated magnitude (ENG-1 N1).
     _span_caps = _pole_caps(job_p50_all, job_bimodal_all)
+    _job_graph = findings_doc.get("workflow_job_graph")
+    _confirmed_gate_checks: frozenset[str] | None = None
+    if spine_required_scoped and req_names and _job_graph:
+        _confirmed_gate_checks = frozenset(
+            name for name in pr_check_p50
+            if _pole_is_required_reachable(name, req_names, _job_graph, crit_by_wf))
     pr_checks_tuple, check_present, present_n_pr, check_pole_freq = _rank_spine_present_first(
-        pr_check_p50, _era_per_sha_checks, req_names, _span_caps)
+        pr_check_p50, _era_per_sha_checks, req_names, _span_caps,
+        _confirmed_gate_checks)
     # Headline-crown recovery. The crowned `critical_path_check` (pr_checks_tuple[0]) is what the
     # report HEADLINES as the merge gate. When it maps to a workflow that run-list triage skipped
     # (jobs never fetched), the headline pole has no sampled job to drill and dead-ends ("no
@@ -24887,8 +28140,11 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # ~750s on code PRs). Each population gets its own critical path, so a check
     # that's only the pole when the gate self-skips earns its real wall-clock for
     # that population instead of being zeroed by a gate it never runs alongside.
+    pr_check_population_complete: list[bool] = []
     pr_check_populations = _segment_pr_populations(
-        _era_per_sha_checks, pr_check_p50, job_p50_all, job_bimodal_all)
+        _era_per_sha_checks, pr_check_p50, job_p50_all, job_bimodal_all,
+        per_sha_check_runs_complete=_era_check_runs_complete,
+        population_completeness_out=pr_check_population_complete)
     # Map each spine check to its producing workflow file (when it maps to a sampled job),
     # emitted per check so the renderer can tell a file-backed check from a fileless/external
     # one (a Socket/CLA bot) WITHOUT relying on whether the check happened to be drilled as a
@@ -24915,12 +28171,387 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 # trace it — an ambiguous-internal check looks identical to a real bot.
                 logger.debug("critical path: check %r left unmapped (no scanned job-graph "
                              "match, or ambiguous across workflows) — renders external", _n)
+    # A required/reachable check can have a small but severe slow tail that its
+    # median and the >=30% bimodal detector intentionally do not surface.  Stamp
+    # that descriptive evidence only after the required closure actually narrowed
+    # the spine: an independent sibling outside every required `needs:` closure
+    # must not acquire a merge-wait finding merely because it has a slow tail.
+    _minority_tail_confirmed = {
+        _n for _n, _p50 in pr_checks_tuple
+        if spine_required_scoped and _pole_is_required_reachable(
+            _n, req_names, _jg, crit_by_wf)
+    }
+    _minority_tail_by_check = _minority_tails_for_checks(
+        pr_checks_tuple, crit_by_wf, _minority_tail_confirmed)
     # ENG-1 PR-N1: per-PR chain TIMING facts (data-only; nothing renders or
     # ranks on them until PR-N2). One entry per sampled repr sha — the longest
     # `needs:` chain (capped member spans, `_span_caps` — the caps the ranking
     # uses) plus the attempt-scoped, span-capped empirical makespan cross-check.
+    _chain_spine = (set(_confirmed_gate_checks)
+                    if _confirmed_gate_checks is not None else set(pr_check_p50))
+
+    def _commit_job_node(workflow: str, job_name: str) -> str | None:
+        mapped = _check_to_job_node(job_name, _jg, crit_by_wf)
+        return mapped[1] if mapped is not None and mapped[0] == workflow else None
+
+    def _needs_chain(workflow: str, node: str | None) -> set[str]:
+        if node is None:
+            return set()
+        jobs = (_jg or {}).get(workflow) or {}
+        parents: dict[str, set[str]] = {}
+        children: dict[str, set[str]] = defaultdict(set)
+        for key, candidate in jobs.items():
+            raw_needs = candidate.get("needs") if isinstance(candidate, dict) else []
+            needed = ([raw_needs] if isinstance(raw_needs, str)
+                      else (raw_needs or []))
+            parents[str(key)] = {str(item) for item in needed}
+            for item in needed:
+                children[str(item)].add(str(key))
+        seen: set[str] = {node}
+        for edges in (parents, children):
+            reached = {node}
+            todo = [node]
+            while todo:
+                current = todo.pop()
+                for adjacent in edges.get(current, set()):
+                    if adjacent not in reached:
+                        reached.add(adjacent)
+                        todo.append(adjacent)
+            seen.update(reached)
+        return seen
+
+    def _needs_ancestors(workflow: str, node: str) -> set[str]:
+        jobs = (_jg or {}).get(workflow) or {}
+        reached: set[str] = set()
+        todo = [node]
+        while todo:
+            current = todo.pop()
+            candidate = jobs.get(current) or {}
+            raw_needs = (candidate.get("needs")
+                         if isinstance(candidate, dict) else [])
+            needed = [raw_needs] if isinstance(raw_needs, str) else (raw_needs or [])
+            for parent in (str(item) for item in needed):
+                if parent not in reached:
+                    reached.add(parent)
+                    todo.append(parent)
+        return reached
+
+    def _joint_nodes_coupled(workflow: str, left: str, right: str) -> bool:
+        if right in _needs_chain(workflow, left):
+            return True
+        return bool(_needs_ancestors(workflow, left)
+                    & _needs_ancestors(workflow, right))
+
+    _commit_facts: list[dict[str, Any]] = []
+    _joint_observations: list[dict[str, Any]] = []
+    _joint_population_complete = bool(
+        _confirmed_gate_checks is not None
+        and len(_confirmed_gate_checks) >= 2
+        and set(req_names).issubset(_confirmed_gate_checks))
+    _commit_shas: list[str] = []
+    _commit_checks_by_sha: dict[str, dict[str, float]] = {}
+    _commit_dropped_workflows: dict[str, set[str]] = {}
+    _era_facts = [fact for fact in config_era_facts
+                  if fact.get("workflow_file")
+                  and fact.get("rule") != "runner_label_change"]
+    for _rep in _era_repr_shas:
+        for _sha in _rep_members.get(_rep, [_rep]):
+            _ts = str((sha_meta.get(_sha) or {}).get("ts") or "")
+            _dropped_wfs = {
+                str(fact["workflow_file"]) for fact in _era_facts
+                if _era_pr_side(_ts, fact, _sha) == "dropped"
+            }
+            _checks = {
+                str(row.get("name") or "?"): float(duration)
+                for row in (_member_check_runs.get(_sha) or [])
+                if (duration := _duration_s(row.get("started_at"),
+                                            row.get("completed_at"))) is not None
+                and duration > 0
+                and _era_check_wf_of(str(row.get("name") or "?")) not in _dropped_wfs
+            }
+            if _dropped_wfs and not any(name in _chain_spine for name in _checks):
+                continue
+            _commit_shas.append(_sha)
+            _commit_checks_by_sha[_sha] = _checks
+            _commit_dropped_workflows[_sha] = _dropped_wfs
+    _commit_jobs_by_run: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for _wf, _job_runs in jobs_per_run_by_wf.items():
+        for _job_run in _job_runs:
+            if not _job_run:
+                continue
+            _rid = str(_job_run[0].get("_run_id") or "")
+            if _rid:
+                _commit_jobs_by_run[(_wf, _rid)] = _job_run
+
+    def _commit_wall_fact(_sha: str, _event: str,
+                          _run_rows: list[tuple[str, dict[str, Any]]],
+                          _jobs_by_run: dict[tuple[str, str], list[dict[str, Any]]],
+                          _expected_workflows: set[str]) -> dict[str, Any]:
+        """One commit's wall clock across every workflow run on that SHA and
+        event: earliest run creation to the last job completion, with the
+        slowest job, the next-longest job outside its `needs:` chain, and the
+        shared projection. Used by the PR lane and the default-branch push lane."""
+        nonlocal _joint_population_complete
+        _missing: set[str] = _expected_workflows - {_wf for _wf, _run in _run_rows}
+        _created: list[float] = []
+        _created_iso: dict[float, str] = {}
+        _job_rows: list[dict[str, Any]] = []
+        # Raw per-job intervals for the runner queue / work split. Queued time
+        # is the job's own `created_at` when GitHub gives it.
+        _job_intervals: list[dict[str, str]] = []
+        for _wf, _run in _run_rows:
+            _created_dt = _parse_dt(str(_run.get("created_at") or ""))
+            if _created_dt is not None:
+                _created.append(_created_dt.timestamp())
+                _created_iso.setdefault(_created_dt.timestamp(),
+                                        str(_run.get("created_at") or ""))
+            _rid = str(_run.get("id") or "")
+            _run_jobs = _jobs_by_run.get((_wf, _rid))
+            if not _run_jobs:
+                _missing.add(_wf)
+                continue
+            _completed_here = False
+            for _job in _run_jobs:
+                _started_dt = _parse_dt(str(_job.get("started_at") or ""))
+                _completed_dt = _parse_dt(str(_job.get("completed_at") or ""))
+                if _started_dt is None or _completed_dt is None:
+                    continue
+                _duration = _completed_dt.timestamp() - _started_dt.timestamp()
+                if _duration < 0:
+                    continue
+                _completed_here = True
+                _job_intervals.append({
+                    "name": str(_job.get("name") or ""),
+                    "workflow_file": _wf,
+                    # A job with no queued time of its own queued from its run's
+                    # creation, never from the commit's first run.
+                    "created_at": str(_job.get("created_at")
+                                      or _run.get("created_at") or ""),
+                    "started_at": str(_job.get("started_at") or ""),
+                    "completed_at": str(_job.get("completed_at") or ""),
+                })
+                _job_rows.append({
+                    "name": str(_job.get("name") or ""),
+                    "workflow_file": _wf,
+                    "duration_s": round(_duration, 3),
+                    "started_ts": _started_dt.timestamp(),
+                    "completed_ts": _completed_dt.timestamp(),
+                    "node": _commit_job_node(_wf, str(_job.get("name") or "")),
+                    "run_id": str(_job.get("_run_id") or ""),
+                    "run_attempt": _job.get("_run_attempt"),
+                    "runner": _job_runner_label(_job),
+                })
+            if not _completed_here:
+                _missing.add(_wf)
+
+        _job_rows.sort(key=lambda row: (-float(row["duration_s"]),
+                                        str(row["workflow_file"]), str(row["name"])))
+        _slowest = _job_rows[0] if _job_rows else None
+        _excluded = (_needs_chain(str(_slowest["workflow_file"]), _slowest.get("node"))
+                     if _slowest else set())
+
+        def _outside_slowest_chain(row: dict[str, Any]) -> bool:
+            if _slowest is None or row["workflow_file"] != _slowest["workflow_file"]:
+                return True
+            if row.get("node") not in _excluded:
+                return True
+            # Matrix display legs share one YAML node but execute independently.
+            # Preserve another concrete leg as a floor; a repeated attempt with
+            # the same display name is not an independent sibling.
+            node = row.get("node")
+            spec = ((_jg or {}).get(str(row["workflow_file"])) or {}).get(node) or {}
+            return bool(node == _slowest.get("node")
+                        and row.get("name") != _slowest.get("name")
+                        and isinstance(spec, dict) and spec.get("matrix"))
+
+        _next = next((row for row in _job_rows[1:]
+                      if _outside_slowest_chain(row)), None) if _slowest else None
+        _observed = (round(max(float(row["completed_ts"]) for row in _job_rows)
+                           - min(_created), 3)
+                     if _job_rows and _created else None)
+        # The slowest job's own `needs:` chain on this commit (its ancestors and
+        # descendants; other legs of its matrix run independently). Speeding the
+        # slowest job leaves the rest of that chain in series, so a projection
+        # floors the whole chain path, not the job alone, at the next path.
+        _chain_rows = ([row for row in _job_rows
+                        if _slowest is not None
+                        and row["workflow_file"] == _slowest["workflow_file"]
+                        and row.get("node") in _excluded
+                        and not _outside_slowest_chain(row)
+                        and (row.get("node") != _slowest.get("node")
+                             or row.get("name") == _slowest.get("name"))]
+                       if _slowest is not None and _slowest.get("node") is not None
+                       else [])
+        _chain_span = (round(max(float(row["completed_ts"]) for row in _chain_rows)
+                             - min(float(row["started_ts"]) for row in _chain_rows), 3)
+                       if len(_chain_rows) > 1 else None)
+        if _chain_span is not None and _slowest is not None:
+            _chain_span = max(_chain_span, float(_slowest["duration_s"]))
+        _partial = bool(_missing or not _run_rows or _observed is None)
+
+        _joint_nodes: dict[str, tuple[str, str]] = {}
+        _commit_checks = _commit_checks_by_sha.get(_sha) or {}
+        if _joint_population_complete and not _partial:
+            for _check in sorted(_chain_spine):
+                if _check not in _commit_checks:
+                    _joint_nodes = {}
+                    break
+                _mapped = _map_check_to_job(_check, crit_by_wf,
+                                            require_developer_timing=True)
+                if _mapped is None:
+                    _joint_nodes = {}
+                    break
+                _mapped_wf, _mapped_job = _mapped
+                _mapped_node = _commit_job_node(_mapped_wf, _mapped_job)
+                if _mapped_node is None:
+                    _joint_nodes = {}
+                    break
+                _mapped_spec = (((_jg or {}).get(_mapped_wf) or {}).get(
+                    _mapped_node) or {})
+                if isinstance(_mapped_spec, dict) and _mapped_spec.get("matrix"):
+                    _joint_nodes = {}
+                    break
+                _joint_nodes[_check] = (_mapped_wf, _mapped_node)
+        if (_joint_population_complete
+                and len(_joint_nodes) == len(_chain_spine)):
+            _joint_observation = _joint_gating_observation(
+                _sha, _joint_nodes, _job_rows, _joint_nodes_coupled)
+            if _joint_observation is not None:
+                _joint_observations.append(_joint_observation)
+            else:
+                _joint_population_complete = False
+        elif _joint_population_complete:
+            _joint_population_complete = False
+
+        _fact: dict[str, Any] = {
+            "sha": _sha,
+            "event": _event,
+            "partial": _partial,
+            "missing_workflows": sorted(_missing),
+            **({"created_at": _created_iso[min(_created)]} if _created else {}),
+            "jobs": _job_intervals,
+            "wall_s": None if _partial else _observed,
+            **({"observed_wall_s": _observed} if _observed is not None else {}),
+            **({"slowest_job": {k: _slowest[k] for k in
+                                ("name", "workflow_file", "duration_s")}}
+               if _slowest else {}),
+            **({"next_longest_job": {k: _next[k] for k in
+                                     ("name", "workflow_file", "duration_s")}}
+               if _next else {}),
+            **({"slowest_chain_span_s": _chain_span}
+               if _chain_span is not None else {}),
+        }
+        if not _partial and _slowest is not None:
+            _next_s = float(_next["duration_s"]) if _next else 0.0
+            _projection = project_commit_wall(
+                float(_observed), float(_slowest["duration_s"]), _next_s, 4.0,
+                **({"chain_s": _chain_span, "pole_s": float(_slowest["duration_s"]),
+                    "runner_up_s": _next_s} if _chain_span is not None else {}))
+            _fact["projection_4x"] = {
+                "job_speedup": 4.0,
+                "projected_s": _projection.projected_s,
+                "multiple": _projection.multiple,
+            }
+        return _fact
+
+    for _sha in _commit_shas:
+        _event = str((sha_meta.get(_sha) or {}).get("event") or "")
+        _run_rows: list[tuple[str, dict[str, Any]]] = []
+        for _wf in sorted(set(sampled_runs_by_wf) | set(all_status_runs_by_wf)):
+            if _wf in _commit_dropped_workflows.get(_sha, set()):
+                continue
+            _runs_by_id: dict[str, dict[str, Any]] = {}
+            for _run in [*(all_status_runs_by_wf.get(_wf) or []),
+                         *(sampled_runs_by_wf.get(_wf) or [])]:
+                _runs_by_id[str(_run.get("id") or id(_run))] = _run
+            _runs = [
+                _run for _run in _runs_by_id.values()
+                if (str(_run.get("head_sha") or "") == _sha
+                    and str(_run.get("event") or "") == _event)
+            ]
+            # A workflow can run more than once on one commit and event. The
+            # developer waits on the latest run, not every earlier trigger.
+            if _runs:
+                _run_rows.append((_wf, max(
+                    _runs, key=lambda r: (str(r.get("created_at") or ""),
+                                          str(r.get("id") or "")))))
+
+        _expected_workflows: set[str] = set()
+        for _check_name in (_commit_checks_by_sha.get(_sha) or {}):
+            _mapped = _check_to_job_node(_check_name, _jg, crit_by_wf)
+            if _mapped is not None:
+                _expected_workflows.add(_mapped[0])
+        _commit_facts.append(_commit_wall_fact(
+            _sha, _event, _run_rows, _commit_jobs_by_run, _expected_workflows))
+
+    _complete_walls = [float(f["wall_s"]) for f in _commit_facts
+                       if isinstance(f.get("wall_s"), (int, float))]
+    _commit_wall_clock = {
+        "p50_s": (round(_percentile(_complete_walls, 50), 3)
+                  if _complete_walls else None),
+        "p90_s": (round(_percentile(_complete_walls, 90), 3)
+                  if _complete_walls else None),
+        "facts": _commit_facts,
+    }
+    _joint_runner_bases = {
+        tuple(sorted((observation.get("check_runners") or {}).items()))
+        for observation in _joint_observations
+    }
+    if (_joint_population_complete and _joint_observations
+            and len(_joint_observations) == len(_commit_facts)
+            and len(_joint_runner_bases) == 1):
+        findings_doc[joint.JOINT_SCENARIO_INPUTS_KEY] = {
+            "contract_version": joint.SCENARIO_CONTRACT_VERSION,
+            "topology": joint.SUPPORTED_TOPOLOGY,
+            "basis": "job_started_at_to_completed_at",
+            "check_names": sorted(_chain_spine),
+            "observations": _joint_observations,
+            # No current finding carries per-observation local reductions,
+            # affected-work identity, stable matrix identity, and the local-
+            # runtime-only certificate together. Measured observations are
+            # stamped without inventing an effect adapter.
+            "effects": [],
+        }
+    # The default-branch push lane uses the same per-commit builder. Its pushed
+    # commits' job lists are the lane's only new API reads: at most the runs of
+    # `_DEFAULT_BRANCH_PUSH_SAMPLE_MAX` commits, memoised with every other job read.
+    _push_lane = findings_doc.get("default_branch_push_lane") or {}
+    if _push_shas and _push_lane.get("status") == "complete":
+        _push_rows_by_sha = {
+            _sha: [(_push_run_wf.get(str(_run.get("id") or id(_run)), ""), _run)
+                   for _run in _push_runs_by_sha[_sha]]
+            for _sha in _push_shas
+        }
+        _push_to_fetch = [
+            _run for _sha in _push_shas for _wf, _run in _push_rows_by_sha[_sha]
+            if (_wf, str(_run.get("id") or "")) not in _commit_jobs_by_run
+        ]
+        _push_kept, _push_failures = _gather_run_jobs(
+            client, repo, _push_to_fetch, keep_empty=True, memo=job_memo)
+        _push_jobs_by_run = dict(_commit_jobs_by_run)
+        for _run, _jobs in _push_kept:
+            _rid = str(_run.get("id") or "")
+            _push_jobs_by_run[(_push_run_wf.get(_rid, ""), _rid)] = list(_jobs)
+        _push_facts = [
+            _commit_wall_fact(_sha, "push", _push_rows_by_sha[_sha], _push_jobs_by_run,
+                              {_wf for _wf, _run in _push_rows_by_sha[_sha]})
+            for _sha in _push_shas
+        ]
+        _push_walls = [float(f["wall_s"]) for f in _push_facts
+                       if isinstance(f.get("wall_s"), (int, float))
+                       and not isinstance(f.get("wall_s"), bool)
+                       and float(f["wall_s"]) > 0]
+        _push_lane.update({
+            "job_fetch_count": len(_push_to_fetch),
+            "job_fetch_failures": int(_push_failures),
+            "p50_s": (round(_percentile(_push_walls, 50), 3)
+                      if _push_walls else None),
+            "p90_s": (round(_percentile(_push_walls, 90), 3)
+                      if _push_walls else None),
+            "facts": _push_facts,
+        })
     _chain_facts = _stamp_chain_facts(
-        _era_repr_shas, _era_per_sha_checks, set(pr_check_p50), _span_caps, _jg,
+        _era_repr_shas, _era_per_sha_checks, _chain_spine, _span_caps, _jg,
         crit_by_wf, _era_sha_intervals)
     _chain_summary_val = _chain_summary(_chain_facts)
     # ENG-1 PR-N3: an OPT21 (unnecessary `needs:`) finding whose workflow hosts
@@ -24938,6 +28569,14 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                       if _chain_ctx_members else 0.0)
     _chain_ctx_win = (float((_chain_summary_val or {}).get("chain_win_p50_s") or 0.0)
                       if _chain_ctx_members else 0.0)
+    _commit_ctx_facts = tuple(
+        (float(f["wall_s"]), float(f["slowest_job"]["duration_s"]),
+         float((f.get("next_longest_job") or {}).get("duration_s") or 0.0),
+         float(f.get("slowest_chain_span_s") or f["slowest_job"]["duration_s"]))
+        for f in _commit_facts
+        if isinstance(f.get("wall_s"), (int, float))
+        and isinstance(f.get("slowest_job"), dict)
+    )
     findings_doc["pr_critical_path"] = {
         # KEPT-side count post the #80 spine door: `sampled_pr_count` is the number of PRs whose
         # timing actually feeds the rendered chain/makespan/populations/presence — a dropped-era PR
@@ -24976,10 +28615,15 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
              # renderer reads it so its demotion agrees with `critical_path_check`, and
              # verify_report re-derives it from `populations` to catch a phantom gate.
              "pole_n": check_pole_freq.get(n, 0),
+             **({"required_reachable": False}
+                if (_confirmed_gate_checks is not None
+                    and n not in _confirmed_gate_checks) else {}),
              **({"workflow_file": _check_wf[n]} if n in _check_wf else {}),
              **({"timing_source": check_timing_source[n]}
                 if n in check_timing_source else {}),
-             **({"bimodal": job_bimodal_all[n]} if n in job_bimodal_all else {})}
+             **({"bimodal": job_bimodal_all[n]} if n in job_bimodal_all else {}),
+             **({"minority_tail": _minority_tail_by_check[n]}
+                if n in _minority_tail_by_check else {})}
             for n, p in pr_checks_tuple],
         # When a check is bimodal across PRs, wall-clock is sized as the EXPECTED
         # value over the per-PR critical paths (one population per sampled PR), so
@@ -24995,6 +28639,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         # chain, competing-path bound, signed divergence) — the verifier
         # re-derives it from `chain_facts`.
         "chain_summary": _chain_summary_val,
+        "commit_wall_clock": _commit_wall_clock,
         # Per-population check sets (one population per sampled PR that ran >=1
         # tracked check; share = 1/m). Persisted so the report's "Long poles"
         # section can show how OFTEN each check is the actual pole across sampled
@@ -25005,6 +28650,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             [share, [[n, p] for n, p in checks]]
             for share, checks in pr_check_populations
         ],
+        "population_check_runs_complete": pr_check_population_complete,
         # Checks excluded from the critical path as non-PR-gating (push/schedule-only
         # workflows whose check-run rode along on a sampled SHA) - recorded so the
         # exclusion is visible, never a silent drop.
@@ -25129,55 +28775,33 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             pr_checks_tuple, crit_by_wf, findings_doc.get("workflow_job_graph"),
             triaged_fast_workflows, _STRUCTURAL_TOP_N):
         poles.append(_decompose_pole(check_name, check_p50))
-    # The report drills _DRILL_DISTINCT_MATRICES distinct job MATRICES (matrix legs that
-    # share one fix collapse to one). Beyond the gate (the slowest by median), the next
-    # matrix is chosen by IMPACT = max(median, bimodal slow mode) - so a bimodal lever
-    # (a job cheap on the typical PR but a long gate on a large share, e.g. a `test`
-    # job) is drilled as the 2nd finding instead of a higher-median but trivial check.
-    # Those gates can rank below _STRUCTURAL_TOP_N by median or hide under a big matrix
-    # in ONE workflow, so decompose them here even if absent from the top-N.
-    def _impact(check: str, p50: float) -> float:
-        bi = job_bimodal_all.get(check) or {}
-        return max(p50, float(bi.get("high_p50_s") or 0.0))
-
-    matrices: list[tuple[str, float]] = []
+    # Decompose all mapped candidates from facts already in memory, then use the
+    # report's selector. Median-first selection can miss a frequent gate when a
+    # bimodal slow mode pulls another candidate into the bounded capture set.
+    candidates = list(poles)
     for check_name, check_p50 in pr_checks_tuple:
-        _cm = _map_check_to_job(
-            check_name, crit_by_wf, require_developer_timing=True)
-        if _cm is None:
-            continue  # fileless / unmapped (e.g. an AI review bot) - nothing to drill
-        # Disambiguate by workflow file: a `Python 3.13` job in framework-test.yml is a
-        # DISTINCT matrix from a `Python 3.13` job in datasets-test.yml, even though
-        # GitHub gives them identical check-run names. Without the workflow key they
-        # collapse and only one is drilled, mis-binding the other's steps to a sibling.
-        if any(bp._same_matrix(check_name, m, _cm[0],
-                               (_map_check_to_job(
-                                   m, crit_by_wf,
-                                   require_developer_timing=True) or ("", ""))[0])
-               for m, _ in matrices):
+        if any(p.get("check") == check_name for p in candidates):
             continue
-        matrices.append((check_name, check_p50))
-    drill_poles: list[dict[str, Any]] = []
-    if matrices:
-        # Mirror the renderer's typical-first pole tiering so the captured (drilled) set
-        # equals the rendered set — otherwise a rare-but-slow pole gets drilled here but
-        # demoted in the report, leaving the rendered pole logless and mis-bound to a
-        # sibling's bundle by `_match_key`'s exact-workflow-stem rule. `_is_typical_check`
-        # uses the SAME pole-FREQUENCY demotion (`check_pole_freq >= _POLE_RECUR_FLOOR`), the
-        # `_RARE_PRESENCE_MIN_PR` sample-size floor, and the required-check exemption as
-        # `_rank_spine_present_first` and the renderer's `_typical_check` — so the drilled
-        # (captured) pole set can never disagree with `critical_path_check`.
-        def _is_typical_check(check: str) -> bool:
-            if present_n_pr < _RARE_PRESENCE_MIN_PR or check in req_names:
-                return True
-            return check_pole_freq.get(check, 0) >= _POLE_RECUR_FLOOR
-        ordered = _order_drill_matrices(matrices, _impact, _is_typical_check)
-        for check_name, check_p50 in ordered[:_DRILL_DISTINCT_MATRICES]:
-            existing = next((p for p in poles if p.get("check") == check_name), None)
-            if existing is None:
-                existing = _decompose_pole(check_name, check_p50)
-                poles.append(existing)
-            drill_poles.append(existing)   # the exact poles the renderer drills + we log
+        if _map_check_to_job(check_name, crit_by_wf, require_developer_timing=True) is not None:
+            candidates.append(_decompose_pole(check_name, check_p50))
+    _stamp_pole_required_reachability(
+        candidates, spine_required_scoped, req_names,
+        findings_doc.get("workflow_job_graph"), crit_by_wf)
+    drill_poles, _ = bp._select_render_poles(findings_doc, candidates)
+    if _confirmed_gate_checks:
+        # Keep the data crown on the ranker's slowest confirmed merge-blocking check. Render
+        # order also accounts for aggregation shape and is therefore not a safe crown source.
+        _confirmed_crown = next(
+            ((name, span) for name, span in pr_checks_tuple
+             if name in _confirmed_gate_checks), None)
+        if _confirmed_crown is not None:
+            _crown_name, _crown_span = _confirmed_crown
+            critical_path = findings_doc["pr_critical_path"]
+            critical_path["critical_path_check"] = _crown_name
+            critical_path["critical_path_s"] = float(_crown_span)
+    # Retain the same candidate context for aggregation inheritance and matrix
+    # representatives when the report selects its five sections later.
+    poles = candidates
     # ENG-1 PR-N3 (the N2 as-built record): on a chain-gated repo the gate IS
     # the chain — its members drill first, in chain order, then the rest in
     # their existing span order. `critical_path_check` keeps its
@@ -25215,7 +28839,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     cp = findings_doc["pr_critical_path"]
     unsatisfiable = bool(sample_diag.get("required_suite_unsatisfiable"))
     required_all_external = not unsatisfiable and _required_suite_all_external(
-        required_checks, req_names, crit_by_wf, findings_doc.get("workflow_job_graph"))
+        required_checks, req_names, crit_by_wf, findings_doc.get("workflow_job_graph"),
+        status_publishers=findings_doc.get("workflow_status_publishers"))
     file_poles = [p for p in poles if p.get("workflow_file") and p.get("job")]
     if (unsatisfiable or required_all_external) and file_poles:
         cp["gate_kind"] = "pr_floor_fallback"
@@ -25278,6 +28903,16 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         _pole_is_required_reachable(
             cp.get("critical_path_check"), req_names,
             findings_doc.get("workflow_job_graph"), crit_by_wf))
+    if (cp["provenance"] == "unresolved" and _required_reachability_unresolved(
+            req_names, crit_by_wf, findings_doc.get("workflow_job_graph"),
+            findings_doc.get("workflow_status_publishers"))):
+        published = sorted(name for name in _repo_published_required(
+            req_names, findings_doc.get("workflow_status_publishers"))
+            if _check_to_job_node(name, findings_doc.get("workflow_job_graph") or {},
+                                  crit_by_wf) is None)
+        cp["unresolved_reason"] = (
+            "Required status posted by this repo's own workflow: " + ", ".join(published)
+            + "; which checks it waits on is not traced. The displayed gate is a best guess.")
     # Run-frequency is a CORE input: a wall-clock saving on a workflow that
     # rarely runs removes little developer wait, no matter how big per-run. Share
     # = this workflow's 30d volume / the busiest PR-triggered workflow's volume.
@@ -25378,8 +29013,43 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             "workflow returned content")
 
     next_id = max((int(f["id"][1:]) for f in findings if f.get("id", "").startswith("f") and f["id"][1:].isdigit()), default=0)
+    # OPT98 reuses the rule reader and cached run pages. Only a readable strict
+    # rule with no visible queue pays for one merged-PR count (and, at volume,
+    # at most 30 merged-PR timelines for the rebase-churn share).
+    _opt98_volume, _opt98_churn = _opt98_collect_volume(
+        client, repo, default_branch, _opt98_rules, _wf_docs, all_status_runs_by_wf, created_before)
+    _opt98_new, _opt98_info = _detect_opt98_merge_queue(
+        workflows=_wf_docs, runs_by_workflow=all_status_runs_by_wf,
+        branch_rules=_opt98_rules, volume=_opt98_volume, start_id=next_id, churn=_opt98_churn)
+    findings.extend(_opt98_new)
+    next_id += len(_opt98_new)
     # (workflow_file, job) pairs OPT81 A1 saw on two or more runner labels.
     _opt81_multi_label_jobs: set[tuple[str, str]] = set()
+    # A single bounded inventory call only for a sufficiently sampled own-runner
+    # population. Permission failure or >100 runners leaves uniqueness unknown.
+    _opt97_inventory = findings_doc.get("runner_inventory")
+    if _opt97_inventory is None and any(
+            sum(1 for run in rows for job in run if "self-hosted" in (job.get("labels") or [])) >= 15
+            for rows in jobs_per_run_by_wf.values()):
+        _opt97_inventory = _opt97_runner_inventory(client, repo)
+    # OPT97's dense competition read: every run in a candidate population's
+    # window, made only for a population that already meets the queue thresholds
+    # on a self-hosted or hinted pool. Sampled runs' jobs are reused, responses are
+    # shared across populations, and the call counts reach the Data sources table.
+    _opt97_known_runs: dict[str, list[dict[str, Any]]] = {}
+    for _rows in jobs_per_run_by_wf.values():
+        for _run in _rows:
+            _rid = next((j.get("run_id") or j.get("_run_id") for j in _run
+                         if j.get("run_id") or j.get("_run_id")), None)
+            if _rid is not None:
+                _opt97_known_runs[str(_rid)] = _run
+    _opt97_calls = {"run_pages": 0, "job_lists": 0, "populations": 0}
+    _opt97_cache: dict[str, Any] = {}
+
+    def _opt97_competition(labels, group, lo, hi):
+        return _opt97_dense_competition(
+            client, repo, labels, group, lo, hi, workflow_docs=_wf_docs,
+            known_runs=_opt97_known_runs, stats=_opt97_calls, cache=_opt97_cache)
     for wf_path, jobs_per_run in jobs_per_run_by_wf.items():
         if not jobs_per_run:
             continue
@@ -25398,7 +29068,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
 
-        new = _detect_opt25_shard_imbalance(wf_path, jobs_per_run, next_id, crit)
+        new = _detect_opt25_shard_imbalance(
+            wf_path, jobs_per_run, next_id, crit, workflow_doc=_wf_docs.get(wf_path, {}))
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
 
@@ -25418,7 +29089,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         # found nothing". Disclosed through the same channel a fetch failure
         # uses, so the report NAMES the workflow instead.
         if not isinstance((_wf_docs.get(wf_path) or {}).get("jobs"), dict):
-            _skip_detectors(wf_path, ["OPT77", "OPT79", "OPT80", "OPT82"],
+            _skip_detectors(wf_path, ["OPT77", "OPT79", "OPT80", "OPT82", "OPT97"],
                             "its workflow YAML could not be parsed")
         # OPT77 shares OPT65's event-scoped monthly volume (same workflow, same
         # scaling question) so it costs no extra gh call, and reads the workflow
@@ -25504,7 +29175,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             # and an unknown merge wait is never claimed.
             merge_gating_jobs=_opt80_merge_gating_jobs(
                 wf_path, required_checks, findings_doc.get("workflow_job_graph"),
-                crit_by_wf, workflow_names=findings_doc.get("workflow_names")))
+                crit_by_wf, workflow_names=findings_doc.get("workflow_names"),
+                status_publishers=findings_doc.get("workflow_status_publishers")))
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
 
@@ -25552,12 +29224,49 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         # The sibling windows come from the SAME cached all-status page the
         # run-elimination block below fetches (net zero extra gh calls); with
         # no wf_id the page is unfetchable and the attribution stays None.
-        new = _detect_opt43_queue_time(
-            wf_path, jobs_per_run, next_id, is_pr,
-            all_status_runs=(_all_status_page(wf_path, wf_id)
-                             if wf_id is not None else None))
+        # Without this workflow's scanned job graph OPT43 cannot tell an entry job
+        # from a `needs:`-gated one; timing every job from the run trigger would
+        # charge upstream RUN time as queue. Skip it and disclose by name instead.
+        _opt43_graph = (findings_doc.get("workflow_job_graph") or {}).get(wf_path)
+        if not isinstance(_opt43_graph, dict) or not _opt43_graph:
+            _skip_detectors(wf_path, ["OPT43"],
+                            "the workflow's job graph is missing, so queue time "
+                            "can't be separated from upstream job run time")
+            new = []
+        else:
+            new = _detect_opt43_queue_time(
+                wf_path, jobs_per_run, next_id, is_pr,
+                all_status_runs=(_all_status_page(wf_path, wf_id)
+                                 if wf_id is not None else None),
+                job_graph=_opt43_graph)
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
+
+        # Capacity inference: queue thresholds from the sampled intervals, in-flight
+        # counts only from the bounded dense read above (`_opt97_competition`). The
+        # optional inventory probe supplies only complete repo-level lists. A
+        # workflow whose YAML could not be parsed is already disclosed as skipped.
+        _opt97_notes = []
+        try:
+            new = (_detect_opt97_single_slot_queue(
+                wf_path, jobs_per_run, next_id, _wf_docs.get(wf_path, {}),
+                all_jobs_by_wf=jobs_per_run_by_wf, workflow_docs=_wf_docs,
+                merge_gating_jobs=_opt80_merge_gating_jobs(
+                    wf_path, required_checks, findings_doc.get("workflow_job_graph"),
+                    crit_by_wf, workflow_names=findings_doc.get("workflow_names"),
+                    status_publishers=findings_doc.get("workflow_status_publishers")),
+                runner_inventory=_opt97_inventory, notes=_opt97_notes,
+                competition=_opt97_competition)
+                if isinstance((_wf_docs.get(wf_path) or {}).get("jobs"), dict) else [])
+        except Exception as exc:  # noqa: BLE001 — failure is disclosed, never clean
+            _skip_detectors(wf_path, ["OPT97"],
+                            f"the capacity check failed ({type(exc).__name__})")
+            new = []
+        findings_doc.setdefault("opt97_notes", []).extend(_opt97_notes)
+        next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
+        _merge_opt97_findings(findings, new, _wf_docs.get(wf_path, {}))
+        if _opt97_calls["populations"]:
+            findings_doc["opt97_competition_calls"] = dict(_opt97_calls)
 
         if wf_id is not None:
             new = _detect_opt48_failure_rate(client, repo, wf_id, wf_path, long_pole, monthly, next_id, created_before)
@@ -25624,6 +29333,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                     "prior_attempt_job_minutes": 0.0,
                 }
             attempt_runs = _rerun_attempt_runs(all_runs) if all_runs is not None else []
+            attempt_samples = []
+            _infra_attempt_errors = 0
             if attempt_runs:
                 # Prefetch the `filter=all` leg ONLY — never the `filter=latest` leg.
                 #
@@ -25648,6 +29359,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 attempt_samples, latest_failures = _attempt_job_samples(
                     client, repo, kept_all, memo=job_memo)
                 wf_failures += latest_failures
+                _infra_attempt_errors = wf_failures
                 jobs_fetch_failures += wf_failures
                 _add_cost_spine_fetch_failures(wf_path, wf_failures)
                 prior_runs: list[list[dict[str, Any]]] = []
@@ -25668,10 +29380,22 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                         "sampled_workflow_run_count": len(all_runs),
                         "runs": prior_runs,
                     }
-                new = _detect_opt64_rerun_attempt_waste(
-                    wf_path, attempt_samples, monthly, len(all_runs), next_id)
-                next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
-                findings.extend(new)
+            # Infra classification reuses all-status and prior-attempt job payloads.
+            # Require a readable merge gate; unknown membership never becomes a finding.
+            _infra_gate = _opt80_merge_gating_jobs(
+                wf_path, required_checks, findings_doc.get("workflow_job_graph"),
+                crit_by_wf, workflow_names=findings_doc.get("workflow_names"),
+                status_publishers=findings_doc.get("workflow_status_publishers"))
+            new, _infra_skip, _infra_errors = _opt100_workflow_pass(
+                client, repo, wf_path, all_runs=all_runs, attempt_samples=attempt_samples,
+                attempt_errors=_infra_attempt_errors, gate=_infra_gate,
+                graph=(findings_doc.get("workflow_job_graph") or {}).get(wf_path, {}),
+                job_memo=job_memo, monthly=monthly, crit=crit, next_id=next_id)
+            jobs_fetch_failures += _infra_errors
+            if _infra_skip:
+                _skip_detectors(wf_path, ["OPT100"], _infra_skip)
+            next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
+            findings.extend(new)
 
             if all_runs is not None and _opt35_shard_job_specs(wf_doc):
                 failure_run_jobs = []
@@ -25823,6 +29547,28 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
 
     findings_doc["findings"] = findings
 
+    # Capture once before sizing so OPT96 enters the same floor cascade as all
+    # measured findings. The later bundle section publishes this same manifest.
+    pole_logs = []
+    if with_logs and data_dir is not None:
+        pole_logs = _persist_pole_logs(
+            client, repo, drill_poles or poles, jobs_per_run_by_wf, data_dir,
+            events_jobs_by_wf=events_jobs_by_wf,
+            iso=findings_doc.get("test_runner_isolation"),
+            opt96_findings=[f for f in findings if f.get("pattern") == "OPT96"],
+            wf_docs=_wf_docs,
+            cache_effective_paths=findings_doc.get("cache_effective_paths"))
+    _opt96_check_default_branch(findings_doc, default_branch)
+    _ground_opt96(findings, drill_poles or poles, _wf_docs,
+                  fetch_gaps={str(g.get("workflow_file")) for g in _sample_gaps()})
+
+    # OPT32's bill estimate is useful only when it reflects this repository's
+    # sampled pull requests. Reuse the run sample already selected above, fetch
+    # changed files for those PRs only, and stamp the measured fraction before
+    # the common sizing pass consumes it.
+    _measure_opt32_path_filters(
+        client, repo, findings, sampled_runs_by_wf, _wf_docs)
+
     # The repo's longest measured job across ALL workflows — the physical ceiling on
     # any wall-clock saving (you can't save more than the slowest run takes). Used to
     # cap OPT19, whose source-sleep total is summed statically and isn't bound to a
@@ -25884,9 +29630,13 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 events=tuple(sorted(events_by_wf.get(wf_path) or ())),
                 pr_checks=pr_checks_tuple, own_check_names=own_check_names,
                 pr_check_populations=tuple(pr_check_populations),
+                pr_check_populations_complete=tuple(pr_check_population_complete),
                 chain_members=_chain_ctx_members, chain_p50_s=_chain_ctx_p50,
-                chain_win_s=_chain_ctx_win)
-            res = size_wall_clock(float(wc), ctx)
+                chain_win_s=_chain_ctx_win, commit_wall_facts=_commit_ctx_facts)
+            _size_opt25_next_step(f, ctx)
+            res = size_wall_clock(float(wc), ctx,
+                                  cascade=([("within-workflow", bound_within_workflow)] + CASCADE)
+                                  if f.get("pattern") == "OPT96" else None)
             if res.derivation:
                 f["wall_clock_p50_s"] = res.effective_s
                 f["wall_clock_uncapped_p50_s"] = res.raw_s
@@ -25932,7 +29682,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         triaged_fast_workflows=triaged_fast_workflows,
         chain_members=_chain_ctx_members, chain_p50_s=_chain_ctx_p50,
         chain_win_s=_chain_ctx_win,
-        wf_docs=_wf_docs, overlap_withheld=_overlap_withheld)
+        wf_docs=_wf_docs, overlap_withheld=_overlap_withheld,
+        status_publishers=findings_doc.get("workflow_status_publishers"),
+        pr_check_populations_complete=pr_check_population_complete)
     # Stamped only when a lever was held back, so a repo without `parallel:`
     # groups or background steps keeps a byte-identical findings document.
     if _overlap_withheld:
@@ -26063,6 +29815,36 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 f["workflow_activity"] = act
         _o81_next = max(_o81_next, max((int(f["id"][1:]) for f in new), default=_o81_next))
         findings.extend(new)
+
+    # Structural findings are routed after the main sizing loop. Apply the
+    # shared whole-commit projection bound once more at the final findings door
+    # so those late additions cannot publish a saving above the next-job floor.
+    _commit_only_ctx = WallClockContext(commit_wall_facts=_commit_ctx_facts)
+    for _finding in findings:
+        _saving = _finding.get("wall_clock_p50_s")
+        if not isinstance(_saving, (int, float)) or _saving <= 0:
+            continue
+        if any(isinstance(step, dict) and step.get("bound") == "commit-projection"
+               for step in (_finding.get("wall_clock_derivation") or [])):
+            continue
+        _bounded = bound_commit_projection(float(_saving), _commit_only_ctx)
+        if _bounded.value >= round(float(_saving), 1):
+            continue
+        _finding.setdefault("wall_clock_uncapped_p50_s", round(float(_saving), 1))
+        _finding["wall_clock_p50_s"] = _bounded.value
+        _finding.setdefault("wall_clock_derivation", []).append({
+            "bound": "commit-projection",
+            "from_s": round(float(_saving), 1),
+            "to_s": _bounded.value,
+            "reason": _bounded.reason,
+        })
+        _previous_note = str(_finding.get("size_note") or "")
+        _finding["size_note"] = (
+            f"{_previous_note}; {_bounded.reason}" if _previous_note
+            else str(_bounded.reason or ""))
+        if _bounded.value <= 0:
+            _finding["tier"] = 2
+            _finding["realization"] = "none"
     findings_doc["findings"] = findings
 
     # encord §6 Cause 2: stamp `off_spine` on findings whose job was DROPPED from the
@@ -26089,12 +29871,6 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         # report / fix-agent can read the step's internal timing without
         # re-downloading. One fetch per pole job (the median-representative instance).
         if data_dir is not None:
-            pole_logs = _persist_pole_logs(
-                client, repo, drill_poles or poles, jobs_per_run_by_wf, data_dir,
-                events_jobs_by_wf=events_jobs_by_wf,
-                # scan's config fact, so the spine's leaf detection matches the
-                # renderer's (a config-gated leaf is invisible without it).
-                iso=findings_doc.get("test_runner_isolation"))
             logs_fetched = len(pole_logs)
             if pole_logs:
                 findings_doc["data_bundle"] = {
@@ -26213,6 +29989,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         # the detectors read YAML that produced none of the timings. None = no skew we
         # could see. See `_root_branch_skew`.
         "workflow_yaml_skew": workflow_yaml_skew,
+        "merge_queue": _opt98_info,
         # Detectors that were NOT EVALUATED for a named workflow because their basis run
         # list was unfetchable. Their absence from the findings is UNKNOWN, not clean —
         # the whole reason this is DATA and not just a log line. The renderer must name
@@ -26489,6 +30266,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         client.errors, _sample_gaps(), gave_up=getattr(client, "gave_up", False))
     findings_doc["data_sources"]["partial_kind"] = _partial_kind(
         client.errors, _sample_gaps(), gave_up=getattr(client, "gave_up", False))
+    _stamp_auth_interruption(findings_doc["data_sources"], client)
     findings_doc["per_workflow_monthly_volume"] = {
         wf: vol_by_wf[wf] for wf in sorted(final_volume_workflows) if wf in vol_by_wf
     }
@@ -26498,6 +30276,19 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # so sort to a serializable list.
     findings_doc["events_by_wf"] = {
         _wf: sorted(_evs) for _wf, _evs in events_by_wf.items()}
+    # The per-commit wall-clock pass owns this stamp's producer. Accept both the
+    # top-level handoff and its final `pr_critical_path` location so callers can
+    # enrich an in-progress document without copying the producer here.
+    _commit_clock = findings_doc["pr_critical_path"].get("commit_wall_clock")
+    if not isinstance(_commit_clock, dict):
+        _commit_clock = _incoming_commit_clock
+    if isinstance(_commit_clock, dict):
+        _commit_clock = _stamp_commit_queue_work(_commit_clock)
+        findings_doc["pr_critical_path"]["commit_wall_clock"] = _commit_clock
+        findings_doc.pop("commit_wall_clock", None)
+        _cap_code_findings_at_commit_work(
+            findings_doc.get("findings") or [],
+            _commit_work_budget(_commit_clock))
     # Join required-check names to their workflows' PR-trigger conditionality
     # (the dead-required check's load-bearing conjunct). Additive metadata on
     # the critical path; harmless if unconsumed.

@@ -144,6 +144,8 @@ const REJECTED = [
   'maintainers/ci-speedup/scripts/draft_detector.py',      // the grader_seeds entry is EXACT — no other maintainers script
   'maintainers/ci-speedup/workflows/ci-speedup-dogfood.js',// nor the loop workflow
   'skills/ci-speedup/references/optimization-patterns.md',  // the catalog
+  'skills/ci-speedup/references/patterns/opt81-same-job-faster-on-another-runner.md', // per-pattern catalog files
+  'skills/ci-speedup/references/patterns/INDEX.md',         // the catalog index
   'skills/ci-speedup/evals/evals.json',                     // evals
   'skills/ci-speedup/reports/a/findings.json',              // worked-example provenance
   'skills/ci-speedup/SKILL.md',                             // the contract (still rejected — only ARCHITECTURE.md was opened)

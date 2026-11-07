@@ -26,9 +26,9 @@ developer's wait. It gets its own prominent section below.
 
 ## 1. Purpose & scope
 
-ci-speedup audits a repository's GitHub Actions workflows against an 82-pattern
-catalog — 73 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76, OPT77, OPT79, OPT80, OPT81 and OPT82) plus 9 **structural /
-critical-path** patterns (OPT70–OPT75, OPT78, OPT83 and OPT84, routed from the measured long pole; see
+ci-speedup audits a repository's GitHub Actions workflows against a 97-pattern
+catalog — 86 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94, OPT96, OPT97, OPT98 and OPT100–OPT102) plus 11 **structural /
+critical-path** patterns (OPT70–OPT75, OPT78, OPT83, OPT84, OPT85 and OPT87, routed from the measured long pole; see
 §11) — and produces a **root-cause-analysis** markdown report with **measured**
 impact on two axes: developer wall-clock wait (the ranking axis) and
 runner-minutes (the cloud bill). Detection, ranking, and every measured number
@@ -194,7 +194,8 @@ cardinal bug, and it has a dozen possible sites — this is the list of them.
      failed during collection". Never re-derive a `data_sources` value a helper already
      owns. **All four keys are stamped on EVERY exit from `collect()`, even when empty**
      — an early return that omitted them made the verify invariant SKIP (see link 3).
-     **`gh_unavailable` means gh is genuinely absent — NOT an API refusal.** `available()`
+     **`gh_unavailable` means the gh pass could not start (gh absent, logged out, or a
+     sandboxed shell with no keychain) — NOT an API refusal.** `available()`
      is a `gh auth status` probe, and that probe makes a live API call to verify the
      token, so it ALSO returns non-zero when gh is installed and a token is stored but the
      API does not accept the credential — a secondary-rate-limit 403, a transport / 5xx
@@ -211,7 +212,12 @@ cardinal bug, and it has a dozen possible sites — this is the list of them.
      never that the API would accept it), so the disclosure names both remedies — wait out
      a rate limit, or re-authenticate — rather than asserting one; and an ambiguous probe
      failure (a hung `gh auth token`, `TimeoutExpired`) also routes LOUD, never back to
-     the quiet path that would re-open the silent drop.
+     the quiet path that would re-open the silent drop. A sandboxed / no-network shell
+     can land on EITHER side (no keychain → `gh_unavailable`; a readable token →
+     `api_blocked`), so both reasons quote gh's own error line (`_gh_probe_error_line`,
+     which skips gh's bare host-name line) and name the "retry with network / host
+     access" remedy. `gh_unavailable` therefore never reads as a quiet repo: the report
+     renders a "run history was not read" banner, not the dormant-repo one.
   2. **Renderer.** `blocking_path._coverage_note` renders it at the severity the DATA
      says, branching on `partial_kind` and never string-matching the prose. Only
      `sample_thinned` may carry the minimizing suffix ("a few runs/jobs are absent
@@ -626,6 +632,15 @@ requires any rendered "up to ~X" ceiling that exceeds the typical merge wait to
 co-render the slow-mode/worst-case reconciliation (the excess is the pole's conditional
 figure on the PRs where it IS the pole, not the median).
 
+**Runner-label-only eras are disclosure-only.** A gating job can move between runners without a
+workflow-file change (for example, through a repository variable or runner-group update). When the
+same sampled gate has exactly two non-empty runner labels with one chronological transition, the
+collector appends a `rule: runner_label_change` fact with `kept_era: all`, `disclosure_only: true`,
+the job name, and both labels' run counts. The renderer names that split and the verifier requires
+both populations in the note. These facts never enter the content-era enumeration or per-PR spine
+doors: both runner populations remain measured, and no check, run, pole, or timing-spread sample is
+partitioned at the synthetic label boundary.
+
 **Enumeration binding — one report describes one configuration (issue #69).** The partition
 above scopes the SPINE TIMING (`runs_for_spine`) to one era, but the enumerated CHECK SET —
 the PR-gate check-run sample that seeds pole candidacy, the populations, and the Level-1 chart
@@ -657,8 +672,9 @@ era's `other_era_checks` — a check absent from the kept era's runs. A second, 
 (`check_era_disclosure_matches_enumeration`, issue #74) keys on the RENDERED disclosure marker: a
 pre-only "measures the previous configuration" caveat must not co-exist with an all-post / hollow
 (empty-`kept_checks`) measurement — re-derivable now that the flip makes stamps always survive. Both
-are a loud narrow SKIP on a straddle artifact predating the enumeration stamps (the cleared-stamp
-shape the old guard went blind on — the bind isn't re-derivable, a coverage gap not a clean pass).
+run on every `config_eras` fact, the same stamp the renderer's era banner reads; a fact predating the
+enumeration stamps contributes no other-era names to the set-dependent legs (said in the detail),
+and only findings with no `config_eras` stamp skip.
 
 **Per-PR spine door — the makespan/chain layer is bound to the kept era too (issue #80).** The
 enumeration bind above scopes the CHECK SET (`pr_check_p50`) by NAME, but a check name survives a
@@ -874,7 +890,7 @@ never discards a whole wave.
 | `catalog_patterns_without_detector` | scan | coverage-honesty list |
 | `scanned_at` / `skill_commit_sha` / `commit_sha` / `repo` | scan main | provenance |
 | `data_sources` | collect_runs | tiers run, gh counts, `sampled_runs_created_before`, `partial_reason`, adaptive-sampling fields (`shallow_runs`, `max_runs`, `shallow_capped`, `capped_workflows`, `pole_candidates`, `deepened_workflows`, `deepen_converged`, `full_depth_workflows`, `shallow_remaining_workflows` — §2.1), run-list-triage fields (`triaged_fast_workflows`, `triaged_fast_count`, `recovered_fast_workflows`, `recovered_fast_count` — §2.1), cost-spine-only triage/fetch fields (`cost_spine_triaged_workflows_included`, counts for workflows/runs/jobs, `cost_spine_job_fetch_failures`, `cost_deepen_candidate_workflows`, `cost_deepened_workflows`, `cost_spine_full_depth_workflows`, and `cost_spine_shallow_workflows`), and `cache_dist_probe` (`{cache_poles, push_logs_fetched, pr_logs_reused}` — the cache-distribution provenance + the schema stamp `verify_report`'s cache checks SKIP on when absent, §12.4) |
-| `pr_critical_path` | collect_runs | the merge-wait spine: `critical_path_check`/`critical_path_s` (the headline pole), `checks[]` (`name`, `p50_s`, `present_on`, **`pole_n`** = PRs where this check is the actual pole, the recurrence-ranking signal, §11; `workflow_file`, `bimodal?`), `check_present_n_pr` (presence denominator), `sampled_pr_count` (the kept-side PR count post the §2.1a #80 spine door) + **`era_dropped_pr_count`** (PRs the door removed as dropped-era; stamped only on a straddle that dropped >=1), `poles[]` (decomposed drilled poles; a cache pole also carries **`cache_dist`** = the per-event, fork-aware miss distribution + `verdict`, §12.4), `populations[]` (per-PR check sets, M2), `dropped_non_pr_checks` / `dropped_non_required_checks` (visible exclusions), **`fileless_status_checks[]`** (`name`, `span_s`, `basis` — the fileless/managed status checks EXCLUDED from the crowning basis, disclosed as PR-lifetime status-gating latency; issue #12, §12.2a) + **`all_checks_fileless`** (the degenerate flag), **`config_eras[]`** (`workflow_file`, `boundary`, `kept_era`, `rule`, `pre_count`, `post_count`, plus `prev_boundary` / `multi_change` / `kept_count` on a `disclosed_pre` era — per-workflow record of every sample that straddled its last-change commit; empty when nothing straddled; issue #66, §2.1a), **`chain_facts[]`** (ENG-1: per sampled PR the longest `needs:` chain — spine-scoped members, capped per-member spans, `chain_s`, `co_longest_n`, `runner_up_s`, the attempt-scoped `makespan_s` cross-check) + **`chain_summary`** (modal chain, `chain_p50_s`, `runner_up_p50_s`, signed `divergence_pct`) — when the modal chain has >=2 members the renderer's headline names the CHAIN and its summed p50 instead of the slowest single check (`headline_chain` claim, re-derived by `check_headline_chain_matches_stamp`) |
+| `pr_critical_path` | collect_runs | the merge-wait spine: `critical_path_check`/`critical_path_s` (the headline pole), `checks[]` (`name`, `p50_s`, `present_on`, **`pole_n`** = PRs where this check is the actual pole, the recurrence-ranking signal, §11; `workflow_file`, `bimodal?`), `check_present_n_pr` (presence denominator), `sampled_pr_count` (the kept-side PR count post the §2.1a #80 spine door) + **`era_dropped_pr_count`** (PRs the door removed as dropped-era; stamped only on a straddle that dropped >=1), `poles[]` (decomposed drilled poles; a cache pole also carries **`cache_dist`** = the per-event, fork-aware miss distribution + `verdict`, §12.4), `populations[]` (per-PR check sets, M2), `dropped_non_pr_checks` / `dropped_non_required_checks` (visible exclusions), **`fileless_status_checks[]`** (`name`, `span_s`, `basis` — the fileless/managed status checks EXCLUDED from the crowning basis, disclosed as PR-lifetime status-gating latency; issue #12, §12.2a) + **`all_checks_fileless`** (the degenerate flag), **`config_eras[]`** (content eras carry `workflow_file`, `boundary`, `kept_era`, `rule`, `pre_count`, `post_count`, plus `prev_boundary` / `multi_change` / `kept_count` on `disclosed_pre`; disclosure-only runner transitions instead carry `rule: runner_label_change`, `kept_era: all`, `job`, and `runner_label_counts[]` and never partition the sample; empty when neither kind is detected; §2.1a), **`chain_facts[]`** (ENG-1: per sampled PR the longest `needs:` chain — spine-scoped members, capped per-member spans, `chain_s`, `co_longest_n`, `runner_up_s`, the attempt-scoped `makespan_s` cross-check) + **`chain_summary`** (modal chain, `chain_p50_s`, `runner_up_p50_s`, signed `divergence_pct`) — when the modal chain has >=2 members the renderer's headline names the CHAIN and its summed p50 instead of the slowest single check (`headline_chain` claim, re-derived by `check_headline_chain_matches_stamp`) |
 | `per_workflow_timing` | collect_runs | `{wf: {long_pole_job, long_pole_p50, floor_p50, job_p50, events}}` (`events` = the workflow's OBSERVED trigger events, so `verify_report` can re-derive merge-path eligibility — §12.6a); a run-list-triaged workflow (§2.1) instead carries `{long_pole_p50: 0, …, concurrent_wall_p50}` (its run-list wall, read only by the cross-workflow floor) |
 | `per_workflow_monthly_volume` | collect_runs | `{wf: 30-day run count}` for the final cost-spine coverage denominator: finding-backed workflows plus any detector-only probes that emitted cost-spine rows. Detector-only probes that emit no finding and no rows are sampled for evidence but omitted from this map so they do not masquerade as incomplete cost-spine coverage. |
 | `runner_minute_spine` | collect_runs | source block for the cost-spine table: stable per-workflow/job/runner rows, raw compute minutes, billable-equivalent minutes, totals, repo visibility, and `render_ready: true` only when complete workflow coverage is proven; PR16 stamps `sampled_workflows_in_play_with_job_data` plus `workflow_coverage` for positive-volume workflows in play, omitted workflows, unknown-volume workflows, triaged workflows included, and source-row fetch failures |
@@ -1860,9 +1876,9 @@ critical-path spine (job start → finish) doesn't capture, and it carries no
 runner-minute saving. So `_queue_wait_block` renders it in its own **"⏳ Pre-start
 wait (queue time)"** section ABOVE the hygiene appendix (with a Contents pointer),
 ranked by P90, excluded from `_also_noticed_block`. For a `needs:`-gated job the
-metric is wait-to-start — it includes the gating job's run time, so the embedded agent
-prompt (`_hygiene_prompt(wait=True)`) frames it as wall-clock wait bounded by the
-gating job's own fix, not a bill cut. See the OPT43 note in §3 and `collect_runs`
+metric is measured from when its last needed upstream job completed (upstream run time
+is never queue), and the embedded agent prompt (`_hygiene_prompt(wait=True)`) frames it
+as wall-clock wait, not a bill cut. See `collect_runs`
 `_detect_opt43_queue_time` (`wc_p50` holds the floor-capped **savable** wait for
 this family; the raw P90 is in `wall_clock_uncapped_p50_s`, present only when a
 bound actually capped the P90 — absent when nothing capped, where `wc_p50` is
@@ -2563,7 +2579,8 @@ future change to the budget has to be a deliberate edit.
     repo's timings, silently. Unverifiable (no remote, not a checkout) falls back
     to the API.
   - **Right commit line?** `_root_branch_skew` compares HEAD against the repo's
-    `default_branch` — a feature branch, a detached HEAD, or a `main` that is
+    `default_branch` — a feature branch, a detached HEAD (unless it is exactly the
+    default tip, as `git worktree add --detach` leaves it), or a `main` that is
     behind/ahead of `origin/main`. This is the half `-dirty` cannot see: a clean
     checkout on a feature branch has no uncommitted change, so the stamped sha is
     perfectly *true* while the detectors parse YAML that produced **none** of the
@@ -2761,7 +2778,7 @@ bounds the gaps list originally named - three implemented, one deliberately not:
   `run.event`; required-check gating would add a usually-blank, contentious cap
   on top. Left out on purpose rather than shipped hollow.
 
-### Joint scenarios for two concurrent checks — contract present, nothing feeds it
+### Joint scenarios for two concurrent checks — observations only
 
 `scripts/joint_scenario.py` holds a data contract and a pure calculator for
 sizing **two findings on two different concurrent checks together**. It exists
@@ -2770,38 +2787,42 @@ and 299s, cutting 100s off either alone moves the gate by 1s or 0s while doing
 both moves it by 100s, and `wall_clock_p50_s` is an already-capped merge-wait
 saving rather than a post-fix duration, so subtracting the stamps yields 1s.
 
-**It is imported by nothing.** No stage calls it, it has no `main()`, and no
-report renders a joint block. That is deliberate, not an oversight: the module's
-`MISSING_PRODUCER_EVIDENCE` tuple names the six things a producer would have to
-stamp first (per-observation durations for the whole gating set, stamped
-concurrency validation, per-observation local reductions, affected-step
-identity, stable matrix-leg identity, and a local-runtime-only certificate),
-none of which the engine stamps today. `load_inputs` on a current findings
-artifact returns `contract_inputs_absent` rather than reconstructing a scenario
-out of the aggregate stamps that happen to be present.
+The collector stamps matched observations only when every check in the whole
+confirmed gating set maps to one concrete job execution, every execution has
+attempt and runner identity, the checks have no `needs:` relationship or shared
+upstream, and their measured intervals overlap within the scheduling tolerance.
+Unknown required sets, matrix jobs and incomplete observations produce no stamp.
+
+The report does not consume the contract yet. The artifact also deliberately
+carries an empty `effects` list because no current finding supplies all four
+remaining requirements named by `MISSING_PRODUCER_EVIDENCE`: per-observation
+local reductions, affected-work identity, stable matrix-leg identity, and a
+local-runtime-only scheduling/coverage/job-set certificate. Aggregate savings
+stamps are not adapted into effects, so there is no supported joint claim.
 
 The methodology is `references/wall-clock-methodology.md` §8; the tests are
 `tests/test_joint_sizing.py`, which pin the numbers and every rejection code.
 The refusal vocabulary is closed: `REJECTION_CODES` exports it, a rejection
 built with a code outside it raises, and the suite asserts the exported set is
 exactly the set of codes the module can actually produce.
-**The next step that would change this status is a producer**, not more
-calculator: until one exists the module stays inert, and it should be either
-wired or removed rather than left to become archaeology.
+**The next step that would change this status is an effect producer**, not more
+calculator. Until one qualifies, the measured observations remain data-only.
 
 ## 11. The structural / critical-path track
 
-The hygiene/data-driven catalog (OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81, OPT82) is mostly **declarative** -
+The hygiene/data-driven catalog (OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94, OPT96–OPT98 and OPT100–OPT102) is mostly **declarative** -
 static findings are locally-checkable YAML defects, while measured Tier-2 rows
 come from run history. Its blind spot: on real repos the merge is
 gated by a check that is *working as intended* and simply slow, with no
 catalog match. The old catalog-spine report used to dead-end there ("inherent
-cost, outside this catalog"). The **structural track** (catalog category 14, OPT70–OPT75 plus OPT78, OPT83 and OPT84,
+cost, outside this catalog"). The **structural track** (catalog category 14, OPT70–OPT75 plus OPT78, OPT83, OPT84, OPT85 and OPT87,
 `class: structural`) is a **second finding class that is not catalog-bound** —
 it is routed from the measured critical path instead of matched against YAML.
 OPT70–OPT75 are routed by the deterministic router described below; **OPT78** is
 routed by the drill-time `vitest-isolate-pool` leaf detector (§12.3) and is
-reported by `scan.py` as having no critical-path router. **OPT83** is routed by
+reported by `scan.py` as having no critical-path router. **OPT74, OPT85 and
+OPT87** have no router at all: `scan.py` lists them the same way and nothing
+emits them. **OPT83** is routed by
 its own per-pole pass (`_detect_opt83_parallel_steps`) over each pole's step
 decomposition, then checked for independence against the workflow YAML.
 **OPT84** is routed by its own per-pole pass (`_detect_opt84_tool_swap`) over the
@@ -2896,14 +2917,17 @@ consumes it:
 
 - **`_required_reachable_checks(candidates, req_names, job_graph, crit_by_wf)`** — returns
   the candidates that are required **or** a job the required work transitively `needs:`.
-  Each required check maps to a job *node* (`_check_to_job_node`): a `<caller> / <child>`
-  name resolves to the **reusable caller** job (so a required reusable child anchors the
-  whole invocation — the merge-reports-rollup pattern), and a plain check anchors its file
-  via `_map_check_to_job` then matches the job `name` template (exact, then matrix-regex).
-  The **anchors** are those required job nodes; the **reachable** set is the anchors plus
-  their downward `needs:` closure (everything an anchor depends on). A candidate is kept
-  iff required, or its node is reachable, or it's file-backed-but-unpinnable (kept, never
-  silently dropped); a fileless/external non-required check is dropped.
+  Each required check maps to a job *node* (`_check_to_job_node`). A nested
+  `<caller> / <child>` name resolves to the editable leaf job while retaining its local
+  caller path; that invocation's outer caller node becomes the anchor. A plain check anchors its
+  file via `_map_check_to_job` then matches the job `name` template (exact, then
+  matrix-regex). The **reachable** set is the anchors plus their downward `needs:` closure
+  (everything an anchor depends on). A nested candidate inherits that reachability only
+  through its caller-prefixed path. A bare check from a workflow's separate
+  `pull_request` run has no such path and keeps its own reachability, even when the same
+  leaf job also runs under a required caller. A candidate is kept iff required, or its
+  node is reachable through the applicable identity, or it's file-backed-but-unpinnable
+  (kept, never silently dropped); a fileless/external non-required check is dropped.
 - **A match-anything matrix `name:` binds nothing (no-timing binders).** A job whose `name:`
   is ENTIRELY a matrix placeholder (`${{ matrix.target }}`) expands to `^.+?$` — it matches
   *every* check-run name, so it carries no discriminating signal. The no-sampled-timing binders
@@ -2964,6 +2988,21 @@ consumes it:
   `triggerdotdev/trigger.dev`, whose required `All PR Checks` aggregator gates every PR but
   whose required `Devin Review` status is never a check-run). A fully-external suite
   (nothing observable) still falls back to the PR-floor.
+- **A status the repo posts itself is not an outside gate (issue #119).** scan.py records
+  `workflow_status_publishers`: each workflow whose YAML, local action, or repo-local script
+  posts a commit status (a `repos/…/statuses/<sha>` call, `createCommitStatus`, a known
+  status action), with the literal contexts those sources post (`contexts`). Only when a
+  context is built at run time does it keep the sources' string literals (`names`) as a
+  looser fallback; no raw source text is stored. Local-action entrypoints resolve from the
+  action's folder, and scripts are followed transitively (bounded). A required context
+  equal to one of those (`_repo_published_required`) is an in-repo aggregate that may wait
+  on any job with no `needs:` edge. A name that merely appears in a publisher (its title,
+  a comment, the checks an aggregator waits on) does not count: that would un-scope a
+  correctly scoped gate. The sampler never calls the suite unsatisfiable on its account
+  (`required_checks_repo_published`), `_required_suite_all_external` returns False, and
+  when it names no job (`_required_reachability_unresolved`) the scoper stays inert and
+  the structural stamp says `unknown`, never `not-required`. The pole is an `unresolved`
+  best guess; which jobs the publisher waits on is not traced.
 - **No silent drop.** Excluded checks are recorded on `cp["dropped_non_required_checks"]`
   (sibling to `dropped_non_pr_checks`) AND surfaced as a report footnote ("Narrowed to
   merge-blocking checks: …"); a dropped check loses its structural pole/findings but the
@@ -3772,7 +3811,7 @@ agent prompt in `_PROMPTS`; it is **not** a prescribed fix):
 | `fix_key` | Root cause | `magnitude` (the one load-bearing number) |
 | --- | --- | --- |
 | `prisma-migrate-once` | `db push --force-reset` per test group | DB-migration share of the slowest test file |
-| `vitest-v8-coverage` | istanbul coverage instruments every file | compile+instrument share of test work |
+| `vitest-v8-coverage` | compile/instrument/load dominates measured summed worker time | compile+instrument share of test work |
 | `vitest-isolate-pool` | per-file isolation re-pays the import cost (OPT78, HIGH risk). Gated on `scan.py`'s `test_runner_isolation` config fact — whose `verdict` field must read `isolation_on` — so every `_parse_log` caller (render, `_gap_poles`, `_persist_pole_logs` / `_magnitude_sample`) must pass that block; a guard test pins that every call site does | import share of the vitest run |
 | `vitest-import-bound` | the same import-bound split when OPT78 is WITHHELD (opted out, config not fully read, an unresolvable `isolate` value, a crashed config reader, vm pool): names the split and the withheld reason, forbids flipping isolation. Its config sentence travels as the leaf's `config_fact`, rendered outside the untrusted-log block | import share of the vitest run |
 | `turbo-remote-cache` | remote caching off / 0 cached → every package rebuilt | packages rebuilt (cache-miss %) |
@@ -3835,7 +3874,7 @@ cross-run-check locator phrase must co-occur with the section marker in the same
 
 A cache-miss finding is born from ONE drilled run's log, and the drilled run is deliberately the
 slow-mode representative — so its miss rate is NOT evidence the cache is a broad wall-clock lever.
-For a cache leaf (`turbo-*`, `buildx-no-cache`, `install-lifecycle-build`), `_cache_distribution`
+For a cache leaf (`turbo-*`, `buildx-no-cache`, `install-lifecycle-build`, `dependency-cache`), `_cache_distribution`
 stamps a per-pole **`cache_dist`** onto `pr_critical_path.poles[]`: the miss rate across the sampled
 runs, split PR vs push, with fork PRs excluded from the upstream median (a fork PR gets no repo
 secrets, so a secrets-gated remote cache is unreachable to it, and it cannot restore an upstream
@@ -3843,7 +3882,9 @@ feature branch's own scope — so it can run colder than upstream), plus a re-de
 **`verdict`** (`cold | churn | miss-tail |
 mostly-warm | insufficient`, `_cache_verdict`). The miss metric is always the per-run
 `cache_state.miss_pct` (read by `_cache_state_of_log` uniformly), NOT the leaf's magnitude (which is
-seconds for `install-lifecycle-build`).
+seconds for `install-lifecycle-build`). `dependency-cache` uses a 50% partial-miss floor
+(`_DEPENDENCY_CACHE_FLOOR_PCT`, mirrored in `verify_report._VR_CACHE_FLOOR_BY_FIX_KEY`) and the
+OPT96 confirmation described in "Default-branch dependency-cache seeding (OPT96)" below.
 
 Two properties make it honest:
 - **Every sampled run counts, not only the miss-heavy ones.** The distribution reuses the logs
@@ -3992,12 +4033,24 @@ aggregation gate whose wait IS its `needs:` upstream — names the slowest measu
 upstream member with its P50, and closes with a pointer to the pole that drills
 that member (an anchor when it renders, otherwise a named check plus what a re-run
 would do — never a dead link). It renders **no drill, no floor note, and no agent
-prompt**. Crowning/ranking is untouched (the frequency crown is correct data), and
-a sink that is itself a **modal-chain member** keeps the chain-stage framing (the
-chain model already frames it as serialized; no double-framing). A pole carrying a
-matched log-detector leaf or a routed structural lever also keeps today's render —
-there the drill is not inert, and suppressing it would silently drop a measured
-lever.
+prompt**. A sink that is itself a **modal-chain member** (only ever the chain's
+last stage — a sink is terminal) still renders as the aggregation gate, with its
+chain stage stated in the same role line, so the verdict job ending a
+`suite → verdict` chain never gets a drill of its own verdict step. A pole carrying
+a matched log-detector leaf or a routed *specific* structural lever (OPT70/71/72)
+keeps today's render — there the drill is not inert, and suppressing it would
+silently drop a measured lever; the generic OPT75 ("speed up the dominant step")
+does not count, because on a sink that step is the verdict itself.
+
+**Ranking, routing and the digest agree.** The sink's slowest measured upstream
+member inherits the sink's gate rank (a job a required verdict `needs:` is
+required in effect), so the p50 tie-break puts the real time-holder at Long pole 1
+and the 3s sink after it; before this a required verdict headed the report ahead of
+the suite it waits on (starslingdev/skills: `test`, 3s, ahead of `test
+(self-hosted)`, 4m32s). The structural router (`collect_runs._is_aggregation_gate_check`,
+the same (a)–(d) test, exempting measured build work that routes to OPT70/OPT72)
+routes no lever to a verdict sink, and `summary.py` lists sinks under
+"Aggregation gates", never under "Addressable long poles".
 
 Two coupled invariants hold the seam:
 `verify_report.check_speed_poles_complete` **exempts** such a pole from the
@@ -4049,13 +4102,26 @@ order of preference:
    the adversarial-review rubric (Scope 5) enforce the label + grounding and that no
    pole ships as a dead-end.
 
+   **A generic structural match is still a gap.** OPT75 (the neutral "one step holds
+   the time" catch-all, routed on the dominant step's category) and OPT71 (routed on
+   required-status) name no cause inside the job (`_GENERIC_STRUCTURAL_PATTERNS`). A pole
+   whose only catalog matches are these, with a captured log, renders the gap note, is
+   listed by `_gap_poles`, and takes `--analysis`; its generic card still renders beside
+   the analysis. Every other structural pattern (OPT70/72/73/74/78) names a cause and
+   covers its pole. `verify_report` fails any pole that says "no known root-cause pattern
+   matched" with no analysis block, and the renderer says that phrase only for a real gap
+   (a captured log, no covering pattern, no analysis yet).
+
 ## 13. Cross-references
 
 - [`SKILL.md`](SKILL.md) - the canonical contract (phases, admission gate,
   quality review).
-- [`references/optimization-patterns.md`](references/optimization-patterns.md) -
-  the 82-pattern catalog (METADATA + body per pattern); the source of truth for
-  detection and the report's TL;DR / pattern background.
+- [`references/patterns/INDEX.md`](references/patterns/INDEX.md) -
+  the 97-pattern catalog, one file per pattern (frontmatter + body); the source
+  of truth for detection and the report's TL;DR / pattern background. The
+  single-file [`references/optimization-patterns.md`](references/optimization-patterns.md)
+  is compiled from `references/patterns/` by
+  `maintainers/ci-speedup/scripts/build_catalog.py`.
 - [`references/wall-clock-methodology.md`](references/wall-clock-methodology.md)
   - critical-path / long-pole / cluster-floor model and the non-additive rule.
 - [`references/savings-methodology.md`](references/savings-methodology.md) -
@@ -4066,3 +4132,220 @@ order of preference:
 - `maintainers/ci-speedup/MAINTAINERS.md` + `maintainers/ci-speedup/loops/gap-to-catalog-prompt.md`
   (maintainer-only, not shipped in an installed skill — source checkout only) -
   the gap → catalog loop (auto-draft a detector when the LLM fallback fires; §12.7).
+
+### Default-branch dependency-cache seeding (OPT96)
+
+The static pass correlates PR restore families with default-branch save points,
+including local reusable callers and local composite actions. Seed events are a push
+to the default branch, `schedule`, `workflow_run` and `repository_dispatch`, each
+evaluated against its own conditions; `merge_group` never counts (temporary queue
+ref) and a `workflow_dispatch`-only saver does not seed, though the evidence notes a
+manual warmer. Push filters: tags-only is non-branch only when neither `branches`
+nor `branches-ignore` is set, string filters are one pattern, null filters are safe.
+Unknown conditions remain reachable. Key matching treats every `${{ }}` expression
+as a wildcard; a writer matches when either template can match the other
+(`restore-keys` as prefixes). A match resting only on an all-expression template is
+undecidable and is held back; an all-expression reader with no matching writer is flagged.
+
+Uncertainty never reaches `scan_incomplete`. A reader the scan cannot decide is held
+back (no finding) and recorded in the top-level `opt96_unresolved` list (workflow_file,
+job, family, reason), rendered as a "cache seeding: held back" row in the Data sources
+table; a detector error is caught and disclosed the same way. Hold-back scope: a writer
+whose saves cannot be read on a seed event (remote reusable workflow, remote action not
+on the non-caching allowlist of checkout / upload-artifact / download-artifact /
+github-script, unreadable local composite) holds back only readers whose workflow or
+caller chain references the same repository or local path, or whose literal key prefix
+appears in that step's `with:` inputs. A missing local reusable file hides no writer.
+The default branch comes from `--default-branch`, else origin/HEAD (evidence notes it may
+be stale), else main/master; `collect_runs` compares the scan's `opt96_default_branch`
+stamp with GitHub's default branch and, on mismatch, demotes every OPT96 finding to
+unconfirmed and discloses it in `opt96_unresolved`. Readers inside a local reusable
+workflow carry `callers` (caller workflow, job chain, callee display name) so they ground
+on the caller's pole as "caller job / callee job".
+
+Measured confirmation needs a median upstream PR miss rate of at least 50% and either
+every sampled push log showing only misses with no save, the job absent from sampled
+push runs, or no push runs at all. Only push jobs that completed (success/failure) count;
+queued, in-progress, cancelled or display-name-mismatched push jobs are unknown and never
+confirm. The no-push-runs shortcut applies only when the workflow's `on:` has no
+push/schedule/workflow_run/repository_dispatch trigger and its run and job lists
+downloaded; otherwise the reason is "push probe unavailable". An unconfirmed finding's
+`size_note` names one of: no matching pole, pole log not fetched, another detector took
+precedence, confirmation failed, push probe unavailable, default-branch mismatch.
+The dependency-cache and OPT101 cache-path leaves are observation-only
+(`_OBSERVATION_ONLY_LEAVES`): a restore line never closes a coverage gap or holds back the OPT81 advisory, and a default-branch
+restore refutes the measured confirmation. Dependency-cache sampling and the push probe
+run only for a pole whose job a static OPT96 finding names (`_opt96_pole_matches`: job id,
+or its `name:` / matrix leg resolved through the workflow YAML).
+The "Dependency cache: check this" log leaf renders only when the OPT96-gated sampling
+ran on that pole (`pole.cache_dist.fix_key == "dependency-cache"`); a restore line alone
+renders nothing. Cross-run magnitude samples accept a sibling run's number only when the
+same detector (`fix_key`) fired on it (turbo's remote-off and partial leaves count as one
+family, `_MAG_LEAF_FAMILY`), and for OPT96-named poles the pole magnitude stays
+the dominant step's wall time with cache outcomes living only in `cache_dist`.
+The dependency-cache leaf reads restore outcomes using the existing magnitude
+sample and bounded push probe. Only a matching static finding can promote the
+measured install hit/miss difference, multiplied by upstream PR miss share.
+Multiple cache results and absent hit timings remain uncredited. The leaf itself
+is a secondary observation, never the entire install-step ceiling. Credited rows
+pass the within-workflow cap and the existing cross-workflow cascade; below-tail
+or unconfirmed rows retain “check this” wording. No additional probe budget is
+introduced.
+
+### Single-slot queue capacity (OPT97)
+
+`_detect_opt97_single_slot_queue` groups each workflow's sampled jobs by job and
+exact runner-label set. Readiness excludes upstream execution; an entry job
+under a workflow-level global group is timed from the run's creation, because
+GitHub creates such a run's jobs only when the group frees. A population that
+meets the queue thresholds (15 samples, median 60 s, P90 300 s) is evaluated
+only on a self-hosted label set or with a static hint (global group, one
+repo-level runner, device step). On hosted runners the account's
+concurrent-job limit raises queue and in-flight work together, so that queue
+stays with OPT43.
+
+In-flight counts never come from the newest-success sample, which sees a small
+fraction of competing work. `collect()` hands the detector
+`_opt97_dense_competition`: one bounded read of every run, any status, created
+in the population's window (at most 3 run-list pages), then job lists only for
+runs whose workflow could share the runners or group (at most 60; sampled runs
+are reused and responses shared across populations). A failed or capped read is
+noted "competition not measured" and never fires. Call counts, thin samples,
+unresolved jobs and unmeasured populations reach the Data sources table
+(`opt97_competition_calls`, `opt97_notes`; each row shows 5 entries, the rest
+stay in findings JSON).
+
+Measured OPT97 replaces the same workflow's same-job OPT43 (OPT44 is accepted
+but has no detector), uses the pre-start axis, and credits only established
+gating jobs: the median same-run completion change when the queue above the
+P10 of the other sampled jobs is removed. No baseline or incomplete completion
+timestamps give no credit; existing floors still apply. No utilization or
+billing claim is derived from correlation.
+
+### Merge validation (OPT98)
+
+The required-check reader optionally returns strict/merge-queue metadata from
+the same API responses. Strict is on when any source says so and off only when
+classic protection was read (a non-admin's 404 there leaves it unknown). A
+queue is present when a ruleset, a `merge_group` trigger or a cached
+`merge_group` run shows one. A strict, queue-free candidate uses one REST search
+for the prior 30 complete UTC days before the pin; total_count supplies volume.
+At 30 merges a day, up to 30 of the newest merged PR timelines supply the
+rebase-churn share (two-parent commits and head force-pushes). Run pages can't:
+GitHub empties `pull_requests[]` once a PR merges.
+`_opt98_static_scope` classifies each queue workflow as full, scoped (OPT70
+affected-only signals or a build/remote cache), queue-only or unknown
+(event-dependent conditions, commands, inputs or matrices; reusable workflows;
+unread local actions). Full candidates need 15 successful first-attempt runs per
+event and a queue/PR median ratio from 0.8 to 1.5. Both cases are uncredited and
+render in a dedicated Repeated merge validation section so a drilled pole cannot
+hide the observation. Unknown scopes, thin samples, slower queue runs, malformed
+workflows, unavailable branch rules and missing timings are named in data
+sources; `merge_queue.status` says measured, partial or not_measured.
+
+### Infrastructure faults (OPT100)
+
+`_opt100_workflow_pass` runs once per workflow after the repeated-attempt
+prefetch. It reuses the all-status and prior-attempt job pages, resolves
+observed job names to exactly one merge-gating YAML job, and reads evidence
+only for gating jobs with at least five failures: one log per failed job with
+a failed step, or one check-run annotations call (the job id is its check-run
+id) per failed job with no failed step, which is how a lost runner appears.
+`_opt100_job_class` parses log timestamps with the shared OPT80 line parser
+(seven fractional digits), keeps the first failed step's lines up to one second
+past its whole-second end, and stops at that step's runner exit line. The
+signature table in `blocking_path.py` then classifies lost runner, out of
+memory (the runner's own exit 137 line), browser crash (crash wording only) and
+network (errno or a 502/503 beside HTTP wording, in install, fetch or "Set up
+job" steps). Retry compute counts only jobs that ran in the failed attempt and
+again in the next. OPT100 is reported as not evaluated only when no finding
+fired and unread job pages or logs could change the verdict; a fired finding
+states its unread-log count. OPT64 then runs over the retries OPT100 did not
+claim.
+
+### PR lifecycle context
+
+`pr_lifecycle.py` adds a separate `pr_lifecycle` document block and renders it
+near the report's top on every path. It does not alter CI findings or savings.
+The collector makes at most four read-only GraphQL requests, 10 merged PRs per
+page, ordered by most recent update (GraphQL has no merged-at ordering; update
+order tracks merges, while creation order drops long-lived PRs merged recently).
+Ten per page and GitHub Actions suites only (app 15368) keep a page inside
+GitHub's per-query resource limits: installed apps open an empty suite on every
+commit, and 25 PRs of full job history exceeded the limit on busy repos. A
+query failure or malformed page makes the whole block `not measured`. A PR
+whose own history is incomplete (force-pushed, a truncated nested connection,
+required checks missing or not green on the merged head, a malformed timestamp)
+is left out and counted by reason; the block shows "Measured N of M" and is
+`not measured` when fewer than 10 PRs remain.
+
+CI running is the union of all GitHub Actions job attempts, clipped to PR life;
+skipped jobs, which GitHub stamps as ending just before they start, count as zero.
+The merged head's `statusCheckRollup` (every app's latest checks plus commit
+statuses) decides when the last required check passed.
+Red waiting extends from failed-check completion to the next commit timestamp;
+GitHub no longer supports Commit.pushedDate, so this is explicitly not push
+latency.
+
+Green waiting covers every review round. It is the union of each stretch where
+the PR's latest commit had all its required checks passed and no newer commit
+existed, running until the next commit timestamp or the merge. The merged
+head's stretch starts when its rollup shows the last required check passing.
+An earlier commit is read from the GitHub Actions jobs the same query already
+returns (no extra request): its stretch starts at the latest completion among
+the required names, and only when every required name is a passing job on that
+commit. An earlier commit whose required checks are absent, failing or
+unreadable adds no green time; it never makes the PR unmeasurable. Only the
+merged head's data is mandatory. A required check that only another app or a
+commit status reports keeps earlier rounds out of green, since those are read
+on the merged head alone. Running wins interval overlaps, followed by red then
+green; draft waiting and everything else form the remainder. Ready-for-review
+and convert-to-draft timeline events exclude draft idle time from red/green
+waiting. The final-head CI share is a subset, not a fifth bucket.
+
+Required checks come from rulesets and classic branch protection. When they are
+not fully readable (the usual case for a repository the caller cannot
+administer), the block is an estimate rather than `not measured`. Every check
+on each PR's merged head stands in for the required set: the rollup's latest
+check runs and commit statuses, excluding skipped and neutral ones and ones that
+did not complete by the merge (pending, never completed, or finishing after it).
+The estimate needs the head's complete check list (the rollup's `pageInfo`); a
+truncated or empty list leaves the PR out, counted by reason. An earlier commit
+is green under the estimate only when those names and all of its own completed
+jobs passed. The block's data records `basis` (`required` or
+`all-final-commit-checks`), and the rendered block carries the label
+"Estimated: required checks are not readable, ..." with the bias it implies:
+an optional slow check delays the green moment, so green waiting may be
+understated. Readable required checks keep the stricter rules (a required check
+finishing after merge leaves the PR out).
+
+The report gives per-PR median and nearest-rank p90 shares, and uses strict
+<10% final-head CI / >25% green thresholds for its headline. Current policy,
+update-order sampling and coverage are disclosed; no historical-policy claim is
+made. `verify_report.py` re-checks the rendered block (median <= p90, final-head
+CI within all CI, headline iff its own rendered shares cross the thresholds) and,
+given the findings, requires the estimate label exactly when the recorded basis
+is `all-final-commit-checks` (a measured block with no recorded basis fails).
+
+GraphQL uses a dedicated one-attempt GhClient transport (no retries, so the
+four-call ceiling includes transport failures), existing governor/breaker,
+and hashed-query record/replay keys. See GitHub's
+[commit schema](https://docs.github.com/en/graphql/reference/commits) and
+[pull-request schema](https://docs.github.com/en/graphql/reference/pulls).
+
+### Cache effective path mismatch (OPT101)
+
+The scan emits `cache_effective_paths` as optional context, never findings.
+When a drilled log contains the missing-path warning (actions/cache logs it as
+`[warning]Path Validation Error: ...`), collection checks
+every sampled successful instance of the same job that reached the same known
+actions/cache save post-step, without the duration filter used to pick the drill.
+Timestamp-scoped warning evidence is required in every such attempt (the window
+runs one second past the whole-second step end; a warning adjacent cache
+post-steps could both claim withholds unless all of them warned); unknown logs
+and mixed results withhold. Each log is read once, the drilled one is reused, and
+it is released before the next. The pole carries `cache_path_sample` to the
+renderer, which adds an uncredited observation and prompt beside the pole's own
+leaf and secondary note; the pole stays a coverage gap when nothing else matched. It never
+claims the pole ceiling or contributes to `_SIZING`. See the pattern for the
+existing-wrong-path coverage limit and static-context exclusions.

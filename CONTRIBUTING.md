@@ -18,11 +18,13 @@ Thanks for your interest in improving `ci-speedup`. Pull requests are welcome.
   PyYAML is not optional: without it, pytest aborts during collection with
   `INTERNALERROR` instead of a readable failure, and no tests run at all.
 
-  CI runs the same command on every push and PR (`.github/workflows/ci.yml`).
+  CI runs the full suite with four workers on every push and PR
+  (`python3 -m pytest -v -n 4 --dist worksteal` in `.github/workflows/ci.yml`).
   Tests live under `skills/ci-speedup/tests/`, `maintainers/ci-speedup/tests/`,
   and the repo-root `tests/`; the root `pyproject.toml` wires the paths so one
   `pytest -v` finds them all. A pre-commit hook (`.githooks/pre-commit`, enable
-  with `git config core.hooksPath .githooks`) runs the same suite locally.
+  with `git config core.hooksPath .githooks`) runs the same suite sequentially
+  locally.
 
 - **Keep the changelog current.** Every change that alters skill behavior adds a
   dated (UTC) bullet to
@@ -54,11 +56,11 @@ External contributions are welcome and follow the standard fork flow:
 - **One required check, `test`, covers both.** It is a verdict job that always
   runs and passes only when the suite that was supposed to run actually ran and
   passed — so a fork PR cannot merge without a green suite.
-- **Local gate: green on your machine means green in CI.** The same
-  `python3 -m pytest -v` runs in both places, so you can reproduce CI locally
-  before you push — provided your environment has the dev dependencies
-  (`pip install -e ".[dev]"`). CI installs them explicitly; a local environment
-  missing PyYAML fails at collection rather than reproducing anything.
+- **Reproduce the full CI suite locally.** Install the dev dependencies with
+  `pip install -e ".[dev]"`, then run `python3 -m pytest -v -n 4 --dist worksteal`
+  to match CI. Use `python3 -m pytest -v` for sequential debugging. Both run
+  every test; parallel execution changes scheduling only. Missing PyYAML
+  fails at collection rather than reproducing anything.
 
 ## Registry security scanning
 

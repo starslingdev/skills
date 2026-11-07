@@ -436,6 +436,496 @@ jobs:
     assert "OPT21" not in _scan_one(tmp_path, neg)
 
 
+# --- OPT21 cheap-gate carve-out ---------------------------------------------
+# A job that `needs:` a check-only job (lint / pre-commit / format / lockfile
+# check) is a deliberate cheap gate: the expensive job never starts when the
+# cheap check fails. OPT21 must not flag (and so must not credit) that wait.
+# Every needed job has to be a check-only gate; anything the vocabulary cannot
+# classify keeps the finding (fail closed).
+
+def _opt21_jobs(tmp_path: Path, content: str) -> list[str]:
+    _write_workflow(tmp_path, "ci.yml", content)
+    return sorted(j for f in _scan(tmp_path)["findings"]
+                  if f["pattern"] == "OPT21" for j in f["affected_jobs"])
+
+
+def test_opt21_not_flagged_on_a_pre_commit_gate(tmp_path: Path):
+    # openai/whisper test.yml shape: the matrix test job waits on a job that
+    # only runs `pre-commit run --all-files`.
+    content = """name: test
+on: [push, pull_request]
+jobs:
+  pre-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch base branch
+        run: git fetch origin ${{ github.base_ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - name: Get pip cache dir
+        id: pip-cache
+        run: |
+          echo "dir=$(pip cache dir)" >> $GITHUB_OUTPUT
+      - name: pip/pre-commit cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ hashFiles('**/.pre-commit-config.yaml') }}
+      - name: pre-commit
+        run: |
+          pip install --upgrade pre-commit
+          pre-commit install --install-hooks
+          pre-commit run --all-files
+  whisper-test:
+    needs: pre-commit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip3 install .["dev"]
+      - run: pytest -vv
+"""
+    assert _opt21_jobs(tmp_path, content) == []
+
+
+def test_opt21_not_flagged_on_a_lockfile_check_gate(tmp_path: Path):
+    # openai/openai-python ci.yml shape: lint, build and test all wait on a
+    # short `dependency-locks` job that only verifies the lockfile.
+    content = """name: CI
+on: [push, pull_request]
+jobs:
+  dependency-locks:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify dependency source provenance before installing tools
+        run: |
+          python -I -c 'import tomllib, pathlib; assert tomllib.loads(pathlib.Path("uv.lock").read_text())'
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+      - name: Verify dependency groups and committed lock
+        run: |
+          uv run --no-project python -c 'import tomllib'
+          uv lock --check
+  lint:
+    needs: dependency-locks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: uv sync --locked
+      - run: ./scripts/lint
+  build:
+    needs: dependency-locks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/build
+  test:
+    needs: dependency-locks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/test
+"""
+    assert _opt21_jobs(tmp_path, content) == []
+
+
+_OPT21_LINT_GATE = """  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+      - run: npm ci
+      - run: npm run lint
+"""
+
+
+@pytest.mark.parametrize("dep_job", [
+    pytest.param("""  dep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - run: npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist
+""", id="build-job-uploading-an-unused-artifact"),
+    pytest.param("""  dep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install -e .
+      - run: pytest
+""", id="test-job"),
+    pytest.param("""  dep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/do-something
+""", id="unclassifiable-step"),
+    pytest.param("""  dep:
+    runs-on: ubuntu-latest
+    outputs:
+      ok: ${{ steps.l.outputs.ok }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: l
+        run: npm run lint
+""", id="gate-declaring-outputs"),
+    pytest.param("""  dep:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm run lint
+""", id="gate-that-cannot-fail"),
+])
+def test_opt21_still_flags_a_wait_on_a_non_gate(tmp_path: Path, dep_job: str):
+    content = ("name: CI\non: pull_request\njobs:\n" + dep_job +
+               """  e2e:
+    needs: dep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm test
+""")
+    assert _opt21_jobs(tmp_path, content) == ["e2e"]
+
+
+# A check-style step NAME must not turn a full test or build run into a gate:
+# flags before the subcommand, and test runners outside the npm/cargo/go set.
+@pytest.mark.parametrize("name,run", [
+    ("Verify", "mvn -B verify"),
+    ("Check", "make check"),
+    ("Validate", "pnpm -r test"),
+    ("Check flake", "nix flake check"),
+    ("Verify", "bundle exec rspec"),
+    ("Check", "ctest --output-on-failure"),
+    ("Check", "python -m unittest discover"),
+    ("Verify", "./ci/run_all_tests.sh"),
+])
+def test_opt21_still_flags_a_test_run_under_a_check_name(tmp_path: Path, name: str, run: str):
+    content = f"""name: CI
+on: pull_request
+jobs:
+  dep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: {name}
+        run: {run}
+  e2e:
+    needs: dep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm test
+"""
+    assert _opt21_jobs(tmp_path, content) == ["e2e"]
+
+
+# A gate that cannot fail, whose only check is conditional, or whose steps
+# could not all be read gates nothing the detector can vouch for.
+@pytest.mark.parametrize("gate_steps", [
+    pytest.param("""      - uses: actions/checkout@v4
+      - run: ruff check . || true
+""", id="check-that-cannot-fail"),
+    pytest.param("""      - uses: actions/checkout@v4
+      - name: Lint
+        run: eslint . || exit 0
+""", id="check-named-step-that-cannot-fail"),
+    pytest.param("""      - uses: actions/checkout@v4
+      - run: npm run lint
+        if: github.event_name == 'push'
+""", id="only-check-is-conditional"),
+    pytest.param("""      - uses: actions/checkout@v4
+      - npm run deploy
+      - run: npm run lint
+""", id="unreadable-step"),
+    pytest.param("""      - uses: actions/checkout@v4
+      - parallel: npm run deploy
+      - run: npm run lint
+""", id="unreadable-parallel-group"),
+    pytest.param("""      - uses: actions/checkout@v4
+      - run: npm run lint-and-build
+""", id="script-name-only-starting-with-lint"),
+    pytest.param("""      - uses: actions/checkout@v4
+      - run: npm run lint
+      - run: ./scripts/do-something
+""", id="check-beside-an-unclassifiable-step"),
+    pytest.param("""      - uses: actions/checkout@v4
+      - uses: someorg/deploy-action@v1
+      - run: npm run lint
+""", id="check-beside-a-non-setup-action"),
+    pytest.param("""      - uses: actions/checkout@v4
+      - run: npm run lint
+        continue-on-error: true
+""", id="check-step-that-cannot-fail"),
+    pytest.param("""      - uses: actions/checkout@v4
+      - run: npm ci
+""", id="setup-only-no-check"),
+    pytest.param("""      - uses: actions/checkout@v4
+      - name: Verify build
+        run: npm run build
+""", id="check-named-build"),
+])
+def test_opt21_still_flags_a_wait_on_a_gate_it_cannot_vouch_for(tmp_path: Path, gate_steps: str):
+    content = ("name: CI\non: pull_request\njobs:\n  dep:\n    runs-on: ubuntu-latest\n"
+               "    steps:\n" + gate_steps + """  e2e:
+    needs: dep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm test
+""")
+    assert _opt21_jobs(tmp_path, content) == ["e2e"]
+
+
+@pytest.mark.parametrize("extra", [
+    "    services:\n      pg:\n        image: postgres\n",
+    "    container: node:20\n",
+    "    environment: production\n",
+])
+def test_opt21_still_flags_a_wait_on_a_lint_job_with_job_level_extras(tmp_path: Path, extra: str):
+    gate = _OPT21_LINT_GATE.replace("    runs-on: ubuntu-latest\n",
+                                    "    runs-on: ubuntu-latest\n" + extra, 1)
+    content = ("name: CI\non: pull_request\njobs:\n" + gate + """  e2e:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm test
+""")
+    assert _opt21_jobs(tmp_path, content) == ["e2e"]
+
+
+@pytest.mark.parametrize("cond", ["failure()", "cancelled()", "${{ !cancelled() }}"])
+def test_opt21_still_flags_a_gate_wait_under_a_result_condition(tmp_path: Path, cond: str):
+    content = ("name: CI\non: pull_request\njobs:\n" + _OPT21_LINT_GATE +
+               f"""  e2e:
+    needs: lint
+    if: {cond}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm test
+""")
+    assert _opt21_jobs(tmp_path, content) == ["e2e"]
+
+
+@pytest.mark.parametrize("needs", ["[lint, typecheck]", "[typecheck, lint]"])
+def test_opt21_not_flagged_on_two_gates(tmp_path: Path, needs: str):
+    content = ("name: CI\non: pull_request\njobs:\n" + _OPT21_LINT_GATE +
+               f"""  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npx tsc --noEmit
+  e2e:
+    needs: {needs}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm test
+""")
+    assert _opt21_jobs(tmp_path, content) == []
+
+
+def test_opt21_still_flags_a_wait_on_a_missing_or_empty_job(tmp_path: Path):
+    content = """name: CI
+on: pull_request
+jobs:
+  empty:
+    runs-on: ubuntu-latest
+    steps: []
+  a:
+    needs: ghost
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+  b:
+    needs: empty
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+"""
+    assert sorted(_opt21_jobs(tmp_path, content)) == ["a", "b"]
+
+
+def test_opt21_gate_suppression_leaves_a_debug_trace(tmp_path: Path):
+    import os
+    _write_workflow(tmp_path, "ci.yml", "name: CI\non: pull_request\njobs:\n" +
+                    _OPT21_LINT_GATE + """  e2e:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm test
+""")
+    result = subprocess.run(
+        [sys.executable, str(_SCAN_SCRIPT), "--root", str(tmp_path)],
+        capture_output=True, text=True, check=True,
+        env={**os.environ, "STARSLING_LOG_LEVEL": "DEBUG"},
+    )
+    assert "OPT21" not in _patterns(json.loads(result.stdout))
+    assert re.search(r"OPT21 not flagged: job e2e\b", result.stderr)
+
+
+# More work dressed as a check: flags before the build verb, a check piped or
+# chained into other work, a hyphenated script name, a lint that cannot fail,
+# runners and scripts outside the check vocabulary, and job or step shapes
+# that change what runs (a local composite action, a custom shell).
+@pytest.mark.parametrize("step", [
+    pytest.param("- name: Lint and test\n        run: make -j4 test", id="make-flag-then-test"),
+    pytest.param("- name: Check\n        run: go -C sub test ./...", id="go-flag-then-test"),
+    pytest.param("- name: Check\n        run: npm --prefix web test", id="npm-flag-then-test"),
+    pytest.param("- name: Check\n        run: cargo +nightly build --release",
+                 id="cargo-toolchain-then-build"),
+    pytest.param("- name: Check it compiles\n        run: cmake -B build && cmake --build build -j",
+                 id="cmake-build"),
+    pytest.param("- name: Check\n        run: gradle --no-daemon check", id="gradle-check"),
+    pytest.param("- run: eslint . | ./heavy.sh", id="lint-piped-into-other-work"),
+    pytest.param("- run: pre-commit run --all-files || ./run-integration-tests.sh",
+                 id="lint-or-other-work"),
+    pytest.param("- run: ./scripts/lint-and-test.sh", id="lint-and-test-script"),
+    pytest.param("- run: make lint-and-test", id="make-lint-and-test"),
+    pytest.param("- run: flake8 --exit-zero .", id="lint-with-exit-zero"),
+    pytest.param("- name: Check everything\n        run: cargo nextest run", id="named-check-runs-nextest"),
+    pytest.param("- name: Verify\n        run: make", id="named-check-runs-bare-make"),
+    pytest.param("- name: Check build\n        run: make -j4", id="named-check-runs-make-j4"),
+    pytest.param("- name: Check\n        run: turbo run test", id="named-check-runs-turbo"),
+    pytest.param("- name: Ensure\n        run: ./scripts/e2e.sh", id="named-check-runs-e2e-script"),
+    pytest.param("- name: Check\n        run: bash ci/run_tests.sh", id="named-check-runs-test-script"),
+    pytest.param("- name: Check types\n        run: tsc -b", id="named-check-runs-tsc-build"),
+    pytest.param("- name: Validate\n        run: terraform plan", id="named-check-runs-terraform-plan"),
+    pytest.param("- uses: ./setup-and-test\n      - run: npm run lint", id="local-composite-action"),
+    pytest.param("- run: ruff check .\n        shell: bash -c 'pytest' {0}", id="custom-shell"),
+])
+def test_opt21_still_flags_a_wait_on_work_dressed_as_a_check(tmp_path: Path, step: str):
+    content = ("name: CI\non: pull_request\njobs:\n  dep:\n    runs-on: ubuntu-latest\n"
+               "    steps:\n      - uses: actions/checkout@v4\n      " + step + "\n" +
+               """  e2e:
+    needs: dep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm test
+""")
+    assert _opt21_jobs(tmp_path, content) == ["e2e"]
+
+
+@pytest.mark.parametrize("gate", [
+    pytest.param("    steps:\n      - wait: all\n      - run: ruff check .\n", id="control-step"),
+    pytest.param("    defaults:\n      run:\n        shell: bash -c 'pytest' {0}\n"
+                 "    steps:\n      - run: ruff check .\n", id="job-default-shell"),
+])
+def test_opt21_still_flags_a_wait_on_a_gate_whose_steps_are_not_plain(tmp_path: Path, gate: str):
+    content = ("name: CI\non: pull_request\njobs:\n  dep:\n    runs-on: ubuntu-latest\n" +
+               gate + """  e2e:
+    needs: dep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm test
+""")
+    assert _opt21_jobs(tmp_path, content) == ["e2e"]
+
+
+def test_opt21_still_flags_a_wait_through_a_gate_that_waits_on_a_build(tmp_path: Path):
+    # `e2e` really waits for `build` through the gate, so the gate is not cheap.
+    content = """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make build
+  lint:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ruff check .
+  e2e:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm test
+"""
+    assert _opt21_jobs(tmp_path, content) == ["e2e", "lint"]
+
+
+@pytest.mark.parametrize("prefix", ["      - run: ", "      - name: Verify\n        run: "])
+def test_opt21_gate_classification_stays_fast_on_a_long_flag_run(tmp_path: Path, prefix: str):
+    # A runner prefix followed by many flags and an unknown command must not
+    # send the check-line or inline-script regex into exponential backtracking.
+    import time
+    flags = " ".join(f"--flag{i}" for i in range(16))
+    content = ("name: CI\non: pull_request\njobs:\n  dep:\n    runs-on: ubuntu-latest\n"
+               "    steps:\n" + prefix + "uv run " + flags + " python zzz\n" + """  e2e:
+    needs: dep
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+""")
+    t0 = time.monotonic()
+    assert _opt21_jobs(tmp_path, content) == ["e2e"]
+    assert time.monotonic() - t0 < 5
+
+
+def test_opt21_still_flags_a_job_needing_a_gate_and_an_unused_build(tmp_path: Path):
+    content = ("name: CI\non: pull_request\njobs:\n" + _OPT21_LINT_GATE +
+               """  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - run: npm run build
+  e2e:
+    needs: [lint, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm test
+""")
+    assert _opt21_jobs(tmp_path, content) == ["e2e"]
+
+
+def test_opt21_still_flags_a_gate_wait_the_job_runs_through(tmp_path: Path):
+    # `if: always()` runs the job whether the gate passed or failed, so the
+    # edge gates nothing: it is pure ordering, still an OPT21 candidate.
+    content = ("name: CI\non: pull_request\njobs:\n" + _OPT21_LINT_GATE +
+               """  e2e:
+    needs: lint
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm test
+""")
+    assert _opt21_jobs(tmp_path, content) == ["e2e"]
+
+
+def test_opt21_not_flagged_on_a_lint_gate(tmp_path: Path):
+    content = ("name: CI\non: pull_request\njobs:\n" + _OPT21_LINT_GATE +
+               """  e2e:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm test
+""")
+    assert _opt21_jobs(tmp_path, content) == []
+
+
 def test_opt27_duplicate_setup_node(tmp_path: Path):
     pos = """name: CI
 on: push
@@ -2281,7 +2771,7 @@ def test_phase2_patterns_have_detectors(tmp_path: Path):
     # mapping needs docker-compose.yml), so it is excluded here.
     for pat in ("OPT1", "OPT2", "OPT3", "OPT5", "OPT9", "OPT12", "OPT14",
                 "OPT16", "OPT19", "OPT21", "OPT27", "OPT29", "OPT31",
-                "OPT33", "OPT39", "OPT62", "OPT63", "OPT7", "OPT37", "OPT40",
+                "OPT33", "OPT39", "OPT62", "OPT63", "OPT7", "OPT37", "OPT40", "OPT96",
                 "OPT52", "OPT53", "OPT58", "OPT59", "OPT60"):
         assert pat not in without, f"{pat} should have a registered detector"
 
@@ -2296,17 +2786,20 @@ def test_structural_pattern_without_router_is_reported_not_hidden(tmp_path: Path
     data = _scan(tmp_path)
     without = set(data["catalog_structural_patterns_without_detector"])
     assert "OPT74" in without, "OPT74 has no router and must be reported as uncovered"
+    # OPT85 / OPT87 are catalogued with no router; their catalog entries promise
+    # the scan lists them here, so registering either as detected without a
+    # router would silently claim coverage the audit does not have.
+    for pat in ("OPT85", "OPT87"):
+        assert pat in without, f"{pat} has no router and must be reported as uncovered"
     for pat in ("OPT70", "OPT71", "OPT72", "OPT73", "OPT75"):
         assert pat not in without, f"{pat} has a router and must not be listed"
 
 
 def _catalog_section(pat: str) -> str:
-    """The catalog body of one `### <PAT> — ...` section, up to the next `###`
-    heading (or EOF — the last section in the file must not blow up the lint)."""
-    catalog = (_SKILL_DIR / "references" / "optimization-patterns.md").read_text()
-    start = catalog.index(f"### {pat} —")
-    nxt = catalog.find("\n### ", start + 1)
-    return catalog[start:] if nxt < 0 else catalog[start:nxt]
+    """The catalog body of one pattern: its own file under references/patterns/
+    (frontmatter, `# <PAT> — ...` title, then the verbatim body)."""
+    path = next((_SKILL_DIR / "references" / "patterns").glob(f"{pat.lower()}-*.md"))
+    return path.read_text(encoding="utf-8")
 
 
 def _yaml_blocks(body: str) -> list[str]:
@@ -2893,6 +3386,7 @@ jobs: {}
     assert ci["lint"]["matrix"] is False                                                  # no strategy block -> not matrix
     assert ci["lint"]["timeout_minutes"] is False                                         # no timeout-minutes -> false
     assert ci["suite"]["reusable"] is True and ci["suite"]["needs"] == ["build"]          # job-level uses -> reusable
+    assert ci["suite"]["uses"] == "./.github/workflows/suite.yml"
     assert ".github/workflows/empty.yml" not in graph                                     # empty-jobs file omitted
 
 
@@ -3050,7 +3544,7 @@ jobs:
 # the shipped "N-pattern" doc claims stay reconciled with the real count.
 # =============================================================================
 
-_CATALOG_PATH = _SKILL_DIR / "references" / "optimization-patterns.md"
+_CATALOG_PATH = _SKILL_DIR / "references" / "patterns"
 
 
 def test_opt66_stays_retired_not_silently_deleted():
@@ -3064,12 +3558,15 @@ def test_opt66_stays_retired_not_silently_deleted():
     _sys.path.insert(0, str(_SKILL_DIR / "scripts"))
     import scan  # noqa: E402
 
-    text = _CATALOG_PATH.read_text(encoding="utf-8")
-    assert "### OPT66" in text, (
-        "OPT66 must keep a retired-id stub in the catalog, not be silently deleted")
-    stub = re.search(r"### OPT66.*?(?=\n### OPT|\Z)", text, re.S)
-    assert stub and "REMOVED" in stub.group(0), (
-        "the OPT66 stub must carry a REMOVED/CUT marker naming the pricing excision")
+    files = list(_CATALOG_PATH.glob("opt66-*.md"))
+    assert len(files) == 1, (
+        "OPT66 must keep a retired-id stub file in the catalog, not be silently deleted")
+    text = files[0].read_text(encoding="utf-8")
+    front = re.match(r"---\n(.*?)\n---\n", text, re.S)
+    assert front and re.search(r"^status: removed$", front.group(1), re.M), (
+        "the OPT66 stub must carry `status: removed` in its frontmatter")
+    assert "REMOVED" in text, (
+        "the OPT66 stub body must carry a REMOVED marker naming the pricing excision")
     ents = {e.pattern: e for e in scan.load_catalog(_CATALOG_PATH)}
     assert "OPT66" in ents, "OPT66 must parse as a catalog entry (keeps the id in the count)"
     assert ents["OPT66"].detector == "manual", (
@@ -3092,7 +3589,7 @@ def test_catalog_pattern_count_matches_doc_claims():
         for claimed in re.findall(r"(\d+)[- ]pattern", text):
             assert int(claimed) == count, (
                 f"{rel} claims a {claimed}-pattern catalog but the real count is "
-                f"{count} — reconcile the doc with optimization-patterns.md")
+                f"{count} — reconcile the doc with references/patterns/")
 
 
 def test_catalog_pattern_count_breakdown_sums_to_the_total():
@@ -3104,7 +3601,9 @@ def test_catalog_pattern_count_breakdown_sums_to_the_total():
     _sys.path.insert(0, str(_SKILL_DIR / "scripts"))
     import scan  # noqa: E402
 
-    count = len(scan.load_catalog(_CATALOG_PATH))
+    catalog = scan.load_catalog(_CATALOG_PATH)
+    count = len(catalog)
+    real_structural = sum(1 for e in catalog if e.finding_class == "structural")
     breakdown = re.compile(
         r"(\d+)[- ]pattern\s*\n?catalog\s*[—-]\s*(\d+)\s+\*\*hygiene/data-driven\*\*"
         r".*?plus\s+(\d+)\s+\*\*structural",
@@ -3119,6 +3618,11 @@ def test_catalog_pattern_count_breakdown_sums_to_the_total():
             f"{rel} breaks down its {total}-pattern catalog as {hygiene} hygiene + "
             f"{structural} structural = {hygiene + structural} — the breakdown must "
             f"sum to the total")
+        # A split that sums to the total can still be wrong (76 + 10 for a
+        # catalog with 11 structural entries); pin it to the real class count.
+        assert structural == real_structural, (
+            f"{rel} claims {structural} structural patterns but the catalog has "
+            f"{real_structural} `class: structural` entries")
 
 
 # =============================================================================
@@ -4588,3 +5092,370 @@ jobs:
       - run: pnpm lint
 """
     assert "OPT12" in _scan_one(tmp_path, pos)
+
+
+def test_workflow_status_publishers_records_in_repo_status_posters(tmp_path: Path):
+    """Issue #119: scan records the workflows that post commit statuses themselves, so
+    collect_runs can tell an in-repo aggregate status (`All CI`) from an outside gate.
+    Covers a `gh api .../statuses/<sha>` call in the YAML, an `actions/github-script`
+    step whose repo-local script calls `createCommitStatus`, and a workflow that only
+    READS statuses (`commits/<sha>/statuses`) or posts nothing, which must not count."""
+    _write_workflow(tmp_path, "aggregate.yml", """name: Aggregate
+on: pull_request
+jobs:
+  publish:
+    name: Publish aggregate
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh api repos/${{ github.repository }}/statuses/${{ github.sha }} -f context='All CI' -f state=pending
+""")
+    _write_workflow(tmp_path, "script.yml", """name: Script aggregate
+on: pull_request
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const run = require('./.github/scripts/aggregate.js')
+            await run({ github, context })
+""")
+    scripts = tmp_path / ".github" / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "aggregate.js").write_text(
+        "module.exports = async ({ github, context }) => {\n"
+        "  await github.rest.repos.createCommitStatus({ ...context.repo,\n"
+        "    sha: context.sha, state: 'success', context: 'Script CI' })\n}\n",
+        encoding="utf-8")
+    _write_workflow(tmp_path, "reader.yml", """name: Reader
+on: pull_request
+jobs:
+  read:
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh api repos/${{ github.repository }}/commits/${{ github.sha }}/statuses
+      - run: echo 'All CI'
+""")
+    pubs = _scan(tmp_path).get("workflow_status_publishers")
+    assert set(pubs) == {".github/workflows/aggregate.yml", ".github/workflows/script.yml"}
+    assert pubs[".github/workflows/aggregate.yml"]["contexts"] == ["All CI"]
+    script = pubs[".github/workflows/script.yml"]
+    assert ".github/scripts/aggregate.js" in script["sources"]
+    assert script["contexts"] == ["Script CI"] and "names" not in script
+
+
+@pytest.mark.parametrize("action_yml,entry", [
+    ("runs:\n  using: node20\n  main: dist/index.js\n", "dist/index.js"),
+    ("runs:\n  using: node20\n  pre: dist/setup.js\n  main: dist/noop.js\n",
+     "dist/setup.js"),
+    ("runs:\n  using: node20\n  main: dist/noop.js\n  post: 'dist/post.js'\n",
+     "dist/post.js"),
+    ("runs:\n  using: composite\n  steps:\n"
+     "    - run: node ${{ github.action_path }}/scripts/post.mjs\n      shell: bash\n",
+     "scripts/post.mjs"),
+    ("runs:\n  using: composite\n  steps:\n"
+     "    - run: python \"$GITHUB_ACTION_PATH/scripts/post.py\"\n      shell: bash\n",
+     "scripts/post.py"),
+], ids=["node-main", "node-pre", "node-post", "composite-action_path",
+        "composite-GITHUB_ACTION_PATH"])
+def test_workflow_status_publishers_resolves_local_action_entrypoints_from_action_dir(
+        tmp_path: Path, action_yml: str, entry: str):
+    """A local action's `main:` / `pre:` / `post:` entrypoint, and a composite step
+    that runs a script under `github.action_path`, live in the ACTION directory, not
+    the repo root. When that file is what posts the required status, the workflow is
+    still a publisher; resolving it from the root would miss it and keep the status
+    framed as an outside gate."""
+    _write_workflow(tmp_path, "aggregate.yml", """name: Aggregate
+on: pull_request
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/aggregate
+""")
+    action = tmp_path / ".github" / "actions" / "aggregate"
+    (action / Path(entry).parent).mkdir(parents=True)
+    (action / "action.yml").write_text("name: aggregate\n" + action_yml, encoding="utf-8")
+    (action / entry).write_text(
+        "await octokit.rest.repos.createCommitStatus({ context: 'All CI' })\n",
+        encoding="utf-8")
+    pubs = _scan(tmp_path).get("workflow_status_publishers")
+    assert set(pubs) == {".github/workflows/aggregate.yml"}
+    assert pubs[".github/workflows/aggregate.yml"]["contexts"] == ["All CI"]
+
+
+def test_workflow_status_publishers_follows_script_imports(tmp_path: Path):
+    """The script a workflow runs often imports a helper that posts the status
+    (`require('./lib/post.js')`, relative to the SCRIPT's folder). Following only the
+    first script would miss the publisher and keep the status an outside gate."""
+    _write_workflow(tmp_path, "aggregate.yml", """name: Aggregate
+on: pull_request
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - run: node .github/scripts/aggregate.js
+""")
+    lib = tmp_path / ".github" / "scripts" / "lib"
+    lib.mkdir(parents=True)
+    (lib.parent / "aggregate.js").write_text(
+        "const post = require('./lib/post.js')\npost('All CI')\n", encoding="utf-8")
+    (lib / "post.js").write_text(
+        "module.exports = (ctx) => octokit.rest.repos.createCommitStatus({ context: ctx })\n",
+        encoding="utf-8")
+    pubs = _scan(tmp_path).get("workflow_status_publishers")
+    assert set(pubs) == {".github/workflows/aggregate.yml"}
+    assert ".github/scripts/lib/post.js" in pubs[".github/workflows/aggregate.yml"]["sources"]
+    # The context is passed in at run time, so the literal fallback carries the name.
+    import collect_runs as cr
+    assert cr._repo_published_required({"All CI", "Lint"}, pubs) == {"All CI"}
+
+
+def test_workflow_status_publishers_keeps_context_name_past_the_size_cap(tmp_path: Path):
+    """A bundled entrypoint (`dist/index.js`) is often over the per-source cap. When the
+    context literal sits past the cap, the stored text must still carry it; otherwise
+    the workflow is recorded as a publisher but collect cannot match the name, and the
+    status silently falls back to an outside gate."""
+    import collect_runs as cr
+    _write_workflow(tmp_path, "aggregate.yml", """name: Aggregate
+on: pull_request
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - run: node dist/index.js
+""")
+    (tmp_path / "dist").mkdir()
+    (tmp_path / "dist" / "index.js").write_text(
+        "octokit.rest.repos.createCommitStatus(x);\n" + ("var a=1;" * 40_000)
+        + "\nconst CONTEXT = 'All CI';\n", encoding="utf-8")
+    pubs = _scan(tmp_path).get("workflow_status_publishers")
+    assert set(pubs) == {".github/workflows/aggregate.yml"}
+    assert len(json.dumps(pubs)) < 400_000
+    assert cr._repo_published_required({"All CI"}, pubs) == {"All CI"}
+
+
+@pytest.mark.parametrize("text,want", [
+    ("gh api repos/o/r/statuses/$SHA -f \"context=All CI\" -f state=success", ["All CI"]),
+    ("gh api repos/o/r/statuses/$SHA -f context='All CI'", ["All CI"]),
+    ("gh api repos/o/r/statuses/$SHA -f context=lint", ["lint"]),
+    ("      context: All CI\n", ["All CI"]),
+    ('Context: github.String("Go CI"),', ["Go CI"]),
+    ("create_status(state='success', context=\"Py CI\")", ["Py CI"]),
+])
+def test_status_contexts_reads_each_literal_form_once(text: str, want: list):
+    """Each way of writing a literal context yields exactly that name, with no
+    fragment (`All` from `"context=All CI"`) or wrapper (`github.String(...)`) that a
+    short required name could then falsely match."""
+    sys.path.insert(0, str(_SKILL_DIR / "scripts"))
+    import scan  # noqa: E402
+    assert scan._status_contexts([text]) == (want, None)
+
+
+def test_repo_published_required_matches_posted_context_not_any_mention(tmp_path: Path):
+    """A required name that merely APPEARS in a status-posting workflow (its title, a
+    comment, the list of checks an aggregator waits on) is not posted by it. Counting
+    it would un-scope a correctly scoped gate (an external `Vercel` app check next to
+    a real `Test` job) or relabel a CLA bot as repo-published. Only the context the
+    workflow actually posts, a literal `context` value, counts."""
+    import collect_runs as cr
+    _write_workflow(tmp_path, "preview.yml", """name: Deploy preview to Vercel
+on: pull_request
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run build  # runs on ci
+      - run: gh api repos/${{ github.repository }}/statuses/${{ github.sha }} -f context='Preview' -f state=success
+""")
+    _write_workflow(tmp_path, "aggregate.yml", """name: Aggregate
+on: pull_request
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const waitFor = ['Test', 'license/cla']
+            await github.rest.repos.createCommitStatus({ ...context.repo,
+              sha: context.sha, state: 'success', context: "All CI" })
+""")
+    pubs = _scan(tmp_path).get("workflow_status_publishers")
+    assert set(pubs) == {".github/workflows/preview.yml", ".github/workflows/aggregate.yml"}
+    req = {"Vercel", "Test", "license/cla", "ci", "build", "All CI", "Preview"}
+    assert cr._repo_published_required(req, pubs) == {"All CI", "Preview"}
+
+
+# =============================================================================
+# Mutually exclusive jobs are not duplicated work (OPT14 / OPT12)
+# =============================================================================
+# A same-repo/fork split (`test-self` runs on push or a same-repo PR, `test-fork`
+# only on a fork PR) runs EXACTLY ONE of the two jobs per run, so the pair never
+# co-runs: there is no second copy of checkout + install to hand off or dedupe.
+
+_EXCLUSIVE_SPLIT = """name: CI
+on: [push, pull_request]
+jobs:
+  test-self:
+    if: >-
+      github.event_name == 'push' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+      - run: pnpm install
+      - run: pnpm test
+  test-fork:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+      - run: pnpm install
+      - run: pnpm test
+"""
+
+
+def test_exclusive_job_pair_is_not_duplicated_setup(tmp_path: Path):
+    pats = _scan_one(tmp_path, _EXCLUSIVE_SPLIT)
+    assert "OPT14" not in pats
+    assert "OPT12" not in pats
+
+
+def test_negated_exclusive_pair_is_not_duplicated_setup(tmp_path: Path):
+    """The De Morgan form: `!= 'pull_request' || head == repo` vs
+    `== 'pull_request' && head != repo` (a `scan` / `scan-fork` split)."""
+    wf = _EXCLUSIVE_SPLIT.replace(
+        "github.event_name == 'push' ||",
+        "github.event_name != 'pull_request' ||")
+    pats = _scan_one(tmp_path, wf)
+    assert "OPT14" not in pats
+    assert "OPT12" not in pats
+
+
+def test_same_condition_pair_still_flagged(tmp_path: Path):
+    """Positive control: two jobs under the SAME condition co-run every time."""
+    cond = ("github.event_name == 'workflow_dispatch' || "
+            "github.event.pull_request.head.repo.full_name == github.repository")
+    wf = re.sub(r"if: >-\n(?:      .*\n){2}", f"if: {cond}\n", _EXCLUSIVE_SPLIT)
+    assert wf.count(cond) == 2
+    pats = _scan_one(tmp_path, wf)
+    assert "OPT14" in pats
+    assert "OPT12" in pats
+
+
+def test_unconditioned_pair_still_flagged(tmp_path: Path):
+    """Positive control: no `if:` at all — both jobs always run."""
+    wf = re.sub(r"    if: >-\n(?:      .*\n){2}", "", _EXCLUSIVE_SPLIT)
+    assert "if:" not in wf
+    pats = _scan_one(tmp_path, wf)
+    assert "OPT14" in pats
+    assert "OPT12" in pats
+
+
+def test_exclusive_pair_plus_a_co_running_job_still_fires(tmp_path: Path):
+    """A third unconditioned setup job co-runs with whichever split job runs,
+    so the finding still fires and names it."""
+    wf = _EXCLUSIVE_SPLIT + """  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+      - run: pnpm install
+      - run: pnpm lint
+"""
+    _write_workflow(tmp_path, "ci.yml", wf)
+    found = {f["pattern"]: f for f in _scan(tmp_path)["findings"]}
+    assert "OPT14" in found
+    assert "lint" in found["OPT14"]["affected_jobs"]
+    assert "OPT12" in found
+
+
+def test_job_exclusivity_is_conservative():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("_scan_excl", _SCAN_SCRIPT)
+    scan = importlib.util.module_from_spec(spec)
+    sys.modules["_scan_excl"] = scan  # scan.py's @dataclass resolves __module__ here
+    spec.loader.exec_module(scan)
+    ex = scan._jobs_mutually_exclusive
+    assert ex({"if": "github.event_name == 'push'"},
+              {"if": "${{ github.event_name == 'pull_request' }}"})
+    assert ex({"if": "github.ref == 'refs/heads/main'"},
+              {"if": "github.ref != 'refs/heads/main'"})
+    assert ex({"if": "(inputs.b == 'x' || inputs.b == 'y') && "
+                     "github.head_ref == github.ref_name"},
+              {"if": "github.head_ref != github.ref_name"})
+    # Actions string comparison is case-insensitive: same literal, not exclusive.
+    assert not ex({"if": "github.event_name == 'push'"},
+                  {"if": "github.event_name == 'PUSH'"})
+    # Unknown / unparseable shapes are NOT exclusive (real duplicates still fire).
+    assert not ex({"if": "github.event_name == 'push'"}, {})
+    assert not ex({"if": "contains(github.ref, 'main')"},
+                  {"if": "!contains(github.ref, 'main')"})
+    assert not ex({"if": "github.event_name == 'push' || inputs.x"},
+                  {"if": "github.event_name == 'pull_request'"})
+    assert not ex({"if": "github.event_name != 'push'"},
+                  {"if": "github.event_name != 'pull_request'"})
+
+
+def _load_scan_excl():
+    import importlib.util
+    if "_scan_excl" in sys.modules:
+        return sys.modules["_scan_excl"]
+    spec = importlib.util.spec_from_file_location("_scan_excl", _SCAN_SCRIPT)
+    scan = importlib.util.module_from_spec(spec)
+    sys.modules["_scan_excl"] = scan
+    spec.loader.exec_module(scan)
+    return scan
+
+
+def test_numeric_looking_literals_are_not_proof_of_exclusivity():
+    """Actions coerces mismatched types to numbers: with a numeric input
+    `shards = 1`, both `== '1'` and `== '1.0'` are true, and a null value
+    equals both `''` and `'0'` (each becomes 0). Different literals only
+    prove disjointness when at least one cannot be read as a number."""
+    ex = _load_scan_excl()._jobs_mutually_exclusive
+    assert not ex({"if": "inputs.shards == '1'"}, {"if": "inputs.shards == '1.0'"})
+    assert not ex({"if": "inputs.flag == ''"}, {"if": "inputs.flag == '0'"})
+    assert not ex({"if": "inputs.n == '0x10'"}, {"if": "inputs.n == '16'"})
+    # One non-numeric literal still proves it (a number never equals NaN).
+    assert ex({"if": "inputs.mode == 'fast'"}, {"if": "inputs.mode == '1'"})
+
+
+def test_job_specific_contexts_are_not_proof_of_exclusivity():
+    """`needs.*` resolves per job (a job that does not directly need `build`
+    sees null), and `github.job` differs per job, so the same path text in two
+    jobs' conditions need not be the same value."""
+    ex = _load_scan_excl()._jobs_mutually_exclusive
+    assert not ex({"if": "needs.build.outputs.flag == 'yes'"},
+                  {"if": "needs.build.outputs.flag != 'yes'"})
+    assert not ex({"if": "github.job == 'a'"}, {"if": "github.job == 'b'"})
+    assert not ex({"if": "matrix.os == 'linux'"}, {"if": "matrix.os == 'mac'"})
+    # Run-wide contexts still prove it.
+    assert ex({"if": "inputs.mode == 'fast'"}, {"if": "inputs.mode == 'slow'"})
+    assert ex({"if": "vars.MODE == 'a'"}, {"if": "vars.MODE != 'a'"})
+
+
+def test_deeply_nested_condition_does_not_crash_the_scan():
+    """A pathological `if:` (hundreds of nested parentheses) is 'cannot
+    prove', never an uncaught RecursionError that kills the whole audit."""
+    ex = _load_scan_excl()._jobs_mutually_exclusive
+    deep = "(" * 2000 + "github.event_name == 'push'" + ")" * 2000
+    assert not ex({"if": deep}, {"if": "github.event_name == 'pull_request'"})
+
+
+def test_unicode_conditions_are_not_proof_of_exclusivity():
+    # Actions uses .NET OrdinalIgnoreCase: both Greek sigma forms compare equal,
+    # whereas Python lower() leaves final sigma distinct. Do not infer disjoint
+    # jobs from a Unicode folding model that differs from the expression engine.
+    ex = _load_scan_excl()._jobs_mutually_exclusive
+    assert not ex({"if": "inputs.mode == 'Σ'"}, {"if": "inputs.mode == 'ς'"})
+    assert not ex({"if": "inputs.mode == 'K'"}, {"if": "inputs.mode != 'K'"})

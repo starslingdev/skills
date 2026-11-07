@@ -1,5 +1,9 @@
 # pallets/flask - why is the merge slow?
 
+**Where your PRs' time goes**
+
+not measured: lifecycle data was not collected
+
 | Repository | `pallets/flask` |
 | :--- | :--- |
 | **Audited commit** | [`36e4a82`](https://github.com/pallets/flask/commit/36e4a824f340fdee7ed50937ba8e7f6bc7d17f81) - file & line references are anchored to this tree |
@@ -12,9 +16,19 @@
 >
 > **34s until all checks finish** - `Windows` is the slowest check a typical PR waits on. 
 >
-> **`.github/workflows/tests.yaml` changed ~172 days ago - narrowed to the current configuration.** This audit measures only the 9 runs since that change; the 11 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/tests.yaml` changed ~214 days ago - narrowed to the current configuration.** This audit measures only the 9 runs since that change; the 11 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
-> **`.github/workflows/zizmor.yaml` changed ~173 days ago - narrowed to the current configuration.** This audit measures only the 6 runs since that change; the 4 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/zizmor.yaml` changed ~216 days ago - narrowed to the current configuration.** This audit measures only the 6 runs since that change; the 4 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+>
+> **What gates next:** After this fix, CI is gated by `tests.yaml / PyPy` at ~26 s.
+> This projection assumes the full headline saving is realized; a smaller fix may leave the current gate in place.
+>
+> **How to check it worked**
+>
+> - **Measure:** time from the push's first job created to the last job finished, across **all** workflows the push triggers.
+> - **Runs:** at least 2 before and 2 after, plus one unchanged rerun as a noise control.
+> - **Don't** sum workflow durations, and don't average per-job ratios. Both hide a gain on the one workflow that gates.
+> - **Caches:** judge cache-touching fixes on the second run after the change.
 >
 > **After the gate.** 3 min/mo of wall-clock-neutral runner minutes is recoverable (1 neutral finding; none can slow a merge).
 
@@ -28,7 +42,7 @@
 4. 🟡 [3.14t](#pole-4) - 25s · rarely the merge pole
 5. 🟡 [3.9](#pole-5) - 24s · rarely the merge pole
 
-**💸 Runner-minute reductions** - ~3 min/mo of measured, merge-safe runner-minute savings, backed by a 19-row cost spine: [section](#runner-minute-reductions).
+**💸 Runner-minute reductions** - ~3 min/mo of measured, merge-safe runner-minute savings, backed by a 12-row cost spine (+7 more runner-minute rows hidden): [section](#runner-minute-reductions).
 
 1. 🟢 [Cron Schedule Too Frequent](#r-1) - 3 min/mo
 
@@ -102,11 +116,13 @@ THE GATE
 - Workflow `tests.yaml`, job `Windows`.
 - Slowest check a typical PR waits on: P50 34s.
 
+Runner-minute effect: If the structural fix moves work to added jobs or machines, duplicated checkout and setup raise runner minutes; moving the same work without duplication is roughly level, and removing measured work lowers them.
+
 WHERE THE TIME GOES
 - The job's time is dominated by the `Run uv run --locked --no-default-groups --group dev tox run + 1 more other step` step: ~28s (67% of the job wall), from the sampled per-step decomposition (no single-run timeline was captured for this job).
 
 STRUCTURAL CATALOG PATTERN MATCHED
-- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log (the Audit link) to see exactly what inside it the lever reshapes.
+- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log in a recent pull-request run of this job (no direct log link is shown here) to see exactly what inside it the lever reshapes.
 
 WHAT'S ADDRESSABLE (wall-clock ceiling - don't over-promise)
 - up to ~7s - it gates until it drops to the next concurrent check, `PyPy` (26s); below that the gate moves and further savings are runner-minutes, not wall-clock.
@@ -133,6 +149,10 @@ NEVER BUY SPEED BY CHECKING LESS
 - A pipeline that finishes sooner because it verifies less is a
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
+
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+- State the pole's observed range beside the predicted saving. Do not open a pull request when the predicted saving is smaller than that range.
 
 DELIVER & VERIFY
 - A change that cuts the dominant step's wall time without dropping coverage; re-measure the step on a PR run to confirm the reduction.
@@ -180,11 +200,13 @@ THE GATE
 - Workflow `pre-commit.yaml`, job `main`.
 - Slowest check a typical PR waits on: P50 19s.
 
+Runner-minute effect: If the structural fix moves work to added jobs or machines, duplicated checkout and setup raise runner minutes; moving the same work without duplication is roughly level, and removing measured work lowers them.
+
 WHERE THE TIME GOES
 - The job's time is dominated by the `Run uv run --locked --no-default-groups --group pre-commit pre-commit run --show-diff-on-failure --color=always --all-files + 1 more other step` step: ~11s (58% of the job wall), from the sampled per-step decomposition (no single-run timeline was captured for this job).
 
 STRUCTURAL CATALOG PATTERN MATCHED
-- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log (the Audit link) to see exactly what inside it the lever reshapes.
+- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log in a recent pull-request run of this job (no direct log link is shown here) to see exactly what inside it the lever reshapes.
 
 WHERE TO LOOK
 - The `pre-commit.yaml` workflow definition for the dominant step, and the tool/config it invokes (build tool, test runner, or install) - that's where its time is spent.
@@ -208,6 +230,10 @@ NEVER BUY SPEED BY CHECKING LESS
 - A pipeline that finishes sooner because it verifies less is a
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
+
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+- State the pole's observed range beside the predicted saving. Do not open a pull request when the predicted saving is smaller than that range.
 
 DELIVER & VERIFY
 - A change that cuts the dominant step's wall time without dropping coverage; re-measure the step on a PR run to confirm the reduction.
@@ -254,11 +280,13 @@ THE GATE
 - Workflow `tests.yaml`, job `PyPy`.
 - Rarely the merge pole - the actual slowest check a PR waits on, on only 0/20 sampled PRs (present on 18/20): P50 26s. A slower concurrent check usually gates ahead, so speeding it helps only the PRs where it IS the pole, not typical merge-wait.
 
+Runner-minute effect: If the structural fix moves work to added jobs or machines, duplicated checkout and setup raise runner minutes; moving the same work without duplication is roughly level, and removing measured work lowers them.
+
 WHERE THE TIME GOES
 - The job's time is dominated by the `Run uv run --locked --no-default-groups --group dev tox run + 1 more other step` step: ~30s (87% of the job wall), from the sampled per-step decomposition (no single-run timeline was captured for this job).
 
 STRUCTURAL CATALOG PATTERN MATCHED
-- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log (the Audit link) to see exactly what inside it the lever reshapes.
+- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log in a recent pull-request run of this job (no direct log link is shown here) to see exactly what inside it the lever reshapes.
 
 WHERE TO LOOK
 - The `tests.yaml` workflow definition for the dominant step, and the tool/config it invokes (build tool, test runner, or install) - that's where its time is spent.
@@ -282,6 +310,10 @@ NEVER BUY SPEED BY CHECKING LESS
 - A pipeline that finishes sooner because it verifies less is a
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
+
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+- State the pole's observed range beside the predicted saving. Do not open a pull request when the predicted saving is smaller than that range.
 
 DELIVER & VERIFY
 - A change that cuts the dominant step's wall time without dropping coverage; re-measure the step on a PR run to confirm the reduction.
@@ -329,11 +361,13 @@ THE GATE
 - Workflow `tests.yaml`, job `3.14t`.
 - Rarely the merge pole - the actual slowest check a PR waits on, on only 0/20 sampled PRs (present on 18/20): P50 25s. A slower concurrent check usually gates ahead, so speeding it helps only the PRs where it IS the pole, not typical merge-wait.
 
+Runner-minute effect: If the structural fix moves work to added jobs or machines, duplicated checkout and setup raise runner minutes; moving the same work without duplication is roughly level, and removing measured work lowers them.
+
 WHERE THE TIME GOES
 - The job's time is dominated by the `Run actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405` step: ~10s (42% of the job wall), from the sampled per-step decomposition (no single-run timeline was captured for this job).
 
 STRUCTURAL CATALOG PATTERN MATCHED
-- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log (the Audit link) to see exactly what inside it the lever reshapes.
+- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log in a recent pull-request run of this job (no direct log link is shown here) to see exactly what inside it the lever reshapes.
 
 WHERE TO LOOK
 - The `tests.yaml` workflow definition for the dominant step, and the tool/config it invokes (build tool, test runner, or install) - that's where its time is spent.
@@ -357,6 +391,10 @@ NEVER BUY SPEED BY CHECKING LESS
 - A pipeline that finishes sooner because it verifies less is a
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
+
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+- State the pole's observed range beside the predicted saving. Do not open a pull request when the predicted saving is smaller than that range.
 
 DELIVER & VERIFY
 - A change that cuts the dominant step's wall time without dropping coverage; re-measure the step on a PR run to confirm the reduction.
@@ -402,11 +440,13 @@ THE GATE
 - Workflow `tests.yaml`, job `3.9`.
 - Rarely the merge pole - the actual slowest check a PR waits on, on only 0/20 sampled PRs (present on 4/20): P50 24s. A slower concurrent check usually gates ahead, so speeding it helps only the PRs where it IS the pole, not typical merge-wait.
 
+Runner-minute effect: If the structural fix moves work to added jobs or machines, duplicated checkout and setup raise runner minutes; moving the same work without duplication is roughly level, and removing measured work lowers them.
+
 WHERE THE TIME GOES
 - The job's time is dominated by the `Run actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405` step: ~12s (55% of the job wall), from the sampled per-step decomposition (no single-run timeline was captured for this job).
 
 STRUCTURAL CATALOG PATTERN MATCHED
-- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log (the Audit link) to see exactly what inside it the lever reshapes.
+- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log in a recent pull-request run of this job (no direct log link is shown here) to see exactly what inside it the lever reshapes.
 
 WHERE TO LOOK
 - The `tests.yaml` workflow definition for the dominant step, and the tool/config it invokes (build tool, test runner, or install) - that's where its time is spent.
@@ -431,6 +471,10 @@ NEVER BUY SPEED BY CHECKING LESS
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
 
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+- State the pole's observed range beside the predicted saving. Do not open a pull request when the predicted saving is smaller than that range.
+
 DELIVER & VERIFY
 - A change that cuts the dominant step's wall time without dropping coverage; re-measure the step on a PR run to confirm the reduction.
 ```
@@ -447,7 +491,7 @@ DELIVER & VERIFY
 
 All figures are runner-minutes; multiply by your runner's per-minute rate to get dollars.
 
-| Workflow | Job | Runner | Event | Status | Attempt | Volume | Raw min/mo | Billable min/mo | Share |
+| Workflow | Job | Runner | Event | Status | Attempt | Volume | Raw min/mo | Rounded-up min/mo | Share |
 | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: |
 | .github/workflows/tests.yaml | Windows | windows-latest | all-events | success | latest | all-status | 26.647 | 42.846 | 8.200% |
 | .github/workflows/pre-commit.yaml | main | ubuntu-latest | all-events | success | latest | all-status | 12.708 | 39.000 | 7.500% |
@@ -462,7 +506,10 @@ All figures are runner-minutes; multiply by your runner's per-minute rate to get
 | .github/workflows/tests.yaml | 3.12 | ubuntu-latest | all-events | success | latest | all-status | 9.899 | 37.000 | 7.100% |
 | .github/workflows/tests.yaml | 3.10 | ubuntu-latest | all-events | success | latest | all-status | 9.315 | 37.000 | 7.100% |
 | Total |  |  |  |  |  |  | 179.195 | 522.741 | 100.000% |
+
 +7 more runner-minute rows hidden
+
+Rounded-up min/mo rounds each job up to a whole minute, the way per-minute runner billing counts it. All 522.741 min/mo ran on GitHub-hosted runner labels.
 
 > These findings cut wall-clock-neutral runner spend without touching your merge gate; each R-numbered finding carries a machine-derived proof it cannot slow a PR.
 > **3 min/mo credited after de-overlap** (naive sum 3 min/mo; 1 neutral finding). All figures are runner-minutes; multiply by your runner's per-minute rate to get dollars.
@@ -484,7 +531,7 @@ _Schedule burn is counted only on event=schedule runs whose head_sha repeats con
 
 - **What ci-speedup measured:** 95 scheduled run(s) in 5 consecutive same-head_sha group(s) re-ran without a code change in the sampled schedule slice (95% of 100 schedule run(s)); ~3 runner-min/mo of schedule-event compute (mean over 20 timed run(s); ×0.30 to the 30d volume (30 runs); 100-run recent slice (not a full 30d census)).
 - **Why this can't slow your merge:** machine-derived proof: `non_pr_event` - `schedule` runs do not gate a PR merge (event=schedule subset only; consecutive same-head_sha schedule runs; schedule is not a developer PR/merge event).
-- **Source block:** `runner_minute_spine` matched 1 row for `.github/workflows/lock.yaml`; current measured cost spine for those rows is 3.200 raw min/mo, 30.000 billable min/mo.
+- **Source block:** `runner_minute_spine` matched 1 row for `.github/workflows/lock.yaml`; current measured cost spine for those rows is 3.200 raw min/mo, 30.000 rounded-up min/mo. The saving is credited in raw minutes; the rounded-up figure rounds each job up to a whole minute.
 - **Guardrail:** Confirm the cron cadence is not an operational SLA; prefer widening the interval only for cleanup/triage/build jobs where delayed execution is acceptable.
 - **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt36--cron-schedule-too-frequent
 
@@ -521,6 +568,9 @@ NEVER BUY SPEED BY CHECKING LESS
 - A pipeline that finishes sooner because it verifies less is a
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
+
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
 
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
@@ -591,6 +641,9 @@ NEVER BUY SPEED BY CHECKING LESS
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
 
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
 failure mode and how you have guarded it before shipping.
@@ -652,6 +705,9 @@ NEVER BUY SPEED BY CHECKING LESS
   regression, not a win. If that is the only way to make this faster, say
   so and stop.
 
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+
 Do: confirm the pattern at each location above, recover the intent from git
 history, and apply the catalog's fix recipe where it is safe. State the
 failure mode and how you have guarded it before shipping.
@@ -670,7 +726,7 @@ failure mode and how you have guarded it before shipping.
 
 | Source | Coverage | Used for |
 | --- | --- | --- |
-| ci-speedup static scan (skill commit `2f048be`, scripts tree `fc0b219`) | All `.github/workflows/*.yml` under the analyzed tree (36e4a82) | Static pattern detection (full OPT catalog) |
+| ci-speedup static scan (skill commit `2f048be`, scripts tree `463d800`) | All `.github/workflows/*.yml` under the analyzed tree (36e4a82) | Static pattern detection (full OPT catalog) |
 | gh runs/jobs API (timestamps) | 47 runs / 152 jobs sampled | Critical-path + per-step P50 |
 | job logs | 1 job log(s) sampled | Step internals + cross-run magnitude (deeper levels) |
 | workflow YAML | 5 from the analyzed checkout | `on:` triggers, matrix/shard axes, job timeouts (detector inputs) |

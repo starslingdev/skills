@@ -1,6 +1,6 @@
 # `gh` fallback: everything `sling` cannot do
 
-`sling` is **read-only** in this release. Anything that changes CI state
+`sling` **makes no change to GitHub**. Anything that changes CI state
 goes to the GitHub CLI. Syntax below was checked against **`gh` v2.93.0**.
 
 Before the first `gh` call, confirm `gh` is installed **and** `gh auth

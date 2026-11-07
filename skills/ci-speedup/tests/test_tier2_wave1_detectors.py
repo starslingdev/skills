@@ -984,8 +984,26 @@ def _opt64(samples, monthly=1, denominator=1):
         "ci.yml", samples, monthly, denominator, 0)
 
 
+def _ranked_samples(n=3):
+    """n runs, each retried after `test` failed and failing again on the retry:
+    the shape OPT64 ranks (minimum sample, no pass on a retry). `_attempt_sample`
+    alone is one run whose `test` then passed, which OPT64 holds advisory
+    (test_opt64_minimum_sample.py). Pair with denominator=n to keep the
+    one-run per-sample figures (25.0) below."""
+    out = []
+    for i in range(1, n + 1):
+        run, all_jobs, latest = _attempt_sample(run_id=f"run-{i}")[0]
+        all_jobs = [j | {"id": f"{j['id']}-r{i}"} for j in all_jobs]
+        latest = [j | {"id": f"{j['id']}-r{i}"} for j in latest]
+        for j in (*all_jobs, *latest):
+            if j["name"] == "test" and j["run_attempt"] == 2:
+                j["conclusion"] = "failure"
+        out.append((run, all_jobs, latest))
+    return out
+
+
 def test_opt64_rerun_attempt_promotes_measured_post_completion_waste():
-    out = _opt64(_attempt_sample())
+    out = _opt64(_ranked_samples(), denominator=3)
     assert len(out) == 1
     f = out[0]
     assert f["pattern"] == "OPT64"
@@ -1004,17 +1022,17 @@ def test_opt64_rerun_attempt_promotes_measured_post_completion_waste():
 
 
 def test_opt64_scales_by_all_status_sample_denominator():
-    out = _opt64(_attempt_sample(), monthly=100, denominator=100)
+    out = _opt64(_ranked_samples(), monthly=100, denominator=300)
     assert out[0]["runner_min_saving"] == 25.0
-    assert "100 sampled all-status run(s)" in out[0]["evidence"]
+    assert "100 runs in 30 days; 300 sampled (any status)" in out[0]["evidence"]
 
 
 def test_opt64_can_use_job_id_delta_when_job_attempt_missing():
-    samples = _attempt_sample()
-    run, all_jobs, latest = samples[0]
-    for job in all_jobs:
-        job.pop("run_attempt", None)
-    out = _opt64([(run, all_jobs, latest)])
+    samples = _ranked_samples()
+    for _run_doc, all_jobs, _latest in samples:
+        for job in all_jobs:
+            job.pop("run_attempt", None)
+    out = _opt64(samples, denominator=3)
     assert out[0]["runner_min_saving"] == 25.0
 
 
@@ -1358,7 +1376,12 @@ def test_opt64_requires_same_dominant_failure_across_prior_attempts():
         _attempt_job("test", 2, 0, 10, "failure", "test-2"),
         _attempt_job("setup", 2, 0, 4, "success", "setup-2"),
     ]
-    out = _opt64([(run, [*same_prior, *latest], latest)])
+    # Ranked shape: three such runs, `test` failing again on the latest attempt.
+    failing_latest = [j | {"conclusion": "failure"} if j["name"] == "test" else j
+                      for j in latest]
+    runs = [(run | {"id": f"run-3{i}"}, [*same_prior, *failing_latest], failing_latest)
+            for i in range(3)]
+    out = _opt64(runs, denominator=3)
     assert out[0]["rerun_dominant_job"] == "test"
     assert out[0]["runner_min_saving"] == 39.0
 
@@ -1377,7 +1400,7 @@ def test_opt64_keeps_matrix_legs_distinct_for_rerun_cause():
 
 
 def test_opt64_output_composes_with_pr1_stamps():
-    f = _opt64(_attempt_sample())[0]
+    f = _opt64(_ranked_samples(), denominator=3)[0]
     crit = {"job_runner": {}, "job_p50": {}, "floor_p50": 0.0,
             "runner_scope": "ubuntu-latest"}
     cr._stamp_sizing_basis(f)
@@ -1739,7 +1762,10 @@ def test_detectors_wired_into_collect():
     # the rare re-fetch fallback), never call the latest-attempt fetcher directly.
     assert "_attempt_job_samples(" in src
     assert "_fetch_run_jobs_latest_attempt" not in src
-    assert "_detect_opt64_rerun_attempt_waste(" in src
+    # OPT64 runs inside the per-workflow OPT100 pass (over the retries OPT100 did
+    # not claim), which collect calls; pin both links of that chain.
+    assert "_opt100_workflow_pass(" in src
+    assert "_detect_opt64_rerun_attempt_waste(" in inspect.getsource(cr._opt100_workflow_pass)
     assert "_detect_opt35_fail_fast_waste(" in src
     assert "_opt35_shard_job_specs(" in src
     assert "_supersede_static_opt35(" in src

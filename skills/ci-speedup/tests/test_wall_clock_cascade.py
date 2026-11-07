@@ -16,6 +16,7 @@ from __future__ import annotations
 import pytest
 
 from wall_clock import (
+    CASCADE,
     BoundResult,
     SharedSubstepCredit,
     WallClockContext,
@@ -133,6 +134,30 @@ _WITHIN_THEN_CROSS = [
     ("within-workflow", bound_within_workflow),
     ("cross-workflow", bound_cross_workflow),
 ]
+
+
+@pytest.mark.parametrize(
+    ("raw_s", "expected_s"),
+    [(57.375, 57.4), (57.34, 57.3)],
+    ids=["rounds-up", "rounds-down"],
+)
+def test_cascade_quantizes_raw_value_before_first_bound(raw_s, expected_s):
+    ctx = WallClockContext(
+        workflow="ci.yml",
+        crit=_CRIT,
+        affected_jobs=("test",),
+        events=("pull_request",),
+    )
+    production_cascade = [("within-workflow", bound_within_workflow), *CASCADE]
+
+    try:
+        result = size_wall_clock(raw_s, ctx, cascade=production_cascade)
+    except AssertionError as exc:
+        pytest.fail(str(exc))
+
+    assert result.raw_s == expected_s
+    assert result.effective_s == expected_s
+    assert result.derivation == []
 
 
 def test_passthrough_without_timing():
@@ -433,3 +458,19 @@ def test_no_chain_data_keeps_the_classic_floor():
     )
     res = bound_measured_critical_path(38.0, ctx)
     assert res.value == 0.0, "legacy behavior must not change without chain data"
+
+
+def test_single_population_cap_names_the_targets_own_span_not_a_blocker():
+    ctx = WallClockContext(
+        pr_checks=(("only", 60.0),),
+        pr_check_populations=((1.0, (("only", 60.0),)),),
+        pr_check_populations_complete=(True,),
+        own_check_names=frozenset({"only"}),
+    )
+
+    result = bound_measured_critical_path(100.0, ctx)
+
+    assert result.value == 60.0
+    assert result.reason is not None
+    assert "this check's observed span (60s)" in result.reason
+    assert "`None`" not in result.reason

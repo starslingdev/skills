@@ -222,7 +222,7 @@ def test_runner_minute_spine_renderer_round_trips_against_verifier(tmp_path: Pat
     # The single minutes-only cost-spine shape (pricing excised 2026-07-20): no
     # SKU/Billing/Weighted/USD columns, just the runner-minute surface.
     assert ("| Workflow | Job | Runner | Event | Status | Attempt | Volume "
-            "| Raw min/mo | Billable min/mo | Share |") in report
+            "| Raw min/mo | Rounded-up min/mo | Share |") in report
     assert "| Total |" in report
     # The one-sentence pricing story leads the table; no dollar column anywhere.
     assert ("All figures are runner-minutes; multiply by your runner's per-minute "
@@ -835,6 +835,64 @@ def test_rendered_tauri_shape_passes_the_spine_dropped_verify_gate_end_to_end(tm
         f"a footnote-demoted leg must not be framed on the merge-gating path:\n{line}"
 
 
+def test_dropped_check_gets_one_off_path_framing_and_passes_verify(tmp_path: Path):
+    doc = _doc_one_pole()
+    doc["skill_commit_sha"] = "abc1234"
+    doc["pr_critical_path"]["dropped_non_required_checks"] = ["integration"]
+    doc["findings"] = [{
+        "id": "f1", "pattern": "OPT24", "severity": "HIGH",
+        "title": "Long Test Job Without Sharding",
+        "workflow_file": ".github/workflows/integration.yml", "line": 8,
+        "affected_jobs": ["integration"],
+        "runner_min_saving": 0, "wall_clock_p50_s": 400.0,
+    }]
+
+    out = bp.render(doc)
+    fp = tmp_path / "findings.json"
+    fp.write_text(json.dumps(doc), encoding="utf-8")
+    line = _spine_dropped_check_line(out, fp)
+    assert line.startswith("PASS"), line
+
+    # The whole self-check passes, not just the framing invariant: the report is saveable.
+    import subprocess
+    rp = tmp_path / "report-2026-06-08.md"
+    rp.write_text(out, encoding="utf-8")
+    verify = Path(__file__).resolve().parent / "verify_report.py"
+    res = subprocess.run(
+        [sys.executable, str(verify), "--report", str(rp), "--findings", str(fp)],
+        capture_output=True, text=True)
+    fails = [ln for ln in res.stdout.splitlines() if ln.startswith("FAIL")]
+    assert res.returncode == 0 and not fails, "\n".join(fails) or res.stdout[-2000:]
+
+    appendix = out.split("## 🧹 Also noticed - residual hygiene", 1)[1]
+    assert appendix.count("off the merge-gating critical path, so ~0 developer wall-clock") == 1
+    assert "sits ON the merge-gating critical path" not in appendix
+
+
+def test_dropped_job_does_not_demote_a_finding_that_also_covers_a_kept_job(tmp_path: Path):
+    doc = _doc_one_pole()
+    doc["pr_critical_path"]["dropped_non_required_checks"] = ["integration"]
+    doc["findings"] = [{
+        "id": "f1", "pattern": "OPT24", "severity": "HIGH",
+        "title": "Long Test Job Without Sharding",
+        "workflow_file": ".github/workflows/pipeline.yml", "line": 8,
+        "affected_jobs": ["integration", "tests-web"],
+        "runner_min_saving": 0, "wall_clock_p50_s": 400.0,
+    }]
+
+    out = bp.render(doc)
+    assert not doc["findings"][0].get("off_spine")
+    appendix = out.split("## 🧹 Also noticed - residual hygiene", 1)[1]
+    assert "sits ON the merge-gating critical path" in appendix
+    where = next(line for line in appendix.splitlines() if line.startswith("**Where:**"))
+    assert "tests-web" in where
+    assert "integration" not in where
+    fp = tmp_path / "findings.json"
+    fp.write_text(json.dumps(doc), encoding="utf-8")
+    line = _spine_dropped_check_line(out, fp)
+    assert line.startswith("PASS"), line
+
+
 def test_render_excludes_pole_job_from_also_noticed_appendix():
     # Class A #5: a catalog finding on a job that is ALSO drilled as a long pole must NOT appear in
     # the "Also noticed" off-path appendix (the pole already headlines it as the biggest lever).
@@ -974,6 +1032,49 @@ def test_parse_log_detects_vitest_istanbul_coverage():
     # Compile/load vs tests split is the root-cause level.
     last = leaf["deeper"][-1]
     assert any("transform" in r[0] for r in last["rows"])
+
+
+def test_vitest_coverage_guidance_requires_matched_provider_timing():
+    log = "\n".join([
+        "$ vitest run --coverage --coverage.provider=istanbul",
+        " RUN  v4.1.5 /repo/packages/core",
+        "      Coverage enabled with istanbul",
+        " Duration  12.18s (transform 12.24s, setup 0ms, import 19.07s, "
+        "tests 4.13s, environment 7ms)",
+        " RUN  v4.1.5 /repo/packages/web",
+        " Duration  19.30s (transform 7.03s, setup 0ms, import 14.25s, "
+        "tests 32.56s, environment 0ms)",
+    ])
+    leaf = bp._parse_log(log)
+
+    # Keep the existing detector and measured compile/load share while making the
+    # provider recommendation honest about what this single run can establish.
+    assert leaf is not None and leaf["fix_key"] == "vitest-v8-coverage"
+    assert leaf["magnitude"]["value"] == round(100 * 52.59 / (52.59 + 36.69), 2)
+    note = leaf["deeper"][-1]["blocker_note"].lower()
+    assert "caused by" not in note
+
+    pole = {
+        "check": "test", "workflow_file": ".github/workflows/ci.yml", "p50_s": 120.0,
+        "dominant_step": "test", "dominant_p50_s": 100.0, "dominant_share": 0.83,
+        "steps": [{"step": "test", "category": "test", "p50_s": 100.0}],
+    }
+    prompt = bp._build_agent_prompt(
+        leaf, pole, [], "https://example.invalid/actions/runs/1",
+        "example/repo", "abc1234", 5, 20, timeline=None)
+    guidance = prompt.lower()
+    assert "much cheaper" not in guidance
+    assert "time both providers on the same commit" in guidance
+    assert "coverage figures change" in guidance
+    assert "re-baseline thresholds" in guidance
+    assert "no provider-switch saving is credited" in guidance
+
+    architecture = (Path(__file__).resolve().parents[1] / "ARCHITECTURE.md").read_text()
+    catalog_row = next(
+        line for line in architecture.splitlines() if line.startswith("| `vitest-v8-coverage`")
+    )
+    assert "instruments every file" not in catalog_row.lower()
+    assert "measured" in catalog_row.lower()
 
 
 def test_parse_log_detects_vitest_import_bound_without_coverage():
@@ -4361,17 +4462,19 @@ def test_render_unrecognized_log_on_timeline_path_still_flags_the_gap():
     assert "no specific callout to search for" in md
 
 
-def _doc_with_structural_pole() -> dict:
+def _doc_with_structural_pole(pattern: str = "OPT75") -> dict:
     # A pole whose log matches NO leaf detector but to which a STRUCTURAL finding
     # (OPT70–75) is routed via `affected_jobs` — the reflex-dev/reflex shape: the
     # structural track IS the pole, so the finding must render AS the pole, not be
-    # dropped (excluded from "Also noticed") AND missing from the pole.
+    # dropped (excluded from "Also noticed") AND missing from the pole. With a captured
+    # log, a GENERIC pattern (OPT75/OPT71) leaves the pole a gap-fill target
+    # (test_generic_structural_gap_fill.py); a specific one (e.g. OPT72) covers it.
     doc = _doc_one_pole()
     job = "integration-app-harness (redis, 3.14, 1)"
     doc["pr_critical_path"]["poles"][0]["check"] = job
     doc["pr_critical_path"]["poles"][0]["job"] = job
     doc["findings"] = [
-        {"id": "f103", "pattern": "OPT75", "pattern_class": "structural",
+        {"id": "f103", "pattern": pattern, "pattern_class": "structural",
          "structural": True, "severity": "HIGH", "risk": "MEDIUM",
          "title": "Decompose the dominant addressable step",
          "workflow_file": ".github/workflows/pipeline.yml", "line": 0,
@@ -4390,14 +4493,17 @@ def test_structural_finding_routed_to_a_pole_renders_as_the_pole_not_a_dead_end(
     # "Also noticed" (the pole "already represents" it) but NEVER rendered at the pole,
     # so the pole falsely read "no catalog pattern matched" and the finding's
     # risk/guardrail/rollout rendered nowhere. The structural track IS the pole.
-    doc = _doc_with_structural_pole()
+    # OPT72 (a structural pattern that names a cause): the generic OPT75/OPT71 still
+    # render AT the pole but leave it a gap-fill target (test_generic_structural_gap_fill).
+    doc = _doc_with_structural_pole("OPT72")
     md = bp.render(doc, {"pipeline": "log that matches no leaf detector at all"}, {},
                    {"pipeline": "https://github.com/o/r/actions/runs/9"}, "2026-06-08")
     # (a) the pole no longer claims it's a coverage gap / no catalog match.
     assert "no drill-down available; this is a coverage gap" not in md
     assert "matched no known root-cause pattern" not in md
-    # (b) the OPT75 finding renders AT the pole with its mandatory risk axis.
-    assert "OPT75" in md
+    assert "no known root-cause pattern matched" not in md
+    # (b) the OPT72 finding renders AT the pole with its mandatory risk axis.
+    assert "OPT72" in md
     assert "Decompose the dominant addressable step" in md
     assert "risk **MEDIUM**" in md
     assert "Keep a full-suite fallback before scoping." in md          # guardrail
@@ -4588,15 +4694,17 @@ def test_is_pole_structural_uncredited_opt73_renders_as_a_pole():
 def test_structural_pole_with_analysis_suppresses_the_llm_gap_fill():
     # Even when an --analysis is supplied (the gap-fill ran), a structural catalog match
     # means the pole is NOT a coverage gap, so the LLM gap-fill must be suppressed
-    # (SKILL.md phase 4a fires only for poles that "matched no catalog detector").
-    doc = _doc_with_structural_pole()
+    # (SKILL.md phase 4a fires only for poles that "matched no catalog detector"). A
+    # structural pattern that names a cause (OPT72); the generic OPT75/OPT71 take the
+    # analysis instead (test_generic_structural_gap_fill.py).
+    doc = _doc_with_structural_pole("OPT72")
     analysis = {"cause": "serial test projects", "breakdown": [["a", "1s"]],
                 "evidence": ["X"], "prompt": "REPO: o/r\ndo the thing"}
     md = bp.render(doc, {"pipeline": "log matching no leaf detector"}, {},
                    {"pipeline": "https://github.com/o/r/actions/runs/9"}, "2026-06-08",
                    analyses={"pipeline": analysis})
     assert "🤖 LLM root-cause analysis" not in md
-    assert "OPT75" in md and "risk **MEDIUM**" in md
+    assert "OPT72" in md and "risk **MEDIUM**" in md
 
 
 def _doc_with_data_driven_pole() -> dict:
@@ -5974,6 +6082,54 @@ def test_required_scoped_minority_pole_reads_as_required_path_conditional():
     assert "Required · path-conditional - ran on 1/20 sampled PRs" in md       # role label reframed
     assert "throughput/cost, not merge-wait" not in md                         # the bug framing is gone
     assert "opt-in / conditional (e.g. label-gated)" not in md
+
+
+def test_confirmed_required_need_headlines_before_faster_unpinnable_keep():
+    """A conservative cat-3 keep stays visible without outranking a proven gate."""
+    doc = _doc_one_pole()
+    doc["required_checks"] = ["merge-gate"]
+    cp = doc["pr_critical_path"]
+    cp.update({
+        "spine_required_scoped": True,
+        "critical_path_check": "mystery matrix",
+        "critical_path_s": 500.0,
+        "checks": [
+            {"name": "mystery matrix", "p50_s": 500.0, "present_on": 20},
+            {"name": "unit", "p50_s": 300.0, "present_on": 20},
+        ],
+        "populations": [
+            [1.0, [["mystery matrix", 500.0], ["unit", 300.0]]]
+            for _ in range(20)
+        ],
+        "poles": [
+            {"check": "mystery matrix", "p50_s": 500.0,
+             "workflow_file": ".github/workflows/mystery.yml", "job": "mystery matrix",
+             "required_reachable": False},
+            {"check": "unit", "p50_s": 300.0,
+             "workflow_file": ".github/workflows/ci.yml", "job": "unit",
+             "required_reachable": True},
+        ],
+    })
+
+    selected, _ = bp._select_render_poles(doc, cp["poles"])
+    assert [p["check"] for p in selected] == ["unit", "mystery matrix"]
+
+    report = bp.render(doc, {}, {}, {}, "2026-11-05")
+    assert "Long pole 1: `ci.yml` ▸ `unit`" in report
+    assert "Could not confirm this check blocks merging" in report
+    headline = next(line for line in report.splitlines() if "until all checks finish" in line)
+    assert "`unit` is the slowest check a typical PR waits on" in headline
+    assert "mystery matrix" not in headline
+
+    # An unreadable required set has no reachability stamps and keeps the old order.
+    unreadable = _doc_one_pole()
+    unreadable_cp = unreadable["pr_critical_path"]
+    unreadable_cp["poles"] = [
+        {k: v for k, v in p.items() if k != "required_reachable"}
+        for p in cp["poles"]
+    ]
+    unchanged, _ = bp._select_render_poles(unreadable, unreadable_cp["poles"])
+    assert [p["check"] for p in unchanged] == ["mystery matrix", "unit"]
 
 
 def test_sampling_scoped_but_spine_unscoped_keeps_opt_in_framing():
@@ -7954,22 +8110,22 @@ def test_aggregation_gate_near_miss_renders_byte_identically(monkeypatch):
     assert "🤖 Prompt for your coding agent" in after
 
 
-def test_aggregation_gate_yields_to_the_chain_member_framing(monkeypatch):
-    # A sink that IS a modal-chain member keeps the chain-stage rendering (`thank you, next`
-    # as stage 3/3): the chain model already frames it as serialized, and double-framing it
-    # would contradict that. Pinned byte-for-byte against detection-disabled rendering.
+def test_aggregation_gate_that_ends_a_chain_keeps_its_stage_and_prescribes_nothing():
+    # A sink that IS a modal-chain member (only ever the LAST stage: a sink is terminal)
+    # renders as the aggregation gate, with its chain stage kept in the role line. The
+    # chain-stage-only rendering drilled the verdict's own step and handed over an "optimize
+    # this step" prompt for a job that runs no work (starslingdev/skills' 3s `test` verdict
+    # ending the `test (self-hosted)` → `test` chain).
     doc = _agg_gate_doc()
     doc["pr_critical_path"]["chain_summary"] = {
         "modal_chain": ["build", "stable - x86_64-linux", "thank you, build"],
         "chain_p50_s": 598.0}
-    after = _pole_section(bp.render(doc, {}, {}, {}, "2026-07-28T00:00:00Z", {}),
-                          "thank you, build")
-    monkeypatch.setattr(bp, "_agg_gate_shape", lambda *a, **k: None)
-    before = _pole_section(bp.render(doc, {}, {}, {}, "2026-07-28T00:00:00Z", {}),
-                           "thank you, build")
-    assert after == before
-    assert "Stage 3/3 of the" in after and "gate chain" in after
-    assert "**Aggregation gate" not in after
+    sec = _pole_section(bp.render(doc, {}, {}, {}, "2026-07-28T00:00:00Z", {}),
+                        "thank you, build")
+    assert "**Aggregation gate" in sec
+    assert "stage 3/3 of the" in sec and "gate chain" in sec
+    assert "**➡️ Where the wait actually is:**" in sec
+    assert "🤖 Prompt for your coding agent" not in sec
 
 
 def test_agg_gate_shape_structural_conditions():
@@ -8187,27 +8343,33 @@ def test_advisory_long_pole_does_not_overclaim_what_continue_on_error_does():
         assert banned not in sec, f"weakening advice: {banned!r}"
 
 
-def test_pole_without_the_declaration_renders_byte_identically():
-    # Fact-only, and only when the scanned graph literally says so. Two poles must be
-    # untouched: the same job with no `continue-on-error`, and a sibling pole in the same
-    # workflow whose own job carries none. (Scoped to the advisory sentence, not the bare
-    # word: the no-weakening rail's prompt copy names `continue-on-error` on every pole.)
+def test_pole_without_the_declaration_and_its_sibling_remain_unrouted():
+    # The route is based on the pole job's literal declaration. The same job without
+    # `continue-on-error`, and a sibling whose own job carries none, stay untouched.
+    # (Scoped to the advisory sentence, not the bare word: the no-weakening rail's prompt
+    # copy names `continue-on-error` on every pole.)
     advisory = "does not fail the workflow run"
     plain = _pole_section(
         bp.render(_advisory_pole_doc(False), {}, {}, {}, "2026-09-02T00:00:00Z", {}), "e2e")
     assert advisory not in plain, plain
+    assert "confirm it is not a required check" not in plain
+    assert "OPT71 recipe (c)" not in plain
     md = bp.render(_advisory_pole_doc(True), {}, {}, {}, "2026-09-02T00:00:00Z", {})
-    assert advisory not in _pole_section(md, "lint")
-    # The advisory pole's section is otherwise byte-identical to the un-annotated one:
-    # the change adds a fact, it does not re-frame anything. The fact renders in TWO places
-    # (the prose disclosure under the role line, and the bullet inside the copy-paste agent
-    # prompt), and only the prose one carries a blank separator line, so the comparison drops
-    # the advisory lines and then collapses blank runs - applied to BOTH sides, so any real
-    # re-framing still shows up as a difference.
+    sibling = _pole_section(md, "lint")
+    assert advisory not in sibling
+    assert "confirm it is not a required check" not in sibling
+    assert "OPT71 recipe (c)" not in sibling
+    # Outside its own lines, the advisory pole's section is otherwise byte-identical to
+    # the un-annotated one: the declaration adds facts and (here, with required-check
+    # status unknown) a confirm-first instruction; it re-frames nothing else. Drop the
+    # advisory lines from both sides and collapse blank runs, so any real re-framing
+    # still shows up as a difference.
+    markers = (advisory, "Required-check status is unavailable or partial")
+
     def _without_advisory(text: str) -> str:
         kept: list[str] = []
         for line in text.splitlines():
-            if advisory in line:
+            if any(marker in line for marker in markers):
                 continue
             if line == "" and kept and kept[-1] == "":
                 continue
@@ -8215,6 +8377,7 @@ def test_pole_without_the_declaration_renders_byte_identically():
         return "\n".join(kept)
 
     annotated = _pole_section(md, "e2e")
+    assert advisory in annotated
     assert _without_advisory(annotated) == _without_advisory(plain)
 
 
@@ -8289,6 +8452,66 @@ def test_advisory_long_pole_tells_the_coding_agent_the_job_is_advisory():
         bp.render(_advisory_pole_doc(False), {}, {}, {}, "2026-09-02T00:00:00Z", {}), "e2e")
     assert "continue-on-error: true" not in plain.split(
         "#### 🤖 Prompt for your coding agent", 1)[1]
+
+
+def _advisory_prompt(*, required_checks: list[str] | None,
+                     continue_on_error: bool = True) -> str:
+    doc = _advisory_pole_doc(continue_on_error)
+    if required_checks is not None:
+        doc["required_checks"] = required_checks
+        doc["required_checks_complete"] = True
+    md = bp.render(doc, {}, {}, {}, "2026-09-02T00:00:00Z", {})
+    return _pole_section(md, "e2e").split(
+        "#### 🤖 Prompt for your coding agent", 1)[1]
+
+
+def test_non_required_declared_advisory_pole_routes_to_async_recipe():
+    prompt = _advisory_prompt(required_checks=[])
+
+    assert prompt.index("decide first whether this job is meant to gate") < prompt.index(
+        "Declared advisory")
+    assert "OPT71 recipe (c)" in prompt
+    assert "make it advisory-async" in prompt
+    assert "enumerate every consumer of the job and its outputs" in prompt
+    assert "feeds a required aggregator" in prompt
+    assert ("moving a job that cannot block the merge off the PR trigger changes what "
+            "the developer waits on, not what verifies the merge") in prompt
+    assert "may be moved off the PR trigger" in prompt
+    assert "never delete the job" in prompt.lower()
+    assert "never remove its `continue-on-error`" in prompt.lower()
+
+
+def test_advisory_route_carve_out_is_absent_from_non_advisory_poles():
+    prompt = _advisory_prompt(required_checks=[], continue_on_error=False)
+
+    assert "may be moved off the PR trigger" not in prompt
+    assert "OPT71 recipe (c)" not in prompt
+
+
+def test_required_declared_advisory_pole_gets_disclosure_without_route():
+    prompt = _advisory_prompt(required_checks=["e2e"])
+
+    assert "Declared advisory" in prompt
+    assert "OPT71 recipe (c)" not in prompt
+    assert "may be moved off the PR trigger" not in prompt
+
+
+def test_unknown_required_status_requires_confirmation_without_route():
+    prompt = _advisory_prompt(required_checks=None)
+
+    assert "confirm it is not a required check" in prompt
+    assert "OPT71 recipe (c)" not in prompt
+    assert "may be moved off the PR trigger" not in prompt
+
+
+def test_llm_gap_fill_keeps_advisory_route_when_body_repeats_declaration():
+    prompt = bp._llm_agent_prompt(
+        "The job sets `continue-on-error: true`; inspect its expensive setup.",
+        {"_advisory_declared": True, "_advisory_required_status": "not-required"})
+
+    assert "decide first whether this job is meant to gate" in prompt
+    assert "OPT71 recipe (c)" in prompt
+    assert "may be moved off the PR trigger" in prompt
 
 
 def test_distinct_opt77_consolidations_render_as_separate_rows():

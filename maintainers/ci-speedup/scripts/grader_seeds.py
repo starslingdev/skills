@@ -56,27 +56,34 @@ EXCLUDE = "exclude"       # run/harness artifact → never a skill bug
 # The committed, reviewable TRIAGE ALLOWLIST. Keyed by the live `verify_report.Check.name` string
 # (what `run_checks` actually yields) so the classification can be applied at runtime and the
 # "every check is classified" invariant is directly testable; the originating `check_*` function
-# name is in the trailing comment for cross-reference with spec §2-A. 73 AUTO_SEED / 1 EXCLUDE /
+# name is in the trailing comment for cross-reference with spec §2-A. 84 AUTO_SEED / 1 EXCLUDE /
 # 3 TRIAGE — a new `verify_report` check makes `test_every_check_is_classified` go red until it's
 # classified here (so no check is ever left undisposed).
 TRIAGE_ALLOWLIST = {
+    "wall-clock headline carries next gate and verification guidance": AUTO_SEED,
+    "per-commit wall-clock projections are physically bounded": AUTO_SEED,
     "primary section present (Long poles)": AUTO_SEED,                                              # check_primary_section_present
     "static-only banner matches CI shape": AUTO_SEED,                                               # check_static_only_banner_matches_ci_shape
     "headline names the wall-clock (merge-wait) axis": AUTO_SEED,                                   # check_headline_names_wall_clock
     "every #pole-N / #also-noticed / #pre-start-wait / #runner-minute-reductions reference resolves to an anchor": AUTO_SEED,  # check_pole_anchors_resolve
     "RCA hands off via prompts (never prescribes a fix, never dead-ends)": AUTO_SEED,               # check_rca_hands_off_never_prescribes
+    "job-adding prompts state their runner-minute effect": AUTO_SEED,                               # check_job_adding_prompts_state_runner_minute_effect
     "agent-prompt MEASURED CAUSE never asserts timeline steps the pole doesn't render": AUTO_SEED,  # check_measured_cause_matches_rendered_timeline
     "TOC 'Also noticed' count == appendix rows + hidden pointer": AUTO_SEED,                        # check_also_noticed_count_honest
     "data basis disclosed; coverage gaps named, not silent": AUTO_SEED,                             # check_coverage_disclosed
     "workflows missing from the sample are NAMED in the report": AUTO_SEED,                         # check_run_list_gaps_named
     "report uses ASCII hyphens only (no em/en/figure/bar/minus dash)": AUTO_SEED,                   # check_no_typographic_dashes
+    "PR lifecycle block is consistent with its own shares": AUTO_SEED,                              # check_pr_lifecycle_block
     "code fences are balanced (no stray ``` breaking out of a fence)": AUTO_SEED,                   # check_fences_balanced
     "every rendered finding pattern exists in the findings JSON": AUTO_SEED,                        # check_rendered_patterns_exist
+    "Windows setup benchmark pointers match their measured OPT72 card": AUTO_SEED,
     "every data-driven finding carries a measured signal (no unsupported claims)": AUTO_SEED,       # check_data_driven_have_signal
     "report drills every gating pole, each with a hand-off prompt": AUTO_SEED,                      # check_speed_poles_complete
     "aggregation-gate poles tell the upstream story, never an optimize-this prompt": AUTO_SEED,    # check_aggregation_gate_poles_never_prescribe
     "each rendered pole's drill belongs to its own job (no cross-job log leak)": AUTO_SEED,         # check_pole_drill_belongs_to_its_job
+    "every pole that cites the Audit link renders its own Audit line": AUTO_SEED,                   # check_pole_audit_link_reference_resolves
     "every 🤖 gap-fill evidence line is verbatim from the captured job log (issue #106)": AUTO_SEED,  # check_gap_fill_evidence_grounded
+    "a pole with no known root-cause pattern carries a gap-fill analysis": AUTO_SEED,             # check_no_root_cause_pole_is_gap_filled
     "no spine-dropped check is also framed on the merge-gating critical path": AUTO_SEED,           # check_dropped_check_not_framed_on_path
     "no spine-demoted pole carries the typical-gate framing (prompt / Contents)": AUTO_SEED,        # check_demoted_pole_not_framed_typical_gate
     "headline 'slowest check' names the data layer's critical_path_check": AUTO_SEED,               # check_headline_slowest_matches_stamp
@@ -85,6 +92,8 @@ TRIAGE_ALLOWLIST = {
     "chain headline re-derives from the stamped chain facts": AUTO_SEED,                             # check_headline_chain_matches_stamp (ENG-1 PR-N2)
     "rendered chain total is never below the largest member it sums": AUTO_SEED,                      # check_aggregate_total_ge_largest_member (issue #25/#22)
     "headline merge-wait is never above the measured makespan p50": AUTO_SEED,                        # check_headline_wait_within_makespan (issue #25/#24)
+    "default-branch push lane is isolated": AUTO_SEED,                                                # check_default_branch_push_lane_isolated
+    "code findings stay within commit work and never claim runner queue": AUTO_SEED,                  # check_commit_queue_work_credit
     "each finding's runner-minute saving is within its jobs' measured compute": AUTO_SEED,            # check_saving_within_measured_compute (issue #25)
     "every credited runner-minute saving carries a measured-basis stamp (sizing door)": AUTO_SEED,     # check_saving_carries_measured_basis (issues #43/#44/#45)
     "cluster-floor lever's ceiling floors at a NON-sibling check (not its own matrix leg)": AUTO_SEED,  # check_cluster_lever_ceiling_escapes_sibling (issue #44)
@@ -122,13 +131,18 @@ TRIAGE_ALLOWLIST = {
     "OPT79 findings re-derive by their arm, and pole caches render": AUTO_SEED,                  # check_opt79_findings_rederived
     "OPT80 tail lines re-derive and pair with their stamped blocks": AUTO_SEED,                  # check_opt80_tail_lines
     "OPT80 slowest-job sentence pairs with its withheld reason": AUTO_SEED,                      # check_opt80_tail_withheld_reasons
+    "minority slow tails on merge-blocking checks are re-derived": AUTO_SEED,                    # check_minority_gate_tails
     "OPT81 runner-class comparisons re-derive and carry the publisher disclosure": AUTO_SEED,  # check_opt81_runner_comparison_rederived
     "Tier-2 section-lead totals match de-overlapped findings": AUTO_SEED,                         # check_tier2_total_deoverlapped
     "no claim or prose cites the closing-down /timing endpoints": AUTO_SEED,                     # check_no_timing_endpoint_citation
     "Tier-2 claims carry the jobs-API derivation-basis field": AUTO_SEED,                        # check_tier2_claims_derivation_basis
     "Tier-2 headline claim names the top stamped finding": AUTO_SEED,                             # check_tier2_headline_matches_stamp
     "Tier-2 savings rows are backed by runner-minute cost spine": AUTO_SEED,                      # check_tier2_savings_rows_backed_by_cost_spine
+    "OPT64 is ranked only on enough retried runs": AUTO_SEED,                                     # check_opt64_minimum_sample
     "runner-minute cost spine source block is re-derivable": AUTO_SEED,                           # check_runner_minute_spine_contract
+    "cost-spine Contents count matches the rows the table shows": AUTO_SEED,                      # check_cost_spine_contents_count_matches_table
+    "cost spine names the minutes on runners GitHub does not host": AUTO_SEED,                    # check_cost_spine_runner_host_split
+    "drill-log fetch time is compared truthfully with the audit's scan time": AUTO_SEED,          # check_drill_log_capture_relation
     "no rate-derived dollars on the minutes surfaces": AUTO_SEED,                                 # check_no_rate_derived_dollars
     "shallow cost-spine sample is disclosed (re-derived from the stamped workflows)": AUTO_SEED,  # check_cost_spine_shallow_disclosed
     "the fetch plan matches its call sites (no unconsumed prefetches)": AUTO_SEED,                # check_prefetch_plan_consumed
@@ -167,23 +181,30 @@ CLASS_ENUM = frozenset({
 # workflow's class routing; classifying it here is for consistency/clustering with LLM-found
 # instances of the same underlying defect shape, and for the audit trail.
 CHECK_CLASS = {
+    "per-commit wall-clock projections are physically bounded": "fabricated-or-unsupported-finding",
     "primary section present (Long poles)": "missing-phase-check",                       # a required phase section is absent
     "static-only banner matches CI shape": "fabricated-or-unsupported-finding",          # dormant-repo banner asserted at a live no-PR-gating repo / "no run timing" beside priced timed runs — the report contradicts its own data
     "headline names the wall-clock (merge-wait) axis": "ambiguous-phase-instruction",     # headline mislabels the axis it renders
+    "wall-clock headline carries next gate and verification guidance": "missing-phase-check",  # next-gate line or how-to-check block absent, or names a gate no saved floor supports
     "every #pole-N / #also-noticed / #pre-start-wait / #runner-minute-reductions reference resolves to an anchor": "missing-phase-check",  # broken cross-reference — a rendering-completeness gap
     "RCA hands off via prompts (never prescribes a fix, never dead-ends)": "prescribed-a-fix",  # exact match
+    "job-adding prompts state their runner-minute effect": "missing-phase-check",  # a required cost disclosure is absent from a job-expanding hand-off
     "agent-prompt MEASURED CAUSE never asserts timeline steps the pole doesn't render": "fabricated-or-unsupported-finding",  # a canned cause asserts a timeline shape the report contradicts
     "TOC 'Also noticed' count == appendix rows + hidden pointer": "fabricated-or-unsupported-finding",  # a rendered count not backed by the data
     "data basis disclosed; coverage gaps named, not silent": "coverage-gap-dead-end",     # exact match (the spec's own no-silent-drop framing)
     "workflows missing from the sample are NAMED in the report": "coverage-gap-dead-end",  # a workflow that vanished from the sample rendering as measured
     "report uses ASCII hyphens only (no em/en/figure/bar/minus dash)": "other",           # pure formatting, no semantic root-cause fits
+    "PR lifecycle block is consistent with its own shares": "fabricated-or-unsupported-finding",  # a headline or share the block's own numbers do not support
     "code fences are balanced (no stray ``` breaking out of a fence)": "other",           # structural corruption guard, no semantic root-cause fits
     "every rendered finding pattern exists in the findings JSON": "fabricated-or-unsupported-finding",  # rendered claim not backed by findings
+    "Windows setup benchmark pointers match their measured OPT72 card": "fabricated-or-unsupported-finding",
     "every data-driven finding carries a measured signal (no unsupported claims)": "estimated-not-measured",  # exact match
     "report drills every gating pole, each with a hand-off prompt": "missing-second-pole-or-finding",  # a required pole/finding is missing
     "aggregation-gate poles tell the upstream story, never an optimize-this prompt": "prescribed-a-fix",  # an "optimize this step" prompt over a `needs:`-only success sink that runs no work
     "each rendered pole's drill belongs to its own job (no cross-job log leak)": "fabricated-or-unsupported-finding",  # a drill misattributed to the wrong job's evidence
+    "every pole that cites the Audit link renders its own Audit line": "fabricated-or-unsupported-finding",  # a prompt points at an Audit link the pole does not render
     "every 🤖 gap-fill evidence line is verbatim from the captured job log (issue #106)": "fabricated-or-unsupported-finding",  # a quoted evidence line not in the captured log = a fabricated/altered quote
+    "a pole with no known root-cause pattern carries a gap-fill analysis": "coverage-gap-dead-end",  # exact match: a pole shipped with no root cause while its log was in hand
     "no spine-dropped check is also framed on the merge-gating critical path": "mis-ranked-lever",  # spine/critical-path framing error
     "no spine-demoted pole carries the typical-gate framing (prompt / Contents)": "mis-ranked-lever",  # a demoted pole framed as the typical gate = a ranking-framing error
     "headline 'slowest check' names the data layer's critical_path_check": "mis-ranked-lever",  # headline doesn't match the measured critical path
@@ -192,6 +213,8 @@ CHECK_CLASS = {
     "chain headline re-derives from the stamped chain facts": "mis-ranked-lever",  # ENG-1 PR-N2: chain headline drifted from chain_facts
     "rendered chain total is never below the largest member it sums": "fabricated-or-unsupported-finding",  # issue #22: a rendered total below a member it sums is a number the data contradicts
     "headline merge-wait is never above the measured makespan p50": "estimated-not-measured",  # issue #24: a crowned/modeled wait above the MEASURED wall — the estimate overstates the measurement
+    "default-branch push lane is isolated": "mis-ranked-lever",  # post-merge timing leaking into the merge-gate headline or ranking
+    "code findings stay within commit work and never claim runner queue": "estimated-not-measured",  # a modeled code saving above measured work, or a claim against runner queue
     "each finding's runner-minute saving is within its jobs' measured compute": "estimated-not-measured",  # issue #25: a modeled saving above the job's measured compute — an estimate exceeding its physical bound
     "every credited runner-minute saving carries a measured-basis stamp (sizing door)": "estimated-not-measured",  # issues #43/#44/#45: a saving that skipped the measured sizing door (no basis / unmeasured path) — an estimate with no measured grounding
     "cluster-floor lever's ceiling floors at a NON-sibling check (not its own matrix leg)": "mis-ranked-lever",  # issue #44: a cluster lever capped by its own sibling leg renders ~15x under its true ceiling and is buried — a ranking/placement error
@@ -228,13 +251,18 @@ CHECK_CLASS = {
     "OPT79 findings re-derive by their arm, and pole caches render": "fabricated-or-unsupported-finding",  # a merge-wait figure the measured excess and headroom do not support
     "OPT80 tail lines re-derive and pair with their stamped blocks": "fabricated-or-unsupported-finding",  # a tail line whose N or X the per-run checkout rows and stall proofs do not re-derive, or that is misplaced, unpaired, in legacy wording, or on a job the collector's gate would not stamp
     "OPT80 slowest-job sentence pairs with its withheld reason": "fabricated-or-unsupported-finding",  # a merge-wait claim, or a no-tail-line reason, the stamped facts do not support
+    "minority slow tails on merge-blocking checks are re-derived": "fabricated-or-unsupported-finding",  # a minority wait whose p90/share/example does not match its stamped observations
     "OPT81 runner-class comparisons re-derive and carry the publisher disclosure": "fabricated-or-unsupported-finding",  # a runner-class gap the stamped runs do not support, an advisory carrying a number, or a card without the publisher disclosure
     "Tier-2 section-lead totals match de-overlapped findings": "fabricated-or-unsupported-finding",  # rendered totals not backed by findings
     "no claim or prose cites the closing-down /timing endpoints": "fabricated-or-unsupported-finding",  # cites a data source the pipeline does not use
     "Tier-2 claims carry the jobs-API derivation-basis field": "fabricated-or-unsupported-finding",  # a Tier-2 claim without its machine-readable data-source field
     "Tier-2 headline claim names the top stamped finding": "mis-ranked-lever",  # top bill-axis claim names the wrong ranked row
     "Tier-2 savings rows are backed by runner-minute cost spine": "fabricated-or-unsupported-finding",  # rendered savings rows not backed by cost-spine rows
+    "OPT64 is ranked only on enough retried runs": "fabricated-or-unsupported-finding",  # a ranked retry saving resting on too few retried runs, or on a flaky retry
     "runner-minute cost spine source block is re-derivable": "fabricated-or-unsupported-finding",  # cost-spine source rows/totals not backed by rates/stamps
+    "cost-spine Contents count matches the rows the table shows": "fabricated-or-unsupported-finding",  # a Contents row count the rendered table does not show
+    "cost spine names the minutes on runners GitHub does not host": "unscrubbed-or-disclosure-risk",  # minutes on non-GitHub runners presented as GitHub-billable without the disclosure
+    "drill-log fetch time is compared truthfully with the audit's scan time": "fabricated-or-unsupported-finding",  # a "newer"/"older" claim the two timestamps do not support
     "no rate-derived dollars on the minutes surfaces": "fabricated-or-unsupported-finding",  # a rate-derived $/USD figure leaked onto a minutes-only surface
     "shallow cost-spine sample is disclosed (re-derived from the stamped workflows)": "coverage-gap-dead-end",  # an undisclosed shallow sample reads as exact coverage
     "the fetch plan matches its call sites (no unconsumed prefetches)": "other",  # a drifted prefetch plan wasted API budget; a collection-orchestration bug, no data-faithfulness enum fits

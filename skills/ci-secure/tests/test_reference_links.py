@@ -274,16 +274,19 @@ def test_the_self_proof_runbook_still_explains_every_outcome_skill_md_branches_o
 
 # Phase 2 expanded `${REPO:+--repo}` while the only assignment of `REPO` had
 # moved into `references/troubleshooting.md`. An agent that did not open that
-# reference ran the scan with no `--repo`, and the four gh-gated checks
-# silently degraded to "skipped" on a repository where full coverage was
+# reference ran the scan with no `--repo`, and the gh-gated lookups that need
+# it silently degraded to "unmeasured" on a repository where full coverage was
 # available. Safe direction — a skip is never a false pass — but a real
 # coverage loss, and invisible: no link was broken and every other guard was
 # green. This is the trim's characteristic failure, so it is pinned.
 #
 # The environment supplies these; the contract is not expected to assign them.
-_AMBIENT_SHELL_VARS = {"TMPDIR", "HOME", "PATH", "PWD", "USER", "SHELL"}
+# CI_SECURE_REPO is the user's optional owner/repo override: unset is the normal
+# case, and Phase 2 then derives the value itself, so it is not a silent gap.
+_AMBIENT_SHELL_VARS = {"TMPDIR", "HOME", "PATH", "PWD", "USER", "SHELL", "CI_SECURE_REPO"}
 _VAR_EXPANSION = re.compile(r"\$\{?([A-Z][A-Z0-9_]*)")
-_VAR_ASSIGNMENT = re.compile(r"^\s*(?:export\s+)?([A-Z][A-Z0-9_]*)=", re.MULTILINE)
+# An assignment starts a line or follows `;` (one-line path preludes).
+_VAR_ASSIGNMENT = re.compile(r"(?:^|;)\s*(?:export\s+)?([A-Z][A-Z0-9_]*)=", re.MULTILINE)
 
 
 def _bash_blocks(text: str) -> list[str]:

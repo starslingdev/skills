@@ -6262,7 +6262,19 @@ def _compute_security_score(
                 # a score — the report renders none by design, and "this is NOT a score of 100" in a report with no score
                 # is the removed contract leaking back at the reader.
                 "reason": f"config-facts layer failed: {exc!r} — no config "
-                          "fact could be checked", "registered": None}
+                          "fact could be checked", "registered": None,
+                # The unscored push-access lists, in their "not checked"
+                # shape: an inventory absent from a crashed run must not read
+                # as "no secrets exposed".
+                "push_access": {
+                    "status": "not_checked",
+                    "reason": "the config-facts layer failed",
+                    "environments": [],
+                    "inventory": {"status": "not_checked",
+                                  "repo_secrets": None, "org_secrets": None,
+                                  "high_value": [],
+                                  "reason": "the config-facts layer failed"},
+                    "tier1_gap": "", "credential_note": ""}}
 
 
 def _default_catalog_path() -> Path:

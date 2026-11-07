@@ -330,6 +330,71 @@ def test_run_jobs_paginates_past_100():
     assert got is not None and len(got) == 142
 
 
+def test_run_jobs_retries_a_502_with_smaller_pages():
+    """A large run can make GitHub reject the 100-job page while serving the
+    same complete listing in smaller pages. Retry that one response shape at 30
+    before disclosing the run as unavailable."""
+    jobs = lambda lo, hi: [{"id": i, "name": f"pole-{i}"} for i in range(lo, hi)]  # noqa: E731
+
+    class _LargeRunClient(_PagingClient):
+        def failure_status(self, endpoint: str) -> int | None:
+            return 502 if endpoint.endswith("per_page=100") else None
+
+        def recover_failure(self, endpoint: str) -> None:
+            self.errors -= 1
+
+    client = _LargeRunClient({
+        "repos/o/r/actions/runs/7/jobs?per_page=30": {
+            "total_count": 64, "jobs": jobs(0, 30)},
+        "repos/o/r/actions/runs/7/jobs?per_page=30&page=2": {
+            "total_count": 64, "jobs": jobs(30, 60)},
+        "repos/o/r/actions/runs/7/jobs?per_page=30&page=3": {
+            "total_count": 64, "jobs": jobs(60, 64)},
+    })
+
+    got = collect_runs._fetch_run_jobs(client, "o/r", 7)
+
+    assert got is not None and [job["id"] for job in got] == list(range(64))
+    assert client.calls == [
+        "repos/o/r/actions/runs/7/jobs?per_page=100",
+        "repos/o/r/actions/runs/7/jobs?per_page=30",
+        "repos/o/r/actions/runs/7/jobs?per_page=30&page=2",
+        "repos/o/r/actions/runs/7/jobs?per_page=30&page=3",
+    ]
+    assert client.errors == 0
+
+
+def test_prefetched_502s_do_not_block_smaller_job_pages(monkeypatch, no_sleep):
+    """Concurrent large-page failures must leave the client able to fetch the
+    smaller pages that recover those same run-job listings."""
+    first = "repos/o/r/actions/runs/7/jobs?per_page=100"
+    second = "repos/o/r/actions/runs/8/jobs?per_page=100"
+
+    def _run(cmd, *args, **kwargs):
+        endpoint = cmd[-1]
+        if endpoint.endswith("per_page=100"):
+            return _server_error(cmd, *args, **kwargs)
+        run_id = int(endpoint.split("/runs/", 1)[1].split("/", 1)[0])
+        return _completed(
+            returncode=0,
+            stdout=_ok(
+                f'{{"total_count": 1, "jobs": [{{"id": {run_id}, "name": "pole"}}]}}'
+            ),
+        )
+
+    _patch_run(monkeypatch, _run)
+    client = GhClient()
+    client.prefetch_json([first, second])
+
+    first_jobs = collect_runs._fetch_run_jobs(client, "o/r", 7)
+    second_jobs = collect_runs._fetch_run_jobs(client, "o/r", 8)
+
+    assert first_jobs == [{"id": 7, "name": "pole"}]
+    assert second_jobs == [{"id": 8, "name": "pole"}]
+    assert not client.gave_up
+    assert client.errors == 0
+
+
 def test_run_jobs_filtered_paginates_and_keeps_the_filter_param():
     jobs = lambda lo, hi: [{"id": i} for i in range(lo, hi)]  # noqa: E731
     client = _PagingClient({
@@ -572,6 +637,124 @@ def test_a_status_less_rate_limit_is_retried_and_counted(monkeypatch, no_sleep):
     assert client.json("repos/o/r/rulesets", allow_missing=True) is None
     assert len(calls) == collect_runs._GH_MAX_ATTEMPTS, "a rate limit must be retried"
     assert client.errors == 1, "a rate-limit block is a coverage gap, even allow_missing"
+
+
+@pytest.mark.parametrize("stderr,status", [
+    ("gh: Bad credentials (HTTP 401)", 401),
+    ("gh: Bad credentials (HTTP 403)", 403),
+    ("gh: This token has expired (HTTP 403)", 403),
+    ("gh: Requires authentication (HTTP 403)", 403),
+])
+def test_expired_or_rejected_credentials_are_classified_as_auth_failures(stderr, status):
+    assert collect_runs._classify_gh_failure(stderr, status) == "auth"
+
+
+def test_permission_403_is_not_mistaken_for_an_expired_token():
+    assert collect_runs._classify_gh_failure(
+        "gh: Resource not accessible by integration (HTTP 403)", 403,
+    ) == "forbidden"
+
+
+@pytest.mark.parametrize("middle", [200, 403, 404, 500])
+def test_auth_breaker_requires_consecutive_auth_failures(monkeypatch, no_sleep, middle):
+    replies = [200, 401, 401, middle, 401, 401]
+    # One server error can be retried, so make it a full exhausted endpoint.
+    if middle == 500:
+        replies = [200, 401, 401, 500, 500, 500, 401, 401]
+    def run(*args, **kwargs):
+        status = replies.pop(0)
+        return _completed(returncode=0 if status == 200 else 1,
+                          stdout=_gh_i(f"HTTP/2 {status} Response", body='{}'),
+                          stderr=f"gh: HTTP {status}")
+    _patch_run(monkeypatch, run)
+    client = GhClient()
+    for i in range(6):
+        client.json(f"repos/o/r/branches/b{i}", allow_missing=True)
+    assert not client.gave_up
+    assert not client.auth_interrupted
+
+
+def test_permission_403_does_not_change_optional_branch_protection(monkeypatch):
+    _patch_run(monkeypatch, lambda *a, **kw: _completed(
+        returncode=1, stdout=_gh_i("HTTP/2 403 Forbidden"),
+        stderr="gh: Resource not accessible by integration (HTTP 403)"))
+    client = GhClient()
+    assert client.json("repos/o/r/branches/main/protection", allow_missing=True) is None
+    assert client.errors == 0
+    assert not client.gave_up
+
+
+def test_auth_at_start_does_not_claim_token_stopped_partway(monkeypatch):
+    _patch_run(monkeypatch, lambda *a, **kw: _completed(
+        returncode=1, stdout=_gh_i("HTTP/2 401 Unauthorized"),
+        stderr="gh: Bad credentials (HTTP 401)"))
+    client = GhClient()
+    for i in range(3):
+        client.json(f"repos/o/r/branches/b{i}")
+    assert not client.auth_interrupted
+    assert client.errors == 3
+
+
+def test_auth_words_cannot_override_rate_limit_headers():
+    assert collect_runs._classify_gh_failure(
+        "Bad credentials", 403, {"x-ratelimit-remaining": "0"}) == "rate_limit"
+
+
+def test_job_fetch_counts_are_logical_fetches_not_pages(monkeypatch):
+    pages = iter([{"jobs": [{"id": i} for i in range(100)]}, {"jobs": []}])
+    client = GhClient()
+    monkeypatch.setattr(client, "json", lambda *a, **kw: next(pages))
+    assert len(collect_runs._fetch_run_jobs(client, "o/r", 1)) == 100
+    assert client.job_fetch_count == 1
+    assert client.job_fetch_failed_count == 0
+
+
+def test_mid_run_auth_failure_trips_the_breaker_without_fetching_the_whole_plan(monkeypatch, caplog):
+    """A token can expire after run discovery succeeded. Three consecutive auth
+    failures prove that the credential, not five independent job resources, is broken;
+    the two queued fetches must be counted but must not spawn more ``gh`` processes."""
+    calls: list[list[str]] = []
+
+    def _run(cmd, *args, **kwargs):
+        calls.append(cmd)
+        if len(calls) == 1:
+            return _completed(returncode=0, stdout=_ok('{"workflow_runs": []}'))
+        return _completed(
+            returncode=1,
+            stdout=_gh_i("HTTP/2.0 401 Unauthorized",
+                         body='{"message":"Bad credentials"}'),
+            stderr="gh: Bad credentials (HTTP 401)",
+        )
+
+    _patch_run(monkeypatch, _run)
+    client = GhClient()
+    assert client.json("repos/o/r/actions/workflows/1/runs?per_page=100") == {
+        "workflow_runs": []}
+
+    results = [
+        client.json(f"repos/o/r/actions/runs/{run_id}/jobs?per_page=100",
+                    allow_missing=True)
+        for run_id in range(1, 6)
+    ]
+
+    assert results == [None] * 5
+    assert client.errors == 5
+    assert client.gave_up
+    assert len(calls) == 4, "only the successful run list plus three auth failures fetch"
+    stops = [r for r in caplog.records if "GIVING UP on the whole gh pass" in r.getMessage()]
+    assert len(stops) == 1, "the stop reason must be logged once when the token dies"
+    assert "the token stopped working" in stops[0].getMessage()
+
+
+def test_auth_interruption_reason_has_no_dangling_separator():
+    client = GhClient()
+    client.auth_interrupted = True
+    client.job_fetch_count, client.job_fetch_failed_count = 4, 2
+    ds: dict = {}
+    collect_runs._stamp_auth_interruption(ds, client)
+    assert ds["partial_reason"].startswith("the GitHub token stopped working partway")
+    assert "2 of 4 job fetches failed" in ds["partial_reason"]
+    assert not ds["partial_reason"].rstrip().endswith(";")
 
 
 def test_rate_limit_is_retried_logged_at_warning_and_then_succeeds(monkeypatch, no_sleep, caplog):

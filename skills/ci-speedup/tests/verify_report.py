@@ -38,6 +38,7 @@ when the bug genuinely cannot be expressed as a re-derivation property.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import math
@@ -594,6 +595,228 @@ def check_headline_names_wall_clock(report: str) -> Check:
     ok = any(p in bottom for p in ("checks to finish", "merge", "wall"))
     return Check(name, ok, "headline names the merge-wait axis" if ok
                  else f"headline names no wall-clock/merge axis: {bottom[:60]!r}")
+
+
+def check_commit_wall_clock_projection(report: str, findings_path: Path | None) -> Check:
+    """Re-derive the per-commit wall and every printed slowest-job projection."""
+    name = "per-commit wall-clock projections are physically bounded"
+    if not findings_path:
+        return Check(name, True, "no findings JSON supplied", skipped=True)
+    try:
+        doc = json.loads(Path(findings_path).read_text())
+    except (OSError, ValueError, TypeError) as exc:
+        return Check(name, False, f"cannot read findings JSON: {exc}")
+    cp = doc.get("pr_critical_path") if isinstance(doc, dict) else None
+    stamp = cp.get("commit_wall_clock") if isinstance(cp, dict) else None
+    if not isinstance(stamp, dict):
+        return Check(name, True, "legacy findings have no commit wall stamp", skipped=True)
+
+    def projection(wall: float, slowest: float, next_longest: float,
+                   speedup: float, chain: float | None = None) -> tuple[float, float | None]:
+        # A slowest job inside a `needs:` chain keeps the rest of the chain in
+        # series: the chain path shrinks by the job's saving and is floored at
+        # the next independent path; time outside both stays.
+        if chain is not None and chain > slowest:
+            unchanged = max(wall - max(chain, next_longest), 0.0)
+            projected = round(max(0.0, unchanged + max(
+                chain - slowest + slowest / speedup, next_longest)), 1)
+        else:
+            projected = round(max(
+                0.0, wall - slowest + max(slowest / speedup, next_longest)), 1)
+        return projected, (round(wall / projected, 2) if projected > 0 else None)
+
+    def percentile(values: list[float], pct: float) -> float:
+        ordered = sorted(values)
+        k = (len(ordered) - 1) * pct / 100.0
+        lo, hi = int(k), min(int(k) + 1, len(ordered) - 1)
+        return ordered[lo] + (ordered[hi] - ordered[lo]) * (k - lo)
+
+    def duration(seconds: float) -> str:
+        whole = max(0, round(seconds))
+        hours, rem = divmod(whole, 3600)
+        minutes, secs = divmod(rem, 60)
+        return (f"{hours}h {minutes:02d}m {secs:02d}s" if hours
+                else f"{minutes}m {secs:02d}s")
+
+    failures: list[str] = []
+    facts = [f for f in (stamp.get("facts") or []) if isinstance(f, dict)]
+    complete: list[tuple[dict, float, float, float, float | None]] = []
+    for index, fact in enumerate(facts):
+        wall = _num(fact.get("wall_s"))
+        slow = fact.get("slowest_job")
+        next_job = fact.get("next_longest_job") or {}
+        slowest = _num(slow.get("duration_s")) if isinstance(slow, dict) else None
+        next_longest = (_num(next_job.get("duration_s"))
+                        if isinstance(next_job, dict) else None)
+        if fact.get("partial") is True:
+            if wall is not None:
+                failures.append(f"partial fact {index} publishes wall_s {wall}")
+            continue
+        if wall is None or slowest is None:
+            failures.append(f"complete fact {index} lacks wall/slowest timing")
+            continue
+        next_longest = next_longest or 0.0
+        chain = _num(fact.get("slowest_chain_span_s"))
+        if chain is not None and chain < slowest:
+            failures.append(
+                f"fact {index} chain span {chain} is shorter than its slowest job {slowest}")
+            continue
+        complete.append((fact, wall, slowest, next_longest, chain))
+        p4 = fact.get("projection_4x")
+        if not isinstance(p4, dict):
+            failures.append(f"complete fact {index} lacks projection_4x")
+            continue
+        projected, cap_multiple = projection(wall, slowest, next_longest, 4.0, chain)
+        claimed_projected = _num(p4.get("projected_s"))
+        claimed_multiple = _num(p4.get("multiple"))
+        if claimed_projected is None or abs(claimed_projected - projected) > 0.11:
+            failures.append(
+                f"fact {index} projected_s {claimed_projected!r} != {projected}")
+        if cap_multiple is None:
+            if claimed_multiple is not None:
+                failures.append(
+                    f"fact {index} multiple {claimed_multiple!r} must be absent "
+                    "for a zero projected wall")
+        elif claimed_multiple is None or claimed_multiple > cap_multiple + 0.001:
+            failures.append(
+                f"fact {index} multiple {claimed_multiple!r} exceeds {cap_multiple}")
+
+    partial = [fact for fact in facts if fact.get("partial") is True]
+    if partial:
+        missing = sorted({
+            str(workflow) for fact in partial
+            for workflow in (fact.get("missing_workflows") or []) if workflow
+        })
+        named = ", ".join(f"`{_strip_scope(workflow)}`" for workflow in missing)
+        expected_partial_line = (
+            f"> {len(partial)} sampled commit(s) were partial"
+            + (f" (missing {named})" if named else "")
+            + "; their observed shorter spans were excluded from these percentiles.")
+        if report.splitlines().count(expected_partial_line) != 1:
+            failures.append(
+                "report lacks the re-derived partial-commit count/workflow disclosure")
+
+    walls = [row[1] for row in complete]
+    if walls:
+        expected_p50 = round(percentile(walls, 50), 3)
+        expected_p90 = round(percentile(walls, 90), 3)
+        if _num(stamp.get("p50_s")) != expected_p50:
+            failures.append(f"p50_s {stamp.get('p50_s')!r} != {expected_p50}")
+        if _num(stamp.get("p90_s")) != expected_p90:
+            failures.append(f"p90_s {stamp.get('p90_s')!r} != {expected_p90}")
+        basis, wall, slowest, next_longest, chain = min(
+            complete, key=lambda row: abs(row[1] - expected_p50))
+        projected, multiple = projection(wall, slowest, next_longest, 4.0, chain)
+        expected_line = (
+            "> **Per-commit PR wait:** p50 "
+            f"**{duration(expected_p50)}**, p90 **{duration(expected_p90)}**, from the "
+            "earliest workflow run created to the last job completed across every "
+            "workflow on that commit."
+            + (" At the sampled p50 commit, a 4x speedup to its slowest job "
+               f"projects to **{duration(projected)}** (**{multiple:.2f}x**)."
+               if multiple is not None else ""))
+        if report.splitlines().count(expected_line) != 1:
+            failures.append("report lacks the re-derived per-commit wait/projection line")
+    elif _num(stamp.get("p50_s")) is not None or _num(stamp.get("p90_s")) is not None:
+        failures.append("empty complete population publishes commit percentiles")
+
+    max_caps = [wall - projection(wall, slowest, next_longest, float("inf"), chain)[0]
+                for _fact, wall, slowest, next_longest, chain in complete]
+    if max_caps:
+        max_p50_saving = float(statistics.median(max_caps))
+        for finding in doc.get("findings") or []:
+            if not isinstance(finding, dict):
+                continue
+            saving = _num(finding.get("wall_clock_p50_s"))
+            if saving is not None and saving > max_p50_saving + 0.11:
+                failures.append(
+                    f"finding {finding.get('id')!r} saving {saving} exceeds "
+                    f"whole-commit cap {max_p50_saving:.1f}")
+    return Check(name, not failures,
+                 "; ".join(failures[:8]) if failures
+                 else f"{len(complete)} complete commit projection(s) re-derived")
+
+
+def _headline_gate_candidates(doc: dict) -> list[tuple[str, float]]:
+    """Every (label, seconds) the renderer could name as the next gate: a saved PR check at
+    its p50 or bimodal slow mode, or a floor named in a finding's stamped bound derivation."""
+    def num(v: object) -> float | None:
+        return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+    cp = doc.get("pr_critical_path") if isinstance(doc.get("pr_critical_path"), dict) else {}
+    checks = [c for c in (cp.get("checks") or []) if isinstance(c, dict)]
+    timing = doc.get("per_workflow_timing") if isinstance(doc.get("per_workflow_timing"), dict) else {}
+    out: list[tuple[str, float]] = []
+
+    def labels(check: str) -> list[str]:
+        found = [_strip_scope(check)]
+        for c in checks:
+            if str(c.get("name") or c.get("check") or "") == check and c.get("workflow_file"):
+                found.append(f"{_wf_base(str(c['workflow_file']))} / {_strip_scope(check)}")
+        for wf, t in timing.items():
+            if _wf_base(str(wf)) == check and isinstance(t, dict) and t.get("long_pole_job"):
+                found.append(f"{check} / {t['long_pole_job']}")
+        return found
+
+    for c in checks:
+        bi = c.get("bimodal") if isinstance(c.get("bimodal"), dict) else {}
+        for s in (num(c.get("p50_s")), num(bi.get("high_p50_s"))):
+            if s:
+                out += [(lbl, s) for lbl in labels(str(c.get("name") or c.get("check") or ""))]
+    for f in doc.get("findings") or []:
+        for bound in (f.get("wall_clock_derivation") or []) if isinstance(f, dict) else []:
+            m = re.search(r"floor [—-] `([^`]+)` \((\d+(?:\.\d+)?)s\)",
+                          str(bound.get("reason") or "") if isinstance(bound, dict) else "")
+            if m:
+                out += [(lbl, float(m[2])) for lbl in labels(m[1])]
+    return out
+
+
+def check_headline_followup(report: str, findings_path: Path | None = None) -> Check:
+    """Every measured wall-clock headline includes a next gate and a measurement protocol."""
+    name = "wall-clock headline carries next gate and verification guidance"
+    measured = False
+    doc = None
+    if findings_path:
+        try:
+            doc = json.loads(Path(findings_path).read_text())
+            cp = doc.get("pr_critical_path") if isinstance(doc, dict) else None
+            measured = bool(cp.get("poles")) if isinstance(cp, dict) else False
+        except (OSError, ValueError, TypeError):
+            doc = None
+    if not measured:
+        measured = bool(re.search(r"^> \*\*Bottom line\.\*\* A typical PR waits", report, re.MULTILINE))
+    if not measured:
+        return Check(name, True, "no measured wall-clock headline", skipped=True)
+    # Restrict to the headline block, so an appendix or quoted prompt cannot
+    # satisfy the requirement on behalf of the report's actual headline.
+    match = re.search(r"^> \*\*Bottom line\.\*\*.*?(?=^## |\Z)", report, re.MULTILINE | re.DOTALL)
+    if not match:
+        return Check(name, False, "missing wall-clock headline")
+    block = match[0]
+    gates = re.findall(r"^> \*\*What gates next:\*\* (.+)$", block, re.MULTILINE)
+    if len(gates) != 1 or not (
+            re.fullmatch(r"After this fix, CI is gated by `[^`]+` at ~\d+ s\.", gates[0])
+            or gates[0] == "The next gate is unavailable from the saved floor evidence; re-measure all workflows after the change."):
+        return Check(name, False, "missing or malformed gates-next line")
+    named = re.fullmatch(r"After this fix, CI is gated by `([^`]+)` at ~(\d+) s\.", gates[0])
+    if named and isinstance(doc, dict):
+        candidates = _headline_gate_candidates(doc)
+        label, secs = _norm_check(named[1]), int(named[2])
+        if not any(_norm_check(c) == label and abs(secs - s) <= 1 for c, s in candidates):
+            return Check(name, False, f"gates-next names `{named[1]}` at ~{secs} s, which no saved "
+                                      "check or stamped floor bound supports")
+    required = [
+        "> This projection assumes the full headline saving is realized; a smaller fix may leave the current gate in place.",
+        "> **How to check it worked**",
+        "> - **Measure:** time from the push's first job created to the last job finished, across **all** workflows the push triggers.",
+        "> - **Runs:** at least 2 before and 2 after, plus one unchanged rerun as a noise control.",
+        "> - **Don't** sum workflow durations, and don't average per-job ratios. Both hide a gain on the one workflow that gates.",
+        "> - **Caches:** judge cache-touching fixes on the second run after the change.",
+    ]
+    missing = [line for line in required if block.splitlines().count(line) != 1]
+    return Check(name, not missing, "next gate and full verification protocol present" if not missing
+                 else "missing or duplicated how-to-check instructions: " + "; ".join(missing))
 
 
 def check_also_noticed_count_honest(report: str) -> Check:
@@ -1829,13 +2052,61 @@ def check_date_matches_filename(report: str, report_path: Path | None) -> Check:
 # ci-secure's security framing that must NOT survive into a ci-speedup report.
 # Phrase-precise: an audited repo may legitimately run zizmor, and that name will
 # appear in a finding's evidence - that's the AUDITED REPO's content, not a leak.
-_LEAK_PATTERNS: tuple[tuple[str, str], ...] = (
-    (r"what an attacker (?:can|could) do", "attacker-capability prose label"),
-    (r"attacker_scenario", "attacker_scenario field"),
-    (r"ci-secure (?:skill|catalog|report|scan|finding|audit)", "ci-secure self-reference"),
-    (r"blended under the same severity", "zizmor methodology text"),
-    (r"\brun zizmor\b", "zizmor recommendation"),
+# The third field marks patterns an audited identifier can legitimately carry (a
+# check named `ci-secure scan`, a step named `Run zizmor`): those are matched
+# with the renderer's identifier spans removed (_strip_audited_identifiers).
+# The rest are skill vocabulary no identifier carries, matched everywhere.
+_LEAK_PATTERNS: tuple[tuple[str, str, bool], ...] = (
+    (r"what an attacker (?:can|could) do", "attacker-capability prose label", False),
+    (r"attacker_scenario", "attacker_scenario field", False),
+    (r"ci-secure (?:skill|catalog|report|scan|finding|audit)", "ci-secure self-reference", True),
+    (r"blended under the same severity", "zizmor methodology text", False),
+    (r"\brun zizmor\b", "zizmor recommendation", True),
 )
+
+# Only recognizable identifier positions get an exemption. Backticks alone do
+# not make prose an audited identifier: "Please `run zizmor`" is a recommendation.
+_IDENT_CODE_SPAN_RE = re.compile(r"`[^`\n]+`")
+_IDENT_POLE_TOC_RE = re.compile(
+    r"^(\s*\d+\.\s+[^\[\n]*)\[[^\]\n]*\]\(#pole-\d+\)(?=\s+[-—]\s+\d)")
+_IDENT_NARROWED_LIST_RE = re.compile(
+    r"^(> - \*\*Narrowed to merge-blocking checks:\*\* \d+ non-required check\(s\) "
+    r"excluded from the critical path - )(.*?)(\. They run on PRs)")
+_IDENT_NOUN_BEFORE_RE = re.compile(
+    r"\b(?:check|job|step|workflow|runner)(?:s)?(?: (?:named|called))?\s*[:=]?\s*$", re.I)
+_IDENT_NOUN_AFTER_RE = re.compile(r"^\s+(?:check|job|step|workflow|runner)\b", re.I)
+
+
+def _strip_audited_identifiers(report: str) -> str:
+    out: list[str] = []
+    fence: "tuple[str, int] | None" = None
+    for line in report.splitlines():
+        # A quoted fence is still a code block, whose backticks are literal.
+        content = re.sub(r"^(?: {0,3}>[ \t]?)+", "", line)
+        stripped = content.lstrip()
+        if fence is None:
+            for ch in ("`", "~"):
+                n = len(stripped) - len(stripped.lstrip(ch))
+                if n >= 3:
+                    fence = (ch, n)
+                    break
+            else:
+                if not content.startswith(("    ", "\t")):
+                    line = _IDENT_POLE_TOC_RE.sub(r"\1[]", line)
+                    line = _IDENT_NARROWED_LIST_RE.sub(
+                        lambda m: m[1] + _IDENT_CODE_SPAN_RE.sub("``", m[2]) + m[3], line)
+                    def identifier_span(m: re.Match) -> str:
+                        before = line[:m.start()].replace("*", "")
+                        after = line[m.end():].replace("*", "")
+                        return "``" if (_IDENT_NOUN_BEFORE_RE.search(before)
+                                        or _IDENT_NOUN_AFTER_RE.search(after)) else m[0]
+                    line = _IDENT_CODE_SPAN_RE.sub(identifier_span, line)
+        else:
+            n = len(stripped) - len(stripped.lstrip(fence[0]))
+            if n >= fence[1] and not stripped[n:].strip():
+                fence = None
+        out.append(line)
+    return "\n".join(out)
 
 # Every typographic dash the render boundary (_strip_emdashes) must flatten to an
 # ASCII "-". A report that still carries any of these slipped past the sanitizer.
@@ -1848,6 +2119,78 @@ def check_no_typographic_dashes(report: str) -> Check:
     return Check(name, not found, "clean - ASCII hyphens only"
                  if not found else
                  f"typographic dash(es) survived the render boundary: {found}")
+
+
+_LIFECYCLE_TITLE = "**Where your PRs' time goes**"
+_LIFECYCLE_HEADLINE = "CI is not where your PRs wait."
+_LIFECYCLE_ROW_RE = re.compile(r"^\| (.+?) \| (\d+(?:\.\d+)?)% \| (\d+(?:\.\d+)?)% \|$", re.MULTILINE)
+_LIFECYCLE_COVERAGE_RE = re.compile(r"Measured (\d+) of (\d+) merged PRs")
+_LIFECYCLE_ESTIMATE = "Estimated: required checks are not readable"
+_LIFECYCLE_BASES = ("required", "all-final-commit-checks")
+
+
+def _lifecycle_basis_violation(block: str, findings_path: Path | str | None) -> str | None:
+    """The estimate label appears exactly when the findings record the fallback basis
+    (every final-commit check treated as required). No findings, or a findings doc
+    without a measured lifecycle block, leaves nothing to cross-check."""
+    if findings_path is None:
+        return None
+    data, err = _load_findings_doc(Path(findings_path))
+    block_data = data.get("pr_lifecycle") if not err else None
+    if not isinstance(block_data, dict) or block_data.get("status") != "measured":
+        return None
+    basis, labelled = block_data.get("basis"), _LIFECYCLE_ESTIMATE in block
+    if basis not in _LIFECYCLE_BASES:
+        return f"measured lifecycle block records no known basis ({basis!r})"
+    if labelled != (basis == "all-final-commit-checks"):
+        return (f"estimate label {'shown' if labelled else 'missing'} on basis {basis!r}")
+    return None
+
+
+def check_pr_lifecycle_block(report: str, findings_path: Path | str | None = None) -> Check:
+    """The PR lifecycle block either says why it is not measured, or shows shares that
+    are internally consistent and a headline that matches its own thresholds (final-commit
+    CI median under 10% and green-waiting median over 25%, judged on the rendered
+    one-decimal percentages with half a step of rounding slack). The estimate label
+    appears exactly when the findings record the all-final-commit-checks basis."""
+    name = "PR lifecycle block is consistent with its own shares"
+    count = report.count(_LIFECYCLE_TITLE)
+    if count == 0:
+        return Check(name, True, "skipped - report predates the PR lifecycle block", skipped=True)
+    if count > 1:
+        return Check(name, False, f"lifecycle block rendered {count} times")
+    after = report.split(_LIFECYCLE_TITLE, 1)[1]
+    end = "Overlapping checks count once."
+    # A measured block ends with its footnote; the not-measured form is one line.
+    block = after.split(end, 1)[0] if end in after[:4000] else "\n".join(after.splitlines()[:4])
+    if "not measured:" in block:
+        reason = block.split("not measured:", 1)[1].split("\n", 1)[0].strip()
+        bad = [] if reason else ["no reason given"]
+        if _LIFECYCLE_HEADLINE in block or _LIFECYCLE_ROW_RE.search(block) or _LIFECYCLE_ESTIMATE in block:
+            bad.append("shares, headline or estimate label shown alongside 'not measured'")
+        return Check(name, not bad, "; ".join(bad) if bad else f"not measured, with reason: {reason}")
+    rows = {label: (float(m), float(p)) for label, m, p in _LIFECYCLE_ROW_RE.findall(block)}
+    need = ("CI running", "Green, waiting for review or merge", "CI on the final commit (subset)")
+    missing = [k for k in need if k not in rows]
+    if missing:
+        return Check(name, False, f"measured block lacks rows: {missing}")
+    bad = [f"{k}: median {m}% > p90 {p}%" for k, (m, p) in rows.items() if not 0 <= m <= p <= 100]
+    final, ci = rows["CI on the final commit (subset)"], rows["CI running"]
+    if final[0] > ci[0] or final[1] > ci[1]:
+        bad.append(f"final-commit CI {final} exceeds all CI running {ci}")
+    cov = _LIFECYCLE_COVERAGE_RE.search(block)
+    if not cov or not 0 < int(cov.group(1)) <= int(cov.group(2)):
+        bad.append("coverage line 'Measured N of M merged PRs' missing or inconsistent")
+    green = rows["Green, waiting for review or merge"][0]
+    if _LIFECYCLE_HEADLINE in block and not (final[0] <= 10.0 and green >= 25.0):
+        bad.append(f"headline shown at final-commit CI {final[0]}% / green {green}%")
+    if _LIFECYCLE_HEADLINE not in block and final[0] < 9.95 and green > 25.05:
+        bad.append(f"headline missing at final-commit CI {final[0]}% / green {green}%")
+    basis_bad = _lifecycle_basis_violation(block, findings_path)
+    if basis_bad:
+        bad.append(basis_bad)
+    return Check(name, not bad, "; ".join(bad) if bad else
+                 f"shares consistent; headline {'shown' if _LIFECYCLE_HEADLINE in block else 'withheld'} per thresholds")
 
 
 _FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,})([^`]*)$")   # opener: run + info string (no backtick)
@@ -1888,7 +2231,9 @@ def check_fences_balanced(report: str) -> Check:
 
 def check_no_domain_leakage(report: str) -> Check:
     name = "no ci-secure template leakage (security-domain framing in ci-speedup prose)"
-    hits = [why for pat, why in _LEAK_PATTERNS if re.search(pat, report, re.IGNORECASE)]
+    prose = _strip_audited_identifiers(report)
+    hits = [why for pat, why, ident_ok in _LEAK_PATTERNS
+            if re.search(pat, prose if ident_ok else report, re.IGNORECASE)]
     return Check(name, not hits,
                  "clean - only audited-repo content references security tooling, if any"
                  if not hits else f"template leak: {', '.join(hits)}")
@@ -2050,6 +2395,66 @@ def check_skill_commit_provenance(report: str, skill_repo: Path | None) -> Check
     return Check(name, False, detail + (
         " (NOT an ancestor of HEAD - recorded on a divergent branch? re-render the "
         "report so it carries a `scripts tree` token)"))
+
+
+def check_windows_setup_guidance(report: str, findings_path: Path | None) -> Check:
+    """Independently validate manual pointers against their own structural card."""
+    name = "Windows setup benchmark pointers match their measured OPT72 card"
+    for glyph in _TYPOGRAPHIC_DASHES:
+        report = report.replace(glyph, "-")
+    marker = "- **Windows setup benchmark:**"
+    if findings_path is None:
+        return Check(name, marker not in report, "pointer requires findings JSON")
+    try:
+        data = json.loads(findings_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return Check(name, False, f"could not read findings JSON: {exc}")
+    findings = [f for f in _as_list(_as_dict(data).get("findings")) if isinstance(f, dict)]
+    blocks = re.findall(
+        r"\*\*📐 (?:Structural root-cause|Sibling matrix leg)[^\n]*\n"
+        r"(?:(?!\*\*📐 |\n##)[\s\S])*?- \*\*Catalog \(background \+ fix recipe\):\*\*[^\n]*",
+        report)
+    seen = 0
+    for block in blocks:
+        lines = [line for line in block.splitlines() if marker in line]
+        seen += len(lines)
+        if not lines:
+            continue
+        if len(lines) != 1:
+            return Check(name, False, "duplicate benchmark pointer")
+        line = lines[0]
+        matched = False
+        for f in findings:
+            title = _flatten_cell(str(f.get("title") or f.get("pattern") or ""))
+            for glyph in _TYPOGRAPHIC_DASHES:
+                title = title.replace(glyph, "-")
+            if f.get("pattern") != "OPT72" or f"OPT72 · {title}**" not in block.splitlines()[0]:
+                continue
+            samples = f.get("runner_labels")
+            if not isinstance(samples, list) or not samples:
+                continue
+            if any(not isinstance(labels, list) or not any(
+                    re.fullmatch(r"windows(?:-[a-z0-9.]+)*", str(label), re.I) for label in labels)
+                    or any(re.match(r"(?:ubuntu|macos|linux)(?:-|$)", str(label), re.I) for label in labels)
+                    for labels in samples):
+                continue
+            step = str(_as_dict(f.get("decomposition")).get("dominant_step") or "")
+            if re.search(r"setup-dotnet|dotnet\s+workload\s+install|install\s+\.net\s+workloads?|^(?:setup|set\s+up|install)\s+\.net(?:\s+\d+(?:\.\d+)*(?:\.x)?)?(?:\s+sdk)?\s*$", step, re.I):
+                target, anchor, label = ("OPT94", "opt94--the-net-sdk-can-reconcile-unrelated-machine-wide-workloads", "isolated .NET SDK setup")
+            elif re.search(r"(?:nuget|dotnet)\s+restore|restore\s+(?:nuget|\.net)(?:\s+packages)?", step, re.I):
+                target, anchor, label = ("OPT93", "opt93--nuget-restores-to-a-slower-disk-on-windows-runners", "NuGet cache placement")
+            else:
+                continue
+            url = block.split("- **Catalog (background + fix recipe):** ", 1)[1].strip().split("#", 1)[0]
+            expected = (f"{marker} [{target}]({url}#{anchor}) describes a manual benchmark "
+                        f"for {label}; no additional credit is assigned.")
+            if line == expected:
+                matched = True
+        if not matched:
+            return Check(name, False, "benchmark pointer lacks matching Windows .NET OPT72 evidence")
+    if seen != report.count(marker):
+        return Check(name, False, "benchmark pointer outside its structural card")
+    return Check(name, True, "benchmark pointers remain uncredited and evidence-matched")
 
 
 def check_rendered_patterns_exist(report: str, findings_path: Path | None) -> Check:
@@ -2876,6 +3281,41 @@ def check_pole_drill_belongs_to_its_job(report: str, findings_path: Path | None)
                  f"({len(drilled)} drilled job(s))")
 
 
+# A pole's prompt that sends the agent to "the Audit link" tells the truth ONLY when that
+# pole's section renders the `🔗 Audit:` line (`blocking_path._audit_links`, emitted only
+# when a run log was captured for the pole). The 2026-11-03 dogfood report rendered a third
+# pole with no captured log, so no Audit line, while its prompt said "open its log (the
+# Audit link)" - a coding agent sent to a link that is not there. Same dangling-reference
+# class as the cross-run check above, re-derived per pole. Literals pinned to the renderer
+# by `test_phase0_literals_stay_coupled_to_the_renderer`. The report footer's generic
+# "follow the pole's **🔗 Audit** link" note carries markup between the two words, so it
+# never matches the reference pattern.
+_AUDIT_LINK_REF_RE = re.compile(r"\bAudit link\b", re.IGNORECASE)
+_AUDIT_LINE_MARKER = "**🔗 Audit:**"
+
+
+def check_pole_audit_link_reference_resolves(report: str) -> Check:
+    """Each Audit pointer has a linked Audit line outside quoted code blocks."""
+    name = "every pole that cites the Audit link renders its own Audit line"
+    sections = _pole_header_sections(report)
+    citing = [(wf, check, body) for wf, check, body in sections
+              if _AUDIT_LINK_REF_RE.search(body)]
+    if not citing:
+        return Check(name, True, f"{len(sections)} pole(s); none cites an Audit link",
+                     skipped=not sections)
+    dangling = [f"`{wf}` ▸ {check}" for wf, check, body in citing
+                if not any(line.startswith(_AUDIT_LINE_MARKER)
+                           and re.search(r"\[[^\n]*\]\(https?://[^\s)]+\)", line)
+                           for line in _nonfence_markdown_lines(body))]
+    if dangling:
+        return Check(name, False,
+                     "pole(s) cite 'the Audit link' but render no linked '🔗 Audit:' line, "
+                     "so the prompt sends the agent to a link that "
+                     "is not there (capture the pole's log in the data pass, or render it "
+                     "without the pointer): " + "; ".join(dangling))
+    return Check(name, True, f"{len(citing)} pole(s) cite the Audit link; each renders it")
+
+
 # --- gap-fill evidence grounding (issue #106) --------------------------------
 # The phase-4a gap-fill has the driving agent READ a third-party job log and author an analysis
 # JSON `{cause, breakdown, evidence, prompt}` that renders ~verbatim as a `🤖 LLM root-cause
@@ -2938,6 +3378,33 @@ def _ground_transform(text: str) -> str:
     for dash in _TYPOGRAPHIC_DASHES:
         corpus = corpus.replace(dash, "-")
     return corpus
+
+
+# A pole that says nothing is known about what its job spends the time on. The renderer prints
+# these ONLY for a real coverage gap (a captured log, no catalog pattern that names a cause, no
+# gap-fill yet): the Audit line's "no known root-cause pattern matched" and the waterfall's
+# "matched no known root-cause pattern" note. Either one in a pole with no `🤖 LLM root-cause
+# analysis` block means the report's lever shipped with no root cause while its log was in hand
+# (dogfood 2026-11-03: an OPT75-only top pole). Pinned by test_generic_structural_gap_fill.py.
+_NO_ROOT_CAUSE_RE = re.compile(
+    r"no known root-cause pattern matched|matched no known root-cause pattern", re.IGNORECASE)
+
+
+def check_no_root_cause_pole_is_gap_filled(report: str) -> Check:
+    """Every pole that says "no known root-cause pattern matched" (or the waterfall's
+    equivalent) carries the phase-4a `🤖 LLM root-cause analysis` in the same section. A pole
+    whose only catalog match is generic (OPT75 / OPT71) says it too, so this fails the report
+    the dead-end marker check alone let through."""
+    name = "a pole with no known root-cause pattern carries a gap-fill analysis"
+    bad = [f"`{wf}` ▸ {check}" for wf, check, body in _pole_header_sections(report)
+           if _NO_ROOT_CAUSE_RE.search(body) and _LLM_ANALYSIS_MARKER not in body]
+    if bad:
+        return Check(name, False,
+                     "pole(s) say 'no known root-cause pattern matched' with no `🤖 LLM "
+                     "root-cause analysis` attached - phase 4a must read the pole's captured "
+                     "log and re-render with --analysis KEY=PATH: " + "; ".join(bad))
+    return Check(name, True, "no pole says 'no known root-cause pattern matched' without "
+                 "a gap-fill analysis")
 
 
 def check_gap_fill_evidence_grounded(report: str, findings_path: Path | None) -> Check:
@@ -3263,6 +3730,165 @@ def _vr_gate_counts(cp: dict) -> tuple[dict, int]:
         for nm, _p in pos:
             present[nm] = present.get(nm, 0) + 1
     return present, n
+
+
+def _verify_per_pr_floor_split(
+    name: str, report: str, cp: dict, data: dict | None = None,
+) -> Check | None:
+    """Independently re-derive a rendered per-PR sibling-floor split.
+
+    Returns None when the report has no such claim. This deliberately reads
+    only the sampled populations and the stamped critical-path check; it does
+    not trust the renderer's aggregate candidates or a finding's prose.
+    """
+    if "Per-PR split:" not in report:
+        return None
+    stamp = str(cp.get("critical_path_check") or "")
+    bottom = next((line for line in report.splitlines() if "**Bottom line.**" in line), "")
+    bottom_s = _headline_win_s(bottom)
+    populations = _as_list(cp.get("populations"))
+    completeness = _as_list(cp.get("population_check_runs_complete"))
+    completion_aligned = len(completeness) == len(populations) and bool(populations)
+    if data is not None and bottom_s is not None and completion_aligned:
+        crowned = [
+            f for f in _as_list(_as_dict(data).get("findings"))
+            if isinstance(f, dict)
+            and abs((_num(f.get("wall_clock_p50_s")) or 0.0) - bottom_s) <= 0.5
+            and _as_list(f.get("affected_jobs"))
+        ]
+        if len(crowned) == 1:
+            finding = crowned[0]
+            workflow = str(finding.get("workflow_file") or "")
+            graph = _as_dict(_as_dict(data).get("workflow_job_graph")).get(workflow)
+            graph = _as_dict(graph)
+            sampled = [
+                str(check.get("name") or "")
+                for check in _as_list(cp.get("checks"))
+                if isinstance(check, dict) and str(check.get("name") or "")
+                and (not workflow or str(check.get("workflow_file") or "") == workflow)
+            ]
+            resolved: list[str] = []
+            for affected in _as_list(finding.get("affected_jobs")):
+                job_key = str(affected or "")
+                direct = [name for name in sampled if _cmp_name(name) == _cmp_name(job_key)]
+                if direct:
+                    resolved.extend(direct)
+                    continue
+                node = _as_dict(graph.get(job_key))
+                job_name = str(node.get("name") or job_key)
+                is_matrix = bool(node.get("matrix"))
+                resolved.extend(
+                    name for name in sampled
+                    if _vr_job_produces_check(job_name, is_matrix, name))
+            resolved = list(dict.fromkeys(resolved))
+            if resolved:
+                current = str(cp.get("critical_path_check") or "")
+                stamp = current if current in resolved else resolved[0]
+    if not stamp:
+        return Check(name, False, "rendered per-PR split has no critical_path_check stamp")
+    target = _cmp_name(stamp)
+    targets = {target}
+    if "change that speeds *every* leg at once" in report:
+        stamp_wf = ""
+        for check in _as_list(cp.get("checks")):
+            if isinstance(check, dict) and _cmp_name(str(check.get("name") or "")) == target:
+                stamp_wf = str(check.get("workflow_file") or "")
+                break
+        base = re.sub(r"\s*\([^)]*\)\s*$", "", target)
+        for check in _as_list(cp.get("checks")):
+            if not isinstance(check, dict) or str(check.get("workflow_file") or "") != stamp_wf:
+                continue
+            candidate = _cmp_name(str(check.get("name") or ""))
+            if re.sub(r"\s*\([^)]*\)\s*$", "", candidate) == base:
+                targets.add(candidate)
+    rows: list[tuple[float, str, bool, bool]] = []
+    unknown_n = 0
+    incomplete_n = 0
+    total_n = 0
+    completion_aligned = len(completeness) == len(populations)
+    for pop_idx, entry in enumerate(populations):
+        try:
+            _share, checks = entry
+            positive = [(str(check), float(duration)) for check, duration in checks
+                        if float(duration) > 0]
+        except (TypeError, ValueError):
+            continue
+        own = [duration for check, duration in positive if _cmp_name(check) in targets]
+        if not own:
+            if positive:
+                sibling, floor_s = max(positive, key=lambda item: item[1])
+                total_n += 1
+                rows.append((0.0, sibling, False, False))
+            continue
+        total_n += 1
+        siblings = [(check, duration) for check, duration in positive
+                    if _cmp_name(check) not in targets]
+        if not siblings:
+            if completion_aligned and completeness[pop_idx] is True:
+                rows.append((max(own), "", True, True))
+            else:
+                unknown_n += 1
+                if completion_aligned:
+                    incomplete_n += 1
+            continue
+        sibling, floor_s = max(siblings, key=lambda item: item[1])
+        rows.append((max(max(own) - floor_s, 0.0), sibling, True, False))
+    if total_n <= 0:
+        return Check(name, False,
+                     "rendered per-PR split has no usable population containing its pole")
+    expected: list[str] = []
+    zero = [row for row in rows if row[0] <= 0]
+    single = [row for row in rows if row[0] > 0 and row[3]]
+    positive = [row for row in rows if row[0] > 0 and not row[3]]
+    if zero:
+        blockers = {_strip_scope(sibling) for _saving, sibling, _target_ran, _single in zero}
+        blockers.discard("")
+        where = (f" where `{next(iter(blockers))}` runs"
+                 if len(blockers) == 1 and all(row[2] for row in zero)
+                 else " where another check runs longer")
+        expected.append(f"0 on {len(zero)} of {total_n} PRs{where}")
+    if positive:
+        by_cap: dict[float, int] = {}
+        for saving, _sibling, _target_ran, _single in positive:
+            cap = round(saving, 1)
+            by_cap[cap] = by_cap.get(cap, 0) + 1
+        for cap, count in sorted(by_cap.items()):
+            other = "the other " if zero and len(zero) + count == total_n else ""
+            expected.append(
+                f"up to {_fmt_clock(cap)} on {other}{count} of {total_n} PRs")
+    if single:
+        by_cap: dict[float, int] = {}
+        for saving, _sibling, _target_ran, _single in single:
+            cap = round(saving, 1)
+            by_cap[cap] = by_cap.get(cap, 0) + 1
+        for cap, count in sorted(by_cap.items()):
+            other = "the other " if zero and len(zero) + count == total_n else ""
+            expected.append(
+                f"up to {_fmt_clock(cap)} on {other}{count} of {total_n} PRs "
+                "where it was the only check")
+    if incomplete_n:
+        expected.append(
+            f"unknown on {incomplete_n} of {total_n} PRs with an incomplete check-runs read")
+    legacy_unknown_n = unknown_n - incomplete_n
+    if legacy_unknown_n:
+        expected.append(
+            f"unknown on {legacy_unknown_n} of {total_n} PRs with a missing sibling observation")
+    missing = [claim for claim in expected if claim not in report]
+    if missing:
+        return Check(name, False,
+                     "per-PR sibling-floor split disagrees with populations; missing: "
+                     + "; ".join(missing))
+    max_saving = max((row[0] for row in rows), default=0.0)
+    rendered = _headline_win_s(bottom)
+    if rendered is None:
+        return Check(name, False, "per-PR split rendered without a parseable Bottom-line win")
+    if rendered > max_saving + 0.5:
+        return Check(name, False,
+                     f"Bottom-line win {_fmt_clock(rendered)} exceeds the independently re-derived "
+                     f"maximum per-PR saving {_fmt_clock(max_saving)}")
+    return Check(name, True,
+                 f"per-PR split matches {total_n} sampled populations and Bottom-line "
+                 f"{_fmt_clock(rendered)} <= maximum {_fmt_clock(max_saving)}")
 
 
 def _rare_demoted_check_names(data: dict) -> set[str]:
@@ -3740,11 +4366,21 @@ def check_headline_floor_presence_reconciled(report: str, findings_path: Path | 
     except (OSError, json.JSONDecodeError):
         return Check(name, True, "findings unreadable", skipped=True)
     cp = _as_dict(_as_dict(data).get("pr_critical_path"))
+    split_check = _verify_per_pr_floor_split(name, report, cp, data)
+    if split_check is not None and not split_check.ok:
+        return split_check
+
+    def _with_split(presence_check: Check) -> Check:
+        """A rendered split is an additional invariant, never an early exit."""
+        if split_check is None or not presence_check.ok:
+            return presence_check
+        return Check(name, True, f"{split_check.detail}; {presence_check.detail}")
+
     stamp = cp.get("critical_path_check")
     # A non-string / empty stamp is a malformed or stampless bundle — degrade to the SAME SKIP as an
     # empty findings container (the wrong-type-container degradation contract), never a spurious FAIL.
     if not isinstance(stamp, str) or not stamp:
-        return Check(name, True, "no critical_path_check stamped", skipped=True)
+        return _with_split(Check(name, True, "no critical_path_check stamped", skipped=True))
     stamped = _cmp_name(stamp)
 
     # The named slowest check's OWN p50 — a FIELD read from checks[], keyed the same way the engine
@@ -3763,12 +4399,13 @@ def check_headline_floor_presence_reconciled(report: str, findings_path: Path | 
             if nm == str(stamp):
                 break
     if slowest_p50 is None:
-        return Check(name, True, "critical_path_check carries no numeric checks[].p50_s", skipped=True)
+        return _with_split(Check(
+            name, True, "critical_path_check carries no numeric checks[].p50_s", skipped=True))
 
     present_map, npop = _vr_gate_counts(cp)          # the engine's _gate_counts (present, n)
     if not npop:
-        return Check(name, True, "no per-PR populations to re-derive presence/floor from",
-                     skipped=True)
+        return _with_split(Check(
+            name, True, "no per-PR populations to re-derive presence/floor from", skipped=True))
     spresent = present_map.get(str(stamp))
     if spresent is None:
         for nm, cnt in present_map.items():
@@ -3781,20 +4418,22 @@ def check_headline_floor_presence_reconciled(report: str, findings_path: Path | 
     # None below the stability floor, so the engine keeps the slowest check's p50 and lowers nothing).
     maxima = [max(p for _n, p in pr) for pr in _populations_per_pr(cp) if pr]
     if len(maxima) < _VR_RARE_PRESENCE_MIN_PR:
-        return Check(name, True,
-                     f"only {len(maxima)} per-PR populations (< {_VR_RARE_PRESENCE_MIN_PR}) — the "
-                     "population floor is not derivable, so the slowest check's p50 stands unlowered",
-                     skipped=True)
+        return _with_split(Check(
+            name, True,
+            f"only {len(maxima)} per-PR populations (< {_VR_RARE_PRESENCE_MIN_PR}) — the "
+            "population floor is not derivable, so the slowest check's p50 stands unlowered",
+            skipped=True))
     pop_floor = statistics.median(maxima)
 
     # The engine LOWERS the floor (→ the Form-2 contradiction risk) ⇔ the slowest is non-universal AND
     # the population floor is strictly below its p50 — EXACTLY blocking_path's `floor_p50 = _pop_floor`
     # guard (`0 < _spresent < npop` and `_pop_floor < slowest_p50`). Otherwise no reconciliation is owed.
     if not (0 < spresent < npop and pop_floor < slowest_p50):
-        return Check(name, True,
-                     f"`{stamp}` floor not lowered (present {spresent}/{npop}, "
-                     f"pop-floor {_fmt_clock(pop_floor)} vs p50 {_fmt_clock(slowest_p50)}) — no "
-                     "reconciliation owed", skipped=True)
+        return _with_split(Check(
+            name, True,
+            f"`{stamp}` floor not lowered (present {spresent}/{npop}, "
+            f"pop-floor {_fmt_clock(pop_floor)} vs p50 {_fmt_clock(slowest_p50)}) — no "
+            "reconciliation owed", skipped=True))
 
     # PHYSICAL BOUND (issue #24): the renderer caps the population floor at the MEASURED makespan p50
     # (the median per-PR span-capped wall) — a re-run-inflated per-PR check p50 can leave `pop_floor`
@@ -3838,9 +4477,10 @@ def check_headline_floor_presence_reconciled(report: str, findings_path: Path | 
                      f"was lowered (present {spresent}/{npop}), so the headline must disclose either "
                      "the presence caveat (minority-present) or the conditional-p50 overstatement "
                      f"(majority-present); expected {presence_recon!r} or {overstatement_recon!r}")
-    return Check(name, True,
-                 f"headline reconciles `{stamp}` ({spresent}/{npop} presence, ~"
-                 f"{_fmt_clock(slowest_p50)}) with the {merge_dur} population floor")
+    return _with_split(Check(
+        name, True,
+        f"headline reconciles `{stamp}` ({spresent}/{npop} presence, ~"
+        f"{_fmt_clock(slowest_p50)}) with the {merge_dur} population floor"))
 
 
 # The presence-CAUSAL headline template (blocking_path `elif gate_is_slowest:`, non-universal
@@ -4177,6 +4817,7 @@ def check_headline_chain_matches_stamp(report: str, findings_path: Path | None,
                  f"facts-derived headroom ~{_fmt_clock(win_bound)}"
                  + (f"; undrilled member(s) skipped: {', '.join(undrilled)}"
                     if undrilled else ""))
+
 
 
 # --- The physical-bounds invariant family (issue #25) ------------------------------------------
@@ -4946,7 +5587,7 @@ _RUNNER_MINUTE_SPINE_REQUIRED_HEADERS = {
     "attempt": "attempt_filter",
     "volume": "volume_filter",
     "raw min/mo": "raw_compute_runner_min_per_month",
-    "billable min/mo": "billable_equiv_min_per_month",
+    "rounded-up min/mo": "billable_equiv_min_per_month",
     "share": "share_of_all_row_total",
 }
 _VR_RUNNER_MINUTE_SPINE_CAP = 12
@@ -4977,10 +5618,74 @@ def _load_findings_doc(findings_path: Path | None) -> tuple[dict, str | None]:
     return _as_dict(data), None
 
 
+# Twin of collect_runs._OPT64_MIN_RETRIED_RUNS / blocking_path._OPT64_MIN_RETRIED_RUNS
+# (test_opt64_minimum_sample.py pins all three equal). Re-derived here from the
+# findings JSON, never read from the report.
+_VR_OPT64_MIN_RETRIED_RUNS = 3
+
+
+def _vr_opt64_hold_reason(f: dict) -> str | None:
+    """Why an OPT64 finding may NOT be ranked, or None when it may. The engine's
+    `rerun_sample` stamp is exact; a legacy finding without it counts its evidence
+    table for sample size only; missing retry outcomes keep it advisory. A
+    dominant job that passed on the retry is a
+    flaky-test signal (SKILL.md admission rule 3) whatever the count."""
+    if str(f.get("pattern") or "") != "OPT64" or f.get("advisory"):
+        return None
+    stamp = _as_dict(f.get("rerun_sample"))
+    n = stamp.get("retried_runs")
+    valid = lambda value: isinstance(value, int) and not isinstance(value, bool) and value >= 0
+    if valid(n):
+        passed, unsettled = stamp.get("passed_on_retry"), stamp.get("unsettled_on_retry")
+        known = valid(passed) and valid(unsettled) and passed + unsettled <= n
+    else:
+        n = len(_as_list(_as_dict(_as_dict(f.get("measured_evidence")).get("table")).get("rows")))
+        known = False
+    if not known:
+        if n < _VR_OPT64_MIN_RETRIED_RUNS:
+            return f"rests on {n} retried run(s), below the minimum of {_VR_OPT64_MIN_RETRIED_RUNS}"
+        return "retry outcomes are unavailable or invalid; re-collect before crediting a saving"
+    runs = f"{n} retried run{'s' if n != 1 else ''}"
+    if passed > 0:
+        return f"in {passed} of {runs} the dominant job passed on the retry (flaky signal)"
+    if unsettled > 0:
+        return f"in {unsettled} of {runs} the dominant job did not fail again on the retry"
+    if n < _VR_OPT64_MIN_RETRIED_RUNS:
+        return f"rests on {runs}, below the minimum of {_VR_OPT64_MIN_RETRIED_RUNS}"
+    return None
+
+
+def check_opt64_minimum_sample(report: str, findings_path: Path | None) -> Check:
+    """No R-row may rank an OPT64 finding that rests on fewer retried runs than the
+    minimum, or whose dominant job passed on a retry. Reads the RAW findings JSON
+    (what the engine stamped), not the renderer's held view."""
+    name = "OPT64 is ranked only on enough retried runs"
+    ranked = [fid for fid, pat in _tier2_markers(report) if pat == "OPT64"]
+    if not ranked:
+        return Check(name, True, "no ranked OPT64 row", skipped=True)
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return Check(name, False, f"ranked OPT64 row(s) {ranked} but {err}")
+    by_id = {_tier2_id(f, idx): f for idx, f in enumerate(_as_list(data.get("findings")), 1)
+             if isinstance(f, dict)}
+    bad = []
+    for fid in ranked:
+        f = by_id.get(fid)
+        if f is None:
+            bad.append(f"{fid}: no such finding")
+            continue
+        why = _vr_opt64_hold_reason(f)
+        if why:
+            bad.append(f"{fid}: {why}")
+    return Check(name, not bad, "; ".join(bad) if bad
+                 else f"{len(ranked)} ranked OPT64 row(s) meet the minimum sample")
+
+
 def _tier2_findings(data: dict) -> list[dict]:
     return [f for f in _as_list(data.get("findings"))
             if isinstance(f, dict)
             and not f.get("advisory")
+            and _vr_opt64_hold_reason(f) is None
             and f.get("sizing_basis") == "measured"
             and isinstance(f.get("tier2_neutrality"), dict)
             and bool(f.get("tier2_neutrality"))
@@ -5003,6 +5708,7 @@ def _has_tier2_top_level_surface(data: dict) -> bool:
 def _has_positive_runner_min_candidate(data: dict) -> bool:
     return any(isinstance(f, dict)
                and not f.get("advisory")
+               and _vr_opt64_hold_reason(f) is None
                and not str(f.get("tier2_superseded_by") or "").strip()
                and (_num(f.get("runner_min_saving")) or 0.0) > 0
                for f in _as_list(data.get("findings")))
@@ -5817,6 +6523,173 @@ def check_runner_minute_spine_contract(report: str, findings_path: Path | None) 
     if problems:
         return Check(name, False, "; ".join(problems[:12]))
     return Check(name, True, f"runner_minute_spine rows re-derived ({len(rows)} row(s))")
+
+
+_SPINE_CONTENTS_COUNT_RE = re.compile(
+    r"(?:backed by a (\d+)-row cost spine|"
+    r"\*\*Runner-minute cost spine\*\* [-—] (\d+) workflow/job rows?)"
+    r"(?: \(\+(\d+) more runner-minute rows? hidden\))?")
+_SPINE_GLUED_HIDDEN_RE = re.compile(
+    r"^\|[^\n]*\n\+\d+\s+more\s+runner-minute\s+rows?\s+hidden", re.MULTILINE)
+
+
+def check_cost_spine_contents_count_matches_table(report: str,
+                                                  findings_path: Path | None) -> Check:
+    """The Contents line counts the cost-spine rows the table SHOWS and names the hidden
+    ones as the table does, and the table's hidden-row line is set apart from the table
+    (GitHub-flavoured markdown folds a plain line that directly follows a table into it as
+    one more row). 2026-11-03 dogfood: "a 13-row cost spine" over a 12-row table."""
+    name = "cost-spine Contents count matches the rows the table shows"
+    if not _RUNNER_MINUTE_SPINE_MARKER_RE.search(report or ""):
+        return Check(name, True, "no rendered cost spine", skipped=True)
+    rows, _total, hidden, err = _parse_runner_minute_spine_table(report)
+    if err:
+        return Check(name, True, f"cost-spine table unparsed ({err}); the spine "
+                     "contract check reports it", skipped=True)
+    hidden = hidden or 0
+    problems: list[str] = []
+    for m in _SPINE_CONTENTS_COUNT_RE.finditer(report or ""):
+        stated = int(m.group(1) or m.group(2))
+        stated_hidden = int(m.group(3) or 0)
+        if stated != len(rows) or stated_hidden != hidden:
+            problems.append(
+                f"Contents says {m.group(0)!r} but the table shows {len(rows)} row(s) "
+                f"with {hidden} hidden")
+    marker = _RUNNER_MINUTE_SPINE_MARKER_RE.search(report)
+    if marker and _SPINE_GLUED_HIDDEN_RE.search(report[marker.end():]):
+        problems.append("the hidden-row line directly follows the table, so GitHub renders "
+                        "it as a table row; separate it with a blank line")
+    if problems:
+        return Check(name, False, "; ".join(problems))
+    return Check(name, True, f"Contents and table agree: {len(rows)} shown, {hidden} hidden")
+
+
+_DRILL_LOG_FETCHED_RE = re.compile(
+    r"pole jobs' raw logs, fetched \*\*([^*]+)\*\*"
+    r"(?: \((the same capture as|the same day as|newer than|older than) "
+    r"the critical-path audit above\))?")
+
+
+def _vr_capture_time(value: str):
+    import datetime as _vdt
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = _vdt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_vdt.timezone.utc)
+    return parsed, bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", text))
+
+
+def check_drill_log_capture_relation(report: str, findings_path: Path | None) -> Check:
+    """The Data sources line compares the drill logs' fetch time with the audit's scan
+    time truthfully: equal is "the same capture", never "newer". 2026-11-03 dogfood: two
+    identical timestamps were called "newer than the critical-path audit above"."""
+    name = "drill-log fetch time is compared truthfully with the audit's scan time"
+    m = _DRILL_LOG_FETCHED_RE.search(report or "")
+    if not m:
+        return Check(name, True, "no drill-log provenance line rendered", skipped=True)
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return Check(name, True, err, skipped=True)
+    import datetime as _vdt
+    cap, scan = _vr_capture_time(m.group(1)), _vr_capture_time(str(data.get("scanned_at") or ""))
+    if cap is None or scan is None:
+        expected = None
+    elif cap[1] or scan[1]:
+        cd = cap[0].astimezone(_vdt.timezone.utc).date()
+        sd = scan[0].astimezone(_vdt.timezone.utc).date()
+        expected = ("the same day as" if cd == sd else
+                    "newer than" if cd > sd else "older than")
+    else:
+        expected = ("the same capture as" if cap[0] == scan[0] else
+                    "newer than" if cap[0] > scan[0] else "older than")
+    if m.group(2) != expected:
+        return Check(name, False,
+                     f"logs fetched {m.group(1)!r}, audit scanned "
+                     f"{data.get('scanned_at')!r}: the line says {m.group(2)!r}, "
+                     f"expected {expected!r}")
+    return Check(name, True, f"relation {expected!r} matches the timestamps")
+
+
+# Mirror of blocking_path's GitHub-hosted label rule, kept independent on purpose.
+_VR_GITHUB_HOSTED_LABEL_RE = re.compile(
+    r"^(?:ubuntu-(?:latest|slim|(?:18|20|22|24|26)\.04)(?:-arm)?|"
+    r"windows-(?:latest|2019|2022|2025)(?:-vs2026)?|windows-11(?:-vs2026)?-arm|"
+    r"macos-(?:latest|11|12|13|14|15|26)(?:-(?:intel|large|xlarge))?|xcode-27)$",
+    re.IGNORECASE)
+
+
+def _vr_is_github_hosted_label(label: object) -> bool:
+    toks = str(label or "").split()
+    if not toks or any(t.lower() == "self-hosted" for t in toks):
+        return False
+    return all(_VR_GITHUB_HOSTED_LABEL_RE.match(t) for t in toks)
+
+
+def _vr_spine_host_note(spine: dict) -> str:
+    """Rebuild the cost spine's runner-host sentence from the source rows (MIRROR of
+    blocking_path._spine_runner_host_note)."""
+    rows = [_as_dict(r) for r in _as_list(spine.get("rows"))]
+    hosted = sum(_num(r.get("billable_equiv_min_per_month")) or 0.0
+                 for r in rows if _vr_is_github_hosted_label(r.get("runner_label")))
+    other_rows = [r for r in rows if not _vr_is_github_hosted_label(r.get("runner_label"))]
+    other = sum(_num(r.get("billable_equiv_min_per_month")) or 0.0 for r in other_rows)
+    labels = sorted({str(r.get("runner_label") or "").strip() or "unknown runner"
+                     for r in other_rows})
+    total = _num(_as_dict(spine.get("totals")).get("billable_equiv_min_per_month"))
+    total = hosted + other if total is None else total
+    shown = ", ".join(
+        "`" + lb.replace("\r", " ").replace("\n", " ").replace("|", "\\|").strip() + "`"
+        for lb in labels[:4])
+    if len(labels) > 4:
+        shown += f" +{len(labels) - 4} more"
+    lead = ("Rounded-up min/mo rounds each job up to a whole minute, the way per-minute "
+            "runner billing counts it. ")
+    custom = (" A GitHub larger runner with a custom name is not recognised and "
+              "counts here too.")
+    not_billed = (" GitHub bills only the runners it hosts, so minutes on a self-hosted or "
+                  "third-party runner are not on the GitHub bill.")
+    if not labels:
+        return lead + f"All {total:.3f} min/mo ran on GitHub-hosted runner labels."
+    if len(other_rows) == len(rows):
+        return lead + (f"None of the {total:.3f} min/mo ran on GitHub-hosted runner labels "
+                       f"({shown}).") + custom + not_billed
+    return lead + (f"{hosted:.3f} of the {total:.3f} min/mo ran on GitHub-hosted runner labels "
+                   f"and {other:.3f} on labels not recognised as GitHub-hosted ({shown}).") + custom + not_billed
+
+
+def check_cost_spine_runner_host_split(report: str, findings_path: Path | None) -> Check:
+    """The cost spine never calls its minutes GitHub-billable: the rounded-up column is
+    explained, and the minutes on runners GitHub does not host are named, re-derived from
+    the source rows. 2026-11-03 dogfood: a "Billable min/mo" column and its Share counted
+    `starsling-ubuntu-24.04` minutes, which GitHub does not bill."""
+    name = "cost spine names the minutes on runners GitHub does not host"
+    marker = _RUNNER_MINUTE_SPINE_MARKER_RE.search(report or "")
+    if not marker:
+        return Check(name, True, "no rendered cost spine", skipped=True)
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return Check(name, False, f"rendered cost spine without readable findings JSON: {err}")
+    spine = data.get("runner_minute_spine")
+    if not isinstance(spine, dict):
+        return Check(name, False, "rendered cost spine without a runner_minute_spine block")
+    section = report[marker.end():]
+    nxt = re.search(r"^##\s+", section, re.MULTILINE)
+    section = section[:nxt.start()] if nxt else section
+    problems: list[str] = []
+    if re.search(r"\|\s*billable min/mo\s*\|", section, re.IGNORECASE):
+        problems.append("the minutes column is headed Billable, but it counts every runner")
+    expected = _vr_spine_host_note(spine)
+    if expected not in section:
+        problems.append(f"runner-host sentence missing or not re-derivable (expected: "
+                        f"{expected!r})")
+    if problems:
+        return Check(name, False, "; ".join(problems))
+    return Check(name, True, "runner-host split re-derived from the spine rows")
 
 
 def _text_from_json(v: object) -> str:
@@ -8404,6 +9277,9 @@ def _vr_opt80_merge_gating_problems(f: dict, data: dict) -> list[str]:
     if data.get("required_checks_complete") is not True:
         return ["the required-check read was not complete, so no job is shown to "
                 "be on the merge-gating path"]
+    if _vr_required_reachability_unresolved(data):
+        return ["a required status is published by this repo's own workflow and "
+                "names no job, so which jobs the merge waits on is unknown"]
     req = {str(r) for r in _as_list(data.get("required_checks"))}
     rc, rj, jk = (str(mg.get("required_check") or ""), str(mg.get("required_job") or ""),
                   str(mg.get("job_key") or ""))
@@ -8625,6 +9501,30 @@ _VR_OPT80_MERGE_WAIT_CLAIM_RE = re.compile(
 _VR_OPT80_SLOWEST_JOB = "is this workflow's slowest job"
 
 
+def _vr_required_reachability_unresolved(data: dict) -> bool:
+    """Minimal own copy of `collect_runs._required_reachability_unresolved` (issue
+    #119): some required context is one a workflow that posts commit statuses posts
+    (`workflow_status_publishers`: exactly equal to one of an entry's `contexts`, or
+    its `names` fallback) and no YAML job in `workflow_job_graph` is that context's
+    check-run. Such a context (an in-repo `All CI` aggregate) waits on jobs no
+    `needs:` edge records, so no job can be called off the merge wait."""
+    pubs = _as_dict(data.get("workflow_status_publishers"))
+    posted = {str(s).strip() for p in pubs.values() if isinstance(p, dict)
+              for k in ("contexts", "names") for s in _as_list(p.get(k))}
+    if not posted:
+        return False
+    graph = _as_dict(data.get("workflow_job_graph"))
+    names = data.get("workflow_names")
+    for r in {str(x) for x in _as_list(data.get("required_checks"))}:
+        if r.strip() not in posted:
+            continue
+        if not any(_vr_opt80_check_names_job(r, str(k), _as_dict(n),
+                                             _vr_opt80_workflow_prefixes(str(w), names))
+                   for w, wjobs in graph.items() for k, n in _as_dict(wjobs).items()):
+            return True
+    return False
+
+
 def _vr_opt80_tail_withheld_expected(f: dict, data: dict) -> "set[str] | None":
     """The reasons the stamped facts allow, in the collector's gate order, or
     None when the doc predates the facts (no `declared_pr_workflows`)."""
@@ -8641,6 +9541,20 @@ def _vr_opt80_tail_withheld_expected(f: dict, data: dict) -> "set[str] | None":
             and _as_list(data.get("required_checks"))
             and _as_dict(_as_dict(data.get("workflow_job_graph")).get(wf))):
         return {"merge_gating_unknown"}
+    # A required status the repo publishes itself, naming no job: which jobs the
+    # merge waits on is unknown, so "not merge-gating" is not a stamped fact.
+    if _vr_required_reachability_unresolved(data):
+        return {"merge_gating_unknown"}
+    # A shared check name cannot identify one workflow's job. Mirror the
+    # collector's ambiguity refusal, including workflow-prefix disambiguation.
+    graph = _as_dict(data.get("workflow_job_graph"))
+    for required in _as_list(data.get("required_checks")):
+        hits = [(str(w), str(k)) for w, jobs in graph.items()
+                for k, node in _as_dict(jobs).items()
+                if _vr_opt80_check_names_job(str(required), str(k), _as_dict(node),
+                    _vr_opt80_workflow_prefixes(str(w), data.get("workflow_names")))]
+        if len(hits) > 1 and any(w == wf for w, _ in hits):
+            return {"merge_gating_unknown"}
     return {"not_merge_gating", "tail_not_derivable"}
 
 
@@ -10485,8 +11399,11 @@ def check_tier2_total_deoverlapped(report: str, findings_path: Path | None,
         if not isinstance(f, dict):
             continue
         pat = str(f.get("pattern") or "")
-        if (f.get("advisory") or str(f.get("tier2_superseded_by") or "").strip()
-                or pat == "OPT43" or pat in _VR_PER_POLE_STRUCTURAL
+        # A held OPT64 is advisory to the renderer (`_admitted_findings`): no credit,
+        # so nothing for the lead to account for.
+        if (f.get("advisory") or _vr_opt64_hold_reason(f)
+                or str(f.get("tier2_superseded_by") or "").strip()
+                or pat in {"OPT43", "OPT97"} or pat in _VR_PER_POLE_STRUCTURAL
                 or (_num(f.get("runner_min_saving")) or 0.0) <= 0
                 or id(f) in promoted_ids):
             continue
@@ -10786,6 +11703,8 @@ def _tier2_opt64_group_cover_ok(f: dict, data: dict) -> bool:
             and str(g.get("pattern") or "") == "OPT64"
             and str(g.get("workflow_file") or "").strip() == wf
             and not g.get("advisory")
+            # A held sibling claims nothing: the renderer drops it to advisory.
+            and _vr_opt64_hold_reason(g) is None
             and g.get("sizing_basis") == "measured"
             and isinstance(g.get("tier2_neutrality"), dict)
             and bool(g.get("tier2_neutrality"))
@@ -10831,9 +11750,14 @@ def _tier2_expected_source_line(f: dict, data: dict) -> str | None:
                 f"`{_flatten_cell(wf)}`")
     else:
         head = (f"matched {len(rows)} row{plural} for `{_flatten_cell(wf)}`")
+    # Every pattern but OPT65 credits against RAW minutes (`_tier2_source_rows_cover_saving`),
+    # so a reader comparing the saving with the larger billable figure needs the reason.
+    why = ("" if str(f.get("pattern") or "") == "OPT65" else
+           " The saving is credited in raw minutes; the rounded-up figure rounds each "
+           "job up to a whole minute.")
     return (f"**Source block:** `runner_minute_spine` {head}; "
             "current measured cost spine for those rows is "
-            f"{raw:.3f} raw min/mo, {billable:.3f} billable min/mo.")
+            f"{raw:.3f} raw min/mo, {billable:.3f} rounded-up min/mo.{why}")
 
 
 def _tier2_rendered_source_lines(body: str) -> list[str]:
@@ -11177,6 +12101,31 @@ def check_pole_not_reframed_as_hygiene(report: str, findings_path: Path | None) 
             # place the rules and ledger reach the reader), so it is no
             # contradiction of the pole headline. Mirror that exemption.
             continue
+        if pat == "OPT32":
+            measurement = f.get("path_filter_measurement")
+            if isinstance(measurement, dict):
+                sampled = measurement.get("sampled_prs")
+                skipped = measurement.get("would_skip_prs")
+                rate = measurement.get("hit_rate")
+                stamp_ok = (
+                    isinstance(sampled, int) and not isinstance(sampled, bool) and sampled > 0
+                    and isinstance(skipped, int) and not isinstance(skipped, bool)
+                    and 0 <= skipped <= sampled
+                    and isinstance(rate, (int, float)) and not isinstance(rate, bool)
+                    and math.isclose(float(rate), round(skipped / sampled, 4), abs_tol=5e-5)
+                )
+                modeled_ok = (
+                    skipped == 0
+                    or (f.get("runner_min_unrealizable") is True
+                        and isinstance(f.get("runner_min_unrealizable_s"), (int, float))
+                        and not isinstance(f.get("runner_min_unrealizable_s"), bool)
+                        and float(f["runner_min_unrealizable_s"]) > 0)
+                )
+                if stamp_ok and modeled_ok and f.get("runner_min_saving") is None:
+                    # A measured OPT32 row is descriptive rather than a second
+                    # credited pole lever: a positive result renders an explicitly
+                    # modeled upper bound, and zero is itself useful evidence.
+                    continue
         rm = f.get("runner_min_saving")
         rm = float(rm) if isinstance(rm, (int, float)) else 0.0
         wc = f.get("wall_clock_p50_s")
@@ -11255,9 +12204,19 @@ def check_workflow_gate_frequency_matches(report: str, findings_path: Path | Non
     except (OSError, json.JSONDecodeError):
         return Check(name, True, "findings unreadable", skipped=True)
     cp = _as_dict(_as_dict(data).get("pr_critical_path"))
+    # Claims first: the renderer only prints "gates N/M" from `populations` (bimodal-only), so a run
+    # without them legitimately renders no claim — that is the SKIP. A rendered claim with no
+    # populations to check it against is unverifiable output, never a quiet SKIP (bug 4).
+    claims = _GATE_FREQ_RE.findall(report)
+    if not claims:
+        return Check(name, True, "no rendered '`wf` gates N/M PRs' claim", skipped=True)
     pole_count, npop, dropped = _populations_pole_counts(cp)
     if not npop:
-        return Check(name, True, "no per-PR populations to re-derive gate frequency from", skipped=True)
+        return Check(name, False,
+                     f"{len(claims)} rendered '`wf` gates N/M PRs' claim(s) but no per-PR "
+                     "populations to re-derive them from — per-PR data "
+                     + ("present but not readable" if _vr_per_pr_data_present(cp)
+                        else "absent, so the claim has no basis"))
     wf_freq: dict[str, int] = {}
     for c in _as_list(cp.get("checks")):
         if not isinstance(c, dict):
@@ -11266,9 +12225,6 @@ def check_workflow_gate_frequency_matches(report: str, findings_path: Path | Non
         if wf.endswith((".yml", ".yaml")):
             wf_freq[wf] = wf_freq.get(wf, 0) + pole_count.get(
                 str(c.get("name") or c.get("check") or ""), 0)
-    claims = _GATE_FREQ_RE.findall(report)
-    if not claims:
-        return Check(name, True, "no rendered '`wf` gates N/M PRs' claim", skipped=True)
     bad: list[str] = []
     checked = 0
     unjoinable = 0
@@ -11329,8 +12285,15 @@ def check_spine_heavy_check_disclosed(report: str, findings_path: Path | None) -
     cp = _as_dict(_as_dict(data).get("pr_critical_path"))
     per_pr = _populations_per_pr(cp)
     pole_secs = _pole_header_sections(report)
-    if not per_pr or not pole_secs:
-        return Check(name, True, "no populations / no drilled poles", skipped=True)
+    if not pole_secs:
+        return Check(name, True, "no drilled poles", skipped=True)
+    if not per_pr:
+        # Not the bug-4 class: without `populations` the RENDERER floors on global presence, not on
+        # per-pole co-occurrence, and `chain_facts` record chain members only (no co-occurrence),
+        # so there is no per-pole floor here to disagree with. Say so rather than "no data".
+        return Check(name, True, "no populations stamped (no bimodal gate): the renderer floors on "
+                     "global presence on this run, outside this per-pole co-occurrence check",
+                     skipped=True)
     # Effective-floor value map (bimodal-aware, mirroring `_eff_floor_s`) + each check's workflow file
     # (for the sibling-leg corroboration). A floor is selected/valued by `eff`, not the bare p50.
     eff_by: dict[str, float] = {}
@@ -11513,6 +12476,7 @@ _CONFIG_ERA_DISCLOSED_MARKER = "measures the previous configuration"
 _CONFIG_ERA_NARROWED_MARKER = "narrowed to the current configuration"
 # The post_only_thin provisional marker (issue #74) — mirrors blocking_path._CONFIG_ERA_THIN_MARKER.
 _CONFIG_ERA_THIN_MARKER = "treat these numbers as provisional"
+_RUNNER_LABEL_ERA_MARKER = "runner labels changed within the sample"
 _RECOVERABLE_RECONCILE_MARKER = "slow-mode/worst-case figure on the PRs where"
 # A recoverable ceiling within this margin of the typical wait is coherent read alone (clock
 # rounding + benign aggregation) — only a ceiling clearly ABOVE the wait needs the reconciliation.
@@ -11602,6 +12566,31 @@ def check_config_era_boundary(report: str, findings_path: Path | None,
     if not eras:
         return Check(name, True, "no workflow sample straddled a config change — no era to bind",
                      skipped=True)
+    runner_eras = [e for e in eras if e.get("rule") == "runner_label_change"]
+    report_lines = report.splitlines()
+    for era in runner_eras:
+        counts = [x for x in _as_list(era.get("runner_label_counts"))
+                  if isinstance(x, dict) and x.get("label")]
+        expected = [
+            f"`{_strip_scope(str(x.get('label')))}` "
+            f"({int(_num(x.get('count')) or 0)} runs)"
+            for x in counts
+        ]
+        wf = _strip_scope(str(era.get("workflow_file") or ""))
+        job = _strip_scope(str(era.get("job") or "gate"))
+        identity = f"`{wf}` / `{job}` {_RUNNER_LABEL_ERA_MARKER}"
+        matching_line = next((line for line in report_lines
+                              if identity in line
+                              and all(piece in line for piece in expected)), "")
+        if len(expected) != 2 or not matching_line:
+            return Check(
+                name, False,
+                "a detected runner-label era is stamped in findings but the report does not "
+                "disclose its workflow/job and both observed runner labels with their sample counts")
+    eras = [e for e in eras if e.get("rule") != "runner_label_change"]
+    if not eras:
+        return Check(name, True,
+                     f"{len(runner_eras)} runner-label era(s) carry labels and counts")
     # Issue #116: a pre-era straddle owes the LOUD disclosure only when it can touch the headline.
     # A push/cron-only or check-neutral straddle (0 PR-gating spine checks) legitimately suppresses
     # its global caveat — the renderer gates on the same `_era_fact_spine_relevant`, so excluding it
@@ -11719,9 +12708,9 @@ def check_era_enumeration_bound(report: str, findings_path: Path | None,
     `kept_checks` alongside. This guard re-derives the bind: NO check the report enumerates (from
     `pr_critical_path.checks` / `poles` / `populations`) may be a member of any era's
     `other_era_checks` — i.e. no rendered pole/check is absent from the kept era's stamped run set.
-    FAILs loudly and names the leak. A LOUD NARROW SKIP on a straddle artifact that predates the
-    #69 enumeration stamps (a stamped straddle but no `other_era_checks`/`kept_checks` key anywhere
-    — nothing to re-derive against). Standalone; keys on `pr_critical_path`."""
+    FAILs loudly and names the leak. Every config-era fact activates the guard; older facts without
+    per-era enumeration sets have no stamped other-era names to compare, but are still checked rather
+    than mislabeled as uncovered. Standalone; keys on `pr_critical_path`."""
     name = "check enumeration is bound to the kept config era (no other-config check leaks in)"
     if not findings_path:
         return Check(name, True, "no findings — no config-era stamp to bind", skipped=True)
@@ -11737,14 +12726,12 @@ def check_era_enumeration_bound(report: str, findings_path: Path | None,
     if not eras:
         return Check(name, True, "no workflow sample straddled a config change — no era to bind",
                      skipped=True)
-    # LOUD NARROW SKIP: a straddle is stamped but none carries the #69 enumeration stamps — a
-    # pre-#69 artifact whose enumeration was never era-scoped. Nothing to re-derive against (not a
-    # clean pass: the report may well leak, we just can't prove it from this artifact).
-    stamped = [e for e in eras if "other_era_checks" in e or "kept_checks" in e]
-    if not stamped:
-        return Check(name, True, "straddle stamped but no per-era enumeration sets "
-                     "(other_era_checks/kept_checks) — pre-#69 artifact, enumeration bind not "
-                     "re-derivable. Coverage gap, not a clean pass.", skipped=True)
+    # The renderer keys its era banner on every workflow fact in `config_eras`, not on the later
+    # enumeration-set additions. Use that same stamp here so a rendered era banner can never coexist
+    # with a verifier SKIP. Missing sets simply contribute no other-era names to this guard.
+    stamped = eras
+    without_sets = sum(1 for e in stamped
+                       if "other_era_checks" not in e and "kept_checks" not in e)
     other_era: set[str] = set()
     for e in stamped:
         for n in _as_list(e.get("other_era_checks")):
@@ -11752,6 +12739,10 @@ def check_era_enumeration_bound(report: str, findings_path: Path | None,
             if cn:
                 other_era.add(cn)
     if not other_era:
+        if without_sets:
+            return Check(name, True,
+                         f"{without_sets} config-era fact(s) checked without per-era enumeration "
+                         "sets; no stamped other-config check names are available to compare")
         return Check(name, True, "the other configuration adds/removes no checks — every stamped "
                      f"straddle enumerates a single era ({len(stamped)} straddle(s) checked)")
     rendered = _era_rendered_check_names(cp)
@@ -11798,9 +12789,9 @@ def check_era_disclosure_matches_enumeration(report: str, findings_path: Path | 
         kept/other spine check). NOTE: a disclosed_pre may now be spine-IRRELEVANT (empty kept AND
         empty other) — a valid suppressed state, distinct from the #74 hollow shape (empty kept,
         NON-empty other) that still FAILs.
-    A LOUD NARROW SKIP on a straddle artifact without the enumeration stamps (pre-#69/#74 — the
-    cleared-stamp shape the OLD guard went blind on; not re-derivable, a coverage gap not a clean
-    pass). Standalone; keys on `pr_critical_path` + the rendered disclosure marker.
+    Every config-era fact activates the guard, including an older fact without the later enumeration
+    sets; only an absent `config_eras` stamp skips. Standalone; keys on `pr_critical_path` + the
+    rendered disclosure marker.
 
     **Timing-provenance leg, basis-aware (issue #77).** A POST-claiming straddle whose pole drilled a
     PRE-era run FAILs — but "pre-era" is judged by the pole's stamped classification BASIS, closing
@@ -11829,11 +12820,11 @@ def check_era_disclosure_matches_enumeration(report: str, findings_path: Path | 
     if not eras:
         return Check(name, True, "no workflow sample straddled a config change — no era to bind",
                      skipped=True)
-    stamped = [e for e in eras if "other_era_checks" in e or "kept_checks" in e]
-    if not stamped:
-        return Check(name, True, "straddle stamped but no per-era enumeration sets "
-                     "(other_era_checks/kept_checks) — pre-#69/#74 artifact, the disclosure/enumeration "
-                     "bind isn't re-derivable. Coverage gap, not a clean pass.", skipped=True)
+    # Match `_config_era_disclosure_lines`: every workflow fact in `config_eras` is an era stamp.
+    # Later enumeration keys enrich the checks below but do not decide whether this guard runs.
+    stamped = eras
+    without_sets = sum(1 for e in stamped
+                       if "other_era_checks" not in e and "kept_checks" not in e)
     disclosed_pre = [e for e in stamped if e.get("rule") == "disclosed_pre"]
     # (1) A disclosed_pre fact that measured NOTHING pre-era (empty kept, non-empty other) — the #74
     #     shape. This is the lie whether or not the marker parsed cleanly, so check the stamps first.
@@ -11970,10 +12961,12 @@ def check_era_disclosure_matches_enumeration(report: str, findings_path: Path | 
                      "from post-era runs): poles "
                      + ", ".join(f"`{o}`" for o in pre_era_poles[:5]))
     kept_ok = sum(1 for e in disclosed_pre if _as_list(e.get("kept_checks")))
+    legacy_note = (f"; {without_sets} fact(s) have no per-era enumeration sets, so set-dependent "
+                   "legs had no stamped names to compare" if without_sets else "")
     return Check(name, True,
                  f"disclosure matches enumeration ({len(disclosed_pre)} disclosed_pre straddle(s), "
                  f"{kept_ok} with a real pre-era measurement; no pre-only caveat over post-era checks; "
-                 "no post-claiming pole drilled from a pre-era run)")
+                 f"no post-claiming pole drilled from a pre-era run{legacy_note})")
 
 
 def check_era_chain_spine_bound_to_kept_era(report: str, findings_path: Path | None,
@@ -12008,8 +13001,9 @@ def check_era_chain_spine_bound_to_kept_era(report: str, findings_path: Path | N
          legitimately fast minority PR; a non-unanimous kept gate is NOT re-derivable this way offline
          (the median PR may not have run it) and is left to leg 2 + the engine-side door.
 
-    Standalone; keys on `pr_critical_path`. A LOUD NARROW SKIP on a straddle artifact predating the
-    #69/#74 enumeration stamps (nothing to re-derive against). Pure SKIP when nothing straddled."""
+    Standalone; keys on `pr_critical_path`. Every config-era fact activates the guard; later
+    enumeration stamps add stronger legs but do not gate execution. Pure SKIP when nothing
+    straddled."""
     name = "the per-PR chain/makespan spine is bound to the kept config era (no dropped-era PR blends in)"
     if not findings_path:
         return Check(name, True, "no findings — no config-era stamp to bind", skipped=True)
@@ -12025,11 +13019,12 @@ def check_era_chain_spine_bound_to_kept_era(report: str, findings_path: Path | N
     if not eras:
         return Check(name, True, "no workflow sample straddled a config change — no spine to bind",
                      skipped=True)
-    stamped = [e for e in eras if "other_era_checks" in e or "kept_checks" in e]
-    if not stamped:
-        return Check(name, True, "straddle stamped but no per-era enumeration sets — pre-#69/#74 "
-                     "artifact, the spine bind isn't re-derivable. Coverage gap, not a clean pass.",
-                     skipped=True)
+    # The rendered banner and all verifier guards share `config_eras` as their activation stamp.
+    # An older fact may lack enumeration sets, in which case the set-dependent legs are vacuous, but
+    # the guard still runs and reports that result instead of SKIP.
+    stamped = eras
+    without_sets = sum(1 for e in stamped
+                       if "other_era_checks" not in e and "kept_checks" not in e)
     cs = _as_dict(cp.get("chain_summary"))
     chain_facts = [c for c in _as_list(cp.get("chain_facts")) if isinstance(c, dict)]
     sampled = _num(cp.get("sampled_pr_count"))
@@ -12083,10 +13078,13 @@ def check_era_chain_spine_bound_to_kept_era(report: str, findings_path: Path | N
                              "is physically impossible in the kept era; it was measured on faster "
                              "dropped-era PRs (issue #80).")
     n_disp = int(cs_n) if cs_n is not None else 0
+    legacy_note = (f"; {without_sets} fact(s) have no per-era enumeration sets, so set-dependent "
+                   "legs had no stamped names to compare" if without_sets else "")
     return Check(name, True,
                  f"the per-PR spine is bound to the kept era ({len(disclosed_pre)} disclosed_pre "
                  f"straddle(s); {n_disp} chain fact(s) within the kept-side sample; no dropped-era "
-                 "head feeds a kept-era chain member; no makespan below a unanimous kept gate)")
+                 f"head feeds a kept-era chain member; no makespan below a unanimous kept gate"
+                 f"{legacy_note})")
 
 
 # The measured sizing DOOR invariants (issues #43/#44/#45). Every rendered runner-minute saving must
@@ -12254,12 +13252,23 @@ def check_cluster_lever_ceiling_escapes_sibling(report: str, findings_path: Path
 
 
 _HEADLINE_WIN_RE = re.compile(r"\*\*~\s*([0-9hms  ]+?)\*\*")
+_COMMIT_WORK_WIN_RE = re.compile(
+    r"biggest credited code finding[^\n]{0,240}?removes\s+\*\*~\s*"
+    r"([0-9hms  ]+?)\*\*", re.IGNORECASE)
+
+
+def _headline_win_s(bottom_line: str) -> float | None:
+    """Parse the credited win, skipping a commit Bottom line's queue clock."""
+    match = _COMMIT_WORK_WIN_RE.search(bottom_line)
+    if match is None:
+        match = _HEADLINE_WIN_RE.search(bottom_line)
+    return _parse_clock_to_s(match.group(1)) if match else None
 
 
 def _cluster_leads_bottom_line(bl: str, rendered_s: float | None, f: dict, cluster_s: float) -> bool:
     """True only when the Bottom line's crown sentence IS this cluster's: it names the cluster's
     workflow (`` `<basename>` ``) and points at its **OPT73** entry, the two facts
-    `blocking_path._cluster_headline_bottom_line` always prints, and its first `~<clock>` win is not
+    `blocking_path._cluster_headline_bottom_line` always prints, and its credited `~<clock>` win is not
     smaller than the stamped ceiling by more than the 2s whole-second rendering tolerance (smaller is
     a burial, the sibling burial guard's target). The number alone does not identify the crown:
     reading `rendered >= ceiling` as "the cluster leads" credited a chain headroom to a small demoted
@@ -12287,7 +13296,7 @@ def check_headline_consumes_stamped_cluster_ceiling(report: str, findings_path: 
     catches BOTH live reports. LOUD narrow SKIP when OPT73 findings exist but NONE carries the persisted
     `cluster_floor_lever` marker (a legacy artifact predating the #49 stamp — burial can't be verified),
     so it can never read clean on a real cluster report. Standalone; keys on
-    `findings[].cluster_floor_lever` / `wall_clock_p50_s` and the rendered `~<clock>`."""
+    `findings[].cluster_floor_lever` / `wall_clock_p50_s` and the rendered credited `~<clock>`."""
     name = "Bottom-line headline leads with the stamped cluster-floor ceiling (no burial)"
     if not findings_path:
         return Check(name, True, "no findings path", skipped=True)
@@ -12322,10 +13331,9 @@ def check_headline_consumes_stamped_cluster_ceiling(report: str, findings_path: 
     best_f, best_s = max(credited, key=lambda t: t[1])
     wf = best_f.get("workflow_file", "?")
     # The rendered Bottom line names the merge wait in bold WITHOUT a tilde and the addressable win in
-    # bold WITH a leading `~`. Parse the first `~<clock>` in the Bottom-line paragraph.
+    # bold WITH a leading `~`. Parse that credited win rather than the queue/work clocks.
     bl = next((ln for ln in report.splitlines() if "**Bottom line.**" in ln), "")
-    m = _HEADLINE_WIN_RE.search(bl)
-    rendered_s = _parse_clock_to_s(m.group(1)) if m else None
+    rendered_s = _headline_win_s(bl)
     if rendered_s is None:
         # The Bottom line renders NO addressable `~<clock>` win at all — a deliberate
         # no-single-win framing (competing-path chain / PR-floor / tiny-lever fallback),
@@ -12401,8 +13409,7 @@ def check_headline_lever_is_presence_eligible(report: str, findings_path: Path |
     # Confirm the Bottom line actually LEADS with this lever (a smaller rendered win means it was
     # buried — the sibling burial guard's target, not this one).
     bl = next((ln for ln in report.splitlines() if "**Bottom line.**" in ln), "")
-    m = _HEADLINE_WIN_RE.search(bl)
-    rendered_s = _parse_clock_to_s(m.group(1)) if m else None
+    rendered_s = _headline_win_s(bl)
     if not _cluster_leads_bottom_line(bl, rendered_s, best_f, best_s):
         return Check(name, True,
                      f"the credited cluster lever (OPT73 `{wf}`, ~{_fmt_clock(best_s)}) does not lead "
@@ -12459,7 +13466,7 @@ def check_headline_cluster_lever_on_spine(report: str, findings_path: Path | Non
     dropped/kept check sets). The stamped off-spine cluster can be the workflow's heaviest step yet
     never gate the merge — it is bill/throughput, not merge-wait — so crowning it as the typical-PR
     "biggest single measured win" (~9m08s over a 1m56s wall, 4.7x the whole wait) is the defect. Keys
-    on `findings[].cluster_floor_lever` / `off_spine` / `wall_clock_p50_s` and the rendered first
+    on `findings[].cluster_floor_lever` / `off_spine` / `wall_clock_p50_s` and the rendered credited
     `~<clock>`. LOUD narrow SKIP when the max credited cluster does not lead (correctly demoted / no
     tilde-win), so it never reads clean on an unverifiable crown."""
     name = "Bottom-line crowned cluster lever is on the merge-gating spine (not off-spine)"
@@ -12486,13 +13493,19 @@ def check_headline_cluster_lever_on_spine(report: str, findings_path: Path | Non
     best_f, best_s = max(credited, key=lambda t: t[1])
     wf = str(best_f.get("workflow_file", "") or "")
     bl = next((ln for ln in report.splitlines() if "**Bottom line.**" in ln), "")
-    m = _HEADLINE_WIN_RE.search(bl)
-    rendered_s = _parse_clock_to_s(m.group(1)) if m else None
+    rendered_s = _headline_win_s(bl)
     if not _cluster_leads_bottom_line(bl, rendered_s, best_f, best_s):
         # The max credited cluster does not LEAD the Bottom line (buried / demoted / outranked by a
         # chain or pole win the crown sentence names instead / no tilde-win) — the renderer's off-spine drop, or a genuine
         # burial (the sibling guard's target). Not this guard's crown to judge → LOUD narrow skip
         # (L8: never read clean on an unverifiable crown).
+        split_check = _verify_per_pr_floor_split(
+            name, report, _as_dict(data.get("pr_critical_path")), data)
+        if split_check is not None:
+            if best_f.get("off_spine") is True:
+                return Check(name, False,
+                             f"per-PR floor is bounded, but OPT73 `{wf}` is stamped off_spine")
+            return split_check
         return Check(name, True,
                      f"the max credited cluster lever (OPT73 `{wf}`, ~{_fmt_clock(best_s)}) does not "
                      "lead the Bottom line (demoted/buried/outranked or no `~<clock>` win) — no "
@@ -13058,12 +14071,17 @@ def check_structural_step_category_not_payload_binned_as_build(findings_path: Pa
 # dominant measured work. The `_VR_LEAF_STEP_CATEGORY` mirror is pinned to the engine map by
 # test_verify_report_self (L7).
 _VR_LEAF_STEP_CATEGORY: dict[str, str] = {
+    "dependency-cache": "install",
+    "cache-effective-path-mismatch": "install",
     "prisma-migrate-once": "test",
     "vitest-v8-coverage": "test",
     "vitest-isolate-pool": "test",
     "vitest-import-bound": "test",
     "playwright-parallel": "test",
     "pytest-no-xdist": "test",
+    "test-isolated-serial": "test",
+    "test-loop-serial": "test",
+    "emulated-image-compile": "build",
     "cargo-test-shard": "test",
     "benchmark-serial-reruns": "test",
     "android-emulator-shard": "test",
@@ -13167,6 +14185,8 @@ def check_detector_leaf_agrees_with_dominant_category(report: str,
 # `_VR_*` copies keep verify_report import-free; a coupling test pins them to the engine.
 _VR_CACHE_CONTEXT_MARKER = "<!-- ci-speedup:cache-context -->"
 _VR_PARTIAL_MISS_FLOOR_PCT = 40.0
+# Per-leaf floor override, mirror of `collect_runs._CACHE_FLOOR_BY_FIX_KEY`.
+_VR_CACHE_FLOOR_BY_FIX_KEY: dict[str, float] = {"dependency-cache": 50.0}
 _VR_CACHE_TAIL_MIN_FRAC = 0.25
 _VR_CACHE_COLD_MISS_PCT = 99.5
 _VR_BIGGEST_LEVER = "BIGGEST LEVER"
@@ -13210,7 +14230,9 @@ def _vr_cache_verdict(cache_dist: dict) -> str:
     if all(_is_cold(v) for v in upstream):
         return "cold"
     med = statistics.median([_miss(v) for v in upstream])
-    if med >= _VR_PARTIAL_MISS_FLOOR_PCT:
+    floor = _VR_CACHE_FLOOR_BY_FIX_KEY.get(str(cd.get("fix_key") or ""),
+                                           _VR_PARTIAL_MISS_FLOOR_PCT)
+    if med >= floor:
         return "churn"
     prev = tail.get("prevalence_max")
     if isinstance(prev, (int, float)) and prev >= _VR_CACHE_TAIL_MIN_FRAC:
@@ -13360,13 +14382,75 @@ def _vr_pole_frequencies(per_pr: list[list[tuple[str, float]]],
     return freq
 
 
+def _vr_per_pr_count(cp: dict) -> int:
+    """Largest explicit sample count; missing records remain unknown PRs."""
+    counts = [cp.get("sampled_pr_count"), cp.get("populations_n")]
+    return max([v for v in counts if isinstance(v, int) and not isinstance(v, bool)]
+               + [len(_as_list(cp.get("chain_facts"))), len(_as_list(cp.get("populations")))])
+
+
+def _vr_per_pr_data_present(cp: dict) -> bool:
+    """True when the run clearly sampled enough PRs for a per-PR re-derivation: the stamped
+    `sampled_pr_count`, the persisted `chain_facts`, or the populations count reaches the stability
+    floor. A per-PR check that then finds nothing it can read must FAIL loudly, never SKIP as
+    "thin sample" (bug 4: a 20/20-sampled run whose recurring-gate check skipped on `populations`,
+    which the collector only stamps for bimodal gates)."""
+    return _vr_per_pr_count(cp) >= _VR_RARE_PRESENCE_MIN_PR
+
+
+def _vr_chain_fact_poles(cp: dict, candidates: "set[str] | None"
+                         ) -> tuple[dict[str, int], int, int]:
+    """Per-check pole frequency re-derived from `chain_facts`, the per-PR record the collector
+    stamps on EVERY run (`populations` is bimodal-only). Returns (lower, undetermined, n): `n`
+    chain-fact records (one per sampled PR, malformed ones included), `lower[c]` = PRs on which `c` is PROVABLY the slowest ranked check, and
+    `undetermined` = PRs whose slowest check the facts can't pin.
+
+    Why it is sound: `runner_up_s` is the longest path left with every chain member zeroed, and a
+    path is at least as long as any one of its members, so it bounds every NON-chain check's
+    capped span from above. When the slowest chain member (rounded to 0.1s, the engine's
+    `_pole_frequencies` basis) strictly exceeds `runner_up_s`, it is the PR's pole on the same
+    caps the engine ranks with; ties among members credit each, as the engine does. Otherwise the
+    pole may be a non-chain check and the PR is counted undetermined, so callers get a bound
+    (lower .. lower + undetermined), never a guess."""
+    lower: dict[str, int] = {}
+    undetermined = n = 0
+    for e in _as_list(cp.get("chain_facts")):
+        # Every record is a sampled PR. A malformed one is UNDETERMINED (it widens the bound),
+        # never dropped: dropped records could hide a recurring gate behind a fragmented PASS.
+        n += 1
+        spans = e.get("member_spans_s") if isinstance(e, dict) else None
+        ru = e.get("runner_up_s") if isinstance(e, dict) else None
+        if (not isinstance(spans, dict) or not isinstance(ru, (int, float))
+                or isinstance(ru, bool) or not math.isfinite(ru) or ru < 0):
+            undetermined += 1
+            continue
+        if any(not isinstance(v, (int, float)) or isinstance(v, bool)
+               or not math.isfinite(v) or v < 0 for v in spans.values()):
+            undetermined += 1
+            continue
+        scoped = {str(k): round(float(v), 1) for k, v in spans.items()
+                  if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
+                  and (candidates is None or str(k) in candidates)}
+        top = max(scoped.values(), default=0.0)
+        if not scoped or top <= round(float(ru), 1):
+            undetermined += 1
+            continue
+        for k, v in scoped.items():
+            if v == top:
+                lower[k] = lower.get(k, 0) + 1
+    return lower, undetermined, n
+
+
 def check_headline_pole_actually_gates(report: str, findings_path: Path | None) -> Check:
     """The rendered headline `critical_path_check` must ACTUALLY gate the merge — be the slowest
     job a PR waits on — on some sampled PRs. A headline that is the pole on FEWER than the
     recurrence floor of PRs while a genuine recurring gate (pole on >= floor) exists is a phantom
     gate (the expo/expo class: a lightweight always-present check crowned over the real 20-minute
-    suites). Re-derived from `populations` — job-p50-capped, the same basis the engine ranks on.
-    Required checks gate by definition (exempt). SKIPs on a thin sample / no populations.
+    suites). Re-derived from `populations` — job-p50-capped, the same basis the engine ranks on —
+    or, when the collector stamped none (it only does for a bimodal gate), from `chain_facts`
+    (`_vr_chain_fact_poles`, a sound bound on the same caps). Required checks gate by definition
+    (exempt). SKIPs only on a genuinely thin sample; a run that sampled enough PRs but left nothing
+    readable FAILS ("per-PR data present but not readable"), as does a bound too loose to decide.
 
     Why FAIL only when a real gate was PASSED OVER (not simply `hf < floor`): on a fragmented
     repo where NO check is the pole on >= floor PRs, the engine legitimately crowns the slowest
@@ -13387,10 +14471,6 @@ def check_headline_pole_actually_gates(report: str, findings_path: Path | None) 
         # degrade to the same "no headline" SKIP as empty findings (never a false FAIL/crash).
         return Check(name, True, "no headline critical_path_check (static-only / no spine)",
                      skipped=True)
-    per_pr = _populations_per_pr(cp)
-    if len(per_pr) < _VR_RARE_PRESENCE_MIN_PR:
-        return Check(name, True, f"only {len(per_pr)} PR population(s) (< {_VR_RARE_PRESENCE_MIN_PR}) "
-                     "— pole frequency is noise on this sample", skipped=True)
     # Required checks gate by definition (branch protection), even if never the slowest — exempt.
     # Match on the RAW name (as the engine's `req_names` does), NOT a scope-normalized key: a
     # `_cmp_name` collapse would let a required `@teamA/build` exempt an unrelated phantom
@@ -13401,27 +14481,66 @@ def check_headline_pole_actually_gates(report: str, findings_path: Path | None) 
     # Restrict the pole re-derivation to the ranked check set (the engine argmaxes over exactly
     # these — `set(pr_check_p50)`), keyed by RAW name to match `critical_path_check` and avoid the
     # monorepo scope-collision that a normalized key would introduce.
-    ranked = {str(c.get("name") or c.get("check")) for c in _as_list(cp.get("checks"))
-              if isinstance(c, dict)}
-    freq = _vr_pole_frequencies(per_pr, ranked or None)
+    ranked_rows = [c for c in _as_list(cp.get("checks")) if isinstance(c, dict)]
+    ranked = {str(c.get("name") or c.get("check")) for c in ranked_rows
+              if c.get("required_reachable") is not False}
+    # Per-PR basis: `populations` when stamped (exact), else `chain_facts`, which the collector
+    # stamps on EVERY run (a bound: some PRs' pole may be undetermined). `populations` is
+    # bimodal-only, so reading it alone skipped this check on most fully sampled runs (bug 4).
+    per_pr = _populations_per_pr(cp)
+    if len(per_pr) >= _VR_RARE_PRESENCE_MIN_PR:
+        freq, und, n_pr, basis = _vr_pole_frequencies(per_pr, ranked or None), 0, len(per_pr), \
+            "populations"
+    else:
+        freq, und, n_pr = _vr_chain_fact_poles(cp, ranked or None)
+        basis = "chain_facts"
+    if n_pr < _VR_RARE_PRESENCE_MIN_PR:
+        if _vr_per_pr_data_present(cp):
+            return Check(name, False,
+                         "per-PR data present but not readable: the run sampled "
+                         f"{cp.get('sampled_pr_count')} PR(s) with "
+                         f"{len(_as_list(cp.get('chain_facts')))} chain fact(s), yet only "
+                         f"{len(per_pr)} population(s) and {n_pr} chain fact(s) — the "
+                         "headline's recurrence can't be re-derived, so this check would otherwise "
+                         "skip on exactly the run that has the data")
+        return Check(name, True, f"only {n_pr} PR population(s) (< {_VR_RARE_PRESENCE_MIN_PR}) "
+                     "— pole frequency is noise on this sample", skipped=True)
+    missing = max(0, _vr_per_pr_count(cp) - n_pr)
+    und += missing
+    n_pr += missing
     hf = freq.get(str(headline), 0)
+    hf_hi = hf + und
     real_gates = sorted((n for n, c in freq.items() if c >= _VR_POLE_RECUR_FLOOR),
                         key=lambda n: -freq[n])
-    if hf < _VR_POLE_RECUR_FLOOR and real_gates:
+    span = f"{hf}/{n_pr}" if not und else f"{hf}-{hf_hi}/{n_pr}"
+    via = f" (from {basis}" + (f"; {und} PR(s) whose slowest check the facts can't pin" if und
+                               else "") + ")"
+    if hf_hi < _VR_POLE_RECUR_FLOOR and real_gates:
         top = [(n, freq[n]) for n in real_gates[:3]]
         return Check(name, False,
                      f"headline `{headline}` is the actual slowest job (the merge gate) on only "
-                     f"{hf}/{len(per_pr)} sampled PRs, yet genuine recurring gate(s) exist and were "
+                     f"{span} sampled PRs{via}, yet genuine recurring gate(s) exist and were "
                      f"passed over: {', '.join(f'{n} (gates {c})' for n, c in top)}. The headline is "
                      "not the gate — this is the phantom-gate class.")
     if hf >= _VR_POLE_RECUR_FLOOR:
         return Check(name, True,
-                     f"headline `{headline}` is the actual gate on {hf}/{len(per_pr)} sampled PRs "
+                     f"headline `{headline}` is the actual gate on {span} sampled PRs{via} "
                      f"(>= floor {_VR_POLE_RECUR_FLOOR})")
-    return Check(name, True,
-                 f"headline `{headline}` gates {hf}/{len(per_pr)} PRs; no check reaches the "
-                 f"recurrence floor ({_VR_POLE_RECUR_FLOOR}) on this fragmented sample, so the "
-                 "slowest-overall headline is the honest best available")
+    # Fragmented: no other check could reach the floor even if every undetermined PR were its pole
+    # (with an exact basis, `und == 0`, this is simply "no recurring gate exists").
+    others = (ranked | set(freq)) - {str(headline)}
+    could_gate = (any(freq.get(c, 0) + und >= _VR_POLE_RECUR_FLOOR for c in others)
+                  or (not ranked and und >= _VR_POLE_RECUR_FLOOR))
+    if hf_hi < _VR_POLE_RECUR_FLOOR and not could_gate:
+        return Check(name, True,
+                     f"headline `{headline}` gates {span} PRs{via}; no check reaches the "
+                     f"recurrence floor ({_VR_POLE_RECUR_FLOOR}) on this fragmented sample, so the "
+                     "slowest-overall headline is the honest best available")
+    # Only reachable with undetermined PRs: they decide the verdict, so it can't be re-derived.
+    return Check(name, False,
+                 f"per-PR data present but not readable: headline `{headline}` gates {span} PRs"
+                 f"{via}, and the undetermined PRs decide whether it is a recurring gate — the "
+                 "verdict can't be re-derived from the stamped per-PR data")
 
 
 # Priced-dollar surface excised 2026-07-20 (the pre-public development archive
@@ -13472,7 +14591,7 @@ _VR_OPT81_CHEAPER_STRUCTURAL = frozenset({"OPT70", "OPT71", "OPT72", "OPT73", "O
                                            "OPT78"})
 # Pre-start findings (queue wait) shorten no step of the job, so they never count
 # as a credited lever covering it (`collect_runs._PRESTART_AXIS_PATTERNS`).
-_VR_OPT81_PRESTART_PATTERNS = frozenset({"OPT43"})
+_VR_OPT81_PRESTART_PATTERNS = frozenset({"OPT43", "OPT97"})
 _VR_OPT81_DISCLOSURE = (
     "The publisher of this skill sells CI runners. This finding compares your own "
     "runs on runner classes you already use (A1), or names a class of lever and asks "
@@ -13868,13 +14987,530 @@ def check_no_rate_derived_dollars(report: str, findings_path: Path | None = None
     return Check(name, True, "no rate-derived dollar tokens on the minutes surfaces")
 
 
+_VR_DEFAULT_BRANCH_PUSH_SAMPLE_MAX = 10
+_VR_PUSH_LABEL_WIDTH = 33
+
+
+def _vr_push_label(name: str) -> str:
+    """Mirror blocking_path._lbl for push-lane job-name comparisons."""
+    clean = _strip_scope(name)
+    return (clean if len(clean) <= _VR_PUSH_LABEL_WIDTH
+            else clean[:_VR_PUSH_LABEL_WIDTH - 1] + "…")
+
+
+def check_default_branch_push_lane_isolated(
+        report: str, findings_path: Path | None = None) -> Check:
+    """Re-derive the post-merge lane and keep it out of merge-gate claims."""
+    name = "default-branch push lane is isolated"
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return Check(name, True, err, skipped=True)
+    lane = _as_dict(data.get("default_branch_push_lane"))
+    if not lane:
+        return Check(name, True, "no default-branch push lane stamped", skipped=True)
+
+    failures: list[str] = []
+    marker = "<!-- ci-speedup:default-branch-push-lane -->"
+    marker_n = report.count(marker)
+    start = report.find(marker)
+    end = report.find("\n---", start + len(marker)) if start >= 0 else -1
+    block = report[start:end if end >= 0 else len(report)] if start >= 0 else ""
+    if marker_n != 1:
+        failures.append(f"push-lane marker rendered {marker_n} times, not once")
+    if "After merge, not a merge gate" not in block:
+        failures.append("the lane title does not say `After merge, not a merge gate`")
+
+    cap = int(_num(lane.get("sample_cap")) or 0)
+    sampled = int(_num(lane.get("sampled_push_count")) or 0)
+    if cap != _VR_DEFAULT_BRANCH_PUSH_SAMPLE_MAX:
+        failures.append(
+            f"sample cap {cap} != pinned cap {_VR_DEFAULT_BRANCH_PUSH_SAMPLE_MAX}")
+    if sampled < 0 or sampled > _VR_DEFAULT_BRANCH_PUSH_SAMPLE_MAX:
+        failures.append(f"sampled_push_count {sampled} exceeds the bounded cohort")
+    zero_line = "no eligible completed pushes to the default branch were sampled"
+    status = str(lane.get("status") or "")
+    if status in {"default_branch_unknown", "run_list_incomplete"}:
+        disclosure = {
+            "default_branch_unknown": "default branch could not be determined",
+            "run_list_incomplete": "push run-list coverage was incomplete",
+        }[status]
+        if disclosure not in block:
+            failures.append(f"{status} lane lacks its coverage disclosure")
+        if zero_line in block.lower():
+            failures.append("unknown push coverage is rendered as a factual zero")
+        return Check(
+            name, not failures,
+            "; ".join(failures) if failures else f"{status} is disclosed, not zeroed")
+    if status != "complete":
+        failures.append(f"push lane has unknown collection status {status!r}")
+    if sampled == 0:
+        if zero_line not in block.lower():
+            failures.append("an empty eligible push cohort lacks its explicit zero line")
+        return Check(
+            name, not failures,
+            "; ".join(failures) if failures else "zero-push lane is explicit and isolated")
+
+    facts = [
+        fact for fact in _as_list(lane.get("facts"))
+        if isinstance(fact, dict) and fact.get("partial") is not True
+        and (_num(fact.get("wall_s")) or 0) > 0
+    ]
+    if not facts:
+        unavailable = "no complete commit-wide timing fact was available" in block
+        if not unavailable:
+            failures.append("sampled pushes have neither complete facts nor a coverage line")
+        return Check(
+            name, not failures,
+            "; ".join(failures) if failures else
+            "pushes sampled; shared commit-wall facts were unavailable and disclosed")
+
+    def percentile(values: list[float], pct: float) -> float:
+        values = sorted(values)
+        k = (len(values) - 1) * pct / 100.0
+        lo, hi = int(k), min(int(k) + 1, len(values) - 1)
+        return values[lo] + (values[hi] - values[lo]) * (k - lo)
+
+    walls = [float(fact["wall_s"]) for fact in facts]
+    p50, p90 = percentile(walls, 50), percentile(walls, 90)
+    if abs((_num(lane.get("p50_s")) or 0.0) - p50) > 0.11:
+        failures.append("lane p50 stamp drifted from its complete commit facts")
+    if abs((_num(lane.get("p90_s")) or 0.0) - p90) > 0.11:
+        failures.append("lane p90 stamp drifted from its complete commit facts")
+    if f"p50 **{_fmt_clock(p50)}**" not in block:
+        failures.append("lane does not render its re-derived p50")
+    if f"p90 **{_fmt_clock(p90)}**" not in block:
+        failures.append("lane does not render its re-derived p90")
+
+    typical = min(facts, key=lambda fact: abs(float(fact["wall_s"]) - p50))
+    slowest = _as_dict(typical.get("slowest_job"))
+    next_job = _as_dict(typical.get("next_longest_job"))
+    for label, job in (("slowest", slowest), ("next-longest", next_job)):
+        job_name = str(job.get("name") or "")
+        if not job_name or f"`{_vr_push_label(job_name)}`" not in block:
+            failures.append(f"lane omits the representative {label} job")
+
+    projection = next((
+        _as_dict(value) for key, value in typical.items()
+        if str(key).startswith("projection_") and isinstance(value, dict)
+    ), {})
+    if projection:
+        speedup = _num(projection.get("job_speedup")) or 0.0
+        wall = float(typical["wall_s"])
+        slow_s = _num(slowest.get("duration_s")) or 0.0
+        next_s = _num(next_job.get("duration_s")) or 0.0
+        if speedup <= 0 or slow_s <= 0:
+            failures.append("lane projection lacks a positive speedup and slowest job")
+        else:
+            expected_s = wall - slow_s + max(slow_s / speedup, next_s)
+            expected_multiple = wall / expected_s if expected_s > 0 else 0.0
+            if abs((_num(projection.get("projected_s")) or 0.0) - expected_s) > 0.11:
+                failures.append("projected push wall drifted from the next-job floor")
+            if abs((_num(projection.get("multiple")) or 0.0) - expected_multiple) > 0.011:
+                failures.append("projected push multiple drifted from the bounded wall")
+            rendered = (
+                f"projects to **{_fmt_clock(expected_s)}** "
+                f"(**{expected_multiple:.2f}x**)")
+            if rendered not in block:
+                failures.append("lane omits its re-derived bounded projection")
+
+    cp = _as_dict(data.get("pr_critical_path"))
+    merge_waits = [
+        value for value in (
+            _num(cp.get("critical_path_s")), _num(cp.get("p50_s")),
+            *[_num(pole.get("p50_s")) for pole in _as_list(cp.get("poles"))
+              if isinstance(pole, dict)])
+        if value is not None and value > 0
+    ]
+    lane_clock_is_distinct = (
+        not merge_waits or all(abs(value - p50) > 0.11 for value in merge_waits))
+    before_lane = report[:start] if start >= 0 else report
+    contents_at = before_lane.find("## 📋 Contents")
+    pole_at = before_lane.find('<a id="pole-')
+    headline = before_lane[:contents_at if contents_at >= 0 else len(before_lane)]
+    contents = (before_lane[contents_at:pole_at if pole_at >= 0 else len(before_lane)]
+                if contents_at >= 0 else "")
+    score_lines = "\n".join(
+        line for line in before_lane.splitlines()
+        if re.search(r"\bscore\b", line, re.IGNORECASE))
+    if lane_clock_is_distinct and _fmt_clock(p50) in headline:
+        failures.append("post-merge push timing leaked into the merge-gate headline")
+    if lane_clock_is_distinct and _fmt_clock(p50) in contents:
+        failures.append("post-merge push timing leaked into the ranked critical-path spine")
+    if lane_clock_is_distinct and _fmt_clock(p50) in score_lines:
+        failures.append("post-merge push timing leaked into a score")
+    if isinstance(cp.get("default_branch_push_lane"), dict):
+        failures.append("push lane is nested inside the merge-gate critical path")
+
+    return Check(
+        name, not failures,
+        "; ".join(failures[:8]) if failures else
+        f"{len(facts)} complete push fact(s) re-derived outside the merge-gate spine")
+
+
+def check_minority_gate_tails(report: str, findings_path: Path | None = None) -> Check:
+    """Re-derive every required-check tail from its stamped observations."""
+    name = "minority slow tails on merge-blocking checks are re-derived"
+    if findings_path is None or not Path(findings_path).exists():
+        return Check(name, True, "no findings JSON", skipped=True)
+    try:
+        data = _as_dict(json.loads(Path(findings_path).read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError):
+        return Check(name, True, "findings JSON is unreadable", skipped=True)
+    cp = _as_dict(data.get("pr_critical_path"))
+    stamped = [
+        (str(c.get("name") or ""), _as_dict(c.get("minority_tail")))
+        for c in _as_list(cp.get("checks"))
+        if isinstance(c, dict) and isinstance(c.get("minority_tail"), dict)
+    ]
+    if not stamped:
+        return Check(name, True, "no minority gate tails stamped", skipped=True)
+    if not cp.get("spine_required_scoped"):
+        return Check(name, False,
+                     "a minority tail is stamped outside a confirmed required/needs closure")
+    required = {str(check) for check in _as_list(data.get("required_checks"))}
+    confirmed = {
+        str(pole.get("check") or "")
+        for pole in _as_list(cp.get("poles"))
+        if isinstance(pole, dict) and pole.get("required_reachable") is True
+    } | required
+
+    def percentile(values: list[float], pct: float) -> float:
+        values = sorted(values)
+        k = (len(values) - 1) * pct / 100.0
+        lo, hi = int(k), min(int(k) + 1, len(values) - 1)
+        return values[lo] + (values[hi] - values[lo]) * (k - lo)
+
+    failures: list[str] = []
+    for check_name, tail in stamped:
+        if check_name not in confirmed:
+            failures.append(
+                f"`{check_name}` is not confirmed required or needs-reachable")
+        observations = [
+            (_num(row.get("duration_s")), str(row.get("url") or ""))
+            for row in _as_list(tail.get("observations"))
+            if isinstance(row, dict) and _num(row.get("duration_s")) is not None
+        ]
+        durations = [float(d) for d, _url in observations if d is not None and d > 0]
+        if not durations:
+            failures.append(f"`{check_name}` has no positive stamped observations")
+            continue
+        p50 = percentile(durations, 50)
+        p90 = percentile(durations, 90)
+        slow = [(d, url) for d, url in observations if d is not None and d >= p90]
+        share = 100.0 * len(slow) / len(durations)
+        example = str(tail.get("example_url") or "")
+        clean_name = _strip_scope(check_name)
+        marker_id = re.sub(r"[^A-Za-z0-9._-]+", "-", clean_name).strip("-") or "check"
+        if marker_id != clean_name:
+            marker_id += "-" + hashlib.sha256(clean_name.encode("utf-8")).hexdigest()[:8]
+        marker = f"<!-- minority-gate-tail:{marker_id} -->"
+        if p90 < 600.0 or p90 < 3.0 * p50:
+            failures.append(f"`{check_name}` does not meet the p90 tail threshold")
+        if abs((_num(tail.get("p50_s")) or 0.0) - p50) > 0.11:
+            failures.append(f"`{check_name}` p50 stamp drifted from observations")
+        if abs((_num(tail.get("p90_s")) or 0.0) - p90) > 0.11:
+            failures.append(f"`{check_name}` p90 stamp drifted from observations")
+        if int(_num(tail.get("tail_n")) or 0) != len(slow):
+            failures.append(f"`{check_name}` tail count drifted from observations")
+        if abs((_num(tail.get("tail_share_pct")) or 0.0) - share) > 0.11:
+            failures.append(f"`{check_name}` tail share drifted from observations")
+        if not example or example not in {url for _d, url in slow if url}:
+            failures.append(f"`{check_name}` example is not one of its slow-tail runs")
+        start = report.find(marker)
+        next_start = report.find("<!-- minority-gate-tail:", start + len(marker))
+        block = report[start:next_start if next_start >= 0 else len(report)] if start >= 0 else ""
+        share_text = f"{share:.0f}" if float(share).is_integer() else f"{share:.1f}"
+        if (not block or _fmt_clock(p90) not in block or example not in block
+                or f"~{share_text}% of PRs" not in block):
+            failures.append(f"`{check_name}` stamped tail is not rendered with its p90 and link")
+        if "No saving is credited" not in block:
+            failures.append(f"`{check_name}` tail lacks the no-saving disclosure")
+    return Check(name, not failures,
+                 "; ".join(failures[:6]) if failures
+                 else f"{len(stamped)} minority gate tail(s) re-derived")
+
+
+def check_job_adding_prompts_state_runner_minute_effect(
+        report: str, findings_path: Path | None = None) -> Check:
+    """Closed-world prompt guard for fixes that add jobs, shards or machines.
+
+    The guard reads every rendered coding-agent prompt, rather than trusting a
+    list of call sites. Known job-expanding families remain recognizable after
+    their cost line is deleted, which makes the missing-line mutant fail closed.
+    """
+    name = "job-adding prompts state their runner-minute effect"
+    blocks = re.findall(
+        r"#### 🤖 Prompt for your coding agent\s*\n\s*```text\n(.*?)\n```",
+        report,
+        flags=re.DOTALL,
+    )
+    failures: list[str] = []
+    for index, body in enumerate(blocks, 1):
+        known_shard = "Pattern: OPT24 " in body or "Pattern: OPT25 " in body
+        machine = ("Pattern: OPT81 " in body or "Pattern: OPT81 (" in body)
+        structural = ("structural catalog pattern" in body
+                      or "Structural cost context:" in body)
+        isolated = ("unique schema, database or prefix" in body
+                    or "isolated tests concurrently inside this one job" in body)
+        # The renderer owns this label, so it remains a stable family marker
+        # when only the cost line is deleted. Free-form action wording is not a
+        # safe discriminator: generic investigation prompts can discuss adding
+        # work to an existing job without recommending another billed runner.
+        job_expanding = "Concurrency order:" in body
+        if not (known_shard or machine or structural or isolated or job_expanding):
+            continue
+        expected_prefix = "Runner cost effect:" if machine else "Runner-minute effect:"
+        cost_lines = [line for line in body.splitlines()
+                      if line.startswith(expected_prefix)]
+        if len(cost_lines) != 1:
+            failures.append(
+                f"prompt {index} has {len(cost_lines)} runner-minute effect lines"
+            )
+        if known_shard:
+            lines = body.splitlines()
+            order_lines = [i for i, line in enumerate(lines)
+                           if line.startswith("Concurrency order:")]
+            cost_line = next((i for i, line in enumerate(lines)
+                              if line.startswith("Runner-minute effect:")), -1)
+            shard_actions = [i for i, line in enumerate(lines)
+                             if not line.startswith("Concurrency order:")
+                             and re.search(
+                                 r"(?i)\b(?:add|raise|increase|split)\w*\b[^.]*"
+                                 r"\b(?:shards?|jobs?)\b",
+                                 line,
+                             )]
+            targets = [cost_line, *shard_actions]
+            if (len(order_lines) != 1 or any(target < 0 for target in targets)
+                    or any(order_lines[0] >= target for target in targets)):
+                failures.append(
+                    f"prompt {index} does not put OPT88/in-job concurrency before shards"
+                )
+            if "OPT88" not in body:
+                failures.append(f"prompt {index} does not name OPT88")
+            if "repeat checkout and setup" not in body or "bill each job" not in body:
+                failures.append(f"prompt {index} omits the per-job setup/billing cost")
+        if isolated and "runner minutes go down" not in body:
+            failures.append(f"prompt {index} does not say in-job runner minutes go down")
+    return Check(
+        name,
+        not failures,
+        "; ".join(failures[:6]) if failures
+        else f"{len(blocks)} coding-agent prompt(s) checked",
+    )
+def check_commit_queue_work_credit(report: str, findings_path: Path | None,
+                                   report_path: Path | None = None) -> Check:
+    """Queue is in the developer wait, but only runner-pool findings own it.
+
+    Re-derive queue/work from the supplied per-commit job intervals rather than
+    trusting the aggregate split. Every other finding is a code/config change,
+    so its credited seconds must fit inside work. Its projected multiple is
+    checked against the full wall, leaving runner-pickup queue unchanged.
+    """
+    name = "code findings stay within commit work and never claim runner queue"
+    if findings_path is None:
+        return Check(name, True, "no --findings to inspect", skipped=True)
+    try:
+        data = _as_dict(json.loads(findings_path.read_text(encoding="utf-8")))
+    except (OSError, ValueError) as exc:
+        return Check(name, False, f"could not read findings JSON: {exc}")
+    clock = _as_dict(_as_dict(data.get("pr_critical_path")).get("commit_wall_clock"))
+    commits = _as_list(clock.get("facts")) or _as_list(clock.get("commits"))
+    if not commits:
+        return Check(name, True, "no per-commit queue/work stamp", skipped=True)
+
+    import datetime as _queue_dt
+
+    def _ts(value: object) -> float | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            return _queue_dt.datetime.fromisoformat(
+                text.replace("Z", "+00:00")).timestamp()
+        except (TypeError, ValueError):
+            return None
+
+    def _queue_code_claim(text: str) -> str | None:
+        code_word = re.compile(
+            r"(?i)\b(?:code|workflow|cache|test|build|shard(?:ing)?|parallel\w*)\b")
+        queue_word = re.compile(
+            r"(?i)\b(?:runner[- ]pickup\s+)?queue(?:\s+(?:time|wait|seconds?))?\b")
+        action = (
+            r"(?:cut|cuts|cutting|reduce|reduces|reducing|reduced|remove|removes|"
+            r"removing|removed|save|saves|saving|saved|halve|halves|halving|halved|"
+            r"shorten|shortens|shortening|shortened|eliminate|eliminates|eliminating|"
+            r"eliminated)")
+        positive = re.compile(
+            rf"(?i)\b{action}\b[^.!?\n]{{0,60}}\b(?:runner[- ]pickup\s+)?queue\b"
+            rf"|\b(?:runner[- ]pickup\s+)?queue\b[^.!?\n]{{0,40}}"
+            rf"\b(?:is|gets?|would\s+be|can\s+be)\s+{action}\b")
+        denial = re.compile(
+            rf"(?i)\b(?:does\s+not|do\s+not|cannot|can't|never|won't)\b"
+            rf"[^.!?\n]{{0,50}}\b(?:claim|{action})\w*\b[^.!?\n]{{0,50}}\bqueue\b"
+            r"|\b(?:runner[- ]pickup\s+)?queue\b[^.!?\n]{0,25}"
+            r"\b(?:remains?|stays?|is|are)\b[^.!?\n]{0,15}"
+            r"\b(?:unchanged|intact|untouched|unaffected)\b"
+            r"|\b(?:work|code)\b[^.!?\n]{0,30}\bnot\s+(?:the\s+)?queue\b")
+        return next((
+            sentence.strip()
+            for sentence in re.split(r"(?<=[.!?])\s+|\n+", text)
+            if code_word.search(sentence) and queue_word.search(sentence)
+            and positive.search(sentence) and not denial.search(sentence)
+        ), None)
+
+    queue_values: list[float] = []
+    work_values: list[float] = []
+    wall_values: list[float] = []
+    share_values: list[float] = []
+    mismatches: list[str] = []
+    for raw in commits:
+        fact = _as_dict(raw)
+        if fact.get("partial") is True:
+            continue
+        try:
+            wall = float(fact.get("commit_wall_s")
+                         if fact.get("commit_wall_s") is not None
+                         else fact.get("wall_s"))
+        except (TypeError, ValueError):
+            continue
+        start = _ts(fact.get("created_at"))
+        if start is None or wall < 0:
+            continue
+        end = start + wall
+        queued: list[tuple[float, float]] = []
+        running: list[tuple[float, float]] = []
+        starts: list[float] = []
+        for raw_job in _as_list(fact.get("jobs")):
+            job = _as_dict(raw_job)
+            js = _ts(job.get("started_at"))
+            if js is None:
+                continue
+            js = min(max(js, start), end)
+            starts.append(js)
+            jq = _ts(job.get("queued_at") or job.get("created_at")
+                     or fact.get("created_at"))
+            if jq is not None:
+                jq = min(max(jq, start), end)
+                if js > jq:
+                    queued.append((jq, js))
+            jc = _ts(job.get("completed_at"))
+            if jc is not None:
+                jc = min(max(jc, start), end)
+                if jc > js:
+                    running.append((js, jc))
+        if starts and min(starts) > start:
+            queued.append((start, min(starts)))
+        points = sorted({start, end, *(v for iv in queued + running for v in iv)})
+        queue = 0.0
+        for left, right in zip(points, points[1:]):
+            if (right > left
+                    and any(a < right and b > left for a, b in queued)
+                    and not any(a < right and b > left for a, b in running)):
+                queue += right - left
+        queue = min(max(queue, 0.0), wall)
+        work = wall - queue
+        label = str(fact.get("sha") or "?")[:12]
+        for key, expected in (("queue_s", queue), ("work_s", work)):
+            try:
+                stamped = float(fact.get(key))
+            except (TypeError, ValueError):
+                mismatches.append(f"{label} {key} is missing/non-numeric")
+                continue
+            if abs(stamped - expected) > 0.11:
+                mismatches.append(
+                    f"{label} {key} {stamped:g}s != re-derived {expected:g}s")
+        queue_values.append(queue)
+        work_values.append(work)
+        wall_values.append(wall)
+        if wall > 0:
+            share_values.append(queue / wall)
+
+    queue_claim = _queue_code_claim(report)
+    if not work_values:
+        if commits and all(_as_dict(raw).get("partial") is True for raw in commits):
+            if queue_claim is not None:
+                return Check(name, False,
+                             "report says a code/config change cuts runner queue")
+            return Check(name, True, "all per-commit observations are partial",
+                         skipped=True)
+        return Check(name, False, "commit-wall stamp has no complete, re-derivable observations")
+    work_p50 = statistics.median(work_values)
+    queue_p50 = statistics.median(queue_values)
+    wall_p50 = statistics.median(wall_values)
+    share_p50 = statistics.median(share_values) if share_values else 0.0
+    displayed_work = max(wall_p50 - min(queue_p50, wall_p50), 0.0)
+    credited_work = min(work_p50, displayed_work)
+    for key, expected in (("work_p50_s", work_p50),
+                          ("queue_p50_s", queue_p50),
+                          ("p50_s", wall_p50),
+                          ("queue_share_p50", share_p50),
+                          ("n", float(len(work_values)))):
+        try:
+            stamped = float(clock.get(key))
+        except (TypeError, ValueError):
+            mismatches.append(f"{key} is missing/non-numeric")
+            continue
+        if abs(stamped - expected) > 0.11:
+            mismatches.append(f"{key} {stamped:g}s != re-derived {expected:g}s")
+
+    runner_pool = {"OPT43", "OPT97"}
+    findings = [f for f in _as_list(data.get("findings")) if isinstance(f, dict)]
+    bad_credit: list[str] = []
+    code_savings: list[float] = []
+    for finding in findings:
+        if str(finding.get("pattern") or "") in runner_pool:
+            continue
+        try:
+            saving = float(finding.get("wall_clock_p50_s"))
+        except (TypeError, ValueError):
+            continue
+        if (saving > 0 and not finding.get("off_spine")
+                and not finding.get("advisory") and not finding.get("spine_rare")):
+            code_savings.append(saving)
+        if saving > credited_work + 0.11:
+            bad_credit.append(
+                f"{finding.get('id') or finding.get('pattern') or '?'} credits "
+                f"{saving:g}s above {credited_work:g}s work on the typical full wait")
+
+    text_failures: list[str] = []
+    if queue_p50 > 0:
+        bottom = next((line for line in report.splitlines()
+                       if line.startswith("> **Bottom line.**")), "")
+        if _fmt_clock(wall_p50) not in bottom:
+            text_failures.append("Bottom line omits the full per-commit wait")
+        if f"~{_fmt_clock(queue_p50)} of it waiting for a runner" not in bottom:
+            text_failures.append("Bottom line omits the runner-queue share")
+        if f"({queue_p50 / wall_p50:.0%})" not in bottom:
+            text_failures.append("Bottom line omits the runner-queue percentage")
+        if f"the remaining **~{_fmt_clock(displayed_work)}** is work" not in bottom:
+            text_failures.append("Bottom line omits the coherent work remainder")
+        saving = min(max(code_savings, default=0.0), credited_work, wall_p50)
+        if saving > 0 and wall_p50 > saving:
+            expected_multiple = f"{wall_p50 / (wall_p50 - saving):.2f}x"
+            if expected_multiple not in bottom:
+                text_failures.append(
+                    f"Bottom line omits full-wait projection {expected_multiple}")
+
+    if queue_claim is not None:
+        text_failures.append("report says a code/config change cuts runner queue")
+
+    failures = mismatches + bad_credit + text_failures
+    return Check(
+        name, not failures,
+        "; ".join(failures[:8]) if failures else
+        f"{len(work_values)} commit(s) re-derived; code credit <= {credited_work:g}s work")
+
+
 def run_checks(report, report_path, findings_path, skill_repo, clone=None):
     return [
         check_primary_section_present(report, findings_path),
         check_static_only_banner_matches_ci_shape(report, findings_path),
         check_headline_names_wall_clock(report),
+        check_commit_wall_clock_projection(report, findings_path),
+        check_headline_followup(report, findings_path),
         check_pole_anchors_resolve(report),
         check_rca_hands_off_never_prescribes(report),
+        check_job_adding_prompts_state_runner_minute_effect(report, findings_path),
         check_measured_cause_matches_rendered_timeline(report),
         check_skip_family_prompts_carry_pending_caveat(report),
         check_also_noticed_count_honest(report),
@@ -13884,15 +15520,19 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_cost_spine_shallow_disclosed(report, findings_path),
         check_date_matches_filename(report, report_path),
         check_no_typographic_dashes(report),
+        check_pr_lifecycle_block(report, findings_path),
         check_fences_balanced(report),
         check_no_domain_leakage(report),
         check_skill_commit_provenance(report, skill_repo),
         check_rendered_patterns_exist(report, findings_path),
+        check_windows_setup_guidance(report, findings_path),
         check_data_driven_have_signal(findings_path),
         check_speed_poles_complete(report, findings_path),
         check_aggregation_gate_poles_never_prescribe(report, findings_path),
         check_pole_drill_belongs_to_its_job(report, findings_path),
+        check_pole_audit_link_reference_resolves(report),
         check_gap_fill_evidence_grounded(report, findings_path),
+        check_no_root_cause_pole_is_gap_filled(report),
         check_dropped_check_not_framed_on_path(report, findings_path),
         check_demoted_pole_not_framed_typical_gate(report, findings_path),
         check_headline_slowest_matches_stamp(report, findings_path, report_path),
@@ -13901,6 +15541,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_headline_chain_matches_stamp(report, findings_path, report_path),
         check_aggregate_total_ge_largest_member(report, findings_path, report_path),
         check_headline_wait_within_makespan(report, findings_path, report_path),
+        check_commit_queue_work_credit(report, findings_path, report_path),
         check_headline_basis_excludes_fileless(report, findings_path, report_path),
         check_saving_within_measured_compute(report, findings_path),
         check_saving_carries_measured_basis(report, findings_path),
@@ -13918,8 +15559,14 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_tier2_claims_derivation_basis(report, findings_path, report_path),
         check_tier2_headline_matches_stamp(report, findings_path, report_path),
         check_tier2_savings_rows_backed_by_cost_spine(report, findings_path),
+        check_opt64_minimum_sample(report, findings_path),
         check_runner_minute_spine_contract(report, findings_path),
+        check_cost_spine_contents_count_matches_table(report, findings_path),
+        check_cost_spine_runner_host_split(report, findings_path),
+        check_drill_log_capture_relation(report, findings_path),
         check_no_rate_derived_dollars(report, findings_path),
+        check_default_branch_push_lane_isolated(report, findings_path),
+        check_minority_gate_tails(report, findings_path),
         check_opt80_tail_lines(report, findings_path),
         check_opt80_tail_withheld_reasons(report, findings_path),
         check_structural_pole_has_measured_step(findings_path),

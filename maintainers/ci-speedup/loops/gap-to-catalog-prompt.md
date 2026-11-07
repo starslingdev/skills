@@ -30,7 +30,9 @@ extend the catalog first).
   scanned_at, run_url}`).
 - `skills/ci-speedup/scripts/blocking_path.py` — the existing `_parse_log` detectors and
   `_FIX_META` (so you extend the established shape and don't duplicate a detector).
-- `skills/ci-speedup/references/optimization-patterns.md` — the OPT catalog (for naming/leverage).
+- `skills/ci-speedup/references/patterns/INDEX.md` — the OPT pattern index (for naming/leverage). A new
+  pattern is a NEW file `references/patterns/opt<N>-<slug>.md` + its INDEX.md line, then run
+  `python3 maintainers/ci-speedup/scripts/build_catalog.py`; never hand-edit `optimization-patterns.md`.
 - `skills/ci-speedup/tests/test_blocking_path.py` — the detector test conventions to match.
 
 ## Output

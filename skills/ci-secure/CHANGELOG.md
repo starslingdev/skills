@@ -13,6 +13,81 @@ entries are dated (UTC). Format loosely follows
 
 ### Added
 
+- ci-secure: "If a push credential leaks" — three new config hygiene checks,
+  read over the GitHub API the way the required-checks and fork-approval
+  checks already are. A credential that can push workflow files (GitHub's
+  docs name, among others, the `workflow` scope for classic tokens and OAuth apps, and the
+  "Workflows" permission for GitHub Apps and fine-grained tokens; the report
+  links them) can create a throwaway branch, add a workflow that reads
+  secrets, run it and delete the branch; none of it reaches the scanned
+  checkout, and protecting workflow files on the default branch does not
+  stop it.
+  `sec.environments.branch-restricted` passes when every deployment
+  environment accepts only branches and tags a non-admin push credential can
+  neither create nor move, or requires a reviewer (an admin or owner
+  credential is not covered, and the report says so). A pull request rule
+  holds a branch only when it needs at least one approval that is
+  dismissed or re-asked after a new push, and a pull-request-mode bypass
+  actor can still move it. Only one classic rule applies to a branch (an
+  exact name outranks every wildcard), so an open exact-name rule inside a
+  closed wildcard opens it. Patterns are matched the
+  way GitHub documents (only `**/` crosses `/`; no `*`, `?` or bracket
+  class matches it). Every environment counts,
+  secrets or not, because a cloud role trusts an environment name over OIDC;
+  the GitHub-managed `github-pages` and `copilot` count only when they hold a
+  secret, and one whose secrets cannot be read and that would not pass
+  leaves the check unmeasured. "Protected branches only" is decided by classic branch protection
+  rules alone (rulesets do not count there), and with no classic rule at all
+  GitHub lets every branch and tag deploy, which fails. A repository with no
+  environments is not applicable here. `sec.environments.approval-holds`
+  passes when every environment with reviewers blocks self-review (a
+  GitHub-managed one whose secrets cannot be read and that allows
+  self-review leaves it unmeasured).
+  `sec.secrets.environment-scoped` passes when no repository or
+  organisation secret is readable from any branch (no secrets at all
+  included) and fails when one is, naming each (NAMES, never values; likely
+  high-value ones first) and saying what must be done: an environment that
+  passes the branch check, the value re-entered there (GitHub never shows a
+  stored value), the old copy deleted, or for an organisation secret its
+  repository access narrowed, with what that can break (jobs on pull
+  requests or other branches lose the secret). It never reads "0 secrets" over a list that
+  could not be read. The report shows all of it under a new sub-heading,
+  with one line naming what is not checked yet: a credential that cannot
+  push workflow files but can change code the repository's own workflows
+  run. No repository, no token, or an unreadable source is unmeasured with
+  the reason, never a pass; classic protection rules and ruleset bypass
+  lists are readable only by an admin, so verdicts that depend on them are
+  unmeasured on any other token, while an environment that fails on its
+  settings alone still fails. An answer of an unexpected shape (a null classic rule, a missing allowance or reviewer list, a branch policy of a type other than branch or tag, a malformed entry in a branch listing) is unmeasured too, the unmeasured reason is the real one (a 502 or a SAML single sign-on 403 is not sent off to get admin rights), and a field the verdict code cannot handle costs only these three checks, never the rest of the fact table. **The config-fact aggregate this skill hands
+  ci-advisor gains three facts, so the security score shifts for anyone
+  running with a token**: `applicable_count` rises by up to three, and a
+  repo whose environments accept any branch, or that keeps secrets outside
+  every environment, now scores lower than before. Most repositories
+  scanned with a token that can read secret lists will fail
+  `sec.secrets.environment-scoped` at first; that is the exposure, not a
+  false positive. Without a token all
+  three are unmeasured and stay in the applicable count as a disclosed gap;
+  where the secret lists answer 403 (recorded for a non-collaborator) the
+  secrets check stays unmeasured. The CI gate does not read them (they stay
+  unmeasured there, each a non-blocking warning line). (2026-10-26)
+- ci-secure: new config hygiene check `sec.deps.update-cooldown` — every
+  configured dependency update tool waits at least 3 days before proposing a
+  fresh release (Dependabot `cooldown`, Renovate `minimumReleaseAge`), the
+  prevention half of the install-script vector (P14.25). Not applicable when
+  neither tool is configured; a config this scan cannot parse (a Renovate
+  config with comments or trailing commas, say) is unmeasured, never a pass or
+  a fail. A Dependabot entry with no `cooldown` is judged at Dependabot's own
+  3-day default (github.com; GHES from 3.23) and passes with that named. An
+  exemption that covers every package fails (a Dependabot `cooldown.exclude`
+  of `*`, or a Renovate `packageRules` entry with no narrowing filter that
+  lowers `minimumReleaseAge` below 3 days); a partial exemption passes and the
+  row names it.
+  Security updates are not delayed by either tool. **The config-fact aggregate
+  this skill hands ci-advisor gains a fact**: in a repository with Dependabot
+  or Renovate, `applicable_count` and `scored_count` each rise by one; with
+  neither, the fact is n/a and both are unchanged. A vendored CI gate run
+  without `--advisory` reds on a failing cooldown; the shipped workflow runs
+  with `--advisory`, which reports it without blocking. (2026-10-22)
 - ci-secure: `set +e; set -e; pytest -q` is recognised as a correctly wired
   suite. Reading the restore by physical line left an empty slice where all
   three share one line, failing a suite whose failure does end the job.
@@ -109,6 +184,95 @@ entries are dated (UTC). Format loosely follows
 
 ### Changed
 
+- 2026-10-27: Required-summary coverage now reads strict jq assertions, resolves
+  verdict-action tags only to the reviewed commit, and proves large strict
+  aggregates without enumerating every result combination. Scores can move
+  from unmeasured to pass or fail. The conditional-step rule from #150 now
+  also sees steps inside `parallel:` groups, conditional groups and background
+  steps, and the large-aggregate shortcut refuses any upstream step `if:`.
+
+- **2026-10-26** — **A required check that used to pass can now fail or
+  become unmeasured.** `sec.required-checks.skippable` no longer accepts an
+  always-running verdict job just because it runs: it now reads what the
+  verdict asserts and walks its dependency chain (including a reviewed,
+  pinned `alls-green` revision and its allowed lists). When detection fails
+  or is cancelled, the suites skip and the verdict still goes green, the
+  check fails. Unknown scripts, action revisions and unsupported expressions
+  are unmeasured, which removes the check from the score's denominator, so
+  scores before and after this change are not directly comparable. The
+  bounded value domain includes literal outputs and shell/environment
+  comparison values. A job that runs its own suite is still not asked to
+  assert on its dependencies, provided the test invocation is supported and
+  fatal; help, version, collection and negated commands do not count. The API
+  gate and fact IDs are unchanged. Follow-up hardening:
+  - An intermediate job whose condition names a status function in any
+    letter case (`success() || …`, `Always()`, `!Cancelled()`) is now
+    evaluated rather than assumed to skip after a failure; a gate that
+    reports success over a failed detector fails the check instead of
+    passing, and one whose steps cannot be resolved is unmeasured.
+  - A reusable-workflow caller or matrix output producer can now reproduce
+    a failure; neither can certify a pass.
+  - The ordinary-suite allowance now covers `go test`, `cargo test`,
+    `npm`/`pnpm`/`yarn test` and `pytest` with paths and common execution
+    flags, which had become unmeasured; listing, compile-only, empty-filter
+    and `|| true`-style forms are still refused.
+  - `test`/`[` with `==` under `shell: sh` is unmeasured, since dash rejects
+    it, instead of being read as a passing assertion.
+  - A job condition the analysis cannot evaluate no longer hides a bypass
+    elsewhere: when a failed build skips the tests and the aggregator still
+    succeeds however that unrelated condition resolves, the check fails
+    instead of becoming unmeasured.
+  - Suites routed by event (`github.event_name == 'push'` and its negation,
+    a head-repository match and its negation) are evaluated on both
+    branches, so a verdict requiring exactly one of them to succeed can pass
+    instead of being unmeasured.
+  - Ordinary multi-line summary scripts are read: `set -euo pipefail`,
+    echo lines, and flat `if [ ... ] && [ ... ]; then ... exit N; fi`
+    blocks, so ci-secure's own gate scaffold and the common
+    exactly-one-of-two arbitration pass instead of being unmeasured.
+    `else`, nesting, pipes and substitutions stay unmeasured.
+  - `cancelled()` in a job condition means the whole run was cancelled, not
+    that a dependency was: a gate guarded by `!cancelled()` that runs green
+    after its detector timed out no longer lets the check pass.
+  - A summary step without `shell:` is read as bash on any GitHub-hosted
+    `ubuntu-*`/`macos-*` label; on other runners the unmeasured reason now
+    says to set `shell: bash`.
+  - Cargo's positional test-name filter and Node pass-through flags other
+    than `--coverage`/`--ci` (for example `--passWithNoTests`) no longer
+    count as an ordinary suite, since they can run nothing and exit 0.
+  - Values the runner fixes cannot carry an assertion: a workflow `env:`
+    named `GITHUB_*`/`RUNNER_*` is ignored (the runner sets those), an
+    array such as `needs.*.result` interpolated into a script is
+    unmeasured (it renders as `Array`), and a summary job in a `container:`
+    is not assumed to have bash. A job whose earlier `run:` writes
+    `$GITHUB_ENV`/`$GITHUB_PATH`, and `go test -count=0` or a pytest
+    `@file` argument, no longer count as an ordinary suite.
+  - A summary job guarded by `if: ${{ !cancelled() }}` no longer counts as
+    always running: when the run is cancelled (by hand, or by a newer push
+    under a concurrency group) that job is skipped, and GitHub reports a
+    skipped required check as passed. Only `if: always()` qualifies, and the
+    fix recipe now recommends it alone. Without `needs:` the condition is
+    still accepted, since such a job starts at once and a cancellation
+    reports it cancelled.
+
+- **2026-10-22** — **The five eval scenarios now run at the same time.** The
+  shared eval runner starts every session at once (at most five; `--jobs N` or
+  `SKILL_EVALS_JOBS` to change it), each in its own sandbox, skill copy and
+  temp dir, and prints each verdict as its session finishes. The suite takes
+  about as long as its slowest case instead of the sum of all five, and the CI
+  job's timeout drops from 100 to 45 minutes to match. All five stay in the
+  per-PR `gate` tier; the checks and the skill's behaviour are unchanged.
+- **2026-10-22** — **The five eval scenarios run on the shared eval runner,
+  and ci-secure's own harness is retired.** The cases moved from five
+  `case.yaml` files into `evals/evals.json`, the fixtures from `evals/files/`
+  to `evals/fixtures/<slug>/` (still cloaked) with a Python `scaffold.py`, and
+  the run command is now `maintainers/scripts/run_skill_evals.py --skill
+  ci-secure`. Every mechanical check keeps its regex, target, match mode and
+  count bounds; the `tool_used` checks are re-anchored to the shared runner's
+  `<Tool> <json input>` record (`^Bash .*<old input match>`). The seven `llm`
+  graders are dropped, since nothing here runs a judge model; their criteria
+  live on in each entry's `expected_output`. The skill's own behaviour is
+  unchanged.
 - **2026-08-25** — **The rejection record now accounts for every pattern id
   the old catalog carried, and states the catalog's size correctly.**
   `references/why-these-ten.md` is the one document that explains why each
@@ -141,6 +305,73 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-10-28** — Required summary checks no longer certify upstream jobs
+  with a step allowed to fail. Literal `false` keeps the existing proof; other
+  `continue-on-error` values, including expressions and values inside parallel
+  groups, withhold a pass and name the job even after an earlier conditional
+  or background step. Literal outputs can still prove a concrete failure.
+
+- 2026-10-27: Verdict shell proofs remain unmeasured when exported Bash
+  functions or case variants of shell-control environment names are present.
+
+- 2026-10-27: Strict jq verdicts with inline dependency JSON remain unmeasured
+  when dependencies declare outputs; quoted environment-variable input keeps
+  the JSON separate from shell source.
+
+- **2026-10-27** — **The required-check verdict no longer passes a summary job
+  whose upstream test step may never have run, and `failure()` now sees failed
+  jobs further up the chain.** A dependency that reports success can still have
+  skipped a step behind its own `if:`, so such a dependency now leaves the
+  verdict unmeasured instead of passing. Its literal declared outputs still
+  count as evidence, so a reproducible bypass through it still fails. A job's
+  `failure()` condition is now true when any ancestor failed, not only a
+  direct dependency, matching GitHub. Two skippable jobs sharing a required
+  check name stay pinned as a failing verdict. (#150)
+
+- **2026-10-22** — **`sec.codeowners.workflows` no longer passes on a
+  CODEOWNERS rule the branch does not enforce.** CODEOWNERS only requests an
+  owner's review; it binds only when the default branch requires review from
+  Code Owners. A covering file passed on its own, so a repository whose rules
+  required one approval from anyone read as needing an owner's sign-off on
+  workflow changes. A missing or non-covering CODEOWNERS still fails from the
+  files alone. A covering one now also reads the merge rules over the API,
+  under the same contract as the other API-gated facts: pass when a ruleset
+  (organisation rulesets included) or classic branch protection requires
+  review from Code Owners; fail when both are readable and neither does,
+  naming the setting to turn on; unmeasured, with the reason, when there is no
+  repository or token or the answer cannot be completed (a ruleset that does
+  not require it plus admin-only classic protection the reader cannot see,
+  on a branch the public branch endpoint reports as protected). A reader
+  without admin access still gets a measured fail when that endpoint reports
+  the branch unprotected, since then no classic protection exists. The
+  fact's label now says the rule must be enforced. A covering CODEOWNERS
+  that used to pass now reads as unmeasured in every scan without a
+  repository and token, the vendored CI gate included, so the scored count
+  there drops by one; that is a coverage gap stated out loud, not a
+  regression. Two fixes ride along: gh's real "Branch not protected" 404
+  (reason before status) is now recognised as an answer, which also lets
+  `sec.required-checks.skippable` measure ruleset-only branches read by an
+  admin, and the branch name is escaped in every API path.
+- **2026-10-22** — **The scan step now works out `owner/repo` itself, so the
+  two API-gated config facts (required-checks-skippable, fork-PR approval) and
+  the dormancy lookup actually run in a real session.** The repo was derived
+  while following one step and read back in the next, but each step runs in
+  its own shell, so it arrived empty: the scanner got no `--repo` and those
+  checks reported UNMEASURED on every run even with `gh` signed in. The scan
+  block now derives it in its own shell — only when `gh auth status`
+  succeeds, from a `github.com` origin in either the https or ssh shape (a
+  remote with no `github.com` prefix, such as a relative path, yields
+  nothing), and only when the result is exactly `owner/repo`. The override is
+  now `CI_SECURE_REPO`, shape-checked the same way; a generic `REPO` in the
+  environment is ignored, because a stale one set by another tool read a
+  different repository's settings and run history and scored them as this
+  one's (two passes and a dormant finding that were not true). The
+  impostor-SHA check was not affected: it runs whenever `gh` is signed in.
+  Same bug class, later phases: the report render built its path from a slug
+  only the scan step's shell had set, so every repository rendered to the
+  same `ci-secure-report-.md` (two audits at once read each other's report),
+  and the summary and selection steps read paths nothing in their own shell
+  set. Every later block now re-derives its paths on its first line.
 - **2026-10-10** — **A self-repository action (`uses: $/path`, GitHub
   2026-07-30) run after a checkout of the fork's head now counts as fork code
   executed with privileges, exactly like a `./` action or a `run:` step.** A

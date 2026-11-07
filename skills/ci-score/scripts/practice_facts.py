@@ -1,11 +1,11 @@
 """CI Score v0.1-basic — the practice-facts computation (extracted from
 ci-speedup's scanner, 2026-07-16).
 
-`_practice_facts(parsed, root)` walks a repo's PARSED workflow YAML + local
-composite actions and returns the eleven pass/fail CONFIGURATION FACTS the CI
-Score consumes (each fact: {"state": "pass"|"fail"|"not_applicable",
+`_practice_facts(parsed, root, parse_errors)` walks a repo's PARSED workflow
+YAML + local composite actions and returns the eleven pass/fail CONFIGURATION
+FACTS the CI Score consumes (each fact: {"state": "pass"|"fail"|"not_applicable",
 "evidence": str, "files": [..<=3]}). `ci_score.compute_ci_score` maps these
-onto the frozen v0.1.4 registry and does the arithmetic.
+onto the frozen v0.1.6 registry and does the arithmetic.
 
 STRUCTURE, NOT SUBSTRINGS: every fact walks the parsed workflow (jobs, steps,
 with-blocks, on-blocks). The only substring matching is over the CODE inside a
@@ -17,10 +17,14 @@ predates this and matches raw code, but its only effect is a PASS (it never
 turns a comment into a false FAIL). A false FAIL on a public page is this
 design's worst outcome, and no substring path can produce one from a comment.
 
-VISIBILITY: workflow files plus LOCAL COMPOSITE ACTIONS
-(.github/actions/**/action.yml). Cross-repo reusable workflows remain
-invisible; the affected facts land not_applicable-with-evidence naming what was
-searched, never a confident claim about unseen files.
+VISIBILITY: workflow files plus LOCAL COMPOSITE ACTIONS (everything under
+.github/actions/**, and every local action a step's `uses:` names wherever it
+lives, followed through nested references), plus the workflow lockfile
+(.github/workflows/actions.lock) for the pinning check. Same-repository
+reusable workflows a pull-request job calls are graded on the PR path.
+Cross-repo reusable workflows' CONTENTS remain invisible (their reference is
+counted for pinning); the affected facts land not_applicable-with-evidence
+naming what was searched, never a confident claim about unseen files.
 
 This module is a self-contained COPY of the helpers it needs (cross-skill
 imports are forbidden — a skill must install standalone). It shares no code
@@ -28,9 +32,12 @@ with ci-speedup at runtime.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
+import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -324,7 +331,7 @@ def _automation_only(parsed: list[tuple[str, dict, str]], root: Path) -> bool:
         for jid, job in _wf_jobs(doc).items():
             if _TESTISH_RE.search(jid) or _TESTISH_RE.search(str(job.get("name", ""))):
                 return False  # signal 1 (test-like job name)
-    step_sources = _step_sources(parsed, _composite_action_docs(root))
+    step_sources = _step_sources(parsed, _composite_action_docs(root, parsed=parsed))
     if _has_test_command(step_sources):
         return False  # signal 1 (test-runner command)
     if _has_build_signal(parsed, root, step_sources):
@@ -497,7 +504,9 @@ def _walk_steps(steps: Any, stats: dict[str, Any] | None = None,
                 job: str | None = None, _prefix: str = "",
                 _path: frozenset[int] = frozenset(),
                 _budget: list[int] | None = None,
-                _side_by_side: bool = False) -> list[dict]:
+                _side_by_side: bool = False,
+                _group_of: dict[int, int] | None = None,
+                _group: int | None = None) -> list[dict]:
     """Every step the checks read — any mapping that is not a `parallel:`
     group or a bare control step — in declaration order, descending into
     `parallel:` groups. `_depth` is the nesting level of `steps` (0 = the
@@ -505,7 +514,10 @@ def _walk_steps(steps: Any, stats: dict[str, Any] | None = None,
     past `_MAX_PARALLEL_DEPTH` is not entered. `_budget` is the one counter
     the whole walk spends from (`_MAX_WALK_STEPS`). `_side_by_side` marks
     `steps` as a documented group's children, the only steps counted in
-    `steps_in_groups`. See `_new_step_stats` for
+    `steps_in_groups`. With `_group_of`, every step read inside a `parallel:`
+    group is mapped (by `id`) to the position of the top-level group holding
+    it, so a caller can tell which steps may run side by side. See
+    `_new_step_stats` for
     what is counted and why: inside `parallel:` groups nothing is skipped
     without being counted and named."""
     out: list[dict] = []
@@ -513,6 +525,14 @@ def _walk_steps(steps: Any, stats: dict[str, Any] | None = None,
         return out
     if _budget is None:
         _budget = [_MAX_WALK_STEPS]
+
+    def keep(step: dict) -> None:
+        out.append(step)
+        if _group_of is not None and _group is not None:
+            _group_of[id(step)] = _group
+        if stats is not None and _side_by_side:
+            stats["steps_in_groups"] += 1
+
     path = _path | {id(steps)}
     for i, step in enumerate(steps):
         if _budget[0] <= 0:
@@ -534,9 +554,7 @@ def _walk_steps(steps: Any, stats: dict[str, Any] | None = None,
         if _PARALLEL_KEY in step:
             group = step.get(_PARALLEL_KEY)
             if is_leaf:
-                out.append(step)
-                if stats is not None and _side_by_side:
-                    stats["steps_in_groups"] += 1
+                keep(step)
             undocumented = [r for r, hit in (("in_composite", in_composite),
                                               ("nested", _depth > 0),
                                               ("beside_run_uses", is_leaf)) if hit]
@@ -564,20 +582,20 @@ def _walk_steps(steps: Any, stats: dict[str, Any] | None = None,
             out.extend(_walk_steps(children, stats, rel, _depth + 1,
                                    in_composite=in_composite, job=job,
                                    _prefix=f"{label}.", _path=path | {id(group)},
-                                   _budget=_budget, _side_by_side=not undocumented))
+                                   _budget=_budget, _side_by_side=not undocumented,
+                                   _group_of=_group_of,
+                                   _group=i if _group is None else _group))
             continue
         if not is_leaf and any(k in step for k in _CONTROL_STEP_KEYS):
             if stats is not None:
                 stats["control_steps"] += 1
             continue
-        if stats is not None and _side_by_side:
-            stats["steps_in_groups"] += 1
-        out.append(step)
+        keep(step)
     return out
 
 
-def _job_steps(job: dict) -> list[dict]:
-    return _walk_steps(job.get("steps"))
+def _job_steps(job: dict, group_of: dict[int, int] | None = None) -> list[dict]:
+    return _walk_steps(job.get("steps"), _group_of=group_of)
 
 
 def _composite_steps(doc: dict, stats: dict[str, Any] | None = None,
@@ -610,7 +628,7 @@ def _step_walk_stats(parsed: list[tuple[str, dict, str]], root: Path) -> dict[st
     different read than the checks made. The collector records this; the
     report header discloses it."""
     stats = _new_step_stats()
-    _step_sources(parsed, _composite_action_docs(root), stats)
+    _step_sources(parsed, _composite_action_docs(root, parsed=parsed), stats)
     return stats
 
 
@@ -630,7 +648,10 @@ def _step_uses(step: dict) -> tuple[str, str] | None:
 # `_HISTORY_JOB_NAME_RE`, `_LINE_CONTINUATION_RE`, `_has_git_history_op`,
 # `_NESTED_LOCAL_USES_RE`, `_MAX_LOCAL_ACTION_DEPTH`, `_local_ref_path`,
 # `_read_local_history_file`, `_local_action_needs_history`,
-# `_index_local_git_actions` and `_job_needs_git_history`. What follows is a
+# `_index_local_git_actions`, `_FIRST_PARTY_SCRIPT_RE`,
+# `_SCRIPT_GIT_HISTORY_RE`, `_first_party_script_refs`, `_local_script_path`,
+# `_local_script_needs_history`, `_index_local_git_scripts` and
+# `_job_needs_git_history`. What follows is a
 # deliberate VERBATIM COPY of that predicate, not an import.
 # `_LOCAL_USES_PREFIXES` and `_is_local_uses` are duplicated separately (they
 # sit with the pinning helpers above, not in this block), copied from the same
@@ -729,6 +750,133 @@ def _has_git_history_op(text: str) -> bool:
     return bool(_GIT_HISTORY_RE.search(_LINE_CONTINUATION_RE.sub(" ", text)))
 
 
+# One deliberately bounded hop into a first-party script invoked directly by a
+# workflow run step. This is narrower than `_GIT_HISTORY_RE`: prose and
+# working-tree-only commands inside a general-purpose script must not make a
+# full-history checkout look load-bearing.
+_FIRST_PARTY_SCRIPT_RE = re.compile(
+    r"(?:^|[\n;&|])\s*(?:"
+    r"(?P<direct>\./[^\s;&|]+)|"
+    r"(?:bash|python|node)\s+(?P<interpreter>(?!-)(?:\./)?[^\s;&|]+)"
+    r")(?=\s|$)",
+    re.M,
+)
+_SCRIPT_GIT_HISTORY_RE = re.compile(
+    r"(?:^|[\n;&|])\s*(?:"
+    r"git\s+(?:rev-list|describe|merge-base)\b|"
+    r"git\s+log\b[^\n|;&]*\.\.\.?|"
+    r"git\s+diff\b(?:(?!\s--\s|>)[^\n|;&])*(?:\.\.\.?|\borigin/|\brefs/|HEAD[~^]|\.sha\b|\$[({]?[A-Za-z_0-9])|"
+    r"git\s+fetch\b[^\n|;&]*(?:--unshallow\b|--depth(?:=|\s)|--tags\b)|"
+    r"(?:npx\s+|pnpm\s+|yarn\s+)?changesets?\b|"
+    r"(?:dorny/paths-filter|tj-actions/changed-files)\b"
+    r")",
+    re.I | re.M,
+)
+_SCRIPT_LITERAL_CALL_RE = re.compile(
+    r"subprocess\.(?:run|call|check_call|check_output|Popen)\s*\(\s*\[(?P<python>[^\]\n]*)\]|"
+    r"(?:spawn|spawnSync|execFile|execFileSync)\s*\(\s*['\"]git['\"]\s*,\s*\[(?P<node>[^\]\n]*)\]",
+    re.I,
+)
+_SCRIPT_LITERAL_ARG_RE = re.compile(r"(['\"])(.*?)\1")
+_SCRIPT_COMMENT_LINE_RE = re.compile(r"^\s*(?:#|//).*$", re.M)
+_SCRIPT_GIT_ARGS_RE = re.compile(
+    r"^git\s+(?:rev-list|describe|merge-base)\b|"
+    r"^git\s+log\b.*\.\.\.?|"
+    r"^git\s+diff\b(?:(?!\s--\s|>).)*(?:\.\.\.?|\borigin/|\brefs/|HEAD[~^]|\.sha\b|\$[({]?[A-Za-z_0-9])|"
+    r"^git\s+fetch\b.*(?:--unshallow\b|--depth(?:=|\s)|--tags\b)",
+    re.I,
+)
+
+
+def _first_party_script_refs(text: str) -> set[str]:
+    """Return direct, relative script operands from a workflow `run:` block."""
+    joined = _LINE_CONTINUATION_RE.sub(" ", text)
+    return {ref.strip("'\"") for match in _FIRST_PARTY_SCRIPT_RE.finditer(joined)
+            if (ref := (match.group("direct") or match.group("interpreter")))}
+
+
+def _script_working_directory(job: dict, step: dict) -> str:
+    """The step's effective Actions working directory, relative to root."""
+    defaults = job.get("defaults")
+    run_defaults = defaults.get("run") if isinstance(defaults, dict) else None
+    inherited = (run_defaults.get("working-directory")
+                 if isinstance(run_defaults, dict) else None)
+    value = step.get("working-directory", inherited)
+    return str(value).strip() if value not in (None, "") else "."
+
+
+def _script_ref_key(ref: str, working_directory: str) -> str:
+    return ref if working_directory in ("", ".") else f"{working_directory}\0{ref}"
+
+
+def _script_key_parts(key: str) -> tuple[str, str]:
+    working_directory, separator, ref = key.partition("\0")
+    return (working_directory, ref) if separator else (".", working_directory)
+
+
+def _local_script_path(root: Path, key: str) -> "Path | None":
+    """Resolve a relative script ref only when its real path stays in root."""
+    working_directory, ref = _script_key_parts(key)
+    candidate = root / (ref[2:] if ref.startswith("./") else ref)
+    if working_directory != ".":
+        candidate = root / working_directory / (ref[2:] if ref.startswith("./") else ref)
+    try:
+        root_n = os.path.realpath(root)
+        candidate_n = os.path.realpath(candidate)
+        if os.path.commonpath([root_n, candidate_n]) != root_n:
+            return None
+    except ValueError:
+        return None
+    return candidate
+
+
+def _read_local_script(root: Path, key: str) -> "str | None":
+    path = _local_script_path(root, key)
+    if path is None:
+        return None
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except (OSError, ValueError):
+        return None
+
+
+def _has_script_git_history_op(text: str) -> bool:
+    without_comments = _SCRIPT_COMMENT_LINE_RE.sub("", text)
+    joined = _LINE_CONTINUATION_RE.sub(" ", without_comments)
+    if _SCRIPT_GIT_HISTORY_RE.search(joined):
+        return True
+    for match in _SCRIPT_LITERAL_CALL_RE.finditer(joined):
+        raw = match.group("python") or match.group("node") or ""
+        args = [value for _quote, value in _SCRIPT_LITERAL_ARG_RE.findall(raw)]
+        if match.group("python") is not None:
+            if not args or args.pop(0).lower() != "git":
+                continue
+        command = "git " + " ".join(args)
+        if _SCRIPT_GIT_ARGS_RE.search(command):
+            return True
+    return False
+
+
+def _local_script_needs_history(root: Path, key: str) -> bool:
+    """Read exactly one invoked script; unreadable or external refs fail closed."""
+    text = _read_local_script(root, key)
+    return text is None or _has_script_git_history_op(text)
+
+
+def _index_local_git_scripts(root: Path,
+                             parsed: list[tuple[str, dict, str]]) -> set[str]:
+    """Index invoked first-party scripts that directly need git history."""
+    refs: set[str] = set()
+    for _rel, doc, _raw in parsed:
+        for job in _wf_jobs(doc).values():
+            for step in _job_steps(job):
+                working_directory = _script_working_directory(job, step)
+                refs.update(_script_ref_key(ref, working_directory)
+                            for ref in _first_party_script_refs(
+                                str(step.get("run") or "")))
+    return {ref for ref in refs if _local_script_needs_history(root, ref)}
+
+
 def _step_uses_ref(step: dict) -> str:
     """The raw `uses:` string (local `./...` / `$/...` refs included, unlike
     `_step_uses`, which is scoped to remote actions)."""
@@ -819,7 +967,8 @@ def _index_local_git_actions(root: Path,
 
 
 def _job_needs_git_history(job: dict, job_name: str = "",
-                           local_history_actions: set[str] | None = None) -> bool:
+                           local_history_actions: set[str] | None = None,
+                           local_history_scripts: set[str] | None = None) -> bool:
     """True when shallowing this job's checkout would break it."""
     blob = "\n".join(str(s.get("run") or "") for s in _job_steps(job))
     uses_blob = "\n".join(_step_uses_ref(s) for s in _job_steps(job))
@@ -832,6 +981,12 @@ def _job_needs_git_history(job: dict, job_name: str = "",
         for s in _job_steps(job):
             if _step_uses_ref(s).split("@")[0].strip() in local_history_actions:
                 return True
+    if local_history_scripts:
+        for step in _job_steps(job):
+            working_directory = _script_working_directory(job, step)
+            for ref in _first_party_script_refs(str(step.get("run") or "")):
+                if _script_ref_key(ref, working_directory) in local_history_scripts:
+                    return True
     # Name-based fallback: a changeset/release/version job almost always needs
     # history even when the op lives in an invoked script. Conservative on
     # purpose — never recommend shallowing one of these.
@@ -992,38 +1147,393 @@ def _job_if_excludes_pull_requests(job: dict, doc: dict) -> bool:
         return False
 
 
-def _composite_action_docs(root: Path,
-                           errors: list[str] | None = None) -> list[tuple[str, dict]]:
+def _composite_action_docs(root: Path, errors: list[str] | None = None,
+                           parsed: list[tuple[str, dict, str]] | None = None,
+                           raw_out: dict[str, str] | None = None,
+                           ) -> list[tuple[str, dict]]:
     """Local composite actions' parsed action.yml files - setup (and its
     caching / pinning) frequently lives there rather than in the workflow.
-    With `errors`, an action file that cannot be read or parsed, or is not a
-    mapping, is appended by name (the collector records them as
-    `data_sources.composite_parse_errors`, the way it records
-    `workflow_parse_errors`)."""
-    out: list[tuple[str, dict]] = []
+    With `parsed`, every local action a `uses:` names is read too, wherever
+    it lives (`_local_composites`). With `errors`, an action file that cannot
+    be read or parsed, or is not a mapping, is appended by name (the collector
+    records them as `data_sources.composite_parse_errors`, the way it records
+    `workflow_parse_errors`). With `raw_out`, each parsed file's raw text is
+    kept by name, so a caller that also needs the comments YAML drops reads
+    the same bytes instead of opening the file again."""
+    return [(rel, doc) for rel, doc, _locked in
+            _local_composites(root, parsed or [], errors, raw_out=raw_out)]
+
+
+# How many distinct local action files one scan reads through `uses:`
+# references. A real repository has a handful; past the cap the reference is
+# recorded as unread, never silently dropped.
+_MAX_LOCAL_COMPOSITES = 256
+
+
+def _local_uses_key(uses: Any) -> str | None:
+    """The `./…` / `$/…` path of a local `uses:` reference, or None (remote
+    or docker://). At step level it always names an action directory, even
+    one called `setup.yml`; at job level, a reusable workflow file. No suffix
+    is filtered here: the level the `uses:` sits at decides which it is."""
+    if not isinstance(uses, str) or not _is_local_uses(uses):
+        return None
+    return uses.split("@")[0].strip()
+
+
+def _local_call_target(key: str) -> str:
+    """The normalized repository path a local job-level `uses:` key names
+    (`./.github/workflows/x.yml` -> `.github/workflows/x.yml`), or "" when
+    the key names nothing after its prefix."""
+    rest = key[2:]
+    return os.path.normpath(rest) if rest else ""
+
+
+def _with_map(node: dict) -> dict:
+    """A step's or calling job's `with:` mapping; {} when absent or not a
+    mapping."""
+    w = node.get("with")
+    return w if isinstance(w, dict) else {}
+
+
+# ---- What a runner checks out: exact path spelling ---------------------------
+#
+# A runner checks out exactly the paths git stores, byte for byte. A Linux
+# runner (the common case) has a case-sensitive disk, so `uses: ./CI/Setup`
+# does not exist there when git stores `ci/setup`; Windows and macOS runners
+# ignore case and would find it. The scan refuses a wrong-case path rather than
+# grade a file that may not run. The local disk is the wrong witness for this:
+# a macOS disk ignores case and accent form (a decomposed `é` on disk is the
+# composed `é` git stores), and a directory it cannot list says nothing. So
+# when the root is a git work tree, git's own file list decides; only a path
+# git does not track (or a root that is not a work tree, or no git at all)
+# falls back to the directory listing, and a directory that cannot be listed
+# there fails CLOSED.
+_UNSET: Any = object()
+
+
+class _Tracked:
+    """The paths git tracks under one root: exact spellings, and every
+    spelling under its case- and accent-folded key."""
+
+    def __init__(self, paths: list[str]) -> None:
+        self.exact = frozenset(paths)
+        self._folded: dict[str, list[str]] | None = None
+
+    @property
+    def folded(self) -> dict[str, list[str]]:
+        if self._folded is None:  # built only when a lookup misses
+            self._folded = {}
+            for p in sorted(self.exact):
+                self._folded.setdefault(_fold(p), []).append(p)
+        return self._folded
+
+
+def _fold(name: str) -> str:
+    return unicodedata.normalize("NFC", name).casefold()
+
+
+def _git_tracked(root: Path) -> "_Tracked | None":
+    """git's file list for `root` (`git ls-files`, relative to `root`), or None
+    when git is missing, fails, or `root` is not a git work tree. GIT_*
+    variables are dropped so a calling hook's index or work tree cannot leak
+    in. Local only: ls-files reads the index, never the network."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    try:
+        out = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--cached"],
+                             capture_output=True, timeout=60, env=env)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    return _Tracked([os.fsdecode(p) for p in out.stdout.split(b"\0") if p])
+
+
+def _path_state(root: Path, rel: str, tracked: "_Tracked | None") -> tuple[str, str | None]:
+    """How the posix path `rel` under `root` stands for a runner:
+    ("exact", rel) when that spelling exists; ("case", actual) when only a
+    spelling that differs in case (or accent form) exists, `actual` being it;
+    ("unlisted", None) when a directory on the way could not be listed (fail
+    closed); ("missing", None) when nothing like it exists. git's file list
+    decides for a tracked path; anything else is read from the disk."""
+    if tracked is not None:
+        if rel in tracked.exact:
+            return "exact", rel
+        variants = tracked.folded.get(_fold(rel))
+        if variants:
+            return "case", variants[0]
+    cur = os.path.normpath(os.path.abspath(root))
+    seen: list[str] = []
+    case = False
+    for part in rel.split("/"):
+        try:
+            with os.scandir(cur) as entries:
+                names = sorted(e.name for e in entries)
+        except OSError:
+            return "unlisted", None
+        if part not in names:
+            # outside git, a name that differs only in accent form is the
+            # same file on the disk that holds it
+            same = [n for n in names if unicodedata.normalize("NFC", n)
+                    == unicodedata.normalize("NFC", part)]
+            folded = same or [n for n in names if _fold(n) == _fold(part)]
+            if not folded:
+                return "missing", None
+            case = case or not same
+            part = folded[0]
+        seen.append(part)
+        cur = os.path.join(cur, part)
+    actual = "/".join(seen)
+    return ("case", actual) if case else ("exact", actual)
+
+
+def _rel_posix(root_n: str, path: Path) -> str:
+    """`path` relative to the normalized root, posix-style, in composed
+    (NFC) form so one file has one key whatever form the disk returns."""
+    rel = Path(os.path.relpath(os.path.normpath(os.path.abspath(path)), root_n)).as_posix()
+    return unicodedata.normalize("NFC", rel)
+
+
+def _case_mismatch(root: Path, path: Path, tracked: Any = _UNSET) -> bool:
+    """True when `path` under `root`, as written, is not a spelling a runner
+    checks out but one differing from it in case exists, or when a directory
+    on the way could not be listed (fail closed). See the block comment above:
+    git's file list decides when there is one."""
+    if tracked is _UNSET:
+        tracked = _git_tracked(root)
+    root_n = os.path.normpath(os.path.abspath(root))
+    state, _actual = _path_state(Path(root_n), _rel_posix(root_n, path), tracked)
+    return state in ("case", "unlisted")
+
+
+def _outside_root(root: Path, path: Path) -> bool:
+    """True when `path` resolves (symbolic links followed) outside `root`."""
+    try:
+        real_root = os.path.realpath(os.path.normpath(os.path.abspath(root)))
+        return os.path.commonpath([real_root, os.path.realpath(path)]) != real_root
+    except ValueError:
+        return True
+
+
+def _local_composites(root: Path, parsed: list[tuple[str, dict, str]],
+                      errors: list[str] | None = None,
+                      info: dict[str, Any] | None = None,
+                      raw_out: dict[str, str] | None = None,
+                      ) -> list[tuple[str, dict, frozenset[str] | None]]:
+    """(rel, doc, self_locked) for every local action the scan reads: each
+    `action.yml` under `.github/actions/**`, plus each action a step's `uses:`
+    names wherever it lives (`./ci/setup`, `$/tools/x`), followed through the
+    local references inside those actions. The `uses:` path is the truth: an
+    action outside `.github/actions/` is as much a part of the job as one
+    inside it, cache step and remote actions included.
+
+    Fails CLOSED, the same rules as the history read: a reference that
+    resolves outside the repository root, names no readable `action.yml` /
+    `action.yaml`, sits deeper than `_MAX_LOCAL_ACTION_DEPTH`, or arrives past
+    `_MAX_LOCAL_COMPOSITES` is never read and is appended to `errors` by its
+    reference, so nothing it holds can earn credit unseen.
+
+    `self_locked` is the set of workflow files that reach the action, and is
+    set only when every reference that reaches it is a self-repository `$/`
+    reference from a workflow or from another self-locked action (else None):
+    `$/` runs at the workflow's own commit, so a workflow lockfile covers the
+    actions it uses, while `./` runs whatever is in the workspace and the
+    lockfile cannot cover it. Credit then needs an entry under every one of
+    those workflows, never one borrowed from a workflow that does not run it.
+
+    The seed walk under `.github/actions/**` applies the same symbolic-link
+    rule. A local `uses:` path must be a spelling a runner checks out
+    (`_path_state`: git's file list when there is one): a wrong-case path does
+    not exist on a Linux runner, so it is never read, and an action the seed
+    walk read whose every reference is wrong-case earns nothing either. Action
+    files load with the duplicate-key-refusing loader, since plain YAML keeps
+    the last of two equal keys and would hide the first; a file that fails to
+    load is named with its reason.
+
+    With `info`, also fills: `unread_reasons` (every step-level local
+    reference whose action was not read, for any reason -> the first reason,
+    None when its file was already named by the walk that failed on it),
+    `key_rel` (reference -> the action file it read), and `caller_withs`
+    (action file -> the `with:` mapping of every step that reaches it, for
+    resolving `inputs.*`). With `raw_out`, each read action's raw text is
+    kept by name (the caching check reads version comments YAML drops)."""
+    root_n = os.path.normpath(os.path.abspath(root))
+    tracked = _git_tracked(root)
+    docs: dict[str, dict] = {}
+    unreadable: set[str] = set()
+    arrivals: dict[str, list[tuple[str | None, bool]]] = {}
+    errs: list[str] = []
+    unread_reasons: dict[str, str | None] = {}
+    key_rel: dict[str, str] = {}
+    caller_withs: dict[str, list[dict]] = {}
+    case_targets: set[str] = set()
+    queue: list[tuple[str, str | None, int, dict]] = []
+
+    def load(path: Path, rel: str) -> None:
+        why = "not a mapping"
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            doc, why = None, "could not be read"
+        else:
+            try:
+                doc = _load_strict_yaml(text)
+            except _DuplicateKeyError as exc:
+                doc, why = None, str(exc)
+            except (ValueError, yaml.YAMLError):
+                doc, why = None, "does not parse as YAML"
+        if not isinstance(doc, dict):
+            unreadable.add(rel)
+            errs.append(f"{rel} ({why})")
+            return
+        docs[rel] = doc
+        if raw_out is not None:
+            raw_out[rel] = text
+        for step in _composite_steps(doc):
+            key = _local_uses_key(step.get("uses"))
+            if key is not None:
+                queue.append((key, rel, 0, _with_map(step)))
+
     for pattern in ("action.yml", "action.yaml"):
         for path in sorted((root / ".github" / "actions").rglob(pattern)):
-            rel = str(path.relative_to(root))
-            try:
-                doc = yaml.safe_load(path.read_text(encoding="utf-8", errors="replace"))
-            except (OSError, yaml.YAMLError):
-                if errors is not None:
-                    errors.append(rel)
+            rel = _rel_posix(root_n, path)
+            # a symbolic link out of the checkout (the file itself, or a
+            # directory above it, `.github/actions` included) is not this
+            # repository's file
+            if _outside_root(root_n, path):
+                unreadable.add(rel)
+                errs.append(f"{rel} (resolves outside the repository)")
                 continue
-            if isinstance(doc, dict):
-                out.append((rel, doc))
-            elif errors is not None:
-                errors.append(rel)
-    return out
+            load(path, rel)
+    # depth counts nested hops; the seeds' own references start at depth 1
+    queue = [(k, p, 1, w) for k, p, _d, w in queue]
+    wf_marks: dict[str, str] = {}  # "wf:<rel>" parent marker -> workflow rel
+    for wf_rel, doc, _raw in parsed:
+        mark = "\0wf:" + os.path.normpath(wf_rel)
+        wf_marks[mark] = os.path.normpath(wf_rel)
+        for job in _wf_jobs(doc).values():
+            for step in _job_steps(job):
+                key = _local_uses_key(step.get("uses"))
+                if key is not None:
+                    queue.append((key, mark, 0, _with_map(step)))
+
+    def unread(key: str, why: str | None) -> None:
+        unread_reasons.setdefault(key, why)
+        if why is not None:
+            errs.append(f"{key} ({why})")
+
+    while queue:
+        key, parent, depth, with_ = queue.pop(0)
+        base = _local_ref_path(root, key)
+        if base is None:
+            unread(key, "resolves outside the repository")
+            continue
+        found = None
+        case_actual = None
+        unlisted = False
+        for cand in (base / "action.yml", base / "action.yaml"):
+            state, actual = _path_state(Path(root_n), _rel_posix(root_n, cand), tracked)
+            if state == "exact":
+                try:
+                    if cand.is_file():
+                        found = cand
+                        break
+                except (OSError, ValueError):
+                    continue
+            elif state == "case":
+                case_actual = case_actual or actual
+            elif state == "unlisted":
+                unlisted = True
+        if found is None:
+            if case_actual is not None:
+                # a runner checks out exact spellings: on a Linux runner this
+                # path does not exist, so it is never read
+                case_targets.add(unicodedata.normalize("NFC", case_actual))
+                unread(key, "path case does not match the repository")
+            elif unlisted:
+                unread(key, "directory could not be listed")
+            else:
+                unread(key, _NO_ACTION_REASON)
+            continue
+        rel = _rel_posix(root_n, found)
+        if rel in unreadable:
+            unread(key, None)  # already named once, by the walk that failed on it
+            continue
+        # a symbolic link out of the checkout is not this repository's file
+        if _outside_root(root_n, found):
+            unreadable.add(rel)
+            unread(key, "resolves outside the repository")
+            continue
+        if depth > _MAX_LOCAL_ACTION_DEPTH:
+            unread(key, f"nested more than {_MAX_LOCAL_ACTION_DEPTH} deep")
+            continue
+        arrivals.setdefault(rel, []).append((parent, key.startswith("$/")))
+        caller_withs.setdefault(rel, []).append(with_)
+        if rel in docs:
+            key_rel[key] = rel
+            continue
+        if len(docs) >= _MAX_LOCAL_COMPOSITES:
+            unread(key, f"past the {_MAX_LOCAL_COMPOSITES}-action read limit")
+            continue
+        before = len(queue)
+        load(found, rel)
+        if rel in unreadable:
+            unread(key, None)
+            continue
+        key_rel[key] = rel
+        queue[before:] = [(k, p, depth + 1, w) for k, p, _d, w in queue[before:]]
+
+    # An action the seed walk read whose every reference is in the wrong case
+    # never runs on a Linux runner: it earns nothing (its references are named).
+    for rel in case_targets:
+        if rel in docs and rel not in arrivals:
+            del docs[rel]
+            if raw_out is not None:
+                raw_out.pop(rel, None)
+
+    # self-locked: every arrival is `$/` from a workflow or a self-locked
+    # action. Start optimistic for referenced actions and only ever lower a
+    # flag, so the loop terminates (cycles included).
+    locked = {rel: rel in arrivals for rel in docs}
+    changed = True
+    while changed:
+        changed = False
+        for rel, arr in arrivals.items():
+            if locked.get(rel) and any(
+                    not dollar or (p not in wf_marks and not locked.get(p, False))
+                    for p, dollar in arr):
+                locked[rel] = False
+                changed = True
+    # the workflows that reach each action, directly or through other actions:
+    # lockfile credit inside it needs an entry under EVERY one of them
+    reach: dict[str, set[str]] = {rel: set() for rel in docs}
+    changed = True
+    while changed:
+        changed = False
+        for rel, arr in arrivals.items():
+            for p, _dollar in arr:
+                add = {wf_marks[p]} if p in wf_marks else reach.get(p, set())
+                if not add <= reach.setdefault(rel, set()):
+                    reach[rel] |= add
+                    changed = True
+    if errors is not None:
+        errors.extend(dict.fromkeys(errs))
+    if info is not None:
+        info.update(unread_reasons=unread_reasons, key_rel=key_rel,
+                    caller_withs=caller_withs)
+    return [(rel, doc, frozenset(reach[rel]) if locked[rel] and reach[rel] else None)
+            for rel, doc in docs.items()]
 
 
-def _unreadable_step_sources(parsed: list[tuple[str, dict, str]],
-                             root: Path) -> tuple[list[str], list[str]]:
+def _unreadable_step_sources(parsed: list[tuple[str, dict, str]], root: Path,
+                             composites: list[tuple[str, dict]] | None = None,
+                             ) -> tuple[list[str], list[str]]:
     """(step lists that are not lists, composite action files that did not
     parse), by name. A job whose `steps:` is a mapping or a string, or a
     composite whose `runs.steps` is, reads as having no steps at all; neither
     may go unrecorded. An absent or empty `steps:` is not listed (a job that
-    calls a reusable workflow has none)."""
+    calls a reusable workflow has none). With `composites` (already read),
+    those are checked and no action is read again; the second list is then
+    empty, as the caller holds the read's own errors."""
     bad_lists: list[str] = []
     for rel, doc, _raw in parsed:
         for jid, job in _wf_jobs(doc).items():
@@ -1031,12 +1541,721 @@ def _unreadable_step_sources(parsed: list[tuple[str, dict, str]],
             if steps is not None and not isinstance(steps, list):
                 bad_lists.append(f"{rel}: jobs.{jid}.steps")
     parse_errors: list[str] = []
-    for rel, doc in _composite_action_docs(root, parse_errors):
+    if composites is None:
+        composites = _composite_action_docs(root, parse_errors, parsed)
+    for rel, doc in composites:
         runs = doc.get("runs")
         steps = runs.get("steps") if isinstance(runs, dict) else None
         if steps is not None and not isinstance(steps, list):
             bad_lists.append(f"{rel}: runs.steps")
     return bad_lists, parse_errors
+
+
+# ---- Setup actions whose caching is on by default ----------------------------
+#
+# CANONICAL SOURCE: `skills/ci-speedup/scripts/collect_runs.py` —
+# `_OPT79_SETUP_CACHE_INPUTS`, `_OPT79_SETUP_NODE_AUTO_CACHE_FROM_MAJOR`,
+# `_OPT79_SETUP_NODE_V5_PM_RE`, `_OPT79_SETUP_NODE_NPM_RE`, `_OPT79_OFF_VALUES`,
+# `_opt79_ref_major`, `_opt79_setup_node_auto_cache` and
+# `_opt79_setup_cache_state`. A COPY, not an import (each skill installs
+# standalone); `tests/test_ci_score_setup_cache_parity.py` pins the two tables.
+# `{action: (the input that switches its cache, the first major whose default
+# is ON, or None when the default is OFF)}`; every other setup-* action is
+# switched by `cache:` and is off without it. A SHA or branch ref names no
+# major, so in this shared verdict a default-on action pinned by SHA counts as
+# caching: the shared verdict never reads a `# v5` comment beside the SHA,
+# exactly as in ci-speedup. ci-score's rules live in the wrapper or walk
+# below (`_step_caches_by_default`, `_dependency_cache_walk`), never here.
+_SETUP_CACHE_INPUTS: dict[str, tuple[str, int | None]] = {
+    "actions/setup-go": ("cache", 4),
+    "astral-sh/setup-uv": ("enable-cache", 5),
+    "ruby/setup-ruby": ("bundler-cache", None),
+}
+_SETUP_NODE_AUTO_CACHE_FROM_MAJOR = 5
+_SETUP_NODE_V5_PM_RE = re.compile(r"^(?:\^)?(npm|yarn|pnpm)@")
+_SETUP_NODE_NPM_RE = re.compile(r"(\^)?npm(@.*)?")   # fullmatch = JS ^…$
+_SETUP_OFF_VALUES = ("false", "no", "off")
+# Actions that restore a dependency cache of their own without `cache` in the
+# action name or an `owner/setup-*` shape (ci-speedup's
+# `_OPT79_OTHER_CACHE_USES_RE`, minus the ones `_CACHE_ACTION_RE` already
+# matches). Gradle's are on unless `cache-disabled` is set true.
+_DEFAULT_ON_CACHE_ACTIONS_RE = re.compile(
+    r"^(gradle/actions/setup-gradle|gradle/gradle-build-action|bahmutov/npm-install)$",
+    re.IGNORECASE)
+
+
+def _ref_major(ref: str) -> int | None:
+    """The major a `uses:` ref names (`v5`, `v5.1`, `5.1.2`), or None for a
+    SHA (even one starting with digits) or a branch."""
+    m = re.fullmatch(r"v?(\d+)(?:\.\d+){0,2}", (ref or "").strip())
+    if not m or len(m.group(1)) > 4:
+        return None
+    return int(m.group(1))
+
+
+def _setup_node_auto_cache(major: int | None, package_json: Any) -> str:
+    """setup-node v5+'s automatic cache for one parsed `package.json`: `on`,
+    `off`, or `maybe` (file unread/invalid, or a SHA ref on which the v5 and
+    v6+ rules disagree)."""
+    if not isinstance(package_json, dict):
+        return "maybe"
+
+    def _v5() -> bool:
+        pm = package_json.get("packageManager")
+        return isinstance(pm, str) and bool(_SETUP_NODE_V5_PM_RE.match(pm))
+
+    def _v6() -> bool:
+        dev = package_json.get("devEngines")
+        dev_pm = dev.get("packageManager") if isinstance(dev, dict) else None
+        items = (dev_pm if isinstance(dev_pm, list) else [dev_pm]) if dev_pm else []
+        for obj in items:
+            nm = obj.get("name") if isinstance(obj, dict) else None
+            if isinstance(nm, str) and _SETUP_NODE_NPM_RE.fullmatch(nm):
+                return True
+        pm = package_json.get("packageManager")
+        return isinstance(pm, str) and bool(_SETUP_NODE_NPM_RE.fullmatch(pm))
+
+    if major is None:
+        a, b = _v5(), _v6()
+        return ("on" if a else "off") if a == b else "maybe"
+    if major == _SETUP_NODE_AUTO_CACHE_FROM_MAJOR:
+        return "on" if _v5() else "off"
+    return "on" if _v6() else "off"
+
+
+def _setup_cache_state(action: str, ref: str, with_in: dict[str, Any],
+                       package_json: Any = None) -> str:
+    """Whether a `setup-*` step restores a cache: `on`, `off`, `maybe` or
+    `expr` (its cache input is an unevaluated `${{ … }}` expression). An input
+    that is SET decides it; an absent one falls back to the action's default."""
+    action = action.strip().lower()
+    major = _ref_major(ref)
+    input_name, on_from = _SETUP_CACHE_INPUTS.get(action, ("cache", None))
+    raw = with_in.get(input_name)
+    node_auto = action == "actions/setup-node" and (
+        major is None or major >= _SETUP_NODE_AUTO_CACHE_FROM_MAJOR)
+    if raw is not None:
+        val = str(raw).strip()
+        if "${{" in val:
+            return "expr"
+        if not val and node_auto:
+            raw = None   # setup-node v5+: an EMPTY `cache:` falls through to auto
+        else:
+            return "off" if (not val or val.lower() in _SETUP_OFF_VALUES) else "on"
+    if on_from is not None and (major is None or major >= on_from):
+        return "on"
+    if node_auto:
+        pmc = with_in.get("package-manager-cache")
+        pmc_val = "" if pmc is None else str(pmc).strip()
+        if "${{" in pmc_val:
+            return "expr"
+        # `(input || 'true').toUpperCase() === 'TRUE'`
+        if pmc_val and pmc_val.upper() != "TRUE":
+            return "off"
+        return _setup_node_auto_cache(major, package_json)
+    return "off"
+
+
+_BOM = chr(0xFEFF)   # built at runtime: no invisible character in the source
+_PJ_BOM_REASON = ("package.json starts with a byte-order mark, which setup-node's "
+                  "JSON parse rejects")
+# Reasons that DECIDE the default off (named as "earns no default cache"),
+# as opposed to the ones that leave it undecided ("could not be resolved").
+_DECIDED_OFF_REASONS = frozenset({_PJ_BOM_REASON})
+
+
+def _root_package_json(root: Path) -> tuple[Any, str | None]:
+    """(the repo-root package.json as setup-node parses it, why it could not
+    be). Absent: `(None, None)` - setup-node then finds no package manager, so
+    the default is not credited and not named. Present but unusable: `(None or
+    the parsed non-object, reason)`; the shared verdict reads that as
+    undecided, and the caching fact names the reason
+    (`_unresolved_setup_defaults`). setup-node reads the file with
+    `fs.readFileSync(…, 'utf-8')` and hands it to `JSON.parse` with no BOM
+    strip, so a byte-order mark makes it fail there too: that one is decided
+    off (setup-node cannot use the file), named as "earns no default cache",
+    never credited."""
+    path = root / "package.json"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None, None
+    except (OSError, ValueError):
+        return None, "package.json could not be read"
+    if text.startswith(_BOM):
+        return None, _PJ_BOM_REASON
+    try:
+        doc = json.loads(text)
+    except ValueError:
+        return None, "package.json is not valid JSON"
+    if not isinstance(doc, dict):
+        return doc, "package.json is not a JSON object"
+    return doc, None
+
+
+def _checkout_state(state: str, step: dict) -> str:
+    """Where `$GITHUB_WORKSPACE` stands after `step` (ci-speedup's
+    `_opt79_checkout_state`): `none` (nothing checked out yet), `root` (this
+    repository at the workspace root) or `moved` (a sub-path or another
+    repository - sticky, since the root files are then not the ones this scan
+    read)."""
+    ua = _step_uses(step)
+    if not ua or ua[0].strip().lower() != "actions/checkout":
+        return state
+    w = step.get("with") if isinstance(step.get("with"), dict) else {}
+    path = str(w.get("path") or "").strip()
+    if w.get("repository") or path not in ("", ".", "./"):
+        return "moved"
+    return "moved" if state == "moved" else "root"
+
+
+def _is_background(step: dict) -> bool:
+    v = step.get("background")
+    return v is True or (isinstance(v, str) and v.strip().lower() == "true")
+
+
+def _workspace_states(steps: list[dict], group_of: dict[int, int],
+                      start: str = "none") -> list[str]:
+    """`_checkout_state` as each step sees it (ci-speedup's
+    `_opt79_workspace_states`): only a checkout that has FINISHED counts - one
+    earlier in sequence, or in an earlier `parallel:` group (a group ends in an
+    implicit wait). A checkout that may still be running - in the step's own
+    group, or a top-level `background: true` checkout before it - leaves the
+    workspace `racing`, never `root`, so a default that reads the workspace is
+    not credited on declaration order alone."""
+    states: list[str] = []
+    done = start
+    racing_bg = False
+    for st in steps:
+        g = group_of.get(id(st))
+        racing = racing_bg or (g is not None and any(
+            group_of.get(id(o)) == g and o is not st
+            and _checkout_state("none", o) != "none" for o in steps))
+        states.append("racing" if racing else done)
+        if _checkout_state("none", st) == "none":
+            continue
+        if g is None and _is_background(st):
+            racing_bg = True
+        else:
+            done = _checkout_state(done, st)
+    return states
+
+
+# ---- ci-score's own narrowing of the copied verdict (OD-CS23)
+#
+# ci-speedup counts an unseen cache as ON because there that can only withhold
+# a savings claim; here the same choice would hand out a pass. So the rules
+# below sit in the per-step wrapper (`_step_caches_by_default`) or the walk
+# that calls it (`_dependency_cache_walk`), never in the shared
+# `_setup_cache_state` (which the parity test pins verdict for verdict). Every
+# rule but one only WITHHOLDS credit the shared verdict gave:
+#
+# 1. A SHA-pinned action carrying a version comment (`@<sha> # v3.5.0`,
+#    `# tag=v3.5.0`, `# ratchet:owner/action@v3`, `# pin@v3`) is re-checked at
+#    the commented major: a comment naming a release from before caching
+#    became the default earns nothing, and so does a comment that names no
+#    release at all (it is there, so the pin is meant to be read by it, and
+#    what it says cannot be read). A date (`# 2024-05-01`), a range
+#    (`# 20.x`) or a major no release of the action has had is not a release.
+#    No comment: the shared verdict stands. Gradle's and npm-install's
+#    default-on actions always cache, so their comments are not read.
+# 2. setup-uv's input-free default (`enable-cache: auto`) caches only on
+#    GitHub-hosted runners, so it is credited only when the job's `runs-on` is
+#    one of GitHub's published image labels. Any other runner, including a
+#    larger runner whose label its owner names, earns the credit with
+#    `enable-cache: true`.
+# 3. (The one rule that may ADD credit, owner decision 3.) A SHA-pinned
+#    setup-node whose v5 and v6 rules disagree (`maybe`) is credited when it
+#    carries version comment(s) and EVERY commented major caches for this repo.
+#
+# And four readings the shared verdict leaves open (all withhold only):
+# `package-manager-cache: ${{ … }}` is read as its default `true`, so it
+# still needs a manager in package.json; setup-go's default needs a finished
+# root checkout and a go.sum (its cache key); and a checkout that may still
+# be running (`parallel:` sibling, earlier `background: true`) does not count.
+# `with:` keys are read case-insensitively in both directions (GitHub matches
+# action inputs that way): the shared verdict is computed from the lower-cased
+# inputs, so `Cache: npm` opts in exactly as `Cache: false` opts out.
+#
+# A withhold this scan could not decide is never silent: it is recorded with
+# its reason (`{file, step, reason}`) and named in the fact's evidence. A
+# plain off (an opt-out, a pre-default release, no checkout at all, no
+# package manager in package.json) names nothing.
+_SHA_REF_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+# `uses: owner/action@<sha>` and whatever follows on the same line.
+_USES_SHA_LINE_RE = re.compile(
+    r"""uses:\s*['"]?([\w.-]+/[\w./-]+)@([0-9a-fA-F]{40})\b([^\n]*)""")
+# A YAML comment after the ref: `#` at the start of the rest of the line or
+# after whitespace, a quote, or a closing `}` / `]` / `,` of a flow mapping.
+_TRAILING_COMMENT_RE = re.compile(r"""(?:^|[\s'"}\],])#(.*)$""")
+# The release a pin comment names: `v3`, `3.5.0`, `tag=v3.5.0`,
+# `ratchet:owner/action@v3`, `pin@v3`, `owner/action@v3`. A number followed
+# by `-` (a date such as `2024-05-01`) or by `.x` / another word character (a
+# range such as `20.x`) names no release.
+_COMMENT_VERSION_RE = re.compile(
+    r"""^\s*(?:tag\s*=\s*|ratchet:\s*[\w./-]*@|pin@|[\w.-]+/[\w./-]+@|@)?v?(\d{1,4})(?:\.\d+){0,2}(?![\w-]|\.\w)""",
+    re.IGNORECASE)
+# The highest major a version comment may name for each default-on action
+# (its current major plus headroom); anything above, or below 1, is a toolchain
+# version, a date or a typo, never one of the action's releases.
+_PLAUSIBLE_MAJOR = {"actions/setup-go": 9, "actions/setup-node": 9,
+                    "astral-sh/setup-uv": 15, "ruby/setup-ruby": 5}
+_PLAUSIBLE_MAJOR_DEFAULT = 20
+# GitHub's published hosted-runner image labels. Source: the "GitHub-hosted
+# runners" reference
+# (https://docs.github.com/en/actions/reference/runners/github-hosted-runners),
+# which lists the ubuntu-*, windows-*, macos-* and `xcode-27` labels, plus the
+# macOS larger-runner labels. Larger Linux / Windows runners carry names their
+# owner chooses, which no pattern can tell from a self-hosted label, so they
+# earn the credit the same way any runner does: with `enable-cache: true`.
+_GITHUB_HOSTED_LABEL_RE = re.compile(
+    r"^(?:ubuntu-(?:latest|slim|\d+\.\d+(?:-arm)?)"
+    r"|windows-(?:latest|\d{4}(?:-vs\d{4})?|11(?:-vs\d{4})?-arm)"
+    r"|macos-(?:latest|\d+)(?:-intel|-large|-xlarge)?"
+    r"|xcode-\d+)$", re.IGNORECASE)
+_RUNNER_GATED_DEFAULTS = {"astral-sh/setup-uv": "enable-cache"}
+_UNDECIDED_TAIL = "and setup-node v5 and v6 decide this package.json differently"
+_SHA_UNDECIDED = f"a SHA pin names no release, {_UNDECIDED_TAIL}"
+_REF_UNDECIDED = f"a branch or SHA ref names no release, {_UNDECIDED_TAIL}"
+_RUNNER_UNREAD_TAIL = ("so this scan cannot tell whether the runner is GitHub-hosted, the "
+                       "only place setup-uv's default (enable-cache: auto) caches")
+_RUNS_ON_EXPR = f"runs-on is an expression, {_RUNNER_UNREAD_TAIL}"
+_RUNS_ON_GROUP = f"runs-on is a runner group or object, {_RUNNER_UNREAD_TAIL}"
+_WS_RACING = ("a checkout may still be running when this step starts (a parallel: "
+              "sibling, or an earlier background: true checkout), so what the action "
+              "reads from the workspace is not settled")
+_WS_MOVED = ("the checkout before this step went to a sub-path or another repository, "
+             "so the workspace root is not the tree this scan read")
+
+
+def _sha_version_comments(texts: list[str],
+                          unparsed: dict[tuple[str, str], list[str]] | None = None,
+                          ) -> dict[tuple[str, str], set[int | None]]:
+    """{(action, sha): {majors}} from version comments on `uses:
+    owner/action@<sha>` lines in the raw workflow / composite text (YAML
+    parsing drops comments). A comment that names no release (or a major
+    outside the action's plausible range) adds None, and with `unparsed` its
+    text is kept under the same key, for the evidence."""
+    out: dict[tuple[str, str], set[int | None]] = {}
+    for text in texts:
+        for m in _USES_SHA_LINE_RE.finditer(text or ""):
+            c = _TRAILING_COMMENT_RE.search(m.group(3))
+            if not c:
+                continue
+            action = m.group(1).lower()
+            key = (action, m.group(2).lower())
+            v = _COMMENT_VERSION_RE.match(c.group(1))
+            major = int(v.group(1)) if v else None
+            if major is not None and not (
+                    1 <= major <= _PLAUSIBLE_MAJOR.get(action, _PLAUSIBLE_MAJOR_DEFAULT)):
+                major = None
+            out.setdefault(key, set()).add(major)
+            if major is None and unparsed is not None:
+                unparsed.setdefault(key, []).append(c.group(1).strip())
+    return out
+
+
+def _runs_on_github_hosted(runs_on: Any) -> bool:
+    """A published GitHub-hosted image label, as a string or a one-item list.
+    Expressions, other labels, groups/objects and multi-label lists: False."""
+    if isinstance(runs_on, list) and len(runs_on) == 1:
+        runs_on = runs_on[0]
+    return isinstance(runs_on, str) and bool(_GITHUB_HOSTED_LABEL_RE.match(runs_on.strip()))
+
+
+def _runs_on_unread(runs_on: Any) -> str | None:
+    """Why this scan cannot read the runner from `runs-on` (an expression, or
+    a group / object), or None when it is literal labels."""
+    if isinstance(runs_on, dict):
+        return _RUNS_ON_GROUP
+    items = runs_on if isinstance(runs_on, list) else [runs_on]
+    if any(isinstance(x, str) and "${{" in x for x in items):
+        return _RUNS_ON_EXPR
+    if any(isinstance(x, (dict, list)) for x in items):
+        return _RUNS_ON_GROUP
+    return None
+
+
+def _go_sum_check(root: Path, dep_path: Any) -> tuple[bool, str | None]:
+    """(a go.sum setup-go keys on exists, why it could not be checked).
+    setup-go keys its cache on `cache-dependency-path` (files or globs, one
+    per line) or, without it, on the workspace's `go.sum`; with no such file it
+    restores nothing. An expression, an absolute path, one leaving the
+    repository, or only `!` exclusions cannot be checked here: not credited
+    (fail closed), and the reason is returned so the fact can name it."""
+    val = "" if dep_path is None else str(dep_path)
+    if not val.strip():
+        return (root / "go.sum").is_file(), None
+    if "${{" in val:
+        return False, ("cache-dependency-path is an expression, so the go.sum setup-go "
+                       "keys its cache on cannot be checked")
+    unread: str | None = None
+    includes = 0
+    for line in val.splitlines():
+        p = line.strip().strip("'\"")
+        if p.startswith("./"):
+            p = p[2:]
+        if not p or p.startswith("!"):
+            continue
+        includes += 1
+        if p.startswith("/"):
+            unread = unread or (f"cache-dependency-path '{p}' is an absolute path, outside "
+                                f"the tree this scan read")
+            continue
+        if ".." in Path(p).parts:
+            unread = unread or (f"cache-dependency-path '{p}' leaves the repository (..), "
+                                f"so it cannot be checked")
+            continue
+        if any(ch in p for ch in "*?["):
+            try:
+                if any(x.is_file() for x in root.glob(p)):
+                    return True, None
+            except (ValueError, NotImplementedError, OSError):
+                continue
+        elif (root / p).is_file():
+            return True, None
+    if unread:
+        return False, unread
+    if not includes:
+        return False, ("cache-dependency-path has only exclusion (!) patterns, so no "
+                       "go.sum to key on can be checked")
+    return False, None
+
+
+def _step_caches_by_default(step: dict, package_json: Any, workspace_unknown: bool,
+                            version_comments: dict[tuple[str, str], set[int | None]] | None = None,
+                            github_hosted: bool = True, *, root: Path | None = None,
+                            package_json_problem: str | None = None,
+                            unresolved: list[dict[str, str]] | None = None,
+                            rel: str = "", workspace: str | None = None,
+                            runner_unread: str | None = None,
+                            comment_texts: dict[tuple[str, str], list[str]] | None = None,
+                            ) -> bool:
+    """A step whose own action restores a dependency cache with no `cache:`
+    input (or through a differently-named input): ci-speedup's verdict, then
+    ci-score's rules (see above). `workspace_unknown`: no root checkout of this
+    repository has finished before the step (none yet, a moved one, or one
+    that may still be running), so nothing read from the workspace counts;
+    `workspace` is that state (`none`, `moved`, `racing`), for the reason.
+    `root` None skips the go.sum check (the parity harness has no tree).
+    `runner_unread` is why the job's `runs-on` could not be read. A withhold
+    this scan could not decide is appended to `unresolved` as
+    `{file, step, reason}`; a plain off appends nothing."""
+    ua = _step_uses(step)
+    if not ua:
+        return False
+    with_ = step.get("with") if isinstance(step.get("with"), dict) else {}
+    with_lc = {str(k).strip().lower(): v for k, v in with_.items()}
+    if _DEFAULT_ON_CACHE_ACTIONS_RE.match(ua[0]):
+        return all(str(w.get("cache-disabled", "")).strip().lower() != "true"
+                   for w in (with_, with_lc))
+    if not re.match(r"^[\w.-]+/setup-[\w.-]+$", ua[0], re.IGNORECASE):
+        return False
+    action = ua[0].strip().lower()
+    ref = (ua[1] or "").strip()
+    pj = None if workspace_unknown else package_json
+    # The shared verdict reads the lower-cased inputs: GitHub matches input
+    # names case-insensitively, so `Cache: npm` is `cache: npm`.
+    shared = _setup_cache_state(ua[0], ua[1], with_lc, pj)
+    eff = dict(with_lc)
+    if (action == "actions/setup-node"
+            and "${{" in str(eff.get("package-manager-cache") or "")
+            and "${{" not in str(eff.get("cache") or "")):
+        # the expression is the only thing undecided: read it as its default
+        eff["package-manager-cache"] = "true"
+    state = _setup_cache_state(ua[0], ua[1], eff, pj)
+    key = (action, ref.lower())
+    comments = ((version_comments or {}).get(key, set())
+                if _SHA_REF_RE.match(ref) else set())
+    texts = (comment_texts or {}).get(key) or []
+    comment_reason = (f"version comment '{texts[0]}' names no release" if texts
+                      else "a version comment names no release")
+    ws_reason = {"racing": _WS_RACING, "moved": _WS_MOVED}.get(workspace or "")
+
+    def withhold(reason: str | None) -> bool:
+        if reason and unresolved is not None:
+            unresolved.append({"file": rel, "step": f"{ua[0]}@{ref}", "reason": reason})
+        return False
+
+    def at(major: int) -> str:
+        return _setup_cache_state(ua[0], f"v{major}", eff, pj)
+
+    credited = shared in ("on", "expr") and state in ("on", "expr")
+    if (not credited and shared in ("on", "expr", "maybe") and state == "maybe" and comments
+            and None not in comments and all(at(m) == "on" for m in comments)):
+        credited = True   # owner decision 3: every commented release caches
+    if not credited:
+        if state != "maybe":
+            switch = _SETUP_CACHE_INPUTS.get(action, ("cache", None))[0]
+            value = eff.get(switch)
+            if value is not None and str(value).strip().lower() in _SETUP_OFF_VALUES:
+                # Some actions reject off spellings instead of disabling the
+                # cache. Name the value without claiming a parser behavior.
+                return withhold(f"cache input {switch}: {str(value)!r} earns no caching credit")
+            return False
+        if workspace_unknown:
+            # The workspace is the cause, never package.json: name a racing or
+            # moved checkout when the default would otherwise not be off; no
+            # checkout at all is a plain off.
+            would = _setup_cache_state(ua[0], ua[1], eff, package_json)
+            return withhold(ws_reason if would != "off" else None)
+        if package_json_problem:
+            return withhold(package_json_problem)
+        if comments:
+            # a comment naming releases decides it (none caches): a plain off
+            return withhold(comment_reason if None in comments else None)
+        if isinstance(pj, dict) and _ref_major(ref) is None:
+            return withhold(_SHA_UNDECIDED if _SHA_REF_RE.match(ref) else _REF_UNDECIDED)
+        return False
+    if action == "actions/setup-go" and eff.get("cache") is None:
+        if workspace_unknown:
+            return withhold(ws_reason)
+        if root is not None:
+            present, why = _go_sum_check(root, eff.get("cache-dependency-path"))
+            if not present:
+                return withhold(why)
+    gate = _RUNNER_GATED_DEFAULTS.get(action)
+    gate_value = eff.get(gate) if gate else None
+    if isinstance(gate_value, str):
+        gate_value = gate_value.strip()
+    if gate and gate_value in (None, "auto") and not github_hosted:
+        if gate_value == "auto":
+            return withhold((runner_unread + "; " if runner_unread else "") +
+                            "enable-cache: auto needs a literal GitHub-hosted runner "
+                            "label; set enable-cache: true to enable caching on any runner")
+        return withhold(runner_unread)
+    # Version comments constrain automatic defaults, not an explicit switch
+    # that the shared verdict already found enabled.
+    switch = _SETUP_CACHE_INPUTS.get(action, ("cache", None))[0]
+    if str(eff.get(switch) or "").strip():
+        return True
+    if None in comments:
+        return withhold(comment_reason)
+    return all(at(m) in ("on", "expr") for m in comments)
+
+
+# The `owner/setup-*` shape `_step_caches_by_default` grades (any case).
+_SETUP_SHAPE_RE = re.compile(r"^[\w.-]+/setup-[\w.-]+$", re.IGNORECASE)
+
+
+def _cache_switch_input(action: str) -> str | None:
+    """The input that switches an action's dependency cache, lower-cased (the
+    key GitHub matches in any case), or None for an action with no cache
+    switch: Gradle's and npm-install's `cache-disabled`, a setup action's
+    entry in `_SETUP_CACHE_INPUTS` (setup-ruby `bundler-cache`, setup-uv
+    `enable-cache`), else `cache` for any action whose name holds `setup-`.
+    Action names match in any case."""
+    if _DEFAULT_ON_CACHE_ACTIONS_RE.match(action):
+        return "cache-disabled"
+    name = action.strip().lower()
+    if "setup-" not in name:
+        return None
+    return _SETUP_CACHE_INPUTS.get(name, ("cache", None))[0]
+
+
+def _dependency_cache_walk(parsed: list[tuple[str, dict, str]], root: Path,
+                           composites: list[tuple[str, dict]],
+                           composite_raw: dict[str, str],
+                           cache_values: Any = None,
+                           ) -> tuple[list[str], list[dict[str, str]], list[str]]:
+    """(files that configure dependency caching, setup defaults left
+    unresolved, files whose cache input is an expression that resolves to no
+    caching value). One walk over every job and local composite action;
+    `parsed` is the workflows the caching check grades. `cache_values(rel, v)`
+    (`_cache_input_resolver`, OD-CS24) gives every value an expression on a
+    cache switch takes; without it every expression is unresolved.
+
+    A literal value and a resolved expression use the same shared verdict
+    and ci-score wrapper (OD-CS25). An EXPRESSION on the input
+    that switches the action's cache (`_cache_switch_input`: setup-ruby
+    `bundler-cache`, setup-uv `enable-cache`, Gradle `cache-disabled`, else
+    `cache`; action names in any case) decides its step on its own: each value
+    it resolves to is put back in place and graded by the same verdict a
+    written value gets (`_step_caches_by_default`), and the step is credited
+    when any of them caches. It never falls back to the action's default,
+    whose shared verdict reads any expression as on: an expression that does
+    not resolve earns nothing and is disclosed. An expression on a key the
+    action does not read changes nothing (its default decides)."""
+    hits: list[str] = []
+    unresolved: list[dict[str, str]] = []
+    expr_unresolved: list[str] = []
+    package_json, pj_problem = _root_package_json(root)
+    raw_texts = [raw for _rel, _doc, raw in parsed]
+    raw_texts.extend(composite_raw.get(crel, "") for crel, _cdoc in composites)
+    comment_texts: dict[tuple[str, str], list[str]] = {}
+    version_comments = _sha_version_comments(raw_texts, comment_texts)
+    if cache_values is None:
+        def cache_values(_rel: str, v: Any) -> list[Any]:
+            return [_UNRESOLVED if _is_expression(v) else v]
+
+    def explicit_cache(rel: str, step: dict, ua: tuple, with_: dict,
+                       by_default: Any) -> str | None:
+        """Grade the actual cache switch, literal or resolved expression.
+        An unresolved expression is disclosed; an absent switch leaves the
+        default to decide."""
+        key = _cache_switch_input(ua[0])
+        exprs = [v for k, v in with_.items()
+                 if key and str(k).strip().lower() == key]
+        if not exprs:
+            return None
+        rest = {k: v for k, v in with_.items() if str(k).strip().lower() != key}
+        unread = False
+        for x in (x for v in exprs for x in cache_values(rel, v)):
+            if x is _UNRESOLVED:
+                unread = True
+                continue
+            placed = dict(step)
+            placed["with"] = {**rest, key: x}
+            if by_default(placed) or (
+                    not _SETUP_SHAPE_RE.match(ua[0])
+                    and not _DEFAULT_ON_CACHE_ACTIONS_RE.match(ua[0])
+                    and _setup_cache_state(ua[0], ua[1] or "", {key: x}) == "on"):
+                return "on"
+        if unread:
+            expr_unresolved.append(rel)
+        return "off"
+
+    def scan(rel: str, steps: list[dict], group_of: dict[int, int], start: str,
+             github_hosted: bool, runner_unread: str | None) -> None:
+        # setup-node and setup-go read the workspace when their step runs, so
+        # it counts only once a root checkout has FINISHED earlier in the job.
+        states = _workspace_states(steps, group_of, start)
+        for step, ws in zip(steps, states):
+            ua = _step_uses(step)
+            with_ = step.get("with") if isinstance(step.get("with"), dict) else {}
+            if ua and _CACHE_ACTION_RE.search(ua[0]):
+                hits.append(rel)
+                continue
+
+            def by_default(s: dict, ws: str = ws) -> bool:
+                return _step_caches_by_default(
+                    s, package_json, ws != "root", version_comments, github_hosted,
+                    root=root, package_json_problem=pj_problem, unresolved=unresolved,
+                    rel=rel, workspace=ws, runner_unread=runner_unread,
+                    comment_texts=comment_texts)
+
+            explicit = explicit_cache(rel, step, ua, with_, by_default) if ua else None
+            if explicit == "on" or (explicit is None and by_default(step)):
+                hits.append(rel)
+
+    # The same walk `_step_sources` makes, keeping each job's `runs-on` and its
+    # `parallel:` groups.
+    for rel, doc, _raw in parsed:
+        for job in _wf_jobs(doc).values():
+            group_of: dict[int, int] = {}
+            steps = _job_steps(job, group_of)
+            runs_on = job.get("runs-on")
+            scan(rel, steps, group_of, "none",
+                 _runs_on_github_hosted(runs_on), _runs_on_unread(runs_on))
+    # A local composite action is itself read from the checked-out workspace,
+    # so its steps start checked out; its runner is its caller's, unknown here.
+    for rel, doc in composites:
+        if isinstance(doc.get("runs"), dict):
+            scan(rel, _composite_steps(doc), {}, "root", False, None)
+    seen: set[tuple[str, str, str]] = set()
+    unique = []
+    for u in unresolved:
+        key = (u["file"], u["step"], u["reason"])
+        if key not in seen:
+            seen.add(key)
+            unique.append(u)
+    return hits, unique, list(dict.fromkeys(expr_unresolved))
+
+
+def _unresolved_evidence(unresolved: list[dict[str, str]]) -> str:
+    """`; <step> <verdict>: <reason>` for the first three recorded defaults,
+    and how many more there are: what the caching fact appends to its
+    evidence, so a withhold is never a silent fail."""
+    if not unresolved:
+        return ""
+
+    def verdict(reason: str) -> str:
+        if reason.startswith("cache input "):
+            return "is not credited"
+        if reason in _DECIDED_OFF_REASONS:
+            return "earns no default cache"
+        return "default cache could not be resolved"
+
+    named = "; ".join(f"{u['step'].split('/', 1)[-1]} {verdict(u['reason'])}: {u['reason']}"
+                      for u in unresolved[:3])
+    more = f" (and {len(unresolved) - 3} more)" if len(unresolved) > 3 else ""
+    return f"; {named}{more}"
+
+
+def _unresolved_setup_defaults(parsed: list[tuple[str, dict, str]],
+                               root: Path) -> list[dict[str, str]]:
+    """Setup defaults the caching fact could not decide (`{file, step,
+    reason}`), for the collector's `data_sources.unresolved_setup_defaults`:
+    unread config is visible on every surface, never silently a fail."""
+    return _cache_walk_inputs(parsed, root)[1]
+
+
+def _cache_input_resolver(parsed: list[tuple[str, dict, str]],
+                          graded: list[tuple[str, dict, str]],
+                          comp_docs: dict[str, dict],
+                          caller_withs: dict[str, list[dict]]) -> Any:
+    """`cache_values(rel, v)` for the caching walk (OD-CS24): a cache input
+    set by an expression earns credit only when it resolves.
+    `${{ inputs.<name> }}` inside a local action takes every caller's `with:`
+    value, else the action's own input default; inside a workflow it takes
+    every calling job's `with:` value, else the `workflow_call` input default
+    (and the empty value a trigger other than a call sees, plus a manual
+    run's `workflow_dispatch` default). An input the workflow declares under
+    neither trigger has no value this scan can read. Any other expression -
+    `${{ env.X }}`, `${{ matrix.x }}`, `${{ inputs.x || 'npm' }}` - is
+    `_UNRESOLVED`: it earns nothing and is disclosed."""
+    wf_docs = {os.path.normpath(rel): doc for rel, doc, _raw in graded}
+    wf_call_withs = _all_call_withs(parsed)
+
+    def cache_values(rel: str, v: Any) -> list[Any]:
+        if rel in comp_docs:
+            return _resolve_input(v, caller_withs.get(rel, []), comp_docs[rel].get("inputs"))
+        norm = os.path.normpath(rel)
+        doc = wf_docs.get(norm)
+        if doc is None:
+            return [_UNRESOLVED if _is_expression(v) else v]
+        name = _input_name(v)
+        call_inputs = _trigger_inputs(doc, "workflow_call")
+        dispatch_inputs = _trigger_inputs(doc, "workflow_dispatch")
+        if name and not any(isinstance(i, dict) and name in i
+                            for i in (call_inputs, dispatch_inputs)):
+            return [_UNRESOLVED]
+        vals = _resolve_input(v, wf_call_withs.get(norm, []), call_inputs,
+                              direct=_wf_runs_uncalled(doc))
+        # a manual run takes the workflow_dispatch input's own default
+        dispatch = _input_default(dispatch_inputs, name) if name else None
+        return vals + ([dispatch] if dispatch is not None else [])
+
+    return cache_values
+
+
+def _cache_walk_inputs(parsed: list[tuple[str, dict, str]], root: Path,
+                       read: tuple[list[tuple[str, dict]], dict[str, str],
+                                   dict[str, list[dict]]] | None = None,
+                       ) -> tuple[list[str], list[dict[str, str]], list[str]]:
+    """`_dependency_cache_walk` over exactly what the caching fact grades, for
+    the card and the collector alike: every workflow except a called one no
+    PR path could read (`_pr_path_workflows`' `unread_files`), and the local
+    actions `_local_composites` reads from THOSE workflows (plus its
+    `.github/actions/**` seed walk), so an action that only an unread
+    workflow runs earns nothing. Returns (hits, unresolved setup defaults,
+    files with an unresolved cache expression). `read` is a caller's own
+    `_local_composites` read over all of `parsed` (composites, raw texts,
+    caller withs): reused when every workflow is graded, so each action file
+    is read once."""
+    pr_wfs = [(rel, doc) for rel, doc, _raw in parsed if _wf_is_pr_gating(doc)]
+    unread_files = _pr_path_workflows(parsed, pr_wfs)[3]
+    graded = [p for p in parsed if os.path.normpath(p[0]) not in unread_files]
+    if read is not None and len(graded) == len(parsed):
+        composites, raw, caller_withs = read
+    else:
+        raw = {}
+        info: dict[str, Any] = {}
+        composites = [(rel, doc) for rel, doc, _locked in
+                      _local_composites(root, graded, None, info, raw_out=raw)]
+        caller_withs = info["caller_withs"]
+    resolver = _cache_input_resolver(parsed, graded, dict(composites), caller_withs)
+    return _dependency_cache_walk(graded, root, composites, raw, resolver)
 
 
 def _conc_cancels_basic(conc: Any) -> bool:
@@ -1048,18 +2267,528 @@ def _conc_cancels_basic(conc: Any) -> bool:
     return val is not None and val is not False
 
 
-def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path) -> dict[str, Any]:
+def _pr_path_workflows(parsed: list[tuple[str, dict, str]],
+                       pr_wfs: list[tuple[str, dict]],
+                       ) -> tuple[list[tuple[str, dict, dict]], list[str],
+                                  dict[str, list[dict]], set[str]]:
+    """(entries, unread_calls, call_withs, unread_files) for the job-level
+    checks on the PR path.
+
+    `entries` is every PR-gating workflow, followed by every same-repository
+    reusable workflow (`jobs.x.uses: ./.github/workflows/y.yml` or `$/…`)
+    that a PR-reachable job calls, directly or through nested calls, each as
+    (rel, doc, event_doc). A callee's own trigger is `workflow_call`, but it
+    runs on every pull request its caller runs on, and inside it
+    `github.event_name` is the CALLER's event: `event_doc` carries those
+    pull-request event names, so a callee job's own `if:` is judged against
+    the events that actually reach it. For a PR-gating workflow that no other
+    PR workflow calls, `event_doc` is its own doc. A calling job whose `if:`
+    can never be true for a pull request reaches nothing.
+
+    `unread_calls` names each local call on the PR path that could not be
+    followed: a path outside the repository root, a file that is not a parsed
+    workflow (missing or unparseable) or that holds a duplicated key (plain
+    YAML keeps the last of two equal keys, hiding the first), or a chain
+    deeper than `_MAX_LOCAL_ACTION_DEPTH`. Those are never graded as clean or
+    as dirty; the caller discloses them.
+
+    `call_withs` maps each called workflow (normalized path) to the `with:`
+    mapping of every PR-reachable job that calls it, so a callee's
+    `${{ inputs.x }}` can be resolved against what its callers pass.
+
+    `unread_files` is every parsed workflow (normalized path) that an
+    unreadable call names (a duplicated key, or past the depth cap) and that
+    no PR path followed: the caching and pinning checks leave it out, so the
+    card's "not read" note about that call is true."""
+    by_rel = {os.path.normpath(rel): (rel, doc) for rel, doc, _raw in parsed}
+    raw_by = {os.path.normpath(rel): raw for rel, _doc, raw in parsed}
+    strict_ok: dict[str, bool] = {}
+    call_withs: dict[str, list[dict]] = {}
+    refused: set[str] = set()
+    # A PR workflow that another PR workflow also calls starts from its own
+    # events and gains the caller's: `github.event_name` inside the call is
+    # the caller's event, so a job scoped to it runs on pull requests too.
+    own = {os.path.normpath(rel): set(_wf_pr_event_names(doc)) for rel, doc in pr_wfs}
+    events: dict[str, set[str]] = {t: set(e) for t, e in own.items()}
+    unread: list[str] = []
+    queue = [(doc, set(own[os.path.normpath(rel)]), 0) for rel, doc in pr_wfs]
+    while queue:
+        doc, evs, depth = queue.pop(0)
+        for job in _wf_jobs(doc).values():
+            key = _local_uses_key(job.get("uses"))
+            if key is None:
+                continue
+            # only the events the calling job itself can run on reach the callee
+            job_evs = _job_pr_events(job, evs)
+            if not job_evs:
+                continue
+            target = _local_call_target(key)
+            if (not target or os.path.isabs(target) or target == ".."
+                    or target.startswith(".." + os.sep) or target not in by_rel):
+                unread.append(key)
+                continue
+            if depth >= _MAX_LOCAL_ACTION_DEPTH:
+                unread.append(key)
+                refused.add(target)
+                continue
+            if target not in strict_ok:
+                try:
+                    _load_strict_yaml(raw_by[target], workflow=True)
+                    strict_ok[target] = True
+                except (ValueError, yaml.YAMLError):
+                    strict_ok[target] = False
+            if not strict_ok[target]:
+                unread.append(key)
+                refused.add(target)
+                continue
+            call_withs.setdefault(target, []).append(_with_map(job))
+            if job_evs <= events.get(target, set()):
+                continue  # no new events reach it
+            events.setdefault(target, set()).update(job_evs)
+            queue.append((by_rel[target][1], set(events[target]), depth + 1))
+    entries = []
+    for rel, doc in pr_wfs:
+        norm = os.path.normpath(rel)
+        entries.append((rel, doc, doc if events[norm] == own[norm]
+                        else {"on": sorted(events[norm])}))
+    callees = sorted((by_rel[t][0], by_rel[t][1], {"on": sorted(e)})
+                     for t, e in events.items() if t not in own)
+    return entries + callees, sorted(set(unread)), call_withs, refused - set(events)
+
+
+def _job_pr_events(job: dict, events: set[str]) -> set[str]:
+    """The pull-request events in `events` for which the job's own `if:` can
+    be true. Fails closed: no condition, or one that cannot be resolved,
+    keeps every event."""
+    cond = job.get("if")
+    if not isinstance(cond, str) or not cond.strip():
+        return set(events)
+    try:
+        tokens = _tokenize_if(cond)
+        return {ev for ev in events if _eval_if_for_event(tokens, ev)}
+    except _UnresolvableIf:
+        return set(events)
+
+
+# GitHub workflow lockfile (public preview 2026-10-14; written by the
+# `gh actions-lock` CLI extension): `.github/workflows/actions.lock` records,
+# per workflow file, the exact commit every action reference runs at, while
+# the YAML keeps its tags. Shape (format version v0.0.x):
+#   version: 'v0.0.3'
+#   workflows: {'.github/workflows/ci.yml': ['actions/checkout@v7.0.1', ...]}
+#   dependencies: {'actions/checkout@v7.0.1': {ref, commit: 'sha1-<40 hex>',
+#                                              owner_id, repo_id, uses?}}
+_LOCKFILE_REL = ".github/workflows/actions.lock"
+_LOCK_VERSION_RE = re.compile(r"\Av\d+\.\d+\.\d+\Z")
+_LOCK_COMMIT_RE = re.compile(r"\Asha1-[0-9a-f]{40}\Z")
+# The format versions GitHub documents: v0.0.2 in the docs' example lockfile,
+# v0.0.3 as gh actions-lock writes it. The tool is pre-1.0 and says its format
+# may change, so any other version may mean something else: no credit.
+_LOCK_VERSIONS = ("v0.0.2", "v0.0.3")
+
+
+class _StrictLockLoader(yaml.SafeLoader):
+    """SafeLoader that refuses a duplicated mapping key. Plain yaml keeps the
+    LAST of two equal keys, so a malformed entry followed by a valid one
+    would read as valid; the lockfile reader must see the whole file."""
+
+
+class _DuplicateKeyError(yaml.YAMLError):
+    """A mapping repeats a key; the message names it ("duplicated key 'x'")."""
+
+
+def _no_duplicate_keys(loader: yaml.SafeLoader, node: Any, deep: bool = False) -> Any:
+    seen = set()
+    for key_node, _value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            dup = key in seen
+            seen.add(key)
+        except TypeError:  # an unhashable key: not a lockfile either
+            raise yaml.YAMLError("unhashable mapping key")
+        if dup:
+            raise _DuplicateKeyError(f"duplicated key {key!r}")
+    return loader.construct_mapping(node, deep=deep)
+
+
+_StrictLockLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _no_duplicate_keys)
+
+
+class _StrictWorkflowLoader(_StrictLockLoader):
+    """Strict mappings with GitHub's YAML 1.2 boolean spellings.
+
+    PyYAML's YAML 1.1 resolver aliases ON and YES (also OFF and NO), which
+    would falsely reject distinct environment-variable names as duplicates.
+    Keep the inherited duplicate-key constructor, but copy the resolver table
+    so changing workflow booleans cannot alter lockfile or composite readers.
+    """
+    yaml_implicit_resolvers = {
+        ch: [(tag, pattern) for tag, pattern in entries
+             if tag != "tag:yaml.org,2002:bool"]
+        for ch, entries in _StrictLockLoader.yaml_implicit_resolvers.items()
+    }
+
+
+_StrictWorkflowLoader.add_implicit_resolver(
+    "tag:yaml.org,2002:bool", re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"),
+    list("tTfF"))
+
+
+def _load_strict_yaml(text: str, *, workflow: bool = False) -> Any:
+    """Parse one document with safe constructors and strict mapping keys.
+
+    Instantiate the SafeLoader subclass directly so the safety boundary is
+    explicit to static analyzers. Keep PyYAML's single-document semantics
+    and release parser resources even when construction rejects the input.
+    Workflows use GitHub boolean spellings; other readers retain their rules.
+    """
+    loader = _StrictWorkflowLoader(text) if workflow else _StrictLockLoader(text)
+    try:
+        return loader.get_single_data()
+    finally:
+        loader.dispose()
+
+
+def _lock_key(action: str, ref: str) -> str:
+    # engine assumption (GitHub's docs are silent): owner and repo names
+    # match case-insensitively, as GitHub resolves them; refs are exact
+    return f"{action.strip().lower()}@{ref.strip()}"
+
+
+def _lock_ref_key(text: Any) -> str | None:
+    if not isinstance(text, str) or "@" not in text:
+        return None
+    action, _, ref = text.partition("@")
+    return _lock_key(action, ref)
+
+
+_LOCK_WORKFLOW_KEY_RE = re.compile(r"\A\.github/workflows/[^/]+\Z")
+
+
+def _load_lockfile(root: Path) -> tuple[str, dict[str, set[str]]]:
+    """(state, per_workflow). `state` is "absent", "valid", "invalid",
+    "case:<path>" for a lockfile whose path differs from
+    `.github/workflows/actions.lock` only in case (it covers nothing: a runner
+    does not see it, and GitHub reads only the exact path; `_path_state`
+    decides, from git's file list when there is one), or "version:<v>" for a
+    well-formed version GitHub does not document (`_LOCK_VERSIONS`), which
+    covers nothing. `per_workflow` maps a workflow file to the references the
+    lockfile covers for it: listed under that workflow AND carrying a valid
+    dependency entry (a full commit).
+
+    Fails CLOSED: a lockfile that cannot be read, does not parse, carries an
+    unknown top-level key, or holds ANY malformed list or entry is "invalid"
+    and covers nothing: a partly-read lockfile is never credited, as GitHub
+    warns against checking in a corrupt one. Malformed includes: a commit that
+    is not `sha1-` plus 40 hex; a missing ref / owner_id / repo_id; an entry
+    whose `ref` differs from the ref in its key (a key that is itself a full
+    commit, as GitHub writes for nested dependencies, keeps its tag as `ref`
+    and must instead record that same commit); a reference listed under a
+    workflow, or in an entry's `uses:`, with no entry of its own; and a
+    workflow key that is not exactly `.github/workflows/<file>` (a key that
+    normalizes to another spelling could stand in for, or collide with, the
+    real one)."""
+    path = root / _LOCKFILE_REL
+    bad: tuple[str, dict[str, set[str]]] = ("invalid", {})
+    try:
+        spelled, actual = _path_state(root, _LOCKFILE_REL, _git_tracked(root))
+        if spelled == "case":
+            return f"case:{actual}", {}
+        if spelled in ("missing", "unlisted") and not path.is_symlink():
+            return "absent", {}
+        # a symbolic link out of the checkout is not this repository's lockfile
+        if _outside_root(root, path):
+            return bad
+        doc = _load_strict_yaml(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, yaml.YAMLError):
+        return bad
+    if not isinstance(doc, dict) or set(doc) - {"version", "workflows", "dependencies"}:
+        return bad
+    wfs, deps = doc.get("workflows"), doc.get("dependencies")
+    if not (isinstance(doc.get("version"), str) and _LOCK_VERSION_RE.match(doc["version"])
+            and isinstance(wfs, dict) and isinstance(deps, dict)):
+        return bad
+    if doc["version"] not in _LOCK_VERSIONS:
+        return f"version:{doc['version']}", {}
+    valid: set[str] = set()
+    nested: set[str] = set()
+    for key, entry in deps.items():
+        k = _lock_ref_key(key)
+        if (k is None or not isinstance(entry, dict)
+                or not isinstance(entry.get("ref"), str)
+                or not (isinstance(entry.get("commit"), str)
+                        and _LOCK_COMMIT_RE.match(entry["commit"]))
+                or not all(isinstance(entry.get(f), int) and not isinstance(entry.get(f), bool)
+                           for f in ("owner_id", "repo_id"))):
+            return bad
+        key_ref = key.partition("@")[2].strip()
+        if _SHA40_RE.match(key_ref):
+            if entry["commit"] != f"sha1-{key_ref}":
+                return bad
+        elif entry["ref"] != key_ref:
+            return bad
+        uses = entry.get("uses", [])
+        if not isinstance(uses, list) or any(_lock_ref_key(u) is None for u in uses):
+            return bad
+        valid.add(k)
+        nested.update(_lock_ref_key(u) for u in uses)
+    per_workflow: dict[str, set[str]] = {}
+    for wf, refs in wfs.items():
+        if not isinstance(wf, str) or not isinstance(refs, list):
+            return bad
+        if (not _LOCK_WORKFLOW_KEY_RE.match(wf) or os.path.normpath(wf) != wf
+                or wf in per_workflow):
+            return bad
+        keys = [_lock_ref_key(r) for r in refs]
+        if any(k is None or k not in valid for k in keys):
+            return bad
+        per_workflow[wf] = set(keys)
+    if not nested <= valid:
+        return bad
+    return "valid", per_workflow
+
+
+# ---- Content the scan could not read ----------------------------------------
+#
+# A check that passes or fails without having read a file is only honest if
+# the card says which file. Every list of unread content - workflows that do
+# not parse, step lists that are not lists, local actions not read, local
+# reusable-workflow calls not followed - feeds ONE note, appended to the
+# caching, pinning and shallow-checkout evidence (`_unread_note`).
+
+# `${{ inputs.<name> }}` and nothing else: the one expression shape resolved
+# against what a caller passes. Any other expression is left unresolved.
+_INPUT_EXPR_RE = re.compile(r"\A\$\{\{\s*inputs\.([A-Za-z_][\w-]*)\s*\}\}\Z")
+_UNRESOLVED = object()
+
+
+def _is_expression(value: Any) -> bool:
+    return isinstance(value, str) and "${{" in value
+
+
+def _input_default(inputs: Any, name: str) -> Any:
+    spec = inputs.get(name) if isinstance(inputs, dict) else None
+    return spec.get("default") if isinstance(spec, dict) else None
+
+
+def _input_name(value: Any) -> str | None:
+    """`<name>` when `value` is exactly `${{ inputs.<name> }}`, else None."""
+    m = _INPUT_EXPR_RE.match(value.strip()) if isinstance(value, str) else None
+    return m.group(1) if m else None
+
+
+def _resolve_input(value: Any, withs: list[dict], inputs: Any,
+                   direct: bool = False) -> list[Any]:
+    """Every value `${{ inputs.<name> }}` takes across the callers in `withs`
+    (each caller's own `with:` value, else the default the `inputs:` spec
+    declares), with `_UNRESOLVED` wherever no plain value is known: no caller
+    value and no default, or a value that is itself an expression. `direct`
+    adds the empty value a workflow triggered directly (not called) sees. A
+    plain value is returned as is; any other expression comes back as
+    `_UNRESOLVED`."""
+    name = _input_name(value)
+    if name is None:
+        return [_UNRESOLVED if _is_expression(value) else value]
+    default = _input_default(inputs, name)
+    out: list[Any] = []
+    for w in withs or ([] if direct else [{}]):
+        v = w.get(name, default) if isinstance(w, dict) else default
+        out.append(_UNRESOLVED if v is None or _is_expression(v) else v)
+    if direct:
+        out.append("")
+    return out
+
+
+def _unproven_history_links(root: Path, ref: str) -> list[str]:
+    """For a local action `_local_action_needs_history` flags: [] when some
+    link in its chain this check can read PROVES a git-history op, else the
+    links it treats as unread (missing, outside the repository by path or by
+    a symbolic link, wrong case, or past the depth cap). The copied predicate
+    applies neither the symbolic-link nor the case check, so for such a link
+    the verdict may rest on a history op this check refuses to read; the
+    explanation is then conservative ("exempt only because ... could not be
+    read"). Not part of the copied carve-out predicate (see the block comment
+    above it): this only explains a verdict, it never changes one."""
+    tracked = _git_tracked(root)
+    seen: set[str] = set()
+    queue: list[tuple[str, int]] = [(ref, 0)]
+    unread: list[str] = []
+    while queue:
+        cur, depth = queue.pop()
+        if cur in seen:
+            continue
+        seen.add(cur)
+        base = _local_ref_path(root, cur)
+        if depth > _MAX_LOCAL_ACTION_DEPTH or base is None:
+            unread.append(cur)
+            continue
+        text = None
+        cands = [base] if base.suffix in (".yml", ".yaml") else [
+            base / "action.yml", base / "action.yaml"]
+        for cand in cands:
+            try:
+                if (cand.is_file() and not _outside_root(root, cand)
+                        and not _case_mismatch(root, cand, tracked)):
+                    text = cand.read_text(encoding="utf-8", errors="replace")
+                    break
+            except (OSError, ValueError):
+                continue
+        if text is None:
+            unread.append(cur)
+            continue
+        if _has_git_history_op(text):
+            return []
+        queue += [(m.split("@")[0].strip(), depth + 1)
+                  for m in _NESTED_LOCAL_USES_RE.findall(text)]
+    return unread
+
+
+def _history_exemption_unread(root: Path, job: dict, job_name: str,
+                              local_history_actions: set[str],
+                              local_history_scripts: set[str]) -> list[str]:
+    """For a job `_job_needs_git_history` exempts: [] when the exemption is
+    proven (a history op in the job itself, its name, or a readable local
+    action or script), else the unread local references it rests on."""
+    if _job_needs_git_history(job, job_name, None, None):
+        return []
+    unread: list[str] = []
+    for s in _job_steps(job):
+        ref = _step_uses_ref(s).split("@")[0].strip()
+        if ref in local_history_actions:
+            links = _unproven_history_links(root, ref)
+            if not links:
+                return []
+            unread += links
+        working_directory = _script_working_directory(job, s)
+        for script_ref in _first_party_script_refs(str(s.get("run") or "")):
+            key = _script_ref_key(script_ref, working_directory)
+            if key not in local_history_scripts:
+                continue
+            text = _read_local_script(root, key)
+            if text is not None and _has_script_git_history_op(text):
+                return []
+            unread.append(script_ref)
+    return list(dict.fromkeys(unread))
+
+
+_NO_ACTION_REASON = "no readable action.yml or action.yaml"
+_NO_ACTION_FILE = f" ({_NO_ACTION_REASON})"
+
+
+def _literally_false(cond: Any) -> bool:
+    """A step `if:` that can never be true: `false`, `'false'` or
+    `${{ false }}`. Anything else may run."""
+    if cond is False:
+        return True
+    if not isinstance(cond, str):
+        return False
+    text = cond.strip()
+    if text.startswith("${{") and text.endswith("}}"):
+        text = text[3:-2].strip()
+    return text == "false"
+
+
+def _step_code(step: dict) -> list[str]:
+    """A step's `run:` and `with.script` code, shell comments stripped."""
+    code = (step.get("run"), _with_map(step).get("script"))
+    return [_SHELL_COMMENT_RE.sub("", c) for c in code if isinstance(c, str)]
+
+
+def _wf_runs_uncalled(doc: dict) -> bool:
+    """True when the workflow has a trigger besides `workflow_call`, where an
+    `inputs.*` value is empty unless that trigger supplies one."""
+    on = doc.get("on", doc.get(True))
+    if isinstance(on, str):
+        return on != "workflow_call"
+    if isinstance(on, (list, dict)):
+        return any(str(e) != "workflow_call" for e in on)
+    return False
+
+
+def _trigger_inputs(doc: dict, trigger: str) -> Any:
+    """The `inputs:` spec of one trigger (`on.workflow_call.inputs`), or None."""
+    on = doc.get("on", doc.get(True))
+    spec = on.get(trigger) if isinstance(on, dict) else None
+    return spec.get("inputs") if isinstance(spec, dict) else None
+
+
+def _all_call_withs(parsed: list[tuple[str, dict, str]]) -> dict[str, list[dict]]:
+    """Called workflow (normalized path) -> the `with:` of every job, in any
+    workflow, that calls it locally."""
+    out: dict[str, list[dict]] = {}
+    for _rel, doc, _raw in parsed:
+        for job in _wf_jobs(doc).values():
+            key = _local_uses_key(job.get("uses"))
+            target = _local_call_target(key) if key is not None else ""
+            if target:
+                out.setdefault(target, []).append(_with_map(job))
+    return out
+
+
+def _first_three(names: list[str]) -> str:
+    """"a, b, c and N more": the first three names, then a count of the rest."""
+    more = f" and {len(names) - 3} more" if len(names) > 3 else ""
+    return f"{', '.join(names[:3])}{more}"
+
+
+def _unread_note(entries: list[str]) -> str:
+    """"; not read, so nothing inside was graded: a, b, c and N more", or ""."""
+    if not entries:
+        return ""
+    # A path with no action.yml in the checkout is usually one a job checks
+    # out at run time (a shared-actions repo); say so instead of reading as a
+    # broken repository.
+    shown = [e.replace(_NO_ACTION_FILE,
+                       " (no action.yml in the checkout; it may be checked out at run time)")
+             for e in entries]
+    return f"; not read, so nothing inside was graded: {_first_three(shown)}"
+
+
+def _workflow_parse_errors_on_disk(parsed: list[tuple[str, dict, str]],
+                                   root: Path) -> list[str]:
+    """Workflow files on disk that are not among `parsed` - the collector's
+    `workflow_parse_errors`, derived when a caller does not pass them."""
+    have = {os.path.normpath(rel) for rel, _doc, _raw in parsed}
+    wf_dir = root / ".github" / "workflows"
+    files = sorted(set(wf_dir.glob("*.yml")) | set(wf_dir.glob("*.yaml")))
+    return [str(p.relative_to(root)) for p in files
+            if os.path.normpath(str(p.relative_to(root))) not in have]
+
+
+def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path,
+                    workflow_parse_errors: list[str] | None = None,
+                    workflow_parse_error_reasons: dict[str, str] | None = None) -> dict[str, Any]:
     """The eleven CI Score v0.1-basic facts. Shape per fact:
     {"state": "pass"|"fail"|"not_applicable", "evidence": str, "files": [..<=3]}.
     Evidence is NEVER empty: a failed check must hand the maintainer the exact
-    thing to look at."""
+    thing to look at. `workflow_parse_errors` is the collector's list of
+    workflow files that did not parse; when omitted it is derived from the
+    files on disk."""
+    if workflow_parse_errors is None:
+        workflow_parse_errors = _workflow_parse_errors_on_disk(parsed, root)
     pr_wfs = [(rel, doc) for rel, doc, _raw in parsed if _wf_is_pr_gating(doc)]
     remote_reusables = _remote_reusable_refs(parsed)
-    composites = _composite_action_docs(root)
+    unread_actions: list[str] = []
+    read_info: dict[str, Any] = {}
+    composite_raw: dict[str, str] = {}
+    local_composites = _local_composites(root, parsed, unread_actions, read_info,
+                                         raw_out=composite_raw)
+    composites = [(rel, doc) for rel, doc, _locked in local_composites]
+    comp_docs = dict(composites)
+    bad_step_lists, _ = _unreadable_step_sources(parsed, root, composites)
     # steps everywhere the repo's own files define them: workflows + local
     # composite actions (the "runs.steps" shape), leaf steps via the walker
     # (children of `parallel:` groups included).
     step_sources = _step_sources(parsed, composites)
+    # PR workflows plus the same-repository reusable workflows they call. A
+    # called workflow no PR path could read (a duplicated key, past the depth
+    # cap) is left out of the caching and pinning reads too, so the "not
+    # read" note those cards carry about the call is true.
+    pr_path, unread_calls, call_withs, unread_files = _pr_path_workflows(parsed, pr_wfs)
+    graded = [p for p in parsed if os.path.normpath(p[0]) not in unread_files]
+    graded_sources = (step_sources if len(graded) == len(parsed)
+                      else _step_sources(graded, composites))
 
     def fact(state: str, evidence: str, files: list[str]) -> dict[str, Any]:
         # Dedupe preserving order (never re-sort): callers rank meaningfully —
@@ -1074,17 +2803,79 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path) -> dict[str
     # 1. Dependency caching: a cache action (actions/cache incl. /restore
     # /save, Swatinem/rust-cache, buildjet/cache, ccache-action - anything
     # whose action name says cache), or a setup-* step's truthy cache input.
-    hits = []
-    for rel, steps in step_sources:
-        for step in steps:
-            ua = _step_uses(step)
-            with_ = step.get("with") if isinstance(step.get("with"), dict) else {}
-            if ua and _CACHE_ACTION_RE.search(ua[0]):
-                hits.append(rel)
-            elif ua and "setup-" in ua[0] and any(
-                    k in ("cache", "enable-cache") and v not in (False, "false", None, "")
-                    for k, v in with_.items()):
-                hits.append(rel)
+    # Also a setup action whose caching is ON BY DEFAULT or switched by a
+    # differently-named input (setup-go v4+, setup-uv v5+, setup-ruby's
+    # bundler-cache, setup-node v5+ with a package-manager field,
+    # gradle/actions/setup-gradle, gradle/gradle-build-action,
+    # bahmutov/npm-install) - ci-speedup's table, copied above, narrowed by
+    # ci-score's wrapper. A default left undecided is named in the evidence.
+    # A cache input set by an expression earns credit only when it resolves
+    # (`_cache_input_resolver`, OD-CS24): any other expression earns nothing
+    # and is disclosed. The walk is the collector's own (`_cache_walk_inputs`),
+    # so a local action only an unread workflow runs earns nothing on either.
+    hits, unresolved, cache_unresolved = _cache_walk_inputs(
+        parsed, root, (composites, composite_raw, read_info["caller_withs"]))
+    # Owner decision 2026-10-27 (OD-CS24): not_applicable only when a local
+    # action that is not in the checkout is the ONLY thing that could explain
+    # the missing cache. All of these must hold: no readable step is a setup-*
+    # action or carries a cache input (the same test that grants credit); the
+    # unread action runs, in a job on the PR path, BEFORE an install, build
+    # or test step, and its own `if:` is not literally false; its only reason
+    # for being unread is that no action.yml is in the checkout (an action
+    # fetched at run time) - a wrong-case path, a path outside the repository
+    # or a file that would not load is not; and no install anywhere runs with
+    # no such action before it in its job. Readable local actions are followed
+    # in step order, so an unread action they run counts in place.
+    unread_reasons = read_info["unread_reasons"]
+    key_rel = read_info["key_rel"]
+    pr_jobs = {(os.path.normpath(rel), jid) for rel, doc, event_doc in pr_path
+               for jid, job in _wf_jobs(doc).items()
+               if not _job_if_excludes_pull_requests(job, event_doc)}
+
+    def _scan(steps: list[dict], on_pr: bool, pending: list[str],
+              seen: frozenset = frozenset()) -> tuple[bool, list[str]]:
+        """(an install with no qualifying unread action before it, the
+        qualifying unread actions that run before an install/build/test)."""
+        plain, used = False, []
+        for s in steps:
+            if _literally_false(s.get("if")):
+                continue
+            k = _local_uses_key(s.get("uses"))
+            if k is not None:
+                if k in unread_reasons:
+                    if on_pr and unread_reasons[k] == _NO_ACTION_REASON:
+                        pending.append(k)
+                elif key_rel.get(k) in comp_docs and key_rel[k] not in seen:
+                    sub_p, sub_u = _scan(_composite_steps(comp_docs[key_rel[k]]), on_pr,
+                                         pending, seen | {key_rel[k]})
+                    plain = plain or sub_p
+                    used += sub_u
+                continue
+            code = _step_code(s)
+            installs = any(_INSTALL_CMD_RE.search(c) for c in code)
+            if installs or any(_BUILD_CMD_RE.search(c) or _TEST_CMD_RE.search(c) for c in code):
+                if pending:
+                    used += pending
+                elif installs:
+                    plain = True
+        return plain, used
+
+    cache_unread: list[str] = []
+    plain_uncached_install = False
+    for rel, doc, _raw in graded:
+        for jid, job in _wf_jobs(doc).items():
+            plain, used = _scan(_job_steps(job), (os.path.normpath(rel), jid) in pr_jobs, [])
+            cache_unread += used
+            plain_uncached_install = plain_uncached_install or plain
+    cache_unread = list(dict.fromkeys(cache_unread))
+    # "the same test that grants credit": a setup-* step, a default-on cache
+    # action (OD-CS23), or a cache input under any key case
+    readable_setup = any(
+        (ua := _step_uses(s)) and (
+            "setup-" in ua[0].lower() or _DEFAULT_ON_CACHE_ACTIONS_RE.match(ua[0])
+            or any(str(k).strip().lower() in ("cache", "enable-cache")
+                   for k in _with_map(s)))
+        for _rel, steps in graded_sources for s in steps)
     if hits:
         facts["ci.cache.dependency-cache"] = fact(
             "pass",
@@ -1094,9 +2885,10 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path) -> dict[str
         facts["ci.cache.dependency-cache"] = fact(
             "not_applicable",
             "CI is delegated to cross-repo reusable workflow(s) "
-            f"({', '.join(remote_reusables[:2])}); caching there is not visible from this repo",
+            f"({', '.join(remote_reusables[:2])}); caching there is not visible from this repo"
+            + _unresolved_evidence(unresolved),
             [])
-    elif not (_has_dep_manifest(root) or _has_install_signal(step_sources)):
+    elif not (_has_dep_manifest(root) or _has_install_signal(graded_sources)):
         # No manifest AND no inline install — nothing is installed, so there is
         # nothing to cache: not_applicable, never a fail (OD-CS19). A manifest
         # OR an inline install makes the check applicable (and here, a fail).
@@ -1104,11 +2896,25 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path) -> dict[str
             "not_applicable",
             "no dependency manifest and no dependency-install step detected; nothing to cache",
             [])
-    else:
+    elif cache_unread and not readable_setup and not plain_uncached_install:
+        # the action itself is named once, in the "not read" note below
         facts["ci.cache.dependency-cache"] = fact(
-            "fail",
-            "no cache action and no setup-* cache input in any workflow or local composite action",
+            "not_applicable",
+            "no readable workflow or local action configures a cache or has a setup-* "
+            "step that could; a local action that is not in the checkout runs before an "
+            "install, build or test step and may hold the cache",
             [])
+    else:
+        # A withheld default is never a silent fail: name it
+        # (data_sources.unresolved_setup_defaults records it too).
+        evidence = ("no cache action and no setup-* cache input in any workflow or "
+                    "local composite action") + _unresolved_evidence(unresolved)
+        facts["ci.cache.dependency-cache"] = fact(
+            "fail", evidence, [u["file"] for u in unresolved])
+    if cache_unresolved and not hits:
+        facts["ci.cache.dependency-cache"]["evidence"] += (
+            "; cache input set by an expression that could not be resolved, so not "
+            f"credited: {_first_three(cache_unresolved)}")
 
     # 2. Build caching: applicable only when a detectable build tool exists.
     tools = sorted({name for name, probe in (
@@ -1140,53 +2946,146 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path) -> dict[str
     # per-JOB, not per-workflow: a second job in the same file that takes full
     # history for nothing is still a real finding.
     local_history_actions = _index_local_git_actions(root, parsed)
+    local_history_scripts = _index_local_git_scripts(root, parsed)
     offenders = []
     carved_out = 0   # PR-gating jobs that take full history AND need it
     off_pr_path = 0  # jobs whose own `if:` can never be true on a pull request
-    for rel, doc in pr_wfs:
+    off_pr_steps = 0  # jobs whose every full-history checkout STEP is PR-excluded
+    carved_unread: list[str] = []  # unread actions an exemption rests on
+    carved_unread_jobs = 0
+    depth_unresolved: list[str] = []  # jobs whose depth is an unresolved expression
+    # `pr_path`: PR workflows plus the same-repository reusable workflows they
+    # call (computed above, with `unread_calls` and `call_withs`)
+    triggered_norm = {os.path.normpath(rel) for rel, _doc in pr_wfs}
+    for rel, doc, event_doc in pr_path:
+        norm = os.path.normpath(rel)
+        call_inputs = _trigger_inputs(doc, "workflow_call")
         for job_name, job in _wf_jobs(doc).items():
-            takes_full_history = any(
-                str((step.get("with") if isinstance(step.get("with"), dict) else {})
-                    .get("fetch-depth")).strip("'\"") == "0"
-                for step in _job_steps(job))
-            if not takes_full_history:
+            # `fetch-depth: ${{ inputs.x }}` in a called workflow takes each
+            # caller's value (else the input default); any other expression,
+            # or an input nothing resolves, leaves the job ungraded, disclosed
+            depth_strs: list[str | None] = []
+            # steps that take, or may take, full history, with their depths
+            deep_steps: list[tuple[dict, list[str | None]]] = []
+            for step in _job_steps(job):
+                with_ = _with_map(step)
+                if "fetch-depth" in with_:
+                    step_depths = [
+                        None if d is _UNRESOLVED else str(d).strip("'\"")
+                        for d in _resolve_input(with_["fetch-depth"], call_withs.get(norm, []),
+                                                call_inputs, direct=norm in triggered_norm)]
+                    depth_strs += step_depths
+                    if "0" in step_depths or None in step_depths:
+                        deep_steps.append((step, step_depths))
+            takes_full_history = "0" in depth_strs
+            if not takes_full_history and None not in depth_strs:
                 continue
             # A job whose own `if:` can never be true for a pull-request event
             # is not on the PR path at all — no pull request waits for it, so
             # its checkout depth is not a PR-speed fact.
-            if _job_if_excludes_pull_requests(job, doc):
-                off_pr_path += 1
+            if _job_if_excludes_pull_requests(job, event_doc):
+                if takes_full_history:
+                    off_pr_path += 1
                 continue
-            if _job_needs_git_history(job, job_name, local_history_actions):
-                carved_out += 1
+            # The same PR-reachability read as the job-level `if:` above, on
+            # the checkout STEP's own `if:`: a step that can never run for a
+            # pull-request event takes no history on the PR path. Fails
+            # closed - an unresolvable step `if:` still counts. Only the steps
+            # that can run on a pull request decide the job.
+            live = [d for step, ds in deep_steps
+                    if not _job_if_excludes_pull_requests(step, event_doc) for d in ds]
+            if not live:
+                if takes_full_history:
+                    off_pr_steps += 1
+                continue
+            takes_full_history = "0" in live
+            if _job_needs_git_history(job, job_name, local_history_actions,
+                                      local_history_scripts):
+                if takes_full_history:
+                    carved_out += 1
+                    unread = _history_exemption_unread(root, job, job_name,
+                                                       local_history_actions,
+                                                       local_history_scripts)
+                    if unread:
+                        carved_unread_jobs += 1
+                        carved_unread += unread
+                continue
+            if not takes_full_history:
+                depth_unresolved.append(rel)
                 continue
             offenders.append(rel)
     uniq_offenders = sorted(set(offenders))
     if offenders:
-        evidence = (f"fetch-depth: 0 on {len(uniq_offenders)} PR-gating workflow(s), "
+        # a called reusable workflow has no pull_request trigger of its own:
+        # name it as what it is, so nobody hunts it for one
+        triggered = {rel for rel, _doc in pr_wfs}
+        n_called = sum(1 for rel in uniq_offenders if rel not in triggered)
+        n_gating = len(uniq_offenders) - n_called
+        kinds = [f"{n_gating} PR-gating workflow(s)"] if n_gating else []
+        if n_called:
+            kinds.append(f"{n_called} reusable workflow(s) a PR-gating workflow calls")
+        evidence = (f"fetch-depth: 0 on {' and '.join(kinds)}, "
                     f"e.g. {', '.join(uniq_offenders[:3])}")
     elif not pr_wfs:
         evidence = "no PR-gating workflows"
-    elif carved_out or off_pr_path:
+    elif carved_out or off_pr_path or off_pr_steps:
         # A pass that an exemption produced must SAY so. `fetch-depth: 0` is
         # right there in a PR-triggered workflow, and evidence claiming
         # otherwise sends the maintainer to a file that contradicts the card.
         why = []
-        if carved_out:
-            why.append(f"{carved_out} walk(s) git history, so shallowing the "
+        proven = carved_out - carved_unread_jobs
+        if proven:
+            why.append(f"{proven} walk(s) git history, so shallowing the "
                        f"checkout would break the job")
+        if carved_unread_jobs:
+            # fail-closed, but not proof: the action may or may not walk history
+            names = list(dict.fromkeys(carved_unread))
+            why.append(f"{carved_unread_jobs} exempt only because "
+                       f"{', '.join(names[:3])}{' and more' if len(names) > 3 else ''} "
+                       f"could not be read")
         if off_pr_path:
             why.append(f"{off_pr_path} cannot run on a pull request at all (a "
                        f"job-level if: that is never true for a pull-request event)")
-        evidence = (f"{carved_out + off_pr_path} job(s) in PR-triggered workflow(s) "
+        if off_pr_steps:
+            why.append(f"{off_pr_steps} take(s) full history only in a checkout "
+                       f"step whose own if: is never true for a pull-request event")
+        evidence = (f"{carved_out + off_pr_path + off_pr_steps} job(s) in PR-triggered workflow(s) "
                     f"check out full history and are exempt: " + "; ".join(why) +
                     "; no other PR-gating job takes full history")
     else:
         evidence = ("no PR-gating workflow checks out full history (post-merge "
                     "automation like backport/changelog jobs is exempt - it needs "
                     "history and gates nobody)")
+    # A call to a workflow that did not parse is named once, as that workflow,
+    # by the shared note below; every other call that could not be followed
+    # is named here, never graded either way, so a pass never reads as
+    # covering it.
+    parse_norm = {os.path.normpath(rel) for rel in workflow_parse_errors}
+    shallow_calls = [key for key in unread_calls
+                     if os.path.normpath(key[2:]) not in parse_norm]
+    if shallow_calls:
+        evidence += (f"; {len(shallow_calls)} reusable workflow call(s) on the PR path "
+                     f"could not be read and were not graded: {', '.join(shallow_calls[:3])}")
+    if depth_unresolved:
+        rels = sorted(set(depth_unresolved))
+        evidence += (f"; {len(depth_unresolved)} job(s) on the PR path set fetch-depth by "
+                     f"an expression that could not be resolved and were not graded: "
+                     f"{', '.join(rels[:3])}")
+    # A wholly external PR path exposes no checkout to grade. Keep mixed
+    # paths and unread local calls applicable: their local work is not proof
+    # that every checkout lives in another repository.
+    pr_reachable_jobs = [job for _rel, doc, event_doc in pr_path
+                         for job in _wf_jobs(doc).values()
+                         if not _job_if_excludes_pull_requests(job, event_doc)]
+    all_external = bool(pr_reachable_jobs) and all(
+        isinstance(job.get("uses"), str) and not _is_local_uses(job["uses"])
+        and "@" in job["uses"] for job in pr_reachable_jobs)
+    if all_external:
+        evidence = ("every PR-gating job calls another repository's reusable workflow; "
+                    "checkout happens there and is not visible from this repository")
     facts["ci.checkout.shallow-clone"] = fact(
-        "fail" if offenders else ("pass" if pr_wfs else "not_applicable"),
+        "not_applicable" if all_external else
+        ("fail" if offenders else ("pass" if pr_wfs else "not_applicable")),
         evidence, offenders)
 
     # 4. Test sharding / matrix: a matrix on a TEST-LIKE job (test/spec/e2e/
@@ -1203,6 +3102,17 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path) -> dict[str
                 has_testish_job = True
             strategy = job.get("strategy")
             matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
+            if isinstance(matrix, str) and "${{" in matrix:
+                # A matrix GENERATED at runtime (`${{ fromJSON(...) }}`): the
+                # job runs a matrix whose axes this scan cannot read. On a
+                # test-like job that is the practice (the fact is "a test-like
+                # job runs a matrix"); on any other job no axis is visible to
+                # call shard-like, so the job-name rule decides, as it does
+                # for a literal matrix.
+                if testish and not matched:
+                    hits.append(rel)
+                    matched = True
+                continue
             if not isinstance(matrix, dict):
                 continue
             shard_axis = any(_SHARD_AXIS_RE.search(str(k)) for k in matrix
@@ -1311,13 +3221,28 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path) -> dict[str
         hits or [rel for rel, _doc in pr_wfs])
 
     # 9. Job timeouts: a JOB carries timeout-minutes (never a comment).
+    # A job that calls a reusable workflow (`uses:` at job level) cannot set
+    # timeout-minutes at all; a LOCAL callee's own jobs are graded where they
+    # are defined. When every job delegates and some delegate cross-repo, the
+    # jobs that could carry a timeout live where this scan cannot see:
+    # not_applicable, never a fail (the same handoff as caching/sharding).
     hits = [rel for rel, doc, _raw in parsed
             if any("timeout-minutes" in j for j in _wf_jobs(doc).values())]
-    facts["ci.hygiene.job-timeouts"] = fact(
-        "pass" if hits else "fail",
-        (f"timeout-minutes set in {len(hits)} workflow(s)" if hits
-         else "no job sets timeout-minutes (GitHub's default is 360 minutes)"),
-        hits or [rel for rel, _doc, _raw in parsed])
+    runs_own_steps = any("uses" not in j for _rel, doc, _raw in parsed
+                         for j in _wf_jobs(doc).values())
+    if not hits and remote_reusables and not runs_own_steps:
+        facts["ci.hygiene.job-timeouts"] = fact(
+            "not_applicable",
+            "every job calls a reusable workflow, so none can set timeout-minutes here; "
+            f"CI is delegated to cross-repo reusable workflow(s) "
+            f"({', '.join(remote_reusables[:2])}) whose jobs are not visible from this repo",
+            [])
+    else:
+        facts["ci.hygiene.job-timeouts"] = fact(
+            "pass" if hits else "fail",
+            (f"timeout-minutes set in {len(hits)} workflow(s)" if hits
+             else "no job sets timeout-minutes (GitHub's default is 360 minutes)"),
+            hits or [rel for rel, _doc, _raw in parsed])
 
     # 10. Scoped id-token: job-level grants pass; a workflow-level id-token
     # grant - explicit or via write-all - fails.
@@ -1347,31 +3272,140 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path) -> dict[str
     # exempt them. The threshold asks "is pinning an adopted, automated
     # practice?": it admits Renovate-style stragglers (<=1 in 20) and rejects
     # partial adoption (OD-CS17). Integer arithmetic - no float boundary.
-    pinned = total = 0
+    # Every remote reference counts: step-level actions AND job-level calls to
+    # another repository's reusable workflow (`jobs.x.uses: org/r/...yml@ref`).
+    # A reference also counts as pinned when the workflow lockfile covers it:
+    # a valid entry listed under its own workflow file, or, inside a local
+    # action reached only through `$/`, a valid entry under every workflow
+    # that reaches it. A call to another repository's reusable workflow is
+    # pinned ONLY by a full SHA: the `gh actions-lock` README states that such
+    # calls are not locked (github/gh-actions-lock#179, open), even though
+    # GitHub's docs page says reusable workflows are pinned. Until the tool
+    # locks them, a lockfile entry for one enforces nothing (OD-CS24).
+    workflow_rels = {os.path.normpath(rel) for rel, _doc, _raw in parsed}
+    self_locked = {rel: wfs for rel, _doc, wfs in local_composites if wfs}
+    lock_state, lock_per_wf = _load_lockfile(root)
+    remote_refs = [(rel, ua, True) for rel, steps in graded_sources for step in steps
+                   if (ua := _step_uses(step))]
+    reusable_calls = 0
+    for rel, doc, _raw in graded:
+        for job in _wf_jobs(doc).values():
+            uses = job.get("uses")
+            if isinstance(uses, str) and not _is_local_uses(uses) and "@" in uses:
+                action, _, ref = uses.partition("@")
+                remote_refs.append((rel, (action, ref), False))
+                reusable_calls += 1
+    pinned = total = via_lock = 0
     offenders_ranked: list[tuple[int, str]] = []
-    for rel, steps in step_sources:
-        for step in steps:
-            ua = _step_uses(step)
-            if not ua:
-                continue
-            total += 1
-            if _SHA40_RE.match(ua[1]):
-                pinned += 1
-            else:
-                # Third-party offenders sort FIRST: pointing the maintainer at
-                # actions/labeler while an unpinned third-party action holds
-                # release credentials is worse than no file list.
-                first_party = ua[0].startswith(("actions/", "github/"))
-                offenders_ranked.append((1 if first_party else 0, rel))
+    for rel, ua, lockable in remote_refs:
+        total += 1
+        norm = os.path.normpath(rel)
+        key = _lock_key(ua[0], ua[1])
+        if _SHA40_RE.match(ua[1]):
+            pinned += 1
+        elif lockable and (key in lock_per_wf.get(norm, ()) if norm in workflow_rels
+                           else (rel in self_locked and all(
+                               key in lock_per_wf.get(wf, ()) for wf in self_locked[rel]))):
+            pinned += 1
+            via_lock += 1
+        else:
+            # Third-party offenders sort FIRST: pointing the maintainer at
+            # actions/labeler while an unpinned third-party action holds
+            # release credentials is worse than no file list.
+            first_party = ua[0].startswith(("actions/", "github/"))
+            offenders_ranked.append((1 if first_party else 0, rel))
     offender_files = [rel for _rank, rel in sorted(set(offenders_ranked))]
     if total == 0:
         facts["ci.security.pinned-action-shas"] = fact(
             "not_applicable", "no remote actions used in workflow or local composite action files", [])
     else:
+        # The base sentence gains a clause only for what applies: the
+        # reusable-workflow calls counted, the lockfile credit, or why a
+        # lockfile grants none.
+        scope = "workflow + local composite action files"
+        if reusable_calls:
+            scope += f", including {reusable_calls} reusable-workflow call(s)"
+        head = (f"{pinned} of {total} remote action references pinned, {via_lock} via "
+                f"lockfile ({_LOCKFILE_REL})" if lock_state == "valid" else
+                f"{pinned} of {total} remote action references SHA-pinned")
+        evidence = f"{head} ({scope}; passes at >=95%)"
+        if lock_state == "invalid":
+            evidence += (f"; {_LOCKFILE_REL} is not a readable, well-formed lockfile, "
+                         f"so it grants no credit")
+        elif lock_state.startswith("version:"):
+            evidence += (f"; {_LOCKFILE_REL} format version {lock_state[len('version:'):]} "
+                         f"is not one GitHub documents ({', '.join(_LOCK_VERSIONS)}), "
+                         f"so it grants no credit")
+        elif lock_state.startswith("case:"):
+            evidence += (f"; {lock_state[len('case:'):]}: path case does not match the "
+                         f"repository (a runner reads {_LOCKFILE_REL}), so it grants no credit")
         facts["ci.security.pinned-action-shas"] = fact(
-            "pass" if pinned * 100 >= total * 95 else "fail",
-            f"{pinned} of {total} remote action references SHA-pinned "
-            f"(workflow + local composite action files; passes at >=95%)",
-            offender_files)
+            "pass" if pinned * 100 >= total * 95 else "fail", evidence, offender_files)
+
+    # Content the scan could not read may hold the cache step, unpinned
+    # actions or a full-history checkout: never graded either way, and named
+    # on all three cards so no state reads as covering it (data_sources
+    # carries the same lists). The shallow-checkout card names the
+    # reusable-workflow calls it could not follow in its own sentence, so
+    # they are not repeated there. On every card a call to a workflow that did
+    # not parse is named once, as that workflow. The caching and pinning cards
+    # name a call only when the file it names was read by no PR path: those
+    # checks leave such a file out (`unread_files`), so the note is true.
+    reasons = workflow_parse_error_reasons or {}
+    parse_errs = [f"{rel} ({reasons.get(rel, 'does not parse as a workflow')})"
+                  for rel in workflow_parse_errors]
+    followed = {os.path.normpath(rel) for rel, _doc, _event in pr_path}
+    calls = [f"{key} (reusable workflow call not followed)" for key in shallow_calls
+             if os.path.normpath(key[2:]) not in followed]
+    lists = [f"{entry} (not a list of steps)" for entry in bad_step_lists]
+    base = unread_actions + parse_errs + lists
+    for check, entries in (("ci.cache.dependency-cache", base + calls),
+                           ("ci.security.pinned-action-shas", base + calls),
+                           ("ci.checkout.shallow-clone", base)):
+        facts[check]["evidence"] += _unread_note(entries)
+
+    # Every check reads workflows, even when its applicability also depends
+    # on root configuration. Keep the unread-workflow boundary on each card;
+    # the three cards above already carry it with their richer source notes.
+    for check in facts:
+        if check not in {"ci.cache.dependency-cache", "ci.security.pinned-action-shas",
+                         "ci.checkout.shallow-clone"}:
+            facts[check]["evidence"] += _unread_note(parse_errs)
 
     return facts
+
+
+def _runner_advisories(parsed: list[tuple[str, dict, str]]) -> list[dict]:
+    """Repeated literal custom labels are portability advice, never scored facts.
+
+    Generic self-hosted OS/architecture selectors do not identify a runner
+    class. Expressions remain centralized even when their value is unknown.
+    """
+    by_label: dict[str, set[tuple[str, str]]] = {}
+    generic = {"self-hosted", "linux", "windows", "macos", "x64", "arm", "arm64"}
+    for filename, workflow, _raw in parsed:
+        jobs = workflow.get("jobs")
+        if not isinstance(jobs, dict):
+            continue
+        for job_id, job in jobs.items():
+            if not isinstance(job, dict):
+                continue
+            labels = job.get("runs-on")
+            if isinstance(labels, dict):
+                labels = labels.get("labels")
+            if isinstance(labels, str):
+                labels = [labels]
+            if not isinstance(labels, list):
+                continue
+            for label in labels:
+                if not isinstance(label, str):
+                    continue
+                label = label.strip()
+                if (not label or "${{" in label or label.lower() in generic
+                        or _runs_on_github_hosted(label)):
+                    continue
+                by_label.setdefault(label.lower(), set()).add((filename, str(job_id)))
+    return [dict(advisory_id="ci.runner.swappable", label=label,
+                 jobs=[dict(file=f, job=j) for f,j in sorted(jobs)],
+                 job_count=len(jobs))
+            for label,jobs in sorted(by_label.items()) if len(jobs) >= 3]

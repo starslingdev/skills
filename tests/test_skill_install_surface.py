@@ -43,10 +43,12 @@ _MOVED_NAMES = {
     "loop-analysis-prompt.md",
     "loop-summary.schema.json",
     "draft_detector.py",
+    "build_catalog.py",
     "aggregate_lessons.py",
     "ci-speedup-dogfood.js",
     "ci-speedup-dogfood.command.md",
     "test_draft_detector.py",
+    "test_build_catalog.py",
     "test_aggregate_lessons.py",
     "test_loop_summary_infra.py",
     "dogfood-retry.test.mjs",
@@ -54,7 +56,32 @@ _MOVED_NAMES = {
     "record_opt82_resolver_snapshot.py",
     "test_opt82_resolver_snapshot.py",
     "opt82_resolver_snapshot.json",
+    # The shared skill-eval runner, its gh stand-in, and their test.
+    "run_skill_evals.py",
+    "eval_gh_shim.py",
+    "test_shared_skill_eval_runner.py",
+    "test_eval_gh_shim.py",
+    # Reading accounting, the eval baseline tools, and their tests.
+    "eval_reading.py",
+    "test_eval_reading.py",
+    "eval_withhold_entry.py",
+    "eval_baseline_summary.py",
+    "test_eval_baseline_tools.py",
 }
+
+
+def test_eval_baseline_lives_under_maintainers_never_in_the_install():
+    """The committed eval baseline (per-run results + summary) is maintainer data:
+    it must exist under maintainers/ci-speedup/evals/baseline/ and nowhere under skills/."""
+    baselines = _MAINT / "evals" / "baseline"
+    assert list(baselines.glob("*/summary.md")), "no committed eval baseline summary"
+    assert not [p for p in (_REPO / "skills").rglob("*")
+                if p.is_dir() and p.name == "baseline"]
+
+
+def test_no_skill_eval_results_dir_under_skills():
+    """The eval runner writes per-run token/time results; they never ship."""
+    assert not list((_REPO / "skills").rglob("skill-eval-results"))
 
 
 def test_skill_dir_has_no_maintainer_only_files():

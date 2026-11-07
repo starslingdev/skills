@@ -1,0 +1,356 @@
+[
+  {
+    "id": 11,
+    "name": "quality-review-opt81",
+    "run": 1,
+    "passed": true,
+    "tool_calls": 24,
+    "input_tokens": 557750,
+    "output_tokens": 5351,
+    "duration_ms": 151078,
+    "cost_usd": 1.1782556000000002,
+    "reading": {
+      "reference_bytes": 112567,
+      "reference_lines": 1419,
+      "catalog_opened": true,
+      "catalog_entries_read": [
+        "OPT81",
+        "OPT52",
+        "OPT53",
+        "OPT54",
+        "OPT55",
+        "OPT56",
+        "OPT57",
+        "OPT58",
+        "OPT59",
+        "OPT60"
+      ],
+      "unattributed_calls": 0,
+      "reference_files": [
+        {
+          "path": "optimization-patterns.md",
+          "bytes": 69536,
+          "lines": 908,
+          "calls": 6
+        },
+        {
+          "path": "adversarial-review-rubric.md",
+          "bytes": 43031,
+          "lines": 511,
+          "calls": 4
+        }
+      ],
+      "session": {
+        "wall_s": 153.0,
+        "input_tokens": 946720,
+        "output_tokens": 17308,
+        "result_events": 1,
+        "subagents": 2
+      }
+    },
+    "checks": [
+      {
+        "name": "ci-speedup-skill-invoked",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "data-pass-ran",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "names-the-catalog-only-fork-caveat",
+        "passed": true,
+        "detail": "found"
+      },
+      {
+        "name": "read-some-reference-material",
+        "passed": true,
+        "detail": "reference_bytes=112567"
+      },
+      {
+        "name": "read-the-opt81-catalog-entry",
+        "passed": true,
+        "detail": "catalog_entries_read=1"
+      }
+    ]
+  },
+  {
+    "id": 11,
+    "name": "quality-review-opt81",
+    "run": 2,
+    "passed": true,
+    "tool_calls": 22,
+    "input_tokens": 518827,
+    "output_tokens": 6189,
+    "duration_ms": 116656,
+    "cost_usd": 0.9425980000000003,
+    "reading": {
+      "reference_bytes": 86201,
+      "reference_lines": 714,
+      "catalog_opened": true,
+      "catalog_entries_read": [
+        "OPT81",
+        "OPT52"
+      ],
+      "unattributed_calls": 0,
+      "reference_files": [
+        {
+          "path": "optimization-patterns.md",
+          "bytes": 75945,
+          "lines": 560,
+          "calls": 7
+        },
+        {
+          "path": "adversarial-review-rubric.md",
+          "bytes": 10256,
+          "lines": 154,
+          "calls": 4
+        }
+      ],
+      "session": {
+        "wall_s": 117.5,
+        "input_tokens": 809986,
+        "output_tokens": 13052,
+        "result_events": 1,
+        "subagents": 2
+      }
+    },
+    "checks": [
+      {
+        "name": "ci-speedup-skill-invoked",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "data-pass-ran",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "names-the-catalog-only-fork-caveat",
+        "passed": true,
+        "detail": "found"
+      },
+      {
+        "name": "read-some-reference-material",
+        "passed": true,
+        "detail": "reference_bytes=86201"
+      },
+      {
+        "name": "read-the-opt81-catalog-entry",
+        "passed": true,
+        "detail": "catalog_entries_read=1"
+      }
+    ]
+  },
+  {
+    "id": 11,
+    "name": "quality-review-opt81",
+    "run": 3,
+    "passed": true,
+    "tool_calls": 23,
+    "input_tokens": 65358,
+    "output_tokens": 1543,
+    "duration_ms": 15910,
+    "cost_usd": 1.1844248000000002,
+    "reading": {
+      "reference_bytes": 74628,
+      "reference_lines": 887,
+      "catalog_opened": true,
+      "catalog_entries_read": [
+        "OPT81"
+      ],
+      "unattributed_calls": 0,
+      "reference_files": [
+        {
+          "path": "optimization-patterns.md",
+          "bytes": 42540,
+          "lines": 383,
+          "calls": 6
+        },
+        {
+          "path": "adversarial-review-rubric.md",
+          "bytes": 32088,
+          "lines": 504,
+          "calls": 3
+        }
+      ],
+      "session": {
+        "wall_s": 149.1,
+        "input_tokens": 915151,
+        "output_tokens": 18419,
+        "result_events": 3,
+        "subagents": 2
+      }
+    },
+    "checks": [
+      {
+        "name": "ci-speedup-skill-invoked",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "data-pass-ran",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "names-the-catalog-only-fork-caveat",
+        "passed": true,
+        "detail": "found"
+      },
+      {
+        "name": "read-some-reference-material",
+        "passed": true,
+        "detail": "reference_bytes=74628"
+      },
+      {
+        "name": "read-the-opt81-catalog-entry",
+        "passed": true,
+        "detail": "catalog_entries_read=1"
+      }
+    ]
+  },
+  {
+    "id": 11,
+    "name": "quality-review-opt81",
+    "run": 4,
+    "passed": true,
+    "tool_calls": 9,
+    "input_tokens": 428362,
+    "output_tokens": 3671,
+    "duration_ms": 46283,
+    "cost_usd": 0.4102546,
+    "reading": {
+      "reference_bytes": 30540,
+      "reference_lines": 519,
+      "catalog_opened": true,
+      "catalog_entries_read": [
+        "OPT81",
+        "OPT52",
+        "OPT53",
+        "OPT54",
+        "OPT55",
+        "OPT56",
+        "OPT57",
+        "OPT58",
+        "OPT59",
+        "OPT60"
+      ],
+      "unattributed_calls": 0,
+      "reference_files": [
+        {
+          "path": "optimization-patterns.md",
+          "bytes": 30540,
+          "lines": 519,
+          "calls": 3
+        }
+      ],
+      "session": {
+        "wall_s": 47.0,
+        "input_tokens": 428362,
+        "output_tokens": 3671,
+        "result_events": 1,
+        "subagents": 0
+      }
+    },
+    "checks": [
+      {
+        "name": "ci-speedup-skill-invoked",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "data-pass-ran",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "names-the-catalog-only-fork-caveat",
+        "passed": true,
+        "detail": "found"
+      },
+      {
+        "name": "read-some-reference-material",
+        "passed": true,
+        "detail": "reference_bytes=30540"
+      },
+      {
+        "name": "read-the-opt81-catalog-entry",
+        "passed": true,
+        "detail": "catalog_entries_read=1"
+      }
+    ]
+  },
+  {
+    "id": 11,
+    "name": "quality-review-opt81",
+    "run": 5,
+    "passed": true,
+    "tool_calls": 22,
+    "input_tokens": 424277,
+    "output_tokens": 5830,
+    "duration_ms": 130892,
+    "cost_usd": 1.0194294,
+    "reading": {
+      "reference_bytes": 70043,
+      "reference_lines": 765,
+      "catalog_opened": true,
+      "catalog_entries_read": [
+        "OPT81",
+        "OPT60"
+      ],
+      "unattributed_calls": 0,
+      "reference_files": [
+        {
+          "path": "adversarial-review-rubric.md",
+          "bytes": 41439,
+          "lines": 550,
+          "calls": 6
+        },
+        {
+          "path": "optimization-patterns.md",
+          "bytes": 28604,
+          "lines": 215,
+          "calls": 5
+        }
+      ],
+      "session": {
+        "wall_s": 131.6,
+        "input_tokens": 803601,
+        "output_tokens": 15866,
+        "result_events": 1,
+        "subagents": 2
+      }
+    },
+    "checks": [
+      {
+        "name": "ci-speedup-skill-invoked",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "data-pass-ran",
+        "passed": true,
+        "detail": "count=1"
+      },
+      {
+        "name": "names-the-catalog-only-fork-caveat",
+        "passed": true,
+        "detail": "found"
+      },
+      {
+        "name": "read-some-reference-material",
+        "passed": true,
+        "detail": "reference_bytes=70043"
+      },
+      {
+        "name": "read-the-opt81-catalog-entry",
+        "passed": true,
+        "detail": "catalog_entries_read=1"
+      }
+    ]
+  }
+]

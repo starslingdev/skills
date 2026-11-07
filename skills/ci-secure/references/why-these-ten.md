@@ -177,7 +177,15 @@ these three were removed without being written down:
   execution on the runner first. That places it with the blast-radius class
   above. Its output also needed per-job human triage to tell release tokens
   from benign build ones — advisory as flagged, and only HIGH once a human
-  confirmed which jobs mattered.
+  confirmed which jobs mattered. Its concern now lives as a scored config
+  fact, not a finding: `sec.environments.branch-restricted` asks whether
+  each deployment environment is limited to branches a leaked push
+  credential cannot create or move (or requires a reviewer), read from the
+  repository's environment settings rather than from which jobs name an
+  `environment:`, and `sec.secrets.environment-scoped` beside it names the
+  repository and organisation secrets every branch can read
+  (`security-facts.md`). Both stay blast radius, so they stay out of the
+  ten.
 
 No detector for any of the three ships, so none of them can raise a finding.
 Test fixtures named for two of them (`p14_1_*`, `p14_21_*`) do still ship, kept
@@ -269,3 +277,10 @@ catalog/doc mismatch. Mechanically, in ONE change:
   hash in `tests/fixtures/cloak-manifest.json`, or the cloak-prune step drops
   it;
 - update the list and rejection record in THIS document in the same change.
+
+F7's required-verdict assertion extension (2026-10-26) belongs to the existing
+API-gated configuration fact, not a new attack vector or offline guess about
+branch protection. It catches a required check that runs but accepts missing
+verification. Its stronger pass meaning and unmeasured assertion coverage are
+documented in `security-facts.md`; historical score values are not equivalent
+measurements merely because this extension preserves the fact IDs.

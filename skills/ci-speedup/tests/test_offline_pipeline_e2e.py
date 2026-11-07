@@ -185,7 +185,10 @@ _JOB_ID = 9001
 #            or PR fetch. The OPT84 detector itself makes ZERO calls: it reads the
 #            pole's stamped step decomposition, the workflow YAML and the scan's
 #            package.json / ESLint config facts from the checkout.)
-_GOLDEN_GH_QUERY_COUNT = 111
+# Lifecycle adds one bounded GraphQL probe; this older replay has no lifecycle page.
+# OPT32 adds one changed-files page for each of the three already-sampled PRs. It
+# performs no PR discovery, and the fixture pages are short, so the exact delta is +3.
+_GOLDEN_GH_QUERY_COUNT = 115
 # PR-H1: `push` is UNSCOPED (no `branches:`) so the same-head_sha push+PR run
 # pair in the corpus satisfies OPT47's structural precondition (a push scoped
 # only to the default branch is excluded by design).
@@ -2085,6 +2088,48 @@ def test_collect_credits_the_chained_pole_cache_untouched(tmp_path, monkeypatch)
     assert _opt79_rows(doc) == []
 
 
+def test_collect_does_not_charge_a_needs_job_its_upstream_run_time_as_queue(
+        tmp_path, monkeypatch):
+    """`chained.yml`'s `verify` (`needs: prep`) starts 2s after the 120s `prep`
+    finishes on every sampled run. Timed from the run trigger it reads 122s, above
+    the 60s PR bar, but that is `prep` RUNNING, not runner queueing. The real
+    collect() must hand OPT43 the scanned job graph so `verify` is timed from
+    `prep`'s completion and draws no queue finding. A call site that drops the
+    graph brings the false positive back, and this test goes red."""
+    doc = _collect_in_process(tmp_path, monkeypatch)
+    opt43 = [(f["workflow_file"], f["affected_jobs"], f.get("evidence"))
+             for f in doc["findings"] if f.get("pattern") == "OPT43"
+             and f.get("workflow_file") == _CHAINED]
+    assert opt43 == [], opt43
+
+
+def test_collect_skips_opt43_and_discloses_when_the_job_graph_is_missing(
+        tmp_path, monkeypatch):
+    """A findings input with no `workflow_job_graph` gives OPT43 no way to tell an
+    entry job from a `needs:`-gated one. Timing every job from the run trigger
+    would bring back the 122s false positive on `verify` under copy that says
+    upstream run time was excluded, so OPT43 is skipped for the workflow and the
+    skip is disclosed by name instead."""
+    repo_root = tmp_path / "repo"
+    _init_repo(repo_root)
+    fixtures = _replay_dir(tmp_path)
+    scan = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "scan.py"), "--root", str(repo_root),
+         "--repo", _REPO], capture_output=True, text=True, timeout=60)
+    assert scan.returncode == 0, scan.stderr
+    scan_doc = json.loads(scan.stdout)
+    scan_doc.pop("workflow_job_graph", None)
+    monkeypatch.setenv("CI_SPEEDUP_GH_FIXTURES", str(fixtures))
+    monkeypatch.delenv("CI_SPEEDUP_GH_RECORD", raising=False)
+    doc = cr.collect(scan_doc, _REPO, 20, root=repo_root)
+    opt43 = [(f["workflow_file"], f["affected_jobs"])
+             for f in doc["findings"] if f.get("pattern") == "OPT43"]
+    assert opt43 == [], opt43
+    skipped = {e["workflow"]: e["detectors"]
+               for e in doc["data_sources"].get("detectors_skipped") or []}
+    assert "OPT43" in skipped.get(_CHAINED, []), skipped
+
+
 @pytest.mark.parametrize("how", ["zeroed", "off_spine"])
 def test_collect_demotes_a_pole_finding_with_no_merge_wait_left(
         tmp_path, monkeypatch, how):
@@ -3518,3 +3563,99 @@ def test_opt84_detector_crash_skips_and_discloses_through_collect(tmp_path, monk
     assert "opt84-" not in report
     ok = _verify(report_path, findings_path, env)
     assert ok.returncode == 0, f"{ok.stdout}\n{ok.stderr}"
+
+
+# ---------------------------------------------------------------------------
+# A detached HEAD that IS the default branch's tip is not skew. CI runners and git
+# worktrees check out a detached HEAD exactly at `origin/<default>`; the YAML parsed
+# there is byte-identical to the branch the sampled runs came from. Before the fix any
+# detached HEAD was reported as "workflow YAML source skew" — a false warning the report
+# repeated. Only a detached HEAD whose workflows differ from the default tip is skew.
+# ---------------------------------------------------------------------------
+
+_GIT_ID_ENV = {"GIT_AUTHOR_NAME": "ci-speedup-test", "GIT_AUTHOR_EMAIL": "test@example.com",
+               "GIT_COMMITTER_NAME": "ci-speedup-test",
+               "GIT_COMMITTER_EMAIL": "test@example.com"}
+
+
+def _git(root: Path, *args: str) -> str:
+    return subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True,
+                          text=True, env={**os.environ, **_GIT_ID_ENV}).stdout.strip()
+
+
+def _commit_file(root: Path, rel: str, text: str, msg: str) -> None:
+    p = root / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(text, encoding="utf-8")
+    _git(root, "add", rel)
+    _git(root, "commit", "-q", "-m", msg)
+
+
+def test_detached_head_at_the_remote_default_tip_is_not_skew(tmp_path):
+    """The CI / worktree shape: detached exactly at `origin/main`, no local `main`."""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    _git(root, "update-ref", "refs/remotes/origin/main", "HEAD")
+    _git(root, "checkout", "-q", "--detach")
+    _git(root, "branch", "-q", "-D", "main")
+    assert cr._root_branch_skew(root, "main") is None
+
+
+def test_detached_head_at_the_local_default_tip_is_not_skew(tmp_path):
+    """No `origin/main` ref fetched; the local `main` is the only default tip to compare."""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    _git(root, "checkout", "-q", "--detach")
+    assert cr._root_branch_skew(root, "main") is None
+
+
+def test_detached_head_behind_the_tip_still_warns_even_with_identical_workflows(tmp_path):
+    """Detectors read more than `.github/workflows` from the checkout (local composite
+    actions, package.json), so an identical workflows tree is not proof of no skew — and
+    an attached `main` behind `origin/main` already warns. Only the exact tip is exempt."""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    _commit_file(root, "package.json", '{"scripts": {}}\n', "manifest only")
+    _git(root, "update-ref", "refs/remotes/origin/main", "HEAD")
+    _git(root, "checkout", "-q", "--detach", "HEAD~1")
+    skew = cr._root_branch_skew(root, "main")
+    assert skew and "DETACHED HEAD" in skew["reason"]
+
+
+def test_detached_head_at_a_stale_local_default_still_warns_when_origin_moved(tmp_path):
+    """`origin/<default>` is the branch the sampled runs came from: a detached HEAD at a
+    stale local `main` is skew even though it equals that local tip."""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    _commit_file(root, ".github/workflows/new.yml",
+                 "on: pull_request\njobs:\n  a:\n    runs-on: ubuntu-latest\n"
+                 "    steps:\n      - run: true\n", "new workflow")
+    _git(root, "update-ref", "refs/remotes/origin/main", "HEAD")
+    _git(root, "reset", "-q", "--hard", "HEAD~1")        # local main stays behind origin
+    _git(root, "checkout", "-q", "--detach")
+    skew = cr._root_branch_skew(root, "main")
+    assert skew and "DETACHED HEAD" in skew["reason"]
+
+
+def test_detached_head_off_the_default_tip_still_warns(tmp_path):
+    """Control: detached at a commit whose workflows differ from the tip IS skew."""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    _commit_file(root, ".github/workflows/new.yml",
+                 "on: pull_request\njobs:\n  a:\n    runs-on: ubuntu-latest\n"
+                 "    steps:\n      - run: true\n", "new workflow")
+    _git(root, "update-ref", "refs/remotes/origin/main", "HEAD")
+    _git(root, "checkout", "-q", "--detach", "HEAD~1")
+    skew = cr._root_branch_skew(root, "main")
+    assert skew and "DETACHED HEAD" in skew["reason"]
+    assert skew["branch"] is None and skew["default_branch"] == "main"
+
+
+def test_detached_head_with_no_default_ref_to_compare_still_warns(tmp_path):
+    """Control: nothing to compare against (no `main`, no `origin/main`) — keep warning."""
+    root = tmp_path / "repo"
+    _init_repo(root)
+    _git(root, "checkout", "-q", "--detach")
+    _git(root, "branch", "-q", "-D", "main")
+    skew = cr._root_branch_skew(root, "main")
+    assert skew and "DETACHED HEAD" in skew["reason"]

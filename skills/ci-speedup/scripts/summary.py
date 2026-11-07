@@ -52,9 +52,9 @@ def _tier2_promoted(doc: dict[str, Any]) -> list[dict[str, Any]]:
     population as the renderer's section/bottom-line call sites. Deferred
     import (the `_render_keys` `_match_key` precedent) keeps the module
     standalone-runnable."""
-    from blocking_path import _dedupe_findings, _tier2_source_backed_ranked
+    from blocking_path import _admitted_findings, _tier2_source_backed_ranked
     return _tier2_source_backed_ranked(
-        _dedupe_findings(_as_list(doc.get("findings"))), doc)
+        _admitted_findings(_as_list(doc.get("findings"))), doc)
 
 
 def _tier2_summary_line(doc: dict[str, Any]) -> str:
@@ -174,10 +174,17 @@ def _render_keys(logs: list[dict[str, Any]]) -> list[str]:
     return _dedup([cands[0] if cands else f"pole{i}" for i, cands in enumerate(cand_sets)])
 
 
-def _collapse_poles(poles: list[dict[str, Any]]) -> list[tuple[Any, str, Any]]:
+def _collapse_poles(poles: list[dict[str, Any]],
+                    own_checks: set[tuple[str, str]] | None = None
+                    ) -> list[tuple[Any, str, Any]]:
     """Collapse matrix siblings (same base check + workflow, differing only in matrix
     params like `(pg12)` / `(pg15)`) into one (check, workflow, max-P50) row — the
-    fallback when no drill bundle is present. Preserves first-seen order."""
+    fallback when no drill bundle is present. Preserves first-seen order.
+
+    `own_checks` holds (check, workflow basename) pairs measured as check-runs of their
+    own. A pole whose base is one of them is a DISTINCT check that merely looks like
+    `<base> (<params>)` (`test (self-hosted)` beside the `test` verdict job), never a leg
+    of that base — a real matrix base is not a check-run — so it keeps its own name."""
     groups: dict[tuple[str, str], list[Any]] = {}
     order: list[tuple[str, str]] = []
     label: dict[tuple[str, str], tuple[Any, str]] = {}
@@ -185,6 +192,8 @@ def _collapse_poles(poles: list[dict[str, Any]]) -> list[tuple[Any, str, Any]]:
         check = str(p.get("check") or "")
         wf = Path(str(p.get("workflow_file") or "")).name
         base = check.split(" (")[0]
+        if base != check and (base, wf) in (own_checks or set()):
+            base = check
         gkey = (base, wf)
         if gkey not in groups:
             groups[gkey], order = [], order + [gkey]
@@ -251,8 +260,9 @@ def funnel_reason_chain(doc: dict[str, Any]) -> tuple[list[str], str | None]:
 
     # Stage 0 — the gh timing tier itself ran at all.
     if "gh-timing" not in (ds.get("tiers_run") or []):
-        reason = ds.get("partial_reason") or "the gh data pass did not run"
-        lines.append(_BRK + f"gh data pass did NOT run — {reason}")
+        reason = str(ds.get("partial_reason") or "the gh data pass did not run")
+        lines.append(_BRK + (reason if reason.startswith("gh data pass")
+                             else f"gh data pass did NOT run — {reason}"))
         return lines, "collection"
 
     # Stage 1 — workflows discovered/analyzed.
@@ -348,8 +358,9 @@ def _break_is_transient(doc: dict[str, Any], stage: str | None) -> bool:
     ds = doc.get("data_sources") or {}
     cp = doc.get("pr_critical_path") or {}
     if stage == "collection":
-        # A mid-collection abort / API refusal is transient; a missing/unauth gh CLI or
-        # a --repo-less static run is not fixed by re-running the same way.
+        # A mid-collection abort / API refusal is transient; a gh pass that could not
+        # start (no gh / token, or a sandboxed shell) or a --repo-less static run is not
+        # fixed by re-running the SAME way — it needs gh access or `--repo` first.
         return ds.get("partial_kind") == "collection_failed"
     if stage in ("runs", "drill"):
         return True  # a run-list / job-log fetch wipeout is a gh-side gap
@@ -396,8 +407,11 @@ def _durable_hint(stage: str | None, doc: dict[str, Any]) -> str:
         return ("No scan finding referenced a real workflow file — the repo's CI may be "
                 "trivial or not GitHub Actions.")
     if stage == "collection":
-        return (ds.get("partial_reason")
-                or "the gh CLI is unavailable/unauthenticated; re-running as-is won't help.")
+        if ds.get("partial_kind") == "static_only":
+            return "Re-run with --repo <owner/name> to measure CI timings."
+        # The reason line above already names the probe failure AND the sandbox remedy.
+        return ("Fix gh access as the reason above says (or install gh / run `gh auth "
+                "login`), then re-run the same audit.")
     return "Re-running will reproduce it."
 
 
@@ -452,6 +466,11 @@ def empty_spine_diagnostics(doc: dict[str, Any], findings_path: str,
         if cmd:
             out.append("Re-run:")
             out.append("  " + cmd)
+    elif stage == "collection":
+        # The gh pass never ran, so nothing about the repo was measured — calling the
+        # empty spine a property of the repo would contradict the "broken run" line above.
+        out.append("Nothing was measured, so this says nothing about the repo. "
+                   + _durable_hint(stage, doc))
     else:
         out.append("This empty spine is a PROPERTY of the repo in this window, not a "
                    "transient gap — re-running reproduces it. " + _durable_hint(stage, doc))
@@ -540,6 +559,10 @@ def build_summary(doc: dict[str, Any], findings_path: str = "FINDINGS.json",
     if rc:
         out.append("Required (gating) checks — already resolved from rulesets + branch "
                    f"protection: {', '.join(rc)}.")
+    elif (isinstance(doc.get("data_sources"), dict)
+          and "tiers_run" in doc["data_sources"]
+          and "gh-timing" not in (doc["data_sources"]["tiers_run"] or [])):
+        out.append("Required (gating) checks: not queried — the gh data pass did not run.")
     elif rc == [] and rc_complete:
         out.append("Required (gating) checks: NONE declared — the repo readably configures "
                    "zero required checks (rulesets + branch protection already read; do NOT "
@@ -549,6 +572,15 @@ def build_summary(doc: dict[str, Any], findings_path: str = "FINDINGS.json",
                    "rulesets + branch protection without admin access (do NOT re-probe gh). "
                    "Ranking falls back to the slowest checks across sampled PRs.")
     out.append("")
+
+    repo_pub = cp.get("required_checks_repo_published") or []
+    if repo_pub and not cp.get("unresolved_reason"):
+        out.append("Required status posted by this repo's own workflow: "
+                   + ", ".join(repo_pub) + "; which checks it waits on is not traced.")
+    if cp.get("provenance") == "unresolved" and cp.get("unresolved_reason"):
+        out.append("Merge gate unresolved: " + str(cp["unresolved_reason"]))
+    if repo_pub or cp.get("unresolved_reason"):
+        out.append("")
 
     # PR-FLOOR fallback: no required check resolved to a workflow file (the required
     # suite is external/managed, or no sampled PR carried it). The spine below is the
@@ -619,6 +651,29 @@ def build_summary(doc: dict[str, Any], findings_path: str = "FINDINGS.json",
     # drill bundle (already matrix-collapsed: one entry per drilled pole); fall back
     # to the file-backed critical-path poles collapsed by base check name, so matrix
     # siblings (tests-web (pg12) / (pg15) / …) read as ONE pole, not five.
+    # An aggregation (verdict) gate is NOT addressable: its wait is its `needs:` upstream.
+    # Same structural test the renderer applies, with the renderer's exemption: a sink
+    # carrying a SPECIFIC structural lever (anything but the generic OPT75) keeps its drill
+    # in the report, so it stays addressable here too. (The renderer's other exemption, a
+    # matched log-detector leaf, needs the parsed logs this data-pass digest never reads.)
+    from blocking_path import _agg_gate_shape, _check_name, _structural_for_pole
+    graph = doc.get("workflow_job_graph")
+    cp_checks = cp.get("checks") or []
+    all_findings = list(doc.get("findings") or [])
+
+    def _pole_key(p: dict[str, Any]) -> tuple[str, str]:
+        return (str(p.get("check")), Path(str(p.get("workflow_file") or "")).name)
+
+    agg_gates: dict[tuple[str, str], str] = {}
+    for p in poles:
+        if any(str(f.get("pattern", "")) != "OPT75"
+               for f in _structural_for_pole(p, all_findings, cp_checks)):
+            continue
+        shape = _agg_gate_shape(p, graph, cp_checks)
+        if shape:
+            agg_gates[_pole_key(p)] = _check_name(shape["slowest"])
+    # Gates leave BEFORE the fallback's matrix collapse: folding `test (self-hosted)` into a
+    # `test` row first and then dropping that row as the gate would hide the suite.
     logs = (doc.get("data_bundle") or {}).get("logs") or []
     if logs:
         # The bundle entry's `duration_s` is the nearest-P50 *representative run's*
@@ -629,12 +684,21 @@ def build_summary(doc: dict[str, Any], findings_path: str = "FINDINGS.json",
         drilled = [(e.get("check"), Path(str(e.get("workflow_file") or "")).name,
                     p50_by_check.get(str(e.get("check")), e.get("duration_s")))
                    for e in logs]
+        drilled = [d for d in drilled if (str(d[0]), d[1]) not in agg_gates]
     else:
-        drilled = _collapse_poles([p for p in poles if p.get("workflow_file")])
+        filed = [p for p in poles if p.get("workflow_file")]
+        drilled = _collapse_poles([p for p in filed if _pole_key(p) not in agg_gates],
+                                  own_checks={_pole_key(p) for p in filed})
     out.append(f"Addressable long poles — the fixable critical path ({len(drilled)}):")
     for check, wf, p50 in drilled:
         out.append(f"  • {check}  [{wf or '—'}]  P50 {_clock(p50)}")
     out.append("")
+    if agg_gates:
+        out.append("Aggregation gates — not addressable; each waits on its slowest `needs:` "
+                   f"upstream ({len(agg_gates)}):")
+        for (check, wf), upstream in agg_gates.items():
+            out.append(f"  • {check}  [{wf or '—'}]  → waits on {upstream}")
+        out.append("")
 
     # Structural root causes deduped to distinct patterns (the catalog routes one per
     # matrix leg, so the raw list repeats); one representative title each.
@@ -667,6 +731,19 @@ def build_summary(doc: dict[str, Any], findings_path: str = "FINDINGS.json",
         scope = (" — recency-only (external required suite, no PR carried it)"
                  if cp.get("required_suite_unsatisfiable") else "")
         out.append(f"Sample: {spr}/{tgt} PRs ({complete}{gap}){scope}.")
+    # The gh API cost, from the same stamp the report's Data sources line quotes, so a
+    # run on a shared API budget sees it here, before rendering (2026-11-03 dogfood).
+    ds = doc.get("data_sources") if isinstance(doc.get("data_sources"), dict) else {}
+    calls = ds.get("gh_query_count")
+    if isinstance(calls, int) and not isinstance(calls, bool) and calls > 0:
+        cost = f"gh API cost: {calls} call(s)"
+        secs = _num((doc.get("timings") or {}).get("scripted_total_s"))
+        if secs:
+            cost += f" in ~{_clock(secs)}"
+        errs = ds.get("gh_error_count")
+        if isinstance(errs, int) and not isinstance(errs, bool) and errs > 0:
+            cost += f" ({errs} failed)"
+        out.append(cost + ".")
     out.append("")
 
     # The render command — so the agent never reads blocking_path.py to invoke it.

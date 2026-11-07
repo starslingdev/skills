@@ -27,7 +27,7 @@ illustrative figures from real audits, kept to anchor the model.
 - [5a. Observed timing spread is descriptive, never an inference](#5a-observed-timing-spread-is-descriptive-never-an-inference)
 - [6. Reliability is a wall-clock multiplier](#6-reliability-is-a-wall-clock-multiplier)
 - [7. Report structure](#7-report-structure)
-- [8. Joint scenarios for two concurrent checks (contract only — not yet produced)](#8-joint-scenarios-for-two-concurrent-checks-contract-only--not-yet-produced)
+- [8. Joint scenarios for two concurrent checks (observations only)](#8-joint-scenarios-for-two-concurrent-checks-observations-only)
 
 ---
 
@@ -304,6 +304,55 @@ finding.)
 
 ## 7. Report structure
 
+### How to check it worked
+
+Every measured wall-clock headline includes a **What gates next** line and this
+fixed protocol. The next-gate label and seconds come from the floor already
+used to size that headline; no new timing collection is added. For a cluster
+fix, use its applied cross-workflow bound rather than a sibling that descends
+with the fix. If the saved evidence cannot name a single next gate (for example,
+a population-weighted bound or a chain without a named competing path), say
+that the next gate is unavailable instead of inventing a label or duration.
+These are modeled post-fix floors, not observed after measurements. The report
+explicitly conditions this projection on realizing the full headline saving;
+a smaller fix may leave the current gate in place.
+
+- **Measure:** time from the push's first job created to the last job finished,
+  across **all** workflows the push triggers. The last workflow to finish sets
+  the end, including workflows that start later.
+- **Runs:** at least 2 before and 2 after, plus one unchanged rerun as a noise
+  control.
+- **Don't** sum workflow durations, and don't average per-job ratios. Both hide
+  a gain on the one workflow that gates.
+- **Caches:** judge cache-touching fixes on the second run after the change.
+
+The interval is `max(job.completed_at) - min(job.created_at)` over the complete
+push cohort. It includes scheduling and cross-workflow delays. Neither the
+longest individual workflow duration nor the old gate's duration is a substitute
+when workflows start at different times. The phase-7 plan uses this same
+push-wide definition.
+
+### Where your PRs' time goes (PR lifecycle context)
+
+A short block near the top splits each sampled merged PR's open-to-merge life
+into CI running, red waiting for the next commit, green waiting for review or
+merge, and everything else, plus the final-commit CI share as a subset. It is
+context, never a finding or a saving.
+
+- **Green waiting covers every review round:** each stretch where the PR's
+  latest commit had passed its required checks, until the next commit or the
+  merge. An earlier round counts only when every required check is a passing
+  GitHub Actions job on that commit; otherwise it adds no green time.
+- **Estimated basis:** when required checks are not readable, every check that
+  completed on each PR's final commit by the merge (minus skipped and neutral
+  ones) is treated as required. The block says so in its first line and notes
+  that an optional slow check delays the green moment, so green waiting may be
+  understated.
+- **Headline:** "CI is not where your PRs wait" only when final-commit CI is
+  under 10% and green waiting over 25% of median PR life. Fewer than 10
+  measurable PRs renders "not measured" with the reason.
+
+
 **The report opens with a `## Contents` TOC, and every entry is an anchor link.**
 It MUST anchor-link the reversal table, every Tier (1/2/3), **every finding
 (`W1…Wn` / `R1…Rn`) as a nested child**, "The stacked wall-clock model", and
@@ -436,7 +485,7 @@ e.g. build-dedup spends developer-minutes of *wait* to save runner-minutes of
 
 ---
 
-## 8. Joint scenarios for two concurrent checks (contract only — not yet produced)
+## 8. Joint scenarios for two concurrent checks (observations only)
 
 Two findings on two *different* concurrent checks can each be worth almost
 nothing alone and a great deal together. With A at 300s and B at 299s, cutting
@@ -565,25 +614,20 @@ or leaves the concurrency validation unstamped. This is
 deliberately not a general DAG scheduler; the existing single-finding
 chain-aware behaviour is unchanged.
 
-### Status: the contract exists, no producer feeds it
+### Status: measured observations, no qualifying effect producer
 
-`scripts/joint_scenario.py` holds the data contract, the calculator and the
-admission rules, unit-tested against every counterexample above. **Nothing in
-the engine stamps its inputs**, so no report renders a joint block. The gaps are
-listed in that module as `MISSING_PRODUCER_EVIDENCE`; in summary, the engine has
-no per-observation durations for the *whole* gating set —
-`pr_critical_path.chain_facts` carries per-sha, era-scoped `member_spans_s`,
-but only for the
-members of that PR's winning chain and with no attempt or runner identity,
-while `populations` is bimodal-gated and identity-free — no stamped
-concurrency validation (overlap is inferred from the `needs:` closure and
-*defaults to concurrent* when no job graph is available), no per-observation
-local reductions (raw pre-cascade estimates are one scalar per finding, and one
-scalar across all legs for a cluster finding), no affected-step identity beyond
-a cluster finding's `measured_evidence.waterfall.shared_step` and a single
-`decomposition.dominant_step`, no stable matrix-leg identity (`affected_jobs`
-holds YAML job keys on the scan path and display names on the measured path,
-and a job key names all of a job's legs at once), and no
-certificate that a fix leaves scheduling, coverage and the job set unchanged.
-Adding an adapter before that evidence exists would produce confident numbers
-with nothing behind them.
+`scripts/joint_scenario.py` holds the data contract, calculator and admission
+rules. The collector now stamps per-observation durations for the *whole*
+confirmed gating set, plus attempt identity, runner identity and measured
+concurrency validation. It stamps nothing when the required set is unknown,
+when a check cannot map to exactly one non-matrix job execution, when the set
+contains a `needs:` relationship or shared upstream, or when the measured
+starts and overlap do not meet the concurrency tolerance.
+
+The report does not consume this contract yet. Separately, the artifact's
+`effects` list remains empty, so there is no supported joint claim to render.
+The remaining gaps are listed in `MISSING_PRODUCER_EVIDENCE`: no current finding
+supplies per-observation local reductions bounded by the affected work,
+affected-work identity, stable matrix-leg identity, and a certificate that the
+fix leaves scheduling, coverage and the job set unchanged. Adapting aggregate
+savings stamps before that evidence exists would produce unsupported numbers.

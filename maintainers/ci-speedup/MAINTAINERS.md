@@ -435,6 +435,42 @@ only caught by re-running across repos).
   any counts (test totals, dropped-check counts, validation tables) at write time —
   don't carry a stale number forward.
 
+## Behavioural evals
+
+`skills/ci-speedup/evals/evals.json` entries that carry `checks` run as real
+headless agent sessions: `python3 maintainers/scripts/run_skill_evals.py --skill ci-speedup`
+(add `--id 10` for one entry, `--runs 3` to gauge flakiness). That runs the
+`gate` tier, up to five sessions at once; entry 11 (`quality-review-opt81`) is
+tier `measure` and needs `--tier measure` or `--all` (it exists for the catalog
+before/after and the baseline, not as a per-PR check). The `synthetic`
+fixture builds the offline e2e test's repository and replays its gh corpus, and
+`maintainers/scripts/eval_gh_shim.py` answers the agent's own `gh` calls about
+that repository from the same corpus. Each run costs about $0.40 to $0.65 and
+under two minutes; results (tokens, time, cost, per-check verdicts) land in the gitignored
+`skill-eval-results/`, failing sessions in `skill-eval-logs/`. CI runs the same
+command in the `ci-speedup skill evals` job. Run it before merging a SKILL.md or
+references change that CI did not cover (fork PRs). Details:
+`skills/ci-speedup/evals/README.md`.
+
+**Reading baseline.** Every run also records how much of `references/` the
+session read (`maintainers/scripts/eval_reading.py`). The baseline a catalog
+change is judged against is committed under
+`maintainers/ci-speedup/evals/baseline/<date>/`: per-run results JSON for five
+runs of every runnable entry, plus `summary.md`. To re-run it, on a clean
+branch of the commit you want to measure: run each entry five times with the
+same pinned model the existing baseline names (`--model`, recorded in its
+`summary.md`), one entry per invocation with `--all` so entry 11 is included,
+and at most two invocations at once (the full-run entries 10, 11 and 13 write
+fixed `/tmp` scratch paths; within one invocation the runner's `serial` flag
+makes them take turns, but across invocations nothing does, so run those three
+one after another), copy the `skill-eval-results/ci-speedup-*.json` files into
+a new dated directory, regenerate the table with
+`python3 maintainers/ci-speedup/scripts/eval_baseline_summary.py <dir>`, grep
+the results for tokens before committing, and prove the discriminating case
+still discriminates with `maintainers/ci-speedup/scripts/eval_withhold_entry.py`.
+Compare a candidate against the committed baseline, never against a re-run of
+it taken on a different model.
+
 ## NEVER (applies to all three loops)
 
 - Never commit `.ci-speedup-gaps/`, `.ci-speedup-loop/`, or `.ci-speedup-dogfood/`
@@ -467,12 +503,28 @@ runner-rates file to refresh and no freshness check to run.
 
 ## Adding a pattern to the catalog (manual)
 
-Adding a new pattern is a two-part edit: author the catalog entry (METADATA +
-body) in `skills/ci-speedup/references/optimization-patterns.md`, then register its detector in
+Adding a new pattern is a three-part edit:
+
+1. **Author the pattern file** `skills/ci-speedup/references/patterns/opt<N>-<slug>.md`
+   (slug = the pattern's `fix_strategy`): YAML frontmatter with the same keys as
+   the old METADATA block, in the same order, plus `category: N`; then the body
+   with the title as the H1 (`# OPT<N> — Title`).
+2. **Add its line to `references/patterns/INDEX.md`** under its category, at the
+   position it should appear in the compiled file (INDEX order is the build
+   order).
+3. **Build and commit.** Run `python3 maintainers/ci-speedup/scripts/build_catalog.py`
+   and commit the new file, `INDEX.md` and the regenerated
+   `references/optimization-patterns.md` together. Never hand-edit the compiled
+   file: it is generated, and `build_catalog.py --check` in CI turns red on drift.
+
+Then register its detector in
 `skills/ci-speedup/scripts/scan.py` (a per-file / cross-workflow / repo-file handler or, for
-single-condition patterns, just `match:` / `yaml_path:` METADATA params) or
+single-condition patterns, just `match:` / `yaml_path:` frontmatter params) or
 `skills/ci-speedup/scripts/collect_runs.py` (for a `data-driven` pattern, or a `structural`
 pattern routed from the measured critical path).
+
+A cut pattern keeps its file with `status: cut`. A retitled pattern keeps its
+file name and gets an `aliases:` entry (plus `alias_note:`) for the old anchor.
 
 Coverage bookkeeping: a `static` catalog entry with no detector is reported in
 `catalog_patterns_without_detector`; `data-driven` entries are detected in
@@ -482,8 +534,10 @@ asymmetry to know — a `data-driven` pattern that is **intentionally cut**
 retained but not dispatched) is NOT surfaced in any without-detector list; its
 cut is documented in the catalog body and this runbook. A `structural` entry
 with no router is NOT silently assumed covered — `scan.py` lists it in
-`catalog_structural_patterns_without_detector` (currently OPT74 and OPT78).
+`catalog_structural_patterns_without_detector` (currently OPT74, OPT78, OPT85 and OPT87).
 OPT74 is the trust-boundary cache split, catalogued for human application but
 needing fork-PR cache signals the scanner doesn't sample; OPT78 is the vitest
 test-isolation lever, routed by a drill-time log leaf in `blocking_path.py`
-rather than by the critical-path router.
+rather than by the critical-path router. OPT85 (one process per test case or
+binary) and OPT87 (tests waiting on an unverified external dependency) are
+catalogued for human application with no router yet.
