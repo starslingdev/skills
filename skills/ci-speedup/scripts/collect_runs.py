@@ -24119,6 +24119,9 @@ _OPT79_POLE_MIN_HEADROOM_S = 1.0
 _OPT79_BUILDKIT_KIND = "opt79_buildkit_export"
 _OPT79_BUILDKIT_EXPORT_FLOOR_S = 60.0
 _OPT79_BUILDKIT_MIN_RUNS = 2
+_OPT79_BUILDKIT_COMPILE_RE = _re.compile(
+    r"\b(?:cargo|go)\s+build\b|\bcmake\s+--build\b|\bdotnet\s+(?:build|publish)\b|"
+    r"\b(?:npm|pnpm|yarn)\s+(?:run\s+)?build\b|\bmake(?:\s|$)", _re.IGNORECASE)
 
 
 def _opt79_buildkit_export_jobs(wf_doc: dict[str, Any] | None) -> set[str]:
@@ -24160,20 +24163,33 @@ def _opt79_buildkit_export_measurement(log: str) -> tuple[float, str, bool] | No
     exports = [done[n] for n in export_ids if n in done]
     if not exports:
         return None
-    layers: list[tuple[float, str, str]] = []
+    layer_headers: list[tuple[str, str]] = []
     for match in _re.finditer(
             r"^\s*#(\d+)\s+\[([^\]]+)\]\s+(RUN|FROM|COPY|ADD)\s+(.+)$",
             log, _re.MULTILINE):
         number = match.group(1)
+        description = f"{match.group(2)} {match.group(3)} {match.group(4)}"
+        layer_headers.append((number, description))
+    cached_ids = {
+        match.group(1) for match in _re.finditer(
+            r"^\s*#(\d+)\s+CACHED\b", log, _re.MULTILINE)
+    }
+    # A cached work layer has no DONE duration, so it cannot participate in the
+    # slow-layer maximum below. Fail closed on any observed work-layer hit rather
+    # than silently dropping the very evidence that disproves an all-cold build.
+    cached_work = next(((number, description) for number, description in layer_headers
+                        if number in cached_ids
+                        and _OPT79_BUILDKIT_COMPILE_RE.search(description)), None)
+    if cached_work is not None:
+        return max(exports), cached_work[1], True
+    layers: list[tuple[float, str, str]] = []
+    for number, description in layer_headers:
         if number in done:
-            layers.append((done[number], number,
-                           f"{match.group(2)} {match.group(3)} {match.group(4)}"))
+            layers.append((done[number], number, description))
     if not layers:
         return None
-    _seconds, slow_id, description = max(layers)
-    cached = bool(_re.search(rf"^\s*#{_re.escape(slow_id)}\s+CACHED\b",
-                             log, _re.MULTILINE))
-    return max(exports), description, cached
+    _seconds, _slow_id, description = max(layers)
+    return max(exports), description, False
 
 
 def _opt79_tags_only(wf_doc: dict[str, Any] | None) -> bool:

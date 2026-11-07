@@ -112,10 +112,9 @@ jobs:
 
     def text(self, endpoint: str, allow_missing: bool = False):
         self.queries += 1
-        cached = "\n#10 CACHED" if self.cached_compile else ""
         return "\n".join([
             "#10 [build 2/3] RUN cargo build --release",
-            "#10 DONE 300.0s" + cached,
+            "#10 CACHED" if self.cached_compile else "#10 DONE 300.0s",
             "#20 exporting to GitHub Actions Cache",
             "#20 DONE 220.0s",
         ])
