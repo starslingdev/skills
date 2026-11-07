@@ -987,6 +987,55 @@ def _cache_probe_count_violation(report: str, findings_path: Path | None
     return None, f"; cache-probe count honest ({returned}/{probed} read)"
 
 
+_DS_COMPILE_PROBE_ROW_RE = re.compile(
+    r"^\|\s*test compile log probe\s*\|\s*(.+?)\s*\|", re.MULTILINE)
+
+
+def _compile_probe_count_violation(report: str, findings_path: Path | None
+                                   ) -> tuple[str | None, str]:
+    """Re-derive the OPT24 compile-probe disclosure from findings.json."""
+    if not findings_path:
+        return None, ""
+    row = _DS_COMPILE_PROBE_ROW_RE.search(report)
+    try:
+        data = json.loads(Path(findings_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return (f"the test-compile probe row could not be re-derived: findings JSON at "
+                f"{findings_path} is unreadable ({type(exc).__name__})"), ""
+    probe = _as_dict(_as_dict(_as_dict(data).get("data_sources")).get(
+        "shard_compile_probe_logs"))
+    if probe:
+        planned = probe.get("planned")
+        returned = probe.get("returned")
+        valid = all(isinstance(value, int) and not isinstance(value, bool) and value >= 0
+                    for value in (planned, returned))
+        if not valid or returned > planned:
+            return (f"the test-compile probe counts in findings are malformed "
+                    f"({{'planned': {planned!r}, 'returned': {returned!r}}})"), ""
+    else:
+        planned = returned = 0
+    if planned <= 0:
+        if row:
+            return ("Data sources declares a test compile log probe, but the run "
+                    "planned none"), ""
+        return None, ""
+    if not row:
+        return (f"{planned} job log(s) were planned for the test compile comparison "
+                "but the Data sources table has no row for them"), ""
+    cell = _strip_render_artifacts(row.group(1)).lower()
+    if returned == planned:
+        claimed = re.search(r"(\d+)\s+job log", cell)
+        if not claimed or int(claimed.group(1)) != planned:
+            return (f"Data sources test-compile probe cell {cell!r} does not state "
+                    f"the {planned} log(s) read"), ""
+    else:
+        pair = re.search(r"(\d+)\s+of\s+(\d+)", cell)
+        if not pair or (int(pair.group(1)), int(pair.group(2))) != (returned, planned):
+            return (f"Data sources test-compile probe cell {cell!r} does not state "
+                    f"that {returned} of {planned} planned log(s) returned content"), ""
+    return None, f"; test-compile probe count honest ({returned}/{planned} returned)"
+
+
 _VR_OPT79_WITHHELD_DOC_KEY = "opt79_withheld_candidates"
 # The plain-English phrase for every gate that can be recorded. This is a
 # standalone copy of `blocking_path._OPT79_HELD_BACK_REASONS` (this checker
@@ -1822,6 +1871,10 @@ def check_coverage_disclosed(report: str, findings_path: Path | None = None) -> 
     probe_violation, probe_note = _cache_probe_count_violation(report, findings_path)
     if probe_violation:
         return Check(name, False, probe_violation)
+    compile_probe_violation, compile_probe_note = _compile_probe_count_violation(
+        report, findings_path)
+    if compile_probe_violation:
+        return Check(name, False, compile_probe_violation)
     gh_violation, gh_note = _gh_errors_disclosure_violation(report, findings_path)
     if gh_violation:
         return Check(name, False, gh_violation)
@@ -1842,9 +1895,10 @@ def check_coverage_disclosed(report: str, findings_path: Path | None = None) -> 
         if "**" not in banner:
             return Check(name, False, "Incomplete-coverage banner names no file")
         return Check(name, True, "coverage gap disclosed and files named"
-                     + logs_note + probe_note + gh_note + skip_note)
+                     + logs_note + probe_note + compile_probe_note + gh_note + skip_note)
     return Check(name, True,
-                 "data basis disclosed" + logs_note + probe_note + gh_note + skip_note)
+                 "data basis disclosed" + logs_note + probe_note + compile_probe_note
+                 + gh_note + skip_note)
 
 
 # The two `data_sources` lists naming workflows that left the MEASURED sample: the

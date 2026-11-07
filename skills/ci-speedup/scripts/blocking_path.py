@@ -7234,6 +7234,17 @@ def _data_sources_footer(doc: dict[str, Any], repo: str,
             cov += f" (capped at {_bud} for the repository)"
         rows.append(("cache hit/miss log probe", cov,
                      "Splitting a cached job's runs into cache hits and misses"))
+    _compile_probe = ds.get("shard_compile_probe_logs")
+    if isinstance(_compile_probe, dict) \
+            and isinstance(_compile_probe.get("planned"), int) \
+            and _compile_probe["planned"] > 0:
+        _planned = _compile_probe["planned"]
+        _returned = _compile_probe.get("returned")
+        _returned = _returned if isinstance(_returned, int) else 0
+        cov = (f"{_planned} job log(s) read" if _returned == _planned
+               else f"{_returned} of {_planned} job log(s) returned content")
+        rows.append(("test compile log probe", cov,
+                     "Separating repeated pre-test compilation from shardable test work"))
     # WHICH workflow YAML fed the detectors. `collect_runs` stamps this, and until now
     # nothing rendered it — so the reader could not tell whether the `on:`/matrix/timeout
     # signals came off the audited checkout or off the default branch's HEAD (the two

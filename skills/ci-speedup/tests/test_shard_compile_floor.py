@@ -147,6 +147,77 @@ jobs:
         return "$ npx jest\nTests: 42 passed, 42 total"
 
 
+class _DynamicExpiredClient(_Client):
+    def json(self, endpoint: str, allow_missing: bool = False):
+        if endpoint == f"repos/o/r/contents/{_WORKFLOW}":
+            self.queries += 1
+            workflow = """\
+on: pull_request
+jobs:
+  cargo-tests:
+    name: cargo tests (${{ matrix.os }})
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - run: cargo test --locked
+  go-tests:
+    name: go tests
+    needs: cargo-tests
+    runs-on: ubuntu-latest
+    steps:
+      - run: go test ./...
+  jest-tests:
+    name: jest tests
+    needs: go-tests
+    runs-on: ubuntu-latest
+    steps:
+      - run: npx jest
+"""
+            return {"content": base64.b64encode(workflow.encode()).decode()}
+        return super().json(endpoint, allow_missing)
+
+    def text(self, endpoint: str, allow_missing: bool = False):
+        self.queries += 1
+        return ""
+
+
+class _SeparateBuildClient(_Client):
+    def json(self, endpoint: str, allow_missing: bool = False):
+        response = super().json(endpoint, allow_missing)
+        if re.match(r"repos/o/r/actions/runs/(101|102)/jobs", endpoint):
+            cargo = response["jobs"][0]
+            cargo["steps"] = [
+                {
+                    "name": "Build",
+                    "conclusion": "success",
+                    "started_at": _iso(0),
+                    "completed_at": _iso(1200),
+                },
+                {
+                    "name": "Run tests",
+                    "conclusion": "success",
+                    "started_at": _iso(1200),
+                    "completed_at": _iso(3000),
+                },
+            ]
+        return response
+
+    def text(self, endpoint: str, allow_missing: bool = False):
+        job_id = int(endpoint.split("/")[-2])
+        if job_id % 10 != 1:
+            return super().text(endpoint, allow_missing)
+        self.queries += 1
+        return "\n".join([
+            f"{_iso(0)} $ cargo build --locked",
+            f"{_iso(1190)} Finished `dev` profile [unoptimized + debuginfo] target(s) in 19m 50s",
+            f"{_iso(1200)} $ cargo test --locked",
+            f"{_iso(2990)} Finished `test` profile [unoptimized + debuginfo] target(s) in 29m 50s",
+            f"{_iso(2995)} test result: ok. 42 passed; 0 failed; finished in 5.00s",
+        ])
+
+
 def _finding(doc: dict, job: str) -> dict:
     return next(
         finding for finding in doc["findings"]
@@ -183,6 +254,7 @@ def test_collect_excludes_repeated_compile_from_sharding_credit_and_report_verif
     assert jest["wall_clock_p50_s"] == 1400.0
 
     report = bp.render(doc, captured_at="2026-11-07T00:00:00Z")
+    assert "| test compile log probe | 3 job log(s) read |" in report
     findings_path = tmp_path / "findings.json"
     report_path = tmp_path / "report.md"
     findings_path.write_text(json.dumps(doc), encoding="utf-8")
@@ -194,6 +266,59 @@ def test_collect_excludes_repeated_compile_from_sharding_credit_and_report_verif
         report, report_path, findings_path, skill_repo=None)
         if not check.skipped and not check.ok]
     assert failures == [], [(check.name, check.detail) for check in failures]
+
+    missing_probe_row = report.replace(
+        "| test compile log probe | 3 job log(s) read | "
+        "Separating repeated pre-test compilation from shardable test work |\n", "")
+    failures = [check for check in vr.run_checks(
+        missing_probe_row, report_path, findings_path, skill_repo=None)
+        if not check.skipped and not check.ok]
+    assert any("test compile" in check.detail for check in failures)
+
+
+def _collect_and_verify(monkeypatch, tmp_path: Path, client_type: type[_Client]) -> dict:
+    monkeypatch.setattr(cr, "GhClient", client_type)
+    doc = cr.collect({
+        "repo": "o/r",
+        "skill_commit_sha": "installed:unversioned",
+        "workflow_job_graph": {
+            _WORKFLOW: {
+                "cargo-tests": {"name": "cargo tests", "needs": []},
+                "go-tests": {"name": "go tests", "needs": ["cargo-tests"]},
+                "jest-tests": {"name": "jest tests", "needs": ["go-tests"]},
+            },
+        },
+        "findings": [],
+    }, "o/r", max_runs=2, shallow_runs=2)
+    report = bp.render(doc, captured_at="2026-11-07T00:00:00Z")
+    findings_path = tmp_path / "findings.json"
+    report_path = tmp_path / "report.md"
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+    report_path.write_text(report, encoding="utf-8")
+    assert bp._LAST_CLAIMS is not None
+    report_path.with_name(report_path.name + ".claims.json").write_text(
+        json.dumps(bp._LAST_CLAIMS.to_json()), encoding="utf-8")
+    failures = [check for check in vr.run_checks(
+        report, report_path, findings_path, skill_repo=None)
+        if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+    return doc
+
+
+def test_dynamic_matrix_name_with_expired_log_holds_back_compile_credit(
+        monkeypatch, tmp_path: Path) -> None:
+    doc = _collect_and_verify(monkeypatch, tmp_path, _DynamicExpiredClient)
+    cargo = _finding(doc, "cargo tests")
+    assert cargo["wall_clock_p50_s"] == 0.0
+    assert cargo["pre_test_floor_unmeasured"] is True
+
+
+def test_separate_build_compile_is_not_subtracted_from_test_payload_twice(
+        monkeypatch, tmp_path: Path) -> None:
+    doc = _collect_and_verify(monkeypatch, tmp_path, _SeparateBuildClient)
+    cargo = _finding(doc, "cargo tests")
+    assert cargo["wall_clock_p50_s"] == 0.0
+    assert cargo["pre_test_floor_s"] == 1790.0
 
 
 def test_shard_guidance_names_the_repeated_runner_minute_floor() -> None:

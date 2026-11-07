@@ -22704,33 +22704,88 @@ def _opt24_log_timestamp(line: str) -> float | None:
         return None
 
 
-def _opt24_job_commands(wf_doc: dict[str, Any] | None, base: str) -> str:
+def _opt24_static_job_name(name: str) -> str:
+    """The stable part of a workflow job name that contains matrix expressions."""
+    static = _re.sub(r"\$\{\{.*?\}\}", "", name)
+    static = _re.sub(r"\(\s*\)|\[\s*\]|\{\s*\}", "", static)
+    return _re.sub(r"\s+", " ", static).strip(" -:/")
+
+
+def _opt24_matching_job_commands(
+    wf_doc: dict[str, Any] | None, base: str,
+) -> tuple[str, bool]:
     jobs = (wf_doc or {}).get("jobs")
     if not isinstance(jobs, dict):
-        return ""
+        return "", False
     commands: list[str] = []
+    matched = False
     for key, spec in jobs.items():
         if not isinstance(spec, dict):
             continue
         declared = spec.get("name")
-        rendered = str(declared) if isinstance(declared, str) and "${{" not in declared else str(key)
-        if _matrix_base_name(rendered) != base and str(key) != base:
+        rendered = str(declared) if isinstance(declared, str) else str(key)
+        static = _opt24_static_job_name(rendered)
+        dynamic = isinstance(declared, str) and "${{" in declared
+        name_matches = _matrix_base_name(rendered) == base or str(key) == base
+        if dynamic and static:
+            name_matches = name_matches or base == static or base.startswith(static)
+        if not name_matches:
             continue
+        matched = True
         for step in spec.get("steps") or []:
             if isinstance(step, dict) and isinstance(step.get("run"), str):
                 commands.append(step["run"])
-    return "\n".join(commands)
+    return "\n".join(commands), matched
+
+
+def _opt24_job_commands(wf_doc: dict[str, Any] | None, base: str) -> str:
+    return _opt24_matching_job_commands(wf_doc, base)[0]
 
 
 def _opt24_compiled_kind(log: str, wf_doc: dict[str, Any] | None, base: str) -> str | None:
-    evidence = f"{_opt24_job_commands(wf_doc, base)}\n{log}".lower()
+    commands, matched = _opt24_matching_job_commands(wf_doc, base)
+    evidence = f"{commands}\n{log}".lower()
     checks = (
         ("cargo", r"\bcargo\s+(?:test|nextest)\b"),
         ("go", r"\bgo\s+test\b"),
         ("gradle", r"(?:^|[\s/])(?:gradle|gradlew)(?:\s|$)"),
         ("cibuildwheel", r"\bcibuildwheel\b"),
     )
-    return next((kind for kind, pattern in checks if _re.search(pattern, evidence)), None)
+    kind = next((kind for kind, pattern in checks if _re.search(pattern, evidence)), None)
+    if kind is not None:
+        return kind
+    jobs = (wf_doc or {}).get("jobs")
+    # An expired log plus a workflow job we could not map is not evidence that the
+    # step has no compile floor. Hold the saving back until the command is known.
+    if isinstance(jobs, dict) and jobs and not matched and not log.strip():
+        return "unknown"
+    return None
+
+
+def _opt24_test_step_log(job: dict[str, Any], log: str) -> str:
+    """Restrict a job log to test-step time, avoiding a separate build's output."""
+    steps = [step for step in (job.get("steps") or []) if isinstance(step, dict)]
+    test_steps = [step for step in steps
+                  if _step_category(str(step.get("name") or "")) == "test"]
+    if not test_steps:
+        return ""
+    bounds: list[tuple[float, float]] = []
+    for step in test_steps:
+        start = _parse_dt(step.get("started_at"))
+        end = _parse_dt(step.get("completed_at"))
+        if start is not None and end is not None and end >= start:
+            bounds.append((start.timestamp(), end.timestamp()))
+    timestamped = [(line, _opt24_log_timestamp(line)) for line in log.splitlines()]
+    if bounds and any(stamp is not None for _line, stamp in timestamped):
+        return "\n".join(
+            line for line, stamp in timestamped
+            if stamp is not None and any(start <= stamp <= end for start, end in bounds)
+        )
+    separate_setup = any(
+        _step_category(str(step.get("name") or "")) in _SETUP_BUILD_CATEGORIES
+        for step in steps if step not in test_steps
+    )
+    return "" if separate_setup else log
 
 
 def _opt24_pre_test_floor(log: str, compiled_kind: str | None) -> float | None:
@@ -22911,11 +22966,14 @@ def _detect_opt24_long_test_no_sharding(
         if decomp is not None and decomp["payload_s"] > 0:
             shardable = min(decomp["payload_s"], p50)
             wc = round(shardable / 2.0, 1)
-        base_log = next((str((logs_by_job_id or {}).get(j.get("id")) or "")
-                         for j in inst_by_base.get(base, [])
-                         if (logs_by_job_id or {}).get(j.get("id"))), "")
+        logged_job = next((j for j in inst_by_base.get(base, [])
+                           if (logs_by_job_id or {}).get(j.get("id"))), None)
+        base_log = (str((logs_by_job_id or {}).get(logged_job.get("id")) or "")
+                    if logged_job is not None else "")
         compiled_kind = _opt24_compiled_kind(base_log, wf_doc, base)
-        pre_test_floor = _opt24_pre_test_floor(base_log, compiled_kind)
+        test_step_log = (_opt24_test_step_log(logged_job, base_log)
+                         if logged_job is not None else "")
+        pre_test_floor = _opt24_pre_test_floor(test_step_log, compiled_kind)
         compile_note = ""
         measure_first = compiled_kind is not None and pre_test_floor is None
         if pre_test_floor is not None:
