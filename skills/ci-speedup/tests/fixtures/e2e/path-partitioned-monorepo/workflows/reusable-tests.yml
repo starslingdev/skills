@@ -1,0 +1,16 @@
+name: Reusable package tests
+on:
+  workflow_call:
+    inputs:
+      package-set:
+        type: string
+        required: true
+jobs:
+  test:
+    strategy:
+      matrix:
+        package: [api, web]
+        runtime: [20, 22]
+    runs-on: ubuntu-latest
+    steps:
+      - run: make test PACKAGE=${{ matrix.package }} RUNTIME=${{ matrix.runtime }}

@@ -1,0 +1,398 @@
+{
+  "captured_at": "2026-01-31T00:00:00Z",
+  "checks": {
+    "sha-a": [
+      {
+        "completed_at": "2026-01-28T00:02:00Z",
+        "conclusion": "success",
+        "name": "tests / test (api, 20)",
+        "started_at": "2026-01-28T00:00:00Z"
+      },
+      {
+        "completed_at": "2026-01-28T00:02:00Z",
+        "conclusion": "success",
+        "name": "tests / test (api, 22)",
+        "started_at": "2026-01-28T00:00:00Z"
+      },
+      {
+        "completed_at": "2026-01-28T00:02:00Z",
+        "conclusion": "success",
+        "name": "tests / test (web, 20)",
+        "started_at": "2026-01-28T00:00:00Z"
+      },
+      {
+        "completed_at": "2026-01-28T00:02:00Z",
+        "conclusion": "success",
+        "name": "tests / test (web, 22)",
+        "started_at": "2026-01-28T00:00:00Z"
+      },
+      {
+        "completed_at": "2026-01-28T00:05:00Z",
+        "conclusion": "success",
+        "name": "gate",
+        "started_at": "2026-01-28T00:02:00Z"
+      }
+    ],
+    "sha-b": [
+      {
+        "completed_at": "2026-01-27T00:02:00Z",
+        "conclusion": "success",
+        "name": "tests / test (api, 20)",
+        "started_at": "2026-01-27T00:00:00Z"
+      },
+      {
+        "completed_at": "2026-01-27T00:02:00Z",
+        "conclusion": "success",
+        "name": "tests / test (api, 22)",
+        "started_at": "2026-01-27T00:00:00Z"
+      },
+      {
+        "completed_at": "2026-01-27T00:02:00Z",
+        "conclusion": "success",
+        "name": "tests / test (web, 20)",
+        "started_at": "2026-01-27T00:00:00Z"
+      },
+      {
+        "completed_at": "2026-01-27T00:02:00Z",
+        "conclusion": "success",
+        "name": "tests / test (web, 22)",
+        "started_at": "2026-01-27T00:00:00Z"
+      },
+      {
+        "completed_at": "2026-01-27T00:05:00Z",
+        "conclusion": "success",
+        "name": "gate",
+        "started_at": "2026-01-27T00:02:00Z"
+      }
+    ],
+    "sha-c": [
+      {
+        "completed_at": "2026-01-26T00:02:00Z",
+        "conclusion": "success",
+        "name": "tests / test (api, 20)",
+        "started_at": "2026-01-26T00:00:00Z"
+      },
+      {
+        "completed_at": "2026-01-26T00:02:00Z",
+        "conclusion": "success",
+        "name": "tests / test (api, 22)",
+        "started_at": "2026-01-26T00:00:00Z"
+      },
+      {
+        "completed_at": "2026-01-26T00:02:00Z",
+        "conclusion": "success",
+        "name": "tests / test (web, 20)",
+        "started_at": "2026-01-26T00:00:00Z"
+      },
+      {
+        "completed_at": "2026-01-26T00:02:00Z",
+        "conclusion": "success",
+        "name": "tests / test (web, 22)",
+        "started_at": "2026-01-26T00:00:00Z"
+      },
+      {
+        "completed_at": "2026-01-26T00:05:00Z",
+        "conclusion": "success",
+        "name": "gate",
+        "started_at": "2026-01-26T00:02:00Z"
+      }
+    ]
+  },
+  "default_branch": "main",
+  "jobs": {
+    "1001": [
+      {
+        "completed_at": "2026-01-28T00:02:00Z",
+        "id": 10011,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "name": "tests / test (api, 20)",
+        "started_at": "2026-01-28T00:00:00Z",
+        "steps": [
+          {
+            "completed_at": "2026-01-28T00:02:00Z",
+            "name": "test api on 20",
+            "started_at": "2026-01-28T00:00:00Z"
+          }
+        ]
+      },
+      {
+        "completed_at": "2026-01-28T00:02:00Z",
+        "id": 10012,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "name": "tests / test (api, 22)",
+        "started_at": "2026-01-28T00:00:00Z",
+        "steps": [
+          {
+            "completed_at": "2026-01-28T00:02:00Z",
+            "name": "test api on 22",
+            "started_at": "2026-01-28T00:00:00Z"
+          }
+        ]
+      },
+      {
+        "completed_at": "2026-01-28T00:02:00Z",
+        "id": 10013,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "name": "tests / test (web, 20)",
+        "started_at": "2026-01-28T00:00:00Z",
+        "steps": [
+          {
+            "completed_at": "2026-01-28T00:02:00Z",
+            "name": "test web on 20",
+            "started_at": "2026-01-28T00:00:00Z"
+          }
+        ]
+      },
+      {
+        "completed_at": "2026-01-28T00:02:00Z",
+        "id": 10014,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "name": "tests / test (web, 22)",
+        "started_at": "2026-01-28T00:00:00Z",
+        "steps": [
+          {
+            "completed_at": "2026-01-28T00:02:00Z",
+            "name": "test web on 22",
+            "started_at": "2026-01-28T00:00:00Z"
+          }
+        ]
+      },
+      {
+        "completed_at": "2026-01-28T00:05:00Z",
+        "id": 10019,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "name": "gate",
+        "started_at": "2026-01-28T00:02:00Z",
+        "steps": [
+          {
+            "completed_at": "2026-01-28T00:05:00Z",
+            "name": "test",
+            "started_at": "2026-01-28T00:02:00Z"
+          }
+        ]
+      }
+    ],
+    "1002": [
+      {
+        "completed_at": "2026-01-27T00:02:00Z",
+        "id": 10021,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "name": "tests / test (api, 20)",
+        "started_at": "2026-01-27T00:00:00Z",
+        "steps": [
+          {
+            "completed_at": "2026-01-27T00:02:00Z",
+            "name": "test api on 20",
+            "started_at": "2026-01-27T00:00:00Z"
+          }
+        ]
+      },
+      {
+        "completed_at": "2026-01-27T00:02:00Z",
+        "id": 10022,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "name": "tests / test (api, 22)",
+        "started_at": "2026-01-27T00:00:00Z",
+        "steps": [
+          {
+            "completed_at": "2026-01-27T00:02:00Z",
+            "name": "test api on 22",
+            "started_at": "2026-01-27T00:00:00Z"
+          }
+        ]
+      },
+      {
+        "completed_at": "2026-01-27T00:02:00Z",
+        "id": 10023,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "name": "tests / test (web, 20)",
+        "started_at": "2026-01-27T00:00:00Z",
+        "steps": [
+          {
+            "completed_at": "2026-01-27T00:02:00Z",
+            "name": "test web on 20",
+            "started_at": "2026-01-27T00:00:00Z"
+          }
+        ]
+      },
+      {
+        "completed_at": "2026-01-27T00:02:00Z",
+        "id": 10024,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "name": "tests / test (web, 22)",
+        "started_at": "2026-01-27T00:00:00Z",
+        "steps": [
+          {
+            "completed_at": "2026-01-27T00:02:00Z",
+            "name": "test web on 22",
+            "started_at": "2026-01-27T00:00:00Z"
+          }
+        ]
+      },
+      {
+        "completed_at": "2026-01-27T00:05:00Z",
+        "id": 10029,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "name": "gate",
+        "started_at": "2026-01-27T00:02:00Z",
+        "steps": [
+          {
+            "completed_at": "2026-01-27T00:05:00Z",
+            "name": "test",
+            "started_at": "2026-01-27T00:02:00Z"
+          }
+        ]
+      }
+    ],
+    "1003": [
+      {
+        "completed_at": "2026-01-26T00:02:00Z",
+        "id": 10031,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "name": "tests / test (api, 20)",
+        "started_at": "2026-01-26T00:00:00Z",
+        "steps": [
+          {
+            "completed_at": "2026-01-26T00:02:00Z",
+            "name": "test api on 20",
+            "started_at": "2026-01-26T00:00:00Z"
+          }
+        ]
+      },
+      {
+        "completed_at": "2026-01-26T00:02:00Z",
+        "id": 10032,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "name": "tests / test (api, 22)",
+        "started_at": "2026-01-26T00:00:00Z",
+        "steps": [
+          {
+            "completed_at": "2026-01-26T00:02:00Z",
+            "name": "test api on 22",
+            "started_at": "2026-01-26T00:00:00Z"
+          }
+        ]
+      },
+      {
+        "completed_at": "2026-01-26T00:02:00Z",
+        "id": 10033,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "name": "tests / test (web, 20)",
+        "started_at": "2026-01-26T00:00:00Z",
+        "steps": [
+          {
+            "completed_at": "2026-01-26T00:02:00Z",
+            "name": "test web on 20",
+            "started_at": "2026-01-26T00:00:00Z"
+          }
+        ]
+      },
+      {
+        "completed_at": "2026-01-26T00:02:00Z",
+        "id": 10034,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "name": "tests / test (web, 22)",
+        "started_at": "2026-01-26T00:00:00Z",
+        "steps": [
+          {
+            "completed_at": "2026-01-26T00:02:00Z",
+            "name": "test web on 22",
+            "started_at": "2026-01-26T00:00:00Z"
+          }
+        ]
+      },
+      {
+        "completed_at": "2026-01-26T00:05:00Z",
+        "id": 10039,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "name": "gate",
+        "started_at": "2026-01-26T00:02:00Z",
+        "steps": [
+          {
+            "completed_at": "2026-01-26T00:05:00Z",
+            "name": "test",
+            "started_at": "2026-01-26T00:02:00Z"
+          }
+        ]
+      }
+    ]
+  },
+  "repo": "fixture/path-partitioned-monorepo",
+  "required_checks": [
+    "gate"
+  ],
+  "shape": "path-partitioned-monorepo",
+  "workflows": [
+    {
+      "id": 201,
+      "name": "CI",
+      "path": ".github/workflows/ci.yml",
+      "runs": [
+        {
+          "conclusion": "success",
+          "created_at": "2026-01-28T00:00:00Z",
+          "event": "pull_request",
+          "head_branch": "feature-a",
+          "head_sha": "sha-a",
+          "id": 1001,
+          "run_started_at": "2026-01-28T00:00:00Z",
+          "status": "completed",
+          "updated_at": "2026-01-28T00:05:00Z"
+        },
+        {
+          "conclusion": "success",
+          "created_at": "2026-01-27T00:00:00Z",
+          "event": "pull_request",
+          "head_branch": "feature-b",
+          "head_sha": "sha-b",
+          "id": 1002,
+          "run_started_at": "2026-01-27T00:00:00Z",
+          "status": "completed",
+          "updated_at": "2026-01-27T00:05:00Z"
+        },
+        {
+          "conclusion": "success",
+          "created_at": "2026-01-26T00:00:00Z",
+          "event": "pull_request",
+          "head_branch": "feature-c",
+          "head_sha": "sha-c",
+          "id": 1003,
+          "run_started_at": "2026-01-26T00:00:00Z",
+          "status": "completed",
+          "updated_at": "2026-01-26T00:05:00Z"
+        }
+      ],
+      "runs_30d": 3
+    }
+  ]
+}
