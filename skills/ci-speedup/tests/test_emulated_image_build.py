@@ -99,6 +99,14 @@ def test_opt102_keeps_compile_tools_at_command_positions(tmp_path: Path):
     )
     assert "OPT102" in chained_patterns
 
+    env_wrapped = tmp_path / "env-wrapped"
+    env_wrapped.mkdir()
+    env_patterns = _write_build(
+        env_wrapped,
+        "FROM debian:bookworm\nRUN env BUILD_MODE=release make -j2\n",
+    )
+    assert "OPT102" in env_patterns
+
 
 def test_emulated_leaf_ignores_build_tool_package_arguments():
     log = """#1 [linux/amd64 build 1/1] RUN apt-get install -y make

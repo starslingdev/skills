@@ -1762,8 +1762,8 @@ def _uses(step: dict) -> str:
 _OPT102_ROOT: Path | None = None
 _OPT102_COMPILE_RE = re.compile(
     r"(?:^|&&|\|\||[;|]|\bthen\b|\bdo\b)\s*"
-    r"(?:(?:[A-Za-z_][A-Za-z0-9_]*=(?:[^\s;&|]+|'[^']*'|\"[^\"]*\"))\s+)*"
-    r"(?:(?:env|sudo|time)\s+)*(?:go\s+(?:build|install)|xx-go\b|cargo\s+(?:build|install)|"
+    r"(?:(?:(?:[A-Za-z_][A-Za-z0-9_]*=(?:[^\s;&|]+|'[^']*'|\"[^\"]*\"))|"
+    r"(?:env|sudo|time))\s+)*(?:go\s+(?:build|install)|xx-go\b|cargo\s+(?:build|install)|"
     r"cargo\s+chef\s+cook|xx-cargo\b|(?:npm|pnpm|yarn)\s+(?:run\s+)?build|"
     r"cmake\s+(?:--build|-G)|ninja(?:\s|$)|meson\s+compile|node-gyp\b|"
     r"pip\s+wheel\b|(?:\./)?mvnw?\b[^\n;&|]*\b(?:compile|package|install)\b|"
