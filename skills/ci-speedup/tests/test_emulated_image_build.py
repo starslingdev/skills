@@ -306,7 +306,7 @@ def test_buildx_log_measures_emulated_compile_share():
     leaf = bp._parse_log(log)
     assert leaf is not None and leaf["fix_key"] == "emulated-image-compile"
     assert leaf["magnitude"] == {
-        "label": "emulated compile seconds", "unit": "s", "value": 1289.0}
+        "label": "emulated compile/install seconds", "unit": "s", "value": 1289.0}
 
 
 def test_cache_hit_does_not_hide_emulated_compile():
@@ -345,6 +345,27 @@ jobs:
     (tmp_path / "Dockerfile").write_text(
         "FROM golang:1.23\nRUN go build -o /server ./cmd/server\n", encoding="utf-8")
     assert any(f["pattern"] == "OPT102" for f in _scan(tmp_path))
+
+
+def test_opt102_raw_buildx_resolves_workflow_env_and_context(tmp_path: Path):
+    wf = tmp_path / ".github/workflows/build.yml"
+    wf.parent.mkdir(parents=True)
+    wf.write_text("""on: push
+env:
+  TARGET_PLATFORMS: linux/arm64
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: docker buildx build --platform "$TARGET_PLATFORMS" ./app
+""", encoding="utf-8")
+    app = tmp_path / "app"
+    app.mkdir()
+    (app / "Dockerfile").write_text(
+        "FROM golang:1.23\nRUN go build -o /server ./cmd/server\n", encoding="utf-8")
+    (tmp_path / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+    hit = next(f for f in _scan(tmp_path) if f["pattern"] == "OPT102")
+    assert "app/Dockerfile" in hit["evidence"]
 
 
 def test_opt102_raw_build_resolves_earlier_step_output(tmp_path: Path):
@@ -386,6 +407,33 @@ jobs:
     hits = [f for f in _scan(tmp_path) if f["pattern"] == "OPT102"]
     assert len(hits) == 1
     assert "linux/arm/v7" in hits[0]["evidence"]
+
+
+def test_opt102_matrix_include_augments_axes_and_exclude_removes_legs(tmp_path: Path):
+    wf = tmp_path / ".github/workflows/build.yml"
+    wf.parent.mkdir(parents=True)
+    wf.write_text("""on: push
+jobs:
+  image:
+    strategy:
+      matrix:
+        platform: [linux/amd64, linux/arm64, linux/arm/v7]
+        runner: [ubuntu-24.04]
+        exclude:
+          - platform: linux/arm64
+            runner: ubuntu-24.04
+        include:
+          - label: release
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - run: docker buildx build --platform ${{ matrix.platform }} .
+""", encoding="utf-8")
+    (tmp_path / "Dockerfile").write_text(
+        "FROM golang:1.23\nRUN go build -o /server ./cmd/server\n", encoding="utf-8")
+    hits = [f for f in _scan(tmp_path) if f["pattern"] == "OPT102"]
+    assert len(hits) == 1
+    assert "linux/arm/v7" in hits[0]["evidence"]
+    assert "linux/arm64" not in hits[0]["evidence"]
 
 
 def test_opt102_reusable_caller_resolves_dockerfile_input(tmp_path: Path):
@@ -450,6 +498,41 @@ jobs:
     assert not any(f["pattern"] == "OPT102" for f in _scan(tmp_path))
 
 
+def test_opt102_scans_run_bodies_and_respects_source_flag_order(tmp_path: Path):
+    patterns = _write_build(tmp_path, """FROM node:22
+ENV BUILD_COMMAND="go build ./..."
+COPY ninja /usr/local/bin/ninja
+RUN npm ci
+ENV npm_config_build_from_source=true
+""", platforms="linux/arm64")
+    assert "OPT102" not in patterns
+
+
+def test_opt102_plain_foreign_npm_install_stays_silent(tmp_path: Path):
+    patterns = _write_build(tmp_path, """FROM node:22
+RUN apk add git
+RUN npm ci
+""", platforms="linux/arm64")
+    assert "OPT102" not in patterns
+
+
+def test_opt102_build_action_keeps_sequence_platform_inputs(tmp_path: Path):
+    wf = tmp_path / ".github/workflows/build.yml"
+    wf.parent.mkdir(parents=True)
+    wf.write_text("""on: push
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/build-push-action@v6
+        with:
+          platforms: [linux/amd64, linux/arm64]
+""", encoding="utf-8")
+    (tmp_path / "Dockerfile").write_text(
+        "FROM golang:1.23\nRUN go build ./...\n", encoding="utf-8")
+    assert any(f["pattern"] == "OPT102" for f in _scan(tmp_path))
+
+
 def test_opt102_native_platform_and_install_only_dockerfile_stay_silent(tmp_path: Path):
     patterns = _write_build(tmp_path, """FROM node:22
 RUN apk add git
@@ -490,6 +573,19 @@ def test_buildx_log_sums_chef_and_foreign_only_compile():
 
 def test_buildx_log_names_source_install_as_emulated_install():
     log = """#12 [linux/arm64 2/2] RUN npm_config_build_from_source=true npm ci
+#12 DONE 75.0s
+"""
+    leaf = bp._parse_log(log)
+    rows = leaf["deeper"][0]["rows"] if leaf is not None else []
+    assert leaf is not None and leaf["magnitude"]["value"] == 75.0
+    assert any(row[0] == "foreign-architecture emulated install" for row in rows)
+    assert leaf["magnitude"]["label"] == "emulated compile/install seconds"
+
+
+def test_buildx_log_carries_stage_source_flag_to_npm_install():
+    log = """#11 [linux/arm64 1/2] ENV npm_config_build_from_source=true
+#11 DONE 0.0s
+#12 [linux/arm64 2/2] RUN npm ci
 #12 DONE 75.0s
 """
     leaf = bp._parse_log(log)

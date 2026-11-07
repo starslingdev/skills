@@ -2217,11 +2217,36 @@ def _emulated_image_compile_leaf(lines: list[str]) -> dict[str, Any] | None:
         re.IGNORECASE)
     operations: dict[str, tuple[str, str, str]] = {}
     durations: list[tuple[str, float, str, str, str]] = []
+    source_scopes: set[tuple[str, str]] = set()
     for line in lines:
-        match = re.search(r"#(\d+)\s+\[linux/([^\s\]]+)[^\]]*\]\s+RUN\s+(.+)", line)
+        instruction = re.search(
+            r"#(\d+)\s+\[linux/([^\s\]]+)\s*([^\]]*)\]\s+"
+            r"(ARG|ENV|RUN)\s+(.+)", line, re.IGNORECASE)
+        if instruction:
+            arch = instruction.group(2).lower()
+            stage = re.sub(r"(?:^|\s)\d+/\d+\s*$", "", instruction.group(3)).strip()
+            scope = (arch, stage)
+            keyword = instruction.group(4).upper()
+            command = instruction.group(5)
+            if keyword in {"ARG", "ENV"}:
+                flag = re.search(
+                    r"(?:SKIP\w*PREBUILT\w*|npm_config_build_from_source)"
+                    r"\s*(?:=|\s)\s*['\"]?([^\s'\"]+)", command, re.IGNORECASE)
+                if flag:
+                    if flag.group(1).lower() in {"1", "true", "yes", "on"}:
+                        source_scopes.add(scope)
+                    else:
+                        source_scopes.discard(scope)
+                continue
+        match = re.search(r"#(\d+)\s+\[linux/([^\s\]]+)\s*([^\]]*)\]\s+RUN\s+(.+)", line)
         if match:
-            command = match.group(3)
-            kind = "install" if source_install_re.search(command) else "compile"
+            stage = re.sub(r"(?:^|\s)\d+/\d+\s*$", "", match.group(3)).strip()
+            command = match.group(4)
+            source_install = (source_install_re.search(command)
+                              or ((match.group(2).lower(), stage) in source_scopes
+                                  and re.search(r"\bnpm\s+(?:ci|install)\b",
+                                                command, re.IGNORECASE)))
+            kind = "install" if source_install else "compile"
             if kind == "install" or compile_re.search(command):
                 operations[match.group(1)] = (match.group(2).lower(), line, kind)
                 continue
@@ -2252,7 +2277,7 @@ def _emulated_image_compile_leaf(lines: list[str]) -> dict[str, Any] | None:
         "fix_key": "emulated-image-compile",
         "unit_label": (f"native compile/install {native:g}s; foreign-architecture "
                        f"compile/install {emulated:g}s ({scope})"),
-        "magnitude": {"label": "emulated compile seconds", "unit": "s",
+        "magnitude": {"label": "emulated compile/install seconds", "unit": "s",
                       "value": round(emulated, 3)},
         "deeper": [{"rows": rows,
                     "blocker_note": (f"foreign-architecture work is {scope}"),

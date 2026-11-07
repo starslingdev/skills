@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -1809,18 +1810,40 @@ def _opt102_matrix_legs(job: dict) -> list[dict[str, str]]:
               if isinstance(job.get("strategy"), dict) else None)
     if not isinstance(matrix, dict):
         return [{}]
-    include = matrix.get("include")
-    if isinstance(include, list):
-        rows = [{str(k): str(v) for k, v in row.items()}
-                for row in include if isinstance(row, dict)]
-        if rows:
-            return rows
+    if any(isinstance(value, list) and not value for key, value in matrix.items()
+           if key not in {"include", "exclude"}):
+        return []
     axes = [(str(key), [str(v) for v in value]) for key, value in matrix.items()
             if key not in {"include", "exclude"} and isinstance(value, list) and value]
-    legs = [{}]
+    legs = [{}] if axes else []
     for key, values in axes:
         legs = [{**leg, key: value} for leg in legs for value in values]
-    return legs
+    exclude = matrix.get("exclude")
+    if isinstance(exclude, list):
+        omitted = [{str(k): str(v) for k, v in row.items()}
+                   for row in exclude if isinstance(row, dict)]
+        legs = [leg for leg in legs
+                if not any(all(leg.get(key) == value for key, value in row.items())
+                           for row in omitted)]
+    include = matrix.get("include")
+    if isinstance(include, list):
+        if not axes:
+            return [{str(k): str(v) for k, v in row.items()}
+                    for row in include if isinstance(row, dict)]
+        axis_keys = {key for key, _values in axes}
+        for row in include:
+            if not isinstance(row, dict):
+                continue
+            values = {str(k): str(v) for k, v in row.items()}
+            matched = [leg for leg in legs
+                       if all(key not in axis_keys or leg.get(key) == value
+                              for key, value in values.items())]
+            if matched:
+                for leg in matched:
+                    leg.update(values)
+            else:
+                legs.append(values)
+    return legs or ([{}] if not axes and not isinstance(include, list) else [])
 
 
 def _opt102_resolve(value: Any, *, env: dict[str, str], matrix: dict[str, str],
@@ -1853,6 +1876,55 @@ def _opt102_x64_runner(value: Any, matrix: dict[str, str]) -> tuple[bool, str]:
     low = resolved.lower()
     hosted = low in {"ubuntu-latest", "ubuntu-24.04", "ubuntu-22.04", "ubuntu-20.04"}
     return hosted and "arm" not in low, note
+
+
+_OPT102_DOCKERFILE_INSTRUCTIONS = {
+    "ADD", "ARG", "CMD", "COPY", "ENTRYPOINT", "ENV", "EXPOSE", "FROM",
+    "HEALTHCHECK", "LABEL", "MAINTAINER", "ONBUILD", "RUN", "SHELL",
+    "STOPSIGNAL", "USER", "VOLUME", "WORKDIR",
+}
+
+
+def _opt102_dockerfile_instructions(stage: str) -> list[tuple[str, str]]:
+    """Return Dockerfile instructions without mistaking heredoc lines for them."""
+    lines = stage.splitlines()[1:]
+    out: list[tuple[str, str]] = []
+    index = 0
+    while index < len(lines):
+        match = re.match(r"^\s*([A-Za-z]+)\s+(.*)$", lines[index])
+        if not match or match.group(1).upper() not in _OPT102_DOCKERFILE_INSTRUCTIONS:
+            index += 1
+            continue
+        keyword, body = match.group(1).upper(), match.group(2)
+        parts = [body]
+        delimiters = (re.findall(r"<<-?\s*['\"]?([A-Za-z_][\w.-]*)", body)
+                      if keyword == "RUN" else [])
+        index += 1
+        if delimiters:
+            pending = list(delimiters)
+            while index < len(lines):
+                line = lines[index]
+                parts.append(line)
+                index += 1
+                if pending and line.strip() == pending[0]:
+                    pending.pop(0)
+                    if not pending:
+                        break
+        else:
+            while parts[-1].rstrip().endswith("\\") and index < len(lines):
+                parts.append(lines[index])
+                index += 1
+        out.append((keyword, "\n".join(parts)))
+    return out
+
+
+def _opt102_source_flag(text: str) -> bool | None:
+    values = re.findall(
+        r"(?i)(?:SKIP\w*PREBUILT\w*|npm_config_build_from_source)"
+        r"\s*(?:=|\s)\s*['\"]?([^\s'\"]+)", text)
+    if not values:
+        return None
+    return values[-1].lower() in {"1", "true", "yes", "on"}
 
 
 def _opt102_risky_stage(candidate: Path, target: str) -> tuple[str, str] | None:
@@ -1898,15 +1970,73 @@ def _opt102_risky_stage(candidate: Path, target: str) -> tuple[str, str] | None:
                 pending.append(ref_index)
     for index in sorted(reachable):
         header, clean, _refs = stages[index]
-        source_install = bool(re.search(
-            r"(?im)^\s*ENV\s+[^\n]*(?:SKIP[^=\s]*PREBUILT|npm_config_build_from_source)\s*=\s*(?:1|true)",
-            clean))
-        risky = bool(_OPT102_COMPILE_RE.search(clean))
-        if source_install and re.search(r"\bnpm\s+(?:ci|install)\b", clean, re.I):
-            risky = True
+        source_install = False
+        risky = False
+        for keyword, body in _opt102_dockerfile_instructions(clean):
+            if keyword in {"ARG", "ENV"}:
+                flag = _opt102_source_flag(body)
+                if flag is not None:
+                    source_install = flag
+            elif keyword == "RUN" and (_OPT102_COMPILE_RE.search(body)
+                                       or (source_install and re.search(
+                                           r"\bnpm\s+(?:ci|install)\b", body, re.I))):
+                risky = True
+                break
         if risky and not on_build_platform[index]:
             return header, clean
     return None
+
+
+def _opt102_raw_build_config(run: str, match: re.Match[str]) -> dict[str, Any]:
+    command = run[match.start():]
+    command = re.split(r"&&|;|(?<!\\)\n", command, maxsplit=1)[0]
+    expressions: list[str] = []
+
+    def protect(found: re.Match[str]) -> str:
+        expressions.append(found.group(0))
+        return f"__OPT102_EXPR_{len(expressions) - 1}__"
+    protected = re.sub(r"\$\{\{.*?\}\}", protect, command)
+    try:
+        tokens = shlex.split(protected)
+    except ValueError:
+        return {}
+    tokens = [re.sub(
+        r"__OPT102_EXPR_(\d+)__", lambda found: expressions[int(found.group(1))], token)
+        for token in tokens]
+    try:
+        build_at = tokens.index("build", 1)
+    except ValueError:
+        return {}
+    args = tokens[build_at + 1:]
+    config: dict[str, Any] = {"platforms": "", "context": "."}
+    value_options = {
+        "--add-host", "--annotation", "--attest", "--build-arg", "--builder",
+        "--cache-from", "--cache-to", "--file", "-f", "--iidfile", "--label",
+        "--metadata-file", "--network", "--output", "-o", "--platform",
+        "--progress", "--secret", "--ssh", "--tag", "-t", "--target", "--ulimit",
+    }
+    positional: list[str] = []
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token.startswith("--platform="):
+            config["platforms"] = token.split("=", 1)[1]
+        elif token.startswith("--file="):
+            config["file"] = token.split("=", 1)[1]
+        elif token in value_options and index + 1 < len(args):
+            if token == "--platform":
+                config["platforms"] = args[index + 1]
+            elif token in {"--file", "-f"}:
+                config["file"] = args[index + 1]
+            elif token == "--target":
+                config["target"] = args[index + 1]
+            index += 1
+        elif not token.startswith("-"):
+            positional.append(token)
+        index += 1
+    if positional:
+        config["context"] = positional[-1]
+    return config
 
 
 def _detect_opt102(doc: dict, raw: str) -> list[Hit]:
@@ -1919,6 +2049,9 @@ def _detect_opt102(doc: dict, raw: str) -> list[Hit]:
         return []
     rel = _opt102_workflow_rel(root, raw)
     caller_inputs = _opt102_caller_inputs(root, rel)
+    raw_workflow_env = doc.get("env") or {}
+    workflow_env = ({str(k): str(v) for k, v in raw_workflow_env.items()}
+                    if isinstance(raw_workflow_env, dict) else {})
     hits: list[Hit] = []
     for job_name, job in jobs.items():
         if not isinstance(job, dict):
@@ -1927,10 +2060,14 @@ def _detect_opt102(doc: dict, raw: str) -> list[Hit]:
             x64, runner_note = _opt102_x64_runner(job.get("runs-on"), matrix)
             if not x64:
                 continue
-            env = {str(k): str(v) for k, v in (job.get("env") or {}).items()}
+            raw_job_env = job.get("env") or {}
+            env = {**workflow_env, **({str(k): str(v) for k, v in raw_job_env.items()}
+                                     if isinstance(raw_job_env, dict) else {})}
             outputs: dict[str, str] = {}
             for step in _steps(job):
-                step_env = {**env, **{str(k): str(v) for k, v in (step.get("env") or {}).items()}}
+                raw_step_env = step.get("env") or {}
+                step_env = {**env, **({str(k): str(v) for k, v in raw_step_env.items()}
+                                     if isinstance(raw_step_env, dict) else {})}
                 resolved_env = {k: (_opt102_resolve(v, env=step_env, matrix=matrix,
                                                    inputs=caller_inputs, outputs=outputs) or v)
                                 for k, v in step_env.items()}
@@ -1942,18 +2079,21 @@ def _detect_opt102(doc: dict, raw: str) -> list[Hit]:
                 if uses_action:
                     config = dict(step.get("with") or {}) if isinstance(step.get("with"), dict) else {}
                 elif raw_build:
-                    platform = re.search(
-                        r"--platform(?:=|\s+)(\$\{\{.*?\}\}|[^\s]+)", run)
-                    file_match = re.search(
-                        r"(?:--file|-f)(?:=|\s+)(\$\{\{.*?\}\}|[^\s]+)", run)
-                    config = {"platforms": platform.group(1) if platform else "",
-                              "file": file_match.group(1) if file_match else "Dockerfile",
-                              "context": "."}
+                    config = _opt102_raw_build_config(run, raw_build)
                     marker = "docker build"
                 if config is not None:
-                    resolved = {key: _opt102_resolve(value, env=resolved_env, matrix=matrix,
+                    resolved = {}
+                    for key, value in config.items():
+                        if isinstance(value, list):
+                            parts = [_opt102_resolve(item, env=resolved_env, matrix=matrix,
                                                      inputs=caller_inputs, outputs=outputs)
-                                for key, value in config.items()}
+                                     for item in value]
+                            resolved[key] = (None if any(item is None for item in parts)
+                                             else ",".join(str(item) for item in parts))
+                        else:
+                            resolved[key] = _opt102_resolve(
+                                value, env=resolved_env, matrix=matrix,
+                                inputs=caller_inputs, outputs=outputs)
                     if any(value is None for value in resolved.values()):
                         config = None
                     else:
