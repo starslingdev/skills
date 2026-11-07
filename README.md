@@ -92,7 +92,7 @@ and repository context before changing anything.
 [Savings methodology](skills/ci-speedup/references/savings-methodology.md) ·
 [Changelog](skills/ci-speedup/CHANGELOG.md) ·
 [All files](skills/ci-speedup/) ·
-[Website](https://starsling.dev/ci-speedup)
+[Website](https://starsling.dev/skills/ci-speedup)
 
 ---
 
@@ -125,7 +125,7 @@ security claim.
 **Reference:** [Methodology](skills/ci-score/references/ci-score-methodology.md)
 · [Machine-readable rubric](skills/ci-score/references/ci-score-spec.json) ·
 [Changelog](skills/ci-score/CHANGELOG.md) · [All files](skills/ci-score/) ·
-[Website](https://starsling.dev/ci-score)
+[Website](https://starsling.dev/skills/ci-score)
 
 ---
 
@@ -187,7 +187,7 @@ make the check required when you are ready for it to block merges.
 [Configuration checks](skills/ci-secure/references/security-facts.md) ·
 [Troubleshooting](skills/ci-secure/references/troubleshooting.md) ·
 [Changelog](skills/ci-secure/CHANGELOG.md) · [All files](skills/ci-secure/) ·
-[Website](https://starsling.dev/ci-secure)
+[Website](https://starsling.dev/skills/ci-secure)
 
 ---
 
@@ -241,6 +241,8 @@ not personal repositories.
 · [GitHub CLI fallback](skills/sling/references/gh-fallback.md) ·
 [Machine-readable command surface](skills/sling/references/command-surface.json)
 · [Changelog](skills/sling/CHANGELOG.md) · [All files](skills/sling/) ·
+[Website](https://starsling.dev/cli) ·
+[StarSling homepage](https://starsling.dev/) ·
 [CLI documentation](https://docs.starsling.dev/sling-cli)
 
 ---
@@ -262,9 +264,9 @@ the `skills` CLI never copies it into an installation:
   [README](maintainers/skills-registry-security/README.md).
 
 This repository's internal CI runs on [StarSling
-Runners](https://starsling.dev/). Fork pull requests run the same suite on
-GitHub-hosted runners, so untrusted code does not execute on self-hosted
-runners. See [CONTRIBUTING.md](CONTRIBUTING.md).
+Runners](https://starsling.dev/products/runners). Fork pull requests run the
+same suite on GitHub-hosted runners, so untrusted code does not execute on
+self-hosted runners. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
