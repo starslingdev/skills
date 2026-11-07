@@ -531,6 +531,8 @@ def test_long_push_job_names_use_the_same_rendered_label_in_the_verifier(
     for fact in doc["default_branch_push_lane"]["facts"]:
         fact["slowest_job"]["name"] = "publish-image-for-every-supported-platform"
         fact["next_longest_job"]["name"] = "verify-every-package-in-the-workspace"
+    doc["default_branch_push_lane"]["drill"]["job"] = (
+        "publish-image-for-every-supported-platform")
 
     report, findings_path, _report_path = _write_artifacts(tmp_path, doc)
     check = vr.check_default_branch_push_lane_isolated(report, findings_path)

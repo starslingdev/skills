@@ -12446,6 +12446,23 @@ def _default_branch_push_lane_block(doc: dict[str, Any]) -> list[str]:
         f"wall is p50 **{_clock(p50)}** and p90 **{_clock(p90)}**.",
         "",
     ]
+    median_multiple = _num(lane.get("median_projection_multiple")) or 0.0
+    worst = lane.get("worst_commit") or {}
+    worst_wall = _num(worst.get("wall_s")) or 0.0
+    worst_sha = str(worst.get("sha") or "")[:7]
+    worst_wf = str(worst.get("workflow_file") or "")
+    if median_multiple > 0:
+        lines += [
+            f"The median per-commit 4x job projection is **{median_multiple:.2f}x**.",
+            "",
+        ]
+    if worst_wall > 0 and worst_sha:
+        held_by = f"; `{_wf_base(worst_wf)}` holds its slowest job" if worst_wf else ""
+        lines += [
+            f"The worst sampled commit is `{worst_sha}` at **{_clock(worst_wall)}**"
+            f"{held_by}.",
+            "",
+        ]
     slow_name = str(slowest.get("name") or "")
     next_name = str(next_job.get("name") or "")
     if slow_name:
@@ -12469,6 +12486,44 @@ def _default_branch_push_lane_block(doc: dict[str, Any]) -> list[str]:
                 f"**{_clock(projected)}** (**{multiple:.2f}x**) for the full push.",
                 "",
             ]
+    drill = lane.get("drill") or {}
+    if isinstance(drill, dict) and drill.get("job"):
+        drill_job = str(drill.get("job") or "")
+        drill_wf = str(drill.get("workflow_file") or "")
+        drill_duration = _num(drill.get("duration_s")) or 0.0
+        lines += [
+            "### 🔬 Slowest push-job drill",
+            "",
+            f"The representative pole is `{_lbl(drill_job)}` in "
+            f"`{_wf_base(drill_wf)}` at **{_clock(drill_duration)}**.",
+            "",
+        ]
+        timeline = drill.get("timeline") or {}
+        timed_steps = [
+            step for step in (timeline.get("steps") or [])
+            if isinstance(step, dict) and (_num(step.get("dur_s")) or 0) > 0
+        ]
+        if timed_steps:
+            lines += ["**Step timeline:**", ""]
+            for step in timed_steps:
+                lines.append(
+                    f"- `{_flatten_cell(str(step.get('name') or 'step'))}`: "
+                    f"{_clock(_num(step.get('dur_s')) or 0.0)}")
+            lines.append("")
+        dominant = str(drill.get("dominant_step") or "")
+        if dominant:
+            lines += [f"**Dominant step:** `{_flatten_cell(dominant)}`.", ""]
+        route = str(drill.get("catalog_route") or drill.get("pattern") or "")
+        if route:
+            lines += [f"**Catalog route:** {route}.", ""]
+        elif drill.get("catalog_status") == "log_unavailable":
+            lines += ["**Catalog route:** the representative log was unavailable.", ""]
+        else:
+            lines += ["**Catalog route:** no pattern matched the representative log.", ""]
+        prompt = str(drill.get("agent_prompt") or "")
+        if prompt:
+            lines += ["#### 🤖 Prompt for your coding agent", "", "```text",
+                      *[_fence_safe(line) for line in prompt.splitlines()], "```", ""]
     lines += [
         "These runs start after merge. Their times stay out of the merge-gate "
         "Bottom line, headline, ranked spine and scores.",

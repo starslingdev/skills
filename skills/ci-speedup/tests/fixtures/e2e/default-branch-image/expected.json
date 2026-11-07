@@ -1,21 +1,41 @@
 {
   "commit_wall_clock": {
-    "p50_s": null,
-    "p90_s": null,
-    "queue_p50_s": null,
-    "queue_p90_s": null,
-    "work_p50_s": null,
-    "work_p90_s": null
+    "p50_s": 120.0,
+    "p90_s": 120.0,
+    "queue_p50_s": 0.0,
+    "queue_p90_s": 0.0,
+    "work_p50_s": 120.0,
+    "work_p90_s": 120.0
   },
   "config_eras": [],
-  "credited_findings": [],
+  "credited_findings": [
+    {
+      "pattern": "OPT45",
+      "runner_min": 1.2,
+      "wall_clock_s": 0.0
+    },
+    {
+      "pattern": "OPT75",
+      "runner_min": null,
+      "wall_clock_s": 60.0
+    },
+    {
+      "pattern": "OPT71",
+      "runner_min": null,
+      "wall_clock_s": 120.0
+    }
+  ],
   "detected_patterns": [
-    "OPT32"
+    "OPT102",
+    "OPT32",
+    "OPT45",
+    "OPT71",
+    "OPT75"
   ],
   "gate_kind": "pr_floor_fallback",
   "headline": {
     "check": "gate",
-    "seconds": 300.0
+    "seconds": 120.0
   },
   "lane": {
     "job_fetches": 0,
@@ -27,7 +47,7 @@
   "provenance": "pr_floor_fallback",
   "representative_jobs": {
     "next": null,
-    "slowest": null
+    "slowest": "gate"
   },
   "verifier": {
     "fail": [],
@@ -39,8 +59,6 @@
       "TOC 'Also noticed' pointer's on/off-path label matches the appendix",
       "Tier-2 R-rows carry re-derived wall-clock-neutral certificates",
       "Tier-2 R-rows use measured sizing basis",
-      "Tier-2 claims carry the jobs-API derivation-basis field",
-      "Tier-2 headline claim names the top stamped finding",
       "Tier-2 savings rows are backed by runner-minute cost spine",
       "Tier-2 section-lead totals match de-overlapped findings",
       "a pole's step list says how many skipped or untimeable steps it leaves out",
@@ -51,24 +69,17 @@
       "chain headline re-derives from the stamped chain facts",
       "check enumeration is bound to the kept config era (no other-config check leaks in)",
       "cluster-floor lever's ceiling floors at a NON-sibling check (not its own matrix leg)",
-      "code findings stay within commit work and never claim runner queue",
       "crowned detector leaf agrees with the pole's dominant measured category (no off-category ceiling)",
       "declared drilled-run timelines are readable",
-      "each finding's runner-minute saving is within its jobs' measured compute",
       "each rendered pole's drill belongs to its own job (no cross-job log leak)",
-      "every credited runner-minute saving carries a measured-basis stamp (sizing door)",
       "every data-driven finding carries a measured signal (no unsupported claims)",
       "every drilled pole's binding floor is disclosed on the spine (no silent heavy-check drop)",
-      "every file-backed structural lever carries a measured dominant step (no name-inferred OPT75)",
       "every rendered cache claim carries a cross-run cache distribution",
-      "headline 'slowest check' names the data layer's critical_path_check",
+      "headline critical-path check is an actual recurring gate",
       "headline leads with the observed wall when the chain sum diverges from the makespan",
-      "headline merge-wait is never above the measured makespan p50",
       "headline reconciles a non-universal slowest check with the population floor",
       "minority slow tails on merge-blocking checks are re-derived",
       "no drilled pole measures a pre-change config era without the era disclosure",
-      "no finding cites a step longer than its job's measured window",
-      "no payload-bearing step is binned as `build` (redundant-work inflation \u2192 OPT72 misroute)",
       "no spine-demoted pole carries the typical-gate framing (prompt / Contents)",
       "no spine-dropped check is also framed on the merge-gating critical path",
       "pole addressable ceiling within the co-occurrence floor",

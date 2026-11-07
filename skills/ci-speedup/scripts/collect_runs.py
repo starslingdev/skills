@@ -29447,12 +29447,217 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         _push_lane.update({
             "job_fetch_count": len(_push_to_fetch),
             "job_fetch_failures": int(_push_failures),
+            "log_fetch_count": 0,
             "p50_s": (round(_percentile(_push_walls, 50), 3)
                       if _push_walls else None),
             "p90_s": (round(_percentile(_push_walls, 90), 3)
                       if _push_walls else None),
             "facts": _push_facts,
         })
+        _complete_push_facts = [
+            fact for fact in _push_facts
+            if fact.get("partial") is not True
+            and isinstance(fact.get("wall_s"), (int, float))
+            and float(fact["wall_s"]) > 0
+        ]
+        if _complete_push_facts:
+            _push_p50 = float(_push_lane.get("p50_s") or 0.0)
+            _typical_push = min(
+                _complete_push_facts,
+                key=lambda fact: abs(float(fact["wall_s"]) - _push_p50))
+            _worst_push = max(_complete_push_facts, key=lambda fact: float(fact["wall_s"]))
+            _projection_multiples = [
+                float(projection["multiple"])
+                for fact in _complete_push_facts
+                for projection in [fact.get("projection_4x")]
+                if isinstance(projection, dict)
+                and isinstance(projection.get("multiple"), (int, float))
+            ]
+            _push_lane["median_projection_multiple"] = (
+                round(_percentile(_projection_multiples, 50), 3)
+                if _projection_multiples else None)
+            _push_lane["worst_commit"] = {
+                "sha": _worst_push.get("sha"),
+                "wall_s": _worst_push.get("wall_s"),
+                "workflow_file": (_worst_push.get("slowest_job") or {}).get(
+                    "workflow_file"),
+            }
+
+            # Drill the representative push-lane pole from the job lists already
+            # fetched above. The only new request is its log; selection, steps,
+            # floor and whole-commit projection all reuse the lane's shared facts.
+            _slowest_push = _typical_push.get("slowest_job") or {}
+            _push_job_name = str(_slowest_push.get("name") or "")
+            _push_workflow = str(_slowest_push.get("workflow_file") or "")
+            _push_sha = str(_typical_push.get("sha") or "")
+            _push_repr_job: dict[str, Any] | None = None
+            for _wf, _run in _push_rows_by_sha.get(_push_sha, []):
+                if _wf != _push_workflow:
+                    continue
+                _run_jobs = _push_jobs_by_run.get((_wf, str(_run.get("id") or "")), [])
+                _push_repr_job = next(
+                    (job for job in _run_jobs
+                     if str(job.get("name") or "") == _push_job_name), None)
+                if _push_repr_job is not None:
+                    break
+            if _push_repr_job is not None:
+                import blocking_path as bp
+                _push_lane["log_fetch_count"] = 1 if _job_has_log(_push_repr_job) else 0
+                _push_log = _fetch_job_log(client, repo, _push_repr_job)
+                _push_duration = _job_duration_s(_push_repr_job) or 0.0
+                _push_timeline = _step_timeline(
+                    _push_repr_job, _push_job_name, round(_push_duration, 1))
+                _timed_push_steps = [
+                    step for step in (_push_timeline.get("steps") or [])
+                    if isinstance(step, dict)
+                    and isinstance(step.get("dur_s"), (int, float))
+                ]
+                _push_dominant_step = (
+                    max(_timed_push_steps, key=lambda step: float(step["dur_s"])).get(
+                        "name")
+                    if _timed_push_steps else None)
+                _push_run_keys = {
+                    (_wf, str(_run.get("id") or ""))
+                    for _sha in _push_shas
+                    for _wf, _run in _push_rows_by_sha.get(_sha, [])
+                }
+                _push_instances = [
+                    job for (_wf, _rid), jobs in _push_jobs_by_run.items()
+                    if _wf == _push_workflow and (_wf, _rid) in _push_run_keys
+                    for job in jobs
+                    if str(job.get("name") or "") == _push_job_name
+                ]
+                _push_decomp = _decompose_job_steps(_push_instances)
+                _push_leaf = bp._parse_log(
+                    _push_log or "", findings_doc.get("test_runner_isolation"))
+                _leaf_fix_key = str((_push_leaf or {}).get("fix_key") or "")
+                _leaf_pattern = {
+                    "emulated-image-compile": "OPT102",
+                }.get(_leaf_fix_key)
+                _push_job_aliases = {
+                    _push_job_name, _matrix_base_name(_push_job_name),
+                }
+                for _job_id, _job_info in (_jg.get(_push_workflow) or {}).items():
+                    _declared_name = str(_job_info.get("name") or _job_id)
+                    if (_declared_name == _push_job_name
+                            or (not _name_template_is_degenerate(_declared_name)
+                                and _name_template_regex(_declared_name).fullmatch(
+                                    _push_job_name))
+                            or _static_matrix_leg_match(
+                                _declared_name, bool(_job_info.get("matrix")),
+                                _push_job_name)):
+                        _push_job_aliases.update({_job_id, _declared_name})
+
+                def _push_job_matches(affected: Any) -> bool:
+                    affected_name = str(affected or "")
+                    return bool(
+                        affected_name
+                        and (affected_name in _push_job_aliases
+                             or _matrix_base_name(affected_name)
+                             in {_matrix_base_name(alias)
+                                 for alias in _push_job_aliases}))
+
+                _base_push_findings = [
+                    finding for finding in findings
+                    if finding.get("pattern") == _leaf_pattern
+                    and str(finding.get("workflow_file") or "") == _push_workflow
+                    and any(_push_job_matches(job)
+                            for job in (finding.get("affected_jobs") or []))
+                ]
+                _projection = _typical_push.get("projection_4x") or {}
+                _projected_s = float(_projection.get("projected_s") or 0.0)
+                _potential_s = max(
+                    float(_typical_push.get("wall_s") or 0.0) - _projected_s, 0.0)
+                _leaf_magnitude = (_push_leaf or {}).get("magnitude") or {}
+                _cause_ceiling_s = (
+                    float(_leaf_magnitude["value"])
+                    if isinstance(_leaf_magnitude.get("value"), (int, float))
+                    and str(_leaf_magnitude.get("unit") or "") == "s"
+                    else _potential_s)
+                _rare_push = _push_lane.get("rare") is True
+                _projection_stamp = {
+                    "job_speedup": float(_projection.get("job_speedup") or 0.0),
+                    "projected_s": round(_projected_s, 3),
+                    "multiple": round(float(_projection.get("multiple") or 0.0), 3),
+                    "potential_s": round(_potential_s, 3),
+                    "cause_ceiling_s": round(_cause_ceiling_s, 3),
+                    "credited_s": (0.0 if _rare_push else
+                                   round(min(_potential_s, _cause_ceiling_s), 3)),
+                    "next_longest_s": round(float(
+                        (_typical_push.get("next_longest_job") or {}).get(
+                            "duration_s") or 0.0), 3),
+                }
+                _recipe = bp._FIX_META.get(_leaf_fix_key, {}) if _leaf_fix_key else {}
+                _measured_cause = str((_push_leaf or {}).get("unit_label") or "")
+                _evidence_lines = [
+                    str(line) for line in ((_push_leaf or {}).get("evidence") or [])[:4]
+                ]
+                _push_prompt = (
+                    (f"{int(_push_lane.get('pushes_30d') or 0)} pushes to the default "
+                     "branch in the last 30 days; this rare lane is uncredited.\n"
+                     if _rare_push else "")
+                    + "ci-speedup measured the pattern below but does NOT prescribe the "
+                      "fix - investigate it in the repository and apply a safe change.\n"
+                    + (f"Catalog route: {_leaf_pattern or _leaf_fix_key}.\n"
+                       if _leaf_fix_key else
+                       "No catalog pattern matched the representative job log.\n"
+                       if _push_log else
+                       "The representative job log was unavailable, so catalog routing "
+                       "could not run.\n")
+                    + f"Where: {_push_workflow} ({_push_job_name}).\n"
+                    + (f"Measured cause: {_measured_cause}.\n" if _measured_cause else "")
+                    + ("Measured evidence:\n- " + "\n- ".join(_evidence_lines) + "\n"
+                       if _evidence_lines else "")
+                    + (f"Constraints: {_recipe.get('constraints')}\n"
+                       if _recipe.get("constraints") else "")
+                    + "This changes the wait after merge, not the merge gate. Preserve "
+                      "the job's outputs and verification, apply the catalog guardrails, "
+                      "and re-measure the full default-branch push.\n"
+                    + "\n".join(bp._NO_WEAKENING_LINES)
+                    + "\n"
+                    + "\n".join(bp._VERIFICATION_BAR_LINES)
+                )
+                _push_lane["drill"] = {
+                    "sha": _push_sha,
+                    "workflow_file": _push_workflow,
+                    "job": _push_job_name,
+                    "job_id": _push_repr_job.get("id"),
+                    "duration_s": round(_push_duration, 1),
+                    "timeline": _push_timeline,
+                    "dominant_step": _push_dominant_step,
+                    "dominant_category": (_push_decomp or {}).get("dominant_category"),
+                    "leaf": _push_leaf,
+                    "catalog_status": ("matched" if _leaf_fix_key else
+                                       "no_pattern" if _push_log else "log_unavailable"),
+                    "pattern": _leaf_pattern,
+                    "catalog_route": _leaf_pattern or _leaf_fix_key or None,
+                    "finding_ids": [],
+                    "projection": _projection_stamp,
+                    "agent_prompt": _push_prompt,
+                }
+                _push_findings: list[dict[str, Any]] = []
+                for _base_finding in _base_push_findings:
+                    _lanes = {
+                        str(lane) for lane in (_base_finding.get("workflow_lanes") or [])
+                    }
+                    if _lanes & {"pull_request", "pull_request_target", "merge_group"}:
+                        _push_finding = copy.deepcopy(_base_finding)
+                        _push_finding["id"] = f"{_base_finding.get('id', 'finding')}-push"
+                        findings.append(_push_finding)
+                    else:
+                        _push_finding = _base_finding
+                    _push_finding.update({
+                        "lane": "push",
+                        "push_lane_projection": _projection_stamp,
+                        "agent_prompt": _push_prompt,
+                    })
+                    _push_findings.append(_push_finding)
+                _push_lane["drill"]["finding_ids"] = [
+                    finding.get("id") for finding in _push_findings if finding.get("id")
+                ]
+                _push_lane["drill"]["finding_id"] = (
+                    _push_lane["drill"]["finding_ids"][0]
+                    if _push_lane["drill"]["finding_ids"] else None)
     _chain_facts = _stamp_chain_facts(
         _era_repr_shas, _era_per_sha_checks, _chain_spine, _span_caps, _jg,
         crit_by_wf, _era_sha_intervals)
@@ -30637,6 +30842,19 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 f["wall_clock_p50_s"] = 0.0
                 f["tier"] = 2
                 f["realization"] = "none"
+
+    # Push-lane projections have their own after-merge accounting. Keep the
+    # matching catalog finding visible and actionable, but leave every ordinary
+    # merge-gate and runner-minute field neutral so no existing ranking or score
+    # can consume the post-merge opportunity by accident.
+    for f in findings:
+        if f.get("lane") != "push":
+            continue
+        f["non_pr_lane"] = True
+        f["wall_clock_p50_s"] = 0.0
+        f["runner_min_saving"] = 0.0
+        f["tier"] = 2
+        f["realization"] = "none"
 
     # ---- STRUCTURAL / critical-path findings (the second, non-catalog-bound
     # track). Routed from the measured critical path AFTER hygiene sizing, so a
