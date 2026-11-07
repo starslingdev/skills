@@ -1,0 +1,179 @@
+{
+  "repo": "fixture/path-partitioned-monorepo",
+  "captured_at": "2026-01-31T00:00:00Z",
+  "default_branch": "main",
+  "required_checks": [
+    "gate"
+  ],
+  "workflows": [
+    {
+      "id": 201,
+      "path": ".github/workflows/ci.yml",
+      "name": "CI",
+      "runs_30d": 3,
+      "runs": [
+        {
+          "id": 1001,
+          "event": "pull_request",
+          "head_branch": "feature-a",
+          "head_sha": "sha-a",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-28T00:00:00Z",
+          "run_started_at": "2026-01-28T00:00:00Z",
+          "updated_at": "2026-01-28T00:05:00Z"
+        },
+        {
+          "id": 1002,
+          "event": "pull_request",
+          "head_branch": "feature-b",
+          "head_sha": "sha-b",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-27T00:00:00Z",
+          "run_started_at": "2026-01-27T00:00:00Z",
+          "updated_at": "2026-01-27T00:05:00Z"
+        },
+        {
+          "id": 1003,
+          "event": "pull_request",
+          "head_branch": "feature-c",
+          "head_sha": "sha-c",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-26T00:00:00Z",
+          "run_started_at": "2026-01-26T00:00:00Z",
+          "updated_at": "2026-01-26T00:05:00Z"
+        }
+      ]
+    }
+  ],
+  "jobs": {
+    "1001": [
+      {
+        "id": 1101,
+        "name": "build",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-28T00:00:00Z",
+        "completed_at": "2026-01-28T00:02:00Z",
+        "steps": [
+          {
+            "name": "build",
+            "started_at": "2026-01-28T00:00:00Z",
+            "completed_at": "2026-01-28T00:02:00Z"
+          }
+        ]
+      },
+      {
+        "id": 1102,
+        "name": "gate",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-28T00:02:00Z",
+        "completed_at": "2026-01-28T00:05:00Z",
+        "steps": [
+          {
+            "name": "test",
+            "started_at": "2026-01-28T00:02:00Z",
+            "completed_at": "2026-01-28T00:05:00Z"
+          }
+        ]
+      }
+    ],
+    "1002": [
+      {
+        "id": 1201,
+        "name": "build",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-27T00:00:00Z",
+        "completed_at": "2026-01-27T00:02:00Z",
+        "steps": [
+          {
+            "name": "build",
+            "started_at": "2026-01-27T00:00:00Z",
+            "completed_at": "2026-01-27T00:02:00Z"
+          }
+        ]
+      },
+      {
+        "id": 1202,
+        "name": "gate",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-27T00:02:00Z",
+        "completed_at": "2026-01-27T00:05:00Z",
+        "steps": [
+          {
+            "name": "test",
+            "started_at": "2026-01-27T00:02:00Z",
+            "completed_at": "2026-01-27T00:05:00Z"
+          }
+        ]
+      }
+    ],
+    "1003": [
+      {
+        "id": 1301,
+        "name": "build",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-26T00:00:00Z",
+        "completed_at": "2026-01-26T00:02:00Z",
+        "steps": [
+          {
+            "name": "build",
+            "started_at": "2026-01-26T00:00:00Z",
+            "completed_at": "2026-01-26T00:02:00Z"
+          }
+        ]
+      },
+      {
+        "id": 1302,
+        "name": "gate",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-26T00:02:00Z",
+        "completed_at": "2026-01-26T00:05:00Z",
+        "steps": [
+          {
+            "name": "test",
+            "started_at": "2026-01-26T00:02:00Z",
+            "completed_at": "2026-01-26T00:05:00Z"
+          }
+        ]
+      }
+    ]
+  },
+  "checks": {
+    "sha-a": [
+      {
+        "name": "gate",
+        "started_at": "2026-01-28T00:02:00Z",
+        "completed_at": "2026-01-28T00:05:00Z"
+      }
+    ],
+    "sha-b": [
+      {
+        "name": "gate",
+        "started_at": "2026-01-27T00:02:00Z",
+        "completed_at": "2026-01-27T00:05:00Z"
+      }
+    ],
+    "sha-c": [
+      {
+        "name": "gate",
+        "started_at": "2026-01-26T00:02:00Z",
+        "completed_at": "2026-01-26T00:05:00Z"
+      }
+    ]
+  },
+  "shape": "path-partitioned-monorepo"
+}

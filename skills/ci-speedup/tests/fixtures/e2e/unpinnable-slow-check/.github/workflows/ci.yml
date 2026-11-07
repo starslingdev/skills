@@ -1,0 +1,12 @@
+name: CI
+on: [pull_request]
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make unit
+  merge-gate:
+    needs: unit
+    runs-on: ubuntu-latest
+    steps:
+      - run: make gate

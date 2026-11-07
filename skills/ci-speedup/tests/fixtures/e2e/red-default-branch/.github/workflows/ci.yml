@@ -1,0 +1,13 @@
+name: Main health
+on:
+  push:
+    branches: [main]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make build
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make test

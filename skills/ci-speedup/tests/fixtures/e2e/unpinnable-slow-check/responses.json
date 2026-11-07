@@ -1,0 +1,759 @@
+{
+  "repo": "fixture/unpinnable-slow-check",
+  "captured_at": "2026-01-31T00:00:00Z",
+  "default_branch": "main",
+  "required_checks": [
+    "merge-gate"
+  ],
+  "workflows": [
+    {
+      "id": 301,
+      "path": ".github/workflows/ci.yml",
+      "name": "CI",
+      "runs_30d": 8,
+      "runs": [
+        {
+          "id": 1000,
+          "event": "pull_request",
+          "head_branch": "feature-1",
+          "head_sha": "sha-1",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-28T00:00:00Z",
+          "run_started_at": "2026-01-28T00:00:00Z",
+          "updated_at": "2026-01-28T00:05:10Z"
+        },
+        {
+          "id": 1001,
+          "event": "pull_request",
+          "head_branch": "feature-2",
+          "head_sha": "sha-2",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-27T00:00:00Z",
+          "run_started_at": "2026-01-27T00:00:00Z",
+          "updated_at": "2026-01-27T00:05:10Z"
+        },
+        {
+          "id": 1002,
+          "event": "pull_request",
+          "head_branch": "feature-3",
+          "head_sha": "sha-3",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-26T00:00:00Z",
+          "run_started_at": "2026-01-26T00:00:00Z",
+          "updated_at": "2026-01-26T00:05:10Z"
+        },
+        {
+          "id": 1003,
+          "event": "pull_request",
+          "head_branch": "feature-4",
+          "head_sha": "sha-4",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-25T00:00:00Z",
+          "run_started_at": "2026-01-25T00:00:00Z",
+          "updated_at": "2026-01-25T00:05:10Z"
+        },
+        {
+          "id": 1004,
+          "event": "pull_request",
+          "head_branch": "feature-5",
+          "head_sha": "sha-5",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-24T00:00:00Z",
+          "run_started_at": "2026-01-24T00:00:00Z",
+          "updated_at": "2026-01-24T00:05:10Z"
+        },
+        {
+          "id": 1005,
+          "event": "pull_request",
+          "head_branch": "feature-6",
+          "head_sha": "sha-6",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-23T00:00:00Z",
+          "run_started_at": "2026-01-23T00:00:00Z",
+          "updated_at": "2026-01-23T00:05:10Z"
+        },
+        {
+          "id": 1006,
+          "event": "pull_request",
+          "head_branch": "feature-7",
+          "head_sha": "sha-7",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-22T00:00:00Z",
+          "run_started_at": "2026-01-22T00:00:00Z",
+          "updated_at": "2026-01-22T00:05:10Z"
+        },
+        {
+          "id": 1007,
+          "event": "pull_request",
+          "head_branch": "feature-8",
+          "head_sha": "sha-8",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-21T00:00:00Z",
+          "run_started_at": "2026-01-21T00:00:00Z",
+          "updated_at": "2026-01-21T00:05:10Z"
+        }
+      ]
+    },
+    {
+      "id": 302,
+      "path": ".github/workflows/mystery.yml",
+      "name": "Mystery",
+      "runs_30d": 8,
+      "runs": [
+        {
+          "id": 2000,
+          "event": "pull_request",
+          "head_branch": "feature-1",
+          "head_sha": "sha-1",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-28T00:00:00Z",
+          "run_started_at": "2026-01-28T00:00:00Z",
+          "updated_at": "2026-01-28T00:08:30Z"
+        },
+        {
+          "id": 2001,
+          "event": "pull_request",
+          "head_branch": "feature-2",
+          "head_sha": "sha-2",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-27T00:00:00Z",
+          "run_started_at": "2026-01-27T00:00:00Z",
+          "updated_at": "2026-01-27T00:08:30Z"
+        },
+        {
+          "id": 2002,
+          "event": "pull_request",
+          "head_branch": "feature-3",
+          "head_sha": "sha-3",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-26T00:00:00Z",
+          "run_started_at": "2026-01-26T00:00:00Z",
+          "updated_at": "2026-01-26T00:08:30Z"
+        },
+        {
+          "id": 2003,
+          "event": "pull_request",
+          "head_branch": "feature-4",
+          "head_sha": "sha-4",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-25T00:00:00Z",
+          "run_started_at": "2026-01-25T00:00:00Z",
+          "updated_at": "2026-01-25T00:08:30Z"
+        },
+        {
+          "id": 2004,
+          "event": "pull_request",
+          "head_branch": "feature-5",
+          "head_sha": "sha-5",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-24T00:00:00Z",
+          "run_started_at": "2026-01-24T00:00:00Z",
+          "updated_at": "2026-01-24T00:08:30Z"
+        },
+        {
+          "id": 2005,
+          "event": "pull_request",
+          "head_branch": "feature-6",
+          "head_sha": "sha-6",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-23T00:00:00Z",
+          "run_started_at": "2026-01-23T00:00:00Z",
+          "updated_at": "2026-01-23T00:08:30Z"
+        },
+        {
+          "id": 2006,
+          "event": "pull_request",
+          "head_branch": "feature-7",
+          "head_sha": "sha-7",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-22T00:00:00Z",
+          "run_started_at": "2026-01-22T00:00:00Z",
+          "updated_at": "2026-01-22T00:08:30Z"
+        },
+        {
+          "id": 2007,
+          "event": "pull_request",
+          "head_branch": "feature-8",
+          "head_sha": "sha-8",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-21T00:00:00Z",
+          "run_started_at": "2026-01-21T00:00:00Z",
+          "updated_at": "2026-01-21T00:08:30Z"
+        }
+      ]
+    }
+  ],
+  "jobs": {
+    "1000": [
+      {
+        "id": 10001,
+        "name": "unit",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-28T00:00:00Z",
+        "completed_at": "2026-01-28T00:05:00Z",
+        "steps": [
+          {
+            "name": "unit",
+            "started_at": "2026-01-28T00:00:00Z",
+            "completed_at": "2026-01-28T00:05:00Z"
+          }
+        ]
+      },
+      {
+        "id": 10002,
+        "name": "merge-gate",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-28T00:05:00Z",
+        "completed_at": "2026-01-28T00:05:05Z",
+        "steps": [
+          {
+            "name": "gate",
+            "started_at": "2026-01-28T00:05:00Z",
+            "completed_at": "2026-01-28T00:05:05Z"
+          }
+        ]
+      }
+    ],
+    "1001": [
+      {
+        "id": 10011,
+        "name": "unit",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-27T00:00:00Z",
+        "completed_at": "2026-01-27T00:05:00Z",
+        "steps": [
+          {
+            "name": "unit",
+            "started_at": "2026-01-27T00:00:00Z",
+            "completed_at": "2026-01-27T00:05:00Z"
+          }
+        ]
+      },
+      {
+        "id": 10012,
+        "name": "merge-gate",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-27T00:05:00Z",
+        "completed_at": "2026-01-27T00:05:05Z",
+        "steps": [
+          {
+            "name": "gate",
+            "started_at": "2026-01-27T00:05:00Z",
+            "completed_at": "2026-01-27T00:05:05Z"
+          }
+        ]
+      }
+    ],
+    "1002": [
+      {
+        "id": 10021,
+        "name": "unit",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-26T00:00:00Z",
+        "completed_at": "2026-01-26T00:05:00Z",
+        "steps": [
+          {
+            "name": "unit",
+            "started_at": "2026-01-26T00:00:00Z",
+            "completed_at": "2026-01-26T00:05:00Z"
+          }
+        ]
+      },
+      {
+        "id": 10022,
+        "name": "merge-gate",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-26T00:05:00Z",
+        "completed_at": "2026-01-26T00:05:05Z",
+        "steps": [
+          {
+            "name": "gate",
+            "started_at": "2026-01-26T00:05:00Z",
+            "completed_at": "2026-01-26T00:05:05Z"
+          }
+        ]
+      }
+    ],
+    "1003": [
+      {
+        "id": 10031,
+        "name": "unit",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-25T00:00:00Z",
+        "completed_at": "2026-01-25T00:05:00Z",
+        "steps": [
+          {
+            "name": "unit",
+            "started_at": "2026-01-25T00:00:00Z",
+            "completed_at": "2026-01-25T00:05:00Z"
+          }
+        ]
+      },
+      {
+        "id": 10032,
+        "name": "merge-gate",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-25T00:05:00Z",
+        "completed_at": "2026-01-25T00:05:05Z",
+        "steps": [
+          {
+            "name": "gate",
+            "started_at": "2026-01-25T00:05:00Z",
+            "completed_at": "2026-01-25T00:05:05Z"
+          }
+        ]
+      }
+    ],
+    "1004": [
+      {
+        "id": 10041,
+        "name": "unit",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-24T00:00:00Z",
+        "completed_at": "2026-01-24T00:05:00Z",
+        "steps": [
+          {
+            "name": "unit",
+            "started_at": "2026-01-24T00:00:00Z",
+            "completed_at": "2026-01-24T00:05:00Z"
+          }
+        ]
+      },
+      {
+        "id": 10042,
+        "name": "merge-gate",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-24T00:05:00Z",
+        "completed_at": "2026-01-24T00:05:05Z",
+        "steps": [
+          {
+            "name": "gate",
+            "started_at": "2026-01-24T00:05:00Z",
+            "completed_at": "2026-01-24T00:05:05Z"
+          }
+        ]
+      }
+    ],
+    "1005": [
+      {
+        "id": 10051,
+        "name": "unit",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-23T00:00:00Z",
+        "completed_at": "2026-01-23T00:05:00Z",
+        "steps": [
+          {
+            "name": "unit",
+            "started_at": "2026-01-23T00:00:00Z",
+            "completed_at": "2026-01-23T00:05:00Z"
+          }
+        ]
+      },
+      {
+        "id": 10052,
+        "name": "merge-gate",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-23T00:05:00Z",
+        "completed_at": "2026-01-23T00:05:05Z",
+        "steps": [
+          {
+            "name": "gate",
+            "started_at": "2026-01-23T00:05:00Z",
+            "completed_at": "2026-01-23T00:05:05Z"
+          }
+        ]
+      }
+    ],
+    "1006": [
+      {
+        "id": 10061,
+        "name": "unit",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-22T00:00:00Z",
+        "completed_at": "2026-01-22T00:05:00Z",
+        "steps": [
+          {
+            "name": "unit",
+            "started_at": "2026-01-22T00:00:00Z",
+            "completed_at": "2026-01-22T00:05:00Z"
+          }
+        ]
+      },
+      {
+        "id": 10062,
+        "name": "merge-gate",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-22T00:05:00Z",
+        "completed_at": "2026-01-22T00:05:05Z",
+        "steps": [
+          {
+            "name": "gate",
+            "started_at": "2026-01-22T00:05:00Z",
+            "completed_at": "2026-01-22T00:05:05Z"
+          }
+        ]
+      }
+    ],
+    "1007": [
+      {
+        "id": 10071,
+        "name": "unit",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-21T00:00:00Z",
+        "completed_at": "2026-01-21T00:05:00Z",
+        "steps": [
+          {
+            "name": "unit",
+            "started_at": "2026-01-21T00:00:00Z",
+            "completed_at": "2026-01-21T00:05:00Z"
+          }
+        ]
+      },
+      {
+        "id": 10072,
+        "name": "merge-gate",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-21T00:05:00Z",
+        "completed_at": "2026-01-21T00:05:05Z",
+        "steps": [
+          {
+            "name": "gate",
+            "started_at": "2026-01-21T00:05:00Z",
+            "completed_at": "2026-01-21T00:05:05Z"
+          }
+        ]
+      }
+    ],
+    "2000": [
+      {
+        "id": 20001,
+        "name": "mystery matrix",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-28T00:00:00Z",
+        "completed_at": "2026-01-28T00:08:20Z",
+        "steps": [
+          {
+            "name": "mystery",
+            "started_at": "2026-01-28T00:00:00Z",
+            "completed_at": "2026-01-28T00:08:20Z"
+          }
+        ]
+      }
+    ],
+    "2001": [
+      {
+        "id": 20011,
+        "name": "mystery matrix",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-27T00:00:00Z",
+        "completed_at": "2026-01-27T00:08:20Z",
+        "steps": [
+          {
+            "name": "mystery",
+            "started_at": "2026-01-27T00:00:00Z",
+            "completed_at": "2026-01-27T00:08:20Z"
+          }
+        ]
+      }
+    ],
+    "2002": [
+      {
+        "id": 20021,
+        "name": "mystery matrix",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-26T00:00:00Z",
+        "completed_at": "2026-01-26T00:08:20Z",
+        "steps": [
+          {
+            "name": "mystery",
+            "started_at": "2026-01-26T00:00:00Z",
+            "completed_at": "2026-01-26T00:08:20Z"
+          }
+        ]
+      }
+    ],
+    "2003": [
+      {
+        "id": 20031,
+        "name": "mystery matrix",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-25T00:00:00Z",
+        "completed_at": "2026-01-25T00:08:20Z",
+        "steps": [
+          {
+            "name": "mystery",
+            "started_at": "2026-01-25T00:00:00Z",
+            "completed_at": "2026-01-25T00:08:20Z"
+          }
+        ]
+      }
+    ],
+    "2004": [
+      {
+        "id": 20041,
+        "name": "mystery matrix",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-24T00:00:00Z",
+        "completed_at": "2026-01-24T00:08:20Z",
+        "steps": [
+          {
+            "name": "mystery",
+            "started_at": "2026-01-24T00:00:00Z",
+            "completed_at": "2026-01-24T00:08:20Z"
+          }
+        ]
+      }
+    ],
+    "2005": [
+      {
+        "id": 20051,
+        "name": "mystery matrix",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-23T00:00:00Z",
+        "completed_at": "2026-01-23T00:08:20Z",
+        "steps": [
+          {
+            "name": "mystery",
+            "started_at": "2026-01-23T00:00:00Z",
+            "completed_at": "2026-01-23T00:08:20Z"
+          }
+        ]
+      }
+    ],
+    "2006": [
+      {
+        "id": 20061,
+        "name": "mystery matrix",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-22T00:00:00Z",
+        "completed_at": "2026-01-22T00:08:20Z",
+        "steps": [
+          {
+            "name": "mystery",
+            "started_at": "2026-01-22T00:00:00Z",
+            "completed_at": "2026-01-22T00:08:20Z"
+          }
+        ]
+      }
+    ],
+    "2007": [
+      {
+        "id": 20071,
+        "name": "mystery matrix",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-21T00:00:00Z",
+        "completed_at": "2026-01-21T00:08:20Z",
+        "steps": [
+          {
+            "name": "mystery",
+            "started_at": "2026-01-21T00:00:00Z",
+            "completed_at": "2026-01-21T00:08:20Z"
+          }
+        ]
+      }
+    ]
+  },
+  "checks": {
+    "sha-1": [
+      {
+        "name": "unit",
+        "started_at": "2026-01-28T00:00:00Z",
+        "completed_at": "2026-01-28T00:05:00Z"
+      },
+      {
+        "name": "merge-gate",
+        "started_at": "2026-01-28T00:05:00Z",
+        "completed_at": "2026-01-28T00:05:05Z"
+      },
+      {
+        "name": "mystery matrix",
+        "started_at": "2026-01-28T00:00:00Z",
+        "completed_at": "2026-01-28T00:08:20Z"
+      }
+    ],
+    "sha-2": [
+      {
+        "name": "unit",
+        "started_at": "2026-01-27T00:00:00Z",
+        "completed_at": "2026-01-27T00:05:00Z"
+      },
+      {
+        "name": "merge-gate",
+        "started_at": "2026-01-27T00:05:00Z",
+        "completed_at": "2026-01-27T00:05:05Z"
+      },
+      {
+        "name": "mystery matrix",
+        "started_at": "2026-01-27T00:00:00Z",
+        "completed_at": "2026-01-27T00:08:20Z"
+      }
+    ],
+    "sha-3": [
+      {
+        "name": "unit",
+        "started_at": "2026-01-26T00:00:00Z",
+        "completed_at": "2026-01-26T00:05:00Z"
+      },
+      {
+        "name": "merge-gate",
+        "started_at": "2026-01-26T00:05:00Z",
+        "completed_at": "2026-01-26T00:05:05Z"
+      },
+      {
+        "name": "mystery matrix",
+        "started_at": "2026-01-26T00:00:00Z",
+        "completed_at": "2026-01-26T00:08:20Z"
+      }
+    ],
+    "sha-4": [
+      {
+        "name": "unit",
+        "started_at": "2026-01-25T00:00:00Z",
+        "completed_at": "2026-01-25T00:05:00Z"
+      },
+      {
+        "name": "merge-gate",
+        "started_at": "2026-01-25T00:05:00Z",
+        "completed_at": "2026-01-25T00:05:05Z"
+      },
+      {
+        "name": "mystery matrix",
+        "started_at": "2026-01-25T00:00:00Z",
+        "completed_at": "2026-01-25T00:08:20Z"
+      }
+    ],
+    "sha-5": [
+      {
+        "name": "unit",
+        "started_at": "2026-01-24T00:00:00Z",
+        "completed_at": "2026-01-24T00:05:00Z"
+      },
+      {
+        "name": "merge-gate",
+        "started_at": "2026-01-24T00:05:00Z",
+        "completed_at": "2026-01-24T00:05:05Z"
+      },
+      {
+        "name": "mystery matrix",
+        "started_at": "2026-01-24T00:00:00Z",
+        "completed_at": "2026-01-24T00:08:20Z"
+      }
+    ],
+    "sha-6": [
+      {
+        "name": "unit",
+        "started_at": "2026-01-23T00:00:00Z",
+        "completed_at": "2026-01-23T00:05:00Z"
+      },
+      {
+        "name": "merge-gate",
+        "started_at": "2026-01-23T00:05:00Z",
+        "completed_at": "2026-01-23T00:05:05Z"
+      },
+      {
+        "name": "mystery matrix",
+        "started_at": "2026-01-23T00:00:00Z",
+        "completed_at": "2026-01-23T00:08:20Z"
+      }
+    ],
+    "sha-7": [
+      {
+        "name": "unit",
+        "started_at": "2026-01-22T00:00:00Z",
+        "completed_at": "2026-01-22T00:05:00Z"
+      },
+      {
+        "name": "merge-gate",
+        "started_at": "2026-01-22T00:05:00Z",
+        "completed_at": "2026-01-22T00:05:05Z"
+      },
+      {
+        "name": "mystery matrix",
+        "started_at": "2026-01-22T00:00:00Z",
+        "completed_at": "2026-01-22T00:08:20Z"
+      }
+    ],
+    "sha-8": [
+      {
+        "name": "unit",
+        "started_at": "2026-01-21T00:00:00Z",
+        "completed_at": "2026-01-21T00:05:00Z"
+      },
+      {
+        "name": "merge-gate",
+        "started_at": "2026-01-21T00:05:00Z",
+        "completed_at": "2026-01-21T00:05:05Z"
+      },
+      {
+        "name": "mystery matrix",
+        "started_at": "2026-01-21T00:00:00Z",
+        "completed_at": "2026-01-21T00:08:20Z"
+      }
+    ]
+  },
+  "shape": "unpinnable-slow-check"
+}

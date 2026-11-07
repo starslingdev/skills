@@ -1,0 +1,14 @@
+name: PR and publish
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make build
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make test
