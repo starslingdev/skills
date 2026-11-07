@@ -527,7 +527,7 @@ def test_missing_workflow_run_makes_the_commit_partial_instead_of_shorter(
 
     report = bp.render(doc, captured_at="2026-11-06T00:00:00Z")
     assert ("> 1 sampled commit(s) were partial (missing "
-            "`.github/workflows/second.yml`); their observed shorter spans were "
+            "`.github/workflows/second.yml`); their observed spans were "
             "excluded from these percentiles.") in report
     findings_path = tmp_path / "findings.json"
     findings_path.write_text(json.dumps(doc), encoding="utf-8")
@@ -623,6 +623,20 @@ def test_verifier_rejects_a_projection_multiple_above_the_shared_cap(
     check = vr.check_commit_wall_clock_projection(report, findings_path)
     assert not check.ok
     assert "exceeds 1.56" in check.detail
+
+
+def test_verifier_rejects_a_complete_fact_that_carries_a_rerun(
+        monkeypatch, tmp_path: Path):
+    doc = _collect(monkeypatch)
+    report = bp.render(doc, captured_at="2026-11-07T00:00:00Z")
+    doc["pr_critical_path"]["commit_wall_clock"]["facts"][0][
+        "rerun_workflows"] = [_SECOND]
+    findings_path = tmp_path / "findings.json"
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+
+    check = vr.check_commit_wall_clock_projection(report, findings_path)
+    assert not check.ok
+    assert "complete fact 0 includes a re-run workflow" in check.detail
 
 
 def test_commit_fact_carries_the_run_start_and_job_intervals_for_the_queue_split(

@@ -13129,7 +13129,7 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         _commit_wall_block.append(
             f"> {len(_partial_commit_facts)} sampled commit(s) were partial"
             + (f" ({'; '.join(_partial_reasons)})" if _partial_reasons else "")
-            + "; their observed shorter spans were excluded from these percentiles.")
+            + "; their observed spans were excluded from these percentiles.")
     _fold_bottom_line(
         out,
         _lead_block,

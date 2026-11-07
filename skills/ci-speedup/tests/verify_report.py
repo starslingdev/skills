@@ -703,7 +703,7 @@ def check_commit_wall_clock_projection(report: str, findings_path: Path | None) 
         expected_partial_line = (
             f"> {len(partial)} sampled commit(s) were partial"
             + (f" ({'; '.join(reasons)})" if reasons else "")
-            + "; their observed shorter spans were excluded from these percentiles.")
+            + "; their observed spans were excluded from these percentiles.")
         if report.splitlines().count(expected_partial_line) != 1:
             failures.append(
                 "report lacks the re-derived partial-commit count/workflow disclosure")
