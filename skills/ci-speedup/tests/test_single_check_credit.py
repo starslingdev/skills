@@ -223,6 +223,17 @@ def test_complete_single_check_prs_keep_the_full_saving(monkeypatch, tmp_path):
         if not check.skipped and not check.ok]
     assert failures == [], [(check.name, check.detail) for check in failures]
 
+    floor_mutant = json.loads(json.dumps(doc))
+    two_job_fact = floor_mutant["pr_critical_path"]["commit_wall_clock"]["facts"][4]
+    pole_projection = next(
+        row for row in two_job_fact["job_projections"] if row["name"] == "pole")
+    pole_projection["independent_jobs"] = []
+    floor_mutant_path = tmp_path / "floor-mutant.json"
+    floor_mutant_path.write_text(json.dumps(floor_mutant), encoding="utf-8")
+    floor_check = vr.check_commit_wall_clock_projection(report, floor_mutant_path)
+    assert not floor_check.ok
+    assert "independent floors do not re-derive" in floor_check.detail
+
     # Exercise the generic population-wide cap separately: no targeted job
     # means each commit's slowest job supplies the projection inputs.
     cap_doc = json.loads(json.dumps(doc))
@@ -253,6 +264,19 @@ def test_collect_caps_a_non_slowest_target_against_its_own_job(monkeypatch):
         if step["bound"] == "commit-projection")
     assert commit_bound["from_s"] == 500.0
     assert commit_bound["to_s"] == 200.0
+
+
+def test_collect_projects_every_job_changed_by_a_cluster_finding(monkeypatch):
+    doc_in = json.loads(json.dumps(_DOC))
+    doc_in["findings"][0]["affected_jobs"] = ["pole", "sibling"]
+    monkeypatch.setattr(cr, "GhClient", _SingleCheckClient)
+
+    doc = cr.collect(doc_in, "o/r", max_runs=10, shallow_runs=10)
+    finding = doc["findings"][0]
+
+    # On the six two-job commits the shared fix lowers both concurrent jobs.
+    # The other affected job must not become the unchanged projection floor.
+    assert finding["wall_clock_p50_s"] == 500.0
 
 
 def test_incomplete_single_check_reads_remain_unknown(monkeypatch):

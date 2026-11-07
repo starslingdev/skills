@@ -641,6 +641,38 @@ def check_commit_wall_clock_projection(report: str, findings_path: Path | None) 
     failures: list[str] = []
     facts = [f for f in (stamp.get("facts") or []) if isinstance(f, dict)]
     complete: list[tuple[dict, float, float, float, float | None]] = []
+    job_graph = doc.get("workflow_job_graph") or {}
+
+    def needs_chain(workflow: str, node: str | None) -> set[str]:
+        if node is None:
+            return set()
+        jobs = job_graph.get(workflow) or {}
+        parents: dict[str, set[str]] = {}
+        children: dict[str, set[str]] = {}
+        for key, candidate in jobs.items():
+            raw_needs = candidate.get("needs") if isinstance(candidate, dict) else []
+            needed = [raw_needs] if isinstance(raw_needs, str) else (raw_needs or [])
+            parents[str(key)] = {str(item) for item in needed}
+            for item in needed:
+                children.setdefault(str(item), set()).add(str(key))
+        seen = {node}
+        for edges in (parents, children):
+            reached = {node}
+            todo = [node]
+            while todo:
+                current = todo.pop()
+                for adjacent in edges.get(current, set()):
+                    if adjacent not in reached:
+                        reached.add(adjacent)
+                        todo.append(adjacent)
+            seen.update(reached)
+        return seen
+
+    def projection_identity(row: dict) -> tuple[str, str, float]:
+        return (str(row.get("workflow_file") or ""),
+                str(row.get("name") or ""),
+                float(_num(row.get("duration_s")) or 0.0))
+
     for index, fact in enumerate(facts):
         wall = _num(fact.get("wall_s"))
         slow = fact.get("slowest_job")
@@ -663,6 +695,44 @@ def check_commit_wall_clock_projection(report: str, findings_path: Path | None) 
             failures.append(
                 f"fact {index} chain span {chain} is shorter than its slowest job {slowest}")
             continue
+        projection_rows = fact.get("job_projections")
+        if isinstance(projection_rows, list):
+            rows = [row for row in projection_rows if isinstance(row, dict)]
+            raw_jobs = [row for row in (fact.get("jobs") or []) if isinstance(row, dict)]
+            raw_identities = sorted(projection_identity(row) for row in raw_jobs)
+            if sorted(projection_identity(row) for row in rows) != raw_identities:
+                failures.append(f"fact {index} job projection durations do not match jobs")
+            for target in rows:
+                target_wf = str(target.get("workflow_file") or "")
+                target_node = (str(target.get("node"))
+                               if target.get("node") is not None else None)
+                target_chain = needs_chain(target_wf, target_node)
+
+                def outside_target(row: dict) -> bool:
+                    if row is target:
+                        return False
+                    if str(row.get("workflow_file") or "") != target_wf:
+                        return True
+                    row_node = (str(row.get("node"))
+                                if row.get("node") is not None else None)
+                    if row_node not in target_chain:
+                        return True
+                    spec = (job_graph.get(target_wf) or {}).get(row_node) or {}
+                    return bool(
+                        row_node == target_node
+                        and str(row.get("name") or "")
+                        != str(target.get("name") or "")
+                        and isinstance(spec, dict) and spec.get("matrix"))
+
+                expected_independent = sorted(
+                    projection_identity(row) for row in rows if outside_target(row))
+                stamped_independent = target.get("independent_jobs")
+                if not isinstance(stamped_independent, list) or sorted(
+                        projection_identity(row) for row in stamped_independent
+                        if isinstance(row, dict)) != expected_independent:
+                    failures.append(
+                        f"fact {index} job projection independent floors do not re-derive")
+                    break
         complete.append((fact, wall, slowest, next_longest, chain))
         p4 = fact.get("projection_4x")
         if not isinstance(p4, dict):
@@ -744,15 +814,20 @@ def check_commit_wall_clock_projection(report: str, findings_path: Path | None) 
         workflow = str(finding.get("workflow_file") or "")
         affected = {str(job) for job in (finding.get("affected_jobs") or []) if job}
         affected_bases = {matrix_base(job) for job in affected}
+
+        def matches_affected(row: dict) -> bool:
+            return bool(
+                str(row.get("workflow_file") or "") == workflow
+                and (str(row.get("node") or "") in affected
+                     or str(row.get("name") or "") in affected
+                     or matrix_base(str(row.get("name") or "")) in affected_bases))
+
         caps: list[float] = []
         for fact, wall, slowest, next_longest, chain in complete:
             candidates = [
                 row for row in (fact.get("job_projections") or [])
                 if isinstance(row, dict)
-                and str(row.get("workflow_file") or "") == workflow
-                and (str(row.get("node") or "") in affected
-                     or str(row.get("name") or "") in affected
-                     or matrix_base(str(row.get("name") or "")) in affected_bases)
+                and matches_affected(row)
             ] if workflow and affected else []
             if workflow and affected:
                 if "job_projections" not in fact:
@@ -765,7 +840,14 @@ def check_commit_wall_clock_projection(report: str, findings_path: Path | None) 
                     continue
                 target = max(candidates, key=lambda row: _num(row.get("duration_s")) or 0.0)
                 target_s = _num(target.get("duration_s"))
-                target_next = _num(target.get("next_longest_s")) or 0.0
+                unchanged_floors = [
+                    _num(row.get("duration_s")) or 0.0
+                    for row in (target.get("independent_jobs") or [])
+                    if isinstance(row, dict) and not matches_affected(row)
+                ]
+                target_next = (max(unchanged_floors, default=0.0)
+                               if "independent_jobs" in target
+                               else (_num(target.get("next_longest_s")) or 0.0))
                 target_chain = _num(target.get("chain_span_s"))
                 if target_s is None or target_s <= 0:
                     caps.append(0.0)

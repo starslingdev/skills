@@ -29314,6 +29314,12 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
 
             _runner_up = next(
                 (_row for _row in _job_rows if _outside_target_chain(_row)), None)
+            _independent_jobs = [
+                {"name": _row["name"], "node": _row.get("node"),
+                 "workflow_file": _row["workflow_file"],
+                 "duration_s": _row["duration_s"]}
+                for _row in _job_rows if _outside_target_chain(_row)
+            ]
             _target_chain_rows = (
                 [_row for _row in _job_rows
                  if _row["workflow_file"] == _target_wf
@@ -29336,6 +29342,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 "duration_s": _target["duration_s"],
                 "next_longest_s": (float(_runner_up["duration_s"])
                                    if _runner_up is not None else 0.0),
+                "independent_jobs": _independent_jobs,
                 "chain_span_s": (_target_chain_span
                                  if _target_chain_span is not None
                                  else float(_target["duration_s"])),
@@ -29755,6 +29762,15 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         if not _workflow or not _affected:
             return _commit_ctx_facts
         _affected_bases = {_matrix_base_name(name) for name in _affected}
+
+        def _matches_affected(_row: dict[str, Any]) -> bool:
+            return bool(
+                str(_row.get("workflow_file") or "") == _workflow
+                and (str(_row.get("node") or "") in _affected
+                     or str(_row.get("name") or "") in _affected
+                     or _matrix_base_name(str(_row.get("name") or ""))
+                     in _affected_bases))
+
         _selected: list[tuple[float, ...]] = []
         for _fact in _commit_facts:
             _wall = _fact.get("wall_s")
@@ -29763,20 +29779,21 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             _matches = [
                 row for row in (_fact.get("job_projections") or [])
                 if isinstance(row, dict)
-                and str(row.get("workflow_file") or "") == _workflow
-                and (str(row.get("node") or "") in _affected
-                     or str(row.get("name") or "") in _affected
-                     or _matrix_base_name(str(row.get("name") or ""))
-                     in _affected_bases)
+                and _matches_affected(row)
             ]
             if not _matches:
                 _selected.append((float(_wall), 0.0, 0.0, 0.0))
                 continue
             _target = max(_matches, key=lambda row: float(row.get("duration_s") or 0.0))
             _duration = float(_target.get("duration_s") or 0.0)
+            _unchanged_floors = [
+                float(row.get("duration_s") or 0.0)
+                for row in (_target.get("independent_jobs") or [])
+                if isinstance(row, dict) and not _matches_affected(row)
+            ]
             _selected.append((
                 float(_wall), _duration,
-                float(_target.get("next_longest_s") or 0.0),
+                max(_unchanged_floors, default=0.0),
                 float(_target.get("chain_span_s") or _duration),
             ))
         return tuple(_selected)
