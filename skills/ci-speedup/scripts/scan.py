@@ -668,9 +668,6 @@ def _index_local_git_scripts(root: Path,
             parent_depths[ref] = depth
             parent_depths[_script_key_parts(ref)[1]] = depth
     _GIT_PARENT_DEPTH_LOCAL_SCRIPTS = parent_depths
-    # The job predicate has no workflow-level defaults. A conservative alias
-    # keeps the checkout deep when the indexed effective path needed history.
-    history_refs.update(_script_key_parts(ref)[1] for ref in tuple(history_refs))
     return history_refs
 
 
@@ -769,7 +766,8 @@ def _index_local_git_actions(root: Path, parsed: list[tuple[str, dict, str]]) ->
     return {ref for ref in refs if _local_action_needs_history(root, ref)}
 
 
-def _job_needs_git_history(job: dict, job_name: str = "") -> bool:
+def _job_needs_git_history(job: dict, job_name: str = "",
+                           workflow: dict | None = None) -> bool:
     blob = _job_run_blob(job)
     uses_blob = "\n".join(_uses(s) for s in _steps(job))
     if _has_git_history_op(blob) or _has_git_history_op(uses_blob):
@@ -783,7 +781,7 @@ def _job_needs_git_history(job: dict, job_name: str = "") -> bool:
                 return True
     if _GIT_HISTORY_LOCAL_SCRIPTS:
         for step in _steps(job):
-            working_directory = _script_working_directory(job, step)
+            working_directory = _script_working_directory(job, step, workflow)
             for ref in _first_party_script_refs(str(step.get("run") or "")):
                 if _script_ref_key(ref, working_directory) in _GIT_HISTORY_LOCAL_SCRIPTS:
                     return True
@@ -895,7 +893,7 @@ def _detect_opt28(doc: dict, raw: str) -> list[Hit]:
     for job_name, job in _jobs_from_doc(doc).items():
         if not isinstance(job, dict):
             continue
-        if _job_needs_git_history(job, job_name):
+        if _job_needs_git_history(job, job_name, doc):
             continue  # depth:0 is load-bearing here — removing it breaks the job
         checkout_index = 0  # Track which checkout step this is (1-based)
         for step in _steps(job):

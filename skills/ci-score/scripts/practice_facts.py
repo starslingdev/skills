@@ -925,9 +925,6 @@ def _index_local_git_scripts(root: Path,
             if (_script_key_parts(ref)[1] not in _BUILD_TOOL_SCRIPT_REFS
                 or ((_local_script_path(root, ref) or Path()).is_file()))}
     history_refs = {ref for ref in refs if _local_script_needs_history(root, ref)}
-    # The job predicate has no workflow-level defaults. A conservative alias
-    # keeps the checkout deep when the indexed effective path needed history.
-    history_refs.update(_script_key_parts(ref)[1] for ref in tuple(history_refs))
     return history_refs
 
 
@@ -1022,7 +1019,8 @@ def _index_local_git_actions(root: Path,
 
 def _job_needs_git_history(job: dict, job_name: str = "",
                            local_history_actions: set[str] | None = None,
-                           local_history_scripts: set[str] | None = None) -> bool:
+                           local_history_scripts: set[str] | None = None,
+                           workflow: dict | None = None) -> bool:
     """True when shallowing this job's checkout would break it."""
     blob = "\n".join(str(s.get("run") or "") for s in _job_steps(job))
     uses_blob = "\n".join(_step_uses_ref(s) for s in _job_steps(job))
@@ -1037,7 +1035,7 @@ def _job_needs_git_history(job: dict, job_name: str = "",
                 return True
     if local_history_scripts:
         for step in _job_steps(job):
-            working_directory = _script_working_directory(job, step)
+            working_directory = _script_working_directory(job, step, workflow)
             for ref in _first_party_script_refs(str(step.get("run") or "")):
                 if _script_ref_key(ref, working_directory) in local_history_scripts:
                     return True
@@ -2700,11 +2698,12 @@ def _unproven_history_links(root: Path, ref: str) -> list[str]:
 
 def _history_exemption_unread(root: Path, job: dict, job_name: str,
                               local_history_actions: set[str],
-                              local_history_scripts: set[str]) -> list[str]:
+                              local_history_scripts: set[str],
+                              workflow: dict | None = None) -> list[str]:
     """For a job `_job_needs_git_history` exempts: [] when the exemption is
     proven (a history op in the job itself, its name, or a readable local
     action or script), else the unread local references it rests on."""
-    if _job_needs_git_history(job, job_name, None, None):
+    if _job_needs_git_history(job, job_name, None, None, workflow):
         return []
     unread: list[str] = []
     for s in _job_steps(job):
@@ -2714,7 +2713,7 @@ def _history_exemption_unread(root: Path, job: dict, job_name: str,
             if not links:
                 return []
             unread += links
-        working_directory = _script_working_directory(job, s)
+        working_directory = _script_working_directory(job, s, workflow)
         for script_ref in _first_party_script_refs(str(s.get("run") or "")):
             key = _script_ref_key(script_ref, working_directory)
             if key not in local_history_scripts:
@@ -3054,12 +3053,12 @@ def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path,
                 continue
             takes_full_history = "0" in live
             if _job_needs_git_history(job, job_name, local_history_actions,
-                                      local_history_scripts):
+                                      local_history_scripts, doc):
                 if takes_full_history:
                     carved_out += 1
                     unread = _history_exemption_unread(root, job, job_name,
                                                        local_history_actions,
-                                                       local_history_scripts)
+                                                       local_history_scripts, doc)
                     if unread:
                         carved_unread_jobs += 1
                         carved_unread += unread

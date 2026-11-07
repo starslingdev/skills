@@ -258,6 +258,9 @@ def test_workflow_default_working_directory_selects_script(engines, tmp_path: Pa
     workflow.write_text(raw, encoding="utf-8")
     parsed = [(parsed[0][0], yaml.safe_load(raw), raw)]
     assert _verdicts(engines, tmp_path, parsed) == (False, "pass")
+    evidence = engines[1]._practice_facts(parsed, tmp_path)[
+        "ci.checkout.shallow-clone"]["evidence"]
+    assert "could not be read" not in evidence
 
 
 def test_make_target_recipe_history_read_keeps_full_history(engines, tmp_path: Path):
