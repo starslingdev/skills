@@ -14357,8 +14357,21 @@ def check_cache_sizing_guards(report: str, findings_path: Path | None) -> Check:
         data = _as_dict(json.loads(findings_path.read_text(encoding="utf-8")))
     except (OSError, json.JSONDecodeError):
         return Check(name, True, "findings unreadable", skipped=True)
-    guarded = [f for f in _as_list(data.get("findings"))
-               if isinstance(f, dict) and isinstance(f.get("cache_sizing_guard"), dict)]
+    findings = [f for f in _as_list(data.get("findings")) if isinstance(f, dict)]
+    guarded = [f for f in findings if isinstance(f.get("cache_sizing_guard"), dict)]
+    cache_patterns = {"OPT4", "OPT6", "OPT9", "OPT61", "OPT96", "OPT101"}
+    missing = [
+        f for f in findings
+        if (str(f.get("pattern") or "") in cache_patterns
+            or str(_as_dict(f.get("cache_dist")).get("fix_key") or "")
+            in {"dependency-cache", "buildx-no-cache"})
+        and not isinstance(f.get("cache_sizing_guard"), dict)
+        and (((_num(f.get("wall_clock_p50_s")) or 0.0) > 0)
+             or ((_num(f.get("runner_min_saving")) or 0.0) > 0))
+    ]
+    if missing:
+        ids = ", ".join(str(f.get("id") or "?") for f in missing[:8])
+        return Check(name, False, f"credited cache finding(s) lack a sizing guard: {ids}")
     if not guarded:
         return Check(name, True, "no cache sizing guards stamped", skipped=True)
     bad = []
@@ -14382,15 +14395,26 @@ def check_cache_sizing_guards(report: str, findings_path: Path | None) -> Check:
                        f"three checks re-derive {expected_status!r}")
         budget = _as_dict(checks.get("budget"))
         usage, proposed = budget.get("usage_bytes"), budget.get("proposed_bytes")
-        if isinstance(usage, (int, float)) and isinstance(proposed, (int, float)):
-            budget_failed = usage + proposed > 10 * 1024 ** 3
-            if budget_failed != (statuses["budget"] == "failed"):
-                bad.append(f"{finding.get('id')}: budget status disagrees with stored bytes")
+        expected_budget = "not_measured"
+        if isinstance(usage, (int, float)):
+            if usage > 11 * 1024 ** 3:
+                expected_budget = "not_measured"
+            elif usage >= 9 * 1024 ** 3:
+                expected_budget = "failed"
+            elif isinstance(proposed, (int, float)):
+                expected_budget = (
+                    "failed" if usage + proposed > 10 * 1024 ** 3 else "passed")
+        if statuses["budget"] != expected_budget:
+            bad.append(f"{finding.get('id')}: budget status disagrees with stored bytes")
         invalidation = _as_dict(checks.get("invalidation"))
         rate = invalidation.get("invalidation_rate")
         if isinstance(rate, (int, float)) and "sampled_prs" in invalidation:
             if (rate >= 0.5) != (statuses["invalidation"] == "failed"):
                 bad.append(f"{finding.get('id')}: invalidation status disagrees with stored rate")
+        elif statuses["invalidation"] in {"passed", "failed"}:
+            if not (isinstance(rate, (int, float))
+                    and isinstance(invalidation.get("sampled_runs"), int)):
+                bad.append(f"{finding.get('id')}: measured invalidation lacks raw terms")
         economics = _as_dict(checks.get("economics"))
         terms = [economics.get(key) for key in
                  ("hit_rate", "saving_s", "restore_s", "save_s")]
@@ -14399,6 +14423,8 @@ def check_cache_sizing_guards(report: str, findings_path: Path | None) -> Check:
             expected = hit * saving - restore - (1 - hit) * save
             if (expected > 0) != (statuses["economics"] == "passed"):
                 bad.append(f"{finding.get('id')}: transfer-cost status disagrees with stored terms")
+        elif statuses["economics"] in {"passed", "failed"}:
+            bad.append(f"{finding.get('id')}: measured transfer cost lacks raw terms")
         credited = ((isinstance(finding.get("wall_clock_p50_s"), (int, float))
                      and finding.get("wall_clock_p50_s") > 0)
                     or (isinstance(finding.get("runner_min_saving"), (int, float))

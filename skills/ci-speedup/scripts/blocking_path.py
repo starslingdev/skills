@@ -1903,13 +1903,13 @@ def _cache_state_of_log(text: str | None, fix_key: str | None) -> dict[str, Any]
         for match in _CACHE_SIZE_RE.finditer(joined):
             sizes.append(float(match.group(1)) * units[match.group(2).upper()])
         if sizes:
-            out["cache_size_gb"] = round(max(sizes), 6)
+            out["cache_size_gb"] = round(sum(sizes), 6)
         restores = [float(m.group(1)) for m in _CACHE_RESTORE_SECONDS_RE.finditer(joined)]
         saves = [float(m.group(1)) for m in _CACHE_SAVE_SECONDS_RE.finditer(joined)]
         if restores:
-            out["restore_s"] = max(restores)
+            out["restore_s"] = sum(restores)
         if saves:
-            out["save_s"] = max(saves)
+            out["save_s"] = sum(saves)
         # BuildKit reports cache import/export as numbered progress vertices,
         # followed by `#N DONE 12.3s` rather than actions/cache's prose.
         vertices: dict[str, str] = {}
@@ -1927,7 +1927,7 @@ def _cache_state_of_log(text: str | None, fix_key: str | None) -> dict[str, Any]
                 buildkit[vertices[done.group(1)]].append(float(done.group(2)))
         for key, measured in buildkit.items():
             if measured:
-                out[key] = sum(measured)
+                out[key] = out.get(key, 0.0) + sum(measured)
         return out
 
     def _with_transfer(state: dict[str, Any]) -> dict[str, Any]:

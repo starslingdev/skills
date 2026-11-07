@@ -202,6 +202,35 @@ def test_verifier_rejects_cache_credit_after_a_failed_guard(tmp_path):
     assert "remains credited" in check.detail
 
 
+def test_verifier_requires_guard_and_raw_terms_for_credited_cache(tmp_path):
+    path = Path(__file__).with_name("verify_report.py")
+    spec = importlib.util.spec_from_file_location("cache_guard_terms_verify", path)
+    vr = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = vr
+    assert spec.loader is not None
+    spec.loader.exec_module(vr)
+
+    findings = tmp_path / "findings.json"
+    findings.write_text(json.dumps({"findings": [{
+        "id": "f1", "pattern": "OPT6", "wall_clock_p50_s": 30.0,
+    }]}), encoding="utf-8")
+    missing = vr.check_cache_sizing_guards("", findings)
+    assert not missing.ok
+    assert "lack a sizing guard" in missing.detail
+
+    findings.write_text(json.dumps({"findings": [{
+        "id": "f1", "pattern": "OPT6", "wall_clock_p50_s": 30.0,
+        "cache_sizing_guard": {"status": "passed", "checks": {
+            "budget": {"status": "passed"},
+            "invalidation": {"status": "passed"},
+            "economics": {"status": "passed"},
+        }},
+    }]}), encoding="utf-8")
+    empty = vr.check_cache_sizing_guards("all three cache sizing checks passed", findings)
+    assert not empty.ok
+    assert "raw terms" in empty.detail or "stored bytes" in empty.detail
+
+
 def test_cache_transfer_parser_reads_actions_cache_and_buildkit_timings():
     actions = bp._cache_state_of_log(
         "Cache restored from key: deps\nCache Size: 1.5 GB\n"
@@ -215,3 +244,107 @@ def test_cache_transfer_parser_reads_actions_cache_and_buildkit_timings():
         "#3 exporting cache to GitHub Actions Cache\n#3 DONE 9.0s", "buildx-no-cache")
     assert buildkit["restore_s"] == 3.5
     assert buildkit["save_s"] == 9.0
+
+    multiple = bp._cache_state_of_log(
+        "Cache restored from key: one\nCache Size: 1 GB\nCache restored in 2 seconds\n"
+        "Cache Size: 3 GB\nCache restored in 4 seconds\nCache saved in 5 seconds",
+        "dependency-cache")
+    assert multiple["cache_size_gb"] == 4.0
+    assert multiple["restore_s"] == 6.0
+
+
+def test_rolling_key_printed_miss_rate_can_fail_invalidation_guard():
+    values = [{"fork": False, "cache_state": {
+        "miss_pct": 75.0, "cache_size_gb": 1.0, "restore_s": 1.0, "save_s": 1.0,
+    }} for _ in range(4)]
+    finding = {
+        "id": "f1", "pattern": "OPT6", "cache_key_globs": ["github.sha"],
+        "cache_copies": 1, "wall_clock_p50_s": 120.0,
+        "cache_dist": {"pr": {"values": values}, "sizing": {"saving_s": 120.0}},
+    }
+
+    cr._apply_cache_sizing_guard(
+        finding, usage_bytes=0, changed={}, sampled_runs=[], wf_docs={})
+
+    invalidation = finding["cache_sizing_guard"]["checks"]["invalidation"]
+    assert invalidation["status"] == "failed"
+    assert invalidation["invalidation_rate"] == 0.75
+    assert finding["cache_sizing_guard"]["status"] == "failed"
+    assert finding["wall_clock_p50_s"] is None
+
+
+def test_matrix_include_leg_counts_as_a_separate_cache_copy():
+    finding = {"workflow_file": "w.yml", "affected_jobs": ["build"]}
+    workflows = {"w.yml": {"jobs": {"build": {"strategy": {"matrix": {
+        "os": ["ubuntu", "windows"],
+        "include": [{"os": "macos", "experimental": True}],
+    }}}}}}
+    assert cr._cache_copy_count(finding, [{"head_branch": "feature"}], workflows) == 3
+
+    include_only = {"w.yml": {"jobs": {"build": {"strategy": {"matrix": {
+        "include": [{"os": "ubuntu"}, {"os": "windows"}, {"os": "macos"}],
+    }}}}}}
+    assert cr._cache_copy_count(finding, [{"head_branch": "feature"}], include_only) == 3
+
+
+def test_hashfiles_arguments_and_character_classes_measure_invalidation():
+    finding = {
+        "workflow_file": "w.yml", "affected_jobs": ["build"],
+        "cache_dist": {"pr": {"values": []}},
+    }
+    workflows = {"w.yml": {"jobs": {"build": {"steps": [{
+        "uses": "actions/cache@v4",
+        "with": {"key": "src-${{ hashFiles('**/*.ts', '**/*.[jt]sx') }}"},
+    }]}}}}
+    _text, globs = cr._cache_key_text_and_globs(finding, workflows)
+    assert globs == ["**/*.ts", "**/*.[jt]sx"]
+    assert cr._opt32_glob_matches("packages/app/main.ts", globs[0])
+    assert cr._opt32_glob_matches("packages/app/main.jsx", globs[1])
+
+
+def test_cache_evidence_joins_named_job_without_touching_unrelated_finding():
+    dist = {"fix_key": "dependency-cache", "pr": {"values": []}}
+    poles = [{"workflow_file": "w.yml", "job": "Test suite", "cache_dist": dist}]
+    workflows = {"w.yml": {"jobs": {"test": {"name": "Test suite"}}}}
+
+    cache_finding = {
+        "pattern": "OPT4", "workflow_file": "w.yml", "affected_jobs": ["test"]}
+    unrelated = {
+        "pattern": "OPT1", "workflow_file": "w.yml", "affected_jobs": ["test"]}
+
+    assert cr._cache_dist_for_finding(cache_finding, poles, workflows) is dist
+    assert cr._cache_dist_for_finding(unrelated, poles, workflows) is None
+
+
+def test_jobs_api_step_times_fill_standard_cache_log_timing_gap():
+    job = {"steps": [
+        {"name": "Cache dependencies", "started_at": "2026-01-01T00:00:00Z",
+         "completed_at": "2026-01-01T00:00:04Z"},
+        {"name": "Post Cache dependencies", "started_at": "2026-01-01T00:01:00Z",
+         "completed_at": "2026-01-01T00:01:07Z"},
+    ]}
+    assert cr._cache_step_transfer_times(job) == (4.0, 7.0)
+
+
+def test_dependency_cache_economics_use_unweighted_avoided_work():
+    values = [{"fork": False, "cache_state": {
+        "miss_pct": 75.0, "cache_size_gb": 1.0, "restore_s": 20.0, "save_s": 1.0,
+    }} for _ in range(4)]
+    finding = {
+        "id": "f1", "pattern": "OPT96", "cache_key_globs": ["lockfile"],
+        "cache_copies": 1, "wall_clock_p50_s": 75.0,
+        "cache_dist": {"pr": {"values": values}, "sizing": {
+            "saving_s": 75.0, "miss_time_s": 100.0, "hit_time_s": 0.0}},
+    }
+    sampled = [{"pull_requests": [{"number": n}]} for n in range(1, 5)]
+    changed = {n: [f"src/{n}.py"] for n in range(1, 5)}
+
+    cr._apply_cache_sizing_guard(
+        finding, usage_bytes=0, changed=changed,
+        sampled_runs=sampled, wf_docs={})
+
+    economics = finding["cache_sizing_guard"]["checks"]["economics"]
+    assert economics["status"] == "passed"
+    assert economics["saving_s"] == 100.0
+    assert economics["expected_s"] == 4.25
+    assert finding["cache_sizing_guard"]["status"] == "passed"

@@ -25,6 +25,7 @@ import copy
 import datetime as _dt
 import fnmatch
 import hashlib
+import itertools
 import json
 import logging
 import math
@@ -5821,7 +5822,7 @@ def _opt32_glob_matches(path: str, pattern: str) -> bool:
     """
     path = path.lstrip("/")
     pattern = pattern.strip().lstrip("/")
-    if not path or not pattern or any(c in pattern for c in "[]{}"):
+    if not path or not _opt32_glob_supported(pattern):
         return False
     out = []
     i = 0
@@ -5839,10 +5840,41 @@ def _opt32_glob_matches(path: str, pattern: str) -> bool:
             out.append("[^/]*")
         elif c == "?":
             out.append("[^/]")
+        elif c == "[":
+            end = pattern.find("]", i + 1)
+            content = pattern[i + 1:end]
+            negate = content.startswith(("!", "^"))
+            if negate:
+                content = content[1:]
+            escaped = "".join(ch if ch == "-" else re.escape(ch) for ch in content)
+            out.append("[" + ("^" if negate else "") + escaped + "]")
+            i = end
         else:
             out.append(re.escape(c))
         i += 1
     return re.fullmatch("".join(out), path) is not None
+
+
+def _opt32_glob_supported(pattern: str) -> bool:
+    """Whether the conservative matcher can evaluate this glob exactly enough."""
+    pattern = pattern.strip().lstrip("/")
+    if not pattern or any(c in pattern for c in "{}"):
+        return False
+    index = 0
+    while index < len(pattern):
+        if pattern[index] == "]":
+            return False
+        if pattern[index] != "[":
+            index += 1
+            continue
+        end = pattern.find("]", index + 1)
+        if end < 0 or end == index + 1:
+            return False
+        content = pattern[index + 1:end].lstrip("!^")
+        if not content or any(not (ch.isalnum() or ch in "_.-") for ch in content):
+            return False
+        index = end + 1
+    return True
 
 
 def _opt32_default_path_matches(path: str) -> bool:
@@ -5994,7 +6026,8 @@ _CACHE_SIZING_PATTERNS = frozenset(
 _CACHE_DEFAULT_BUDGET_BYTES = 10 * 1024 ** 3
 _CACHE_BUDGET_FULL_FRACTION = 0.90
 _CACHE_LIMIT_UNKNOWN_ABOVE = 1.10
-_HASH_FILES_RE = re.compile(r"hashFiles\(\s*(['\"])(.*?)\1\s*\)", re.I)
+_HASH_FILES_CALL_RE = re.compile(r"hashFiles\((.*?)\)", re.I | re.S)
+_HASH_FILES_ARG_RE = re.compile(r"(['\"])(.*?)\1", re.S)
 
 
 def _cache_guard_candidates(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -6023,6 +6056,38 @@ def _cache_guard_values(finding: dict[str, Any]) -> list[dict[str, Any]]:
             and isinstance(v.get("cache_state"), dict)]
 
 
+def _cache_step_transfer_times(job: dict[str, Any]) -> tuple[float | None, float | None]:
+    """Fallback transfer timing from the jobs API when action logs omit seconds."""
+    cache_steps = [
+        (name, seconds) for name, seconds in _step_durations(job)
+        if re.search(r"cache|setup[- ]?(?:node|go|python|java|ruby|uv)", name, re.I)
+    ]
+    restores = [seconds for name, seconds in cache_steps
+                if not name.lower().startswith("post ")]
+    saves = [seconds for name, seconds in cache_steps
+             if name.lower().startswith("post ")]
+    return (round(sum(restores), 2) if restores else None,
+            round(sum(saves), 2) if saves else None)
+
+
+def _cache_dist_for_finding(
+    finding: dict[str, Any], poles: list[dict[str, Any]],
+    wf_docs: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Join measured cache evidence only to an actual cache finding."""
+    if str(finding.get("pattern") or "") not in _CACHE_SIZING_PATTERNS:
+        return None
+    current = finding.get("cache_dist")
+    if isinstance(current, dict):
+        return current
+    workflow = str(finding.get("workflow_file") or "")
+    pole = next((p for p in poles
+                 if str(p.get("workflow_file") or "") == workflow
+                 and isinstance(p.get("cache_dist"), dict)
+                 and _opt96_pole_matches(finding, p, wf_docs)), None)
+    return pole.get("cache_dist") if isinstance(pole, dict) else None
+
+
 def _cache_key_text_and_globs(finding: dict[str, Any],
                               wf_docs: dict[str, dict[str, Any]]) -> tuple[str, list[str]]:
     explicit = finding.get("cache_key_globs")
@@ -6048,7 +6113,9 @@ def _cache_key_text_and_globs(finding: dict[str, Any],
             if uses.startswith("swatinem/rust-cache@"):
                 texts.append("**/Cargo.lock")
     key_text = " ".join(texts)
-    globs = [m.group(2) for m in _HASH_FILES_RE.finditer(key_text)]
+    globs = [arg.group(2)
+             for call in _HASH_FILES_CALL_RE.finditer(key_text)
+             for arg in _HASH_FILES_ARG_RE.finditer(call.group(1))]
     if not globs:
         for text in texts:
             if "${{" not in text and any(token in text.lower()
@@ -6078,13 +6145,32 @@ def _cache_copy_count(finding: dict[str, Any],
         matrix = strategy.get("matrix") if isinstance(strategy, dict) else {}
         if not isinstance(matrix, dict):
             continue
-        product = 1
-        for axis, values in matrix.items():
-            if axis in {"include", "exclude"}:
-                continue
-            if isinstance(values, list) and values:
-                product *= len(values)
-        legs = max(legs, product)
+        axes = {str(axis): values for axis, values in matrix.items()
+                if axis not in {"include", "exclude"}
+                and isinstance(values, list) and values}
+        product = math.prod(len(values) for values in axes.values()) if axes else 1
+        include_rows = [row for row in matrix.get("include", []) if isinstance(row, dict)]
+        standalone = (len(include_rows) if not axes else sum(
+            any(axis in row and row[axis] not in values
+                for axis, values in axes.items())
+            for row in include_rows))
+        excludes = [row for row in matrix.get("exclude", []) if isinstance(row, dict)]
+        if axes and product <= 10_000:
+            axis_names = list(axes)
+            combinations = (
+                dict(zip(axis_names, values))
+                for values in itertools.product(*(axes[axis] for axis in axis_names)))
+            base_legs = sum(
+                not any(all(combo.get(str(key)) == value for key, value in row.items()
+                            if str(key) in axes)
+                        and any(str(key) in axes for key in row)
+                        for row in excludes)
+                for combo in combinations)
+        else:
+            # A very large or expression-shaped matrix cannot be enumerated.
+            # Ignoring excludes overcounts capacity, which fails closed.
+            base_legs = 0 if not axes and include_rows else product
+        legs = max(legs, base_legs + standalone)
     return max(1, len(refs)) * legs
 
 
@@ -6146,11 +6232,16 @@ def _apply_cache_sizing_guard(
               if isinstance(v.get("miss_pct"), (int, float))]
     if ("github.sha" in key_text or str((finding.get("cache_dist") or {}).get("fix_key"))
             in {"buildx-no-cache"}) and misses:
+        miss_rate = statistics.mean(misses) / 100.0
         invalidation = _cache_guard_check(
-            "passed", "printed cache hit rate measured for a rolling or build-output cache",
-            invalidation_rate=round(statistics.mean(misses) / 100.0, 4), sampled_runs=len(misses))
+            "failed" if miss_rate >= 0.5 else "passed",
+            f"printed cache miss rate is {miss_rate:.0%} for a rolling or build-output cache",
+            invalidation_rate=round(miss_rate, 4), sampled_runs=len(misses))
     elif not globs:
         invalidation = _cache_guard_check("not_measured", "cache key invalidation inputs not measured")
+    elif not all(_opt32_glob_supported(glob) for glob in globs):
+        invalidation = _cache_guard_check(
+            "not_measured", "cache key invalidation glob syntax not measured")
     elif not readable:
         invalidation = _cache_guard_check("not_measured", "sampled PR changed files not measured")
     else:
@@ -6169,7 +6260,11 @@ def _apply_cache_sizing_guard(
              if isinstance(v.get("save_s"), (int, float)) and v["save_s"] >= 0]
     cd = finding.get("cache_dist") if isinstance(finding.get("cache_dist"), dict) else {}
     sizing = cd.get("sizing") if isinstance(cd.get("sizing"), dict) else {}
-    saving = sizing.get("saving_s")
+    miss_time = sizing.get("miss_time_s")
+    hit_time = sizing.get("hit_time_s")
+    saving = (max(0.0, float(miss_time) - float(hit_time))
+              if isinstance(miss_time, (int, float))
+              and isinstance(hit_time, (int, float)) else sizing.get("saving_s"))
     if not isinstance(saving, (int, float)):
         saving = finding.get("wall_clock_p50_s")
     if not misses or not restores or not saves or not isinstance(saving, (int, float)):
@@ -26151,6 +26246,14 @@ def _magnitude_sample(
                 entry["fork"] = bool(hr) and hr.lower() != repo.lower()
                 entry["duration_s"] = round(_job_duration_s(j) or 0.0, 1)
                 entry["cache_state"] = states.get(jid)
+                state = entry["cache_state"]
+                if isinstance(state, dict):
+                    restore_s, save_s = _cache_step_transfer_times(j)
+                    if "restore_s" not in state and restore_s is not None:
+                        state["restore_s"] = restore_s
+                    if ("save_s" not in state and save_s is not None
+                            and ("saved" not in state or state.get("saved") is True)):
+                        state["save_s"] = save_s
                 if primary.get("fix_key") == "dependency-cache":
                     entry["install_steps"] = {name: seconds for name, seconds in _step_durations(j)
                                               if _step_category(name) == "install"}
@@ -29796,16 +29899,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # when the finding is not OPT96. Reuse the already-fetched pole logs; this
     # adds no job-log reads.
     for _finding in findings:
-        if isinstance(_finding.get("cache_dist"), dict):
-            continue
-        _wf = str(_finding.get("workflow_file") or "")
-        _jobs = {str(v) for v in (_finding.get("affected_jobs") or [])}
-        _pole = next((p for p in (drill_poles or poles)
-                      if str(p.get("workflow_file") or "") == _wf
-                      and isinstance(p.get("cache_dist"), dict)
-                      and (not _jobs or str(p.get("job") or "") in _jobs)), None)
-        if _pole is not None:
-            _finding["cache_dist"] = _pole["cache_dist"]
+        _dist = _cache_dist_for_finding(_finding, drill_poles or poles, _wf_docs)
+        if _dist is not None:
+            _finding["cache_dist"] = _dist
     _cache_candidates = _cache_guard_candidates(findings)
     _cache_usage = _cache_usage_bytes(client, repo, _cache_candidates)
     _cache_guard_changed_files(
