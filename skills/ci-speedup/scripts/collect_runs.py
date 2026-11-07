@@ -29577,6 +29577,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                     finding for finding in findings
                     if finding.get("pattern") == _leaf_pattern
                     and str(finding.get("workflow_file") or "") == _push_workflow
+                    and (_leaf_fix_key != "eslint-no-cache"
+                         or str(finding.get("opt9_tool") or "").lower() == "eslint")
                     and any(_push_job_matches(job)
                             for job in (finding.get("affected_jobs") or []))
                 ]
@@ -29665,7 +29667,12 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                     _lanes = {
                         str(lane) for lane in (_base_finding.get("workflow_lanes") or [])
                     }
-                    if _lanes & {"pull_request", "pull_request_target", "merge_group"}:
+                    _push_scopes = {
+                        str(scope) for scope in (
+                            _base_finding.get("workflow_push_scopes") or [])
+                    }
+                    if (_lanes & {"pull_request", "pull_request_target", "merge_group"}
+                            or _push_scopes != {"default_branch_only"}):
                         _push_finding = copy.deepcopy(_base_finding)
                         _push_finding["id"] = f"{_base_finding.get('id', 'finding')}-push"
                         findings.append(_push_finding)

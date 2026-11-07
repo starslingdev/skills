@@ -495,6 +495,31 @@ def test_push_drill_isolates_every_match_without_erasing_a_pr_match(
     assert failures == [], [(check.name, check.detail) for check in failures]
 
 
+def test_push_drill_clones_an_unscoped_branch_push_finding(
+        monkeypatch, tmp_path):
+    fixture = tmp_path / "unscoped-push-image"
+    shutil.copytree(FIXTURE_ROOT / "default-branch-image", fixture)
+    workflow = fixture / "workflows" / "ci.yml"
+    workflow.write_text(
+        workflow.read_text(encoding="utf-8").replace(
+            "  push:\n    branches: [main]", "  push:"),
+        encoding="utf-8")
+
+    run_root = tmp_path / "run-unscoped-push"
+    run_root.mkdir()
+    doc, _report, checks = run_fixture(fixture, monkeypatch, run_root)
+    opt102 = [row for row in doc["findings"] if row.get("pattern") == "OPT102"]
+    ordinary = [row for row in opt102 if row.get("lane") != "push"]
+    push = [row for row in opt102 if row.get("lane") == "push"]
+
+    assert len(ordinary) == 1
+    assert ordinary[0]["workflow_push_scopes"] == ["unscoped"]
+    assert len(push) == 1
+    assert push[0]["id"] != ordinary[0]["id"]
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+
+
 def test_push_drill_credits_a_non_rare_lane_through_the_full_pipeline(
         monkeypatch, tmp_path):
     fixture = tmp_path / "non-rare-default-branch-image"
@@ -559,6 +584,52 @@ def test_push_drill_keeps_log_only_and_non_opt102_routes_valid(
     assert "**Catalog route:** OPT9." in report
     assert "Enable `--cache` with a stable `--cache-location`" in drill["agent_prompt"]
     assert "no pattern matched" not in report.lower()
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+
+
+def test_push_drill_attaches_only_the_matching_opt9_tool(
+        monkeypatch, tmp_path):
+    fixture = tmp_path / "eslint-push"
+    shutil.copytree(FIXTURE_ROOT / "default-branch-image", fixture)
+    (fixture / "Dockerfile").unlink()
+    (fixture / "package.json").write_text("{}\n", encoding="utf-8")
+    (fixture / "workflows" / "ci.yml").write_text(
+        """name: Check
+on:
+  push:
+    branches: [main]
+    paths: ["**"]
+concurrency: push-check
+jobs:
+  build-image:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npx eslint .
+      - run: npx tsc --noEmit
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make verify
+""", encoding="utf-8")
+    real_parse = bp._parse_log
+
+    def eslint_route(text, *args, **kwargs):
+        if "linux/arm64" in text:
+            return {"fix_key": "eslint-no-cache"}
+        return real_parse(text, *args, **kwargs)
+
+    monkeypatch.setattr(bp, "_parse_log", eslint_route)
+    run_root = tmp_path / "run-eslint"
+    run_root.mkdir()
+    doc, _report, checks = run_fixture(fixture, monkeypatch, run_root)
+    drill = doc["default_branch_push_lane"]["drill"]
+    attached = [
+        row for row in doc["findings"]
+        if str(row.get("id") or "") in set(drill["finding_ids"])
+    ]
+
+    assert [row.get("opt9_tool") for row in attached] == ["eslint"]
     failures = [check for check in checks if not check.skipped and not check.ok]
     assert failures == [], [(check.name, check.detail) for check in failures]
 
