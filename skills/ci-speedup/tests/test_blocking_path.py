@@ -8343,27 +8343,33 @@ def test_advisory_long_pole_does_not_overclaim_what_continue_on_error_does():
         assert banned not in sec, f"weakening advice: {banned!r}"
 
 
-def test_pole_without_the_declaration_renders_byte_identically():
-    # Fact-only, and only when the scanned graph literally says so. Two poles must be
-    # untouched: the same job with no `continue-on-error`, and a sibling pole in the same
-    # workflow whose own job carries none. (Scoped to the advisory sentence, not the bare
-    # word: the no-weakening rail's prompt copy names `continue-on-error` on every pole.)
+def test_pole_without_the_declaration_and_its_sibling_remain_unrouted():
+    # The route is based on the pole job's literal declaration. The same job without
+    # `continue-on-error`, and a sibling whose own job carries none, stay untouched.
+    # (Scoped to the advisory sentence, not the bare word: the no-weakening rail's prompt
+    # copy names `continue-on-error` on every pole.)
     advisory = "does not fail the workflow run"
     plain = _pole_section(
         bp.render(_advisory_pole_doc(False), {}, {}, {}, "2026-09-02T00:00:00Z", {}), "e2e")
     assert advisory not in plain, plain
+    assert "confirm it is not a required check" not in plain
+    assert "OPT71 recipe (c)" not in plain
     md = bp.render(_advisory_pole_doc(True), {}, {}, {}, "2026-09-02T00:00:00Z", {})
-    assert advisory not in _pole_section(md, "lint")
-    # The advisory pole's section is otherwise byte-identical to the un-annotated one:
-    # the change adds a fact, it does not re-frame anything. The fact renders in TWO places
-    # (the prose disclosure under the role line, and the bullet inside the copy-paste agent
-    # prompt), and only the prose one carries a blank separator line, so the comparison drops
-    # the advisory lines and then collapses blank runs - applied to BOTH sides, so any real
-    # re-framing still shows up as a difference.
+    sibling = _pole_section(md, "lint")
+    assert advisory not in sibling
+    assert "confirm it is not a required check" not in sibling
+    assert "OPT71 recipe (c)" not in sibling
+    # Outside its own lines, the advisory pole's section is otherwise byte-identical to
+    # the un-annotated one: the declaration adds facts and (here, with required-check
+    # status unknown) a confirm-first instruction; it re-frames nothing else. Drop the
+    # advisory lines from both sides and collapse blank runs, so any real re-framing
+    # still shows up as a difference.
+    markers = (advisory, "Required-check status is unavailable or partial")
+
     def _without_advisory(text: str) -> str:
         kept: list[str] = []
         for line in text.splitlines():
-            if advisory in line:
+            if any(marker in line for marker in markers):
                 continue
             if line == "" and kept and kept[-1] == "":
                 continue
@@ -8371,6 +8377,7 @@ def test_pole_without_the_declaration_renders_byte_identically():
         return "\n".join(kept)
 
     annotated = _pole_section(md, "e2e")
+    assert advisory in annotated
     assert _without_advisory(annotated) == _without_advisory(plain)
 
 
@@ -8445,6 +8452,66 @@ def test_advisory_long_pole_tells_the_coding_agent_the_job_is_advisory():
         bp.render(_advisory_pole_doc(False), {}, {}, {}, "2026-09-02T00:00:00Z", {}), "e2e")
     assert "continue-on-error: true" not in plain.split(
         "#### 🤖 Prompt for your coding agent", 1)[1]
+
+
+def _advisory_prompt(*, required_checks: list[str] | None,
+                     continue_on_error: bool = True) -> str:
+    doc = _advisory_pole_doc(continue_on_error)
+    if required_checks is not None:
+        doc["required_checks"] = required_checks
+        doc["required_checks_complete"] = True
+    md = bp.render(doc, {}, {}, {}, "2026-09-02T00:00:00Z", {})
+    return _pole_section(md, "e2e").split(
+        "#### 🤖 Prompt for your coding agent", 1)[1]
+
+
+def test_non_required_declared_advisory_pole_routes_to_async_recipe():
+    prompt = _advisory_prompt(required_checks=[])
+
+    assert prompt.index("decide first whether this job is meant to gate") < prompt.index(
+        "Declared advisory")
+    assert "OPT71 recipe (c)" in prompt
+    assert "make it advisory-async" in prompt
+    assert "enumerate every consumer of the job and its outputs" in prompt
+    assert "feeds a required aggregator" in prompt
+    assert ("moving a job that cannot block the merge off the PR trigger changes what "
+            "the developer waits on, not what verifies the merge") in prompt
+    assert "may be moved off the PR trigger" in prompt
+    assert "never delete the job" in prompt.lower()
+    assert "never remove its `continue-on-error`" in prompt.lower()
+
+
+def test_advisory_route_carve_out_is_absent_from_non_advisory_poles():
+    prompt = _advisory_prompt(required_checks=[], continue_on_error=False)
+
+    assert "may be moved off the PR trigger" not in prompt
+    assert "OPT71 recipe (c)" not in prompt
+
+
+def test_required_declared_advisory_pole_gets_disclosure_without_route():
+    prompt = _advisory_prompt(required_checks=["e2e"])
+
+    assert "Declared advisory" in prompt
+    assert "OPT71 recipe (c)" not in prompt
+    assert "may be moved off the PR trigger" not in prompt
+
+
+def test_unknown_required_status_requires_confirmation_without_route():
+    prompt = _advisory_prompt(required_checks=None)
+
+    assert "confirm it is not a required check" in prompt
+    assert "OPT71 recipe (c)" not in prompt
+    assert "may be moved off the PR trigger" not in prompt
+
+
+def test_llm_gap_fill_keeps_advisory_route_when_body_repeats_declaration():
+    prompt = bp._llm_agent_prompt(
+        "The job sets `continue-on-error: true`; inspect its expensive setup.",
+        {"_advisory_declared": True, "_advisory_required_status": "not-required"})
+
+    assert "decide first whether this job is meant to gate" in prompt
+    assert "OPT71 recipe (c)" in prompt
+    assert "may be moved off the PR trigger" in prompt
 
 
 def test_distinct_opt77_consolidations_render_as_separate_rows():
