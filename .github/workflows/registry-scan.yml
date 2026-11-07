@@ -95,7 +95,7 @@ jobs:
     # self-hosted, so never execute untrusted fork-PR code on it, and repository secrets —
     # SNYK_TOKEN included — are not available to fork PRs anyway. Fork PRs get the
     # `fork-not-scanned` job below, which reports the coverage gap instead of a green check.
-    runs-on: starsling-ubuntu-24.04
+    runs-on: starsling-ubuntu-26.04
     # The scan talks to a network service. A stalled request would otherwise hold a self-hosted
     # runner for the six-hour GitHub default with no signal.
     timeout-minutes: 20

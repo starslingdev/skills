@@ -197,4 +197,4 @@ def test_github_token_is_never_passed_to_the_action(job: dict) -> None:
 
 def test_runner_matches_the_rest_of_the_repo(job: dict) -> None:
     """This repo dogfoods StarSling runners for its own CI."""
-    assert job["runs-on"] == "starsling-ubuntu-24.04"
+    assert job["runs-on"] == "starsling-ubuntu-26.04"

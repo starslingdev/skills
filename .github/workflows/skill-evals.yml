@@ -92,7 +92,7 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: starsling-ubuntu-24.04
+    runs-on: starsling-ubuntu-26.04
     # Above the runner's own worst case: the five entries run in parallel (one round), so the
     # longest per-session cap in evals.json (25 minutes) plus about 10 for setup (checkout, pip,
     # the CLI install, five scaffolds). A lower budget would kill a slow-but-healthy suite before
@@ -191,7 +191,7 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: starsling-ubuntu-24.04
+    runs-on: starsling-ubuntu-26.04
     # Entries run in parallel, except the three `serial` full audits (10, 11, 13), which write
     # fixed /tmp paths and so take turns: worst case (tier all) is those three end to end at the
     # runner's 1500s per-session cap, plus about 10 minutes of setup and scaffolds. Healthy runs

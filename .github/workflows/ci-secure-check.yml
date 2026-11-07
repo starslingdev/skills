@@ -68,7 +68,7 @@ jobs:
     # Dogfoods StarSling runners like ci.yml; fork PRs are excluded from the
     # self-hosted runner and get the hosted twin below instead.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: starsling-ubuntu-24.04
+    runs-on: starsling-ubuntu-26.04
     timeout-minutes: 10
     steps:
       # fetch-depth: 1 — the scan only reads the tree at this commit; unlike

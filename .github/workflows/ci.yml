@@ -41,7 +41,7 @@ jobs:
     # Never execute untrusted fork-PR code on the self-hosted runner: run only for pushes and
     # pull requests whose head is this same repository. Fork PRs get the identical suite on
     # GitHub-hosted runners via test-fork below.
-    runs-on: starsling-ubuntu-24.04
+    runs-on: starsling-ubuntu-26.04
     # Without this, a dead runner pool leaves the job queued (self-hosted jobs wait up to 24h)
     # and the required `test` check pending with no signal. The suite runtime is measured by pytest.
     timeout-minutes: 30
