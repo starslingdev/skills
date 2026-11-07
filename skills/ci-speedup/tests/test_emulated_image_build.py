@@ -302,6 +302,17 @@ def test_buildx_log_measures_emulated_compile_share():
         "label": "emulated compile seconds", "unit": "s", "value": 1289.0}
 
 
+def test_cache_hit_does_not_hide_emulated_compile():
+    log = """#10 [linux/amd64 4/8] RUN go build -o /out/server ./cmd/server
+#10 DONE 10.0s
+#15 [linux/arm64 4/8] RUN go build -o /out/server ./cmd/server
+#15 DONE 90.0s
+Cache restored from key: deps-linux
+"""
+    leaf = bp._parse_log(log)
+    assert leaf is not None and leaf["fix_key"] == "emulated-image-compile"
+
+
 def test_buildx_log_correlates_reused_operation_ids_in_order():
     log = """#1 [linux/amd64 3/3] RUN go build -o /out/server ./cmd/server
 #1 DONE 10.0s

@@ -59,6 +59,8 @@ The deterministic router stops there — it routes on **dominant category alone*
 
 **Conservative rollout (REQUIRED)**: Run the scoped job **in parallel with** the existing full job for **N runs** (≥1–2 weeks of PR traffic), comparing pass/fail and coverage on every PR. Cut over only after the scoped job has matched the full job across the diff distribution — including at least one PR that touches a shared/base package. Keep the unscoped full job on every push to the default branch or at least on a schedule even after cutover, under the post-merge guardrail above.
 
+**Measurable safety bar (REQUIRED)**: Evaluate at least the last N merged PRs and report the selectable share: how often the scoped set was smaller while still matching the full run. Deliberately plant a defect in a supposedly unaffected dependency and replay known red commits; the scoped gate must still turn red. Audit changed tests, data-file edges and test neighbours that may sit outside the declared dependency graph. If the scoped run cannot preserve these failures and the full result set, it is not a speedup.
+
 **Sizing**: population-weighted Δ wall-clock = (dominant-step p50 − the scoped-run floor) × the share of PRs whose diff is narrow enough to scope, capped at the cross-workflow critical-path floor (the next-slowest check still gates the PR). Never size this off the single best-case PR.
 
 **Risk**: **HIGH** — correctness exposure. NEVER list as a quick win.

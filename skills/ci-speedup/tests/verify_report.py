@@ -652,6 +652,8 @@ def check_commit_wall_clock_projection(report: str, findings_path: Path | None) 
             if wall is not None:
                 failures.append(f"partial fact {index} publishes wall_s {wall}")
             continue
+        if fact.get("rerun_workflows"):
+            failures.append(f"complete fact {index} includes a re-run workflow")
         if wall is None or slowest is None:
             failures.append(f"complete fact {index} lacks wall/slowest timing")
             continue
@@ -688,10 +690,20 @@ def check_commit_wall_clock_projection(report: str, findings_path: Path | None) 
             for workflow in (fact.get("missing_workflows") or []) if workflow
         })
         named = ", ".join(f"`{_strip_scope(workflow)}`" for workflow in missing)
+        reruns = sorted({
+            str(workflow) for fact in partial
+            for workflow in (fact.get("rerun_workflows") or []) if workflow
+        })
+        named_reruns = ", ".join(f"`{_strip_scope(workflow)}`" for workflow in reruns)
+        reasons = []
+        if named:
+            reasons.append(f"missing {named}")
+        if named_reruns:
+            reasons.append(f"re-run {named_reruns}")
         expected_partial_line = (
             f"> {len(partial)} sampled commit(s) were partial"
-            + (f" (missing {named})" if named else "")
-            + "; their observed shorter spans were excluded from these percentiles.")
+            + (f" ({'; '.join(reasons)})" if reasons else "")
+            + "; their observed spans were excluded from these percentiles.")
         if report.splitlines().count(expected_partial_line) != 1:
             failures.append(
                 "report lacks the re-derived partial-commit count/workflow disclosure")
@@ -14348,6 +14360,99 @@ def check_cache_framing_matches_distribution(report: str, findings_path: Path | 
     return Check(name, True, f"all {checked} cache pole(s) framed to match their distribution")
 
 
+def check_cache_sizing_guards(report: str, findings_path: Path | None) -> Check:
+    """Re-derive each cache guard's outcome and reject credit after any failed input."""
+    name = "cache savings pass budget, invalidation and transfer-cost guards"
+    if findings_path is None:
+        return Check(name, True, "no --findings to inspect", skipped=True)
+    try:
+        data = _as_dict(json.loads(findings_path.read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError):
+        return Check(name, True, "findings unreadable", skipped=True)
+    findings = [f for f in _as_list(data.get("findings")) if isinstance(f, dict)]
+    guarded = [f for f in findings if isinstance(f.get("cache_sizing_guard"), dict)]
+    cache_patterns = {"OPT4", "OPT6", "OPT9", "OPT61", "OPT96", "OPT101"}
+    missing = [
+        f for f in findings
+        if (str(f.get("pattern") or "") in cache_patterns
+            or str(_as_dict(f.get("cache_dist")).get("fix_key") or "")
+            in {"dependency-cache", "buildx-no-cache"})
+        and not isinstance(f.get("cache_sizing_guard"), dict)
+        and (((_num(f.get("wall_clock_p50_s")) or 0.0) > 0)
+             or ((_num(f.get("runner_min_saving")) or 0.0) > 0))
+    ]
+    if missing:
+        ids = ", ".join(str(f.get("id") or "?") for f in missing[:8])
+        return Check(name, False, f"credited cache finding(s) lack a sizing guard: {ids}")
+    if not guarded:
+        return Check(name, True, "no cache sizing guards stamped", skipped=True)
+    bad = []
+    for finding in guarded:
+        guard = _as_dict(finding.get("cache_sizing_guard"))
+        checks = _as_dict(guard.get("checks"))
+        if set(checks) != {"budget", "invalidation", "economics"}:
+            bad.append(f"{finding.get('id')}: guard does not carry exactly three checks")
+            continue
+        statuses = {key: str(_as_dict(value).get("status") or "")
+                    for key, value in checks.items()}
+        if any(value not in {"passed", "failed", "not_measured"}
+               for value in statuses.values()):
+            bad.append(f"{finding.get('id')}: invalid check status {statuses}")
+            continue
+        expected_status = ("passed" if all(v == "passed" for v in statuses.values())
+                           else "failed" if any(v == "failed" for v in statuses.values())
+                           else "not_measured")
+        if guard.get("status") != expected_status:
+            bad.append(f"{finding.get('id')}: stamped {guard.get('status')!r}, "
+                       f"three checks re-derive {expected_status!r}")
+        budget = _as_dict(checks.get("budget"))
+        usage, proposed = budget.get("usage_bytes"), budget.get("proposed_bytes")
+        expected_budget = "not_measured"
+        if isinstance(usage, (int, float)):
+            if usage > 11 * 1024 ** 3:
+                expected_budget = "not_measured"
+            elif usage >= 9 * 1024 ** 3:
+                expected_budget = "failed"
+            elif isinstance(proposed, (int, float)):
+                expected_budget = (
+                    "failed" if usage + proposed > 10 * 1024 ** 3 else "passed")
+        if statuses["budget"] != expected_budget:
+            bad.append(f"{finding.get('id')}: budget status disagrees with stored bytes")
+        invalidation = _as_dict(checks.get("invalidation"))
+        rate = invalidation.get("invalidation_rate")
+        if isinstance(rate, (int, float)) and "sampled_prs" in invalidation:
+            if (rate >= 0.5) != (statuses["invalidation"] == "failed"):
+                bad.append(f"{finding.get('id')}: invalidation status disagrees with stored rate")
+        elif statuses["invalidation"] in {"passed", "failed"}:
+            if not (isinstance(rate, (int, float))
+                    and isinstance(invalidation.get("sampled_runs"), int)):
+                bad.append(f"{finding.get('id')}: measured invalidation lacks raw terms")
+        economics = _as_dict(checks.get("economics"))
+        terms = [economics.get(key) for key in
+                 ("hit_rate", "saving_s", "restore_s", "save_s")]
+        if all(isinstance(value, (int, float)) for value in terms):
+            hit, saving, restore, save = (float(value) for value in terms)
+            expected = hit * saving - restore - (1 - hit) * save
+            if (expected > 0) != (statuses["economics"] == "passed"):
+                bad.append(f"{finding.get('id')}: transfer-cost status disagrees with stored terms")
+        elif statuses["economics"] in {"passed", "failed"}:
+            bad.append(f"{finding.get('id')}: measured transfer cost lacks raw terms")
+        credited = ((isinstance(finding.get("wall_clock_p50_s"), (int, float))
+                     and finding.get("wall_clock_p50_s") > 0)
+                    or (isinstance(finding.get("runner_min_saving"), (int, float))
+                        and finding.get("runner_min_saving") > 0))
+        if expected_status != "passed" and credited:
+            bad.append(f"{finding.get('id')}: cache saving remains credited after {expected_status}")
+        details = [str(_as_dict(value).get("detail") or "")
+                   for value in checks.values() if _as_dict(value).get("status") != "passed"]
+        marker = ("all three cache sizing checks passed" if expected_status == "passed"
+                  else next((detail for detail in details if detail), ""))
+        if marker and marker not in report:
+            bad.append(f"{finding.get('id')}: report omits cache guard disclosure {marker!r}")
+    return Check(name, not bad, "; ".join(bad[:8]) if bad else
+                 f"{len(guarded)} cache saving guard(s) re-derived")
+
+
 # --- The phantom-gate class (headline ranks a check that never actually gates) ------------
 # The expo/expo bug: the spine ranker demoted every check present on <= 50% of PRs and crowned
 # the slowest ALWAYS-present check — a lightweight `check-packages` that, by the findings' own
@@ -15651,6 +15756,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_toc_also_noticed_label_honest(report),
         check_cache_claim_backed_by_distribution(report, findings_path),
         check_cache_framing_matches_distribution(report, findings_path),
+        check_cache_sizing_guards(report, findings_path),
         check_headline_pole_actually_gates(report, findings_path),
     ]
 
