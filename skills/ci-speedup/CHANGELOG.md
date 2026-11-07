@@ -16,6 +16,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-11-07** — Exclude compilation performed inside a test step from OPT24's sharding credit. Cargo's measured compile duration, or the timestamped gap before the first test result, becomes a repeated pre-test floor; compiled test steps without a measurable split stay visible but uncredited, and shard prompts include the repeated runner-minute cost.
 - **2026-11-07** — Add a compact whole-pipeline fixture corpus that runs synthetic repositories through collection, rendering, and the complete report verifier. The fixtures pin report facts for required and external gates, reusable matrices, configuration changes, post-merge pushes, partial credentials, and representative findings; a review-only regenerator prints expectation diffs, and regression mutants prove the corpus detects crown, log-leaf precedence, and unconfirmed-gate credit changes.
 - **2026-11-07** — Keep serial test-loop and emulated-image findings visible when the same job also restores a dependency cache. A cache miss retains precedence; a hit-only restore becomes the fallback observation after the more specific log detectors run.
 - **2026-11-07** — Gate cache savings on repository capacity, sampled key invalidation, and net restore/save economics. The collector reads repository cache usage once, reuses sampled PR changed files, multiplies cache size across saving copies, and leaves failed or unreadable checks visible but uncredited.
