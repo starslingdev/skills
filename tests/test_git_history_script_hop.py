@@ -193,6 +193,169 @@ def test_history_operation_two_script_hops_away_is_not_followed(engines, tmp_pat
     assert score_state == "fail"
 
 
+@pytest.mark.parametrize("script", [
+    "VERSION=$(git describe --tags)\n",
+    "COUNT=`git rev-list --count HEAD`\n",
+    "if git merge-base --is-ancestor origin/main HEAD; then echo ok; fi\n",
+    "python -c \"import os; os.system('git describe --tags')\"\n",
+    "node -e \"require('child_process').execSync('git describe --tags')\"\n",
+])
+def test_history_idioms_inside_scripts_keep_full_history(
+        engines, tmp_path: Path, script: str):
+    parsed = _case(tmp_path, "./scripts/check.sh", "scripts/check.sh", script)
+    assert _verdicts(engines, tmp_path, parsed) == (False, "pass")
+
+
+@pytest.mark.parametrize(("script", "depth"), [
+    ("git rev-parse HEAD~1\n", 2),
+    ("git rev-parse HEAD^\n", 2),
+    ("git show HEAD~2:pyproject.toml\n", 3),
+    ("pnpm ls --filter '...[HEAD^1]'\n", 2),
+    ("git rev-parse HEAD^^\n", 3),
+    ("git show HEAD~1~1:pyproject.toml\n", 3),
+])
+def test_parent_only_history_read_recommends_bounded_depth(
+        engines, tmp_path: Path, script: str, depth: int):
+    parsed = _case(tmp_path, "./scripts/check.sh", "scripts/check.sh", script)
+    speed_flags, score_state = _verdicts(engines, tmp_path, parsed)
+    assert speed_flags is True
+    # ci-score's fix recipe is static, so it safely exempts a bounded parent
+    # read until it can print the required depth. ci-speedup prints the depth.
+    assert score_state == "pass"
+    finding = next(f for f in engines[0].scan(
+        tmp_path, CATALOG, default_branch="main")["findings"]
+                   if f.get("pattern") == "OPT28")
+    assert f"fetch-depth: {depth}" in finding["evidence"]
+    assert "no git-history operation found" not in finding["evidence"]
+
+
+@pytest.mark.parametrize("run", [
+    "sh scripts/check.sh",
+    "python3 scripts/check.py",
+    "python3.12 -I scripts/check.py",
+    "bash -e scripts/check.sh",
+    "FOO=1 ./scripts/check.sh",
+    "env FOO=1 ./scripts/check.sh",
+    "sudo ./scripts/check.sh",
+    "time ./scripts/check.sh",
+    "exec ./scripts/check.sh",
+    "if ./scripts/check.sh; then echo ok; fi",
+    "$GITHUB_WORKSPACE/scripts/check.sh",
+    "${{ github.workspace }}/scripts/check.sh",
+])
+def test_common_launchers_resolve_the_first_party_script(
+        engines, tmp_path: Path, run: str):
+    suffix = ".py" if "python" in run else ".sh"
+    path = f"scripts/check{suffix}"
+    parsed = _case(tmp_path, run, path, "git describe --tags\n")
+    assert _verdicts(engines, tmp_path, parsed) == (False, "pass")
+
+
+def test_workflow_default_working_directory_selects_script(engines, tmp_path: Path):
+    parsed = _case(tmp_path, "bash check.sh", "check.sh", "echo clean\n")
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "check.sh").write_text(
+        "git rev-list --count HEAD\n", encoding="utf-8")
+    workflow = tmp_path / ".github" / "workflows" / "ci.yml"
+    raw = workflow.read_text(encoding="utf-8").replace(
+        "jobs:\n", "defaults:\n  run:\n    working-directory: tools\njobs:\n")
+    workflow.write_text(raw, encoding="utf-8")
+    parsed = [(parsed[0][0], yaml.safe_load(raw), raw)]
+    assert _verdicts(engines, tmp_path, parsed) == (False, "pass")
+    evidence = engines[1]._practice_facts(parsed, tmp_path)[
+        "ci.checkout.shallow-clone"]["evidence"]
+    assert "could not be read" not in evidence
+
+
+def test_make_target_recipe_history_read_keeps_full_history(engines, tmp_path: Path):
+    parsed = _case(tmp_path, "make release", "unused", "echo clean\n")
+    (tmp_path / "Makefile").write_text(
+        "VERSION := $(shell git describe --tags)\nrelease:\n\t@echo $(VERSION)\n",
+        encoding="utf-8")
+    assert _verdicts(engines, tmp_path, parsed) == (False, "pass")
+
+
+def test_quiet_make_recipe_history_read_keeps_full_history(engines, tmp_path: Path):
+    parsed = _case(tmp_path, "make check", "unused", "echo clean\n")
+    (tmp_path / "Makefile").write_text(
+        "check:\n\t@git describe --tags\n", encoding="utf-8")
+    assert _verdicts(engines, tmp_path, parsed) == (False, "pass")
+
+
+@pytest.mark.parametrize("run", [
+    "$GITHUB_WORKSPACE/scripts/check.sh",
+    "${{ github.workspace }}/scripts/check.sh",
+])
+def test_workspace_root_path_ignores_working_directory(
+        engines, tmp_path: Path, run: str):
+    parsed = _case(tmp_path, run, "scripts/check.sh", "git describe --tags\n")
+    (tmp_path / "tools" / "scripts").mkdir(parents=True)
+    (tmp_path / "tools" / "scripts" / "check.sh").write_text(
+        "echo clean\n", encoding="utf-8")
+    workflow = tmp_path / ".github" / "workflows" / "ci.yml"
+    raw = workflow.read_text(encoding="utf-8").replace(
+        "      - run:", "      - run:", 1).replace(
+        f"      - run: {run}\n", f"      - run: {run}\n        working-directory: tools\n")
+    workflow.write_text(raw, encoding="utf-8")
+    parsed = [(parsed[0][0], yaml.safe_load(raw), raw)]
+    assert _verdicts(engines, tmp_path, parsed) == (False, "pass")
+
+
+def test_parent_depths_for_same_relative_path_stay_separate(
+        engines, tmp_path: Path):
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "check.sh").write_text(
+        "git show HEAD~4:file\n", encoding="utf-8")
+    (tmp_path / "tools" / "scripts").mkdir(parents=True)
+    (tmp_path / "tools" / "scripts" / "check.sh").write_text(
+        "git show HEAD~1:file\n", encoding="utf-8")
+    root_raw = """name: Root
+on: pull_request
+jobs:
+  root-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: ./scripts/check.sh
+"""
+    tools_raw = """name: Tools
+on: pull_request
+jobs:
+  tools-check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: ./scripts/check.sh
+"""
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "root.yml").write_text(root_raw, encoding="utf-8")
+    (workflows / "tools.yml").write_text(tools_raw, encoding="utf-8")
+    findings = [f for f in engines[0].scan(
+        tmp_path, CATALOG, default_branch="main")["findings"]
+                if f.get("pattern") == "OPT28"]
+    by_job = {f["affected_jobs"][0]: f["evidence"] for f in findings}
+    assert "fetch-depth: 5" in by_job["root-check"]
+    assert "fetch-depth: 2" in by_job["tools-check"]
+
+
+def test_snapcraft_override_history_read_keeps_full_history(engines, tmp_path: Path):
+    parsed = _case(tmp_path, "snapcraft", "unused", "echo clean\n")
+    (tmp_path / "snap").mkdir()
+    (tmp_path / "snap" / "snapcraft.yaml").write_text(
+        "parts:\n  app:\n    plugin: nil\n    override-pull: |\n"
+        "      git describe --tags\n",
+        encoding="utf-8")
+    assert _verdicts(engines, tmp_path, parsed) == (False, "pass")
+
+
 def test_script_history_indexes_and_predicates_stay_in_parity(engines, tmp_path: Path):
     parsed = _case(tmp_path, "bash scripts/check.sh", "scripts/check.sh",
                    "git merge-base origin/main HEAD\n")

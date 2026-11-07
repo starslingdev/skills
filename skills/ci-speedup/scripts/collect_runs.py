@@ -28617,6 +28617,11 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         shared projection. Used by the PR lane and the default-branch push lane."""
         nonlocal _joint_population_complete
         _missing: set[str] = _expected_workflows - {_wf for _wf, _run in _run_rows}
+        _rerun_workflows = sorted({
+            _wf for _wf, _run in _run_rows
+            if isinstance(_run.get("run_attempt"), int)
+            and int(_run["run_attempt"]) > 1
+        })
         _created: list[float] = []
         _created_iso: dict[float, str] = {}
         _job_rows: list[dict[str, Any]] = []
@@ -28711,7 +28716,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                        if len(_chain_rows) > 1 else None)
         if _chain_span is not None and _slowest is not None:
             _chain_span = max(_chain_span, float(_slowest["duration_s"]))
-        _partial = bool(_missing or not _run_rows or _observed is None)
+        _partial = bool(_missing or _rerun_workflows or not _run_rows
+                        or _observed is None)
 
         _joint_nodes: dict[str, tuple[str, str]] = {}
         _commit_checks = _commit_checks_by_sha.get(_sha) or {}
@@ -28752,6 +28758,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             "event": _event,
             "partial": _partial,
             "missing_workflows": sorted(_missing),
+            "rerun_workflows": _rerun_workflows,
             **({"created_at": _created_iso[min(_created)]} if _created else {}),
             "jobs": _job_intervals,
             "wall_s": None if _partial else _observed,

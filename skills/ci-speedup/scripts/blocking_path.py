@@ -3173,7 +3173,8 @@ _NO_WEAKENING_LINES = [
 
 _CONCURRENCY_ORDER_LINE = (
     "Concurrency order: First use OPT88 to measure and fill the existing job's idle "
-    "cores; only then add shards or jobs."
+    "cores; only then add shards or jobs. Before adding workers, confirm that they "
+    "cannot interfere through a shared external server."
 )
 _SHARD_RUNNER_MINUTE_LINE = (
     "Runner-minute effect: With safe in-job concurrency, runner minutes go down because "
@@ -3532,7 +3533,7 @@ _FIX_META: dict[str, dict[str, Any]] = {
                  "`-n`/`--numprocesses`, so every collected test runs one-by-one on a "
                  "single worker. The dependency for parallelism is already present and "
                  "simply isn't switched on (no `[gw0]` worker tags in the log).",
-        "look": "`{wf}` — the step's `pytest` command (does it pass `-n auto`/`-n <N>`?), "
+        "look": "`{wf}` — the step's `pytest` command (does it pass `-n logical`/`-n <N>`?), "
                 "the plugin banner line (`xdist-<ver>` confirms the dep is installed), and "
                 "`pytest.ini`/`pyproject.toml`/`setup.cfg` `addopts` (a project-wide `-n` "
                 "may be set but overridden here). Check whether the tests are STATEFUL "
@@ -3541,7 +3542,7 @@ _FIX_META: dict[str, dict[str, Any]] = {
         "constraints": "These may be integration tests kept serial ON PURPOSE: parallel "
                        "workers can collide on fixed ports or a shared sqlite/Postgres DB, "
                        "or interleave stdout under `-s`. Recover the intent from git "
-                       "history before flipping it on. Before adding `-n auto`, prove "
+                       "history before flipping it on. Before adding `-n logical`, prove "
                        "per-worker isolation (a unique port/DB/tmp per `gw` worker); if "
                        "coverage is collected (`--cov`), merge it across workers "
                        "(`coverage combine`) or the report goes partial. If in-process "
@@ -3550,12 +3551,15 @@ _FIX_META: dict[str, dict[str, Any]] = {
                        "is a required status check, the new matrix jobs must be added to "
                        "branch protection as required checks (or the ruleset equivalent), or "
                        "the split-out tests silently stop gating merges (everything stays "
-                       "green) until that admin-only re-gating step is done.",
+                       "green) until that admin-only re-gating step is done. Keep "
+                       "deadline-bound or process-global tests in a serial pre-step, and "
+                       "record the worker count that actually started rather than only "
+                       "the requested setting.",
         "docs": ["pytest-xdist — distributing tests: "
                  "https://pytest-xdist.readthedocs.io/en/stable/distribution.html",
                  "pytest-xdist — known limitations (shared state): "
                  "https://pytest-xdist.readthedocs.io/en/stable/known-limitations.html"],
-        "deliver": "Run the suite across workers — add `-n auto` (xdist is already a dep) "
+        "deliver": "Run the suite across workers — add `-n logical` (xdist is already a dep) "
                    "once per-worker isolation is proven, or shard the suite across matrix "
                    "jobs by directory. Keep the full test count and (if present) a "
                    "complete merged coverage report; re-measure the step.",
@@ -3643,7 +3647,8 @@ _FIX_META: dict[str, dict[str, Any]] = {
                        "stable `restore-keys` prefix `<tool>-<os>-<lockfile-hash>-`. Include "
                        "the eslint config and plugin versions in that dependency hash. An exact key hit is "
                        "not saved again, while the rolling key saves the updated results. "
-                       "Keep `--cache-strategy content` if mtimes are unreliable in CI. "
+                       "When the cache persists between CI runs, require `--cache-strategy content` "
+                       "so restored mtimes cannot make stale entries look current. "
                        "Don't weaken coverage: every file eslint lints today must still be "
                        "linted.",
         "docs": ["ESLint CLI — caching (`--cache`, `--cache-location`, "
@@ -13186,10 +13191,21 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         })
         _named_missing = ", ".join(f"`{_clean_label(wf)}`"
                                    for wf in _missing_commit_workflows)
+        _rerun_commit_workflows = sorted({
+            str(wf) for f in _partial_commit_facts
+            for wf in (f.get("rerun_workflows") or []) if wf
+        })
+        _named_reruns = ", ".join(f"`{_clean_label(wf)}`"
+                                  for wf in _rerun_commit_workflows)
+        _partial_reasons = []
+        if _named_missing:
+            _partial_reasons.append(f"missing {_named_missing}")
+        if _named_reruns:
+            _partial_reasons.append(f"re-run {_named_reruns}")
         _commit_wall_block.append(
             f"> {len(_partial_commit_facts)} sampled commit(s) were partial"
-            + (f" (missing {_named_missing})" if _named_missing else "")
-            + "; their observed shorter spans were excluded from these percentiles.")
+            + (f" ({'; '.join(_partial_reasons)})" if _partial_reasons else "")
+            + "; their observed spans were excluded from these percentiles.")
     _fold_bottom_line(
         out,
         _lead_block,
