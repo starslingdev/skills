@@ -454,6 +454,7 @@ _HISTORY_JOB_NAME_RE = re.compile(
 # `_job_needs_git_history` so OPT28 never recommends shallowing such a job.
 _GIT_HISTORY_LOCAL_ACTIONS: set[str] = set()
 _GIT_HISTORY_LOCAL_SCRIPTS: set[str] = set()
+_GIT_PARENT_DEPTH_LOCAL_SCRIPTS: dict[str, int] = {}
 
 # A `uses:` naming THIS repository: `./path`, or the self-repository prefix
 # `$/path` GitHub shipped 2026-07-30 (same commit, same files, no checkout
@@ -486,14 +487,17 @@ def _has_git_history_op(text: str) -> bool:
 # working-tree-only commands inside a general-purpose script must not make a
 # full-history checkout look load-bearing.
 _FIRST_PARTY_SCRIPT_RE = re.compile(
-    r"(?:^|[\n;&|])\s*(?:"
-    r"(?P<direct>\./[^\s;&|]+)|"
-    r"(?:bash|python|node)\s+(?P<interpreter>(?!-)(?:\./)?[^\s;&|]+)"
-    r")(?=\s|$)",
+    r"(?:^|[\n;&|])\s*(?:(?:if|then|while|until|!|exec|time|sudo|env)\s+|"
+    r"[A-Za-z_][A-Za-z_0-9]*=[^\s;&|]+\s+)*(?:"
+    r"(?P<direct>(?:\./|\$GITHUB_WORKSPACE/|\$\{\{\s*github\.workspace\s*\}\}/)[^\s;&|]+)|"
+    r"(?:bash|sh|python(?:\d+(?:\.\d+)?)?|node)"
+    r"(?!\s+-(?:m|c)\b)(?:\s+-(?!-?(?:m|c)\b)\S+)*\s+"
+    r"(?P<interpreter>(?!-)(?:\./)?[^\s;&|]+)"
+    r")(?=[\s;&|]|$)",
     re.M,
 )
 _SCRIPT_GIT_HISTORY_RE = re.compile(
-    r"(?:^|[\n;&|])\s*(?:"
+    r"(?:^|[\n;&|(`]|\b(?:if|then|while|until)\s+)\s*(?:shell\s+)?(?:"
     r"git\s+(?:rev-list|describe|merge-base)\b|"
     r"git\s+log\b[^\n|;&]*\.\.\.?|"
     r"git\s+diff\b(?:(?!\s--\s|>)[^\n|;&])*(?:\.\.\.?|\borigin/|\brefs/|HEAD[~^]|\.sha\b|\$[({]?[A-Za-z_0-9])|"
@@ -502,6 +506,11 @@ _SCRIPT_GIT_HISTORY_RE = re.compile(
     r"(?:dorny/paths-filter|tj-actions/changed-files)\b"
     r")",
     re.I | re.M,
+)
+_SCRIPT_SHELL_CALL_RE = re.compile(
+    r"(?:execSync|exec|os\.system|subprocess\.(?:run|call|check_call|"
+    r"check_output|Popen))\s*\(\s*(['\"])(?P<command>git\s+.*?)\1",
+    re.I,
 )
 _SCRIPT_LITERAL_CALL_RE = re.compile(
     r"subprocess\.(?:run|call|check_call|check_output|Popen)\s*\(\s*\[(?P<python>[^\]\n]*)\]|"
@@ -517,21 +526,46 @@ _SCRIPT_GIT_ARGS_RE = re.compile(
     r"^git\s+fetch\b.*(?:--unshallow\b|--depth(?:=|\s)|--tags\b)",
     re.I,
 )
+_SCRIPT_MAX_BYTES = 1024 * 1024
+_MAKE_CALL_RE = re.compile(r"(?:^|[\n;&|])\s*(?:env\s+)?make(?:\s|$)", re.M)
+_SNAPCRAFT_CALL_RE = re.compile(r"(?:^|[\n;&|])\s*snapcraft(?:\s|$)", re.M)
+_BUILD_TOOL_SCRIPT_REFS = {"Makefile", "snap/snapcraft.yaml"}
+_SCRIPT_PARENT_REF_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:HEAD|[A-Za-z0-9_./-]+)(?:~(?P<tilde>\d+)|"
+    r"\^(?P<caret>\d*))",
+    re.I,
+)
 
 
 def _first_party_script_refs(text: str) -> set[str]:
     """Return direct, relative script operands from a workflow `run:` block."""
     joined = _LINE_CONTINUATION_RE.sub(" ", text)
-    return {ref.strip("'\"") for match in _FIRST_PARTY_SCRIPT_RE.finditer(joined)
+    refs = {ref.strip("'\"") for match in _FIRST_PARTY_SCRIPT_RE.finditer(joined)
             if (ref := (match.group("direct") or match.group("interpreter")))}
+    normalized = set()
+    for ref in refs:
+        ref = re.sub(r"^\$GITHUB_WORKSPACE/", "./", ref)
+        ref = re.sub(r"^\$\{\{\s*github\.workspace\s*\}\}/", "./", ref)
+        normalized.add(ref)
+    if _MAKE_CALL_RE.search(joined):
+        normalized.add("Makefile")
+    if _SNAPCRAFT_CALL_RE.search(joined):
+        normalized.add("snap/snapcraft.yaml")
+    return normalized
 
 
-def _script_working_directory(job: dict, step: dict) -> str:
+def _script_working_directory(job: dict, step: dict,
+                              workflow: dict | None = None) -> str:
     """The step's effective Actions working directory, relative to root."""
     defaults = job.get("defaults")
     run_defaults = defaults.get("run") if isinstance(defaults, dict) else None
+    workflow_defaults = workflow.get("defaults") if isinstance(workflow, dict) else None
+    workflow_run = (workflow_defaults.get("run")
+                    if isinstance(workflow_defaults, dict) else None)
+    workflow_inherited = (workflow_run.get("working-directory")
+                          if isinstance(workflow_run, dict) else None)
     inherited = (run_defaults.get("working-directory")
-                 if isinstance(run_defaults, dict) else None)
+                 if isinstance(run_defaults, dict) else workflow_inherited)
     value = step.get("working-directory", inherited)
     return str(value).strip() if value not in (None, "") else "."
 
@@ -566,6 +600,8 @@ def _read_local_script(root: Path, key: str) -> "str | None":
     if path is None:
         return None
     try:
+        if path.stat().st_size > _SCRIPT_MAX_BYTES:
+            return None
         return path.read_text(encoding="utf-8", errors="replace")
     except (OSError, ValueError):
         return None
@@ -576,6 +612,9 @@ def _has_script_git_history_op(text: str) -> bool:
     joined = _LINE_CONTINUATION_RE.sub(" ", without_comments)
     if _SCRIPT_GIT_HISTORY_RE.search(joined):
         return True
+    for match in _SCRIPT_SHELL_CALL_RE.finditer(joined):
+        if _SCRIPT_GIT_ARGS_RE.search(match.group("command")):
+            return True
     for match in _SCRIPT_LITERAL_CALL_RE.finditer(joined):
         raw = match.group("python") or match.group("node") or ""
         args = [value for _quote, value in _SCRIPT_LITERAL_ARG_RE.findall(raw)]
@@ -586,6 +625,16 @@ def _has_script_git_history_op(text: str) -> bool:
         if _SCRIPT_GIT_ARGS_RE.search(command):
             return True
     return False
+
+
+def _script_parent_depth(text: str) -> int:
+    """Smallest checkout depth that contains every parent-only operand."""
+    without_comments = _SCRIPT_COMMENT_LINE_RE.sub("", text)
+    distances = []
+    for match in _SCRIPT_PARENT_REF_RE.finditer(without_comments):
+        raw = match.group("tilde") or match.group("caret") or "1"
+        distances.append(int(raw))
+    return max(distances, default=0) + 1 if distances else 0
 
 
 def _local_script_needs_history(root: Path, key: str) -> bool:
@@ -603,11 +652,37 @@ def _index_local_git_scripts(root: Path,
             if not isinstance(job, dict):
                 continue
             for step in _steps(job):
-                working_directory = _script_working_directory(job, step)
-                refs.update(_script_ref_key(ref, working_directory)
-                            for ref in _first_party_script_refs(
-                                str(step.get("run") or "")))
-    return {ref for ref in refs if _local_script_needs_history(root, ref)}
+                working_directory = _script_working_directory(job, step, doc)
+                for ref in _first_party_script_refs(str(step.get("run") or "")):
+                    refs.add(_script_ref_key(ref, working_directory))
+    refs = {ref for ref in refs
+            if (_script_key_parts(ref)[1] not in _BUILD_TOOL_SCRIPT_REFS
+                or ((_local_script_path(root, ref) or Path()).is_file()))}
+    global _GIT_PARENT_DEPTH_LOCAL_SCRIPTS
+    history_refs = {ref for ref in refs if _local_script_needs_history(root, ref)}
+    parent_depths: dict[str, int] = {}
+    for ref in refs - history_refs:
+        text = _read_local_script(root, ref)
+        depth = _script_parent_depth(text or "")
+        if depth:
+            parent_depths[ref] = depth
+            parent_depths[_script_key_parts(ref)[1]] = depth
+    _GIT_PARENT_DEPTH_LOCAL_SCRIPTS = parent_depths
+    # The job predicate has no workflow-level defaults. A conservative alias
+    # keeps the checkout deep when the indexed effective path needed history.
+    history_refs.update(_script_key_parts(ref)[1] for ref in tuple(history_refs))
+    return history_refs
+
+
+def _job_parent_checkout_depth(job: dict) -> int:
+    depth = 0
+    for step in _steps(job):
+        working_directory = _script_working_directory(job, step)
+        for ref in _first_party_script_refs(str(step.get("run") or "")):
+            key = _script_ref_key(ref, working_directory)
+            depth = max(depth, _GIT_PARENT_DEPTH_LOCAL_SCRIPTS.get(key, 0),
+                        _GIT_PARENT_DEPTH_LOCAL_SCRIPTS.get(ref, 0))
+    return depth
 
 
 # A local `uses:` reference written inside an action or reusable-workflow file
@@ -840,11 +915,14 @@ def _detect_opt28(doc: dict, raw: str) -> list[Hit]:
                 # direction this pattern already chose.
                 if _opt28_history_justification(raw, line):
                     continue
+                parent_depth = _job_parent_checkout_depth(job)
+                detail = (f"parent-only history reads need `fetch-depth: {parent_depth}`"
+                          if parent_depth else "no git-history operation found in the job")
                 hits.append(Hit(
                     line=line,
                     affected_jobs=[job_name],
                     evidence=f"job `{job_name}` uses `{uses}` with `fetch-depth: 0` "
-                             f"(no git-history operation found in the job)",
+                             f"({detail})",
                     match_text=job_name,
                 ))
     return hits
