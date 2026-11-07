@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import copy
 import json
 import re
 import sys
@@ -71,12 +72,14 @@ class _PushLaneClient:
 
     def __init__(self, *, include_pushes: bool = True,
                  default_branch_known: bool = True,
-                 all_status_available: bool = True) -> None:
+                 all_status_available: bool = True,
+                 frequency_probe: object = None) -> None:
         self.queries = 0
         self.errors = 0
         self.include_pushes = include_pushes
         self.default_branch_known = default_branch_known
         self.all_status_available = all_status_available
+        self.frequency_probe = frequency_probe
         self.jobs = {100: [_job("merge-gate", 100, 0, 120)]}
         for index, sha in enumerate(_PUSH_SHAS):
             base = 10000 + index * 4000
@@ -123,7 +126,8 @@ class _PushLaneClient:
                     and "status=success" not in match.group(2)):
                 return None
             if re.search(r"per_page=1(?![0-9])", match.group(2)):
-                return {"total_count": 30}
+                return ({"total_count": 30} if self.frequency_probe is None
+                        else self.frequency_probe)
             return {"workflow_runs": self._runs(int(match.group(1)))}
         match = re.match(r"repos/o/r/actions/runs/(\d+)/jobs", endpoint)
         if match:
@@ -164,13 +168,16 @@ def _doc() -> dict:
 
 def _collect(monkeypatch, *, include_pushes: bool = True,
              default_branch_known: bool = True,
-             all_status_available: bool = True) -> dict:
+             all_status_available: bool = True,
+             created_before: str = "2026-01-02T00:00:00Z") -> dict:
     client = _PushLaneClient(
         include_pushes=include_pushes,
         default_branch_known=default_branch_known,
         all_status_available=all_status_available)
     monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
-    return cr.collect(_doc(), "o/r", max_runs=20, shallow_runs=20)
+    return cr.collect(
+        _doc(), "o/r", max_runs=20, shallow_runs=20,
+        created_before=created_before)
 
 
 def _write_artifacts(tmp_path: Path, doc: dict) -> tuple[str, Path, Path]:
@@ -237,6 +244,247 @@ def test_collect_renders_a_capped_default_branch_push_lane_and_verifies(
         check = vr.check_default_branch_push_lane_isolated(
             isolation_mutant, findings_path)
         assert not check.ok
+
+
+def test_push_lane_reports_the_30_day_frequency_and_rare_window(
+        monkeypatch, tmp_path: Path):
+    client = _PushLaneClient()
+    original_runs = client._runs
+
+    def runs_with_long_history(workflow_id: int) -> list[dict]:
+        rows = original_runs(workflow_id)
+        pushes = [row for row in rows if row.get("event") == "push"]
+        non_pushes = [row for row in rows if row.get("event") != "push"]
+        for index, row in enumerate(pushes):
+            days_old = (2, 12, 29, 35, 43, 51, 59, 67, 75, 90, 90, 90)[index]
+            created = datetime(2026, 1, 2, tzinfo=timezone.utc) - timedelta(days=days_old)
+            row["created_at"] = created.isoformat().replace("+00:00", "Z")
+        return [*pushes, *non_pushes]
+
+    client._runs = runs_with_long_history  # type: ignore[method-assign]
+    monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
+    doc = cr.collect(
+        _doc(), "o/r", max_runs=20, shallow_runs=20,
+        created_before="2026-01-02T00:00:00Z")
+
+    lane = doc["default_branch_push_lane"]
+    assert lane["pushes_30d"] == 3
+    assert lane["window_span_days"] == 90
+    assert lane["rare"] is True
+
+    report, findings_path, report_path = _write_artifacts(tmp_path, doc)
+    assert "3 pushes to the default branch in the last 30 days" in report
+    assert "rare" in report.lower()
+    checks = vr.run_checks(report, report_path, findings_path, skill_repo=None)
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+
+    mutant = report.replace(
+        "3 pushes to the default branch in the last 30 days.\n", "", 1)
+    check = vr.check_default_branch_push_lane_isolated(mutant, findings_path)
+    assert not check.ok
+
+
+def test_truncated_push_frequency_is_a_lower_bound_when_probe_is_unusable(
+        monkeypatch, tmp_path: Path):
+    client = _PushLaneClient(frequency_probe={"message": "rate limited"})
+    monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
+    # Make the compact fixture exercise the same full-page path as production.
+    monkeypatch.setattr(cr, "_COST_RUNLIST_MAX", 13)
+
+    doc = cr.collect(
+        _doc(), "o/r", max_runs=20, shallow_runs=20,
+        created_before="2026-01-02T00:00:00Z")
+    lane = doc["default_branch_push_lane"]
+
+    assert lane["status"] == "frequency_incomplete"
+    assert lane["pushes_30d"] == len(_PUSH_SHAS)
+    assert lane["rare"] is False
+    report, findings_path, report_path = _write_artifacts(tmp_path, doc)
+    assert f"at least {len(_PUSH_SHAS)} pushes" in report.lower()
+    checks = vr.run_checks(report, report_path, findings_path, skill_repo=None)
+    assert not [check for check in checks if not check.skipped and not check.ok]
+
+
+def test_push_frequency_endpoint_quotes_the_default_branch():
+    endpoint = cr._push_volume_endpoint(
+        "o/r", 7, "release&event=pull_request#stable",
+        "2026-01-02T00:00:00Z")
+
+    assert "branch=release%26event%3Dpull_request%23stable" in endpoint
+    assert endpoint.count("&event=") == 1
+
+
+def test_frequent_push_lane_is_not_marked_rare(monkeypatch, tmp_path: Path):
+    client = _PushLaneClient()
+    original_runs = client._runs
+
+    def thirty_pushes(workflow_id: int) -> list[dict]:
+        pull_rows = [
+            row for row in original_runs(workflow_id)
+            if row.get("event") != "push"
+        ]
+        rows = []
+        for index in range(30):
+            base = 1000 + index * 100
+            run_id = (3000 if workflow_id == 1 else 4000) + index
+            sha = f"dense-{index}"
+            rows.append(_push_run(run_id, sha, base, base + 300))
+            job_name = "verify" if workflow_id == 1 else "publish-image"
+            duration = 120 if workflow_id == 1 else 300
+            client.jobs[run_id] = [_job(job_name, run_id, base, base + duration)]
+        return [*reversed(rows), *pull_rows]
+
+    client._runs = thirty_pushes  # type: ignore[method-assign]
+    monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
+    doc = cr.collect(
+        _doc(), "o/r", max_runs=40, shallow_runs=40,
+        created_before="2026-01-02T00:00:00Z")
+
+    lane = doc["default_branch_push_lane"]
+    assert lane["pushes_30d"] == 30
+    assert lane["rare"] is False
+    report, findings_path, report_path = _write_artifacts(tmp_path, doc)
+    assert "30 pushes to the default branch in the last 30 days" in report
+    lane_block = report.split("<!-- ci-speedup:default-branch-push-lane -->", 1)[1]
+    assert "rare" not in lane_block.split("---", 1)[0].lower()
+    checks = vr.run_checks(report, report_path, findings_path, skill_repo=None)
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+
+
+def test_release_only_static_hit_is_tagged_and_never_gets_wall_clock_credit(
+        monkeypatch, tmp_path: Path):
+    client = _PushLaneClient()
+    monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
+    source = _doc()
+    source["findings"] = [{
+        "id": "f1",
+        "pattern": "OPT102",
+        "pattern_class": "static",
+        "severity": "MEDIUM",
+        "title": "Emulated compilation in a multi-platform image build",
+        "workflow_file": _PUBLISH,
+        "line": 8,
+        "affected_jobs": ["publish-image"],
+        "workflow_activity": {},
+        "workflow_lanes": ["release"],
+        "evidence": "a multi-platform image compiles in the build job",
+        "fix_strategy": "compile for each target without emulation",
+        "fix_recipe_anchor": "opt102",
+        "wall_clock_p50_s": 600.0,
+        "sizing_basis": "measured",
+        "realization": "direct",
+        "tier": 1,
+    }]
+
+    doc = cr.collect(
+        source, "o/r", max_runs=20, shallow_runs=20,
+        created_before="2026-01-02T00:00:00Z")
+    finding = doc["findings"][0]
+    assert finding["non_pr_lane"] is True
+    assert finding["wall_clock_p50_s"] == 0.0
+
+    report, findings_path, report_path = _write_artifacts(tmp_path, doc)
+    assert "release lane only; no merge-gate wall-clock credit" in report
+    checks = vr.run_checks(report, report_path, findings_path, skill_repo=None)
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+    mutant = report.replace(
+        "**Lane:** release lane only; no merge-gate wall-clock credit.\n", "", 1)
+    assert not vr.check_default_branch_push_lane_isolated(mutant, findings_path).ok
+
+
+def test_unscoped_push_static_hit_is_not_assumed_to_be_non_pr(
+        monkeypatch, tmp_path: Path):
+    client = _PushLaneClient()
+    monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
+    source = _doc()
+    source["findings"] = [{
+        "id": "f1",
+        "pattern": "OPT102",
+        "pattern_class": "static",
+        "severity": "MEDIUM",
+        "title": "Emulated compilation in a multi-platform image build",
+        "workflow_file": _PUBLISH,
+        "line": 8,
+        "affected_jobs": ["publish-image"],
+        "workflow_activity": {},
+        "workflow_lanes": ["push"],
+        "workflow_push_scopes": ["unscoped"],
+        "evidence": "a multi-platform image compiles in the build job",
+        "fix_strategy": "compile for each target without emulation",
+        "fix_recipe_anchor": "opt102",
+        "wall_clock_p50_s": 600.0,
+        "sizing_basis": "measured",
+        "realization": "direct",
+        "tier": 1,
+    }]
+
+    doc = cr.collect(
+        source, "o/r", max_runs=20, shallow_runs=20,
+        created_before="2026-01-02T00:00:00Z")
+    assert doc["findings"][0].get("non_pr_lane") is not True
+
+    report, findings_path, report_path = _write_artifacts(tmp_path, doc)
+    checks = vr.run_checks(report, report_path, findings_path, skill_repo=None)
+    assert not [check for check in checks if not check.skipped and not check.ok]
+
+
+def test_group_activity_counts_each_workflow_once(monkeypatch, tmp_path: Path):
+    client = _PushLaneClient()
+    monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
+    source = _doc()
+    source["findings"] = [
+        {
+            "id": f"f{index}",
+            "pattern": "OPT102",
+            "pattern_class": "static",
+            "severity": "MEDIUM",
+            "title": "Emulated compilation in a multi-platform image build",
+            "workflow_file": _PUBLISH,
+            "line": 8 + index,
+            "affected_jobs": ["publish-image"],
+            "workflow_activity": {},
+            "workflow_lanes": ["release"],
+            "evidence": "a multi-platform image compiles in the build job",
+            "fix_strategy": "compile for each target without emulation",
+            "fix_recipe_anchor": "opt102",
+            "runner_min_saving": 0.0,
+            "sizing_basis": "measured",
+            "realization": "direct",
+            "tier": 2,
+        }
+        for index in range(2)
+    ]
+    source["findings"][1]["workflow_lanes"] = ["schedule"]
+    doc = cr.collect(
+        source, "o/r", max_runs=20, shallow_runs=20,
+        created_before="2026-01-02T00:00:00Z")
+    expected = doc["findings"][0]["workflow_activity"]["runs_30d"]
+
+    report, findings_path, report_path = _write_artifacts(tmp_path, doc)
+    assert f"**Activity:** {expected} runs in 30 days" in report
+    assert f"**Activity:** {expected * 2} runs in 30 days" not in report
+    assert "**Lane:** release, schedule lanes; no merge-gate wall-clock credit." in report
+    checks = vr.run_checks(report, report_path, findings_path, skill_repo=None)
+    assert not [check for check in checks if not check.skipped and not check.ok]
+
+
+def test_zero_push_lane_still_verifies_non_pr_finding_invariants(
+        monkeypatch, tmp_path: Path):
+    doc = _collect(monkeypatch, include_pushes=False)
+    report, findings_path, _report_path = _write_artifacts(tmp_path, doc)
+    doc["findings"].append({
+        "pattern": "OPT102",
+        "workflow_file": _PUBLISH,
+        "workflow_lanes": ["release"],
+        "wall_clock_p50_s": 123.0,
+    })
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+
+    check = vr.check_default_branch_push_lane_isolated(report, findings_path)
+    assert not check.ok
 
 
 def test_no_default_branch_pushes_renders_an_explicit_zero_line(monkeypatch, tmp_path: Path):
@@ -316,3 +564,100 @@ def test_real_collection_times_the_push_lane_without_supplied_facts(
     checks = vr.run_checks(report, report_path, findings_path, skill_repo=None)
     failures = [check for check in checks if not check.skipped and not check.ok]
     assert failures == [], [(check.name, check.detail) for check in failures]
+
+
+def test_unread_classic_protection_keeps_advisory_route_unconfirmed(
+        monkeypatch, tmp_path: Path):
+    class RulesetOnlyClient(_PushLaneClient):
+        def __init__(self, classic, *, rulesets=True):
+            super().__init__()
+            self.classic = classic
+            self.rulesets = rulesets
+
+        def json(self, endpoint: str, allow_missing: bool = False):
+            if endpoint == "repos/o/r/rulesets?includes_parents=true":
+                self.queries += 1
+                return [{"id": 9}] if self.rulesets else None
+            if endpoint == "repos/o/r/rulesets/9":
+                self.queries += 1
+                return {
+                    "enforcement": "active",
+                    "target": "branch",
+                    "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"]}},
+                    "rules": [{
+                        "type": "required_status_checks",
+                        "parameters": {
+                            "required_status_checks": [{"context": "lint"}],
+                        },
+                    }],
+                }
+            if endpoint == "repos/o/r/branches/main/protection/required_status_checks":
+                self.queries += 1
+                return self.classic
+            return super().json(endpoint, allow_missing=allow_missing)
+
+    source = _doc()
+    source["workflow_job_graph"][_GATE]["merge-gate"]["continue_on_error"] = True
+    client = RulesetOnlyClient(None)
+    monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
+    doc = cr.collect(
+        source, "o/r", max_runs=20, shallow_runs=20,
+        created_before="2026-01-02T00:00:00Z")
+
+    assert doc["required_checks"] == ["lint"]
+    assert doc["required_checks_complete"] is True
+    assert doc["required_checks_classic_read"] is False
+    assert doc["required_checks_rulesets_read"] is True
+    assert doc["required_checks_advice_complete"] is False
+    assert not [row for row in doc["findings"] if row.get("pattern") == "OPT71"]
+
+    report, findings_path, report_path = _write_artifacts(tmp_path, doc)
+    assert "confirm it is not a required check" in report
+    assert "OPT71 recipe (c)" not in report
+    checks = vr.run_checks(report, report_path, findings_path, skill_repo=None)
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+
+    mutated = copy.deepcopy(doc)
+    mutated["required_checks_advice_complete"] = True
+    (tmp_path / "mutated").mkdir()
+    mutated_report, mutated_findings_path, mutated_report_path = _write_artifacts(
+        tmp_path / "mutated", mutated)
+    mutated_checks = vr.run_checks(
+        mutated_report, mutated_report_path, mutated_findings_path, skill_repo=None)
+    assert any(
+        check.name == "required-check advice is backed by both protection reads"
+        and not check.ok for check in mutated_checks)
+
+    control_source = _doc()
+    control_source["workflow_job_graph"][_GATE]["merge-gate"]["continue_on_error"] = True
+    control_client = RulesetOnlyClient({"contexts": []})
+    monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: control_client)
+    control = cr.collect(
+        control_source, "o/r", max_runs=20, shallow_runs=20,
+        created_before="2026-01-02T00:00:00Z")
+    assert control["required_checks_classic_read"] is True
+    assert control["required_checks_rulesets_read"] is True
+    assert control["required_checks_advice_complete"] is True
+    (tmp_path / "control").mkdir()
+    control_report, control_findings_path, control_report_path = _write_artifacts(
+        tmp_path / "control", control)
+    assert "OPT71 recipe (c)" in control_report
+    control_checks = vr.run_checks(
+        control_report, control_report_path, control_findings_path, skill_repo=None)
+    control_failures = [
+        check for check in control_checks if not check.skipped and not check.ok]
+    assert control_failures == [
+    ], [(check.name, check.detail) for check in control_failures]
+
+    rulesets_unread_source = _doc()
+    rulesets_unread_source["workflow_job_graph"][_GATE]["merge-gate"][
+        "continue_on_error"] = True
+    rulesets_unread_client = RulesetOnlyClient({"contexts": []}, rulesets=False)
+    monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: rulesets_unread_client)
+    rulesets_unread = cr.collect(
+        rulesets_unread_source, "o/r", max_runs=20, shallow_runs=20,
+        created_before="2026-01-02T00:00:00Z")
+    assert rulesets_unread["required_checks_classic_read"] is True
+    assert rulesets_unread["required_checks_rulesets_read"] is False
+    assert rulesets_unread["required_checks_advice_complete"] is False

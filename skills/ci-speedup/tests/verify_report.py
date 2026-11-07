@@ -5630,6 +5630,36 @@ def _load_findings_doc(findings_path: Path | None) -> tuple[dict, str | None]:
     return _as_dict(data), None
 
 
+def check_required_check_advice_proof(report: str, findings_path: Path | None) -> Check:
+    """Advice that removes a check from the PR path requires both protection reads.
+
+    Re-derive the combined authorization bit from the independent source stamps. A
+    missing stamp is unknown, never permission; this also keeps older findings
+    artifacts fail closed when rendered by a newer skill.
+    """
+    name = "required-check advice is backed by both protection reads"
+    data, error = _load_findings_doc(findings_path)
+    if error:
+        return Check(name, True, error, skipped=True)
+    expected = (
+        data.get("required_checks_complete") is True
+        and data.get("required_checks_rulesets_read") is True
+        and data.get("required_checks_classic_read") is True)
+    stamped = data.get("required_checks_advice_complete")
+    if (stamped is True) != expected:
+        return Check(
+            name, False,
+            "required_checks_advice_complete does not equal the conjunction of "
+            "complete, rulesets-read, and classic-read evidence")
+    if not expected and "OPT71 recipe (c)" in report:
+        return Check(
+            name, False,
+            "the report authorizes the off-PR recipe without both protection reads")
+    return Check(
+        name, True,
+        "the combined advice stamp and rendered route agree with both source reads")
+
+
 # Twin of collect_runs._OPT64_MIN_RETRIED_RUNS / blocking_path._OPT64_MIN_RETRIED_RUNS
 # (test_opt64_minimum_sample.py pins all three equal). Re-derived here from the
 # findings JSON, never read from the report.
@@ -15125,6 +15155,49 @@ def check_default_branch_push_lane_isolated(
     if "After merge, not a merge gate" not in block:
         failures.append("the lane title does not say `After merge, not a merge gate`")
 
+    # Finding invariants are independent of whether push timing was available.
+    # Keep them ahead of every coverage/no-fact return below.
+    finding_details = re.findall(
+        r"<details>\s*<summary><strong>OPT\d+\b.*?</details>",
+        report, re.DOTALL)
+    for details in finding_details:
+        if "**Where:**" in details and "**Activity:**" not in details:
+            failures.append("a finding group omits its workflow activity")
+            break
+
+    non_pr_events = {
+        "release", "workflow_dispatch", "repository_dispatch", "schedule", "push", "tag"
+    }
+    lane_groups: dict[str, set[str]] = {}
+    for finding in _as_list(data.get("findings")):
+        if not isinstance(finding, dict):
+            continue
+        lanes = sorted({str(value) for value in _as_list(finding.get("workflow_lanes"))})
+        if not lanes or not set(lanes) <= non_pr_events:
+            continue
+        push_scopes = {
+            str(value) for value in _as_list(finding.get("workflow_push_scopes"))
+        }
+        if ("push" in lanes
+                and (not push_scopes
+                     or not push_scopes <= {"tag_only", "default_branch_only"})):
+            continue
+        wall = _num(finding.get("wall_clock_p50_s")) or 0.0
+        if wall > 0:
+            failures.append("a non-PR lane finding retains merge-gate wall-clock credit")
+        lane_groups.setdefault(str(finding.get("pattern") or ""), set()).update(lanes)
+    for pattern, lanes in lane_groups.items():
+        ordered = sorted(lanes)
+        label = ", ".join(ordered).replace("_", " ")
+        label += " lane only" if len(ordered) == 1 else " lanes"
+        matching_groups = [
+            details for details in finding_details
+            if (not pattern or f"<strong>{pattern} -" in details)
+        ]
+        if not any(label in details for details in matching_groups):
+            failures.append(
+                f"report omits the static finding group's {label} tag")
+
     cap = int(_num(lane.get("sample_cap")) or 0)
     sampled = int(_num(lane.get("sampled_push_count")) or 0)
     if cap != _VR_DEFAULT_BRANCH_PUSH_SAMPLE_MAX:
@@ -15147,7 +15220,22 @@ def check_default_branch_push_lane_isolated(
             name, not failures,
             "; ".join(failures) if failures else f"{status} is disclosed, not zeroed")
     if status != "complete":
-        failures.append(f"push lane has unknown collection status {status!r}")
+        if status != "frequency_incomplete":
+            failures.append(f"push lane has unknown collection status {status!r}")
+    pushes_30d = int(_num(lane.get("pushes_30d")) or 0)
+    push_word = "push" if pushes_30d == 1 else "pushes"
+    frequency_line = ((f"At least {pushes_30d} {push_word} to the default branch"
+                       if status == "frequency_incomplete" else
+                       f"{pushes_30d} {push_word} to the default branch in the last 30 days"))
+    if frequency_line not in block:
+        failures.append("push lane omits its 30-day default-branch frequency")
+    rare = lane.get("rare") is True
+    if status == "frequency_incomplete" and rare:
+        failures.append("an incomplete push frequency is marked rare")
+    elif status == "complete" and rare != (pushes_30d < 8):
+        failures.append("push lane rare stamp disagrees with its 30-day frequency")
+    if rare and "rare" not in block.lower():
+        failures.append("rare push lane lacks its uncredited disclosure")
     if sampled == 0:
         if zero_line not in block.lower():
             failures.append("an empty eligible push cohort lacks its explicit zero line")
@@ -15621,6 +15709,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_also_noticed_count_honest(report),
         check_coverage_disclosed(report, findings_path),
         check_run_list_gaps_named(report, findings_path),
+        check_required_check_advice_proof(report, findings_path),
         check_prefetch_plan_consumed(report, findings_path),
         check_cost_spine_shallow_disclosed(report, findings_path),
         check_date_matches_filename(report, report_path),

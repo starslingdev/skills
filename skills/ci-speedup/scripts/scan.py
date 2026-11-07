@@ -6318,6 +6318,67 @@ def _declared_triggers(parsed: list[tuple[str, dict, str]]) -> dict[str, list[st
     return out
 
 
+def _declared_push_scopes(
+    parsed: list[tuple[str, dict, str]], default_branch: str | None,
+) -> dict[str, list[str]]:
+    """Classify push triggers only when their filters prove their PR relevance."""
+    out: dict[str, list[str]] = {}
+    for rel, doc, _raw in parsed:
+        on = doc.get("on", doc.get(True))
+        if not isinstance(on, dict) or "push" not in on:
+            # A scalar/list `push` has no filters.
+            events = ([on] if isinstance(on, str) else on
+                      if isinstance(on, list) else [])
+            if "push" in events:
+                out[rel] = ["unscoped"]
+            continue
+        config = on.get("push")
+        if not isinstance(config, dict):
+            out[rel] = ["unscoped"]
+            continue
+        has_tags = "tags" in config or "tags-ignore" in config
+        has_branches = "branches" in config or "branches-ignore" in config
+        scopes: list[str] = []
+        if has_tags and not has_branches:
+            scopes.append("tag_only")
+        branches = config.get("branches")
+        branch_values = ([branches] if isinstance(branches, str)
+                         else branches if isinstance(branches, list) else [])
+        if (default_branch and branch_values == [default_branch]
+                and "branches-ignore" not in config):
+            scopes.append("default_branch_only")
+        if not scopes:
+            scopes.append("filtered" if (has_tags or has_branches) else "unscoped")
+        out[rel] = scopes
+    return out
+
+
+def _inherit_reusable_workflow_lanes(
+    lanes: dict[str, list[str]], push_scopes: dict[str, list[str]],
+    graph: dict[str, list[str]],
+) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """Resolve local reusable workflows to the lanes of their known callers."""
+    resolved = {path: set(values) for path, values in lanes.items()}
+    scopes = {path: set(values) for path, values in push_scopes.items()}
+    for _ in range(max(1, len(resolved))):
+        changed = False
+        for caller, children in graph.items():
+            inherited = resolved.get(caller, set()) - {"workflow_call"}
+            for child in children:
+                if not inherited:
+                    continue
+                before = set(resolved.get(child, set()))
+                after = (before - {"workflow_call"}) | inherited
+                if after != before:
+                    resolved[child] = after
+                    changed = True
+                scopes.setdefault(child, set()).update(scopes.get(caller, set()))
+        if not changed:
+            break
+    return ({path: sorted(values) for path, values in resolved.items()},
+            {path: sorted(values) for path, values in scopes.items() if values})
+
+
 def _trigger_conditionality(parsed: list[tuple[str, dict, str]]) -> dict[str, str]:
     """Per-workflow PR-trigger conditionality, for the dead-required check: a
     required check may only be called DEAD when its workflow's PR trigger is
@@ -6521,6 +6582,11 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
             scan_incomplete.append({"path": rel, "reason": "top-level is not a mapping"})
             continue
         parsed.append((rel, doc, raw))
+    workflow_lanes = _declared_triggers(parsed)
+    workflow_call_graph = _build_workflow_call_graph(parsed)
+    workflow_lanes, workflow_push_scopes = _inherit_reusable_workflow_lanes(
+        workflow_lanes, _declared_push_scopes(parsed, default_branch),
+        workflow_call_graph)
 
     # What the step walker read inside GitHub Actions `parallel:` groups, and
     # the control steps it skipped. A malformed group (`MALFORMED_KINDS`: not a
@@ -6597,6 +6663,9 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
             for hit in hits:
                 finding_idx += 1
                 f = _emit(entry, hit, rel, finding_idx)
+                f["workflow_lanes"] = workflow_lanes.get(rel, [])
+                if workflow_push_scopes.get(rel):
+                    f["workflow_push_scopes"] = workflow_push_scopes[rel]
                 if entry.pattern == "OPT9" and "#" in hit.match_text:
                     # The detector owns the tool identity. Keep it separate from
                     # the job name and command prose so downstream sizing cannot
@@ -6623,6 +6692,9 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
             continue
         finding_idx += 1
         f = _emit(entry, hit, wf, finding_idx)
+        f["workflow_lanes"] = workflow_lanes.get(wf, [])
+        if workflow_push_scopes.get(wf):
+            f["workflow_push_scopes"] = workflow_push_scopes[wf]
         if hit.snippet:
             f["evidence_snippet"] = hit.snippet
         if pat == "OPT96":
@@ -6683,7 +6755,7 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
         "scan_incomplete": scan_incomplete,
         # Declared `on:` events per scanned workflow. Available to any
         # trigger-scope consumer; additive, harmless if unconsumed.
-        "workflow_triggers": _declared_triggers(parsed),
+        "workflow_triggers": workflow_lanes,
         # Per-workflow PR-trigger conditionality (unconditional / path_scoped /
         # branch_scoped / merge_group_scoped / not_pr_triggered). Joined against
         # the required-check list by collect_runs into
@@ -6694,7 +6766,7 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
         # so downstream sizing/report CAN attribute a child's frequency +
         # check-runs to its caller instead of treating a per-PR reusable suite as
         # dormant; the attribution itself is not yet wired up.
-        "workflow_call_graph": _build_workflow_call_graph(parsed),
+        "workflow_call_graph": workflow_call_graph,
         # Per-workflow job dependency graph (job -> name/needs/reusable) used by
         # collect_runs to scope the critical-path pole to merge-blocking (required-
         # reachable) work. Repo-agnostic; harmless if unconsumed.
