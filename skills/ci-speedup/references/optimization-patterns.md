@@ -2167,6 +2167,14 @@ Common settings can leave cores idle, but each is evidence to measure rather tha
 | `pytest -n auto` | xdist resolves `auto` from physical cores | Is that physical-core count the best point for this suite's CPU, memory and shared services? |
 | Maven without `-T` | Reactor modules are built without Maven's parallel reactor | Are modules independent enough for a measured `-T` setting? |
 | CTest without `-j` | Tests run without CTest's explicit parallel level | Which measured parallel level preserves fixtures, resource locks and failures? |
+| `go test -p` / `go test -parallel` | `-p` caps concurrently built test binaries; `-parallel` caps tests inside each binary | Which combination uses the runner without exhausting memory or sharing process-global state? |
+| Rust doctest | Doctest binaries have concurrency and compilation costs distinct from the main test harness | Does measuring doctest separately expose a different safe cap? |
+| gtest | A gtest binary may still be serial even when several binaries run concurrently | Should the harness parallelize binaries, cases, or both? |
+| Static analysis tool | An analysis tool may have its own worker flag and memory ceiling | Does its configured worker count match the runner rather than the build tool's setting? |
+| pytest `--dist load` / `--dist worksteal` | Distribution policy can dominate balance when test durations vary | Which policy and worker count minimize the measured tail? |
+| Jest `maxWorkers` | Jest chooses its own process count unless `maxWorkers` pins it | Does the actual CI worker count fit available memory? |
+| CPython `regrtest -j` | The regrtest harness has a separate multiprocess setting | Which measured `-j` value preserves isolation and failure reporting? |
+| `meson test --num-processes` | Meson controls concurrent test processes independently of compilation | Which value respects suites marked serial and resource limits? |
 
 The table carries no seconds and no modeled saving. Time the settings on the repository's real runner class and workload.
 
@@ -3408,6 +3416,8 @@ title_template: "Every pull request pays for coverage that could run after merge
 4. Make a red post-merge run impossible to miss: it notifies an owner, and it blocks a release.
 
 **Guardrail**: moving coverage after merge means a regression can land on the default branch before it is caught. Keep that window short and owned: every merged commit must be covered (a post-merge or merge-queue run starts on every merge; a scheduled run tests the latest merged tree, so it must run often enough to keep the window short), its failures must reach someone, and a release must not ship a commit the full matrix has not passed. Never move a leg whose failures are often unique to it.
+
+**Measurable safety bar (REQUIRED)**: Evaluate at least the last N merged PRs and report the selectable share: how often the proposed PR subset would have preserved the full matrix's decision. Deliberately plant a defect aimed at a proposed post-merge-only leg and replay known red commits; the retained PR checks must catch every failure the team says must block a merge. Include changed tests, data-file edges and test neighbours when choosing the subset. If the evidence does not justify removing a leg from the merge gate, it is not a speedup.
 
 **Sizing: uncredited**. No `_SIZING` model. The ceiling is the measured share of the PR's wait spent on the legs that move; what remains is the subset's time.
 
@@ -4811,7 +4821,7 @@ grep -rn 'actions/cache\|rust-cache\|sccache\|setup-node.*cache\|setup-go.*cache
 grep -rn 'cargo \|pip install\|uv sync\|go build\|mvn \|gradle\|cmake\|make ' /tmp/workflows/
 ```
 
-**Fix**: Add the ecosystem-appropriate caching action. For multi-job workflows, use `shared-key` or equivalent to avoid N separate caches.
+**Fix**: Add the ecosystem-appropriate caching action. In multi-job workflows, use one key per compilation mode so incompatible artifacts cannot overwrite or restore each other. Give only one job permission to save each mode's cache, such as with a `save-if` condition; the other jobs restore it without racing to publish separate entries.
 
 ---
 
@@ -5319,6 +5329,8 @@ The deterministic router stops there — it routes on **dominant category alone*
 5. **Keep an unscoped safety net after merge.** The full suite must run on every push to the default branch or at least on a schedule, with OPT90's post-merge guardrail enforced. Test the skip logic above before relying on it.
 
 **Conservative rollout (REQUIRED)**: Run the scoped job **in parallel with** the existing full job for **N runs** (≥1–2 weeks of PR traffic), comparing pass/fail and coverage on every PR. Cut over only after the scoped job has matched the full job across the diff distribution — including at least one PR that touches a shared/base package. Keep the unscoped full job on every push to the default branch or at least on a schedule even after cutover, under the post-merge guardrail above.
+
+**Measurable safety bar (REQUIRED)**: Evaluate at least the last N merged PRs and report the selectable share: how often the scoped set was smaller while still matching the full run. Deliberately plant a defect in a supposedly unaffected dependency and replay known red commits; the scoped gate must still turn red. Audit changed tests, data-file edges and test neighbours that may sit outside the declared dependency graph. If the scoped run cannot preserve these failures and the full result set, it is not a speedup.
 
 **Sizing**: population-weighted Δ wall-clock = (dominant-step p50 − the scoped-run floor) × the share of PRs whose diff is narrow enough to scope, capped at the cross-workflow critical-path floor (the next-slowest check still gates the PR). Never size this off the single best-case PR.
 
