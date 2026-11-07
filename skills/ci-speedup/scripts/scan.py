@@ -437,7 +437,9 @@ _GIT_HISTORY_RE = re.compile(
     # OPT28 false positive of "shallow this, no git-history op found" on a
     # change-gate job (e.g. mastra `prebuild.yml` *-check-changes jobs).
     r"dorny/paths-filter|tj-actions/changed-files|"
-    r"nx\s+affected|--affected|lerna\b.*--since|\[origin/|\.\.\.[A-Za-z]",
+    r"nx\s+affected|--affected|lerna\b.*--since|\[origin/|\.\.\.[A-Za-z]|"
+    r"--filter(?:=|\s+)[^\n]*\.\.\.\[[^\]\n]+\]|"
+    r"--(?:changedSince|changed|diffBase|base|since)(?:=|\s+)['\"]?[^\s'\"]+",
     re.I)
 # A job whose NAME signals history work (the actual git op is often hidden in a
 # repo script the YAML invokes, e.g. `node .github/scripts/auto-changeset.ts`).
@@ -474,13 +476,23 @@ def _is_local_uses(uses: str) -> bool:
 # the continuations back together before matching, so a git command whose
 # history-revealing operand sits on the next line is still seen as one command.
 _LINE_CONTINUATION_RE = re.compile(r"\\\n[ \t]*")
+_INLINE_PARENT_ONLY_OPERAND_RE = re.compile(
+    r"--filter(?:=|\s+)['\"]?\.\.\.\[\s*HEAD(?:~\d+|\^\d*)+\s*\]['\"]?|"
+    r"--(?:changedSince|changed|diffBase|base|since)(?:=|\s+)"
+    r"['\"]?HEAD(?:~\d+|\^\d*)+['\"]?",
+    re.I,
+)
 
 
 def _has_git_history_op(text: str) -> bool:
     """True when `text` runs a git operation that needs full history. Applied to
     every surface `_GIT_HISTORY_RE` is matched against, so line continuations are
     joined in exactly one place."""
-    return bool(_GIT_HISTORY_RE.search(_LINE_CONTINUATION_RE.sub(" ", text)))
+    joined = _LINE_CONTINUATION_RE.sub(" ", text)
+    # A parent-only operand has a safe finite checkout depth. Leave it for
+    # `_job_parent_checkout_depth` instead of classifying it as full history.
+    joined = _INLINE_PARENT_ONLY_OPERAND_RE.sub("", joined)
+    return bool(_GIT_HISTORY_RE.search(joined))
 
 
 # One deliberately bounded hop into a first-party script invoked directly by a
@@ -678,7 +690,7 @@ def _index_local_git_scripts(root: Path,
 
 
 def _job_parent_checkout_depth(job: dict, workflow: dict | None = None) -> int:
-    depth = 0
+    depth = _script_parent_depth(_job_run_blob(job))
     for step in _steps(job):
         working_directory = _script_working_directory(job, step, workflow)
         for ref in _first_party_script_refs(str(step.get("run") or "")):

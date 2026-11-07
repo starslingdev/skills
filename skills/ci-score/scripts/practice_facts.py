@@ -728,7 +728,9 @@ _GIT_HISTORY_RE = re.compile(
     # checkout breaks them. Treating them as history ops (fail-closed) avoids the
     # false positive of "shallow this, no git-history op found" on a change-gate job.
     r"dorny/paths-filter|tj-actions/changed-files|"
-    r"nx\s+affected|--affected|lerna\b.*--since|\[origin/|\.\.\.[A-Za-z]",
+    r"nx\s+affected|--affected|lerna\b.*--since|\[origin/|\.\.\.[A-Za-z]|"
+    r"--filter(?:=|\s+)[^\n]*\.\.\.\[[^\]\n]+\]|"
+    r"--(?:changedSince|changed|diffBase|base|since)(?:=|\s+)['\"]?[^\s'\"]+",
     re.I)
 
 # A job whose NAME signals history work (the actual git op is often hidden in a
@@ -741,13 +743,21 @@ _HISTORY_JOB_NAME_RE = re.compile(
 # the continuations back together before matching, so a git command whose
 # history-revealing operand sits on the next line is still seen as one command.
 _LINE_CONTINUATION_RE = re.compile(r"\\\n[ \t]*")
+_INLINE_PARENT_ONLY_OPERAND_RE = re.compile(
+    r"--filter(?:=|\s+)['\"]?\.\.\.\[\s*HEAD(?:~\d+|\^\d*)+\s*\]['\"]?|"
+    r"--(?:changedSince|changed|diffBase|base|since)(?:=|\s+)"
+    r"['\"]?HEAD(?:~\d+|\^\d*)+['\"]?",
+    re.I,
+)
 
 
 def _has_git_history_op(text: str) -> bool:
     """True when `text` runs a git operation that needs full history. Applied to
     every surface `_GIT_HISTORY_RE` is matched against, so line continuations are
     joined in exactly one place."""
-    return bool(_GIT_HISTORY_RE.search(_LINE_CONTINUATION_RE.sub(" ", text)))
+    joined = _LINE_CONTINUATION_RE.sub(" ", text)
+    joined = _INLINE_PARENT_ONLY_OPERAND_RE.sub("", joined)
+    return bool(_GIT_HISTORY_RE.search(joined))
 
 
 # One deliberately bounded hop into a first-party script invoked directly by a
@@ -1039,6 +1049,10 @@ def _job_needs_git_history(job: dict, job_name: str = "",
     blob = "\n".join(str(s.get("run") or "") for s in _job_steps(job))
     uses_blob = "\n".join(_step_uses_ref(s) for s in _job_steps(job))
     if _has_git_history_op(blob) or _has_git_history_op(uses_blob):
+        return True
+    # ci-score cannot print a bounded checkout depth, so parent-only operands
+    # stay exempt from its shallow-checkout advice.
+    if _script_parent_depth(blob):
         return True
     # A local composite action the job invokes may run the git op internally
     # (the workflow yaml shows only `uses: ./…` or `uses: $/…`). Consult the
