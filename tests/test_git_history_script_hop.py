@@ -271,6 +271,12 @@ def test_non_revision_depth_operand_still_allows_shallow_advice(
     assert _verdicts(engines, tmp_path, parsed) == (True, "fail")
 
 
+def test_unrelated_parent_looking_text_still_allows_shallow_advice(
+        engines, tmp_path: Path):
+    parsed = _inline_case(tmp_path, "echo HEAD^1")
+    assert _verdicts(engines, tmp_path, parsed) == (True, "fail")
+
+
 @pytest.mark.parametrize("run", [
     "sh scripts/check.sh",
     "python3 scripts/check.py",

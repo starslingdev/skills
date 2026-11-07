@@ -656,6 +656,15 @@ def _script_parent_depth(text: str) -> int:
     return max(distances, default=0) + 1 if distances else 0
 
 
+def _inline_parent_operand_depth(text: str) -> int:
+    """Finite depth required by a recognized tool revision operand."""
+    return max(
+        (_script_parent_depth(match.group(0))
+         for match in _INLINE_PARENT_ONLY_OPERAND_RE.finditer(text)),
+        default=0,
+    )
+
+
 def _local_script_needs_history(root: Path, key: str) -> bool:
     """Read exactly one invoked script; unreadable or external refs fail closed."""
     text = _read_local_script(root, key)
@@ -690,7 +699,7 @@ def _index_local_git_scripts(root: Path,
 
 
 def _job_parent_checkout_depth(job: dict, workflow: dict | None = None) -> int:
-    depth = _script_parent_depth(_job_run_blob(job))
+    depth = _inline_parent_operand_depth(_job_run_blob(job))
     for step in _steps(job):
         working_directory = _script_working_directory(job, step, workflow)
         for ref in _first_party_script_refs(str(step.get("run") or "")):

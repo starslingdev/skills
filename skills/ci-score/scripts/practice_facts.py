@@ -921,6 +921,15 @@ def _script_parent_depth(text: str) -> int:
     return max(distances, default=0) + 1 if distances else 0
 
 
+def _inline_parent_operand_depth(text: str) -> int:
+    """Finite depth required by a recognized tool revision operand."""
+    return max(
+        (_script_parent_depth(match.group(0))
+         for match in _INLINE_PARENT_ONLY_OPERAND_RE.finditer(text)),
+        default=0,
+    )
+
+
 def _local_script_needs_history(root: Path, key: str) -> bool:
     """Read exactly one invoked script; unreadable or external refs fail closed."""
     text = _read_local_script(root, key)
@@ -1052,7 +1061,7 @@ def _job_needs_git_history(job: dict, job_name: str = "",
         return True
     # ci-score cannot print a bounded checkout depth, so parent-only operands
     # stay exempt from its shallow-checkout advice.
-    if _script_parent_depth(blob):
+    if _inline_parent_operand_depth(blob):
         return True
     # A local composite action the job invokes may run the git op internally
     # (the workflow yaml shows only `uses: ./…` or `uses: $/…`). Consult the
