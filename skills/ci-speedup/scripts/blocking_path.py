@@ -2206,12 +2206,14 @@ def _cache_path_leaf(cache_path_sample: dict[str, Any] | None) -> dict[str, Any]
 def _emulated_image_compile_leaf(lines: list[str]) -> dict[str, Any] | None:
     """Measure foreign-platform compile/install work before generic cache advice."""
     compile_re = re.compile(
-        r"\b(?:go\s+(?:build|install)|xx-go\b|cargo\s+(?:build|install)|"
+        r"(?:^|&&|\|\||[;|]|\bthen\b|\bdo\b)\s*"
+        r"(?:(?:[A-Za-z_][A-Za-z0-9_]*=(?:[^\s;&|]+|'[^']*'|\"[^\"]*\"))\s+)*"
+        r"(?:(?:env|sudo|time)\s+)*(?:go\s+(?:build|install)|xx-go\b|cargo\s+(?:build|install)|"
         r"cargo\s+chef\s+cook|xx-cargo\b|(?:npm|pnpm|yarn)\s+(?:run\s+)?build|"
         r"cmake\s+(?:--build|-G)|ninja(?:\s|$)|meson\s+compile|node-gyp\b|"
         r"pip\s+wheel\b|(?:\./)?mvnw?\b[^\n;&|]*\b(?:compile|package|install)\b|"
         r"dotnet\s+(?:build|publish)|"
-        r"gradle\w*\s+.*\bbuild|make(?:\s|$))", re.IGNORECASE)
+        r"gradle\w*\s+.*\bbuild|make(?:\s|$))", re.IGNORECASE | re.MULTILINE)
     source_install_re = re.compile(
         r"(?:SKIP\w*PREBUILT\w*\s*=\s*(?:1|true)|"
         r"npm_config_build_from_source\s*=\s*(?:1|true)).*\bnpm\s+(?:ci|install)\b",

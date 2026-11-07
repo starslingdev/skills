@@ -70,6 +70,45 @@ COPY --from=build /out/server /server
     assert "OPT102" in patterns
 
 
+def test_opt102_does_not_treat_package_names_as_compile_commands(
+        tmp_path: Path):
+    apt_patterns = _write_build(
+        tmp_path,
+        "FROM debian:bookworm\nRUN apt-get update && apt-get install -y make gcc\n",
+    )
+    assert "OPT102" not in apt_patterns
+
+    other = tmp_path / "apk"
+    other.mkdir()
+    apk_patterns = _write_build(
+        other,
+        "FROM alpine:3.21\nRUN apk add ninja cmake\n",
+    )
+    assert "OPT102" not in apk_patterns
+
+
+def test_opt102_keeps_compile_tools_at_command_positions(tmp_path: Path):
+    direct = _write_build(tmp_path, "FROM debian:bookworm\nRUN make -j2\n")
+    assert "OPT102" in direct
+
+    chained = tmp_path / "chained"
+    chained.mkdir()
+    chained_patterns = _write_build(
+        chained,
+        "FROM debian:bookworm\nRUN apt-get install -y make && make -j2\n",
+    )
+    assert "OPT102" in chained_patterns
+
+
+def test_emulated_leaf_ignores_build_tool_package_arguments():
+    log = """#1 [linux/amd64 build 1/1] RUN apt-get install -y make
+#1 DONE 10.0s
+#2 [linux/arm64 build 1/1] RUN apt-get install -y make
+#2 DONE 90.0s
+"""
+    assert bp._emulated_image_compile_leaf(log.splitlines()) is None
+
+
 def test_static_hit_carries_its_release_lane(tmp_path: Path):
     _write_build(
         tmp_path,
