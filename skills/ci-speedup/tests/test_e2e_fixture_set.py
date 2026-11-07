@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -104,18 +105,25 @@ class FixtureClient:
 
 def run_fixture(path: Path, monkeypatch, tmp_path: Path) -> tuple[dict, str, list]:
     recorded = json.loads((path / "responses.json").read_text(encoding="utf-8"))
+    repo_root = tmp_path / f"{path.name}-repo"
+    shutil.copytree(path, repo_root)
+    workflow_root = repo_root / ".github/workflows"
+    workflow_root.mkdir(parents=True)
+    for workflow in (repo_root / "workflows").glob("*.yml"):
+        shutil.copy2(workflow, workflow_root / workflow.name)
     client = FixtureClient(recorded)
     monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
     monkeypatch.setattr(cr, "_root_is_clone_of", lambda *args, **kwargs: True)
     monkeypatch.setattr(cr, "_workflows_are_dirty", lambda *args, **kwargs: False)
     monkeypatch.setattr(cr, "_root_branch_skew", lambda *args, **kwargs: None)
-    scanned = scan.scan(path, CATALOG, default_branch=recorded.get("default_branch", "main"))
+    scanned = scan.scan(
+        repo_root, CATALOG, default_branch=recorded.get("default_branch", "main"))
     scanned["skill_commit_sha"] = "installed:unversioned"
     doc = cr.collect(
         scanned, recorded["repo"], max_runs=20,
         shallow_runs=recorded.get("shallow_runs", 20),
         with_logs=True, data_dir=tmp_path / f"{path.name}-data",
-        created_before=recorded["captured_at"], root=path)
+        created_before=recorded["captured_at"], root=repo_root)
     logs: dict[str, str] = {}
     steps: dict[str, dict] = {}
     mags: dict[str, dict] = {}
