@@ -35,6 +35,8 @@ category: 7
 
 **Guardrail**: moving coverage after merge means a regression can land on the default branch before it is caught. Keep that window short and owned: every merged commit must be covered (a post-merge or merge-queue run starts on every merge; a scheduled run tests the latest merged tree, so it must run often enough to keep the window short), its failures must reach someone, and a release must not ship a commit the full matrix has not passed. Never move a leg whose failures are often unique to it.
 
+**Measurable safety bar (REQUIRED)**: Evaluate at least the last N merged PRs and report the selectable share: how often the proposed PR subset would have preserved the full matrix's decision. Deliberately plant a defect aimed at a proposed post-merge-only leg and replay known red commits; the retained PR checks must catch every failure the team says must block a merge. Include changed tests, data-file edges and test neighbours when choosing the subset. If the evidence does not justify removing a leg from the merge gate, it is not a speedup.
+
 **Sizing: uncredited**. No `_SIZING` model. The ceiling is the measured share of the PR's wait spent on the legs that move; what remains is the subset's time.
 
 **Real-world example (OpenAI)**, their numbers, not a forecast for your repo:

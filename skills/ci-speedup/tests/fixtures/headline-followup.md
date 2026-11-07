@@ -125,6 +125,7 @@ DELIVER & VERIFY
 <summary><strong>OPT25 - Shard imbalance</strong> · ~4m 10s wall-clock · MEDIUM · 1 across 1 wf</summary>
 
 **Where:** `test.yml` (tests)
+**Activity:** not measured.
 **Wall-clock:** unlike the other findings in this section, this one **sits ON the merge-gating critical path** (a long pole) - its catalog fix **cuts developer wall-clock**, it is not a bill-only cleanup. See the spine above and this pattern's catalog recipe below for the remedy.
 **Evidence:** One shard gates the matrix.
 **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/abcdef1234567890/skills/ci-speedup/references/optimization-patterns.md
@@ -138,7 +139,7 @@ investigate it in the repo and apply a safe change.
 Pattern: OPT25 - Shard imbalance.
 Where: test.yml (tests).
 What ci-speedup saw: One shard gates the matrix.
-Concurrency order: First use OPT88 to measure and fill the existing job's idle cores; only then add shards or jobs.
+Concurrency order: First use OPT88 to measure and fill the existing job's idle cores; only then add shards or jobs. Before adding workers, confirm that they cannot interfere through a shared external server.
 Runner-minute effect: With safe in-job concurrency, runner minutes go down because the same job finishes sooner; extra shard jobs repeat checkout and setup and bill each job, so a saturated runner buys more wall-clock speed only by spending runner minutes.
 Saving: developer WALL-CLOCK (~4m 10s) - this job is a long pole ON the merge-gating critical path, so its catalog fix shortens the merge wait. NOT a runner-bill cut, and NOT off the critical path.
 
