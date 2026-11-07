@@ -13,6 +13,13 @@ sys.path.insert(0, str(_SKILL_DIR / "scripts"))
 import blocking_path as bp  # noqa: E402
 
 
+def _scan(root: Path) -> list[dict]:
+    result = subprocess.run(
+        [sys.executable, str(_SCAN_SCRIPT), "--root", str(root)],
+        capture_output=True, text=True, check=True)
+    return json.loads(result.stdout)["findings"]
+
+
 def _write_build(root: Path, dockerfile: str, *, context: str = ".",
                  file: str | None = None, target: str | None = None,
                  platforms: str = "linux/amd64,linux/arm64",
@@ -321,3 +328,171 @@ def test_buildx_log_correlates_reused_operation_ids_in_order():
 """
     leaf = bp._parse_log(log)
     assert leaf is not None and leaf["magnitude"]["value"] == 90.0
+
+
+def test_opt102_raw_buildx_resolves_env_platform(tmp_path: Path):
+    wf = tmp_path / ".github/workflows/build.yml"
+    wf.parent.mkdir(parents=True)
+    wf.write_text("""on: push
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    env:
+      TARGET_PLATFORMS: linux/arm64
+    steps:
+      - run: docker buildx build --platform $TARGET_PLATFORMS .
+""", encoding="utf-8")
+    (tmp_path / "Dockerfile").write_text(
+        "FROM golang:1.23\nRUN go build -o /server ./cmd/server\n", encoding="utf-8")
+    assert any(f["pattern"] == "OPT102" for f in _scan(tmp_path))
+
+
+def test_opt102_raw_build_resolves_earlier_step_output(tmp_path: Path):
+    wf = tmp_path / ".github/workflows/build.yml"
+    wf.parent.mkdir(parents=True)
+    wf.write_text("""on: push
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    steps:
+      - id: choose
+        run: echo "platform=linux/arm64" >> "$GITHUB_OUTPUT"
+      - run: docker build --platform ${{ steps.choose.outputs.platform }} .
+""", encoding="utf-8")
+    (tmp_path / "Dockerfile").write_text(
+        "FROM golang:1.23\nRUN go build -o /server ./cmd/server\n", encoding="utf-8")
+    assert any(f["pattern"] == "OPT102" for f in _scan(tmp_path))
+
+
+def test_opt102_matrix_resolves_platform_and_runner_per_leg(tmp_path: Path):
+    wf = tmp_path / ".github/workflows/build.yml"
+    wf.parent.mkdir(parents=True)
+    wf.write_text("""on: push
+jobs:
+  image:
+    strategy:
+      matrix:
+        include:
+          - platform: linux/arm/v7
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - run: docker buildx build --platform ${{ matrix.platform }} .
+""", encoding="utf-8")
+    (tmp_path / "Dockerfile").write_text(
+        "FROM golang:1.23\nRUN go build -o /server ./cmd/server\n", encoding="utf-8")
+    hits = [f for f in _scan(tmp_path) if f["pattern"] == "OPT102"]
+    assert len(hits) == 1
+    assert "linux/arm/v7" in hits[0]["evidence"]
+
+
+def test_opt102_reusable_caller_resolves_dockerfile_input(tmp_path: Path):
+    wd = tmp_path / ".github/workflows"
+    wd.mkdir(parents=True)
+    (wd / "caller.yml").write_text("""on: push
+jobs:
+  image:
+    uses: ./.github/workflows/image.yml
+    with:
+      dockerfile: docker/release.Dockerfile
+""", encoding="utf-8")
+    (wd / "image.yml").write_text("""on:
+  workflow_call:
+    inputs:
+      dockerfile:
+        type: string
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/build-push-action@v6
+        with:
+          file: ${{ inputs.dockerfile }}
+          platforms: linux/arm64
+""", encoding="utf-8")
+    dockerfile = tmp_path / "docker/release.Dockerfile"
+    dockerfile.parent.mkdir()
+    dockerfile.write_text("FROM golang:1.23\nRUN go build ./...\n", encoding="utf-8")
+    assert any(f["pattern"] == "OPT102" for f in _scan(tmp_path))
+
+
+def test_opt102_heredoc_ninja_and_native_npm_install(tmp_path: Path):
+    patterns = _write_build(tmp_path, """FROM node:22
+ENV npm_config_build_from_source=true
+RUN <<'BUILD'
+npm ci
+cmake -GNinja -S . -B build
+ninja -C build
+BUILD
+""", platforms="linux/arm64")
+    assert "OPT102" in patterns
+
+
+def test_opt102_unresolved_output_and_plain_install_stay_silent(tmp_path: Path):
+    wf = tmp_path / ".github/workflows/build.yml"
+    wf.parent.mkdir(parents=True)
+    wf.write_text("""on: push
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - id: choose
+        run: echo dynamic
+      - uses: docker/build-push-action@v6
+        with:
+          file: ${{ steps.choose.outputs.file }}
+          platforms: linux/arm64
+""", encoding="utf-8")
+    (tmp_path / "Dockerfile").write_text(
+        "FROM node:22\nRUN apk add git\nRUN npm ci\n", encoding="utf-8")
+    assert not any(f["pattern"] == "OPT102" for f in _scan(tmp_path))
+
+
+def test_opt102_native_platform_and_install_only_dockerfile_stay_silent(tmp_path: Path):
+    patterns = _write_build(tmp_path, """FROM node:22
+RUN apk add git
+RUN npm ci
+""", platforms="linux/amd64")
+    assert "OPT102" not in patterns
+
+
+def test_opt102_uses_hosted_x64_fallback_from_runs_on_expression(tmp_path: Path):
+    wf = tmp_path / ".github/workflows/build.yml"
+    wf.parent.mkdir(parents=True)
+    wf.write_text("""on: push
+jobs:
+  image:
+    strategy:
+      matrix:
+        arm: [false]
+    runs-on: ${{ matrix.arm && 'self-hosted-arm' || 'ubuntu-24.04' }}
+    steps:
+      - run: docker buildx build --platform linux/arm64 .
+""", encoding="utf-8")
+    (tmp_path / "Dockerfile").write_text(
+        "FROM golang:1.23\nRUN go build -o /server ./cmd/server\n", encoding="utf-8")
+    hit = next(f for f in _scan(tmp_path) if f["pattern"] == "OPT102")
+    assert "hosted x64 fallback" in hit["evidence"]
+
+
+def test_buildx_log_sums_chef_and_foreign_only_compile():
+    log = """#10 [linux/arm64 2/4] RUN cargo chef cook --release
+#10 DONE 120.0s
+#11 [linux/arm64 3/4] RUN cargo build --release
+#11 DONE 180.0s
+"""
+    leaf = bp._parse_log(log)
+    assert leaf is not None and leaf["fix_key"] == "emulated-image-compile"
+    assert leaf["magnitude"]["value"] == 300.0
+
+
+def test_buildx_log_names_source_install_as_emulated_install():
+    log = """#12 [linux/arm64 2/2] RUN npm_config_build_from_source=true npm ci
+#12 DONE 75.0s
+"""
+    leaf = bp._parse_log(log)
+    rows = leaf["deeper"][0]["rows"] if leaf is not None else []
+    assert leaf is not None and leaf["magnitude"]["value"] == 75.0
+    assert any(row[0] == "foreign-architecture emulated install" for row in rows)

@@ -1760,8 +1760,11 @@ def _uses(step: dict) -> str:
 
 _OPT102_ROOT: Path | None = None
 _OPT102_COMPILE_RE = re.compile(
-    r"\b(?:go\s+build|cargo\s+build|(?:npm|pnpm|yarn)\s+(?:run\s+)?build|"
-    r"cmake\s+--build|dotnet\s+(?:build|publish)|gradle\w*\s+.*\bbuild|make(?:\s|$))",
+    r"\b(?:go\s+(?:build|install)|xx-go\b|cargo\s+(?:build|install)|"
+    r"cargo\s+chef\s+cook|xx-cargo\b|(?:npm|pnpm|yarn)\s+(?:run\s+)?build|"
+    r"cmake\s+(?:--build|-G)|ninja(?:\s|$)|meson\s+compile|node-gyp\b|"
+    r"pip\s+wheel\b|(?:\./)?mvnw?\s|dotnet\s+(?:build|publish)|"
+    r"gradle\w*\s+.*\bbuild|make(?:\s|$))",
     re.IGNORECASE,
 )
 # Only a stage that runs on the build platform avoids emulation. GOOS / GOARCH /
@@ -1770,119 +1773,227 @@ _OPT102_BUILDPLATFORM_RE = re.compile(
     r"--platform=\$(?:\{BUILDPLATFORM\}|BUILDPLATFORM\b)", re.IGNORECASE)
 
 
+def _opt102_workflow_rel(root: Path, raw: str) -> str | None:
+    for path in sorted((root / ".github/workflows").glob("*.y*ml")):
+        try:
+            if path.read_text(encoding="utf-8", errors="replace") == raw:
+                return str(path.relative_to(root))
+        except OSError:
+            continue
+    return None
+
+
+def _opt102_caller_inputs(root: Path, callee: str | None) -> dict[str, str]:
+    if not callee:
+        return {}
+    values: dict[str, set[str]] = {}
+    for path in sorted((root / ".github/workflows").glob("*.y*ml")):
+        try:
+            caller = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            continue
+        for spec in _jobs_from_doc(caller).values():
+            if not isinstance(spec, dict):
+                continue
+            uses = str(spec.get("uses") or "").removeprefix("./")
+            if uses != callee:
+                continue
+            for key, value in (spec.get("with") or {}).items():
+                if isinstance(value, (str, int, float)) and "${{" not in str(value):
+                    values.setdefault(str(key), set()).add(str(value))
+    return {key: next(iter(found)) for key, found in values.items() if len(found) == 1}
+
+
+def _opt102_matrix_legs(job: dict) -> list[dict[str, str]]:
+    matrix = ((job.get("strategy") or {}).get("matrix")
+              if isinstance(job.get("strategy"), dict) else None)
+    if not isinstance(matrix, dict):
+        return [{}]
+    include = matrix.get("include")
+    if isinstance(include, list):
+        rows = [{str(k): str(v) for k, v in row.items()}
+                for row in include if isinstance(row, dict)]
+        if rows:
+            return rows
+    axes = [(str(key), [str(v) for v in value]) for key, value in matrix.items()
+            if key not in {"include", "exclude"} and isinstance(value, list) and value]
+    legs = [{}]
+    for key, values in axes:
+        legs = [{**leg, key: value} for leg in legs for value in values]
+    return legs
+
+
+def _opt102_resolve(value: Any, *, env: dict[str, str], matrix: dict[str, str],
+                    inputs: dict[str, str], outputs: dict[str, str]) -> str | None:
+    text = str(value or "")
+    lookups = {**{f"matrix.{k}": v for k, v in matrix.items()},
+               **{f"inputs.{k}": v for k, v in inputs.items()},
+               **{f"env.{k}": v for k, v in env.items()}, **outputs}
+    def expr(match: re.Match[str]) -> str:
+        key = match.group(1).strip()
+        return lookups.get(key, match.group(0))
+    text = re.sub(r"\$\{\{\s*([^}]+?)\s*\}\}", expr, text)
+    text = re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}",
+                  lambda m: env.get(m.group(1), m.group(0)), text)
+    text = re.sub(r"\$([A-Za-z_][A-Za-z0-9_]*)",
+                  lambda m: env.get(m.group(1), m.group(0)), text)
+    return None if "${{" in text or re.search(r"\$[{A-Za-z_]", text) else text.strip()
+
+
+def _opt102_x64_runner(value: Any, matrix: dict[str, str]) -> tuple[bool, str]:
+    raw = str(value or "")
+    resolved = _opt102_resolve(raw, env={}, matrix=matrix, inputs={}, outputs={})
+    note = ""
+    if resolved is None and "||" in raw:
+        fallback = re.search(r"\|\|\s*['\"]?([^'\"\s}]+)", raw)
+        resolved = fallback.group(1) if fallback else None
+        note = " (hosted x64 fallback of the runs-on expression)" if resolved else ""
+    if not resolved:
+        return False, ""
+    low = resolved.lower()
+    hosted = low in {"ubuntu-latest", "ubuntu-24.04", "ubuntu-22.04", "ubuntu-20.04"}
+    return hosted and "arm" not in low, note
+
+
+def _opt102_risky_stage(candidate: Path, target: str) -> tuple[str, str] | None:
+    try:
+        docker_text = candidate.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    raw_stages = [stage for stage in re.split(r"(?im)(?=^\s*FROM\s+)", docker_text)
+                  if re.match(r"(?i)^\s*FROM\s+", stage)]
+    stages: list[tuple[str, str, set[str]]] = []
+    aliases: dict[str, int] = {}
+    on_build_platform: list[bool] = []
+    for stage in raw_stages:
+        clean = "\n".join(line for line in stage.splitlines()
+                          if not line.lstrip().startswith("#"))
+        header = clean.splitlines()[0].strip()
+        match = re.match(r"(?i)^FROM(?:\s+--\S+)*\s+(\S+)(?:\s+AS\s+(\S+))?", header)
+        if not match:
+            continue
+        refs = {match.group(1)} | set(re.findall(
+            r"(?im)^\s*COPY\b[^\n]*?--from=([^\s]+)", clean))
+        base = aliases.get(match.group(1).lower())
+        on_build_platform.append(bool(_OPT102_BUILDPLATFORM_RE.search(header)
+                                      or (base is not None and on_build_platform[base])))
+        stages.append((header, clean, refs))
+        if match.group(2):
+            aliases[match.group(2).lower()] = len(stages) - 1
+    if not stages:
+        return None
+    selected = aliases.get(target.lower()) if target else len(stages) - 1
+    if selected is None:
+        return None
+    reachable, pending = set(), [selected]
+    while pending:
+        index = pending.pop()
+        if index in reachable or index >= len(stages):
+            continue
+        reachable.add(index)
+        for ref in stages[index][2]:
+            ref_index = (int(ref) if ref.isdigit() and int(ref) < len(stages)
+                         else aliases.get(ref.lower()))
+            if ref_index is not None:
+                pending.append(ref_index)
+    for index in sorted(reachable):
+        header, clean, _refs = stages[index]
+        source_install = bool(re.search(
+            r"(?im)^\s*ENV\s+[^\n]*(?:SKIP[^=\s]*PREBUILT|npm_config_build_from_source)\s*=\s*(?:1|true)",
+            clean))
+        risky = bool(_OPT102_COMPILE_RE.search(clean))
+        if source_install and re.search(r"\bnpm\s+(?:ci|install)\b", clean, re.I):
+            risky = True
+        if risky and not on_build_platform[index]:
+            return header, clean
+    return None
+
+
 def _detect_opt102(doc: dict, raw: str) -> list[Hit]:
-    """Find local multi-platform image builds whose compile stage lacks a
-    build-platform pin or an explicit cross-compilation target."""
+    """Find local foreign-platform image builds that compile under emulation."""
     if _OPT102_ROOT is None:
         return []
     root = _OPT102_ROOT.resolve()
     jobs = doc.get("jobs") or {}
     if not isinstance(jobs, dict):
         return []
+    rel = _opt102_workflow_rel(root, raw)
+    caller_inputs = _opt102_caller_inputs(root, rel)
     hits: list[Hit] = []
     for job_name, job in jobs.items():
         if not isinstance(job, dict):
             continue
-        for step in _steps(job):
-            if not re.match(r"^docker/build-push-action@", _uses(step)):
+        for matrix in _opt102_matrix_legs(job):
+            x64, runner_note = _opt102_x64_runner(job.get("runs-on"), matrix)
+            if not x64:
                 continue
-            with_ = step.get("with") or {}
-            if not isinstance(with_, dict):
-                continue
-            value = with_.get("platforms")
-            if isinstance(value, list):
-                platforms = [str(item).strip().lower() for item in value]
-            else:
-                platforms = [item.strip().lower() for item in
-                             re.split(r"[,\n]", str(value or "")) if item.strip()]
-            # Hosted x64 runners are the assumed build platform; an arm runner
-            # (or an unresolved expression) leaves the host unknown, so stay silent.
-            runs_on = json.dumps(job.get("runs-on")).lower()
-            if "arm" in runs_on or "${{" in runs_on:
-                continue
-            if not any(p.startswith("linux/") and p != "linux/amd64"
-                       for p in platforms):
-                continue
-            context = str(with_.get("context") or ".").strip()
-            dockerfile = str(with_.get("file") or "Dockerfile").strip()
-            target = str(with_.get("target") or "").strip()
-            if (not context or not dockerfile or "${{" in context + dockerfile + target
-                    or "://" in context or context.startswith("git@")
-                    or Path(context).is_absolute() or Path(dockerfile).is_absolute()):
-                continue
-            candidate = (root / dockerfile if "file" in with_
-                         else root / context / dockerfile).resolve()
-            try:
-                candidate.relative_to(root)
-                docker_text = candidate.read_text(encoding="utf-8", errors="replace")
-            except (ValueError, OSError):
-                continue
-            raw_stages = [stage for stage in
-                          re.split(r"(?im)(?=^\s*FROM\s+)", docker_text)
-                          if re.match(r"(?i)^\s*FROM\s+", stage)]
-            stages: list[tuple[str, str, set[str]]] = []
-            aliases: dict[str, int] = {}
-            on_build_platform: list[bool] = []
-            for index, stage in enumerate(raw_stages):
-                clean = "\n".join(line for line in stage.splitlines()
-                                  if not line.lstrip().startswith("#"))
-                header = clean.splitlines()[0].strip()
-                header_match = re.match(
-                    r"(?i)^FROM(?:\s+--\S+)*\s+(\S+)(?:\s+AS\s+(\S+))?", header)
-                if not header_match:
-                    continue
-                refs = {header_match.group(1)}
-                refs.update(re.findall(
-                    r"(?im)^\s*COPY\b[^\n]*?--from=([^\s]+)", clean))
-                base = aliases.get(header_match.group(1).lower())
-                on_build_platform.append(bool(
-                    _OPT102_BUILDPLATFORM_RE.search(header)
-                    or (base is not None and on_build_platform[base])))
-                stages.append((header, clean, refs))
-                if header_match.group(2):
-                    aliases[header_match.group(2).lower()] = index
-            if not stages:
-                continue
-            if target:
-                selected = aliases.get(target.lower())
-                if selected is None:
-                    continue
-            else:
-                selected = len(stages) - 1
-            reachable: set[int] = set()
-            pending = [selected]
-            while pending:
-                index = pending.pop()
-                if index in reachable or index >= len(stages):
-                    continue
-                reachable.add(index)
-                for ref in stages[index][2]:
-                    ref_index = (int(ref) if ref.isdigit() and int(ref) < len(stages)
-                                 else aliases.get(ref.lower()))
-                    if ref_index is not None:
-                        pending.append(ref_index)
-            risky_stage = None
-            for index in sorted(reachable):
-                header, clean, _refs = stages[index]
-                runs = re.findall(
-                    r"(?ims)^\s*RUN\s+(.+?)(?=^\s*[A-Z][A-Z0-9]*\s+|\Z)", clean)
-                if (any(_OPT102_COMPILE_RE.search(run) for run in runs)
-                        and not on_build_platform[index]):
-                    risky_stage = (header, clean)
-                    break
-            if risky_stage is None:
-                continue
-            line = _line_of_in_job(raw, str(job_name), "docker/build-push-action@")
-            stage_head = risky_stage[0]
-            hits.append(Hit(
-                line=line,
-                affected_jobs=[str(job_name)],
-                evidence=(f"job `{job_name}` builds {', '.join(platforms)} from "
-                          f"`{candidate.relative_to(root)}`; compile stage "
-                          f"`{stage_head}` has no build-platform or cross-target signal"),
-                match_text=str(candidate.relative_to(root)),
-                snippet=_raw_line(raw, line),
-            ))
+            env = {str(k): str(v) for k, v in (job.get("env") or {}).items()}
+            outputs: dict[str, str] = {}
+            for step in _steps(job):
+                step_env = {**env, **{str(k): str(v) for k, v in (step.get("env") or {}).items()}}
+                resolved_env = {k: (_opt102_resolve(v, env=step_env, matrix=matrix,
+                                                   inputs=caller_inputs, outputs=outputs) or v)
+                                for k, v in step_env.items()}
+                uses_action = bool(re.match(r"^docker/build-push-action@", _uses(step)))
+                run = str(step.get("run") or "")
+                raw_build = re.search(r"\bdocker\s+(?:buildx\s+)?build\b", run)
+                config: dict[str, Any] | None = None
+                marker = "docker/build-push-action@"
+                if uses_action:
+                    config = dict(step.get("with") or {}) if isinstance(step.get("with"), dict) else {}
+                elif raw_build:
+                    platform = re.search(
+                        r"--platform(?:=|\s+)(\$\{\{.*?\}\}|[^\s]+)", run)
+                    file_match = re.search(
+                        r"(?:--file|-f)(?:=|\s+)(\$\{\{.*?\}\}|[^\s]+)", run)
+                    config = {"platforms": platform.group(1) if platform else "",
+                              "file": file_match.group(1) if file_match else "Dockerfile",
+                              "context": "."}
+                    marker = "docker build"
+                if config is not None:
+                    resolved = {key: _opt102_resolve(value, env=resolved_env, matrix=matrix,
+                                                     inputs=caller_inputs, outputs=outputs)
+                                for key, value in config.items()}
+                    if any(value is None for value in resolved.values()):
+                        config = None
+                    else:
+                        platforms = [p.strip().lower() for p in re.split(
+                            r"[,\n]", str(resolved.get("platforms") or "")) if p.strip()]
+                        foreign = [p for p in platforms
+                                   if p.startswith("linux/") and p != "linux/amd64"]
+                        if foreign:
+                            context = str(resolved.get("context") or ".")
+                            dockerfile = str(resolved.get("file") or "Dockerfile")
+                            target = str(resolved.get("target") or "")
+                            if (context and dockerfile and "://" not in context
+                                    and not Path(context).is_absolute()
+                                    and not Path(dockerfile).is_absolute()):
+                                candidate = (root / dockerfile if "file" in resolved
+                                             else root / context / dockerfile).resolve()
+                                try:
+                                    candidate.relative_to(root)
+                                except ValueError:
+                                    candidate = root.parent / "__outside__"
+                                risky = _opt102_risky_stage(candidate, target)
+                                if risky is not None:
+                                    line = _line_of_in_job(raw, str(job_name), marker)
+                                    hits.append(Hit(
+                                        line=line, affected_jobs=[str(job_name)],
+                                        evidence=(f"job `{job_name}` builds {', '.join(foreign)} "
+                                                  f"from `{candidate.relative_to(root)}`; "
+                                                  f"compile stage `{risky[0]}` has no "
+                                                  f"build-platform signal{runner_note}"),
+                                        match_text=str(candidate.relative_to(root)),
+                                        snippet=_raw_line(raw, line)))
+                step_id = str(step.get("id") or "")
+                if step_id:
+                    for key, value in re.findall(
+                            r"echo\s+['\"]?([A-Za-z_][\w-]*)=([^'\"\s]+).*GITHUB_OUTPUT", run):
+                        resolved_value = _opt102_resolve(
+                            value, env=resolved_env, matrix=matrix,
+                            inputs=caller_inputs, outputs=outputs)
+                        if resolved_value is not None:
+                            outputs[f"steps.{step_id}.outputs.{key}"] = resolved_value
     return hits
 
 

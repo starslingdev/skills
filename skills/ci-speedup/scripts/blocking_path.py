@@ -2204,44 +2204,60 @@ def _cache_path_leaf(cache_path_sample: dict[str, Any] | None) -> dict[str, Any]
 
 
 def _emulated_image_compile_leaf(lines: list[str]) -> dict[str, Any] | None:
-    """Measure foreign-platform compile work before generic BuildKit cache advice."""
+    """Measure foreign-platform compile/install work before generic cache advice."""
     compile_re = re.compile(
-        r"\b(?:go\s+build|cargo\s+build|(?:npm|pnpm|yarn)\s+(?:run\s+)?build|"
-        r"cmake\s+--build|dotnet\s+(?:build|publish)|gradle\w*\s+.*\bbuild|"
-        r"make(?:\s|$))", re.IGNORECASE)
-    operations: dict[str, tuple[str, str]] = {}
-    durations: list[tuple[str, float, str, str]] = []
+        r"\b(?:go\s+(?:build|install)|xx-go\b|cargo\s+(?:build|install)|"
+        r"cargo\s+chef\s+cook|xx-cargo\b|(?:npm|pnpm|yarn)\s+(?:run\s+)?build|"
+        r"cmake\s+(?:--build|-G)|ninja(?:\s|$)|meson\s+compile|node-gyp\b|"
+        r"pip\s+wheel\b|(?:\./)?mvnw?\s|dotnet\s+(?:build|publish)|"
+        r"gradle\w*\s+.*\bbuild|make(?:\s|$))", re.IGNORECASE)
+    source_install_re = re.compile(
+        r"(?:SKIP\w*PREBUILT\w*\s*=\s*(?:1|true)|"
+        r"npm_config_build_from_source\s*=\s*(?:1|true)).*\bnpm\s+(?:ci|install)\b",
+        re.IGNORECASE)
+    operations: dict[str, tuple[str, str, str]] = {}
+    durations: list[tuple[str, float, str, str, str]] = []
     for line in lines:
         match = re.search(r"#(\d+)\s+\[linux/([^\s\]]+)[^\]]*\]\s+RUN\s+(.+)", line)
-        if match and compile_re.search(match.group(3)):
-            operations[match.group(1)] = (match.group(2).lower(), line)
-            continue
+        if match:
+            command = match.group(3)
+            kind = "install" if source_install_re.search(command) else "compile"
+            if kind == "install" or compile_re.search(command):
+                operations[match.group(1)] = (match.group(2).lower(), line, kind)
+                continue
         done = re.search(r"#(\d+)\s+DONE\s+([\d.]+)s\b", line)
         if done and done.group(1) in operations:
-            arch, header = operations.pop(done.group(1))
-            durations.append((arch, float(done.group(2)), header, line))
-    native = sum(seconds for arch, seconds, _header, _done in durations
+            arch, header, kind = operations.pop(done.group(1))
+            durations.append((arch, float(done.group(2)), header, line, kind))
+    native = sum(seconds for arch, seconds, _header, _done, _kind in durations
                  if arch in {"amd64", "x86_64"})
-    emulated = sum(seconds for arch, seconds, _header, _done in durations
-                   if arch not in {"amd64", "x86_64"})
+    emulated_compile = sum(seconds for arch, seconds, _header, _done, kind in durations
+                           if arch not in {"amd64", "x86_64"} and kind == "compile")
+    emulated_install = sum(seconds for arch, seconds, _header, _done, kind in durations
+                           if arch not in {"amd64", "x86_64"} and kind == "install")
+    emulated = emulated_compile + emulated_install
     total = native + emulated
-    if native <= 0 or emulated <= 0 or emulated / total < 0.50:
+    if emulated <= 0 or (native > 0 and emulated / total < 0.50):
         return None
     share = round(100 * emulated / total)
+    rows = []
+    if native > 0:
+        rows.append(("native linux/amd64 compile/install", native, None))
+    if emulated_compile > 0:
+        rows.append(("foreign-architecture compile", emulated_compile, None))
+    if emulated_install > 0:
+        rows.append(("foreign-architecture emulated install", emulated_install, None))
+    scope = "foreign-only" if native <= 0 else f"{share}% of measured compile/install time"
     leaf: dict[str, Any] = {
         "fix_key": "emulated-image-compile",
-        "unit_label": (f"native compile {native:g}s; foreign-architecture compile "
-                       f"{emulated:g}s ({share}% of measured compile time)"),
+        "unit_label": (f"native compile/install {native:g}s; foreign-architecture "
+                       f"compile/install {emulated:g}s ({scope})"),
         "magnitude": {"label": "emulated compile seconds", "unit": "s",
                       "value": round(emulated, 3)},
-        "deeper": [{
-            "rows": [("native linux/amd64 compile", native, None),
-                     ("foreign-architecture compile", emulated, None)],
-            "blocker_note": (f"foreign-architecture work is {share}% of measured "
-                             "compile time"),
-            "pct_of": "sum",
-        }],
-        "evidence": [item for _arch, _seconds, header, done in durations
+        "deeper": [{"rows": rows,
+                    "blocker_note": (f"foreign-architecture work is {scope}"),
+                    "pct_of": "sum"}],
+        "evidence": [item for _arch, _seconds, header, done, _kind in durations
                      for item in (header, done)][:6],
         "search": ["docker/build-push-action", "BUILDPLATFORM", "TARGETARCH"],
     }
@@ -2250,8 +2266,7 @@ def _emulated_image_compile_leaf(lines: list[str]) -> dict[str, Any] | None:
         leaf["config_fact"] = (
             "The measured build command explicitly includes `--no-cache`; treat that "
             "flag as an intentional cache bypass to confirm, and do not infer layer-cache "
-            "advice from this run."
-        )
+            "advice from this run.")
     return leaf
 
 
