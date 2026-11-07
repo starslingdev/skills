@@ -22,7 +22,7 @@ not measured: lifecycle data was not collected
 >
 > **`.github/workflows/publish_release.yml` changed ~114 days ago - narrowed to the current configuration.** This audit measures only the 14 runs since that change; the 6 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
-> **`.github/workflows/tests_bidi.yml` changed ~118 days ago - narrowed to the current configuration.** This audit measures only the 8 runs since that change; the 12 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/tests_bidi.yml` changed ~119 days ago - narrowed to the current configuration.** This audit measures only the 8 runs since that change; the 12 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
 > **`.github/workflows/tests_secondary.yml` changed ~126 days ago - narrowed to the current configuration.** This audit measures only the 18 runs since that change; the 2 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
@@ -520,7 +520,7 @@ DELIVER & VERIFY
 <summary><strong>OPT43 - Excessive Queue Time</strong> · worst savable wait 5m 48s · MEDIUM · 41 across 3 wf</summary>
 
 **Where:** `tests_mcp.yml` (windows-latest - msedge), `tests_mcp.yml` (ubuntu-latest - firefox), `tests_mcp.yml` (macos-latest - chrome), `tests_mcp.yml` (macos-latest - chromium), `tests_mcp.yml` (ubuntu-latest - chromium), `tests_mcp.yml` (macos-latest - webkit), `tests_mcp.yml` (windows-latest - firefox), `tests_mcp.yml` (windows-latest - chromium), +33 more
-**Activity:** 32262 runs in 30 days · most recent 2026-07-24.
+**Activity:** 1954 runs in 30 days · most recent 2026-07-24.
 **Evidence:** job `windows-latest - msedge` P90 queue 4396s over 8 runs (threshold 60s for PR workflows)
 **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt43--excessive-queue-time
 
@@ -927,7 +927,7 @@ failure mode and how you have guarded it before shipping.
 <summary><strong>OPT24 - Long Test Job Without Sharding</strong> · ~6m 51s wall-clock · HIGH · 9 across 2 wf</summary>
 
 **Where:** `tests_primary.yml` (Installation Test ubuntu-latest), `tests_primary.yml` (Installation Test windows-latest), `tests_primary.yml` (Installation Test macos-latest), `tests_secondary.yml` (time test runner - realtime), `tests_secondary.yml` (Test chrome on ubuntu-22.04), `tests_secondary.yml` (Test chrome-beta on ubuntu-22.04), `tests_secondary.yml` (time test runner - frozen), `tests_secondary.yml` (Test chrome on macos-latest), +1 more
-**Activity:** 4350 runs in 30 days · most recent 2026-07-24.
+**Activity:** 1114 runs in 30 days · most recent 2026-07-24.
 **Wall-clock:** this job carries a real wall-clock saving, but the spine demotes it as **opt-in / rare** - it runs on only a minority of sampled PRs, so a typical PR doesn't wait on it (see the spine's opt-in footnote above). Its fix cuts wall-clock on the PRs that DO run it, not on the typical merge path.
 **Evidence:** job `Test chrome on macos-latest` p50 3573s over 4 runs, no shard axis observed (job names lack a `shard` / `partition` matrix marker)
 **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt24--long-test-job-without-sharding
@@ -1571,7 +1571,7 @@ failure mode and how you have guarded it before shipping.
 
 | Source | Coverage | Used for |
 | --- | --- | --- |
-| ci-speedup static scan (skill commit `2f048be`, scripts tree `463d800`) | All `.github/workflows/*.yml` under the analyzed tree (3827650) | Static pattern detection (full OPT catalog) |
+| ci-speedup static scan (skill commit `2f048be`, scripts tree `d0e3bc2-dirty`) | All `.github/workflows/*.yml` under the analyzed tree (3827650) | Static pattern detection (full OPT catalog) |
 | gh runs/jobs API (timestamps) | 161 runs / 1630 jobs sampled | Critical-path + per-step P50 |
 | job logs | not run | Sampled only for a slow pole worth log-level inspection |
 | workflow YAML | 18 from the analyzed checkout | `on:` triggers, matrix/shard axes, job timeouts (detector inputs) |

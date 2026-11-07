@@ -83,6 +83,71 @@ RUN go build -o /out/server ./cmd/server
     assert finding["workflow_lanes"] == ["release"]
 
 
+def test_static_hit_distinguishes_unscoped_and_tag_only_pushes(tmp_path: Path):
+    _write_build(
+        tmp_path,
+        """FROM golang:1.23 AS build
+RUN go build -o /out/server ./cmd/server
+""",
+    )
+    result = subprocess.run(
+        [sys.executable, str(_SCAN_SCRIPT), "--root", str(tmp_path)],
+        capture_output=True, text=True, check=True)
+    finding = next(
+        row for row in json.loads(result.stdout)["findings"]
+        if row["pattern"] == "OPT102")
+    assert finding["workflow_push_scopes"] == ["unscoped"]
+
+    workflow = tmp_path / ".github" / "workflows" / "build.yml"
+    workflow.write_text(
+        workflow.read_text(encoding="utf-8").replace(
+            "on: push", "on:\n  push:\n    tags: ['v*']"),
+        encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(_SCAN_SCRIPT), "--root", str(tmp_path)],
+        capture_output=True, text=True, check=True)
+    finding = next(
+        row for row in json.loads(result.stdout)["findings"]
+        if row["pattern"] == "OPT102")
+    assert finding["workflow_push_scopes"] == ["tag_only"]
+
+
+def test_reusable_static_hit_inherits_its_callers_lane(tmp_path: Path):
+    workflow_dir = tmp_path / ".github" / "workflows"
+    workflow_dir.mkdir(parents=True)
+    (workflow_dir / "release.yml").write_text(
+        """on: release
+jobs:
+  image:
+    uses: ./.github/workflows/image.yml
+""",
+        encoding="utf-8")
+    (workflow_dir / "image.yml").write_text(
+        """on: workflow_call
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+""",
+        encoding="utf-8")
+    (tmp_path / "Dockerfile").write_text(
+        "FROM golang:1.23 AS build\nRUN go build -o /out/server ./cmd/server\n",
+        encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, str(_SCAN_SCRIPT), "--root", str(tmp_path)],
+        capture_output=True, text=True, check=True)
+    finding = next(
+        row for row in json.loads(result.stdout)["findings"]
+        if row["pattern"] == "OPT102")
+    assert finding["workflow_file"].endswith("image.yml")
+    assert finding["workflow_lanes"] == ["release"]
+
+
 def test_opt102_accepts_explicit_cross_compile(tmp_path: Path):
     patterns = _write_build(
         tmp_path,

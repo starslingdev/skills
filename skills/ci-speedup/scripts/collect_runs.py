@@ -38,6 +38,7 @@ import subprocess
 import sys
 import threading
 import time
+from urllib.parse import quote
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -4040,7 +4041,8 @@ def _push_volume_endpoint(repo: str, wf_id: int, default_branch: str,
     since_iso, upper = _window_30d(created_before)
     created = f"{since_iso}..{upper}" if upper else f">={since_iso}"
     return (f"repos/{repo}/actions/workflows/{wf_id}/runs"
-            f"?per_page=1&event=push&branch={default_branch}&created={created}")
+            f"?per_page=1&event=push&branch={quote(default_branch, safe='')}"
+            f"&created={created}")
 
 
 def _run_list_endpoint(repo: str, wf_id: int, max_runs: int,
@@ -27615,10 +27617,11 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     _pushes_30d = len(_recent_push_shas)
     # A full all-status page whose oldest row is still inside the window cannot
     # prove the 30-day count. Pay for one count-only probe for that workflow.
-    # Different workflows generally see the same pushed commits, so take the
-    # maximum probe rather than summing duplicate workflow runs; the distinct
-    # SHAs already present on the cached pages remain the lower bound.
+    # The probe counts run rows, not distinct commits. Use it only to prove that
+    # the cached page covers the filtered workflow history; distinct SHAs always
+    # come from the rows themselves.
     _push_count_probes: list[int] = []
+    _push_frequency_incomplete = False
     if default_branch and _push_window_start is not None:
         for _push_wf, _push_runs in all_status_runs_by_wf.items():
             _dated = [
@@ -27636,9 +27639,23 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             _probe = client.json(_push_volume_endpoint(
                 repo, _wf_id, default_branch, created_before))
             if isinstance(_probe, dict) and isinstance(_probe.get("total_count"), int):
-                _push_count_probes.append(int(_probe["total_count"]))
-    if _push_count_probes:
-        _pushes_30d = max(_pushes_30d, max(_push_count_probes))
+                _probe_total = int(_probe["total_count"])
+                _push_count_probes.append(_probe_total)
+                # The probe counts workflow-run ROWS, not distinct pushed SHAs.
+                # It can prove that our cached page covers the filtered workflow
+                # history, but it must never be substituted for the distinct-SHA
+                # count (reruns would inflate it).
+                _seen_recent_rows = sum(
+                    1 for row in _push_runs
+                    for parsed in [_parse_dt(str(row.get("created_at") or ""))]
+                    if (row.get("event") == "push"
+                        and row.get("head_branch") == default_branch
+                        and parsed is not None
+                        and _push_window_start <= parsed <= _push_window_end))
+                if _probe_total > _seen_recent_rows:
+                    _push_frequency_incomplete = True
+            else:
+                _push_frequency_incomplete = True
     _window_span_days = (
         int((_push_window_end - min(_push_dates)).total_seconds() // 86400)
         if _push_dates and _push_window_end is not None else 0)
@@ -27656,6 +27673,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     elif all_status_failed:
         _push_lane_status = "run_list_incomplete"
         _push_lane_reason = "push run-list coverage was incomplete"
+    elif _push_frequency_incomplete:
+        _push_lane_status = "frequency_incomplete"
+        _push_lane_reason = "the 30-day push frequency is a lower bound"
     else:
         _push_lane_status = "complete"
         _push_lane_reason = ""
@@ -27668,7 +27688,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         "pushes_30d": _pushes_30d,
         "window_span_days": _window_span_days,
         "frequency_probe_count": len(_push_count_probes),
-        "rare": _pushes_30d < _PUSH_LANE_RARE_PER_30D,
+        "rare": (_push_lane_status == "complete"
+                 and _pushes_30d < _PUSH_LANE_RARE_PER_30D),
         # Timing is filled in after the shared per-commit producer below runs.
         "job_fetch_count": 0,
         "job_fetch_failures": 0,
@@ -29730,10 +29751,18 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         _lanes = {
             str(lane) for lane in (f.get("workflow_lanes") or []) if str(lane)
         }
+        _push_scopes = {
+            str(scope) for scope in (f.get("workflow_push_scopes") or []) if str(scope)
+        }
+        _push_is_non_pr = (
+            "push" not in _lanes
+            or (bool(_push_scopes)
+                and _push_scopes <= {"tag_only", "default_branch_only"}))
         if (_lanes
                 and not (_lanes & {"pull_request", "pull_request_target", "merge_group"})
                 and _lanes <= {"release", "workflow_dispatch", "repository_dispatch",
-                               "schedule", "push"}):
+                               "schedule", "push", "tag"}
+                and _push_is_non_pr):
             f["non_pr_lane"] = True
             _lane_wall = f.get("wall_clock_p50_s")
             if (isinstance(_lane_wall, (int, float))

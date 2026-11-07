@@ -71,12 +71,14 @@ class _PushLaneClient:
 
     def __init__(self, *, include_pushes: bool = True,
                  default_branch_known: bool = True,
-                 all_status_available: bool = True) -> None:
+                 all_status_available: bool = True,
+                 frequency_probe: object = None) -> None:
         self.queries = 0
         self.errors = 0
         self.include_pushes = include_pushes
         self.default_branch_known = default_branch_known
         self.all_status_available = all_status_available
+        self.frequency_probe = frequency_probe
         self.jobs = {100: [_job("merge-gate", 100, 0, 120)]}
         for index, sha in enumerate(_PUSH_SHAS):
             base = 10000 + index * 4000
@@ -123,7 +125,8 @@ class _PushLaneClient:
                     and "status=success" not in match.group(2)):
                 return None
             if re.search(r"per_page=1(?![0-9])", match.group(2)):
-                return {"total_count": 30}
+                return ({"total_count": 30} if self.frequency_probe is None
+                        else self.frequency_probe)
             return {"workflow_runs": self._runs(int(match.group(1)))}
         match = re.match(r"repos/o/r/actions/runs/(\d+)/jobs", endpoint)
         if match:
@@ -281,6 +284,36 @@ def test_push_lane_reports_the_30_day_frequency_and_rare_window(
     assert not check.ok
 
 
+def test_truncated_push_frequency_is_a_lower_bound_when_probe_is_unusable(
+        monkeypatch, tmp_path: Path):
+    client = _PushLaneClient(frequency_probe={"message": "rate limited"})
+    monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
+    # Make the compact fixture exercise the same full-page path as production.
+    monkeypatch.setattr(cr, "_COST_RUNLIST_MAX", 13)
+
+    doc = cr.collect(
+        _doc(), "o/r", max_runs=20, shallow_runs=20,
+        created_before="2026-01-02T00:00:00Z")
+    lane = doc["default_branch_push_lane"]
+
+    assert lane["status"] == "frequency_incomplete"
+    assert lane["pushes_30d"] == len(_PUSH_SHAS)
+    assert lane["rare"] is False
+    report, findings_path, report_path = _write_artifacts(tmp_path, doc)
+    assert f"at least {len(_PUSH_SHAS)} pushes" in report.lower()
+    checks = vr.run_checks(report, report_path, findings_path, skill_repo=None)
+    assert not [check for check in checks if not check.skipped and not check.ok]
+
+
+def test_push_frequency_endpoint_quotes_the_default_branch():
+    endpoint = cr._push_volume_endpoint(
+        "o/r", 7, "release&event=pull_request#stable",
+        "2026-01-02T00:00:00Z")
+
+    assert "branch=release%26event%3Dpull_request%23stable" in endpoint
+    assert endpoint.count("&event=") == 1
+
+
 def test_frequent_push_lane_is_not_marked_rare(monkeypatch, tmp_path: Path):
     client = _PushLaneClient()
     original_runs = client._runs
@@ -359,6 +392,98 @@ def test_release_only_static_hit_is_tagged_and_never_gets_wall_clock_credit(
     mutant = report.replace(
         "**Lane:** release lane only; no merge-gate wall-clock credit.\n", "", 1)
     assert not vr.check_default_branch_push_lane_isolated(mutant, findings_path).ok
+
+
+def test_unscoped_push_static_hit_is_not_assumed_to_be_non_pr(
+        monkeypatch, tmp_path: Path):
+    client = _PushLaneClient()
+    monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
+    source = _doc()
+    source["findings"] = [{
+        "id": "f1",
+        "pattern": "OPT102",
+        "pattern_class": "static",
+        "severity": "MEDIUM",
+        "title": "Emulated compilation in a multi-platform image build",
+        "workflow_file": _PUBLISH,
+        "line": 8,
+        "affected_jobs": ["publish-image"],
+        "workflow_activity": {},
+        "workflow_lanes": ["push"],
+        "workflow_push_scopes": ["unscoped"],
+        "evidence": "a multi-platform image compiles in the build job",
+        "fix_strategy": "compile for each target without emulation",
+        "fix_recipe_anchor": "opt102",
+        "wall_clock_p50_s": 600.0,
+        "sizing_basis": "measured",
+        "realization": "direct",
+        "tier": 1,
+    }]
+
+    doc = cr.collect(
+        source, "o/r", max_runs=20, shallow_runs=20,
+        created_before="2026-01-02T00:00:00Z")
+    assert doc["findings"][0].get("non_pr_lane") is not True
+
+    report, findings_path, report_path = _write_artifacts(tmp_path, doc)
+    checks = vr.run_checks(report, report_path, findings_path, skill_repo=None)
+    assert not [check for check in checks if not check.skipped and not check.ok]
+
+
+def test_group_activity_counts_each_workflow_once(monkeypatch, tmp_path: Path):
+    client = _PushLaneClient()
+    monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
+    source = _doc()
+    source["findings"] = [
+        {
+            "id": f"f{index}",
+            "pattern": "OPT102",
+            "pattern_class": "static",
+            "severity": "MEDIUM",
+            "title": "Emulated compilation in a multi-platform image build",
+            "workflow_file": _PUBLISH,
+            "line": 8 + index,
+            "affected_jobs": ["publish-image"],
+            "workflow_activity": {},
+            "workflow_lanes": ["release"],
+            "evidence": "a multi-platform image compiles in the build job",
+            "fix_strategy": "compile for each target without emulation",
+            "fix_recipe_anchor": "opt102",
+            "runner_min_saving": 0.0,
+            "sizing_basis": "measured",
+            "realization": "direct",
+            "tier": 2,
+        }
+        for index in range(2)
+    ]
+    source["findings"][1]["workflow_lanes"] = ["schedule"]
+    doc = cr.collect(
+        source, "o/r", max_runs=20, shallow_runs=20,
+        created_before="2026-01-02T00:00:00Z")
+    expected = doc["findings"][0]["workflow_activity"]["runs_30d"]
+
+    report, findings_path, report_path = _write_artifacts(tmp_path, doc)
+    assert f"**Activity:** {expected} runs in 30 days" in report
+    assert f"**Activity:** {expected * 2} runs in 30 days" not in report
+    assert "**Lane:** release, schedule lanes; no merge-gate wall-clock credit." in report
+    checks = vr.run_checks(report, report_path, findings_path, skill_repo=None)
+    assert not [check for check in checks if not check.skipped and not check.ok]
+
+
+def test_zero_push_lane_still_verifies_non_pr_finding_invariants(
+        monkeypatch, tmp_path: Path):
+    doc = _collect(monkeypatch, include_pushes=False)
+    report, findings_path, _report_path = _write_artifacts(tmp_path, doc)
+    doc["findings"].append({
+        "pattern": "OPT102",
+        "workflow_file": _PUBLISH,
+        "workflow_lanes": ["release"],
+        "wall_clock_p50_s": 123.0,
+    })
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+
+    check = vr.check_default_branch_push_lane_isolated(report, findings_path)
+    assert not check.ok
 
 
 def test_no_default_branch_pushes_renders_an_explicit_zero_line(monkeypatch, tmp_path: Path):
