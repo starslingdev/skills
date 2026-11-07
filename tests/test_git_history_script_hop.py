@@ -265,6 +265,12 @@ def test_inline_changed_since_keeps_full_history(engines, tmp_path: Path):
     assert _verdicts(engines, tmp_path, parsed) == (False, "pass")
 
 
+def test_non_revision_vite_base_still_allows_shallow_advice(
+        engines, tmp_path: Path):
+    parsed = _inline_case(tmp_path, "vite build --base=/preview/")
+    assert _verdicts(engines, tmp_path, parsed) == (True, "fail")
+
+
 def test_non_revision_depth_operand_still_allows_shallow_advice(
         engines, tmp_path: Path):
     parsed = _inline_case(tmp_path, "pnpm ls --depth -1")

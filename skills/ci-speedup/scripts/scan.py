@@ -437,9 +437,7 @@ _GIT_HISTORY_RE = re.compile(
     # OPT28 false positive of "shallow this, no git-history op found" on a
     # change-gate job (e.g. mastra `prebuild.yml` *-check-changes jobs).
     r"dorny/paths-filter|tj-actions/changed-files|"
-    r"nx\s+affected|--affected|lerna\b.*--since|\[origin/|\.\.\.[A-Za-z]|"
-    r"--filter(?:=|\s+)[^\n]*\.\.\.\[[^\]\n]+\]|"
-    r"--(?:changedSince|changed|diffBase|base|since)(?:=|\s+)['\"]?[^\s'\"]+",
+    r"nx\s+affected|--affected|lerna\b.*--since|\[origin/|\.\.\.[A-Za-z]",
     re.I)
 # A job whose NAME signals history work (the actual git op is often hidden in a
 # repo script the YAML invokes, e.g. `node .github/scripts/auto-changeset.ts`).
@@ -476,10 +474,26 @@ def _is_local_uses(uses: str) -> bool:
 # the continuations back together before matching, so a git command whose
 # history-revealing operand sits on the next line is still seen as one command.
 _LINE_CONTINUATION_RE = re.compile(r"\\\n[ \t]*")
+_INLINE_TOOL_PREFIX = (
+    r"(?:^|[\n;&|])\s*(?:(?:env|sudo|time)\s+)*"
+    r"(?:(?:npx|bunx|yarn|pnpm\s+exec)\s+)?"
+)
+_INLINE_HISTORY_OPERAND_RE = re.compile(
+    _INLINE_TOOL_PREFIX
+    + r"(?:pnpm|turbo)\b[^\n;&|]*--filter(?:=|\s+)[^\n;&|]*\.\.\.\[[^\]\n]+\]|"
+    + _INLINE_TOOL_PREFIX
+    + r"(?:jest|vitest|eslint|nx|lerna|turbo)\b[^\n;&|]*"
+      r"--(?:changedSince|changed|diffBase|base|since)(?:=|\s+)['\"]?[^\s'\"]+",
+    re.I,
+)
 _INLINE_PARENT_ONLY_OPERAND_RE = re.compile(
-    r"--filter(?:=|\s+)['\"]?\.\.\.\[\s*HEAD(?:~\d+|\^\d*)+\s*\]['\"]?|"
-    r"--(?:changedSince|changed|diffBase|base|since)(?:=|\s+)"
-    r"['\"]?HEAD(?:~\d+|\^\d*)+['\"]?",
+    _INLINE_TOOL_PREFIX
+    + r"(?:pnpm|turbo)\b[^\n;&|]*--filter(?:=|\s+)"
+      r"['\"]?\.\.\.\[\s*HEAD(?:~\d+|\^\d*)+\s*\]['\"]?|"
+    + _INLINE_TOOL_PREFIX
+    + r"(?:jest|vitest|eslint|nx|lerna|turbo)\b[^\n;&|]*"
+      r"--(?:changedSince|changed|diffBase|base|since)(?:=|\s+)"
+      r"['\"]?HEAD(?:~\d+|\^\d*)+['\"]?",
     re.I,
 )
 
@@ -492,7 +506,8 @@ def _has_git_history_op(text: str) -> bool:
     # A parent-only operand has a safe finite checkout depth. Leave it for
     # `_job_parent_checkout_depth` instead of classifying it as full history.
     joined = _INLINE_PARENT_ONLY_OPERAND_RE.sub("", joined)
-    return bool(_GIT_HISTORY_RE.search(joined))
+    return bool(_GIT_HISTORY_RE.search(joined)
+                or _INLINE_HISTORY_OPERAND_RE.search(joined))
 
 
 # One deliberately bounded hop into a first-party script invoked directly by a
@@ -766,7 +781,8 @@ def _local_action_needs_history(root: Path, ref: str) -> bool:
         if depth > _MAX_LOCAL_ACTION_DEPTH:
             return True
         text = _read_local_history_file(root, cur)
-        if text is None or _has_git_history_op(text):
+        if (text is None or _has_git_history_op(text)
+                or _inline_parent_operand_depth(text)):
             return True
         queue += [(m.split("@")[0].strip(), depth + 1)
                   for m in _NESTED_LOCAL_USES_RE.findall(text)]
