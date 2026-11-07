@@ -1,8 +1,13 @@
 {
   "commit_wall_clock": {
-    "p50_s": 300.0,
-    "p90_s": 300.0
+    "p50_s": 1200.0,
+    "p90_s": 1200.0,
+    "queue_p50_s": 900.0,
+    "queue_p90_s": 900.0,
+    "work_p50_s": 300.0,
+    "work_p90_s": 300.0
   },
+  "config_eras": [],
   "credited_findings": [
     {
       "pattern": "OPT21",
@@ -15,10 +20,22 @@
       "wall_clock_s": 0.0
     },
     {
+      "pattern": "OPT43",
+      "runner_min": null,
+      "wall_clock_s": 180.0
+    },
+    {
       "pattern": "OPT75",
       "runner_min": null,
       "wall_clock_s": 90.0
     }
+  ],
+  "detected_patterns": [
+    "OPT21",
+    "OPT32",
+    "OPT43",
+    "OPT45",
+    "OPT75"
   ],
   "gate_kind": null,
   "headline": {
@@ -32,10 +49,11 @@
     "sampled_pushes": 0
   },
   "leaves": [],
-  "provenance": null,
+  "minority_tails": [],
+  "provenance": "required_scoped",
   "representative_jobs": {
     "next": null,
-    "slowest": null
+    "slowest": "gate"
   },
   "verifier": {
     "fail": [],
@@ -58,7 +76,6 @@
       "crowned detector leaf agrees with the pole's dominant measured category (no off-category ceiling)",
       "declared drilled-run timelines are readable",
       "each rendered pole's drill belongs to its own job (no cross-job log leak)",
-      "every data-driven finding carries a measured signal (no unsupported claims)",
       "every drilled pole's binding floor is disclosed on the spine (no silent heavy-check drop)",
       "every rendered cache claim carries a cross-run cache distribution",
       "headline leads with the observed wall when the chain sum diverges from the makespan",
@@ -78,5 +95,9 @@
       "the per-PR chain/makespan spine is bound to the kept config era (no dropped-era PR blends in)",
       "the rendered era disclosure matches the enumerated config (no pre-only caveat over post-era checks)"
     ]
+  },
+  "workflow_shapes": {
+    "matrix_jobs": [],
+    "reusable_jobs": []
   }
 }

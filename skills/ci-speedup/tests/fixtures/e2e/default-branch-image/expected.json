@@ -1,10 +1,18 @@
 {
   "commit_wall_clock": {
     "p50_s": null,
-    "p90_s": null
+    "p90_s": null,
+    "queue_p50_s": null,
+    "queue_p90_s": null,
+    "work_p50_s": null,
+    "work_p90_s": null
   },
+  "config_eras": [],
   "credited_findings": [],
-  "gate_kind": null,
+  "detected_patterns": [
+    "OPT32"
+  ],
+  "gate_kind": "pr_floor_fallback",
   "headline": {
     "check": "gate",
     "seconds": 300.0
@@ -16,7 +24,8 @@
     "sampled_pushes": 3
   },
   "leaves": [],
-  "provenance": null,
+  "minority_tails": [],
+  "provenance": "pr_floor_fallback",
   "representative_jobs": {
     "next": null,
     "slowest": null
@@ -73,5 +82,9 @@
       "the per-PR chain/makespan spine is bound to the kept config era (no dropped-era PR blends in)",
       "the rendered era disclosure matches the enumerated config (no pre-only caveat over post-era checks)"
     ]
+  },
+  "workflow_shapes": {
+    "matrix_jobs": [],
+    "reusable_jobs": []
   }
 }

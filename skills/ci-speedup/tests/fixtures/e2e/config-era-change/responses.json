@@ -1,179 +1,544 @@
 {
-  "repo": "fixture/config-era-change",
   "captured_at": "2026-01-31T00:00:00Z",
-  "default_branch": "main",
-  "required_checks": [
-    "gate"
-  ],
-  "workflows": [
+  "checks": {
+    "sha-1": [
+      {
+        "completed_at": "2026-01-28T00:05:00Z",
+        "name": "gate",
+        "started_at": "2026-01-28T00:02:00Z"
+      }
+    ],
+    "sha-2": [
+      {
+        "completed_at": "2026-01-27T00:05:00Z",
+        "name": "gate",
+        "started_at": "2026-01-27T00:02:00Z"
+      }
+    ],
+    "sha-3": [
+      {
+        "completed_at": "2026-01-26T00:05:00Z",
+        "name": "gate",
+        "started_at": "2026-01-26T00:02:00Z"
+      }
+    ],
+    "sha-4": [
+      {
+        "completed_at": "2026-01-25T00:05:00Z",
+        "name": "gate",
+        "started_at": "2026-01-25T00:02:00Z"
+      }
+    ],
+    "sha-5": [
+      {
+        "completed_at": "2026-01-24T00:05:00Z",
+        "name": "gate",
+        "started_at": "2026-01-24T00:02:00Z"
+      }
+    ],
+    "sha-6": [
+      {
+        "completed_at": "2026-01-23T00:05:00Z",
+        "name": "gate",
+        "started_at": "2026-01-23T00:02:00Z"
+      }
+    ],
+    "sha-7": [
+      {
+        "completed_at": "2026-01-22T00:05:00Z",
+        "name": "gate",
+        "started_at": "2026-01-22T00:02:00Z"
+      }
+    ],
+    "sha-8": [
+      {
+        "completed_at": "2026-01-21T00:05:00Z",
+        "name": "gate",
+        "started_at": "2026-01-21T00:02:00Z"
+      }
+    ],
+    "sha-9": [
+      {
+        "completed_at": "2026-01-20T00:05:00Z",
+        "name": "gate",
+        "started_at": "2026-01-20T00:02:00Z"
+      }
+    ]
+  },
+  "commits_by_path": [
     {
-      "id": 207,
-      "path": ".github/workflows/ci.yml",
-      "name": "CI",
-      "runs_30d": 3,
-      "runs": [
-        {
-          "id": 1001,
-          "event": "pull_request",
-          "head_branch": "feature-a",
-          "head_sha": "sha-a",
-          "status": "completed",
-          "conclusion": "success",
-          "created_at": "2026-01-28T00:00:00Z",
-          "run_started_at": "2026-01-28T00:00:00Z",
-          "updated_at": "2026-01-28T00:05:00Z"
-        },
-        {
-          "id": 1002,
-          "event": "pull_request",
-          "head_branch": "feature-b",
-          "head_sha": "sha-b",
-          "status": "completed",
-          "conclusion": "success",
-          "created_at": "2026-01-27T00:00:00Z",
-          "run_started_at": "2026-01-27T00:00:00Z",
-          "updated_at": "2026-01-27T00:05:00Z"
-        },
-        {
-          "id": 1003,
-          "event": "pull_request",
-          "head_branch": "feature-c",
-          "head_sha": "sha-c",
-          "status": "completed",
-          "conclusion": "success",
-          "created_at": "2026-01-26T00:00:00Z",
-          "run_started_at": "2026-01-26T00:00:00Z",
-          "updated_at": "2026-01-26T00:05:00Z"
+      "commit": {
+        "committer": {
+          "date": "2026-01-22T12:00:00Z"
         }
-      ]
+      },
+      "sha": "boundary-post"
+    },
+    {
+      "commit": {
+        "committer": {
+          "date": "2026-01-10T00:00:00Z"
+        }
+      },
+      "sha": "boundary-pre"
     }
   ],
+  "default_branch": "main",
   "jobs": {
     "1001": [
       {
-        "id": 1101,
-        "name": "build",
+        "completed_at": "2026-01-28T00:02:00Z",
+        "id": 10011,
         "labels": [
           "ubuntu-latest"
         ],
+        "name": "build",
         "started_at": "2026-01-28T00:00:00Z",
-        "completed_at": "2026-01-28T00:02:00Z",
         "steps": [
           {
+            "completed_at": "2026-01-28T00:02:00Z",
             "name": "build",
-            "started_at": "2026-01-28T00:00:00Z",
-            "completed_at": "2026-01-28T00:02:00Z"
+            "started_at": "2026-01-28T00:00:00Z"
           }
         ]
       },
       {
-        "id": 1102,
-        "name": "gate",
+        "completed_at": "2026-01-28T00:05:00Z",
+        "id": 10012,
         "labels": [
           "ubuntu-latest"
         ],
+        "name": "gate",
         "started_at": "2026-01-28T00:02:00Z",
-        "completed_at": "2026-01-28T00:05:00Z",
         "steps": [
           {
+            "completed_at": "2026-01-28T00:05:00Z",
             "name": "test",
-            "started_at": "2026-01-28T00:02:00Z",
-            "completed_at": "2026-01-28T00:05:00Z"
+            "started_at": "2026-01-28T00:02:00Z"
           }
         ]
       }
     ],
     "1002": [
       {
-        "id": 1201,
-        "name": "build",
+        "completed_at": "2026-01-27T00:02:00Z",
+        "id": 10021,
         "labels": [
           "ubuntu-latest"
         ],
+        "name": "build",
         "started_at": "2026-01-27T00:00:00Z",
-        "completed_at": "2026-01-27T00:02:00Z",
         "steps": [
           {
+            "completed_at": "2026-01-27T00:02:00Z",
             "name": "build",
-            "started_at": "2026-01-27T00:00:00Z",
-            "completed_at": "2026-01-27T00:02:00Z"
+            "started_at": "2026-01-27T00:00:00Z"
           }
         ]
       },
       {
-        "id": 1202,
-        "name": "gate",
+        "completed_at": "2026-01-27T00:05:00Z",
+        "id": 10022,
         "labels": [
           "ubuntu-latest"
         ],
+        "name": "gate",
         "started_at": "2026-01-27T00:02:00Z",
-        "completed_at": "2026-01-27T00:05:00Z",
         "steps": [
           {
+            "completed_at": "2026-01-27T00:05:00Z",
             "name": "test",
-            "started_at": "2026-01-27T00:02:00Z",
-            "completed_at": "2026-01-27T00:05:00Z"
+            "started_at": "2026-01-27T00:02:00Z"
           }
         ]
       }
     ],
     "1003": [
       {
-        "id": 1301,
-        "name": "build",
+        "completed_at": "2026-01-26T00:02:00Z",
+        "id": 10031,
         "labels": [
           "ubuntu-latest"
         ],
+        "name": "build",
         "started_at": "2026-01-26T00:00:00Z",
-        "completed_at": "2026-01-26T00:02:00Z",
         "steps": [
           {
+            "completed_at": "2026-01-26T00:02:00Z",
             "name": "build",
-            "started_at": "2026-01-26T00:00:00Z",
-            "completed_at": "2026-01-26T00:02:00Z"
+            "started_at": "2026-01-26T00:00:00Z"
           }
         ]
       },
       {
-        "id": 1302,
-        "name": "gate",
+        "completed_at": "2026-01-26T00:05:00Z",
+        "id": 10032,
         "labels": [
           "ubuntu-latest"
         ],
+        "name": "gate",
         "started_at": "2026-01-26T00:02:00Z",
-        "completed_at": "2026-01-26T00:05:00Z",
         "steps": [
           {
+            "completed_at": "2026-01-26T00:05:00Z",
             "name": "test",
-            "started_at": "2026-01-26T00:02:00Z",
-            "completed_at": "2026-01-26T00:05:00Z"
+            "started_at": "2026-01-26T00:02:00Z"
+          }
+        ]
+      }
+    ],
+    "1004": [
+      {
+        "completed_at": "2026-01-25T00:02:00Z",
+        "id": 10041,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "name": "build",
+        "started_at": "2026-01-25T00:00:00Z",
+        "steps": [
+          {
+            "completed_at": "2026-01-25T00:02:00Z",
+            "name": "build",
+            "started_at": "2026-01-25T00:00:00Z"
+          }
+        ]
+      },
+      {
+        "completed_at": "2026-01-25T00:05:00Z",
+        "id": 10042,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "name": "gate",
+        "started_at": "2026-01-25T00:02:00Z",
+        "steps": [
+          {
+            "completed_at": "2026-01-25T00:05:00Z",
+            "name": "test",
+            "started_at": "2026-01-25T00:02:00Z"
+          }
+        ]
+      }
+    ],
+    "1005": [
+      {
+        "completed_at": "2026-01-24T00:02:00Z",
+        "id": 10051,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "name": "build",
+        "started_at": "2026-01-24T00:00:00Z",
+        "steps": [
+          {
+            "completed_at": "2026-01-24T00:02:00Z",
+            "name": "build",
+            "started_at": "2026-01-24T00:00:00Z"
+          }
+        ]
+      },
+      {
+        "completed_at": "2026-01-24T00:05:00Z",
+        "id": 10052,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "name": "gate",
+        "started_at": "2026-01-24T00:02:00Z",
+        "steps": [
+          {
+            "completed_at": "2026-01-24T00:05:00Z",
+            "name": "test",
+            "started_at": "2026-01-24T00:02:00Z"
+          }
+        ]
+      }
+    ],
+    "1006": [
+      {
+        "completed_at": "2026-01-23T00:02:00Z",
+        "id": 10061,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "name": "build",
+        "started_at": "2026-01-23T00:00:00Z",
+        "steps": [
+          {
+            "completed_at": "2026-01-23T00:02:00Z",
+            "name": "build",
+            "started_at": "2026-01-23T00:00:00Z"
+          }
+        ]
+      },
+      {
+        "completed_at": "2026-01-23T00:05:00Z",
+        "id": 10062,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "name": "gate",
+        "started_at": "2026-01-23T00:02:00Z",
+        "steps": [
+          {
+            "completed_at": "2026-01-23T00:05:00Z",
+            "name": "test",
+            "started_at": "2026-01-23T00:02:00Z"
+          }
+        ]
+      }
+    ],
+    "1007": [
+      {
+        "completed_at": "2026-01-22T00:02:00Z",
+        "id": 10071,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "name": "build",
+        "started_at": "2026-01-22T00:00:00Z",
+        "steps": [
+          {
+            "completed_at": "2026-01-22T00:02:00Z",
+            "name": "build",
+            "started_at": "2026-01-22T00:00:00Z"
+          }
+        ]
+      },
+      {
+        "completed_at": "2026-01-22T00:05:00Z",
+        "id": 10072,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "name": "gate",
+        "started_at": "2026-01-22T00:02:00Z",
+        "steps": [
+          {
+            "completed_at": "2026-01-22T00:05:00Z",
+            "name": "test",
+            "started_at": "2026-01-22T00:02:00Z"
+          }
+        ]
+      }
+    ],
+    "1008": [
+      {
+        "completed_at": "2026-01-21T00:02:00Z",
+        "id": 10081,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "name": "build",
+        "started_at": "2026-01-21T00:00:00Z",
+        "steps": [
+          {
+            "completed_at": "2026-01-21T00:02:00Z",
+            "name": "build",
+            "started_at": "2026-01-21T00:00:00Z"
+          }
+        ]
+      },
+      {
+        "completed_at": "2026-01-21T00:05:00Z",
+        "id": 10082,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "name": "gate",
+        "started_at": "2026-01-21T00:02:00Z",
+        "steps": [
+          {
+            "completed_at": "2026-01-21T00:05:00Z",
+            "name": "test",
+            "started_at": "2026-01-21T00:02:00Z"
+          }
+        ]
+      }
+    ],
+    "1009": [
+      {
+        "completed_at": "2026-01-20T00:02:00Z",
+        "id": 10091,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "name": "build",
+        "started_at": "2026-01-20T00:00:00Z",
+        "steps": [
+          {
+            "completed_at": "2026-01-20T00:02:00Z",
+            "name": "build",
+            "started_at": "2026-01-20T00:00:00Z"
+          }
+        ]
+      },
+      {
+        "completed_at": "2026-01-20T00:05:00Z",
+        "id": 10092,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "name": "gate",
+        "started_at": "2026-01-20T00:02:00Z",
+        "steps": [
+          {
+            "completed_at": "2026-01-20T00:05:00Z",
+            "name": "test",
+            "started_at": "2026-01-20T00:02:00Z"
           }
         ]
       }
     ]
   },
-  "checks": {
-    "sha-a": [
-      {
-        "name": "gate",
-        "started_at": "2026-01-28T00:02:00Z",
-        "completed_at": "2026-01-28T00:05:00Z"
-      }
-    ],
-    "sha-b": [
-      {
-        "name": "gate",
-        "started_at": "2026-01-27T00:02:00Z",
-        "completed_at": "2026-01-27T00:05:00Z"
-      }
-    ],
-    "sha-c": [
-      {
-        "name": "gate",
-        "started_at": "2026-01-26T00:02:00Z",
-        "completed_at": "2026-01-26T00:05:00Z"
-      }
-    ]
+  "repo": "fixture/config-era-change",
+  "required_checks": [
+    "gate"
+  ],
+  "shape": "config-era-change",
+  "workflow_blobs": {
+    "boundary-post": {
+      "sha": "new-blob"
+    },
+    "boundary-pre": {
+      "sha": "old-blob"
+    },
+    "sha-1": {
+      "sha": "new-blob"
+    },
+    "sha-2": {
+      "sha": "new-blob"
+    },
+    "sha-3": {
+      "sha": "new-blob"
+    },
+    "sha-4": {
+      "sha": "new-blob"
+    },
+    "sha-5": {
+      "sha": "new-blob"
+    },
+    "sha-6": {
+      "sha": "new-blob"
+    },
+    "sha-7": {
+      "sha": "old-blob"
+    },
+    "sha-8": {
+      "sha": "old-blob"
+    },
+    "sha-9": {
+      "sha": "old-blob"
+    }
   },
-  "shape": "config-era-change"
+  "workflows": [
+    {
+      "id": 207,
+      "name": "CI",
+      "path": ".github/workflows/ci.yml",
+      "runs": [
+        {
+          "conclusion": "success",
+          "created_at": "2026-01-28T00:00:00Z",
+          "event": "pull_request",
+          "head_branch": "feature-1",
+          "head_sha": "sha-1",
+          "id": 1001,
+          "run_started_at": "2026-01-28T00:00:00Z",
+          "status": "completed",
+          "updated_at": "2026-01-28T00:05:00Z"
+        },
+        {
+          "conclusion": "success",
+          "created_at": "2026-01-27T00:00:00Z",
+          "event": "pull_request",
+          "head_branch": "feature-2",
+          "head_sha": "sha-2",
+          "id": 1002,
+          "run_started_at": "2026-01-27T00:00:00Z",
+          "status": "completed",
+          "updated_at": "2026-01-27T00:05:00Z"
+        },
+        {
+          "conclusion": "success",
+          "created_at": "2026-01-26T00:00:00Z",
+          "event": "pull_request",
+          "head_branch": "feature-3",
+          "head_sha": "sha-3",
+          "id": 1003,
+          "run_started_at": "2026-01-26T00:00:00Z",
+          "status": "completed",
+          "updated_at": "2026-01-26T00:05:00Z"
+        },
+        {
+          "conclusion": "success",
+          "created_at": "2026-01-25T00:00:00Z",
+          "event": "pull_request",
+          "head_branch": "feature-4",
+          "head_sha": "sha-4",
+          "id": 1004,
+          "run_started_at": "2026-01-25T00:00:00Z",
+          "status": "completed",
+          "updated_at": "2026-01-25T00:05:00Z"
+        },
+        {
+          "conclusion": "success",
+          "created_at": "2026-01-24T00:00:00Z",
+          "event": "pull_request",
+          "head_branch": "feature-5",
+          "head_sha": "sha-5",
+          "id": 1005,
+          "run_started_at": "2026-01-24T00:00:00Z",
+          "status": "completed",
+          "updated_at": "2026-01-24T00:05:00Z"
+        },
+        {
+          "conclusion": "success",
+          "created_at": "2026-01-23T00:00:00Z",
+          "event": "pull_request",
+          "head_branch": "feature-6",
+          "head_sha": "sha-6",
+          "id": 1006,
+          "run_started_at": "2026-01-23T00:00:00Z",
+          "status": "completed",
+          "updated_at": "2026-01-23T00:05:00Z"
+        },
+        {
+          "conclusion": "success",
+          "created_at": "2026-01-22T00:00:00Z",
+          "event": "pull_request",
+          "head_branch": "feature-7",
+          "head_sha": "sha-7",
+          "id": 1007,
+          "run_started_at": "2026-01-22T00:00:00Z",
+          "status": "completed",
+          "updated_at": "2026-01-22T00:05:00Z"
+        },
+        {
+          "conclusion": "success",
+          "created_at": "2026-01-21T00:00:00Z",
+          "event": "pull_request",
+          "head_branch": "feature-8",
+          "head_sha": "sha-8",
+          "id": 1008,
+          "run_started_at": "2026-01-21T00:00:00Z",
+          "status": "completed",
+          "updated_at": "2026-01-21T00:05:00Z"
+        },
+        {
+          "conclusion": "success",
+          "created_at": "2026-01-20T00:00:00Z",
+          "event": "pull_request",
+          "head_branch": "feature-9",
+          "head_sha": "sha-9",
+          "id": 1009,
+          "run_started_at": "2026-01-20T00:00:00Z",
+          "status": "completed",
+          "updated_at": "2026-01-20T00:05:00Z"
+        }
+      ],
+      "runs_30d": 3
+    }
+  ]
 }

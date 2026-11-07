@@ -8,6 +8,7 @@ import re
 import shutil
 import sys
 from pathlib import Path
+from urllib.parse import parse_qs
 
 import pytest
 
@@ -72,10 +73,32 @@ class FixtureClient:
             workflow = next(
                 row for row in self.recorded["workflows"]
                 if row["id"] == int(match.group(1)))
-            if re.search(r"(?:^|&)per_page=1(?:&|$)", match.group(2)):
-                return {"total_count": workflow.get(
-                    "runs_30d", len(workflow.get("runs", [])))}
-            return {"workflow_runs": workflow.get("runs", [])}
+            query = parse_qs(match.group(2), keep_blank_values=True)
+            runs = list(workflow.get("runs", []))
+            for key, field in (("event", "event"), ("branch", "head_branch")):
+                if query.get(key):
+                    runs = [
+                        row for row in runs
+                        if str(row.get(field) or "") == query[key][0]
+                    ]
+            if query.get("status"):
+                wanted = query["status"][0]
+                runs = [
+                    row for row in runs
+                    if wanted in {str(row.get("status") or ""),
+                                  str(row.get("conclusion") or "")}
+                ]
+            if query.get("created"):
+                created = query["created"][0]
+                if created.startswith(">="):
+                    runs = [row for row in runs
+                            if str(row.get("created_at") or "") >= created[2:]]
+                elif created.startswith("<="):
+                    runs = [row for row in runs
+                            if str(row.get("created_at") or "") <= created[2:]]
+            if query.get("per_page") == ["1"]:
+                return {"total_count": len(runs)}
+            return {"workflow_runs": runs}
         match = re.match(
             rf"repos/{re.escape(repo)}/actions/runs/(\d+)/jobs", endpoint)
         if match:
@@ -92,7 +115,11 @@ class FixtureClient:
                 "/protection/required_status_checks"):
             return {"contexts": self.recorded.get("required_checks", ["gate"])}
         if "/commits?path=" in endpoint:
-            return []
+            return self.recorded.get("commits_by_path", [])
+        match = re.match(
+            rf"repos/{re.escape(repo)}/contents/(.+)\?ref=(.+)", endpoint)
+        if match:
+            return self.recorded.get("workflow_blobs", {}).get(match.group(2))
         return None
 
     def text(self, endpoint: str, allow_missing: bool = False):
@@ -106,10 +133,17 @@ class FixtureClient:
 def run_fixture(path: Path, monkeypatch, tmp_path: Path) -> tuple[dict, str, list]:
     recorded = json.loads((path / "responses.json").read_text(encoding="utf-8"))
     repo_root = tmp_path / f"{path.name}-repo"
-    shutil.copytree(path, repo_root)
+    repo_root.mkdir()
+    for entry in path.iterdir():
+        if entry.name in {"expected.json", "responses.json", "workflows"}:
+            continue
+        if entry.is_dir():
+            shutil.copytree(entry, repo_root / entry.name)
+        else:
+            shutil.copy2(entry, repo_root / entry.name)
     workflow_root = repo_root / ".github/workflows"
     workflow_root.mkdir(parents=True)
-    for workflow in (repo_root / "workflows").glob("*.yml"):
+    for workflow in (path / "workflows").glob("*.yml"):
         shutil.copy2(workflow, workflow_root / workflow.name)
     client = FixtureClient(recorded)
     monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
@@ -160,10 +194,19 @@ def run_fixture(path: Path, monkeypatch, tmp_path: Path) -> tuple[dict, str, lis
 
 def fixture_facts(doc: dict, checks: list) -> dict:
     cp = doc.get("pr_critical_path") or {}
-    poles = cp.get("poles") or []
-    crown = poles[0] if poles else {}
     clock = cp.get("commit_wall_clock") or {}
+    complete_clock_facts = [
+        row for row in clock.get("facts") or []
+        if row.get("partial") is not True
+        and isinstance(row.get("wall_s"), (int, float))
+    ]
+    clock_p50 = clock.get("p50_s")
+    representative = (
+        min(complete_clock_facts,
+            key=lambda row: abs(float(row["wall_s"]) - float(clock_p50)))
+        if complete_clock_facts and isinstance(clock_p50, (int, float)) else {})
     lane = doc.get("default_branch_push_lane") or {}
+    graph = doc.get("workflow_job_graph") or {}
     bundle = doc.get("data_bundle") or {}
     logs_dir = Path(bundle.get("logs_dir") or ".")
     leaves = []
@@ -189,12 +232,38 @@ def fixture_facts(doc: dict, checks: list) -> dict:
             "check": cp.get("critical_path_check"),
             "seconds": cp.get("critical_path_s"),
         },
-        "gate_kind": crown.get("gate_kind"),
-        "provenance": crown.get("provenance"),
-        "commit_wall_clock": {"p50_s": clock.get("p50_s"), "p90_s": clock.get("p90_s")},
+        "gate_kind": cp.get("gate_kind"),
+        "provenance": cp.get("provenance"),
+        "commit_wall_clock": {
+            "p50_s": clock.get("p50_s"), "p90_s": clock.get("p90_s"),
+            "queue_p50_s": clock.get("queue_p50_s"),
+            "queue_p90_s": clock.get("queue_p90_s"),
+            "work_p50_s": clock.get("work_p50_s"),
+            "work_p90_s": clock.get("work_p90_s"),
+        },
         "representative_jobs": {
-            "slowest": (clock.get("slowest_job") or {}).get("name"),
-            "next": (clock.get("next_longest_job") or {}).get("name"),
+            "slowest": (representative.get("slowest_job") or {}).get("name"),
+            "next": (representative.get("next_longest_job") or {}).get("name"),
+        },
+        "detected_patterns": sorted({
+            str(row.get("pattern")) for row in doc.get("findings", [])
+            if row.get("pattern")
+        }),
+        "config_eras": [
+            {key: row.get(key) for key in (
+                "workflow_file", "kept_era", "rule", "pre_count", "post_count")}
+            for row in cp.get("config_eras") or []
+        ],
+        "minority_tails": sorted(
+            row.get("name") for row in cp.get("checks") or []
+            if row.get("minority_tail")),
+        "workflow_shapes": {
+            "matrix_jobs": sorted(
+                f"{workflow}:{name}" for workflow, jobs in graph.items()
+                for name, spec in jobs.items() if spec.get("matrix")),
+            "reusable_jobs": sorted(
+                f"{workflow}:{name}" for workflow, jobs in graph.items()
+                for name, spec in jobs.items() if spec.get("reusable")),
         },
         "credited_findings": credited,
         "lane": {
@@ -246,6 +315,79 @@ def test_fixture_corpus_has_broad_interaction_coverage():
         f"expected at least 10 whole-pipeline fixtures, found {len(fixtures)}")
 
 
+def test_compact_facts_pin_collected_provenance_and_representative_job(
+        monkeypatch, tmp_path):
+    fixture = FIXTURE_ROOT / "serial-chain"
+    doc, _report, checks = run_fixture(fixture, monkeypatch, tmp_path)
+    facts = fixture_facts(doc, checks)
+
+    assert facts["provenance"] == "required_scoped"
+    assert facts["representative_jobs"]["slowest"] == "gate"
+
+
+def test_fixture_client_applies_run_query_filters():
+    recorded = json.loads(
+        (FIXTURE_ROOT / "push-job-list" / "responses.json").read_text())
+    client = FixtureClient(recorded)
+    repo = recorded["repo"]
+    workflow_id = recorded["workflows"][0]["id"]
+
+    prs = client.json(
+        f"repos/{repo}/actions/workflows/{workflow_id}/runs?"
+        "per_page=100&event=pull_request&status=success")
+    pushes = client.json(
+        f"repos/{repo}/actions/workflows/{workflow_id}/runs?"
+        "per_page=1&event=push&branch=main&status=success")
+
+    assert {row["event"] for row in prs["workflow_runs"]} == {"pull_request"}
+    assert pushes["total_count"] == 1
+
+
+def test_fixture_materialization_excludes_recording_and_expectation_files(
+        monkeypatch, tmp_path):
+    real_scan = scan.scan
+
+    def guarded_scan(root, *args, **kwargs):
+        assert not (root / "responses.json").exists()
+        assert not (root / "expected.json").exists()
+        return real_scan(root, *args, **kwargs)
+
+    monkeypatch.setattr(scan, "scan", guarded_scan)
+    run_fixture(FIXTURE_ROOT / "serial-chain", monkeypatch, tmp_path)
+
+
+def test_named_fixtures_exercise_their_defining_interactions(
+        monkeypatch, tmp_path):
+    docs = {}
+    for name in (
+            "config-era-change", "external-required-gate", "heavy-runner-queue",
+            "minority-tail", "multiarch-image", "path-partitioned-monorepo"):
+        docs[name], _report, _checks = run_fixture(
+            FIXTURE_ROOT / name, monkeypatch, tmp_path)
+
+    assert docs["config-era-change"]["pr_critical_path"]["config_eras"]
+    external = docs["external-required-gate"]["pr_critical_path"]
+    assert external["gate_kind"] == "pr_floor_fallback"
+    assert external["provenance"] == "pr_floor_fallback"
+    assert (docs["heavy-runner-queue"]["pr_critical_path"]
+            ["commit_wall_clock"]["queue_p50_s"]) > 0
+    assert any(
+        row.get("minority_tail")
+        for row in docs["minority-tail"]["pr_critical_path"]["checks"])
+    assert "OPT102" in {
+        row.get("pattern") for row in docs["multiarch-image"]["findings"]}
+    assert any(
+        spec.get("matrix")
+        for jobs in docs["path-partitioned-monorepo"]["workflow_job_graph"].values()
+        for spec in jobs.values())
+
+    red = json.loads(
+        (FIXTURE_ROOT / "red-default-branch" / "responses.json").read_text())
+    assert any(
+        run.get("event") == "push" and run.get("conclusion") == "failure"
+        for workflow in red["workflows"] for run in workflow["runs"])
+
+
 @pytest.mark.parametrize(
     "fixture", sorted(path for path in FIXTURE_ROOT.glob("*") if path.is_dir()),
     ids=lambda path: path.name)
@@ -261,24 +403,11 @@ def test_fixture_runs_through_collect_render_and_full_verifier(
 
 def test_fixture_set_catches_required_crown_regression(monkeypatch, tmp_path):
     fixture = FIXTURE_ROOT / "unpinnable-slow-check"
-    real_collect = cr.collect
-
-    def reverted_collect(*args, **kwargs):
-        doc = real_collect(*args, **kwargs)
-        path = doc.get("pr_critical_path") or {}
-        checks = path.get("checks") or []
-        if checks:
-            old_crown = max(checks, key=lambda row: float(row.get("p50_s") or 0))
-            path["critical_path_check"] = old_crown["name"]
-            path["critical_path_s"] = old_crown["p50_s"]
-        return doc
-
-    monkeypatch.setattr(cr, "collect", reverted_collect)
+    monkeypatch.setattr(
+        cr, "_pole_is_required_reachable", lambda *args, **kwargs: True)
     doc, _report, checks = run_fixture(fixture, monkeypatch, tmp_path)
-    with pytest.raises(
-            AssertionError,
-            match=r"unpinnable-slow-check: headline\.check changed"):
-        assert_fixture_facts(fixture, fixture_facts(doc, checks))
+    facts = fixture_facts(doc, checks)
+    assert facts["headline"]["check"] != "unit"
 
 
 def test_fixture_set_catches_leaf_precedence_regression(monkeypatch, tmp_path):

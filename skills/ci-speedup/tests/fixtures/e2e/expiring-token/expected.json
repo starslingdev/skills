@@ -1,9 +1,19 @@
 {
   "commit_wall_clock": {
     "p50_s": null,
-    "p90_s": null
+    "p90_s": null,
+    "queue_p50_s": null,
+    "queue_p90_s": null,
+    "work_p50_s": null,
+    "work_p90_s": null
   },
+  "config_eras": [],
   "credited_findings": [],
+  "detected_patterns": [
+    "OPT21",
+    "OPT32",
+    "OPT45"
+  ],
   "gate_kind": null,
   "headline": {
     "check": null,
@@ -16,6 +26,7 @@
     "sampled_pushes": null
   },
   "leaves": [],
+  "minority_tails": [],
   "provenance": null,
   "representative_jobs": {
     "next": null,
@@ -88,5 +99,9 @@
       "the rendered era disclosure matches the enumerated config (no pre-only caveat over post-era checks)",
       "wall-clock headline carries next gate and verification guidance"
     ]
+  },
+  "workflow_shapes": {
+    "matrix_jobs": [],
+    "reusable_jobs": []
   }
 }

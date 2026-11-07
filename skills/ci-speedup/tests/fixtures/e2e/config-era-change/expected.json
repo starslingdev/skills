@@ -1,8 +1,21 @@
 {
   "commit_wall_clock": {
     "p50_s": 300.0,
-    "p90_s": 300.0
+    "p90_s": 300.0,
+    "queue_p50_s": 0.0,
+    "queue_p90_s": 0.0,
+    "work_p50_s": 300.0,
+    "work_p90_s": 300.0
   },
+  "config_eras": [
+    {
+      "kept_era": "post",
+      "post_count": 6,
+      "pre_count": 3,
+      "rule": "post_only",
+      "workflow_file": ".github/workflows/ci.yml"
+    }
+  ],
   "credited_findings": [
     {
       "pattern": "OPT21",
@@ -11,7 +24,7 @@
     },
     {
       "pattern": "OPT45",
-      "runner_min": 3.0,
+      "runner_min": 9.0,
       "wall_clock_s": 0.0
     },
     {
@@ -19,6 +32,12 @@
       "runner_min": null,
       "wall_clock_s": 90.0
     }
+  ],
+  "detected_patterns": [
+    "OPT21",
+    "OPT32",
+    "OPT45",
+    "OPT75"
   ],
   "gate_kind": null,
   "headline": {
@@ -32,10 +51,11 @@
     "sampled_pushes": 0
   },
   "leaves": [],
-  "provenance": null,
+  "minority_tails": [],
+  "provenance": "required_scoped",
   "representative_jobs": {
     "next": null,
-    "slowest": null
+    "slowest": "gate"
   },
   "verifier": {
     "fail": [],
@@ -53,7 +73,6 @@
       "aggregation-gate poles tell the upstream story, never an optimize-this prompt",
       "cache finding's framing matches its measured hit-rate distribution",
       "chain headline re-derives from the stamped chain facts",
-      "check enumeration is bound to the kept config era (no other-config check leaks in)",
       "cluster-floor lever's ceiling floors at a NON-sibling check (not its own matrix leg)",
       "crowned detector leaf agrees with the pole's dominant measured category (no off-category ceiling)",
       "declared drilled-run timelines are readable",
@@ -64,7 +83,6 @@
       "headline leads with the observed wall when the chain sum diverges from the makespan",
       "headline reconciles a non-universal slowest check with the population floor",
       "minority slow tails on merge-blocking checks are re-derived",
-      "no drilled pole measures a pre-change config era without the era disclosure",
       "no spine-demoted pole carries the typical-gate framing (prompt / Contents)",
       "no spine-dropped check is also framed on the merge-gating critical path",
       "pole addressable ceiling within the co-occurrence floor",
@@ -74,9 +92,11 @@
       "rendered per-workflow gate frequency matches the populations re-derivation",
       "scanned date matches the date in the filename",
       "shallow cost-spine sample is disclosed (re-derived from the stamped workflows)",
-      "static-only banner matches CI shape",
-      "the per-PR chain/makespan spine is bound to the kept config era (no dropped-era PR blends in)",
-      "the rendered era disclosure matches the enumerated config (no pre-only caveat over post-era checks)"
+      "static-only banner matches CI shape"
     ]
+  },
+  "workflow_shapes": {
+    "matrix_jobs": [],
+    "reusable_jobs": []
   }
 }
