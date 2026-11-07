@@ -5929,6 +5929,7 @@ def _measure_opt32_path_filters(
     findings: list[dict[str, Any]],
     sampled_runs_by_wf: dict[str, list[dict[str, Any]]],
     wf_docs: dict[str, dict[str, Any]],
+    changed_files: dict[int, list[str] | None] | None = None,
 ) -> None:
     """Measure OPT32 only from PRs already selected by the normal run sample."""
     targets = [f for f in findings if f.get("pattern") == "OPT32"]
@@ -5945,8 +5946,10 @@ def _measure_opt32_path_filters(
         number for finding in targets
         for number in numbers_by_workflow.get(
             str(finding.get("workflow_file") or ""), [])))
-    changed = {number: _opt32_changed_files(client, repo, number)
-               for number in all_numbers}
+    changed = changed_files if changed_files is not None else {}
+    for number in all_numbers:
+        if number not in changed:
+            changed[number] = _opt32_changed_files(client, repo, number)
     for finding in targets:
         numbers = numbers_by_workflow.get(str(finding.get("workflow_file") or ""), [])
         if not numbers or any(changed[number] is None for number in numbers):
@@ -5984,6 +5987,224 @@ def _measure_opt32_path_filters(
                       "`*.md`, `docs/**/*.md`, `LICENSE*`, `.github/*.md`.")
         finding["evidence"] = (str(finding.get("evidence") or "").rstrip()
                                + measured + suffix)
+
+
+_CACHE_SIZING_PATTERNS = frozenset(
+    {"OPT4", "OPT6", "OPT9", "OPT61", "OPT96", "OPT101"})
+_CACHE_DEFAULT_BUDGET_BYTES = 10 * 1024 ** 3
+_CACHE_BUDGET_FULL_FRACTION = 0.90
+_CACHE_LIMIT_UNKNOWN_ABOVE = 1.10
+_HASH_FILES_RE = re.compile(r"hashFiles\(\s*(['\"])(.*?)\1\s*\)", re.I)
+
+
+def _cache_guard_candidates(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [f for f in findings if str(f.get("pattern") or "") in _CACHE_SIZING_PATTERNS
+            or str((f.get("cache_dist") or {}).get("fix_key") or "")
+            in {"dependency-cache", "buildx-no-cache"}]
+
+
+def _cache_usage_bytes(client: GhClient, repo: str,
+                       candidates: list[dict[str, Any]]) -> int | None:
+    """Read repository cache usage once, and only when a cache could be credited."""
+    if not candidates:
+        return None
+    doc = client.json(f"repos/{repo}/actions/cache/usage", allow_missing=True)
+    if not isinstance(doc, dict):
+        return None
+    value = doc.get("active_caches_size_in_bytes")
+    return int(value) if isinstance(value, (int, float)) and value >= 0 else None
+
+
+def _cache_guard_values(finding: dict[str, Any]) -> list[dict[str, Any]]:
+    cd = finding.get("cache_dist") if isinstance(finding.get("cache_dist"), dict) else {}
+    pr = cd.get("pr") if isinstance(cd.get("pr"), dict) else {}
+    return [v.get("cache_state") for v in (pr.get("values") or [])
+            if isinstance(v, dict) and not v.get("fork")
+            and isinstance(v.get("cache_state"), dict)]
+
+
+def _cache_key_text_and_globs(finding: dict[str, Any],
+                              wf_docs: dict[str, dict[str, Any]]) -> tuple[str, list[str]]:
+    explicit = finding.get("cache_key_globs")
+    if isinstance(explicit, list):
+        return " ".join(str(v) for v in explicit), [str(v) for v in explicit if str(v)]
+    wf = wf_docs.get(str(finding.get("workflow_file") or "")) or {}
+    jobs = wf.get("jobs") if isinstance(wf, dict) else {}
+    wanted = {str(v) for v in (finding.get("affected_jobs") or [])}
+    texts: list[str] = []
+    for key, job in (jobs.items() if isinstance(jobs, dict) else ()):
+        if wanted and str(key) not in wanted and str((job or {}).get("name") or "") not in wanted:
+            continue
+        for leaf in job_walk(job).leaves:
+            step = leaf.step if isinstance(leaf.step, dict) else {}
+            uses = str(step.get("uses") or "").lower()
+            with_ = step.get("with") if isinstance(step.get("with"), dict) else {}
+            texts.extend(str(value) for name, value in with_.items()
+                         if str(name).lower() in {"key", "cache-dependency-path"})
+            # These actions compute their keys internally. Use their documented
+            # dependency inputs when the workflow does not override the path.
+            if uses.startswith("actions/setup-go@") and "cache-dependency-path" not in with_:
+                texts.append("**/go.sum")
+            if uses.startswith("swatinem/rust-cache@"):
+                texts.append("**/Cargo.lock")
+    key_text = " ".join(texts)
+    globs = [m.group(2) for m in _HASH_FILES_RE.finditer(key_text)]
+    if not globs:
+        for text in texts:
+            if "${{" not in text and any(token in text.lower()
+                for token in ("lock", "requirements", "go.sum", "cargo")):
+                globs.extend(part.strip() for part in text.splitlines() if part.strip())
+    return key_text, list(dict.fromkeys(globs))
+
+
+def _cache_copy_count(finding: dict[str, Any],
+                      sampled_runs: list[dict[str, Any]],
+                      wf_docs: dict[str, dict[str, Any]]) -> int:
+    explicit = finding.get("cache_copies")
+    if isinstance(explicit, int) and explicit > 0:
+        return explicit
+    # A PR branch can save a separate cache namespace. Distinct sampled refs are
+    # therefore separate copies unless the detector proved saves are main-only.
+    refs = {str(r.get("head_branch") or "") for r in sampled_runs
+            if str(r.get("head_branch") or "")}
+    wf = wf_docs.get(str(finding.get("workflow_file") or "")) or {}
+    jobs = wf.get("jobs") if isinstance(wf, dict) else {}
+    wanted = {str(v) for v in (finding.get("affected_jobs") or [])}
+    legs = 1
+    for key, job in (jobs.items() if isinstance(jobs, dict) else ()):
+        if wanted and str(key) not in wanted and str((job or {}).get("name") or "") not in wanted:
+            continue
+        strategy = (job or {}).get("strategy") if isinstance(job, dict) else {}
+        matrix = strategy.get("matrix") if isinstance(strategy, dict) else {}
+        if not isinstance(matrix, dict):
+            continue
+        product = 1
+        for axis, values in matrix.items():
+            if axis in {"include", "exclude"}:
+                continue
+            if isinstance(values, list) and values:
+                product *= len(values)
+        legs = max(legs, product)
+    return max(1, len(refs)) * legs
+
+
+def _cache_guard_changed_files(
+    client: GhClient, repo: str, candidates: list[dict[str, Any]],
+    sampled_runs_by_wf: dict[str, list[dict[str, Any]]],
+    changed: dict[int, list[str] | None],
+) -> None:
+    workflows = {str(f.get("workflow_file") or "") for f in candidates}
+    for workflow in workflows:
+        for run in sampled_runs_by_wf.get(workflow, []):
+            number = _run_pr_number(run)
+            if isinstance(number, int) and number not in changed:
+                changed[number] = _opt32_changed_files(client, repo, number)
+
+
+def _cache_guard_check(status: str, detail: str, **data: Any) -> dict[str, Any]:
+    return {"status": status, "detail": detail, **data}
+
+
+def _apply_cache_sizing_guard(
+    finding: dict[str, Any], *, usage_bytes: int | None,
+    changed: dict[int, list[str] | None], sampled_runs: list[dict[str, Any]],
+    wf_docs: dict[str, dict[str, Any]],
+) -> None:
+    """Admit a cache saving only after budget, invalidation and net-cost checks."""
+    values = _cache_guard_values(finding)
+    sizes = [float(v["cache_size_gb"]) for v in values
+             if isinstance(v.get("cache_size_gb"), (int, float)) and v["cache_size_gb"] >= 0]
+    copies = _cache_copy_count(finding, sampled_runs, wf_docs)
+    if usage_bytes is None:
+        budget = _cache_guard_check("not_measured", "repository cache usage not measured")
+    elif usage_bytes > _CACHE_DEFAULT_BUDGET_BYTES * _CACHE_LIMIT_UNKNOWN_ABOVE:
+        budget = _cache_guard_check(
+            "not_measured", "repository cache usage is far above 10 GB; limit unknown: not measured",
+            usage_bytes=usage_bytes)
+    elif usage_bytes >= _CACHE_DEFAULT_BUDGET_BYTES * _CACHE_BUDGET_FULL_FRACTION:
+        budget = _cache_guard_check(
+            "failed", "repository cache usage already fills the default budget",
+            usage_bytes=usage_bytes)
+    elif not sizes:
+        budget = _cache_guard_check("not_measured", "proposed cache size not measured")
+    else:
+        proposed = max(sizes) * copies * 1024 ** 3
+        if usage_bytes + proposed > _CACHE_DEFAULT_BUDGET_BYTES:
+            budget = _cache_guard_check(
+                "failed", "the proposed copies would exceed the repository's cache budget",
+                usage_bytes=usage_bytes, proposed_bytes=round(proposed), copies=copies)
+        else:
+            budget = _cache_guard_check(
+                "passed", "cache fits beside measured repository usage",
+                usage_bytes=usage_bytes, proposed_bytes=round(proposed), copies=copies)
+
+    key_text, globs = _cache_key_text_and_globs(finding, wf_docs)
+    numbers = list(dict.fromkeys(n for run in sampled_runs
+                                 for n in [_run_pr_number(run)] if isinstance(n, int)))
+    readable = bool(numbers) and all(changed.get(n) is not None for n in numbers)
+    misses = [float(v["miss_pct"]) for v in values
+              if isinstance(v.get("miss_pct"), (int, float))]
+    if ("github.sha" in key_text or str((finding.get("cache_dist") or {}).get("fix_key"))
+            in {"buildx-no-cache"}) and misses:
+        invalidation = _cache_guard_check(
+            "passed", "printed cache hit rate measured for a rolling or build-output cache",
+            invalidation_rate=round(statistics.mean(misses) / 100.0, 4), sampled_runs=len(misses))
+    elif not globs:
+        invalidation = _cache_guard_check("not_measured", "cache key invalidation inputs not measured")
+    elif not readable:
+        invalidation = _cache_guard_check("not_measured", "sampled PR changed files not measured")
+    else:
+        invalidated = sum(any(_opt32_glob_matches(path, glob)
+                              for path in (changed.get(number) or []) for glob in globs)
+                          for number in numbers)
+        rate = invalidated / len(numbers)
+        detail = f"cache key invalidated on {rate:.0%} of sampled PRs"
+        invalidation = _cache_guard_check(
+            "failed" if rate >= 0.5 else "passed", detail,
+            invalidated_prs=invalidated, sampled_prs=len(numbers), invalidation_rate=round(rate, 4))
+
+    restores = [float(v["restore_s"]) for v in values
+                if isinstance(v.get("restore_s"), (int, float)) and v["restore_s"] >= 0]
+    saves = [float(v["save_s"]) for v in values
+             if isinstance(v.get("save_s"), (int, float)) and v["save_s"] >= 0]
+    cd = finding.get("cache_dist") if isinstance(finding.get("cache_dist"), dict) else {}
+    sizing = cd.get("sizing") if isinstance(cd.get("sizing"), dict) else {}
+    saving = sizing.get("saving_s")
+    if not isinstance(saving, (int, float)):
+        saving = finding.get("wall_clock_p50_s")
+    if not misses or not restores or not saves or not isinstance(saving, (int, float)):
+        economics = _cache_guard_check(
+            "not_measured", "restore, save, hit-rate and avoided-work costs were not all measured")
+    else:
+        hit_rate = max(0.0, min(1.0, 1.0 - statistics.mean(misses) / 100.0))
+        restore_s, save_s = statistics.median(restores), statistics.median(saves)
+        expected = hit_rate * float(saving) - restore_s - (1.0 - hit_rate) * save_s
+        economics = _cache_guard_check(
+            "passed" if expected > 0 else "failed",
+            ("expected cache saving is positive" if expected > 0
+             else "restore and save cost exceeds the expected saving"),
+            hit_rate=round(hit_rate, 4), saving_s=round(float(saving), 2),
+            restore_s=round(restore_s, 2), save_s=round(save_s, 2),
+            expected_s=round(expected, 2))
+
+    checks = {"budget": budget, "invalidation": invalidation, "economics": economics}
+    status = ("passed" if all(v["status"] == "passed" for v in checks.values())
+              else "failed" if any(v["status"] == "failed" for v in checks.values())
+              else "not_measured")
+    finding["cache_sizing_guard"] = {"status": status, "checks": checks}
+    details = "; ".join(v["detail"] for v in checks.values() if v["status"] != "passed")
+    if status == "passed":
+        details = "all three cache sizing checks passed"
+    finding["evidence"] = (str(finding.get("evidence") or "").rstrip()
+                           + f" Cache sizing guard: {details}.").strip()
+    if status != "passed":
+        finding["wall_clock_p50_s"] = None
+        finding["runner_min_saving"] = None
+        finding["tier"] = 2
+        finding["realization"] = "none"
+        prior_note = str(finding.get("size_note") or "").strip()
+        guard_note = f"cache saving uncredited: {details}"
+        finding["size_note"] = f"{prior_note}; {guard_note}" if prior_note else guard_note
 
 
 def _affected_job_p50(f: dict[str, Any], crit: dict[str, Any]) -> float:
@@ -29566,8 +29787,29 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # sampled pull requests. Reuse the run sample already selected above, fetch
     # changed files for those PRs only, and stamp the measured fraction before
     # the common sizing pass consumes it.
+    _changed_files: dict[int, list[str] | None] = {}
     _measure_opt32_path_filters(
-        client, repo, findings, sampled_runs_by_wf, _wf_docs)
+        client, repo, findings, sampled_runs_by_wf, _wf_docs,
+        changed_files=_changed_files)
+
+    # A cache log distribution belongs to the same workflow/job finding even
+    # when the finding is not OPT96. Reuse the already-fetched pole logs; this
+    # adds no job-log reads.
+    for _finding in findings:
+        if isinstance(_finding.get("cache_dist"), dict):
+            continue
+        _wf = str(_finding.get("workflow_file") or "")
+        _jobs = {str(v) for v in (_finding.get("affected_jobs") or [])}
+        _pole = next((p for p in (drill_poles or poles)
+                      if str(p.get("workflow_file") or "") == _wf
+                      and isinstance(p.get("cache_dist"), dict)
+                      and (not _jobs or str(p.get("job") or "") in _jobs)), None)
+        if _pole is not None:
+            _finding["cache_dist"] = _pole["cache_dist"]
+    _cache_candidates = _cache_guard_candidates(findings)
+    _cache_usage = _cache_usage_bytes(client, repo, _cache_candidates)
+    _cache_guard_changed_files(
+        client, repo, _cache_candidates, sampled_runs_by_wf, _changed_files)
 
     # The repo's longest measured job across ALL workflows — the physical ceiling on
     # any wall-clock saving (you can't save more than the slowest run takes). Used to
@@ -29587,6 +29829,11 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         crit = crit_by_wf.get(wf_path, {})
         vol = vol_by_wf.get(wf_path)
         _size_finding(f, crit, vol)
+        if f in _cache_candidates:
+            _apply_cache_sizing_guard(
+                f, usage_bytes=_cache_usage, changed=_changed_files,
+                sampled_runs=sampled_runs_by_wf.get(str(wf_path), []),
+                wf_docs=_wf_docs)
         _cap_opt19_wall_clock(f, global_long_pole)
         # Cross-workflow concurrency floor: a per-workflow wall-clock saving is
         # only real developer-wait if THIS workflow is the slowest one running
