@@ -18,6 +18,7 @@ from wall_clock import (  # noqa: E402
     WallClockContext,
     bound_commit_projection,
     bound_measured_critical_path,
+    size_wall_clock,
 )
 
 
@@ -277,6 +278,30 @@ def test_collect_projects_every_job_changed_by_a_cluster_finding(monkeypatch):
     # On the six two-job commits the shared fix lowers both concurrent jobs.
     # The other affected job must not become the unchanged projection floor.
     assert finding["wall_clock_p50_s"] == 500.0
+
+
+def test_population_bounds_share_one_basis_instead_of_weighting_twice():
+    populations = tuple(
+        [(0.1, (("pole", 600.0),))] * 4
+        + [(0.1, (("sibling", 690.0), ("pole", 600.0)))] * 6)
+    commit_facts = tuple(
+        [(600.0, 600.0, 0.0, 600.0)] * 4
+        + [(690.0, 600.0, 690.0, 600.0)] * 6)
+    ctx = WallClockContext(
+        pr_checks=populations[0][1],
+        pr_check_populations=populations,
+        pr_check_populations_complete=(True,) * 10,
+        own_check_names=frozenset({"pole"}),
+        commit_wall_facts=commit_facts,
+    )
+
+    result = size_wall_clock(
+        500.0, ctx,
+        cascade=[("commit-projection", bound_commit_projection),
+                 ("measured-critical-path", bound_measured_critical_path)])
+
+    assert result.effective_s == 200.0
+    assert [step[0] for step in result.derivation] == ["commit-projection"]
 
 
 def test_incomplete_single_check_reads_remain_unknown(monkeypatch):

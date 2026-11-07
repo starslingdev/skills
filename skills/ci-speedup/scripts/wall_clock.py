@@ -784,18 +784,29 @@ def size_wall_clock(raw_s: float, ctx: WallClockContext,
     steps = CASCADE if cascade is None else cascade
     quantized_raw_s = round(float(raw_s), 1)
     v = quantized_raw_s
+    population_basis: float | None = None
     derivation: list[tuple[str, float, float, str]] = []
     for name, fn in steps:
-        r = fn(v, ctx)
-        if r.value > v + 1e-9:
+        if name == "commit-projection":
+            population_basis = v
+        # These two bounds summarize the same sampled PR population. Feeding
+        # one share-weighted result into the other weights that population a
+        # second time. Evaluate both from their common input and keep the
+        # tighter result before continuing the cascade.
+        bound_input = (population_basis
+                       if name == "measured-critical-path"
+                       and population_basis is not None else v)
+        r = fn(bound_input, ctx)
+        if r.value > bound_input + 1e-9:
             raise AssertionError(
-                f"wall-clock bound {name!r} RAISED the saving ({v} -> {r.value}); "
-                "bounds must be monotonic-down")
-        if abs(r.value - v) > 1e-9:
+                f"wall-clock bound {name!r} RAISED the saving "
+                f"({bound_input} -> {r.value}); bounds must be monotonic-down")
+        bounded = min(v, r.value)
+        if abs(bounded - v) > 1e-9:
             if not r.reason:
                 raise AssertionError(
                     f"wall-clock bound {name!r} shrank the saving "
-                    f"({v} -> {r.value}) without a reason")
-            derivation.append((name, round(v, 1), round(r.value, 1), r.reason))
-            v = r.value
+                    f"({v} -> {bounded}) without a reason")
+            derivation.append((name, round(v, 1), round(bounded, 1), r.reason))
+            v = bounded
     return WallClockResult(quantized_raw_s, round(v, 1), derivation)

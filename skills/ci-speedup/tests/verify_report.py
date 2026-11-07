@@ -697,8 +697,14 @@ def check_commit_wall_clock_projection(report: str, findings_path: Path | None) 
             continue
         projection_rows = fact.get("job_projections")
         if isinstance(projection_rows, list):
+            import datetime as _projection_dt
+
             rows = [row for row in projection_rows if isinstance(row, dict)]
             raw_jobs = [row for row in (fact.get("jobs") or []) if isinstance(row, dict)]
+            raw_by_identity = {
+                (str(row.get("workflow_file") or ""), str(row.get("name") or "")): row
+                for row in raw_jobs
+            }
             raw_identities = sorted(projection_identity(row) for row in raw_jobs)
             if sorted(projection_identity(row) for row in rows) != raw_identities:
                 failures.append(f"fact {index} job projection durations do not match jobs")
@@ -732,6 +738,49 @@ def check_commit_wall_clock_projection(report: str, findings_path: Path | None) 
                         if isinstance(row, dict)) != expected_independent:
                     failures.append(
                         f"fact {index} job projection independent floors do not re-derive")
+                    break
+                expected_next = max(
+                    (duration for _wf, _name, duration in expected_independent),
+                    default=0.0)
+                if abs((_num(target.get("next_longest_s")) or 0.0) - expected_next) > 0.001:
+                    failures.append(
+                        f"fact {index} job projection next-longest floor does not re-derive")
+                    break
+
+                chain_rows = [
+                    row for row in rows
+                    if str(row.get("workflow_file") or "") == target_wf
+                    and (str(row.get("node")) if row.get("node") is not None else None)
+                    in target_chain
+                    and not outside_target(row)
+                    and ((str(row.get("node"))
+                          if row.get("node") is not None else None) != target_node
+                         or str(row.get("name") or "")
+                         == str(target.get("name") or ""))
+                ]
+                expected_chain = _num(target.get("duration_s")) or 0.0
+                if len(chain_rows) > 1:
+                    try:
+                        starts = [
+                            _projection_dt.datetime.fromisoformat(
+                                str(raw_by_identity[(target_wf, str(row.get("name") or ""))]
+                                    ["started_at"]).replace("Z", "+00:00")).timestamp()
+                            for row in chain_rows
+                        ]
+                        completions = [
+                            _projection_dt.datetime.fromisoformat(
+                                str(raw_by_identity[(target_wf, str(row.get("name") or ""))]
+                                    ["completed_at"]).replace("Z", "+00:00")).timestamp()
+                            for row in chain_rows
+                        ]
+                        expected_chain = max(expected_chain, max(completions) - min(starts))
+                    except (KeyError, TypeError, ValueError):
+                        failures.append(
+                            f"fact {index} job projection chain timing cannot be re-derived")
+                        break
+                if abs((_num(target.get("chain_span_s")) or 0.0) - expected_chain) > 0.001:
+                    failures.append(
+                        f"fact {index} job projection chain span does not re-derive")
                     break
         complete.append((fact, wall, slowest, next_longest, chain))
         p4 = fact.get("projection_4x")
