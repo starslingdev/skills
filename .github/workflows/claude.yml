@@ -56,7 +56,7 @@ jobs:
     if: >-
       contains(github.event.comment.body, '@claude') &&
       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
-    runs-on: starsling-ubuntu-24.04
+    runs-on: starsling-ubuntu-26.04
     # An agent turn has no natural bound, and a stalled one would otherwise hold
     # a self-hosted runner for the six-hour GitHub default with no signal — the
     # same reason registry-scan.yml sets a timeout.

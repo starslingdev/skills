@@ -132,7 +132,7 @@ def test_suite_jobs_split_by_fork_and_runner():
     jobs = _jobs()
     self_hosted = jobs["test-self"]
     fork = jobs["test-fork"]
-    assert self_hosted["runs-on"] == "starsling-ubuntu-24.04"
+    assert self_hosted["runs-on"] == "starsling-ubuntu-26.04"
     assert "!=" not in str(self_hosted.get("if", "")) and \
         "== github.repository" in str(self_hosted.get("if", "")), (
         "self-hosted suite must run only for pushes and same-repo PRs")
