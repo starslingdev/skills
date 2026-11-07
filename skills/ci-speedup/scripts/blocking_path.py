@@ -9532,6 +9532,72 @@ def _commit_wait_bottom_line(commit_clock: dict[str, Any],
     return bottom
 
 
+_WORKFLOW_LANE_EVENTS = frozenset({
+    "branch_protection_rule", "check_run", "check_suite", "create", "delete",
+    "deployment", "deployment_status", "discussion", "discussion_comment",
+    "fork", "gollum", "issue_comment", "issues", "label", "merge_group",
+    "milestone", "page_build", "project", "project_card", "project_column",
+    "public", "pull_request", "pull_request_review",
+    "pull_request_review_comment", "pull_request_target", "push", "registry_package",
+    "release", "repository_dispatch", "schedule", "status", "tag", "watch",
+    "workflow_call", "workflow_dispatch", "workflow_run",
+})
+
+
+def _workflow_activity_line(ms: list[dict[str, Any]]) -> str:
+    """Render each workflow's activity once, even when a pattern has many hits."""
+    by_workflow: dict[str, list[dict[str, Any]]] = {}
+    for index, finding in enumerate(ms):
+        key = str(finding.get("workflow_file") or f"<unknown:{index}>")
+        activity = finding.get("workflow_activity")
+        if isinstance(activity, dict):
+            by_workflow.setdefault(key, []).append(activity)
+        else:
+            by_workflow.setdefault(key, [])
+    measured: list[dict[str, Any]] = []
+    unknown = 0
+    for activities in by_workflow.values():
+        candidates = [
+            activity for activity in activities
+            if (isinstance(activity.get("runs_30d"), int)
+                and not isinstance(activity.get("runs_30d"), bool))
+        ]
+        if candidates:
+            # Repeated finding stamps for one workflow should agree. Taking the
+            # maximum is conservative if an externally supplied document does not.
+            measured.append(max(candidates, key=lambda a: int(a["runs_30d"])))
+        else:
+            unknown += 1
+    if not measured:
+        return "**Activity:** not measured."
+    runs = sum(int(activity["runs_30d"]) for activity in measured)
+    latest = max(
+        (_flatten_cell(str(activity.get("last_run") or "")[:10])
+         for activity in measured), default="")
+    recent = f" · most recent {latest}" if latest else ""
+    missing = (f" · not measured for {unknown} workflow"
+               f"{'s' if unknown != 1 else ''}" if unknown else "")
+    return f"**Activity:** {runs} runs in 30 days{recent}{missing}."
+
+
+def _workflow_lane_line(ms: list[dict[str, Any]]) -> str | None:
+    # Trigger keys come from repository YAML. Only GitHub's declared event
+    # vocabulary may become trusted report prose.
+    lanes = sorted({
+        str(lane)
+        for finding in ms for lane in (finding.get("workflow_lanes") or [])
+        if str(lane) in _WORKFLOW_LANE_EVENTS
+    })
+    if not lanes:
+        return None
+    label = ", ".join(lanes).replace("_", " ")
+    suffix = " lane only" if len(lanes) == 1 else " lanes"
+    line = f"**Lane:** {label}{suffix}."
+    if all(finding.get("non_pr_lane") is True for finding in ms):
+        line = line[:-1] + "; no merge-gate wall-clock credit."
+    return line
+
+
 def _queue_wait_block(findings: list[dict[str, Any]], catalog_url: str,
                       shallow_note: str = "",
                       commit_clock: dict[str, Any] | None = None) -> list[str]:
@@ -9620,6 +9686,10 @@ def _queue_wait_block(findings: list[dict[str, Any]], catalog_url: str,
                   f"<summary><strong>{pat} - {title}</strong> · worst savable wait "
                   f"{_clock(worst)} · {_sev_of(ms)} · {occ}</summary>", "",
                   f"**Where:** {locs}"]
+        lines.append(_workflow_activity_line(ms))
+        lane_line = _workflow_lane_line(ms)
+        if lane_line:
+            lines.append(lane_line)
         if ev:
             lines.append(f"**Evidence:** {_flatten_cell(ev)}")
         lines += [f"**Catalog (background + fix recipe):** {url}", "",
@@ -10566,6 +10636,10 @@ def _also_noticed_block(findings: list[dict[str, Any]],
                   f"<summary><strong>{pat} - {title}</strong> · {summary_metric} · "
                   f"{_sev_of(ms)} · {occ}</summary>", "",
                   f"**Where:** {locs}"]
+        lines.append(_workflow_activity_line(ms))
+        lane_line = _workflow_lane_line(ms)
+        if lane_line:
+            lines.append(lane_line)
         has_source_unbacked_tier2 = any(_source_unbacked_tier2_here(m) for m in ms)
         # PR-P1 (D3-rev1's accounting condition): a demoted MEASURED finding names its
         # reason class here, and certificate-carrying ones render their proof class —
@@ -12101,6 +12175,24 @@ def _default_branch_push_lane_block(doc: dict[str, Any]) -> list[str]:
             *lines,
             "Push timing could not be measured because push run-list coverage was "
             "incomplete.",
+            "",
+        ]
+    pushes_30d = int(_num(lane.get("pushes_30d")) or 0)
+    push_word = "push" if pushes_30d == 1 else "pushes"
+    if status == "frequency_incomplete":
+        lines += [
+            f"At least {pushes_30d} {push_word} to the default branch were observed "
+            "in the last 30 days; the exact frequency could not be measured.",
+            "",
+        ]
+    else:
+        lines += [
+            f"{pushes_30d} {push_word} to the default branch in the last 30 days.",
+            "",
+        ]
+    if lane.get("rare") is True:
+        lines += [
+            "This is a **rare** lane, so its findings are left uncredited.",
             "",
         ]
     if sampled == 0:

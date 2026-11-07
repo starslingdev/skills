@@ -591,6 +591,7 @@ failure mode and how you have guarded it before shipping.
 <summary><strong>OPT32 - Missing `paths`/`paths-ignore` on Expensive Workflows</strong> · no bill saving · HIGH · 1 across 1 wf</summary>
 
 **Where:** `publish.yaml:2` (build)
+**Activity:** 0 runs in 30 days · most recent 2026-02-19.
 **Evidence:** workflow triggers on push but declares no `paths:`/`paths-ignore:` filter (the `on:` block below has no `paths:` key).
 **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt32--missing-pathspaths-ignore-on-expensive-workflows
 
@@ -655,6 +656,7 @@ failure mode and how you have guarded it before shipping.
 <summary><strong>OPT33 - No Draft PR Gating on Expensive Jobs</strong> · no bill saving · MEDIUM · 1 across 1 wf</summary>
 
 **Where:** `tests.yaml:13` (tests)
+**Activity:** 37 runs in 30 days · most recent 2026-07-22.
 **Evidence:** expensive job `tests` (matrix) runs on every PR that changes the workflow's filtered `paths:` including drafts - no `if: github.event.pull_request.draft == false` gate
 **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt33--no-draft-pr-gating-on-expensive-jobs
 

@@ -1,5 +1,7 @@
 # Changelog
 
+- Report the default-branch push count and mark infrequent post-merge lanes as rare.
+
 All notable changes to the `ci-speedup` skill are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/); the skill is
 unversioned and updates by reinstall from `main`.

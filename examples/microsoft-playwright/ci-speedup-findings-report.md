@@ -22,7 +22,7 @@ not measured: lifecycle data was not collected
 >
 > **`.github/workflows/publish_release.yml` changed ~114 days ago - narrowed to the current configuration.** This audit measures only the 14 runs since that change; the 6 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
-> **`.github/workflows/tests_bidi.yml` changed ~118 days ago - narrowed to the current configuration.** This audit measures only the 8 runs since that change; the 12 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/tests_bidi.yml` changed ~119 days ago - narrowed to the current configuration.** This audit measures only the 8 runs since that change; the 12 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
 > **`.github/workflows/tests_secondary.yml` changed ~126 days ago - narrowed to the current configuration.** This audit measures only the 18 runs since that change; the 2 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
@@ -520,6 +520,7 @@ DELIVER & VERIFY
 <summary><strong>OPT43 - Excessive Queue Time</strong> · worst savable wait 5m 48s · MEDIUM · 41 across 3 wf</summary>
 
 **Where:** `tests_mcp.yml` (windows-latest - msedge), `tests_mcp.yml` (ubuntu-latest - firefox), `tests_mcp.yml` (macos-latest - chrome), `tests_mcp.yml` (macos-latest - chromium), `tests_mcp.yml` (ubuntu-latest - chromium), `tests_mcp.yml` (macos-latest - webkit), `tests_mcp.yml` (windows-latest - firefox), `tests_mcp.yml` (windows-latest - chromium), +33 more
+**Activity:** 1954 runs in 30 days · most recent 2026-07-24.
 **Evidence:** job `windows-latest - msedge` P90 queue 4396s over 8 runs (threshold 60s for PR workflows)
 **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt43--excessive-queue-time
 
@@ -926,6 +927,7 @@ failure mode and how you have guarded it before shipping.
 <summary><strong>OPT24 - Long Test Job Without Sharding</strong> · ~6m 51s wall-clock · HIGH · 9 across 2 wf</summary>
 
 **Where:** `tests_primary.yml` (Installation Test ubuntu-latest), `tests_primary.yml` (Installation Test windows-latest), `tests_primary.yml` (Installation Test macos-latest), `tests_secondary.yml` (time test runner - realtime), `tests_secondary.yml` (Test chrome on ubuntu-22.04), `tests_secondary.yml` (Test chrome-beta on ubuntu-22.04), `tests_secondary.yml` (time test runner - frozen), `tests_secondary.yml` (Test chrome on macos-latest), +1 more
+**Activity:** 1114 runs in 30 days · most recent 2026-07-24.
 **Wall-clock:** this job carries a real wall-clock saving, but the spine demotes it as **opt-in / rare** - it runs on only a minority of sampled PRs, so a typical PR doesn't wait on it (see the spine's opt-in footnote above). Its fix cuts wall-clock on the PRs that DO run it, not on the typical merge path.
 **Evidence:** job `Test chrome on macos-latest` p50 3573s over 4 runs, no shard axis observed (job names lack a `shard` / `partition` matrix marker)
 **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt24--long-test-job-without-sharding
@@ -981,6 +983,7 @@ failure mode and how you have guarded it before shipping.
 <summary><strong>OPT25 - Matrix Leg Imbalance</strong> · ~3m 21s wall-clock · MEDIUM · 2 across 2 wf</summary>
 
 **Where:** `tests_components.yml` (- Node.js 20), `tests_secondary.yml` (Windows)
+**Activity:** 1114 runs in 30 days · most recent 2026-07-24.
 **Wall-clock:** unlike the other findings in this section, this one **sits ON the merge-gating critical path** (a long pole) - its catalog fix **cuts developer wall-clock**, it is not a bill-only cleanup. See the spine above and this pattern's catalog recipe below for the remedy.
 **Evidence:** leg `Windows (firefox)` median 4377s vs `Windows (chromium)` 1598s - 2.7× imbalance over 3 sampled runs (heterogeneous legs - split the slow leg, don't rebalance)
 **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt25--shard-imbalance
@@ -1036,6 +1039,7 @@ failure mode and how you have guarded it before shipping.
 <summary><strong>OPT73 - Shared step recurs across the cluster - fix once, lower the floor</strong> · 109,114 min/mo · HIGH · 1 across 1 wf</summary>
 
 **Where:** `tests_primary.yml` (ubuntu-22.04 (webkit - Node.js 20))
+**Activity:** 778 runs in 30 days · most recent 2026-07-24.
 **Evidence:** the `Run ./.github/actions/run-test` step is 100% of the slowest cluster job `ubuntu-22.04 (webkit - Node.js 20)` (2480s) and recurs across 5 concurrent jobs of `.github/workflows/tests_primary.yml` (~1693-2474s per job) - a cluster-floor lever
 **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever
 
@@ -1087,6 +1091,7 @@ failure mode and how you have guarded it before shipping.
 <summary><strong>OPT73 - Shared step recurs across the cluster - fix once, lower the floor</strong> · 101,710 min/mo · HIGH · 1 across 1 wf</summary>
 
 **Where:** `tests_mcp.yml` (windows-latest - firefox)
+**Activity:** 840 runs in 30 days · most recent 2026-07-24.
 **Evidence:** the `Run ./.github/actions/run-test` step is 100% of the slowest cluster job `windows-latest - firefox` (2413s) and recurs across 5 concurrent jobs of `.github/workflows/tests_mcp.yml` (~1463-2404s per job) - a cluster-floor lever
 **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever
 
@@ -1138,6 +1143,7 @@ failure mode and how you have guarded it before shipping.
 <summary><strong>OPT73 - Shared step recurs across the cluster - fix once, lower the floor</strong> · 59,226 min/mo · HIGH · 1 across 1 wf</summary>
 
 **Where:** `tests_secondary.yml` (Windows (firefox))
+**Activity:** 336 runs in 30 days · most recent 2026-07-23.
 **Evidence:** the `Run ./.github/actions/run-test` step is 100% of the slowest cluster job `Windows (firefox)` (4375s) and recurs across 4 concurrent jobs of `.github/workflows/tests_secondary.yml` (~2654-4366s per job) - a cluster-floor lever
 **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever
 
@@ -1189,6 +1195,7 @@ failure mode and how you have guarded it before shipping.
 <summary><strong>OPT35 - Missing `fail-fast` on Non-Diagnostic Matrix Dimensions</strong> · 5,230 min/mo · LOW · 2 across 2 wf</summary>
 
 **Where:** `tests_primary.yml` (test_test_runner), `tests_webview_simulator.yml` (test_webview_simulator)
+**Activity:** 821 runs in 30 days · most recent 2026-07-24.
 **Tier-2 note:** measured wall-clock-neutral instance(s) of this pattern did not have matching render-ready `runner_minute_spine` source rows, so they are kept here instead of rendered as source-backed savings cards. Their computed neutrality certificate(s) (`post_completion_waste`) are stamped in findings.json and re-derived by verify_report.
 **Evidence:** 11 sampled failed matrix occurrence(s) left shard sibling jobs running after the first failed shard; ~5015 runner-min/mo of post-failure matrix compute (778/30d ÷ 100 sampled all-status run(s)).; 43 sampled failed matrix occurrence(s) left shard sibling jobs running after the first failed shard; ~215 runner-min/mo of post-failure matrix compute (43/30d ÷ 100 sampled all-status run(s)).
 **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt35--missing-fail-fast-on-non-diagnostic-matrix-dimensions
@@ -1241,6 +1248,7 @@ failure mode and how you have guarded it before shipping.
 <summary><strong>OPT2 - Uncached Large Downloads</strong> · 1,315 min/mo · MEDIUM · 5 across 5 wf</summary>
 
 **Where:** `infra.yml:24` (doc-and-lint), `tests_bidi.yml:54` (test_bidi), `tests_components.yml:46` (test_components), `tests_extension.yml:50` (test_extension), `tests_primary.yml:178` (test_vscode_extension)
+**Activity:** 2630 runs in 30 days · most recent 2026-07-24.
 **Evidence:** job `doc-and-lint` runs `playwright install` with no preceding `actions/cache` step keyed on the Playwright version; job `test_bidi` runs `playwright install` with no preceding `actions/cache` step keyed on the Playwright version; job `test_components` runs `playwright install` with no preceding `actions/cache` step keyed on the Playwright version; job `test_extension` runs `playwright install` with no preceding `actions/cache` step keyed on the Playwright version; job `test_vscode_extension` runs `playwright install` with no preceding `actions/cache` step keyed on the Playwright version
 **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt2--uncached-large-downloads
 
@@ -1292,6 +1300,7 @@ failure mode and how you have guarded it before shipping.
 <summary><strong>OPT14 - Repeated Checkout/Setup Without Artifact Handoff (and Slow Tool Replacement)</strong> · 1,240 min/mo · MEDIUM · 2 across 2 wf</summary>
 
 **Where:** `infra.yml:1` (doc-and-lint), `tests_primary.yml:1` (test_vscode_extension)
+**Activity:** 1653 runs in 30 days · most recent 2026-07-24.
 **Wall-clock:** this saves runner-minutes but its fix is **wall-clock-negative** (build-once-then-fan-out adds a serial gate), so it lengthens the merge wait. Treat it as a bill saving, not a speed win.
 **Evidence:** 2 jobs each run checkout + dependency install with no `actions/upload-artifact` / `download-artifact` handoff: doc-and-lint, lint-snippets; 2 jobs each run checkout + dependency install with no `actions/upload-artifact` / `download-artifact` handoff: test_vscode_extension, test_package_installations
 **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt14--repeated-checkoutsetup-without-artifact-handoff-and-slow-tool-replacement
@@ -1344,6 +1353,7 @@ failure mode and how you have guarded it before shipping.
 <summary><strong>OPT73 - Shared step recurs across the cluster - fix once, lower the floor</strong> · 1,098 min/mo · HIGH · 1 across 1 wf</summary>
 
 **Where:** `tests_webview_simulator.yml` (WebView on iOS Simulator (4/4))
+**Activity:** 43 runs in 30 days · most recent 2026-07-21.
 **Evidence:** the `Run WebView tests` step is 77% of the slowest cluster job `WebView on iOS Simulator (4/4)` (1310s) and recurs across 2 concurrent jobs of `.github/workflows/tests_webview_simulator.yml` (~776-1006s per job) - a cluster-floor lever
 **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever
 
@@ -1395,6 +1405,7 @@ failure mode and how you have guarded it before shipping.
 <summary><strong>OPT73 - Shared step recurs across the cluster - fix once, lower the floor</strong> · 72 min/mo · HIGH · 1 across 1 wf</summary>
 
 **Where:** `tests_docker_changes.yml` (test_linux_docker / Docker noble arm64)
+**Activity:** 11 runs in 30 days · most recent 2026-07-10.
 **Evidence:** the `Run @smoke tests inside docker` step is 27% of the slowest cluster job `test_linux_docker / Docker noble arm64` (288s) and recurs across 6 concurrent jobs of `.github/workflows/tests_docker_changes.yml` (~75-112s per job) - a cluster-floor lever
 **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever
 
@@ -1446,6 +1457,7 @@ failure mode and how you have guarded it before shipping.
 <summary><strong>OPT73 - Shared step recurs across the cluster - fix once, lower the floor</strong> · 33 min/mo · HIGH · 1 across 1 wf</summary>
 
 **Where:** `tests_docker_release.yml` (test_linux_docker / Docker jammy amd64)
+**Activity:** 5 runs in 30 days · most recent 2026-07-24.
 **Evidence:** the `Run @smoke tests inside docker` step is 37% of the slowest cluster job `test_linux_docker / Docker jammy amd64` (308s) and recurs across 6 concurrent jobs of `.github/workflows/tests_docker_release.yml` (~76-114s per job) - a cluster-floor lever
 **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt73--shared-sub-step-across-critical-path-jobs-cluster-floor-lever
 
@@ -1497,6 +1509,7 @@ failure mode and how you have guarded it before shipping.
 <summary><strong>OPT1 - Unnecessary Tool Install</strong> · 11 min/mo · MEDIUM · 2 across 2 wf</summary>
 
 **Where:** `copilot-setup-steps.yml:17` (copilot-setup-steps), `fix-flakes.yml:155` (fix)
+**Activity:** 22 runs in 30 days · most recent 2026-07-24.
 **Evidence:** job `copilot-setup-steps` installs Playwright browsers but no step runs `playwright test` or any package script that could (same step also matched OPT2 'uncached download'; reconciled to removal - caching an unused install is moot, so the saving is credited once here); job `fix` installs Playwright browsers but no step runs `playwright test` or any package script that could (same step also matched OPT2 'uncached download'; reconciled to removal - caching an unused install is moot, so the saving is credited once here)
 **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt1--unnecessary-tool-install
 
@@ -1558,7 +1571,7 @@ failure mode and how you have guarded it before shipping.
 
 | Source | Coverage | Used for |
 | --- | --- | --- |
-| ci-speedup static scan (skill commit `2f048be`, scripts tree `463d800`) | All `.github/workflows/*.yml` under the analyzed tree (3827650) | Static pattern detection (full OPT catalog) |
+| ci-speedup static scan (skill commit `2f048be`, scripts tree `d0e3bc2-dirty`) | All `.github/workflows/*.yml` under the analyzed tree (3827650) | Static pattern detection (full OPT catalog) |
 | gh runs/jobs API (timestamps) | 161 runs / 1630 jobs sampled | Critical-path + per-step P50 |
 | job logs | not run | Sampled only for a slow pole worth log-level inspection |
 | workflow YAML | 18 from the analyzed checkout | `on:` triggers, matrix/shard axes, job timeouts (detector inputs) |
