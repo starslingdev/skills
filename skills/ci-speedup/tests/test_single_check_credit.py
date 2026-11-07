@@ -204,27 +204,10 @@ def test_complete_single_check_prs_keep_the_full_saving(monkeypatch, tmp_path):
     assert "0 on 6 of 10 PRs where `sibling` runs" in result.reason
     assert "up to 8m 20s on the other 4 of 10 PRs where it was the only check" in result.reason
 
-    projected = bound_commit_projection(result.value, _commit_context(doc))
-    assert projected.value == 90.0
+    projected = bound_commit_projection(500.0, _commit_context(doc))
+    assert projected.value == 254.0
     assert projected.reason is not None
 
-    finding = doc["findings"][0]
-    finding["wall_clock_p50_s"] = projected.value
-    finding["wall_clock_uncapped_p50_s"] = 500.0
-    finding["wall_clock_derivation"] = [
-        {
-            "bound": "measured-critical-path",
-            "from_s": 500.0,
-            "to_s": result.value,
-            "reason": result.reason,
-        },
-        {
-            "bound": "commit-projection",
-            "from_s": result.value,
-            "to_s": projected.value,
-            "reason": projected.reason,
-        },
-    ]
     report = bp.render(doc, captured_at="2026-11-06T00:00:00Z")
     assert "4 of 10 PRs where it was the only check" in report
 
@@ -239,6 +222,37 @@ def test_complete_single_check_prs_keep_the_full_saving(monkeypatch, tmp_path):
         report, report_path, findings_path, skill_repo=None)
         if not check.skipped and not check.ok]
     assert failures == [], [(check.name, check.detail) for check in failures]
+
+    # Exercise the generic population-wide cap separately: no targeted job
+    # means each commit's slowest job supplies the projection inputs.
+    cap_doc = json.loads(json.dumps(doc))
+    cap_finding = cap_doc["findings"][0]
+    cap_finding["affected_jobs"] = []
+    cap_finding["wall_clock_p50_s"] = projected.value
+    cap_path = tmp_path / "cap-findings.json"
+    cap_path.write_text(json.dumps(cap_doc), encoding="utf-8")
+    assert vr.check_commit_wall_clock_projection(report, cap_path).ok
+
+    monkeypatch.setattr(vr.statistics, "mean", vr.statistics.median)
+    median_mutant = vr.check_commit_wall_clock_projection(report, cap_path)
+    assert not median_mutant.ok
+    assert "whole-commit cap 90.0" in median_mutant.detail
+
+
+def test_collect_caps_a_non_slowest_target_against_its_own_job(monkeypatch):
+    doc = _collect(monkeypatch, _SingleCheckClient)
+    finding = doc["findings"][0]
+
+    # On six commits `sibling` is slower than the targeted `pole`. Shortening
+    # only `pole` cannot move those commits, so they contribute zero rather
+    # than the slowest job's 90-second headroom.
+    assert finding["affected_jobs"] == ["pole"]
+    assert finding["wall_clock_p50_s"] == 200.0
+    commit_bound = next(
+        step for step in finding["wall_clock_derivation"]
+        if step["bound"] == "commit-projection")
+    assert commit_bound["from_s"] == 500.0
+    assert commit_bound["to_s"] == 200.0
 
 
 def test_incomplete_single_check_reads_remain_unknown(monkeypatch):
@@ -263,6 +277,10 @@ def test_singleton_and_faster_sibling_ceilings_match_the_verifier(monkeypatch, t
     pole_node = graph.pop("pole")
     pole_node["name"] = "pole"
     graph["pole-key"] = pole_node
+    for fact in cp["commit_wall_clock"]["facts"]:
+        for row in fact.get("job_projections") or []:
+            if row.get("node") == "pole":
+                row["node"] = "pole-key"
 
     result = bound_measured_critical_path(500.0, _population_context(doc))
     assert result.value == 260.0
@@ -270,8 +288,13 @@ def test_singleton_and_faster_sibling_ceilings_match_the_verifier(monkeypatch, t
     assert "up to 5m 00s on 2 of 10 PRs" in result.reason
     assert "up to 8m 20s on 4 of 10 PRs where it was the only check" in result.reason
 
-    projected = bound_commit_projection(result.value, _commit_context(doc))
-    assert projected.value == 90.0
+    own_context = WallClockContext(commit_wall_facts=tuple(
+        (float(fact["wall_s"]), 600.0,
+         690.0 if index >= 4 else 0.0, 600.0)
+        for index, fact in enumerate(cp["commit_wall_clock"]["facts"])
+    ))
+    projected = bound_commit_projection(result.value, own_context)
+    assert projected.value == 104.0
     assert projected.reason is not None
 
     finding = doc["findings"][0]

@@ -251,7 +251,7 @@ class WallClockContext:
     # One tuple per complete sampled commit: (whole-commit wall, slowest job,
     # next-longest job outside the slowest job's `needs:` chain[, that chain's
     # span on the commit]). The commit projection bound uses every tuple, then
-    # takes the median allowed saving. Without the fourth value the slowest job
+    # takes their share-weighted mean allowed saving. Without the fourth value the slowest job
     # is its own chain.
     commit_wall_facts: tuple[tuple[float, ...], ...] = ()
     # #44 — a CLUSTER-FLOOR lever (OPT73): its fix lowers ALL of `own_check_names`
@@ -638,7 +638,10 @@ def bound_commit_projection(value: float, ctx: WallClockContext) -> BoundResult:
     for fact in ctx.commit_wall_facts:
         wall, slowest, next_longest = fact[:3]
         chain = fact[3] if len(fact) > 3 else slowest
-        if wall <= 0 or slowest <= 0:
+        if wall <= 0:
+            continue
+        if slowest <= 0:
+            caps.append(0.0)
             continue
         remaining = max(slowest - value, 0.0)
         speedup = slowest / remaining if remaining > 0 else float("inf")
@@ -649,7 +652,11 @@ def bound_commit_projection(value: float, ctx: WallClockContext) -> BoundResult:
         caps.append(max(0.0, wall - projected.projected_s))
     if not caps:
         return BoundResult(round(value, 1))
-    cap = round(float(statistics.median(caps)), 1)
+    # Every sampled commit is one observed population share. A median collapses
+    # a bimodal gate to its majority case (for example, six sibling-gated PRs
+    # erase the larger saving on four singleton PRs); the expected saving is
+    # the share-weighted mean across those observed commits.
+    cap = round(float(statistics.mean(caps)), 1)
     if cap >= round(value, 1):
         return BoundResult(round(value, 1))
     return BoundResult(cap, (

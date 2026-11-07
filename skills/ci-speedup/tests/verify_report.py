@@ -732,18 +732,62 @@ def check_commit_wall_clock_projection(report: str, findings_path: Path | None) 
     elif _num(stamp.get("p50_s")) is not None or _num(stamp.get("p90_s")) is not None:
         failures.append("empty complete population publishes commit percentiles")
 
-    max_caps = [wall - projection(wall, slowest, next_longest, float("inf"), chain)[0]
-                for _fact, wall, slowest, next_longest, chain in complete]
-    if max_caps:
-        max_p50_saving = float(statistics.median(max_caps))
-        for finding in doc.get("findings") or []:
-            if not isinstance(finding, dict):
-                continue
-            saving = _num(finding.get("wall_clock_p50_s"))
-            if saving is not None and saving > max_p50_saving + 0.11:
-                failures.append(
-                    f"finding {finding.get('id')!r} saving {saving} exceeds "
-                    f"whole-commit cap {max_p50_saving:.1f}")
+    def matrix_base(name: str) -> str:
+        return re.sub(r"\s*\([^()]*(?:,[^()]*)?\)\s*$", "", name).strip()
+
+    for finding in doc.get("findings") or []:
+        if not isinstance(finding, dict):
+            continue
+        saving = _num(finding.get("wall_clock_p50_s"))
+        if saving is None:
+            continue
+        workflow = str(finding.get("workflow_file") or "")
+        affected = {str(job) for job in (finding.get("affected_jobs") or []) if job}
+        affected_bases = {matrix_base(job) for job in affected}
+        caps: list[float] = []
+        for fact, wall, slowest, next_longest, chain in complete:
+            candidates = [
+                row for row in (fact.get("job_projections") or [])
+                if isinstance(row, dict)
+                and str(row.get("workflow_file") or "") == workflow
+                and (str(row.get("node") or "") in affected
+                     or str(row.get("name") or "") in affected
+                     or matrix_base(str(row.get("name") or "")) in affected_bases)
+            ] if workflow and affected else []
+            if workflow and affected:
+                if "job_projections" not in fact:
+                    projected = projection(
+                        wall, slowest, next_longest, float("inf"), chain)[0]
+                    caps.append(max(0.0, wall - projected))
+                    continue
+                if not candidates:
+                    caps.append(0.0)
+                    continue
+                target = max(candidates, key=lambda row: _num(row.get("duration_s")) or 0.0)
+                target_s = _num(target.get("duration_s"))
+                target_next = _num(target.get("next_longest_s")) or 0.0
+                target_chain = _num(target.get("chain_span_s"))
+                if target_s is None or target_s <= 0:
+                    caps.append(0.0)
+                    continue
+                if target_chain is not None and target_chain < target_s:
+                    failures.append(
+                        f"finding {finding.get('id')!r} has a target chain shorter "
+                        "than its job")
+                    continue
+                projected = projection(
+                    wall, target_s, target_next, float("inf"), target_chain)[0]
+            else:
+                projected = projection(
+                    wall, slowest, next_longest, float("inf"), chain)[0]
+            caps.append(max(0.0, wall - projected))
+        if not caps:
+            continue
+        max_weighted_saving = float(statistics.mean(caps))
+        if saving > max_weighted_saving + 0.11:
+            failures.append(
+                f"finding {finding.get('id')!r} saving {saving} exceeds "
+                f"whole-commit cap {max_weighted_saving:.1f}")
     return Check(name, not failures,
                  "; ".join(failures[:8]) if failures
                  else f"{len(complete)} complete commit projection(s) re-derived")
