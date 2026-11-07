@@ -27,7 +27,7 @@ illustrative figures from real audits, kept to anchor the model.
 - [5a. Observed timing spread is descriptive, never an inference](#5a-observed-timing-spread-is-descriptive-never-an-inference)
 - [6. Reliability is a wall-clock multiplier](#6-reliability-is-a-wall-clock-multiplier)
 - [7. Report structure](#7-report-structure)
-- [8. Joint scenarios for two concurrent checks (contract only — not yet produced)](#8-joint-scenarios-for-two-concurrent-checks-contract-only--not-yet-produced)
+- [8. Joint scenarios for two concurrent checks (observations only)](#8-joint-scenarios-for-two-concurrent-checks-observations-only)
 
 ---
 
@@ -485,7 +485,7 @@ e.g. build-dedup spends developer-minutes of *wait* to save runner-minutes of
 
 ---
 
-## 8. Joint scenarios for two concurrent checks (contract only — not yet produced)
+## 8. Joint scenarios for two concurrent checks (observations only)
 
 Two findings on two *different* concurrent checks can each be worth almost
 nothing alone and a great deal together. With A at 300s and B at 299s, cutting
@@ -614,25 +614,20 @@ or leaves the concurrency validation unstamped. This is
 deliberately not a general DAG scheduler; the existing single-finding
 chain-aware behaviour is unchanged.
 
-### Status: the contract exists, no producer feeds it
+### Status: measured observations, no qualifying effect producer
 
-`scripts/joint_scenario.py` holds the data contract, the calculator and the
-admission rules, unit-tested against every counterexample above. **Nothing in
-the engine stamps its inputs**, so no report renders a joint block. The gaps are
-listed in that module as `MISSING_PRODUCER_EVIDENCE`; in summary, the engine has
-no per-observation durations for the *whole* gating set —
-`pr_critical_path.chain_facts` carries per-sha, era-scoped `member_spans_s`,
-but only for the
-members of that PR's winning chain and with no attempt or runner identity,
-while `populations` is bimodal-gated and identity-free — no stamped
-concurrency validation (overlap is inferred from the `needs:` closure and
-*defaults to concurrent* when no job graph is available), no per-observation
-local reductions (raw pre-cascade estimates are one scalar per finding, and one
-scalar across all legs for a cluster finding), no affected-step identity beyond
-a cluster finding's `measured_evidence.waterfall.shared_step` and a single
-`decomposition.dominant_step`, no stable matrix-leg identity (`affected_jobs`
-holds YAML job keys on the scan path and display names on the measured path,
-and a job key names all of a job's legs at once), and no
-certificate that a fix leaves scheduling, coverage and the job set unchanged.
-Adding an adapter before that evidence exists would produce confident numbers
-with nothing behind them.
+`scripts/joint_scenario.py` holds the data contract, calculator and admission
+rules. The collector now stamps per-observation durations for the *whole*
+confirmed gating set, plus attempt identity, runner identity and measured
+concurrency validation. It stamps nothing when the required set is unknown,
+when a check cannot map to exactly one non-matrix job execution, when the set
+contains a `needs:` relationship or shared upstream, or when the measured
+starts and overlap do not meet the concurrency tolerance.
+
+The report does not consume this contract yet. Separately, the artifact's
+`effects` list remains empty, so there is no supported joint claim to render.
+The remaining gaps are listed in `MISSING_PRODUCER_EVIDENCE`: no current finding
+supplies per-observation local reductions bounded by the affected work,
+affected-work identity, stable matrix-leg identity, and a certificate that the
+fix leaves scheduling, coverage and the job set unchanged. Adapting aggregate
+savings stamps before that evidence exists would produce unsupported numbers.
