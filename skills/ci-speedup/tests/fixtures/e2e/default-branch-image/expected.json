@@ -20,7 +20,6 @@
   "lane": {
     "job_fetches": 0,
     "p50_s": 300.0,
-    "pushes_30d": null,
     "sampled_pushes": 3
   },
   "leaves": [],

@@ -1,11 +1,11 @@
 {
   "commit_wall_clock": {
-    "p50_s": 300.0,
-    "p90_s": 300.0,
-    "queue_p50_s": 0.0,
-    "queue_p90_s": 0.0,
-    "work_p50_s": 300.0,
-    "work_p90_s": 300.0
+    "p50_s": null,
+    "p90_s": null,
+    "queue_p50_s": null,
+    "queue_p90_s": null,
+    "work_p50_s": null,
+    "work_p90_s": null
   },
   "config_eras": [],
   "credited_findings": [
@@ -29,7 +29,8 @@
     "OPT21",
     "OPT33",
     "OPT45",
-    "OPT75"
+    "OPT75",
+    "OPT81"
   ],
   "gate_kind": null,
   "headline": {
@@ -39,15 +40,14 @@
   "lane": {
     "job_fetches": 0,
     "p50_s": null,
-    "pushes_30d": null,
     "sampled_pushes": 0
   },
   "leaves": [],
   "minority_tails": [],
   "provenance": "required_scoped",
   "representative_jobs": {
-    "next": "build",
-    "slowest": "gate"
+    "next": null,
+    "slowest": null
   },
   "verifier": {
     "fail": [],
@@ -67,10 +67,10 @@
       "chain headline re-derives from the stamped chain facts",
       "check enumeration is bound to the kept config era (no other-config check leaks in)",
       "cluster-floor lever's ceiling floors at a NON-sibling check (not its own matrix leg)",
+      "code findings stay within commit work and never claim runner queue",
       "crowned detector leaf agrees with the pole's dominant measured category (no off-category ceiling)",
       "declared drilled-run timelines are readable",
       "each rendered pole's drill belongs to its own job (no cross-job log leak)",
-      "every data-driven finding carries a measured signal (no unsupported claims)",
       "every drilled pole's binding floor is disclosed on the spine (no silent heavy-check drop)",
       "every rendered cache claim carries a cross-run cache distribution",
       "headline leads with the observed wall when the chain sum diverges from the makespan",
@@ -81,7 +81,6 @@
       "no spine-dropped check is also framed on the merge-gating critical path",
       "pole addressable ceiling within the co-occurrence floor",
       "presence-causal headline only when the slowest check is minority-present",
-      "recoverable ceiling above the typical wait carries a worst-case reconciliation",
       "rendered chain total is never below the largest member it sums",
       "rendered per-workflow gate frequency matches the populations re-derivation",
       "scanned date matches the date in the filename",

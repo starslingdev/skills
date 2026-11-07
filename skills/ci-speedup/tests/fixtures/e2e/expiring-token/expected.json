@@ -22,7 +22,6 @@
   "lane": {
     "job_fetches": null,
     "p50_s": null,
-    "pushes_30d": null,
     "sampled_pushes": null
   },
   "leaves": [],

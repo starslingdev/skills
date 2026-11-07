@@ -30,7 +30,6 @@
   "lane": {
     "job_fetches": 0,
     "p50_s": null,
-    "pushes_30d": null,
     "sampled_pushes": 0
   },
   "leaves": [],

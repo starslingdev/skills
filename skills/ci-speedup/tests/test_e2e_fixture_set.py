@@ -43,6 +43,7 @@ class FixtureClient:
         self.recorded = recorded
         self.queries = 0
         self.errors = 0
+        self.job_reads: dict[str, int] = {}
 
     def available(self) -> bool:
         return not self.gave_up
@@ -102,7 +103,9 @@ class FixtureClient:
         match = re.match(
             rf"repos/{re.escape(repo)}/actions/runs/(\d+)/jobs", endpoint)
         if match:
-            return {"jobs": self.recorded.get("jobs", {}).get(match.group(1), [])}
+            run_id = match.group(1)
+            self.job_reads[run_id] = self.job_reads.get(run_id, 0) + 1
+            return {"jobs": self.recorded.get("jobs", {}).get(run_id, [])}
         match = re.match(
             rf"repos/{re.escape(repo)}/commits/([^/]+)/check-runs", endpoint)
         if match:
@@ -189,6 +192,7 @@ def run_fixture(path: Path, monkeypatch, tmp_path: Path) -> tuple[dict, str, lis
     report_path.with_name(report_path.name + ".claims.json").write_text(
         json.dumps(bp._LAST_CLAIMS.to_json()), encoding="utf-8")
     checks = vr.run_checks(report, report_path, findings_path, skill_repo=None)
+    doc["_fixture_job_reads"] = dict(client.job_reads)
     return doc, report, checks
 
 
@@ -267,7 +271,6 @@ def fixture_facts(doc: dict, checks: list) -> dict:
         },
         "credited_findings": credited,
         "lane": {
-            "pushes_30d": lane.get("pushes_30d"),
             "sampled_pushes": lane.get("sampled_push_count"),
             "job_fetches": lane.get("job_fetch_count"),
             "p50_s": lane.get("p50_s"),
@@ -380,12 +383,22 @@ def test_named_fixtures_exercise_their_defining_interactions(
         spec.get("matrix")
         for jobs in docs["path-partitioned-monorepo"]["workflow_job_graph"].values()
         for spec in jobs.values())
+    assert any(
+        row.get("name", "").startswith("tests / test (")
+        for row in docs["path-partitioned-monorepo"]["pr_critical_path"]["checks"])
 
     red = json.loads(
         (FIXTURE_ROOT / "red-default-branch" / "responses.json").read_text())
     assert any(
         run.get("event") == "push" and run.get("conclusion") == "failure"
         for workflow in red["workflows"] for run in workflow["runs"])
+
+
+def test_push_fixture_fetches_the_recorded_run_jobs_once(monkeypatch, tmp_path):
+    doc, _report, _checks = run_fixture(
+        FIXTURE_ROOT / "push-job-list", monkeypatch, tmp_path)
+
+    assert doc["_fixture_job_reads"]["9001"] == 1
 
 
 @pytest.mark.parametrize(
