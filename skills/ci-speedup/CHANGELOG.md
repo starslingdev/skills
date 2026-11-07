@@ -13,6 +13,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-11-07** — Keep serial test-loop and emulated-image findings visible when the same job also restores a dependency cache. A cache miss retains precedence; a hit-only restore becomes the fallback observation after the more specific log detectors run.
 - **2026-11-07** — Gate cache savings on repository capacity, sampled key invalidation, and net restore/save economics. The collector reads repository cache usage once, reuses sampled PR changed files, multiplies cache size across saving copies, and leaves failed or unreadable checks visible but uncredited.
 - **2026-11-07** — Correct fix guidance for pytest workers, persisted ESLint caches, multi-job build caches, in-job concurrency controls, and change-selected test coverage. The catalog now requires measured safety evidence before reducing the pre-merge test set and lists common tool-specific worker controls that must be measured independently.
 - **2026-11-07** — Exclude commits containing a workflow re-run from per-commit PR wait percentiles, and name each re-run workflow in the partial-sample disclosure so time before the re-run was requested cannot inflate the reported CI wait.

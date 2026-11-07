@@ -54,6 +54,16 @@ def test_dependency_cache_leaf_keeps_precedence_over_serial_test_loop():
     assert leaf is not None and leaf["fix_key"] == "dependency-cache"
 
 
+def test_cache_hit_does_not_hide_a_serial_test_loop():
+    leaf = bp._parse_log(_loop_log() + "\nCache restored from key: deps-linux")
+    assert leaf is not None and leaf["fix_key"] == "test-loop-serial"
+
+
+def test_cache_hit_alone_remains_a_dependency_cache_observation():
+    leaf = bp._parse_log("Cache restored from key: deps-linux")
+    assert leaf is not None and leaf["fix_key"] == "dependency-cache"
+
+
 def test_emulated_image_compile_leaf_follows_serial_test_loop_in_parser_order():
     tree = ast.parse(textwrap.dedent(inspect.getsource(bp._parse_log)))
     ordered = []
