@@ -113,15 +113,35 @@ jobs:
     def text(self, endpoint: str, allow_missing: bool = False):
         self.queries += 1
         return "\n".join([
-            "#10 [build 2/3] RUN cargo build --release",
-            "#10 CACHED" if self.cached_compile else "#10 DONE 300.0s",
-            "#20 exporting to GitHub Actions Cache",
-            "#20 DONE 220.0s",
+            f"{_iso(10)} #10 [build 2/3] RUN cargo build --release",
+            f"{_iso(310)} " + ("#10 CACHED" if self.cached_compile else "#10 DONE 300.0s"),
+            f"{_iso(311)} #20 exporting to GitHub Actions Cache",
+            f"{_iso(531)} #20 DONE 220.0s",
         ])
 
 
 class _CachedClient(_Client):
     cached_compile = True
+
+
+class _NoCacheClient(_Client):
+    def text(self, endpoint: str, allow_missing: bool = False):
+        return (f"{_iso(0)} docker buildx build --no-cache --cache-to type=gha .\n" +
+                super().text(endpoint, allow_missing))
+
+
+class _UnrelatedCachedCompileClient(_Client):
+    def text(self, endpoint: str, allow_missing: bool = False):
+        if endpoint.endswith("/1011/logs"):
+            return "\n".join([
+                f"{_iso(10)} #9 [build 1/3] RUN cargo build --bin helper",
+                f"{_iso(11)} #9 CACHED",
+                f"{_iso(12)} #10 [build 2/3] RUN cargo build --release",
+                f"{_iso(312)} #10 DONE 300.0s",
+                f"{_iso(313)} #20 exporting to GitHub Actions Cache",
+                f"{_iso(533)} #20 DONE 220.0s",
+            ])
+        return super().text(endpoint, allow_missing)
 
 
 def _multi_platform_log(*, no_cache: bool = False) -> str:
@@ -209,6 +229,19 @@ def test_manifest_first_build_keeps_budgeted_cache_advice() -> None:
     assert "measure" in prompt.lower()
 
 
+def test_whole_context_copy_in_another_stage_does_not_replace_cache_advice() -> None:
+    prompt = _prompt("\n".join([
+        "docker buildx build --platform linux/amd64 .",
+        "#2 [assets 1/1] COPY . .",
+        "#2 DONE 5.0s",
+        "#3 [build 1/3] COPY Cargo.toml Cargo.lock ./",
+        "#3 DONE 5.0s",
+        "#4 [build 2/3] RUN cargo build --release",
+        "#4 DONE 300.0s",
+    ]))
+    assert "--cache-to" in prompt
+
+
 def test_opt4_contract_does_not_recommend_mode_max_unconditionally() -> None:
     pattern = (Path(__file__).resolve().parents[1] / "references" / "patterns" /
                "opt4-docker-layer-cache-missing.md").read_text(encoding="utf-8")
@@ -256,3 +289,66 @@ def test_collect_stays_silent_when_the_compile_layer_hits_cache(
     doc, _report = _collect(monkeypatch, tmp_path, _CachedClient)
     assert not any(f.get("cache_net_negative", {}).get("kind") ==
                    "opt79_buildkit_export" for f in doc["findings"])
+
+
+def test_unrelated_cached_compile_does_not_hide_the_cold_slowest_layer(
+        monkeypatch, tmp_path: Path) -> None:
+    doc, _report = _collect(monkeypatch, tmp_path, _UnrelatedCachedCompileClient)
+    findings = [f for f in doc["findings"]
+                if f.get("cache_net_negative", {}).get("kind") ==
+                "opt79_buildkit_export"]
+    assert len(findings) == 1
+    assert findings[0]["sizing_basis"] == "measured"
+
+
+def test_collect_stays_silent_for_an_explicit_no_cache_build(
+        monkeypatch, tmp_path: Path) -> None:
+    doc, _report = _collect(monkeypatch, tmp_path, _NoCacheClient)
+    assert not any(f.get("cache_net_negative", {}).get("kind") ==
+                   "opt79_buildkit_export" for f in doc["findings"])
+
+
+def test_buildkit_candidates_share_the_existing_per_workflow_probe_limit() -> None:
+    wf_doc = {"jobs": {
+        name: {"name": name, "steps": [{
+            "uses": "docker/build-push-action@v6",
+            "with": {"cache-to": "type=gha"},
+        }]}
+        for name in ("small", "medium", "large")
+    }}
+    jobs = [{
+        "id": index, "name": name, "conclusion": "success",
+        "started_at": _iso(0), "completed_at": _iso(duration),
+    } for index, (name, duration) in enumerate(
+        (("small", 100), ("medium", 200), ("large", 300)), 1)]
+    plan = cr._opt79_log_plan("wf.yml", [jobs], {}, wf_doc)
+    selected = {job["name"] for _p50, _wf, job in plan}
+    assert selected == {"medium", "large"}
+
+
+def test_verifier_rederives_buildkit_monthly_sizing(
+        monkeypatch, tmp_path: Path) -> None:
+    doc, report = _collect(monkeypatch, tmp_path, _Client)
+    finding = next(f for f in doc["findings"]
+                   if f.get("cache_net_negative", {}).get("kind") ==
+                   "opt79_buildkit_export")
+    report_path = tmp_path / "report.md"
+    findings_path = tmp_path / "findings.json"
+    for key, value in (("effective_monthly_runs", 999.0),
+                       ("sampled_runs", 999), ("monthly_volume", 999)):
+        mutant = json.loads(json.dumps(doc))
+        stamped = next(f for f in mutant["findings"] if f["id"] == finding["id"])
+        stamped["cache_net_negative"][key] = value
+        findings_path.write_text(json.dumps(mutant), encoding="utf-8")
+        failures = [check for check in vr.run_checks(
+            report, report_path, findings_path, skill_repo=None)
+            if not check.skipped and not check.ok]
+        assert any("OPT79 findings re-derive" in check.name for check in failures)
+    mutant = json.loads(json.dumps(doc))
+    stamped = next(f for f in mutant["findings"] if f["id"] == finding["id"])
+    stamped["runner_min_saving"] = 999.0
+    findings_path.write_text(json.dumps(mutant), encoding="utf-8")
+    failures = [check for check in vr.run_checks(
+        report, report_path, findings_path, skill_repo=None)
+        if not check.skipped and not check.ok]
+    assert any("OPT79 findings re-derive" in check.name for check in failures)

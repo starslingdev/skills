@@ -1682,6 +1682,9 @@ _PARTIAL_MISS_FLOOR_PCT = 40.0
 # seconds, and on the number of work-bearing (RUN/FROM/COPY/ADD) steps that ran cold.
 _BUILDX_COLD_WALL_FLOOR_S = 60.0
 _BUILDX_MIN_WORK_STEPS = 2
+_BUILDX_COMPILE_OPERATION_RE = re.compile(
+    r"\b(?:cargo|go)\s+build\b|\bcmake\s+--build\b|\bdotnet\s+(?:build|publish)\b|"
+    r"\b(?:npm|pnpm|yarn)\s+(?:run\s+)?build\b|\bmake(?:\s|$)", re.IGNORECASE)
 
 # A pytest run with `pytest-xdist` INSTALLED (in the plugin banner) but NO `-n`/
 # `--numprocesses` on the invocation runs every test serially on one worker — the
@@ -2703,15 +2706,19 @@ def _parse_log(text: str,
         if (cached == 0 and len(work_steps) >= _BUILDX_MIN_WORK_STEPS
                 and cold_wall >= _BUILDX_COLD_WALL_FLOOR_S):
             work_steps.sort(key=lambda w: -w[0])
-            slow_secs, slow_stage, _slow_kind, slow_n = work_steps[0]
+            slow_secs, slow_stage, slow_kind, slow_n = work_steps[0]
             slow_header_pos = next(
                 (i for i, (n, _stage, _kind, _rest) in enumerate(work_headers)
                  if n == slow_n), len(work_headers))
+            slow_rest = next((rest for n, _stage, _kind, rest in work_headers
+                              if n == slow_n), "")
+            slow_stage_base = slow_stage.split()[0] if slow_stage else ""
             whole_context_before_slowest = any(
                 i < slow_header_pos and kind in {"COPY", "ADD"}
+                and stage.split()[0] == slow_stage_base
                 and re.search(r"(?:^|\s)\.\s+\.\s*$", rest.strip())
-                for i, (_n, _stage, kind, rest) in enumerate(work_headers)
-            )
+                for i, (_n, stage, kind, rest) in enumerate(work_headers)
+            ) and slow_kind == "RUN" and bool(_BUILDX_COMPILE_OPERATION_RE.search(slow_rest))
             # ALWAYS quote the slowest cold layer's header + DONE - the single pair the
             # BIGGEST-LEVER magnitude (slow_secs / cold_wall) is computed from - adjacent
             # and verbatim, so the evidence substantiates the headline %. A blind

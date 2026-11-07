@@ -24141,6 +24141,15 @@ def _opt79_buildkit_export_jobs(wf_doc: dict[str, Any] | None) -> set[str]:
             uses = str(step.get("uses") or "").lower()
             with_in = step.get("with") if isinstance(step.get("with"), dict) else {}
             run = str(step.get("run") or "")
+            no_cache = with_in.get("no-cache")
+            action_bypasses = ("docker/build-push-action" in uses
+                               and no_cache is not None
+                               and str(no_cache).strip().lower() not in {"", "false", "no", "off"})
+            command_bypasses = bool(_re.search(
+                r"docker\s+buildx\s+build\b[^\n]*\s--no-cache(?:\s|$)", run))
+            if action_bypasses or command_bypasses:
+                exports = False
+                break
             if ("docker/build-push-action" in uses and with_in.get("cache-to")) \
                     or ("docker buildx build" in run and "--cache-to" in run):
                 exports = True
@@ -24151,8 +24160,12 @@ def _opt79_buildkit_export_jobs(wf_doc: dict[str, Any] | None) -> set[str]:
     return out
 
 
-def _opt79_buildkit_export_measurement(log: str) -> tuple[float, str, bool] | None:
-    """(export seconds, slowest layer description, slowest layer cached)."""
+def _opt79_buildkit_export_measurement(log: str) -> tuple[float, str, set[str]] | None:
+    """(export seconds, slowest observed layer, cached compile layers)."""
+    # GitHub prefixes every real job-log line with an ISO timestamp. Match the
+    # BuildKit grammar after removing that transport prefix, just like the rest
+    # of the cache-family log readers do.
+    log = "\n".join(_clean_log_line(line) for line in log.splitlines())
     export_ids = {
         match.group(1) for match in _re.finditer(
             r"^\s*#(\d+)\s+(?:exporting cache to|exporting to GitHub Actions Cache)",
@@ -24177,19 +24190,20 @@ def _opt79_buildkit_export_measurement(log: str) -> tuple[float, str, bool] | No
     # A cached work layer has no DONE duration, so it cannot participate in the
     # slow-layer maximum below. Fail closed on any observed work-layer hit rather
     # than silently dropping the very evidence that disproves an all-cold build.
-    cached_work = next(((number, description) for number, description in layer_headers
-                        if number in cached_ids
-                        and _OPT79_BUILDKIT_COMPILE_RE.search(description)), None)
-    if cached_work is not None:
-        return max(exports), cached_work[1], True
+    cached_work = [description for number, description in layer_headers
+                   if number in cached_ids
+                   and _OPT79_BUILDKIT_COMPILE_RE.search(description)]
     layers: list[tuple[float, str, str]] = []
     for number, description in layer_headers:
         if number in done:
             layers.append((done[number], number, description))
-    if not layers:
+    if layers:
+        _seconds, _slow_id, description = max(layers)
+    elif cached_work:
+        description = cached_work[0]
+    else:
         return None
-    _seconds, _slow_id, description = max(layers)
-    return max(exports), description, False
+    return max(exports), description, set(cached_work)
 
 
 def _opt79_tags_only(wf_doc: dict[str, Any] | None) -> bool:
@@ -24978,6 +24992,7 @@ def _opt79_candidates(
     withheld: dict[str, int] | None = None,
     package_json: Any = None,
     withheld_candidates: list[dict[str, Any]] | None = None,
+    apply_limit: bool = True,
 ) -> list[tuple[str, dict[str, Any]]]:
     """The jobs worth spending a log probe on, most expensive first — the ONE
     selector shared by the log plan and the detector, so the two can never
@@ -25120,11 +25135,12 @@ def _opt79_candidates(
         out.append((p50, name, block))
 
     out.sort(key=lambda t: (-t[0], t[1]))
-    if len(out) > _OPT79_MAX_CANDIDATE_JOBS:
+    if apply_limit and len(out) > _OPT79_MAX_CANDIDATE_JOBS:
         for _p, name, _b in out[_OPT79_MAX_CANDIDATE_JOBS:]:
             _no("beyond_the_per_workflow_candidate_log_budget", job=name,
                 budget=_OPT79_MAX_CANDIDATE_JOBS)
-    return [(name, block) for _p, name, block in out[:_OPT79_MAX_CANDIDATE_JOBS]]
+    selected = out[:_OPT79_MAX_CANDIDATE_JOBS] if apply_limit else out
+    return [(name, block) for _p, name, block in selected]
 
 
 def _opt79_log_plan(
@@ -25133,6 +25149,7 @@ def _opt79_log_plan(
     crit: dict[str, Any],
     wf_doc: dict[str, Any] | None,
     package_json: Any = None,
+    withheld: dict[str, int] | None = None,
 ) -> list[tuple[float, str, dict[str, Any]]]:
     """The job occurrences whose logs OPT79 needs, as
     `(candidate job p50, workflow file, job dict)` so the caller can plan the
@@ -25145,44 +25162,43 @@ def _opt79_log_plan(
     runs_in_the_order_it_is_given` pins the assumption so a sampler that starts
     handing runs over oldest-first cannot silently change which occurrences the
     comparison is built from."""
+    candidates: dict[str, tuple[float, bool]] = {}
+    for name, block in _opt79_candidates(
+            wf_path, jobs_per_run, crit, wf_doc, package_json=package_json,
+            apply_limit=False):
+        candidates[name] = (float(block.get("job_p50_s") or 0.0), False)
+    for name in _opt79_buildkit_export_jobs(wf_doc):
+        occurrences = [job for run_jobs in jobs_per_run for job in run_jobs
+                       if _matrix_base_name(str(job.get("name") or "")) == name]
+        durations = [value for job in occurrences
+                     if (value := _job_duration_s(job)) is not None]
+        p50 = _percentile(durations, 50) if durations else 0.0
+        prior = candidates.get(name)
+        candidates[name] = (max(float(p50), prior[0] if prior else 0.0), True)
+    ranked = sorted(candidates.items(), key=lambda item: (-item[1][0], item[0]))
+    selected = ranked[:_OPT79_MAX_CANDIDATE_JOBS]
+    for name, (_p50, _is_buildkit) in ranked[_OPT79_MAX_CANDIDATE_JOBS:]:
+        if withheld is not None:
+            withheld["beyond_the_per_workflow_candidate_log_budget"] = (
+                withheld.get("beyond_the_per_workflow_candidate_log_budget", 0) + 1)
+        logger.debug("OPT79 %s: candidate %r exceeded the combined per-workflow "
+                     "log budget", wf_path, name)
     out: list[tuple[float, str, dict[str, Any]]] = []
     planned_ids: set[Any] = set()
-    for name, block in _opt79_candidates(wf_path, jobs_per_run, crit, wf_doc,
-                                         package_json=package_json):
-        p50 = float(block.get("job_p50_s") or 0.0)
+    for name, (p50, is_buildkit) in selected:
         picked = 0
         for run_jobs in jobs_per_run:
             if picked >= _OPT79_LOG_PROBE_MAX:
                 break
             job = next((j for j in run_jobs
-                        if str(j.get("name") or "").strip() == name
+                        if ((is_buildkit and _matrix_base_name(str(j.get("name") or "")) == name)
+                            or (not is_buildkit and str(j.get("name") or "").strip() == name))
                         and _job_has_log(j) and j.get("id")), None)
-            if job is None:
-                # This run either did not carry the job or carries no fetchable
-                # log for it. Not a withhold (the detector counts the occurrence
-                # it never got a log for), but not silent either.
-                logger.debug("OPT79 %s: no log-bearing occurrence of %r in one "
-                             "sampled run", wf_path, name)
+            if job is None or job.get("id") in planned_ids:
                 continue
             out.append((p50, wf_path, job))
             planned_ids.add(job.get("id"))
             picked += 1
-    # BuildKit export-cost evidence uses the same bounded OPT79 probe wave. It is
-    # selected from workflow commands, then measured only from returned logs.
-    for name in _opt79_buildkit_export_jobs(wf_doc):
-        occurrences = [
-            job for run_jobs in jobs_per_run for job in run_jobs
-            if _matrix_base_name(str(job.get("name") or "")) == name
-            and _job_has_log(job) and job.get("id")
-        ]
-        durations = [_job_duration_s(job) for job in occurrences]
-        p50 = _percentile([value for value in durations if value is not None], 50) \
-            if any(value is not None for value in durations) else 0.0
-        for job in occurrences[:_OPT79_LOG_PROBE_MAX]:
-            if job.get("id") in planned_ids:
-                continue
-            out.append((float(p50), wf_path, job))
-            planned_ids.add(job.get("id"))
     return out
 
 
@@ -25312,7 +25328,7 @@ def _opt79_probe_logs(
             continue
         plan.extend(_opt79_log_plan(
             wf_path, jpr, crit_by_wf[wf_path], wf_docs.get(wf_path, {}),
-            package_json=package_json))
+            package_json=package_json, withheld=withheld))
     kept = _opt79_trim_repo_probe_plan(plan, withheld=withheld)
     probe_jobs = [j for _p, _wf, j in kept]
     _prefetch_text(client, [_job_log_endpoint(repo, j["id"]) for j in probe_jobs])
@@ -25438,7 +25454,8 @@ def _detect_opt79_buildkit_export(
     out: list[dict[str, Any]] = []
     for base in sorted(_opt79_buildkit_export_jobs(wf_doc)):
         by_branch: "defaultdict[str, list[dict[str, Any]]]" = defaultdict(list)
-        saw_cached_slowest = False
+        cached_compile_layers: set[str] = set()
+        cold_slowest_layers: set[str] = set()
         for run_jobs in jobs_per_run:
             job = next((item for item in run_jobs
                         if _matrix_base_name(str(item.get("name") or "")) == base), None)
@@ -25447,13 +25464,19 @@ def _detect_opt79_buildkit_export(
             log = logs.get(job.get("id"))
             if not log:
                 continue
+            if _re.search(r"docker\s+buildx\s+build\b[^\n]*\s--no-cache(?:\s|$)", log):
+                continue
             measured = _opt79_buildkit_export_measurement(log)
             if measured is None:
                 continue
-            export_s, slow_layer, cached = measured
-            if cached:
-                saw_cached_slowest = True
+            export_s, slow_layer, cached_layers = measured
+            cached_normalized = {
+                " ".join(layer.lower().split()) for layer in cached_layers}
+            cached_compile_layers.update(cached_normalized)
+            slow_normalized = " ".join(slow_layer.lower().split())
+            if slow_normalized in cached_normalized:
                 continue
+            cold_slowest_layers.add(slow_normalized)
             branch = str(job.get("_run_head_branch") or "")
             if branch and export_s >= _OPT79_BUILDKIT_EXPORT_FLOOR_S:
                 by_branch[branch].append({
@@ -25463,7 +25486,7 @@ def _detect_opt79_buildkit_export(
                     "slowest_layer": slow_layer,
                     "slowest_layer_cached": False,
                 })
-        if saw_cached_slowest:
+        if cached_compile_layers & cold_slowest_layers:
             continue
         eligible = [(branch, rows) for branch, rows in by_branch.items()
                     if len(rows) >= _OPT79_BUILDKIT_MIN_RUNS]
@@ -25473,10 +25496,8 @@ def _detect_opt79_buildkit_export(
         export_p50 = round(float(_stats.median(row["export_s"] for row in rows)), 1)
         sampled = sum(1 for run_jobs in jobs_per_run if any(
             _matrix_base_name(str(job.get("name") or "")) == base for job in run_jobs))
-        effective = (_effective_volume(monthly_volume, len(rows), sampled)
-                     if monthly_volume and sampled else None)
-        runner_minutes = (round(export_p50 * effective / 60.0, 1)
-                          if effective is not None else 0.0)
+        effective = _effective_volume(monthly_volume, len(rows), sampled)
+        runner_minutes = round(export_p50 * effective / 60.0, 1)
         scope = (" This workflow runs only for tag pushes; no later tag can restore "
                  "this GitHub Actions cache export." if _opt79_tags_only(wf_doc) else "")
         evidence = (
@@ -25513,6 +25534,10 @@ def _detect_opt79_buildkit_export(
             "effective_monthly_runs": effective,
             "tags_only": _opt79_tags_only(wf_doc),
         }
+        # The saving is re-derived exactly from the stamped export samples; the
+        # shared sizing door must preserve that measured figure rather than cap
+        # it as a modeled estimate before the verifier sees it.
+        finding["sizing_basis"] = "measured"
         out.append(finding)
     return out
 

@@ -8654,6 +8654,23 @@ def _opt79_finding_rederived(f: dict, data: dict) -> list[str]:
             got = _num(cn.get("export_p50_s"))
             if got is None or abs(got - want) > 0.11:
                 problems.append(f"BuildKit export p50 {got!r} != re-derived {want!r}")
+            monthly = _num(cn.get("monthly_volume"))
+            sampled = cn.get("sampled_runs")
+            if not isinstance(sampled, int) or isinstance(sampled, bool) or sampled <= 0:
+                problems.append("BuildKit export sampled-run denominator is malformed")
+            else:
+                effective = ((monthly or 0.0) * min(len(rows) / sampled, 1.0))
+                stamped_effective = _num(cn.get("effective_monthly_runs"))
+                if stamped_effective is None or abs(stamped_effective - effective) > 0.011:
+                    problems.append(
+                        f"BuildKit effective monthly runs {stamped_effective!r} != "
+                        f"re-derived {effective!r}")
+                expected_rm = round(want * effective / 60.0, 1)
+                got_rm = _num(f.get("runner_min_saving"))
+                if got_rm is None or abs(got_rm - expected_rm) > 0.11:
+                    problems.append(
+                        f"BuildKit runner-minute saving {got_rm!r} != re-derived "
+                        f"{expected_rm!r}")
         if _num(f.get("wall_clock_p50_s")) != 0:
             problems.append("BuildKit export finding must not claim merge-gate wall-clock")
         return problems
