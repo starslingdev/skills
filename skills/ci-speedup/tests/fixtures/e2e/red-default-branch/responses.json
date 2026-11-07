@@ -1,0 +1,181 @@
+{
+  "captured_at": "2026-01-31T00:00:00Z",
+  "checks": {
+    "sha-a": [
+      {
+        "completed_at": "2026-01-28T00:05:00Z",
+        "conclusion": "failure",
+        "name": "gate",
+        "started_at": "2026-01-28T00:00:00Z"
+      }
+    ],
+    "sha-b": [
+      {
+        "completed_at": "2026-01-27T00:05:00Z",
+        "name": "gate",
+        "started_at": "2026-01-27T00:00:00Z"
+      }
+    ],
+    "sha-c": [
+      {
+        "completed_at": "2026-01-26T00:05:00Z",
+        "name": "gate",
+        "started_at": "2026-01-26T00:00:00Z"
+      }
+    ]
+  },
+  "default_branch": "main",
+  "jobs": {
+    "1001": [
+      {
+        "completed_at": "2026-01-28T00:02:00Z",
+        "id": 1101,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "name": "build",
+        "started_at": "2026-01-28T00:00:00Z",
+        "steps": [
+          {
+            "completed_at": "2026-01-28T00:02:00Z",
+            "name": "build",
+            "started_at": "2026-01-28T00:00:00Z"
+          }
+        ]
+      },
+      {
+        "completed_at": "2026-01-28T00:05:00Z",
+        "conclusion": "failure",
+        "id": 1102,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "name": "gate",
+        "started_at": "2026-01-28T00:00:00Z",
+        "steps": [
+          {
+            "completed_at": "2026-01-28T00:05:00Z",
+            "name": "test",
+            "started_at": "2026-01-28T00:00:00Z"
+          }
+        ]
+      }
+    ],
+    "1002": [
+      {
+        "completed_at": "2026-01-27T00:02:00Z",
+        "id": 1201,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "name": "build",
+        "started_at": "2026-01-27T00:00:00Z",
+        "steps": [
+          {
+            "completed_at": "2026-01-27T00:02:00Z",
+            "name": "build",
+            "started_at": "2026-01-27T00:00:00Z"
+          }
+        ]
+      },
+      {
+        "completed_at": "2026-01-27T00:05:00Z",
+        "id": 1202,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "name": "gate",
+        "started_at": "2026-01-27T00:00:00Z",
+        "steps": [
+          {
+            "completed_at": "2026-01-27T00:05:00Z",
+            "name": "test",
+            "started_at": "2026-01-27T00:00:00Z"
+          }
+        ]
+      }
+    ],
+    "1003": [
+      {
+        "completed_at": "2026-01-26T00:02:00Z",
+        "id": 1301,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "name": "build",
+        "started_at": "2026-01-26T00:00:00Z",
+        "steps": [
+          {
+            "completed_at": "2026-01-26T00:02:00Z",
+            "name": "build",
+            "started_at": "2026-01-26T00:00:00Z"
+          }
+        ]
+      },
+      {
+        "completed_at": "2026-01-26T00:05:00Z",
+        "id": 1302,
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "name": "gate",
+        "started_at": "2026-01-26T00:00:00Z",
+        "steps": [
+          {
+            "completed_at": "2026-01-26T00:05:00Z",
+            "name": "test",
+            "started_at": "2026-01-26T00:00:00Z"
+          }
+        ]
+      }
+    ]
+  },
+  "repo": "fixture/red-default-branch",
+  "required_checks": [
+    "gate"
+  ],
+  "shape": "red-default-branch",
+  "workflows": [
+    {
+      "id": 209,
+      "name": "CI",
+      "path": ".github/workflows/ci.yml",
+      "runs": [
+        {
+          "conclusion": "failure",
+          "created_at": "2026-01-28T00:00:00Z",
+          "event": "push",
+          "head_branch": "main",
+          "head_sha": "sha-a",
+          "id": 1001,
+          "run_started_at": "2026-01-28T00:00:00Z",
+          "status": "completed",
+          "updated_at": "2026-01-28T00:05:00Z"
+        },
+        {
+          "conclusion": "success",
+          "created_at": "2026-01-27T00:00:00Z",
+          "event": "push",
+          "head_branch": "main",
+          "head_sha": "sha-b",
+          "id": 1002,
+          "run_started_at": "2026-01-27T00:00:00Z",
+          "status": "completed",
+          "updated_at": "2026-01-27T00:05:00Z"
+        },
+        {
+          "conclusion": "success",
+          "created_at": "2026-01-26T00:00:00Z",
+          "event": "push",
+          "head_branch": "main",
+          "head_sha": "sha-c",
+          "id": 1003,
+          "run_started_at": "2026-01-26T00:00:00Z",
+          "status": "completed",
+          "updated_at": "2026-01-26T00:05:00Z"
+        }
+      ],
+      "runs_30d": 3
+    }
+  ]
+}

@@ -1,0 +1,95 @@
+{
+  "commit_wall_clock": {
+    "p50_s": 500.0,
+    "p90_s": 500.0,
+    "queue_p50_s": 0.0,
+    "queue_p90_s": 0.0,
+    "work_p50_s": 500.0,
+    "work_p90_s": 500.0
+  },
+  "config_eras": [],
+  "credited_findings": [
+    {
+      "pattern": "OPT45",
+      "runner_min": 9.6,
+      "wall_clock_s": 0.0
+    },
+    {
+      "pattern": "OPT75",
+      "runner_min": null,
+      "wall_clock_s": 150.0
+    },
+    {
+      "pattern": "OPT75",
+      "runner_min": null,
+      "wall_clock_s": 195.0
+    }
+  ],
+  "detected_patterns": [
+    "OPT21",
+    "OPT32",
+    "OPT45",
+    "OPT75"
+  ],
+  "gate_kind": null,
+  "headline": {
+    "check": "unit",
+    "seconds": 300.0
+  },
+  "lane": {
+    "job_fetches": 0,
+    "p50_s": null,
+    "sampled_pushes": 0
+  },
+  "leaves": [],
+  "minority_tails": [],
+  "provenance": "required_scoped",
+  "representative_jobs": {
+    "next": "unit",
+    "slowest": "mystery matrix"
+  },
+  "verifier": {
+    "fail": [],
+    "skip": [
+      "Bottom-line crowned cluster lever is on the merge-gating spine (not off-spine)",
+      "Bottom-line crowned cluster lever is presence-eligible (no minority-workflow crown)",
+      "Bottom-line headline leads with the stamped cluster-floor ceiling (no burial)",
+      "OPT64 is ranked only on enough retried runs",
+      "TOC 'Also noticed' pointer's on/off-path label matches the appendix",
+      "Tier-2 R-rows carry re-derived wall-clock-neutral certificates",
+      "Tier-2 R-rows use measured sizing basis",
+      "Tier-2 savings rows are backed by runner-minute cost spine",
+      "Tier-2 section-lead totals match de-overlapped findings",
+      "a pole's step list says how many skipped or untimeable steps it leaves out",
+      "agent-prompt MEASURED CAUSE never asserts timeline steps the pole doesn't render",
+      "aggregation-gate poles tell the upstream story, never an optimize-this prompt",
+      "cache finding's framing matches its measured hit-rate distribution",
+      "check enumeration is bound to the kept config era (no other-config check leaks in)",
+      "cluster-floor lever's ceiling floors at a NON-sibling check (not its own matrix leg)",
+      "crowned detector leaf agrees with the pole's dominant measured category (no off-category ceiling)",
+      "declared drilled-run timelines are readable",
+      "each rendered pole's drill belongs to its own job (no cross-job log leak)",
+      "every data-driven finding carries a measured signal (no unsupported claims)",
+      "every drilled pole's binding floor is disclosed on the spine (no silent heavy-check drop)",
+      "every rendered cache claim carries a cross-run cache distribution",
+      "headline 'slowest check' names the data layer's critical_path_check",
+      "headline leads with the observed wall when the chain sum diverges from the makespan",
+      "headline reconciles a non-universal slowest check with the population floor",
+      "minority slow tails on merge-blocking checks are re-derived",
+      "no drilled pole measures a pre-change config era without the era disclosure",
+      "no spine-dropped check is also framed on the merge-gating critical path",
+      "pole addressable ceiling within the co-occurrence floor",
+      "presence-causal headline only when the slowest check is minority-present",
+      "rendered per-workflow gate frequency matches the populations re-derivation",
+      "scanned date matches the date in the filename",
+      "shallow cost-spine sample is disclosed (re-derived from the stamped workflows)",
+      "static-only banner matches CI shape",
+      "the per-PR chain/makespan spine is bound to the kept config era (no dropped-era PR blends in)",
+      "the rendered era disclosure matches the enumerated config (no pre-only caveat over post-era checks)"
+    ]
+  },
+  "workflow_shapes": {
+    "matrix_jobs": [],
+    "reusable_jobs": []
+  }
+}

@@ -1,0 +1,8 @@
+name: Mystery
+on: [pull_request]
+jobs:
+  other:
+    name: different display
+    runs-on: ubuntu-latest
+    steps:
+      - run: external-tool publish-status
