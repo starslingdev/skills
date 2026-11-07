@@ -56,7 +56,7 @@ EXCLUDE = "exclude"       # run/harness artifact → never a skill bug
 # The committed, reviewable TRIAGE ALLOWLIST. Keyed by the live `verify_report.Check.name` string
 # (what `run_checks` actually yields) so the classification can be applied at runtime and the
 # "every check is classified" invariant is directly testable; the originating `check_*` function
-# name is in the trailing comment for cross-reference with spec §2-A. 84 AUTO_SEED / 1 EXCLUDE /
+# name is in the trailing comment for cross-reference with spec §2-A. 88 AUTO_SEED / 1 EXCLUDE /
 # 3 TRIAGE — a new `verify_report` check makes `test_every_check_is_classified` go red until it's
 # classified here (so no check is ever left undisposed).
 TRIAGE_ALLOWLIST = {
@@ -72,6 +72,7 @@ TRIAGE_ALLOWLIST = {
     "TOC 'Also noticed' count == appendix rows + hidden pointer": AUTO_SEED,                        # check_also_noticed_count_honest
     "data basis disclosed; coverage gaps named, not silent": AUTO_SEED,                             # check_coverage_disclosed
     "workflows missing from the sample are NAMED in the report": AUTO_SEED,                         # check_run_list_gaps_named
+    "required-check advice is backed by both protection reads": AUTO_SEED,                         # check_required_check_advice_proof
     "report uses ASCII hyphens only (no em/en/figure/bar/minus dash)": AUTO_SEED,                   # check_no_typographic_dashes
     "PR lifecycle block is consistent with its own shares": AUTO_SEED,                              # check_pr_lifecycle_block
     "code fences are balanced (no stray ``` breaking out of a fence)": AUTO_SEED,                   # check_fences_balanced
@@ -120,6 +121,7 @@ TRIAGE_ALLOWLIST = {
     "TOC 'Also noticed' pointer's on/off-path label matches the appendix": AUTO_SEED,             # check_toc_also_noticed_label_honest
     "every rendered cache claim carries a cross-run cache distribution": AUTO_SEED,               # check_cache_claim_backed_by_distribution
     "cache finding's framing matches its measured hit-rate distribution": AUTO_SEED,             # check_cache_framing_matches_distribution
+    "cache savings pass budget, invalidation and transfer-cost guards": AUTO_SEED,               # check_cache_sizing_guards
     "headline critical-path check is an actual recurring gate": AUTO_SEED,                        # check_headline_pole_actually_gates
     "every 'slowest ... waits on' framing phrase is a registered claim": AUTO_SEED,               # check_claims_cover_framing_vocabulary
     "Tier-2 R-rows carry re-derived wall-clock-neutral certificates": AUTO_SEED,                  # check_tier2_neutrality_derived
@@ -193,6 +195,7 @@ CHECK_CLASS = {
     "TOC 'Also noticed' count == appendix rows + hidden pointer": "fabricated-or-unsupported-finding",  # a rendered count not backed by the data
     "data basis disclosed; coverage gaps named, not silent": "coverage-gap-dead-end",     # exact match (the spec's own no-silent-drop framing)
     "workflows missing from the sample are NAMED in the report": "coverage-gap-dead-end",  # a workflow that vanished from the sample rendering as measured
+    "required-check advice is backed by both protection reads": "fabricated-or-unsupported-finding",  # off-PR advice without both source reads is an unsupported authorization claim
     "report uses ASCII hyphens only (no em/en/figure/bar/minus dash)": "other",           # pure formatting, no semantic root-cause fits
     "PR lifecycle block is consistent with its own shares": "fabricated-or-unsupported-finding",  # a headline or share the block's own numbers do not support
     "code fences are balanced (no stray ``` breaking out of a fence)": "other",           # structural corruption guard, no semantic root-cause fits
@@ -240,6 +243,7 @@ CHECK_CLASS = {
     "TOC 'Also noticed' pointer's on/off-path label matches the appendix": "fabricated-or-unsupported-finding",  # a rendered label not backed by the appendix
     "every rendered cache claim carries a cross-run cache distribution": "estimated-not-measured",  # a claim without the backing distribution
     "cache finding's framing matches its measured hit-rate distribution": "estimated-not-measured",  # framing not grounded in the measured distribution
+    "cache savings pass budget, invalidation and transfer-cost guards": "estimated-not-measured",  # credited cache saving lacks its capacity/lifetime/net-cost proof
     "headline critical-path check is an actual recurring gate": "mis-ranked-lever",       # headline names a non-recurring (non-)gate
     "every 'slowest ... waits on' framing phrase is a registered claim": "fabricated-or-unsupported-finding",  # a rendered framing sentence not backed by a registered claim
     "Tier-2 R-rows carry re-derived wall-clock-neutral certificates": "fabricated-or-unsupported-finding",  # a promoted row's proof is not backed by the data

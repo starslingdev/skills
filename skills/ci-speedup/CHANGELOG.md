@@ -1,5 +1,8 @@
 # Changelog
 
+- Require a readable classic branch-protection result before advising that a check move off pull requests.
+- Report the default-branch push count and mark infrequent post-merge lanes as rare.
+
 All notable changes to the `ci-speedup` skill are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/); the skill is
 unversioned and updates by reinstall from `main`.
@@ -14,6 +17,9 @@ unversioned and updates by reinstall from `main`.
 ### Added
 
 - **2026-11-07** — Add a compact whole-pipeline fixture corpus that runs synthetic repositories through collection, rendering, and the complete report verifier. The fixtures pin report facts for required and external gates, reusable matrices, configuration changes, post-merge pushes, partial credentials, and representative findings; a review-only regenerator prints expectation diffs, and regression mutants prove the corpus detects crown, log-leaf precedence, and unconfirmed-gate credit changes.
+- **2026-11-07** — Keep serial test-loop and emulated-image findings visible when the same job also restores a dependency cache. A cache miss retains precedence; a hit-only restore becomes the fallback observation after the more specific log detectors run.
+- **2026-11-07** — Gate cache savings on repository capacity, sampled key invalidation, and net restore/save economics. The collector reads repository cache usage once, reuses sampled PR changed files, multiplies cache size across saving copies, and leaves failed or unreadable checks visible but uncredited.
+- **2026-11-07** — Correct fix guidance for pytest workers, persisted ESLint caches, multi-job build caches, in-job concurrency controls, and change-selected test coverage. The catalog now requires measured safety evidence before reducing the pre-merge test set and lists common tool-specific worker controls that must be measured independently.
 - **2026-11-07** — Exclude commits containing a workflow re-run from per-commit PR wait percentiles, and name each re-run workflow in the partial-sample disclosure so time before the re-run was requested cannot inflate the reported CI wait.
 - **2026-11-07** — Keep shallow-checkout advice from breaking jobs whose first-party scripts read history through command substitution, shell conditions, quoted child-process calls, parent revisions, common interpreter and wrapper forms, workflow-level working directories, Make recipes, or Snapcraft overrides. Parent-only reads now recommend the bounded checkout depth they require, and oversized or unreadable scripts continue to fail closed.
 - **2026-11-06** — Stamp matched whole-gating-set observations for future joint-scenario sizing only when every confirmed required check maps to one independent, concurrent job execution with attempt and runner identity. Joint effects remain empty because no current finding supplies per-observation local reductions, affected-work and matrix identity, and an unchanged scheduling/coverage/job-set certificate together.

@@ -555,21 +555,25 @@ def build_summary(doc: dict[str, Any], findings_path: str = "FINDINGS.json",
 
     # Gating — already resolved in the data pass; the agent must not re-probe.
     rc = doc.get("required_checks")
-    rc_complete = doc.get("required_checks_complete")
-    if rc:
+    rc_advice_complete = doc.get("required_checks_advice_complete") is True
+    if rc and rc_advice_complete:
         out.append("Required (gating) checks — already resolved from rulesets + branch "
                    f"protection: {', '.join(rc)}.")
+    elif rc:
+        out.append("Required (gating) checks observed from readable protection sources: "
+                   f"{', '.join(rc)}. At least one protection source was unavailable, so "
+                   "checks absent from this list remain unknown.")
     elif (isinstance(doc.get("data_sources"), dict)
           and "tiers_run" in doc["data_sources"]
           and "gh-timing" not in (doc["data_sources"]["tiers_run"] or [])):
         out.append("Required (gating) checks: not queried — the gh data pass did not run.")
-    elif rc == [] and rc_complete:
+    elif rc == [] and rc_advice_complete:
         out.append("Required (gating) checks: NONE declared — the repo readably configures "
                    "zero required checks (rulesets + branch protection already read; do NOT "
                    "re-probe gh). Ranking falls back to the slowest checks across sampled PRs.")
     else:
-        out.append("Required (gating) checks: NONE readable — the data pass already queried "
-                   "rulesets + branch protection without admin access (do NOT re-probe gh). "
+        out.append("Required (gating) checks: NONE confirmed — the data pass queried "
+                   "rulesets and branch protection, but at least one source was unavailable. "
                    "Ranking falls back to the slowest checks across sampled PRs.")
     out.append("")
 

@@ -8460,6 +8460,7 @@ def _advisory_prompt(*, required_checks: list[str] | None,
     if required_checks is not None:
         doc["required_checks"] = required_checks
         doc["required_checks_complete"] = True
+        doc["required_checks_advice_complete"] = True
     md = bp.render(doc, {}, {}, {}, "2026-09-02T00:00:00Z", {})
     return _pole_section(md, "e2e").split(
         "#### 🤖 Prompt for your coding agent", 1)[1]
@@ -8502,6 +8503,33 @@ def test_unknown_required_status_requires_confirmation_without_route():
     assert "confirm it is not a required check" in prompt
     assert "OPT71 recipe (c)" not in prompt
     assert "may be moved off the PR trigger" not in prompt
+
+
+def test_unread_classic_protection_requires_confirmation_without_route():
+    doc = _advisory_pole_doc(True)
+    doc["required_checks"] = ["lint"]
+    doc["required_checks_complete"] = True
+    doc["required_checks_advice_complete"] = False
+
+    md = bp.render(doc, {}, {}, {}, "2026-09-02T00:00:00Z", {})
+    prompt = _pole_section(md, "e2e").split(
+        "#### 🤖 Prompt for your coding agent", 1)[1]
+
+    assert "confirm it is not a required check" in prompt
+    assert "OPT71 recipe (c)" not in prompt
+
+
+def test_legacy_required_read_without_advice_proof_fails_closed():
+    doc = _advisory_pole_doc(True)
+    doc["required_checks"] = []
+    doc["required_checks_complete"] = True
+
+    md = bp.render(doc, {}, {}, {}, "2026-09-02T00:00:00Z", {})
+    prompt = _pole_section(md, "e2e").split(
+        "#### 🤖 Prompt for your coding agent", 1)[1]
+
+    assert "confirm it is not a required check" in prompt
+    assert "OPT71 recipe (c)" not in prompt
 
 
 def test_llm_gap_fill_keeps_advisory_route_when_body_repeats_declaration():

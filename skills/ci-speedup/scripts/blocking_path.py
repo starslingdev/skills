@@ -1864,6 +1864,12 @@ _DEPENDENCY_CACHE_MISS_RE = re.compile(
     r"Cache not found for input keys|\bcache is not found\b", re.I)
 _DEPENDENCY_CACHE_SAVED_RE = re.compile(
     r"Cache saved successfully|Cache saved with (?:the )?key")
+_CACHE_SIZE_RE = re.compile(
+    r"(?:cache|archive)\s+size\s*:\s*~?([0-9]+(?:\.[0-9]+)?)\s*(B|KB|MB|GB)\b", re.I)
+_CACHE_RESTORE_SECONDS_RE = re.compile(
+    r"cache\s+restored\s+in\s+([0-9]+(?:\.[0-9]+)?)\s*(?:s|sec(?:ond)?s?)\b", re.I)
+_CACHE_SAVE_SECONDS_RE = re.compile(
+    r"cache\s+saved\s+in\s+([0-9]+(?:\.[0-9]+)?)\s*(?:s|sec(?:ond)?s?)\b", re.I)
 # Leaves that record an observation, not a root cause: a restore line appears in
 # nearly every job log, so it never closes a coverage gap (phase 4a gap-fill and
 # capture still run) and never holds back the runner advisory. OPT101's cache
@@ -1889,14 +1895,51 @@ def _cache_state_of_log(text: str | None, fix_key: str | None) -> dict[str, Any]
         return None
     lines = _clean_log(text)
     joined = "\n".join(lines)
+    def _transfer() -> dict[str, float]:
+        out: dict[str, float] = {}
+        sizes = []
+        units = {"B": 1 / 1024 ** 3, "KB": 1 / 1024 ** 2,
+                 "MB": 1 / 1024, "GB": 1}
+        for match in _CACHE_SIZE_RE.finditer(joined):
+            sizes.append(float(match.group(1)) * units[match.group(2).upper()])
+        if sizes:
+            out["cache_size_gb"] = round(sum(sizes), 6)
+        restores = [float(m.group(1)) for m in _CACHE_RESTORE_SECONDS_RE.finditer(joined)]
+        saves = [float(m.group(1)) for m in _CACHE_SAVE_SECONDS_RE.finditer(joined)]
+        if restores:
+            out["restore_s"] = sum(restores)
+        if saves:
+            out["save_s"] = sum(saves)
+        # BuildKit reports cache import/export as numbered progress vertices,
+        # followed by `#N DONE 12.3s` rather than actions/cache's prose.
+        vertices: dict[str, str] = {}
+        buildkit: dict[str, list[float]] = {"restore_s": [], "save_s": []}
+        for line in lines:
+            start = re.search(r"^#(\d+)\s+(.+)$", line)
+            if start:
+                label = start.group(2).lower()
+                if "importing cache" in label:
+                    vertices[start.group(1)] = "restore_s"
+                elif "exporting cache" in label or "preparing build cache for export" in label:
+                    vertices[start.group(1)] = "save_s"
+            done = re.search(r"^#(\d+)\s+DONE\s+([0-9]+(?:\.[0-9]+)?)s\b", line, re.I)
+            if done and done.group(1) in vertices:
+                buildkit[vertices[done.group(1)]].append(float(done.group(2)))
+        for key, measured in buildkit.items():
+            if measured:
+                out[key] = out.get(key, 0.0) + sum(measured)
+        return out
+
+    def _with_transfer(state: dict[str, Any]) -> dict[str, Any]:
+        return {**state, **_transfer()}
     if fix_key == "dependency-cache":
         misses = sum(bool(_DEPENDENCY_CACHE_MISS_RE.search(line)) for line in lines)
         hits = sum("Cache restored from key" in line for line in lines)
         if not hits + misses:
             return None
-        return {"miss_pct": 100.0 * misses / (hits + misses),
+        return _with_transfer({"miss_pct": 100.0 * misses / (hits + misses),
                 "cold": hits == 0, "remote_off": False, "restore_count": hits + misses,
-                "saved": any(_DEPENDENCY_CACHE_SAVED_RE.search(line) for line in lines)}
+                "saved": any(_DEPENDENCY_CACHE_SAVED_RE.search(line) for line in lines)})
     if fix_key in ("turbo-remote-cache", "turbo-partial-cache", "install-lifecycle-build"):
         # For the install-lifecycle leaf, measure the miss rate from the SAME install-step section
         # `_parse_log`'s detector fired on — NOT the whole log. Otherwise a later explicit
@@ -1915,8 +1958,8 @@ def _cache_state_of_log(text: str | None, fix_key: str | None) -> dict[str, Any]
             _cmd, _s, _e, _hit, _total, _secs, _cidx = sec
             _miss = (100.0 * (_total - _hit) / _total) if _total else 0.0
             _ro = "Remote caching disabled" in "\n".join(lines[_s:_e])
-            return {"miss_pct": round(_miss, 2),
-                    "cold": _ro or (_total > 0 and _hit == 0), "remote_off": _ro}
+            return _with_transfer({"miss_pct": round(_miss, 2),
+                    "cold": _ro or (_total > 0 and _hit == 0), "remote_off": _ro})
         lo, hi = 0, len(lines)
         blocks: list[tuple[int, int, float | None]] = []
         for _i in range(lo, hi):
@@ -1939,23 +1982,23 @@ def _cache_state_of_log(text: str | None, fix_key: str | None) -> dict[str, Any]
             # on a sampled run would stamp it 100% cold and drag the cross-run median toward
             # churn/cold. Only a summary-less log with a real burst of misses counts as cold here.
             if remote_off or activity > 5:
-                return {"miss_pct": 100.0, "cold": True, "remote_off": remote_off}
+                return _with_transfer({"miss_pct": 100.0, "cold": True, "remote_off": remote_off})
             return None
         timed = [b for b in blocks if b[2] is not None]
         hit, total, _ = (max(timed, key=lambda b: b[2]) if timed
                          else max(blocks, key=lambda b: b[1] - b[0]))
         rebuilt = total - hit
         miss_pct = (100.0 * rebuilt / total) if total else 0.0
-        return {"miss_pct": round(miss_pct, 2),
+        return _with_transfer({"miss_pct": round(miss_pct, 2),
                 "cold": remote_off or (total > 0 and hit == 0),
-                "remote_off": remote_off}
+                "remote_off": remote_off})
     if fix_key == "buildx-no-cache":
         work = len(re.findall(r"#\d+ \[[^\]]+\] (?:RUN|FROM|COPY|ADD) ", joined))
         if work == 0:
             return None
         cached = len(re.findall(r"^\s*#\d+ CACHED\b", joined, re.MULTILINE))
-        return {"miss_pct": round(100.0 * max(work - cached, 0) / work, 2),
-                "cold": cached == 0, "remote_off": False}
+        return _with_transfer({"miss_pct": round(100.0 * max(work - cached, 0) / work, 2),
+                "cold": cached == 0, "remote_off": False})
     return None
 
 
@@ -2887,8 +2930,9 @@ def _parse_log(text: str,
             "search": [":test", "BUILD SUCCESSFUL in", "maxParallelForks"],
         }
     dependency_state = _cache_state_of_log(text, "dependency-cache")
+    dependency_hit_leaf = None
     if dependency_state:
-        return {
+        dependency_hit_leaf = {
             "fix_key": "dependency-cache",
             "unit_label": "dependency cache restore results",
             "magnitude": {"label": "dependency cache misses", "unit": "%",
@@ -2899,6 +2943,8 @@ def _parse_log(text: str,
             "search": ["Cache not found for input keys", "cache is not found",
                        "Cache restored from key"],
         }
+    if dependency_state and dependency_state["miss_pct"] > 0:
+        return dependency_hit_leaf
     # --- L: isolated tests in one file wait on the same fixed timer ------------
     # This is narrower than the shell-loop detector below. Four tests in ONE file
     # must each carry an explicit, distinct schema/database/prefix marker inside
@@ -3073,7 +3119,7 @@ def _parse_log(text: str,
                          for item in (header, done)][:6],
             "search": ["docker/build-push-action", "BUILDPLATFORM", "TARGETARCH"],
         }
-    return None
+    return dependency_hit_leaf
 
 
 # --------------------------------------------------------------------------- #
@@ -3130,7 +3176,8 @@ _NO_WEAKENING_LINES = [
 
 _CONCURRENCY_ORDER_LINE = (
     "Concurrency order: First use OPT88 to measure and fill the existing job's idle "
-    "cores; only then add shards or jobs."
+    "cores; only then add shards or jobs. Before adding workers, confirm that they "
+    "cannot interfere through a shared external server."
 )
 _SHARD_RUNNER_MINUTE_LINE = (
     "Runner-minute effect: With safe in-job concurrency, runner minutes go down because "
@@ -3489,7 +3536,7 @@ _FIX_META: dict[str, dict[str, Any]] = {
                  "`-n`/`--numprocesses`, so every collected test runs one-by-one on a "
                  "single worker. The dependency for parallelism is already present and "
                  "simply isn't switched on (no `[gw0]` worker tags in the log).",
-        "look": "`{wf}` — the step's `pytest` command (does it pass `-n auto`/`-n <N>`?), "
+        "look": "`{wf}` — the step's `pytest` command (does it pass `-n logical`/`-n <N>`?), "
                 "the plugin banner line (`xdist-<ver>` confirms the dep is installed), and "
                 "`pytest.ini`/`pyproject.toml`/`setup.cfg` `addopts` (a project-wide `-n` "
                 "may be set but overridden here). Check whether the tests are STATEFUL "
@@ -3498,7 +3545,7 @@ _FIX_META: dict[str, dict[str, Any]] = {
         "constraints": "These may be integration tests kept serial ON PURPOSE: parallel "
                        "workers can collide on fixed ports or a shared sqlite/Postgres DB, "
                        "or interleave stdout under `-s`. Recover the intent from git "
-                       "history before flipping it on. Before adding `-n auto`, prove "
+                       "history before flipping it on. Before adding `-n logical`, prove "
                        "per-worker isolation (a unique port/DB/tmp per `gw` worker); if "
                        "coverage is collected (`--cov`), merge it across workers "
                        "(`coverage combine`) or the report goes partial. If in-process "
@@ -3507,12 +3554,15 @@ _FIX_META: dict[str, dict[str, Any]] = {
                        "is a required status check, the new matrix jobs must be added to "
                        "branch protection as required checks (or the ruleset equivalent), or "
                        "the split-out tests silently stop gating merges (everything stays "
-                       "green) until that admin-only re-gating step is done.",
+                       "green) until that admin-only re-gating step is done. Keep "
+                       "deadline-bound or process-global tests in a serial pre-step, and "
+                       "record the worker count that actually started rather than only "
+                       "the requested setting.",
         "docs": ["pytest-xdist — distributing tests: "
                  "https://pytest-xdist.readthedocs.io/en/stable/distribution.html",
                  "pytest-xdist — known limitations (shared state): "
                  "https://pytest-xdist.readthedocs.io/en/stable/known-limitations.html"],
-        "deliver": "Run the suite across workers — add `-n auto` (xdist is already a dep) "
+        "deliver": "Run the suite across workers — add `-n logical` (xdist is already a dep) "
                    "once per-worker isolation is proven, or shard the suite across matrix "
                    "jobs by directory. Keep the full test count and (if present) a "
                    "complete merged coverage report; re-measure the step.",
@@ -3600,7 +3650,8 @@ _FIX_META: dict[str, dict[str, Any]] = {
                        "stable `restore-keys` prefix `<tool>-<os>-<lockfile-hash>-`. Include "
                        "the eslint config and plugin versions in that dependency hash. An exact key hit is "
                        "not saved again, while the rolling key saves the updated results. "
-                       "Keep `--cache-strategy content` if mtimes are unreliable in CI. "
+                       "When the cache persists between CI runs, require `--cache-strategy content` "
+                       "so restored mtimes cannot make stale entries look current. "
                        "Don't weaken coverage: every file eslint lints today must still be "
                        "linted.",
         "docs": ["ESLint CLI — caching (`--cache`, `--cache-location`, "
@@ -8323,6 +8374,31 @@ def _opt80_tail_for(pole: dict[str, Any],
     return out
 
 
+def _cache_sizing_guard_block(doc: dict[str, Any] | None) -> list[str]:
+    """Show cache opportunities whose budget, lifetime or transfer math was checked."""
+    rows = []
+    for finding in ((doc or {}).get("findings") or []):
+        guard = finding.get("cache_sizing_guard") if isinstance(finding, dict) else None
+        if not isinstance(guard, dict):
+            continue
+        checks = guard.get("checks") if isinstance(guard.get("checks"), dict) else {}
+        details = [str(v.get("detail")) for v in checks.values()
+                   if isinstance(v, dict) and v.get("status") != "passed" and v.get("detail")]
+        if guard.get("status") == "passed":
+            details = ["all three cache sizing checks passed"]
+        rows.append((str(finding.get("title") or finding.get("pattern") or "Cache opportunity"),
+                     str(guard.get("status") or "not_measured"), details))
+    if not rows:
+        return []
+    out = ["---", "", "## Cache sizing checks", ""]
+    for title, status, details in rows:
+        label = "credited" if status == "passed" else "check this - uncredited"
+        out += [f"- **{_clean_label(title)}** - {label}: "
+                + "; ".join(_clean_label(detail) for detail in details)]
+    out.append("")
+    return out
+
+
 def _opt80_tail_count_sentence(axis: dict[str, Any]) -> str:
     """What "one run in N" stands on, from the stamped counts: m of n sampled
     runs were slow, L of their logs were read - k show the stall, u could not
@@ -9532,6 +9608,72 @@ def _commit_wait_bottom_line(commit_clock: dict[str, Any],
     return bottom
 
 
+_WORKFLOW_LANE_EVENTS = frozenset({
+    "branch_protection_rule", "check_run", "check_suite", "create", "delete",
+    "deployment", "deployment_status", "discussion", "discussion_comment",
+    "fork", "gollum", "issue_comment", "issues", "label", "merge_group",
+    "milestone", "page_build", "project", "project_card", "project_column",
+    "public", "pull_request", "pull_request_review",
+    "pull_request_review_comment", "pull_request_target", "push", "registry_package",
+    "release", "repository_dispatch", "schedule", "status", "tag", "watch",
+    "workflow_call", "workflow_dispatch", "workflow_run",
+})
+
+
+def _workflow_activity_line(ms: list[dict[str, Any]]) -> str:
+    """Render each workflow's activity once, even when a pattern has many hits."""
+    by_workflow: dict[str, list[dict[str, Any]]] = {}
+    for index, finding in enumerate(ms):
+        key = str(finding.get("workflow_file") or f"<unknown:{index}>")
+        activity = finding.get("workflow_activity")
+        if isinstance(activity, dict):
+            by_workflow.setdefault(key, []).append(activity)
+        else:
+            by_workflow.setdefault(key, [])
+    measured: list[dict[str, Any]] = []
+    unknown = 0
+    for activities in by_workflow.values():
+        candidates = [
+            activity for activity in activities
+            if (isinstance(activity.get("runs_30d"), int)
+                and not isinstance(activity.get("runs_30d"), bool))
+        ]
+        if candidates:
+            # Repeated finding stamps for one workflow should agree. Taking the
+            # maximum is conservative if an externally supplied document does not.
+            measured.append(max(candidates, key=lambda a: int(a["runs_30d"])))
+        else:
+            unknown += 1
+    if not measured:
+        return "**Activity:** not measured."
+    runs = sum(int(activity["runs_30d"]) for activity in measured)
+    latest = max(
+        (_flatten_cell(str(activity.get("last_run") or "")[:10])
+         for activity in measured), default="")
+    recent = f" · most recent {latest}" if latest else ""
+    missing = (f" · not measured for {unknown} workflow"
+               f"{'s' if unknown != 1 else ''}" if unknown else "")
+    return f"**Activity:** {runs} runs in 30 days{recent}{missing}."
+
+
+def _workflow_lane_line(ms: list[dict[str, Any]]) -> str | None:
+    # Trigger keys come from repository YAML. Only GitHub's declared event
+    # vocabulary may become trusted report prose.
+    lanes = sorted({
+        str(lane)
+        for finding in ms for lane in (finding.get("workflow_lanes") or [])
+        if str(lane) in _WORKFLOW_LANE_EVENTS
+    })
+    if not lanes:
+        return None
+    label = ", ".join(lanes).replace("_", " ")
+    suffix = " lane only" if len(lanes) == 1 else " lanes"
+    line = f"**Lane:** {label}{suffix}."
+    if all(finding.get("non_pr_lane") is True for finding in ms):
+        line = line[:-1] + "; no merge-gate wall-clock credit."
+    return line
+
+
 def _queue_wait_block(findings: list[dict[str, Any]], catalog_url: str,
                       shallow_note: str = "",
                       commit_clock: dict[str, Any] | None = None) -> list[str]:
@@ -9620,6 +9762,10 @@ def _queue_wait_block(findings: list[dict[str, Any]], catalog_url: str,
                   f"<summary><strong>{pat} - {title}</strong> · worst savable wait "
                   f"{_clock(worst)} · {_sev_of(ms)} · {occ}</summary>", "",
                   f"**Where:** {locs}"]
+        lines.append(_workflow_activity_line(ms))
+        lane_line = _workflow_lane_line(ms)
+        if lane_line:
+            lines.append(lane_line)
         if ev:
             lines.append(f"**Evidence:** {_flatten_cell(ev)}")
         lines += [f"**Catalog (background + fix recipe):** {url}", "",
@@ -10566,6 +10712,10 @@ def _also_noticed_block(findings: list[dict[str, Any]],
                   f"<summary><strong>{pat} - {title}</strong> · {summary_metric} · "
                   f"{_sev_of(ms)} · {occ}</summary>", "",
                   f"**Where:** {locs}"]
+        lines.append(_workflow_activity_line(ms))
+        lane_line = _workflow_lane_line(ms)
+        if lane_line:
+            lines.append(lane_line)
         has_source_unbacked_tier2 = any(_source_unbacked_tier2_here(m) for m in ms)
         # PR-P1 (D3-rev1's accounting condition): a demoted MEASURED finding names its
         # reason class here, and certificate-carrying ones render their proof class —
@@ -11762,6 +11912,7 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     # report collapsed to the one-line no-critical-path note, which is exactly
     # the silence this block exists to break.
     uncredited_lines = _opt79_uncredited_block(doc)
+    cache_guard_lines = _cache_sizing_guard_block(doc)
     opt79_off_pole = _opt79_off_pole_block(all_findings, catalog_url, drilled=False)
     # A candidate any pattern held back is disclosed in the Data sources footer;
     # collapsing to the one-line note would drop the footer with it and let
@@ -11781,6 +11932,7 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     parallel_n = parallel_steps_used(doc.get("parallel_steps"))
     if (not tier2_lines and not also_lines and not queue_lines
             and not incomplete and not broken and not uncredited_lines
+            and not cache_guard_lines
             and not withheld_n and not opt79_off_pole and not opt81_n
             and not parallel_n):
         return ""  # nothing static to say — caller keeps the one-line note
@@ -11993,6 +12145,7 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
         out += ["---", "", *_o84_lines]
     if also_lines:
         out += ["---", "", *also_lines]
+    out += cache_guard_lines
     # Measured net-negative caches that could not be PRICED (three cases: the
     # slowest job, or one tied with it, of a workflow no PR runs; a PR workflow's
     # slowest job the pole arm declined; a PR-workflow job `needs:`-chained to the
@@ -12101,6 +12254,24 @@ def _default_branch_push_lane_block(doc: dict[str, Any]) -> list[str]:
             *lines,
             "Push timing could not be measured because push run-list coverage was "
             "incomplete.",
+            "",
+        ]
+    pushes_30d = int(_num(lane.get("pushes_30d")) or 0)
+    push_word = "push" if pushes_30d == 1 else "pushes"
+    if status == "frequency_incomplete":
+        lines += [
+            f"At least {pushes_30d} {push_word} to the default branch were observed "
+            "in the last 30 days; the exact frequency could not be measured.",
+            "",
+        ]
+    else:
+        lines += [
+            f"{pushes_30d} {push_word} to the default branch in the last 30 days.",
+            "",
+        ]
+    if lane.get("rare") is True:
+        lines += [
+            "This is a **rare** lane, so its findings are left uncredited.",
             "",
         ]
     if sampled == 0:
@@ -13895,7 +14066,7 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         # quantity - it restates one scanned YAML fact - so it has no comparator to bind.
         _adv_required_status = _advisory_required_status(
             p, doc.get("required_checks"),
-            doc.get("required_checks_complete") is True)
+            doc.get("required_checks_advice_complete") is True)
         _adv = _advisory_job_line(
             p, doc.get("workflow_job_graph"), _adv_required_status)
         if _adv:
@@ -14263,6 +14434,7 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         # (§5.5/G15; `check_cost_spine_shallow_disclosed` re-derives it from
         # `data_sources`, so dropping this line is a verify FAIL, not a style choice).
         out += ["---", "", f"> ⚠️ _{shallow_note}_", ""]
+    out += _cache_sizing_guard_block(doc)
     # Measured net-negative caches that could not be PRICED (three cases: the
     # slowest job, or one tied with it, of a workflow no PR runs; a PR workflow's
     # slowest job the pole arm declined; a PR-workflow job `needs:`-chained to the
