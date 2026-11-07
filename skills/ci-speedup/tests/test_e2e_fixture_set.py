@@ -401,6 +401,38 @@ def test_push_fixture_fetches_the_recorded_run_jobs_once(monkeypatch, tmp_path):
     assert doc["_fixture_job_reads"]["9001"] == 1
 
 
+def test_default_branch_image_is_drilled_and_kept_out_of_merge_claims(
+        monkeypatch, tmp_path):
+    doc, report, checks = run_fixture(
+        FIXTURE_ROOT / "default-branch-image", monkeypatch, tmp_path)
+    finding = next(
+        row for row in doc["findings"]
+        if row.get("pattern") == "OPT102" and row.get("lane") == "push")
+    projection = finding["push_lane_projection"]
+
+    assert finding["wall_clock_p50_s"] == 0.0
+    assert projection["projected_s"] == 120.0
+    assert projection["credited_s"] == 0.0  # three pushes in 30 days is rare
+    assert doc["default_branch_push_lane"]["drill"]["dominant_step"] == (
+        "Build multi-platform image")
+    assert "changes the wait after merge, not the merge gate" in finding["agent_prompt"]
+    assert "OPT102" in report
+    bottom = next(line for line in report.splitlines() if "**Bottom line.**" in line)
+    assert "after merge" not in bottom.lower()
+    assert "OPT102" not in bottom
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+
+    mutant = report.replace(
+        "## 📋 Contents", "## Tier 1\n\nOPT102 push-lane finding\n\n## 📋 Contents", 1)
+    assert not vr.check_default_branch_push_lane_isolated(
+        mutant, tmp_path / "default-branch-image" / "findings.json").ok
+    bottom_mutant = report.replace(
+        "**Bottom line.**", "**Bottom line.** OPT102 push-lane finding;", 1)
+    assert not vr.check_default_branch_push_lane_isolated(
+        bottom_mutant, tmp_path / "default-branch-image" / "findings.json").ok
+
+
 @pytest.mark.parametrize(
     "fixture", sorted(path for path in FIXTURE_ROOT.glob("*") if path.is_dir()),
     ids=lambda path: path.name)

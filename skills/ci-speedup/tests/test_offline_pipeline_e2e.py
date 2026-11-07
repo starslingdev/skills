@@ -190,7 +190,7 @@ _JOB_ID = 9001
 # performs no PR discovery, and the fixture pages are short, so the exact delta is +3.
 # One repository-wide cache-usage read gates every cache saving against the
 # shared budget; it is issued once per audit, not once per finding.
-_GOLDEN_GH_QUERY_COUNT = 116
+_GOLDEN_GH_QUERY_COUNT = 117
 # PR-H1: `push` is UNSCOPED (no `branches:`) so the same-head_sha push+PR run
 # pair in the corpus satisfies OPT47's structural precondition (a push scoped
 # only to the default branch is excluded by design).
@@ -891,8 +891,9 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     # the backstop: a regression that stops requesting it wouldn't fail any assertion
     # above. The replay-access log records each fixture actually read; require the
     # committed corpus to appear in it. Job-LOG fixtures (`*_logs.txt`) are excluded:
-    # they are fetched only on the `--with-logs` drill path, which this e2e does not
-    # exercise (the run-time _monthly_volume bracket fixtures are likewise extra).
+    # the plain path now fetches exactly one representative default-branch push
+    # log, while the other pole logs still belong to the `--with-logs` drill path
+    # (the run-time _monthly_volume bracket fixtures are likewise extra).
     # `contents/` fixtures are also excluded: run.py passes `--root`, so workflow YAML
     # is read from the CHECKOUT (cheaper, and the same commit the report stamps) and
     # the contents endpoint is only the FALLBACK for a workflow that isn't on disk.
