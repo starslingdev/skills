@@ -197,6 +197,25 @@ def _bullets(heading: str) -> list[str]:
     return [re.sub(r"\s+", " ", b) for b in bullets]
 
 
+def _contract_rows(heading: str) -> dict[str, dict[str, str]]:
+    """Read a normative markdown table as a closed-world rule map."""
+    try:
+        section = _raw_section(heading)
+    except AssertionError:
+        return {}
+    rows: dict[str, dict[str, str]] = {}
+    for line in section.splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        if len(cells) != 4 or cells[0] in {"Rule", "---"}:
+            continue
+        assert cells[0] not in rows, f"duplicate comparability rule {cells[0]!r}"
+        rows[cells[0]] = {
+            "evidence": cells[1], "state": cells[2], "report": cells[3]}
+    return rows
+
+
 # --------------------------------------------------------------------------
 # 1. The amendments
 # --------------------------------------------------------------------------
@@ -574,7 +593,58 @@ def test_bootstrap_does_not_deadlock():
 
 
 # --------------------------------------------------------------------------
-# 5. The six locked decisions survive the amendments
+# 5. Comparability and disclosure
+# --------------------------------------------------------------------------
+
+
+def test_comparability_contract_is_closed_world():
+    rows = _contract_rows("## Comparability and disclosure contract")
+    assert set(rows) == {
+        "queue-work", "compute", "in-flight", "tests", "lint-format-types",
+        "build-output", "coverage", "cache-replay", "missing-totals",
+        "red-before", "runner-class", "changed-step", "cold-evidence",
+        "task-cache", "suspicious-warm", "triggered-set", "per-commit",
+        "billed-compute", "runner-carry-over", "exclusions", "lane",
+        "negative-control",
+    }
+    assert all(set(row) == {"evidence", "state", "report"}
+               for row in rows.values())
+
+
+def test_comparability_contract_carries_each_required_guard():
+    rows = _contract_rows("## Comparability and disclosure contract")
+    required = {
+        "queue-work": ("queue_delta_s", "work_delta_s", "not attributable"),
+        "compute": ("sum of job durations", "disclosure", "not a sized saving"),
+        "in-flight": ("never a sample", "excluded", "in-flight"),
+        "tests": ("totals or names", "reduced", "coverage change, not a speedup"),
+        "lint-format-types": ("files checked", "reduced", "work parity"),
+        "build-output": ("file list and hashes", "unknown", "sizes"),
+        "coverage": ("reported coverage", "changed", "delta"),
+        "cache-replay": ("more than 10 percentage points", "changed", "not run"),
+        "missing-totals": ("neither arm", "unknown", "never `same`"),
+        "red-before": ("before arm is red", "never `same`", "failed"),
+        "runner-class": ("label and image", "not attributable", "runner pool"),
+        "changed-step": ("mandatory", "same step", "before and after"),
+        "cold-evidence": ("cache miss", "cold", "why"),
+        "task-cache": ("more than 20 percentage points", "not attributable", "hit share"),
+        "suspicious-warm": ("persistent-disk", "changed", "unrelated jobs"),
+        "triggered-set": ("same workflows and jobs", "changed", "triggered set"),
+        "per-commit": ("median of per-commit ratios", "comparable", "worst pair"),
+        "billed-compute": ("rounded up to the minute", "disclosure", "runner OS"),
+        "runner-carry-over": ("runner label and size", "restricted", "multiple"),
+        "exclusions": ("infrastructure stalls", "excluded", "with and without"),
+        "lane": ("30-day run count", "required", "lane"),
+        "negative-control": ("must fail", "required", "parity"),
+    }
+    for name, tokens in required.items():
+        text = " ".join(rows.get(name, {}).values()).lower()
+        for token in tokens:
+            assert token.lower() in text, f"{name} lost {token!r}: {text!r}"
+
+
+# --------------------------------------------------------------------------
+# 6. The six locked decisions survive the amendments
 # --------------------------------------------------------------------------
 
 
