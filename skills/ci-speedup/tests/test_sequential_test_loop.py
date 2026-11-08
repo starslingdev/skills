@@ -89,6 +89,7 @@ _EXPECTED_PARSE_LOG_LEAF_ORDER = (
     "dependency-cache",
     "test-isolated-serial",
     "test-loop-serial",
+    "vendored-lib-build",
     "dependency-cache",
 )
 

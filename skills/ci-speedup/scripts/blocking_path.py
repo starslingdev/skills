@@ -2144,6 +2144,77 @@ def _cache_path_stamp(value: Any) -> datetime | None:
         return None
 
 
+_VENDORED_LIBRARY_PATH_RE = re.compile(
+    r"(?:^|/)(?P<root>contrib|third_party|vendor|external)/"
+    r"(?P<library>[A-Za-z0-9_.+-]+)(?:/|$)")
+
+
+def _vendored_lib_build_leaf(text: str) -> dict[str, Any] | None:
+    """Measure completed, timestamped vendored-library source builds.
+
+    Admission requires an ``Entering directory`` marker followed by that same
+    library's ``.stamp.*.build`` completion. Merely restoring or walking a
+    vendored source tree is therefore silent.
+    """
+    stamped: list[tuple[datetime, str, str]] = []
+    for raw in text.splitlines():
+        stamp, sep, message = raw.partition(" ")
+        when = _cache_path_stamp(stamp)
+        if sep and when is not None:
+            stamped.append((when, message.strip(), raw.strip()))
+    if len(stamped) < 2:
+        return None
+
+    starts: dict[str, tuple[datetime, str]] = {}
+    intervals: list[tuple[str, datetime, datetime, str, str]] = []
+    entering = re.compile(r"\bEntering directory\s+['\"](?P<path>[^'\"]+)['\"]")
+    completed = re.compile(r"\btouch\s+(?P<path>\S+/\.stamp\.[^/\s]+\.build)\b")
+    for when, message, raw in stamped:
+        start = entering.search(message)
+        if start and (path := _VENDORED_LIBRARY_PATH_RE.search(start.group("path"))):
+            key = f"{path.group('root')}/{path.group('library')}"
+            starts.setdefault(key, (when, raw))
+            continue
+        finish = completed.search(message)
+        if not finish or not (path := _VENDORED_LIBRARY_PATH_RE.search(
+                finish.group("path"))):
+            continue
+        key = f"{path.group('root')}/{path.group('library')}"
+        begun = starts.pop(key, None)
+        if begun is not None and when > begun[0]:
+            intervals.append((key, begun[0], when, begun[1], raw))
+
+    if not intervals:
+        return None
+    intervals.sort(key=lambda row: row[1])
+    # Summed wall time is meaningful only for sequential builds. Parallel
+    # intervals would double-count the same portion of the step wall.
+    if any(intervals[index][2] > intervals[index + 1][1]
+           for index in range(len(intervals) - 1)):
+        return None
+    step_wall = (stamped[-1][0] - stamped[0][0]).total_seconds()
+    built_wall = sum((ended - started).total_seconds()
+                     for _key, started, ended, _start_raw, _end_raw in intervals)
+    if step_wall <= 0 or built_wall / step_wall < 0.5:
+        return None
+    per_library: dict[str, float] = {}
+    for key, started, ended, _start_raw, _end_raw in intervals:
+        per_library[key] = per_library.get(key, 0.0) + (
+            ended - started).total_seconds()
+    rows = [(key, round(seconds, 1), None)
+            for key, seconds in per_library.items()]
+    rows.sort(key=lambda row: (-row[1], row[0]))
+    return {
+        "fix_key": "vendored-lib-build",
+        "unit_label": f"{len(rows)} vendored libraries built from source in sequence",
+        "magnitude": {"label": "vendored library build share", "unit": "%",
+                      "value": round(100 * built_wall / step_wall, 1)},
+        "deeper": [{"rows": rows, "blocker_note": "", "pct_of": "sum"}],
+        "evidence": [intervals[0][3], intervals[0][4]],
+        "search": ["Entering directory", ".stamp.", "contrib/"],
+    }
+
+
 def _cache_path_warnings(text: str, steps: dict[Any, dict]) -> dict[Any, str]:
     """`{key: warning}` for each known actions/cache post-step in `steps`
     (`{key: step}`) whose own save emitted the exact toolkit warning.
@@ -3145,6 +3216,7 @@ def _parse_log(text: str,
             "search": [":test", "BUILD SUCCESSFUL in", "maxParallelForks"],
         }
     dependency_state = _cache_state_of_log(text, "dependency-cache")
+    vendored_build_leaf = _vendored_lib_build_leaf(text)
     dependency_hit_leaf = None
     if dependency_state:
         dependency_hit_leaf = {
@@ -3158,7 +3230,8 @@ def _parse_log(text: str,
             "search": ["Cache not found for input keys", "cache is not found",
                        "Cache restored from key"],
         }
-    if dependency_state and dependency_state["miss_pct"] > 0:
+    if (dependency_state and dependency_state["miss_pct"] > 0
+            and vendored_build_leaf is None):
         return dependency_hit_leaf
     # --- L: isolated tests in one file wait on the same fixed timer ------------
     # This is narrower than the shell-loop detector below. Four tests in ONE file
@@ -3294,6 +3367,8 @@ def _parse_log(text: str,
             "evidence": [x[3] for x in command_starts[:2]],
             "search": ["test loop", "parallel", "OPT88"],
         }
+    if vendored_build_leaf is not None:
+        return vendored_build_leaf
     return dependency_hit_leaf
 
 
@@ -3780,6 +3855,27 @@ _FIX_META: dict[str, dict[str, Any]] = {
         "deliver": "Run independent files concurrently with a measured worker cap, keep "
                    "any exclusive files in a serial lane, verify the same test count and "
                    "results, and re-measure the step.",
+    },
+    "vendored-lib-build": {
+        "cause": "Timestamped build markers show vendored libraries under `contrib/`, "
+                 "`third_party/`, `vendor/`, or `external/` compiling sequentially for "
+                 "at least half of the measured step wall.",
+        "look": "`{wf}` and the vendored build recipes — identify the source, patches, "
+                "toolchain inputs, stamp files, and every artifact each library produces. "
+                "Check whether the build system declares those artifacts as prerequisites.",
+        "constraints": "Use one cache entry per library, keyed by its recipe, source, "
+                       "patches, and pinned toolchain. Restore with a matching stable prefix "
+                       "and save new entries only from the default branch. Check the summed "
+                       "entry size against the repository's cache budget with the shipped "
+                       "cache guard helpers. A warm build must still confirm every expected "
+                       "artifact exists; incomplete make prerequisites can otherwise turn a "
+                       "cache hit into a silently partial build.",
+        "docs": ["GitHub Actions dependency caching reference: "
+                 "https://docs.github.com/en/actions/using-workflows/caching-dependencies-to-speed-up-workflows"],
+        "deliver": "Cache each completed vendored library separately with stable-prefix "
+                   "restore and default-branch-only save. Exercise several warm builds, "
+                   "including changed recipes and patches, and confirm every expected "
+                   "artifact exists before comparing the measured step wall.",
     },
     "emulated-image-compile": {
         "cause": "Buildx spends at least half of the measured compile time building a "
@@ -6095,6 +6191,7 @@ _LEAF_STEP_CATEGORY: dict[str, str] = {
     "pytest-no-xdist": "test",
     "test-isolated-serial": "test",
     "test-loop-serial": "test",
+    "vendored-lib-build": "build",
     "emulated-image-compile": "build",
     "cargo-test-shard": "test",
     "benchmark-serial-reruns": "test",

@@ -16,6 +16,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-11-08** — Measure sequential vendored-library source builds from completed timestamped intervals, drill their per-library wall time, and route dominant builds to guarded per-library cache guidance. Restored trees without build stamps stay quiet, and the recipe requires complete artifacts across repeated warm builds.
 - **2026-11-08** — Pin the complete log-leaf precedence, including helper-returned and assigned-before-return leaves. Regression mutants prove that moving an existing leaf or inserting a new one without choosing its slot fails the guard.
 - **2026-11-07** — Detect duplicate test work on the same trigger and runner platform, including commands expanded from local composite actions and coverage-only reruns. The finding preserves every gate and sizes one removed suite run from sampled default-branch pushes while accounting for the producer workflow's completion delay.
 - **2026-11-07** — Confirm emulated image compilation against one inspected Buildx builder node and its native platform. Multi-node builders fail closed, foreign compilation must dominate cold layer time and materially exceed the native compile, and the fix guidance sizes cross-compilation and native-runner alternatives against the work that remains.

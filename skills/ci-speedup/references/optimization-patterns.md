@@ -4952,14 +4952,14 @@ Flag only when the job runs on `self-hosted` runners. On GitHub-hosted runners, 
 pattern: OPT86
 impact: HIGH
 class: data-driven
-detector: manual
+detector: log-leaf
 risk: LOW
 affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml,pyproject.toml,requirements*.txt,uv.lock,poetry.lock,requirements*.lock,package.json,Cargo.toml"
 fix_strategy: use-prebuilt-dependency-packages
 title_template: "CI compiles a dependency that ships prebuilt"
 -->
 
-**Not auto-detected yet.** Like OPT88, no pass emits OPT86, so the audit never reports it on its own and never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading a slow install step's log against the heuristic below.
+**Narrow automatic coverage.** A measured log leaf emits OPT86 when timestamped markers show sequential builds under `contrib/`, `third_party/`, `vendor/`, or `external/` consuming at least half of a step. It requires an `Entering directory` marker and that library's matching `.stamp.*.build` completion; restored libraries without build stamps stay quiet. The other package-manager shapes below remain manual checks.
 
 **TL;DR**: An install step compiles a dependency from source (a C or C++ extension, a native add-on, a large machine-learning framework) when a prebuilt package exists for that interpreter and platform. Pin a version that ships prebuilt packages for every leg of the matrix, and make the install refuse to build from source, so the next lockfile bump cannot bring the compile back unnoticed.
 
@@ -4974,10 +4974,17 @@ title_template: "CI compiles a dependency that ships prebuilt"
 1. The slow step is an install or build step, and its log shows a dependency being compiled: pip or uv `Building wheel for <pkg>` / `Building <pkg>==<version>`, `Running setup.py install`, `node-gyp rebuild` or `gyp info` during a JavaScript install, or a cargo build script compiling a bundled C or C++ library. The compile ends at the matching `Built <pkg>==<version>` line, so the span between the two is the compile time. A `Building <project> @ file://...` line is the project building itself, not a dependency compile. For the oversized-build cause there is no compile: the log instead shows the large build being downloaded and installed on a runner that cannot use it (for example the `nvidia-*` CUDA packages a default PyTorch install pulls on Linux, on a runner with no GPU).
 2. A prebuilt package exists for the job's interpreter, OS and architecture at a version the project accepts (check the package index), or the project publishes a prebuilt binary or a smaller build.
 3. Where a matrix exists, the leg that compiles (or downloads the oversized build) is the slow outlier.
+4. For a vendored source tree, group the timestamped `Entering directory` to `.stamp.*.build` intervals by library. The automatic finding requires completed, non-overlapping intervals to account for at least half of the timestamped step wall; it does not infer a build from directory names alone.
 
 [OPT61](#opt61--missing-dependency-caching) and [OPT63](#opt63--dependency-install-with-cache-disabled) are the cache side of the same step (no cache, or one switched off). OPT86 is about what gets installed; both can apply at once, and a warm cache can hide a source build until its key changes.
 
-**Fix recipe**:
+**Vendored-library fix recipe**:
+
+1. Cache each library separately so one recipe or patch change does not invalidate every other build. Key each entry on that library's source revision, recipe, patches, and pinned toolchain.
+2. Give the key a stable matching `restore-keys` prefix, and save new entries only from the default branch. Before rollout, sum the expected entry sizes and check them against the repository's cache budget with ci-speedup's cache guard helpers.
+3. Treat restored files as build inputs, not proof of completeness. Make every produced artifact an explicit prerequisite, then run several warm builds after changing recipes and patches and confirm every artifact exists. Missing prerequisites can otherwise make a partial cache restore look green.
+
+**Prebuilt-package fix recipe**:
 
 1. Constrain the dependency to a version that ships prebuilt packages for every interpreter and platform in the matrix, with per-interpreter markers when one version cannot cover them all.
 2. Make a source build an error, so a future bump fails loudly instead of slowing down: `pip install --only-binary=<pkg>` for the package that compiled, or uv's `--no-build-package <pkg>`. Widen it to every dependency (`--only-binary=:all:`, or uv's `UV_NO_BUILD=1` / `--no-build`) only once every dependency, pure-Python ones included, ships a prebuilt package, since the wide form also refuses a pure-Python dependency published only as a source archive. Exempt only the project itself if it must be built.

@@ -1,0 +1,14 @@
+name: CI
+on:
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make build
+  gate:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: build vendored libraries
+        run: make contrib

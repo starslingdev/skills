@@ -369,7 +369,7 @@ def test_named_fixtures_exercise_their_defining_interactions(
     for name in (
             "config-era-change", "duplicate-gate-job", "external-required-gate",
             "heavy-runner-queue", "minority-tail", "multiarch-image",
-            "path-partitioned-monorepo"):
+            "path-partitioned-monorepo", "vendored-libs"):
         docs[name], _report, _checks = run_fixture(
             FIXTURE_ROOT / name, monkeypatch, tmp_path)
 
@@ -397,6 +397,8 @@ def test_named_fixtures_exercise_their_defining_interactions(
         pole.get("job") == "image"
         for pole in image_doc["pr_critical_path"]["poles"])
     assert "emulated-image-compile" in fixture_facts(image_doc, [])["leaves"]
+    assert "vendored-lib-build" in fixture_facts(
+        docs["vendored-libs"], [])["leaves"]
     assert any(
         row.get("cache_net_negative", {}).get("kind") == "opt79_buildkit_export"
         for row in image_doc["findings"])
