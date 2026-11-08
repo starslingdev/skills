@@ -7745,7 +7745,11 @@ def _opt79_pole_for(pole: dict[str, Any],
             continue
         if _wf_conflict(pole_wf, str(f.get("workflow_file") or "")):
             continue
-        jobs = [str(j) for j in (f.get("affected_jobs") or []) if str(j)]
+        routed_jobs = (f.get("wall_clock_affected_jobs")
+                       if ((f.get("wall_clock_p50_s") or 0) > 0
+                           and isinstance(f.get("wall_clock_affected_jobs"), list))
+                       else f.get("affected_jobs"))
+        jobs = [str(j) for j in (routed_jobs or []) if str(j)]
         if any(j == t or _same_matrix(j, t) or _matrix_base(t) == j
                or _matrix_base(j) == t for j in jobs for t in targets):
             out.append(f)

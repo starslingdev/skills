@@ -22515,21 +22515,38 @@ def _detect_shared_substep(
         # the appendix). Missing marker (legacy) defaults to concurrent, the matrix case.
         f["cluster_legs_concurrent"] = bool(concurrent)
         crit_wf = crit_by_wf.get(wf_path, {})
+        wall_jobs = [
+            job for job in ordered
+            if _pole_is_required_reachable(job, req_names, job_graph, crit_by_wf)
+        ]
+        if len(wall_jobs) != len(ordered):
+            # `affected_jobs` remains the full runner-minute scope. This narrower
+            # stamp is the set that can honestly support merge-wait credit.
+            f["wall_clock_affected_jobs"] = wall_jobs
         # Scope the floor to the cluster legs the shared step actually lowers (they
         # run concurrently, so own_max = the slowest of THESE legs); a slower
         # non-cluster check on the PR then correctly floors the saving.
-        _apply_structural_cascade(
-            f, credit.wall_clock_s, wf_path, crit_wf, events_by_wf,
-            pr_checks_tuple, pr_check_populations,
-            pr_check_populations_complete=pr_check_populations_complete,
-            own_check_names=frozenset(jobs.keys()),
-            chain_members=chain_members,
-            chain_p50_s=chain_p50_s, chain_win_s=chain_win_s,
-            # #44 — OPT73 IS a cluster-floor lever by construction: the shared step
-            # recurs across all these concurrent legs, so cutting it lowers them
-            # together. A sibling leg must not cap the win via chain_win_s (mastodon
-            # f83: capped at ~40s vs the true ~639s non-sibling floor).
-            cluster_floor_lever=True)
+        if wall_jobs:
+            _apply_structural_cascade(
+                f, credit.wall_clock_s, wf_path, crit_wf, events_by_wf,
+                pr_checks_tuple, pr_check_populations,
+                pr_check_populations_complete=pr_check_populations_complete,
+                own_check_names=frozenset(wall_jobs),
+                chain_members=chain_members,
+                chain_p50_s=chain_p50_s, chain_win_s=chain_win_s,
+                # #44 — OPT73 IS a cluster-floor lever by construction: the shared step
+                # recurs across all these concurrent legs, so cutting it lowers them
+                # together. A sibling leg must not cap the win via chain_win_s (mastodon
+                # f83: capped at ~40s vs the true ~639s non-sibling floor).
+                cluster_floor_lever=True)
+        else:
+            f["wall_clock_p50_s"] = 0.0
+            f["realization"] = "none"
+            f["tier"] = 2
+            f["size_note"] = (
+                f"{f.get('size_note') or ''}; no direct merge-wait saving is credited "
+                "because none of the shared-step jobs could be confirmed to block merging"
+            ).lstrip("; ")
         # Rare-presence demotion. The cascade floors by population-weighted
         # MAGNITUDE but does not know the spine's PRESENCE demotion: when every
         # cluster job is opt-in/rare (path-/label-gated, present on <= half the

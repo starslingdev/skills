@@ -1626,6 +1626,62 @@ def test_shared_substep_across_cluster_is_a_floor_lever():
     assert "`Build`" in (f.get("measured_evidence") or {}).get("summary", "")
 
 
+def test_shared_substep_credits_only_confirmed_required_reachable_jobs():
+    wf = ".github/workflows/ci.yml"
+    app = [("Checkout", 20), ("Install deps", 80), ("Build", 180),
+           ("Bundle app", 40)]
+    web = [("Checkout", 20), ("Install deps", 40), ("Build", 180),
+           ("Bundle web", 40)]
+    runs = [[_job("app", app), _job("web", web)] for _ in range(5)]
+    jpr = {wf: runs}
+    crit_by_wf = {wf: cr._critical_path(runs)}
+    pr_checks = (("app", 320.0), ("web", 280.0), ("gate", 5.0))
+    events = {wf: {"pull_request"}}
+    graph = {wf: {
+        "app": {"name": "app", "needs": [], "reusable": False},
+        "web": {"name": "web", "needs": [], "reusable": False},
+        "gate": {"name": "gate", "needs": ["app"], "reusable": False},
+    }}
+
+    out = cr._detect_shared_substep(
+        crit_by_wf, jpr, events, pr_checks, [], 0,
+        vol_by_wf={wf: 1000}, job_graph=graph, req_names={"gate"})
+    finding = next(f for f in out if f["pattern"] == "OPT73")
+
+    assert (finding.get("wall_clock_p50_s") or 0) > 0
+    assert finding.get("wall_clock_affected_jobs") == ["app"]
+    assert set(finding["affected_jobs"]) == {"app", "web"}
+
+
+def test_shared_substep_is_uncredited_when_every_job_is_unconfirmed():
+    wf = ".github/workflows/ci.yml"
+    app = [("Checkout", 20), ("Install deps", 80), ("Build", 180),
+           ("Bundle app", 40)]
+    web = [("Checkout", 20), ("Install deps", 80), ("Build", 180),
+           ("Bundle web", 40)]
+    runs = [[_job("app", app), _job("web", web)] for _ in range(5)]
+    jpr = {wf: runs}
+    crit_by_wf = {wf: cr._critical_path(runs)}
+    pr_checks = (("app", 320.0), ("web", 320.0), ("gate", 5.0))
+    events = {wf: {"pull_request"}}
+    graph = {wf: {
+        "app": {"name": "app", "needs": [], "reusable": False},
+        "web": {"name": "web", "needs": [], "reusable": False},
+        "gate": {"name": "gate", "needs": [], "reusable": False},
+    }}
+
+    out = cr._detect_shared_substep(
+        crit_by_wf, jpr, events, pr_checks, [], 0,
+        vol_by_wf={wf: 1000}, job_graph=graph, req_names={"gate"})
+    finding = next(f for f in out if f["pattern"] == "OPT73")
+
+    assert finding.get("wall_clock_p50_s") == 0.0
+    assert finding.get("realization") == "none"
+    assert finding.get("tier") == 2
+    assert finding.get("wall_clock_affected_jobs") == []
+    assert (finding.get("runner_min_saving") or 0) > 0
+
+
 def test_shared_substep_labels_sequential_needs_chain_truthfully():
     # Regression: two cluster jobs that share a step but are wired in a `needs:`
     # chain (`test` needs `compile`) are SEQUENTIAL, not concurrent. OPT73 must

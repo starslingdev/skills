@@ -16130,11 +16130,25 @@ def check_unconfirmed_checks_have_no_direct_credit_or_gate_framing(
     if not rows:
         return Check(name, True, "no unconfirmed checks", skipped=True)
 
-    keys = {
+    measured = {
         (Path(str(row.get("workflow_file") or "")).name,
-         _matrix_base(_cmp_name(str(row.get("name") or row.get("check") or ""))))
-        for row in rows
+         _cmp_name(str(row.get("name") or row.get("check") or "")))
+        for row in _as_list(cp.get("checks")) if isinstance(row, dict)
     }
+
+    def _matches_unconfirmed(wf: str, job: str) -> bool:
+        for row in rows:
+            row_wf = Path(str(row.get("workflow_file") or "")).name
+            target = _cmp_name(str(row.get("name") or row.get("check") or ""))
+            if wf != row_wf:
+                continue
+            if job == target:
+                return True
+            distinct = job != target and (wf, job) in measured and (wf, target) in measured
+            if ((_matrix_base(target) == job or _matrix_base(job) == target)
+                    and not distinct):
+                return True
+        return False
     failures: list[str] = []
     forbidden = re.compile(
         r"critical-path check|on the critical path|sits on the critical path|"
@@ -16145,13 +16159,15 @@ def check_unconfirmed_checks_have_no_direct_credit_or_gate_framing(
         if not isinstance(finding, dict):
             continue
         wf = Path(str(finding.get("workflow_file") or "")).name
-        jobs = [str(job) for job in _as_list(finding.get("affected_jobs")) if str(job)]
+        wall = _num(finding.get("wall_clock_p50_s")) or 0.0
+        job_field = ("wall_clock_affected_jobs"
+                     if wall > 0 and isinstance(finding.get("wall_clock_affected_jobs"), list)
+                     else "affected_jobs")
+        jobs = [str(job) for job in _as_list(finding.get(job_field)) if str(job)]
         if finding.get("job"):
             jobs.append(str(finding.get("job")))
-        fkeys = {(wf, _matrix_base(_cmp_name(job))) for job in jobs}
-        if not fkeys.intersection(keys):
+        if not any(_matches_unconfirmed(wf, _cmp_name(job)) for job in jobs):
             continue
-        wall = _num(finding.get("wall_clock_p50_s")) or 0.0
         if (wall > 0 or finding.get("realization") == "direct"
                 or int(_num(finding.get("tier")) or 0) == 1):
             failures.append(

@@ -314,3 +314,42 @@ def test_confirmed_check_keeps_structural_credit_and_framing(monkeypatch, tmp_pa
         report, report_path, findings_path, skill_repo=None)
         if not check.skipped and not check.ok]
     assert failures == [], [(check.name, check.detail) for check in failures]
+
+
+def test_unconfirmed_verifier_preserves_exact_distinct_check_credit(tmp_path):
+    wf = ".github/workflows/ci.yml"
+    doc = {
+        "pr_critical_path": {"checks": [
+            {"name": "test", "workflow_file": wf, "required_reachable": True},
+            {"name": "test (self-hosted)", "workflow_file": wf,
+             "required_reachable": False},
+        ]},
+        "findings": [{
+            "id": "confirmed", "pattern": "OPT75", "workflow_file": wf,
+            "affected_jobs": ["test"], "wall_clock_p50_s": 10.0,
+            "realization": "direct", "tier": 1,
+        }],
+    }
+    findings_path = tmp_path / "findings.json"
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+    report = """## 📋 Contents
+
+**🐌 Measured checks** - unconfirmed blockers are labelled.
+
+## Long poles
+
+## Long pole: `ci.yml` ▸ `test (self-hosted)` - 1m
+
+**Could not confirm this check blocks merging.**
+"""
+
+    check = vr.check_unconfirmed_checks_have_no_direct_credit_or_gate_framing(
+        report, findings_path)
+    assert check.ok, check.detail
+
+    doc["findings"][0]["affected_jobs"] = ["test (self-hosted)"]
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+    check = vr.check_unconfirmed_checks_have_no_direct_credit_or_gate_framing(
+        report, findings_path)
+    assert not check.ok
+    assert "direct credit" in check.detail
