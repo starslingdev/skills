@@ -40,7 +40,7 @@ This order is also the compiled file's order; contributors see `README.md`.
 - OPT24 — Long Test Job Without Sharding (HIGH, static) — long test job, no shards
 - OPT25 — Shard Imbalance (MEDIUM, data-driven) — one shard far slower than the rest
 - OPT88 — Test Concurrency Is a Guess, Not a Measurement (MEDIUM, data-driven) — unmeasured test worker count
-- OPT89 — The Slowest Platform Compiles Its Own Tests (HIGH, data-driven) — cross-compile once, test on each platform
+- OPT89 — The Slowest Platform Compiles Its Own Tests (HIGH, static) — cross-compile once, test on each platform
 ## Category 5 — Actions and Checkout
 - OPT26 — Outdated Action Major Versions (LOW, static) — old actions/* major versions
 - OPT27 — Duplicate `setup-node` Calls in Same Job (LOW, static) — setup-node twice in a job

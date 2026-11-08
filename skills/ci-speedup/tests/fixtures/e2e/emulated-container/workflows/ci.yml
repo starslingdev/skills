@@ -1,0 +1,18 @@
+name: Emulated container CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: uraimo/run-on-arch-action@v2
+        with:
+          arch: aarch64
+          distro: ubuntu22.04
+          run: |
+            ./configure
+            make -j2
+  gate:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - run: make test

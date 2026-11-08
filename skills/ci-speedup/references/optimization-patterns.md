@@ -2265,15 +2265,15 @@ The table carries no seconds and no modeled saving. Time the settings on the rep
 <!-- METADATA
 pattern: OPT89
 impact: HIGH
-class: data-driven
-detector: manual
+class: static
+detector: bespoke
 risk: MEDIUM
 affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml,.bazelrc,Cargo.toml,.cargo/config.toml,.config/nextest.toml"
 fix_strategy: build-once-test-natively
 title_template: "The slowest platform compiles its own tests"
 -->
 
-**Not auto-detected yet.** Like OPT86 and OPT88, no pass emits OPT89, so the audit never reports it on its own and never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading the slowest platform leg's steps against the heuristic below.
+**Auto-detected for emulated container compilation.** The static pass reports compile commands inside `uraimo/run-on-arch-action`, a foreign-platform `docker run` after QEMU setup, or a foreign-architecture job container on a hosted x64 runner. Native ARM runners and emulated test-only steps stay quiet. Other slow-platform build shapes still require the measured review below.
 
 **TL;DR**: A multi-platform test matrix makes every platform build its own test binaries, so the slowest or scarcest runner (Windows, an ARM machine, an emulated architecture) spends most of its time compiling instead of testing. Build the test binaries once on a fast runner (cross-compiling for the target), hand them over as an artifact, and run them natively on each platform.
 
@@ -2281,11 +2281,12 @@ title_template: "The slowest platform compiles its own tests"
 
 **Relation to other patterns**: [OPT81](#opt81--the-same-job-is-measurably-faster-on-another-runner) moves a whole job to a faster runner class. OPT89 moves only the build, and keeps the tests on the platform they must run on. [OPT14](#opt14--repeated-checkoutsetup-without-artifact-handoff) is the same artifact-handoff idea for setup work inside one platform.
 
-**Detection heuristic** (manual; read, never inferred):
+**Detection heuristic**:
 
-1. A matrix runs the same build-and-test on several platforms or architectures, and one platform leg is the slow outlier.
-2. On that leg, the build or compile work (or an emulation setup step such as QEMU) takes most of the job, and running the tests is a minority of it. When compile and test share one step (`bazel test`, or a test command that compiles first), step timings cannot split them: read the run log, a build-timing artifact (Bazel's profile, cargo's `--timings` report), or a test-only run of the same tests on another runner before concluding.
-3. The toolchain can build for that target elsewhere: cross-compilation is supported (for example Rust targets, Go `GOOS`/`GOARCH`, a C or C++ cross toolchain), or the test runner can package built tests as an archive to replay elsewhere (for example `cargo nextest archive`).
+1. The static detector requires a compile command in a known emulated-container surface on a hosted x64 runner. A job already running natively on ARM is excluded.
+2. Size the opportunity from that compile step's own measured time. If the step also runs tests, or a later emulated test suite remains, that test time is the floor and is never credited to this finding.
+3. For other platform legs, confirm that one leg is the slow outlier and split compile from test time using step timings, a build profile, or a test-only comparison.
+4. Confirm the toolchain can build for the target elsewhere: use a target toolchain or a test archive that can be replayed on the native platform.
 
 **Fix recipe**:
 
@@ -2296,7 +2297,7 @@ title_template: "The slowest platform compiles its own tests"
 
 **Guardrail**: a cross-compiled binary is not always the binary a native build produces (different linker, toolchain or bundled native libraries). List what the cross-built tests do not exercise, keep a native run that covers it, and do not drop a test from the native platform because it does not build cross.
 
-**Sizing: uncredited**. No `_SIZING` model. The ceiling is the measured build share of the slow leg; the saving is what the next sampled runs show.
+**Sizing: measure the compile step.** The ceiling is the compile step's own measured time. An emulated test suite is the unchanged floor, and the saving is what the next sampled runs show after moving only the build.
 
 **Real-world example (OpenAI)**, their numbers, not a forecast for your repo:
 
