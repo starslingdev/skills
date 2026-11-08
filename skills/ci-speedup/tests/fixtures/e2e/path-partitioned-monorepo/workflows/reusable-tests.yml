@@ -13,4 +13,5 @@ jobs:
         runtime: [20, 22]
     runs-on: ubuntu-latest
     steps:
+      - run: pnpm ls --filter '...[HEAD^1]'
       - run: make test PACKAGE=${{ matrix.package }} RUNTIME=${{ matrix.runtime }}
