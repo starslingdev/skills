@@ -2492,6 +2492,10 @@ def _opt89_compile_signal(command: str) -> str | None:
 def _opt89_docker_payload(command: str) -> str:
     """Return the command after `docker run ... IMAGE`, or fail closed."""
     command = _LINE_CONTINUATION_RE.sub(" ", command)
+    # Expressions are opaque to this detector. Collapse them to one shell
+    # token so an expression used as an option value cannot be mistaken for
+    # the container image or payload.
+    command = re.sub(r"\$\{\{[^}]+\}\}", "__OPT89_EXPRESSION__", command)
     try:
         tokens = shlex.split(command.splitlines()[0])
     except ValueError:
@@ -2576,7 +2580,8 @@ def _detect_opt89(doc: dict, raw: str) -> list[Hit]:
                 run = _run(step)
                 resolved_run = _opt102_resolve(
                     run, env={}, matrix=matrix, inputs={}, outputs={}) or ""
-                normalized_run = _LINE_CONTINUATION_RE.sub(" ", resolved_run)
+                normalized_run = _LINE_CONTINUATION_RE.sub(
+                    " ", resolved_run if resolved_run else run)
                 with_ = step.get("with") or {}
                 if uses.startswith("uraimo/run-on-arch-action@"):
                     action_occurrence += 1
@@ -2606,9 +2611,7 @@ def _detect_opt89(doc: dict, raw: str) -> list[Hit]:
                     arch = (_opt102_resolve(
                         with_.get("arch"), env={}, matrix=matrix, inputs={}, outputs={})
                         or "").lower()
-                    command = (_opt102_resolve(
-                        with_.get("run"), env={}, matrix=matrix, inputs={}, outputs={})
-                        or "")
+                    command = str(with_.get("run") or "")
                     marker = "uraimo/run-on-arch-action@"
                     occurrence = action_occurrence
                     mechanism = "run-on-arch action"
@@ -2619,13 +2622,13 @@ def _detect_opt89(doc: dict, raw: str) -> list[Hit]:
                       and _opt89_qemu_supports(
                           qemu_platforms, platform.group("platform"))):
                     arch = platform.group("platform").lower()
-                    command = _opt89_docker_payload(resolved_run)
+                    command = _opt89_docker_payload(run)
                     marker = "docker run"
                     occurrence = docker_occurrence
                     mechanism = "QEMU-backed docker run"
-                elif container_arch and resolved_run:
+                elif container_arch and run:
                     arch = container_arch
-                    command = resolved_run
+                    command = run
                     marker = first_line
                     occurrence = container_occurrences[first_line]
                     mechanism = "foreign-architecture job container"
