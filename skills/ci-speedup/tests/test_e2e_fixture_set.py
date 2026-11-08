@@ -406,6 +406,113 @@ def test_named_fixtures_exercise_their_defining_interactions(
         for workflow in red["workflows"] for run in workflow["runs"])
 
 
+def _run_multiarch_log_variant(
+        name: str, monkeypatch, tmp_path, transform):
+    fixture = tmp_path / "fixture-variants" / name
+    fixture.parent.mkdir(exist_ok=True)
+    shutil.copytree(FIXTURE_ROOT / "multiarch-image", fixture)
+    responses_path = fixture / "responses.json"
+    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
+    recorded["logs"] = {
+        job_id: transform(log) for job_id, log in recorded["logs"].items()
+    }
+    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
+    doc, report, checks = run_fixture(fixture, monkeypatch, tmp_path)
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+    facts = fixture_facts(doc, checks)
+    bundle = doc.get("data_bundle") or {}
+    logs_dir = Path(bundle.get("logs_dir") or tmp_path)
+    facts["leaf_details"] = [
+        leaf for entry in bundle.get("logs") or []
+        if entry.get("file")
+        for leaf in [bp._parse_log((logs_dir / entry["file"]).read_text())]
+        if leaf is not None
+    ]
+    return doc, report, facts
+
+
+def test_builder_topology_and_foreign_only_shapes_run_through_collection(
+        monkeypatch, tmp_path):
+    second_node = (
+        "Name:                  native-arm0\n"
+        "Endpoint:              tcp://native-arm.example:1234\n"
+        "Status:                running\n"
+        "BuildKit version:      v0.24.0\n"
+        "Platforms:             linux/arm64, linux/arm/v7\n")
+
+    _doc, _report, multi_node = _run_multiarch_log_variant(
+        "multiarch-two-node", monkeypatch, tmp_path,
+        lambda log: log.replace(
+            "#10 [linux/amd64 build 2/3]", second_node + "#10 [linux/amd64 build 2/3]"))
+    assert "emulated-image-compile" not in multi_node["leaves"]
+
+    def foreign_only(log: str) -> str:
+        start = log.index("#10 [linux/amd64 build 2/3]")
+        end = log.index("Cache not found", start)
+        return (log[:start]
+                + "#15 [linux/arm/v7 build 2/3] RUN make -j2\n"
+                  "#15 DONE 100.0s\n"
+                + log[end:])
+
+    _doc, report, armv7 = _run_multiarch_log_variant(
+        "multiarch-foreign-only-armv7", monkeypatch, tmp_path, foreign_only)
+    assert "emulated-image-compile" in armv7["leaves"]
+    assert "foreign-architecture compile" in report
+    assert "100s" in report
+
+    def native_arm(log: str) -> str:
+        return foreign_only(log).replace(
+            "linux/amd64, linux/amd64/v2, linux/arm64, linux/arm/v7",
+            "linux/arm64, linux/arm/v7")
+
+    _doc, _report, native = _run_multiarch_log_variant(
+        "multiarch-native-arm", monkeypatch, tmp_path, native_arm)
+    assert "emulated-image-compile" not in native["leaves"]
+
+
+def test_builder_detected_platform_and_dominance_guards_run_through_collection(
+        monkeypatch, tmp_path):
+    def configured_first(log: str) -> str:
+        return log.replace(
+            "linux/amd64, linux/amd64/v2, linux/arm64, linux/arm/v7",
+            "linux/arm64*, linux/amd64, linux/amd64/v2, linux/arm64, linux/arm/v7")
+
+    _doc, report, configured = _run_multiarch_log_variant(
+        "multiarch-configured-platform-first", monkeypatch, tmp_path,
+        configured_first)
+    assert "emulated-image-compile" in configured["leaves"]
+    emulated = next(
+        leaf for leaf in configured["leaf_details"]
+        if leaf.get("fix_key") == "emulated-image-compile")
+    assert emulated["deeper"][0]["rows"][0][0] == (
+        "native linux/amd64 compile/install")
+    assert any("Platforms:" in line and "linux/arm64*" in line
+               for line in emulated["evidence"])
+    assert "native linux/amd64" in report
+    assert ("Platforms:             linux/arm64*, linux/amd64" in report)
+
+    def cold_layer_dominates(log: str) -> str:
+        return log.replace(
+            "#15 DONE 120.0s\n",
+            "#15 DONE 120.0s\n"
+            "#16 [linux/arm64 build 3/3] RUN download-release-assets\n"
+            "#16 DONE 400.0s\n")
+
+    _doc, _report, cold = _run_multiarch_log_variant(
+        "multiarch-cold-layer-dominates", monkeypatch, tmp_path,
+        cold_layer_dominates)
+    assert "emulated-image-compile" not in cold["leaves"]
+
+    def near_native_speed(log: str) -> str:
+        return (log.replace("#10 DONE 20.0s", "#10 DONE 300.0s")
+                .replace("#15 DONE 120.0s", "#15 DONE 320.0s"))
+
+    _doc, _report, near_native = _run_multiarch_log_variant(
+        "multiarch-near-native-speed", monkeypatch, tmp_path, near_native_speed)
+    assert "emulated-image-compile" not in near_native["leaves"]
+
+
 def test_push_fixture_fetches_the_recorded_run_jobs_once(monkeypatch, tmp_path):
     doc, _report, _checks = run_fixture(
         FIXTURE_ROOT / "push-job-list", monkeypatch, tmp_path)

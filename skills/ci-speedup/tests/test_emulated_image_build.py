@@ -405,6 +405,24 @@ Platforms:             linux/arm64, linux/arm/v7
         (_SINGLE_AMD64_BUILDER + second_node + compile_log).splitlines()) is None
 
 
+def test_builder_native_platform_skips_user_configured_starred_entries():
+    builder = _SINGLE_AMD64_BUILDER.replace(
+        "linux/amd64, linux/amd64/v2, linux/arm64, linux/arm/v7",
+        "linux/arm64*, linux/amd64, linux/amd64/v2, linux/arm64, linux/arm/v7")
+    compile_log = """#10 [linux/amd64 4/8] RUN go build ./...
+#10 DONE 20.0s
+#15 [linux/arm64 4/8] RUN go build ./...
+#15 DONE 100.0s
+"""
+    leaf = bp._emulated_image_compile_leaf((builder + compile_log).splitlines())
+
+    assert leaf is not None
+    assert leaf["deeper"][0]["rows"][0][0] == (
+        "native linux/amd64 compile/install")
+    assert any("Platforms:" in line and "linux/arm64*" in line
+               for line in leaf["evidence"])
+
+
 def test_foreign_only_armv7_uses_the_builder_native_platform():
     compile_log = """#15 [linux/arm/v7 build 4/8] RUN make -j2
 #15 DONE 100.0s

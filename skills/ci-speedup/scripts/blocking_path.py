@@ -2203,33 +2203,50 @@ def _cache_path_leaf(cache_path_sample: dict[str, Any] | None) -> dict[str, Any]
             "config_fact": " ".join(context)}
 
 
-def _buildx_native_platform(lines: list[str]) -> str | None:
-    """Return the first (native) platform of a single inspected buildx node.
+def _buildx_single_node(
+    lines: list[str],
+) -> tuple[str, list[str]] | None:
+    """Return the native platform and auditable evidence for one Buildx node.
 
     `docker buildx inspect --bootstrap` prints the builder header, then a
-    `Nodes:` section with one `Name:` and `Platforms:` pair per node. Emulated
-    platforms follow the node's native platform, so the first platform is the
-    only one used here. Missing or multi-node evidence fails closed.
+    `Nodes:` section with one `Name:` and `Platforms:` pair per node. Platforms
+    configured by the user are printed first with a `*`; the detected native
+    platform is the first unstarred entry, before emulated detected platforms.
+    Missing, all-configured, or multi-node evidence fails closed.
     """
     in_nodes = False
-    nodes: list[str] = []
+    nodes: list[dict[str, str]] = []
+    nodes_header = ""
     awaiting_platform = False
     for line in lines:
         if re.search(r"\bNodes:\s*$", line):
             in_nodes = True
+            nodes_header = line
             continue
         if not in_nodes:
             continue
         if re.search(r"\bName:\s+\S+", line):
-            nodes.append("")
+            nodes.append({"name": line, "platforms": "", "native": ""})
             awaiting_platform = True
             continue
-        platform = re.search(r"\bPlatforms:\s+(linux/[^,\s]+)", line)
+        platform = re.search(r"\bPlatforms:\s+(.+)$", line)
         if awaiting_platform and platform and nodes:
-            nodes[-1] = platform.group(1).lower()
+            detected = [
+                item.strip().lower()
+                for item in platform.group(1).split(",")
+                if item.strip().lower().startswith("linux/")
+                and not item.strip().endswith("*")
+            ]
+            nodes[-1]["platforms"] = line
+            nodes[-1]["native"] = detected[0] if detected else ""
             awaiting_platform = False
-    complete = [platform for platform in nodes if platform]
-    return complete[0] if len(nodes) == 1 and len(complete) == 1 else None
+    if len(nodes) != 1 or not nodes[0]["native"]:
+        return None
+    node = nodes[0]
+    evidence = [line for line in (
+        nodes_header, node["name"], node["platforms"],
+    ) if line]
+    return node["native"], evidence
 
 
 def _platform_family(platform: str) -> str:
@@ -2307,9 +2324,10 @@ def _emulated_image_compile_leaf(lines: list[str]) -> dict[str, Any] | None:
         if done and done.group(1) in cold_operations:
             arch, _header = cold_operations.pop(done.group(1))
             cold_durations.append((arch, float(done.group(2))))
-    native_platform = _buildx_native_platform(lines)
-    if native_platform is None:
+    builder = _buildx_single_node(lines)
+    if builder is None:
         return None
+    native_platform, builder_evidence = builder
     native_family = _platform_family(native_platform)
     native = sum(seconds for arch, seconds, _header, _done, _kind in durations
                  if _platform_family(f"linux/{arch}") == native_family)
@@ -2328,7 +2346,7 @@ def _emulated_image_compile_leaf(lines: list[str]) -> dict[str, Any] | None:
     share = round(100 * emulated / total)
     rows = []
     if native > 0:
-        rows.append(("native linux/amd64 compile/install", native, None))
+        rows.append((f"native {native_platform} compile/install", native, None))
     if emulated_compile > 0:
         rows.append(("foreign-architecture compile", emulated_compile, None))
     if emulated_install > 0:
@@ -2343,8 +2361,10 @@ def _emulated_image_compile_leaf(lines: list[str]) -> dict[str, Any] | None:
         "deeper": [{"rows": rows,
                     "blocker_note": (f"foreign-architecture work is {scope}"),
                     "pct_of": "sum"}],
-        "evidence": [item for _arch, _seconds, header, done, _kind in durations
-                     for item in (header, done)][:6],
+        "evidence": (builder_evidence + [
+            item for _arch, _seconds, header, done, _kind in durations
+            for item in (header, done)
+        ])[:8],
         "search": ["docker/build-push-action", "BUILDPLATFORM", "TARGETARCH"],
     }
     if re.search(r"(?:docker\s+buildx\s+build\b[^\n]*|build-push-action[^\n]*)"
