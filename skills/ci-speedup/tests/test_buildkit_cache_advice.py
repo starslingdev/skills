@@ -147,6 +147,14 @@ class _UnrelatedCachedCompileClient(_Client):
 def _multi_platform_log(*, no_cache: bool = False) -> str:
     flag = " --no-cache" if no_cache else ""
     return "\n".join([
+        "Name:          builder",
+        "Driver:        docker-container",
+        "Nodes:",
+        "Name:                  builder0",
+        "Endpoint:              unix:///var/run/docker.sock",
+        "Status:                running",
+        "BuildKit version:      v0.24.0",
+        "Platforms:             linux/amd64, linux/amd64/v2, linux/arm64",
         f"docker buildx build{flag} --platform linux/amd64,linux/arm64 .",
         "#2 [linux/amd64 1/3] FROM docker.io/library/golang:1.23",
         "#2 DONE 3.0s",

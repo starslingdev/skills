@@ -2203,6 +2203,61 @@ def _cache_path_leaf(cache_path_sample: dict[str, Any] | None) -> dict[str, Any]
             "config_fact": " ".join(context)}
 
 
+def _buildx_single_node(
+    lines: list[str],
+) -> tuple[str, list[str]] | None:
+    """Return the native platform and auditable evidence for one Buildx node.
+
+    `docker buildx inspect --bootstrap` prints the builder header, then a
+    `Nodes:` section with one `Name:` and `Platforms:` pair per node. Platforms
+    configured by the user are printed first with a `*`; the detected native
+    platform is the first unstarred entry, before emulated detected platforms.
+    Missing, all-configured, or multi-node evidence fails closed.
+    """
+    in_nodes = False
+    nodes: list[dict[str, str]] = []
+    nodes_header = ""
+    awaiting_platform = False
+    for line in lines:
+        if re.search(r"\bNodes:\s*$", line):
+            in_nodes = True
+            nodes_header = line
+            continue
+        if not in_nodes:
+            continue
+        if re.search(r"\bName:\s+\S+", line):
+            nodes.append({"name": line, "platforms": "", "native": ""})
+            awaiting_platform = True
+            continue
+        platform = re.search(r"\bPlatforms:\s+(.+)$", line)
+        if awaiting_platform and platform and nodes:
+            detected = [
+                item.strip().lower()
+                for item in platform.group(1).split(",")
+                if item.strip().lower().startswith("linux/")
+                and not item.strip().endswith("*")
+            ]
+            nodes[-1]["platforms"] = line
+            nodes[-1]["native"] = detected[0] if detected else ""
+            awaiting_platform = False
+    if len(nodes) != 1 or not nodes[0]["native"]:
+        return None
+    node = nodes[0]
+    evidence = [line for line in (
+        nodes_header, node["name"], node["platforms"],
+    ) if line]
+    return node["native"], evidence
+
+
+def _platform_family(platform: str) -> str:
+    arch = platform.lower().removeprefix("linux/")
+    if arch.startswith(("amd64", "x86_64")):
+        return "amd64"
+    if arch.startswith(("arm64", "arm/", "aarch64")):
+        return "arm"
+    return arch.split("/", 1)[0]
+
+
 def _emulated_image_compile_leaf(lines: list[str]) -> dict[str, Any] | None:
     """Measure foreign-platform compile/install work before generic cache advice."""
     compile_re = re.compile(
@@ -2220,9 +2275,16 @@ def _emulated_image_compile_leaf(lines: list[str]) -> dict[str, Any] | None:
         r"npm_config_build_from_source\s*=\s*(?:1|true)).*\bnpm\s+(?:ci|install)\b",
         re.IGNORECASE)
     operations: dict[str, tuple[str, str, str]] = {}
+    cold_operations: set[str] = set()
     durations: list[tuple[str, float, str, str, str]] = []
+    cold_durations: list[float] = []
     source_scopes: set[tuple[str, str]] = set()
     for line in lines:
+        cold_header = re.search(
+            r"#(\d+)\s+\[[^\]]+\]\s+(?:FROM|RUN|COPY|ADD)\b",
+            line, re.IGNORECASE)
+        if cold_header:
+            cold_operations.add(cold_header.group(1))
         instruction = re.search(
             r"#(\d+)\s+\[linux/([^\s\]]+)\s*([^\]]*)\]\s+"
             r"(ARG|ENV|RUN)\s+(.+)", line, re.IGNORECASE)
@@ -2254,28 +2316,41 @@ def _emulated_image_compile_leaf(lines: list[str]) -> dict[str, Any] | None:
             if kind == "install" or compile_re.search(command):
                 operations[match.group(1)] = (match.group(2).lower(), line, kind)
                 continue
-        done = re.search(r"#(\d+)\s+DONE\s+([\d.]+)s\b", line)
+        done = re.search(r"#(\d+)\s+DONE\s+(\d+(?:\.\d+)?)s\b", line)
         if done and done.group(1) in operations:
             arch, header, kind = operations.pop(done.group(1))
             durations.append((arch, float(done.group(2)), header, line, kind))
+        if done and done.group(1) in cold_operations:
+            cold_operations.discard(done.group(1))
+            cold_durations.append(float(done.group(2)))
+    builder = _buildx_single_node(lines)
+    if builder is None:
+        return None
+    native_platform, builder_evidence = builder
+    native_family = _platform_family(native_platform)
     native = sum(seconds for arch, seconds, _header, _done, _kind in durations
-                 if arch in {"amd64", "x86_64"})
+                 if _platform_family(f"linux/{arch}") == native_family)
     emulated_compile = sum(seconds for arch, seconds, _header, _done, kind in durations
-                           if arch not in {"amd64", "x86_64"} and kind == "compile")
+                           if _platform_family(f"linux/{arch}") != native_family
+                           and kind == "compile")
     emulated_install = sum(seconds for arch, seconds, _header, _done, kind in durations
-                           if arch not in {"amd64", "x86_64"} and kind == "install")
+                           if _platform_family(f"linux/{arch}") != native_family
+                           and kind == "install")
+    foreign_by_arch: dict[str, float] = {}
+    for arch, seconds, _header, _done, _kind in durations:
+        if _platform_family(f"linux/{arch}") != native_family:
+            foreign_by_arch[arch] = foreign_by_arch.get(arch, 0.0) + seconds
     emulated = emulated_compile + emulated_install
     total = native + emulated
-    x64_builder = bool(re.search(
-        r"(?:runner\s+architecture|runner_arch|architecture)\s*[:=]\s*"
-        r"(?:x64|amd64|x86_64)\b", "\n".join(lines), re.IGNORECASE))
-    if (emulated <= 0 or (native <= 0 and not x64_builder)
-            or (native > 0 and emulated / total < 0.50)):
+    all_cold = sum(cold_durations)
+    if (emulated <= 0 or all_cold <= 0 or emulated / all_cold < 0.50
+            or (native > 0 and any(
+                seconds / native < 2.0 for seconds in foreign_by_arch.values()))):
         return None
     share = round(100 * emulated / total)
     rows = []
     if native > 0:
-        rows.append(("native linux/amd64 compile/install", native, None))
+        rows.append((f"native {native_platform} compile/install", native, None))
     if emulated_compile > 0:
         rows.append(("foreign-architecture compile", emulated_compile, None))
     if emulated_install > 0:
@@ -2290,8 +2365,10 @@ def _emulated_image_compile_leaf(lines: list[str]) -> dict[str, Any] | None:
         "deeper": [{"rows": rows,
                     "blocker_note": (f"foreign-architecture work is {scope}"),
                     "pct_of": "sum"}],
-        "evidence": [item for _arch, _seconds, header, done, _kind in durations
-                     for item in (header, done)][:6],
+        "evidence": (builder_evidence + [
+            item for _arch, _seconds, header, done, _kind in durations
+            for item in (header, done)
+        ])[:8],
         "search": ["docker/build-push-action", "BUILDPLATFORM", "TARGETARCH"],
     }
     if re.search(r"(?:docker\s+buildx\s+build\b[^\n]*|build-push-action[^\n]*)"
@@ -3720,13 +3797,17 @@ _FIX_META: dict[str, dict[str, Any]] = {
                  "https://docs.docker.com/build/building/multi-platform/"],
         "deliver": "Build platform-independent output once on `FROM "
                    "--platform=$BUILDPLATFORM` and copy it into each target image, or "
-                   "cross-compile with explicit target arguments. This removes most "
-                   "emulated compile seconds, so both wall time and runner minutes should "
-                   "fall. If cross-compilation is unsafe, use a native runner per "
-                   "architecture and merge manifests; that cuts wall time but adds jobs "
-                   "and a merge step, so runner minutes will usually stay level or rise. "
-                   "Run each image on its native architecture and re-measure both "
-                   "wall time and total runner minutes.",
+                   "cross-compile with explicit target arguments. Native cross-compilation "
+                   "still costs about one native compile per extra architecture; size the "
+                   "saving as emulated seconds minus native seconds times the foreign "
+                   "architectures, and name what stays (cache import/export, image export, "
+                   "and push). For cgo with `CGO_ENABLED=1`, Rust `-sys` crates, and native "
+                   "Node add-ons, use `tonistiigi/xx` or `gcc-<arch>-linux-gnu` where the "
+                   "target toolchain is required. If cross-compilation is unsafe, use a "
+                   "native runner per architecture and merge manifests; check its cores "
+                   "and memory against link-time optimisation and parallel links, and "
+                   "build only the binaries the image ships. Run each image on its native "
+                   "architecture and re-measure wall time and total runner minutes.",
     },
     "eslint-no-cache": {
         "cause": "The lint step runs `eslint` over the whole file tree with NO `--cache` "
