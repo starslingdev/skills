@@ -366,11 +366,12 @@ def test_fixture_materialization_excludes_recording_and_expectation_files(
 def test_named_fixtures_exercise_their_defining_interactions(
         monkeypatch, tmp_path):
     docs = {}
+    reports = {}
     for name in (
             "config-era-change", "duplicate-gate-job", "emulated-container",
             "external-required-gate", "heavy-runner-queue", "minority-tail",
             "multiarch-image", "path-partitioned-monorepo", "vendored-libs"):
-        docs[name], _report, _checks = run_fixture(
+        docs[name], reports[name], _checks = run_fixture(
             FIXTURE_ROOT / name, monkeypatch, tmp_path)
 
     assert docs["config-era-change"]["pr_critical_path"]["config_eras"]
@@ -401,6 +402,7 @@ def test_named_fixtures_exercise_their_defining_interactions(
     assert "emulated-image-compile" in fixture_facts(image_doc, [])["leaves"]
     assert "vendored-lib-build" in fixture_facts(
         docs["vendored-libs"], [])["leaves"]
+    assert "vendored libraries built from source" in reports["vendored-libs"]
     assert any(
         row.get("cache_net_negative", {}).get("kind") == "opt79_buildkit_export"
         for row in image_doc["findings"])

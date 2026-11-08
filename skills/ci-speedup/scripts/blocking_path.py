@@ -2153,8 +2153,9 @@ def _vendored_lib_build_leaf(text: str) -> dict[str, Any] | None:
     """Measure completed, timestamped vendored-library source builds.
 
     Admission requires an ``Entering directory`` marker followed by that same
-    library's ``.stamp.*.build`` completion. Merely restoring or walking a
-    vendored source tree is therefore silent.
+    library's ``.stamp.*.build`` completion inside one timestamped workflow-step
+    section. Merely restoring or walking a vendored source tree is therefore
+    silent.
     """
     stamped: list[tuple[datetime, str, str]] = []
     for raw in text.splitlines():
@@ -2165,54 +2166,70 @@ def _vendored_lib_build_leaf(text: str) -> dict[str, Any] | None:
     if len(stamped) < 2:
         return None
 
-    starts: dict[str, tuple[datetime, str]] = {}
-    intervals: list[tuple[str, datetime, datetime, str, str]] = []
+    sections = _log_step_sections([message for _when, message, _raw in stamped])
+    if not sections:
+        return None
     entering = re.compile(r"\bEntering directory\s+['\"](?P<path>[^'\"]+)['\"]")
     completed = re.compile(r"\btouch\s+(?P<path>\S+/\.stamp\.[^/\s]+\.build)\b")
-    for when, message, raw in stamped:
-        start = entering.search(message)
-        if start and (path := _VENDORED_LIBRARY_PATH_RE.search(start.group("path"))):
+    candidates: list[tuple[float, dict[str, Any]]] = []
+    for _command, section_start, section_end in sections:
+        section = stamped[section_start:section_end]
+        if len(section) < 2:
+            continue
+        starts: dict[str, tuple[datetime, str]] = {}
+        intervals: list[tuple[str, datetime, datetime, str, str]] = []
+        for when, message, raw in section:
+            start = entering.search(message)
+            if start and (path := _VENDORED_LIBRARY_PATH_RE.search(
+                    start.group("path"))):
+                key = f"{path.group('root')}/{path.group('library')}"
+                # The latest entry is the only one bounded by the completion;
+                # an earlier configure/no-op visit must not absorb idle time.
+                starts[key] = (when, raw)
+                continue
+            finish = completed.search(message)
+            if not finish or not (path := _VENDORED_LIBRARY_PATH_RE.search(
+                    finish.group("path"))):
+                continue
             key = f"{path.group('root')}/{path.group('library')}"
-            starts.setdefault(key, (when, raw))
+            begun = starts.pop(key, None)
+            if begun is not None and when > begun[0]:
+                intervals.append((key, begun[0], when, begun[1], raw))
+        if not intervals:
             continue
-        finish = completed.search(message)
-        if not finish or not (path := _VENDORED_LIBRARY_PATH_RE.search(
-                finish.group("path"))):
+        intervals.sort(key=lambda row: row[1])
+        # Summed wall time is meaningful only for sequential builds. Parallel
+        # intervals would double-count the same portion of the step wall.
+        if any(intervals[index][2] > intervals[index + 1][1]
+               for index in range(len(intervals) - 1)):
             continue
-        key = f"{path.group('root')}/{path.group('library')}"
-        begun = starts.pop(key, None)
-        if begun is not None and when > begun[0]:
-            intervals.append((key, begun[0], when, begun[1], raw))
-
-    if not intervals:
+        step_end = (stamped[section_end][0]
+                    if section_end < len(stamped) else section[-1][0])
+        step_wall = (step_end - section[0][0]).total_seconds()
+        built_wall = sum((ended - started).total_seconds()
+                         for _key, started, ended, _start_raw, _end_raw in intervals)
+        if step_wall <= 0 or built_wall / step_wall < 0.5:
+            continue
+        per_library: dict[str, float] = {}
+        for key, started, ended, _start_raw, _end_raw in intervals:
+            per_library[key] = per_library.get(key, 0.0) + (
+                ended - started).total_seconds()
+        rows = [(key, round(seconds, 1), None)
+                for key, seconds in per_library.items()]
+        rows.sort(key=lambda row: (-row[1], row[0]))
+        candidates.append((built_wall, {
+            "unit_label": f"{len(rows)} vendored libraries built from source in sequence",
+            "magnitude": {"label": "vendored library build share", "unit": "%",
+                          "value": round(100 * built_wall / step_wall, 1)},
+            "deeper": [{"rows": rows, "blocker_note": "", "pct_of": "sum"}],
+            "evidence": [intervals[0][3], intervals[0][4]],
+            "search": ["Entering directory", ".stamp.", rows[0][0]],
+        }))
+    if not candidates:
         return None
-    intervals.sort(key=lambda row: row[1])
-    # Summed wall time is meaningful only for sequential builds. Parallel
-    # intervals would double-count the same portion of the step wall.
-    if any(intervals[index][2] > intervals[index + 1][1]
-           for index in range(len(intervals) - 1)):
-        return None
-    step_wall = (stamped[-1][0] - stamped[0][0]).total_seconds()
-    built_wall = sum((ended - started).total_seconds()
-                     for _key, started, ended, _start_raw, _end_raw in intervals)
-    if step_wall <= 0 or built_wall / step_wall < 0.5:
-        return None
-    per_library: dict[str, float] = {}
-    for key, started, ended, _start_raw, _end_raw in intervals:
-        per_library[key] = per_library.get(key, 0.0) + (
-            ended - started).total_seconds()
-    rows = [(key, round(seconds, 1), None)
-            for key, seconds in per_library.items()]
-    rows.sort(key=lambda row: (-row[1], row[0]))
-    return {
-        "fix_key": "vendored-lib-build",
-        "unit_label": f"{len(rows)} vendored libraries built from source in sequence",
-        "magnitude": {"label": "vendored library build share", "unit": "%",
-                      "value": round(100 * built_wall / step_wall, 1)},
-        "deeper": [{"rows": rows, "blocker_note": "", "pct_of": "sum"}],
-        "evidence": [intervals[0][3], intervals[0][4]],
-        "search": ["Entering directory", ".stamp.", "contrib/"],
-    }
+    leaf = {"fix_key": "vendored-lib-build",
+            **max(candidates, key=lambda item: item[0])[1]}
+    return leaf
 
 
 def _cache_path_warnings(text: str, steps: dict[Any, dict]) -> dict[Any, str]:
@@ -3864,8 +3881,10 @@ _FIX_META: dict[str, dict[str, Any]] = {
                 "toolchain inputs, stamp files, and every artifact each library produces. "
                 "Check whether the build system declares those artifacts as prerequisites.",
         "constraints": "Use one cache entry per library, keyed by its recipe, source, "
-                       "patches, and pinned toolchain. Restore with a matching stable prefix "
-                       "and save new entries only from the default branch. Check the summed "
+                       "patches, pinned toolchain, runner OS and architecture, target ABI, "
+                       "build mode, and output-affecting flags. Restore with a matching "
+                       "stable prefix that cannot cross incompatible legs, and save new "
+                       "entries only from the default branch. Check the summed "
                        "entry size against the repository's cache budget with the shipped "
                        "cache guard helpers. A warm build must still confirm every expected "
                        "artifact exists; incomplete make prerequisites can otherwise turn a "
