@@ -282,6 +282,11 @@ def test_local_composite_action_indexing_agrees(sides, tmp_path: Path):
     plain.mkdir(parents=True)
     plain.joinpath("action.yml").write_text(
         "runs:\n  using: composite\n  steps:\n    - run: npm ci\n      shell: bash\n")
+    parent = tmp_path / ".github" / "actions" / "parent"
+    parent.mkdir(parents=True)
+    parent.joinpath("action.yml").write_text(
+        "runs:\n  using: composite\n  steps:\n"
+        "    - run: lerna list --since HEAD~1\n      shell: bash\n")
     doc = {"on": {"pull_request": None}, "jobs": {
         "a": {"steps": [{"uses": "./.github/actions/changed"}]},
         "b": {"steps": [{"uses": "./.github/actions/plain"}]},
@@ -290,6 +295,8 @@ def test_local_composite_action_indexing_agrees(sides, tmp_path: Path):
         "d": {"steps": [{"uses": "$/.github/actions/changed"}]},
         "e": {"steps": [{"uses": "$/.github/actions/plain"}]},
         "f": {"steps": [{"uses": "$/.github/actions/missing"}]},
+        "g": {"steps": [{"uses": "./.github/actions/parent"}]},
+        "h": {"steps": [{"uses": "$/.github/actions/parent"}]},
     }}
     parsed = [(".github/workflows/ci.yml", doc, "")]
 
@@ -299,6 +306,7 @@ def test_local_composite_action_indexing_agrees(sides, tmp_path: Path):
     for prefix in ("./", "$/"):
         assert f"{prefix}.github/actions/changed" in score_idx
         assert f"{prefix}.github/actions/missing" in score_idx   # fail closed
+        assert f"{prefix}.github/actions/parent" in score_idx
         assert f"{prefix}.github/actions/plain" not in score_idx
 
     speed._GIT_HISTORY_LOCAL_ACTIONS = speed_idx
