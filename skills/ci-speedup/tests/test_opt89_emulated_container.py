@@ -273,6 +273,44 @@ jobs:
     assert "aarch64" in hits[0]["evidence"]
 
 
+def test_run_on_arch_resolves_matrix_test_target_before_classifying(
+        tmp_path: Path):
+    hits = _opt89(tmp_path, """name: matrix action target
+on: pull_request
+jobs:
+  arm:
+    strategy:
+      matrix:
+        target: [test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: uraimo/run-on-arch-action@v2
+        with:
+          arch: aarch64
+          run: make ${{ matrix.target }}
+""")
+
+    assert hits == []
+
+
+def test_job_container_resolves_matrix_compile_command(tmp_path: Path):
+    hits = _opt89(tmp_path, """name: matrix container command
+on: pull_request
+jobs:
+  arm:
+    strategy:
+      matrix:
+        command: [make -j2]
+    runs-on: ubuntu-latest
+    container: arm64v8/ubuntu:24.04
+    steps:
+      - run: ${{ matrix.command }}
+""")
+
+    assert len(hits) == 1
+    assert "make" in hits[0]["evidence"]
+
+
 def test_docker_run_resolves_matrix_platform(tmp_path: Path):
     hits = _opt89(tmp_path, """name: matrix docker
 on: pull_request
@@ -289,6 +327,40 @@ jobs:
 
     assert len(hits) == 1
     assert "linux/arm64" in hits[0]["evidence"]
+
+
+def test_docker_run_resolves_matrix_platform_beside_opaque_volume(
+        tmp_path: Path):
+    hits = _opt89(tmp_path, """name: matrix docker with variable volume
+on: pull_request
+jobs:
+  arm:
+    strategy:
+      matrix:
+        platform: [linux/arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-qemu-action@v3
+      - run: docker run --platform ${{ matrix.platform }} -v $PWD:/src build-image make -j2
+""")
+
+    assert len(hits) == 1
+    assert "linux/arm64" in hits[0]["evidence"]
+
+
+def test_docker_run_keeps_formatted_mount_expression_opaque(tmp_path: Path):
+    hits = _opt89(tmp_path, """name: formatted docker volume
+on: pull_request
+jobs:
+  arm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-qemu-action@v3
+      - run: docker run --platform linux/arm64 -v ${{ format('{0}', github.workspace) }}:/src build-image make -j2
+""")
+
+    assert len(hits) == 1
+    assert "make" in hits[0]["evidence"]
 
 
 def test_job_container_resolves_matrix_image(tmp_path: Path):

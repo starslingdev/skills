@@ -2440,7 +2440,7 @@ _OPT89_FOREIGN_ARCH_RE = re.compile(
 )
 _OPT89_DOCKER_RUN_PLATFORM_RE = re.compile(
     r"\bdocker\s+run\b[^\n]*?--platform(?:=|\s+)"
-    r"(?P<platform>linux/(?:aarch64|arm64|arm/v\d+|riscv64|s390x|ppc64le))\b",
+    r"\s*(?P<platform>\$\{\{[^}]+\}\}|[^\s;&|]+)",
     re.IGNORECASE,
 )
 _OPT89_CONTAINER_IMAGE_RE = re.compile(
@@ -2489,13 +2489,57 @@ def _opt89_compile_signal(command: str) -> str | None:
     return None
 
 
+def _opt89_resolve_known_expressions(
+        command: str, matrix: dict[str, str]) -> str:
+    """Substitute direct known matrix values without rejecting other variables."""
+    return re.sub(
+        r"\$\{\{\s*matrix\.([\w-]+)\s*\}\}",
+        lambda match: matrix.get(match.group(1), match.group(0)),
+        command,
+    )
+
+
+def _opt89_collapse_expressions(command: str) -> str:
+    """Collapse each GitHub expression to one shell token.
+
+    The closing ``}}`` is recognized only outside quoted expression strings,
+    so format strings such as ``format('{0}', value)`` remain intact.
+    """
+    pieces: list[str] = []
+    cursor = 0
+    while (opening := command.find("${{", cursor)) >= 0:
+        pieces.append(command[cursor:opening])
+        index = opening + 3
+        quote = ""
+        while index < len(command) - 1:
+            char = command[index]
+            if quote:
+                if char == "\\" and index + 1 < len(command):
+                    index += 2
+                    continue
+                if char == quote:
+                    quote = ""
+            elif char in {"'", '"'}:
+                quote = char
+            elif command.startswith("}}", index):
+                pieces.append("__OPT89_EXPRESSION__")
+                cursor = index + 2
+                break
+            index += 1
+        else:
+            pieces.append(command[opening:])
+            return "".join(pieces)
+    pieces.append(command[cursor:])
+    return "".join(pieces)
+
+
 def _opt89_docker_payload(command: str) -> str:
     """Return the command after `docker run ... IMAGE`, or fail closed."""
     command = _LINE_CONTINUATION_RE.sub(" ", command)
     # Expressions are opaque to this detector. Collapse them to one shell
     # token so an expression used as an option value cannot be mistaken for
     # the container image or payload.
-    command = re.sub(r"\$\{\{[^}]+\}\}", "__OPT89_EXPRESSION__", command)
+    command = _opt89_collapse_expressions(command)
     try:
         tokens = shlex.split(command.splitlines()[0])
     except ValueError:
@@ -2527,6 +2571,20 @@ def _opt89_docker_payload(command: str) -> str:
             payload = payload[2:]
         return " ".join(payload)
     return ""
+
+
+def _opt89_docker_platform(command: str, matrix: dict[str, str]) -> str | None:
+    """Resolve only the Docker platform operand, leaving other tokens opaque."""
+    match = _OPT89_DOCKER_RUN_PLATFORM_RE.search(command)
+    if match is None:
+        return None
+    platform = _opt102_resolve(
+        match.group("platform"), env={}, matrix=matrix, inputs={}, outputs={})
+    if not platform or not re.fullmatch(
+            r"linux/(?:aarch64|arm64|arm/v\d+|riscv64|s390x|ppc64le)",
+            platform, re.IGNORECASE):
+        return None
+    return platform.lower()
 
 
 def _opt89_qemu_supports(platforms: set[str], platform: str) -> bool:
@@ -2578,10 +2636,7 @@ def _detect_opt89(doc: dict, raw: str) -> list[Hit]:
             for step in _steps(job):
                 uses = _uses(step)
                 run = _run(step)
-                resolved_run = _opt102_resolve(
-                    run, env={}, matrix=matrix, inputs={}, outputs={}) or ""
-                normalized_run = _LINE_CONTINUATION_RE.sub(
-                    " ", resolved_run if resolved_run else run)
+                normalized_run = _LINE_CONTINUATION_RE.sub(" ", run)
                 with_ = step.get("with") or {}
                 if uses.startswith("uraimo/run-on-arch-action@"):
                     action_occurrence += 1
@@ -2611,24 +2666,27 @@ def _detect_opt89(doc: dict, raw: str) -> list[Hit]:
                     arch = (_opt102_resolve(
                         with_.get("arch"), env={}, matrix=matrix, inputs={}, outputs={})
                         or "").lower()
-                    command = str(with_.get("run") or "")
+                    command = _opt89_resolve_known_expressions(
+                        str(with_.get("run") or ""), matrix)
                     marker = "uraimo/run-on-arch-action@"
                     occurrence = action_occurrence
                     mechanism = "run-on-arch action"
                     if not _OPT89_FOREIGN_ARCH_RE.search(arch):
                         continue
                 elif (qemu_platforms is not None
-                      and (platform := _OPT89_DOCKER_RUN_PLATFORM_RE.search(normalized_run))
+                      and (platform := _opt89_docker_platform(
+                          normalized_run, matrix)) is not None
                       and _opt89_qemu_supports(
-                          qemu_platforms, platform.group("platform"))):
-                    arch = platform.group("platform").lower()
-                    command = _opt89_docker_payload(run)
+                          qemu_platforms, platform)):
+                    arch = platform
+                    command = _opt89_docker_payload(
+                        _opt89_resolve_known_expressions(run, matrix))
                     marker = "docker run"
                     occurrence = docker_occurrence
                     mechanism = "QEMU-backed docker run"
                 elif container_arch and run:
                     arch = container_arch
-                    command = run
+                    command = _opt89_resolve_known_expressions(run, matrix)
                     marker = first_line
                     occurrence = container_occurrences[first_line]
                     mechanism = "foreign-architecture job container"
