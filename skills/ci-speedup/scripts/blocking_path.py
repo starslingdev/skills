@@ -4958,6 +4958,9 @@ def _llm_agent_prompt(body: str, pole: dict[str, Any] | None = None) -> str:
     _ts = _timing_spread_sentence(_as_dict(pole))
     if _ts and _ts not in body:
         body = _ts + "\n\n" + body
+    _sf = _shard_floor_sentence(_as_dict(pole))
+    if _sf and _sf not in body:
+        body = _sf + "\n\n" + body
     # The no-weakening rail is the renderer's too, for the same reason the disclaimer
     # is: the gap-fill body is LLM-authored, so the one rule the hand-off cannot afford
     # to have paraphrased away is appended here, not left to the author. The canonical

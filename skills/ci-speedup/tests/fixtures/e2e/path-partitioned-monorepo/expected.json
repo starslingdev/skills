@@ -30,7 +30,7 @@
   ],
   "gate_kind": null,
   "headline": {
-    "check": "tests / test (api, 20)",
+    "check": "tests / test (api-20)",
     "seconds": 275.0
   },
   "lane": {

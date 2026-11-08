@@ -138,7 +138,7 @@ def test_in_step_collection_floor_is_removed_from_divided_work():
     jobs = [[_shard_job(200 + i, f"tests / test (pkg, {i})", test_s=215)
              for i in range(4)]]
     workflow = {"jobs": {"test": {"strategy": {"matrix": {
-        "shard": [0, 1, 2, 3]}}, "steps": [{"run": "cargo test"}]}}}
+        "package": ["pkg"], "shard": [0, 1, 2, 3]}}, "steps": [{"run": "cargo test"}]}}}
     log = "\n".join([
         "2026-09-08T00:01:00Z cargo test",
         "2026-09-08T00:03:00Z collected 900 items",
@@ -207,7 +207,7 @@ def test_fixed_part_labels_are_shared_by_every_sampled_leg():
     second["steps"] = [step for step in second["steps"]
                        if step["name"] != "Install browser"]
     workflow = {"jobs": {"test": {"strategy": {"matrix": {
-        "shard": [0, 1]}}, "steps": [{"run": "pytest -q"}]}}}
+        "package": ["pkg"], "shard": [0, 1]}}, "steps": [{"run": "pytest -q"}]}}}
 
     stamp = _shard_floor(
         "tests / test (pkg, 0)", workflow, [[first, second]],
@@ -215,6 +215,84 @@ def test_fixed_part_labels_are_shared_by_every_sampled_leg():
 
     assert stamp is not None
     assert stamp["fixed_parts"] == ["setup", "build"]
+
+
+def test_other_matrix_dimensions_do_not_inflate_the_shard_count():
+    jobs = [
+        _shard_job(700, "tests / test (api, 0)"),
+        _shard_job(701, "tests / test (api, 1)"),
+        _shard_job(702, "tests / test (web, 0)", test_s=900),
+        _shard_job(703, "tests / test (web, 1)", test_s=900),
+    ]
+    workflow = {"jobs": {"test": {"strategy": {"matrix": {
+        "package": ["api", "web"], "shard": [0, 1]}},
+        "steps": [{"run": "pytest -q"}]}}}
+
+    stamp = _shard_floor(
+        "tests / test (api, 0)", workflow, [jobs], logs_by_job_id={})
+
+    assert stamp is not None
+    assert stamp["n_shards"] == 2
+    assert stamp["divided_work_s"] == 90.0
+
+
+def test_test_step_is_divided_work_when_lint_runs_first():
+    jobs = [_shard_job(800 + i, f"tests / test (pkg, {i})")
+            for i in range(2)]
+    for job in jobs:
+        job["steps"].insert(3, {
+            "name": "Lint", "conclusion": "success",
+            "started_at": _iso(60), "completed_at": _iso(90),
+        })
+        job["steps"][4]["started_at"] = _iso(90)
+        job["steps"][4]["completed_at"] = _iso(180)
+        job["completed_at"] = _iso(180)
+    workflow = {"jobs": {"test": {"strategy": {"matrix": {
+        "package": ["pkg"], "shard": [0, 1]}}, "steps": [
+            {"name": "Lint", "run": "ruff check ."},
+            {"name": "Tests", "run": "pytest -q"},
+        ]}}}
+
+    stamp = _shard_floor(
+        "tests / test (pkg, 0)", workflow, [jobs], logs_by_job_id={})
+
+    assert stamp is not None
+    assert stamp["divided_work_s"] == 90.0
+
+
+def test_pytest_collection_floor_is_removed_from_divided_work():
+    jobs = [[_shard_job(900 + i, f"tests / test (pkg, {i})", test_s=215)
+             for i in range(2)]]
+    workflow = {"jobs": {"test": {"strategy": {"matrix": {
+        "package": ["pkg"], "shard": [0, 1]}}, "steps": [{"run": "pytest -q"}]}}}
+    log = "\n".join([
+        "2026-09-08T00:01:00Z pytest -q",
+        "2026-09-08T00:03:00Z collected 900 items",
+        "2026-09-08T00:03:05Z tests/example.py::test_one PASSED",
+    ])
+
+    stamp = _shard_floor(
+        "tests / test (pkg, 0)", workflow, jobs,
+        logs_by_job_id={job["id"]: log for job in jobs[0]})
+
+    assert stamp is not None
+    assert stamp["in_step_floor_s"] == 125.0
+    assert stamp["divided_work_s"] == 90.0
+
+
+def test_llm_prompt_keeps_the_shard_floor_sentence():
+    stamp = {
+        "version": 1, "floor_s": 60.0, "divided_work_s": 90.0,
+        "in_step_floor_s": None, "n_shards": 4,
+        "basis": "p50_step_timing_before_first_divided_work",
+        "fixed_parts": ["setup", "build"],
+    }
+    sentence = bp._shard_floor_sentence({"shard_floor": stamp})
+
+    prompt = bp._llm_agent_prompt("Inspect the captured evidence.", {
+        "shard_floor": stamp})
+
+    assert sentence in prompt
 
 
 # --------------------------------------------------------------------------------------

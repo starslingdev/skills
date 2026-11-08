@@ -22940,7 +22940,8 @@ def _opt24_pre_test_floor(log: str, compiled_kind: str | None) -> float | None:
             return _opt24_duration_seconds(match.group(1))
     command_re = _re.compile(
         r"(?:\bcargo\s+(?:test|nextest)\b|\bgo\s+test\b|"
-        r"(?:^|[\s/])(?:gradle|gradlew)(?:\s|$)|\bcibuildwheel\b)",
+        r"(?:^|[\s/])(?:gradle|gradlew)(?:\s|$)|\bcibuildwheel\b|"
+        r"(?:^|[\s/])pytest(?:\s|$))",
         _re.IGNORECASE,
     )
     result_re = _re.compile(
@@ -22965,11 +22966,24 @@ _SHARD_FLOOR_VERSION = 1
 _SHARD_FLOOR_BASIS = "p50_step_timing_before_first_divided_work"
 
 
-def _workflow_declares_matrix_leg(job_name: str, wf_doc: dict[str, Any] | None) -> bool:
-    """Whether this workflow declares a matrix that can produce `job_name`."""
+_SHARD_DIMENSION_RE = re.compile(r"(?:^|[_-])(?:shard|partition|chunk)(?:$|[_-])", re.I)
+
+
+def _matrix_variant_values(job_name: str) -> tuple[str, ...] | None:
+    match = re.search(r"\(([^()]*)\)\s*$", job_name)
+    if not match:
+        return None
+    values = tuple(part.strip() for part in match.group(1).split(","))
+    return values if all(values) else None
+
+
+def _workflow_shard_scope(
+    job_name: str, wf_doc: dict[str, Any] | None,
+) -> tuple[int, ...] | None:
+    """Matrix positions that explicitly partition one logical job's work."""
     jobs = (wf_doc or {}).get("jobs")
     if not isinstance(jobs, dict):
-        return False
+        return None
     base = _matrix_base_name(job_name)
     leaf = base.rsplit(" / ", 1)[-1]
     for key, spec in jobs.items():
@@ -22983,15 +22997,23 @@ def _workflow_declares_matrix_leg(job_name: str, wf_doc: dict[str, Any] | None) 
         candidates = {str(key)}
         if isinstance(declared, str):
             candidates.add(_matrix_base_name(_opt24_static_job_name(declared)))
-        if leaf in candidates or base in candidates:
-            return True
-    return False
+        if leaf not in candidates and base not in candidates:
+            continue
+        dimensions = [str(name) for name in matrix if name not in {"include", "exclude"}]
+        values = _matrix_variant_values(job_name)
+        if values is None or len(values) != len(dimensions):
+            return None
+        shard_positions = tuple(
+            index for index, name in enumerate(dimensions)
+            if _SHARD_DIMENSION_RE.search(name))
+        return shard_positions or None
+    return None
 
 
-def _graph_declares_matrix_leg(
+def _graph_matrix_workflow_path(
     job_name: str, workflow_file: str, graph: dict[str, Any] | None,
-) -> bool:
-    """Follow a reusable-job chain and prove the runtime leg came from a matrix."""
+) -> str | None:
+    """Follow a reusable-job chain to the workflow that owns the runtime matrix."""
     nodes_by_workflow = graph or {}
     parts = _matrix_base_name(job_name).split(" / ")
     current = workflow_file
@@ -23004,14 +23026,14 @@ def _graph_declares_matrix_leg(
                       and part in {str(key), _matrix_base_name(str(spec.get("name") or ""))}),
                      None)
         if match is None:
-            return False
+            return None
         if index == len(parts) - 1:
-            return match.get("matrix") is True
+            return current if match.get("matrix") is True else None
         uses = str(match.get("uses") or "")
         if not match.get("reusable") or not uses:
-            return False
+            return None
         current = uses.removeprefix("./")
-    return False
+    return None
 
 
 def _shard_floor_stamp(
@@ -23020,7 +23042,7 @@ def _shard_floor_stamp(
     jobs_per_run: list[list[dict[str, Any]]],
     *,
     logs_by_job_id: dict[Any, str] | None = None,
-    declared_matrix: bool | None = None,
+    shard_positions: tuple[int, ...] | None = None,
     runner_scope: str | None = None,
 ) -> dict[str, Any] | None:
     """Describe the fixed and divided portions of one sampled matrix leg.
@@ -23028,11 +23050,24 @@ def _shard_floor_stamp(
     This is descriptive only. It reads the jobs and logs the collection pass
     already selected and never recommends a shard count.
     """
-    if declared_matrix is None:
-        declared_matrix = _workflow_declares_matrix_leg(job_name, wf_doc)
-    if not declared_matrix:
+    if shard_positions is None:
+        shard_positions = _workflow_shard_scope(job_name, wf_doc)
+    target_variant = _matrix_variant_values(job_name)
+    if shard_positions is None or target_variant is None:
         return None
     base = _matrix_base_name(job_name)
+    fixed_positions = tuple(
+        index for index in range(len(target_variant)) if index not in shard_positions)
+
+    def same_shard_group(job: dict[str, Any]) -> bool:
+        candidate = _matrix_variant_values(str(job.get("name") or ""))
+        return (
+            candidate is not None
+            and len(candidate) == len(target_variant)
+            and all(candidate[index] == target_variant[index]
+                    for index in fixed_positions)
+        )
+
     if not runner_scope:
         exact_labels = [
             _job_runner_label(job) or "?"
@@ -23044,6 +23079,7 @@ def _shard_floor_stamp(
     legs_by_run = [
         [job for job in run
          if _matrix_base_name(str(job.get("name") or "")) == base
+         and same_shard_group(job)
          and (not runner_scope or (_job_runner_label(job) or "?") == runner_scope)]
         for run in jobs_per_run
     ]
@@ -23058,9 +23094,13 @@ def _shard_floor_stamp(
     logs = logs_by_job_id or {}
     for job in (item for legs in legs_by_run for item in legs):
         steps = _step_durations(job)
+        payload_indexes = [
+            i for i, (name, _seconds) in enumerate(steps)
+            if _step_category(name) in _PAYLOAD_CATEGORIES
+        ]
         work_index = next(
-            (i for i, (name, _seconds) in enumerate(steps)
-             if _step_category(name) in _PAYLOAD_CATEGORIES), None)
+            (i for i in payload_indexes if _step_category(steps[i][0]) == "test"),
+            payload_indexes[0] if payload_indexes else None)
         if work_index is None:
             continue
         fixed_steps = steps[:work_index]
@@ -23084,7 +23124,7 @@ def _shard_floor_stamp(
         work_durations.append(work_seconds)
         log = str(logs.get(job.get("id")) or "")
         floor = None
-        if log:
+        if log and _step_category(steps[work_index][0]) == "test":
             kind = _opt24_compiled_kind(log, wf_doc, base)
             floor = _opt24_pre_test_floor(_opt24_test_step_log(job, log), kind)
         if floor is not None and 0 < floor < work_seconds:
@@ -30602,11 +30642,13 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         _job_name = str(_pole.get("job") or "")
         _jobs_per_run = jobs_per_run_by_wf.get(_wf_path) or []
         _runner_scope = str(_pole.get("headline_runner") or "") or None
-        _declared_matrix = _graph_declares_matrix_leg(
+        _matrix_path = _graph_matrix_workflow_path(
             _job_name, _wf_path, findings_doc.get("workflow_job_graph"))
+        _matrix_doc = _wf_docs.get(_matrix_path or "", {})
+        _shard_positions = _workflow_shard_scope(_job_name, _matrix_doc)
         if not _job_name or _shard_floor_stamp(
-                _job_name, _wf_docs.get(_wf_path, {}), _jobs_per_run,
-                logs_by_job_id={}, declared_matrix=_declared_matrix,
+                _job_name, _matrix_doc, _jobs_per_run,
+                logs_by_job_id={}, shard_positions=_shard_positions,
                 runner_scope=_runner_scope) is None:
             continue
         _probe = _shard_floor_representative_log_job(
@@ -30641,11 +30683,13 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         if not _job_name:
             continue
         _runner_scope = str(_pole.get("headline_runner") or "") or None
+        _matrix_path = _graph_matrix_workflow_path(
+            _job_name, _wf_path, findings_doc.get("workflow_job_graph"))
+        _matrix_doc = _wf_docs.get(_matrix_path or "", {})
         _stamp = _shard_floor_stamp(
-            _job_name, _wf_docs.get(_wf_path, {}),
+            _job_name, _matrix_doc,
             jobs_per_run_by_wf.get(_wf_path) or [], logs_by_job_id=opt24_logs,
-            declared_matrix=_graph_declares_matrix_leg(
-                _job_name, _wf_path, findings_doc.get("workflow_job_graph")),
+            shard_positions=_workflow_shard_scope(_job_name, _matrix_doc),
             runner_scope=_runner_scope)
         if _stamp is not None:
             _pole["shard_floor"] = _stamp
