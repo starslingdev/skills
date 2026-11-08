@@ -3,7 +3,7 @@
   "captured_at": "2026-01-31T00:00:00Z",
   "default_branch": "main",
   "required_checks": [
-    "gate"
+    "image"
   ],
   "workflows": [
     {
@@ -15,35 +15,35 @@
         {
           "id": 1001,
           "event": "pull_request",
-          "head_branch": "feature-a",
+          "head_branch": "feature-image",
           "head_sha": "sha-a",
           "status": "completed",
           "conclusion": "success",
           "created_at": "2026-01-28T00:00:00Z",
           "run_started_at": "2026-01-28T00:00:00Z",
-          "updated_at": "2026-01-28T00:05:00Z"
+          "updated_at": "2026-01-28T00:06:30Z"
         },
         {
           "id": 1002,
           "event": "pull_request",
-          "head_branch": "feature-b",
+          "head_branch": "feature-image",
           "head_sha": "sha-b",
           "status": "completed",
           "conclusion": "success",
           "created_at": "2026-01-27T00:00:00Z",
           "run_started_at": "2026-01-27T00:00:00Z",
-          "updated_at": "2026-01-27T00:05:00Z"
+          "updated_at": "2026-01-27T00:06:30Z"
         },
         {
           "id": 1003,
           "event": "pull_request",
-          "head_branch": "feature-c",
+          "head_branch": "feature-image",
           "head_sha": "sha-c",
           "status": "completed",
           "conclusion": "success",
           "created_at": "2026-01-26T00:00:00Z",
           "run_started_at": "2026-01-26T00:00:00Z",
-          "updated_at": "2026-01-26T00:05:00Z"
+          "updated_at": "2026-01-26T00:06:30Z"
         }
       ]
     }
@@ -57,30 +57,36 @@
           "ubuntu-latest"
         ],
         "started_at": "2026-01-28T00:00:00Z",
-        "completed_at": "2026-01-28T00:02:00Z",
+        "completed_at": "2026-01-28T00:06:15Z",
         "steps": [
           {
             "name": "build",
             "started_at": "2026-01-28T00:00:00Z",
-            "completed_at": "2026-01-28T00:02:00Z"
+            "completed_at": "2026-01-28T00:06:15Z"
           }
         ]
       },
       {
         "id": 1102,
-        "name": "gate",
+        "name": "image",
         "labels": [
           "ubuntu-latest"
         ],
-        "started_at": "2026-01-28T00:02:00Z",
-        "completed_at": "2026-01-28T00:05:00Z",
+        "started_at": "2026-01-28T00:00:00Z",
+        "completed_at": "2026-01-28T00:06:30Z",
         "steps": [
           {
-            "name": "test",
-            "started_at": "2026-01-28T00:02:00Z",
-            "completed_at": "2026-01-28T00:05:00Z"
+            "name": "Build multi-platform image",
+            "started_at": "2026-01-28T00:00:00Z",
+            "completed_at": "2026-01-28T00:06:20Z"
+          },
+          {
+            "name": "Test image",
+            "started_at": "2026-01-28T00:06:20Z",
+            "completed_at": "2026-01-28T00:06:30Z"
           }
-        ]
+        ],
+        "conclusion": "success"
       }
     ],
     "1002": [
@@ -91,30 +97,36 @@
           "ubuntu-latest"
         ],
         "started_at": "2026-01-27T00:00:00Z",
-        "completed_at": "2026-01-27T00:02:00Z",
+        "completed_at": "2026-01-27T00:06:15Z",
         "steps": [
           {
             "name": "build",
             "started_at": "2026-01-27T00:00:00Z",
-            "completed_at": "2026-01-27T00:02:00Z"
+            "completed_at": "2026-01-27T00:06:15Z"
           }
         ]
       },
       {
         "id": 1202,
-        "name": "gate",
+        "name": "image",
         "labels": [
           "ubuntu-latest"
         ],
-        "started_at": "2026-01-27T00:02:00Z",
-        "completed_at": "2026-01-27T00:05:00Z",
+        "started_at": "2026-01-27T00:00:00Z",
+        "completed_at": "2026-01-27T00:06:30Z",
         "steps": [
           {
-            "name": "test",
-            "started_at": "2026-01-27T00:02:00Z",
-            "completed_at": "2026-01-27T00:05:00Z"
+            "name": "Build multi-platform image",
+            "started_at": "2026-01-27T00:00:00Z",
+            "completed_at": "2026-01-27T00:06:20Z"
+          },
+          {
+            "name": "Test image",
+            "started_at": "2026-01-27T00:06:20Z",
+            "completed_at": "2026-01-27T00:06:30Z"
           }
-        ]
+        ],
+        "conclusion": "success"
       }
     ],
     "1003": [
@@ -125,55 +137,66 @@
           "ubuntu-latest"
         ],
         "started_at": "2026-01-26T00:00:00Z",
-        "completed_at": "2026-01-26T00:02:00Z",
+        "completed_at": "2026-01-26T00:06:15Z",
         "steps": [
           {
             "name": "build",
             "started_at": "2026-01-26T00:00:00Z",
-            "completed_at": "2026-01-26T00:02:00Z"
+            "completed_at": "2026-01-26T00:06:15Z"
           }
         ]
       },
       {
         "id": 1302,
-        "name": "gate",
+        "name": "image",
         "labels": [
           "ubuntu-latest"
         ],
-        "started_at": "2026-01-26T00:02:00Z",
-        "completed_at": "2026-01-26T00:05:00Z",
+        "started_at": "2026-01-26T00:00:00Z",
+        "completed_at": "2026-01-26T00:06:30Z",
         "steps": [
           {
-            "name": "test",
-            "started_at": "2026-01-26T00:02:00Z",
-            "completed_at": "2026-01-26T00:05:00Z"
+            "name": "Build multi-platform image",
+            "started_at": "2026-01-26T00:00:00Z",
+            "completed_at": "2026-01-26T00:06:20Z"
+          },
+          {
+            "name": "Test image",
+            "started_at": "2026-01-26T00:06:20Z",
+            "completed_at": "2026-01-26T00:06:30Z"
           }
-        ]
+        ],
+        "conclusion": "success"
       }
     ]
   },
   "checks": {
     "sha-a": [
       {
-        "name": "gate",
-        "started_at": "2026-01-28T00:02:00Z",
-        "completed_at": "2026-01-28T00:05:00Z"
+        "name": "image",
+        "started_at": "2026-01-28T00:00:00Z",
+        "completed_at": "2026-01-28T00:06:30Z"
       }
     ],
     "sha-b": [
       {
-        "name": "gate",
-        "started_at": "2026-01-27T00:02:00Z",
-        "completed_at": "2026-01-27T00:05:00Z"
+        "name": "image",
+        "started_at": "2026-01-27T00:00:00Z",
+        "completed_at": "2026-01-27T00:06:30Z"
       }
     ],
     "sha-c": [
       {
-        "name": "gate",
-        "started_at": "2026-01-26T00:02:00Z",
-        "completed_at": "2026-01-26T00:05:00Z"
+        "name": "image",
+        "started_at": "2026-01-26T00:00:00Z",
+        "completed_at": "2026-01-26T00:06:30Z"
       }
     ]
   },
-  "shape": "multiarch-image"
+  "shape": "multiarch-image",
+  "logs": {
+    "1102": "Name:          builder\nDriver:        docker-container\nNodes:\nName:                  builder0\nEndpoint:              unix:///var/run/docker.sock\nStatus:                running\nBuildKit version:      v0.24.0\nPlatforms:             linux/amd64, linux/amd64/v2, linux/arm64, linux/arm/v7\n#10 [linux/amd64 build 2/3] RUN go build ./...\n#10 DONE 20.0s\n#15 [linux/arm64 build 2/3] RUN go build ./...\n#15 DONE 120.0s\nCache not found for input keys: image-deadbeef\n#20 exporting to GitHub Actions Cache\n#20 DONE 220.0s\n",
+    "1202": "Name:          builder\nDriver:        docker-container\nNodes:\nName:                  builder0\nEndpoint:              unix:///var/run/docker.sock\nStatus:                running\nBuildKit version:      v0.24.0\nPlatforms:             linux/amd64, linux/amd64/v2, linux/arm64, linux/arm/v7\n#10 [linux/amd64 build 2/3] RUN go build ./...\n#10 DONE 20.0s\n#15 [linux/arm64 build 2/3] RUN go build ./...\n#15 DONE 120.0s\nCache not found for input keys: image-deadbeef\n#20 exporting to GitHub Actions Cache\n#20 DONE 220.0s\n",
+    "1302": "Name:          builder\nDriver:        docker-container\nNodes:\nName:                  builder0\nEndpoint:              unix:///var/run/docker.sock\nStatus:                running\nBuildKit version:      v0.24.0\nPlatforms:             linux/amd64, linux/amd64/v2, linux/arm64, linux/arm/v7\n#10 [linux/amd64 build 2/3] RUN go build ./...\n#10 DONE 20.0s\n#15 [linux/arm64 build 2/3] RUN go build ./...\n#15 DONE 120.0s\nCache not found for input keys: image-deadbeef\n#20 exporting to GitHub Actions Cache\n#20 DONE 220.0s\n"
+  }
 }

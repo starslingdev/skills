@@ -14,6 +14,17 @@ import blocking_path as bp  # noqa: E402
 import scan as scan_module  # noqa: E402
 
 
+_SINGLE_AMD64_BUILDER = """Name:          builder
+Driver:        docker-container
+Nodes:
+Name:                  builder0
+Endpoint:              unix:///var/run/docker.sock
+Status:                running
+BuildKit version:      v0.24.0
+Platforms:             linux/amd64, linux/amd64/v2, linux/arm64, linux/arm/v7
+"""
+
+
 def _scan(root: Path) -> list[dict]:
     result = subprocess.run(
         [sys.executable, str(_SCAN_SCRIPT), "--root", str(root)],
@@ -125,7 +136,7 @@ def test_emulated_leaf_ignores_build_tool_package_arguments():
 """
     assert bp._emulated_image_compile_leaf(log.splitlines()) is None
 
-    mount_log = """#1 [linux/amd64 build 1/1] RUN --mount=type=cache,target=/root/.cargo cargo build --release
+    mount_log = _SINGLE_AMD64_BUILDER + """#1 [linux/amd64 build 1/1] RUN --mount=type=cache,target=/root/.cargo cargo build --release
 #1 DONE 10.0s
 #2 [linux/arm64 build 1/1] RUN --mount=type=cache,target=/root/.cargo cargo build --release
 #2 DONE 90.0s
@@ -363,7 +374,7 @@ def test_opt102_stays_silent_on_arm_runner_building_arm_only(tmp_path: Path):
 
 def test_buildx_log_measures_emulated_compile_share():
     # Buildx header/DONE layout copied from a committed public Actions build log.
-    log = """2024-12-11T04:49:34.9027906Z #10 [linux/amd64 4/8] RUN go build -o /out/server ./cmd/server
+    log = _SINGLE_AMD64_BUILDER + """2024-12-11T04:49:34.9027906Z #10 [linux/amd64 4/8] RUN go build -o /out/server ./cmd/server
 2024-12-11T04:51:49.9027906Z #10 DONE 135.0s
 2024-12-11T05:17:20.3662178Z #15 [linux/arm64 4/8] RUN go build -o /out/server ./cmd/server
 2024-12-11T05:38:49.3662178Z #15 DONE 1289.0s
@@ -374,8 +385,64 @@ def test_buildx_log_measures_emulated_compile_share():
         "label": "emulated compile/install seconds", "unit": "s", "value": 1289.0}
 
 
+def test_emulated_leaf_requires_a_single_native_builder_node():
+    compile_log = """#10 [linux/amd64 4/8] RUN go build ./...
+#10 DONE 20.0s
+#15 [linux/arm64 4/8] RUN go build ./...
+#15 DONE 100.0s
+"""
+    one_node = bp._emulated_image_compile_leaf(
+        (_SINGLE_AMD64_BUILDER + compile_log).splitlines())
+    assert one_node is not None and one_node["fix_key"] == "emulated-image-compile"
+
+    second_node = """Name:                  native-arm0
+Endpoint:              tcp://native-arm.example:1234
+Status:                running
+BuildKit version:      v0.24.0
+Platforms:             linux/arm64, linux/arm/v7
+"""
+    assert bp._emulated_image_compile_leaf(
+        (_SINGLE_AMD64_BUILDER + second_node + compile_log).splitlines()) is None
+
+
+def test_foreign_only_armv7_uses_the_builder_native_platform():
+    compile_log = """#15 [linux/arm/v7 build 4/8] RUN make -j2
+#15 DONE 100.0s
+"""
+    amd64 = bp._emulated_image_compile_leaf(
+        (_SINGLE_AMD64_BUILDER + compile_log).splitlines())
+    assert amd64 is not None and amd64["magnitude"]["value"] == 100.0
+
+    native_arm = _SINGLE_AMD64_BUILDER.replace(
+        "linux/amd64, linux/amd64/v2, linux/arm64, linux/arm/v7",
+        "linux/arm64, linux/arm/v7")
+    assert bp._emulated_image_compile_leaf(
+        (native_arm + compile_log).splitlines()) is None
+
+
+def test_emulated_leaf_requires_dominant_and_slower_foreign_compile():
+    builder = _SINGLE_AMD64_BUILDER
+    cold_layer_dominates = """#1 [linux/amd64 1/2] RUN go build ./...
+#1 DONE 20.0s
+#2 [linux/arm64 1/2] RUN go build ./...
+#2 DONE 120.0s
+#3 [linux/arm64 2/2] RUN download-release-assets
+#3 DONE 400.0s
+"""
+    assert bp._emulated_image_compile_leaf(
+        (builder + cold_layer_dominates).splitlines()) is None
+
+    equal_compile = """#1 [linux/amd64 1/1] RUN go build ./...
+#1 DONE 300.0s
+#2 [linux/arm64 1/1] RUN go build ./...
+#2 DONE 320.0s
+"""
+    assert bp._emulated_image_compile_leaf(
+        (builder + equal_compile).splitlines()) is None
+
+
 def test_cache_hit_does_not_hide_emulated_compile():
-    log = """#10 [linux/amd64 4/8] RUN go build -o /out/server ./cmd/server
+    log = _SINGLE_AMD64_BUILDER + """#10 [linux/amd64 4/8] RUN go build -o /out/server ./cmd/server
 #10 DONE 10.0s
 #15 [linux/arm64 4/8] RUN go build -o /out/server ./cmd/server
 #15 DONE 90.0s
@@ -386,7 +453,7 @@ Cache restored from key: deps-linux
 
 
 def test_buildx_log_correlates_reused_operation_ids_in_order():
-    log = """#1 [linux/amd64 3/3] RUN go build -o /out/server ./cmd/server
+    log = _SINGLE_AMD64_BUILDER + """#1 [linux/amd64 3/3] RUN go build -o /out/server ./cmd/server
 #1 DONE 10.0s
 #1 [linux/arm64 3/3] RUN go build -o /out/server ./cmd/server
 #1 DONE 90.0s
@@ -707,8 +774,7 @@ jobs:
 
 
 def test_buildx_log_sums_chef_and_foreign_only_compile():
-    log = """Runner Architecture: X64
-#10 [linux/arm64 2/4] RUN cargo chef cook --release
+    log = _SINGLE_AMD64_BUILDER + """#10 [linux/arm64 2/4] RUN cargo chef cook --release
 #10 DONE 120.0s
 #11 [linux/arm64 3/4] RUN cargo build --release
 #11 DONE 180.0s
@@ -736,8 +802,7 @@ def test_buildx_log_maven_dependency_prefetch_stays_silent():
 
 
 def test_buildx_log_names_source_install_as_emulated_install():
-    log = """Runner Architecture: X64
-#12 [linux/arm64 2/2] RUN npm_config_build_from_source=true npm ci
+    log = _SINGLE_AMD64_BUILDER + """#12 [linux/arm64 2/2] RUN npm_config_build_from_source=true npm ci
 #12 DONE 75.0s
 """
     leaf = bp._parse_log(log)
@@ -748,8 +813,7 @@ def test_buildx_log_names_source_install_as_emulated_install():
 
 
 def test_buildx_log_carries_stage_source_flag_to_npm_install():
-    log = """Runner Architecture: X64
-#11 [linux/arm64 1/2] ENV npm_config_build_from_source=true
+    log = _SINGLE_AMD64_BUILDER + """#11 [linux/arm64 1/2] ENV npm_config_build_from_source=true
 #11 DONE 0.0s
 #12 [linux/arm64 2/2] RUN npm ci
 #12 DONE 75.0s

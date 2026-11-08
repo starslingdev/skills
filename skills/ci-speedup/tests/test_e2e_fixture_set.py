@@ -383,6 +383,14 @@ def test_named_fixtures_exercise_their_defining_interactions(
         for row in docs["minority-tail"]["pr_critical_path"]["checks"])
     assert "OPT102" in {
         row.get("pattern") for row in docs["multiarch-image"]["findings"]}
+    image_doc = docs["multiarch-image"]
+    assert any(
+        pole.get("job") == "image"
+        for pole in image_doc["pr_critical_path"]["poles"])
+    assert "emulated-image-compile" in fixture_facts(image_doc, [])["leaves"]
+    assert any(
+        row.get("cache_net_negative", {}).get("kind") == "opt79_buildkit_export"
+        for row in image_doc["findings"])
     assert any(
         spec.get("matrix")
         for jobs in docs["path-partitioned-monorepo"]["workflow_job_graph"].values()
