@@ -13,11 +13,6 @@
       "pattern": "OPT45",
       "runner_min": 9.6,
       "wall_clock_s": 0.0
-    },
-    {
-      "pattern": "OPT75",
-      "runner_min": null,
-      "wall_clock_s": 195.0
     }
   ],
   "detected_patterns": [
@@ -76,6 +71,7 @@
       "no spine-dropped check is also framed on the merge-gating critical path",
       "pole addressable ceiling within the co-occurrence floor",
       "presence-causal headline only when the slowest check is minority-present",
+      "recoverable ceiling above the typical wait carries a worst-case reconciliation",
       "rendered per-workflow gate frequency matches the populations re-derivation",
       "scanned date matches the date in the filename",
       "shallow cost-spine sample is disclosed (re-derived from the stamped workflows)",

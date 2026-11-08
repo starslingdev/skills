@@ -555,7 +555,7 @@ def bound_measured_critical_path(value: float, ctx: WallClockContext) -> BoundRe
                 "population, so there is no concurrent floor"))
         return BoundResult(weighted, (
             f"wall-clock capped at the measured critical-path floor — `{floor_name}` "
-            f"({floor:.0f}s) is a slower concurrent check on a representative PR"))
+            f"({floor:.0f}s) sets the concurrent merge-gate floor on a representative PR"))
     # Multiple populations — the merge gate is bimodal, so the saving is credited
     # only on the PRs where this check is near the pole, share-weighted (the
     # expected wall-clock over the sampled PR critical paths).

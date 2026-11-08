@@ -925,6 +925,5 @@ def test_fixture_set_catches_unconfirmed_gate_credit_regression(
     doc, _report, checks = run_fixture(fixture, monkeypatch, tmp_path)
     with pytest.raises(
             AssertionError,
-            match=(r"unpinnable-slow-check: credited_findings\[1\]\."
-                   r"wall_clock_s changed")):
+            match=r"unpinnable-slow-check: credited_findings\.length changed"):
         assert_fixture_facts(fixture, fixture_facts(doc, checks))

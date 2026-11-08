@@ -16160,6 +16160,93 @@ def check_commit_queue_work_credit(report: str, findings_path: Path | None,
         f"{len(work_values)} commit(s) re-derived; code credit <= {credited_work:g}s work")
 
 
+def check_unconfirmed_checks_have_no_direct_credit_or_gate_framing(
+        report: str, findings_path: Path | None) -> Check:
+    """Unpinnable checks stay visible without becoming merge-gating claims."""
+    name = "unconfirmed checks carry no direct credit or critical-path framing"
+    if findings_path is None:
+        return Check(name, True, "no findings JSON", skipped=True)
+    try:
+        data = _as_dict(json.loads(findings_path.read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError):
+        return Check(name, True, "findings JSON is unreadable", skipped=True)
+    cp = _as_dict(data.get("pr_critical_path"))
+    rows = [
+        row for row in _as_list(cp.get("checks"))
+        if isinstance(row, dict) and row.get("required_reachable") is False
+    ]
+    if not rows:
+        return Check(name, True, "no unconfirmed checks", skipped=True)
+
+    measured = {
+        (Path(str(row.get("workflow_file") or "")).name,
+         _cmp_name(str(row.get("name") or row.get("check") or "")))
+        for row in _as_list(cp.get("checks")) if isinstance(row, dict)
+    }
+
+    def _matches_unconfirmed(wf: str, job: str) -> bool:
+        for row in rows:
+            row_wf = Path(str(row.get("workflow_file") or "")).name
+            target = _cmp_name(str(row.get("name") or row.get("check") or ""))
+            if wf != row_wf:
+                continue
+            if job == target:
+                return True
+            distinct = job != target and (wf, job) in measured and (wf, target) in measured
+            if ((_matrix_base(target) == job or _matrix_base(job) == target)
+                    and not distinct):
+                return True
+        return False
+    failures: list[str] = []
+    forbidden = re.compile(
+        r"critical-path check|on the critical path|sits on the critical path|"
+        r"becomes the gate|it gates until|wall-clock figure applies|"
+        r"What a change here can buy \(wall-clock\)",
+        re.IGNORECASE)
+    for finding in _as_list(data.get("findings")):
+        if not isinstance(finding, dict):
+            continue
+        wf = Path(str(finding.get("workflow_file") or "")).name
+        wall = _num(finding.get("wall_clock_p50_s")) or 0.0
+        job_field = ("wall_clock_affected_jobs"
+                     if wall > 0 and isinstance(finding.get("wall_clock_affected_jobs"), list)
+                     else "affected_jobs")
+        jobs = [str(job) for job in _as_list(finding.get(job_field)) if str(job)]
+        if finding.get("job"):
+            jobs.append(str(finding.get("job")))
+        if not any(_matches_unconfirmed(wf, _cmp_name(job)) for job in jobs):
+            continue
+        if (wall > 0 or finding.get("realization") == "direct"
+                or int(_num(finding.get("tier")) or 0) == 1):
+            failures.append(
+                f"{finding.get('pattern') or finding.get('id')} has direct credit "
+                f"(wall={wall:g}, realization={finding.get('realization')}, "
+                f"tier={finding.get('tier')})")
+        public_text = " ".join(str(finding.get(field) or "") for field in (
+            "title", "evidence", "measured_signal", "size_note", "agent_prompt"))
+        if forbidden.search(public_text):
+            failures.append(
+                f"{finding.get('pattern') or finding.get('id')} uses critical-path wording")
+
+    unconfirmed_names = {_cmp_name(str(row.get("name") or row.get("check") or ""))
+                         for row in rows}
+    toc = _section(report, "📋 Contents")
+    if "**🐌 Critical path**" in toc:
+        failures.append("Contents places unconfirmed checks under Critical path")
+    for _wf, check, body in _pole_header_sections(report):
+        if _cmp_name(check) not in unconfirmed_names:
+            continue
+        if "could not confirm this check blocks merging" not in body.lower():
+            failures.append(f"rendered pole `{check}` omits the unconfirmed-gate reason")
+        if forbidden.search(body):
+            failures.append(f"rendered pole `{check}` uses critical-path wording")
+
+    return Check(
+        name, not failures,
+        "; ".join(failures[:8]) if failures
+        else f"{len(rows)} unconfirmed check(s) stayed uncredited and conditionally framed")
+
+
 def run_checks(report, report_path, findings_path, skill_repo, clone=None):
     return [
         check_primary_section_present(report, findings_path),
@@ -16195,6 +16282,8 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_no_root_cause_pole_is_gap_filled(report),
         check_dropped_check_not_framed_on_path(report, findings_path),
         check_demoted_pole_not_framed_typical_gate(report, findings_path),
+        check_unconfirmed_checks_have_no_direct_credit_or_gate_framing(
+            report, findings_path),
         check_headline_slowest_matches_stamp(report, findings_path, report_path),
         check_headline_floor_presence_reconciled(report, findings_path),
         check_headline_presence_causal_only_when_minority(report, findings_path),
