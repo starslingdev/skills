@@ -16,6 +16,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-11-07** — Hand default-branch push drills the matched catalog recipe, documentation and delivery checks for every recognized log cause. Matching static findings are tagged for the push lane, and emulated-image drills require inspection of the builder's nodes.
 - **2026-11-07** — Recognize inline history operands such as pnpm filter revisions and changed-since flags. Parent-only operands receive their exact bounded checkout depth, while comparisons against a branch keep full history.
 - **2026-11-07** — Treat native-build tool names as compilation only when they occupy a shell command position. Package-manager arguments such as `apt-get install make` stay quiet, while commands chained after an installer remain detectable.
 - **2026-11-07** — Drill the representative slowest job on the default-branch push lane with one bounded log read. The after-merge section now shows its step timeline, dominant step, catalog route, coding-agent handoff, median whole-commit projection, and worst sampled commit; push findings use the lane's next-job floor, stay out of merge-gate rankings and scores, and remain uncredited when pushes are rare.
