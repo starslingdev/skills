@@ -8464,7 +8464,7 @@ _STEP_CATEGORY_RES: list[tuple[str, "_re.Pattern[str]"]] = [
         r"\bpackage\b|docker buildx|\bpublish\b|\barchive\b|\btar\b|\bzip\b",
         _re.IGNORECASE)),
     ("setup", _re.compile(
-        r"^(set up |setup |configure|init |bootstrap|provision|toolchain|"
+        r"^(?:(?:set up|setup)(?:\s|$)|configure|init |bootstrap|provision|toolchain|"
         r"docker (login|pull|compose up))", _re.IGNORECASE)),
 ]
 
@@ -22961,6 +22961,87 @@ def _opt24_pre_test_floor(log: str, compiled_kind: str | None) -> float | None:
     return None
 
 
+_SHARD_FLOOR_VERSION = 1
+_SHARD_FLOOR_BASIS = "p50_step_timing_before_first_divided_work"
+
+
+def _shard_floor_stamp(
+    job_name: str,
+    wf_doc: dict[str, Any] | None,
+    jobs_per_run: list[list[dict[str, Any]]],
+    *,
+    logs_by_job_id: dict[Any, str] | None = None,
+) -> dict[str, Any] | None:
+    """Describe the fixed and divided portions of one sampled matrix leg.
+
+    This is descriptive only. It reads the jobs and logs the collection pass
+    already selected and never recommends a shard count.
+    """
+    base = _matrix_base_name(job_name)
+    legs_by_run = [
+        [job for job in run
+         if _matrix_base_name(str(job.get("name") or "")) == base]
+        for run in jobs_per_run
+    ]
+    counts = [len(legs) for legs in legs_by_run if legs]
+    if not counts or max(counts) <= 1:
+        return None
+
+    fixed: list[float] = []
+    work_durations: list[float] = []
+    in_step: list[float] = []
+    fixed_labels: set[str] = set()
+    logs = logs_by_job_id or {}
+    for job in (item for legs in legs_by_run for item in legs):
+        steps = _step_durations(job)
+        work_index = next(
+            (i for i, (name, _seconds) in enumerate(steps)
+             if _step_category(name) in _PAYLOAD_CATEGORIES), None)
+        if work_index is None:
+            continue
+        fixed_steps = steps[:work_index]
+        fixed.append(sum(
+            seconds for name, seconds in fixed_steps
+            if _step_category(name) in _SETUP_BUILD_CATEGORIES))
+        for name, _seconds in fixed_steps:
+            category = _step_category(name)
+            if category not in _SETUP_BUILD_CATEGORIES:
+                continue
+            low = name.lower()
+            fixed_labels.add(
+                "browser" if "browser" in low else
+                "setup" if category == "setup" else
+                "build" if category == "build" else
+                "checkout" if category == "checkout" else "install")
+
+        work_seconds = steps[work_index][1]
+        work_durations.append(work_seconds)
+        log = str(logs.get(job.get("id")) or "")
+        floor = None
+        if log:
+            kind = _opt24_compiled_kind(log, wf_doc, base)
+            floor = _opt24_pre_test_floor(_opt24_test_step_log(job, log), kind)
+        if floor is not None and 0 < floor < work_seconds:
+            in_step.append(floor)
+
+    if not fixed or not work_durations:
+        return None
+    priority = {"setup": 0, "browser": 1, "build": 2,
+                "checkout": 3, "install": 4}
+    in_step_p50 = _percentile(in_step, 50) if in_step else None
+    divided_p50 = _percentile(work_durations, 50) - (in_step_p50 or 0.0)
+    return {
+        "version": _SHARD_FLOOR_VERSION,
+        "floor_s": round(_percentile(fixed, 50), 1),
+        "divided_work_s": round(max(0.0, divided_p50), 1),
+        "in_step_floor_s": (
+            round(in_step_p50, 1) if in_step_p50 is not None else None),
+        "n_shards": int(round(_percentile(counts, 50))),
+        "basis": _SHARD_FLOOR_BASIS,
+        "fixed_parts": sorted(fixed_labels, key=lambda item: priority[item]),
+    }
+
+
 def _opt24_floor_label(seconds: float) -> str:
     whole = max(0, round(seconds))
     hours, rem = divmod(whole, 3600)
@@ -23327,6 +23408,26 @@ def _opt24_representative_log_jobs(
             seen.add(job_id)
             selected.append(job)
     return selected
+
+
+def _shard_floor_representative_log_job(
+    job_name: str, jobs_per_run: list[list[dict[str, Any]]],
+) -> dict[str, Any] | None:
+    """One median-duration matrix leg for the optional in-step floor."""
+    base = _matrix_base_name(job_name)
+    candidates = [
+        (duration, job)
+        for run in jobs_per_run
+        for job in run
+        if _matrix_base_name(str(job.get("name") or "")) == base
+        and (duration := _job_duration_s(job)) is not None
+        and duration > 0
+        and _job_has_log(job)
+    ]
+    if not candidates:
+        return None
+    target = _percentile([duration for duration, _job in candidates], 50)
+    return min(candidates, key=lambda pair: abs(pair[0] - target))[1]
 
 
 # Declared triggers that mean "a developer waits on this workflow to merge a PR".
@@ -30422,6 +30523,29 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             wf_doc=_wf_docs.get(_wf_path, {}))
         _opt24_probe_jobs.extend(
             _opt24_representative_log_jobs(_jobs_per_run, _provisional))
+    # A critical matrix leg may already be sharded and therefore never be an
+    # OPT24 candidate. Probe one representative leg so its compile/collection
+    # time inside the divided-work step can be disclosed without guessing.
+    for _pole in ((findings_doc.get("pr_critical_path") or {}).get("poles") or []):
+        _wf_path = str(_pole.get("workflow_file") or "")
+        _job_name = str(_pole.get("job") or "")
+        _jobs_per_run = jobs_per_run_by_wf.get(_wf_path) or []
+        if not _job_name or _shard_floor_stamp(
+                _job_name, _wf_docs.get(_wf_path, {}), _jobs_per_run,
+                logs_by_job_id={}) is None:
+            continue
+        _probe = _shard_floor_representative_log_job(_job_name, _jobs_per_run)
+        if _probe is not None:
+            _opt24_probe_jobs.append(_probe)
+    _deduped_probe_jobs: list[dict[str, Any]] = []
+    _seen_probe_ids: set[Any] = set()
+    for _job in _opt24_probe_jobs:
+        _jid = _job.get("id")
+        if _jid is None or _jid in _seen_probe_ids:
+            continue
+        _seen_probe_ids.add(_jid)
+        _deduped_probe_jobs.append(_job)
+    _opt24_probe_jobs = _deduped_probe_jobs
     _prefetch_text(client, [
         _job_log_endpoint(repo, _job["id"])
         for _job in _opt24_probe_jobs if _job.get("id") is not None
@@ -30435,6 +30559,16 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         "planned": len(_opt24_probe_jobs),
         "returned": len(opt24_logs),
     }
+    for _pole in ((findings_doc.get("pr_critical_path") or {}).get("poles") or []):
+        _wf_path = str(_pole.get("workflow_file") or "")
+        _job_name = str(_pole.get("job") or "")
+        if not _job_name:
+            continue
+        _stamp = _shard_floor_stamp(
+            _job_name, _wf_docs.get(_wf_path, {}),
+            jobs_per_run_by_wf.get(_wf_path) or [], logs_by_job_id=opt24_logs)
+        if _stamp is not None:
+            _pole["shard_floor"] = _stamp
 
     next_id = max((int(f["id"][1:]) for f in findings if f.get("id", "").startswith("f") and f["id"][1:].isdigit()), default=0)
     # OPT98 reuses the rule reader and cached run pages. Only a readable strict

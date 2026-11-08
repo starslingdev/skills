@@ -428,6 +428,22 @@ def test_named_fixtures_exercise_their_defining_interactions(
         for workflow in red["workflows"] for run in workflow["runs"])
 
 
+def test_sharded_floor_runs_through_collection_and_full_verifier(
+        monkeypatch, tmp_path):
+    doc, report, checks = run_fixture(
+        FIXTURE_ROOT / "path-partitioned-monorepo", monkeypatch, tmp_path)
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+    pole = next(
+        row for row in doc["pr_critical_path"]["poles"]
+        if row.get("shard_floor"))
+    stamp = pole["shard_floor"]
+    assert stamp["floor_s"] == 60.0
+    assert stamp["divided_work_s"] == 90.0
+    assert stamp["n_shards"] == 4
+    assert "Observed on the sampled runs, not a shard-count recommendation" in report
+
+
 def test_duplicate_gate_sizing_is_independently_verified(monkeypatch, tmp_path):
     doc, report, checks = run_fixture(
         FIXTURE_ROOT / "duplicate-gate-job", monkeypatch, tmp_path)

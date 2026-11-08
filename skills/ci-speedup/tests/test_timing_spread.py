@@ -87,6 +87,85 @@ def _spread_for(durations: list[float], **kw) -> dict:
         _JOB, _WF, _JOB, {_WF: crit}, {_WF: jobs_per_run}, [])
 
 
+def _shard_job(job_id: int, name: str, *, test_s: int = 90) -> dict:
+    start = 0
+    steps = []
+    for step_name, seconds in (
+            ("Setup", 15), ("Build", 30), ("Install browser", 15),
+            ("Tests", test_s)):
+        steps.append({"name": step_name, "conclusion": "success",
+                      "started_at": _iso(start),
+                      "completed_at": _iso(start + seconds)})
+        start += seconds
+    return {**_job(job_id, start, name=name), "started_at": _iso(0),
+            "completed_at": _iso(start), "steps": steps}
+
+
+def _shard_floor(*args, **kwargs) -> dict | None:
+    producer = getattr(cr, "_shard_floor_stamp", None)
+    return producer(*args, **kwargs) if producer is not None else {}
+
+
+def test_matrix_floor_separates_fixed_and_divided_work():
+    jobs = [[_shard_job(100 + i, f"tests / test (pkg, {i})")
+             for i in range(4)]]
+    workflow = {"jobs": {"test": {"strategy": {"matrix": {
+        "package": ["api"], "shard": [0, 1, 2, 3]}},
+        "steps": [{"run": "pytest -q"}]}}}
+
+    stamp = _shard_floor(
+        "tests / test (pkg, 0)", workflow, jobs, logs_by_job_id={})
+
+    assert stamp == {
+        "version": 1,
+        "floor_s": 60.0,
+        "divided_work_s": 90.0,
+        "in_step_floor_s": None,
+        "n_shards": 4,
+        "basis": "p50_step_timing_before_first_divided_work",
+        "fixed_parts": ["setup", "browser", "build"],
+    }
+    sentence = bp._shard_floor_sentence({"shard_floor": stamp})
+    assert "Each of the 4 shards pays ~1m 00s (setup, browser, build)" in sentence
+    assert "remaining ~1m 30s is the work that splits" in sentence
+    assert sentence.endswith(
+        "Observed on the sampled runs, not a shard-count recommendation.")
+    assert bp._shard_floor_report_lines({"shard_floor": stamp})[0] == f"_{sentence}_"
+    assert bp._shard_floor_prompt_lines({"shard_floor": stamp}) == [f"- {sentence}"]
+
+
+def test_in_step_collection_floor_is_removed_from_divided_work():
+    jobs = [[_shard_job(200 + i, f"tests / test (pkg, {i})", test_s=215)
+             for i in range(4)]]
+    workflow = {"jobs": {"test": {"strategy": {"matrix": {
+        "shard": [0, 1, 2, 3]}}, "steps": [{"run": "cargo test"}]}}}
+    log = "\n".join([
+        "2026-09-08T00:01:00Z cargo test",
+        "2026-09-08T00:03:00Z collected 900 items",
+        "2026-09-08T00:03:05Z tests/example.py::test_one PASSED",
+    ])
+
+    stamp = _shard_floor(
+        "tests / test (pkg, 0)", workflow, jobs,
+        logs_by_job_id={job["id"]: log for job in jobs[0]})
+
+    assert stamp is not None
+    assert stamp["floor_s"] == 60.0
+    assert stamp["in_step_floor_s"] == 125.0
+    assert stamp["divided_work_s"] == 90.0
+    assert "~2m 05s compiling or collecting" in bp._shard_floor_sentence(
+        {"shard_floor": stamp})
+
+
+def test_unsharded_job_has_no_fixed_floor_sentence():
+    jobs = [[_shard_job(300, "tests-web")]]
+    assert _shard_floor(
+        "tests-web", {"jobs": {"test": {"steps": []}}}, jobs,
+        logs_by_job_id={}) is None
+    sentence = getattr(bp, "_shard_floor_sentence", lambda _pole: "")({})
+    assert sentence == ""
+
+
 # --------------------------------------------------------------------------------------
 # 1. The counterexample: identical p50 AND p95, different observed range.
 # --------------------------------------------------------------------------------------
