@@ -2316,7 +2316,7 @@ def _emulated_image_compile_leaf(lines: list[str]) -> dict[str, Any] | None:
             if kind == "install" or compile_re.search(command):
                 operations[match.group(1)] = (match.group(2).lower(), line, kind)
                 continue
-        done = re.search(r"#(\d+)\s+DONE\s+([\d.]+)s\b", line)
+        done = re.search(r"#(\d+)\s+DONE\s+(\d+(?:\.\d+)?)s\b", line)
         if done and done.group(1) in operations:
             arch, header, kind = operations.pop(done.group(1))
             durations.append((arch, float(done.group(2)), header, line, kind))
