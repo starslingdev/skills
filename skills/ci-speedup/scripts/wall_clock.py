@@ -250,10 +250,12 @@ class WallClockContext:
     chain_win_s: float = 0.0
     # One tuple per complete sampled commit: (whole-commit wall, slowest job,
     # next-longest job outside the slowest job's `needs:` chain[, that chain's
-    # span on the commit]). The commit projection bound uses every tuple, then
-    # takes the median allowed saving. Without the fourth value the slowest job
-    # is its own chain.
-    commit_wall_facts: tuple[tuple[float, ...], ...] = ()
+    # span on the commit]). A fifth value may carry a targeted multi-job path
+    # population as (chain span, job duration, affected) tuples. The commit
+    # projection bound uses every sampled tuple, then takes their share-weighted
+    # mean allowed saving. Without the fourth value the slowest job is its own
+    # chain.
+    commit_wall_facts: tuple[tuple[Any, ...], ...] = ()
     # #44 — a CLUSTER-FLOOR lever (OPT73): its fix lowers ALL of `own_check_names`
     # (the concurrent sibling legs running the shared step) in lockstep, so a
     # SIBLING leg can never be the floor that caps it — the sibling descends WITH
@@ -638,7 +640,24 @@ def bound_commit_projection(value: float, ctx: WallClockContext) -> BoundResult:
     for fact in ctx.commit_wall_facts:
         wall, slowest, next_longest = fact[:3]
         chain = fact[3] if len(fact) > 3 else slowest
-        if wall <= 0 or slowest <= 0:
+        if wall <= 0:
+            continue
+        # A targeted multi-job finding carries every sampled path as
+        # (chain span, targeted job duration, affected). Shorten all affected
+        # jobs by the same finding saving, with each job saturating at zero,
+        # then retain the slowest remaining path as the commit floor.
+        paths = fact[4] if len(fact) > 4 else ()
+        if paths:
+            original_path = max(float(path[0]) for path in paths)
+            projected_path = max(
+                float(path[0]) - min(value, float(path[1]))
+                if bool(path[2]) else float(path[0])
+                for path in paths
+            )
+            caps.append(max(0.0, original_path - projected_path))
+            continue
+        if slowest <= 0:
+            caps.append(0.0)
             continue
         remaining = max(slowest - value, 0.0)
         speedup = slowest / remaining if remaining > 0 else float("inf")
@@ -649,7 +668,11 @@ def bound_commit_projection(value: float, ctx: WallClockContext) -> BoundResult:
         caps.append(max(0.0, wall - projected.projected_s))
     if not caps:
         return BoundResult(round(value, 1))
-    cap = round(float(statistics.median(caps)), 1)
+    # Every sampled commit is one observed population share. A median collapses
+    # a bimodal gate to its majority case (for example, six sibling-gated PRs
+    # erase the larger saving on four singleton PRs); the expected saving is
+    # the share-weighted mean across those observed commits.
+    cap = round(float(statistics.mean(caps)), 1)
     if cap >= round(value, 1):
         return BoundResult(round(value, 1))
     return BoundResult(cap, (
@@ -777,18 +800,29 @@ def size_wall_clock(raw_s: float, ctx: WallClockContext,
     steps = CASCADE if cascade is None else cascade
     quantized_raw_s = round(float(raw_s), 1)
     v = quantized_raw_s
+    population_basis: float | None = None
     derivation: list[tuple[str, float, float, str]] = []
     for name, fn in steps:
-        r = fn(v, ctx)
-        if r.value > v + 1e-9:
+        if name == "commit-projection":
+            population_basis = v
+        # These two bounds summarize the same sampled PR population. Feeding
+        # one share-weighted result into the other weights that population a
+        # second time. Evaluate both from their common input and keep the
+        # tighter result before continuing the cascade.
+        bound_input = (population_basis
+                       if name == "measured-critical-path"
+                       and population_basis is not None else v)
+        r = fn(bound_input, ctx)
+        if r.value > bound_input + 1e-9:
             raise AssertionError(
-                f"wall-clock bound {name!r} RAISED the saving ({v} -> {r.value}); "
-                "bounds must be monotonic-down")
-        if abs(r.value - v) > 1e-9:
+                f"wall-clock bound {name!r} RAISED the saving "
+                f"({bound_input} -> {r.value}); bounds must be monotonic-down")
+        bounded = min(v, r.value)
+        if abs(bounded - v) > 1e-9:
             if not r.reason:
                 raise AssertionError(
                     f"wall-clock bound {name!r} shrank the saving "
-                    f"({v} -> {r.value}) without a reason")
-            derivation.append((name, round(v, 1), round(r.value, 1), r.reason))
-            v = r.value
+                    f"({v} -> {bounded}) without a reason")
+            derivation.append((name, round(v, 1), round(bounded, 1), r.reason))
+            v = bounded
     return WallClockResult(quantized_raw_s, round(v, 1), derivation)
