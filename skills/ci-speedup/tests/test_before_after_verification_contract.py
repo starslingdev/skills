@@ -631,10 +631,10 @@ def test_comparability_contract_carries_each_required_guard():
         "task-cache": ("more than 20 percentage points", "not attributable", "hit share"),
         "suspicious-warm": ("persistent-disk", "changed", "unrelated jobs"),
         "triggered-set": ("same workflows and jobs", "changed", "triggered set"),
-        "per-commit": ("median of per-commit ratios", "comparable", "worst pair"),
-        "billed-compute": ("rounded up to the minute", "disclosure", "runner OS"),
+        "per-commit": ("explicit shared pair identity", "unavailable", "worst explicit pair"),
+        "billed-compute": ("rounded up to the minute", "github-hosted", "self-hosted"),
         "runner-carry-over": ("runner label and size", "restricted", "multiple"),
-        "exclusions": ("infrastructure stalls", "excluded", "with and without"),
+        "exclusions": ("infrastructure stalls", "complete triggered group", "with and without"),
         "lane": ("30-day run count", "required", "lane"),
         "negative-control": ("must fail", "required", "parity"),
     }

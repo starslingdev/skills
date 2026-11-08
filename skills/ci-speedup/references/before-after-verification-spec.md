@@ -143,10 +143,10 @@ than being guessed from job counts or row position.
 | task-cache | Record Turbo, Nx, and Gradle hit share per sample. | A difference of more than 20 percentage points is not attributable. | Show each arm's hit share on separate warm and cold lines. |
 | suspicious-warm | Find cache hits one arm lacked, including `FULL TURBO`, `CACHED`, and Go `(cached)`. | On persistent-disk runners this is `changed`. | Warn that the hits can come from unrelated jobs. |
 | triggered-set | Compare the same workflows and jobs in both arms. | A different triggered set is `changed`. | List the added or missing workflows and jobs. |
-| per-commit | Pair comparable commits and calculate each ratio. | Only comparable pairs contribute. | Show the median of per-commit ratios and the worst pair beside the ratio of medians. |
-| billed-compute | Each job is rounded up to the minute and grouped by runner OS. | Disclosure only. | Show billed compute for each arm by runner OS. |
+| per-commit | Pair cohorts only when the collected data carries an explicit shared pair identity; never pair by position or reuse one arm's median as a synthetic pair. | Only explicit comparable pairs contribute; without them, this row is unavailable and requires no extra run. | Show the median of per-commit ratios and the worst explicit pair beside the ratio of medians, or state why pairwise ratios are unavailable. |
+| billed-compute | Each job is rounded up to the minute and grouped by runner OS and runner ownership. | Disclosure only. | Show GitHub-hosted billed compute by runner OS; show self-hosted and third-party rounded compute separately, never folded into billed minutes. |
 | runner-carry-over | Bind every measured multiple to its runner label and size. | The multiple is restricted to that class. | State the runner label and size with every multiple. |
-| exclusions | Identify infrastructure stalls, bot-triggered runs, and jobs red on both arms. | Excluded from the primary comparison. | List exclusions and show wall clock with and without jobs red on both arms. |
+| exclusions | Identify infrastructure stalls, bot-triggered runs, and jobs red on both arms. | Exclude them only from a filtered diagnostic; the complete triggered group remains the primary headline. | List exclusions and show wall clock with and without jobs red on both arms, with the complete-group value first. |
 | lane | Bind each verdict to its workflow lane. | Required for every verdict. | Name the lane and its 30-day run count. |
 | negative-control | Remove one known unit of work and rerun parity classification. | Required; the parity check must fail. | Show the negative control and the guard that rejected parity. |
 
