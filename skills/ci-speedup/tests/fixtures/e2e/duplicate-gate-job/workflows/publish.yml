@@ -1,0 +1,15 @@
+name: Publish
+on:
+  push:
+    branches: [main]
+concurrency: publish-${{ github.ref }}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+  build-and-push:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - run: docker build -t example/app .

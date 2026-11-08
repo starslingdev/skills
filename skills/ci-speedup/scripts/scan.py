@@ -220,6 +220,7 @@ class Hit:
     # snippet in the report so a reviewer sees the actual code, not prose.
     # When empty, the report falls back to the raw line at `line`.
     snippet: str = ""
+    facts: dict[str, Any] = field(default_factory=dict)
 
 
 def _raw_line(raw: str, line: int) -> str:
@@ -3378,6 +3379,202 @@ def _detect_opt12(doc: dict, raw: str) -> list[Hit]:
     return hits
 
 
+_OPT12_TEST_COMMAND_RE = re.compile(
+    r"(?:^|\s)(?:npm|pnpm|yarn)\s+(?:run\s+)?test\b|"
+    r"(?:^|\s)(?:pytest|ctest|vitest|jest|rspec)\b|"
+    r"(?:^|\s)(?:make|cmake\s+--build\s+\S+\s+--target)\s+(?:test|check)\b",
+    re.IGNORECASE,
+)
+_OPT12_COVERAGE_FLAG_RE = re.compile(
+    r"^(?:--cov(?:=.*)?|--coverage(?:=.*)?|--cov-report(?:=.*)?|"
+    r"--coverage-report(?:=.*)?|--collectCoverage(?:=.*)?)$", re.IGNORECASE)
+
+
+def _opt12_normalized_test_commands(run: str) -> tuple[tuple[str, ...], bool]:
+    """Test-command signatures and whether coverage-only flags were removed."""
+    found: list[str] = []
+    coverage = False
+    for command in re.split(r"\n|&&|;", run):
+        command = command.strip()
+        if not command or not _OPT12_TEST_COMMAND_RE.search(command):
+            continue
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            tokens = command.split()
+        kept = []
+        for token in tokens:
+            if _OPT12_COVERAGE_FLAG_RE.match(token):
+                coverage = True
+                continue
+            kept.append(token)
+        normalized = " ".join(kept).strip().lower()
+        if normalized and normalized not in found:
+            found.append(normalized)
+    return tuple(found), coverage
+
+
+def _opt12_job_test_commands(job: dict) -> tuple[tuple[str, ...], bool, list[str]]:
+    commands: list[str] = []
+    coverage = False
+    local_refs: list[str] = []
+    for leaf in job_walk(job).leaves:
+        step = leaf.step
+        sigs, has_coverage = _opt12_normalized_test_commands(_run(step))
+        commands.extend(sig for sig in sigs if sig not in commands)
+        coverage = coverage or has_coverage
+        ref = _uses(step).split("@", 1)[0].strip()
+        if not _is_local_uses(ref):
+            continue
+        text = _LOCAL_ACTION_TEXT.get(ref)
+        if text is None:
+            continue
+        local_refs.append(ref)
+        sigs, has_coverage = _opt12_normalized_test_commands(text)
+        commands.extend(sig for sig in sigs if sig not in commands)
+        coverage = coverage or has_coverage
+    return tuple(commands), coverage, local_refs
+
+
+def _opt12_platforms(job: dict) -> set[str]:
+    """Concrete runner OS/architecture labels after bounded matrix expansion."""
+    out: set[str] = set()
+    for matrix in _opt102_matrix_legs(job):
+        raw = job.get("runs-on")
+        values = raw if isinstance(raw, list) else [raw]
+        resolved: list[str] = []
+        for value in values:
+            item = _opt102_resolve(
+                value, env={}, matrix=matrix, inputs={}, outputs={})
+            if not item:
+                return set()
+            resolved.append(item.lower())
+        out.add("+".join(resolved))
+    return out
+
+
+def _opt12_trigger_signature(doc: dict) -> str:
+    on = doc.get("on", doc.get(True))
+    try:
+        return json.dumps(on, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return ""
+
+
+def _opt12_downstream_jobs(jobs: dict[str, Any], start: str) -> list[str]:
+    reached = {start}
+    changed = True
+    while changed:
+        changed = False
+        for name, spec in jobs.items():
+            if not isinstance(spec, dict) or name in reached:
+                continue
+            needs = spec.get("needs")
+            needs = [needs] if isinstance(needs, str) else needs if isinstance(needs, list) else []
+            if any(str(need) in reached for need in needs):
+                reached.add(str(name))
+                changed = True
+    return sorted(reached - {start})
+
+
+def _detect_opt12_duplicate_test_work(
+    parsed: list[tuple[str, dict, str]],
+) -> list[tuple[str, str, Hit]]:
+    """Duplicate test work on the same trigger and concrete runner platform."""
+    rows: list[dict[str, Any]] = []
+    for rel, doc, raw in parsed:
+        trigger = _opt12_trigger_signature(doc)
+        jobs = _jobs_from_doc(doc)
+        for name, job in jobs.items():
+            if not isinstance(job, dict):
+                continue
+            commands, coverage, local_refs = _opt12_job_test_commands(job)
+            platforms = _opt12_platforms(job)
+            if not commands or not platforms or not trigger:
+                continue
+            rows.append({
+                "workflow": rel,
+                "job": str(name),
+                "commands": commands,
+                "coverage": coverage or bool(re.search(r"coverage", str(name), re.I)),
+                "local_refs": local_refs,
+                "platforms": platforms,
+                "trigger": trigger,
+                "downstream": _opt12_downstream_jobs(jobs, str(name)),
+                "raw": raw,
+            })
+    hits: list[tuple[str, str, Hit]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    ranked: list[tuple[int, dict[str, Any], dict[str, Any], tuple[str, ...]]] = []
+    for index, left in enumerate(rows):
+        for right in rows[index + 1:]:
+            if left["trigger"] != right["trigger"]:
+                continue
+            if not (left["platforms"] & right["platforms"]):
+                continue
+            shared = tuple(command for command in left["commands"]
+                           if command in right["commands"])
+            if not shared:
+                continue
+            coverage = left["coverage"] or right["coverage"]
+            on_path = bool(left["downstream"] or right["downstream"])
+            if not (coverage or on_path):
+                continue
+            ranked.append((0 if on_path else 1, left, right, shared))
+    for _rank, left, right, shared in sorted(
+            ranked, key=lambda item: (item[0], item[1]["workflow"], item[1]["job"],
+                                      item[2]["workflow"], item[2]["job"])):
+        key = (left["workflow"], left["job"], right["workflow"], right["job"])
+        if key in seen:
+            continue
+        seen.add(key)
+        coverage = left["coverage"] or right["coverage"]
+        consumer = right if right["downstream"] else left if left["downstream"] else right
+        existing = left if consumer is right else right
+        if coverage:
+            duplicate = left if left["coverage"] else right
+            existing = right if duplicate is left else left
+        else:
+            duplicate = consumer
+        downstream = consumer["downstream"]
+        command_text = ", ".join(f"`{command}`" for command in shared)
+        refs = sorted(set(left["local_refs"] + right["local_refs"]))
+        refs_text = f" through local action(s) {', '.join(refs)}" if refs else ""
+        if coverage:
+            fix = ("Move the coverage floor onto the existing test run; keep every gate. "
+                   "Runner-minute effect: one suite run is saved.")
+        else:
+            slow = f" before `{downstream[0]}`" if downstream else ""
+            fix = ("Keep every gate: either use `workflow_run` with a CI conclusion "
+                   "check, or put the jobs in one workflow and make the slow job `needs` "
+                   "the existing test job. Runner-minute effect: one suite run is saved; "
+                   "under same-workflow `needs`, wall-clock saving is 0s.")
+            if slow:
+                fix = f"The duplicate sits on the needs chain{slow}. " + fix
+        evidence = (
+            f"`{left['workflow']}` job `{left['job']}` and `{right['workflow']}` job "
+            f"`{right['job']}` run the same test command(s){refs_text}: {command_text}. "
+            + fix)
+        hits.append(("OPT12", consumer["workflow"], Hit(
+            line=1,
+            affected_jobs=[duplicate["job"]],
+            evidence=evidence,
+            match_text="duplicate-test-work",
+            snippet="\n".join(shared),
+            facts={"opt12_duplicate_test_work": {
+                "variant": "coverage" if coverage else "needs_chain",
+                "existing_workflow": existing["workflow"],
+                "existing_job": existing["job"],
+                "duplicate_workflow": duplicate["workflow"],
+                "duplicate_job": duplicate["job"],
+                "downstream_job": downstream[0] if downstream else None,
+                "same_workflow": existing["workflow"] == duplicate["workflow"],
+                "commands": list(shared),
+            }},
+        )))
+    return hits
+
+
 def _opt12_first_step_in_a_group(doc: dict) -> list[str]:
     """The jobs OPT12 cannot read a preamble from because their FIRST step is
     inside a `parallel:` group (a composite action cannot hold one). Listed
@@ -6054,6 +6251,7 @@ def _cross_workflow_hits(parsed: list[tuple[str, dict, str]], root: Path,
     out += _detect_opt7(parsed, root)
     out += _detect_opt37(parsed, root)
     out += _detect_opt40(parsed, root)
+    out += _detect_opt12_duplicate_test_work(parsed)
     turbo_hits, incomplete = _detect_turbo(root, _ci_turbo_tasks(root, parsed))
     out += turbo_hits
     cache_hits, cache_held = _detect_opt96(parsed, root, default_branch, branch_source)
@@ -6987,6 +7185,7 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
             for hit in hits:
                 finding_idx += 1
                 f = _emit(entry, hit, rel, finding_idx)
+                f.update(hit.facts)
                 f["workflow_lanes"] = workflow_lanes.get(rel, [])
                 if workflow_push_scopes.get(rel):
                     f["workflow_push_scopes"] = workflow_push_scopes[rel]
@@ -7016,6 +7215,7 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
             continue
         finding_idx += 1
         f = _emit(entry, hit, wf, finding_idx)
+        f.update(hit.facts)
         f["workflow_lanes"] = workflow_lanes.get(wf, [])
         if workflow_push_scopes.get(wf):
             f["workflow_push_scopes"] = workflow_push_scopes[wf]

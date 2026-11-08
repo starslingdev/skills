@@ -367,8 +367,9 @@ def test_named_fixtures_exercise_their_defining_interactions(
         monkeypatch, tmp_path):
     docs = {}
     for name in (
-            "config-era-change", "external-required-gate", "heavy-runner-queue",
-            "minority-tail", "multiarch-image", "path-partitioned-monorepo"):
+            "config-era-change", "duplicate-gate-job", "external-required-gate",
+            "heavy-runner-queue", "minority-tail", "multiarch-image",
+            "path-partitioned-monorepo"):
         docs[name], _report, _checks = run_fixture(
             FIXTURE_ROOT / name, monkeypatch, tmp_path)
 
@@ -381,6 +382,14 @@ def test_named_fixtures_exercise_their_defining_interactions(
     assert any(
         row.get("minority_tail")
         for row in docs["minority-tail"]["pr_critical_path"]["checks"])
+    duplicate = next(
+        row for row in docs["duplicate-gate-job"]["findings"]
+        if row.get("pattern") == "OPT12"
+        and row.get("opt12_duplicate_test_work"))
+    assert duplicate["wall_clock_p50_s"] == 0.0
+    assert duplicate["runner_min_saving"] == 6.0
+    assert duplicate["opt12_duplicate_test_work"]["duplicate_p50_s"] == 90.0
+    assert duplicate["opt12_duplicate_test_work"]["workflow_run_wall_p50_s"] == 0.0
     assert "OPT102" in {
         row.get("pattern") for row in docs["multiarch-image"]["findings"]}
     assert any(
