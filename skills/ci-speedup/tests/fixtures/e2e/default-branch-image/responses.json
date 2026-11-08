@@ -281,8 +281,8 @@
   },
   "shape": "default-branch-image",
   "logs": {
-    "1101": "#9 [linux/amd64 2/2] RUN go build -o /server ./cmd/server\n#9 DONE 60.0s\n#10 [linux/arm64 2/2] RUN go build -o /server ./cmd/server\n#10 DONE 240.0s\n",
-    "1201": "#9 [linux/amd64 2/2] RUN go build -o /server ./cmd/server\n#9 DONE 60.0s\n#10 [linux/arm64 2/2] RUN go build -o /server ./cmd/server\n#10 DONE 240.0s\n",
-    "1301": "#9 [linux/amd64 2/2] RUN go build -o /server ./cmd/server\n#9 DONE 60.0s\n#10 [linux/arm64 2/2] RUN go build -o /server ./cmd/server\n#10 DONE 240.0s\n"
+    "1101": "Name:          builder\nDriver:        docker-container\nNodes:\nName:                  builder0\nEndpoint:              unix:///var/run/docker.sock\nStatus:                running\nBuildKit version:      v0.24.0\nPlatforms:             linux/amd64, linux/amd64/v2, linux/arm64, linux/arm/v7\n#9 [linux/amd64 2/2] RUN go build -o /server ./cmd/server\n#9 DONE 60.0s\n#10 [linux/arm64 2/2] RUN go build -o /server ./cmd/server\n#10 DONE 240.0s\n",
+    "1201": "Name:          builder\nDriver:        docker-container\nNodes:\nName:                  builder0\nEndpoint:              unix:///var/run/docker.sock\nStatus:                running\nBuildKit version:      v0.24.0\nPlatforms:             linux/amd64, linux/amd64/v2, linux/arm64, linux/arm/v7\n#9 [linux/amd64 2/2] RUN go build -o /server ./cmd/server\n#9 DONE 60.0s\n#10 [linux/arm64 2/2] RUN go build -o /server ./cmd/server\n#10 DONE 240.0s\n",
+    "1301": "Name:          builder\nDriver:        docker-container\nNodes:\nName:                  builder0\nEndpoint:              unix:///var/run/docker.sock\nStatus:                running\nBuildKit version:      v0.24.0\nPlatforms:             linux/amd64, linux/amd64/v2, linux/arm64, linux/arm/v7\n#9 [linux/amd64 2/2] RUN go build -o /server ./cmd/server\n#9 DONE 60.0s\n#10 [linux/arm64 2/2] RUN go build -o /server ./cmd/server\n#10 DONE 240.0s\n"
   }
 }

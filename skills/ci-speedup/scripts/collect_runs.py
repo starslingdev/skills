@@ -29688,10 +29688,6 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                        if _recipe.get("docs") else "")
                     + (f"Deliver and verify: {_recipe.get('deliver')}\n"
                        if _recipe.get("deliver") else "")
-                    + ("Before treating the measured foreign-platform time as "
-                       "emulation, confirm the buildx builder has no native node "
-                       "for that platform with `docker buildx inspect`.\n"
-                       if _leaf_fix_key == "emulated-image-compile" else "")
                     + "This changes the wait after merge, not the merge gate. Preserve "
                       "the job's outputs and verification, apply the catalog guardrails, "
                       "and re-measure the full default-branch push.\n"
