@@ -741,13 +741,38 @@ _HISTORY_JOB_NAME_RE = re.compile(
 # the continuations back together before matching, so a git command whose
 # history-revealing operand sits on the next line is still seen as one command.
 _LINE_CONTINUATION_RE = re.compile(r"\\\n[ \t]*")
+_INLINE_TOOL_PREFIX = (
+    r"(?:^|[\n;&|])\s*(?:(?:env|sudo|time)\s+)*"
+    r"(?:(?:npx|bunx|yarn|pnpm\s+exec)\s+)?"
+)
+_INLINE_HISTORY_OPERAND_RE = re.compile(
+    _INLINE_TOOL_PREFIX
+    + r"(?:pnpm|turbo)\b[^\n;&|]*--filter(?:=|\s+)[^\n;&|]*\.\.\.\[[^\]\n]+\]|"
+    + _INLINE_TOOL_PREFIX
+    + r"(?:jest|vitest|eslint|nx|lerna|turbo)\b[^\n;&|]*"
+      r"--(?:changedSince|changed|diffBase|base|since)(?:=|\s+)['\"]?[^\s'\"]+",
+    re.I,
+)
+_INLINE_PARENT_ONLY_OPERAND_RE = re.compile(
+    _INLINE_TOOL_PREFIX
+    + r"(?:pnpm|turbo)\b[^\n;&|]*--filter(?:=|\s+)"
+      r"['\"]?\.\.\.\[\s*HEAD(?:~\d+|\^\d*)+\s*\]['\"]?|"
+    + _INLINE_TOOL_PREFIX
+    + r"(?:jest|vitest|eslint|nx|lerna|turbo)\b[^\n;&|]*"
+      r"--(?:changedSince|changed|diffBase|base|since)(?:=|\s+)"
+      r"['\"]?HEAD(?:~\d+|\^\d*)+['\"]?",
+    re.I,
+)
 
 
 def _has_git_history_op(text: str) -> bool:
     """True when `text` runs a git operation that needs full history. Applied to
     every surface `_GIT_HISTORY_RE` is matched against, so line continuations are
     joined in exactly one place."""
-    return bool(_GIT_HISTORY_RE.search(_LINE_CONTINUATION_RE.sub(" ", text)))
+    joined = _LINE_CONTINUATION_RE.sub(" ", text)
+    joined = _INLINE_PARENT_ONLY_OPERAND_RE.sub("", joined)
+    return bool(_GIT_HISTORY_RE.search(joined)
+                or _INLINE_HISTORY_OPERAND_RE.search(joined))
 
 
 # One deliberately bounded hop into a first-party script invoked directly by a
@@ -911,6 +936,15 @@ def _script_parent_depth(text: str) -> int:
     return max(distances, default=0) + 1 if distances else 0
 
 
+def _inline_parent_operand_depth(text: str) -> int:
+    """Finite depth required by a recognized tool revision operand."""
+    return max(
+        (_script_parent_depth(match.group(0))
+         for match in _INLINE_PARENT_ONLY_OPERAND_RE.finditer(text)),
+        default=0,
+    )
+
+
 def _local_script_needs_history(root: Path, key: str) -> bool:
     """Read exactly one invoked script; unreadable or external refs fail closed."""
     text = _read_local_script(root, key)
@@ -1006,7 +1040,8 @@ def _local_action_needs_history(root: Path, ref: str) -> bool:
         if depth > _MAX_LOCAL_ACTION_DEPTH:
             return True
         text = _read_local_history_file(root, cur)
-        if text is None or _has_git_history_op(text):
+        if (text is None or _has_git_history_op(text)
+                or _inline_parent_operand_depth(text)):
             return True
         queue += [(m.split("@")[0].strip(), depth + 1)
                   for m in _NESTED_LOCAL_USES_RE.findall(text)]
@@ -1039,6 +1074,10 @@ def _job_needs_git_history(job: dict, job_name: str = "",
     blob = "\n".join(str(s.get("run") or "") for s in _job_steps(job))
     uses_blob = "\n".join(_step_uses_ref(s) for s in _job_steps(job))
     if _has_git_history_op(blob) or _has_git_history_op(uses_blob):
+        return True
+    # ci-score cannot print a bounded checkout depth, so parent-only operands
+    # stay exempt from its shallow-checkout advice.
+    if _inline_parent_operand_depth(blob):
         return True
     # A local composite action the job invokes may run the git op internally
     # (the workflow yaml shows only `uses: ./…` or `uses: $/…`). Consult the

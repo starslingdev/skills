@@ -15451,6 +15451,9 @@ def check_default_branch_push_lane_isolated(
                     if isinstance(row, dict)
                     and row.get("lane") == "push"
                     and row.get("pattern") == pattern
+                    and (str(_as_dict(drill.get("leaf")).get("fix_key") or "")
+                         != "eslint-no-cache"
+                         or str(row.get("opt9_tool") or "").lower() == "eslint")
                     and str(row.get("workflow_file") or "") == drill_wf
                     and any(
                         str(job) in drill_aliases
