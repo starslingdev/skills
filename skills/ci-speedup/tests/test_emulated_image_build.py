@@ -417,9 +417,21 @@ def test_no_inspect_dominant_foreign_compile_is_an_uncredited_check():
 
     assert leaf is not None and leaf["fix_key"] == "emulated-image-compile"
     assert leaf["magnitude"] is None
+    assert leaf["uncredited"] is True
     assert leaf["builder_topology_unconfirmed"] is True
     assert "emulat" not in leaf["unit_label"].lower()
-    assert "docker buildx inspect --bootstrap" in leaf["config_fact"]
+    assert "docker buildx inspect --bootstrap" in leaf["search"]
+    assert "config_fact" not in leaf
+
+
+def test_buildkit_headers_without_a_buildx_invocation_do_not_assume_topology():
+    log = """#10 [linux/amd64 build 2/3] RUN go build ./...
+#10 DONE 20.0s
+#15 [linux/arm64 build 2/3] RUN go build ./...
+#15 DONE 120.0s
+"""
+
+    assert bp._parse_log(log) is None
 
 
 def test_builder_native_platform_skips_user_configured_starred_entries():
