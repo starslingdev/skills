@@ -2170,31 +2170,49 @@ def _vendored_lib_build_leaf(text: str) -> dict[str, Any] | None:
     if not sections:
         return None
     entering = re.compile(r"\bEntering directory\s+['\"](?P<path>[^'\"]+)['\"]")
+    leaving = re.compile(r"\bLeaving directory\s+['\"](?P<path>[^'\"]+)['\"]")
     completed = re.compile(r"\btouch\s+(?P<path>\S+/\.stamp\.[^/\s]+\.build)\b")
     candidates: list[tuple[float, dict[str, Any]]] = []
     for _command, section_start, section_end in sections:
         section = stamped[section_start:section_end]
         if len(section) < 2:
             continue
-        starts: dict[str, tuple[datetime, str]] = {}
+        visits: dict[str, list[dict[str, Any]]] = {}
         intervals: list[tuple[str, datetime, datetime, str, str]] = []
         for when, message, raw in section:
             start = entering.search(message)
             if start and (path := _VENDORED_LIBRARY_PATH_RE.search(
                     start.group("path"))):
                 key = f"{path.group('root')}/{path.group('library')}"
-                # The latest entry is the only one bounded by the completion;
-                # an earlier configure/no-op visit must not absorb idle time.
-                starts[key] = (when, raw)
+                visits.setdefault(key, []).append({
+                    "path": start.group("path").rstrip("/"),
+                    "when": when,
+                    "raw": raw,
+                    "completed": False,
+                })
+                continue
+            leave = leaving.search(message)
+            if leave and (path := _VENDORED_LIBRARY_PATH_RE.search(
+                    leave.group("path"))):
+                key = f"{path.group('root')}/{path.group('library')}"
+                stack = visits.get(key, [])
+                leaving_path = leave.group("path").rstrip("/")
+                for index in range(len(stack) - 1, -1, -1):
+                    if stack[index]["path"] == leaving_path:
+                        stack.pop(index)
+                        break
                 continue
             finish = completed.search(message)
             if not finish or not (path := _VENDORED_LIBRARY_PATH_RE.search(
                     finish.group("path"))):
                 continue
             key = f"{path.group('root')}/{path.group('library')}"
-            begun = starts.pop(key, None)
-            if begun is not None and when > begun[0]:
-                intervals.append((key, begun[0], when, begun[1], raw))
+            stack = visits.get(key, [])
+            begun = next((visit for visit in reversed(stack)
+                          if not visit["completed"]), None)
+            if begun is not None and when > begun["when"]:
+                begun["completed"] = True
+                intervals.append((key, begun["when"], when, begun["raw"], raw))
         if not intervals:
             continue
         intervals.sort(key=lambda row: row[1])

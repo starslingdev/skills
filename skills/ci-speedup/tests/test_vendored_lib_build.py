@@ -147,3 +147,21 @@ def test_latest_directory_entry_bounds_the_completed_build():
     leaf = bp._parse_log(log)
 
     assert leaf is None or leaf["fix_key"] != "vendored-lib-build"
+
+
+def test_completed_stamp_does_not_reuse_a_directory_visit_that_already_left():
+    started = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    log = "\n".join((
+        _stamp(started, "##[group]Run make dependencies"),
+        _stamp(started + timedelta(seconds=1),
+               "make: Entering directory '/src/contrib/codec'"),
+        _stamp(started + timedelta(seconds=2),
+               "make: Leaving directory '/src/contrib/codec'"),
+        _stamp(started + timedelta(seconds=90),
+               "touch contrib/codec/.stamp.codec.build"),
+        _stamp(started + timedelta(seconds=100), "##[group]Run tests"),
+    ))
+
+    leaf = bp._parse_log(log)
+
+    assert leaf is None or leaf["fix_key"] != "vendored-lib-build"
