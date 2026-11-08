@@ -97,7 +97,9 @@
     ]
   },
   "workflow_shapes": {
-    "matrix_jobs": [],
+    "matrix_jobs": [
+      ".github/workflows/publish.yml:test"
+    ],
     "reusable_jobs": []
   }
 }

@@ -6340,6 +6340,14 @@ def _ground_opt12_duplicate_test_work(
             continue
         duplicate_wf = str(stamp.get("duplicate_workflow") or "")
         duplicate_job = str(stamp.get("duplicate_job") or "")
+        duplicate_display = str(stamp.get("duplicate_job_display") or "")
+        duplicate_aliases = {
+            alias for alias in (
+                duplicate_job, duplicate_display,
+                _matrix_base_name(duplicate_job),
+                _matrix_base_name(duplicate_display),
+            ) if alias
+        }
         existing_wf = str(stamp.get("existing_workflow") or "")
         rows: list[dict[str, Any]] = []
         for fact in facts:
@@ -6347,9 +6355,13 @@ def _ground_opt12_duplicate_test_work(
             if created is None:
                 continue
             jobs = [job for job in (fact.get("jobs") or []) if isinstance(job, dict)]
-            duplicate = next((job for job in jobs
-                              if str(job.get("workflow_file") or "") == duplicate_wf
-                              and str(job.get("name") or "") == duplicate_job), None)
+            duplicate = next((
+                job for job in jobs
+                if str(job.get("workflow_file") or "") == duplicate_wf
+                and (str(job.get("name") or "") in duplicate_aliases
+                     or _matrix_base_name(str(job.get("name") or ""))
+                     in duplicate_aliases)
+            ), None)
             producer_ends = [
                 _parse_dt(str(job.get("completed_at") or ""))
                 for job in jobs

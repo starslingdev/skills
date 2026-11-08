@@ -15271,6 +15271,45 @@ def check_default_branch_push_lane_isolated(
     for finding in _as_list(data.get("findings")):
         if not isinstance(finding, dict):
             continue
+        duplicate = _as_dict(finding.get("opt12_duplicate_test_work"))
+        rows = [
+            row for row in _as_list(duplicate.get("rows"))
+            if isinstance(row, dict)
+        ]
+        if duplicate and rows:
+            duplicate_seconds: list[float] = []
+            wall_seconds: list[float] = []
+            same_workflow = duplicate.get("same_workflow") is True
+            for row in rows:
+                duplicate_s = _num(row.get("duplicate_s"))
+                producer_s = _num(row.get("producer_completion_s"))
+                wall_s = _num(row.get("workflow_run_wall_s"))
+                if duplicate_s is None or producer_s is None or wall_s is None:
+                    failures.append("a duplicate-test sizing row is incomplete")
+                    continue
+                expected_wall = 0.0 if same_workflow else max(0.0, duplicate_s - producer_s)
+                if abs(wall_s - expected_wall) > 0.001:
+                    failures.append(
+                        f"duplicate-test workflow_run wall {wall_s:g}s != {expected_wall:g}s")
+                duplicate_seconds.append(duplicate_s)
+                wall_seconds.append(expected_wall)
+            if duplicate_seconds:
+                expected_duplicate = round(statistics.median(duplicate_seconds), 3)
+                expected_wall = round(statistics.median(wall_seconds), 3)
+                if _num(duplicate.get("duplicate_p50_s")) != expected_duplicate:
+                    failures.append("duplicate-test p50 duration was not re-derived from rows")
+                if _num(duplicate.get("workflow_run_wall_p50_s")) != expected_wall:
+                    failures.append("duplicate-test workflow_run wall p50 was not re-derived")
+                pushes = int(_num(duplicate.get("pushes_30d")) or 0)
+                if pushes != int(_num(lane.get("pushes_30d")) or 0):
+                    failures.append("duplicate-test push count drifted from the push lane")
+                expected_minutes = (
+                    round(math.ceil(expected_duplicate / 60.0) * pushes, 1)
+                    if pushes > 0 else None)
+                if _num(duplicate.get("runner_min_saving")) != expected_minutes:
+                    failures.append("duplicate-test stamped runner minutes were not re-derived")
+                if _num(finding.get("runner_min_saving")) != expected_minutes:
+                    failures.append("duplicate-test finding runner minutes were not re-derived")
         lanes = sorted({str(value) for value in _as_list(finding.get("workflow_lanes"))})
         if not lanes or not set(lanes) <= non_pr_events:
             continue
@@ -15399,8 +15438,16 @@ def check_default_branch_push_lane_isolated(
         if speedup <= 0 or slow_s <= 0:
             failures.append("lane projection lacks a positive speedup and slowest job")
         else:
-            expected_s = wall - slow_s + max(slow_s / speedup, next_s)
-            expected_multiple = wall / expected_s if expected_s > 0 else 0.0
+            chain_s = _num(typical.get("slowest_chain_span_s"))
+            if chain_s is not None and chain_s > slow_s:
+                unchanged = max(wall - max(chain_s, next_s), 0.0)
+                expected_s = round(max(
+                    0.0, unchanged + max(
+                        chain_s - slow_s + slow_s / speedup, next_s)), 1)
+            else:
+                expected_s = round(max(
+                    0.0, wall - slow_s + max(slow_s / speedup, next_s)), 1)
+            expected_multiple = round(wall / expected_s, 2) if expected_s > 0 else 0.0
             if abs((_num(projection.get("projected_s")) or 0.0) - expected_s) > 0.11:
                 failures.append("projected push wall drifted from the next-job floor")
             if abs((_num(projection.get("multiple")) or 0.0) - expected_multiple) > 0.011:

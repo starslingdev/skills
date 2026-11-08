@@ -248,7 +248,7 @@
     "3001": [
       {
         "id": 3101,
-        "name": "test",
+        "name": "Unit tests (ubuntu-latest)",
         "labels": [
           "ubuntu-latest"
         ],
@@ -284,7 +284,7 @@
     "3002": [
       {
         "id": 3102,
-        "name": "test",
+        "name": "Unit tests (ubuntu-latest)",
         "labels": [
           "ubuntu-latest"
         ],
@@ -320,7 +320,7 @@
     "3003": [
       {
         "id": 3103,
-        "name": "test",
+        "name": "Unit tests (ubuntu-latest)",
         "labels": [
           "ubuntu-latest"
         ],

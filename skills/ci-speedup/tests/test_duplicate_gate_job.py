@@ -99,6 +99,39 @@ jobs:
     assert _duplicate_findings(tmp_path) == []
 
 
+def test_branch_filters_compare_as_sets(tmp_path: Path):
+    _write(tmp_path, "ci.yml", """name: CI
+on:
+  push:
+    branches: [main, release]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make test
+""")
+    _write(tmp_path, "publish.yml", """name: Publish
+on:
+  push:
+    branches: [release, main]
+jobs:
+  duplicate:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: make test
+  publish:
+    needs: duplicate
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo publish
+""")
+
+    finding = next(
+        row for row in _duplicate_findings(tmp_path)
+        if row.get("opt12_duplicate_test_work"))
+    assert finding["opt12_duplicate_test_work"]["duplicate_job"] == "duplicate"
+
+
 def test_duplicate_test_with_different_commands_is_silent(tmp_path: Path):
     _write(tmp_path, "ci.yml", """name: CI
 on: push
@@ -112,6 +145,91 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: pytest tests/
+""")
+
+    assert _duplicate_findings(tmp_path) == []
+
+
+def test_same_command_in_different_working_directories_is_silent(tmp_path: Path):
+    _write(tmp_path, "ci.yml", """name: CI
+on: push
+jobs:
+  package-a:
+    runs-on: ubuntu-latest
+    steps:
+      - working-directory: packages/a
+        run: npm test
+  package-b:
+    needs: package-a
+    runs-on: ubuntu-latest
+    steps:
+      - working-directory: packages/b
+        run: npm test
+""")
+
+    assert _duplicate_findings(tmp_path) == []
+
+
+def test_mutually_exclusive_event_jobs_are_silent(tmp_path: Path):
+    _write(tmp_path, "ci.yml", """name: CI
+on: [push, pull_request]
+jobs:
+  push-tests:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+  pr-tests:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+  publish:
+    needs: push-tests
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo publish
+""")
+
+    assert _duplicate_findings(tmp_path) == []
+
+
+def test_job_with_unique_work_is_not_credited_as_a_removable_copy(tmp_path: Path):
+    _write(tmp_path, "ci.yml", """name: CI
+on: push
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+  mixed:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+      - run: npm run integration
+  publish:
+    needs: mixed
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo publish
+""")
+
+    assert _duplicate_findings(tmp_path) == []
+
+
+def test_case_sensitive_test_arguments_remain_distinct(tmp_path: Path):
+    _write(tmp_path, "ci.yml", """name: CI
+on: push
+jobs:
+  api-upper:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest tests/API
+  api-lower:
+    needs: api-upper
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest tests/api
 """)
 
     assert _duplicate_findings(tmp_path) == []
@@ -138,6 +256,33 @@ jobs:
     assert _duplicate_findings(tmp_path) == []
 
 
+def test_equivalent_linux_x64_hosted_labels_can_be_duplicates(tmp_path: Path):
+    _write(tmp_path, "ci.yml", """name: CI
+on: push
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make test
+  duplicate:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: make test
+  publish:
+    needs: duplicate
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo publish
+""")
+
+    findings = [
+        finding for finding in _duplicate_findings(tmp_path)
+        if finding.get("opt12_duplicate_test_work")
+    ]
+    assert len(findings) == 1
+    assert findings[0]["opt12_duplicate_test_work"]["duplicate_job"] == "duplicate"
+
+
 def test_coverage_only_rerun_is_reported_as_minutes_work(tmp_path: Path):
     _write(tmp_path, "ci.yml", """name: CI
 on: pull_request
@@ -156,6 +301,99 @@ jobs:
                    if "coverage" in finding["evidence"].lower())
     assert "runner-minute" in finding["evidence"].lower()
     assert "existing test run" in finding["evidence"].lower()
+
+
+def test_coverage_only_rerun_normalizes_common_flag_forms(tmp_path: Path):
+    _write(tmp_path, "ci.yml", """name: CI
+on: pull_request
+jobs:
+  pytest-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest tests/
+  pytest-coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest tests/ --cov src --cov-report xml
+  npm-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+  npm-coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test -- --coverage
+""")
+
+    coverage_jobs = {
+        finding["opt12_duplicate_test_work"]["duplicate_job"]
+        for finding in _duplicate_findings(tmp_path)
+        if finding.get("opt12_duplicate_test_work", {}).get("variant") == "coverage"
+    }
+    assert coverage_jobs == {"pytest-coverage", "npm-coverage"}
+
+
+def test_needs_chain_variant_wins_when_the_duplicate_also_collects_coverage(
+        tmp_path: Path):
+    _write(tmp_path, "ci.yml", """name: CI
+on: push
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest tests/
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest tests/ --cov=src
+  publish:
+    needs: coverage
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo publish
+""")
+
+    finding = next(
+        finding for finding in _duplicate_findings(tmp_path)
+        if finding.get("opt12_duplicate_test_work", {}).get("duplicate_job") == "coverage"
+    )
+    assert finding["opt12_duplicate_test_work"]["variant"] == "needs_chain"
+    assert "workflow_run" in finding["evidence"]
+    assert "needs" in finding["evidence"]
+
+
+def test_each_duplicate_job_is_emitted_once_at_its_best_rank(tmp_path: Path):
+    _write(tmp_path, "ci.yml", """name: CI
+on: push
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest tests/
+  duplicate:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest tests/
+  publish:
+    needs: duplicate
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo publish
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest tests/ --cov=src
+""")
+
+    stamps = [
+        finding["opt12_duplicate_test_work"]
+        for finding in _duplicate_findings(tmp_path)
+        if finding.get("opt12_duplicate_test_work")
+    ]
+    assert [(stamp["duplicate_job"], stamp["variant"]) for stamp in stamps] == [
+        ("duplicate", "needs_chain"),
+        ("coverage", "coverage"),
+    ]
 
 
 def test_local_composite_test_commands_are_expanded_in_place(tmp_path: Path):
@@ -189,6 +427,65 @@ jobs:
     assert "pytest tests/" in finding["evidence"]
     assert "ctest" in finding["evidence"]
     assert "runner-minute" in finding["evidence"].lower()
+    stamp = finding["opt12_duplicate_test_work"]
+    assert stamp["existing_job"] == "first"
+    assert stamp["duplicate_job"] == "second"
+
+
+def test_direct_and_local_composite_commands_compare_semantically(tmp_path: Path):
+    action = tmp_path / ".github" / "actions" / "tests" / "action.yml"
+    action.parent.mkdir(parents=True)
+    action.write_text("""name: Tests
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: pytest tests/
+""", encoding="utf-8")
+    _write(tmp_path, "ci.yml", """name: CI
+on: push
+jobs:
+  direct:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest tests/
+  composite:
+    needs: direct
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/tests
+""")
+
+    finding = next(
+        finding for finding in _duplicate_findings(tmp_path)
+        if finding.get("opt12_duplicate_test_work"))
+    assert finding["opt12_duplicate_test_work"]["existing_job"] == "direct"
+    assert finding["opt12_duplicate_test_work"]["duplicate_job"] == "composite"
+
+
+def test_coverage_finding_belongs_to_the_duplicate_jobs_workflow(tmp_path: Path):
+    _write(tmp_path, "a-coverage.yml", """name: Coverage
+on: push
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest tests/ --cov=src
+""")
+    _write(tmp_path, "z-ci.yml", """name: CI
+on: push
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pytest tests/
+""")
+
+    finding = next(
+        finding for finding in _duplicate_findings(tmp_path)
+        if finding.get("opt12_duplicate_test_work"))
+    assert finding["workflow_file"].endswith("a-coverage.yml")
+    assert finding["affected_jobs"] == ["coverage"]
 
 
 def test_workflow_run_sizing_waits_for_the_producer_and_bills_the_suite():
