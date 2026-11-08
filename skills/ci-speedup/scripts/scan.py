@@ -2211,6 +2211,240 @@ def _detect_opt102(doc: dict, raw: str) -> list[Hit]:
     return hits
 
 
+_OPT89_COMPILE_RE = re.compile(
+    r"(?:^|&&|\|\||[;|]|\bthen\b|\bdo\b)\s*"
+    r"(?:(?:(?:[A-Za-z_][A-Za-z0-9_]*=(?:[^\s;&|]+|'[^']*'|\"[^\"]*\"))|"
+    r"(?:env|sudo|time))\s+)*(?:"
+    r"(?:\./)?configure\b|make(?:\s|$)|cmake(?:\s|$)|ninja(?:\s|$)|"
+    r"cargo\s+(?:build|install)\b|go\s+(?:build|install)\b|"
+    r"(?:\./)?mvnw?\b[^\n;&|]*\b(?:compile|package|install)\b|"
+    r"(?:\./)?gradlew?\b[^\n;&|]*\b(?:build|assemble|compile\w*)\b|"
+    r"(?:gcc|g\+\+|clang|clang\+\+|cc|c\+\+)\b)",
+    re.IGNORECASE | re.MULTILINE,
+)
+_OPT89_FOREIGN_ARCH_RE = re.compile(
+    r"(?:^|[/_-])(?:aarch64|arm64|arm(?:/v\d+|v\d+)?|riscv64|s390x|ppc64le)(?:$|[/_-])",
+    re.IGNORECASE,
+)
+_OPT89_DOCKER_RUN_PLATFORM_RE = re.compile(
+    r"\bdocker\s+run\b[^\n]*?--platform(?:=|\s+)"
+    r"(?P<platform>linux/(?:aarch64|arm64|arm/v\d+|riscv64|s390x|ppc64le))\b",
+    re.IGNORECASE,
+)
+_OPT89_CONTAINER_IMAGE_RE = re.compile(
+    r"^(?:arm64v8|arm32v\d+|aarch64|riscv64|s390x|ppc64le)/",
+    re.IGNORECASE,
+)
+
+
+def _opt89_compile_signal(command: str) -> str | None:
+    for match in _OPT89_COMPILE_RE.finditer(command):
+        segment = command[match.start():]
+        segment = re.sub(r"^(?:&&|\|\||[;|])\s*", "", segment).strip()
+        segment = re.split(r"&&|\|\||[;|]|\n", segment, maxsplit=1)[0]
+        low = segment.lower()
+        if re.search(r"\b(?:make|ninja)\b", low):
+            try:
+                tokens = shlex.split(segment)
+            except ValueError:
+                continue
+            tool_at = next((i for i, token in enumerate(tokens)
+                            if Path(token).name.lower() in {"make", "gmake", "ninja"}), None)
+            if tool_at is not None:
+                targets: list[str] = []
+                skip_value = False
+                for token in tokens[tool_at + 1:]:
+                    if skip_value:
+                        skip_value = False
+                        continue
+                    if token in {"-C", "--directory", "-f", "--file", "-j", "--jobs"}:
+                        skip_value = True
+                    elif not token.startswith("-") and "=" not in token:
+                        targets.append(token.lower())
+                test_targets = {"test", "tests", "check", "checks", "ctest", "verify"}
+                if targets and all(target in test_targets for target in targets):
+                    continue
+        if (re.search(r"\bcmake\b", low)
+                and re.search(r"\bcmake\s+(?:--version|--help|-e)\b", low)):
+            continue
+        if (re.search(r"\b(?:gcc|g\+\+|clang|clang\+\+|cc|c\+\+)\b", low)
+                and re.search(r"\s(?:--version|-v)\s*$", low)):
+            continue
+        if re.search(r"(?:\./)?configure\s+(?:--help|--version)\s*$", low):
+            continue
+        return re.sub(
+            r"^(?:&&|\|\||[;|])\s*", "", match.group(0)).strip()
+    return None
+
+
+def _opt89_docker_payload(command: str) -> str:
+    """Return the command after `docker run ... IMAGE`, or fail closed."""
+    command = _LINE_CONTINUATION_RE.sub(" ", command)
+    try:
+        tokens = shlex.split(command.splitlines()[0])
+    except ValueError:
+        return ""
+    try:
+        index = tokens.index("run", tokens.index("docker") + 1) + 1
+    except (ValueError, IndexError):
+        return ""
+    value_options = {
+        "--add-host", "--cap-add", "--cpus", "--device", "--env", "-e",
+        "--env-file", "--entrypoint", "--hostname", "-h", "--memory", "-m",
+        "--mount", "--name", "--network", "--platform", "--user", "-u",
+        "--volume", "-v", "--workdir", "-w",
+    }
+    while index < len(tokens):
+        token = tokens[index]
+        if token in value_options:
+            index += 2
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        payload = tokens[index + 1:]
+        stop = next((i for i, token in enumerate(payload)
+                     if token in {"&&", "||", ";", "|"}), len(payload))
+        payload = payload[:stop]
+        if (len(payload) >= 3 and Path(payload[0]).name in {"sh", "bash", "dash"}
+                and re.fullmatch(r"-[a-z]*c[a-z]*", payload[1])):
+            payload = payload[2:]
+        return " ".join(payload)
+    return ""
+
+
+def _opt89_qemu_supports(platforms: set[str], platform: str) -> bool:
+    if "all" in platforms:
+        return True
+    arch = platform.removeprefix("linux/").lower()
+    aliases = {"aarch64": "arm64"}
+    family = "arm" if arch.startswith("arm/") else aliases.get(arch, arch)
+    return arch in platforms or family in platforms
+
+
+def _opt89_foreign_container(job: dict, matrix: dict[str, str]) -> str | None:
+    container = job.get("container")
+    if isinstance(container, str):
+        image, options = container, ""
+    elif isinstance(container, dict):
+        image = str(container.get("image") or "")
+        options = str(container.get("options") or "")
+    else:
+        return None
+    image = _opt102_resolve(image, env={}, matrix=matrix, inputs={}, outputs={}) or ""
+    options = _opt102_resolve(options, env={}, matrix=matrix, inputs={}, outputs={}) or ""
+    platform = re.search(
+        r"--platform(?:=|\s+)(linux/(?:aarch64|arm64|arm/v\d+|riscv64|s390x|ppc64le))\b",
+        options,
+        re.IGNORECASE,
+    )
+    if platform:
+        return platform.group(1).lower()
+    if _OPT89_CONTAINER_IMAGE_RE.search(image):
+        return image.split("/", 1)[0].lower()
+    return None
+
+
+def _detect_opt89(doc: dict, raw: str) -> list[Hit]:
+    """Find compile commands executed in an emulated foreign container."""
+    hits: list[Hit] = []
+    for job_name, job in _jobs_from_doc(doc).items():
+        if not isinstance(job, dict):
+            continue
+        job_hit = False
+        for matrix in _opt102_matrix_legs(job):
+            if not _opt102_x64_runner(job.get("runs-on"), matrix)[0]:
+                continue
+            qemu_platforms: set[str] | None = None
+            container_arch = _opt89_foreign_container(job, matrix)
+            action_occurrence = docker_occurrence = 0
+            container_occurrences: dict[str, int] = {}
+            for step in _steps(job):
+                uses = _uses(step)
+                run = _run(step)
+                resolved_run = _opt102_resolve(
+                    run, env={}, matrix=matrix, inputs={}, outputs={}) or ""
+                normalized_run = _LINE_CONTINUATION_RE.sub(" ", resolved_run)
+                with_ = step.get("with") or {}
+                if uses.startswith("uraimo/run-on-arch-action@"):
+                    action_occurrence += 1
+                if re.search(r"\bdocker\s+run\b", normalized_run):
+                    docker_occurrence += 1
+                first_line = run.splitlines()[0].strip() if run else ""
+                if first_line:
+                    container_occurrences[first_line] = (
+                        container_occurrences.get(first_line, 0) + 1)
+                if uses.startswith("docker/setup-qemu-action@"):
+                    configured = (str(with_.get("platforms") or "all")
+                                  if isinstance(with_, dict) else "all")
+                    configured = _opt102_resolve(
+                        configured, env={}, matrix=matrix, inputs={}, outputs={}) or ""
+                    if configured:
+                        qemu_platforms = {
+                            value.strip().lower() for value in configured.split(",")
+                            if value.strip()
+                        }
+
+                arch = ""
+                command = ""
+                marker = ""
+                occurrence = 1
+                mechanism = ""
+                if uses.startswith("uraimo/run-on-arch-action@") and isinstance(with_, dict):
+                    arch = (_opt102_resolve(
+                        with_.get("arch"), env={}, matrix=matrix, inputs={}, outputs={})
+                        or "").lower()
+                    command = (_opt102_resolve(
+                        with_.get("run"), env={}, matrix=matrix, inputs={}, outputs={})
+                        or "")
+                    marker = "uraimo/run-on-arch-action@"
+                    occurrence = action_occurrence
+                    mechanism = "run-on-arch action"
+                    if not _OPT89_FOREIGN_ARCH_RE.search(arch):
+                        continue
+                elif (qemu_platforms is not None
+                      and (platform := _OPT89_DOCKER_RUN_PLATFORM_RE.search(normalized_run))
+                      and _opt89_qemu_supports(
+                          qemu_platforms, platform.group("platform"))):
+                    arch = platform.group("platform").lower()
+                    command = _opt89_docker_payload(resolved_run)
+                    marker = "docker run"
+                    occurrence = docker_occurrence
+                    mechanism = "QEMU-backed docker run"
+                elif container_arch and resolved_run:
+                    arch = container_arch
+                    command = resolved_run
+                    marker = first_line
+                    occurrence = container_occurrences[first_line]
+                    mechanism = "foreign-architecture job container"
+                else:
+                    continue
+
+                signal = _opt89_compile_signal(command)
+                if signal is None:
+                    continue
+                line = _line_of_nth_in_job(
+                    raw, str(job_name), marker, occurrence)
+                hits.append(Hit(
+                    line=line,
+                    affected_jobs=[str(job_name)],
+                    evidence=(f"job `{job_name}` compiles via `{signal}` inside a "
+                              f"{mechanism} for `{arch}` on a hosted x64 runner"),
+                    match_text=signal,
+                    snippet=_block_lines(raw, line),
+                    facts={"opt89_emulated_container": {
+                        "architecture": arch,
+                        "compile_signal": signal,
+                        "mechanism": mechanism,
+                    }},
+                ))
+                job_hit = True
+                break
+            if job_hit:
+                break
+    return hits
+
+
 def _run(step: dict) -> str:
     r = step.get("run")
     return r if isinstance(r, str) else ""
@@ -3884,6 +4118,7 @@ _DETECTORS: dict[str, Any] = {
     "OPT45": _detect_opt45,
     "OPT62": _detect_opt62,
     "OPT63": _detect_opt63,
+    "OPT89": _detect_opt89,
     "OPT102": _detect_opt102,
 }
 
