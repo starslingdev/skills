@@ -92,7 +92,8 @@
       "rendered per-workflow gate frequency matches the populations re-derivation",
       "scanned date matches the date in the filename",
       "shallow cost-spine sample is disclosed (re-derived from the stamped workflows)",
-      "static-only banner matches CI shape"
+      "static-only banner matches CI shape",
+      "unconfirmed checks carry no direct credit or critical-path framing"
     ]
   },
   "workflow_shapes": {

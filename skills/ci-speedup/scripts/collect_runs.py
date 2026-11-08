@@ -21873,6 +21873,11 @@ def _detect_structural_candidates(
             req_status = "not-required"
         else:
             req_status = "unknown"
+        pole_required_reachable = (
+            _pole_is_required_reachable(check_name, req_names, job_graph, crit_by_wf)
+            if (required_checks is not None and required_checks.advice_complete
+                and not reach_unresolved) else None
+        )
 
         crit = crit_by_wf.get(wf_path, {})
 
@@ -21999,10 +22004,14 @@ def _detect_structural_candidates(
                 note=("Decomposed from the sampled job's per-step timings. The "
                       "dominant step is the addressable cost — attack it by "
                       "category, don't declare the whole check inherent."))
-            evidence_base = (f"critical-path check `{check_name}` ({check_p50:.0f}s): "
-                             f"dominant step `{decomp['dominant_step']}` "
-                             f"({decomp['dominant_category']}, "
-                             f"{decomp['dominant_share']*100:.0f}% of job `{job_name}`)")
+            evidence_base = (
+                (f"measured check `{check_name}` ({check_p50:.0f}s), which ci-speedup "
+                 "could not confirm blocks merging: ")
+                if pole_required_reachable is False else
+                f"critical-path check `{check_name}` ({check_p50:.0f}s): "
+            ) + (f"dominant step `{decomp['dominant_step']}` "
+                 f"({decomp['dominant_category']}, "
+                 f"{decomp['dominant_share']*100:.0f}% of job `{job_name}`)")
         else:
             me = None
             evidence_base = None
@@ -22092,6 +22101,17 @@ def _detect_structural_candidates(
                 if raw <= 0:
                     f["realization"] = "none"
                     f["tier"] = 2
+            if pole_required_reachable is False:
+                f["required_reachable"] = False
+                f["wall_clock_p50_s"] = 0.0
+                f["realization"] = "none"
+                f["tier"] = 2
+                f.pop("wall_clock_uncapped_p50_s", None)
+                f.pop("wall_clock_derivation", None)
+                note = ("No direct merge-wait saving is credited because ci-speedup "
+                        "could not confirm this check blocks merging. Optimize it only "
+                        "if repository policy confirms that it gates the merge.")
+                f["size_note"] = note
             out.append(f)
         if mapping is not None:
             seen_jobs.add((wf_path, job_name))

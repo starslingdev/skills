@@ -4018,6 +4018,12 @@ def _pole_gate_prompt_claim(check: str, wf: str, dur: str, gate_count: int, npop
             f"Rarely the merge pole - the actual slowest check a PR waits on{_freq}{_prestxt}: "
             f"P50 {dur}. A slower concurrent check usually gates ahead, so speeding it helps only "
             "the PRs where it IS the pole, not typical merge-wait."))
+    _unconfirmed_claim = claims.Claim(
+        kind="pole_gate_prompt", subject=check,
+        fields={"dur": dur, "required_reachable": False},
+        rendered=_strip_emdashes(
+            f"Could not confirm this check blocks merging: P50 {dur}. Treat it as "
+            "uncredited until repository policy confirms that it gates the merge."))
     # A modal-CHAIN member (issue #112) is on-spine but is NOT "the slowest check a typical PR
     # waits on" — it is one serial `needs:` STAGE whose time ADDS on the gate path (the pole's
     # role line already says "Stage N/M … its {dur} ADDS"). Frame the prompt gate line the same
@@ -4037,7 +4043,8 @@ def _pole_gate_prompt_claim(check: str, wf: str, dur: str, gate_count: int, npop
                 f"`needs:` gate chain (chain P50 {_chain.get('merge_dur')}); this stage: P50 {dur}. "
                 "Its time ADDS on the gate path - the chain, not this single stage, is what a "
                 "typical PR waits on."))
-    _claim = _chain_claim or (_demoted_claim if demoted else _gate_claim)
+    _claim = (_unconfirmed_claim if pole.get("required_reachable") is False else
+              _chain_claim or (_demoted_claim if demoted else _gate_claim))
     return cs.add(_claim) if cs is not None else _claim.rendered
 
 
@@ -6416,8 +6423,11 @@ def _toc_block(pole_wfs: list[dict[str, Any]], wf_gate: dict[str, int],
     TOC doesn't contradict the demotion banner. [] when there's nothing to list."""
     if not pole_wfs:
         return []
+    has_unconfirmed = any(p.get("required_reachable") is False for p in pole_wfs)
     intro = ("the file-backed workflows that set your PR-floor (no file-backed required "
-             "gate exists)" if pr_floor else "the checks that gate your merge")
+             "gate exists)" if pr_floor else
+             "the measured PR checks, with unconfirmed merge blockers labelled explicitly"
+             if has_unconfirmed else "the checks that gate your merge")
     lines = ["## 📋 Contents", "",
              f"**🐌 Critical path** — {intro}, each linking to its long-pole drill-down "
              "(waterfall → biggest lever → agent prompt):", ""]
@@ -6439,7 +6449,9 @@ def _toc_block(pole_wfs: list[dict[str, Any]], wf_gate: dict[str, int],
         # count is a sibling check's frequency, so printing "`wf` gates N/npop PRs" beside it
         # contradicts the pole's own header (the caddy goreleaser-check case); tag it "rarely the
         # merge pole" instead. Absent stamp (direct `_toc_block` calls) → the gate tail, as before.
-        if p.get("_demoted_gate_framing"):
+        if p.get("required_reachable") is False:
+            gates = " · could not confirm it blocks merging"
+        elif p.get("_demoted_gate_framing"):
             gates = " · rarely the merge pole"
         elif gc and npop:
             gates = f" · `{wf_base}` gates {gc}/{npop} PRs"
@@ -11413,10 +11425,18 @@ def _structural_block(findings: list[dict[str, Any]],
         title = _flatten_cell(f.get("title") or pat)
         risk = str(f.get("risk", "")).strip().upper()
         risk_s = f" - risk **{risk}**" if risk else ""
+        framing = (
+            "A measured **structural** observation on a check that ci-speedup could not "
+            "confirm blocks merging. No direct merge-wait saving is credited; use this "
+            "lever only if repository policy confirms the check gates the merge. It carries "
+            "a risk profile - review the guardrail and rollout before shipping:"
+            if f.get("required_reachable") is False else
+            "A measured **structural** lever on the critical path (it IS this pole, so "
+            "it's not repeated in the off-path appendix). It carries a risk profile - "
+            "review the guardrail and rollout before shipping:"
+        )
         out += [f"**📐 Structural root-cause — {pat} · {title}**{risk_s}", "",
-                "A measured **structural** lever on the critical path (it IS this pole, so "
-                "it's not repeated in the off-path appendix). It carries a risk profile - "
-                "review the guardrail and rollout before shipping:", ""]
+                framing, ""]
         ev = str(f.get("evidence") or "").strip()
         if ev:
             out.append(f"- **What ci-speedup measured:** {_flatten_cell(ev)}")

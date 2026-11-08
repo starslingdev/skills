@@ -13,11 +13,6 @@
       "pattern": "OPT45",
       "runner_min": 9.6,
       "wall_clock_s": 0.0
-    },
-    {
-      "pattern": "OPT75",
-      "runner_min": null,
-      "wall_clock_s": 195.0
     }
   ],
   "detected_patterns": [

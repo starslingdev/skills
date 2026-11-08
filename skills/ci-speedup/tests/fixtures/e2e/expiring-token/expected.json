@@ -97,6 +97,7 @@
       "the fetch plan matches its call sites (no unconsumed prefetches)",
       "the per-PR chain/makespan spine is bound to the kept config era (no dropped-era PR blends in)",
       "the rendered era disclosure matches the enumerated config (no pre-only caveat over post-era checks)",
+      "unconfirmed checks carry no direct credit or critical-path framing",
       "wall-clock headline carries next gate and verification guidance"
     ]
   },

@@ -16,6 +16,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-11-08** — Keep checks whose required-job reachability cannot be confirmed visible but uncredited. Their structural findings and drill-downs now use conditional framing, and report verification rejects direct merge-wait credit or critical-path wording on those checks.
 - **2026-11-07** — Cap each finding's wall-clock saving against its own job on every sampled commit, including its serial chain and independent floor. Commit caps now use the sampled commit shares instead of collapsing a mixed population to its median, and report verification re-derives the same per-job bound.
 - **2026-11-07** — Hand default-branch push drills the matched catalog recipe, documentation and delivery checks for every recognized log cause. Matching static findings are tagged for the push lane, and emulated-image drills require inspection of the builder's nodes.
 - **2026-11-07** — Recognize inline history operands such as pnpm filter revisions and changed-since flags. Parent-only operands receive their exact bounded checkout depth, while comparisons against a branch keep full history.

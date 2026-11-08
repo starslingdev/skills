@@ -130,6 +130,14 @@ class _RequiredExternalStatusClient(_RequiredCrownClient):
         return super().json(endpoint, allow_missing)
 
 
+class _AllChecksRequiredClient(_RequiredCrownClient):
+    def json(self, endpoint: str, allow_missing: bool = False):
+        if endpoint == "repos/o/r/branches/main/protection/required_status_checks":
+            self.queries += 1
+            return {"contexts": ["merge-gate", "mystery matrix"]}
+        return super().json(endpoint, allow_missing)
+
+
 _DOC = {
     "repo": "o/r",
     "workflow_job_graph": {
@@ -172,6 +180,7 @@ def test_confirmed_required_status_can_crown_without_a_workflow_file(monkeypatch
 def test_collect_crowns_slowest_confirmed_gate_and_verifier_agrees(monkeypatch, tmp_path):
     monkeypatch.setattr(cr, "GhClient", _RequiredCrownClient)
     doc = cr.collect(json.loads(json.dumps(_DOC)), "o/r", max_runs=8, shallow_runs=8)
+    doc["skill_commit_sha"] = "installed:unversioned"
     cp = doc["pr_critical_path"]
 
     assert cp["critical_path_check"] == "unit"
@@ -197,4 +206,85 @@ def test_collect_crowns_slowest_confirmed_gate_and_verifier_agrees(monkeypatch, 
     failures = [check for check in vr.run_checks(
         report, report_path, findings_path, skill_repo=None)
         if not check.skipped and not check.ok and "provenance" not in check.name]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+
+
+def test_unconfirmed_check_is_uncredited_and_verifier_rejects_restamped_credit(
+        monkeypatch, tmp_path):
+    monkeypatch.setattr(cr, "GhClient", _RequiredCrownClient)
+    doc = cr.collect(json.loads(json.dumps(_DOC)), "o/r", max_runs=8, shallow_runs=8)
+    doc["skill_commit_sha"] = "installed:unversioned"
+    finding = next(
+        row for row in doc["findings"]
+        if row.get("pattern") == "OPT75" and row.get("workflow_file") == _MYSTERY)
+    reasons = [
+        str(row.get("reason") or "")
+        for row in finding.get("wall_clock_derivation") or []
+    ]
+
+    assert not (
+        finding.get("realization") == "direct"
+        and float(finding.get("wall_clock_p50_s") or 0) > 0
+    ), (finding.get("pattern"), finding.get("wall_clock_p50_s"), reasons)
+
+    report = bp.render(doc, captured_at="2026-11-05T00:00:00Z")
+    assert "critical-path check `mystery matrix`" not in report
+    assert "could not confirm this check blocks merging" in report.lower()
+    toc = report[report.index("## 📋 Contents"):report.index('<a id="pole-1"')]
+    assert "the checks that gate your merge" not in toc
+    assert "could not confirm it blocks merging" in toc.lower()
+
+    findings_path = tmp_path / "unconfirmed-findings.json"
+    report_path = tmp_path / "unconfirmed-report.md"
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+    report_path.write_text(report, encoding="utf-8")
+    assert bp._LAST_CLAIMS is not None
+    report_path.with_name(report_path.name + ".claims.json").write_text(
+        json.dumps(bp._LAST_CLAIMS.to_json()), encoding="utf-8")
+    failures = [check for check in vr.run_checks(
+        report, report_path, findings_path, skill_repo=None)
+        if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+
+    finding["wall_clock_p50_s"] = 195.0
+    finding["realization"] = "direct"
+    mutant_report = bp.render(doc, captured_at="2026-11-05T00:00:00Z")
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+    report_path.write_text(mutant_report, encoding="utf-8")
+    assert bp._LAST_CLAIMS is not None
+    report_path.with_name(report_path.name + ".claims.json").write_text(
+        json.dumps(bp._LAST_CLAIMS.to_json()), encoding="utf-8")
+    mutant_checks = vr.run_checks(
+        mutant_report, report_path, findings_path, skill_repo=None)
+    assert any(
+        not check.skipped and not check.ok
+        and "unconfirmed" in f"{check.name} {check.detail}".lower()
+        for check in mutant_checks
+    )
+
+
+def test_confirmed_check_keeps_structural_credit_and_framing(monkeypatch, tmp_path):
+    monkeypatch.setattr(cr, "GhClient", _AllChecksRequiredClient)
+    doc = cr.collect(json.loads(json.dumps(_DOC)), "o/r", max_runs=8, shallow_runs=8)
+    doc["skill_commit_sha"] = "installed:unversioned"
+    finding = next(
+        row for row in doc["findings"]
+        if row.get("pattern") == "OPT75" and row.get("workflow_file") == _MYSTERY)
+
+    assert finding.get("required_reachable") is not False
+    assert finding.get("realization") == "direct"
+    assert float(finding.get("wall_clock_p50_s") or 0) > 0
+    report = bp.render(doc, captured_at="2026-11-05T00:00:00Z")
+    assert "critical-path check `mystery matrix`" in report
+
+    findings_path = tmp_path / "confirmed-findings.json"
+    report_path = tmp_path / "confirmed-report.md"
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+    report_path.write_text(report, encoding="utf-8")
+    assert bp._LAST_CLAIMS is not None
+    report_path.with_name(report_path.name + ".claims.json").write_text(
+        json.dumps(bp._LAST_CLAIMS.to_json()), encoding="utf-8")
+    failures = [check for check in vr.run_checks(
+        report, report_path, findings_path, skill_repo=None)
+        if not check.skipped and not check.ok]
     assert failures == [], [(check.name, check.detail) for check in failures]
