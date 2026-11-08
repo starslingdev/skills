@@ -367,8 +367,9 @@ def test_named_fixtures_exercise_their_defining_interactions(
         monkeypatch, tmp_path):
     docs = {}
     for name in (
-            "config-era-change", "external-required-gate", "heavy-runner-queue",
-            "minority-tail", "multiarch-image", "path-partitioned-monorepo"):
+            "config-era-change", "duplicate-gate-job", "external-required-gate",
+            "heavy-runner-queue", "minority-tail", "multiarch-image",
+            "path-partitioned-monorepo"):
         docs[name], _report, _checks = run_fixture(
             FIXTURE_ROOT / name, monkeypatch, tmp_path)
 
@@ -381,6 +382,14 @@ def test_named_fixtures_exercise_their_defining_interactions(
     assert any(
         row.get("minority_tail")
         for row in docs["minority-tail"]["pr_critical_path"]["checks"])
+    duplicate = next(
+        row for row in docs["duplicate-gate-job"]["findings"]
+        if row.get("pattern") == "OPT12"
+        and row.get("opt12_duplicate_test_work"))
+    assert duplicate["wall_clock_p50_s"] == 0.0
+    assert duplicate["runner_min_saving"] == 6.0
+    assert duplicate["opt12_duplicate_test_work"]["duplicate_p50_s"] == 90.0
+    assert duplicate["opt12_duplicate_test_work"]["workflow_run_wall_p50_s"] == 0.0
     assert "OPT102" in {
         row.get("pattern") for row in docs["multiarch-image"]["findings"]}
     image_doc = docs["multiarch-image"]
@@ -411,6 +420,55 @@ def test_named_fixtures_exercise_their_defining_interactions(
         for workflow in red["workflows"] for run in workflow["runs"])
 
 
+def test_duplicate_gate_sizing_is_independently_verified(monkeypatch, tmp_path):
+    doc, report, checks = run_fixture(
+        FIXTURE_ROOT / "duplicate-gate-job", monkeypatch, tmp_path)
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+
+    finding = next(
+        row for row in doc["findings"]
+        if row.get("opt12_duplicate_test_work"))
+    finding["runner_min_saving"] = 5.0
+    finding["opt12_duplicate_test_work"]["runner_min_saving"] = 5.0
+    findings_path = tmp_path / "duplicate-gate-job" / "findings.json"
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+    assert not vr.check_default_branch_push_lane_isolated(
+        report, findings_path).ok
+
+
+def test_duplicate_gate_positive_push_wall_stays_out_of_merge_credit(
+        monkeypatch, tmp_path):
+    fixture = tmp_path / "positive-duplicate-gate"
+    shutil.copytree(FIXTURE_ROOT / "duplicate-gate-job", fixture)
+    responses_path = fixture / "responses.json"
+    responses = json.loads(responses_path.read_text(encoding="utf-8"))
+    for workflow in responses["workflows"]:
+        if workflow["path"].endswith("publish.yml"):
+            for run in workflow["runs"]:
+                run["updated_at"] = run["created_at"].replace("00:00Z", "03:30Z")
+    for run_id in ("3001", "3002", "3003"):
+        test_job, publish_job = responses["jobs"][run_id]
+        test_job["completed_at"] = test_job["started_at"].replace("00:00Z", "03:00Z")
+        test_job["steps"][0]["completed_at"] = test_job["completed_at"]
+        publish_job["started_at"] = test_job["completed_at"]
+        publish_job["completed_at"] = publish_job["started_at"].replace("03:00Z", "03:30Z")
+        publish_job["steps"][0]["started_at"] = publish_job["started_at"]
+        publish_job["steps"][0]["completed_at"] = publish_job["completed_at"]
+    responses_path.write_text(json.dumps(responses), encoding="utf-8")
+
+    run_root = tmp_path / "positive-run"
+    run_root.mkdir()
+    doc, _report, checks = run_fixture(fixture, monkeypatch, run_root)
+    finding = next(
+        row for row in doc["findings"]
+        if row.get("opt12_duplicate_test_work"))
+    stamp = finding["opt12_duplicate_test_work"]
+    assert stamp["workflow_run_wall_p50_s"] == 40.0
+    assert finding["wall_clock_p50_s"] == 0.0
+    assert finding["wall_clock_uncapped_p50_s"] > 0
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
 def _run_multiarch_log_variant(
         name: str, monkeypatch, tmp_path, transform):
     fixture = tmp_path / "fixture-variants" / name
