@@ -1153,6 +1153,14 @@ def _job_payload_blob(job: dict, doc: dict | None = None,
             text = _LOCAL_ACTION_TEXT.get(ref)
             if text is None:
                 return None     # unreadable local action — can't prove it unread
+            # Local composite steps are flattened as text for path-name checks,
+            # but their Docker build configuration is not resolved below. A
+            # Dockerfile inside the action may read the checkout payload, so
+            # fail closed instead of claiming that it does not.
+            if (re.search(r"docker/build-push-action@", text, re.IGNORECASE)
+                    or re.search(r"\bdocker\s+(?:buildx\s+)?build\b", text,
+                                 re.IGNORECASE)):
+                return None
             parts.append(text)
     image_payload = (_opt102_job_image_payload(doc, raw, job)
                      if doc is not None else [])
@@ -2080,6 +2088,32 @@ def _opt102_copy_sources(candidate: Path, context: Path, root: Path) -> list[str
     return sources
 
 
+def _opt102_path_covers(source: str, declared: str) -> bool:
+    """Whether a local source is an equal/ancestor path, case-insensitively."""
+    source_parts = tuple(
+        part.casefold() for part in Path(source).parts if part != ".")
+    declared_parts = tuple(
+        part.casefold() for part in Path(declared.strip("/")).parts)
+    return not source_parts or declared_parts[:len(source_parts)] == source_parts
+
+
+def _opt102_source_has_lfs_hint(root: Path, source: str,
+                                hint: str) -> bool | None:
+    """Check an extension-style LFS hint inside one copied source, bounded."""
+    path = root / source
+    if path.is_file():
+        return path.name.casefold().endswith(hint.casefold())
+    if not path.is_dir():
+        return False
+    for index, candidate in enumerate(path.rglob("*")):
+        if index >= 5_000:
+            return None
+        if (candidate.is_file()
+                and candidate.name.casefold().endswith(hint.casefold())):
+            return True
+    return False
+
+
 def _opt102_job_image_payload(doc: dict, raw: str, job: dict) -> list[str] | None:
     """Resolved image context and COPY/ADD paths read by one workflow job."""
     if _OPT102_ROOT is None:
@@ -2094,6 +2128,9 @@ def _opt102_job_image_payload(doc: dict, raw: str, job: dict) -> list[str] | Non
     env = {**workflow_env, **({str(k): str(v) for k, v in raw_job_env.items()}
                              if isinstance(raw_job_env, dict) else {})}
     payload: set[str] = set()
+    if not any(_opt102_step_build_config(step, job) is not None
+               for step in _steps(job)):
+        return []
     for matrix in _opt102_matrix_legs(job):
         outputs: dict[str, str] = {}
         for step in _steps(job):
@@ -2107,8 +2144,15 @@ def _opt102_job_image_payload(doc: dict, raw: str, job: dict) -> list[str] | Non
             }
             build = _opt102_step_build_config(step, job)
             if build is not None:
+                config, marker = build
+                # build-push-action defaults to a Git context, which does not
+                # consume mutations made by the preceding checkout. Only an
+                # explicit local path context can make that checkout payload
+                # load-bearing.
+                if marker == "docker/build-push-action@" and "context" not in config:
+                    continue
                 paths = _opt102_resolved_dockerfile(
-                    root, build[0], env=resolved_env, matrix=matrix,
+                    root, config, env=resolved_env, matrix=matrix,
                     inputs=caller_inputs, outputs=outputs)
                 if paths is None:
                     return None
@@ -2116,24 +2160,30 @@ def _opt102_job_image_payload(doc: dict, raw: str, job: dict) -> list[str] | Non
                 sources = _opt102_copy_sources(candidate, context, root)
                 if sources is None:
                     return None
-                payload.add(context.relative_to(root).as_posix() or ".")
-                payload.update(sources)
                 # A source directory covers every declared checkout payload
-                # nested under it. Add those concrete declarations so the
-                # existing exact evidence check sees COPY . and subcontexts.
-                for declared in [*_SUBMODULE_PATHS, *_LFS_PATH_HINTS]:
-                    declared_path = Path(declared.strip("/"))
-                    for source in sources:
-                        source_path = Path(source)
-                        if source == "." or declared_path == source_path:
-                            payload.add(declared)
-                            break
-                        try:
-                            declared_path.relative_to(source_path)
-                        except ValueError:
-                            continue
+                # nested under it. Add only those concrete declarations: raw
+                # source strings would make `vendor/lib-generated` a substring
+                # match for the distinct payload `vendor/lib`.
+                for declared in _SUBMODULE_PATHS:
+                    if any(_opt102_path_covers(source, declared) for source in sources):
                         payload.add(declared)
-                        break
+                for hint in _LFS_PATH_HINTS:
+                    if any(source == "." for source in sources):
+                        payload.add(hint)
+                        continue
+                    if not hint.startswith("."):
+                        if any(_opt102_path_covers(source, hint) for source in sources):
+                            payload.add(hint)
+                        continue
+                    # Extension-style attributes (`*.psd` -> `.psd`) need a
+                    # real copied file, not a path-substring guess.
+                    for source in sources:
+                        matched = _opt102_source_has_lfs_hint(root, source, hint)
+                        if matched is None:
+                            return None
+                        if matched:
+                            payload.add(hint)
+                            break
             step_id = str(step.get("id") or "")
             if step_id:
                 run = str(step.get("run") or "")

@@ -3731,6 +3731,186 @@ jobs:
     assert "OPT76" not in _scan_one(tmp_path, workflow)
 
 
+def test_opt76_ignores_build_push_default_git_context(tmp_path: Path):
+    """build-push-action's omitted context uses the Git context, so it does
+    not consume submodules added to the preceding checkout's working tree."""
+    _write_repo_file(tmp_path, ".gitmodules", _GITMODULES)
+    (tmp_path / "Dockerfile").write_text(
+        "FROM alpine:3.21\nCOPY vendor/protos/ /opt/protos/\n",
+        encoding="utf-8",
+    )
+    workflow = """name: CI
+on: pull_request
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: docker/build-push-action@v6
+"""
+
+    assert "OPT76" in _scan_one(tmp_path, workflow)
+
+
+def test_opt76_fails_closed_on_docker_build_inside_local_action(tmp_path: Path):
+    """The scanner does not structurally resolve Docker inputs nested inside
+    a local action, so it must not claim the checkout payload is unread."""
+    _write_repo_file(tmp_path, ".gitmodules", _GITMODULES)
+    action = tmp_path / ".github" / "actions" / "image"
+    action.mkdir(parents=True)
+    (action / "action.yml").write_text(
+        "runs:\n  using: composite\n  steps:\n"
+        "    - uses: docker/build-push-action@v6\n"
+        "      with:\n        context: .\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "Dockerfile").write_text(
+        "FROM alpine:3.21\nCOPY vendor/protos/ /opt/protos/\n",
+        encoding="utf-8",
+    )
+    workflow = """name: CI
+on: pull_request
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/image
+"""
+
+    assert "OPT76" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt76_docker_copy_requires_a_path_component_match(tmp_path: Path):
+    _write_repo_file(
+        tmp_path, ".gitmodules",
+        '[submodule "library"]\n\tpath = vendor/protos\n'
+        '\turl = https://example.invalid/library.git\n')
+    (tmp_path / "Dockerfile").write_text(
+        "FROM alpine:3.21\nCOPY vendor/protos-generated/ /opt/generated/\n",
+        encoding="utf-8",
+    )
+    workflow = """name: CI
+on: pull_request
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+"""
+
+    assert "OPT76" in _scan_one(tmp_path, workflow)
+
+
+def test_opt76_docker_copy_path_coverage_is_case_insensitive(tmp_path: Path):
+    _write_repo_file(
+        tmp_path, ".gitmodules",
+        '[submodule "library"]\n\tpath = vendor/lib\n'
+        '\turl = https://example.invalid/library.git\n')
+    (tmp_path / "Dockerfile").write_text(
+        "FROM alpine:3.21\nCOPY Vendor/ /opt/vendor/\n",
+        encoding="utf-8",
+    )
+    workflow = """name: CI
+on: pull_request
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+"""
+
+    assert "OPT76" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt76_docker_directory_copy_detects_lfs_extension(tmp_path: Path):
+    _write_repo_file(tmp_path, ".gitattributes", _GITATTRIBUTES)
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    (assets / "splash.psd").write_bytes(b"lfs fixture")
+    (tmp_path / "Dockerfile").write_text(
+        "FROM alpine:3.21\nCOPY assets/ /opt/assets/\n",
+        encoding="utf-8",
+    )
+    workflow = """name: CI
+on: pull_request
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+"""
+
+    assert "OPT76" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt76_resolves_add_from_a_non_root_context(tmp_path: Path):
+    _write_repo_file(
+        tmp_path, ".gitmodules",
+        '[submodule "library"]\n\tpath = docker/vendor/lib\n'
+        '\turl = https://example.invalid/library.git\n')
+    docker = tmp_path / "docker"
+    docker.mkdir()
+    (docker / "Dockerfile").write_text(
+        "FROM alpine:3.21\nADD vendor/lib/ /opt/library/\n",
+        encoding="utf-8",
+    )
+    workflow = """name: CI
+on: pull_request
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: docker/build-push-action@v6
+        with:
+          context: docker
+"""
+
+    assert "OPT76" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt76_fails_closed_when_dockerfile_is_missing(tmp_path: Path):
+    _write_repo_file(tmp_path, ".gitmodules", _GITMODULES)
+    workflow = """name: CI
+on: pull_request
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: missing/Dockerfile
+"""
+
+    assert "OPT76" not in _scan_one(tmp_path, workflow)
+
+
 @pytest.mark.parametrize(("copy_source", "fires"), (
     ("src/", True),
     (".", False),
