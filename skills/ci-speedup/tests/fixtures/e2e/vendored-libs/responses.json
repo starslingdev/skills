@@ -1,0 +1,204 @@
+{
+  "repo": "fixture/vendored-libs",
+  "captured_at": "2026-01-31T00:00:00Z",
+  "default_branch": "main",
+  "required_checks": [
+    "gate"
+  ],
+  "workflows": [
+    {
+      "id": 101,
+      "path": ".github/workflows/ci.yml",
+      "name": "CI",
+      "runs_30d": 3,
+      "runs": [
+        {
+          "id": 1001,
+          "event": "pull_request",
+          "head_branch": "feature-a",
+          "head_sha": "sha-a",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-28T00:00:00Z",
+          "run_started_at": "2026-01-28T00:00:00Z",
+          "updated_at": "2026-01-28T00:35:30Z"
+        },
+        {
+          "id": 1002,
+          "event": "pull_request",
+          "head_branch": "feature-b",
+          "head_sha": "sha-b",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-27T00:00:00Z",
+          "run_started_at": "2026-01-27T00:00:00Z",
+          "updated_at": "2026-01-27T00:35:30Z"
+        },
+        {
+          "id": 1003,
+          "event": "pull_request",
+          "head_branch": "feature-c",
+          "head_sha": "sha-c",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-26T00:00:00Z",
+          "run_started_at": "2026-01-26T00:00:00Z",
+          "updated_at": "2026-01-26T00:35:30Z"
+        }
+      ]
+    }
+  ],
+  "jobs": {
+    "1001": [
+      {
+        "id": 1101,
+        "name": "build",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-28T00:00:00Z",
+        "completed_at": "2026-01-28T00:02:00Z",
+        "steps": [
+          {
+            "name": "build",
+            "started_at": "2026-01-28T00:00:00Z",
+            "completed_at": "2026-01-28T00:02:00Z"
+          }
+        ],
+        "conclusion": "success"
+      },
+      {
+        "id": 1102,
+        "name": "gate",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-28T00:02:00Z",
+        "completed_at": "2026-01-28T00:35:30Z",
+        "steps": [
+          {
+            "name": "build vendored libraries",
+            "started_at": "2026-01-28T00:02:00Z",
+            "completed_at": "2026-01-28T00:35:20Z"
+          },
+          {
+            "name": "test artifacts",
+            "started_at": "2026-01-28T00:35:20Z",
+            "completed_at": "2026-01-28T00:35:30Z"
+          }
+        ],
+        "conclusion": "success"
+      }
+    ],
+    "1002": [
+      {
+        "id": 1201,
+        "name": "build",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-27T00:00:00Z",
+        "completed_at": "2026-01-27T00:02:00Z",
+        "steps": [
+          {
+            "name": "build",
+            "started_at": "2026-01-27T00:00:00Z",
+            "completed_at": "2026-01-27T00:02:00Z"
+          }
+        ],
+        "conclusion": "success"
+      },
+      {
+        "id": 1202,
+        "name": "gate",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-27T00:02:00Z",
+        "completed_at": "2026-01-27T00:35:30Z",
+        "steps": [
+          {
+            "name": "build vendored libraries",
+            "started_at": "2026-01-27T00:02:00Z",
+            "completed_at": "2026-01-27T00:35:20Z"
+          },
+          {
+            "name": "test artifacts",
+            "started_at": "2026-01-27T00:35:20Z",
+            "completed_at": "2026-01-27T00:35:30Z"
+          }
+        ],
+        "conclusion": "success"
+      }
+    ],
+    "1003": [
+      {
+        "id": 1301,
+        "name": "build",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-26T00:00:00Z",
+        "completed_at": "2026-01-26T00:02:00Z",
+        "steps": [
+          {
+            "name": "build",
+            "started_at": "2026-01-26T00:00:00Z",
+            "completed_at": "2026-01-26T00:02:00Z"
+          }
+        ],
+        "conclusion": "success"
+      },
+      {
+        "id": 1302,
+        "name": "gate",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-26T00:02:00Z",
+        "completed_at": "2026-01-26T00:35:30Z",
+        "steps": [
+          {
+            "name": "build vendored libraries",
+            "started_at": "2026-01-26T00:02:00Z",
+            "completed_at": "2026-01-26T00:35:20Z"
+          },
+          {
+            "name": "test artifacts",
+            "started_at": "2026-01-26T00:35:20Z",
+            "completed_at": "2026-01-26T00:35:30Z"
+          }
+        ],
+        "conclusion": "success"
+      }
+    ]
+  },
+  "checks": {
+    "sha-a": [
+      {
+        "name": "gate",
+        "started_at": "2026-01-28T00:02:00Z",
+        "completed_at": "2026-01-28T00:35:30Z"
+      }
+    ],
+    "sha-b": [
+      {
+        "name": "gate",
+        "started_at": "2026-01-27T00:02:00Z",
+        "completed_at": "2026-01-27T00:35:30Z"
+      }
+    ],
+    "sha-c": [
+      {
+        "name": "gate",
+        "started_at": "2026-01-26T00:02:00Z",
+        "completed_at": "2026-01-26T00:35:30Z"
+      }
+    ]
+  },
+  "logs": {
+    "1102": "2026-01-28T00:00:00Z ##[group]Run make contrib\n2026-01-28T00:00:00Z make[2]: Entering directory '/src/contrib/lib00'\n2026-01-28T00:00:56Z touch contrib/lib00/.stamp.lib00.build\n2026-01-28T00:00:56Z make[2]: Entering directory '/src/contrib/lib01'\n2026-01-28T00:01:52Z touch contrib/lib01/.stamp.lib01.build\n2026-01-28T00:01:52Z make[2]: Entering directory '/src/contrib/lib02'\n2026-01-28T00:02:48Z touch contrib/lib02/.stamp.lib02.build\n2026-01-28T00:02:48Z make[2]: Entering directory '/src/contrib/lib03'\n2026-01-28T00:03:44Z touch contrib/lib03/.stamp.lib03.build\n2026-01-28T00:03:44Z make[2]: Entering directory '/src/contrib/lib04'\n2026-01-28T00:04:40Z touch contrib/lib04/.stamp.lib04.build\n2026-01-28T00:04:40Z make[2]: Entering directory '/src/contrib/lib05'\n2026-01-28T00:05:36Z touch contrib/lib05/.stamp.lib05.build\n2026-01-28T00:05:36Z make[2]: Entering directory '/src/contrib/lib06'\n2026-01-28T00:06:32Z touch contrib/lib06/.stamp.lib06.build\n2026-01-28T00:06:32Z make[2]: Entering directory '/src/contrib/lib07'\n2026-01-28T00:07:28Z touch contrib/lib07/.stamp.lib07.build\n2026-01-28T00:07:28Z make[2]: Entering directory '/src/contrib/lib08'\n2026-01-28T00:08:24Z touch contrib/lib08/.stamp.lib08.build\n2026-01-28T00:08:24Z make[2]: Entering directory '/src/contrib/lib09'\n2026-01-28T00:09:20Z touch contrib/lib09/.stamp.lib09.build\n2026-01-28T00:09:20Z make[2]: Entering directory '/src/contrib/lib10'\n2026-01-28T00:10:16Z touch contrib/lib10/.stamp.lib10.build\n2026-01-28T00:10:16Z make[2]: Entering directory '/src/contrib/lib11'\n2026-01-28T00:11:12Z touch contrib/lib11/.stamp.lib11.build\n2026-01-28T00:11:12Z make[2]: Entering directory '/src/contrib/lib12'\n2026-01-28T00:12:08Z touch contrib/lib12/.stamp.lib12.build\n2026-01-28T00:12:08Z make[2]: Entering directory '/src/contrib/lib13'\n2026-01-28T00:13:04Z touch contrib/lib13/.stamp.lib13.build\n2026-01-28T00:13:04Z make[2]: Entering directory '/src/contrib/lib14'\n2026-01-28T00:14:00Z touch contrib/lib14/.stamp.lib14.build\n2026-01-28T00:14:00Z make[2]: Entering directory '/src/contrib/lib15'\n2026-01-28T00:14:56Z touch contrib/lib15/.stamp.lib15.build\n2026-01-28T00:14:56Z make[2]: Entering directory '/src/contrib/lib16'\n2026-01-28T00:15:52Z touch contrib/lib16/.stamp.lib16.build\n2026-01-28T00:15:52Z make[2]: Entering directory '/src/contrib/lib17'\n2026-01-28T00:16:48Z touch contrib/lib17/.stamp.lib17.build\n2026-01-28T00:16:48Z make[2]: Entering directory '/src/contrib/lib18'\n2026-01-28T00:17:44Z touch contrib/lib18/.stamp.lib18.build\n2026-01-28T00:17:44Z make[2]: Entering directory '/src/contrib/lib19'\n2026-01-28T00:18:40Z touch contrib/lib19/.stamp.lib19.build\n2026-01-28T00:18:40Z make[2]: Entering directory '/src/contrib/lib20'\n2026-01-28T00:19:36Z touch contrib/lib20/.stamp.lib20.build\n2026-01-28T00:19:36Z make[2]: Entering directory '/src/contrib/lib21'\n2026-01-28T00:20:32Z touch contrib/lib21/.stamp.lib21.build\n2026-01-28T00:20:32Z make[2]: Entering directory '/src/contrib/lib22'\n2026-01-28T00:21:28Z touch contrib/lib22/.stamp.lib22.build\n2026-01-28T00:21:28Z make[2]: Entering directory '/src/contrib/lib23'\n2026-01-28T00:22:24Z touch contrib/lib23/.stamp.lib23.build\n2026-01-28T00:22:24Z make[2]: Entering directory '/src/contrib/lib24'\n2026-01-28T00:23:20Z touch contrib/lib24/.stamp.lib24.build\n2026-01-28T00:33:20Z build step complete\n2026-01-28T00:33:20Z ##[group]Run tests\nCache not found for input keys: deps-linux",
+    "1202": "2026-01-28T00:00:00Z ##[group]Run make contrib\n2026-01-28T00:00:00Z make[2]: Entering directory '/src/contrib/lib00'\n2026-01-28T00:00:56Z touch contrib/lib00/.stamp.lib00.build\n2026-01-28T00:00:56Z make[2]: Entering directory '/src/contrib/lib01'\n2026-01-28T00:01:52Z touch contrib/lib01/.stamp.lib01.build\n2026-01-28T00:01:52Z make[2]: Entering directory '/src/contrib/lib02'\n2026-01-28T00:02:48Z touch contrib/lib02/.stamp.lib02.build\n2026-01-28T00:02:48Z make[2]: Entering directory '/src/contrib/lib03'\n2026-01-28T00:03:44Z touch contrib/lib03/.stamp.lib03.build\n2026-01-28T00:03:44Z make[2]: Entering directory '/src/contrib/lib04'\n2026-01-28T00:04:40Z touch contrib/lib04/.stamp.lib04.build\n2026-01-28T00:04:40Z make[2]: Entering directory '/src/contrib/lib05'\n2026-01-28T00:05:36Z touch contrib/lib05/.stamp.lib05.build\n2026-01-28T00:05:36Z make[2]: Entering directory '/src/contrib/lib06'\n2026-01-28T00:06:32Z touch contrib/lib06/.stamp.lib06.build\n2026-01-28T00:06:32Z make[2]: Entering directory '/src/contrib/lib07'\n2026-01-28T00:07:28Z touch contrib/lib07/.stamp.lib07.build\n2026-01-28T00:07:28Z make[2]: Entering directory '/src/contrib/lib08'\n2026-01-28T00:08:24Z touch contrib/lib08/.stamp.lib08.build\n2026-01-28T00:08:24Z make[2]: Entering directory '/src/contrib/lib09'\n2026-01-28T00:09:20Z touch contrib/lib09/.stamp.lib09.build\n2026-01-28T00:09:20Z make[2]: Entering directory '/src/contrib/lib10'\n2026-01-28T00:10:16Z touch contrib/lib10/.stamp.lib10.build\n2026-01-28T00:10:16Z make[2]: Entering directory '/src/contrib/lib11'\n2026-01-28T00:11:12Z touch contrib/lib11/.stamp.lib11.build\n2026-01-28T00:11:12Z make[2]: Entering directory '/src/contrib/lib12'\n2026-01-28T00:12:08Z touch contrib/lib12/.stamp.lib12.build\n2026-01-28T00:12:08Z make[2]: Entering directory '/src/contrib/lib13'\n2026-01-28T00:13:04Z touch contrib/lib13/.stamp.lib13.build\n2026-01-28T00:13:04Z make[2]: Entering directory '/src/contrib/lib14'\n2026-01-28T00:14:00Z touch contrib/lib14/.stamp.lib14.build\n2026-01-28T00:14:00Z make[2]: Entering directory '/src/contrib/lib15'\n2026-01-28T00:14:56Z touch contrib/lib15/.stamp.lib15.build\n2026-01-28T00:14:56Z make[2]: Entering directory '/src/contrib/lib16'\n2026-01-28T00:15:52Z touch contrib/lib16/.stamp.lib16.build\n2026-01-28T00:15:52Z make[2]: Entering directory '/src/contrib/lib17'\n2026-01-28T00:16:48Z touch contrib/lib17/.stamp.lib17.build\n2026-01-28T00:16:48Z make[2]: Entering directory '/src/contrib/lib18'\n2026-01-28T00:17:44Z touch contrib/lib18/.stamp.lib18.build\n2026-01-28T00:17:44Z make[2]: Entering directory '/src/contrib/lib19'\n2026-01-28T00:18:40Z touch contrib/lib19/.stamp.lib19.build\n2026-01-28T00:18:40Z make[2]: Entering directory '/src/contrib/lib20'\n2026-01-28T00:19:36Z touch contrib/lib20/.stamp.lib20.build\n2026-01-28T00:19:36Z make[2]: Entering directory '/src/contrib/lib21'\n2026-01-28T00:20:32Z touch contrib/lib21/.stamp.lib21.build\n2026-01-28T00:20:32Z make[2]: Entering directory '/src/contrib/lib22'\n2026-01-28T00:21:28Z touch contrib/lib22/.stamp.lib22.build\n2026-01-28T00:21:28Z make[2]: Entering directory '/src/contrib/lib23'\n2026-01-28T00:22:24Z touch contrib/lib23/.stamp.lib23.build\n2026-01-28T00:22:24Z make[2]: Entering directory '/src/contrib/lib24'\n2026-01-28T00:23:20Z touch contrib/lib24/.stamp.lib24.build\n2026-01-28T00:33:20Z build step complete\n2026-01-28T00:33:20Z ##[group]Run tests\nCache not found for input keys: deps-linux",
+    "1302": "2026-01-28T00:00:00Z ##[group]Run make contrib\n2026-01-28T00:00:00Z make[2]: Entering directory '/src/contrib/lib00'\n2026-01-28T00:00:56Z touch contrib/lib00/.stamp.lib00.build\n2026-01-28T00:00:56Z make[2]: Entering directory '/src/contrib/lib01'\n2026-01-28T00:01:52Z touch contrib/lib01/.stamp.lib01.build\n2026-01-28T00:01:52Z make[2]: Entering directory '/src/contrib/lib02'\n2026-01-28T00:02:48Z touch contrib/lib02/.stamp.lib02.build\n2026-01-28T00:02:48Z make[2]: Entering directory '/src/contrib/lib03'\n2026-01-28T00:03:44Z touch contrib/lib03/.stamp.lib03.build\n2026-01-28T00:03:44Z make[2]: Entering directory '/src/contrib/lib04'\n2026-01-28T00:04:40Z touch contrib/lib04/.stamp.lib04.build\n2026-01-28T00:04:40Z make[2]: Entering directory '/src/contrib/lib05'\n2026-01-28T00:05:36Z touch contrib/lib05/.stamp.lib05.build\n2026-01-28T00:05:36Z make[2]: Entering directory '/src/contrib/lib06'\n2026-01-28T00:06:32Z touch contrib/lib06/.stamp.lib06.build\n2026-01-28T00:06:32Z make[2]: Entering directory '/src/contrib/lib07'\n2026-01-28T00:07:28Z touch contrib/lib07/.stamp.lib07.build\n2026-01-28T00:07:28Z make[2]: Entering directory '/src/contrib/lib08'\n2026-01-28T00:08:24Z touch contrib/lib08/.stamp.lib08.build\n2026-01-28T00:08:24Z make[2]: Entering directory '/src/contrib/lib09'\n2026-01-28T00:09:20Z touch contrib/lib09/.stamp.lib09.build\n2026-01-28T00:09:20Z make[2]: Entering directory '/src/contrib/lib10'\n2026-01-28T00:10:16Z touch contrib/lib10/.stamp.lib10.build\n2026-01-28T00:10:16Z make[2]: Entering directory '/src/contrib/lib11'\n2026-01-28T00:11:12Z touch contrib/lib11/.stamp.lib11.build\n2026-01-28T00:11:12Z make[2]: Entering directory '/src/contrib/lib12'\n2026-01-28T00:12:08Z touch contrib/lib12/.stamp.lib12.build\n2026-01-28T00:12:08Z make[2]: Entering directory '/src/contrib/lib13'\n2026-01-28T00:13:04Z touch contrib/lib13/.stamp.lib13.build\n2026-01-28T00:13:04Z make[2]: Entering directory '/src/contrib/lib14'\n2026-01-28T00:14:00Z touch contrib/lib14/.stamp.lib14.build\n2026-01-28T00:14:00Z make[2]: Entering directory '/src/contrib/lib15'\n2026-01-28T00:14:56Z touch contrib/lib15/.stamp.lib15.build\n2026-01-28T00:14:56Z make[2]: Entering directory '/src/contrib/lib16'\n2026-01-28T00:15:52Z touch contrib/lib16/.stamp.lib16.build\n2026-01-28T00:15:52Z make[2]: Entering directory '/src/contrib/lib17'\n2026-01-28T00:16:48Z touch contrib/lib17/.stamp.lib17.build\n2026-01-28T00:16:48Z make[2]: Entering directory '/src/contrib/lib18'\n2026-01-28T00:17:44Z touch contrib/lib18/.stamp.lib18.build\n2026-01-28T00:17:44Z make[2]: Entering directory '/src/contrib/lib19'\n2026-01-28T00:18:40Z touch contrib/lib19/.stamp.lib19.build\n2026-01-28T00:18:40Z make[2]: Entering directory '/src/contrib/lib20'\n2026-01-28T00:19:36Z touch contrib/lib20/.stamp.lib20.build\n2026-01-28T00:19:36Z make[2]: Entering directory '/src/contrib/lib21'\n2026-01-28T00:20:32Z touch contrib/lib21/.stamp.lib21.build\n2026-01-28T00:20:32Z make[2]: Entering directory '/src/contrib/lib22'\n2026-01-28T00:21:28Z touch contrib/lib22/.stamp.lib22.build\n2026-01-28T00:21:28Z make[2]: Entering directory '/src/contrib/lib23'\n2026-01-28T00:22:24Z touch contrib/lib23/.stamp.lib23.build\n2026-01-28T00:22:24Z make[2]: Entering directory '/src/contrib/lib24'\n2026-01-28T00:23:20Z touch contrib/lib24/.stamp.lib24.build\n2026-01-28T00:33:20Z build step complete\n2026-01-28T00:33:20Z ##[group]Run tests\nCache not found for input keys: deps-linux"
+  }
+}
