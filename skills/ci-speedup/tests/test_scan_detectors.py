@@ -3911,6 +3911,83 @@ jobs:
     assert "OPT76" not in _scan_one(tmp_path, workflow)
 
 
+def test_opt76_fails_closed_when_a_run_step_has_multiple_builds(tmp_path: Path):
+    _write_repo_file(tmp_path, ".gitmodules", _GITMODULES)
+    (tmp_path / "Dockerfile.base").write_text(
+        "FROM alpine:3.21\nCOPY src/ /opt/src/\n", encoding="utf-8")
+    (tmp_path / "Dockerfile.app").write_text(
+        "FROM alpine:3.21\nCOPY vendor/protos/ /opt/protos/\n",
+        encoding="utf-8")
+    workflow = """name: CI
+on: pull_request
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - run: docker build -f Dockerfile.base . && docker build -f Dockerfile.app .
+"""
+
+    assert "OPT76" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt76_honors_workflow_default_working_directory(tmp_path: Path):
+    _write_repo_file(
+        tmp_path, ".gitmodules",
+        '[submodule "protos"]\n\tpath = app/vendor/protos\n'
+        '\turl = https://example.invalid/protos.git\n')
+    (tmp_path / "Dockerfile").write_text(
+        "FROM alpine:3.21\nCOPY src/ /opt/src/\n", encoding="utf-8")
+    app = tmp_path / "app"
+    app.mkdir()
+    (app / "Dockerfile").write_text(
+        "FROM alpine:3.21\nCOPY vendor/protos/ /opt/protos/\n",
+        encoding="utf-8")
+    workflow = """name: CI
+on: pull_request
+defaults:
+  run:
+    working-directory: app
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - run: docker build .
+"""
+
+    assert "OPT76" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt76_fails_closed_on_named_local_build_context(tmp_path: Path):
+    _write_repo_file(tmp_path, ".gitmodules", _GITMODULES)
+    (tmp_path / "Dockerfile").write_text(
+        "FROM alpine:3.21\n"
+        "COPY --from=deps protos/ /opt/protos/\n",
+        encoding="utf-8",
+    )
+    workflow = """name: CI
+on: pull_request
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          build-contexts: deps=./vendor
+"""
+
+    assert "OPT76" not in _scan_one(tmp_path, workflow)
+
+
 @pytest.mark.parametrize(("copy_source", "fires"), (
     ("src/", True),
     (".", False),

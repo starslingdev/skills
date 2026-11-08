@@ -1990,7 +1990,9 @@ def _opt102_dockerfile_instructions(stage: str) -> list[tuple[str, str]]:
     return out
 
 
-def _opt102_step_build_config(step: dict, job: dict) -> tuple[dict[str, Any], str] | None:
+def _opt102_step_build_config(
+        step: dict, job: dict, workflow: dict | None = None,
+) -> tuple[dict[str, Any], str] | None:
     """Return a local Docker build's raw config and its workflow marker."""
     if re.match(r"^docker/build-push-action@", _uses(step)):
         with_ = step.get("with") or {}
@@ -2003,12 +2005,18 @@ def _opt102_step_build_config(step: dict, job: dict) -> tuple[dict[str, Any], st
     if not raw_build:
         return None
     config = _opt102_raw_build_config(run, raw_build)
+    workflow_defaults = ((workflow or {}).get("defaults") or {})
+    workflow_run_defaults = (
+        workflow_defaults.get("run") or {}
+        if isinstance(workflow_defaults, dict) else {})
     defaults = job.get("defaults") or {}
     run_defaults = defaults.get("run") or {} if isinstance(defaults, dict) else {}
     config["working_directory"] = (
         step.get("working-directory")
         or (run_defaults.get("working-directory")
             if isinstance(run_defaults, dict) else None)
+        or (workflow_run_defaults.get("working-directory")
+            if isinstance(workflow_run_defaults, dict) else None)
         or ".")
     return config, "docker build"
 
@@ -2128,12 +2136,22 @@ def _opt102_job_image_payload(doc: dict, raw: str, job: dict) -> list[str] | Non
     env = {**workflow_env, **({str(k): str(v) for k, v in raw_job_env.items()}
                              if isinstance(raw_job_env, dict) else {})}
     payload: set[str] = set()
-    if not any(_opt102_step_build_config(step, job) is not None
+    if not any(_opt102_step_build_config(step, job, doc) is not None
                for step in _steps(job)):
         return []
     for matrix in _opt102_matrix_legs(job):
         outputs: dict[str, str] = {}
         for step in _steps(job):
+            run = str(step.get("run") or "")
+            # Parsing one command while silently ignoring a later build could
+            # make a destructive payload-removal recommendation. Named local
+            # contexts likewise need their own COPY source resolution.
+            if (len(re.findall(r"\bdocker\s+(?:buildx\s+)?build\b", run,
+                               re.IGNORECASE)) > 1
+                    or re.search(r"--build-context(?:=|\s)", run)
+                    or (isinstance(step.get("with"), dict)
+                        and "build-contexts" in step["with"])):
+                return None
             raw_step_env = step.get("env") or {}
             step_env = {**env, **({str(k): str(v) for k, v in raw_step_env.items()}
                                  if isinstance(raw_step_env, dict) else {})}
@@ -2142,7 +2160,7 @@ def _opt102_job_image_payload(doc: dict, raw: str, job: dict) -> list[str] | Non
                                       inputs=caller_inputs, outputs=outputs) or value)
                 for key, value in step_env.items()
             }
-            build = _opt102_step_build_config(step, job)
+            build = _opt102_step_build_config(step, job, doc)
             if build is not None:
                 config, marker = build
                 # build-push-action defaults to a Git context, which does not
@@ -2354,7 +2372,7 @@ def _detect_opt102(doc: dict, raw: str) -> list[Hit]:
                                                    inputs=caller_inputs, outputs=outputs) or v)
                                 for k, v in step_env.items()}
                 run = str(step.get("run") or "")
-                build = _opt102_step_build_config(step, job)
+                build = _opt102_step_build_config(step, job, doc)
                 if build is not None:
                     config, marker = build
                     resolved = {}
