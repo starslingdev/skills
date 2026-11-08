@@ -38,7 +38,7 @@ A "broad" cache key (e.g. `hashFiles('**/*.ts', '**/*.tsx')`) does NOT automatic
    - "No `actions/cache` step is configured at all" (no cache exists; not a narrowing question)
    - "Wrong path is being cached" (cache exists but covers the wrong directory)
    - "Cache key is non-deterministic" (a random or time-based token that cannot share a compatible restore prefix)
-   - "Cache key has a per-run token such as `${{ github.sha }}` with no restore-keys" (genuinely no fallback, content never restored — but the finding must still demonstrate step-time delta to claim wall-time savings)
+   - "Cache key has a per-run token such as `${{ github.sha }}` with no restore-keys" (a different token cannot restore the prior content, although a rerun with the identical token can exact-hit; the finding must still demonstrate step-time delta to claim wall-time savings)
    - OPT8's original detector case (Actions cache key broader than an _application-level_ per-item content cache it wraps, where the inner cache provably works) — that pattern is unaffected, but the benchmark requirement in (2) still applies before claiming savings.
 
 If the workflow has no `actions/cache` step at all, or caches the wrong path, that is a different finding type and proceeds normally.
