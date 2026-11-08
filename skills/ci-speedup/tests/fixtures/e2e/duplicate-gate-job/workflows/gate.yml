@@ -1,0 +1,8 @@
+name: Pull request gate
+on: pull_request
+concurrency: gate-${{ github.ref }}
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make test

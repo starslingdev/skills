@@ -641,6 +641,38 @@ def check_commit_wall_clock_projection(report: str, findings_path: Path | None) 
     failures: list[str] = []
     facts = [f for f in (stamp.get("facts") or []) if isinstance(f, dict)]
     complete: list[tuple[dict, float, float, float, float | None]] = []
+    job_graph = doc.get("workflow_job_graph") or {}
+
+    def needs_chain(workflow: str, node: str | None) -> set[str]:
+        if node is None:
+            return set()
+        jobs = job_graph.get(workflow) or {}
+        parents: dict[str, set[str]] = {}
+        children: dict[str, set[str]] = {}
+        for key, candidate in jobs.items():
+            raw_needs = candidate.get("needs") if isinstance(candidate, dict) else []
+            needed = [raw_needs] if isinstance(raw_needs, str) else (raw_needs or [])
+            parents[str(key)] = {str(item) for item in needed}
+            for item in needed:
+                children.setdefault(str(item), set()).add(str(key))
+        seen = {node}
+        for edges in (parents, children):
+            reached = {node}
+            todo = [node]
+            while todo:
+                current = todo.pop()
+                for adjacent in edges.get(current, set()):
+                    if adjacent not in reached:
+                        reached.add(adjacent)
+                        todo.append(adjacent)
+            seen.update(reached)
+        return seen
+
+    def projection_identity(row: dict) -> tuple[str, str, float]:
+        return (str(row.get("workflow_file") or ""),
+                str(row.get("name") or ""),
+                float(_num(row.get("duration_s")) or 0.0))
+
     for index, fact in enumerate(facts):
         wall = _num(fact.get("wall_s"))
         slow = fact.get("slowest_job")
@@ -663,6 +695,89 @@ def check_commit_wall_clock_projection(report: str, findings_path: Path | None) 
             failures.append(
                 f"fact {index} chain span {chain} is shorter than its slowest job {slowest}")
             continue
+        projection_rows = fact.get("job_projections")
+        raw_jobs = [row for row in (fact.get("jobs") or []) if isinstance(row, dict)]
+        if (not isinstance(projection_rows, list)
+                and any(_num(row.get("duration_s")) is not None for row in raw_jobs)):
+            failures.append(f"complete fact {index} lacks current job projections")
+        if isinstance(projection_rows, list):
+            import datetime as _projection_dt
+
+            rows = [row for row in projection_rows if isinstance(row, dict)]
+            raw_by_identity = {
+                (str(row.get("workflow_file") or ""), str(row.get("name") or "")): row
+                for row in raw_jobs
+            }
+            raw_identities = sorted(projection_identity(row) for row in raw_jobs)
+            if sorted(projection_identity(row) for row in rows) != raw_identities:
+                failures.append(f"fact {index} job projection durations do not match jobs")
+            for target in rows:
+                target_wf = str(target.get("workflow_file") or "")
+                target_node = (str(target.get("node"))
+                               if target.get("node") is not None else None)
+                target_chain = needs_chain(target_wf, target_node)
+
+                def outside_target(row: dict) -> bool:
+                    if row is target:
+                        return False
+                    if str(row.get("workflow_file") or "") != target_wf:
+                        return True
+                    row_node = (str(row.get("node"))
+                                if row.get("node") is not None else None)
+                    if row_node not in target_chain:
+                        return True
+                    spec = (job_graph.get(target_wf) or {}).get(row_node) or {}
+                    return bool(
+                        row_node == target_node
+                        and str(row.get("name") or "")
+                        != str(target.get("name") or "")
+                        and isinstance(spec, dict) and spec.get("matrix"))
+
+                expected_independent = sorted(
+                    projection_identity(row) for row in rows if outside_target(row))
+                expected_next = max(
+                    (duration for _wf, _name, duration in expected_independent),
+                    default=0.0)
+                if abs((_num(target.get("next_longest_s")) or 0.0) - expected_next) > 0.001:
+                    failures.append(
+                        f"fact {index} job projection next-longest floor does not re-derive")
+                    break
+
+                chain_rows = [
+                    row for row in rows
+                    if str(row.get("workflow_file") or "") == target_wf
+                    and (str(row.get("node")) if row.get("node") is not None else None)
+                    in target_chain
+                    and not outside_target(row)
+                    and ((str(row.get("node"))
+                          if row.get("node") is not None else None) != target_node
+                         or str(row.get("name") or "")
+                         == str(target.get("name") or ""))
+                ]
+                expected_chain = _num(target.get("duration_s")) or 0.0
+                if len(chain_rows) > 1:
+                    try:
+                        starts = [
+                            _projection_dt.datetime.fromisoformat(
+                                str(raw_by_identity[(target_wf, str(row.get("name") or ""))]
+                                    ["started_at"]).replace("Z", "+00:00")).timestamp()
+                            for row in chain_rows
+                        ]
+                        completions = [
+                            _projection_dt.datetime.fromisoformat(
+                                str(raw_by_identity[(target_wf, str(row.get("name") or ""))]
+                                    ["completed_at"]).replace("Z", "+00:00")).timestamp()
+                            for row in chain_rows
+                        ]
+                        expected_chain = max(expected_chain, max(completions) - min(starts))
+                    except (KeyError, TypeError, ValueError):
+                        failures.append(
+                            f"fact {index} job projection chain timing cannot be re-derived")
+                        break
+                if abs((_num(target.get("chain_span_s")) or 0.0) - expected_chain) > 0.001:
+                    failures.append(
+                        f"fact {index} job projection chain span does not re-derive")
+                    break
         complete.append((fact, wall, slowest, next_longest, chain))
         p4 = fact.get("projection_4x")
         if not isinstance(p4, dict):
@@ -732,18 +847,91 @@ def check_commit_wall_clock_projection(report: str, findings_path: Path | None) 
     elif _num(stamp.get("p50_s")) is not None or _num(stamp.get("p90_s")) is not None:
         failures.append("empty complete population publishes commit percentiles")
 
-    max_caps = [wall - projection(wall, slowest, next_longest, float("inf"), chain)[0]
-                for _fact, wall, slowest, next_longest, chain in complete]
-    if max_caps:
-        max_p50_saving = float(statistics.median(max_caps))
-        for finding in doc.get("findings") or []:
-            if not isinstance(finding, dict):
+    def matrix_base(name: str) -> str:
+        return re.sub(r"\s*\([^()]*(?:,[^()]*)?\)\s*$", "", name).strip()
+
+    for finding in doc.get("findings") or []:
+        if not isinstance(finding, dict):
+            continue
+        saving = _num(finding.get("wall_clock_p50_s"))
+        if saving is None:
+            continue
+        workflow = str(finding.get("workflow_file") or "")
+        affected = {str(job) for job in (finding.get("affected_jobs") or []) if job}
+        affected_bases = {matrix_base(job) for job in affected}
+
+        def matches_affected(row: dict) -> bool:
+            return bool(
+                str(row.get("workflow_file") or "") == workflow
+                and (str(row.get("node") or "") in affected
+                     or str(row.get("name") or "") in affected
+                     or matrix_base(str(row.get("name") or "")) in affected_bases))
+
+        caps: list[float] = []
+        for fact, wall, slowest, next_longest, chain in complete:
+            candidates = [
+                row for row in (fact.get("job_projections") or [])
+                if isinstance(row, dict)
+                and matches_affected(row)
+            ] if workflow and affected else []
+            if workflow and affected:
+                if "job_projections" not in fact:
+                    projected = projection(
+                        wall, slowest, next_longest, float("inf"), chain)[0]
+                    caps.append(max(0.0, wall - projected))
+                    continue
+                if not candidates:
+                    caps.append(0.0)
+                    continue
+                joint_affected = bool(
+                    finding.get("cluster_floor_lever") and len(affected) > 1)
+                if not joint_affected:
+                    target = max(
+                        candidates, key=lambda row: _num(row.get("duration_s")) or 0.0)
+                    target_s = _num(target.get("duration_s"))
+                    target_next = _num(target.get("next_longest_s")) or 0.0
+                    target_chain = _num(target.get("chain_span_s"))
+                    if target_s is None or target_s <= 0:
+                        caps.append(0.0)
+                        continue
+                    projected = projection(
+                        wall, target_s, target_next, float("inf"), target_chain)[0]
+                    caps.append(max(0.0, wall - projected))
+                    continue
+                paths: list[tuple[float, float, bool]] = []
+                for row in (fact.get("job_projections") or []):
+                    if not isinstance(row, dict):
+                        continue
+                    duration_s = _num(row.get("duration_s")) or 0.0
+                    chain_s = _num(row.get("chain_span_s")) or duration_s
+                    if chain_s < duration_s:
+                        failures.append(
+                            f"finding {finding.get('id')!r} has a target chain shorter "
+                            "than its job")
+                        paths = []
+                        break
+                    paths.append((chain_s, duration_s, matches_affected(row)))
+                if not paths:
+                    caps.append(0.0)
+                    continue
+                original_path = max(path[0] for path in paths)
+                projected_path = max(
+                    path_s - duration_s if is_affected else path_s
+                    for path_s, duration_s, is_affected in paths
+                )
+                caps.append(max(0.0, original_path - projected_path))
                 continue
-            saving = _num(finding.get("wall_clock_p50_s"))
-            if saving is not None and saving > max_p50_saving + 0.11:
-                failures.append(
-                    f"finding {finding.get('id')!r} saving {saving} exceeds "
-                    f"whole-commit cap {max_p50_saving:.1f}")
+            else:
+                projected = projection(
+                    wall, slowest, next_longest, float("inf"), chain)[0]
+            caps.append(max(0.0, wall - projected))
+        if not caps:
+            continue
+        max_weighted_saving = float(statistics.mean(caps))
+        if saving > max_weighted_saving + 0.11:
+            failures.append(
+                f"finding {finding.get('id')!r} saving {saving} exceeds "
+                f"whole-commit cap {max_weighted_saving:.1f}")
     return Check(name, not failures,
                  "; ".join(failures[:8]) if failures
                  else f"{len(complete)} complete commit projection(s) re-derived")
@@ -3848,6 +4036,11 @@ def _verify_per_pr_floor_split(
                     if _vr_job_produces_check(job_name, is_matrix, name))
             resolved = list(dict.fromkeys(resolved))
             if resolved:
+                # A cluster lever can shorten several distinct checks together.
+                # This single-check population split cannot represent that
+                # joint move; the per-commit projection verifier below does.
+                if finding.get("cluster_floor_lever") and len(resolved) > 1:
+                    return None
                 current = str(cp.get("critical_path_check") or "")
                 stamp = current if current in resolved else resolved[0]
     if not stamp:
@@ -14221,6 +14414,7 @@ _VR_LEAF_STEP_CATEGORY: dict[str, str] = {
     "pytest-no-xdist": "test",
     "test-isolated-serial": "test",
     "test-loop-serial": "test",
+    "vendored-lib-build": "build",
     "emulated-image-compile": "build",
     "cargo-test-shard": "test",
     "benchmark-serial-reruns": "test",
@@ -15271,6 +15465,45 @@ def check_default_branch_push_lane_isolated(
     for finding in _as_list(data.get("findings")):
         if not isinstance(finding, dict):
             continue
+        duplicate = _as_dict(finding.get("opt12_duplicate_test_work"))
+        rows = [
+            row for row in _as_list(duplicate.get("rows"))
+            if isinstance(row, dict)
+        ]
+        if duplicate and rows:
+            duplicate_seconds: list[float] = []
+            wall_seconds: list[float] = []
+            same_workflow = duplicate.get("same_workflow") is True
+            for row in rows:
+                duplicate_s = _num(row.get("duplicate_s"))
+                producer_s = _num(row.get("producer_completion_s"))
+                wall_s = _num(row.get("workflow_run_wall_s"))
+                if duplicate_s is None or producer_s is None or wall_s is None:
+                    failures.append("a duplicate-test sizing row is incomplete")
+                    continue
+                expected_wall = 0.0 if same_workflow else max(0.0, duplicate_s - producer_s)
+                if abs(wall_s - expected_wall) > 0.001:
+                    failures.append(
+                        f"duplicate-test workflow_run wall {wall_s:g}s != {expected_wall:g}s")
+                duplicate_seconds.append(duplicate_s)
+                wall_seconds.append(expected_wall)
+            if duplicate_seconds:
+                expected_duplicate = round(statistics.median(duplicate_seconds), 3)
+                expected_wall = round(statistics.median(wall_seconds), 3)
+                if _num(duplicate.get("duplicate_p50_s")) != expected_duplicate:
+                    failures.append("duplicate-test p50 duration was not re-derived from rows")
+                if _num(duplicate.get("workflow_run_wall_p50_s")) != expected_wall:
+                    failures.append("duplicate-test workflow_run wall p50 was not re-derived")
+                pushes = int(_num(duplicate.get("pushes_30d")) or 0)
+                if pushes != int(_num(lane.get("pushes_30d")) or 0):
+                    failures.append("duplicate-test push count drifted from the push lane")
+                expected_minutes = (
+                    round(math.ceil(expected_duplicate / 60.0) * pushes, 1)
+                    if pushes > 0 else None)
+                if _num(duplicate.get("runner_min_saving")) != expected_minutes:
+                    failures.append("duplicate-test stamped runner minutes were not re-derived")
+                if _num(finding.get("runner_min_saving")) != expected_minutes:
+                    failures.append("duplicate-test finding runner minutes were not re-derived")
         lanes = sorted({str(value) for value in _as_list(finding.get("workflow_lanes"))})
         if not lanes or not set(lanes) <= non_pr_events:
             continue
@@ -15399,8 +15632,16 @@ def check_default_branch_push_lane_isolated(
         if speedup <= 0 or slow_s <= 0:
             failures.append("lane projection lacks a positive speedup and slowest job")
         else:
-            expected_s = wall - slow_s + max(slow_s / speedup, next_s)
-            expected_multiple = wall / expected_s if expected_s > 0 else 0.0
+            chain_s = _num(typical.get("slowest_chain_span_s"))
+            if chain_s is not None and chain_s > slow_s:
+                unchanged = max(wall - max(chain_s, next_s), 0.0)
+                expected_s = round(max(
+                    0.0, unchanged + max(
+                        chain_s - slow_s + slow_s / speedup, next_s)), 1)
+            else:
+                expected_s = round(max(
+                    0.0, wall - slow_s + max(slow_s / speedup, next_s)), 1)
+            expected_multiple = round(wall / expected_s, 2) if expected_s > 0 else 0.0
             if abs((_num(projection.get("projected_s")) or 0.0) - expected_s) > 0.11:
                 failures.append("projected push wall drifted from the next-job floor")
             if abs((_num(projection.get("multiple")) or 0.0) - expected_multiple) > 0.011:
@@ -15919,6 +16160,93 @@ def check_commit_queue_work_credit(report: str, findings_path: Path | None,
         f"{len(work_values)} commit(s) re-derived; code credit <= {credited_work:g}s work")
 
 
+def check_unconfirmed_checks_have_no_direct_credit_or_gate_framing(
+        report: str, findings_path: Path | None) -> Check:
+    """Unpinnable checks stay visible without becoming merge-gating claims."""
+    name = "unconfirmed checks carry no direct credit or critical-path framing"
+    if findings_path is None:
+        return Check(name, True, "no findings JSON", skipped=True)
+    try:
+        data = _as_dict(json.loads(findings_path.read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError):
+        return Check(name, True, "findings JSON is unreadable", skipped=True)
+    cp = _as_dict(data.get("pr_critical_path"))
+    rows = [
+        row for row in _as_list(cp.get("checks"))
+        if isinstance(row, dict) and row.get("required_reachable") is False
+    ]
+    if not rows:
+        return Check(name, True, "no unconfirmed checks", skipped=True)
+
+    measured = {
+        (Path(str(row.get("workflow_file") or "")).name,
+         _cmp_name(str(row.get("name") or row.get("check") or "")))
+        for row in _as_list(cp.get("checks")) if isinstance(row, dict)
+    }
+
+    def _matches_unconfirmed(wf: str, job: str) -> bool:
+        for row in rows:
+            row_wf = Path(str(row.get("workflow_file") or "")).name
+            target = _cmp_name(str(row.get("name") or row.get("check") or ""))
+            if wf != row_wf:
+                continue
+            if job == target:
+                return True
+            distinct = job != target and (wf, job) in measured and (wf, target) in measured
+            if ((_matrix_base(target) == job or _matrix_base(job) == target)
+                    and not distinct):
+                return True
+        return False
+    failures: list[str] = []
+    forbidden = re.compile(
+        r"critical-path check|on the critical path|sits on the critical path|"
+        r"becomes the gate|it gates until|wall-clock figure applies|"
+        r"What a change here can buy \(wall-clock\)",
+        re.IGNORECASE)
+    for finding in _as_list(data.get("findings")):
+        if not isinstance(finding, dict):
+            continue
+        wf = Path(str(finding.get("workflow_file") or "")).name
+        wall = _num(finding.get("wall_clock_p50_s")) or 0.0
+        job_field = ("wall_clock_affected_jobs"
+                     if wall > 0 and isinstance(finding.get("wall_clock_affected_jobs"), list)
+                     else "affected_jobs")
+        jobs = [str(job) for job in _as_list(finding.get(job_field)) if str(job)]
+        if finding.get("job"):
+            jobs.append(str(finding.get("job")))
+        if not any(_matches_unconfirmed(wf, _cmp_name(job)) for job in jobs):
+            continue
+        if (wall > 0 or finding.get("realization") == "direct"
+                or int(_num(finding.get("tier")) or 0) == 1):
+            failures.append(
+                f"{finding.get('pattern') or finding.get('id')} has direct credit "
+                f"(wall={wall:g}, realization={finding.get('realization')}, "
+                f"tier={finding.get('tier')})")
+        public_text = " ".join(str(finding.get(field) or "") for field in (
+            "title", "evidence", "measured_signal", "size_note", "agent_prompt"))
+        if forbidden.search(public_text):
+            failures.append(
+                f"{finding.get('pattern') or finding.get('id')} uses critical-path wording")
+
+    unconfirmed_names = {_cmp_name(str(row.get("name") or row.get("check") or ""))
+                         for row in rows}
+    toc = _section(report, "📋 Contents")
+    if "**🐌 Critical path**" in toc:
+        failures.append("Contents places unconfirmed checks under Critical path")
+    for _wf, check, body in _pole_header_sections(report):
+        if _cmp_name(check) not in unconfirmed_names:
+            continue
+        if "could not confirm this check blocks merging" not in body.lower():
+            failures.append(f"rendered pole `{check}` omits the unconfirmed-gate reason")
+        if forbidden.search(body):
+            failures.append(f"rendered pole `{check}` uses critical-path wording")
+
+    return Check(
+        name, not failures,
+        "; ".join(failures[:8]) if failures
+        else f"{len(rows)} unconfirmed check(s) stayed uncredited and conditionally framed")
+
+
 def run_checks(report, report_path, findings_path, skill_repo, clone=None):
     return [
         check_primary_section_present(report, findings_path),
@@ -15954,6 +16282,8 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_no_root_cause_pole_is_gap_filled(report),
         check_dropped_check_not_framed_on_path(report, findings_path),
         check_demoted_pole_not_framed_typical_gate(report, findings_path),
+        check_unconfirmed_checks_have_no_direct_credit_or_gate_framing(
+            report, findings_path),
         check_headline_slowest_matches_stamp(report, findings_path, report_path),
         check_headline_floor_presence_reconciled(report, findings_path),
         check_headline_presence_causal_only_when_minority(report, findings_path),

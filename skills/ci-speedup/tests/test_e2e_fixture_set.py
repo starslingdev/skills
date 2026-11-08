@@ -366,10 +366,12 @@ def test_fixture_materialization_excludes_recording_and_expectation_files(
 def test_named_fixtures_exercise_their_defining_interactions(
         monkeypatch, tmp_path):
     docs = {}
+    reports = {}
     for name in (
-            "config-era-change", "external-required-gate", "heavy-runner-queue",
-            "minority-tail", "multiarch-image", "path-partitioned-monorepo"):
-        docs[name], _report, _checks = run_fixture(
+            "config-era-change", "duplicate-gate-job", "emulated-container",
+            "external-required-gate", "heavy-runner-queue", "minority-tail",
+            "multiarch-image", "path-partitioned-monorepo", "vendored-libs"):
+        docs[name], reports[name], _checks = run_fixture(
             FIXTURE_ROOT / name, monkeypatch, tmp_path)
 
     assert docs["config-era-change"]["pr_critical_path"]["config_eras"]
@@ -381,8 +383,31 @@ def test_named_fixtures_exercise_their_defining_interactions(
     assert any(
         row.get("minority_tail")
         for row in docs["minority-tail"]["pr_critical_path"]["checks"])
+    duplicate = next(
+        row for row in docs["duplicate-gate-job"]["findings"]
+        if row.get("pattern") == "OPT12"
+        and row.get("opt12_duplicate_test_work"))
+    assert duplicate["wall_clock_p50_s"] == 0.0
+    assert duplicate["runner_min_saving"] == 6.0
+    assert duplicate["opt12_duplicate_test_work"]["duplicate_p50_s"] == 90.0
+    assert duplicate["opt12_duplicate_test_work"]["workflow_run_wall_p50_s"] == 0.0
     assert "OPT102" in {
         row.get("pattern") for row in docs["multiarch-image"]["findings"]}
+    assert "OPT76" not in {
+        row.get("pattern") for row in docs["multiarch-image"]["findings"]}
+    assert "OPT89" in {
+        row.get("pattern") for row in docs["emulated-container"]["findings"]}
+    image_doc = docs["multiarch-image"]
+    assert any(
+        pole.get("job") == "image"
+        for pole in image_doc["pr_critical_path"]["poles"])
+    assert "emulated-image-compile" in fixture_facts(image_doc, [])["leaves"]
+    assert "vendored-lib-build" in fixture_facts(
+        docs["vendored-libs"], [])["leaves"]
+    assert "vendored libraries built from source" in reports["vendored-libs"]
+    assert any(
+        row.get("cache_net_negative", {}).get("kind") == "opt79_buildkit_export"
+        for row in image_doc["findings"])
     assert any(
         spec.get("matrix")
         for jobs in docs["path-partitioned-monorepo"]["workflow_job_graph"].values()
@@ -390,12 +415,186 @@ def test_named_fixtures_exercise_their_defining_interactions(
     assert any(
         row.get("name", "").startswith("tests / test (")
         for row in docs["path-partitioned-monorepo"]["pr_critical_path"]["checks"])
+    path_facts = docs["path-partitioned-monorepo"]["pr_critical_path"][
+        "commit_wall_clock"]["facts"]
+    assert all(
+        any(row.get("node") == "gate" for row in fact.get("job_projections") or [])
+        for fact in path_facts if fact.get("partial") is not True)
 
     red = json.loads(
         (FIXTURE_ROOT / "red-default-branch" / "responses.json").read_text())
     assert any(
         run.get("event") == "push" and run.get("conclusion") == "failure"
         for workflow in red["workflows"] for run in workflow["runs"])
+
+
+def test_duplicate_gate_sizing_is_independently_verified(monkeypatch, tmp_path):
+    doc, report, checks = run_fixture(
+        FIXTURE_ROOT / "duplicate-gate-job", monkeypatch, tmp_path)
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+
+    finding = next(
+        row for row in doc["findings"]
+        if row.get("opt12_duplicate_test_work"))
+    finding["runner_min_saving"] = 5.0
+    finding["opt12_duplicate_test_work"]["runner_min_saving"] = 5.0
+    findings_path = tmp_path / "duplicate-gate-job" / "findings.json"
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+    assert not vr.check_default_branch_push_lane_isolated(
+        report, findings_path).ok
+
+
+def test_duplicate_gate_positive_push_wall_stays_out_of_merge_credit(
+        monkeypatch, tmp_path):
+    fixture = tmp_path / "positive-duplicate-gate"
+    shutil.copytree(FIXTURE_ROOT / "duplicate-gate-job", fixture)
+    responses_path = fixture / "responses.json"
+    responses = json.loads(responses_path.read_text(encoding="utf-8"))
+    for workflow in responses["workflows"]:
+        if workflow["path"].endswith("publish.yml"):
+            for run in workflow["runs"]:
+                run["updated_at"] = run["created_at"].replace("00:00Z", "03:30Z")
+    for run_id in ("3001", "3002", "3003"):
+        test_job, publish_job = responses["jobs"][run_id]
+        test_job["completed_at"] = test_job["started_at"].replace("00:00Z", "03:00Z")
+        test_job["steps"][0]["completed_at"] = test_job["completed_at"]
+        publish_job["started_at"] = test_job["completed_at"]
+        publish_job["completed_at"] = publish_job["started_at"].replace("03:00Z", "03:30Z")
+        publish_job["steps"][0]["started_at"] = publish_job["started_at"]
+        publish_job["steps"][0]["completed_at"] = publish_job["completed_at"]
+    responses_path.write_text(json.dumps(responses), encoding="utf-8")
+
+    run_root = tmp_path / "positive-run"
+    run_root.mkdir()
+    doc, _report, checks = run_fixture(fixture, monkeypatch, run_root)
+    finding = next(
+        row for row in doc["findings"]
+        if row.get("opt12_duplicate_test_work"))
+    stamp = finding["opt12_duplicate_test_work"]
+    assert stamp["workflow_run_wall_p50_s"] == 40.0
+    assert finding["wall_clock_p50_s"] == 0.0
+    assert finding["wall_clock_uncapped_p50_s"] > 0
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+def _run_multiarch_log_variant(
+        name: str, monkeypatch, tmp_path, transform):
+    fixture = tmp_path / "fixture-variants" / name
+    fixture.parent.mkdir(exist_ok=True)
+    shutil.copytree(FIXTURE_ROOT / "multiarch-image", fixture)
+    responses_path = fixture / "responses.json"
+    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
+    recorded["logs"] = {
+        job_id: transform(log) for job_id, log in recorded["logs"].items()
+    }
+    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
+    doc, report, checks = run_fixture(fixture, monkeypatch, tmp_path)
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+    facts = fixture_facts(doc, checks)
+    bundle = doc.get("data_bundle") or {}
+    logs_dir = Path(bundle.get("logs_dir") or tmp_path)
+    facts["leaf_details"] = [
+        leaf for entry in bundle.get("logs") or []
+        if entry.get("file")
+        for leaf in [bp._parse_log((logs_dir / entry["file"]).read_text())]
+        if leaf is not None
+    ]
+    return doc, report, facts
+
+
+def test_builder_topology_and_foreign_only_shapes_run_through_collection(
+        monkeypatch, tmp_path):
+    second_node = (
+        "Name:                  native-arm0\n"
+        "Endpoint:              tcp://native-arm.example:1234\n"
+        "Status:                running\n"
+        "BuildKit version:      v0.24.0\n"
+        "Platforms:             linux/arm64, linux/arm/v7\n")
+
+    _doc, _report, multi_node = _run_multiarch_log_variant(
+        "multiarch-two-node", monkeypatch, tmp_path,
+        lambda log: log.replace(
+            "#10 [linux/amd64 build 2/3]", second_node + "#10 [linux/amd64 build 2/3]"))
+    assert "emulated-image-compile" not in multi_node["leaves"]
+
+    def foreign_only(log: str) -> str:
+        start = log.index("#10 [linux/amd64 build 2/3]")
+        end = log.index("Cache not found", start)
+        return (log[:start]
+                + "#15 [linux/arm/v7 build 2/3] RUN make -j2\n"
+                  "#15 DONE 100.0s\n"
+                + log[end:])
+
+    _doc, report, armv7 = _run_multiarch_log_variant(
+        "multiarch-foreign-only-armv7", monkeypatch, tmp_path, foreign_only)
+    assert "emulated-image-compile" in armv7["leaves"]
+    assert "foreign-architecture compile" in report
+    assert "100s" in report
+
+    def native_arm(log: str) -> str:
+        return foreign_only(log).replace(
+            "linux/amd64, linux/amd64/v2, linux/arm64, linux/arm/v7",
+            "linux/arm64, linux/arm/v7")
+
+    _doc, _report, native = _run_multiarch_log_variant(
+        "multiarch-native-arm", monkeypatch, tmp_path, native_arm)
+    assert "emulated-image-compile" not in native["leaves"]
+
+
+def test_builder_detected_platform_and_dominance_guards_run_through_collection(
+        monkeypatch, tmp_path):
+    def configured_first(log: str) -> str:
+        return log.replace(
+            "linux/amd64, linux/amd64/v2, linux/arm64, linux/arm/v7",
+            "linux/arm64*, linux/amd64, linux/amd64/v2, linux/arm64, linux/arm/v7")
+
+    _doc, report, configured = _run_multiarch_log_variant(
+        "multiarch-configured-platform-first", monkeypatch, tmp_path,
+        configured_first)
+    assert "emulated-image-compile" in configured["leaves"]
+    emulated = next(
+        leaf for leaf in configured["leaf_details"]
+        if leaf.get("fix_key") == "emulated-image-compile")
+    assert emulated["deeper"][0]["rows"][0][0] == (
+        "native linux/amd64 compile/install")
+    assert any("Platforms:" in line and "linux/arm64*" in line
+               for line in emulated["evidence"])
+    assert "native linux/amd64" in report
+    assert ("Platforms:             linux/arm64*, linux/amd64" in report)
+
+    def cold_layer_dominates(log: str) -> str:
+        return log.replace(
+            "#15 DONE 120.0s\n",
+            "#15 DONE 120.0s\n"
+            "#16 [assets 1/1] RUN download-release-assets\n"
+            "#16 DONE 400.0s\n")
+
+    _doc, _report, cold = _run_multiarch_log_variant(
+        "multiarch-cold-layer-dominates", monkeypatch, tmp_path,
+        cold_layer_dominates)
+    assert "emulated-image-compile" not in cold["leaves"]
+
+    def near_native_speed(log: str) -> str:
+        return (log.replace("#10 DONE 20.0s", "#10 DONE 300.0s")
+                .replace("#15 DONE 120.0s", "#15 DONE 320.0s"))
+
+    _doc, _report, near_native = _run_multiarch_log_variant(
+        "multiarch-near-native-speed", monkeypatch, tmp_path, near_native_speed)
+    assert "emulated-image-compile" not in near_native["leaves"]
+
+    def equal_extra_targets(log: str) -> str:
+        return (log.replace("#10 DONE 20.0s", "#10 DONE 100.0s")
+                .replace(
+                    "#15 DONE 120.0s\n",
+                    "#15 DONE 100.0s\n"
+                    "#16 [linux/arm/v7 build 3/3] RUN go build ./...\n"
+                    "#16 DONE 100.0s\n"))
+
+    _doc, _report, extra_targets = _run_multiarch_log_variant(
+        "multiarch-equal-extra-targets", monkeypatch, tmp_path,
+        equal_extra_targets)
+    assert "emulated-image-compile" not in extra_targets["leaves"]
 
 
 def test_push_fixture_fetches_the_recorded_run_jobs_once(monkeypatch, tmp_path):
@@ -424,7 +623,6 @@ def test_default_branch_image_is_drilled_and_kept_out_of_merge_claims(
                 & set(doc["_fixture_log_reads"]))
     assert "changes the wait after merge, not the merge gate" in finding["agent_prompt"]
     assert "Build platform-independent output once" in finding["agent_prompt"]
-    assert "confirm the buildx builder has no native node" in finding["agent_prompt"]
     assert "OPT102" in report
     bottom = next(line for line in report.splitlines() if "**Bottom line.**" in line)
     assert "after merge" not in bottom.lower()
@@ -727,6 +925,5 @@ def test_fixture_set_catches_unconfirmed_gate_credit_regression(
     doc, _report, checks = run_fixture(fixture, monkeypatch, tmp_path)
     with pytest.raises(
             AssertionError,
-            match=(r"unpinnable-slow-check: credited_findings\[1\]\."
-                   r"wall_clock_s changed")):
+            match=r"unpinnable-slow-check: credited_findings\.length changed"):
         assert_fixture_facts(fixture, fixture_facts(doc, checks))

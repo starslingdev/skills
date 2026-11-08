@@ -1162,7 +1162,7 @@ fix_strategy: duplicated-setup-across-jobs
 title_template: "Duplicated Setup Across Jobs"
 -->
 
-**TL;DR**: Several jobs copy-paste the same setup steps. Pulling them into one shared action is easier to maintain — but note it does NOT speed anything up (each job still runs them).
+**TL;DR**: Several jobs copy-paste the same setup steps, or repeat the same test suite before later work can run. A shared action only reduces maintenance; handing duplicate test work to the existing gate removes one suite run while preserving every check.
 
 **Anti-pattern**: Multiple jobs with identical preamble steps (checkout, setup-node, pnpm install, build) that could be extracted to a composite action or use artifact handoff.
 
@@ -1174,6 +1174,27 @@ title_template: "Duplicated Setup Across Jobs"
 ```
 
 **Fix**: Extract shared setup into a composite action, or build once and pass artifacts to downstream jobs.
+
+#### Duplicate test work on one lane
+
+When two jobs on the same trigger and concrete runner platform execute the same
+test command, and one copy sits on a later job's `needs:` chain, keep every gate
+and execute the suite once. Within one workflow, make the later job depend on
+the existing test job. Across workflows, trigger the consumer with
+`workflow_run` and check the producer workflow's conclusion before continuing.
+If the second run exists only to collect coverage, move that coverage floor onto
+the existing test run.
+
+Expand local composite actions before comparing commands. Matrix legs on
+different operating systems or architectures are platform coverage and are not
+duplicates. Removing a test job or weakening a required status is never the
+fix.
+
+Runner minutes fall by one measured suite run per execution. The cross-workflow
+handoff waits for the producer workflow to complete, so its wall-clock credit is
+`max(0, duplicate job duration - producer workflow completion after push)`.
+A same-workflow `needs:` handoff receives zero wall-clock credit. Measure both
+axes from sampled runs.
 
 **GUARDRAIL — "downstream ignores producer's artifact" claims (REQUIRED before any cross-workflow handoff finding):**
 
@@ -1932,8 +1953,9 @@ fix_strategy: emulated-multi-platform-image-compilation
 title_template: "Foreign-Architecture Image Compilation Runs Under Emulation"
 -->
 
-**Anti-pattern**: A Docker Buildx or `docker build` step on an x64 hosted runner
-builds a foreign Linux architecture from a repository-local Dockerfile whose compile
+**Anti-pattern**: A Docker Buildx or `docker build` step on one inspected builder
+node builds a Linux architecture foreign to that node's native platform from a
+repository-local Dockerfile whose compile
 or source-install stage does not run on the build platform
 (`FROM --platform=$BUILDPLATFORM`). Buildx then runs that work through emulation,
 which is often far slower than native compilation. Target flags such as `GOARCH`,
@@ -1942,8 +1964,8 @@ itself still runs emulated.
 
 **Detection heuristic**:
 
-- require a foreign Linux platform (anything other than `linux/amd64`) on a job
-  whose `runs-on` resolves to a hosted x64 runner; resolve literal environment,
+- require a foreign Linux platform on a job whose `runs-on` resolves to a
+  different native platform; resolve literal environment,
   matrix, reusable-workflow input, and earlier-step output values, while leaving
   unknown values silent
 - read only a repository-local build context and Dockerfile
@@ -1954,20 +1976,31 @@ itself still runs emulated.
   builds with a skip-prebuilt or `npm_config_build_from_source` flag
 - stay quiet when that stage's `FROM` uses `--platform=$BUILDPLATFORM`, directly or
   through the stage it is based on
+- confirm the log diagnosis only when `docker buildx inspect --bootstrap` shows
+  exactly one builder node; skip user-configured platforms marked with `*` and use
+  the first detected platform as that node's native platform, failing closed when
+  the inspect block is missing, lists multiple nodes, or contains no detected platform
 - confirm the opportunity from buildx per-platform `RUN` and `DONE` lines; report
   source installs separately and size the opportunity only when foreign-architecture
-  compile and source-install time is at least half of the measured total, or when a
-  foreign-only build supplies all measured work
+  compile and source-install time is at least half of all measured cold image-build
+  layer time and, when native compilation was measured, each measured foreign
+  architecture takes at least twice that native compile time; include shared-stage
+  layers without a platform prefix in the cold-layer total, and let a foreign-only
+  build qualify against the cold-layer share alone
 
 **Fix**: Build platform-independent output once in a stage based on
 `FROM --platform=$BUILDPLATFORM`, passing the target architecture to a supported
-cross-compiler, then copy the artifact into each target image. If the toolchain
-cannot cross-compile safely, build on native runners per architecture and merge the
-manifests. The first approach removes most emulated compile work and should reduce
-both wall time and runner minutes; native per-architecture jobs reduce wall time but
-usually keep runner minutes level or increase them because they add jobs and a
-manifest merge. Preserve every platform, verify the produced binary architecture,
-test each image natively, and compare total runner minutes as well as wall time.
+cross-compiler, then copy the artifact into each target image. Native
+cross-compilation still costs about one native compile per extra architecture, so
+size the saving as the emulated seconds minus the native seconds for each foreign
+architecture, and retain cache import/export, image export, and push time. cgo with
+`CGO_ENABLED=1`, Rust `-sys` crates, and native Node add-ons can require
+`tonistiigi/xx` or `gcc-<arch>-linux-gnu`. If the toolchain cannot cross-compile
+safely, build on native runners per architecture and merge the manifests; check
+each runner's cores and memory against link-time optimisation and parallel links,
+and build only the binaries the image ships. Preserve every platform, verify the
+produced binary architecture, test each image natively, and compare total runner
+minutes as well as wall time.
 
 ---
 
@@ -2232,15 +2265,15 @@ The table carries no seconds and no modeled saving. Time the settings on the rep
 <!-- METADATA
 pattern: OPT89
 impact: HIGH
-class: data-driven
-detector: manual
+class: static
+detector: bespoke
 risk: MEDIUM
 affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml,.bazelrc,Cargo.toml,.cargo/config.toml,.config/nextest.toml"
 fix_strategy: build-once-test-natively
 title_template: "The slowest platform compiles its own tests"
 -->
 
-**Not auto-detected yet.** Like OPT86 and OPT88, no pass emits OPT89, so the audit never reports it on its own and never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading the slowest platform leg's steps against the heuristic below.
+**Auto-detected for emulated container compilation.** The static pass reports compile commands inside `uraimo/run-on-arch-action`, a foreign-platform `docker run` after QEMU setup, or a foreign-architecture job container on a hosted x64 runner. Native ARM runners and emulated test-only steps stay quiet. Other slow-platform build shapes still require the measured review below.
 
 **TL;DR**: A multi-platform test matrix makes every platform build its own test binaries, so the slowest or scarcest runner (Windows, an ARM machine, an emulated architecture) spends most of its time compiling instead of testing. Build the test binaries once on a fast runner (cross-compiling for the target), hand them over as an artifact, and run them natively on each platform.
 
@@ -2248,11 +2281,12 @@ title_template: "The slowest platform compiles its own tests"
 
 **Relation to other patterns**: [OPT81](#opt81--the-same-job-is-measurably-faster-on-another-runner) moves a whole job to a faster runner class. OPT89 moves only the build, and keeps the tests on the platform they must run on. [OPT14](#opt14--repeated-checkoutsetup-without-artifact-handoff) is the same artifact-handoff idea for setup work inside one platform.
 
-**Detection heuristic** (manual; read, never inferred):
+**Detection heuristic**:
 
-1. A matrix runs the same build-and-test on several platforms or architectures, and one platform leg is the slow outlier.
-2. On that leg, the build or compile work (or an emulation setup step such as QEMU) takes most of the job, and running the tests is a minority of it. When compile and test share one step (`bazel test`, or a test command that compiles first), step timings cannot split them: read the run log, a build-timing artifact (Bazel's profile, cargo's `--timings` report), or a test-only run of the same tests on another runner before concluding.
-3. The toolchain can build for that target elsewhere: cross-compilation is supported (for example Rust targets, Go `GOOS`/`GOARCH`, a C or C++ cross toolchain), or the test runner can package built tests as an archive to replay elsewhere (for example `cargo nextest archive`).
+1. The static detector requires a compile command in a known emulated-container surface on a hosted x64 runner. A job already running natively on ARM is excluded.
+2. Size the opportunity from that compile step's own measured time. If the step also runs tests, or a later emulated test suite remains, that test time is the floor and is never credited to this finding.
+3. For other platform legs, confirm that one leg is the slow outlier and split compile from test time using step timings, a build profile, or a test-only comparison.
+4. Confirm the toolchain can build for the target elsewhere: use a target toolchain or a test archive that can be replayed on the native platform.
 
 **Fix recipe**:
 
@@ -2263,7 +2297,7 @@ title_template: "The slowest platform compiles its own tests"
 
 **Guardrail**: a cross-compiled binary is not always the binary a native build produces (different linker, toolchain or bundled native libraries). List what the cross-built tests do not exercise, keep a native run that covers it, and do not drop a test from the native platform because it does not build cross.
 
-**Sizing: uncredited**. No `_SIZING` model. The ceiling is the measured build share of the slow leg; the saving is what the next sampled runs show.
+**Sizing: measure the compile step.** The ceiling is the compile step's own measured time. An emulated test suite is the unchanged floor, and the saving is what the next sampled runs show after moving only the build.
 
 **Real-world example (OpenAI)**, their numbers, not a forecast for your repo:
 
@@ -4913,47 +4947,58 @@ Flag only when the job runs on `self-hosted` runners. On GitHub-hosted runners, 
 
 ---
 
-### OPT86 — CI Compiles a Dependency That Ships Prebuilt
+<!-- Alias anchor: reports generated before the broader vendored-build detector used this prebuilt-only title. -->
+<a id="opt86--ci-compiles-a-dependency-that-ships-prebuilt"></a>
+
+### OPT86 — CI Repeatedly Compiles Dependencies from Source
 
 <!-- METADATA
 pattern: OPT86
 impact: HIGH
 class: data-driven
-detector: manual
-risk: LOW
-affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml,pyproject.toml,requirements*.txt,uv.lock,poetry.lock,requirements*.lock,package.json,Cargo.toml"
-fix_strategy: use-prebuilt-dependency-packages
-title_template: "CI compiles a dependency that ships prebuilt"
+detector: log-leaf
+risk: MEDIUM
+affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml,Makefile,**/Makefile,pyproject.toml,requirements*.txt,uv.lock,poetry.lock,requirements*.lock,package.json,Cargo.toml"
+fix_strategy: cache-vendored-builds-or-use-prebuilt-packages
+title_template: "CI repeatedly compiles dependencies from source"
 -->
 
-**Not auto-detected yet.** Like OPT88, no pass emits OPT86, so the audit never reports it on its own and never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading a slow install step's log against the heuristic below.
+**Narrow automatic coverage.** A measured log leaf emits OPT86 when timestamped markers show sequential builds under `contrib/`, `third_party/`, `vendor/`, or `external/` consuming at least half of a step. It requires an `Entering directory` marker and that library's matching `.stamp.*.build` completion; restored libraries without build stamps stay quiet. The other package-manager shapes below remain manual checks.
 
-**TL;DR**: An install step compiles a dependency from source (a C or C++ extension, a native add-on, a large machine-learning framework) when a prebuilt package exists for that interpreter and platform. Pin a version that ships prebuilt packages for every leg of the matrix, and make the install refuse to build from source, so the next lockfile bump cannot bring the compile back unnoticed.
+**TL;DR**: CI repeatedly compiles dependency source. For measured vendored-library builds, cache each completed library with all compatibility inputs in its key. For a package-manager source build, first establish that a compatible prebuilt package exists; only then pin it and make an unexpected source fallback fail loudly.
 
 **Anti-pattern**: The usual causes:
 
+- a vendored dependency under `contrib/`, `third_party/`, `vendor/`, or `external/` is rebuilt from source on every cold job even when its source, recipe, patches, toolchain and target have not changed;
 - the locked version has no prebuilt package (wheel) for one interpreter in the matrix, typically the newest Python before the library publishes for it, so the installer falls back to the source archive and compiles it on every cold run;
 - the install pulls a far larger build than the job uses, such as a GPU build of a machine-learning framework on a runner with no GPU, when the project publishes a CPU-only package index;
 - a dependency that publishes a prebuilt binary is built by the job's own toolchain because a feature flag, an environment variable or a missing platform match asks for source.
 
-**Detection heuristic** (manual; read from the step log, never inferred):
+**Detection heuristic** (the vendored shape is automatic; package-manager shapes remain manual):
 
 1. The slow step is an install or build step, and its log shows a dependency being compiled: pip or uv `Building wheel for <pkg>` / `Building <pkg>==<version>`, `Running setup.py install`, `node-gyp rebuild` or `gyp info` during a JavaScript install, or a cargo build script compiling a bundled C or C++ library. The compile ends at the matching `Built <pkg>==<version>` line, so the span between the two is the compile time. A `Building <project> @ file://...` line is the project building itself, not a dependency compile. For the oversized-build cause there is no compile: the log instead shows the large build being downloaded and installed on a runner that cannot use it (for example the `nvidia-*` CUDA packages a default PyTorch install pulls on Linux, on a runner with no GPU).
 2. A prebuilt package exists for the job's interpreter, OS and architecture at a version the project accepts (check the package index), or the project publishes a prebuilt binary or a smaller build.
 3. Where a matrix exists, the leg that compiles (or downloads the oversized build) is the slow outlier.
+4. For a vendored source tree, group the timestamped `Entering directory` to `.stamp.*.build` intervals by library. The automatic finding requires completed, non-overlapping intervals to account for at least half of the timestamped step wall; it does not infer a build from directory names alone.
 
-[OPT61](#opt61--missing-dependency-caching) and [OPT63](#opt63--dependency-install-with-cache-disabled) are the cache side of the same step (no cache, or one switched off). OPT86 is about what gets installed; both can apply at once, and a warm cache can hide a source build until its key changes.
+[OPT61](#opt61--missing-dependency-caching) and [OPT63](#opt63--dependency-install-with-cache-disabled) are the cache side of the same step (no cache, or one switched off). OPT86 identifies dependency source work: either a measured vendored build or, after manual confirmation, a package that could use a compatible prebuilt artifact. A warm cache can hide either source build until its key changes.
 
-**Fix recipe**:
+**Vendored-library fix recipe**:
+
+1. Cache each library separately so one recipe or patch change does not invalidate every other build. Key each entry on that library's source revision, recipe, patches, pinned toolchain, runner OS and architecture, target ABI, build mode, and output-affecting flags.
+2. Give the key a stable matching `restore-keys` prefix that cannot cross incompatible platform, ABI, toolchain, or build-mode legs, and save new entries only from the default branch. Before rollout, sum the expected entry sizes and check them against the repository's cache budget with ci-speedup's cache guard helpers.
+3. Treat restored files as build inputs, not proof of completeness. Make every produced artifact an explicit prerequisite, then run several warm builds after changing recipes and patches and confirm every artifact exists. Missing prerequisites can otherwise make a partial cache restore look green.
+
+**Prebuilt-package fix recipe**:
 
 1. Constrain the dependency to a version that ships prebuilt packages for every interpreter and platform in the matrix, with per-interpreter markers when one version cannot cover them all.
 2. Make a source build an error, so a future bump fails loudly instead of slowing down: `pip install --only-binary=<pkg>` for the package that compiled, or uv's `--no-build-package <pkg>`. Widen it to every dependency (`--only-binary=:all:`, or uv's `UV_NO_BUILD=1` / `--no-build`) only once every dependency, pure-Python ones included, ships a prebuilt package, since the wide form also refuses a pure-Python dependency published only as a source archive. Exempt only the project itself if it must be built.
 3. Install the smallest build the job needs: for example PyTorch from its CPU-only index on runners without a GPU, in its own install command (`pip install torch --index-url https://download.pytorch.org/whl/cpu`), because `--index-url` replaces PyPI for everything in the same command and any other dependency would then fail to resolve.
 4. Cache the result as well ([OPT61](#opt61--missing-dependency-caching)); prebuilt and cached are complementary.
 
-**Guardrail**: the prebuilt package must match what the project ships or tests against. A pinned version must satisfy the project's declared range; a CPU-only build is for jobs that do not test GPU code. A job that exists to test building from source (a packaging job, a source-build smoke test) keeps compiling.
+**Guardrail**: a restored vendored artifact must match the runner, target ABI, toolchain, build mode and flags, and every expected output must exist. A prebuilt package must match what the project ships or tests against. A pinned version must satisfy the project's declared range; a CPU-only build is for jobs that do not test GPU code. A job that exists to test building from source (a packaging job, a source-build smoke test) keeps compiling.
 
-**Sizing: uncredited**. No `_SIZING` model. The ceiling is the measured span of the compile lines in the install step's log (for an oversized build, the measured download and install span); when a compiling leg is also slow for another reason, only the compile span counts toward OPT86's ceiling; the saving is what the next sampled runs show.
+**Sizing: uncredited**. No `_SIZING` model. For the automatic vendored shape, the report measures completed build intervals inside one timestamped workflow-step section. For a manually confirmed package-manager shape, the ceiling is the matching compile span (or the measured oversized download/install span). When the step is slow for another reason, only the measured source-work span counts; the saving is what the next sampled runs show.
 
 **Real-world example (OpenAI)**, their numbers, not a forecast for your repo:
 
@@ -4961,7 +5006,7 @@ title_template: "CI compiles a dependency that ships prebuilt"
 - openai/whisper's test workflow installs `torch==<version>+cpu --index-url https://download.pytorch.org/whl/cpu` (no timing published).
 - openai/openai-python's CI sets `UV_NO_BUILD: '1'` at workflow level (added in [#3641](https://github.com/openai/openai-python/pull/3641) for supply-chain safety; no timing published), so a dependency without a prebuilt package fails the install instead of compiling.
 
-**Risk**: **LOW**. A version constraint and an install flag, both reversible; the hard error surfaces any gap at install time.
+**Risk**: **MEDIUM**. A package version constraint and install flag are reversible, but a native-artifact cache can serve an incompatible or incomplete build if its key omits a target input or its build graph omits an output. Scope restore prefixes to compatible legs and exercise changed recipes, patches, toolchains and targets before relying on warm builds.
 
 ---
 

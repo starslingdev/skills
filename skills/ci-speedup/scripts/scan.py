@@ -220,6 +220,7 @@ class Hit:
     # snippet in the report so a reviewer sees the actual code, not prose.
     # When empty, the report falls back to the raw line at `line`.
     snippet: str = ""
+    facts: dict[str, Any] = field(default_factory=dict)
 
 
 def _raw_line(raw: str, line: int) -> str:
@@ -1115,12 +1116,14 @@ def _index_local_action_text(root: Path,
     return out
 
 
-def _job_payload_blob(job: dict) -> "str | None":
+def _job_payload_blob(job: dict, doc: dict | None = None,
+                      raw: str = "") -> "str | None":
     """Everything in the job that could name a checked-out path: run blocks,
     step and job-level `working-directory`, matrix values, step `if:`/`name:`,
     `uses:` refs, `with:`/`env:` values, and the body of each local composite
-    action it invokes (transitively). None when a local action can't be read —
-    the caller then skips the job (fail closed).
+    action it invokes (transitively), plus local build contexts and COPY/ADD
+    sources from resolved Dockerfiles. None when a local action or Dockerfile
+    can't be read — the caller then skips the job (fail closed).
 
     The blob has to cover EVERY place the job's own YAML can name a path,
     because the finding's evidence asserts that no step in the job references a
@@ -1150,7 +1153,20 @@ def _job_payload_blob(job: dict) -> "str | None":
             text = _LOCAL_ACTION_TEXT.get(ref)
             if text is None:
                 return None     # unreadable local action — can't prove it unread
+            # Local composite steps are flattened as text for path-name checks,
+            # but their Docker build configuration is not resolved below. A
+            # Dockerfile inside the action may read the checkout payload, so
+            # fail closed instead of claiming that it does not.
+            if (re.search(r"docker/build-push-action@", text, re.IGNORECASE)
+                    or re.search(r"\bdocker\s+(?:buildx\s+)?build\b", text,
+                                 re.IGNORECASE)):
+                return None
             parts.append(text)
+    image_payload = (_opt102_job_image_payload(doc, raw, job)
+                     if doc is not None else [])
+    if image_payload is None:
+        return None
+    parts.extend(image_payload)
     return "\n".join(parts)
 
 
@@ -1195,7 +1211,7 @@ def _detect_opt76(doc: dict, raw: str) -> list[Hit]:
     for job_name, job in _jobs_from_doc(doc).items():
         if not isinstance(job, dict):
             continue
-        blob = _job_payload_blob(job)
+        blob = _job_payload_blob(job, doc, raw)
         if blob is None:
             continue    # fail closed
         # Git path matching is effectively case-insensitive on the macOS and
@@ -1231,7 +1247,7 @@ def _detect_opt76(doc: dict, raw: str) -> list[Hit]:
                     affected_jobs=[job_name],
                     evidence=(
                         f"job `{job_name}` checks out with `submodules: {sub}`, and no "
-                        f"step in the job (nor a local composite action it invokes) "
+                        f"step in the job, local action, or resolved Dockerfile "
                         f"references the submodule path(s) declared in `.gitmodules`: "
                         f"{paths}"),
                     match_text=job_name,
@@ -1249,7 +1265,7 @@ def _detect_opt76(doc: dict, raw: str) -> list[Hit]:
                     affected_jobs=[job_name],
                     evidence=(
                         f"job `{job_name}` checks out with `lfs: true`, and no step in "
-                        f"the job (nor a local composite action it invokes) references "
+                        f"the job, local action, or resolved Dockerfile references "
                         f"the LFS-tracked path(s) in `.gitattributes`: {hints}"),
                     match_text=job_name,
                     snippet=_raw_line(raw, line),
@@ -1277,7 +1293,7 @@ def _detect_opt76(doc: dict, raw: str) -> list[Hit]:
                     affected_jobs=[job_name],
                     evidence=(
                         f"job `{job_name}` runs `git lfs` to download LFS objects, and "
-                        f"no step in the job (nor a local composite action it invokes) "
+                        f"no step in the job, local action, or resolved Dockerfile "
                         f"references the LFS-tracked path(s) in `.gitattributes`: {hints}"),
                     match_text=job_name,
                     snippet=_raw_line(raw, line),
@@ -1974,6 +1990,232 @@ def _opt102_dockerfile_instructions(stage: str) -> list[tuple[str, str]]:
     return out
 
 
+def _opt102_step_build_config(
+        step: dict, job: dict, workflow: dict | None = None,
+) -> tuple[dict[str, Any], str] | None:
+    """Return a local Docker build's raw config and its workflow marker."""
+    if re.match(r"^docker/build-push-action@", _uses(step)):
+        with_ = step.get("with") or {}
+        config = ({str(key): value for key, value in with_.items()
+                   if str(key) in {"context", "file", "platforms", "target"}}
+                  if isinstance(with_, dict) else {})
+        return config, "docker/build-push-action@"
+    run = str(step.get("run") or "")
+    raw_build = re.search(r"\bdocker\s+(?:buildx\s+)?build\b", run)
+    if not raw_build:
+        return None
+    config = _opt102_raw_build_config(run, raw_build)
+    workflow_defaults = ((workflow or {}).get("defaults") or {})
+    workflow_run_defaults = (
+        workflow_defaults.get("run") or {}
+        if isinstance(workflow_defaults, dict) else {})
+    defaults = job.get("defaults") or {}
+    run_defaults = defaults.get("run") or {} if isinstance(defaults, dict) else {}
+    config["working_directory"] = (
+        step.get("working-directory")
+        or (run_defaults.get("working-directory")
+            if isinstance(run_defaults, dict) else None)
+        or (workflow_run_defaults.get("working-directory")
+            if isinstance(workflow_run_defaults, dict) else None)
+        or ".")
+    return config, "docker build"
+
+
+def _opt102_resolved_dockerfile(
+        root: Path, config: dict[str, Any], *, env: dict[str, str],
+        matrix: dict[str, str], inputs: dict[str, str], outputs: dict[str, str],
+) -> tuple[Path, Path] | None:
+    """Resolve one local build's Dockerfile and context inside ``root``."""
+    resolved = {
+        key: _opt102_resolve(config.get(key, default), env=env, matrix=matrix,
+                             inputs=inputs, outputs=outputs)
+        for key, default in (("context", "."), ("file", "Dockerfile"),
+                             ("working_directory", "."))
+    }
+    if any(value is None or not value for value in resolved.values()):
+        return None
+    context = str(resolved["context"])
+    dockerfile = str(resolved["file"])
+    working_directory = str(resolved["working_directory"])
+    if ("://" in context or any(Path(value).is_absolute()
+                                  for value in (context, dockerfile,
+                                                working_directory))):
+        return None
+    base = (root / working_directory).resolve()
+    context_path = (base / context).resolve()
+    candidate = (base / dockerfile if "file" in config
+                 else context_path / dockerfile).resolve()
+    try:
+        candidate.relative_to(root)
+        context_path.relative_to(root)
+    except ValueError:
+        return None
+    return candidate, context_path
+
+
+def _opt102_copy_sources(candidate: Path, context: Path, root: Path) -> list[str] | None:
+    """Repository-relative local sources read by Dockerfile COPY/ADD."""
+    try:
+        text = candidate.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    sources: list[str] = []
+    for keyword, body in _opt102_dockerfile_instructions("\n" + text):
+        if keyword not in {"COPY", "ADD"}:
+            continue
+        joined = re.sub(r"\\\s*\n\s*", " ", body).strip()
+        if re.search(r"(?:^|\s)--from(?:=|\s)", joined):
+            continue
+        operands = re.sub(r"^(?:--[^\s]+\s+)+", "", joined)
+        try:
+            if operands.startswith("["):
+                values = json.loads(operands)
+                raw_sources = (values[:-1] if isinstance(values, list)
+                               and len(values) >= 2
+                               and all(isinstance(value, str) for value in values)
+                               else [])
+            else:
+                tokens = shlex.split(operands)
+                values = [token for token in tokens if not token.startswith("--")]
+                raw_sources = values[:-1]
+        except (ValueError, json.JSONDecodeError):
+            return None
+        if not raw_sources:
+            return None
+        for raw_source in raw_sources:
+            source = str(raw_source).lstrip("/")
+            if (not source or "://" in source or "$" in source
+                    or any(char in source for char in "*?[")):
+                return None
+            resolved = (context / source).resolve()
+            try:
+                relative = resolved.relative_to(root)
+            except ValueError:
+                return None
+            sources.append(relative.as_posix() or ".")
+    return sources
+
+
+def _opt102_path_covers(source: str, declared: str) -> bool:
+    """Whether a local source is an equal/ancestor path, case-insensitively."""
+    source_parts = tuple(
+        part.casefold() for part in Path(source).parts if part != ".")
+    declared_parts = tuple(
+        part.casefold() for part in Path(declared.strip("/")).parts)
+    return not source_parts or declared_parts[:len(source_parts)] == source_parts
+
+
+def _opt102_source_has_lfs_hint(root: Path, source: str,
+                                hint: str) -> bool | None:
+    """Check an extension-style LFS hint inside one copied source, bounded."""
+    path = root / source
+    if path.is_file():
+        return path.name.casefold().endswith(hint.casefold())
+    if not path.is_dir():
+        return False
+    for index, candidate in enumerate(path.rglob("*")):
+        if index >= 5_000:
+            return None
+        if (candidate.is_file()
+                and candidate.name.casefold().endswith(hint.casefold())):
+            return True
+    return False
+
+
+def _opt102_job_image_payload(doc: dict, raw: str, job: dict) -> list[str] | None:
+    """Resolved image context and COPY/ADD paths read by one workflow job."""
+    if _OPT102_ROOT is None:
+        return []
+    root = _OPT102_ROOT.resolve()
+    rel = _opt102_workflow_rel(root, raw)
+    caller_inputs = _opt102_caller_inputs(root, rel)
+    raw_workflow_env = doc.get("env") or {}
+    workflow_env = ({str(k): str(v) for k, v in raw_workflow_env.items()}
+                    if isinstance(raw_workflow_env, dict) else {})
+    raw_job_env = job.get("env") or {}
+    env = {**workflow_env, **({str(k): str(v) for k, v in raw_job_env.items()}
+                             if isinstance(raw_job_env, dict) else {})}
+    payload: set[str] = set()
+    if not any(_opt102_step_build_config(step, job, doc) is not None
+               for step in _steps(job)):
+        return []
+    for matrix in _opt102_matrix_legs(job):
+        outputs: dict[str, str] = {}
+        for step in _steps(job):
+            run = str(step.get("run") or "")
+            # Parsing one command while silently ignoring a later build could
+            # make a destructive payload-removal recommendation. Named local
+            # contexts likewise need their own COPY source resolution.
+            if (len(re.findall(r"\bdocker\s+(?:buildx\s+)?build\b", run,
+                               re.IGNORECASE)) > 1
+                    or re.search(r"--build-context(?:=|\s)", run)
+                    or (isinstance(step.get("with"), dict)
+                        and "build-contexts" in step["with"])):
+                return None
+            raw_step_env = step.get("env") or {}
+            step_env = {**env, **({str(k): str(v) for k, v in raw_step_env.items()}
+                                 if isinstance(raw_step_env, dict) else {})}
+            resolved_env = {
+                key: (_opt102_resolve(value, env=step_env, matrix=matrix,
+                                      inputs=caller_inputs, outputs=outputs) or value)
+                for key, value in step_env.items()
+            }
+            build = _opt102_step_build_config(step, job, doc)
+            if build is not None:
+                config, marker = build
+                # build-push-action defaults to a Git context, which does not
+                # consume mutations made by the preceding checkout. Only an
+                # explicit local path context can make that checkout payload
+                # load-bearing.
+                if marker == "docker/build-push-action@" and "context" not in config:
+                    continue
+                paths = _opt102_resolved_dockerfile(
+                    root, config, env=resolved_env, matrix=matrix,
+                    inputs=caller_inputs, outputs=outputs)
+                if paths is None:
+                    return None
+                candidate, context = paths
+                sources = _opt102_copy_sources(candidate, context, root)
+                if sources is None:
+                    return None
+                # A source directory covers every declared checkout payload
+                # nested under it. Add only those concrete declarations: raw
+                # source strings would make `vendor/lib-generated` a substring
+                # match for the distinct payload `vendor/lib`.
+                for declared in _SUBMODULE_PATHS:
+                    if any(_opt102_path_covers(source, declared) for source in sources):
+                        payload.add(declared)
+                for hint in _LFS_PATH_HINTS:
+                    if any(source == "." for source in sources):
+                        payload.add(hint)
+                        continue
+                    if not hint.startswith("."):
+                        if any(_opt102_path_covers(source, hint) for source in sources):
+                            payload.add(hint)
+                        continue
+                    # Extension-style attributes (`*.psd` -> `.psd`) need a
+                    # real copied file, not a path-substring guess.
+                    for source in sources:
+                        matched = _opt102_source_has_lfs_hint(root, source, hint)
+                        if matched is None:
+                            return None
+                        if matched:
+                            payload.add(hint)
+                            break
+            step_id = str(step.get("id") or "")
+            if step_id:
+                run = str(step.get("run") or "")
+                for key, value in re.findall(
+                        r"echo\s+['\"]?([A-Za-z_][\w-]*)=([^'\"\s]+).*GITHUB_OUTPUT",
+                        run):
+                    resolved_value = _opt102_resolve(
+                        value, env=resolved_env, matrix=matrix,
+                        inputs=caller_inputs, outputs=outputs)
+                    if resolved_value is not None:
+                        outputs[f"steps.{step_id}.outputs.{key}"] = resolved_value
+    return sorted(payload)
+
+
 def _opt102_source_flag(text: str) -> bool | None:
     values = re.findall(
         r"(?i)(?:SKIP\w*PREBUILT\w*|npm_config_build_from_source)"
@@ -2129,28 +2371,10 @@ def _detect_opt102(doc: dict, raw: str) -> list[Hit]:
                 resolved_env = {k: (_opt102_resolve(v, env=step_env, matrix=matrix,
                                                    inputs=caller_inputs, outputs=outputs) or v)
                                 for k, v in step_env.items()}
-                uses_action = bool(re.match(r"^docker/build-push-action@", _uses(step)))
                 run = str(step.get("run") or "")
-                raw_build = re.search(r"\bdocker\s+(?:buildx\s+)?build\b", run)
-                config: dict[str, Any] | None = None
-                marker = "docker/build-push-action@"
-                if uses_action:
-                    with_ = step.get("with") or {}
-                    config = ({str(key): value for key, value in with_.items()
-                               if str(key) in {"context", "file", "platforms", "target"}}
-                              if isinstance(with_, dict) else {})
-                elif raw_build:
-                    config = _opt102_raw_build_config(run, raw_build)
-                    defaults = job.get("defaults") or {}
-                    run_defaults = (defaults.get("run") or {}
-                                    if isinstance(defaults, dict) else {})
-                    working_directory = (step.get("working-directory")
-                                         or (run_defaults.get("working-directory")
-                                             if isinstance(run_defaults, dict) else None)
-                                         or ".")
-                    config["working_directory"] = working_directory
-                    marker = "docker build"
-                if config is not None:
+                build = _opt102_step_build_config(step, job, doc)
+                if build is not None:
+                    config, marker = build
                     resolved = {}
                     for key, value in config.items():
                         if isinstance(value, list):
@@ -2171,22 +2395,11 @@ def _detect_opt102(doc: dict, raw: str) -> list[Hit]:
                         foreign = [p for p in platforms
                                    if p.startswith("linux/") and p != "linux/amd64"]
                         if foreign:
-                            context = str(resolved.get("context") or ".")
-                            dockerfile = str(resolved.get("file") or "Dockerfile")
                             target = str(resolved.get("target") or "")
-                            working_directory = str(resolved.get("working_directory") or ".")
-                            if (context and dockerfile and working_directory
-                                    and "://" not in context
-                                    and not Path(context).is_absolute()
-                                    and not Path(dockerfile).is_absolute()
-                                    and not Path(working_directory).is_absolute()):
-                                base = (root / working_directory).resolve()
-                                candidate = (base / dockerfile if "file" in resolved
-                                             else base / context / dockerfile).resolve()
-                                try:
-                                    candidate.relative_to(root)
-                                except ValueError:
-                                    candidate = root.parent / "__outside__"
+                            paths = _opt102_resolved_dockerfile(
+                                root, resolved, env={}, matrix={}, inputs={}, outputs={})
+                            if paths is not None:
+                                candidate, _context = paths
                                 risky = _opt102_risky_stage(candidate, target)
                                 if risky is not None:
                                     line = _line_of_in_job(raw, str(job_name), marker)
@@ -2207,6 +2420,240 @@ def _detect_opt102(doc: dict, raw: str) -> list[Hit]:
                             inputs=caller_inputs, outputs=outputs)
                         if resolved_value is not None:
                             outputs[f"steps.{step_id}.outputs.{key}"] = resolved_value
+    return hits
+
+
+_OPT89_COMPILE_RE = re.compile(
+    r"(?:^|&&|\|\||[;|]|\bthen\b|\bdo\b)\s*"
+    r"(?:(?:(?:[A-Za-z_][A-Za-z0-9_]*=(?:[^\s;&|]+|'[^']*'|\"[^\"]*\"))|"
+    r"(?:env|sudo|time))\s+)*(?:"
+    r"(?:\./)?configure\b|make(?:\s|$)|cmake(?:\s|$)|ninja(?:\s|$)|"
+    r"cargo\s+(?:build|install)\b|go\s+(?:build|install)\b|"
+    r"(?:\./)?mvnw?\b[^\n;&|]*\b(?:compile|package|install)\b|"
+    r"(?:\./)?gradlew?\b[^\n;&|]*\b(?:build|assemble|compile\w*)\b|"
+    r"(?:gcc|g\+\+|clang|clang\+\+|cc|c\+\+)\b)",
+    re.IGNORECASE | re.MULTILINE,
+)
+_OPT89_FOREIGN_ARCH_RE = re.compile(
+    r"(?:^|[/_-])(?:aarch64|arm64|arm(?:/v\d+|v\d+)?|riscv64|s390x|ppc64le)(?:$|[/_-])",
+    re.IGNORECASE,
+)
+_OPT89_DOCKER_RUN_PLATFORM_RE = re.compile(
+    r"\bdocker\s+run\b[^\n]*?--platform(?:=|\s+)"
+    r"(?P<platform>linux/(?:aarch64|arm64|arm/v\d+|riscv64|s390x|ppc64le))\b",
+    re.IGNORECASE,
+)
+_OPT89_CONTAINER_IMAGE_RE = re.compile(
+    r"^(?:arm64v8|arm32v\d+|aarch64|riscv64|s390x|ppc64le)/",
+    re.IGNORECASE,
+)
+
+
+def _opt89_compile_signal(command: str) -> str | None:
+    for match in _OPT89_COMPILE_RE.finditer(command):
+        segment = command[match.start():]
+        segment = re.sub(r"^(?:&&|\|\||[;|])\s*", "", segment).strip()
+        segment = re.split(r"&&|\|\||[;|]|\n", segment, maxsplit=1)[0]
+        low = segment.lower()
+        if re.search(r"\b(?:make|ninja)\b", low):
+            try:
+                tokens = shlex.split(segment)
+            except ValueError:
+                continue
+            tool_at = next((i for i, token in enumerate(tokens)
+                            if Path(token).name.lower() in {"make", "gmake", "ninja"}), None)
+            if tool_at is not None:
+                targets: list[str] = []
+                skip_value = False
+                for token in tokens[tool_at + 1:]:
+                    if skip_value:
+                        skip_value = False
+                        continue
+                    if token in {"-C", "--directory", "-f", "--file", "-j", "--jobs"}:
+                        skip_value = True
+                    elif not token.startswith("-") and "=" not in token:
+                        targets.append(token.lower())
+                test_targets = {"test", "tests", "check", "checks", "ctest", "verify"}
+                if targets and all(target in test_targets for target in targets):
+                    continue
+        if (re.search(r"\bcmake\b", low)
+                and re.search(r"\bcmake\s+(?:--version|--help|-e)\b", low)):
+            continue
+        if (re.search(r"\b(?:gcc|g\+\+|clang|clang\+\+|cc|c\+\+)\b", low)
+                and re.search(r"\s(?:--version|-v)\s*$", low)):
+            continue
+        if re.search(r"(?:\./)?configure\s+(?:--help|--version)\s*$", low):
+            continue
+        return re.sub(
+            r"^(?:&&|\|\||[;|])\s*", "", match.group(0)).strip()
+    return None
+
+
+def _opt89_docker_payload(command: str) -> str:
+    """Return the command after `docker run ... IMAGE`, or fail closed."""
+    command = _LINE_CONTINUATION_RE.sub(" ", command)
+    try:
+        tokens = shlex.split(command.splitlines()[0])
+    except ValueError:
+        return ""
+    try:
+        index = tokens.index("run", tokens.index("docker") + 1) + 1
+    except (ValueError, IndexError):
+        return ""
+    value_options = {
+        "--add-host", "--cap-add", "--cpus", "--device", "--env", "-e",
+        "--env-file", "--entrypoint", "--hostname", "-h", "--memory", "-m",
+        "--mount", "--name", "--network", "--platform", "--user", "-u",
+        "--volume", "-v", "--workdir", "-w",
+    }
+    while index < len(tokens):
+        token = tokens[index]
+        if token in value_options:
+            index += 2
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        payload = tokens[index + 1:]
+        stop = next((i for i, token in enumerate(payload)
+                     if token in {"&&", "||", ";", "|"}), len(payload))
+        payload = payload[:stop]
+        if (len(payload) >= 3 and Path(payload[0]).name in {"sh", "bash", "dash"}
+                and re.fullmatch(r"-[a-z]*c[a-z]*", payload[1])):
+            payload = payload[2:]
+        return " ".join(payload)
+    return ""
+
+
+def _opt89_qemu_supports(platforms: set[str], platform: str) -> bool:
+    if "all" in platforms:
+        return True
+    arch = platform.removeprefix("linux/").lower()
+    aliases = {"aarch64": "arm64"}
+    family = "arm" if arch.startswith("arm/") else aliases.get(arch, arch)
+    return arch in platforms or family in platforms
+
+
+def _opt89_foreign_container(job: dict, matrix: dict[str, str]) -> str | None:
+    container = job.get("container")
+    if isinstance(container, str):
+        image, options = container, ""
+    elif isinstance(container, dict):
+        image = str(container.get("image") or "")
+        options = str(container.get("options") or "")
+    else:
+        return None
+    image = _opt102_resolve(image, env={}, matrix=matrix, inputs={}, outputs={}) or ""
+    options = _opt102_resolve(options, env={}, matrix=matrix, inputs={}, outputs={}) or ""
+    platform = re.search(
+        r"--platform(?:=|\s+)(linux/(?:aarch64|arm64|arm/v\d+|riscv64|s390x|ppc64le))\b",
+        options,
+        re.IGNORECASE,
+    )
+    if platform:
+        return platform.group(1).lower()
+    if _OPT89_CONTAINER_IMAGE_RE.search(image):
+        return image.split("/", 1)[0].lower()
+    return None
+
+
+def _detect_opt89(doc: dict, raw: str) -> list[Hit]:
+    """Find compile commands executed in an emulated foreign container."""
+    hits: list[Hit] = []
+    for job_name, job in _jobs_from_doc(doc).items():
+        if not isinstance(job, dict):
+            continue
+        job_hit = False
+        for matrix in _opt102_matrix_legs(job):
+            if not _opt102_x64_runner(job.get("runs-on"), matrix)[0]:
+                continue
+            qemu_platforms: set[str] | None = None
+            container_arch = _opt89_foreign_container(job, matrix)
+            action_occurrence = docker_occurrence = 0
+            container_occurrences: dict[str, int] = {}
+            for step in _steps(job):
+                uses = _uses(step)
+                run = _run(step)
+                resolved_run = _opt102_resolve(
+                    run, env={}, matrix=matrix, inputs={}, outputs={}) or ""
+                normalized_run = _LINE_CONTINUATION_RE.sub(" ", resolved_run)
+                with_ = step.get("with") or {}
+                if uses.startswith("uraimo/run-on-arch-action@"):
+                    action_occurrence += 1
+                if re.search(r"\bdocker\s+run\b", normalized_run):
+                    docker_occurrence += 1
+                first_line = run.splitlines()[0].strip() if run else ""
+                if first_line:
+                    container_occurrences[first_line] = (
+                        container_occurrences.get(first_line, 0) + 1)
+                if uses.startswith("docker/setup-qemu-action@"):
+                    configured = (str(with_.get("platforms") or "all")
+                                  if isinstance(with_, dict) else "all")
+                    configured = _opt102_resolve(
+                        configured, env={}, matrix=matrix, inputs={}, outputs={}) or ""
+                    if configured:
+                        qemu_platforms = {
+                            value.strip().lower() for value in configured.split(",")
+                            if value.strip()
+                        }
+
+                arch = ""
+                command = ""
+                marker = ""
+                occurrence = 1
+                mechanism = ""
+                if uses.startswith("uraimo/run-on-arch-action@") and isinstance(with_, dict):
+                    arch = (_opt102_resolve(
+                        with_.get("arch"), env={}, matrix=matrix, inputs={}, outputs={})
+                        or "").lower()
+                    command = (_opt102_resolve(
+                        with_.get("run"), env={}, matrix=matrix, inputs={}, outputs={})
+                        or "")
+                    marker = "uraimo/run-on-arch-action@"
+                    occurrence = action_occurrence
+                    mechanism = "run-on-arch action"
+                    if not _OPT89_FOREIGN_ARCH_RE.search(arch):
+                        continue
+                elif (qemu_platforms is not None
+                      and (platform := _OPT89_DOCKER_RUN_PLATFORM_RE.search(normalized_run))
+                      and _opt89_qemu_supports(
+                          qemu_platforms, platform.group("platform"))):
+                    arch = platform.group("platform").lower()
+                    command = _opt89_docker_payload(resolved_run)
+                    marker = "docker run"
+                    occurrence = docker_occurrence
+                    mechanism = "QEMU-backed docker run"
+                elif container_arch and resolved_run:
+                    arch = container_arch
+                    command = resolved_run
+                    marker = first_line
+                    occurrence = container_occurrences[first_line]
+                    mechanism = "foreign-architecture job container"
+                else:
+                    continue
+
+                signal = _opt89_compile_signal(command)
+                if signal is None:
+                    continue
+                line = _line_of_nth_in_job(
+                    raw, str(job_name), marker, occurrence)
+                hits.append(Hit(
+                    line=line,
+                    affected_jobs=[str(job_name)],
+                    evidence=(f"job `{job_name}` compiles via `{signal}` inside a "
+                              f"{mechanism} for `{arch}` on a hosted x64 runner"),
+                    match_text=signal,
+                    snippet=_block_lines(raw, line),
+                    facts={"opt89_emulated_container": {
+                        "architecture": arch,
+                        "compile_signal": signal,
+                        "mechanism": mechanism,
+                    }},
+                ))
+                job_hit = True
+                break
+            if job_hit:
+                break
     return hits
 
 
@@ -3378,6 +3825,390 @@ def _detect_opt12(doc: dict, raw: str) -> list[Hit]:
     return hits
 
 
+_OPT12_TEST_COMMAND_RE = re.compile(
+    r"(?:^|\s)(?:npm|pnpm|yarn)\s+(?:run\s+)?test\b|"
+    r"(?:^|\s)(?:pytest|ctest|vitest|jest|rspec)\b|"
+    r"(?:^|\s)(?:make|cmake\s+--build\s+\S+\s+--target)\s+(?:test|check)\b",
+    re.IGNORECASE,
+)
+_OPT12_COVERAGE_FLAG_RE = re.compile(
+    r"^(?:--cov(?:=.*)?|--coverage(?:=.*)?|--cov-report(?:=.*)?|"
+    r"--coverage-report(?:=.*)?|--collectCoverage(?:=.*)?)$", re.IGNORECASE)
+_OPT12_COVERAGE_VALUE_FLAGS = {"--cov", "--cov-report", "--coverage-report"}
+
+
+def _opt12_normalized_test_commands(run: str) -> tuple[tuple[str, ...], bool]:
+    """Test-command signatures and whether coverage-only flags were removed."""
+    found: list[str] = []
+    coverage = False
+    for command in re.split(r"\n|&&|;", run):
+        command = command.strip()
+        if not command or not _OPT12_TEST_COMMAND_RE.search(command):
+            continue
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            tokens = command.split()
+        kept = []
+        skip_value = False
+        for token_index, token in enumerate(tokens):
+            if skip_value:
+                skip_value = False
+                continue
+            if _OPT12_COVERAGE_FLAG_RE.match(token):
+                coverage = True
+                if (token.lower() in _OPT12_COVERAGE_VALUE_FLAGS
+                        and token_index + 1 < len(tokens)):
+                    next_token = tokens[token_index + 1]
+                    skip_value = not next_token.startswith("-")
+                continue
+            kept.append(token)
+        while kept and kept[-1] == "--":
+            kept.pop()
+        if kept:
+            kept[0] = kept[0].lower()
+            if kept[0] in {"npm", "pnpm", "yarn"} and len(kept) > 1:
+                kept[1] = kept[1].lower()
+        normalized = " ".join(kept).strip()
+        if normalized and normalized not in found:
+            found.append(normalized)
+    return tuple(found), coverage
+
+
+def _opt12_composite_test_commands(
+    ref: str, chain: tuple[str, ...] = (),
+) -> tuple[tuple[str, ...], bool, list[str]]:
+    """Test commands in a readable local composite action, expanded in place."""
+    if _OPT102_ROOT is None or ref in chain or len(chain) >= _MAX_LOCAL_ACTION_DEPTH:
+        return (), False, []
+    text = _read_local_action(_OPT102_ROOT, ref)
+    try:
+        doc = yaml.safe_load(text) if text is not None else None
+    except yaml.YAMLError:
+        doc = None
+    runs = doc.get("runs") if isinstance(doc, dict) else None
+    if not isinstance(runs, dict) or str(runs.get("using") or "").lower() != "composite":
+        return (), False, []
+    steps = runs.get("steps")
+    if not isinstance(steps, list):
+        return (), False, []
+    commands: list[str] = []
+    coverage = False
+    refs = [ref]
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        sigs, has_coverage = _opt12_normalized_test_commands(_run(step))
+        commands.extend(sig for sig in sigs if sig not in commands)
+        coverage = coverage or has_coverage
+        nested = _uses(step).split("@", 1)[0].strip()
+        if not _is_local_uses(nested):
+            continue
+        nested_commands, nested_coverage, nested_refs = _opt12_composite_test_commands(
+            nested, chain + (ref,))
+        commands.extend(sig for sig in nested_commands if sig not in commands)
+        coverage = coverage or nested_coverage
+        refs.extend(item for item in nested_refs if item not in refs)
+    return tuple(commands), coverage, refs
+
+
+def _opt12_job_test_commands(job: dict) -> tuple[dict[str, str], bool, list[str]]:
+    commands: dict[str, str] = {}
+    coverage = False
+    local_refs: list[str] = []
+    defaults = job.get("defaults") if isinstance(job.get("defaults"), dict) else {}
+    run_defaults = defaults.get("run") if isinstance(defaults.get("run"), dict) else {}
+    default_cwd = str(run_defaults.get("working-directory") or ".")
+    job_env = job.get("env") if isinstance(job.get("env"), dict) else {}
+    container = job.get("container")
+
+    def add(signatures: tuple[str, ...], step: dict) -> None:
+        cwd = str(step.get("working-directory") or default_cwd)
+        env = dict(job_env)
+        if isinstance(step.get("env"), dict):
+            env.update(step["env"])
+        for signature in signatures:
+            key = json.dumps({
+                "command": signature,
+                "working_directory": cwd,
+                "env": env,
+                "container": container,
+            }, sort_keys=True, separators=(",", ":"), default=str)
+            commands.setdefault(key, signature)
+
+    for leaf in job_walk(job).leaves:
+        step = leaf.step
+        sigs, has_coverage = _opt12_normalized_test_commands(_run(step))
+        add(sigs, step)
+        coverage = coverage or has_coverage
+        ref = _uses(step).split("@", 1)[0].strip()
+        if not _is_local_uses(ref):
+            continue
+        sigs, has_coverage, refs = _opt12_composite_test_commands(ref)
+        add(sigs, step)
+        coverage = coverage or has_coverage
+        local_refs.extend(item for item in refs if item not in local_refs)
+    return commands, coverage, local_refs
+
+
+def _opt12_platforms(job: dict) -> set[str]:
+    """Concrete runner OS/architecture labels after bounded matrix expansion."""
+    out: set[str] = set()
+    for matrix in _opt102_matrix_legs(job):
+        raw = job.get("runs-on")
+        values = raw if isinstance(raw, list) else [raw]
+        resolved: list[str] = []
+        for value in values:
+            item = _opt102_resolve(
+                value, env={}, matrix=matrix, inputs={}, outputs={})
+            if not item:
+                return set()
+            resolved.append(item.lower())
+        labels = set(resolved)
+        joined = "+".join(sorted(labels))
+        if any(label.startswith("ubuntu-") or label == "linux" for label in labels):
+            os_name = "linux"
+        elif any(label.startswith("windows-") or label == "windows" for label in labels):
+            os_name = "windows"
+        elif any(label.startswith("macos-") or label == "macos" for label in labels):
+            os_name = "macos"
+        else:
+            out.add(joined)
+            continue
+        if any(re.search(r"(?:^|[-_+])(arm64|aarch64|arm)(?:$|[-_+])", label)
+               for label in labels):
+            arch = "arm64"
+        elif any(re.search(r"(?:^|[-_+])(x64|amd64|x86_64)(?:$|[-_+])", label)
+                 for label in labels):
+            arch = "x64"
+        elif any(label.startswith(("ubuntu-", "windows-")) for label in labels):
+            arch = "x64"
+        else:
+            out.add(joined)
+            continue
+        out.add(f"{os_name}/{arch}")
+    return out
+
+
+def _opt12_trigger_signature(doc: dict) -> str:
+    on = doc.get("on", doc.get(True))
+
+    def canonical(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {str(key): canonical(nested) for key, nested in value.items()}
+        if isinstance(value, list):
+            items = [canonical(item) for item in value]
+            return sorted(items, key=lambda item: json.dumps(
+                item, sort_keys=True, separators=(",", ":"), default=str))
+        return value
+
+    try:
+        return json.dumps(canonical(on), sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return ""
+
+
+def _opt12_downstream_jobs(jobs: dict[str, Any], start: str) -> list[str]:
+    reached = {start}
+    changed = True
+    while changed:
+        changed = False
+        for name, spec in jobs.items():
+            if not isinstance(spec, dict) or name in reached:
+                continue
+            needs = spec.get("needs")
+            needs = [needs] if isinstance(needs, str) else needs if isinstance(needs, list) else []
+            if any(str(need) in reached for need in needs):
+                reached.add(str(name))
+                changed = True
+    return sorted(reached - {start})
+
+
+def _opt12_run_is_shared_test_only(run: str, shared: set[str]) -> bool:
+    parts = [part.strip() for part in re.split(r"\n|&&|;", run) if part.strip()]
+    if not parts:
+        return True
+    for part in parts:
+        commands, _coverage = _opt12_normalized_test_commands(part)
+        if len(commands) != 1 or commands[0] not in shared:
+            return False
+    return True
+
+
+def _opt12_composite_is_shared_test_only(
+    ref: str, shared: set[str], chain: tuple[str, ...] = (),
+) -> bool:
+    if _OPT102_ROOT is None or ref in chain or len(chain) >= _MAX_LOCAL_ACTION_DEPTH:
+        return False
+    text = _read_local_action(_OPT102_ROOT, ref)
+    try:
+        doc = yaml.safe_load(text) if text is not None else None
+    except yaml.YAMLError:
+        return False
+    runs = doc.get("runs") if isinstance(doc, dict) else None
+    steps = runs.get("steps") if isinstance(runs, dict) else None
+    if str((runs or {}).get("using") or "").lower() != "composite" \
+            or not isinstance(steps, list):
+        return False
+    for step in steps:
+        if not isinstance(step, dict):
+            return False
+        if _run(step) and not _opt12_run_is_shared_test_only(_run(step), shared):
+            return False
+        nested = _uses(step).split("@", 1)[0].strip()
+        if nested and (not _is_local_uses(nested)
+                       or not _opt12_composite_is_shared_test_only(
+                           nested, shared, chain + (ref,))):
+            return False
+    return True
+
+
+def _opt12_job_is_replaceable(job: dict, shared: set[str]) -> bool:
+    """True when removing the job removes only the shared suite and setup."""
+    if job.get("outputs") or job.get("services"):
+        return False
+    setup_actions = (
+        "actions/checkout", "actions/setup-", "actions/cache",
+    )
+    saw_shared = False
+    for leaf in job_walk(job).leaves:
+        step = leaf.step
+        run = _run(step)
+        if run:
+            if not _opt12_run_is_shared_test_only(run, shared):
+                return False
+            saw_shared = True
+        uses = _uses(step).split("@", 1)[0].strip()
+        if not uses:
+            continue
+        if _is_local_uses(uses):
+            if not _opt12_composite_is_shared_test_only(uses, shared):
+                return False
+            saw_shared = True
+        elif not uses.lower().startswith(setup_actions):
+            return False
+    return saw_shared
+
+
+def _detect_opt12_duplicate_test_work(
+    parsed: list[tuple[str, dict, str]],
+) -> list[tuple[str, str, Hit]]:
+    """Duplicate test work on the same trigger and concrete runner platform."""
+    rows: list[dict[str, Any]] = []
+    for rel, doc, raw in parsed:
+        trigger = _opt12_trigger_signature(doc)
+        jobs = _jobs_from_doc(doc)
+        for name, job in jobs.items():
+            if not isinstance(job, dict):
+                continue
+            commands, coverage, local_refs = _opt12_job_test_commands(job)
+            platforms = _opt12_platforms(job)
+            if not commands or not platforms or not trigger:
+                continue
+            rows.append({
+                "workflow": rel,
+                "job": str(name),
+                "commands": commands,
+                "coverage": coverage or bool(re.search(r"coverage", str(name), re.I)),
+                "local_refs": local_refs,
+                "platforms": platforms,
+                "trigger": trigger,
+                "downstream": _opt12_downstream_jobs(jobs, str(name)),
+                "raw": raw,
+                "spec": job,
+                "display_name": str(job.get("name") or name),
+            })
+    hits: list[tuple[str, str, Hit]] = []
+    seen_duplicates: set[tuple[str, str]] = set()
+    ranked: list[tuple[
+        int, dict[str, Any], dict[str, Any], tuple[str, ...],
+        dict[str, Any], dict[str, Any],
+    ]] = []
+    for index, left in enumerate(rows):
+        for right in rows[index + 1:]:
+            if left["trigger"] != right["trigger"]:
+                continue
+            if _jobs_mutually_exclusive(left["spec"], right["spec"]):
+                continue
+            if not (left["platforms"] & right["platforms"]):
+                continue
+            shared = tuple(command for command in left["commands"]
+                           if command in right["commands"])
+            if not shared:
+                continue
+            same_workflow = left["workflow"] == right["workflow"]
+            left_before_right = same_workflow and right["job"] in left["downstream"]
+            right_before_left = same_workflow and left["job"] in right["downstream"]
+            if left_before_right:
+                duplicate, existing, on_path = right, left, True
+            elif right_before_left:
+                duplicate, existing, on_path = left, right, True
+            elif left["downstream"] and not right["downstream"]:
+                duplicate, existing, on_path = left, right, True
+            elif right["downstream"]:
+                duplicate, existing, on_path = right, left, True
+            elif left["coverage"] or right["coverage"]:
+                duplicate = left if left["coverage"] else right
+                existing = right if duplicate is left else left
+                on_path = False
+            else:
+                continue
+            shared_commands = {left["commands"][signature] for signature in shared}
+            if not _opt12_job_is_replaceable(duplicate["spec"], shared_commands):
+                continue
+            ranked.append((
+                0 if on_path else 1, duplicate, existing, shared, left, right))
+    for rank, duplicate, existing, shared, left, right in sorted(
+            ranked, key=lambda item: (
+                item[0], item[1]["workflow"], item[1]["job"],
+                item[2]["workflow"], item[2]["job"])):
+        duplicate_key = (duplicate["workflow"], duplicate["job"])
+        if duplicate_key in seen_duplicates:
+            continue
+        seen_duplicates.add(duplicate_key)
+        on_path = rank == 0
+        coverage = left["coverage"] or right["coverage"]
+        downstream = duplicate["downstream"]
+        shared_commands = [left["commands"][signature] for signature in shared]
+        command_text = ", ".join(f"`{command}`" for command in shared_commands)
+        refs = sorted(set(left["local_refs"] + right["local_refs"]))
+        refs_text = f" through local action(s) {', '.join(refs)}" if refs else ""
+        if coverage and not on_path:
+            fix = ("Move the coverage floor onto the existing test run; keep every gate. "
+                   "Runner-minute effect: one suite run is saved.")
+        else:
+            slow = f" before `{downstream[0]}`" if downstream else ""
+            fix = ("Keep every gate: either use `workflow_run` with a CI conclusion "
+                   "check, or put the jobs in one workflow and make the slow job `needs` "
+                   "the existing test job. Runner-minute effect: one suite run is saved; "
+                   "under same-workflow `needs`, wall-clock saving is 0s.")
+            if slow:
+                fix = f"The duplicate sits on the needs chain{slow}. " + fix
+        evidence = (
+            f"`{left['workflow']}` job `{left['job']}` and `{right['workflow']}` job "
+            f"`{right['job']}` run the same test command(s){refs_text}: {command_text}. "
+            + fix)
+        hits.append(("OPT12", duplicate["workflow"], Hit(
+            line=1,
+            affected_jobs=[duplicate["job"]],
+            evidence=evidence,
+            match_text="duplicate-test-work",
+            snippet="\n".join(shared_commands),
+            facts={"opt12_duplicate_test_work": {
+                "variant": "needs_chain" if on_path else "coverage",
+                "existing_workflow": existing["workflow"],
+                "existing_job": existing["job"],
+                "duplicate_workflow": duplicate["workflow"],
+                "duplicate_job": duplicate["job"],
+                "duplicate_job_display": duplicate["display_name"],
+                "downstream_job": downstream[0] if downstream else None,
+                "same_workflow": existing["workflow"] == duplicate["workflow"],
+                "commands": shared_commands,
+            }},
+        )))
+    return hits
+
+
 def _opt12_first_step_in_a_group(doc: dict) -> list[str]:
     """The jobs OPT12 cannot read a preamble from because their FIRST step is
     inside a `parallel:` group (a composite action cannot hold one). Listed
@@ -3499,6 +4330,7 @@ _DETECTORS: dict[str, Any] = {
     "OPT45": _detect_opt45,
     "OPT62": _detect_opt62,
     "OPT63": _detect_opt63,
+    "OPT89": _detect_opt89,
     "OPT102": _detect_opt102,
 }
 
@@ -6054,6 +6886,7 @@ def _cross_workflow_hits(parsed: list[tuple[str, dict, str]], root: Path,
     out += _detect_opt7(parsed, root)
     out += _detect_opt37(parsed, root)
     out += _detect_opt40(parsed, root)
+    out += _detect_opt12_duplicate_test_work(parsed)
     turbo_hits, incomplete = _detect_turbo(root, _ci_turbo_tasks(root, parsed))
     out += turbo_hits
     cache_hits, cache_held = _detect_opt96(parsed, root, default_branch, branch_source)
@@ -6987,6 +7820,7 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
             for hit in hits:
                 finding_idx += 1
                 f = _emit(entry, hit, rel, finding_idx)
+                f.update(hit.facts)
                 f["workflow_lanes"] = workflow_lanes.get(rel, [])
                 if workflow_push_scopes.get(rel):
                     f["workflow_push_scopes"] = workflow_push_scopes[rel]
@@ -7016,6 +7850,7 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
             continue
         finding_idx += 1
         f = _emit(entry, hit, wf, finding_idx)
+        f.update(hit.facts)
         f["workflow_lanes"] = workflow_lanes.get(wf, [])
         if workflow_push_scopes.get(wf):
             f["workflow_push_scopes"] = workflow_push_scopes[wf]

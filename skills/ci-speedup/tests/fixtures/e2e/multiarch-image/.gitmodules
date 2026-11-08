@@ -1,0 +1,3 @@
+[submodule "vendor/library"]
+	path = vendor/lib
+	url = https://example.invalid/vendor/library.git

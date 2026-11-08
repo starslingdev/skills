@@ -6320,6 +6320,106 @@ def _affected_job_p50(f: dict[str, Any], crit: dict[str, Any]) -> float:
                default=0.0)
 
 
+def _ground_opt12_duplicate_test_work(
+    findings: list[dict[str, Any]], push_lane: dict[str, Any],
+) -> None:
+    """Size duplicate test work from the sampled default-branch push facts.
+
+    Moving a publish workflow behind ``workflow_run`` waits for the producer
+    workflow to finish. Its wall-clock benefit is therefore only the duplicate
+    job's duration beyond that producer completion offset. A same-workflow
+    ``needs`` handoff preserves the existing chain and receives no wall credit.
+    Runner minutes use GitHub's per-job whole-minute billing shape.
+    """
+    facts = [fact for fact in (push_lane.get("facts") or [])
+             if isinstance(fact, dict) and fact.get("partial") is not True]
+    pushes = int(push_lane.get("pushes_30d") or 0)
+    for finding in findings:
+        stamp = finding.get("opt12_duplicate_test_work")
+        if not isinstance(stamp, dict):
+            continue
+        duplicate_wf = str(stamp.get("duplicate_workflow") or "")
+        duplicate_job = str(stamp.get("duplicate_job") or "")
+        duplicate_display = str(stamp.get("duplicate_job_display") or "")
+        duplicate_aliases = {
+            alias for alias in (
+                duplicate_job, duplicate_display,
+                _matrix_base_name(duplicate_job),
+                _matrix_base_name(duplicate_display),
+            ) if alias
+        }
+        existing_wf = str(stamp.get("existing_workflow") or "")
+        rows: list[dict[str, Any]] = []
+        for fact in facts:
+            created = _parse_dt(str(fact.get("created_at") or ""))
+            if created is None:
+                continue
+            jobs = [job for job in (fact.get("jobs") or []) if isinstance(job, dict)]
+            duplicate = next((
+                job for job in jobs
+                if str(job.get("workflow_file") or "") == duplicate_wf
+                and (str(job.get("name") or "") in duplicate_aliases
+                     or _matrix_base_name(str(job.get("name") or ""))
+                     in duplicate_aliases)
+            ), None)
+            producer_ends = [
+                _parse_dt(str(job.get("completed_at") or ""))
+                for job in jobs
+                if str(job.get("workflow_file") or "") == existing_wf
+            ]
+            producer_ends = [end for end in producer_ends if end is not None]
+            if duplicate is None or not producer_ends:
+                continue
+            duplicate_s = _duration_s(
+                duplicate.get("started_at"), duplicate.get("completed_at"))
+            if duplicate_s is None or duplicate_s <= 0:
+                continue
+            producer_s = max((end - created).total_seconds() for end in producer_ends)
+            wall_s = (0.0 if stamp.get("same_workflow") is True
+                      else max(0.0, duplicate_s - producer_s))
+            rows.append({
+                "sha": fact.get("sha"),
+                "duplicate_s": round(duplicate_s, 3),
+                "producer_completion_s": round(producer_s, 3),
+                "workflow_run_wall_s": round(wall_s, 3),
+            })
+        if not rows:
+            finding.update({
+                "wall_clock_p50_s": 0.0,
+                "runner_min_saving": None,
+                "tier": 2,
+                "realization": "none",
+                "size_note": ("duplicate test work found, but matching push-lane job "
+                              "timings were unavailable; measure the duplicate suite "
+                              "before crediting time"),
+                "sizing_basis": "measured",
+            })
+            continue
+        duplicate_p50 = float(_stats.median(row["duplicate_s"] for row in rows))
+        wall_p50 = float(_stats.median(row["workflow_run_wall_s"] for row in rows))
+        runner_minutes = (round(math.ceil(duplicate_p50 / 60.0) * pushes, 1)
+                          if pushes > 0 else None)
+        stamp.update({
+            "basis": "sampled_default_branch_push_jobs",
+            "rows": rows,
+            "duplicate_p50_s": round(duplicate_p50, 3),
+            "workflow_run_wall_p50_s": round(wall_p50, 3),
+            "pushes_30d": pushes,
+            "runner_min_saving": runner_minutes,
+        })
+        finding.update({
+            "wall_clock_p50_s": round(wall_p50, 1),
+            "runner_min_saving": runner_minutes,
+            "tier": 1 if wall_p50 > 0 else 2,
+            "realization": "direct" if wall_p50 > 0 else "none",
+            "size_note": ("measured duplicate test job; workflow_run wall credit is "
+                          "max(0, duplicate duration - producer workflow completion); "
+                          "same-workflow needs keeps wall credit at 0s; runner minutes "
+                          "remove one billed suite run per push"),
+            "sizing_basis": "measured",
+        })
+
+
 def _affected_jobs_p50_sum(f: dict[str, Any], crit: dict[str, Any]) -> float:
     """Sum of p50 across the finding's affected jobs (0.0 if none resolve).
 
@@ -21873,6 +21973,11 @@ def _detect_structural_candidates(
             req_status = "not-required"
         else:
             req_status = "unknown"
+        pole_required_reachable = (
+            _pole_is_required_reachable(check_name, req_names, job_graph, crit_by_wf)
+            if (required_checks is not None and required_checks.advice_complete
+                and not reach_unresolved) else None
+        )
 
         crit = crit_by_wf.get(wf_path, {})
 
@@ -21999,10 +22104,14 @@ def _detect_structural_candidates(
                 note=("Decomposed from the sampled job's per-step timings. The "
                       "dominant step is the addressable cost — attack it by "
                       "category, don't declare the whole check inherent."))
-            evidence_base = (f"critical-path check `{check_name}` ({check_p50:.0f}s): "
-                             f"dominant step `{decomp['dominant_step']}` "
-                             f"({decomp['dominant_category']}, "
-                             f"{decomp['dominant_share']*100:.0f}% of job `{job_name}`)")
+            evidence_base = (
+                (f"measured check `{check_name}` ({check_p50:.0f}s), which ci-speedup "
+                 "could not confirm blocks merging: ")
+                if pole_required_reachable is False else
+                f"critical-path check `{check_name}` ({check_p50:.0f}s): "
+            ) + (f"dominant step `{decomp['dominant_step']}` "
+                 f"({decomp['dominant_category']}, "
+                 f"{decomp['dominant_share']*100:.0f}% of job `{job_name}`)")
         else:
             me = None
             evidence_base = None
@@ -22092,6 +22201,17 @@ def _detect_structural_candidates(
                 if raw <= 0:
                     f["realization"] = "none"
                     f["tier"] = 2
+            if pole_required_reachable is False:
+                f["required_reachable"] = False
+                f["wall_clock_p50_s"] = 0.0
+                f["realization"] = "none"
+                f["tier"] = 2
+                f.pop("wall_clock_uncapped_p50_s", None)
+                f.pop("wall_clock_derivation", None)
+                note = ("No direct merge-wait saving is credited because ci-speedup "
+                        "could not confirm this check blocks merging. Optimize it only "
+                        "if repository policy confirms that it gates the merge.")
+                f["size_note"] = note
             out.append(f)
         if mapping is not None:
             seen_jobs.add((wf_path, job_name))
@@ -22495,21 +22615,38 @@ def _detect_shared_substep(
         # the appendix). Missing marker (legacy) defaults to concurrent, the matrix case.
         f["cluster_legs_concurrent"] = bool(concurrent)
         crit_wf = crit_by_wf.get(wf_path, {})
+        wall_jobs = [
+            job for job in ordered
+            if _pole_is_required_reachable(job, req_names, job_graph, crit_by_wf)
+        ]
+        if len(wall_jobs) != len(ordered):
+            # `affected_jobs` remains the full runner-minute scope. This narrower
+            # stamp is the set that can honestly support merge-wait credit.
+            f["wall_clock_affected_jobs"] = wall_jobs
         # Scope the floor to the cluster legs the shared step actually lowers (they
         # run concurrently, so own_max = the slowest of THESE legs); a slower
         # non-cluster check on the PR then correctly floors the saving.
-        _apply_structural_cascade(
-            f, credit.wall_clock_s, wf_path, crit_wf, events_by_wf,
-            pr_checks_tuple, pr_check_populations,
-            pr_check_populations_complete=pr_check_populations_complete,
-            own_check_names=frozenset(jobs.keys()),
-            chain_members=chain_members,
-            chain_p50_s=chain_p50_s, chain_win_s=chain_win_s,
-            # #44 — OPT73 IS a cluster-floor lever by construction: the shared step
-            # recurs across all these concurrent legs, so cutting it lowers them
-            # together. A sibling leg must not cap the win via chain_win_s (mastodon
-            # f83: capped at ~40s vs the true ~639s non-sibling floor).
-            cluster_floor_lever=True)
+        if wall_jobs:
+            _apply_structural_cascade(
+                f, credit.wall_clock_s, wf_path, crit_wf, events_by_wf,
+                pr_checks_tuple, pr_check_populations,
+                pr_check_populations_complete=pr_check_populations_complete,
+                own_check_names=frozenset(wall_jobs),
+                chain_members=chain_members,
+                chain_p50_s=chain_p50_s, chain_win_s=chain_win_s,
+                # #44 — OPT73 IS a cluster-floor lever by construction: the shared step
+                # recurs across all these concurrent legs, so cutting it lowers them
+                # together. A sibling leg must not cap the win via chain_win_s (mastodon
+                # f83: capped at ~40s vs the true ~639s non-sibling floor).
+                cluster_floor_lever=True)
+        else:
+            f["wall_clock_p50_s"] = 0.0
+            f["realization"] = "none"
+            f["tier"] = 2
+            f["size_note"] = (
+                f"{f.get('size_note') or ''}; no direct merge-wait saving is credited "
+                "because none of the shared-step jobs could be confirmed to block merging"
+            ).lstrip("; ")
         # Rare-presence demotion. The cascade floors by population-weighted
         # MAGNITUDE but does not know the spine's PRESENCE demotion: when every
         # cluster job is opt-in/rare (path-/label-gated, present on <= half the
@@ -29224,6 +29361,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 _job_intervals.append({
                     "name": str(_job.get("name") or ""),
                     "workflow_file": _wf,
+                    "duration_s": round(_duration, 3),
                     # A job with no queued time of its own queued from its run's
                     # creation, never from the commit's first run.
                     "created_at": str(_job.get("created_at")
@@ -29288,6 +29426,59 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                        if len(_chain_rows) > 1 else None)
         if _chain_span is not None and _slowest is not None:
             _chain_span = max(_chain_span, float(_slowest["duration_s"]))
+
+        def _job_projection_inputs(_target: dict[str, Any]) -> dict[str, Any]:
+            """Projection inputs when this concrete job, rather than the commit's
+            slowest job, is shortened."""
+            _target_wf = str(_target["workflow_file"])
+            _target_node = _target.get("node")
+            _target_chain = (_needs_chain(_target_wf, _target_node)
+                             if _target_node is not None else set())
+
+            def _outside_target_chain(_row: dict[str, Any]) -> bool:
+                if _row is _target:
+                    return False
+                if _row["workflow_file"] != _target_wf:
+                    return True
+                if _row.get("node") not in _target_chain:
+                    return True
+                _node = _row.get("node")
+                _spec = ((_jg or {}).get(_target_wf) or {}).get(_node) or {}
+                return bool(
+                    _node == _target_node
+                    and _row.get("name") != _target.get("name")
+                    and isinstance(_spec, dict) and _spec.get("matrix"))
+
+            _runner_up = next(
+                (_row for _row in _job_rows if _outside_target_chain(_row)), None)
+            _target_chain_rows = (
+                [_row for _row in _job_rows
+                 if _row["workflow_file"] == _target_wf
+                 and _row.get("node") in _target_chain
+                 and not _outside_target_chain(_row)
+                 and (_row.get("node") != _target_node
+                      or _row.get("name") == _target.get("name"))]
+                if _target_node is not None else [])
+            _target_chain_span = (
+                round(max(float(_row["completed_ts"]) for _row in _target_chain_rows)
+                      - min(float(_row["started_ts"]) for _row in _target_chain_rows), 3)
+                if len(_target_chain_rows) > 1 else None)
+            if _target_chain_span is not None:
+                _target_chain_span = max(
+                    _target_chain_span, float(_target["duration_s"]))
+            return {
+                "name": _target["name"],
+                "node": _target.get("node"),
+                "workflow_file": _target_wf,
+                "duration_s": _target["duration_s"],
+                "next_longest_s": (float(_runner_up["duration_s"])
+                                   if _runner_up is not None else 0.0),
+                "chain_span_s": (_target_chain_span
+                                 if _target_chain_span is not None
+                                 else float(_target["duration_s"])),
+            }
+
+        _job_projections = [_job_projection_inputs(_row) for _row in _job_rows]
         _partial = bool(_missing or _rerun_workflows or not _run_rows
                         or _observed is None)
 
@@ -29333,6 +29524,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             "rerun_workflows": _rerun_workflows,
             **({"created_at": _created_iso[min(_created)]} if _created else {}),
             "jobs": _job_intervals,
+            "job_projections": _job_projections,
             "wall_s": None if _partial else _observed,
             **({"observed_wall_s": _observed} if _observed is not None else {}),
             **({"slowest_job": {k: _slowest[k] for k in
@@ -29545,6 +29737,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                     "pytest-no-xdist": "OPT24",
                     "test-isolated-serial": "OPT24",
                     "test-loop-serial": "OPT24",
+                    "vendored-lib-build": "OPT86",
                     "emulated-image-compile": "OPT102",
                     "cargo-test-shard": "OPT24",
                     "android-emulator-shard": "OPT24",
@@ -29633,10 +29826,6 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                        if _recipe.get("docs") else "")
                     + (f"Deliver and verify: {_recipe.get('deliver')}\n"
                        if _recipe.get("deliver") else "")
-                    + ("Before treating the measured foreign-platform time as "
-                       "emulation, confirm the buildx builder has no native node "
-                       "for that platform with `docker buildx inspect`.\n"
-                       if _leaf_fix_key == "emulated-image-compile" else "")
                     + "This changes the wait after merge, not the merge gate. Preserve "
                       "the job's outputs and verification, apply the catalog guardrails, "
                       "and re-measure the full default-branch push.\n"
@@ -29717,6 +29906,72 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         if isinstance(f.get("wall_s"), (int, float))
         and isinstance(f.get("slowest_job"), dict)
     )
+
+    def _commit_facts_for_finding(_finding: dict[str, Any]) -> tuple[tuple[float, ...], ...]:
+        """Select this finding's concrete job on every sampled commit.
+
+        A zero-duration row records a commit where the targeted job did not run;
+        it contributes zero to the share-weighted saving instead of disappearing
+        from the population.
+        """
+        _workflow = str(_finding.get("workflow_file") or "")
+        _affected = {
+            str(name) for name in (_finding.get("affected_jobs") or []) if str(name)
+        }
+        if not _workflow or not _affected:
+            return _commit_ctx_facts
+        _affected_bases = {_matrix_base_name(name) for name in _affected}
+
+        def _matches_affected(_row: dict[str, Any]) -> bool:
+            return bool(
+                str(_row.get("workflow_file") or "") == _workflow
+                and (str(_row.get("node") or "") in _affected
+                     or str(_row.get("name") or "") in _affected
+                     or _matrix_base_name(str(_row.get("name") or ""))
+                     in _affected_bases))
+
+        _selected: list[tuple[float, ...]] = []
+        for _fact in _commit_facts:
+            _wall = _fact.get("wall_s")
+            if not isinstance(_wall, (int, float)) or isinstance(_wall, bool):
+                continue
+            _matches = [
+                row for row in (_fact.get("job_projections") or [])
+                if isinstance(row, dict)
+                and _matches_affected(row)
+            ]
+            if not _matches:
+                _selected.append((float(_wall), 0.0, 0.0, 0.0))
+                continue
+            _target = max(_matches, key=lambda row: float(row.get("duration_s") or 0.0))
+            _duration = float(_target.get("duration_s") or 0.0)
+            if not (_finding.get("cluster_floor_lever") and len(_affected) > 1):
+                _selected.append((
+                    float(_wall), _duration,
+                    float(_target.get("next_longest_s") or 0.0),
+                    float(_target.get("chain_span_s") or _duration),
+                ))
+                continue
+            # Keep every affected and unaffected path. A multi-job lever lowers
+            # all affected jobs together, but each one saturates at zero at its
+            # own duration; selecting only the longest job can otherwise erase a
+            # shorter affected job whose serial chain still gates the commit.
+            _paths = tuple(
+                (
+                    float(row.get("chain_span_s") or row.get("duration_s") or 0.0),
+                    float(row.get("duration_s") or 0.0),
+                    _matches_affected(row),
+                )
+                for row in (_fact.get("job_projections") or [])
+                if isinstance(row, dict)
+            )
+            _selected.append((
+                float(_wall), _duration,
+                0.0,
+                float(_target.get("chain_span_s") or _duration),
+                _paths,
+            ))
+        return tuple(_selected)
     findings_doc["pr_critical_path"] = {
         # KEPT-side count post the #80 spine door: `sampled_pr_count` is the number of PRs whose
         # timing actually feeds the rendered chain/makespan/populations/presence — a dropped-era PR
@@ -30767,6 +31022,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         ((c.get("long_pole_p50", 0.0) or 0.0) for c in crit_by_wf.values()),
         default=0.0)
 
+    _ground_opt12_duplicate_test_work(
+        findings, findings_doc.get("default_branch_push_lane") or {})
+
     # Size each finding (data-driven ones already have measured values
     # inline; _size_finding's "measured" model preserves them) AND stamp
     # workflow_activity (runs_30d / last_run / dormant) from the sampling
@@ -30827,7 +31085,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 pr_check_populations=tuple(pr_check_populations),
                 pr_check_populations_complete=tuple(pr_check_population_complete),
                 chain_members=_chain_ctx_members, chain_p50_s=_chain_ctx_p50,
-                chain_win_s=_chain_ctx_win, commit_wall_facts=_commit_ctx_facts)
+                chain_win_s=_chain_ctx_win,
+                commit_wall_facts=_commit_facts_for_finding(f))
             _size_opt25_next_step(f, ctx)
             res = size_wall_clock(float(wc), ctx,
                                   cascade=([("within-workflow", bound_within_workflow)] + CASCADE)
@@ -31050,7 +31309,6 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # Structural findings are routed after the main sizing loop. Apply the
     # shared whole-commit projection bound once more at the final findings door
     # so those late additions cannot publish a saving above the next-job floor.
-    _commit_only_ctx = WallClockContext(commit_wall_facts=_commit_ctx_facts)
     for _finding in findings:
         _saving = _finding.get("wall_clock_p50_s")
         if not isinstance(_saving, (int, float)) or _saving <= 0:
@@ -31058,6 +31316,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         if any(isinstance(step, dict) and step.get("bound") == "commit-projection"
                for step in (_finding.get("wall_clock_derivation") or [])):
             continue
+        _commit_only_ctx = WallClockContext(
+            commit_wall_facts=_commit_facts_for_finding(_finding))
         _bounded = bound_commit_projection(float(_saving), _commit_only_ctx)
         if _bounded.value >= round(float(_saving), 1):
             continue

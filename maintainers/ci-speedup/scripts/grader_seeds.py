@@ -87,6 +87,7 @@ TRIAGE_ALLOWLIST = {
     "a pole with no known root-cause pattern carries a gap-fill analysis": AUTO_SEED,             # check_no_root_cause_pole_is_gap_filled
     "no spine-dropped check is also framed on the merge-gating critical path": AUTO_SEED,           # check_dropped_check_not_framed_on_path
     "no spine-demoted pole carries the typical-gate framing (prompt / Contents)": AUTO_SEED,        # check_demoted_pole_not_framed_typical_gate
+    "unconfirmed checks carry no direct credit or critical-path framing": AUTO_SEED,                # check_unconfirmed_checks_have_no_direct_credit_or_gate_framing
     "headline 'slowest check' names the data layer's critical_path_check": AUTO_SEED,               # check_headline_slowest_matches_stamp
     "headline reconciles a non-universal slowest check with the population floor": AUTO_SEED,        # check_headline_floor_presence_reconciled
     "presence-causal headline only when the slowest check is minority-present": AUTO_SEED,          # check_headline_presence_causal_only_when_minority
@@ -210,6 +211,7 @@ CHECK_CLASS = {
     "a pole with no known root-cause pattern carries a gap-fill analysis": "coverage-gap-dead-end",  # exact match: a pole shipped with no root cause while its log was in hand
     "no spine-dropped check is also framed on the merge-gating critical path": "mis-ranked-lever",  # spine/critical-path framing error
     "no spine-demoted pole carries the typical-gate framing (prompt / Contents)": "mis-ranked-lever",  # a demoted pole framed as the typical gate = a ranking-framing error
+    "unconfirmed checks carry no direct credit or critical-path framing": "fabricated-or-unsupported-finding",  # credit or gate framing without confirmed reachability is unsupported
     "headline 'slowest check' names the data layer's critical_path_check": "mis-ranked-lever",  # headline doesn't match the measured critical path
     "headline reconciles a non-universal slowest check with the population floor": "mis-ranked-lever",  # a non-universal check headlined as the typical wait without the presence caveat = a critical-path framing error
     "presence-causal headline only when the slowest check is minority-present": "fabricated-or-unsupported-finding",  # headline blames the floor drop on presence the populations contradict
