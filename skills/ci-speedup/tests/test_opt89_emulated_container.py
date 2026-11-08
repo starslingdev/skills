@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 _SKILL_DIR = Path(__file__).resolve().parents[1]
 _SCAN_SCRIPT = _SKILL_DIR / "scripts" / "scan.py"
@@ -65,7 +67,16 @@ jobs:
     assert hits == []
 
 
-def test_run_on_arch_test_only_is_silent(tmp_path: Path):
+@pytest.mark.parametrize("command", [
+    "pytest -q tests",
+    "make test",
+    "make -j2 check",
+    "echo ready && make test",
+    "ninja test",
+    "cmake --version",
+    "gcc --version",
+])
+def test_run_on_arch_test_only_is_silent(tmp_path: Path, command: str):
     hits = _opt89(tmp_path, """name: emulated tests
 on: pull_request
 jobs:
@@ -75,8 +86,8 @@ jobs:
       - uses: uraimo/run-on-arch-action@v2
         with:
           arch: aarch64
-          run: pytest -q tests
-""")
+          run: COMMAND
+""".replace("COMMAND", command))
 
     assert hits == []
 
@@ -94,6 +105,26 @@ jobs:
 
     assert len(hits) == 1
     assert "QEMU-backed docker run" in hits[0]["evidence"]
+
+
+def test_multiline_shell_wrapped_foreign_docker_compile_fires(tmp_path: Path):
+    hits = _opt89(tmp_path, """name: emulated docker build
+on: pull_request
+jobs:
+  arm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+      - run: |
+          docker run \\
+            --platform linux/arm64 \\
+            build-image sh -lc 'make -j2'
+""")
+
+    assert len(hits) == 1
+    assert "make" in hits[0]["evidence"]
 
 
 def test_foreign_job_container_compile_fires(tmp_path: Path):
@@ -123,3 +154,114 @@ jobs:
 """)
 
     assert hits == []
+
+
+def test_foreign_docker_run_without_matching_qemu_platform_is_silent(
+        tmp_path: Path):
+    hits = _opt89(tmp_path, """name: unsupported emulation
+on: pull_request
+jobs:
+  arm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: amd64
+      - run: docker run --platform linux/arm64 build-image make -j2
+""")
+
+    assert hits == []
+
+
+def test_host_command_after_docker_run_is_not_attributed_to_container(
+        tmp_path: Path):
+    hits = _opt89(tmp_path, """name: host build after emulated tests
+on: pull_request
+jobs:
+  arm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-qemu-action@v3
+      - run: docker run --platform linux/arm64 test-image pytest -q && make -j2
+""")
+
+    assert hits == []
+
+
+def test_run_on_arch_resolves_matrix_architecture(tmp_path: Path):
+    hits = _opt89(tmp_path, """name: matrix action
+on: pull_request
+jobs:
+  arm:
+    strategy:
+      matrix:
+        arch: [aarch64]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: uraimo/run-on-arch-action@v2
+        with:
+          arch: ${{ matrix.arch }}
+          run: make -j2
+""")
+
+    assert len(hits) == 1
+    assert "aarch64" in hits[0]["evidence"]
+
+
+def test_docker_run_resolves_matrix_platform(tmp_path: Path):
+    hits = _opt89(tmp_path, """name: matrix docker
+on: pull_request
+jobs:
+  arm:
+    strategy:
+      matrix:
+        platform: [linux/arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-qemu-action@v3
+      - run: docker run --platform ${{ matrix.platform }} build-image make -j2
+""")
+
+    assert len(hits) == 1
+    assert "linux/arm64" in hits[0]["evidence"]
+
+
+def test_job_container_resolves_matrix_image(tmp_path: Path):
+    hits = _opt89(tmp_path, """name: matrix container
+on: pull_request
+jobs:
+  arm:
+    strategy:
+      matrix:
+        image: [arm64v8/ubuntu:24.04]
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - run: make -j2
+""")
+
+    assert len(hits) == 1
+    assert "arm64v8" in hits[0]["evidence"]
+
+
+def test_repeated_action_finding_cites_the_compile_step(tmp_path: Path):
+    hits = _opt89(tmp_path, """name: repeated actions
+on: pull_request
+jobs:
+  arm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: uraimo/run-on-arch-action@v2
+        with:
+          arch: aarch64
+          run: pytest -q
+      - uses: uraimo/run-on-arch-action@v2
+        with:
+          arch: aarch64
+          run: make -j2
+""")
+
+    assert len(hits) == 1
+    assert "make -j2" in hits[0]["evidence_snippet"]
+    assert "pytest" not in hits[0]["evidence_snippet"]
