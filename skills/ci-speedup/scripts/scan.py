@@ -1116,12 +1116,14 @@ def _index_local_action_text(root: Path,
     return out
 
 
-def _job_payload_blob(job: dict) -> "str | None":
+def _job_payload_blob(job: dict, doc: dict | None = None,
+                      raw: str = "") -> "str | None":
     """Everything in the job that could name a checked-out path: run blocks,
     step and job-level `working-directory`, matrix values, step `if:`/`name:`,
     `uses:` refs, `with:`/`env:` values, and the body of each local composite
-    action it invokes (transitively). None when a local action can't be read —
-    the caller then skips the job (fail closed).
+    action it invokes (transitively), plus local build contexts and COPY/ADD
+    sources from resolved Dockerfiles. None when a local action or Dockerfile
+    can't be read — the caller then skips the job (fail closed).
 
     The blob has to cover EVERY place the job's own YAML can name a path,
     because the finding's evidence asserts that no step in the job references a
@@ -1152,6 +1154,11 @@ def _job_payload_blob(job: dict) -> "str | None":
             if text is None:
                 return None     # unreadable local action — can't prove it unread
             parts.append(text)
+    image_payload = (_opt102_job_image_payload(doc, raw, job)
+                     if doc is not None else [])
+    if image_payload is None:
+        return None
+    parts.extend(image_payload)
     return "\n".join(parts)
 
 
@@ -1196,7 +1203,7 @@ def _detect_opt76(doc: dict, raw: str) -> list[Hit]:
     for job_name, job in _jobs_from_doc(doc).items():
         if not isinstance(job, dict):
             continue
-        blob = _job_payload_blob(job)
+        blob = _job_payload_blob(job, doc, raw)
         if blob is None:
             continue    # fail closed
         # Git path matching is effectively case-insensitive on the macOS and
@@ -1232,7 +1239,7 @@ def _detect_opt76(doc: dict, raw: str) -> list[Hit]:
                     affected_jobs=[job_name],
                     evidence=(
                         f"job `{job_name}` checks out with `submodules: {sub}`, and no "
-                        f"step in the job (nor a local composite action it invokes) "
+                        f"step in the job, local action, or resolved Dockerfile "
                         f"references the submodule path(s) declared in `.gitmodules`: "
                         f"{paths}"),
                     match_text=job_name,
@@ -1250,7 +1257,7 @@ def _detect_opt76(doc: dict, raw: str) -> list[Hit]:
                     affected_jobs=[job_name],
                     evidence=(
                         f"job `{job_name}` checks out with `lfs: true`, and no step in "
-                        f"the job (nor a local composite action it invokes) references "
+                        f"the job, local action, or resolved Dockerfile references "
                         f"the LFS-tracked path(s) in `.gitattributes`: {hints}"),
                     match_text=job_name,
                     snippet=_raw_line(raw, line),
@@ -1278,7 +1285,7 @@ def _detect_opt76(doc: dict, raw: str) -> list[Hit]:
                     affected_jobs=[job_name],
                     evidence=(
                         f"job `{job_name}` runs `git lfs` to download LFS objects, and "
-                        f"no step in the job (nor a local composite action it invokes) "
+                        f"no step in the job, local action, or resolved Dockerfile "
                         f"references the LFS-tracked path(s) in `.gitattributes`: {hints}"),
                     match_text=job_name,
                     snippet=_raw_line(raw, line),
@@ -1975,6 +1982,172 @@ def _opt102_dockerfile_instructions(stage: str) -> list[tuple[str, str]]:
     return out
 
 
+def _opt102_step_build_config(step: dict, job: dict) -> tuple[dict[str, Any], str] | None:
+    """Return a local Docker build's raw config and its workflow marker."""
+    if re.match(r"^docker/build-push-action@", _uses(step)):
+        with_ = step.get("with") or {}
+        config = ({str(key): value for key, value in with_.items()
+                   if str(key) in {"context", "file", "platforms", "target"}}
+                  if isinstance(with_, dict) else {})
+        return config, "docker/build-push-action@"
+    run = str(step.get("run") or "")
+    raw_build = re.search(r"\bdocker\s+(?:buildx\s+)?build\b", run)
+    if not raw_build:
+        return None
+    config = _opt102_raw_build_config(run, raw_build)
+    defaults = job.get("defaults") or {}
+    run_defaults = defaults.get("run") or {} if isinstance(defaults, dict) else {}
+    config["working_directory"] = (
+        step.get("working-directory")
+        or (run_defaults.get("working-directory")
+            if isinstance(run_defaults, dict) else None)
+        or ".")
+    return config, "docker build"
+
+
+def _opt102_resolved_dockerfile(
+        root: Path, config: dict[str, Any], *, env: dict[str, str],
+        matrix: dict[str, str], inputs: dict[str, str], outputs: dict[str, str],
+) -> tuple[Path, Path] | None:
+    """Resolve one local build's Dockerfile and context inside ``root``."""
+    resolved = {
+        key: _opt102_resolve(config.get(key, default), env=env, matrix=matrix,
+                             inputs=inputs, outputs=outputs)
+        for key, default in (("context", "."), ("file", "Dockerfile"),
+                             ("working_directory", "."))
+    }
+    if any(value is None or not value for value in resolved.values()):
+        return None
+    context = str(resolved["context"])
+    dockerfile = str(resolved["file"])
+    working_directory = str(resolved["working_directory"])
+    if ("://" in context or any(Path(value).is_absolute()
+                                  for value in (context, dockerfile,
+                                                working_directory))):
+        return None
+    base = (root / working_directory).resolve()
+    context_path = (base / context).resolve()
+    candidate = (base / dockerfile if "file" in config
+                 else context_path / dockerfile).resolve()
+    try:
+        candidate.relative_to(root)
+        context_path.relative_to(root)
+    except ValueError:
+        return None
+    return candidate, context_path
+
+
+def _opt102_copy_sources(candidate: Path, context: Path, root: Path) -> list[str] | None:
+    """Repository-relative local sources read by Dockerfile COPY/ADD."""
+    try:
+        text = candidate.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    sources: list[str] = []
+    for keyword, body in _opt102_dockerfile_instructions("\n" + text):
+        if keyword not in {"COPY", "ADD"}:
+            continue
+        joined = re.sub(r"\\\s*\n\s*", " ", body).strip()
+        if re.search(r"(?:^|\s)--from(?:=|\s)", joined):
+            continue
+        operands = re.sub(r"^(?:--[^\s]+\s+)+", "", joined)
+        try:
+            if operands.startswith("["):
+                values = json.loads(operands)
+                raw_sources = (values[:-1] if isinstance(values, list)
+                               and len(values) >= 2
+                               and all(isinstance(value, str) for value in values)
+                               else [])
+            else:
+                tokens = shlex.split(operands)
+                values = [token for token in tokens if not token.startswith("--")]
+                raw_sources = values[:-1]
+        except (ValueError, json.JSONDecodeError):
+            return None
+        if not raw_sources:
+            return None
+        for raw_source in raw_sources:
+            source = str(raw_source).lstrip("/")
+            if (not source or "://" in source or "$" in source
+                    or any(char in source for char in "*?[")):
+                return None
+            resolved = (context / source).resolve()
+            try:
+                relative = resolved.relative_to(root)
+            except ValueError:
+                return None
+            sources.append(relative.as_posix() or ".")
+    return sources
+
+
+def _opt102_job_image_payload(doc: dict, raw: str, job: dict) -> list[str] | None:
+    """Resolved image context and COPY/ADD paths read by one workflow job."""
+    if _OPT102_ROOT is None:
+        return []
+    root = _OPT102_ROOT.resolve()
+    rel = _opt102_workflow_rel(root, raw)
+    caller_inputs = _opt102_caller_inputs(root, rel)
+    raw_workflow_env = doc.get("env") or {}
+    workflow_env = ({str(k): str(v) for k, v in raw_workflow_env.items()}
+                    if isinstance(raw_workflow_env, dict) else {})
+    raw_job_env = job.get("env") or {}
+    env = {**workflow_env, **({str(k): str(v) for k, v in raw_job_env.items()}
+                             if isinstance(raw_job_env, dict) else {})}
+    payload: set[str] = set()
+    for matrix in _opt102_matrix_legs(job):
+        outputs: dict[str, str] = {}
+        for step in _steps(job):
+            raw_step_env = step.get("env") or {}
+            step_env = {**env, **({str(k): str(v) for k, v in raw_step_env.items()}
+                                 if isinstance(raw_step_env, dict) else {})}
+            resolved_env = {
+                key: (_opt102_resolve(value, env=step_env, matrix=matrix,
+                                      inputs=caller_inputs, outputs=outputs) or value)
+                for key, value in step_env.items()
+            }
+            build = _opt102_step_build_config(step, job)
+            if build is not None:
+                paths = _opt102_resolved_dockerfile(
+                    root, build[0], env=resolved_env, matrix=matrix,
+                    inputs=caller_inputs, outputs=outputs)
+                if paths is None:
+                    return None
+                candidate, context = paths
+                sources = _opt102_copy_sources(candidate, context, root)
+                if sources is None:
+                    return None
+                payload.add(context.relative_to(root).as_posix() or ".")
+                payload.update(sources)
+                # A source directory covers every declared checkout payload
+                # nested under it. Add those concrete declarations so the
+                # existing exact evidence check sees COPY . and subcontexts.
+                for declared in [*_SUBMODULE_PATHS, *_LFS_PATH_HINTS]:
+                    declared_path = Path(declared.strip("/"))
+                    for source in sources:
+                        source_path = Path(source)
+                        if source == "." or declared_path == source_path:
+                            payload.add(declared)
+                            break
+                        try:
+                            declared_path.relative_to(source_path)
+                        except ValueError:
+                            continue
+                        payload.add(declared)
+                        break
+            step_id = str(step.get("id") or "")
+            if step_id:
+                run = str(step.get("run") or "")
+                for key, value in re.findall(
+                        r"echo\s+['\"]?([A-Za-z_][\w-]*)=([^'\"\s]+).*GITHUB_OUTPUT",
+                        run):
+                    resolved_value = _opt102_resolve(
+                        value, env=resolved_env, matrix=matrix,
+                        inputs=caller_inputs, outputs=outputs)
+                    if resolved_value is not None:
+                        outputs[f"steps.{step_id}.outputs.{key}"] = resolved_value
+    return sorted(payload)
+
+
 def _opt102_source_flag(text: str) -> bool | None:
     values = re.findall(
         r"(?i)(?:SKIP\w*PREBUILT\w*|npm_config_build_from_source)"
@@ -2130,28 +2303,10 @@ def _detect_opt102(doc: dict, raw: str) -> list[Hit]:
                 resolved_env = {k: (_opt102_resolve(v, env=step_env, matrix=matrix,
                                                    inputs=caller_inputs, outputs=outputs) or v)
                                 for k, v in step_env.items()}
-                uses_action = bool(re.match(r"^docker/build-push-action@", _uses(step)))
                 run = str(step.get("run") or "")
-                raw_build = re.search(r"\bdocker\s+(?:buildx\s+)?build\b", run)
-                config: dict[str, Any] | None = None
-                marker = "docker/build-push-action@"
-                if uses_action:
-                    with_ = step.get("with") or {}
-                    config = ({str(key): value for key, value in with_.items()
-                               if str(key) in {"context", "file", "platforms", "target"}}
-                              if isinstance(with_, dict) else {})
-                elif raw_build:
-                    config = _opt102_raw_build_config(run, raw_build)
-                    defaults = job.get("defaults") or {}
-                    run_defaults = (defaults.get("run") or {}
-                                    if isinstance(defaults, dict) else {})
-                    working_directory = (step.get("working-directory")
-                                         or (run_defaults.get("working-directory")
-                                             if isinstance(run_defaults, dict) else None)
-                                         or ".")
-                    config["working_directory"] = working_directory
-                    marker = "docker build"
-                if config is not None:
+                build = _opt102_step_build_config(step, job)
+                if build is not None:
+                    config, marker = build
                     resolved = {}
                     for key, value in config.items():
                         if isinstance(value, list):
@@ -2172,22 +2327,11 @@ def _detect_opt102(doc: dict, raw: str) -> list[Hit]:
                         foreign = [p for p in platforms
                                    if p.startswith("linux/") and p != "linux/amd64"]
                         if foreign:
-                            context = str(resolved.get("context") or ".")
-                            dockerfile = str(resolved.get("file") or "Dockerfile")
                             target = str(resolved.get("target") or "")
-                            working_directory = str(resolved.get("working_directory") or ".")
-                            if (context and dockerfile and working_directory
-                                    and "://" not in context
-                                    and not Path(context).is_absolute()
-                                    and not Path(dockerfile).is_absolute()
-                                    and not Path(working_directory).is_absolute()):
-                                base = (root / working_directory).resolve()
-                                candidate = (base / dockerfile if "file" in resolved
-                                             else base / context / dockerfile).resolve()
-                                try:
-                                    candidate.relative_to(root)
-                                except ValueError:
-                                    candidate = root.parent / "__outside__"
+                            paths = _opt102_resolved_dockerfile(
+                                root, resolved, env={}, matrix={}, inputs={}, outputs={})
+                            if paths is not None:
+                                candidate, _context = paths
                                 risky = _opt102_risky_stage(candidate, target)
                                 if risky is not None:
                                     line = _line_of_in_job(raw, str(job_name), marker)

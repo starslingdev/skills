@@ -3699,6 +3699,135 @@ jobs:
     assert "OPT76" not in _scan_one(tmp_path, neg)
 
 
+def test_opt76_suppressed_when_resolved_dockerfile_copies_the_submodule(
+        tmp_path: Path):
+    """A Docker build reads checkout paths through COPY/ADD even when the
+    workflow YAML never names them directly."""
+    _write_repo_file(
+        tmp_path, ".gitmodules",
+        '[submodule "library"]\n\tpath = vendor/lib\n'
+        '\turl = https://example.invalid/library.git\n')
+    docker = tmp_path / "docker"
+    docker.mkdir()
+    (docker / "Dockerfile").write_text(
+        "FROM alpine:3.21\nCOPY vendor/lib/ /opt/library/\n",
+        encoding="utf-8",
+    )
+    workflow = """name: CI
+on: pull_request
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+"""
+
+    assert "OPT76" not in _scan_one(tmp_path, workflow)
+
+
+@pytest.mark.parametrize(("copy_source", "fires"), (
+    ("src/", True),
+    (".", False),
+))
+def test_opt76_dockerfile_copy_scope_controls_payload_use(
+        tmp_path: Path, copy_source: str, fires: bool):
+    _write_repo_file(tmp_path, ".gitmodules", _GITMODULES)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "Dockerfile").write_text(
+        f"FROM alpine:3.21\nCOPY {copy_source} /workspace/\n",
+        encoding="utf-8",
+    )
+    workflow = """name: CI
+on: pull_request
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+"""
+
+    assert ("OPT76" in _scan_one(tmp_path, workflow)) is fires
+
+
+def test_opt76_fails_closed_when_dockerfile_input_is_unresolved(tmp_path: Path):
+    _write_repo_file(tmp_path, ".gitmodules", _GITMODULES)
+    workflow = """name: CI
+on: pull_request
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.df }}
+"""
+
+    assert "OPT76" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt76_resolves_raw_docker_build_context_and_json_copy(tmp_path: Path):
+    _write_repo_file(tmp_path, ".gitmodules", _GITMODULES)
+    docker = tmp_path / "docker"
+    docker.mkdir()
+    (docker / "Dockerfile").write_text(
+        'FROM alpine:3.21\n'
+        'COPY --chown=1000:1000 ["vendor/protos/", "/opt/protos/"]\n',
+        encoding="utf-8",
+    )
+    workflow = """name: CI
+on: pull_request
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - run: docker build -f docker/Dockerfile .
+"""
+
+    assert "OPT76" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt76_copy_from_an_image_stage_does_not_read_the_checkout_payload(
+        tmp_path: Path):
+    _write_repo_file(tmp_path, ".gitmodules", _GITMODULES)
+    (tmp_path / "Dockerfile").write_text(
+        "FROM scratch AS artifacts\n"
+        "FROM alpine:3.21\n"
+        "COPY --from=artifacts vendor/protos/ /opt/protos/\n",
+        encoding="utf-8",
+    )
+    workflow = """name: CI
+on: pull_request
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: docker/build-push-action@v6
+"""
+
+    assert "OPT76" in _scan_one(tmp_path, workflow)
+
+
 def test_opt76_suppressed_when_no_gitmodules_declares_a_path(tmp_path: Path):
     """With no `.gitmodules` in the checkout we can't name a submodule the job
     fails to read — fail CLOSED rather than assert unread payload we never saw."""
