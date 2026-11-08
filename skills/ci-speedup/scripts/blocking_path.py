@@ -2145,6 +2145,112 @@ def _cache_path_stamp(value: Any) -> datetime | None:
         return None
 
 
+_VENDORED_LIBRARY_PATH_RE = re.compile(
+    r"(?:^|/)(?P<root>contrib|third_party|vendor|external)/"
+    r"(?P<library>[A-Za-z0-9_.+-]+)(?:/|$)")
+
+
+def _vendored_lib_build_leaf(text: str) -> dict[str, Any] | None:
+    """Measure completed, timestamped vendored-library source builds.
+
+    Admission requires an ``Entering directory`` marker followed by that same
+    library's ``.stamp.*.build`` completion inside one timestamped workflow-step
+    section. Merely restoring or walking a vendored source tree is therefore
+    silent.
+    """
+    stamped: list[tuple[datetime, str, str]] = []
+    for raw in text.splitlines():
+        stamp, sep, message = raw.partition(" ")
+        when = _cache_path_stamp(stamp)
+        if sep and when is not None:
+            stamped.append((when, message.strip(), raw.strip()))
+    if len(stamped) < 2:
+        return None
+
+    sections = _log_step_sections([message for _when, message, _raw in stamped])
+    if not sections:
+        return None
+    entering = re.compile(r"\bEntering directory\s+['\"](?P<path>[^'\"]+)['\"]")
+    leaving = re.compile(r"\bLeaving directory\s+['\"](?P<path>[^'\"]+)['\"]")
+    completed = re.compile(r"\btouch\s+(?P<path>\S+/\.stamp\.[^/\s]+\.build)\b")
+    candidates: list[tuple[float, dict[str, Any]]] = []
+    for _command, section_start, section_end in sections:
+        section = stamped[section_start:section_end]
+        if len(section) < 2:
+            continue
+        visits: dict[str, list[dict[str, Any]]] = {}
+        intervals: list[tuple[str, datetime, datetime, str, str]] = []
+        for when, message, raw in section:
+            start = entering.search(message)
+            if start and (path := _VENDORED_LIBRARY_PATH_RE.search(
+                    start.group("path"))):
+                key = f"{path.group('root')}/{path.group('library')}"
+                visits.setdefault(key, []).append({
+                    "path": start.group("path").rstrip("/"),
+                    "when": when,
+                    "raw": raw,
+                    "completed": False,
+                })
+                continue
+            leave = leaving.search(message)
+            if leave and (path := _VENDORED_LIBRARY_PATH_RE.search(
+                    leave.group("path"))):
+                key = f"{path.group('root')}/{path.group('library')}"
+                stack = visits.get(key, [])
+                leaving_path = leave.group("path").rstrip("/")
+                for index in range(len(stack) - 1, -1, -1):
+                    if stack[index]["path"] == leaving_path:
+                        stack.pop(index)
+                        break
+                continue
+            finish = completed.search(message)
+            if not finish or not (path := _VENDORED_LIBRARY_PATH_RE.search(
+                    finish.group("path"))):
+                continue
+            key = f"{path.group('root')}/{path.group('library')}"
+            stack = visits.get(key, [])
+            begun = next((visit for visit in reversed(stack)
+                          if not visit["completed"]), None)
+            if begun is not None and when > begun["when"]:
+                begun["completed"] = True
+                intervals.append((key, begun["when"], when, begun["raw"], raw))
+        if not intervals:
+            continue
+        intervals.sort(key=lambda row: row[1])
+        # Summed wall time is meaningful only for sequential builds. Parallel
+        # intervals would double-count the same portion of the step wall.
+        if any(intervals[index][2] > intervals[index + 1][1]
+               for index in range(len(intervals) - 1)):
+            continue
+        step_end = (stamped[section_end][0]
+                    if section_end < len(stamped) else section[-1][0])
+        step_wall = (step_end - section[0][0]).total_seconds()
+        built_wall = sum((ended - started).total_seconds()
+                         for _key, started, ended, _start_raw, _end_raw in intervals)
+        if step_wall <= 0 or built_wall / step_wall < 0.5:
+            continue
+        per_library: dict[str, float] = {}
+        for key, started, ended, _start_raw, _end_raw in intervals:
+            per_library[key] = per_library.get(key, 0.0) + (
+                ended - started).total_seconds()
+        rows = [(key, round(seconds, 1), None)
+                for key, seconds in per_library.items()]
+        rows.sort(key=lambda row: (-row[1], row[0]))
+        candidates.append((built_wall, {
+            "unit_label": f"{len(rows)} vendored libraries built from source in sequence",
+            "magnitude": {"label": "vendored library build share", "unit": "%",
+                          "value": round(100 * built_wall / step_wall, 1)},
+            "deeper": [{"rows": rows, "blocker_note": "", "pct_of": "sum"}],
+            "evidence": [intervals[0][3], intervals[0][4]],
+            "search": ["Entering directory", ".stamp.", rows[0][0]],
+        }))
+    if not candidates:
+        return None
+    leaf = {"fix_key": "vendored-lib-build",
+            **max(candidates, key=lambda item: item[0])[1]}
+    return leaf
+
+
 def _cache_path_warnings(text: str, steps: dict[Any, dict]) -> dict[Any, str]:
     """`{key: warning}` for each known actions/cache post-step in `steps`
     (`{key: step}`) whose own save emitted the exact toolkit warning.
@@ -2204,6 +2310,61 @@ def _cache_path_leaf(cache_path_sample: dict[str, Any] | None) -> dict[str, Any]
             "config_fact": " ".join(context)}
 
 
+def _buildx_single_node(
+    lines: list[str],
+) -> tuple[str, list[str]] | None:
+    """Return the native platform and auditable evidence for one Buildx node.
+
+    `docker buildx inspect --bootstrap` prints the builder header, then a
+    `Nodes:` section with one `Name:` and `Platforms:` pair per node. Platforms
+    configured by the user are printed first with a `*`; the detected native
+    platform is the first unstarred entry, before emulated detected platforms.
+    Missing, all-configured, or multi-node evidence fails closed.
+    """
+    in_nodes = False
+    nodes: list[dict[str, str]] = []
+    nodes_header = ""
+    awaiting_platform = False
+    for line in lines:
+        if re.search(r"\bNodes:\s*$", line):
+            in_nodes = True
+            nodes_header = line
+            continue
+        if not in_nodes:
+            continue
+        if re.search(r"\bName:\s+\S+", line):
+            nodes.append({"name": line, "platforms": "", "native": ""})
+            awaiting_platform = True
+            continue
+        platform = re.search(r"\bPlatforms:\s+(.+)$", line)
+        if awaiting_platform and platform and nodes:
+            detected = [
+                item.strip().lower()
+                for item in platform.group(1).split(",")
+                if item.strip().lower().startswith("linux/")
+                and not item.strip().endswith("*")
+            ]
+            nodes[-1]["platforms"] = line
+            nodes[-1]["native"] = detected[0] if detected else ""
+            awaiting_platform = False
+    if len(nodes) != 1 or not nodes[0]["native"]:
+        return None
+    node = nodes[0]
+    evidence = [line for line in (
+        nodes_header, node["name"], node["platforms"],
+    ) if line]
+    return node["native"], evidence
+
+
+def _platform_family(platform: str) -> str:
+    arch = platform.lower().removeprefix("linux/")
+    if arch.startswith(("amd64", "x86_64")):
+        return "amd64"
+    if arch.startswith(("arm64", "arm/", "aarch64")):
+        return "arm"
+    return arch.split("/", 1)[0]
+
+
 def _emulated_image_compile_leaf(lines: list[str]) -> dict[str, Any] | None:
     """Measure foreign-platform compile/install work before generic cache advice."""
     compile_re = re.compile(
@@ -2221,9 +2382,16 @@ def _emulated_image_compile_leaf(lines: list[str]) -> dict[str, Any] | None:
         r"npm_config_build_from_source\s*=\s*(?:1|true)).*\bnpm\s+(?:ci|install)\b",
         re.IGNORECASE)
     operations: dict[str, tuple[str, str, str]] = {}
+    cold_operations: set[str] = set()
     durations: list[tuple[str, float, str, str, str]] = []
+    cold_durations: list[float] = []
     source_scopes: set[tuple[str, str]] = set()
     for line in lines:
+        cold_header = re.search(
+            r"#(\d+)\s+\[[^\]]+\]\s+(?:FROM|RUN|COPY|ADD)\b",
+            line, re.IGNORECASE)
+        if cold_header:
+            cold_operations.add(cold_header.group(1))
         instruction = re.search(
             r"#(\d+)\s+\[linux/([^\s\]]+)\s*([^\]]*)\]\s+"
             r"(ARG|ENV|RUN)\s+(.+)", line, re.IGNORECASE)
@@ -2255,28 +2423,41 @@ def _emulated_image_compile_leaf(lines: list[str]) -> dict[str, Any] | None:
             if kind == "install" or compile_re.search(command):
                 operations[match.group(1)] = (match.group(2).lower(), line, kind)
                 continue
-        done = re.search(r"#(\d+)\s+DONE\s+([\d.]+)s\b", line)
+        done = re.search(r"#(\d+)\s+DONE\s+(\d+(?:\.\d+)?)s\b", line)
         if done and done.group(1) in operations:
             arch, header, kind = operations.pop(done.group(1))
             durations.append((arch, float(done.group(2)), header, line, kind))
+        if done and done.group(1) in cold_operations:
+            cold_operations.discard(done.group(1))
+            cold_durations.append(float(done.group(2)))
+    builder = _buildx_single_node(lines)
+    if builder is None:
+        return None
+    native_platform, builder_evidence = builder
+    native_family = _platform_family(native_platform)
     native = sum(seconds for arch, seconds, _header, _done, _kind in durations
-                 if arch in {"amd64", "x86_64"})
+                 if _platform_family(f"linux/{arch}") == native_family)
     emulated_compile = sum(seconds for arch, seconds, _header, _done, kind in durations
-                           if arch not in {"amd64", "x86_64"} and kind == "compile")
+                           if _platform_family(f"linux/{arch}") != native_family
+                           and kind == "compile")
     emulated_install = sum(seconds for arch, seconds, _header, _done, kind in durations
-                           if arch not in {"amd64", "x86_64"} and kind == "install")
+                           if _platform_family(f"linux/{arch}") != native_family
+                           and kind == "install")
+    foreign_by_arch: dict[str, float] = {}
+    for arch, seconds, _header, _done, _kind in durations:
+        if _platform_family(f"linux/{arch}") != native_family:
+            foreign_by_arch[arch] = foreign_by_arch.get(arch, 0.0) + seconds
     emulated = emulated_compile + emulated_install
     total = native + emulated
-    x64_builder = bool(re.search(
-        r"(?:runner\s+architecture|runner_arch|architecture)\s*[:=]\s*"
-        r"(?:x64|amd64|x86_64)\b", "\n".join(lines), re.IGNORECASE))
-    if (emulated <= 0 or (native <= 0 and not x64_builder)
-            or (native > 0 and emulated / total < 0.50)):
+    all_cold = sum(cold_durations)
+    if (emulated <= 0 or all_cold <= 0 or emulated / all_cold < 0.50
+            or (native > 0 and any(
+                seconds / native < 2.0 for seconds in foreign_by_arch.values()))):
         return None
     share = round(100 * emulated / total)
     rows = []
     if native > 0:
-        rows.append(("native linux/amd64 compile/install", native, None))
+        rows.append((f"native {native_platform} compile/install", native, None))
     if emulated_compile > 0:
         rows.append(("foreign-architecture compile", emulated_compile, None))
     if emulated_install > 0:
@@ -2291,8 +2472,10 @@ def _emulated_image_compile_leaf(lines: list[str]) -> dict[str, Any] | None:
         "deeper": [{"rows": rows,
                     "blocker_note": (f"foreign-architecture work is {scope}"),
                     "pct_of": "sum"}],
-        "evidence": [item for _arch, _seconds, header, done, _kind in durations
-                     for item in (header, done)][:6],
+        "evidence": (builder_evidence + [
+            item for _arch, _seconds, header, done, _kind in durations
+            for item in (header, done)
+        ])[:8],
         "search": ["docker/build-push-action", "BUILDPLATFORM", "TARGETARCH"],
     }
     if re.search(r"(?:docker\s+buildx\s+build\b[^\n]*|build-push-action[^\n]*)"
@@ -3069,6 +3252,7 @@ def _parse_log(text: str,
             "search": [":test", "BUILD SUCCESSFUL in", "maxParallelForks"],
         }
     dependency_state = _cache_state_of_log(text, "dependency-cache")
+    vendored_build_leaf = _vendored_lib_build_leaf(text)
     dependency_hit_leaf = None
     if dependency_state:
         dependency_hit_leaf = {
@@ -3082,7 +3266,8 @@ def _parse_log(text: str,
             "search": ["Cache not found for input keys", "cache is not found",
                        "Cache restored from key"],
         }
-    if dependency_state and dependency_state["miss_pct"] > 0:
+    if (dependency_state and dependency_state["miss_pct"] > 0
+            and vendored_build_leaf is None):
         return dependency_hit_leaf
     # --- L: isolated tests in one file wait on the same fixed timer ------------
     # This is narrower than the shell-loop detector below. Four tests in ONE file
@@ -3218,6 +3403,8 @@ def _parse_log(text: str,
             "evidence": [x[3] for x in command_starts[:2]],
             "search": ["test loop", "parallel", "OPT88"],
         }
+    if vendored_build_leaf is not None:
+        return vendored_build_leaf
     return dependency_hit_leaf
 
 
@@ -3705,6 +3892,29 @@ _FIX_META: dict[str, dict[str, Any]] = {
                    "any exclusive files in a serial lane, verify the same test count and "
                    "results, and re-measure the step.",
     },
+    "vendored-lib-build": {
+        "cause": "Timestamped build markers show vendored libraries under `contrib/`, "
+                 "`third_party/`, `vendor/`, or `external/` compiling sequentially for "
+                 "at least half of the measured step wall.",
+        "look": "`{wf}` and the vendored build recipes — identify the source, patches, "
+                "toolchain inputs, stamp files, and every artifact each library produces. "
+                "Check whether the build system declares those artifacts as prerequisites.",
+        "constraints": "Use one cache entry per library, keyed by its recipe, source, "
+                       "patches, pinned toolchain, runner OS and architecture, target ABI, "
+                       "build mode, and output-affecting flags. Restore with a matching "
+                       "stable prefix that cannot cross incompatible legs, and save new "
+                       "entries only from the default branch. Check the summed "
+                       "entry size against the repository's cache budget with the shipped "
+                       "cache guard helpers. A warm build must still confirm every expected "
+                       "artifact exists; incomplete make prerequisites can otherwise turn a "
+                       "cache hit into a silently partial build.",
+        "docs": ["GitHub Actions dependency caching reference: "
+                 "https://docs.github.com/en/actions/using-workflows/caching-dependencies-to-speed-up-workflows"],
+        "deliver": "Cache each completed vendored library separately with stable-prefix "
+                   "restore and default-branch-only save. Exercise several warm builds, "
+                   "including changed recipes and patches, and confirm every expected "
+                   "artifact exists before comparing the measured step wall.",
+    },
     "emulated-image-compile": {
         "cause": "Buildx spends at least half of the measured compile time building a "
                  "foreign architecture under emulation instead of compiling it natively "
@@ -3721,13 +3931,17 @@ _FIX_META: dict[str, dict[str, Any]] = {
                  "https://docs.docker.com/build/building/multi-platform/"],
         "deliver": "Build platform-independent output once on `FROM "
                    "--platform=$BUILDPLATFORM` and copy it into each target image, or "
-                   "cross-compile with explicit target arguments. This removes most "
-                   "emulated compile seconds, so both wall time and runner minutes should "
-                   "fall. If cross-compilation is unsafe, use a native runner per "
-                   "architecture and merge manifests; that cuts wall time but adds jobs "
-                   "and a merge step, so runner minutes will usually stay level or rise. "
-                   "Run each image on its native architecture and re-measure both "
-                   "wall time and total runner minutes.",
+                   "cross-compile with explicit target arguments. Native cross-compilation "
+                   "still costs about one native compile per extra architecture; size the "
+                   "saving as emulated seconds minus native seconds times the foreign "
+                   "architectures, and name what stays (cache import/export, image export, "
+                   "and push). For cgo with `CGO_ENABLED=1`, Rust `-sys` crates, and native "
+                   "Node add-ons, use `tonistiigi/xx` or `gcc-<arch>-linux-gnu` where the "
+                   "target toolchain is required. If cross-compilation is unsafe, use a "
+                   "native runner per architecture and merge manifests; check its cores "
+                   "and memory against link-time optimisation and parallel links, and "
+                   "build only the binaries the image ships. Run each image on its native "
+                   "architecture and re-measure wall time and total runner minutes.",
     },
     "eslint-no-cache": {
         "cause": "The lint step runs `eslint` over the whole file tree with NO `--cache` "
@@ -6022,6 +6236,7 @@ _LEAF_STEP_CATEGORY: dict[str, str] = {
     "pytest-no-xdist": "test",
     "test-isolated-serial": "test",
     "test-loop-serial": "test",
+    "vendored-lib-build": "build",
     "emulated-image-compile": "build",
     "cargo-test-shard": "test",
     "benchmark-serial-reruns": "test",

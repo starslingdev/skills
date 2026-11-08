@@ -40,7 +40,7 @@ This order is also the compiled file's order; contributors see `README.md`.
 - OPT24 — Long Test Job Without Sharding (HIGH, static) — long test job, no shards
 - OPT25 — Shard Imbalance (MEDIUM, data-driven) — one shard far slower than the rest
 - OPT88 — Test Concurrency Is a Guess, Not a Measurement (MEDIUM, data-driven) — unmeasured test worker count
-- OPT89 — The Slowest Platform Compiles Its Own Tests (HIGH, data-driven) — cross-compile once, test on each platform
+- OPT89 — The Slowest Platform Compiles Its Own Tests (HIGH, static) — cross-compile once, test on each platform
 ## Category 5 — Actions and Checkout
 - OPT26 — Outdated Action Major Versions (LOW, static) — old actions/* major versions
 - OPT27 — Duplicate `setup-node` Calls in Same Job (LOW, static) — setup-node twice in a job
@@ -96,7 +96,7 @@ This order is also the compiled file's order; contributors see `README.md`.
 - OPT61 — Missing Dependency Caching (HIGH, static) — compiled-language deps uncached
 - OPT62 — Build Artifacts Destroyed Before Every Run (HIGH, static) — rm -rf of build dirs every run
 - OPT63 — Dependency Install with Cache Disabled (MEDIUM, static) — --no-cache installs on persistent runners
-- OPT86 — CI Compiles a Dependency That Ships Prebuilt (HIGH, data-driven) — source builds of wheels or native add-ons
+- OPT86 — CI Repeatedly Compiles Dependencies from Source (HIGH, data-driven) — measured vendored builds or confirmed prebuilt-package opportunities
 - OPT91 — The Compile Is the Long Pole and Nobody Profiled It (HIGH, data-driven) — slow compile, profile it first
 - OPT94 — The .NET SDK Can Reconcile Unrelated Machine-Wide Workloads (MEDIUM, data-driven) — benchmark a pinned isolated SDK
 ## Category 13 — Hidden Failures and Dead Config

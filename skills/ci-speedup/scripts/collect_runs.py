@@ -6320,6 +6320,106 @@ def _affected_job_p50(f: dict[str, Any], crit: dict[str, Any]) -> float:
                default=0.0)
 
 
+def _ground_opt12_duplicate_test_work(
+    findings: list[dict[str, Any]], push_lane: dict[str, Any],
+) -> None:
+    """Size duplicate test work from the sampled default-branch push facts.
+
+    Moving a publish workflow behind ``workflow_run`` waits for the producer
+    workflow to finish. Its wall-clock benefit is therefore only the duplicate
+    job's duration beyond that producer completion offset. A same-workflow
+    ``needs`` handoff preserves the existing chain and receives no wall credit.
+    Runner minutes use GitHub's per-job whole-minute billing shape.
+    """
+    facts = [fact for fact in (push_lane.get("facts") or [])
+             if isinstance(fact, dict) and fact.get("partial") is not True]
+    pushes = int(push_lane.get("pushes_30d") or 0)
+    for finding in findings:
+        stamp = finding.get("opt12_duplicate_test_work")
+        if not isinstance(stamp, dict):
+            continue
+        duplicate_wf = str(stamp.get("duplicate_workflow") or "")
+        duplicate_job = str(stamp.get("duplicate_job") or "")
+        duplicate_display = str(stamp.get("duplicate_job_display") or "")
+        duplicate_aliases = {
+            alias for alias in (
+                duplicate_job, duplicate_display,
+                _matrix_base_name(duplicate_job),
+                _matrix_base_name(duplicate_display),
+            ) if alias
+        }
+        existing_wf = str(stamp.get("existing_workflow") or "")
+        rows: list[dict[str, Any]] = []
+        for fact in facts:
+            created = _parse_dt(str(fact.get("created_at") or ""))
+            if created is None:
+                continue
+            jobs = [job for job in (fact.get("jobs") or []) if isinstance(job, dict)]
+            duplicate = next((
+                job for job in jobs
+                if str(job.get("workflow_file") or "") == duplicate_wf
+                and (str(job.get("name") or "") in duplicate_aliases
+                     or _matrix_base_name(str(job.get("name") or ""))
+                     in duplicate_aliases)
+            ), None)
+            producer_ends = [
+                _parse_dt(str(job.get("completed_at") or ""))
+                for job in jobs
+                if str(job.get("workflow_file") or "") == existing_wf
+            ]
+            producer_ends = [end for end in producer_ends if end is not None]
+            if duplicate is None or not producer_ends:
+                continue
+            duplicate_s = _duration_s(
+                duplicate.get("started_at"), duplicate.get("completed_at"))
+            if duplicate_s is None or duplicate_s <= 0:
+                continue
+            producer_s = max((end - created).total_seconds() for end in producer_ends)
+            wall_s = (0.0 if stamp.get("same_workflow") is True
+                      else max(0.0, duplicate_s - producer_s))
+            rows.append({
+                "sha": fact.get("sha"),
+                "duplicate_s": round(duplicate_s, 3),
+                "producer_completion_s": round(producer_s, 3),
+                "workflow_run_wall_s": round(wall_s, 3),
+            })
+        if not rows:
+            finding.update({
+                "wall_clock_p50_s": 0.0,
+                "runner_min_saving": None,
+                "tier": 2,
+                "realization": "none",
+                "size_note": ("duplicate test work found, but matching push-lane job "
+                              "timings were unavailable; measure the duplicate suite "
+                              "before crediting time"),
+                "sizing_basis": "measured",
+            })
+            continue
+        duplicate_p50 = float(_stats.median(row["duplicate_s"] for row in rows))
+        wall_p50 = float(_stats.median(row["workflow_run_wall_s"] for row in rows))
+        runner_minutes = (round(math.ceil(duplicate_p50 / 60.0) * pushes, 1)
+                          if pushes > 0 else None)
+        stamp.update({
+            "basis": "sampled_default_branch_push_jobs",
+            "rows": rows,
+            "duplicate_p50_s": round(duplicate_p50, 3),
+            "workflow_run_wall_p50_s": round(wall_p50, 3),
+            "pushes_30d": pushes,
+            "runner_min_saving": runner_minutes,
+        })
+        finding.update({
+            "wall_clock_p50_s": round(wall_p50, 1),
+            "runner_min_saving": runner_minutes,
+            "tier": 1 if wall_p50 > 0 else 2,
+            "realization": "direct" if wall_p50 > 0 else "none",
+            "size_note": ("measured duplicate test job; workflow_run wall credit is "
+                          "max(0, duplicate duration - producer workflow completion); "
+                          "same-workflow needs keeps wall credit at 0s; runner minutes "
+                          "remove one billed suite run per push"),
+            "sizing_basis": "measured",
+        })
+
+
 def _affected_jobs_p50_sum(f: dict[str, Any], crit: dict[str, Any]) -> float:
     """Sum of p50 across the finding's affected jobs (0.0 if none resolve).
 
@@ -29637,6 +29737,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                     "pytest-no-xdist": "OPT24",
                     "test-isolated-serial": "OPT24",
                     "test-loop-serial": "OPT24",
+                    "vendored-lib-build": "OPT86",
                     "emulated-image-compile": "OPT102",
                     "cargo-test-shard": "OPT24",
                     "android-emulator-shard": "OPT24",
@@ -29725,10 +29826,6 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                        if _recipe.get("docs") else "")
                     + (f"Deliver and verify: {_recipe.get('deliver')}\n"
                        if _recipe.get("deliver") else "")
-                    + ("Before treating the measured foreign-platform time as "
-                       "emulation, confirm the buildx builder has no native node "
-                       "for that platform with `docker buildx inspect`.\n"
-                       if _leaf_fix_key == "emulated-image-compile" else "")
                     + "This changes the wait after merge, not the merge gate. Preserve "
                       "the job's outputs and verification, apply the catalog guardrails, "
                       "and re-measure the full default-branch push.\n"
@@ -30924,6 +31021,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     global_long_pole = max(
         ((c.get("long_pole_p50", 0.0) or 0.0) for c in crit_by_wf.values()),
         default=0.0)
+
+    _ground_opt12_duplicate_test_work(
+        findings, findings_doc.get("default_branch_push_lane") or {})
 
     # Size each finding (data-driven ones already have measured values
     # inline; _size_finding's "measured" model preserves them) AND stamp
