@@ -16,6 +16,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-11-08** — Pin the complete log-leaf precedence, including helper-returned and assigned-before-return leaves. Regression mutants prove that moving an existing leaf or inserting a new one without choosing its slot fails the guard.
 - **2026-11-07** — Detect duplicate test work on the same trigger and runner platform, including commands expanded from local composite actions and coverage-only reruns. The finding preserves every gate and sizes one removed suite run from sampled default-branch pushes while accounting for the producer workflow's completion delay.
 - **2026-11-07** — Confirm emulated image compilation against one inspected Buildx builder node and its native platform. Multi-node builders fail closed, foreign compilation must dominate cold layer time and materially exceed the native compile, and the fix guidance sizes cross-compilation and native-runner alternatives against the work that remains.
 - **2026-11-07** — Cap each finding's wall-clock saving against its own job on every sampled commit, including its serial chain and independent floor. Commit caps now use the sampled commit shares instead of collapsing a mixed population to its median, and report verification re-derives the same per-job bound.
