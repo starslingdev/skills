@@ -230,9 +230,18 @@ def test_unconfirmed_check_is_uncredited_and_verifier_rejects_restamped_credit(
     report = bp.render(doc, captured_at="2026-11-05T00:00:00Z")
     assert "critical-path check `mystery matrix`" not in report
     assert "could not confirm this check blocks merging" in report.lower()
+    pole = next(
+        body for _workflow, check, body in vr._pole_header_sections(report)
+        if check == "mystery matrix")
+    assert "What a change here can buy (wall-clock)" not in pole
+    assert "becomes the gate" not in pole
+    assert "it gates until" not in pole
+    assert "wall-clock figure applies" not in pole
     toc = report[report.index("## 📋 Contents"):report.index('<a id="pole-1"')]
     assert "the checks that gate your merge" not in toc
     assert "could not confirm it blocks merging" in toc.lower()
+    assert "**🐌 Critical path**" not in toc
+    assert "**🐌 Measured checks**" in toc
 
     findings_path = tmp_path / "unconfirmed-findings.json"
     report_path = tmp_path / "unconfirmed-report.md"
@@ -261,6 +270,23 @@ def test_unconfirmed_check_is_uncredited_and_verifier_rejects_restamped_credit(
         and "unconfirmed" in f"{check.name} {check.detail}".lower()
         for check in mutant_checks
     )
+
+    finding["wall_clock_p50_s"] = 0.0
+    finding["realization"] = "none"
+    finding["evidence"] = str(finding.get("evidence") or "") + " critical-path check"
+    framing_report = bp.render(doc, captured_at="2026-11-05T00:00:00Z")
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+    report_path.write_text(framing_report, encoding="utf-8")
+    assert bp._LAST_CLAIMS is not None
+    report_path.with_name(report_path.name + ".claims.json").write_text(
+        json.dumps(bp._LAST_CLAIMS.to_json()), encoding="utf-8")
+    framing_check = next(
+        check for check in vr.run_checks(
+            framing_report, report_path, findings_path, skill_repo=None)
+        if check.name ==
+        "unconfirmed checks carry no direct credit or critical-path framing")
+    assert not framing_check.ok
+    assert "critical-path wording" in framing_check.detail
 
 
 def test_confirmed_check_keeps_structural_credit_and_framing(monkeypatch, tmp_path):

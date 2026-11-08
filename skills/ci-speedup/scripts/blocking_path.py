@@ -816,7 +816,8 @@ def _floor_note(pole: dict[str, Any],
     suppression guards above the branch are unchanged: a pole whose note is
     suppressed today stays suppressed (cell 7), and non-members render
     byte-identically (cells 1/4)."""
-    if pole.get("job_timing_unavailable"):
+    if (pole.get("job_timing_unavailable")
+            or pole.get("required_reachable") is False):
         return []
     pole_name = _clean_label(str(pole.get("check", "")))
     pole_p = _num(pole.get("p50_s")) or 0.0
@@ -6428,8 +6429,9 @@ def _toc_block(pole_wfs: list[dict[str, Any]], wf_gate: dict[str, int],
              "gate exists)" if pr_floor else
              "the measured PR checks, with unconfirmed merge blockers labelled explicitly"
              if has_unconfirmed else "the checks that gate your merge")
+    heading = "Measured checks" if has_unconfirmed else "Critical path"
     lines = ["## 📋 Contents", "",
-             f"**🐌 Critical path** — {intro}, each linking to its long-pole drill-down "
+             f"**🐌 {heading}** — {intro}, each linking to its long-pole drill-down "
              "(waterfall → biggest lever → agent prompt):", ""]
     for i, p in enumerate(pole_wfs, 1):
         check = _lbl(_clean_label(str(p.get("check", ""))))
@@ -14168,7 +14170,8 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
             else:
                 role = (f"Runs concurrently — becomes the gate once the slower checks "
                         f"above it drop below {dur}.")
-        if chain_active and _raw_check not in set(_chain_modal):
+        if (chain_active and _raw_check not in set(_chain_modal)
+                and p.get("required_reachable") is not False):
             # ENG-1 PR-N2: on a chain-gated repo a non-member pole's own
             # wall-clock matters only once the chain drops below it — say so,
             # or this section contradicts the headline (pass-B finding 1).

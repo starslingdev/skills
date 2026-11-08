@@ -16137,7 +16137,9 @@ def check_unconfirmed_checks_have_no_direct_credit_or_gate_framing(
     }
     failures: list[str] = []
     forbidden = re.compile(
-        r"critical-path check|on the critical path|sits on the critical path",
+        r"critical-path check|on the critical path|sits on the critical path|"
+        r"becomes the gate|it gates until|wall-clock figure applies|"
+        r"What a change here can buy \(wall-clock\)",
         re.IGNORECASE)
     for finding in _as_list(data.get("findings")):
         if not isinstance(finding, dict):
@@ -16164,6 +16166,9 @@ def check_unconfirmed_checks_have_no_direct_credit_or_gate_framing(
 
     unconfirmed_names = {_cmp_name(str(row.get("name") or row.get("check") or ""))
                          for row in rows}
+    toc = _section(report, "📋 Contents")
+    if "**🐌 Critical path**" in toc:
+        failures.append("Contents places unconfirmed checks under Critical path")
     for _wf, check, body in _pole_header_sections(report):
         if _cmp_name(check) not in unconfirmed_names:
             continue
