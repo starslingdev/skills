@@ -2275,17 +2275,16 @@ def _emulated_image_compile_leaf(lines: list[str]) -> dict[str, Any] | None:
         r"npm_config_build_from_source\s*=\s*(?:1|true)).*\bnpm\s+(?:ci|install)\b",
         re.IGNORECASE)
     operations: dict[str, tuple[str, str, str]] = {}
-    cold_operations: dict[str, tuple[str, str]] = {}
+    cold_operations: set[str] = set()
     durations: list[tuple[str, float, str, str, str]] = []
-    cold_durations: list[tuple[str, float]] = []
+    cold_durations: list[float] = []
     source_scopes: set[tuple[str, str]] = set()
     for line in lines:
         cold_header = re.search(
-            r"#(\d+)\s+\[linux/([^\s\]]+)\s*[^\]]*\]\s+"
-            r"(?:FROM|RUN|COPY|ADD)\b", line, re.IGNORECASE)
+            r"#(\d+)\s+\[[^\]]+\]\s+(?:FROM|RUN|COPY|ADD)\b",
+            line, re.IGNORECASE)
         if cold_header:
-            cold_operations[cold_header.group(1)] = (
-                cold_header.group(2).lower(), line)
+            cold_operations.add(cold_header.group(1))
         instruction = re.search(
             r"#(\d+)\s+\[linux/([^\s\]]+)\s*([^\]]*)\]\s+"
             r"(ARG|ENV|RUN)\s+(.+)", line, re.IGNORECASE)
@@ -2322,8 +2321,8 @@ def _emulated_image_compile_leaf(lines: list[str]) -> dict[str, Any] | None:
             arch, header, kind = operations.pop(done.group(1))
             durations.append((arch, float(done.group(2)), header, line, kind))
         if done and done.group(1) in cold_operations:
-            arch, _header = cold_operations.pop(done.group(1))
-            cold_durations.append((arch, float(done.group(2))))
+            cold_operations.discard(done.group(1))
+            cold_durations.append(float(done.group(2)))
     builder = _buildx_single_node(lines)
     if builder is None:
         return None
@@ -2337,11 +2336,16 @@ def _emulated_image_compile_leaf(lines: list[str]) -> dict[str, Any] | None:
     emulated_install = sum(seconds for arch, seconds, _header, _done, kind in durations
                            if _platform_family(f"linux/{arch}") != native_family
                            and kind == "install")
+    foreign_by_arch: dict[str, float] = {}
+    for arch, seconds, _header, _done, _kind in durations:
+        if _platform_family(f"linux/{arch}") != native_family:
+            foreign_by_arch[arch] = foreign_by_arch.get(arch, 0.0) + seconds
     emulated = emulated_compile + emulated_install
     total = native + emulated
-    all_cold = sum(seconds for _arch, seconds in cold_durations)
+    all_cold = sum(cold_durations)
     if (emulated <= 0 or all_cold <= 0 or emulated / all_cold < 0.50
-            or (native > 0 and emulated / native < 2.0)):
+            or (native > 0 and any(
+                seconds / native < 2.0 for seconds in foreign_by_arch.values()))):
         return None
     share = round(100 * emulated / total)
     rows = []

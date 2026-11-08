@@ -496,7 +496,7 @@ def test_builder_detected_platform_and_dominance_guards_run_through_collection(
         return log.replace(
             "#15 DONE 120.0s\n",
             "#15 DONE 120.0s\n"
-            "#16 [linux/arm64 build 3/3] RUN download-release-assets\n"
+            "#16 [assets 1/1] RUN download-release-assets\n"
             "#16 DONE 400.0s\n")
 
     _doc, _report, cold = _run_multiarch_log_variant(
@@ -511,6 +511,19 @@ def test_builder_detected_platform_and_dominance_guards_run_through_collection(
     _doc, _report, near_native = _run_multiarch_log_variant(
         "multiarch-near-native-speed", monkeypatch, tmp_path, near_native_speed)
     assert "emulated-image-compile" not in near_native["leaves"]
+
+    def equal_extra_targets(log: str) -> str:
+        return (log.replace("#10 DONE 20.0s", "#10 DONE 100.0s")
+                .replace(
+                    "#15 DONE 120.0s\n",
+                    "#15 DONE 100.0s\n"
+                    "#16 [linux/arm/v7 build 3/3] RUN go build ./...\n"
+                    "#16 DONE 100.0s\n"))
+
+    _doc, _report, extra_targets = _run_multiarch_log_variant(
+        "multiarch-equal-extra-targets", monkeypatch, tmp_path,
+        equal_extra_targets)
+    assert "emulated-image-compile" not in extra_targets["leaves"]
 
 
 def test_push_fixture_fetches_the_recorded_run_jobs_once(monkeypatch, tmp_path):

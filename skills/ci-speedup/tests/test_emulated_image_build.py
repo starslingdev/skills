@@ -444,7 +444,7 @@ def test_emulated_leaf_requires_dominant_and_slower_foreign_compile():
 #1 DONE 20.0s
 #2 [linux/arm64 1/2] RUN go build ./...
 #2 DONE 120.0s
-#3 [linux/arm64 2/2] RUN download-release-assets
+#3 [assets 1/1] RUN download-release-assets
 #3 DONE 400.0s
 """
     assert bp._emulated_image_compile_leaf(
@@ -457,6 +457,16 @@ def test_emulated_leaf_requires_dominant_and_slower_foreign_compile():
 """
     assert bp._emulated_image_compile_leaf(
         (builder + equal_compile).splitlines()) is None
+
+    extra_target = """#1 [linux/amd64 1/1] RUN go build ./...
+#1 DONE 100.0s
+#2 [linux/arm64 1/1] RUN go build ./...
+#2 DONE 100.0s
+#3 [linux/arm/v7 1/1] RUN go build ./...
+#3 DONE 100.0s
+"""
+    assert bp._emulated_image_compile_leaf(
+        (builder + extra_target).splitlines()) is None
 
 
 def test_cache_hit_does_not_hide_emulated_compile():

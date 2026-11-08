@@ -41,8 +41,10 @@ itself still runs emulated.
 - confirm the opportunity from buildx per-platform `RUN` and `DONE` lines; report
   source installs separately and size the opportunity only when foreign-architecture
   compile and source-install time is at least half of all measured cold image-build
-  layer time and, when native compilation was measured, at least twice that native
-  compile time; a foreign-only build can qualify against the cold-layer share alone
+  layer time and, when native compilation was measured, each measured foreign
+  architecture takes at least twice that native compile time; include shared-stage
+  layers without a platform prefix in the cold-layer total, and let a foreign-only
+  build qualify against the cold-layer share alone
 
 **Fix**: Build platform-independent output once in a stage based on
 `FROM --platform=$BUILDPLATFORM`, passing the target architecture to a supported
