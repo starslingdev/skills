@@ -130,6 +130,26 @@ class _OnlyCheckClient(_SingleCheckClient):
     include_siblings = False
 
 
+class _SerialAffectedClient(_SingleCheckClient):
+    def _jobs(self, run_id: int) -> list[dict]:
+        pole = _job("pole", 600, run_id)
+        sibling = _job("sibling", 700, run_id)
+        sibling["started_at"] = _iso(600)
+        sibling["steps"][0]["started_at"] = _iso(600)
+        return [pole, sibling]
+
+    def json(self, endpoint: str, allow_missing: bool = False):
+        match = re.match(r"repos/o/r/commits/(s\d+)/check-runs", endpoint)
+        if match:
+            self.queries += 1
+            return {"total_count": 2, "check_runs": [
+                {"name": "pole", "started_at": _iso(0), "completed_at": _iso(600)},
+                {"name": "sibling", "started_at": _iso(600),
+                 "completed_at": _iso(700)},
+            ]}
+        return super().json(endpoint, allow_missing)
+
+
 _DOC = {
     "repo": "o/r",
     "scanned_at": "2026-11-06T00:00:00Z",
@@ -163,6 +183,25 @@ def _collect(monkeypatch, client_type: type[_SingleCheckClient]) -> dict:
     doc["skill_commit_sha"] = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], text=True).strip()
     return doc
+
+
+def _verify_collected(doc: dict, tmp_path: Path) -> str:
+    """Render collected facts and run the complete report verifier."""
+    report = bp.render(doc, captured_at="2026-11-06T00:00:00Z")
+    findings_path = tmp_path / "findings.json"
+    report_path = tmp_path / "report.md"
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+    report_path.write_text(report, encoding="utf-8")
+    assert bp._LAST_CLAIMS is not None
+    report_path.with_name(report_path.name + ".claims.json").write_text(
+        json.dumps(bp._LAST_CLAIMS.to_json()), encoding="utf-8")
+    failures = [
+        check for check in vr.run_checks(
+            report, report_path, findings_path, skill_repo=None)
+        if not check.skipped and not check.ok
+    ]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+    return report
 
 
 def _population_context(doc: dict) -> WallClockContext:
@@ -209,31 +248,34 @@ def test_complete_single_check_prs_keep_the_full_saving(monkeypatch, tmp_path):
     assert projected.value == 254.0
     assert projected.reason is not None
 
-    report = bp.render(doc, captured_at="2026-11-06T00:00:00Z")
+    report = _verify_collected(doc, tmp_path)
     assert "4 of 10 PRs where it was the only check" in report
-
-    findings_path = tmp_path / "findings.json"
-    report_path = tmp_path / "report.md"
-    findings_path.write_text(json.dumps(doc), encoding="utf-8")
-    report_path.write_text(report, encoding="utf-8")
-    assert bp._LAST_CLAIMS is not None
-    report_path.with_name(report_path.name + ".claims.json").write_text(
-        json.dumps(bp._LAST_CLAIMS.to_json()), encoding="utf-8")
-    failures = [check for check in vr.run_checks(
-        report, report_path, findings_path, skill_repo=None)
-        if not check.skipped and not check.ok]
-    assert failures == [], [(check.name, check.detail) for check in failures]
 
     floor_mutant = json.loads(json.dumps(doc))
     two_job_fact = floor_mutant["pr_critical_path"]["commit_wall_clock"]["facts"][4]
     pole_projection = next(
         row for row in two_job_fact["job_projections"] if row["name"] == "pole")
-    pole_projection["independent_jobs"] = []
+    pole_projection["next_longest_s"] = 0.0
     floor_mutant_path = tmp_path / "floor-mutant.json"
     floor_mutant_path.write_text(json.dumps(floor_mutant), encoding="utf-8")
     floor_check = vr.check_commit_wall_clock_projection(report, floor_mutant_path)
     assert not floor_check.ok
-    assert "independent floors do not re-derive" in floor_check.detail
+    assert "next-longest floor does not re-derive" in floor_check.detail
+
+    deleted_projection_mutant = json.loads(json.dumps(doc))
+    for fact in deleted_projection_mutant["pr_critical_path"]["commit_wall_clock"]["facts"]:
+        fact.pop("job_projections", None)
+    deleted_path = tmp_path / "deleted-projections.json"
+    deleted_path.write_text(json.dumps(deleted_projection_mutant), encoding="utf-8")
+    deleted_check = vr.check_commit_wall_clock_projection(report, deleted_path)
+    assert not deleted_check.ok
+    assert "lacks current job projections" in deleted_check.detail
+
+    assert all(
+        "independent_jobs" not in row
+        for fact in doc["pr_critical_path"]["commit_wall_clock"]["facts"]
+        for row in fact.get("job_projections") or []
+    )
 
     # Exercise the generic population-wide cap separately: no targeted job
     # means each commit's slowest job supplies the projection inputs.
@@ -251,7 +293,7 @@ def test_complete_single_check_prs_keep_the_full_saving(monkeypatch, tmp_path):
     assert "whole-commit cap 90.0" in median_mutant.detail
 
 
-def test_collect_caps_a_non_slowest_target_against_its_own_job(monkeypatch):
+def test_collect_caps_a_non_slowest_target_against_its_own_job(monkeypatch, tmp_path):
     doc = _collect(monkeypatch, _SingleCheckClient)
     finding = doc["findings"][0]
 
@@ -265,19 +307,41 @@ def test_collect_caps_a_non_slowest_target_against_its_own_job(monkeypatch):
         if step["bound"] == "commit-projection")
     assert commit_bound["from_s"] == 500.0
     assert commit_bound["to_s"] == 200.0
+    _verify_collected(doc, tmp_path)
 
 
-def test_collect_projects_every_job_changed_by_a_cluster_finding(monkeypatch):
+def test_collect_projects_every_job_changed_by_a_cluster_finding(monkeypatch, tmp_path):
     doc_in = json.loads(json.dumps(_DOC))
     doc_in["findings"][0]["affected_jobs"] = ["pole", "sibling"]
     monkeypatch.setattr(cr, "GhClient", _SingleCheckClient)
 
     doc = cr.collect(doc_in, "o/r", max_runs=10, shallow_runs=10)
+    doc["skill_commit_sha"] = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], text=True).strip()
     finding = doc["findings"][0]
 
     # On the six two-job commits the shared fix lowers both concurrent jobs.
     # The other affected job must not become the unchanged projection floor.
     assert finding["wall_clock_p50_s"] == 500.0
+    _verify_collected(doc, tmp_path)
+
+
+def test_collect_caps_joint_jobs_at_each_jobs_serial_residual(monkeypatch, tmp_path):
+    doc_in = json.loads(json.dumps(_DOC))
+    doc_in["workflow_job_graph"][_WORKFLOW]["sibling"]["needs"] = ["pole"]
+    finding_in = doc_in["findings"][0]
+    finding_in["affected_jobs"] = ["pole", "sibling"]
+    monkeypatch.setattr(cr, "GhClient", _SerialAffectedClient)
+
+    doc = cr.collect(doc_in, "o/r", max_runs=10, shallow_runs=10)
+    doc["skill_commit_sha"] = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], text=True).strip()
+    finding = doc["findings"][0]
+
+    # Both jobs move, but the 100-second sibling saturates first. Its remaining
+    # 600-second serial path limits a 500-second raw estimate to 100 seconds.
+    assert finding["wall_clock_p50_s"] == 100.0
+    _verify_collected(doc, tmp_path)
 
 
 def test_population_bounds_share_one_basis_instead_of_weighting_twice():

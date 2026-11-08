@@ -250,10 +250,12 @@ class WallClockContext:
     chain_win_s: float = 0.0
     # One tuple per complete sampled commit: (whole-commit wall, slowest job,
     # next-longest job outside the slowest job's `needs:` chain[, that chain's
-    # span on the commit]). The commit projection bound uses every tuple, then
-    # takes their share-weighted mean allowed saving. Without the fourth value the slowest job
-    # is its own chain.
-    commit_wall_facts: tuple[tuple[float, ...], ...] = ()
+    # span on the commit]). A fifth value may carry a targeted multi-job path
+    # population as (chain span, job duration, affected) tuples. The commit
+    # projection bound uses every sampled tuple, then takes their share-weighted
+    # mean allowed saving. Without the fourth value the slowest job is its own
+    # chain.
+    commit_wall_facts: tuple[tuple[Any, ...], ...] = ()
     # #44 — a CLUSTER-FLOOR lever (OPT73): its fix lowers ALL of `own_check_names`
     # (the concurrent sibling legs running the shared step) in lockstep, so a
     # SIBLING leg can never be the floor that caps it — the sibling descends WITH
@@ -639,6 +641,20 @@ def bound_commit_projection(value: float, ctx: WallClockContext) -> BoundResult:
         wall, slowest, next_longest = fact[:3]
         chain = fact[3] if len(fact) > 3 else slowest
         if wall <= 0:
+            continue
+        # A targeted multi-job finding carries every sampled path as
+        # (chain span, targeted job duration, affected). Shorten all affected
+        # jobs by the same finding saving, with each job saturating at zero,
+        # then retain the slowest remaining path as the commit floor.
+        paths = fact[4] if len(fact) > 4 else ()
+        if paths:
+            original_path = max(float(path[0]) for path in paths)
+            projected_path = max(
+                float(path[0]) - min(value, float(path[1]))
+                if bool(path[2]) else float(path[0])
+                for path in paths
+            )
+            caps.append(max(0.0, original_path - projected_path))
             continue
         if slowest <= 0:
             caps.append(0.0)

@@ -29314,12 +29314,6 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
 
             _runner_up = next(
                 (_row for _row in _job_rows if _outside_target_chain(_row)), None)
-            _independent_jobs = [
-                {"name": _row["name"], "node": _row.get("node"),
-                 "workflow_file": _row["workflow_file"],
-                 "duration_s": _row["duration_s"]}
-                for _row in _job_rows if _outside_target_chain(_row)
-            ]
             _target_chain_rows = (
                 [_row for _row in _job_rows
                  if _row["workflow_file"] == _target_wf
@@ -29342,7 +29336,6 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 "duration_s": _target["duration_s"],
                 "next_longest_s": (float(_runner_up["duration_s"])
                                    if _runner_up is not None else 0.0),
-                "independent_jobs": _independent_jobs,
                 "chain_span_s": (_target_chain_span
                                  if _target_chain_span is not None
                                  else float(_target["duration_s"])),
@@ -29818,15 +29811,31 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 continue
             _target = max(_matches, key=lambda row: float(row.get("duration_s") or 0.0))
             _duration = float(_target.get("duration_s") or 0.0)
-            _unchanged_floors = [
-                float(row.get("duration_s") or 0.0)
-                for row in (_target.get("independent_jobs") or [])
-                if isinstance(row, dict) and not _matches_affected(row)
-            ]
+            if not (_finding.get("cluster_floor_lever") and len(_affected) > 1):
+                _selected.append((
+                    float(_wall), _duration,
+                    float(_target.get("next_longest_s") or 0.0),
+                    float(_target.get("chain_span_s") or _duration),
+                ))
+                continue
+            # Keep every affected and unaffected path. A multi-job lever lowers
+            # all affected jobs together, but each one saturates at zero at its
+            # own duration; selecting only the longest job can otherwise erase a
+            # shorter affected job whose serial chain still gates the commit.
+            _paths = tuple(
+                (
+                    float(row.get("chain_span_s") or row.get("duration_s") or 0.0),
+                    float(row.get("duration_s") or 0.0),
+                    _matches_affected(row),
+                )
+                for row in (_fact.get("job_projections") or [])
+                if isinstance(row, dict)
+            )
             _selected.append((
                 float(_wall), _duration,
-                max(_unchanged_floors, default=0.0),
+                0.0,
                 float(_target.get("chain_span_s") or _duration),
+                _paths,
             ))
         return tuple(_selected)
     findings_doc["pr_critical_path"] = {

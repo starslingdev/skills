@@ -696,11 +696,14 @@ def check_commit_wall_clock_projection(report: str, findings_path: Path | None) 
                 f"fact {index} chain span {chain} is shorter than its slowest job {slowest}")
             continue
         projection_rows = fact.get("job_projections")
+        raw_jobs = [row for row in (fact.get("jobs") or []) if isinstance(row, dict)]
+        if (not isinstance(projection_rows, list)
+                and any(_num(row.get("duration_s")) is not None for row in raw_jobs)):
+            failures.append(f"complete fact {index} lacks current job projections")
         if isinstance(projection_rows, list):
             import datetime as _projection_dt
 
             rows = [row for row in projection_rows if isinstance(row, dict)]
-            raw_jobs = [row for row in (fact.get("jobs") or []) if isinstance(row, dict)]
             raw_by_identity = {
                 (str(row.get("workflow_file") or ""), str(row.get("name") or "")): row
                 for row in raw_jobs
@@ -732,13 +735,6 @@ def check_commit_wall_clock_projection(report: str, findings_path: Path | None) 
 
                 expected_independent = sorted(
                     projection_identity(row) for row in rows if outside_target(row))
-                stamped_independent = target.get("independent_jobs")
-                if not isinstance(stamped_independent, list) or sorted(
-                        projection_identity(row) for row in stamped_independent
-                        if isinstance(row, dict)) != expected_independent:
-                    failures.append(
-                        f"fact {index} job projection independent floors do not re-derive")
-                    break
                 expected_next = max(
                     (duration for _wf, _name, duration in expected_independent),
                     default=0.0)
@@ -887,27 +883,44 @@ def check_commit_wall_clock_projection(report: str, findings_path: Path | None) 
                 if not candidates:
                     caps.append(0.0)
                     continue
-                target = max(candidates, key=lambda row: _num(row.get("duration_s")) or 0.0)
-                target_s = _num(target.get("duration_s"))
-                unchanged_floors = [
-                    _num(row.get("duration_s")) or 0.0
-                    for row in (target.get("independent_jobs") or [])
-                    if isinstance(row, dict) and not matches_affected(row)
-                ]
-                target_next = (max(unchanged_floors, default=0.0)
-                               if "independent_jobs" in target
-                               else (_num(target.get("next_longest_s")) or 0.0))
-                target_chain = _num(target.get("chain_span_s"))
-                if target_s is None or target_s <= 0:
+                joint_affected = bool(
+                    finding.get("cluster_floor_lever") and len(affected) > 1)
+                if not joint_affected:
+                    target = max(
+                        candidates, key=lambda row: _num(row.get("duration_s")) or 0.0)
+                    target_s = _num(target.get("duration_s"))
+                    target_next = _num(target.get("next_longest_s")) or 0.0
+                    target_chain = _num(target.get("chain_span_s"))
+                    if target_s is None or target_s <= 0:
+                        caps.append(0.0)
+                        continue
+                    projected = projection(
+                        wall, target_s, target_next, float("inf"), target_chain)[0]
+                    caps.append(max(0.0, wall - projected))
+                    continue
+                paths: list[tuple[float, float, bool]] = []
+                for row in (fact.get("job_projections") or []):
+                    if not isinstance(row, dict):
+                        continue
+                    duration_s = _num(row.get("duration_s")) or 0.0
+                    chain_s = _num(row.get("chain_span_s")) or duration_s
+                    if chain_s < duration_s:
+                        failures.append(
+                            f"finding {finding.get('id')!r} has a target chain shorter "
+                            "than its job")
+                        paths = []
+                        break
+                    paths.append((chain_s, duration_s, matches_affected(row)))
+                if not paths:
                     caps.append(0.0)
                     continue
-                if target_chain is not None and target_chain < target_s:
-                    failures.append(
-                        f"finding {finding.get('id')!r} has a target chain shorter "
-                        "than its job")
-                    continue
-                projected = projection(
-                    wall, target_s, target_next, float("inf"), target_chain)[0]
+                original_path = max(path[0] for path in paths)
+                projected_path = max(
+                    path_s - duration_s if is_affected else path_s
+                    for path_s, duration_s, is_affected in paths
+                )
+                caps.append(max(0.0, original_path - projected_path))
+                continue
             else:
                 projected = projection(
                     wall, slowest, next_longest, float("inf"), chain)[0]
@@ -4023,6 +4036,11 @@ def _verify_per_pr_floor_split(
                     if _vr_job_produces_check(job_name, is_matrix, name))
             resolved = list(dict.fromkeys(resolved))
             if resolved:
+                # A cluster lever can shorten several distinct checks together.
+                # This single-check population split cannot represent that
+                # joint move; the per-commit projection verifier below does.
+                if finding.get("cluster_floor_lever") and len(resolved) > 1:
+                    return None
                 current = str(cp.get("critical_path_check") or "")
                 stamp = current if current in resolved else resolved[0]
     if not stamp:
