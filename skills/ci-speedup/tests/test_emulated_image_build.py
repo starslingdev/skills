@@ -422,6 +422,7 @@ def test_no_inspect_dominant_foreign_compile_is_an_uncredited_check():
     assert "emulat" not in leaf["unit_label"].lower()
     assert "docker buildx inspect --bootstrap" in leaf["search"]
     assert "config_fact" not in leaf
+    assert "#15 DONE 120.0s" in leaf["evidence"]
 
 
 def test_buildkit_headers_without_a_buildx_invocation_do_not_assume_topology():

@@ -2478,8 +2478,8 @@ def _emulated_image_compile_leaf(lines: list[str]) -> dict[str, Any] | None:
             "deeper": [],
             "uncredited": True,
             "evidence": [
-                item for _arch, _seconds, header, _done, _kind in durations
-                for item in (header,)
+                item for _arch, _seconds, header, done, _kind in durations
+                for item in (header, done)
             ][:6],
             "search": ["docker buildx inspect --bootstrap", "Nodes:", "Platforms:"],
             "builder_topology_unconfirmed": True,
