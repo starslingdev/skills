@@ -29224,6 +29224,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 _job_intervals.append({
                     "name": str(_job.get("name") or ""),
                     "workflow_file": _wf,
+                    "duration_s": round(_duration, 3),
                     # A job with no queued time of its own queued from its run's
                     # creation, never from the commit's first run.
                     "created_at": str(_job.get("created_at")
@@ -29288,6 +29289,59 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                        if len(_chain_rows) > 1 else None)
         if _chain_span is not None and _slowest is not None:
             _chain_span = max(_chain_span, float(_slowest["duration_s"]))
+
+        def _job_projection_inputs(_target: dict[str, Any]) -> dict[str, Any]:
+            """Projection inputs when this concrete job, rather than the commit's
+            slowest job, is shortened."""
+            _target_wf = str(_target["workflow_file"])
+            _target_node = _target.get("node")
+            _target_chain = (_needs_chain(_target_wf, _target_node)
+                             if _target_node is not None else set())
+
+            def _outside_target_chain(_row: dict[str, Any]) -> bool:
+                if _row is _target:
+                    return False
+                if _row["workflow_file"] != _target_wf:
+                    return True
+                if _row.get("node") not in _target_chain:
+                    return True
+                _node = _row.get("node")
+                _spec = ((_jg or {}).get(_target_wf) or {}).get(_node) or {}
+                return bool(
+                    _node == _target_node
+                    and _row.get("name") != _target.get("name")
+                    and isinstance(_spec, dict) and _spec.get("matrix"))
+
+            _runner_up = next(
+                (_row for _row in _job_rows if _outside_target_chain(_row)), None)
+            _target_chain_rows = (
+                [_row for _row in _job_rows
+                 if _row["workflow_file"] == _target_wf
+                 and _row.get("node") in _target_chain
+                 and not _outside_target_chain(_row)
+                 and (_row.get("node") != _target_node
+                      or _row.get("name") == _target.get("name"))]
+                if _target_node is not None else [])
+            _target_chain_span = (
+                round(max(float(_row["completed_ts"]) for _row in _target_chain_rows)
+                      - min(float(_row["started_ts"]) for _row in _target_chain_rows), 3)
+                if len(_target_chain_rows) > 1 else None)
+            if _target_chain_span is not None:
+                _target_chain_span = max(
+                    _target_chain_span, float(_target["duration_s"]))
+            return {
+                "name": _target["name"],
+                "node": _target.get("node"),
+                "workflow_file": _target_wf,
+                "duration_s": _target["duration_s"],
+                "next_longest_s": (float(_runner_up["duration_s"])
+                                   if _runner_up is not None else 0.0),
+                "chain_span_s": (_target_chain_span
+                                 if _target_chain_span is not None
+                                 else float(_target["duration_s"])),
+            }
+
+        _job_projections = [_job_projection_inputs(_row) for _row in _job_rows]
         _partial = bool(_missing or _rerun_workflows or not _run_rows
                         or _observed is None)
 
@@ -29333,6 +29387,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             "rerun_workflows": _rerun_workflows,
             **({"created_at": _created_iso[min(_created)]} if _created else {}),
             "jobs": _job_intervals,
+            "job_projections": _job_projections,
             "wall_s": None if _partial else _observed,
             **({"observed_wall_s": _observed} if _observed is not None else {}),
             **({"slowest_job": {k: _slowest[k] for k in
@@ -29713,6 +29768,72 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         if isinstance(f.get("wall_s"), (int, float))
         and isinstance(f.get("slowest_job"), dict)
     )
+
+    def _commit_facts_for_finding(_finding: dict[str, Any]) -> tuple[tuple[float, ...], ...]:
+        """Select this finding's concrete job on every sampled commit.
+
+        A zero-duration row records a commit where the targeted job did not run;
+        it contributes zero to the share-weighted saving instead of disappearing
+        from the population.
+        """
+        _workflow = str(_finding.get("workflow_file") or "")
+        _affected = {
+            str(name) for name in (_finding.get("affected_jobs") or []) if str(name)
+        }
+        if not _workflow or not _affected:
+            return _commit_ctx_facts
+        _affected_bases = {_matrix_base_name(name) for name in _affected}
+
+        def _matches_affected(_row: dict[str, Any]) -> bool:
+            return bool(
+                str(_row.get("workflow_file") or "") == _workflow
+                and (str(_row.get("node") or "") in _affected
+                     or str(_row.get("name") or "") in _affected
+                     or _matrix_base_name(str(_row.get("name") or ""))
+                     in _affected_bases))
+
+        _selected: list[tuple[float, ...]] = []
+        for _fact in _commit_facts:
+            _wall = _fact.get("wall_s")
+            if not isinstance(_wall, (int, float)) or isinstance(_wall, bool):
+                continue
+            _matches = [
+                row for row in (_fact.get("job_projections") or [])
+                if isinstance(row, dict)
+                and _matches_affected(row)
+            ]
+            if not _matches:
+                _selected.append((float(_wall), 0.0, 0.0, 0.0))
+                continue
+            _target = max(_matches, key=lambda row: float(row.get("duration_s") or 0.0))
+            _duration = float(_target.get("duration_s") or 0.0)
+            if not (_finding.get("cluster_floor_lever") and len(_affected) > 1):
+                _selected.append((
+                    float(_wall), _duration,
+                    float(_target.get("next_longest_s") or 0.0),
+                    float(_target.get("chain_span_s") or _duration),
+                ))
+                continue
+            # Keep every affected and unaffected path. A multi-job lever lowers
+            # all affected jobs together, but each one saturates at zero at its
+            # own duration; selecting only the longest job can otherwise erase a
+            # shorter affected job whose serial chain still gates the commit.
+            _paths = tuple(
+                (
+                    float(row.get("chain_span_s") or row.get("duration_s") or 0.0),
+                    float(row.get("duration_s") or 0.0),
+                    _matches_affected(row),
+                )
+                for row in (_fact.get("job_projections") or [])
+                if isinstance(row, dict)
+            )
+            _selected.append((
+                float(_wall), _duration,
+                0.0,
+                float(_target.get("chain_span_s") or _duration),
+                _paths,
+            ))
+        return tuple(_selected)
     findings_doc["pr_critical_path"] = {
         # KEPT-side count post the #80 spine door: `sampled_pr_count` is the number of PRs whose
         # timing actually feeds the rendered chain/makespan/populations/presence — a dropped-era PR
@@ -30823,7 +30944,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 pr_check_populations=tuple(pr_check_populations),
                 pr_check_populations_complete=tuple(pr_check_population_complete),
                 chain_members=_chain_ctx_members, chain_p50_s=_chain_ctx_p50,
-                chain_win_s=_chain_ctx_win, commit_wall_facts=_commit_ctx_facts)
+                chain_win_s=_chain_ctx_win,
+                commit_wall_facts=_commit_facts_for_finding(f))
             _size_opt25_next_step(f, ctx)
             res = size_wall_clock(float(wc), ctx,
                                   cascade=([("within-workflow", bound_within_workflow)] + CASCADE)
@@ -31046,7 +31168,6 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # Structural findings are routed after the main sizing loop. Apply the
     # shared whole-commit projection bound once more at the final findings door
     # so those late additions cannot publish a saving above the next-job floor.
-    _commit_only_ctx = WallClockContext(commit_wall_facts=_commit_ctx_facts)
     for _finding in findings:
         _saving = _finding.get("wall_clock_p50_s")
         if not isinstance(_saving, (int, float)) or _saving <= 0:
@@ -31054,6 +31175,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         if any(isinstance(step, dict) and step.get("bound") == "commit-projection"
                for step in (_finding.get("wall_clock_derivation") or [])):
             continue
+        _commit_only_ctx = WallClockContext(
+            commit_wall_facts=_commit_facts_for_finding(_finding))
         _bounded = bound_commit_projection(float(_saving), _commit_only_ctx)
         if _bounded.value >= round(float(_saving), 1):
             continue

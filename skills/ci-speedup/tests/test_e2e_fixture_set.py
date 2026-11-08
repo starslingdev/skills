@@ -398,6 +398,11 @@ def test_named_fixtures_exercise_their_defining_interactions(
     assert any(
         row.get("name", "").startswith("tests / test (")
         for row in docs["path-partitioned-monorepo"]["pr_critical_path"]["checks"])
+    path_facts = docs["path-partitioned-monorepo"]["pr_critical_path"][
+        "commit_wall_clock"]["facts"]
+    assert all(
+        any(row.get("node") == "gate" for row in fact.get("job_projections") or [])
+        for fact in path_facts if fact.get("partial") is not True)
 
     red = json.loads(
         (FIXTURE_ROOT / "red-default-branch" / "responses.json").read_text())

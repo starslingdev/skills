@@ -17,11 +17,6 @@
     {
       "pattern": "OPT75",
       "runner_min": null,
-      "wall_clock_s": 150.0
-    },
-    {
-      "pattern": "OPT75",
-      "runner_min": null,
       "wall_clock_s": 195.0
     }
   ],
