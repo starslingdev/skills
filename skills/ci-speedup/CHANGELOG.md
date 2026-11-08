@@ -16,6 +16,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-11-08** — Treat checkout submodules copied by a resolved local Dockerfile as image-build inputs. OPT76 now keeps those checkouts, fails closed on unresolved Dockerfiles, and recognizes both explicit source paths and whole-context copies.
 - **2026-11-08** — Measure sequential vendored-library source builds from completed timestamped intervals, drill their per-library wall time, and route dominant builds to guarded per-library cache guidance. Restored trees without build stamps stay quiet, and the recipe requires complete artifacts across repeated warm builds.
 - **2026-11-08** — Detect compilation inside emulated foreign-architecture containers on hosted x64 runners, including architecture actions, QEMU-backed Docker runs and foreign job containers. Native ARM runners and test-only steps stay quiet, and guidance measures only the compile step above the unchanged test floor.
 - **2026-11-08** — Pin the complete log-leaf precedence, including helper-returned and assigned-before-return leaves. Regression mutants prove that moving an existing leaf or inserting a new one without choosing its slot fails the guard.
