@@ -478,14 +478,24 @@ def test_duplicate_gate_positive_push_wall_stays_out_of_merge_credit(
     failures = [check for check in checks if not check.skipped and not check.ok]
     assert failures == [], [(check.name, check.detail) for check in failures]
 def _run_multiarch_log_variant(
-        name: str, monkeypatch, tmp_path, transform):
+        name: str, monkeypatch, tmp_path, transform, *, preserve_no_inspect=False):
     fixture = tmp_path / "fixture-variants" / name
     fixture.parent.mkdir(exist_ok=True)
     shutil.copytree(FIXTURE_ROOT / "multiarch-image", fixture)
     responses_path = fixture / "responses.json"
     recorded = json.loads(responses_path.read_text(encoding="utf-8"))
+    inspected_prefix = next(
+        log[:log.index("#10 [linux/amd64 build 2/3]")]
+        for log in recorded["logs"].values() if "Nodes:" in log)
+
+    def variant_input(log: str) -> str:
+        if preserve_no_inspect or "Nodes:" in log:
+            return log
+        return inspected_prefix + log[log.index("#10 [linux/amd64 build 2/3]"):]
+
     recorded["logs"] = {
-        job_id: transform(log) for job_id, log in recorded["logs"].items()
+        job_id: transform(variant_input(log))
+        for job_id, log in recorded["logs"].items()
     }
     responses_path.write_text(json.dumps(recorded), encoding="utf-8")
     doc, report, checks = run_fixture(fixture, monkeypatch, tmp_path)
@@ -540,6 +550,27 @@ def test_builder_topology_and_foreign_only_shapes_run_through_collection(
     _doc, _report, native = _run_multiarch_log_variant(
         "multiarch-native-arm", monkeypatch, tmp_path, native_arm)
     assert "emulated-image-compile" not in native["leaves"]
+
+
+def test_no_inspect_foreign_compile_runs_through_collection(
+        monkeypatch, tmp_path):
+    def remove_builder_inspect(log: str) -> str:
+        first_layer = log.index("#10 [linux/amd64 build 2/3]")
+        return ("docker buildx build --platform linux/amd64,linux/arm64 .\n"
+                + log[first_layer:])
+
+    _doc, report, facts = _run_multiarch_log_variant(
+        "multiarch-no-inspect", monkeypatch, tmp_path, remove_builder_inspect,
+        preserve_no_inspect=True)
+    leaf = next(
+        row for row in facts["leaf_details"]
+        if row.get("fix_key") == "emulated-image-compile")
+
+    assert leaf["magnitude"] is None
+    assert leaf["builder_topology_unconfirmed"] is True
+    assert "docker buildx inspect --bootstrap" in report
+    assert "does not establish whether that work ran under emulation" in report
+    assert "building a foreign architecture under emulation instead" not in report
 
 
 def test_builder_detected_platform_and_dominance_guards_run_through_collection(

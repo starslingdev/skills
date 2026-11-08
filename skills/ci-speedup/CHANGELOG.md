@@ -16,6 +16,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-11-08** — Route dominant foreign-platform image compilation with no Buildx node listing to a topology check without crediting savings or claiming emulation. Inspected single-node builders retain the measured recommendation, while explicit multi-node builders still fail closed.
 - **2026-11-08** — Keep checks whose required-job reachability cannot be confirmed visible but uncredited. Their structural findings and drill-downs now use conditional framing, and report verification rejects direct merge-wait credit or critical-path wording on those checks.
 - **2026-11-08** — Treat checkout submodules copied by a resolved local Dockerfile as image-build inputs. OPT76 now keeps those checkouts, fails closed on unresolved Dockerfiles, and recognizes both explicit source paths and whole-context copies.
 - **2026-11-08** — Measure sequential vendored-library source builds from completed timestamped intervals, drill their per-library wall time, and route dominant builds to guarded per-library cache guidance. Restored trees without build stamps stay quiet, and the recipe requires complete artifacts across repeated warm builds.
