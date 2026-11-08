@@ -143,3 +143,25 @@ def test_eslint_prompt_uses_the_same_prefix_for_restore_and_primary_keys():
     text = " ".join(_strings(bp._FIX_META["eslint-no-cache"]))
     assert "<tool>-<os>-<lockfile-hash>-${{ github.sha }}" in text
     assert "<tool>-<os>-<lockfile-hash>-" in text
+
+
+def test_rolling_tokens_are_not_called_permanent_misses_with_restore_fallback():
+    for path in sorted(_PATTERNS.glob("*.md")):
+        text = path.read_text(encoding="utf-8")
+        sentences = re.split(r"(?<=[.!?])\s+|\n+", text)
+        for sentence in sentences:
+            lowered = sentence.lower()
+            if not any(token in lowered for token in ("github.sha", "run_id")):
+                continue
+            if not any(claim in lowered for claim in ("nothing ever hits", "never hits")):
+                continue
+            assert "no restore-keys" in lowered, (path.name, sentence)
+
+
+def test_tool_result_rolling_keys_name_the_cache_budget_tradeoff():
+    fixes = _fix_sections()
+    for name in (
+        "opt6-cache-key-entropy-too-high-or-unstable.md",
+        "opt9-tool-specific-cache-flag-not-enabled.md",
+    ):
+        assert "cache budget" in fixes[name].lower(), (name, fixes[name])

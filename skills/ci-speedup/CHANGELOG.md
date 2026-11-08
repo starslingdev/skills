@@ -16,6 +16,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-11-08** — Align cache-key guidance around rolling tool-result keys: a per-commit primary key with a stable restore prefix can restore useful content and save the updated result, while each new entry consumes cache budget and is unsuitable for large dependency or build stores.
 - **2026-11-07** — Hand default-branch push drills the matched catalog recipe, documentation and delivery checks for every recognized log cause. Matching static findings are tagged for the push lane, and emulated-image drills require inspection of the builder's nodes.
 - **2026-11-07** — Recognize inline history operands such as pnpm filter revisions and changed-since flags. Parent-only operands receive their exact bounded checkout depth, while comparisons against a branch keep full history.
 - **2026-11-07** — Treat native-build tool names as compilation only when they occupy a shell command position. Package-manager arguments such as `apt-get install make` stay quiet, while commands chained after an installer remain detectable.
