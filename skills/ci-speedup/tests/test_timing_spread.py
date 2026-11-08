@@ -166,6 +166,57 @@ def test_unsharded_job_has_no_fixed_floor_sentence():
     assert sentence == ""
 
 
+def test_parenthesized_job_names_without_a_declared_matrix_are_not_shards():
+    jobs = [[
+        _shard_job(400, "tests (api)"),
+        _shard_job(401, "tests (web)"),
+    ]]
+    workflow = {"jobs": {
+        "api": {"name": "tests (api)", "steps": [{"run": "pytest -q"}]},
+        "web": {"name": "tests (web)", "steps": [{"run": "pytest -q"}]},
+    }}
+
+    assert _shard_floor(
+        "tests (api)", workflow, jobs, logs_by_job_id={}) is None
+
+
+def test_matrix_floor_stays_on_the_poles_runner_population():
+    ubuntu = [_shard_job(500 + i, f"tests / test (pkg, {i})")
+              for i in range(4)]
+    macos = [_shard_job(510 + i, f"tests / test (mac, {i})", test_s=900)
+             for i in range(4)]
+    for job in macos:
+        job["labels"] = ["macos-14"]
+        job["runner_name"] = "macos-14"
+    workflow = {"jobs": {"test": {"strategy": {"matrix": {
+        "os": ["ubuntu-latest", "macos-14"], "shard": [0, 1, 2, 3]}},
+        "steps": [{"run": "pytest -q"}]}}}
+
+    stamp = _shard_floor(
+        "tests / test (pkg, 0)", workflow, [ubuntu + macos],
+        logs_by_job_id={})
+
+    assert stamp is not None
+    assert stamp["n_shards"] == 4
+    assert stamp["divided_work_s"] == 90.0
+
+
+def test_fixed_part_labels_are_shared_by_every_sampled_leg():
+    first = _shard_job(600, "tests / test (pkg, 0)")
+    second = _shard_job(601, "tests / test (pkg, 1)")
+    second["steps"] = [step for step in second["steps"]
+                       if step["name"] != "Install browser"]
+    workflow = {"jobs": {"test": {"strategy": {"matrix": {
+        "shard": [0, 1]}}, "steps": [{"run": "pytest -q"}]}}}
+
+    stamp = _shard_floor(
+        "tests / test (pkg, 0)", workflow, [[first, second]],
+        logs_by_job_id={})
+
+    assert stamp is not None
+    assert stamp["fixed_parts"] == ["setup", "build"]
+
+
 # --------------------------------------------------------------------------------------
 # 1. The counterexample: identical p50 AND p95, different observed range.
 # --------------------------------------------------------------------------------------

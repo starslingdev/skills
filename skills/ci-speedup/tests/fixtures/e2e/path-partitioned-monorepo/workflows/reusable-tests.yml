@@ -20,4 +20,4 @@ jobs:
       - name: Install browser
         run: pnpm exec playwright install chromium
       - name: Tests
-        run: make test PACKAGE=${{ matrix.package }} RUNTIME=${{ matrix.runtime }}
+        run: cargo test

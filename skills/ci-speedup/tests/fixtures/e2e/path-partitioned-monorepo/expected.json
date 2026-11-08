@@ -16,8 +16,8 @@
     },
     {
       "pattern": "OPT73",
-      "runner_min": 16.0,
-      "wall_clock_s": 80.0
+      "runner_min": 41.0,
+      "wall_clock_s": 205.0
     }
   ],
   "detected_patterns": [
@@ -31,7 +31,7 @@
   "gate_kind": null,
   "headline": {
     "check": "tests / test (api, 20)",
-    "seconds": 150.0
+    "seconds": 275.0
   },
   "lane": {
     "job_fetches": 0,
@@ -39,7 +39,7 @@
     "sampled_pushes": 0
   },
   "leaves": [
-    "pytest-no-xdist"
+    "cargo-test-shard"
   ],
   "minority_tails": [],
   "provenance": "required_scoped",

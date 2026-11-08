@@ -440,8 +440,17 @@ def test_sharded_floor_runs_through_collection_and_full_verifier(
     stamp = pole["shard_floor"]
     assert stamp["floor_s"] == 60.0
     assert stamp["divided_work_s"] == 90.0
+    assert stamp["in_step_floor_s"] == 125.0
     assert stamp["n_shards"] == 4
-    assert "Observed on the sampled runs, not a shard-count recommendation" in report
+    # One bounded representative-log probe is part of this qualifying path. Pin
+    # the complete offline call budget so it cannot silently fan out per shard.
+    assert doc["data_sources"]["gh_query_count"] == 18
+    sentence = "Observed on the sampled runs, not a shard-count recommendation"
+    assert report.count(sentence) == 2
+    pole_section = report.split("## 🟠 Long pole 2", 1)[1].split("\n## ", 1)[0]
+    assert "#### 🤖 Prompt for your coding agent" in pole_section
+    assert sentence in pole_section.split("#### 🤖 Prompt for your coding agent", 1)[1]
+    assert sentence not in report.split("## 📋 Contents", 1)[0]
 
 
 def test_duplicate_gate_sizing_is_independently_verified(monkeypatch, tmp_path):
