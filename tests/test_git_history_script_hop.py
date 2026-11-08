@@ -58,6 +58,24 @@ def _verdicts(engines, root: Path, parsed):
     return speed_flags, score_state
 
 
+def _inline_case(root: Path, run: str):
+    raw = f"""name: CI
+on: pull_request
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: {run}
+"""
+    workflow = root / ".github" / "workflows" / "ci.yml"
+    workflow.parent.mkdir(parents=True, exist_ok=True)
+    workflow.write_text(raw, encoding="utf-8")
+    return [(".github/workflows/ci.yml", yaml.safe_load(raw), raw)]
+
+
 @pytest.mark.parametrize(("run", "path"), [
     ("./scripts/check.sh", "scripts/check.sh"),
     ("bash scripts/check.sh", "scripts/check.sh"),
@@ -227,6 +245,42 @@ def test_parent_only_history_read_recommends_bounded_depth(
                    if f.get("pattern") == "OPT28")
     assert f"fetch-depth: {depth}" in finding["evidence"]
     assert "no git-history operation found" not in finding["evidence"]
+
+
+def test_inline_parent_operand_recommends_bounded_depth(
+        engines, tmp_path: Path):
+    parsed = _inline_case(tmp_path, "pnpm ls --filter '...[HEAD^1]'")
+    speed_flags, score_state = _verdicts(engines, tmp_path, parsed)
+    assert speed_flags is True
+    assert score_state == "pass"
+    finding = next(f for f in engines[0].scan(
+        tmp_path, CATALOG, default_branch="main")["findings"]
+                   if f.get("pattern") == "OPT28")
+    assert "fetch-depth: 2" in finding["evidence"]
+    assert "no git-history operation found" not in finding["evidence"]
+
+
+def test_inline_changed_since_keeps_full_history(engines, tmp_path: Path):
+    parsed = _inline_case(tmp_path, "jest --changedSince=origin/main")
+    assert _verdicts(engines, tmp_path, parsed) == (False, "pass")
+
+
+def test_non_revision_vite_base_still_allows_shallow_advice(
+        engines, tmp_path: Path):
+    parsed = _inline_case(tmp_path, "vite build --base=/preview/")
+    assert _verdicts(engines, tmp_path, parsed) == (True, "fail")
+
+
+def test_non_revision_depth_operand_still_allows_shallow_advice(
+        engines, tmp_path: Path):
+    parsed = _inline_case(tmp_path, "pnpm ls --depth -1")
+    assert _verdicts(engines, tmp_path, parsed) == (True, "fail")
+
+
+def test_unrelated_parent_looking_text_still_allows_shallow_advice(
+        engines, tmp_path: Path):
+    parsed = _inline_case(tmp_path, "echo HEAD^1")
+    assert _verdicts(engines, tmp_path, parsed) == (True, "fail")
 
 
 @pytest.mark.parametrize("run", [
