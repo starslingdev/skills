@@ -97,7 +97,8 @@ report it separately rather than treating it as a changed-code sample.
   its logs when they name a dependency, build, or task-cache miss or hit. State
   why a cold sample was cold when the log identifies key miss, branch-scope
   visibility, or eviction. Run position is descriptive context, never a
-  substitute for log evidence. Report cold and warm samples on separate lines;
+  substitute for log evidence. Keep every complete sample in the aggregate
+  median and range, and also report cold and warm samples on separate lines;
   an unclassified sample stays unknown. A cold-vs-warm gap that trips the
   variance threshold is cache sensitivity, not jitter, so the adaptive run
   still fires and the range is shown.
@@ -125,6 +126,7 @@ than being guessed from job counts or row position.
 
 | Rule | Evidence | State | Report |
 | --- | --- | --- | --- |
+| aggregate | Retain every complete sample, whether cold, warm, or unknown. | All complete samples contribute to the locked aggregate. | Show the median and range over all complete samples, then show cold and warm samples on separate lines. |
 | queue-work | Derive `queue_delta_s` and `work_delta_s` separately from job timestamps. | A runner-pool change is not attributable to the code change. | Show both deltas and name the changed runner pool. |
 | compute | Compare the sum of job durations in both arms. | Disclosure only. | Show both totals beside wall clock; this is not a sized saving. |
 | in-flight | An in-flight run is never a sample. | Excluded. | Name the in-flight run and its exclusion. |
@@ -421,7 +423,8 @@ jargon, no machinery — the #234 UX direction):
 
 ```
 Speedup (measured): push-wide CI now finishes in ~6m10s, down from ~8m36s — about 28% faster.
-  • After: median of the warm fresh runs on your branch (5m50s–6m30s); the cold sample is 7m05s (cache key miss).
+  • After: median of 3 complete fresh runs on your branch (5m50s–7m05s), including cold and warm samples.
+  • Cache: cold 7m05s (cache key miss); warm 5m50s–6m30s.
   • Before: median of 12 complete historical push cohorts.
   • Queue delta: -8s. Work delta: -2m18s. Total job duration: 22m before, 20m after.
   • Changed step: build, 3m12s before and 1m05s after.
@@ -530,7 +533,7 @@ Decision 6.
   compare runner class, triggered set, task-cache hit share and work parity, and
   emit the disclosed before/after block (all six disclaimers, real wall-clock +
   billing cost).
-- Tests: warm median/range with the cold sample on its own line, the
+- Tests: median/range over all complete samples with cold and warm samples on separate lines, the
   variance-adaptive-N logic, log-backed cold classification, the CI-only-scope guard
   (product code → conflated; each workload state reached only on its own
   evidence, with equal job counts and a pure re-shard NOT classified as

@@ -600,7 +600,7 @@ def test_bootstrap_does_not_deadlock():
 def test_comparability_contract_is_closed_world():
     rows = _contract_rows("## Comparability and disclosure contract")
     assert set(rows) == {
-        "queue-work", "compute", "in-flight", "tests", "lint-format-types",
+        "aggregate", "queue-work", "compute", "in-flight", "tests", "lint-format-types",
         "build-output", "coverage", "cache-replay", "missing-totals",
         "red-before", "runner-class", "changed-step", "cold-evidence",
         "task-cache", "suspicious-warm", "triggered-set", "per-commit",
@@ -614,6 +614,7 @@ def test_comparability_contract_is_closed_world():
 def test_comparability_contract_carries_each_required_guard():
     rows = _contract_rows("## Comparability and disclosure contract")
     required = {
+        "aggregate": ("all complete samples", "median and range", "cold and warm"),
         "queue-work": ("queue_delta_s", "work_delta_s", "not attributable"),
         "compute": ("sum of job durations", "disclosure", "not a sized saving"),
         "in-flight": ("never a sample", "excluded", "in-flight"),
