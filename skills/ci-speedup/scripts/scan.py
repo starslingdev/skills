@@ -220,6 +220,7 @@ class Hit:
     # snippet in the report so a reviewer sees the actual code, not prose.
     # When empty, the report falls back to the raw line at `line`.
     snippet: str = ""
+    facts: dict[str, Any] = field(default_factory=dict)
 
 
 def _raw_line(raw: str, line: int) -> str:
@@ -3378,6 +3379,390 @@ def _detect_opt12(doc: dict, raw: str) -> list[Hit]:
     return hits
 
 
+_OPT12_TEST_COMMAND_RE = re.compile(
+    r"(?:^|\s)(?:npm|pnpm|yarn)\s+(?:run\s+)?test\b|"
+    r"(?:^|\s)(?:pytest|ctest|vitest|jest|rspec)\b|"
+    r"(?:^|\s)(?:make|cmake\s+--build\s+\S+\s+--target)\s+(?:test|check)\b",
+    re.IGNORECASE,
+)
+_OPT12_COVERAGE_FLAG_RE = re.compile(
+    r"^(?:--cov(?:=.*)?|--coverage(?:=.*)?|--cov-report(?:=.*)?|"
+    r"--coverage-report(?:=.*)?|--collectCoverage(?:=.*)?)$", re.IGNORECASE)
+_OPT12_COVERAGE_VALUE_FLAGS = {"--cov", "--cov-report", "--coverage-report"}
+
+
+def _opt12_normalized_test_commands(run: str) -> tuple[tuple[str, ...], bool]:
+    """Test-command signatures and whether coverage-only flags were removed."""
+    found: list[str] = []
+    coverage = False
+    for command in re.split(r"\n|&&|;", run):
+        command = command.strip()
+        if not command or not _OPT12_TEST_COMMAND_RE.search(command):
+            continue
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            tokens = command.split()
+        kept = []
+        skip_value = False
+        for token_index, token in enumerate(tokens):
+            if skip_value:
+                skip_value = False
+                continue
+            if _OPT12_COVERAGE_FLAG_RE.match(token):
+                coverage = True
+                if (token.lower() in _OPT12_COVERAGE_VALUE_FLAGS
+                        and token_index + 1 < len(tokens)):
+                    next_token = tokens[token_index + 1]
+                    skip_value = not next_token.startswith("-")
+                continue
+            kept.append(token)
+        while kept and kept[-1] == "--":
+            kept.pop()
+        if kept:
+            kept[0] = kept[0].lower()
+            if kept[0] in {"npm", "pnpm", "yarn"} and len(kept) > 1:
+                kept[1] = kept[1].lower()
+        normalized = " ".join(kept).strip()
+        if normalized and normalized not in found:
+            found.append(normalized)
+    return tuple(found), coverage
+
+
+def _opt12_composite_test_commands(
+    ref: str, chain: tuple[str, ...] = (),
+) -> tuple[tuple[str, ...], bool, list[str]]:
+    """Test commands in a readable local composite action, expanded in place."""
+    if _OPT102_ROOT is None or ref in chain or len(chain) >= _MAX_LOCAL_ACTION_DEPTH:
+        return (), False, []
+    text = _read_local_action(_OPT102_ROOT, ref)
+    try:
+        doc = yaml.safe_load(text) if text is not None else None
+    except yaml.YAMLError:
+        doc = None
+    runs = doc.get("runs") if isinstance(doc, dict) else None
+    if not isinstance(runs, dict) or str(runs.get("using") or "").lower() != "composite":
+        return (), False, []
+    steps = runs.get("steps")
+    if not isinstance(steps, list):
+        return (), False, []
+    commands: list[str] = []
+    coverage = False
+    refs = [ref]
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        sigs, has_coverage = _opt12_normalized_test_commands(_run(step))
+        commands.extend(sig for sig in sigs if sig not in commands)
+        coverage = coverage or has_coverage
+        nested = _uses(step).split("@", 1)[0].strip()
+        if not _is_local_uses(nested):
+            continue
+        nested_commands, nested_coverage, nested_refs = _opt12_composite_test_commands(
+            nested, chain + (ref,))
+        commands.extend(sig for sig in nested_commands if sig not in commands)
+        coverage = coverage or nested_coverage
+        refs.extend(item for item in nested_refs if item not in refs)
+    return tuple(commands), coverage, refs
+
+
+def _opt12_job_test_commands(job: dict) -> tuple[dict[str, str], bool, list[str]]:
+    commands: dict[str, str] = {}
+    coverage = False
+    local_refs: list[str] = []
+    defaults = job.get("defaults") if isinstance(job.get("defaults"), dict) else {}
+    run_defaults = defaults.get("run") if isinstance(defaults.get("run"), dict) else {}
+    default_cwd = str(run_defaults.get("working-directory") or ".")
+    job_env = job.get("env") if isinstance(job.get("env"), dict) else {}
+    container = job.get("container")
+
+    def add(signatures: tuple[str, ...], step: dict) -> None:
+        cwd = str(step.get("working-directory") or default_cwd)
+        env = dict(job_env)
+        if isinstance(step.get("env"), dict):
+            env.update(step["env"])
+        for signature in signatures:
+            key = json.dumps({
+                "command": signature,
+                "working_directory": cwd,
+                "env": env,
+                "container": container,
+            }, sort_keys=True, separators=(",", ":"), default=str)
+            commands.setdefault(key, signature)
+
+    for leaf in job_walk(job).leaves:
+        step = leaf.step
+        sigs, has_coverage = _opt12_normalized_test_commands(_run(step))
+        add(sigs, step)
+        coverage = coverage or has_coverage
+        ref = _uses(step).split("@", 1)[0].strip()
+        if not _is_local_uses(ref):
+            continue
+        sigs, has_coverage, refs = _opt12_composite_test_commands(ref)
+        add(sigs, step)
+        coverage = coverage or has_coverage
+        local_refs.extend(item for item in refs if item not in local_refs)
+    return commands, coverage, local_refs
+
+
+def _opt12_platforms(job: dict) -> set[str]:
+    """Concrete runner OS/architecture labels after bounded matrix expansion."""
+    out: set[str] = set()
+    for matrix in _opt102_matrix_legs(job):
+        raw = job.get("runs-on")
+        values = raw if isinstance(raw, list) else [raw]
+        resolved: list[str] = []
+        for value in values:
+            item = _opt102_resolve(
+                value, env={}, matrix=matrix, inputs={}, outputs={})
+            if not item:
+                return set()
+            resolved.append(item.lower())
+        labels = set(resolved)
+        joined = "+".join(sorted(labels))
+        if any(label.startswith("ubuntu-") or label == "linux" for label in labels):
+            os_name = "linux"
+        elif any(label.startswith("windows-") or label == "windows" for label in labels):
+            os_name = "windows"
+        elif any(label.startswith("macos-") or label == "macos" for label in labels):
+            os_name = "macos"
+        else:
+            out.add(joined)
+            continue
+        if any(re.search(r"(?:^|[-_+])(arm64|aarch64|arm)(?:$|[-_+])", label)
+               for label in labels):
+            arch = "arm64"
+        elif any(re.search(r"(?:^|[-_+])(x64|amd64|x86_64)(?:$|[-_+])", label)
+                 for label in labels):
+            arch = "x64"
+        elif any(label.startswith(("ubuntu-", "windows-")) for label in labels):
+            arch = "x64"
+        else:
+            out.add(joined)
+            continue
+        out.add(f"{os_name}/{arch}")
+    return out
+
+
+def _opt12_trigger_signature(doc: dict) -> str:
+    on = doc.get("on", doc.get(True))
+
+    def canonical(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {str(key): canonical(nested) for key, nested in value.items()}
+        if isinstance(value, list):
+            items = [canonical(item) for item in value]
+            return sorted(items, key=lambda item: json.dumps(
+                item, sort_keys=True, separators=(",", ":"), default=str))
+        return value
+
+    try:
+        return json.dumps(canonical(on), sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return ""
+
+
+def _opt12_downstream_jobs(jobs: dict[str, Any], start: str) -> list[str]:
+    reached = {start}
+    changed = True
+    while changed:
+        changed = False
+        for name, spec in jobs.items():
+            if not isinstance(spec, dict) or name in reached:
+                continue
+            needs = spec.get("needs")
+            needs = [needs] if isinstance(needs, str) else needs if isinstance(needs, list) else []
+            if any(str(need) in reached for need in needs):
+                reached.add(str(name))
+                changed = True
+    return sorted(reached - {start})
+
+
+def _opt12_run_is_shared_test_only(run: str, shared: set[str]) -> bool:
+    parts = [part.strip() for part in re.split(r"\n|&&|;", run) if part.strip()]
+    if not parts:
+        return True
+    for part in parts:
+        commands, _coverage = _opt12_normalized_test_commands(part)
+        if len(commands) != 1 or commands[0] not in shared:
+            return False
+    return True
+
+
+def _opt12_composite_is_shared_test_only(
+    ref: str, shared: set[str], chain: tuple[str, ...] = (),
+) -> bool:
+    if _OPT102_ROOT is None or ref in chain or len(chain) >= _MAX_LOCAL_ACTION_DEPTH:
+        return False
+    text = _read_local_action(_OPT102_ROOT, ref)
+    try:
+        doc = yaml.safe_load(text) if text is not None else None
+    except yaml.YAMLError:
+        return False
+    runs = doc.get("runs") if isinstance(doc, dict) else None
+    steps = runs.get("steps") if isinstance(runs, dict) else None
+    if str((runs or {}).get("using") or "").lower() != "composite" \
+            or not isinstance(steps, list):
+        return False
+    for step in steps:
+        if not isinstance(step, dict):
+            return False
+        if _run(step) and not _opt12_run_is_shared_test_only(_run(step), shared):
+            return False
+        nested = _uses(step).split("@", 1)[0].strip()
+        if nested and (not _is_local_uses(nested)
+                       or not _opt12_composite_is_shared_test_only(
+                           nested, shared, chain + (ref,))):
+            return False
+    return True
+
+
+def _opt12_job_is_replaceable(job: dict, shared: set[str]) -> bool:
+    """True when removing the job removes only the shared suite and setup."""
+    if job.get("outputs") or job.get("services"):
+        return False
+    setup_actions = (
+        "actions/checkout", "actions/setup-", "actions/cache",
+    )
+    saw_shared = False
+    for leaf in job_walk(job).leaves:
+        step = leaf.step
+        run = _run(step)
+        if run:
+            if not _opt12_run_is_shared_test_only(run, shared):
+                return False
+            saw_shared = True
+        uses = _uses(step).split("@", 1)[0].strip()
+        if not uses:
+            continue
+        if _is_local_uses(uses):
+            if not _opt12_composite_is_shared_test_only(uses, shared):
+                return False
+            saw_shared = True
+        elif not uses.lower().startswith(setup_actions):
+            return False
+    return saw_shared
+
+
+def _detect_opt12_duplicate_test_work(
+    parsed: list[tuple[str, dict, str]],
+) -> list[tuple[str, str, Hit]]:
+    """Duplicate test work on the same trigger and concrete runner platform."""
+    rows: list[dict[str, Any]] = []
+    for rel, doc, raw in parsed:
+        trigger = _opt12_trigger_signature(doc)
+        jobs = _jobs_from_doc(doc)
+        for name, job in jobs.items():
+            if not isinstance(job, dict):
+                continue
+            commands, coverage, local_refs = _opt12_job_test_commands(job)
+            platforms = _opt12_platforms(job)
+            if not commands or not platforms or not trigger:
+                continue
+            rows.append({
+                "workflow": rel,
+                "job": str(name),
+                "commands": commands,
+                "coverage": coverage or bool(re.search(r"coverage", str(name), re.I)),
+                "local_refs": local_refs,
+                "platforms": platforms,
+                "trigger": trigger,
+                "downstream": _opt12_downstream_jobs(jobs, str(name)),
+                "raw": raw,
+                "spec": job,
+                "display_name": str(job.get("name") or name),
+            })
+    hits: list[tuple[str, str, Hit]] = []
+    seen_duplicates: set[tuple[str, str]] = set()
+    ranked: list[tuple[
+        int, dict[str, Any], dict[str, Any], tuple[str, ...],
+        dict[str, Any], dict[str, Any],
+    ]] = []
+    for index, left in enumerate(rows):
+        for right in rows[index + 1:]:
+            if left["trigger"] != right["trigger"]:
+                continue
+            if _jobs_mutually_exclusive(left["spec"], right["spec"]):
+                continue
+            if not (left["platforms"] & right["platforms"]):
+                continue
+            shared = tuple(command for command in left["commands"]
+                           if command in right["commands"])
+            if not shared:
+                continue
+            same_workflow = left["workflow"] == right["workflow"]
+            left_before_right = same_workflow and right["job"] in left["downstream"]
+            right_before_left = same_workflow and left["job"] in right["downstream"]
+            if left_before_right:
+                duplicate, existing, on_path = right, left, True
+            elif right_before_left:
+                duplicate, existing, on_path = left, right, True
+            elif left["downstream"] and not right["downstream"]:
+                duplicate, existing, on_path = left, right, True
+            elif right["downstream"]:
+                duplicate, existing, on_path = right, left, True
+            elif left["coverage"] or right["coverage"]:
+                duplicate = left if left["coverage"] else right
+                existing = right if duplicate is left else left
+                on_path = False
+            else:
+                continue
+            shared_commands = {left["commands"][signature] for signature in shared}
+            if not _opt12_job_is_replaceable(duplicate["spec"], shared_commands):
+                continue
+            ranked.append((
+                0 if on_path else 1, duplicate, existing, shared, left, right))
+    for rank, duplicate, existing, shared, left, right in sorted(
+            ranked, key=lambda item: (
+                item[0], item[1]["workflow"], item[1]["job"],
+                item[2]["workflow"], item[2]["job"])):
+        duplicate_key = (duplicate["workflow"], duplicate["job"])
+        if duplicate_key in seen_duplicates:
+            continue
+        seen_duplicates.add(duplicate_key)
+        on_path = rank == 0
+        coverage = left["coverage"] or right["coverage"]
+        downstream = duplicate["downstream"]
+        shared_commands = [left["commands"][signature] for signature in shared]
+        command_text = ", ".join(f"`{command}`" for command in shared_commands)
+        refs = sorted(set(left["local_refs"] + right["local_refs"]))
+        refs_text = f" through local action(s) {', '.join(refs)}" if refs else ""
+        if coverage and not on_path:
+            fix = ("Move the coverage floor onto the existing test run; keep every gate. "
+                   "Runner-minute effect: one suite run is saved.")
+        else:
+            slow = f" before `{downstream[0]}`" if downstream else ""
+            fix = ("Keep every gate: either use `workflow_run` with a CI conclusion "
+                   "check, or put the jobs in one workflow and make the slow job `needs` "
+                   "the existing test job. Runner-minute effect: one suite run is saved; "
+                   "under same-workflow `needs`, wall-clock saving is 0s.")
+            if slow:
+                fix = f"The duplicate sits on the needs chain{slow}. " + fix
+        evidence = (
+            f"`{left['workflow']}` job `{left['job']}` and `{right['workflow']}` job "
+            f"`{right['job']}` run the same test command(s){refs_text}: {command_text}. "
+            + fix)
+        hits.append(("OPT12", duplicate["workflow"], Hit(
+            line=1,
+            affected_jobs=[duplicate["job"]],
+            evidence=evidence,
+            match_text="duplicate-test-work",
+            snippet="\n".join(shared_commands),
+            facts={"opt12_duplicate_test_work": {
+                "variant": "needs_chain" if on_path else "coverage",
+                "existing_workflow": existing["workflow"],
+                "existing_job": existing["job"],
+                "duplicate_workflow": duplicate["workflow"],
+                "duplicate_job": duplicate["job"],
+                "duplicate_job_display": duplicate["display_name"],
+                "downstream_job": downstream[0] if downstream else None,
+                "same_workflow": existing["workflow"] == duplicate["workflow"],
+                "commands": shared_commands,
+            }},
+        )))
+    return hits
+
+
 def _opt12_first_step_in_a_group(doc: dict) -> list[str]:
     """The jobs OPT12 cannot read a preamble from because their FIRST step is
     inside a `parallel:` group (a composite action cannot hold one). Listed
@@ -6054,6 +6439,7 @@ def _cross_workflow_hits(parsed: list[tuple[str, dict, str]], root: Path,
     out += _detect_opt7(parsed, root)
     out += _detect_opt37(parsed, root)
     out += _detect_opt40(parsed, root)
+    out += _detect_opt12_duplicate_test_work(parsed)
     turbo_hits, incomplete = _detect_turbo(root, _ci_turbo_tasks(root, parsed))
     out += turbo_hits
     cache_hits, cache_held = _detect_opt96(parsed, root, default_branch, branch_source)
@@ -6987,6 +7373,7 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
             for hit in hits:
                 finding_idx += 1
                 f = _emit(entry, hit, rel, finding_idx)
+                f.update(hit.facts)
                 f["workflow_lanes"] = workflow_lanes.get(rel, [])
                 if workflow_push_scopes.get(rel):
                     f["workflow_push_scopes"] = workflow_push_scopes[rel]
@@ -7016,6 +7403,7 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
             continue
         finding_idx += 1
         f = _emit(entry, hit, wf, finding_idx)
+        f.update(hit.facts)
         f["workflow_lanes"] = workflow_lanes.get(wf, [])
         if workflow_push_scopes.get(wf):
             f["workflow_push_scopes"] = workflow_push_scopes[wf]

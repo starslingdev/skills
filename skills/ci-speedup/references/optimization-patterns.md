@@ -1162,7 +1162,7 @@ fix_strategy: duplicated-setup-across-jobs
 title_template: "Duplicated Setup Across Jobs"
 -->
 
-**TL;DR**: Several jobs copy-paste the same setup steps. Pulling them into one shared action is easier to maintain — but note it does NOT speed anything up (each job still runs them).
+**TL;DR**: Several jobs copy-paste the same setup steps, or repeat the same test suite before later work can run. A shared action only reduces maintenance; handing duplicate test work to the existing gate removes one suite run while preserving every check.
 
 **Anti-pattern**: Multiple jobs with identical preamble steps (checkout, setup-node, pnpm install, build) that could be extracted to a composite action or use artifact handoff.
 
@@ -1174,6 +1174,27 @@ title_template: "Duplicated Setup Across Jobs"
 ```
 
 **Fix**: Extract shared setup into a composite action, or build once and pass artifacts to downstream jobs.
+
+#### Duplicate test work on one lane
+
+When two jobs on the same trigger and concrete runner platform execute the same
+test command, and one copy sits on a later job's `needs:` chain, keep every gate
+and execute the suite once. Within one workflow, make the later job depend on
+the existing test job. Across workflows, trigger the consumer with
+`workflow_run` and check the producer workflow's conclusion before continuing.
+If the second run exists only to collect coverage, move that coverage floor onto
+the existing test run.
+
+Expand local composite actions before comparing commands. Matrix legs on
+different operating systems or architectures are platform coverage and are not
+duplicates. Removing a test job or weakening a required status is never the
+fix.
+
+Runner minutes fall by one measured suite run per execution. The cross-workflow
+handoff waits for the producer workflow to complete, so its wall-clock credit is
+`max(0, duplicate job duration - producer workflow completion after push)`.
+A same-workflow `needs:` handoff receives zero wall-clock credit. Measure both
+axes from sampled runs.
 
 **GUARDRAIL — "downstream ignores producer's artifact" claims (REQUIRED before any cross-workflow handoff finding):**
 
