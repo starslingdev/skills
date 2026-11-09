@@ -40,7 +40,7 @@ import sys
 import threading
 import time
 from urllib.parse import quote
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -68,6 +68,7 @@ from wall_clock import (  # noqa: E402
     bound_within_workflow, CASCADE,
     credit_detrigger,
     credit_shared_substep,
+    observed_commit_wall_s,
     project_commit_wall,
     size_wall_clock,
 )
@@ -4171,6 +4172,21 @@ def _all_status_runs(client: GhClient, repo: str, wf_id: int,
         f"?per_page={max_runs}{pin}")
 
 
+_PR_CANDIDATE_PAGE_CAP = 3
+
+
+def _all_status_run_page(client: GhClient, repo: str, wf_id: int,
+                         page: int, created_before: str | None = None
+                         ) -> list[dict[str, Any]] | None:
+    """One deeper all-status page used only to fill a short PR gate sample."""
+    pin_norm = _normalize_pin(created_before)
+    pin = f"&created=<={pin_norm}" if pin_norm else ""
+    return _run_list(
+        client,
+        f"repos/{repo}/actions/workflows/{wf_id}/runs"
+        f"?per_page={_COST_RUNLIST_MAX}{pin}&page={page}")
+
+
 def _all_status_event_runs(client: GhClient, repo: str, wf_id: int, event: str,
                            max_runs: int, created_before: str | None = None
                            ) -> list[dict[str, Any]] | None:
@@ -4621,6 +4637,7 @@ def _select_repr_shas(
     req_names: frozenset[str],
     target: int,
     repo_published: frozenset[str] = frozenset(),
+    max_fetch_override: int | None = None,
 ) -> tuple[list[str], list[dict[str, float]], dict[str, list[float]], dict[str, Any]]:
     """Pick up to `target` PR head-SHAs for the measured critical path.
 
@@ -4682,7 +4699,8 @@ def _select_repr_shas(
     candidates = sorted(sha_ts, key=lambda s: sha_ts[s], reverse=True)
     # Runaway backstop only — the walk normally stops at `target` kept or window
     # exhausted; this just bounds gh calls on a pathologically large window.
-    max_fetch = max(target * 8, 120)
+    max_fetch = (max(target * 8, 120) if max_fetch_override is None
+                 else max(0, int(max_fetch_override)))
     check_durs: dict[str, list[float]] = {}
     per_sha_checks: list[dict[str, float]] = []
     repr_shas: list[str] = []
@@ -4787,7 +4805,14 @@ def _select_repr_shas(
         "kept": len(repr_shas),
         "fetched": fetched,
         "fetch_failures": fetch_failures,
-        "complete": len(repr_shas) >= target,
+        "complete": (
+            len(repr_shas) >= target and not required_suite_unsatisfiable),
+        "stop_reason": (
+            "target_met" if (len(repr_shas) >= target
+                             and not required_suite_unsatisfiable)
+            else "fetch_failures" if fetch_failures
+            else "page_cap" if fetched < len(candidates)
+            else "candidates_exhausted"),
         # True only when the FINAL sample is the required-suite one; a promoted
         # recency fallback is recency-scoped, so it reads False here.
         "required_suite_scoped": bool(req_names) and not required_suite_unsatisfiable,
@@ -4796,6 +4821,12 @@ def _select_repr_shas(
         # external) and were therefore excluded from the per-PR suite test — disclosed so
         # the report can name what was scoped out, never silently treated as satisfied.
         "required_checks_unobservable": required_checks_unobservable,
+        # True only when the selector's own bounded check-run walk left known
+        # candidates unevaluated. Reaching exactly the end of the candidate list
+        # is exhaustion, not a limit hit.
+        "selection_limited": (
+            fetched < len(candidates)
+            and (len(repr_shas) < target or required_suite_unsatisfiable)),
     }
     if required_checks_repo_published:
         # Required statuses the repo posts itself (issue #119): unobservable as check-runs
@@ -4855,6 +4886,19 @@ def _sampling_provenance_fields(sample_diag: dict[str, Any]) -> dict[str, Any]:
     return {
         "sample_target": sample_diag["target"],
         "sample_complete": sample_diag["complete"],
+        "sample_stop_reason": sample_diag.get(
+            "stop_reason",
+            "target_met" if sample_diag["complete"] else "candidates_exhausted"),
+        "sample_candidate_pages_fetched": sample_diag.get("candidate_pages_fetched", 1),
+        "sample_candidate_page_cap": sample_diag.get(
+            "candidate_page_cap", _PR_CANDIDATE_PAGE_CAP),
+        "sample_candidate_pages_exhausted": sample_diag.get(
+            "candidate_pages_exhausted", True),
+        "sample_candidate_page_fetch_failures": sample_diag.get(
+            "candidate_page_fetch_failures", 0),
+        "sample_candidate_era_door": sample_diag.get("candidate_era_door", False),
+        "sample_candidate_selection_limited": sample_diag.get(
+            "selection_limited", False),
         "sample_fetch_failures": sample_diag["fetch_failures"],
         "sample_fetched": sample_diag["fetched"],
         "required_suite_scoped": sample_diag["required_suite_scoped"],
@@ -6059,12 +6103,44 @@ def _cache_usage_bytes(client: GhClient, repo: str,
     return int(value) if isinstance(value, (int, float)) and value >= 0 else None
 
 
-def _cache_guard_values(finding: dict[str, Any]) -> list[dict[str, Any]]:
+def _cache_guard_values(
+    finding: dict[str, Any], eligible_shas: set[str] | None = None,
+) -> list[dict[str, Any]]:
     cd = finding.get("cache_dist") if isinstance(finding.get("cache_dist"), dict) else {}
     pr = cd.get("pr") if isinstance(cd.get("pr"), dict) else {}
-    return [v.get("cache_state") for v in (pr.get("values") or [])
-            if isinstance(v, dict) and not v.get("fork")
-            and isinstance(v.get("cache_state"), dict)]
+    candidates: list[dict[str, Any]] = []
+    for value in pr.get("values") or []:
+        if (not isinstance(value, dict) or value.get("fork")
+                or not isinstance(value.get("cache_state"), dict)):
+            continue
+        sha = str(value.get("head_sha") or "")
+        # New artifacts bind cache economics to one run per edited head. Old
+        # artifacts carry no head stamp and remain readable rather than being
+        # reinterpreted as proof that no sample qualifies.
+        if sha and eligible_shas is not None:
+            if sha not in eligible_shas:
+                continue
+        candidates.append(value)
+
+    # Probe order is representative, fastest, slowest; it is not chronology.
+    # Select the earliest workflow run for an edited head so a warm rerun cannot
+    # displace the original cold run merely because it was the representative.
+    def run_id(value: dict[str, Any]) -> int:
+        match = re.search(r"/actions/runs/(\d+)(?:/|$)", str(value.get("run_url") or ""))
+        return int(match.group(1)) if match else sys.maxsize
+
+    earliest: dict[str, tuple[int, int, dict[str, Any]]] = {}
+    unstamped: list[dict[str, Any]] = []
+    for order, value in enumerate(candidates):
+        sha = str(value.get("head_sha") or "")
+        if not sha:
+            unstamped.append(value)
+            continue
+        candidate = (run_id(value), order, value)
+        if sha not in earliest or candidate[:2] < earliest[sha][:2]:
+            earliest[sha] = candidate
+    selected = unstamped + [item[2] for item in sorted(earliest.values(), key=lambda x: x[1])]
+    return [value["cache_state"] for value in selected]
 
 
 def _cache_step_transfer_times(job: dict[str, Any]) -> tuple[float | None, float | None]:
@@ -6208,7 +6284,13 @@ def _apply_cache_sizing_guard(
     wf_docs: dict[str, dict[str, Any]],
 ) -> None:
     """Admit a cache saving only after budget, invalidation and net-cost checks."""
-    values = _cache_guard_values(finding)
+    real_edit_shas = {
+        str(run.get("head_sha") or "")
+        for run in sampled_runs
+        for number in [_run_pr_number(run)]
+        if isinstance(number, int) and bool(changed.get(number)) and run.get("head_sha")
+    }
+    values = _cache_guard_values(finding, real_edit_shas)
     sizes = [float(v["cache_size_gb"]) for v in values
              if isinstance(v.get("cache_size_gb"), (int, float)) and v["cache_size_gb"] >= 0]
     copies = _cache_copy_count(finding, sampled_runs, wf_docs)
@@ -6220,7 +6302,9 @@ def _apply_cache_sizing_guard(
             usage_bytes=usage_bytes)
     elif usage_bytes >= _CACHE_DEFAULT_BUDGET_BYTES * _CACHE_BUDGET_FULL_FRACTION:
         budget = _cache_guard_check(
-            "failed", "repository cache usage already fills the default budget",
+            "failed", "repository cache usage is at least 90% of the default 10 GB; "
+            "new caches fail this guard even when an owner-raised limit may exist, "
+            "because that admin-only limit is unreadable",
             usage_bytes=usage_bytes)
     elif not sizes:
         budget = _cache_guard_check("not_measured", "proposed cache size not measured")
@@ -6284,14 +6368,18 @@ def _apply_cache_sizing_guard(
     else:
         hit_rate = max(0.0, min(1.0, 1.0 - statistics.mean(misses) / 100.0))
         restore_s, save_s = statistics.median(restores), statistics.median(saves)
-        expected = hit_rate * float(saving) - restore_s - (1.0 - hit_rate) * save_s
+        unused_path = finding.get("cache_path_consumed") is False
+        expected = (-restore_s - (1.0 - hit_rate) * save_s if unused_path
+                    else hit_rate * float(saving) - restore_s
+                    - (1.0 - hit_rate) * save_s)
         economics = _cache_guard_check(
             "passed" if expected > 0 else "failed",
-            ("expected cache saving is positive" if expected > 0
+            ("the job never reads the restored cache path, so restore and save are pure cost"
+             if unused_path else "expected cache saving is positive" if expected > 0
              else "restore and save cost exceeds the expected saving"),
             hit_rate=round(hit_rate, 4), saving_s=round(float(saving), 2),
             restore_s=round(restore_s, 2), save_s=round(save_s, 2),
-            expected_s=round(expected, 2))
+            expected_s=round(expected, 2), sampled_real_edits=len(real_edit_shas))
 
     checks = {"budget": budget, "invalidation": invalidation, "economics": economics}
     status = ("passed" if all(v["status"] == "passed" for v in checks.values())
@@ -6478,6 +6566,15 @@ def _demote_runner_min(f: dict[str, Any], note: str) -> None:
 def _size_finding(f: dict[str, Any], crit: dict[str, Any],
                   monthly_volume: int | None) -> None:
     """Set wall_clock_p50_s and runner_min_saving on the finding in-place."""
+    if f.get("static_cache_lint"):
+        f["wall_clock_p50_s"] = None
+        f["runner_min_saving"] = None
+        f["tier"] = 2
+        f["realization"] = "none"
+        f["size_note"] = ("workflow configuration proves the cache shape needs review; "
+                          "credit no saving until this job's logs measure a miss and "
+                          "the restore/build cost")
+        return
     if f.get("sizing_basis") == "measured" and (
             "wall_clock_p50_s" in f or "runner_min_saving" in f):
         # Detector-issued measured rows already carry their axes. Some catalog
@@ -8464,7 +8561,7 @@ _STEP_CATEGORY_RES: list[tuple[str, "_re.Pattern[str]"]] = [
         r"\bpackage\b|docker buildx|\bpublish\b|\barchive\b|\btar\b|\bzip\b",
         _re.IGNORECASE)),
     ("setup", _re.compile(
-        r"^(set up |setup |configure|init |bootstrap|provision|toolchain|"
+        r"^(?:(?:set up|setup)(?:\s|$)|configure|init |bootstrap|provision|toolchain|"
         r"docker (login|pull|compose up))", _re.IGNORECASE)),
 ]
 
@@ -9565,8 +9662,8 @@ _STRUCTURAL_META: dict[str, dict[str, Any]] = {
             "test-failure exit; output-diff scoped vs full before adoption"),
         "rollout": (
             "run scoped + full in parallel for N runs (>=1-2 weeks of PRs) and "
-            "compare pass/fail + coverage before cutting over; keep the full job "
-            "on main/merge-queue after cutover"),
+            "compare pass/fail + coverage before adoption; keep the full job on "
+            "the default branch and merge queue after adoption"),
     },
     "OPT71": {
         "severity": "HIGH", "risk": "MEDIUM",
@@ -10095,11 +10192,15 @@ def _detect_opt25_shard_imbalance(
     return out
 
 
+_OPT43_CANCELLED_RUN_PROBE_MAX = 3
+
+
 def _detect_opt43_queue_time(
     wf_path: str, jobs_per_run: list[list[dict[str, Any]]], start_idx: int,
     is_pr_workflow: bool,
     all_status_runs: list[dict[str, Any]] | None = None,
     job_graph: dict[str, dict[str, Any]] | None = None,
+    cancelled_jobs_per_run: list[list[dict[str, Any]]] | None = None,
 ) -> list[dict[str, Any]]:
     """P90 queue per job across runs; flag >60s PR / >120s release. Catalog body OPT43.
 
@@ -10168,8 +10269,16 @@ def _detect_opt43_queue_time(
             return degen[0]
         return None
 
-    by_job: dict[str, list[tuple[float, str, int, Any, Any]]] = {}
-    for run_idx, run_jobs in enumerate(jobs_per_run):
+    by_job: dict[str, list[tuple[float, str, int, Any, Any, str]]] = {}
+    # One observation per workflow run and runner label. A run can fan out many
+    # jobs onto the same pool; counting every job would let a wide matrix
+    # dominate the distribution, so each run contributes its maximum queue and
+    # maximum observed work for that label.
+    by_label_run: dict[str, dict[int, list[tuple[float, float | None, bool]]]] = {}
+    sampled_runs = [(run_jobs, True) for run_jobs in jobs_per_run]
+    sampled_runs.extend(
+        (run_jobs, False) for run_jobs in (cancelled_jobs_per_run or []))
+    for run_idx, (run_jobs, finding_sample) in enumerate(sampled_runs):
         nodes = {id(j): _node_of(str(j.get("name", ""))) for j in run_jobs} if job_graph else {}
         # A reusable call's children (`<caller> / <child>`) all map to the CALLER's
         # node, whose `needs` say nothing about the children's own `needs` inside
@@ -10215,19 +10324,75 @@ def _detect_opt43_queue_time(
                     if not ends:
                         continue
                     runnable = max(ends).isoformat()
-            q = _duration_s(runnable, j.get("started_at"))
+            started_at = j.get("started_at")
+            conclusion = str(j.get("conclusion") or "").lower()
+            # GitHub's public jobs API can stamp `started_at` at cancellation
+            # time even though no runner ever picked the job up. `runner_name`
+            # stays null in that shape, so use runner identity rather than a
+            # nullable timestamp to recognize a pre-pickup cancellation.
+            censored = (conclusion == "cancelled" and not j.get("runner_name")
+                        and bool(j.get("completed_at")))
+            queue_end = j.get("completed_at") if censored else started_at
+            q = _duration_s(runnable, queue_end)
+            label = _job_runner_label(j)
+            work = (_duration_s(started_at, j.get("completed_at"))
+                    if started_at and not censored else None)
             if q is not None and q >= 0:
-                by_job.setdefault(name, []).append(
-                    (q, str(j.get("html_url") or ""), run_idx,
-                     _parse_dt(runnable), _parse_dt(j.get("started_at"))))
+                if finding_sample:
+                    by_job.setdefault(name, []).append(
+                        (q, str(j.get("html_url") or ""), run_idx,
+                         _parse_dt(runnable), _parse_dt(queue_end), label))
+                if label:
+                    by_label_run.setdefault(label, {}).setdefault(run_idx, []).append(
+                        (q, work, censored))
             elif q is not None and job_graph and q > -5:
                 # second-granularity stamps: a verdict picked up the same second its
                 # upstream completed can read a hair negative — that is ~0 queue.
-                by_job.setdefault(name, []).append(
-                    (0.0, str(j.get("html_url") or ""), run_idx,
-                     _parse_dt(j.get("started_at")), _parse_dt(j.get("started_at"))))
+                if finding_sample:
+                    by_job.setdefault(name, []).append(
+                        (0.0, str(j.get("html_url") or ""), run_idx,
+                         _parse_dt(queue_end), _parse_dt(queue_end), label))
+                if label:
+                    by_label_run.setdefault(label, {}).setdefault(run_idx, []).append(
+                        (0.0, work, censored))
 
-    def _sibling_overlap_ratio(samples: list[tuple[float, str, int, Any, Any]]) -> float | None:
+    queue_by_runner_label: list[dict[str, Any]] = []
+    for label, per_run in sorted(by_label_run.items()):
+        queue_values: list[float] = []
+        work_values: list[float] = []
+        censored_lower_bounds: list[float] = []
+        censored_n = 0
+        for observations in per_run.values():
+            exact_queue = [row[0] for row in observations if not row[2]]
+            if exact_queue:
+                queue_values.append(max(exact_queue))
+            known_work = [row[1] for row in observations if row[1] is not None]
+            if known_work:
+                work_values.append(max(known_work))
+            censored = [row[0] for row in observations if row[2]]
+            if censored:
+                censored_n += 1
+                censored_lower_bounds.append(max(censored))
+        row: dict[str, Any] = {
+            "runner_label": label,
+            "n": len(queue_values),
+            "queue_p50_s": (round(float(statistics.median(queue_values)), 1)
+                            if queue_values else None),
+            "queue_p95_s": (round(float(_percentile(queue_values, 95)), 1)
+                            if queue_values else None),
+            "work_n": len(work_values),
+            "work_p50_s": (round(float(statistics.median(work_values)), 1)
+                           if work_values else None),
+        }
+        if censored_n:
+            row["censored_n"] = censored_n
+            row["censored_queue_lower_bound_max_s"] = round(
+                max(censored_lower_bounds), 1)
+        queue_by_runner_label.append(row)
+
+    def _sibling_overlap_ratio(
+        samples: list[tuple[float, str, int, Any, Any, str]],
+    ) -> float | None:
         """Share of queued samples whose queue interval overlapped an in-flight
         sibling run of this workflow (windows from the ALL-STATUS slice; a
         sibling is any OTHER run, so the sampled run's own window is excluded
@@ -10236,7 +10401,7 @@ def _detect_opt43_queue_time(
         if not run_windows:
             return None
         checked = overlapped = 0
-        for _q, _url, run_idx, q_start, q_end in samples:
+        for _q, _url, run_idx, q_start, q_end, _label in samples:
             jobs = jobs_per_run[run_idx]
             # Self-exclusion is by RUN ID, never by timestamp equality: the
             # window starts at run_started_at while the queue interval starts
@@ -10316,6 +10481,39 @@ def _detect_opt43_queue_time(
             if cause is not None:
                 f["queue_cause"] = cause
                 f["queue_cause_note"] = cause_note
+            f["queue_by_runner_label"] = queue_by_runner_label
+            sample_labels = {sample[5] for sample in samples if sample[5]}
+            eligible = [
+                row for row in queue_by_runner_label
+                if row["runner_label"] in sample_labels
+                and int(row.get("n") or 0) >= 3
+                and row.get("queue_p50_s") is not None
+            ]
+            primary = (max(eligible, key=lambda row: row["queue_p50_s"])
+                       if eligible else None)
+            alternatives = [
+                row for row in queue_by_runner_label
+                if row is not primary
+                and int(row.get("n") or 0) >= 3
+                and row.get("queue_p50_s") is not None
+            ]
+            materially_lower = [
+                row for row in alternatives
+                if primary is not None
+                and float(primary["queue_p50_s"]) >= 15.0
+                and float(row["queue_p50_s"]) <= float(primary["queue_p50_s"]) * 0.5
+                and float(primary["queue_p50_s"]) - float(row["queue_p50_s"]) >= 10.0
+            ]
+            if primary is not None and materially_lower:
+                faster = min(materially_lower, key=lambda row: row["queue_p50_s"])
+                f["queue_label_comparison"] = {
+                    "slow_label": primary["runner_label"],
+                    "slow_queue_p50_s": primary["queue_p50_s"],
+                    "lower_label": faster["runner_label"],
+                    "lower_queue_p50_s": faster["queue_p50_s"],
+                }
+            else:
+                f["queue_label_comparison"] = {"unavailable": True}
             out.append(f)
     return out
 
@@ -22940,7 +23138,8 @@ def _opt24_pre_test_floor(log: str, compiled_kind: str | None) -> float | None:
             return _opt24_duration_seconds(match.group(1))
     command_re = _re.compile(
         r"(?:\bcargo\s+(?:test|nextest)\b|\bgo\s+test\b|"
-        r"(?:^|[\s/])(?:gradle|gradlew)(?:\s|$)|\bcibuildwheel\b)",
+        r"(?:^|[\s/])(?:gradle|gradlew)(?:\s|$)|\bcibuildwheel\b|"
+        r"(?:^|[\s/])pytest(?:\s|$))",
         _re.IGNORECASE,
     )
     result_re = _re.compile(
@@ -22959,6 +23158,194 @@ def _opt24_pre_test_floor(log: str, compiled_kind: str | None) -> float | None:
             gap = stamp - started
             return gap if gap > 0 else None
     return None
+
+
+_SHARD_FLOOR_VERSION = 1
+_SHARD_FLOOR_BASIS = "p50_step_timing_before_first_divided_work"
+
+
+_SHARD_DIMENSION_RE = re.compile(r"(?:^|[_-])(?:shard|partition|chunk)(?:$|[_-])", re.I)
+
+
+def _matrix_variant_values(job_name: str) -> tuple[str, ...] | None:
+    match = re.search(r"\(([^()]*)\)\s*$", job_name)
+    if not match:
+        return None
+    values = tuple(part.strip() for part in match.group(1).split(","))
+    return values if all(values) else None
+
+
+def _workflow_shard_scope(
+    job_name: str, wf_doc: dict[str, Any] | None,
+) -> tuple[int, ...] | None:
+    """Matrix positions that explicitly partition one logical job's work."""
+    jobs = (wf_doc or {}).get("jobs")
+    if not isinstance(jobs, dict):
+        return None
+    base = _matrix_base_name(job_name)
+    leaf = base.rsplit(" / ", 1)[-1]
+    for key, spec in jobs.items():
+        if not isinstance(spec, dict):
+            continue
+        strategy = spec.get("strategy")
+        matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
+        if not isinstance(matrix, dict):
+            continue
+        declared = spec.get("name")
+        candidates = {str(key)}
+        if isinstance(declared, str):
+            candidates.add(_matrix_base_name(_opt24_static_job_name(declared)))
+        if leaf not in candidates and base not in candidates:
+            continue
+        dimensions = [str(name) for name in matrix if name not in {"include", "exclude"}]
+        values = _matrix_variant_values(job_name)
+        if values is None or len(values) != len(dimensions):
+            return None
+        shard_positions = tuple(
+            index for index, name in enumerate(dimensions)
+            if _SHARD_DIMENSION_RE.search(name))
+        return shard_positions or None
+    return None
+
+
+def _graph_matrix_workflow_path(
+    job_name: str, workflow_file: str, graph: dict[str, Any] | None,
+) -> str | None:
+    """Follow a reusable-job chain to the workflow that owns the runtime matrix."""
+    nodes_by_workflow = graph or {}
+    parts = _matrix_base_name(job_name).split(" / ")
+    current = workflow_file
+    for index, part in enumerate(parts):
+        nodes = nodes_by_workflow.get(current)
+        if not isinstance(nodes, dict):
+            return False
+        match = next((spec for key, spec in nodes.items()
+                      if isinstance(spec, dict)
+                      and part in {str(key), _matrix_base_name(str(spec.get("name") or ""))}),
+                     None)
+        if match is None:
+            return None
+        if index == len(parts) - 1:
+            return current if match.get("matrix") is True else None
+        uses = str(match.get("uses") or "")
+        if not match.get("reusable") or not uses:
+            return None
+        current = uses.removeprefix("./")
+    return None
+
+
+def _shard_floor_stamp(
+    job_name: str,
+    wf_doc: dict[str, Any] | None,
+    jobs_per_run: list[list[dict[str, Any]]],
+    *,
+    logs_by_job_id: dict[Any, str] | None = None,
+    shard_positions: tuple[int, ...] | None = None,
+    runner_scope: str | None = None,
+) -> dict[str, Any] | None:
+    """Describe the fixed and divided portions of one sampled matrix leg.
+
+    This is descriptive only. It reads the jobs and logs the collection pass
+    already selected and never recommends a shard count.
+    """
+    if shard_positions is None:
+        shard_positions = _workflow_shard_scope(job_name, wf_doc)
+    target_variant = _matrix_variant_values(job_name)
+    if shard_positions is None or target_variant is None:
+        return None
+    base = _matrix_base_name(job_name)
+    fixed_positions = tuple(
+        index for index in range(len(target_variant)) if index not in shard_positions)
+
+    def same_shard_group(job: dict[str, Any]) -> bool:
+        candidate = _matrix_variant_values(str(job.get("name") or ""))
+        return (
+            candidate is not None
+            and len(candidate) == len(target_variant)
+            and all(candidate[index] == target_variant[index]
+                    for index in fixed_positions)
+        )
+
+    if not runner_scope:
+        exact_labels = [
+            _job_runner_label(job) or "?"
+            for run in jobs_per_run for job in run
+            if str(job.get("name") or "") == job_name
+        ]
+        if exact_labels:
+            runner_scope = Counter(exact_labels).most_common(1)[0][0]
+    legs_by_run = [
+        [job for job in run
+         if _matrix_base_name(str(job.get("name") or "")) == base
+         and same_shard_group(job)
+         and (not runner_scope or (_job_runner_label(job) or "?") == runner_scope)]
+        for run in jobs_per_run
+    ]
+    counts = [len(legs) for legs in legs_by_run if legs]
+    if not counts or max(counts) <= 1:
+        return None
+
+    fixed: list[float] = []
+    work_durations: list[float] = []
+    in_step: list[float] = []
+    fixed_label_sets: list[set[str]] = []
+    logs = logs_by_job_id or {}
+    for job in (item for legs in legs_by_run for item in legs):
+        steps = _step_durations(job)
+        payload_indexes = [
+            i for i, (name, _seconds) in enumerate(steps)
+            if _step_category(name) in _PAYLOAD_CATEGORIES
+        ]
+        work_index = next(
+            (i for i in payload_indexes if _step_category(steps[i][0]) == "test"),
+            payload_indexes[0] if payload_indexes else None)
+        if work_index is None:
+            continue
+        fixed_steps = steps[:work_index]
+        fixed.append(sum(
+            seconds for name, seconds in fixed_steps
+            if _step_category(name) in _SETUP_BUILD_CATEGORIES))
+        job_fixed_labels: set[str] = set()
+        for name, _seconds in fixed_steps:
+            category = _step_category(name)
+            if category not in _SETUP_BUILD_CATEGORIES:
+                continue
+            low = name.lower()
+            job_fixed_labels.add(
+                "browser" if "browser" in low else
+                "setup" if category == "setup" else
+                "build" if category == "build" else
+                "checkout" if category == "checkout" else "install")
+        fixed_label_sets.append(job_fixed_labels)
+
+        work_seconds = steps[work_index][1]
+        work_durations.append(work_seconds)
+        log = str(logs.get(job.get("id")) or "")
+        floor = None
+        if log and _step_category(steps[work_index][0]) == "test":
+            kind = _opt24_compiled_kind(log, wf_doc, base)
+            floor = _opt24_pre_test_floor(_opt24_test_step_log(job, log), kind)
+        if floor is not None and 0 < floor < work_seconds:
+            in_step.append(floor)
+
+    if not fixed or not work_durations:
+        return None
+    priority = {"setup": 0, "browser": 1, "build": 2,
+                "checkout": 3, "install": 4}
+    in_step_p50 = _percentile(in_step, 50) if in_step else None
+    divided_p50 = _percentile(work_durations, 50) - (in_step_p50 or 0.0)
+    fixed_labels = (set.intersection(*fixed_label_sets)
+                    if fixed_label_sets else set())
+    return {
+        "version": _SHARD_FLOOR_VERSION,
+        "floor_s": round(_percentile(fixed, 50), 1),
+        "divided_work_s": round(max(0.0, divided_p50), 1),
+        "in_step_floor_s": (
+            round(in_step_p50, 1) if in_step_p50 is not None else None),
+        "n_shards": int(round(_percentile(counts, 50))),
+        "basis": _SHARD_FLOOR_BASIS,
+        "fixed_parts": sorted(fixed_labels, key=lambda item: priority[item]),
+    }
 
 
 def _opt24_floor_label(seconds: float) -> str:
@@ -23327,6 +23714,29 @@ def _opt24_representative_log_jobs(
             seen.add(job_id)
             selected.append(job)
     return selected
+
+
+def _shard_floor_representative_log_job(
+    job_name: str, jobs_per_run: list[list[dict[str, Any]]],
+    *, runner_scope: str | None = None,
+) -> dict[str, Any] | None:
+    """One median-duration matrix leg for the optional in-step floor."""
+    base = _matrix_base_name(job_name)
+    candidates = [
+        (duration, job)
+        for run in jobs_per_run
+        for job in run
+        if _matrix_base_name(str(job.get("name") or "")) == base
+        and (not runner_scope
+             or (_job_runner_label(job) or "?") == runner_scope)
+        and (duration := _job_duration_s(job)) is not None
+        and duration > 0
+        and _job_has_log(job)
+    ]
+    if not candidates:
+        return None
+    target = _percentile([duration for duration, _job in candidates], 50)
+    return min(candidates, key=lambda pair: abs(pair[0] - target))[1]
 
 
 # Declared triggers that mean "a developer waits on this workflow to merge a PR".
@@ -23911,6 +24321,15 @@ def _attach_cache_log_evidence(client: "GhClient", repo: str,
             # job may not run the cacheable work. Require POSITIVE evidence: an
             # install/build line in the logs, plus a measurable job cost. Without
             # both, the finding is unprovable → drop it (admission gate).
+            if f.get("static_cache_lint"):
+                f["size_note"] = ("workflow configuration proves this cache cannot "
+                                  "provide a useful warm run; logs did not confirm a "
+                                  "measured miss, so no saving is credited")
+                f["wall_clock_p50_s"] = None
+                f["runner_min_saving"] = None
+                f["tier"] = 2
+                f["realization"] = "none"
+                continue
             if not (saw_install and max_dur > 5.0):
                 f["_drop"] = (
                     "cache finding unprovable from sampled logs — no cache line "
@@ -26856,7 +27275,8 @@ def _magnitude_sample(
             # excluded from the rendered cross-run magnitude line (`_mag_line` filters None) but its
             # `cache_state.miss_pct` still feeds the distribution verdict.
             entry = {"run_url": str(j.get("html_url", "")).split("/job/")[0],
-                     "value": val, "drilled": jid == repr_job.get("id")}
+                     "value": val, "drilled": jid == repr_job.get("id"),
+                     "head_sha": str(j.get("_run_head_sha") or "")}
             if state_fn is not None:
                 # Fork = the run's head repo differs from the audited repo. A fork PR gets no
                 # repo secrets (secrets-gated remote caches are unreachable) and restores only
@@ -27795,6 +28215,11 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # can re-derive that no drilled pole blends eras. Empty when no workflow straddled
     # (the byte-identical no-op case).
     config_era_facts: list[dict[str, Any]] = []
+    # Keep the last-change boundary even when the shallow sample is entirely on
+    # its current side. A later candidate page can cross that boundary and must
+    # stop there instead of introducing retired workflow timings.
+    config_era_boundary_by_wf: dict[str, str] = {}
+    config_era_boundary_checked: set[str] = set()
     # Per-workflow event buckets (`jobs_by_event`), retained so a cache pole's push
     # (default-branch) runs can be probed for their hit rate — `jobs_per_run_by_wf`
     # keeps only the developer-event bucket, dropping the push runs the cache-distribution
@@ -28093,8 +28518,11 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         runs_for_spine = runs
         _era_fact = None
         if len(runs) >= 2:
+            config_era_boundary_checked.add(wf_path)
             _era_boundary, _era_prev, _era_last_sha, _era_prev_sha = _workflow_change_boundary(
                 client, repo, wf_path, created_before)
+            if _era_boundary:
+                config_era_boundary_by_wf[wf_path] = _era_boundary
             # CONTENT-keyed era classification (issue #77). Fetch the workflow-file blobs and classify
             # each sampled run's head_sha by CONTENT only when the sample TIMESTAMP-straddles the
             # boundary — the cheap zero-fetch gate (`_timestamp_straddles`). A workflow that did not
@@ -28702,6 +29130,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     _member_check_runs_complete: dict[str, bool] = {}
 
     def _checks_for_member(member_sha: str) -> list[dict[str, Any]] | None:
+        if member_sha in _member_check_runs:
+            return _member_check_runs[member_sha]
         completion: dict[str, bool] = {}
         rows = _fetch_check_runs(
             client, repo, member_sha, completion=completion)
@@ -28734,6 +29164,113 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         _rep_ts, _checks_for, req_names, _REPR_PR_TARGET,
         repo_published=_repo_published_required(
             req_names, findings_doc.get("workflow_status_publishers")))
+
+    # The timing walk above starts from the all-status page already fetched for each
+    # workflow. A busy repository can fill that page while yielding only a handful of
+    # full-suite PRs. In that case, continue the candidate run-list itself rather than
+    # declaring the gate sample short. Pages are bounded explicitly: this is a sample
+    # fill, not an unbounded history crawl. A short page proves that workflow's visible
+    # history is exhausted. Config-era samples deliberately stop at their era door;
+    # pulling older pages across it would mix retired and current workflow layouts.
+    _candidate_page = 1
+    _candidate_page_failed = False
+    _candidate_page_failures = 0
+    _candidate_era_door = bool(config_era_facts)
+    _candidate_runs_by_wf: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    _candidate_active = {
+        wf_path
+        for wf_path, page_rows in all_status_runs_by_wf.items()
+        if len(page_rows) >= _COST_RUNLIST_MAX
+        and (wf_by_path.get(wf_path) or {}).get("id") is not None
+    }
+    while ((len(repr_shas) < _REPR_PR_TARGET
+            or sample_diag.get("required_suite_unsatisfiable"))
+           and not config_era_facts
+           and _candidate_active
+           and _candidate_page < _PR_CANDIDATE_PAGE_CAP):
+        _candidate_page += 1
+        _next_active: set[str] = set()
+        for wf_path in sorted(_candidate_active):
+            wf_id = (wf_by_path.get(wf_path) or {}).get("id")
+            if wf_path not in config_era_boundary_checked:
+                config_era_boundary_checked.add(wf_path)
+                _late_boundary, _late_prev, _late_sha, _late_prev_sha = (
+                    _workflow_change_boundary(
+                        client, repo, wf_path, created_before))
+                if _late_boundary:
+                    config_era_boundary_by_wf[wf_path] = _late_boundary
+            page_rows = _all_status_run_page(
+                client, repo, wf_id, _candidate_page, created_before)
+            if page_rows is None:
+                _candidate_page_failed = True
+                _candidate_page_failures += 1
+                continue
+            _boundary = config_era_boundary_by_wf.get(wf_path)
+            _crossed_boundary = False
+            if _boundary:
+                _current_rows = [
+                    row for row in page_rows
+                    if str(row.get("created_at") or "") >= _boundary]
+                if len(_current_rows) < len(page_rows):
+                    _candidate_era_door = True
+                    _crossed_boundary = True
+                page_rows = _current_rows
+            _candidate_runs_by_wf[wf_path].extend(page_rows)
+            # A page that crossed the boundary closes this workflow's walk even
+            # when the current-era prefix itself happened to fill the page.
+            if (len(page_rows) >= _COST_RUNLIST_MAX
+                    and not _crossed_boundary):
+                _next_active.add(wf_path)
+            for r in page_rows:
+                if (str(r.get("event") or "") not in _DEVELOPER_EVENTS
+                        or not r.get("head_sha")):
+                    continue
+                sha = str(r["head_sha"])
+                ts = str(r.get("created_at") or r.get("updated_at") or "")
+                if ts > pr_sha_ts.get(sha, ""):
+                    pr_sha_ts[sha] = ts
+                prev_meta = sha_meta.get(sha)
+                if prev_meta is None or ts > str(prev_meta.get("ts") or ""):
+                    sha_meta[sha] = {
+                        "event": str(r.get("event") or ""),
+                        "pr_num": _run_pr_number(r), "ts": ts,
+                    }
+        _candidate_active = _next_active
+        _rep_ts, _rep_members = _group_dev_shas_by_pr(sha_meta)
+        repr_shas, per_sha_checks, check_durs, sample_diag = _select_repr_shas(
+            _rep_ts, _checks_for, req_names, _REPR_PR_TARGET,
+            repo_published=_repo_published_required(
+                req_names, findings_doc.get("workflow_status_publishers")),
+            # Every candidate already paid for by the bounded run-page walk is
+            # eligible. The ordinary selector keeps its 160-fetch runaway cap;
+            # this path's three-page cap is the bound instead.
+            max_fetch_override=len(_rep_ts))
+
+    if (len(repr_shas) >= _REPR_PR_TARGET
+            and not sample_diag.get("required_suite_unsatisfiable")):
+        sample_diag["stop_reason"] = "target_met"
+    elif (sample_diag.get("fetch_failures") or _candidate_page_failed
+          or all_status_failed):
+        sample_diag["stop_reason"] = "fetch_failures"
+    elif _candidate_era_door:
+        sample_diag["stop_reason"] = "era_door"
+    elif (sample_diag.get("selection_limited")
+          or (_candidate_active and _candidate_page >= _PR_CANDIDATE_PAGE_CAP)):
+        sample_diag["stop_reason"] = "page_cap"
+    else:
+        sample_diag["stop_reason"] = "candidates_exhausted"
+    # Completeness means the strict sampling contract was met. A recency-only
+    # fallback can contain 20 rows while still being incomplete for the required
+    # suite, so row count alone cannot certify it.
+    sample_diag["complete"] = sample_diag["stop_reason"] == "target_met"
+    sample_diag.update({
+        "candidate_pages_fetched": _candidate_page,
+        "candidate_page_cap": _PR_CANDIDATE_PAGE_CAP,
+        "candidate_pages_exhausted": not _candidate_active,
+        "candidate_page_fetch_failures": (
+            _candidate_page_failures + len(all_status_failed)),
+        "candidate_era_door": _candidate_era_door,
+    })
     # Config-era thin-flip (issue #74, direction (a): the timing spine flips WITH the rule). Now that
     # the PR gate sample (`per_sha_checks`) is in hand we can tell whether a `disclosed_pre` straddle's
     # kept PRE era actually produced a gate-bearing check IN THE SAMPLE. When it did not (the gate PRs
@@ -29063,6 +29600,16 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         _era_scope_pr_spine_sample(
             repr_shas, per_sha_checks, sha_check_intervals, _rep_ts,
             set(pr_check_p50), config_era_facts, _era_check_wf_of))
+    # The public sample count is the post-era-door population, so completeness
+    # and its reason must be post-door too. Keeping the pre-door `complete=True`
+    # would render a short 12/20 population as complete.
+    sample_diag["kept"] = len(_era_repr_shas)
+    sample_diag["complete"] = (
+        len(_era_repr_shas) >= _REPR_PR_TARGET
+        and not sample_diag.get("required_suite_unsatisfiable"))
+    if _era_dropped_pr_count and len(_era_repr_shas) < _REPR_PR_TARGET:
+        sample_diag["stop_reason"] = "era_door"
+        sample_diag["candidate_era_door"] = True
     _era_check_runs_complete = [
         check_runs_complete_by_sha.get(sha, False) for sha in _era_repr_shas]
     # One caps source for the ranking, the populations, AND the chain facts —
@@ -29316,6 +29863,33 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             if _rid:
                 _commit_jobs_by_run[(_wf, _rid)] = _job_run
 
+    # Deeper candidate pages are fetched after the normal workflow timing pass.
+    # Fetch jobs only for the selected PR members from those pages, so the added
+    # gate rows also participate in the complete per-commit wall spine without
+    # turning pagination into a jobs crawl over every rejected candidate.
+    _commit_sha_set = set(_commit_shas)
+    _candidate_run_wf: dict[str, str] = {}
+    _candidate_commit_runs: list[dict[str, Any]] = []
+    for _wf, _runs in _candidate_runs_by_wf.items():
+        for _run in _runs:
+            _rid = str(_run.get("id") or "")
+            _sha = str(_run.get("head_sha") or "")
+            if (not _rid or _sha not in _commit_sha_set
+                    or (_wf, _rid) in _commit_jobs_by_run):
+                continue
+            _candidate_run_wf[_rid] = _wf
+            _candidate_commit_runs.append(_run)
+    if _candidate_commit_runs:
+        _candidate_kept, _candidate_job_failures = _gather_run_jobs(
+            client, repo, _candidate_commit_runs, keep_empty=True, memo=job_memo)
+        for _run, _jobs in _candidate_kept:
+            _rid = str(_run.get("id") or "")
+            _commit_jobs_by_run[(_candidate_run_wf.get(_rid, ""), _rid)] = list(_jobs)
+        if _candidate_job_failures:
+            logger.warning(
+                "PR sample fill: %d selected deeper-page run job fetch(es) failed; "
+                "their commit-wall facts remain partial", _candidate_job_failures)
+
     def _commit_wall_fact(_sha: str, _event: str,
                           _run_rows: list[tuple[str, dict[str, Any]]],
                           _jobs_by_run: dict[tuple[str, str], list[dict[str, Any]]],
@@ -29358,6 +29932,14 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 if _duration < 0:
                     continue
                 _completed_here = True
+                _runner_label = _job_runner_label(_job)
+                _labels = [str(value) for value in _job.get("labels") or []]
+                _steps = [{
+                    "name": str(_step.get("name") or ""),
+                    "started_at": _step.get("started_at"),
+                    "completed_at": _step.get("completed_at"),
+                } for _step in _job.get("steps") or []
+                    if isinstance(_step, dict) and _step.get("name")]
                 _job_intervals.append({
                     "name": str(_job.get("name") or ""),
                     "workflow_file": _wf,
@@ -29368,6 +29950,14 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                                       or _run.get("created_at") or ""),
                     "started_at": str(_job.get("started_at") or ""),
                     "completed_at": str(_job.get("completed_at") or ""),
+                    "runner_label": _runner_label,
+                    "runner_class": ("self-hosted" if "self-hosted" in _labels
+                                     else "github-hosted"),
+                    "runner_image": "",
+                    "steps": _steps,
+                    "workload_identity": [
+                        f"{_wf}/{str(_job.get('name') or '')}/{step['name']}"
+                        for step in _steps],
                 })
                 _job_rows.append({
                     "name": str(_job.get("name") or ""),
@@ -29405,9 +29995,10 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
 
         _next = next((row for row in _job_rows[1:]
                       if _outside_slowest_chain(row)), None) if _slowest else None
-        _observed = (round(max(float(row["completed_ts"]) for row in _job_rows)
-                           - min(_created), 3)
-                     if _job_rows and _created else None)
+        _observed = observed_commit_wall_s(
+            _job_intervals,
+            cohort_created_at=list(_created_iso.values()),
+        )
         # The slowest job's own `needs:` chain on this commit (its ancestors and
         # descendants; other legs of its matrix run independently). Speeding the
         # slowest job leaves the rest of that chain in series, so a projection
@@ -29552,12 +30143,14 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     for _sha in _commit_shas:
         _event = str((sha_meta.get(_sha) or {}).get("event") or "")
         _run_rows: list[tuple[str, dict[str, Any]]] = []
-        for _wf in sorted(set(sampled_runs_by_wf) | set(all_status_runs_by_wf)):
+        for _wf in sorted(set(sampled_runs_by_wf) | set(all_status_runs_by_wf)
+                          | set(_candidate_runs_by_wf)):
             if _wf in _commit_dropped_workflows.get(_sha, set()):
                 continue
             _runs_by_id: dict[str, dict[str, Any]] = {}
             for _run in [*(all_status_runs_by_wf.get(_wf) or []),
-                         *(sampled_runs_by_wf.get(_wf) or [])]:
+                         *(sampled_runs_by_wf.get(_wf) or []),
+                         *(_candidate_runs_by_wf.get(_wf) or [])]:
                 _runs_by_id[str(_run.get("id") or id(_run))] = _run
             _runs = [
                 _run for _run in _runs_by_id.values()
@@ -29735,6 +30328,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                     "eslint-no-cache": "OPT9",
                     "playwright-parallel": "OPT24",
                     "pytest-no-xdist": "OPT24",
+                    "per-invocation-startup": "OPT85",
                     "test-isolated-serial": "OPT24",
                     "test-loop-serial": "OPT24",
                     "vendored-lib-build": "OPT86",
@@ -29780,11 +30374,14 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 _potential_s = max(
                     float(_typical_push.get("wall_s") or 0.0) - _projected_s, 0.0)
                 _leaf_magnitude = (_push_leaf or {}).get("magnitude") or {}
-                _cause_ceiling_s = (
-                    float(_leaf_magnitude["value"])
-                    if isinstance(_leaf_magnitude.get("value"), (int, float))
-                    and str(_leaf_magnitude.get("unit") or "") == "s"
-                    else _potential_s)
+                _leaf_uncredited = (_push_leaf or {}).get("uncredited") is True
+                if _leaf_uncredited:
+                    _cause_ceiling_s = 0.0
+                elif (isinstance(_leaf_magnitude.get("value"), (int, float))
+                      and str(_leaf_magnitude.get("unit") or "") == "s"):
+                    _cause_ceiling_s = float(_leaf_magnitude["value"])
+                else:
+                    _cause_ceiling_s = _potential_s
                 _rare_push = _push_lane.get("rare") is True
                 _projection_stamp = {
                     "job_speedup": float(_projection.get("job_speedup") or 0.0),
@@ -29792,13 +30389,13 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                     "multiple": round(float(_projection.get("multiple") or 0.0), 3),
                     "potential_s": round(_potential_s, 3),
                     "cause_ceiling_s": round(_cause_ceiling_s, 3),
-                    "credited_s": (0.0 if _rare_push else
+                    "credited_s": (0.0 if _rare_push or _leaf_uncredited else
                                    round(min(_potential_s, _cause_ceiling_s), 3)),
                     "next_longest_s": round(float(
                         (_typical_push.get("next_longest_job") or {}).get(
                             "duration_s") or 0.0), 3),
                 }
-                _recipe = bp._FIX_META.get(_leaf_fix_key, {}) if _leaf_fix_key else {}
+                _recipe = bp._fix_meta_for_leaf(_push_leaf) or {}
                 _measured_cause = str((_push_leaf or {}).get("unit_label") or "")
                 _evidence_lines = [
                     str(line) for line in ((_push_leaf or {}).get("evidence") or [])[:4]
@@ -30422,6 +31019,36 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             wf_doc=_wf_docs.get(_wf_path, {}))
         _opt24_probe_jobs.extend(
             _opt24_representative_log_jobs(_jobs_per_run, _provisional))
+    # A critical matrix leg may already be sharded and therefore never be an
+    # OPT24 candidate. Probe one representative leg so its compile/collection
+    # time inside the divided-work step can be disclosed without guessing.
+    for _pole in ((findings_doc.get("pr_critical_path") or {}).get("poles") or []):
+        _wf_path = str(_pole.get("workflow_file") or "")
+        _job_name = str(_pole.get("job") or "")
+        _jobs_per_run = jobs_per_run_by_wf.get(_wf_path) or []
+        _runner_scope = str(_pole.get("headline_runner") or "") or None
+        _matrix_path = _graph_matrix_workflow_path(
+            _job_name, _wf_path, findings_doc.get("workflow_job_graph"))
+        _matrix_doc = _wf_docs.get(_matrix_path or "", {})
+        _shard_positions = _workflow_shard_scope(_job_name, _matrix_doc)
+        if not _job_name or _shard_floor_stamp(
+                _job_name, _matrix_doc, _jobs_per_run,
+                logs_by_job_id={}, shard_positions=_shard_positions,
+                runner_scope=_runner_scope) is None:
+            continue
+        _probe = _shard_floor_representative_log_job(
+            _job_name, _jobs_per_run, runner_scope=_runner_scope)
+        if _probe is not None:
+            _opt24_probe_jobs.append(_probe)
+    _deduped_probe_jobs: list[dict[str, Any]] = []
+    _seen_probe_ids: set[Any] = set()
+    for _job in _opt24_probe_jobs:
+        _jid = _job.get("id")
+        if _jid is None or _jid in _seen_probe_ids:
+            continue
+        _seen_probe_ids.add(_jid)
+        _deduped_probe_jobs.append(_job)
+    _opt24_probe_jobs = _deduped_probe_jobs
     _prefetch_text(client, [
         _job_log_endpoint(repo, _job["id"])
         for _job in _opt24_probe_jobs if _job.get("id") is not None
@@ -30435,6 +31062,22 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         "planned": len(_opt24_probe_jobs),
         "returned": len(opt24_logs),
     }
+    for _pole in ((findings_doc.get("pr_critical_path") or {}).get("poles") or []):
+        _wf_path = str(_pole.get("workflow_file") or "")
+        _job_name = str(_pole.get("job") or "")
+        if not _job_name:
+            continue
+        _runner_scope = str(_pole.get("headline_runner") or "") or None
+        _matrix_path = _graph_matrix_workflow_path(
+            _job_name, _wf_path, findings_doc.get("workflow_job_graph"))
+        _matrix_doc = _wf_docs.get(_matrix_path or "", {})
+        _stamp = _shard_floor_stamp(
+            _job_name, _matrix_doc,
+            jobs_per_run_by_wf.get(_wf_path) or [], logs_by_job_id=opt24_logs,
+            shard_positions=_workflow_shard_scope(_job_name, _matrix_doc),
+            runner_scope=_runner_scope)
+        if _stamp is not None:
+            _pole["shard_floor"] = _stamp
 
     next_id = max((int(f["id"][1:]) for f in findings if f.get("id", "").startswith("f") and f["id"][1:].isdigit()), default=0)
     # OPT98 reuses the rule reader and cached run pages. Only a readable strict
@@ -30665,11 +31308,29 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                             "can't be separated from upstream job run time")
             new = []
         else:
+            _opt43_all_status = (_all_status_page(wf_path, wf_id)
+                                 if wf_id is not None else None)
+            _cancelled_runs = [
+                run for run in (_opt43_all_status or [])
+                if str(run.get("conclusion") or "").lower() == "cancelled"
+            ][:_OPT43_CANCELLED_RUN_PROBE_MAX]
+            _cancelled_jobs_per_run: list[list[dict[str, Any]]] = []
+            if _cancelled_runs:
+                _prefetch_json(client, [
+                    _run_jobs_endpoint(repo, run.get("id"))
+                    for run in _cancelled_runs
+                ])
+                _cancelled_kept, _cancelled_failures = _gather_run_jobs(
+                    client, repo, _cancelled_runs, memo=job_memo)
+                jobs_fetch_failures += _cancelled_failures
+                for _run, _jobs in _cancelled_kept:
+                    _stamp_run_context(_run, _jobs)
+                    _cancelled_jobs_per_run.append(_jobs)
             new = _detect_opt43_queue_time(
                 wf_path, jobs_per_run, next_id, is_pr,
-                all_status_runs=(_all_status_page(wf_path, wf_id)
-                                 if wf_id is not None else None),
-                job_graph=_opt43_graph)
+                all_status_runs=_opt43_all_status,
+                job_graph=_opt43_graph,
+                cancelled_jobs_per_run=_cancelled_jobs_per_run)
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
 

@@ -50,7 +50,7 @@ Checkout · 6. Conditional Execution · 7. Trigger and Scope · 8. Release Workf
 - **Category 11 — Stack-Specific**: turbo task outputs, unstable turbo env keys, type-aware ESLint on a slow lint job (`OPT82`).
 - **Category 12 — Build Caching (language-agnostic)**: uncached compiled-language builds, a dependency compiled from source when a prebuilt package exists (`OPT86`), a compile nobody profiled (`OPT91`), a machine-wide .NET SDK reconciling unrelated workloads (`OPT94`).
 - **Category 13 — Hidden Failures and Dead Config**: dead env vars, misconfigured caches.
-- **Category 14 — Structural / Critical-Path Levers** (`OPT70`–`OPT75`, `OPT78`, `OPT83`–`OPT85`, `OPT87`): routed from the measured long pole (see ARCHITECTURE §11), not a flat grep. `OPT85` (tests run in many processes instead of one) and `OPT87` (tests wait on a slow dependency they do not verify) have no router yet: like `OPT74`, they are catalogued for application from the drilled pole's log and are reported as without a detector. `OPT78` is routed by the drill-time leaf detector rather than the structural router; `OPT83` and `OPT84` are routed by structural passes over the drilled poles' step decomposition plus the workflow YAML, not by the log leaves (`OPT84` also follows the step's `package.json` scripts).
+- **Category 14 — Structural / Critical-Path Levers** (`OPT70`–`OPT75`, `OPT78`, `OPT83`–`OPT85`, `OPT87`): routed from the measured long pole (see ARCHITECTURE §11), not a flat grep. `OPT87` and `OPT74` remain manual. `OPT78` and `OPT85` are routed by drill-time log leaves; `OPT83` and `OPT84` are routed by structural passes over the drilled poles' step decomposition plus the workflow YAML, not by the log leaves (`OPT84` also follows the step's `package.json` scripts).
 
 (Catalog OPT-ids are the static scan; the `blocking_path.py` `_parse_log` **leaf
 detectors** — prisma / vitest / turbo / playwright — are a separate set run over
@@ -184,6 +184,13 @@ grep -rn 'docker build\|docker compose build' .github/workflows/
 # Check for docker/build-push-action without cache-from/cache-to
 grep -rn 'docker/build-push-action' .github/workflows/
 ```
+
+Also flag a GHA cache scoped to `github.sha`, `run_id`, or `run_number`; a local
+cache exported over the directory it imports without a separate `mode=max`
+destination; and hosted-runner Dockerfiles that use `RUN --mount=type=cache`
+without persisting the BuildKit cache. A SHA scope cannot serve a later commit,
+and a run-ID scope cannot serve a fresh workflow invocation (reruns keep their
+original IDs). A remote persistent builder is not an ephemeral mount case.
 
 **Fix**: Use `docker/build-push-action` with `cache-from: type=gha` and
 `cache-to: type=gha,mode=min` by default, or use `docker compose build` with
@@ -1410,6 +1417,15 @@ title_template: "Within-Job Duplicate Commands"
 
 **Detection heuristic**:
 
+Job logs can prove the Cargo variant even when the workflow commands differ:
+if two distinct step groups print the same in-repository
+`Compiling <crate> v<version> (<path>)` line, every local crate in the later
+step already appeared in the earlier step, and both commands share the same
+observable profile, target, feature, toolchain, compiler and target-directory
+settings, the second step repeats compilation. Different crates or artifact
+settings stay quiet. The later step's full `Finished` wall is an upper bound,
+because it can include linking or other work beside the repeated compilation.
+
 ```bash
 # For each job in each workflow, check if any command appears in multiple steps
 for f in /tmp/workflows/*.yml; do
@@ -1418,7 +1434,14 @@ for f in /tmp/workflows/*.yml; do
 done
 ```
 
-**Fix**: Remove the duplicate invocation. If the rebuild is a workaround for stale artifacts, fix the root cause (e.g., cache key, build system incremental support) instead.
+**Fix**: Remove the duplicate invocation. For Cargo, preserve every intended
+package, feature, platform and test target. Combine package selections in one
+invocation when they are meant to share artifacts, or align the feature, target
+directory, toolchain and compiler settings that should produce the same artifact;
+then confirm every original test target still builds and runs. If distinct feature
+or platform coverage is intentional, keep both builds. If the rebuild is a
+workaround for stale artifacts, fix the root cause (e.g., cache key, build system
+incremental support) instead.
 
 ---
 
@@ -3574,8 +3597,19 @@ title_template: "Excessive Queue Time"
 - Compute the queue per job across recent runs as **runnable time → job `started_at`**. An entry (un-gated) job is runnable at the **run `created_at`** (the trigger). A `needs:`-gated job is runnable when its **last needed upstream job completes** (the latest `completed_at` among its `needs:` jobs in the same run) — measuring it from the trigger would count the upstream jobs' run time as queue and double-count the upstream job's own long-pole fix. A gated sample whose upstream completion is not in the sampled run is excluded, never credited; skipped jobs are not measured.
 - Use **percentile-based baselines by trigger type** (PR runs typically queue differently than release/schedule runs)
 - Flag P90 queue time >60s for PR jobs, >120s for release jobs
+- Group queue and work by the jobs API's runner labels. Each workflow run contributes
+  at most one observation per label, using that run's maximum when several jobs use
+  the same label; report queue p50/p95 and work p50 for each label. A job cancelled
+  before runner pickup contributes runnable-to-cancelled time as a censored lower
+  bound, reported separately from exact queue percentiles.
 
 **Fix**: Depends on root cause — if runner pool saturation: increase runner pool or use larger runners. If concurrency group: relax the group, or cancel superseded runs — but take the **scoped** predicate from [OPT45](#opt45--missing-concurrency-groups) / [OPT46](#opt46--superseded-runs-not-cancelled-missing-concurrency-or-cancel-in-progress-false). **Never a bare `cancel-in-progress: true`**: it kills in-flight runs on the default branch and on release tags (a half-finished deploy/publish/migration), and it must never be reachable from a PR whose head branch is itself the default branch.
+
+When the affected label's queue p50 is materially above another label already in
+the repository, name both measured labels and investigate their capacity difference.
+With only one useful label, say the comparison is unavailable. The table is
+descriptive: OPT81 owns same-job runner-speed comparisons, and queue wait alone is
+not evidence that reducing jobs or shards would help.
 
 ---
 
@@ -4876,6 +4910,11 @@ title_template: "Missing Dependency Caching"
    - C++: `cmake`, `make`, `ninja` → check for `actions/cache` targeting build dir, or `ccache`/`sccache`
 2. Flag if the ecosystem's build/install commands are present but no corresponding cache action exists.
 3. Count total jobs affected — in sharded/matrix workflows, the waste multiplies.
+4. Also flag cache declarations whose workflow shape needs validation: a rolling
+   saved-key family whose restore prefix cannot serve a later edit; ccache capped
+   at 64 MiB or less, which may churn before reuse;
+   ccache, sccache, staticcheck, or golangci-lint caches placed in temporary
+   storage without a persistence step; or a cache directory deleted later.
 
 ```bash
 # Check for any caching across all workflows
@@ -4884,7 +4923,18 @@ grep -rn 'actions/cache\|rust-cache\|sccache\|setup-node.*cache\|setup-go.*cache
 grep -rn 'cargo \|pip install\|uv sync\|go build\|mvn \|gradle\|cmake\|make ' /tmp/workflows/
 ```
 
-**Fix**: Add the ecosystem-appropriate caching action. In multi-job workflows, use one key per compilation mode so incompatible artifacts cannot overwrite or restore each other. Give only one job permission to save each mode's cache, such as with a `save-if` condition; the other jobs restore it without racing to publish separate entries.
+**Fix**: Add the ecosystem-appropriate caching action. For compiler and mutable
+build-output caches such as ccache, sccache, Go's `GOCACHE`, `target/`,
+`.next/cache`, `.turbo`, `.nx/cache`, Gradle's build cache, and Bazel's disk
+cache, use a rolling primary key such as
+`<tool>-<os>-<mode>-<lockfile-hash>-${{ github.sha }}` and the stable
+`restore-keys: <tool>-<os>-<mode>-<lockfile-hash>-` prefix. A new primary entry
+is saved after each run, so budget the accumulated entries and their eviction
+pressure; do not use this shape when the cache is too large for the repository's
+cache budget. In multi-job workflows, use one key family per compilation mode so
+incompatible artifacts cannot overwrite or restore each other. Give only one job
+permission to save each mode's cache, such as with a `save-if` condition; the
+other jobs restore it without racing to publish separate entries.
 
 ---
 
@@ -4909,11 +4959,15 @@ title_template: "Build Artifacts Destroyed Before Every Run"
 1. Search workflow steps for clean commands:
 
 ```bash
-grep -rn 'rm -rf build\|rm -rf target\|rm -rf dist\|rm -rf node_modules\|cargo clean\|make clean\|gradle clean' /tmp/workflows/
+grep -rn 'rm -rf build\|rm -rf target\|rm -rf dist\|rm -rf node_modules\|cargo clean\|make clean\|gradle clean\|go clean .*\(-cache\|-modcache\)' /tmp/workflows/
 ```
 
 2. **CRITICAL**: Also read the build scripts invoked by workflow steps. A workflow step may call `./scripts/build.sh` which internally does `rm -rf build`. The detection heuristic must trace through to the actual script, not stop at the workflow YAML.
 3. Flag when the job runs on `self-hosted` runners (where workspace persists between runs). On GitHub-hosted runners, the workspace is always fresh, so `rm -rf` has no effect.
+4. Flag `go clean -cache`, `go clean -i -cache`, and `go clean -modcache`
+   on any runner because they erase reusable Go build/module state. Keep
+   `go clean -testcache` quiet: it clears test-result reuse rather than compiled
+   build artifacts.
 
 **Fix**: Make the clean step conditional on cache miss, or add an `--incremental` flag to the build script. For cmake: check for `CMakeCache.txt` existence before cleaning. For cargo: incremental compilation is the default — don't `cargo clean`.
 
@@ -5322,7 +5376,7 @@ a finding.
 Most of them (OPT70–OPT75) are routed by the deterministic structural router in
 `collect_runs.py`. **OPT83** and **OPT84** are each routed by a structural pass over each drilled pole's
 per-step decomposition and its workflow YAML (not by the log leaves) and emit a
-finding with its own card; OPT84 also reads the repo's `package.json` scripts and tool versions. **OPT85** and **OPT87** have no router yet: like OPT74 they are listed as structural patterns without a detector, and are applied by reading the drilled pole's log and test code. **OPT78** is routed instead by a drill-time leaf detector over
+finding with its own card; OPT84 also reads the repo's `package.json` scripts and tool versions. **OPT87** and OPT74 remain listed as structural patterns without a detector. **OPT78** and **OPT85** are routed instead by drill-time leaf detectors over
 the long pole's captured log (ARCHITECTURE §12.3), corroborated against the repo's
 test-runner config. It emits no finding record, so the render boundary's `Risk`
 row and banner never see it: its HIGH risk is stamped on the pole's drill-down
@@ -5895,7 +5949,7 @@ fix_strategy: run-tests-in-fewer-processes
 title_template: "Tests start a new process for every case or every test binary"
 -->
 
-**Not auto-detected yet.** No router emits OPT85 today, so `scan.py` lists it in `catalog_structural_patterns_without_detector` (as it does OPT74) and the audit never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading the drilled long pole's log and the test code against the heuristic below.
+**Auto-detected from a drilled log.** The `per-invocation-startup` leaf requires at least ten timestamped, strictly serial iterations from a declared tool signature. It measures process boundary → first work and boundary → completion for every iteration. Unparseable timestamps, overlapping iterations, retries and periodic progress lines fail closed.
 
 **TL;DR**: The slowest test job spends most of its time starting processes rather than running tests: every test case launches a fresh interpreter or script, or every test file is linked into its own test binary. Running the same cases in one process per worker (or one binary) keeps every case and pays the startup once.
 
@@ -5906,10 +5960,10 @@ title_template: "Tests start a new process for every case or every test binary"
 
 **Relation to OPT78**: same family (setup paid per unit instead of once), different mechanism. [OPT78](#opt78--per-file-test-isolation-rebuilding-shared-module-state) is vitest's per-file module registry, a setting inside one test process, emitted by its own log leaf; its scope note keeps it vitest-only, and this entry does not widen it. OPT85 is the operating-system process or the linked binary, whatever the runner.
 
-**Detection heuristic** (manual; read, never inferred):
+**Detection heuristic**:
 
 1. The drilled long pole's dominant step category is `test`. This is a gate only: it holds before and after a regression alike, so it cannot identify one by itself.
-2. Process per case: the test code starts a process inside a parametrized test, a per-case fixture, or a helper either one calls (`subprocess`, `os.system`, `pexpect`, a CLI runner), and the collected case count is large (hundreds or more; count cases from the collect-only listing, not from suite pass totals, which differ across commits). Corroborate with timing before reporting: the runner's slowest-tests report (`pytest --durations=N`) shows many cases of similar duration well above what their logic should cost, or a profile of one case shows most of its time in process creation. The slow run often has no slowest-tests report (the fix may be what adds one); then corroborate by comparing the job's test-step duration with a known-good run of the same job, and by timing one case with and without the process call.
+2. Process per case: a declared pytest invocation, Cargo test-binary banner, or structured verification-script boundary starts each iteration; its first-work and completion lines are timestamped. At least ten unique iterations must be strictly serial. Median startup must be at least half the median iteration, and count × median startup must reach 20 seconds.
 3. Binary per file: the crate has several `tests/*.rs` files, and the captured log shows one `Running tests/<name>.rs` line per file. Corroborate with timing: the link time per binary (`cargo test --no-run` timed, or `cargo build --timings`) and the gaps between binaries in the log.
 
 The shape alone is not a finding. The measured share of the step it accounts for is the claim.
@@ -5920,7 +5974,7 @@ The shape alone is not a finding. The measured share of the step it accounts for
 - **Binary per file**: move the integration tests into one test target, for example `tests/all/main.rs` declaring each former file as a module (`mod foo;`). Every test keeps its body and gains a module path. The crate is linked once, and the harness runs all tests in parallel.
 - Either way, turn on slow-test reporting (`pytest --durations=N` in the configuration, or the runner's timing report) so the next regression of this shape is visible in the log.
 
-**Mandatory guardrail (this pattern is invalid without it)**: the collected test list before and after must match (diff the collect-only listing; a Rust conversion adds a module path to every test name, so map each old name to its new one and check that none is lost or duplicated); each case must still execute the same code path; state a case can leak must be reset explicitly; and the converted suite must pass in random order where the runner can shuffle (for example with pytest-randomly). Stable Rust's test harness cannot shuffle, so run the converted binary both with `--test-threads=1` and with the default parallelism and require both green.
+**Mandatory guardrail (this pattern is invalid without it)**: the collected test list before and after must match (diff the collect-only listing; a Rust conversion adds a module path to every test name, so map each old name to its new one and check that none is lost or duplicated); each case must still execute the same code path; state a case can leak must be reset explicitly. Put a deliberately broken iteration at several positions and require every position to fail, then add a state-leak canary. The converted suite must also pass in random order where the runner can shuffle (for example with pytest-randomly). Stable Rust's test harness cannot shuffle, so run the converted binary both with `--test-threads=1` and with the default parallelism and require both green.
 
 **No-weakening rail**: never drop, merge or skip cases, and never skip setup a case needs, to make the suite fit in one process. Cases that test process behaviour stay real subprocesses.
 
@@ -5928,7 +5982,7 @@ The shape alone is not a finding. The measured share of the step it accounts for
 
 **Conservative rollout (REQUIRED)**: convert one suite at a time; run the old and new paths side by side over real PR traffic and compare case lists and results; keep the subprocess path for the boundary cases permanently.
 
-**Sizing: deliberately uncredited**. No `_SIZING` model. The ceiling is measured, never assumed: per-case startup times the case count, or per-binary link time plus the gaps between binaries. **Benchmark first.**
+**Sizing**: the modeled saving is `N × median startup − one startup`; the first process remains. Running independent iterations concurrently is an alternative on those same measured seconds, never an added saving. **Benchmark first.**
 
 **Real-world example (OpenAI)**, their numbers, not a forecast for your repo:
 

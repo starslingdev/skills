@@ -18,11 +18,15 @@ category: 12
 1. Search workflow steps for clean commands:
 
 ```bash
-grep -rn 'rm -rf build\|rm -rf target\|rm -rf dist\|rm -rf node_modules\|cargo clean\|make clean\|gradle clean' /tmp/workflows/
+grep -rn 'rm -rf build\|rm -rf target\|rm -rf dist\|rm -rf node_modules\|cargo clean\|make clean\|gradle clean\|go clean .*\(-cache\|-modcache\)' /tmp/workflows/
 ```
 
 2. **CRITICAL**: Also read the build scripts invoked by workflow steps. A workflow step may call `./scripts/build.sh` which internally does `rm -rf build`. The detection heuristic must trace through to the actual script, not stop at the workflow YAML.
 3. Flag when the job runs on `self-hosted` runners (where workspace persists between runs). On GitHub-hosted runners, the workspace is always fresh, so `rm -rf` has no effect.
+4. Flag `go clean -cache`, `go clean -i -cache`, and `go clean -modcache`
+   on any runner because they erase reusable Go build/module state. Keep
+   `go clean -testcache` quiet: it clears test-result reuse rather than compiled
+   build artifacts.
 
 **Fix**: Make the clean step conditional on cache miss, or add an `--incremental` flag to the build script. For cmake: check for `CMakeCache.txt` existence before cleaning. For cargo: incremental compilation is the default — don't `cargo clean`.
 

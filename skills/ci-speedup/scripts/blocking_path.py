@@ -2431,9 +2431,16 @@ def _emulated_image_compile_leaf(lines: list[str]) -> dict[str, Any] | None:
             cold_operations.discard(done.group(1))
             cold_durations.append(float(done.group(2)))
     builder = _buildx_single_node(lines)
-    if builder is None:
+    raw_buildx = any(
+        re.search(r"\bdocker\s+buildx\s+build\b|docker/build-push-action@", line,
+                  re.IGNORECASE)
+        for line in lines)
+    builder_unconfirmed = (builder is None and raw_buildx and not any(
+        re.search(r"\bNodes:\s*$", line) for line in lines))
+    if builder is None and not builder_unconfirmed:
         return None
-    native_platform, builder_evidence = builder
+    native_platform, builder_evidence = (
+        builder if builder is not None else ("linux/amd64", []))
     native_family = _platform_family(native_platform)
     native = sum(seconds for arch, seconds, _header, _done, _kind in durations
                  if _platform_family(f"linux/{arch}") == native_family)
@@ -2454,6 +2461,29 @@ def _emulated_image_compile_leaf(lines: list[str]) -> dict[str, Any] | None:
             or (native > 0 and any(
                 seconds / native < 2.0 for seconds in foreign_by_arch.values()))):
         return None
+    if builder_unconfirmed:
+        # A raw hosted build commonly runs on amd64, but without the builder's
+        # node list we cannot establish whether the foreign-platform work used
+        # emulation or a native remote node. Keep the measured dominance as a
+        # routing signal only: no scalar magnitude, no credited seconds and no
+        # emulation claim.
+        if native <= 0:
+            return None
+        return {
+            "fix_key": "emulated-image-compile",
+            "unit_label": (
+                "foreign-platform compilation dominates the cold build, but "
+                "the builder topology was not printed — check the builder nodes"),
+            "magnitude": None,
+            "deeper": [],
+            "uncredited": True,
+            "evidence": [
+                item for _arch, _seconds, header, done, _kind in durations
+                for item in (header, done)
+            ][:6],
+            "search": ["docker buildx inspect --bootstrap", "Nodes:", "Platforms:"],
+            "builder_topology_unconfirmed": True,
+        }
     share = round(100 * emulated / total)
     rows = []
     if native > 0:
@@ -3080,6 +3110,161 @@ def _parse_log(text: str,
                 "magnitude": None, "evidence": [l.strip() for l in uncached[:2]],
                 "search": ["eslint", "--cache", ".eslintcache"]}
 
+    # --- G2: the same local Cargo crate is compiled in two job steps ----------
+    # Cargo's group-delimited step logs let us distinguish a repeated compile
+    # from multiple crates within one invocation. Only paths with a recognizable
+    # GitHub Actions checkout shape count; registry/git and arbitrary machine-local
+    # dependencies are excluded. Both steps must finish the same profile and carry
+    # the same observable compilation context. The SECOND step's Finished time is
+    # an upper bound: it can include linking and other work beside the repeated crate.
+    cargo_groups = [
+        (command, lines[start + 1:end])
+        for command, start, end in _log_step_sections(lines)
+    ]
+
+    def _cargo_repo_path(path: str) -> bool:
+        normalized = path.replace("\\", "/")
+        if normalized.startswith(("./", "../", "/repo/", "/workspace/",
+                                  "/github/workspace/")):
+            return True
+        return bool(re.search(
+            r"/(?:work|_work|a)/([^/]+)/\1(?:/|$)", normalized, re.IGNORECASE))
+
+    def _cargo_command_context(command: str) -> tuple[str, ...] | None:
+        """Output-affecting Cargo context visible in one simple step command.
+
+        Package selection is deliberately excluded: two package-specific test
+        commands are the common shape whose shared local dependency should reuse.
+        Every other observable artifact axis fails closed when it differs.
+        """
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            return None
+        if any(token in {";", "&&", "||", "|"} for token in tokens):
+            return None
+        cargo_index = next((index for index, token in enumerate(tokens)
+                            if token == "cargo" or token.endswith("/cargo")), None)
+        if cargo_index is None:
+            return None
+        prefix = tokens[:cargo_index]
+        if any(token not in {"env", "command"} and "=" not in token
+               for token in prefix):
+            return None
+        environment = sorted(
+            token for token in prefix
+            if re.match(
+                r"^(?:CARGO_TARGET_DIR|CARGO_BUILD_TARGET|RUSTFLAGS|"
+                r"CARGO_ENCODED_RUSTFLAGS|RUSTC|RUSTC_WRAPPER|"
+                r"RUSTC_WORKSPACE_WRAPPER)=", token))
+        tail = tokens[cargo_index + 1:]
+        toolchain = tail.pop(0) if tail and tail[0].startswith("+") else ""
+        if not tail or tail[0] not in {"test", "build", "check", "clippy"}:
+            return None
+        subcommand = tail.pop(0)
+        valued = {
+            "--target", "--target-dir", "--features", "--profile", "--test",
+            "--bench", "--bin", "--example", "--config", "--manifest-path",
+        }
+        switches = {
+            "--all-features", "--no-default-features", "--lib", "--bins",
+            "--tests", "--benches", "--examples", "--all-targets",
+        }
+        context: list[str] = [f"toolchain={toolchain}", f"subcommand={subcommand}",
+                              *environment]
+        index = 0
+        while index < len(tail):
+            token = tail[index]
+            option, separator, inline = token.partition("=")
+            if option in valued:
+                if separator:
+                    value = inline
+                elif index + 1 < len(tail):
+                    index += 1
+                    value = tail[index]
+                else:
+                    return None
+                if option == "--features":
+                    value = ",".join(sorted(part for part in re.split(r"[,\s]+", value)
+                                             if part))
+                context.append(f"{option}={value}")
+            elif token in switches:
+                context.append(token)
+            index += 1
+        return tuple(sorted(context))
+
+    def _cargo_group(group: tuple[str, list[str]]) -> dict[str, Any] | None:
+        command, group_lines = group
+        context = _cargo_command_context(command)
+        if context is None:
+            return None
+        crates: dict[tuple[str, str, str], str] = {}
+        for group_line in group_lines:
+            match = re.search(
+                r"\bCompiling\s+(\S+)\s+v(\S+)\s+\(([^)]+)\)", group_line)
+            if match is None:
+                continue
+            path = match.group(3)
+            if (not _cargo_repo_path(path)
+                    or re.search(r"(?:\.cargo/registry|registry/src|/git/checkouts/)",
+                                 path, re.IGNORECASE)):
+                continue
+            key = (match.group(1), match.group(2), path)
+            crates[key] = group_line.strip()
+        finished = next((
+            match for group_line in group_lines
+            if (match := re.search(
+                r"Finished\s+(?:`(?P<quoted>[^`]+)`\s+profile|"
+                r"(?P<plain>dev|test|release|bench))\s+\[[^\]]+\]\s+"
+                r"target\(s\)\s+in\s+(?P<duration>"
+                r"(?:\d+(?:\.\d+)?\s*[hms]\s*)+)",
+                group_line, re.IGNORECASE))
+        ), None)
+        if not crates or finished is None:
+            return None
+        parts = re.findall(r"(\d+(?:\.\d+)?)\s*([hms])",
+                           finished.group("duration"), re.IGNORECASE)
+        seconds = sum(float(value) * {"h": 3600, "m": 60, "s": 1}[unit.casefold()]
+                      for value, unit in parts)
+        return {"command": command, "context": context, "crates": crates,
+                "profile": (finished.group("quoted") or finished.group("plain")).casefold(),
+                "seconds": seconds,
+                "finished": next(line.strip() for line in group_lines
+                                 if finished.group(0) in line)}
+
+    compiled = [row for group in cargo_groups if (row := _cargo_group(group)) is not None]
+    for later_index, later in enumerate(compiled[1:], 1):
+        for earlier in compiled[:later_index]:
+            repeated = sorted(set(earlier["crates"]) & set(later["crates"]))
+            if (not repeated or not set(later["crates"]) <= set(earlier["crates"])
+                    or earlier["profile"] != later["profile"]
+                    or earlier["context"] != later["context"]):
+                continue
+            names = [key[0] for key in repeated]
+            return {
+                "fix_key": "cargo-double-compile",
+                "unit_label": (f"{len(repeated)} local Cargo crate(s) compile again in a "
+                               f"second `{later['profile']}`-profile step"),
+                "magnitude": {"label": "second Cargo step wall (upper bound)",
+                              "value": round(later["seconds"], 2), "unit": "s"},
+                "deeper": [{
+                    "rows": [(earlier["command"], earlier["seconds"], None),
+                             (later["command"], later["seconds"], None)],
+                    "blocker_note": (f"the second step recompiles {', '.join(names[:3])} "
+                                     "with the same observable Cargo context; its full "
+                                     "wall is only an upper bound"),
+                    "pct_of": "sum",
+                }],
+                "evidence": [
+                    f"Run {earlier['command']}",
+                    earlier["crates"][repeated[0]],
+                    f"Run {later['command']}",
+                    later["crates"][repeated[0]],
+                    later["finished"],
+                ],
+                "search": ["Compiling", "Finished", "--package", "--features"],
+            }
+
     # --- H: long serial `cargo test` suite where a few test binaries dominate -----
     # The standard Rust libtest harness (`cargo test`, NOT cargo-nextest) runs each test
     # BINARY one after another and prints, per binary, a `Running <name> (target/…/deps/
@@ -3269,7 +3454,129 @@ def _parse_log(text: str,
     if (dependency_state and dependency_state["miss_pct"] > 0
             and vendored_build_leaf is None):
         return dependency_hit_leaf
-    # --- L: isolated tests in one file wait on the same fixed timer ------------
+    # --- L: a fresh process pays most of every serial test/check iteration -------
+    # Admit only declared, structured tool boundaries with timestamped work and
+    # completion markers. A periodic progress line is not a process boundary. Each
+    # completion must precede the next boundary, proving these iterations are serial.
+    startup_profiles = (
+        (
+            "pytest",
+            re.compile(
+                r"^\+\s+(?:(?:python(?:3(?:\.\d+)?)?)\s+-m\s+)?"
+                r"pytest\s+(?P<id>.+?)\s*$",
+                re.I,
+            ),
+            re.compile(r"^collecting\b", re.I),
+            re.compile(
+                r"^(?:=+\s*)?\d+\s+(?:passed|failed|errors?|skipped)\b"
+                r".*\bin\s+\d",
+                re.I,
+            ),
+            False,
+        ),
+        (
+            "cargo test binary",
+            re.compile(
+                r"^Running\s+(?P<id>(?:unittests\s+\S+|tests/\S+))\s+"
+                r"\([^)]*\)$",
+                re.I,
+            ),
+            re.compile(r"^running\s+\d+\s+tests?\b", re.I),
+            re.compile(r"^test result:\s+(?:ok|FAILED)\.", re.I),
+            False,
+        ),
+        (
+            "verification script",
+            re.compile(
+                r"^Process started:\s*verification\s+(?P<id>\S.+?)\s*$", re.I),
+            re.compile(r"^Checking verification:\s*(?P<id>\S.+?)\s*$", re.I),
+            re.compile(
+                r"^Verification (?:passed|failed):\s*(?P<id>\S.+?)\s*$", re.I),
+            True,
+        ),
+    )
+    timestamped: list[tuple[datetime, str, str]] = []
+    for raw in text.splitlines():
+        stamp, sep, message = raw.partition(" ")
+        when = _cache_path_stamp(stamp)
+        if sep and when is not None:
+            timestamped.append((when, message.strip(), raw.strip()))
+    startup_leaf: dict[str, Any] | None = None
+    for profile_name, boundary_re, work_re, done_re, bind_identity in startup_profiles:
+        boundaries = [
+            (line_i, when, match.group("id"), raw)
+            for line_i, (when, message, raw) in enumerate(timestamped)
+            if (match := boundary_re.match(message))
+        ]
+        if len(boundaries) < 10 or len({row[2] for row in boundaries}) != len(boundaries):
+            continue
+        startups: list[float] = []
+        iterations: list[float] = []
+        measurements: list[tuple[str, str, str]] = []
+        complete = True
+        for pos, (line_i, started, identity, boundary_raw) in enumerate(boundaries):
+            next_line = (boundaries[pos + 1][0]
+                         if pos + 1 < len(boundaries) else len(timestamped))
+            next_started = (boundaries[pos + 1][1]
+                            if pos + 1 < len(boundaries) else None)
+            window = timestamped[line_i + 1:next_line]
+            work_row = next(((when, raw, match) for when, message, raw in window
+                             if (match := work_re.match(message))), None)
+            done_row = next(((when, raw, match) for when, message, raw in window
+                             if (match := done_re.match(message))), None)
+            if work_row is None or done_row is None:
+                complete = False
+                break
+            work, work_raw, work_match = work_row
+            done, done_raw, done_match = done_row
+            if (bind_identity
+                    and (work_match.group("id") != identity
+                         or done_match.group("id") != identity)):
+                complete = False
+                break
+            if (not (started < work <= done)
+                    or (next_started is not None
+                        and (next_started < started or done > next_started))):
+                complete = False
+                break
+            startups.append((work - started).total_seconds())
+            iterations.append((done - started).total_seconds())
+            measurements.append((boundary_raw, work_raw, done_raw))
+        if not complete:
+            continue
+        startup_median = _median(startups)
+        iteration_median = _median(iterations)
+        count = len(iterations)
+        if (startup_median < iteration_median * 0.5
+                or count * startup_median < 20):
+            continue
+        modeled = round((count - 1) * startup_median, 2)
+        startup_leaf = {
+            "fix_key": "per-invocation-startup",
+            "unit_label": (
+                f"{count} serial {profile_name} iterations each launch a fresh "
+                f"process; median startup is {startup_median:g}s of a "
+                f"{iteration_median:g}s iteration"
+            ),
+            "magnitude": {"label": "modeled repeated process startup",
+                          "value": modeled, "unit": "s"},
+            "deeper": [],
+            "evidence": [
+                *measurements[0],
+                (f"{count} measured intervals: median boundary-to-work "
+                 f"{startup_median:g}s; median boundary-to-completion "
+                 f"{iteration_median:g}s"),
+            ],
+            "search": ["process boundary", "startup", "run concurrently"],
+            "iteration_count": count,
+            "startup_median_s": round(startup_median, 2),
+            "iteration_median_s": round(iteration_median, 2),
+            "modeled_saving_s": modeled,
+        }
+        break
+    if startup_leaf is not None:
+        return startup_leaf
+    # --- M: isolated tests in one file wait on the same fixed timer ------------
     # This is narrower than the shell-loop detector below. Four tests in ONE file
     # must each carry an explicit, distinct schema/database/prefix marker inside
     # its own timestamped interval. Similar runtimes then identify a fixed wait
@@ -3293,6 +3600,7 @@ def _parse_log(text: str,
         when = _cache_path_stamp(stamp)
         if sep and when is not None:
             stamped_tests.append((when, message.strip(), raw.strip(), stamp))
+    isolated_test_leaf: dict[str, Any] | None = None
     starts = [(i, when, m.group("file"), m.group("node"), raw)
               for i, (when, message, raw, _stamp) in enumerate(stamped_tests)
               if (m := isolated_start.match(message))]
@@ -3335,7 +3643,7 @@ def _parse_log(text: str,
                     - starts[0][1]).total_seconds()
             if (summed >= 120 and max(durations) <= min(durations) * 1.05
                     and span <= summed * 1.05 + 1):
-                return {
+                isolated_test_leaf = {
                     "fix_key": "test-isolated-serial",
                     "unit_label": f"{len(starts)} isolated tests in one file run "
                                   "strictly in sequence on a near-identical timer",
@@ -3344,7 +3652,152 @@ def _parse_log(text: str,
                     "evidence": evidence[:4],
                     "search": ["schema", "concurrent", "shared state"],
                 }
-    # --- M: one shell runner invokes many test files one after another ----------
+    # Real pytest ``-v`` output reports each node and outcome on one progress
+    # line. GitHub's runner timestamp makes consecutive completions measurable;
+    # the timestamped invocation is the first test's lower bound. Keep the same
+    # positive isolation requirement as the legacy split START/PASS form.
+    pytest_done = re.compile(
+        r"^(?P<node>(?P<file>\S+\.py)::\S+)\s+"
+        r"(?:PASSED|OK)\b(?:\s+\[\s*\d+%\])?",
+        re.IGNORECASE,
+    )
+    pytest_command = re.compile(r"(?:^|\s)(?:python\s+-m\s+)?pytest\b.*(?:^|\s)-v\b",
+                                re.IGNORECASE)
+    completions = [
+        (i, when, m.group("file"), m.group("node"), raw)
+        for i, (when, message, raw, _stamp) in enumerate(stamped_tests)
+        if (m := pytest_done.match(message))
+    ]
+    if (len(completions) >= 4
+            and len({row[2] for row in completions}) == 1
+            and len({row[3] for row in completions}) == len(completions)):
+        command = next(
+            ((i, when, raw) for i, (when, message, raw, _stamp)
+             in enumerate(stamped_tests[:completions[0][0]])
+             if pytest_command.search(message)),
+            None,
+        )
+        interval_markers: list[str] = []
+        if command is not None:
+            previous_line = command[0]
+            previous_when = command[1]
+            for line_i, completed_when, _file, _node, _raw in completions:
+                found = {
+                    (match.group("assigned") or match.group("created")).casefold()
+                    for marker_when, message, _marker_raw, _marker_stamp
+                    in stamped_tests[previous_line + 1:line_i]
+                    if previous_when <= marker_when <= completed_when
+                    if (match := isolation_marker.search(message))
+                }
+                if len(found) != 1:
+                    interval_markers = []
+                    break
+                interval_markers.append(next(iter(found)))
+                previous_line = line_i
+                previous_when = completed_when
+        if (command is not None and len(interval_markers) == len(completions)
+                and len(set(interval_markers)) == len(interval_markers)):
+            boundaries = [command[1], *(row[1] for row in completions)]
+            durations = [
+                (boundaries[i + 1] - boundaries[i]).total_seconds()
+                for i in range(len(completions))
+            ]
+            # The command timestamp precedes collection and setup, so it is
+            # only a lower bound for test one. Later completion gaps are the
+            # comparable per-test timers.
+            comparable = durations[1:]
+            if (min(durations) > 0 and sum(comparable) >= 120
+                    and max(comparable) <= min(comparable) * 1.05):
+                isolated_test_leaf = {
+                    "fix_key": "test-isolated-serial",
+                    "unit_label": f"{len(completions)} isolated pytest tests in one file "
+                                  "run strictly in sequence on a near-identical timer",
+                    "magnitude": None,
+                    "deeper": [],
+                    "evidence": [command[2], completions[0][4], completions[-1][4]],
+                    "search": ["pytest -v", "schema", "concurrent", "shared state"],
+                    "test_count": len(completions),
+                }
+
+    # Vitest verbose lines carry their own duration. Tests in one file are
+    # sequential unless explicitly declared concurrent. Static scan facts prove
+    # that every named test owns a distinct schema/prefix; the job log need not
+    # print application setup details merely to make this detector work.
+    vitest_done = re.compile(
+        r"^[\s✓✔··]*"
+        r"(?P<file>\S+\.(?:test|spec)\.[cm]?[jt]sx?)\s+>\s+(?P<title>.+?)\s+"
+        r"(?P<duration>\d+(?:\.\d+)?)\s*(?P<unit>ms|s)\s*$",
+        re.IGNORECASE,
+    )
+    vitest_rows: list[tuple[float, str, str, datetime, str]] = []
+    vitest_started = next(
+        (when for when, message, _raw, _stamp in stamped_tests
+         if re.match(r"^RUN\s+v?\d", message, re.IGNORECASE)),
+        None,
+    )
+    for when, message, raw, _stamp in stamped_tests:
+        match = vitest_done.match(message)
+        if match is None:
+            continue
+        duration = float(match.group("duration"))
+        if match.group("unit").casefold() == "ms":
+            duration /= 1000.0
+        test_name = match.group("title").rsplit(" > ", 1)[-1].strip()
+        vitest_rows.append((duration, match.group("file"), raw, when, test_name))
+    count_matches = [
+        int(match.group(1))
+        for _when, message, _raw, _stamp in stamped_tests
+        if (match := re.search(r"\b(\d+)\s+tests?\s+passed\b", message,
+                               re.IGNORECASE))
+    ]
+    by_file: dict[str, list[tuple[float, str, datetime, str]]] = {}
+    for duration, test_file, raw, when, test_name in vitest_rows:
+        by_file.setdefault(test_file, []).append((duration, raw, when, test_name))
+    source_isolation = (iso or {}).get("isolated_test_files") or {}
+    for test_file, rows in by_file.items():
+        markers = source_isolation.get(test_file.removeprefix("./")) or {}
+        matched_markers = [markers.get(row[3]) for row in rows]
+        if (any(marker is None for marker in matched_markers)
+                or len(set(str(marker).casefold() for marker in matched_markers))
+                != len(rows)):
+            continue
+        measured_span = ((max(row[2] for row in rows) - vitest_started).total_seconds()
+                         if vitest_started is not None else 0.0)
+        summed_runtime = sum(row[0] for row in rows)
+        if not (summed_runtime * 0.95 <= measured_span <= summed_runtime * 1.2 + 1):
+            continue
+        if count_matches and max(count_matches) != len(rows):
+            continue
+        completion_order = sorted(rows, key=lambda row: row[2])
+        if any(
+            current[2] - timedelta(seconds=current[0])
+            < previous[2] - timedelta(seconds=1)
+            for previous, current in zip(completion_order, completion_order[1:])
+        ):
+            continue
+        ordered = sorted(rows, key=lambda row: row[0], reverse=True)
+        cohort = ordered[:4]
+        durations = [row[0] for row in cohort]
+        if (len(cohort) == 4 and min(durations) > 0 and sum(durations) >= 120
+                and max(durations) <= min(durations) * 1.05):
+            isolated_test_leaf = {
+                "fix_key": "test-isolated-serial",
+                "unit_label": f"{len(cohort)} long isolated Vitest tests in one file "
+                              "run strictly in sequence on a near-identical timer",
+                "magnitude": None,
+                "deeper": [],
+                "evidence": [
+                    f"source proof: {test_file} maps every logged test to a distinct "
+                    "schema/prefix setup call",
+                    *(row[1] for row in cohort[:2]),
+                ],
+                "search": [test_file, "describe.concurrent", "maxConcurrency"],
+                "test_count": max(count_matches) if count_matches else len(rows),
+                "isolation_basis": "test source",
+            }
+    if isolated_test_leaf is not None:
+        return isolated_test_leaf
+    # --- N: one shell runner invokes many test files one after another ----------
     # This stays ahead of the image-build leaf below. Each admitted invocation
     # needs a timestamped completion
     # before the next invocation starts. That proves serial execution rather than
@@ -3855,22 +4308,53 @@ _FIX_META: dict[str, dict[str, Any]] = {
                    "jobs by directory. Keep the full test count and (if present) a "
                    "complete merged coverage report; re-measure the step.",
     },
+    "per-invocation-startup": {
+        "cause": "At least ten timestamped iterations each launch a fresh process. "
+                 "A declared tool boundary, first-work line and completion line show "
+                 "strictly serial execution, and measured startup is at least half of "
+                 "the median iteration.",
+        "look": "`{wf}` and the command that emits the named process boundaries — "
+                "identify which setup is repeated in every process and whether one "
+                "long-lived process can perform the same complete set of checks.",
+        "constraints": "Preserve every case and failure. Prove isolation adversarially: "
+                       "put a deliberately broken iteration at several positions and "
+                       "confirm each position still fails the job, then add a state-leak "
+                       "canary that fails if one iteration contaminates the next. The "
+                       "modeled saving removes only repeated startup after the first. "
+                       "Running iterations concurrently is an alternative use of those "
+                       "same seconds, so never add both savings. Convert one suite at a "
+                       "time, compare the old and new paths over real pull-request "
+                       "traffic, and permanently retain real subprocess coverage for "
+                       "argument parsing, exit codes, stream wiring, signals and "
+                       "process-boundary isolation.",
+        "docs": ["OPT85 in the ci-speedup catalog — reuse a process or measure safe "
+                 "iteration concurrency"],
+        "deliver": "Reuse one process for the serial iterations when the tool supports "
+                   "it, or run proven-independent iterations concurrently with a measured "
+                   "worker cap. Keep the full case count, the broken-position checks and "
+                   "the state-leak canary. Roll out one suite at a time, compare old and "
+                   "new paths on real pull requests, keep boundary-dependent subprocess "
+                   "tests permanently, then re-measure startup and total iteration wall.",
+    },
     "test-isolated-serial": {
         "cause": "Four or more tests in the same file run strictly one after another "
-                 "for near-identical durations, and each interval logs its own unique "
-                 "schema, database or prefix. That positive isolation evidence makes "
+                 "for near-identical durations, and the log or scanned test source shows "
+                 "that each owns a unique schema, database or prefix. That positive "
+                 "isolation evidence makes "
                  "the repeated fixed wait a candidate for safe in-job concurrency.",
-        "look": "`{wf}` and the named test file — confirm every test owns the logged "
-                "isolation marker, then look for any remaining shared state: fixed ports, "
+        "look": "`{wf}` and the named test file — confirm every test owns the named "
+                "log or source isolation evidence, then look for any remaining shared state: fixed ports, "
                 "process globals, filesystem paths, queues, clocks or ordering assumptions.",
-        "constraints": "The logged marker proves only the named schema/database/prefix "
+        "constraints": "The positive marker proves only the named schema/database/prefix "
                        "is unique. Adversarially test the other shared state, preserve the "
                        "same test count and failure propagation, and keep any genuinely "
                        "exclusive tests in a serial lane.",
         "docs": ["OPT88 in the ci-speedup catalog — measure in-job test concurrency "
                  "before choosing a worker count"],
-        "deliver": "Run the isolated tests concurrently inside this one job with a "
-                   "measured worker cap, check that shared state is not reused, preserve the "
+        "deliver": "Run the isolated tests concurrently inside this one job (for Vitest, "
+                   "prefer a reviewed `describe.concurrent` group and start from its default "
+                   "`maxConcurrency` of 5) with a measured worker cap, check that shared state "
+                   "is not reused, preserve the "
                    "full test set and failures, and re-measure wall clock and runner minutes.",
     },
     "test-loop-serial": {
@@ -3980,6 +4464,30 @@ _FIX_META: dict[str, dict[str, Any]] = {
                    "re-lint changed files and the updated cache "
                    "is saved. Verify a deliberately-introduced lint error still fails CI "
                    "(the cache must not hide it) and re-measure the lint step.",
+    },
+    "cargo-double-compile": {
+        "cause": "Two separate Cargo steps compile the same checked-out crate with the "
+                 "same profile and observable artifact context. The second step's "
+                 "measured `Finished` wall is an upper bound on the repeated compilation, "
+                 "not a claim that every operation in that step is removable.",
+        "look": "`{wf}` and every Cargo command in this job — compare each command's "
+                "`-p`/`--package`, `--features`, target and profile selection, then trace "
+                "why the second command does not reuse the first command's artifacts.",
+        "constraints": "Keep the exact test and build targets, feature combinations and "
+                       "failure propagation. Do not merge commands whose profiles or target "
+                       "triples differ, and do not remove a compile until the later test "
+                       "target demonstrably reuses the intended artifact.",
+        "docs": ["Cargo build cache — shared target directory and configuration: "
+                 "https://doc.rust-lang.org/cargo/reference/build-cache.html",
+                 "Cargo package selection: "
+                 "https://doc.rust-lang.org/cargo/reference/pkgid-spec.html"],
+        "deliver": "Preserve every intended package, feature and test target. Where the "
+                   "commands are meant to share artifacts, combine their `-p`/`--package` "
+                   "selections in one Cargo invocation or make their `--features`, target "
+                   "directory, toolchain and compiler flags consistent. If distinct feature "
+                   "or platform coverage is intentional, keep both builds. Confirm every "
+                   "original test target still builds and runs, keep the full test count and "
+                   "failures, and re-measure both steps.",
     },
     "cargo-test-shard": {
         "cause": "The job runs the whole test suite through the standard `cargo test` "
@@ -4124,6 +4632,36 @@ _FIX_META: dict[str, dict[str, Any]] = {
                    "re-measure the step.",
     },
 }
+
+
+def _fix_meta_for_leaf(leaf: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return claim-safe catalog guidance for one parsed log leaf."""
+    meta = _FIX_META.get(str((leaf or {}).get("fix_key", "")))
+    if not meta:
+        return None
+    resolved = dict(meta)
+    if (str((leaf or {}).get("fix_key") or "") == "emulated-image-compile"
+            and (leaf or {}).get("builder_topology_unconfirmed") is True):
+        resolved.update({
+            "cause": (
+                "Foreign-platform compilation dominates the measured cold build, "
+                "but the builder topology was not printed. The evidence does not "
+                "establish whether that work ran under emulation or on a native node."
+            ),
+            "look": (
+                "Run `docker buildx inspect --bootstrap` first and record every node "
+                "and platform. Then trace the foreign-platform compile stage in `{wf}` "
+                "and its repository-local Dockerfile."
+            ),
+            "deliver": (
+                "Start with `docker buildx inspect --bootstrap`. If the builder has no "
+                "native node for the foreign platform, compare a build-platform stage "
+                "or explicit cross-compilation against the same workload. If a native "
+                "node exists, investigate that node and the cold layer instead. Do not "
+                "claim emulation or a saving until the topology is confirmed."
+            ),
+        })
+    return resolved
 
 
 def _addressable_plain(pole: dict[str, Any], candidates: list[dict[str, Any]]) -> str:
@@ -4346,6 +4884,44 @@ def _timing_spread_prompt_lines(pole: dict[str, Any]) -> list[str]:
     return [f"- {s}"] if s else []
 
 
+_SHARD_FLOOR_VERSION = 1
+
+
+def _shard_floor_sentence(pole: dict[str, Any]) -> str:
+    """The descriptive fixed-floor sentence stamped by collection."""
+    stamp = pole.get("shard_floor")
+    if not isinstance(stamp, dict) or stamp.get("version") != _SHARD_FLOOR_VERSION:
+        return ""
+    floor = _num(stamp.get("floor_s"))
+    divided = _num(stamp.get("divided_work_s"))
+    shards = stamp.get("n_shards")
+    parts = [str(item) for item in stamp.get("fixed_parts") or []
+             if str(item) in {"checkout", "setup", "install", "browser", "build"}]
+    if floor is None or divided is None or not isinstance(shards, int) or shards < 2:
+        return ""
+    fixed = f" ({', '.join(parts)})" if parts else ""
+    sentence = (
+        f"Each of the {shards} shards pays ~{_clock(floor)}{fixed} before its "
+        f"first unit of divided work; the remaining ~{_clock(divided)} is the "
+        "work that splits.")
+    in_step = _num(stamp.get("in_step_floor_s"))
+    if in_step is not None and in_step > 0:
+        sentence += (
+            f" The divided-work step also spends ~{_clock(in_step)} compiling or "
+            "collecting before its first result.")
+    return sentence + " Observed on the sampled runs, not a shard-count recommendation."
+
+
+def _shard_floor_report_lines(pole: dict[str, Any]) -> list[str]:
+    sentence = _shard_floor_sentence(pole)
+    return [f"_{sentence}_", ""] if sentence else []
+
+
+def _shard_floor_prompt_lines(pole: dict[str, Any]) -> list[str]:
+    sentence = _shard_floor_sentence(pole)
+    return [f"- {sentence}"] if sentence else []
+
+
 def _advisory_prompt_lines(pole: dict[str, Any]) -> list[str]:
     """The advisory-job bullet for the agent prompt's THE GATE section, or `[]`.
 
@@ -4408,13 +4984,12 @@ def _build_agent_prompt(leaf: dict[str, Any] | None, pole: dict[str, Any],
     (OPT70–75, rendered AS the pole) or a DATA-DRIVEN catalog pattern (e.g. OPT24,
     rendered in the 'Also noticed' appendix) - pass those finding lists through so the
     generic prompt names the matched pattern instead of falsely claiming no catalog match."""
-    meta = _FIX_META.get(str((leaf or {}).get("fix_key", "")))
+    meta = _fix_meta_for_leaf(leaf)
     if not meta:
         return _build_generic_agent_prompt(
             pole, candidates, run_url, repo, sha, gate_count, npop, timeline,
             structural, data_driven, cs=cs, cross_run_rendered=cross_run_rendered,
             opt79=opt79, opt82=opt82)
-    meta = dict(meta)
     if (str((leaf or {}).get("fix_key") or "") == "buildx-no-cache"
             and (leaf or {}).get("whole_context_before_slowest") is True):
         meta.update({
@@ -4459,6 +5034,7 @@ def _build_agent_prompt(leaf: dict[str, Any] | None, pole: dict[str, Any],
            f"- {gate}",
            *_advisory_prompt_lines(pole),
            *_timing_spread_prompt_lines(pole),
+           *_shard_floor_prompt_lines(pole),
            ""]
 
     fix_key = str((leaf or {}).get("fix_key", ""))
@@ -4619,6 +5195,7 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
             f"- {gate}",
             *_advisory_prompt_lines(pole),
             *_timing_spread_prompt_lines(pole),
+            *_shard_floor_prompt_lines(pole),
             "",
             "WHAT IS MISSING",
             f"- {reason}" if reason else (
@@ -4677,6 +5254,7 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
            f"- {gate}",
            *_advisory_prompt_lines(pole),
            *_timing_spread_prompt_lines(pole),
+           *_shard_floor_prompt_lines(pole),
            ""]
     if struct_pats:
         out += [_RELOCATION_RUNNER_MINUTE_LINE, ""]
@@ -4917,6 +5495,9 @@ def _llm_agent_prompt(body: str, pole: dict[str, Any] | None = None) -> str:
     _ts = _timing_spread_sentence(_as_dict(pole))
     if _ts and _ts not in body:
         body = _ts + "\n\n" + body
+    _sf = _shard_floor_sentence(_as_dict(pole))
+    if _sf and _sf not in body:
+        body = _sf + "\n\n" + body
     # The no-weakening rail is the renderer's too, for the same reason the disclaimer
     # is: the gap-fill body is LLM-authored, so the one rule the hand-off cannot afford
     # to have paraphrased away is appended here, not left to the author. The canonical
@@ -5835,10 +6416,19 @@ def _provenance_block(doc: dict[str, Any], repo: str, captured_at: str) -> list[
                    f"floor — {_shown}{_more}. They can't hold the merge pole, so their "
                    "jobs weren't fetched (saving calls); their off-path hygiene/queue "
                    "figures are run-list-only, not job-level.")
-    gate = (f"> - **Which checks gate (the critical-path ordering):** measured from **{spr}/{tgt} "
-            "sampled PRs**")
+    stop_reason = str(cp.get("sample_stop_reason") or (
+        "target_met" if complete else "candidates_exhausted")).replace("_", " ")
+    gate = (f"> - **Which checks gate (the critical-path ordering):** measured from "
+            f"**{spr}/{tgt} sampled PRs** — **{spr} of {tgt} PRs sampled: "
+            f"{stop_reason}**")
     if not complete:
-        gate += (" — ⚠️ **short sample** (fewer recent PRs ran the full required suite), "
+        short_reasons = {
+            "fetch failures": "some candidate or check-run history was unreadable",
+            "page cap": "the bounded candidate-page walk stopped before reaching the target",
+            "era door": "older PRs from a different workflow configuration were excluded",
+            "candidates exhausted": "the visible candidate history contained too few qualifying PRs",
+        }
+        gate += (f" — ⚠️ **short sample** ({short_reasons.get(stop_reason, 'the sample target was not reached')}), "
                  "so the gate ordering here is a floor, not the full picture")
     elif (evaluated and spr and evaluated >= spr * 3
           and not cp.get("required_suite_unsatisfiable")):
@@ -6223,9 +6813,9 @@ def _cache_health_block(cache_dist: dict[str, Any] | None) -> list[str]:
 # measured). Mirrors the `_apply_cache_dist` precedent (reframe a leaf off a re-derivable
 # measured fact); verify_report re-derives the SAME category agreement from findings.json.
 
-# fix_key -> the `collect_runs._step_category` bin the leaf's fix addresses. Kept coupled to
-# the engine taxonomy AND verify_report's mirror by test_verify_report_self.
-_LEAF_STEP_CATEGORY: dict[str, str] = {
+# fix_key -> the `collect_runs._step_category` bin(s) the leaf's fix addresses. Kept
+# coupled to the engine taxonomy AND verify_report's mirror by test_verify_report_self.
+_LEAF_STEP_CATEGORY: dict[str, str | frozenset[str]] = {
     "dependency-cache": "install",
     "cache-effective-path-mismatch": "install",
     "prisma-migrate-once": "test",
@@ -6234,10 +6824,12 @@ _LEAF_STEP_CATEGORY: dict[str, str] = {
     "vitest-import-bound": "test",
     "playwright-parallel": "test",
     "pytest-no-xdist": "test",
+    "per-invocation-startup": "test",
     "test-isolated-serial": "test",
     "test-loop-serial": "test",
     "vendored-lib-build": "build",
     "emulated-image-compile": "build",
+    "cargo-double-compile": frozenset({"build", "scan", "test"}),
     "cargo-test-shard": "test",
     "benchmark-serial-reruns": "test",
     "android-emulator-shard": "test",
@@ -6278,13 +6870,14 @@ def _offcategory_leaf(leaf: dict[str, Any] | None, pole: dict[str, Any]) -> bool
     if not leaf:
         return False
     fk = str(leaf.get("fix_key", ""))
-    cat = _LEAF_STEP_CATEGORY.get(fk)
-    if cat is None:
+    category = _LEAF_STEP_CATEGORY.get(fk)
+    if category is None:
         return False
+    categories = {category} if isinstance(category, str) else category
     dom_cat = pole.get("dominant_category")
     if not isinstance(dom_cat, str) or not dom_cat:
         return False
-    if cat != dom_cat:
+    if dom_cat not in categories:
         return True
     tok = _LEAF_DOMINANT_STEP_TOKEN.get(fk)
     if tok is not None:
@@ -6339,7 +6932,8 @@ def _offcategory_note_block(leaf: dict[str, Any], pole: dict[str, Any]) -> list[
     dom_step = _fence_safe(str(pole.get("dominant_step") or "the dominant step"))
     dom_cat = str(pole.get("dominant_category") or "")
     fk = str(leaf.get("fix_key", ""))
-    cat = _LEAF_STEP_CATEGORY.get(fk, "")
+    category = _LEAF_STEP_CATEGORY.get(fk, "")
+    cat = category if isinstance(category, str) else "/".join(sorted(category))
     out = [_OFFCATEGORY_MARKER, "",
            "**🔎 Secondary observation — not the measured cause.** A log detector matched "
            f"`{fk}` (a `{cat}` fix) in this job's log, but the pole's measured dominant work "
@@ -7744,7 +8338,10 @@ def _metadata_table(doc: dict[str, Any], repo: str) -> list[str]:
                      f"{_count_noun(runs, 'run')} / {_count_noun(jobs, 'job')}{wf_part}"))
     rows.append(("Runs window", _run_window(str(cutoff) if cutoff else scanned)))
     if isinstance(spr, int) and isinstance(tgt, int):
-        rows.append(("PR gate sample", f"{spr} / {tgt} PRs"))
+        reason = str(cp.get("sample_stop_reason") or (
+            "target_met" if cp.get("sample_complete", True)
+            else "candidates_exhausted")).replace("_", " ")
+        rows.append(("PR gate sample", f"{spr} of {tgt} PRs sampled: {reason}"))
     if skill.startswith("installed:"):
         # Content-hash provenance for an installed skill copy (issue #2): not a
         # commit, so a plain identity string with NO commit permalink to fabricate.
@@ -8761,13 +9358,17 @@ def _cache_sizing_guard_block(doc: dict[str, Any] | None) -> list[str]:
                    if isinstance(v, dict) and v.get("status") != "passed" and v.get("detail")]
         if guard.get("status") == "passed":
             details = ["all three cache sizing checks passed"]
+        credited = ((isinstance(finding.get("wall_clock_p50_s"), (int, float))
+                     and finding.get("wall_clock_p50_s") > 0)
+                    or (isinstance(finding.get("runner_min_saving"), (int, float))
+                        and finding.get("runner_min_saving") > 0))
         rows.append((str(finding.get("title") or finding.get("pattern") or "Cache opportunity"),
-                     str(guard.get("status") or "not_measured"), details))
+                     str(guard.get("status") or "not_measured"), details, credited))
     if not rows:
         return []
     out = ["---", "", "## Cache sizing checks", ""]
-    for title, status, details in rows:
-        label = "credited" if status == "passed" else "check this - uncredited"
+    for title, status, details, credited in rows:
+        label = "credited" if status == "passed" and credited else "check this - uncredited"
         out += [f"- **{_clean_label(title)}** - {label}: "
                 + "; ".join(_clean_label(detail) for detail in details)]
     out.append("")
@@ -9763,6 +10364,30 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
             f"Where: {locs}."]
     if ev:
         body.append(f"What ci-speedup saw: {ev}")
+    if wait and pat == "OPT43":
+        comparisons = [
+            member.get("queue_label_comparison")
+            for member in members
+            if isinstance(member.get("queue_label_comparison"), dict)
+        ]
+        named = next((item for item in comparisons
+                      if not item.get("unavailable")), None)
+        if named is not None:
+            body.append(
+                "Runner-label comparison: the affected label "
+                f"`{named.get('slow_label')}` queued at p50 "
+                f"{_clock(_num(named.get('slow_queue_p50_s')) or 0)}, while "
+                f"`{named.get('lower_label')}` queued at p50 "
+                f"{_clock(_num(named.get('lower_queue_p50_s')) or 0)}. Investigate "
+                "the measured label difference; OPT81 separately owns same-job "
+                "runner-speed comparisons."
+            )
+        else:
+            body.append("Runner-label comparison: comparison unavailable.")
+        body.append(
+            "Queue wait alone does not show that fewer jobs or shards would help; "
+            "preserve the job graph and verification coverage while investigating."
+        )
     if opt9_measure and len(opt9_measure) != len(members):
         body.append(
             "Compiler build-state and generated-output occurrences in this group "
@@ -10049,6 +10674,65 @@ def _workflow_lane_line(ms: list[dict[str, Any]]) -> str | None:
     return line
 
 
+def _queue_runner_label_lines(finding: dict[str, Any]) -> list[str]:
+    """Render OPT43's descriptive per-label queue/work distribution."""
+    rows = [row for row in (finding.get("queue_by_runner_label") or [])
+            if isinstance(row, dict) and row.get("runner_label")]
+    if not rows:
+        return []
+    workflow = _flatten_cell(str(finding.get("workflow_file") or "unknown workflow"))
+    out = [
+        f"**Runner-label queue/work for `{workflow}` "
+        "(one maximum per workflow run and runner label):**",
+        "",
+        "| Runner label | Queue runs | Queue p50 | Queue p95 | Work runs | Work p50 | Censored |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    def clock(value: object) -> str:
+        number = _num(value)
+        return _clock(number) if number is not None else "-"
+
+    for row in sorted(rows, key=lambda item: str(item.get("runner_label"))):
+        out.append(
+            f"| `{_flatten_cell(str(row.get('runner_label') or ''))}` | "
+            f"{int(_num(row.get('n')) or 0)} | "
+            f"{clock(row.get('queue_p50_s'))} | "
+            f"{clock(row.get('queue_p95_s'))} | "
+            f"{int(_num(row.get('work_n')) or 0)} | "
+            f"{clock(row.get('work_p50_s'))} | "
+            f"{int(_num(row.get('censored_n')) or 0)} |"
+        )
+    censored = sum(int(_num(row.get("censored_n")) or 0) for row in rows)
+    out += ["", "Each workflow run contributes at most one observation per label; "
+            "when several jobs use that label, the table uses that run's maximum."]
+    if censored:
+        out.append(
+            f"{censored} run-label observation{'s' if censored != 1 else ''} "
+            "include a job cancelled before runner pickup; runnable-to-cancelled "
+            "time is a censored lower bound on queue wait and is excluded from "
+            "the exact percentiles."
+        )
+    return out
+
+
+def _queue_runner_label_comparison_lines(finding: dict[str, Any]) -> list[str]:
+    comparison = finding.get("queue_label_comparison")
+    jobs = [str(job) for job in (finding.get("affected_jobs") or []) if str(job)]
+    job = _flatten_cell(jobs[0] if jobs else str(finding.get("job") or "unknown job"))
+    if isinstance(comparison, dict) and not comparison.get("unavailable"):
+        slow = _flatten_cell(str(comparison.get("slow_label") or ""))
+        lower = _flatten_cell(str(comparison.get("lower_label") or ""))
+        return [
+            f"**Runner-label comparison for `{job}`:** `{slow}` queued at p50 "
+            f"{_clock(_num(comparison.get('slow_queue_p50_s')) or 0)}, while "
+            f"`{lower}` queued at p50 "
+            f"{_clock(_num(comparison.get('lower_queue_p50_s')) or 0)}. "
+            "This is descriptive runner-label evidence; OPT81 separately owns same-job "
+            "runner-speed comparisons.",
+        ]
+    return [f"**Runner-label comparison for `{job}`:** comparison unavailable."]
+
+
 def _queue_wait_block(findings: list[dict[str, Any]], catalog_url: str,
                       shallow_note: str = "",
                       commit_clock: dict[str, Any] | None = None) -> list[str]:
@@ -10143,6 +10827,16 @@ def _queue_wait_block(findings: list[dict[str, Any]], catalog_url: str,
             lines.append(lane_line)
         if ev:
             lines.append(f"**Evidence:** {_flatten_cell(ev)}")
+        by_workflow: dict[str, list[dict[str, Any]]] = {}
+        for member in ms:
+            if member.get("queue_by_runner_label"):
+                by_workflow.setdefault(str(member.get("workflow_file") or ""), []).append(member)
+        for workflow_members in by_workflow.values():
+            label_lines = _queue_runner_label_lines(workflow_members[0])
+            if label_lines:
+                lines += ["", *label_lines]
+            for member in workflow_members:
+                lines += ["", *_queue_runner_label_comparison_lines(member)]
         lines += [f"**Catalog (background + fix recipe):** {url}", "",
                   *_hygiene_prompt(pat, title, ms, url, wait=True), "", "</details>", ""]
     return lines
@@ -14529,6 +15223,7 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         # advisory line it is plain prose rather than a `Claim` - and it feeds nothing
         # downstream (never the Bottom line, never a saving).
         out += _timing_spread_report_lines(p)
+        out += _shard_floor_report_lines(p)
         if _agg:
             # AGGREGATION GATE (issue #1): the section ENDS at the honest pointer. No
             # per-step drill and no "capture timing, then optimize this step" agent prompt

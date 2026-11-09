@@ -1142,7 +1142,8 @@ def test_sampling_provenance_fields_locks_diag_to_doc_key_mapping():
     # sample_fetched to the wrong diag key, say) would silently zero a coverage
     # caveat — and nothing else fails, since collect() makes live gh calls and is
     # never exercised in the suite. Lock the mapping on the pure helper.
-    from collect_runs import _sampling_provenance_fields, _select_repr_shas
+    from collect_runs import (_PR_CANDIDATE_PAGE_CAP,
+                              _sampling_provenance_fields, _select_repr_shas)
     diag = {"target": 20, "kept": 16, "fetched": 160, "fetch_failures": 3,
             "complete": False, "required_suite_scoped": True,
             "required_suite_unsatisfiable": False,
@@ -1152,6 +1153,13 @@ def test_sampling_provenance_fields_locks_diag_to_doc_key_mapping():
         "sample_complete": False,
         "sample_fetch_failures": 3,
         "sample_fetched": 160,
+        "sample_stop_reason": "candidates_exhausted",
+        "sample_candidate_pages_fetched": 1,
+        "sample_candidate_page_cap": _PR_CANDIDATE_PAGE_CAP,
+        "sample_candidate_pages_exhausted": True,
+        "sample_candidate_page_fetch_failures": 0,
+        "sample_candidate_era_door": False,
+        "sample_candidate_selection_limited": False,
         "required_suite_scoped": True,
         "required_suite_unsatisfiable": False,
         "required_checks_unobservable": ["Devin Review"],
@@ -1165,6 +1173,13 @@ def test_sampling_provenance_fields_locks_diag_to_doc_key_mapping():
     mapped = _sampling_provenance_fields(real_diag)
     assert set(mapped) == {"sample_target", "sample_complete",
                            "sample_fetch_failures", "sample_fetched",
+                           "sample_stop_reason",
+                           "sample_candidate_pages_fetched",
+                           "sample_candidate_page_cap",
+                           "sample_candidate_pages_exhausted",
+                           "sample_candidate_page_fetch_failures",
+                           "sample_candidate_era_door",
+                           "sample_candidate_selection_limited",
                            "required_suite_scoped", "required_suite_unsatisfiable",
                            "required_checks_unobservable"}
     assert mapped["sample_fetched"] == real_diag["fetched"]
@@ -1190,6 +1205,25 @@ def test_select_repr_shas_promotes_recency_when_required_suite_unsatisfiable():
     assert diag["required_suite_scoped"] is False         # the final sample is recency-scoped
     assert diag["required_checks_unobservable"] == []     # case d: all-external ⇒ subset re-select never fires
     assert diag["kept"] == 2
+    assert diag["complete"] is False
+
+
+def test_select_repr_shas_distinguishes_limit_from_exact_exhaustion():
+    from collect_runs import _select_repr_shas
+
+    checks = lambda _sha: {"optional": 1.0}
+    limited = {f"sha-{i}": f"2026-06-{(i % 28) + 1:02d}T00:00:{i:03d}Z"
+               for i in range(161)}
+    _shas, _rows, _durs, diag = _select_repr_shas(
+        limited, checks, frozenset({"gate"}), 20)
+    assert diag["selection_limited"] is True
+    assert diag["stop_reason"] == "page_cap"
+
+    exact = dict(list(limited.items())[:160])
+    _shas, _rows, _durs, diag = _select_repr_shas(
+        exact, checks, frozenset({"gate"}), 20)
+    assert diag["selection_limited"] is False
+    assert diag["stop_reason"] == "candidates_exhausted"
 
 
 def test_select_repr_shas_excludes_status_only_required_check_from_suite_test():

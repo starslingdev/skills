@@ -499,8 +499,9 @@ def test_leaf_category_map_stays_coupled_to_the_engine():
     cr = _load_collect_runs()
     assert vr._VR_LEAF_STEP_CATEGORY == bp._LEAF_STEP_CATEGORY, "verifier mirror drifted from the engine map"
     valid = set(cr._SETUP_BUILD_CATEGORIES) | set(cr._PAYLOAD_CATEGORIES)
-    for fk, cat in bp._LEAF_STEP_CATEGORY.items():
-        assert cat in valid, (fk, cat)          # every leaf category is a real _step_category bin
+    for fk, category in bp._LEAF_STEP_CATEGORY.items():
+        categories = {category} if isinstance(category, str) else category
+        assert set(categories) <= valid, (fk, category)  # every category is a real bin
         assert fk in bp._FIX_META, fk           # every mapped fix_key is a real detector fix_key
     # Every detector fix_key that can crown a pole is categorized (no leaf escapes the guard).
     fix_keys = {m.group(1) for m in re.finditer(r'"fix_key":\s*"([^"]+)"',

@@ -8,7 +8,7 @@ not measured: lifecycle data was not collected
 | :--- | :--- |
 | **Audited commit** | [`abcdef1`](https://github.com/example/project/commit/abcdef1234567890) - file & line references are anchored to this tree |
 | **Runs window** | 2026-10-03 → 2026-11-02 (30-day window) |
-| **PR gate sample** | 4 / 4 PRs |
+| **PR gate sample** | 4 of 4 PRs sampled: target met |
 | **Audit** | ran 2026-11-02 · ci-speedup skill commit [`abcdef1`](https://github.com/starslingdev/skills/commit/abcdef1234567890) |
 
 > **Bottom line.** A typical PR waits **10m 00s** for all checks to finish. The biggest single measured win is **~4m 10s** off the slowest fixable check, `tests` - see [Long pole 1](#pole-1) for the drill-down to the biggest lever.
@@ -182,7 +182,7 @@ failure mode and how you have guarded it before shipping.
 > **Where this data comes from**
 >
 > - **Critical path + step P50:** the committed ci-speedup audit of `example/project`, scanned **2026-11-02** - P50 over **None runs / None jobs** across None workflows (latest runs at scan time).
-> - **Which checks gate (the critical-path ordering):** measured from **4/4 sampled PRs**.
+> - **Which checks gate (the critical-path ordering):** measured from **4/4 sampled PRs** - **4 of 4 PRs sampled: target met**.
 > - **Step internals + cross-run checks (the per-pole drill-downs):** the pole jobs' raw logs, fetched **2026-11-02T00:00:00Z** (the same capture as the critical-path audit above). Each drill-down is **one representative run** of that job - the one closest to its typical time (for a bimodal job, a representative of the slow mode the drill explains), linked + labelled per pole - and the **Cross-run check** validates the load-bearing magnitude (median + range) across several runs.
 
 | Source | Coverage | Used for |

@@ -1,5 +1,10 @@
 # Changelog
 
+- Break excessive queue wait down by runner label with per-run queue and work distributions, including censored jobs cancelled before pickup. Reports name a materially faster observed label without treating queue wait as evidence to reduce jobs or shards.
+- Detect the same checked-out Cargo crates being compiled in separate steps under the same observable artifact settings, report the second step's wall as an upper bound, and guide safe command consolidation without dropping package, feature, platform, or test coverage.
+- Fill a short pull-request gate sample from a bounded walk through recent run pages, and disclose whether the walk met its target, exhausted visible candidates, reached its page cap, crossed a workflow-configuration boundary, or encountered unreadable history.
+- Detect cache configurations that cannot produce a useful warm run, including mismatched restore prefixes, undersized or unpersisted compiler caches, erased Go caches, volatile BuildKit scopes, and ephemeral Dockerfile cache mounts. These checks stay uncredited until logs measure the miss and transfer cost; cache economics now exclude no-change reruns and count unread restored paths as pure cost.
+- Read timestamped pytest verbose progress and Vitest per-test durations when identifying long same-file tests that run serially. Vitest recommendations now require distinct source-level namespaces and name `describe.concurrent` with its default concurrency cap.
 - Require a readable classic branch-protection result before advising that a check move off pull requests.
 - Report the default-branch push count and mark infrequent post-merge lanes as rare.
 
@@ -16,6 +21,13 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-11-09** — Add resumable post-fix verification after an authorized push. It binds samples to the exact remote head, counts the completed automatic cohort first, discloses rerun cost before spending, reuses saved results, invalidates moved-head samples, and waits for three distinct pushes when cache changes make reruns unrepresentative.
+- **2026-11-09** — Add a conservative, read-only before/after engine for complete push cohorts. It binds fresh samples to one exact head and attempt, reports warm and cold timing separately, and withholds attribution when work, runners, triggered workflows, cache replay, or CI-only scope are not comparable.
+- **2026-11-09** — Detect repeated per-invocation process startup from timestamped, strictly serial pytest, Cargo test-binary, and structured verification boundaries. OPT85 reports the measured startup share and modeled repeated-startup saving, while retries, overlaps, progress output, and untimestamped logs fail closed.
+- **2026-11-08** — Expand the before/after measurement contract with separate queue and work deltas, work-parity evidence, runner and trigger comparability, cache-state guards, per-commit ratios, compute disclosures, exclusions, lane frequency, and a required negative control.
+- **2026-11-08** — Detect compilation in emulated containers when shell variables or GitHub expressions appear elsewhere in the command. Platform and architecture values remain resolved, while unrelated variables stay opaque to command parsing.
+- **2026-11-08** — Show each critical matrix leg's measured fixed floor and remaining divided work beside its observed timing spread. When a log exposes compilation or collection inside the divided-work step, report that in-step floor separately without recommending a shard count.
+- **2026-11-08** — Route dominant foreign-platform image compilation with no Buildx node listing to a topology check without crediting savings or claiming emulation. Inspected single-node builders retain the measured recommendation, while explicit multi-node builders still fail closed.
 - **2026-11-08** — Add stable `subject` identities to static findings, stable
   machine-readable `kind` values to scan coverage gaps, an
   `INSTANCE_GRANULAR` detector set, and an out-of-tree symlink refusal so the
