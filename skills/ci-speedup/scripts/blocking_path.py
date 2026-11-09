@@ -10029,16 +10029,16 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
                       if not item.get("unavailable")), None)
         if named is not None:
             body.append(
-                "Runner-pool comparison: the affected label "
+                "Runner-label comparison: the affected label "
                 f"`{named.get('slow_label')}` queued at p50 "
                 f"{_clock(_num(named.get('slow_queue_p50_s')) or 0)}, while "
                 f"`{named.get('lower_label')}` queued at p50 "
                 f"{_clock(_num(named.get('lower_queue_p50_s')) or 0)}. Investigate "
-                "the measured pool difference; OPT81 separately owns same-job "
+                "the measured label difference; OPT81 separately owns same-job "
                 "runner-speed comparisons."
             )
         else:
-            body.append("Runner-pool comparison: comparison unavailable.")
+            body.append("Runner-label comparison: comparison unavailable.")
         body.append(
             "Queue wait alone does not show that fewer jobs or shards would help; "
             "preserve the job graph and verification coverage while investigating."
@@ -10330,7 +10330,7 @@ def _workflow_lane_line(ms: list[dict[str, Any]]) -> str | None:
 
 
 def _queue_runner_label_lines(finding: dict[str, Any]) -> list[str]:
-    """Render OPT43's descriptive per-pool queue/work distribution."""
+    """Render OPT43's descriptive per-label queue/work distribution."""
     rows = [row for row in (finding.get("queue_by_runner_label") or [])
             if isinstance(row, dict) and row.get("runner_label")]
     if not rows:
@@ -10338,16 +10338,22 @@ def _queue_runner_label_lines(finding: dict[str, Any]) -> list[str]:
     out = [
         "**Runner-label queue/work (one maximum per workflow run and runner label):**",
         "",
-        "| Runner label | Runs | Queue p50 | Queue p95 | Work p50 |",
-        "| --- | ---: | ---: | ---: | ---: |",
+        "| Runner label | Queue runs | Queue p50 | Queue p95 | Work runs | Work p50 | Censored |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
+    def clock(value: object) -> str:
+        number = _num(value)
+        return _clock(number) if number is not None else "-"
+
     for row in sorted(rows, key=lambda item: str(item.get("runner_label"))):
         out.append(
             f"| `{_flatten_cell(str(row.get('runner_label') or ''))}` | "
             f"{int(_num(row.get('n')) or 0)} | "
-            f"{_clock(_num(row.get('queue_p50_s')) or 0)} | "
-            f"{_clock(_num(row.get('queue_p95_s')) or 0)} | "
-            f"{_clock(_num(row.get('work_p50_s')) or 0)} |"
+            f"{clock(row.get('queue_p50_s'))} | "
+            f"{clock(row.get('queue_p95_s'))} | "
+            f"{int(_num(row.get('work_n')) or 0)} | "
+            f"{clock(row.get('work_p50_s'))} | "
+            f"{int(_num(row.get('censored_n')) or 0)} |"
         )
     censored = sum(int(_num(row.get("censored_n")) or 0) for row in rows)
     out += ["", "Each workflow run contributes at most one observation per label; "
@@ -10355,8 +10361,9 @@ def _queue_runner_label_lines(finding: dict[str, Any]) -> list[str]:
     if censored:
         out.append(
             f"{censored} run-label observation{'s' if censored != 1 else ''} "
-            "include a job cancelled before it started; created-to-cancelled time is "
-            "a censored lower bound on queue wait."
+            "include a job cancelled before runner pickup; runnable-to-cancelled "
+            "time is a censored lower bound on queue wait and is excluded from "
+            "the exact percentiles."
         )
     comparison = finding.get("queue_label_comparison")
     if isinstance(comparison, dict) and not comparison.get("unavailable"):
@@ -10364,15 +10371,15 @@ def _queue_runner_label_lines(finding: dict[str, Any]) -> list[str]:
         lower = _flatten_cell(str(comparison.get("lower_label") or ""))
         out += [
             "",
-            f"**Runner-pool comparison:** `{slow}` queued at p50 "
+            f"**Runner-label comparison:** `{slow}` queued at p50 "
             f"{_clock(_num(comparison.get('slow_queue_p50_s')) or 0)}, while "
             f"`{lower}` queued at p50 "
             f"{_clock(_num(comparison.get('lower_queue_p50_s')) or 0)}. "
-            "This is descriptive pool evidence; OPT81 separately owns same-job "
+            "This is descriptive runner-label evidence; OPT81 separately owns same-job "
             "runner-speed comparisons.",
         ]
     else:
-        out += ["", "**Runner-pool comparison:** comparison unavailable."]
+        out += ["", "**Runner-label comparison:** comparison unavailable."]
     return out
 
 

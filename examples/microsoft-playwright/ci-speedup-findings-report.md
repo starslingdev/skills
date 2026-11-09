@@ -533,7 +533,7 @@ investigate it in the repo and apply a safe change.
 Pattern: OPT43 - Excessive Queue Time.
 Where: tests_mcp.yml (windows-latest - msedge); tests_mcp.yml (ubuntu-latest - firefox); tests_mcp.yml (macos-latest - chrome); tests_mcp.yml (macos-latest - chromium); tests_mcp.yml (ubuntu-latest - chromium); tests_mcp.yml (macos-latest - webkit); tests_mcp.yml (windows-latest - firefox); tests_mcp.yml (windows-latest - chromium); +33 more (see findings JSON).
 What ci-speedup saw: job `windows-latest - msedge` P90 queue 4396s over 8 runs (threshold 60s for PR workflows)
-Runner-pool comparison: comparison unavailable.
+Runner-label comparison: comparison unavailable.
 Queue wait alone does not show that fewer jobs or shards would help; preserve the job graph and verification coverage while investigating.
 Cost: developer WALL-CLOCK wait before the job starts (queue / wait-to-start) - NOT a runner-bill saving and NOT off the critical path. For a `needs:`-gated job it is measured from when its last needed upstream job completed, so upstream run time is not counted.
 
@@ -1573,7 +1573,7 @@ failure mode and how you have guarded it before shipping.
 
 | Source | Coverage | Used for |
 | --- | --- | --- |
-| ci-speedup static scan (skill commit `2f048be`, scripts tree `a2bf74f-dirty`) | All `.github/workflows/*.yml` under the analyzed tree (3827650) | Static pattern detection (full OPT catalog) |
+| ci-speedup static scan (skill commit `2f048be`, scripts tree `cdb5287-dirty`) | All `.github/workflows/*.yml` under the analyzed tree (3827650) | Static pattern detection (full OPT catalog) |
 | gh runs/jobs API (timestamps) | 161 runs / 1630 jobs sampled | Critical-path + per-step P50 |
 | job logs | not run | Sampled only for a slow pole worth log-level inspection |
 | workflow YAML | 18 from the analyzed checkout | `on:` triggers, matrix/shard axes, job timeouts (detector inputs) |

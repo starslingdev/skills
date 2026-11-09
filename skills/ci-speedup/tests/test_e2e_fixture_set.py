@@ -486,6 +486,7 @@ def test_queue_by_runner_label_runs_through_collection_and_full_verifier(
         "n": 11,
         "queue_p50_s": 20.0,
         "queue_p95_s": 125.0,
+        "work_n": 11,
         "work_p50_s": 180.0,
     }
     assert fast == {
@@ -493,22 +494,50 @@ def test_queue_by_runner_label_runs_through_collection_and_full_verifier(
         "n": 11,
         "queue_p50_s": 5.0,
         "queue_p95_s": 5.0,
+        "work_n": 11,
         "work_p50_s": 60.0,
     }
     assert cancelled == {
         "runner_label": "cancelled-linux self-hosted",
-        "n": 1,
-        "queue_p50_s": 30.0,
-        "queue_p95_s": 30.0,
-        "work_p50_s": 0.0,
+        "n": 0,
+        "queue_p50_s": None,
+        "queue_p95_s": None,
+        "work_n": 0,
+        "work_p50_s": None,
         "censored_n": 1,
+        "censored_queue_lower_bound_max_s": 30.0,
+    }
+    assert finding["queue_label_comparison"] == {
+        "slow_label": "self-hosted slow-linux",
+        "slow_queue_p50_s": 20.0,
+        "lower_label": "fast-linux self-hosted",
+        "lower_queue_p50_s": 5.0,
     }
     assert "self-hosted slow-linux" in report
     assert "fast-linux self-hosted" in report
     assert "20s" in report and "5s" in report and "2m 05s" in report
     assert "one maximum per workflow run and runner label" in report
-    assert "created-to-cancelled time is a censored lower bound" in report
+    assert "runnable-to-cancelled time is a censored lower bound" in report
+    assert "**Runner-label comparison:** `self-hosted slow-linux` queued at p50 20s" in report
     assert "reduce parallelism" not in report.lower()
+
+    table_mutant = report.replace(
+        "| `self-hosted slow-linux` | 11 | 20s | 2m 05s | 11 | 3m 00s | 0 |",
+        "| `self-hosted slow-linux` | 11 | 5s | 2m 05s | 11 | 3m 00s | 0 |",
+    )
+    mutant_checks = vr.run_checks(
+        table_mutant, tmp_path / "heavy-runner-queue" / "report.md",
+        tmp_path / "heavy-runner-queue" / "findings.json", skill_repo=None)
+    assert any(not check.skipped and not check.ok for check in mutant_checks)
+
+    comparison_mutant = report.replace(
+        "**Runner-label comparison:** `self-hosted slow-linux` queued at p50 20s",
+        "**Runner-label comparison:** `self-hosted slow-linux` queued at p50 5s",
+    )
+    mutant_checks = vr.run_checks(
+        comparison_mutant, tmp_path / "heavy-runner-queue" / "report.md",
+        tmp_path / "heavy-runner-queue" / "findings.json", skill_repo=None)
+    assert any(not check.skipped and not check.ok for check in mutant_checks)
 
 
 def test_queue_single_label_says_comparison_unavailable(

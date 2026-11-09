@@ -3583,13 +3583,14 @@ title_template: "Excessive Queue Time"
 - Flag P90 queue time >60s for PR jobs, >120s for release jobs
 - Group queue and work by the jobs API's runner labels. Each workflow run contributes
   at most one observation per label, using that run's maximum when several jobs use
-  the same pool; report queue p50/p95 and work p50 for each label. A job cancelled
-  before it starts contributes created-to-cancelled time as a censored lower bound.
+  the same label; report queue p50/p95 and work p50 for each label. A job cancelled
+  before runner pickup contributes runnable-to-cancelled time as a censored lower
+  bound, reported separately from exact queue percentiles.
 
 **Fix**: Depends on root cause — if runner pool saturation: increase runner pool or use larger runners. If concurrency group: relax the group, or cancel superseded runs — but take the **scoped** predicate from [OPT45](#opt45--missing-concurrency-groups) / [OPT46](#opt46--superseded-runs-not-cancelled-missing-concurrency-or-cancel-in-progress-false). **Never a bare `cancel-in-progress: true`**: it kills in-flight runs on the default branch and on release tags (a half-finished deploy/publish/migration), and it must never be reachable from a PR whose head branch is itself the default branch.
 
 When the affected label's queue p50 is materially above another label already in
-the repository, name both measured pools and investigate their capacity difference.
+the repository, name both measured labels and investigate their capacity difference.
 With only one useful label, say the comparison is unavailable. The table is
 descriptive: OPT81 owns same-job runner-speed comparisons, and queue wait alone is
 not evidence that reducing jobs or shards would help.

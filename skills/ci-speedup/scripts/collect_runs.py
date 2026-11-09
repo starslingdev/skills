@@ -10307,24 +10307,34 @@ def _detect_opt43_queue_time(
     for label, per_run in sorted(by_label_run.items()):
         queue_values: list[float] = []
         work_values: list[float] = []
+        censored_lower_bounds: list[float] = []
         censored_n = 0
         for observations in per_run.values():
-            queue_values.append(max(row[0] for row in observations))
+            exact_queue = [row[0] for row in observations if not row[2]]
+            if exact_queue:
+                queue_values.append(max(exact_queue))
             known_work = [row[1] for row in observations if row[1] is not None]
             if known_work:
                 work_values.append(max(known_work))
-            if any(row[2] for row in observations):
+            censored = [row[0] for row in observations if row[2]]
+            if censored:
                 censored_n += 1
+                censored_lower_bounds.append(max(censored))
         row: dict[str, Any] = {
             "runner_label": label,
             "n": len(queue_values),
-            "queue_p50_s": round(float(statistics.median(queue_values)), 1),
-            "queue_p95_s": round(float(_percentile(queue_values, 95)), 1),
+            "queue_p50_s": (round(float(statistics.median(queue_values)), 1)
+                            if queue_values else None),
+            "queue_p95_s": (round(float(_percentile(queue_values, 95)), 1)
+                            if queue_values else None),
+            "work_n": len(work_values),
             "work_p50_s": (round(float(statistics.median(work_values)), 1)
-                           if work_values else 0.0),
+                           if work_values else None),
         }
         if censored_n:
             row["censored_n"] = censored_n
+            row["censored_queue_lower_bound_max_s"] = round(
+                max(censored_lower_bounds), 1)
         queue_by_runner_label.append(row)
 
     def _sibling_overlap_ratio(
@@ -10419,16 +10429,21 @@ def _detect_opt43_queue_time(
                 f["queue_cause"] = cause
                 f["queue_cause_note"] = cause_note
             f["queue_by_runner_label"] = queue_by_runner_label
-            sample_labels = [sample[5] for sample in samples if sample[5]]
-            primary_label = (
-                sorted(set(sample_labels),
-                       key=lambda candidate: (-sample_labels.count(candidate), candidate))[0]
-                if sample_labels else ""
-            )
-            primary = next((row for row in queue_by_runner_label
-                            if row["runner_label"] == primary_label), None)
-            alternatives = [row for row in queue_by_runner_label
-                            if row["runner_label"] != primary_label]
+            sample_labels = {sample[5] for sample in samples if sample[5]}
+            eligible = [
+                row for row in queue_by_runner_label
+                if row["runner_label"] in sample_labels
+                and int(row.get("n") or 0) >= 3
+                and row.get("queue_p50_s") is not None
+            ]
+            primary = (max(eligible, key=lambda row: row["queue_p50_s"])
+                       if eligible else None)
+            alternatives = [
+                row for row in queue_by_runner_label
+                if row is not primary
+                and int(row.get("n") or 0) >= 3
+                and row.get("queue_p50_s") is not None
+            ]
             materially_lower = [
                 row for row in alternatives
                 if primary is not None
