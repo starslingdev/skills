@@ -3518,6 +3518,7 @@ def _detect_opt21(doc: dict, raw: str) -> list[Hit]:
                           f"artifact from them — verify the dependency isn't a "
                           f"required gate before removing"),
                 match_text=job_name,
+                facts={"opt21_needs": [str(need) for need in needs]},
             ))
     return hits
 

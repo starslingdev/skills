@@ -1,40 +1,51 @@
 {
   "commit_wall_clock": {
-    "p50_s": 300.0,
-    "p90_s": 300.0,
+    "p50_s": 1320.0,
+    "p90_s": 1320.0,
     "queue_p50_s": 0.0,
     "queue_p90_s": 0.0,
-    "work_p50_s": 300.0,
-    "work_p90_s": 300.0
+    "work_p50_s": 1320.0,
+    "work_p90_s": 1320.0
   },
   "config_eras": [],
   "credited_findings": [
     {
       "pattern": "OPT21",
       "runner_min": null,
-      "wall_clock_s": 30.0
+      "wall_clock_s": 120.0
     },
     {
-      "pattern": "OPT45",
-      "runner_min": 3.0,
+      "pattern": "OPT21",
+      "runner_min": null,
+      "wall_clock_s": 400.0
+    },
+    {
+      "pattern": "OPT33",
+      "runner_min": 16.0,
       "wall_clock_s": 0.0
     },
     {
-      "pattern": "OPT75",
-      "runner_min": null,
-      "wall_clock_s": 90.0
+      "pattern": "OPT45",
+      "runner_min": 18.4,
+      "wall_clock_s": 0.0
+    },
+    {
+      "pattern": "OPT24",
+      "runner_min": 0.0,
+      "wall_clock_s": 400.0
     }
   ],
   "detected_patterns": [
     "OPT21",
+    "OPT24",
     "OPT32",
-    "OPT45",
-    "OPT75"
+    "OPT33",
+    "OPT45"
   ],
   "gate_kind": null,
   "headline": {
-    "check": "gate",
-    "seconds": 180.0
+    "check": "t32",
+    "seconds": 400.0
   },
   "lane": {
     "job_fetches": 0,
@@ -48,7 +59,7 @@
   "provenance": "required_scoped",
   "representative_jobs": {
     "next": null,
-    "slowest": "gate"
+    "slowest": "test"
   },
   "verifier": {
     "fail": [],
@@ -71,13 +82,15 @@
       "check enumeration is bound to the kept config era (no other-config check leaks in)",
       "cluster-floor lever's ceiling floors at a NON-sibling check (not its own matrix leg)",
       "crowned detector leaf agrees with the pole's dominant measured category (no off-category ceiling)",
-      "every data-driven finding carries a measured signal (no unsupported claims)",
       "every drilled pole's binding floor is disclosed on the spine (no silent heavy-check drop)",
+      "every file-backed structural lever carries a measured dominant step (no name-inferred OPT75)",
       "every rendered cache claim carries a cross-run cache distribution",
       "headline leads with the observed wall when the chain sum diverges from the makespan",
       "headline reconciles a non-universal slowest check with the population floor",
       "minority slow tails on merge-blocking checks are re-derived",
       "no drilled pole measures a pre-change config era without the era disclosure",
+      "no finding cites a step longer than its job's measured window",
+      "no payload-bearing step is binned as `build` (redundant-work inflation \u2192 OPT72 misroute)",
       "no spine-demoted pole carries the typical-gate framing (prompt / Contents)",
       "no spine-dropped check is also framed on the merge-gating critical path",
       "pole addressable ceiling within the co-occurrence floor",

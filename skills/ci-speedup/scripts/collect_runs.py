@@ -2238,13 +2238,117 @@ def _chain_facts_for_pr(
 def _cite_chain_in_opt21_evidence(findings: "list[dict[str, Any]]",
                                   chain_summary: "dict[str, Any] | None",
                                   jg: "dict[str, Any] | None",
-                                  crit_by_wf: "dict[str, Any]") -> None:
+                                  crit_by_wf: "dict[str, Any]",
+                                  outcome_jobs_by_wf: "dict[str, list[list[dict[str, Any]]]] | None" = None,
+                                  ) -> None:
     """ENG-1 PR-N3: append the measured-gate-chain note to every OPT21
     (unnecessary `needs:`) finding on the chain's own workflow - the edge
     OPT21 questions IS the serialization the headline measures. Evidence
-    annotation only (sizing unchanged); idempotent (the note is never
+    sizes a resolvable single edge from sampled job history; the chain note is
+    idempotent (it is never
     appended twice); a <2-member modal chain or an unresolvable chain
     workflow is a no-op."""
+    outcome_jobs_by_wf = outcome_jobs_by_wf or {}
+
+    def _path_s(graph: dict[str, Any], durations: dict[str, float],
+                removed: tuple[str, str] | None = None) -> float | None:
+        memo: dict[str, float] = {}
+        visiting: set[str] = set()
+
+        def visit(node: str) -> float | None:
+            if node in memo:
+                return memo[node]
+            if node in visiting or node not in durations:
+                return None
+            visiting.add(node)
+            spec = graph.get(node) if isinstance(graph.get(node), dict) else {}
+            parents = [str(parent) for parent in (spec.get("needs") or [])
+                       if removed != (str(parent), node)]
+            parent_spans = [visit(parent) for parent in parents]
+            visiting.remove(node)
+            if any(span is None for span in parent_spans):
+                return None
+            memo[node] = durations[node] + max(
+                (float(span) for span in parent_spans if span is not None), default=0.0)
+            return memo[node]
+
+        spans = [visit(str(node)) for node in graph]
+        if not spans or any(span is None for span in spans):
+            return None
+        return max(float(span) for span in spans if span is not None)
+
+    for f in findings:
+        if f.get("pattern") != "OPT21":
+            continue
+        wf = str(f.get("workflow_file") or "")
+        graph = ((jg or {}).get(wf) or {})
+        affected = [str(job) for job in (f.get("affected_jobs") or [])]
+        needs = [str(job) for job in (f.get("opt21_needs") or [])]
+        crit = crit_by_wf.get(wf) or {}
+        if (len(affected) == 1 and len(needs) == 1 and affected[0] in graph
+                and needs[0] in graph):
+            durations: dict[str, float] = {}
+            for node, spec in graph.items():
+                display = str((spec or {}).get("name") or node)
+                duration = _resolve_job_p50(display, crit.get("job_p50") or {})
+                if duration > 0:
+                    durations[str(node)] = float(duration)
+            before = _path_s(graph, durations)
+            after = _path_s(graph, durations, (needs[0], affected[0]))
+            samples = outcome_jobs_by_wf.get(wf) or []
+            dep_outcomes: list[str] = []
+            for run_jobs in samples:
+                dependency = next((job for job in run_jobs
+                                   if _matrix_base_name(str(job.get("name") or ""))
+                                   in {needs[0], _matrix_base_name(str(
+                                       (graph.get(needs[0]) or {}).get("name") or needs[0]))}),
+                                  None)
+                dep_outcomes.append(str((dependency or {}).get("conclusion") or "missing"))
+            if (before is not None and after is not None and before > after
+                    and dep_outcomes):
+                failed = sum(outcome not in {"success", "neutral"}
+                             for outcome in dep_outcomes)
+                share = failed / len(dep_outcomes)
+                downstream = {affected[0]}
+                changed = True
+                while changed:
+                    prior = len(downstream)
+                    downstream.update(
+                        str(node) for node, spec in graph.items()
+                        if any(str(parent) in downstream
+                               for parent in ((spec or {}).get("needs") or [])))
+                    changed = len(downstream) != prior
+                downstream_s = sum(durations.get(node, 0.0) for node in downstream)
+                projection = project_commit_wall(
+                    before, before, after, float("inf"), chain_s=before,
+                    pole_s=before - after, runner_up_s=after)
+                extra_minutes = round(share * downstream_s / 60.0, 2)
+                stamp = {
+                    "dependency": needs[0], "dependent": affected[0],
+                    "chain_before_s": round(before, 1),
+                    "chain_after_s": round(projection.projected_s, 1),
+                    "dependency_failed_runs": failed,
+                    "dependency_sampled_runs": len(dep_outcomes),
+                    "dependency_failure_share": round(share, 4),
+                    "downstream_p50_s": round(downstream_s, 1),
+                    "extra_runner_min_per_run": extra_minutes,
+                }
+                f.update({
+                    "opt21_edge_sizing": stamp,
+                    "sizing_basis": "measured",
+                    "wall_clock_p50_s": round(before - projection.projected_s, 1),
+                    "runner_min_saving": None,
+                    "tier": 1,
+                    "realization": "direct",
+                    "size_note": "measured change in the workflow's longest dependency path",
+                })
+                f["evidence"] = (str(f.get("evidence") or "")
+                    + f" Measured longest path: {before:.0f}s -> "
+                      f"{projection.projected_s:.0f}s. The dependency did not succeed "
+                      f"on {failed}/{len(dep_outcomes)} sampled runs ({share:.0%}); "
+                      f"starting downstream work on those paths adds {extra_minutes:.2f} "
+                      "extra runner-minutes per run.")
+
     modal = [str(m) for m in ((chain_summary or {}).get("modal_chain") or [])]
     if len(modal) < 2:
         return
@@ -5687,7 +5791,7 @@ _SIZING: dict[str, dict[str, Any]] = {
     "OPT19": {"model": "measured"},  # test source sleep dominance
     "OPT20": {"model": "runner-min-only", "hit_rate": 0.0},  # unpinned docker tags — reliability
     # Parallelization (non fast-path).
-    "OPT21": {"model": "direct", "default_s": 30.0},  # unnecessary needs:
+    "OPT21": {"model": "measured"},  # unnecessary needs: edge path delta
     "OPT22": {"model": "direct", "default_s": 60.0},  # sequential workflow_run
     # Actions/Checkout (non fast-path).
     "OPT26": {"model": "runner-min-only", "hit_rate": 0.0},  # outdated action major
@@ -5854,9 +5958,9 @@ def _opt9_is_build_state(f: dict[str, Any]) -> bool:
 # credited `runner_min_saving` is set to None (so the bill headline / Also-noticed
 # appendix skip it) and the modeled amount is preserved in `runner_min_unrealizable_s` so the
 # report can show it, annotated, instead of summing it into the bill total.
-#   OPT21 — removing a `needs:` edge changes WHEN a job starts (queue wait), not
-#           how long it runs; compute is unchanged, so the bill saving is 0.
-_WALL_CLOCK_ONLY_NO_RUNNER_MIN = {"OPT21"}
+# OPT21 is excluded: its measured stamp reports the extra failure-path compute
+# caused by removing an edge rather than claiming a runner-minute saving.
+_WALL_CLOCK_ONLY_NO_RUNNER_MIN: set[str] = set()
 #   OPT32 — a missing `paths:` filter's bill saving is the compute on irrelevant
 #           runs the filter would skip; it's a GROSS UPPER BOUND that's only
 #           realizable where the workflow's jobs don't ALREADY self-skip (via
@@ -30480,13 +30584,38 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         _era_repr_shas, _era_per_sha_checks, _chain_spine, _span_caps, _jg,
         crit_by_wf, _era_sha_intervals)
     _chain_summary_val = _chain_summary(_chain_facts)
+    _opt21_workflows = {
+        str(f.get("workflow_file") or "") for f in findings
+        if f.get("pattern") == "OPT21" and f.get("workflow_file")
+    }
+    _opt21_failed_runs = {
+        wf: [run for run in (all_status_runs_by_wf.get(wf) or [])
+             if str(run.get("event") or "") in _DEVELOPER_EVENTS
+             and str(run.get("conclusion") or "") in {"failure", "timed_out"}][:max_runs]
+        for wf in _opt21_workflows
+    }
+    _prefetch_json(client, [
+        _run_jobs_endpoint(repo, run.get("id"))
+        for runs in _opt21_failed_runs.values() for run in runs])
+    _opt21_outcome_jobs: dict[str, list[list[dict[str, Any]]]] = {}
+    for _wf in sorted(_opt21_workflows):
+        _failed_kept, _failed_fetches = _gather_run_jobs(
+            client, repo, _opt21_failed_runs.get(_wf) or [], memo=job_memo,
+            keep_empty=True)
+        jobs_fetch_failures += _failed_fetches
+        _add_cost_spine_fetch_failures(_wf, _failed_fetches)
+        _opt21_outcome_jobs[_wf] = [
+            *(jobs_per_run_by_wf.get(_wf) or []),
+            *[jobs for _run, jobs in _failed_kept],
+        ]
     # ENG-1 PR-N3: an OPT21 (unnecessary `needs:`) finding whose workflow hosts
     # the measured gate chain now cites that fact — the edge it questions IS
     # the serialization the headline measures (evidence annotation only; OPT21
     # keeps its modeled sizing, follow-up trigger in the plan). Named helper so
     # the path is directly red/green-testable (the e2e corpus keeps OPT21
     # deliberately quiet, so it can never exercise this).
-    _cite_chain_in_opt21_evidence(findings, _chain_summary_val, _jg, crit_by_wf)
+    _cite_chain_in_opt21_evidence(
+        findings, _chain_summary_val, _jg, crit_by_wf, _opt21_outcome_jobs)
     # ENG-1 PR-N3: the chain fields the sizing cascade consumes (empty/zero on
     # chainless repos — the cascade then behaves exactly as before).
     _cs_modal = [str(m) for m in ((_chain_summary_val or {}).get("modal_chain") or [])]

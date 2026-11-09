@@ -1278,6 +1278,8 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-11-09** — Size unnecessary dependency edges from the measured longest-path change instead of a flat estimate. Reports now disclose the downstream compute started on sampled failure paths, and keep Go script launchers from being mistaken for check-only gates.
+
 - **2026-11-06** — Rank fallback and unresolved merge-wait candidates by the job that actually completes last on each sampled commit. A long pull-request job remains eligible even when its check run is absent from the per-PR check population; readable required-check scopes retain their existing ranking.
 - **2026-11-06** — Project a speedup to a job inside a serial `needs:` chain against the whole chain. Other serialized members, queue and idle gaps remain in the projected wait, while the longest independent path caps the result; each sampled commit stamps the slowest job's chain span, and the per-commit projection, the whole-commit finding cap and the report verifier all use it, so a chained slowest job no longer adds the independent floor to the rest of its chain.
 - **2026-11-06** — Quantize estimated wall-clock savings to tenths of a second before applying physical bounds, so harmless display rounding cannot violate the cascade's strict monotonicity checks.

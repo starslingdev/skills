@@ -341,7 +341,24 @@ def test_compact_facts_pin_collected_provenance_and_representative_job(
     facts = fixture_facts(doc, checks)
 
     assert facts["provenance"] == "required_scoped"
-    assert facts["representative_jobs"]["slowest"] == "gate"
+    assert facts["representative_jobs"]["slowest"] == "test"
+
+
+def test_serial_chain_sizes_removed_edge_and_failure_path_compute(
+        monkeypatch, tmp_path):
+    fixture = FIXTURE_ROOT / "serial-chain"
+    doc, report, checks = run_fixture(fixture, monkeypatch, tmp_path)
+    finding = next(row for row in doc["findings"]
+                   if row.get("pattern") == "OPT21"
+                   and row.get("affected_jobs") == ["t32"])
+    stamp = finding["opt21_edge_sizing"]
+    assert stamp["chain_before_s"] == 1320.0
+    assert stamp["chain_after_s"] == 920.0
+    assert finding["wall_clock_p50_s"] == 400.0
+    assert stamp["dependency_failure_share"] == 0.25
+    assert stamp["extra_runner_min_per_run"] == 1.67
+    assert "25%" in report and "1.67 extra runner-minutes" in report
+    assert not [check for check in checks if not check.skipped and not check.ok]
 
 
 def test_fixture_client_applies_run_query_filters():

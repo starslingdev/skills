@@ -544,6 +544,29 @@ _OPT21_LINT_GATE = """  lint:
 """
 
 
+@pytest.mark.parametrize(("command", "flagged"), [
+    ("go run build/ci.go lint", True),
+    ("go run ./cmd/server", True),
+    ("golangci-lint run", False),
+])
+def test_opt21_go_run_is_not_a_check_gate_but_golangci_lint_is(
+        tmp_path: Path, command: str, flagged: bool) -> None:
+    content = f"""name: CI
+on: pull_request
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - run: {command}
+  test:
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - run: make test
+"""
+    assert ("test" in _opt21_jobs(tmp_path, content)) is flagged
+
+
 @pytest.mark.parametrize("dep_job", [
     pytest.param("""  dep:
     runs-on: ubuntu-latest
