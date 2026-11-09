@@ -9,7 +9,7 @@ not measured: lifecycle data was not collected
 | **Audited commit** | [`3827650`](https://github.com/microsoft/playwright/commit/3827650d171cc1b035cbefb7e00bf5948d6809df) - file & line references are anchored to this tree |
 | **Runs analyzed** | 161 runs / 1630 jobs across 18 workflows |
 | **Runs window** | 2026-06-25 → 2026-07-25 (30-day window) |
-| **PR gate sample** | 20 / 20 PRs |
+| **PR gate sample** | 20 of 20 PRs sampled: target met |
 | **Audit** | ran 2026-07-25 · ci-speedup skill commit [`2f048be`](https://github.com/starslingdev/skills/commit/2f048be) |
 
 > **Bottom line.** A typical PR waits **41m 12s** for all checks to finish. The biggest single measured win is **~1m 06s** off the slowest fixable check, `ubuntu-22.04 (webkit - Node.js 2…` - see [Long pole 1](#pole-1) for the drill-down to the biggest lever.
@@ -1568,12 +1568,12 @@ failure mode and how you have guarded it before shipping.
 >
 > - **Critical path + step P50:** the committed ci-speedup audit of `microsoft/playwright`, scanned **2026-07-25** - P50 over **161 runs / 1630 jobs** across 18 workflows (latest runs at scan time).
 > - **Data-collection cost:** **860 gh API call(s)** in ~2m 34s - adaptive sampling - a 10-run shallow pass over every workflow, then 3 of 9 PR-gating pole candidate(s) deepened to 20 runs, plus 6 bill-pole workflow candidate(s) deepened to 20 runs for the runner-minute source block (the gate, drill-set, and floor are full-depth; other finding-level values may still rest on the shallow sample).
-> - **Which checks gate (the critical-path ordering):** measured from **20/20 sampled PRs**.
+> - **Which checks gate (the critical-path ordering):** measured from **20/20 sampled PRs** - **20 of 20 PRs sampled: target met**.
 > - ⚠️ **Required checks were unreadable** (no admin / branch protection 404), so 'gate' here means the **slowest check on a typical PR** (observed), not a *confirmed required* check. Slow checks that run on only a minority of PRs are shown as a footnote, not the headline.
 
 | Source | Coverage | Used for |
 | --- | --- | --- |
-| ci-speedup static scan (skill commit `2f048be`, scripts tree `27a7288-dirty`) | All `.github/workflows/*.yml` under the analyzed tree (3827650) | Static pattern detection (full OPT catalog) |
+| ci-speedup static scan (skill commit `2f048be`, scripts tree `1052a8c`) | All `.github/workflows/*.yml` under the analyzed tree (3827650) | Static pattern detection (full OPT catalog) |
 | gh runs/jobs API (timestamps) | 161 runs / 1630 jobs sampled | Critical-path + per-step P50 |
 | job logs | not run | Sampled only for a slow pole worth log-level inspection |
 | workflow YAML | 18 from the analyzed checkout | `on:` triggers, matrix/shard axes, job timeouts (detector inputs) |

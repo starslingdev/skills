@@ -734,7 +734,11 @@ def build_summary(doc: dict[str, Any], findings_path: str = "FINDINGS.json",
         # fallback (no PR carried the external gate) — say so, not just the count.
         scope = (" — recency-only (external required suite, no PR carried it)"
                  if cp.get("required_suite_unsatisfiable") else "")
-        out.append(f"Sample: {spr}/{tgt} PRs ({complete}{gap}){scope}.")
+        reason = str(cp.get("sample_stop_reason") or (
+            "target_met" if cp.get("sample_complete") else "candidates_exhausted"
+        )).replace("_", " ")
+        out.append(
+            f"Sample: {spr} of {tgt} PRs sampled: {reason} ({complete}{gap}){scope}.")
     # The gh API cost, from the same stamp the report's Data sources line quotes, so a
     # run on a shared API budget sees it here, before rendering (2026-11-03 dogfood).
     ds = doc.get("data_sources") if isinstance(doc.get("data_sources"), dict) else {}

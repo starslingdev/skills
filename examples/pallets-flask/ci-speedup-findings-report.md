@@ -9,16 +9,16 @@ not measured: lifecycle data was not collected
 | **Audited commit** | [`36e4a82`](https://github.com/pallets/flask/commit/36e4a824f340fdee7ed50937ba8e7f6bc7d17f81) - file & line references are anchored to this tree |
 | **Runs analyzed** | 47 runs / 152 jobs across 5 workflows |
 | **Runs window** | 2026-06-24 → 2026-07-24 (30-day window) |
-| **PR gate sample** | 20 / 20 PRs |
+| **PR gate sample** | 20 of 20 PRs sampled: target met |
 | **Audit** | ran 2026-07-24 · ci-speedup skill commit [`2f048be`](https://github.com/starslingdev/skills/commit/2f048be) |
 
 > **Bottom line.** A typical PR waits **34s** for all checks to finish. The biggest single measured win is **~7s** off the slowest fixable check, `Windows` - see [Long pole 1](#pole-1) for the drill-down to the biggest lever.
 >
 > **34s until all checks finish** - `Windows` is the slowest check a typical PR waits on. 
 >
-> **`.github/workflows/tests.yaml` changed ~216 days ago - narrowed to the current configuration.** This audit measures only the 9 runs since that change; the 11 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/tests.yaml` changed ~217 days ago - narrowed to the current configuration.** This audit measures only the 9 runs since that change; the 11 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
-> **`.github/workflows/zizmor.yaml` changed ~217 days ago - narrowed to the current configuration.** This audit measures only the 6 runs since that change; the 4 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/zizmor.yaml` changed ~219 days ago - narrowed to the current configuration.** This audit measures only the 6 runs since that change; the 4 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
 > **What gates next:** After this fix, CI is gated by `tests.yaml / PyPy` at ~26 s.
 > This projection assumes the full headline saving is realized; a smaller fix may leave the current gate in place.
@@ -723,12 +723,12 @@ failure mode and how you have guarded it before shipping.
 >
 > - **Critical path + step P50:** the committed ci-speedup audit of `pallets/flask`, scanned **2026-07-24** - P50 over **47 runs / 152 jobs** across 5 workflows (latest runs at scan time).
 > - **Data-collection cost:** **320 gh API call(s)** in ~42s - adaptive sampling - a 10-run shallow pass over every workflow, then 1 of 3 PR-gating pole candidate(s) deepened to 20 runs, plus 1 bill-pole workflow candidate(s) deepened to 20 runs for the runner-minute source block (the gate, drill-set, and floor are full-depth; other finding-level values may still rest on the shallow sample).
-> - **Which checks gate (the critical-path ordering):** measured from **20/20 sampled PRs**.
+> - **Which checks gate (the critical-path ordering):** measured from **20/20 sampled PRs** - **20 of 20 PRs sampled: target met**.
 > - ⚠️ **Required checks were unreadable** (no admin / branch protection 404), so 'gate' here means the **slowest check on a typical PR** (observed), not a *confirmed required* check. Slow checks that run on only a minority of PRs are shown as a footnote, not the headline.
 
 | Source | Coverage | Used for |
 | --- | --- | --- |
-| ci-speedup static scan (skill commit `2f048be`, scripts tree `85c3f1d-dirty`) | All `.github/workflows/*.yml` under the analyzed tree (36e4a82) | Static pattern detection (full OPT catalog) |
+| ci-speedup static scan (skill commit `2f048be`, scripts tree `db148d3`) | All `.github/workflows/*.yml` under the analyzed tree (36e4a82) | Static pattern detection (full OPT catalog) |
 | gh runs/jobs API (timestamps) | 47 runs / 152 jobs sampled | Critical-path + per-step P50 |
 | job logs | 1 job log(s) sampled | Step internals + cross-run magnitude (deeper levels) |
 | workflow YAML | 5 from the analyzed checkout | `on:` triggers, matrix/shard axes, job timeouts (detector inputs) |

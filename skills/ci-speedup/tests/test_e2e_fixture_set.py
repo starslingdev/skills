@@ -76,7 +76,16 @@ class FixtureClient:
                 row for row in self.recorded["workflows"]
                 if row["id"] == int(match.group(1)))
             query = parse_qs(match.group(2), keep_blank_values=True)
-            runs = list(workflow.get("runs", []))
+            pages = workflow.get("run_pages")
+            page = int((query.get("page") or ["1"])[0])
+            if (not query.get("status")
+                    and page in set(workflow.get("failed_all_status_pages") or [])):
+                self._bump(error=True)
+                return None
+            if isinstance(pages, list):
+                runs = list(pages[page - 1]) if 0 < page <= len(pages) else []
+            else:
+                runs = list(workflow.get("runs", []))
             for key, field in (("event", "event"), ("branch", "head_branch")):
                 if query.get(key):
                     runs = [
@@ -379,6 +388,9 @@ def test_named_fixtures_exercise_their_defining_interactions(
             FIXTURE_ROOT / name, monkeypatch, tmp_path)
 
     assert docs["config-era-change"]["pr_critical_path"]["config_eras"]
+    assert (docs["config-era-change"]["pr_critical_path"]["sample_stop_reason"]
+            == "era_door")
+    assert docs["config-era-change"]["pr_critical_path"]["sample_complete"] is False
     cache_rows = [row for row in docs["cache-lints"]["findings"]
                   if row.get("pattern") in {"OPT4", "OPT61", "OPT62"}]
     assert {row["pattern"] for row in cache_rows} == {"OPT4", "OPT61", "OPT62"}
@@ -1126,6 +1138,295 @@ def test_fixture_runs_through_collect_render_and_full_verifier(
         (check.name, check.detail) for check in failures]
 
     assert_fixture_facts(fixture, fixture_facts(doc, checks))
+
+
+def _pr_sample_fixture(tmp_path: Path, *, second_page: bool,
+                       third_page: bool = False,
+                       fail_first_page: bool = False,
+                       fail_second_page: bool = False,
+                       zero_first_matches: bool = False,
+                       matches_on_third: bool = False,
+                       era_boundary: bool = False,
+                       wide_short_window: bool = False) -> Path:
+    """A full collect/render/verify fixture with a sparse first candidate page."""
+    fixture = tmp_path / ("pr-sample-paged" if second_page else "pr-sample-exhausted")
+    workflows = fixture / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "ci.yml").write_text(
+        "name: CI\non: [pull_request]\njobs:\n  gate:\n"
+        "    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n",
+        encoding="utf-8")
+    if wide_short_window:
+        for number in range(1, 9):
+            (workflows / f"other-{number}.yml").write_text(
+                f"name: Other {number}\non: [pull_request]\njobs:\n  other:\n"
+                "    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n",
+                encoding="utf-8")
+
+    def run(i: int) -> dict:
+        day = 28 - (i // 24)
+        hour = i % 24
+        ts = f"2026-01-{day:02d}T{hour:02d}:00:00Z"
+        end = f"2026-01-{day:02d}T{hour:02d}:05:00Z"
+        return {
+            "id": 10_000 + i, "event": "pull_request",
+            "head_branch": f"feature-{i}", "head_sha": f"sha-{i}",
+            "status": "completed", "conclusion": "success",
+            "created_at": ts, "run_started_at": ts, "updated_at": end,
+        }
+
+    first = [run(i) for i in range(
+        85 if wide_short_window else (100 if second_page else 9))]
+    other_pages: list[list[dict]] = []
+    if wide_short_window:
+        for number in range(1, 9):
+            page: list[dict] = []
+            for i in range(85):
+                row = run(i)
+                row["id"] += number * 1_000
+                row["head_branch"] = f"other-{number}-{i}"
+                row["head_sha"] = f"other-{number}-sha-{i}"
+                page.append(row)
+            other_pages.append(page)
+    other = [row for page in other_pages for row in page]
+    second_count = (100 if third_page
+                    else (20 if second_page and zero_first_matches
+                          else (12 if second_page else 0)))
+    second = [run(100 + i) for i in range(second_count)]
+    third = [run(200 + i) for i in range(100)] if third_page else []
+    qualifying = (set() if zero_first_matches
+                  else {f"sha-{i}" for i in range(9)})
+    if matches_on_third:
+        qualifying.update(f"sha-{200 + i}" for i in range(20))
+    elif (second_page and not third_page and not fail_second_page
+          and not era_boundary):
+        qualifying.update(
+            f"sha-{100 + i}" for i in range(20 if zero_first_matches else 12))
+    checks = {
+        row["head_sha"]: [{
+            "name": "gate" if row["head_sha"] in qualifying else "optional",
+            "started_at": row["created_at"], "completed_at": row["updated_at"],
+        }]
+        for row in first + second + third + other
+    }
+    jobs = {
+        str(row["id"]): [{
+            "id": row["id"] + 100_000,
+            "name": "gate",
+            "labels": ["ubuntu-latest"],
+            "created_at": row["created_at"],
+            "started_at": row["created_at"],
+            "completed_at": row["updated_at"],
+            "conclusion": "success",
+            "steps": [{
+                "name": "Run tests",
+                "started_at": row["created_at"],
+                "completed_at": row["updated_at"],
+            }],
+        }]
+        for row in first + second + third + other
+    }
+    run_pages = [first]
+    if second_page:
+        run_pages.append(second)
+    if third_page:
+        run_pages.append(third)
+    recorded = {
+        "repo": f"fixture/{fixture.name}",
+        "captured_at": "2026-01-31T00:00:00Z",
+        "default_branch": "main", "required_checks": ["gate"],
+        "workflows": [{
+            "id": 210, "path": ".github/workflows/ci.yml", "name": "CI",
+            "runs_30d": len(first) + len(second) + len(third),
+            "run_pages": run_pages,
+            "failed_all_status_pages": (
+                ([1] if fail_first_page else [])
+                + ([2] if fail_second_page else [])),
+        }] + ([{
+            "id": 210 + number,
+            "path": f".github/workflows/other-{number}.yml",
+            "name": f"Other {number}",
+            "runs_30d": len(page), "run_pages": [page],
+        } for number, page in enumerate(other_pages, 1)]),
+        "jobs": jobs, "checks": checks,
+    }
+    if era_boundary:
+        recorded["commits_by_path"] = [{
+            "sha": "current-config",
+            "commit": {"committer": {"date": "2026-01-23T00:00:00Z"}},
+        }]
+    (fixture / "responses.json").write_text(
+        json.dumps(recorded), encoding="utf-8")
+    (fixture / "expected.json").write_text("{}\n", encoding="utf-8")
+    return fixture
+
+
+def test_pr_sample_pages_until_target_through_collect_and_full_verifier(
+        monkeypatch, tmp_path):
+    fixture = _pr_sample_fixture(tmp_path, second_page=True)
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
+
+    cp = doc["pr_critical_path"]
+    assert cp["sampled_pr_count"] == 20
+    assert cp["sample_stop_reason"] == "target_met"
+    assert cp["commit_wall_clock"]["n"] == 20
+    assert sum(
+        fact.get("partial") is not True
+        for fact in cp["commit_wall_clock"]["facts"]) == 20
+    assert [c for c in checks if not c.skipped and not c.ok] == []
+    assert "20 of 20 PRs sampled: target met" in report
+
+
+def test_pr_sample_does_not_treat_fallback_as_target_through_full_pipeline(
+        monkeypatch, tmp_path):
+    fixture = _pr_sample_fixture(
+        tmp_path, second_page=True, zero_first_matches=True)
+    run_root = tmp_path / "run-zero-strict-first-page"
+    run_root.mkdir()
+    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
+
+    cp = doc["pr_critical_path"]
+    assert cp["sampled_pr_count"] == 20
+    assert cp["sample_stop_reason"] == "target_met"
+    assert cp["required_suite_unsatisfiable"] is False
+    assert cp["sample_candidate_pages_fetched"] == 2
+    assert [c for c in checks if not c.skipped and not c.ok] == []
+    assert "20 of 20 PRs sampled: target met" in report
+
+
+def test_pr_sample_evaluates_third_page_candidates_through_full_pipeline(
+        monkeypatch, tmp_path):
+    fixture = _pr_sample_fixture(
+        tmp_path, second_page=True, third_page=True,
+        zero_first_matches=True, matches_on_third=True)
+    run_root = tmp_path / "run-third-page-target"
+    run_root.mkdir()
+    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
+
+    cp = doc["pr_critical_path"]
+    assert cp["sampled_pr_count"] == 20
+    assert cp["sample_stop_reason"] == "target_met"
+    assert cp["sample_candidate_pages_fetched"] == 3
+    assert [c for c in checks if not c.skipped and not c.ok] == []
+    assert "20 of 20 PRs sampled: target met" in report
+
+
+def test_short_pr_sample_names_exhausted_candidates_through_full_pipeline(
+        monkeypatch, tmp_path):
+    fixture = _pr_sample_fixture(tmp_path, second_page=False)
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
+
+    cp = doc["pr_critical_path"]
+    assert cp["sampled_pr_count"] == 9
+    assert cp["sample_stop_reason"] == "candidates_exhausted"
+    assert [c for c in checks if not c.skipped and not c.ok] == []
+    assert "9 of 20 PRs sampled: candidates exhausted" in report
+
+
+def test_pr_sample_three_page_cap_is_pinned_through_full_pipeline(
+        monkeypatch, tmp_path):
+    fixture = _pr_sample_fixture(
+        tmp_path, second_page=True, third_page=True)
+    run_root = tmp_path / "run-page-cap"
+    run_root.mkdir()
+    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
+
+    cp = doc["pr_critical_path"]
+    assert cp["sampled_pr_count"] == 9
+    assert cp["sample_stop_reason"] == "page_cap"
+    assert cp["sample_candidate_pages_fetched"] == 3
+    assert cp["sample_candidate_page_cap"] == cr._PR_CANDIDATE_PAGE_CAP == 3
+    # Pin the bounded walk's offline API budget: three run-list pages, candidate
+    # checks, and jobs only for the nine selected commits.
+    assert doc["data_sources"]["gh_query_count"] == 254
+    assert [c for c in checks if not c.skipped and not c.ok] == []
+    assert "9 of 20 PRs sampled: page cap" in report
+
+
+def test_pr_sample_selector_limit_is_not_called_exhaustion(
+        monkeypatch, tmp_path):
+    fixture = _pr_sample_fixture(
+        tmp_path, second_page=False, wide_short_window=True)
+    run_root = tmp_path / "run-selector-cap"
+    run_root.mkdir()
+    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
+
+    cp = doc["pr_critical_path"]
+    assert 0 < cp["sampled_pr_count"] < 20
+    assert cp["sample_candidate_selection_limited"] is True, {
+        key: cp.get(key) for key in (
+            "sample_fetched", "sampled_pr_count", "sample_stop_reason",
+            "sample_candidate_pages_exhausted")}
+    assert cp["sample_stop_reason"] == "page_cap"
+    assert cp["sample_candidate_pages_exhausted"] is True
+    assert [c for c in checks if not c.skipped and not c.ok] == []
+    assert "of 20 PRs sampled: page cap" in report
+
+
+def test_pr_sample_page_failure_is_named_through_full_pipeline(
+        monkeypatch, tmp_path):
+    fixture = _pr_sample_fixture(
+        tmp_path, second_page=True, fail_second_page=True)
+    run_root = tmp_path / "run-fetch-failure"
+    run_root.mkdir()
+    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
+
+    cp = doc["pr_critical_path"]
+    assert cp["sampled_pr_count"] == 9
+    assert cp["sample_stop_reason"] == "fetch_failures"
+    assert cp["sample_candidate_page_fetch_failures"] == 1
+    assert [c for c in checks if not c.skipped and not c.ok] == []
+    assert "9 of 20 PRs sampled: fetch failures" in report
+
+
+def test_pr_sample_initial_page_failure_is_named_through_full_pipeline(
+        monkeypatch, tmp_path):
+    fixture = _pr_sample_fixture(
+        tmp_path, second_page=False, fail_first_page=True)
+    run_root = tmp_path / "run-initial-fetch-failure"
+    run_root.mkdir()
+    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
+
+    cp = doc["pr_critical_path"]
+    assert cp["sample_stop_reason"] == "fetch_failures"
+    assert cp["sample_candidate_page_fetch_failures"] == 1
+    assert [c for c in checks if not c.skipped and not c.ok] == []
+    assert "PRs sampled: fetch failures" in report
+
+
+def test_pr_sample_stops_at_era_boundary_discovered_on_later_page(
+        monkeypatch, tmp_path):
+    fixture = _pr_sample_fixture(
+        tmp_path, second_page=True, third_page=True, era_boundary=True)
+    run_root = tmp_path / "run-later-era-door"
+    run_root.mkdir()
+    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
+
+    cp = doc["pr_critical_path"]
+    assert cp["sampled_pr_count"] == 9
+    assert cp["sample_stop_reason"] == "era_door"
+    assert cp["sample_candidate_era_door"] is True
+    assert cp["sample_complete"] is False
+    assert [c for c in checks if not c.skipped and not c.ok] == []
+    assert "9 of 20 PRs sampled: era door" in report
+
+
+def test_pr_sample_verifier_rejects_doctored_stop_reason(monkeypatch, tmp_path):
+    fixture = _pr_sample_fixture(tmp_path, second_page=False)
+    run_root = tmp_path / "run-doctored-stop-reason"
+    run_root.mkdir()
+    doc, report, _checks = run_fixture(fixture, monkeypatch, run_root)
+    findings_path = run_root / "findings.json"
+    doc["pr_critical_path"]["sample_stop_reason"] = "target_met"
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+
+    check = vr.check_pr_sample_stop_reason(report, findings_path)
+    assert not check.ok
+    assert "expected 'candidates_exhausted'" in check.detail
 
 
 def test_fixture_set_catches_required_crown_regression(monkeypatch, tmp_path):
