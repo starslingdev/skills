@@ -4,5 +4,5 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - run: ./ci/build-core.sh
-      - run: ./ci/build-ts.sh
+      - run: cargo test -p goport_core
+      - run: cargo test -p ts_goport

@@ -415,7 +415,7 @@ def test_named_fixtures_exercise_their_defining_interactions(
     assert "cargo-double-compile" in fixture_facts(
         docs["cargo-double-compile"], [])["leaves"]
     assert "Compiling goport_core" in reports["cargo-double-compile"]
-    assert "one consistent `-p`/`--package`" in reports["cargo-double-compile"]
+    assert "combine their `-p`/`--package`" in reports["cargo-double-compile"]
     assert any(
         row.get("cache_net_negative", {}).get("kind") == "opt79_buildkit_export"
         for row in image_doc["findings"])

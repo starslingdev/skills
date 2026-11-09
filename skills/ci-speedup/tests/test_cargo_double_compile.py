@@ -7,7 +7,8 @@ from pathlib import Path
 import blocking_path as bp
 
 
-def _step(command: str, crate: str, profile: str, seconds: int) -> str:
+def _step(command: str, crate: str, profile: str, seconds: int,
+          *, path: str | None = None) -> str:
     profile_line = (
         f"Finished `test` profile [unoptimized + debuginfo] target(s) in {seconds}s"
         if profile == "test"
@@ -15,9 +16,11 @@ def _step(command: str, crate: str, profile: str, seconds: int) -> str:
     )
     return "\n".join((
         f"##[group]Run {command}",
-        f"   Compiling {crate} v0.1.0 (/repo/crates/{crate})",
-        f"    {profile_line}",
+        command,
+        "shell: /usr/bin/bash -e {0}",
         "##[endgroup]",
+        f"   Compiling {crate} v0.1.0 ({path or f'/repo/crates/{crate}'})",
+        f"    {profile_line}",
     ))
 
 
@@ -34,7 +37,7 @@ def test_same_local_crate_compiled_twice_reports_second_compile_wall() -> None:
     assert leaf is not None
     assert leaf["fix_key"] == "cargo-double-compile"
     assert leaf["magnitude"] == {
-        "label": "redundant second Cargo compile wall",
+        "label": "second Cargo step wall (upper bound)",
         "value": 175.0,
         "unit": "s",
     }
@@ -45,6 +48,51 @@ def test_different_crates_and_different_profiles_stay_silent() -> None:
     assert bp._parse_log(_double_log(second_profile="release")) is None
 
 
+def test_unique_local_compile_in_second_step_stays_silent() -> None:
+    first = _step("cargo test -p one", "shared", "test", 181)
+    later = "\n".join((
+        "##[group]Run cargo test -p two",
+        "cargo test -p two",
+        "shell: /usr/bin/bash -e {0}",
+        "##[endgroup]",
+        "   Compiling shared v0.1.0 (/repo/crates/shared)",
+        "   Compiling unique v0.1.0 (/repo/crates/unique)",
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 175s",
+    ))
+    assert bp._parse_log(f"{first}\n{later}") is None
+
+
+def test_different_artifact_contexts_stay_silent() -> None:
+    first = _step("cargo test -p goport_core", "goport_core", "test", 181)
+    variants = (
+        "cargo test -p ts_goport --target aarch64-unknown-linux-gnu",
+        "cargo test -p ts_goport --features serde",
+        "cargo test -p ts_goport --target-dir target/isolated",
+        "cargo +nightly test -p ts_goport",
+        "RUSTFLAGS=-Ctarget-cpu=native cargo test -p ts_goport",
+        "cargo check -p ts_goport",
+    )
+    for command in variants:
+        later = _step(command, "goport_core", "test", 175)
+        assert bp._parse_log(f"{first}\n{later}") is None, command
+
+
+def test_arbitrary_machine_local_path_is_not_called_in_repo() -> None:
+    first = _step("cargo test -p one", "shared", "test", 181,
+                  path="/opt/shared/shared")
+    later = _step("cargo test -p two", "shared", "test", 175,
+                  path="/opt/shared/shared")
+    assert bp._parse_log(f"{first}\n{later}") is None
+
+
+def test_double_compile_can_crown_build_scan_and_test_poles() -> None:
+    leaf = bp._parse_log(_double_log())
+    assert leaf is not None
+    for category in ("build", "scan", "test"):
+        assert not bp._offcategory_leaf(leaf, {"dominant_category": category})
+    assert bp._offcategory_leaf(leaf, {"dominant_category": "install"})
+
+
 def test_double_compile_prompt_aligns_package_and_feature_selection() -> None:
     leaf = bp._parse_log(_double_log())
     assert leaf is not None
@@ -53,9 +101,10 @@ def test_double_compile_prompt_aligns_package_and_feature_selection() -> None:
         {"workflow_file": ".github/workflows/ci.yml", "check": "test", "job": "test"},
         [], None, "example/repo", None, 1, 1,
     )
+    assert "combine" in prompt.lower()
     assert "-p" in prompt or "--package" in prompt
     assert "--features" in prompt
-    assert "test target" in prompt.lower()
+    assert "every original test target" in prompt.lower()
 
 
 def test_opt16_catalog_names_duplicate_cargo_compilation() -> None:
@@ -63,4 +112,5 @@ def test_opt16_catalog_names_duplicate_cargo_compilation() -> None:
             / "opt16-within-job-duplicate-commands.md")
     text = path.read_text(encoding="utf-8").lower()
     assert "compiling <crate>" in text
-    assert "same profile" in text
+    assert "observable profile" in text
+    assert "upper bound" in text

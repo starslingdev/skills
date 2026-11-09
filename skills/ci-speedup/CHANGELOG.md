@@ -1,6 +1,6 @@
 # Changelog
 
-- Detect the same checked-out Cargo crate being compiled in separate steps under the same profile, size the repeated compile from the second step, and guide every Cargo command toward consistent package and feature selection without dropping test targets.
+- Detect the same checked-out Cargo crates being compiled in separate steps under the same observable artifact settings, report the second step's wall as an upper bound, and guide safe command consolidation without dropping package, feature, platform, or test coverage.
 - Read timestamped pytest verbose progress and Vitest per-test durations when identifying long same-file tests that run serially. Vitest recommendations now require distinct source-level namespaces and name `describe.concurrent` with its default concurrency cap.
 - Require a readable classic branch-protection result before advising that a check move off pull requests.
 - Report the default-branch push count and mark infrequent post-merge lanes as rare.
