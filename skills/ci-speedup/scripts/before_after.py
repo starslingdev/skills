@@ -83,8 +83,12 @@ def advance_verification(
     static_matches = all(saved_binding.get(key) == value
                          for key, value in static_binding.items())
     is_default = getattr(client, "is_default_branch", None)
-    on_default_branch = bool(
-        callable(is_default) and is_default(repo, branch))
+    default_branch_state = is_default(repo, branch) if callable(is_default) else False
+    if default_branch_state is None:
+        emit("Could not determine the repository default branch; verification "
+             "will not request reruns.")
+        return {"status": "default-branch-unknown", "verdict": None}
+    on_default_branch = default_branch_state is True
     tracking_default = on_default_branch
     baseline_lane = ("push" if cache_sensitive or on_default_branch
                      else "pull_request")
@@ -346,10 +350,11 @@ class GhVerificationClient:
         commit = payload.get("commit")
         return str(commit.get("sha") or "") if isinstance(commit, dict) else None
 
-    def is_default_branch(self, repo: str, branch: str) -> bool:
+    def is_default_branch(self, repo: str, branch: str) -> bool | None:
         payload = self._api(f"repos/{repo}")
-        return (isinstance(payload, dict)
-                and str(payload.get("default_branch") or "") == branch)
+        if not isinstance(payload, dict):
+            return None
+        return str(payload.get("default_branch") or "") == branch
 
     def _paged_rows(self, endpoint: str, key: str) -> list[dict[str, Any]] | None:
         rows: list[dict[str, Any]] = []
@@ -994,9 +999,15 @@ def compare_push_cohorts(
         str(s.get("head_sha") or "") for s in after_samples
         if s.get("head_sha")
     }
-    no_change = bool(
+    repeated_attempts = bool(
         len(after_success_heads) == 1
         and any(int(s.get("attempt") or 1) > 1 for s in after_samples))
+    before_success_heads = {
+        str(s.get("head_sha") or "") for s in before_samples
+        if s.get("head_sha")
+    }
+    no_change = bool(repeated_attempts
+                     and before_success_heads & after_success_heads)
     clean = (comparable and ci_only and state == "same" and enough_samples
              and not sampling_pending and not noisy_at_cap and not no_change
              and step is not None)
@@ -1018,7 +1029,7 @@ def compare_push_cohorts(
     lane = str(after_samples[0].get("lane") or "unknown")
     lane_runs = after_samples[0].get("lane_runs_30d")
     cold_reasons = ", ".join(str(s["cache_reason"]) for s in cold) or "none observed"
-    sample_label = ("no-change reruns" if no_change
+    sample_label = ("no-change reruns" if repeated_attempts
                     else "fresh complete runs")
     comparison_shape = (
         f"{len(after_samples)} distinct default-branch push cohorts"

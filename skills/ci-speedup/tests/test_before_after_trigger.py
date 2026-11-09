@@ -169,6 +169,19 @@ def test_same_head_after_arm_is_labelled_no_change_reruns():
     result = compare_push_cohorts(
         before, after, changed_files=[".github/workflows/ci.yml"])
     assert "no-change reruns" in result["report"]
+    assert result["verified_saving"] is not None
+
+
+def test_unknown_default_branch_identity_never_requests_a_rerun(tmp_path):
+    class UnknownDefaultClient(FakeClient):
+        def is_default_branch(self, repo, branch):
+            return None
+
+    client = UnknownDefaultClient()
+    result = _invoke(tmp_path, client)
+    assert result["status"] == "default-branch-unknown"
+    assert result["verdict"] is None
+    assert client.reruns == 0
 
 
 def test_no_rerun_before_remote_head_and_completed_first_cohort(tmp_path):
@@ -351,6 +364,11 @@ class AdapterFixture(GhVerificationClient):
             if key in endpoint:
                 return copy.deepcopy(self.responses[key])
         return None
+
+
+def test_default_branch_lookup_preserves_an_unknown_api_result():
+    client = AdapterFixture({})
+    assert client.is_default_branch("o/r", "main") is None
 
 
 def _api_run(run_id, workflow_id, event="pull_request", head="fix", attempt=1):
