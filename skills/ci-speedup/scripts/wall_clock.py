@@ -33,7 +33,11 @@ from datetime import datetime
 from typing import Any, Callable
 
 
-def observed_commit_wall_s(jobs: list[dict[str, Any]]) -> float | None:
+def observed_commit_wall_s(
+    jobs: list[dict[str, Any]],
+    *,
+    cohort_created_at: list[str] | None = None,
+) -> float | None:
     """Return first-job-created to last-job-completed wall time.
 
     Callers pass one complete, exact-head push cohort and one attempt per
@@ -52,7 +56,14 @@ def observed_commit_wall_s(jobs: list[dict[str, Any]]) -> float | None:
                 str(job["completed_at"]).replace("Z", "+00:00")).timestamp())
         except (TypeError, ValueError):
             return None
-    if not created or max(completed) < min(created):
+    if cohort_created_at is not None:
+        try:
+            created = [datetime.fromisoformat(
+                str(value).replace("Z", "+00:00")).timestamp()
+                for value in cohort_created_at]
+        except (TypeError, ValueError):
+            return None
+    if not created or not completed or max(completed) < min(created):
         return None
     return round(max(completed) - min(created), 3)
 

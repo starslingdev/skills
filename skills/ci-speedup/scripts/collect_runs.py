@@ -68,6 +68,7 @@ from wall_clock import (  # noqa: E402
     bound_within_workflow, CASCADE,
     credit_detrigger,
     credit_shared_substep,
+    observed_commit_wall_s,
     project_commit_wall,
     size_wall_clock,
 )
@@ -29680,9 +29681,10 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
 
         _next = next((row for row in _job_rows[1:]
                       if _outside_slowest_chain(row)), None) if _slowest else None
-        _observed = (round(max(float(row["completed_ts"]) for row in _job_rows)
-                           - min(_created), 3)
-                     if _job_rows and _created else None)
+        _observed = observed_commit_wall_s(
+            _job_intervals,
+            cohort_created_at=list(_created_iso.values()),
+        )
         # The slowest job's own `needs:` chain on this commit (its ancestors and
         # descendants; other legs of its matrix run independently). Speeding the
         # slowest job leaves the rest of that chain in series, so a projection

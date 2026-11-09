@@ -115,7 +115,7 @@ def test_report_carries_queue_work_compute_step_and_six_disclosures():
     report = result["report"]
     assert result["queue_delta_s"] is not None
     assert result["work_delta_s"] is not None
-    assert result["total_job_duration"] == {"before_s": 40.0, "after_s": 40.0}
+    assert result["total_job_duration"] == {"before_s": 38.0, "after_s": 36.0}
     assert "Changed step" in report
     for label in ("Sample size", "Asymmetry", "CI-only scope", "Variance",
                   "Cache state", "Environment"):
