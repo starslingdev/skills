@@ -2263,6 +2263,7 @@ def _cite_chain_in_opt21_evidence(findings: "list[dict[str, Any]]",
             visiting.add(node)
             spec = graph.get(node) if isinstance(graph.get(node), dict) else {}
             parents = [str(parent) for parent in (spec.get("needs") or [])
+                       if str(parent) in durations
                        if removed != (str(parent), node)]
             parent_spans = [visit(parent) for parent in parents]
             visiting.remove(node)
@@ -2272,7 +2273,7 @@ def _cite_chain_in_opt21_evidence(findings: "list[dict[str, Any]]",
                 (float(span) for span in parent_spans if span is not None), default=0.0)
             return memo[node]
 
-        spans = [visit(str(node)) for node in graph]
+        spans = [visit(str(node)) for node in durations]
         if not spans or any(span is None for span in spans):
             return None
         return max(float(span) for span in spans if span is not None)
@@ -2288,22 +2289,45 @@ def _cite_chain_in_opt21_evidence(findings: "list[dict[str, Any]]",
         if (len(affected) == 1 and len(needs) == 1 and affected[0] in graph
                 and needs[0] in graph):
             durations: dict[str, float] = {}
+            compute_durations: dict[str, float] = {}
+            job_p50 = crit.get("job_p50") or {}
             for node, spec in graph.items():
                 display = str((spec or {}).get("name") or node)
-                duration = _resolve_job_p50(display, crit.get("job_p50") or {})
+                duration = _resolve_job_p50(display, job_p50)
                 if duration > 0:
                     durations[str(node)] = float(duration)
+                    matrix_legs = [
+                        float(value) for name, value in job_p50.items()
+                        if str(name).startswith(display + " (")
+                        and isinstance(value, (int, float))
+                    ]
+                    compute_durations[str(node)] = (
+                        sum(matrix_legs) if matrix_legs else float(duration))
             before = _path_s(graph, durations)
             after = _path_s(graph, durations, (needs[0], affected[0]))
             samples = outcome_jobs_by_wf.get(wf) or []
             dep_outcomes: list[str] = []
             for run_jobs in samples:
-                dependency = next((job for job in run_jobs
-                                   if _matrix_base_name(str(job.get("name") or ""))
-                                   in {needs[0], _matrix_base_name(str(
-                                       (graph.get(needs[0]) or {}).get("name") or needs[0]))}),
-                                  None)
-                dep_outcomes.append(str((dependency or {}).get("conclusion") or "missing"))
+                dependency_names = {
+                    needs[0], _matrix_base_name(str(
+                        (graph.get(needs[0]) or {}).get("name") or needs[0])),
+                }
+                dependency_legs = [
+                    job for job in run_jobs
+                    if _matrix_base_name(str(job.get("name") or "")) in dependency_names
+                ]
+                # An empty successful jobs response, or a response whose names
+                # do not resolve to this dependency, is unavailable evidence —
+                # never turn it into a synthetic failure. A matrix dependency
+                # succeeds only when every matching leg succeeds (neutral is
+                # also a completed non-failure outcome).
+                conclusions = [str(job.get("conclusion") or "")
+                               for job in dependency_legs]
+                if dependency_legs and all(conclusions):
+                    dep_outcomes.append(
+                        "success" if all(outcome in {"success", "neutral"}
+                                         for outcome in conclusions) else "failure"
+                    )
             if (before is not None and after is not None and before > after
                     and dep_outcomes):
                 failed = sum(outcome not in {"success", "neutral"}
@@ -2318,7 +2342,8 @@ def _cite_chain_in_opt21_evidence(findings: "list[dict[str, Any]]",
                         if any(str(parent) in downstream
                                for parent in ((spec or {}).get("needs") or [])))
                     changed = len(downstream) != prior
-                downstream_s = sum(durations.get(node, 0.0) for node in downstream)
+                downstream_s = sum(compute_durations.get(node, 0.0)
+                                   for node in downstream)
                 projection = project_commit_wall(
                     before, before, after, float("inf"), chain_s=before,
                     pole_s=before - after, runner_up_s=after)
@@ -2329,10 +2354,16 @@ def _cite_chain_in_opt21_evidence(findings: "list[dict[str, Any]]",
                     "chain_after_s": round(projection.projected_s, 1),
                     "dependency_failed_runs": failed,
                     "dependency_sampled_runs": len(dep_outcomes),
+                    "dependency_unmatched_runs": len(samples) - len(dep_outcomes),
                     "dependency_failure_share": round(share, 4),
                     "downstream_p50_s": round(downstream_s, 1),
                     "extra_runner_min_per_run": extra_minutes,
                 }
+                unmatched_note = (
+                    f" {len(samples) - len(dep_outcomes)} sampled run(s) without a "
+                    "resolvable dependency job were excluded."
+                    if len(samples) != len(dep_outcomes) else ""
+                )
                 f.update({
                     "opt21_edge_sizing": stamp,
                     "sizing_basis": "measured",
@@ -2346,8 +2377,9 @@ def _cite_chain_in_opt21_evidence(findings: "list[dict[str, Any]]",
                     + f" Measured longest path: {before:.0f}s -> "
                       f"{projection.projected_s:.0f}s. The dependency did not succeed "
                       f"on {failed}/{len(dep_outcomes)} sampled runs ({share:.0%}); "
-                      f"starting downstream work on those paths adds {extra_minutes:.2f} "
-                      "extra runner-minutes per run.")
+                      f"starting downstream work on those paths can add up to "
+                      f"{extra_minutes:.2f} extra runner-minutes per run."
+                      f"{unmatched_note}")
 
     modal = [str(m) for m in ((chain_summary or {}).get("modal_chain") or [])]
     if len(modal) < 2:
@@ -30588,32 +30620,51 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         str(f.get("workflow_file") or "") for f in findings
         if f.get("pattern") == "OPT21" and f.get("workflow_file")
     }
-    _opt21_failed_runs = {
-        wf: [run for run in (all_status_runs_by_wf.get(wf) or [])
-             if str(run.get("event") or "") in _DEVELOPER_EVENTS
-             and str(run.get("conclusion") or "") in {"failure", "timed_out"}][:max_runs]
+    def _opt21_kept_era(wf: str, run: dict[str, Any]) -> bool:
+        era = next((row for row in config_era_facts
+                    if str(row.get("workflow_file") or "") == wf), None)
+        if not isinstance(era, dict):
+            return True
+        kept = str(era.get("kept_era") or "")
+        by_sha = era.get("content_era_by_sha")
+        sha = str(run.get("head_sha") or "")
+        if isinstance(by_sha, dict) and sha in by_sha:
+            return str(by_sha.get(sha) or "") == kept
+        boundary = str(era.get("boundary") or "")
+        created = str(run.get("created_at") or "")
+        if boundary and created:
+            return ("post" if created >= boundary else "pre") == kept
+        return False
+
+    # One newest-first, event- and configuration-scoped cohort supplies both
+    # successes and failures. Sampling each outcome independently would inflate
+    # a 10% failure rate to 33% when the success stratum hits `max_runs` first.
+    _opt21_outcome_runs = {
+        wf: [
+            run for run in (all_status_runs_by_wf.get(wf)
+                            or sampled_runs_by_wf.get(wf) or [])
+            if str(run.get("event") or "") in _DEVELOPER_EVENTS
+            and str(run.get("conclusion") or "")
+            in {"success", "failure", "timed_out"}
+            and _opt21_kept_era(wf, run)
+        ][:max_runs]
         for wf in _opt21_workflows
     }
     _prefetch_json(client, [
         _run_jobs_endpoint(repo, run.get("id"))
-        for runs in _opt21_failed_runs.values() for run in runs])
+        for runs in _opt21_outcome_runs.values() for run in runs])
     _opt21_outcome_jobs: dict[str, list[list[dict[str, Any]]]] = {}
     for _wf in sorted(_opt21_workflows):
-        _failed_kept, _failed_fetches = _gather_run_jobs(
-            client, repo, _opt21_failed_runs.get(_wf) or [], memo=job_memo,
+        _outcome_kept, _outcome_fetches = _gather_run_jobs(
+            client, repo, _opt21_outcome_runs.get(_wf) or [], memo=job_memo,
             keep_empty=True)
-        jobs_fetch_failures += _failed_fetches
-        _add_cost_spine_fetch_failures(_wf, _failed_fetches)
-        _opt21_outcome_jobs[_wf] = [
-            *(jobs_per_run_by_wf.get(_wf) or []),
-            *[jobs for _run, jobs in _failed_kept],
-        ]
-    # ENG-1 PR-N3: an OPT21 (unnecessary `needs:`) finding whose workflow hosts
-    # the measured gate chain now cites that fact — the edge it questions IS
-    # the serialization the headline measures (evidence annotation only; OPT21
-    # keeps its modeled sizing, follow-up trigger in the plan). Named helper so
-    # the path is directly red/green-testable (the e2e corpus keeps OPT21
-    # deliberately quiet, so it can never exercise this).
+        jobs_fetch_failures += _outcome_fetches
+        _add_cost_spine_fetch_failures(_wf, _outcome_fetches)
+        _opt21_outcome_jobs[_wf] = [jobs for _run, jobs in _outcome_kept]
+    # Size each resolvable OPT21 edge from the measured workflow graph and
+    # disclose its sampled dependency-failure rate plus the upper bound on
+    # downstream compute exposed by removing the edge. The serial-chain E2E
+    # fixture drives this path through collect, render, and the full verifier.
     _cite_chain_in_opt21_evidence(
         findings, _chain_summary_val, _jg, crit_by_wf, _opt21_outcome_jobs)
     # ENG-1 PR-N3: the chain fields the sizing cascade consumes (empty/zero on
@@ -30647,6 +30698,35 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         if not _workflow or not _affected:
             return _commit_ctx_facts
         _affected_bases = {_matrix_base_name(name) for name in _affected}
+
+        # Removing a dependency edge shortens a WHOLE path; it does not shorten
+        # the dependent job. Project the measured path delta against each
+        # commit's competing floor instead of capping it at the dependent's own
+        # duration (A(600) -> B(10) can legitimately expose 600s of parallelism).
+        _edge_stamp = _finding.get("opt21_edge_sizing")
+        if isinstance(_edge_stamp, dict):
+            _edge_before = _finite_float(_edge_stamp.get("chain_before_s"))
+            if _edge_before is None or _edge_before <= 0:
+                return _commit_ctx_facts
+            _edge_rows: list[tuple[float, ...]] = []
+            for _fact in _commit_facts:
+                _wall = _finite_float(_fact.get("wall_s"))
+                if _wall is None or _wall <= 0:
+                    continue
+                _workflow_present = any(
+                    isinstance(row, dict)
+                    and str(row.get("workflow_file") or "") == _workflow
+                    for row in (_fact.get("job_projections") or []))
+                if not _workflow_present:
+                    _edge_rows.append((float(_wall), 0.0, 0.0, 0.0))
+                    continue
+                _competitor = _finite_float(
+                    (_fact.get("next_longest_job") or {}).get("duration_s")) or 0.0
+                _edge_rows.append((
+                    float(_wall), float(_edge_before), float(_competitor),
+                    float(_edge_before),
+                ))
+            return tuple(_edge_rows)
 
         def _matches_affected(_row: dict[str, Any]) -> bool:
             return bool(

@@ -10,20 +10,21 @@
   "config_eras": [],
   "credited_findings": [
     {
-      "pattern": "OPT21",
-      "runner_min": null,
-      "wall_clock_s": 120.0
-    },
-    {
       "pattern": "OPT45",
       "runner_min": 1.0,
       "wall_clock_s": 0.0
+    },
+    {
+      "pattern": "OPT75",
+      "runner_min": null,
+      "wall_clock_s": 90.0
     }
   ],
   "detected_patterns": [
     "OPT21",
     "OPT32",
-    "OPT45"
+    "OPT45",
+    "OPT75"
   ],
   "gate_kind": null,
   "headline": {
@@ -50,6 +51,7 @@
       "Bottom-line headline leads with the stamped cluster-floor ceiling (no burial)",
       "OPT43 runner-label evidence matches its structured stamp",
       "OPT64 is ranked only on enough retried runs",
+      "TOC 'Also noticed' pointer's on/off-path label matches the appendix",
       "Tier-2 R-rows carry re-derived wall-clock-neutral certificates",
       "Tier-2 R-rows use measured sizing basis",
       "Tier-2 savings rows are backed by runner-minute cost spine",
@@ -67,14 +69,11 @@
       "each rendered pole's drill belongs to its own job (no cross-job log leak)",
       "every data-driven finding carries a measured signal (no unsupported claims)",
       "every drilled pole's binding floor is disclosed on the spine (no silent heavy-check drop)",
-      "every file-backed structural lever carries a measured dominant step (no name-inferred OPT75)",
       "every rendered cache claim carries a cross-run cache distribution",
       "headline leads with the observed wall when the chain sum diverges from the makespan",
       "headline reconciles a non-universal slowest check with the population floor",
       "minority slow tails on merge-blocking checks are re-derived",
       "no drilled pole measures a pre-change config era without the era disclosure",
-      "no finding cites a step longer than its job's measured window",
-      "no payload-bearing step is binned as `build` (redundant-work inflation \u2192 OPT72 misroute)",
       "no spine-demoted pole carries the typical-gate framing (prompt / Contents)",
       "no spine-dropped check is also framed on the merge-gating critical path",
       "pole addressable ceiling within the co-occurrence floor",

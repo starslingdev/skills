@@ -338,6 +338,85 @@ def test_opt21_removed_edge_sizing_respects_physical_bound():
     assert _physical_bound_violation(findings[0], crit) is None
 
 
+def _size_opt21_outcomes(samples: list[list[dict]], *,
+                         job_p50: dict[str, float] | None = None,
+                         unmeasured_job: bool = False) -> dict:
+    finding = {
+        "pattern": "OPT21",
+        "workflow_file": ".github/workflows/ci.yml",
+        "affected_jobs": ["test"],
+        "opt21_needs": ["lint"],
+        "evidence": "test waits for lint",
+    }
+    graph = {
+        "lint": {"name": "lint", "needs": []},
+        "test": {"name": "test", "needs": ["lint"]},
+        "build": {"name": "build", "needs": []},
+    }
+    if unmeasured_job:
+        graph["publish"] = {"name": "publish", "needs": []}
+    crit = {
+        "long_pole_job": "test", "long_pole_p50": 500.0,
+        "floor_p50": 400.0,
+        "job_p50": job_p50 or {"lint": 100.0, "test": 400.0, "build": 400.0},
+    }
+    cr._cite_chain_in_opt21_evidence(
+        [finding], None, {".github/workflows/ci.yml": graph},
+        {".github/workflows/ci.yml": crit},
+        {".github/workflows/ci.yml": samples},
+    )
+    return finding
+
+
+def test_opt21_failure_share_excludes_runs_without_the_dependency_job():
+    finding = _size_opt21_outcomes([
+        [],
+        [{"name": "lint", "conclusion": None}],
+        [{"name": "lint", "conclusion": "success"}],
+        [{"name": "lint", "conclusion": "failure"}],
+    ])
+    stamp = finding["opt21_edge_sizing"]
+    assert stamp["dependency_sampled_runs"] == 2
+    assert stamp["dependency_unmatched_runs"] == 2
+    assert stamp["dependency_failed_runs"] == 1
+    assert stamp["dependency_failure_share"] == 0.5
+
+
+def test_opt21_matrix_dependency_fails_when_any_matching_leg_fails():
+    finding = _size_opt21_outcomes([[
+        {"name": "lint (ubuntu)", "conclusion": "success"},
+        {"name": "lint (windows)", "conclusion": "failure"},
+    ]])
+    stamp = finding["opt21_edge_sizing"]
+    assert stamp["dependency_sampled_runs"] == 1
+    assert stamp["dependency_failed_runs"] == 1
+    assert stamp["dependency_failure_share"] == 1.0
+
+
+def test_opt21_downstream_compute_sums_matrix_legs_for_runner_minutes():
+    finding = _size_opt21_outcomes(
+        [[{"name": "lint", "conclusion": "failure"}]],
+        job_p50={
+            "lint": 100.0,
+            "test (ubuntu)": 400.0,
+            "test (windows)": 300.0,
+            "build": 400.0,
+        },
+    )
+    stamp = finding["opt21_edge_sizing"]
+    assert stamp["downstream_p50_s"] == 700.0
+    assert stamp["extra_runner_min_per_run"] == 11.67
+
+
+def test_opt21_edge_sizing_ignores_an_unmeasured_unrelated_job():
+    finding = _size_opt21_outcomes(
+        [[{"name": "lint", "conclusion": "success"}]],
+        unmeasured_job=True,
+    )
+    assert "opt21_edge_sizing" in finding
+    assert finding["opt21_edge_sizing"]["chain_before_s"] == 500.0
+
+
 # --------------------------------------------------------------------------- #
 # Coverage sentinel — a new `measured` detector can't ship un-guarded.
 # --------------------------------------------------------------------------- #
