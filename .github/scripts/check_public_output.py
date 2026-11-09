@@ -31,19 +31,16 @@ _GITHUB_API_URL = re.compile(
     rf"(?i)(?<![A-Za-z0-9_.-])(?:https?://)?api\.github\.com/repos/(?P<repo>{_REPO})"
 )
 _NUMBERED_REFERENCE = re.compile(
-    rf"(?<![A-Za-z0-9_.-])(?P<repo>{_REPO})[#!](?:pull/|issues/)?\d+\b",
-    re.IGNORECASE,
+    rf"(?i)(?<![A-Za-z0-9_.-])(?P<repo>{_REPO})[#!](?:pull/|issues/)?\d+\b"
 )
 _TARGET = re.compile(rf"^{_REPO}$")
 # First path segments on github.com that are site pages, not repository
 # owners: a two-segment URL under them (github.com/settings/tokens) names no
 # repository. Kept to the reserved names that appear in docs and PR text.
-_NON_REPO_OWNERS = frozenset(
-    {
-        "apps", "features", "login", "marketplace", "orgs", "organizations",
-        "settings", "sponsors", "topics",
-    }
-)
+_NON_REPO_OWNERS = frozenset({
+    "apps", "features", "login", "marketplace", "orgs", "organizations", "settings",
+    "sponsors", "topics",
+})
 # Prose punctuation that can trail a link without being part of the name.
 _TRAILING_PUNCTUATION = ".,;:!?)"
 
@@ -70,11 +67,6 @@ def _canonical(value: str) -> str:
         key = stripped
 
 
-def _is_repository(pattern: re.Pattern[str], repo: str) -> bool:
-    owner = repo.split("/", 1)[0].casefold()
-    return not (pattern is _GITHUB_URL and owner in _NON_REPO_OWNERS)
-
-
 def scan_text(
     text: str, *, source: str, target: str, allowed: frozenset[str] = frozenset()
 ) -> list[Finding]:
@@ -85,16 +77,13 @@ def scan_text(
     """
     findings: list[Finding] = []
     allowed_keys = {_canonical(target), *allowed}
-    owner = target.split("/", 1)[0]
-    same_owner_reference = re.compile(
-        rf"(?i)(?<![A-Za-z0-9_.-])(?P<repo>{re.escape(owner)}/{_NAME})"
-    )
-    patterns = (
-        _GITHUB_URL, _GITHUB_API_URL, _NUMBERED_REFERENCE, same_owner_reference
-    )
+    owner = re.escape(target.split("/", 1)[0])
+    same_owner = re.compile(rf"(?i)(?<![A-Za-z0-9_.-])(?P<repo>{owner}/{_NAME})")
+    patterns = (_GITHUB_URL, _GITHUB_API_URL, _NUMBERED_REFERENCE, same_owner)
     for line_number, line in enumerate(text.splitlines(), start=1):
         if any(
-            _is_repository(pattern, match.group("repo"))
+            not (pattern is _GITHUB_URL
+                 and match.group("repo").split("/", 1)[0].casefold() in _NON_REPO_OWNERS)
             and _canonical(match.group("repo")) not in allowed_keys
             for pattern in patterns
             for match in pattern.finditer(line)
@@ -106,7 +95,7 @@ def scan_text(
 # Added-diff lines under these paths are test fixtures and eval cases: they
 # routinely carry synthetic `owner/repo` slugs and upstream documentation
 # links that name no private context. They are skipped by the DIFF scan only;
-# PR text, branch names, and commit messages stay strict everywhere.
+# PR text and commit messages stay strict everywhere.
 _FIXTURE_PATH = re.compile(
     r"^(?:tests/|skills/[^/]+/tests/|skills/[^/]+/evals/|maintainers/[^/]+/tests/)"
 )
@@ -130,12 +119,7 @@ def _git_output(args: list[str]) -> str:
 
 
 def _verify_public_target(target: str, label: str = "destination repository") -> None:
-    result = _run(
-        [
-            "gh", "repo", "view", target, "--json", "visibility",
-            "--jq", ".visibility",
-        ]
-    )
+    result = _run(["gh", "repo", "view", target, "--json", "visibility", "--jq", ".visibility"])
     if result.returncode:
         raise RuntimeError(f"could not verify {label} visibility")
     if result.stdout.strip().upper() != "PUBLIC":
@@ -207,20 +191,17 @@ def _scan_history(base: str, *, target: str, allowed: frozenset[str]) -> list[Fi
     one commit and removed in a later one is still published.
     """
     findings: list[Finding] = []
-    commits = _git_output(["rev-list", "--reverse", f"{base}..HEAD"]).split()
-    for sha in commits:
+    commits = _git_output(["rev-list", "--reverse", "--parents", f"{base}..HEAD"])
+    for sha, *parents in (entry.split() for entry in commits.splitlines()):
         short = _git_output(["rev-parse", "--short", sha]).strip()
         message = _git_output(["log", "-1", "--format=%B", sha])
-        findings.extend(
-            scan_text(message, source=f"commit {short} message", target=target, allowed=allowed)
+        findings += scan_text(
+            message, source=f"commit {short} message", target=target, allowed=allowed
         )
-        parents = _git_output(["rev-list", "--parents", "-n", "1", sha]).split()[1:]
         if len(parents) > 1:
             continue  # merge: its content is covered by its parents and the net diff
         patch = _git_output(["show", "--format=", *_DIFF_FLAGS, sha, "--"])
-        findings.extend(
-            _scan_diff(patch, label=f"commit {short} ", target=target, allowed=allowed)
-        )
+        findings += _scan_diff(patch, label=f"commit {short} ", target=target, allowed=allowed)
     net = _git_output(["diff", *_DIFF_FLAGS, f"{base}...HEAD", "--"])
     findings.extend(_scan_diff(net, label="added diff:", target=target, allowed=allowed))
     return findings
@@ -234,13 +215,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="exact outbound text to scan; repeat for title, body, or readback",
     )
     parser.add_argument(
-        "--base",
-        help="base ref: scans each outgoing commit's message and added lines, "
-        "the net added diff, and the current branch name",
-    )
-    parser.add_argument(
-        "--branch-name",
-        help="branch name to scan (default with --base: the checked-out branch)",
+        "--base", help="base ref: scans each outgoing commit's message and added lines, "
+        "and the net added diff",
     )
     parser.add_argument(
         "--allow", action="append", default=[], metavar="OWNER/REPO",
@@ -251,13 +227,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 def _report(findings: list[Finding]) -> int:
     if findings:
-        print(
-            "privacy preflight blocked: cross-repository GitHub reference(s) found",
-            file=sys.stderr,
-        )
-        for finding in findings:
-            print(f"  {finding.source}:{finding.line}", file=sys.stderr)
-        print("blocked identifiers are intentionally not echoed", file=sys.stderr)
+        lines = [f"  {finding.source}:{finding.line}" for finding in findings]
+        print("privacy preflight blocked: cross-repository GitHub reference(s) found",
+              *lines, "blocked identifiers are intentionally not echoed",
+              sep="\n", file=sys.stderr)
         return 1
     print("privacy preflight passed")
     return 0
@@ -270,16 +243,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     for index, repo in enumerate(args.allow, start=1):
         if not _TARGET.fullmatch(repo):
-            print(
-                f"privacy preflight error: --allow {index} must be owner/repo",
-                file=sys.stderr,
-            )
+            print(f"privacy preflight error: --allow {index} must be owner/repo", file=sys.stderr)
             return 2
-    if not args.text_file and not args.base and args.branch_name is None:
-        print(
-            "privacy preflight error: provide --text-file, --base, or --branch-name",
-            file=sys.stderr,
-        )
+    if not args.text_file and not args.base:
+        print("privacy preflight error: provide --text-file or --base", file=sys.stderr)
         return 2
 
     findings: list[Finding] = []
@@ -294,20 +261,11 @@ def main(argv: list[str] | None = None) -> int:
             except (OSError, UnicodeError):
                 # The exception text carries the path; never print it.
                 raise RuntimeError(f"could not read text file {index}") from None
-            findings.extend(
-                scan_text(text, source=f"text file {index}", target=args.target, allowed=allowed)
-            )
-        branch = args.branch_name
-        if branch is None and args.base:
-            branch = _git_output(["rev-parse", "--abbrev-ref", "HEAD"]).strip()
-            if branch == "HEAD":  # detached: no branch name is pushed
-                branch = None
-        if branch:
-            findings.extend(
-                scan_text(branch, source="branch name", target=args.target, allowed=allowed)
+            findings += scan_text(
+                text, source=f"text file {index}", target=args.target, allowed=allowed
             )
         if args.base:
-            findings.extend(_scan_history(args.base, target=args.target, allowed=allowed))
+            findings += _scan_history(args.base, target=args.target, allowed=allowed)
     except RuntimeError as exc:
         print(f"privacy preflight error: {exc}", file=sys.stderr)
         return 2

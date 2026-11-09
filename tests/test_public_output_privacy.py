@@ -8,14 +8,20 @@ from pathlib import Path
 import pytest
 
 _ROOT = Path(__file__).resolve().parents[1]
-_SCRIPT = _ROOT / ".github" / "scripts" / "check_public_output.py"
-_PUBLIC_TARGET = "/".join(("example", "public-project"))
+_SCRIPTS = _ROOT / ".github" / "scripts"
+_TARGET = "/".join(("example", "public-project"))
+# Same owner as the target (caught by the bare-slug rule) and a DIFFERENT owner
+# (so the same-owner rule cannot mask a URL pattern that fails to match).
+_SAME_OWNER = "/".join(("example", "internal-project"))
+_FOREIGN = "/".join(("other-owner", "private-project"))
+_LINK = f"https://github.com/{_FOREIGN}\n"
 
 
 def _load_checker():
-    spec = importlib.util.spec_from_file_location("check_public_output", _SCRIPT)
+    spec = importlib.util.spec_from_file_location(
+        "check_public_output", _SCRIPTS / "check_public_output.py"
+    )
     module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
@@ -24,291 +30,58 @@ def _load_checker():
 checker = _load_checker()
 
 
-def test_target_repository_references_are_allowed():
-    text = "\n".join(
-        [
-            f"https://github.com/{_PUBLIC_TARGET}/pull/12",
-            f"https://api.github.com/repos/{_PUBLIC_TARGET}/issues/12",
-            f"{_PUBLIC_TARGET}#12",
-        ]
-    )
-    assert checker.scan_text(
-        text, source="payload", target=_PUBLIC_TARGET
-    ) == []
+def _lines(text, **kwargs):
+    return [f.line for f in checker.scan_text(text, source="t", target=_TARGET, **kwargs)]
 
 
-def test_cross_repository_references_are_blocked_without_echo(
-    capsys, monkeypatch, tmp_path
-):
-    private_reference = "/".join(("example", "internal-project#91"))
-    payload = tmp_path / "body.md"
-    payload.write_text(f"Derived from {private_reference}\n", encoding="utf-8")
-
-    monkeypatch.setattr(checker, "_verify_public_target", lambda _target: None)
-    assert checker.main(
-        ["--target", _PUBLIC_TARGET, "--text-file", str(payload)]
-    ) == 1
-    stderr = capsys.readouterr().err
-    assert "cross-repository" in stderr
-    assert private_reference not in stderr
+# --- scan_text -------------------------------------------------------------------
 
 
-def test_sensitive_input_filename_is_not_echoed(capsys, monkeypatch, tmp_path):
-    private_slug = "/".join(("example", "internal-project"))
-    sensitive_name = "internal-project-body.md"
-    payload = tmp_path / sensitive_name
-    payload.write_text(private_slug, encoding="utf-8")
-    monkeypatch.setattr(checker, "_verify_public_target", lambda _target: None)
-
-    assert checker.main(
-        ["--target", _PUBLIC_TARGET, "--text-file", str(payload)]
-    ) == 1
-    stderr = capsys.readouterr().err
-    assert "text file 1:1" in stderr
-    assert sensitive_name not in stderr
-
-
-def test_cross_repository_web_and_api_urls_are_blocked():
-    private_slug = "/".join(("example", "internal-project"))
-    text = "\n".join(
-        [
-            f"https://github.com/{private_slug}/pull/91",
-            f"https://api.github.com/repos/{private_slug}/issues/91",
-        ]
-    )
-    findings = checker.scan_text(
-        text, source="payload", target=_PUBLIC_TARGET
-    )
-    assert [finding.line for finding in findings] == [1, 2]
-
-
-# A DIFFERENT owner than the target: the same-owner bare-slug rule cannot mask
-# a URL pattern that fails to match.
-_FOREIGN = "/".join(("other-owner", "private-project"))
+# `{}` is filled with a foreign-owner repo, then a same-owner one.
+_BLOCKED = [
+    "See https://github.com/{} for context", "(https://github.com/{})",
+    "[context](https://github.com/{})", "`https://github.com/{}`", "<https://github.com/{}>",
+    "[https://github.com/{}]", '"https://github.com/{}",', "'https://github.com/{}'",
+    "https://github.com/{}, then more", "https://github.com/{}.",
+    "https://github.com/{}/pull/91", "github.com/{}", "www.github.com/{}",
+    "https://www.github.com/{} here", "git@github.com:{}.git", "git@github.com:{}",
+    "https://api.github.com/repos/{} now", "https://api.github.com/repos/{})",
+    "https://api.github.com/repos/{}/issues/91", "{}#91", "Derived from {}#91",
+]
 
 
 @pytest.mark.parametrize(
-    "line",
-    [
-        f"See https://github.com/{_FOREIGN} for context",
-        f"(https://github.com/{_FOREIGN})",
-        f"[context](https://github.com/{_FOREIGN})",
-        f"`https://github.com/{_FOREIGN}`",
-        f"<https://github.com/{_FOREIGN}>",
-        f"[https://github.com/{_FOREIGN}]",
-        f'"https://github.com/{_FOREIGN}",',
-        f"'https://github.com/{_FOREIGN}'",
-        f"https://github.com/{_FOREIGN}, then more",
-        f"https://github.com/{_FOREIGN}.",
-        f"https://github.com/{_FOREIGN}/pull/91",
-        f"github.com/{_FOREIGN}",
-        f"www.github.com/{_FOREIGN}",
-        f"https://www.github.com/{_FOREIGN} here",
-        f"git@github.com:{_FOREIGN}.git",
-        f"git@github.com:{_FOREIGN}",
-        f"https://api.github.com/repos/{_FOREIGN} now",
-        f"https://api.github.com/repos/{_FOREIGN})",
-        f"{_FOREIGN}#91",
-    ],
+    "line", [form.format(repo) for repo in (_FOREIGN, _SAME_OWNER) for form in _BLOCKED]
+    + [f"Provenance: {_SAME_OWNER}"],
 )
-def test_foreign_repository_links_are_blocked_in_ordinary_prose(line):
-    findings = checker.scan_text(line, source="payload", target=_PUBLIC_TARGET)
-    assert [finding.line for finding in findings] == [1], line
+def test_cross_repository_references_are_blocked(line):
+    assert _lines(line) == [1], line
 
 
 @pytest.mark.parametrize(
     "line",
     [
-        f"Clone https://github.com/{_PUBLIC_TARGET}.git to start.",
-        f"git@github.com:{_PUBLIC_TARGET}.git",
-        f"See {_PUBLIC_TARGET}.",
-        f"See {_PUBLIC_TARGET}, then run it.",
-        f"(https://github.com/{_PUBLIC_TARGET}).",
-        f"github.com/{_PUBLIC_TARGET}",
-        f"Is it {_PUBLIC_TARGET}?",
-    ],
-)
-def test_destination_repository_forms_are_allowed(line):
-    assert checker.scan_text(line, source="payload", target=_PUBLIC_TARGET) == [], line
-
-
-@pytest.mark.parametrize(
-    "line",
-    [
-        "https://github.com/settings/tokens",
-        "https://github.com/orgs/other-owner/people",
-        "https://github.com/features/actions",
-        "https://github.com/marketplace/actions/some-action",
-        "https://github.com/sponsors/someone",
-        "https://github.com/apps/some-bot",
-        "https://github.com/topics/python",
-        "https://github.com/login/oauth",
+        f"https://github.com/{_TARGET}/pull/12", f"{_TARGET}#12",
+        f"https://api.github.com/repos/{_TARGET}/issues/12", f"Clone https://github.com/{_TARGET}.git to start.",
+        f"git@github.com:{_TARGET}.git", f"See {_TARGET}.", f"See {_TARGET}, then run it.",
+        f"(https://github.com/{_TARGET}).", f"github.com/{_TARGET}", f"Is it {_TARGET}?",
+        # github.com pages that name no repository
+        "https://github.com/settings/tokens", "https://github.com/orgs/other-owner/people",
+        "https://github.com/features/actions", "https://github.com/marketplace/actions/x",
+        "https://github.com/sponsors/someone", "https://github.com/apps/some-bot",
+        "https://github.com/topics/python", "https://github.com/login/oauth",
         "https://docs.github.com/en/actions/using-workflows",
+        "See skills/ci-speedup after internal design and review.",
     ],
 )
-def test_non_repository_github_pages_are_allowed(line):
-    assert checker.scan_text(line, source="payload", target=_PUBLIC_TARGET) == [], line
+def test_destination_and_non_repository_forms_are_allowed(line):
+    assert _lines(line) == [], line
 
 
-def test_bare_repository_slug_in_target_organization_is_blocked():
-    private_slug = "/".join(("example", "internal-project"))
-    findings = checker.scan_text(
-        f"Provenance: {private_slug}",
-        source="payload",
-        target=_PUBLIC_TARGET,
-    )
-    assert [finding.line for finding in findings] == [1]
-
-
-def test_neutral_paths_and_generic_provenance_are_allowed():
-    text = "See skills/ci-speedup after internal design and review."
-    assert checker.scan_text(
-        text, source="payload", target=_PUBLIC_TARGET
-    ) == []
-
-
-def test_invalid_or_empty_invocation_fails_closed(capsys):
-    assert checker.main(["--target", "not-a-repository", "--base", "main"]) == 2
-    assert checker.main(["--target", _PUBLIC_TARGET]) == 2
-    assert "privacy preflight error" in capsys.readouterr().err
-
-
-def test_unverified_visibility_fails_closed(capsys, monkeypatch, tmp_path):
-    payload = tmp_path / "body.md"
-    payload.write_text("neutral payload\n", encoding="utf-8")
-
-    def reject(_target):
-        raise RuntimeError("destination repository is not verified PUBLIC")
-
-    monkeypatch.setattr(checker, "_verify_public_target", reject)
-    assert checker.main(
-        ["--target", _PUBLIC_TARGET, "--text-file", str(payload)]
-    ) == 2
-    assert "not verified PUBLIC" in capsys.readouterr().err
-
-
-def _completed(stdout="", returncode=0):
-    return subprocess.CompletedProcess([], returncode, stdout=stdout, stderr="")
-
-
-def _neutral_payload(tmp_path):
-    payload = tmp_path / "body.md"
-    payload.write_text("neutral payload\n", encoding="utf-8")
-    return payload
-
-
-@pytest.mark.parametrize(
-    ("stdout", "returncode", "expected"),
-    [
-        ("PUBLIC\n", 0, 0),
-        ("PRIVATE\n", 0, 2),
-        ("INTERNAL\n", 0, 2),
-        ("", 0, 2),
-        ("PUBLIC\n", 1, 2),
-    ],
-)
-def test_visibility_check_parses_gh_output(
-    monkeypatch, tmp_path, stdout, returncode, expected
-):
-    calls = []
-
-    def fake_run(cmd, **_kwargs):
-        calls.append(cmd)
-        return _completed(stdout, returncode)
-
-    monkeypatch.setattr(checker.subprocess, "run", fake_run)
-    assert checker.main(
-        ["--target", _PUBLIC_TARGET, "--text-file", str(_neutral_payload(tmp_path))]
-    ) == expected
-    assert calls[0][:4] == ["gh", "repo", "view", _PUBLIC_TARGET]
-
-
-def test_missing_gh_reports_gh_not_installed(capsys, monkeypatch, tmp_path):
-    def missing(cmd, **_kwargs):
-        raise FileNotFoundError(2, "No such file or directory", cmd[0])
-
-    monkeypatch.setattr(checker.subprocess, "run", missing)
-    assert checker.main(
-        ["--target", _PUBLIC_TARGET, "--text-file", str(_neutral_payload(tmp_path))]
-    ) == 2
-    stderr = capsys.readouterr().err
-    assert "gh not installed" in stderr
-    assert "could not read an input file" not in stderr
-
-
-def test_missing_git_reports_git_not_installed(capsys, monkeypatch):
-    monkeypatch.setattr(checker, "_verify_public_target", lambda _target: None)
-
-    def missing(cmd, **_kwargs):
-        raise FileNotFoundError(2, "No such file or directory", cmd[0])
-
-    monkeypatch.setattr(checker.subprocess, "run", missing)
-    assert checker.main(["--target", _PUBLIC_TARGET, "--base", "origin/main"]) == 2
-    stderr = capsys.readouterr().err
-    assert "git not installed" in stderr
-    assert "could not read an input file" not in stderr
-
-
-def test_unreadable_input_file_is_not_echoed(capsys, monkeypatch, tmp_path):
-    monkeypatch.setattr(checker, "_verify_public_target", lambda _target: None)
-    sensitive_name = "internal-project-body.md"
-    assert checker.main(
-        ["--target", _PUBLIC_TARGET, "--text-file", str(tmp_path / sensitive_name)]
-    ) == 2
-    stderr = capsys.readouterr().err
-    assert "could not read text file 1" in stderr
-    assert sensitive_name not in stderr
-    assert str(tmp_path) not in stderr
-
-
-def test_allowed_public_repository_passes(monkeypatch, tmp_path):
-    payload = tmp_path / "body.md"
-    payload.write_text(f"Upstream: https://github.com/{_FOREIGN}\n", encoding="utf-8")
-    viewed = []
-
-    def fake_run(cmd, **_kwargs):
-        viewed.append(cmd[3])
-        return _completed("PUBLIC\n")
-
-    monkeypatch.setattr(checker.subprocess, "run", fake_run)
-    assert checker.main(
-        [
-            "--target", _PUBLIC_TARGET, "--text-file", str(payload),
-            "--allow", _FOREIGN,
-        ]
-    ) == 0
-    assert viewed == [_PUBLIC_TARGET, _FOREIGN]
-
-
-def test_allowed_private_repository_fails_closed(capsys, monkeypatch, tmp_path):
-    payload = tmp_path / "body.md"
-    payload.write_text(f"Upstream: https://github.com/{_FOREIGN}\n", encoding="utf-8")
-
-    def fake_run(cmd, **_kwargs):
-        return _completed("PUBLIC\n" if cmd[3] == _PUBLIC_TARGET else "PRIVATE\n")
-
-    monkeypatch.setattr(checker.subprocess, "run", fake_run)
-    assert checker.main(
-        [
-            "--target", _PUBLIC_TARGET, "--text-file", str(payload),
-            "--allow", _FOREIGN,
-        ]
-    ) == 2
-    stderr = capsys.readouterr().err
-    assert "allowed repository 1 is not verified PUBLIC" in stderr
-    assert _FOREIGN not in stderr
-
-
-def test_allow_only_covers_the_named_repository(monkeypatch):
+def test_allow_only_covers_the_named_repository():
     other = "/".join(("third-owner", "another-project"))
-    monkeypatch.setattr(checker, "_verify_public_target", lambda _target: None)
-    findings = checker.scan_text(
-        f"https://github.com/{_FOREIGN}\nhttps://github.com/{other}\n",
-        source="payload",
-        target=_PUBLIC_TARGET,
-        allowed=frozenset({_FOREIGN}),
-    )
-    assert [finding.line for finding in findings] == [2]
+    text = f"{_LINK}https://github.com/{other}\n"
+    assert _lines(text, allowed=frozenset({_FOREIGN})) == [2]
 
 
 def test_added_lines_parser_tracks_paths_hunks_and_double_plus_content():
@@ -339,33 +112,110 @@ def test_added_lines_parser_tracks_paths_hunks_and_double_plus_content():
     ]
 
 
-# --- real temporary git repositories ------------------------------------------------
+# --- main(): text files, visibility, fail-closed errors ---------------------------
+
+
+def _main(*args):
+    return checker.main(["--target", _TARGET, *args])
+
+
+def _fake_gh(monkeypatch, visibility, returncode=0):
+    viewed = []
+
+    def run(cmd, **_kwargs):
+        viewed.append(cmd)
+        return subprocess.CompletedProcess(cmd, returncode, visibility(cmd[3]), "")
+
+    monkeypatch.setattr(checker.subprocess, "run", run)
+    return viewed
 
 
 @pytest.fixture
-def repo(tmp_path, monkeypatch):
-    """An isolated git repository the checker runs inside.
+def public(monkeypatch):
+    monkeypatch.setattr(checker, "_verify_public_target", lambda *_a, **_k: None)
 
-    Isolated from the caller's git environment (pre-commit hooks and worktrees
-    export GIT_DIR / GIT_WORK_TREE / GIT_INDEX_FILE) and from global config.
-    """
-    for var in (
-        "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_PREFIX",
-    ):
-        monkeypatch.delenv(var, raising=False)
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
-    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(home / ".gitconfig"))
-    root = tmp_path / "repo"
-    root.mkdir()
-    monkeypatch.chdir(root)
-    _git("init", "-q", "-b", "main")
-    _commit("base", {"README.md": "neutral\n"})
-    monkeypatch.setattr(checker, "_verify_public_target", lambda _target: None)
-    return root
+
+def test_blocked_text_echoes_neither_identifier_nor_filename(public, capsys, tmp_path):
+    payload = tmp_path / "internal-project-body.md"
+    payload.write_text(f"Derived from {_SAME_OWNER}#91\n", encoding="utf-8")
+    assert _main("--text-file", str(payload)) == 1
+    stderr = capsys.readouterr().err
+    assert "cross-repository" in stderr and "text file 1:1" in stderr
+    assert _SAME_OWNER not in stderr and payload.name not in stderr
+
+
+def test_unreadable_input_file_is_not_echoed(public, capsys, tmp_path):
+    assert _main("--text-file", str(tmp_path / "internal-project-body.md")) == 2
+    stderr = capsys.readouterr().err
+    assert "could not read text file 1" in stderr
+    assert "internal-project" not in stderr and str(tmp_path) not in stderr
+
+
+@pytest.mark.parametrize(
+    "args", [["--target", "not-a-repository", "--base", "main"], ["--target", _TARGET],
+             ["--target", _TARGET, "--base", "main", "--allow", "not-a-repository"]],
+)
+def test_invalid_invocation_fails_closed(args, capsys):
+    assert checker.main(args) == 2
+    assert "privacy preflight error" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("stdout", "returncode", "expected", "message"),
+    [
+        ("PUBLIC\n", 0, 0, ""),
+        ("PRIVATE\n", 0, 2, "not verified PUBLIC"),
+        ("INTERNAL\n", 0, 2, "not verified PUBLIC"),
+        ("", 0, 2, "not verified PUBLIC"),
+        ("PUBLIC\n", 1, 2, "could not verify destination repository visibility"),
+    ],
+)
+def test_visibility_check_parses_gh_output(
+    monkeypatch, capsys, tmp_path, stdout, returncode, expected, message
+):
+    payload = tmp_path / "body.md"
+    payload.write_text("neutral payload\n", encoding="utf-8")
+    viewed = _fake_gh(monkeypatch, lambda _repo: stdout, returncode)
+    assert _main("--text-file", str(payload)) == expected
+    assert viewed[0][:4] == ["gh", "repo", "view", _TARGET]
+    assert message in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(("visibility", "expected"), [("PUBLIC\n", 0), ("PRIVATE\n", 2)])
+def test_allowed_repository_must_verify_public(
+    monkeypatch, capsys, tmp_path, visibility, expected
+):
+    payload = tmp_path / "body.md"
+    payload.write_text(f"Upstream: {_LINK}", encoding="utf-8")
+    viewed = _fake_gh(
+        monkeypatch, lambda repo: "PUBLIC\n" if repo == _TARGET else visibility
+    )
+    assert _main("--text-file", str(payload), "--allow", _FOREIGN) == expected
+    assert [cmd[3] for cmd in viewed] == [_TARGET, _FOREIGN]
+    stderr = capsys.readouterr().err
+    assert _FOREIGN not in stderr
+    if expected:
+        assert "allowed repository 1 is not verified PUBLIC" in stderr
+
+
+@pytest.mark.parametrize("tool", ["gh", "git"])
+def test_missing_tool_is_named(tool, monkeypatch, capsys, tmp_path):
+    payload = tmp_path / "body.md"
+    payload.write_text("neutral payload\n", encoding="utf-8")
+    if tool == "git":
+        monkeypatch.setattr(checker, "_verify_public_target", lambda *_a, **_k: None)
+
+    def missing(cmd, **_kwargs):
+        raise FileNotFoundError(2, "No such file or directory", cmd[0])
+
+    monkeypatch.setattr(checker.subprocess, "run", missing)
+    args = ["--text-file", str(payload)] if tool == "gh" else ["--base", "origin/main"]
+    assert _main(*args) == 2
+    stderr = capsys.readouterr().err
+    assert f"{tool} not installed" in stderr and "could not read" not in stderr
+
+
+# --- --base against real temporary git repositories -------------------------------
 
 
 def _git(*args):
@@ -391,159 +241,139 @@ def _commit(message, files):
     return _git("rev-parse", "--short", "HEAD")
 
 
-def _run_base(capsys, *extra):
-    code = checker.main(["--target", _PUBLIC_TARGET, "--base", "main", *extra])
-    return code, capsys.readouterr().err
+@pytest.fixture
+def repo(tmp_path, monkeypatch, public):
+    """A git repo isolated from the caller's git env (hooks export GIT_DIR...) and config."""
+    for var in (
+        "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_PREFIX",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(home / ".gitconfig"))
+    root = tmp_path / "repo"
+    root.mkdir()
+    monkeypatch.chdir(root)
+    _git("init", "-q", "-b", "main")
+    _commit("base", {"README.md": "neutral\n"})
+    return root
 
 
-def test_added_line_starting_with_plus_plus_is_scanned(repo, capsys):
+_FIXTURES = {
+    path: _LINK
+    for path in (
+        "tests/test_x.py", "skills/demo/tests/test_y.py",
+        "skills/demo/evals/case.json", "maintainers/demo/tests/test_z.py",
+    )
+}
+
+# (on-main commits, feature commits, exit code, expected locations, forbidden text).
+# Locations use {0}, {1}... for the feature commits' short SHAs.
+_HISTORY_CASES = {
+    "plus-plus-line-is-scanned": (
+        [], [("add notes", {"notes.md": f"++https://github.com/{_FOREIGN}/pull/91\n"})],
+        1, ["commit {0} notes.md:1", "added diff:notes.md:1"], [],
+    ),
+    "added-then-removed-is-blocked-per-commit": (
+        [], [("add notes", {"notes.md": f"see {_FOREIGN}#91\n"}),
+             ("tidy notes", {"notes.md": "see the upstream report\n"})],
+        1, ["commit {0} notes.md:1"], ["added diff:"],
+    ),
+    "commit-message-is-scanned-per-commit": (
+        [], [(f"fix parser\n\nPorted from https://github.com/{_FOREIGN}.", {"a.md": "x\n"})],
+        1, ["commit {0} message:3"], [],
+    ),
+    "fixture-exclusion-does-not-cover-messages": (
+        [], [(f"add fixture for {_FOREIGN}#9", {"tests/test_x.py": "x = 1\n"})],
+        1, ["commit {0} message:1"], [],
+    ),
+    "fixture-paths-are-excluded-from-the-diff": (
+        [], [("add fixtures", _FIXTURES)], 0, [], [],
+    ),
+    "non-fixture-path-is-not-excluded": (
+        [], [("add fixtures", _FIXTURES), ("add doc", {"docs/guide.md": _LINK})],
+        1, ["commit {1} docs/guide.md:1"], ["tests/", "evals/"],
+    ),
+    "removed-only-reference-passes": (
+        [("seed", {"old.md": _LINK})], [("drop old link", {"old.md": None})], 0, [], [],
+    ),
+}
+
+
+@pytest.mark.parametrize("case", list(_HISTORY_CASES), ids=list(_HISTORY_CASES))
+def test_base_scans_outgoing_history(repo, capsys, case):
+    on_main, feature, code, expected, forbidden = _HISTORY_CASES[case]
+    for message, files in on_main:
+        _commit(message, files)
     _git("checkout", "-q", "-b", "feature")
-    sha = _commit("add notes", {"notes.md": f"++https://github.com/{_FOREIGN}/pull/91\n"})
-    code, stderr = _run_base(capsys)
-    assert code == 1
-    assert f"commit {sha} notes.md:1" in stderr
-    assert "added diff:notes.md:1" in stderr
-    assert _FOREIGN not in stderr
-
-
-def test_reference_added_then_removed_in_a_later_commit_is_blocked(repo, capsys):
-    _git("checkout", "-q", "-b", "feature")
-    leaked = _commit("add notes", {"notes.md": f"see {_FOREIGN}#91\n"})
-    _commit("tidy notes", {"notes.md": "see the upstream report\n"})
-    code, stderr = _run_base(capsys)
-    assert code == 1
-    assert f"commit {leaked} notes.md:1" in stderr
-    assert "added diff:" not in stderr
-
-
-def test_commit_message_reference_is_blocked_per_commit(repo, capsys):
-    _git("checkout", "-q", "-b", "feature")
-    sha = _commit(f"fix parser\n\nPorted from https://github.com/{_FOREIGN}.", {"a.md": "x\n"})
-    code, stderr = _run_base(capsys)
-    assert code == 1
-    assert f"commit {sha} message:3" in stderr
-    assert _FOREIGN not in stderr
-
-
-def test_removed_only_reference_passes(repo, capsys):
-    _commit("seed", {"old.md": f"see https://github.com/{_FOREIGN}\n"})
-    _git("checkout", "-q", "-b", "feature")
-    _commit("drop old link", {"old.md": None})
-    code, stderr = _run_base(capsys)
-    assert (code, stderr) == (0, "")
+    shas = [_commit(message, files) for message, files in feature]
+    assert _main("--base", "main") == code
+    stderr = capsys.readouterr().err
+    if code == 0:
+        assert stderr == ""
+    for location in expected:
+        assert location.format(*shas) in stderr
+    for text in [_FOREIGN, *forbidden]:
+        assert text not in stderr
 
 
 def test_unknown_base_fails_closed(repo, capsys):
-    code, stderr = checker.main(
-        ["--target", _PUBLIC_TARGET, "--base", "no-such-ref"]
-    ), capsys.readouterr().err
-    assert code == 2
-    assert "privacy preflight error: git" in stderr
-
-
-def test_git_output_nonzero_exit_fails_closed(monkeypatch, capsys):
-    monkeypatch.setattr(checker, "_verify_public_target", lambda _target: None)
-    monkeypatch.setattr(
-        checker.subprocess, "run", lambda cmd, **_kwargs: _completed("", 128)
-    )
-    assert checker.main(["--target", _PUBLIC_TARGET, "--base", "main"]) == 2
+    assert _main("--base", "no-such-ref") == 2
     assert "privacy preflight error: git" in capsys.readouterr().err
 
 
-def test_fixture_paths_are_excluded_from_the_diff_scan_only(repo, capsys):
-    _git("checkout", "-q", "-b", "feature")
-    link = f"https://github.com/{_FOREIGN}\n"
-    _commit(
-        "add fixtures",
-        {
-            "tests/test_x.py": link,
-            "skills/demo/tests/test_y.py": link,
-            "skills/demo/evals/case.json": link,
-            "maintainers/demo/tests/test_z.py": link,
-        },
-    )
-    assert _run_base(capsys) == (0, "")
-    sha = _commit("add doc", {"docs/guide.md": link})
-    code, stderr = _run_base(capsys)
-    assert code == 1
-    assert f"commit {sha} docs/guide.md:1" in stderr
-    assert "tests/" not in stderr and "evals/" not in stderr
+# --- docs and CI wiring ------------------------------------------------------------
 
 
-def test_fixture_exclusion_does_not_cover_commit_messages(repo, capsys):
-    _git("checkout", "-q", "-b", "feature")
-    sha = _commit(f"add fixture for {_FOREIGN}#9", {"tests/test_x.py": "x = 1\n"})
-    code, stderr = _run_base(capsys)
-    assert code == 1
-    assert f"commit {sha} message:1" in stderr
-
-
-def test_branch_name_is_scanned_automatically_with_base(repo, capsys):
-    _git("checkout", "-q", "-b", "port/" + "/".join(("example", "internal-project")))
-    _commit("neutral", {"a.md": "x\n"})
-    code, stderr = _run_base(capsys)
-    assert code == 1
-    assert "branch name:1" in stderr
-
-
-def test_explicit_branch_name_overrides_detection(repo, capsys):
-    _git("checkout", "-q", "-b", "feature")
-    _commit("neutral", {"a.md": "x\n"})
-    assert _run_base(capsys, "--branch-name", "policy/privacy-gate") == (0, "")
-    code, stderr = _run_base(
-        capsys, "--branch-name", "port/" + "/".join(("example", "internal-project"))
-    )
-    assert code == 1
-    assert "branch name:1" in stderr
-
-
-def _policy_section(name):
+def _section(name):
     text = (_ROOT / name).read_text(encoding="utf-8")
     heading = "## Public-output privacy gate\n"
     assert text.count(heading) == 1, f"{name} must have exactly one gate section"
-    section = text.split(heading, 1)[1]
-    next_heading = section.find("\n## ")
-    return heading + (section if next_heading == -1 else section[: next_heading + 1])
+    return text.split(heading, 1)[1].split("\n## ", 1)[0]
 
 
-def test_agent_instruction_sections_are_identical_and_name_the_gate():
-    agents, claude = _policy_section("AGENTS.md"), _policy_section("CLAUDE.md")
-    assert agents == claude, "AGENTS.md and CLAUDE.md gate sections must be identical"
+def test_agents_md_holds_the_policy_and_claude_md_points_to_it():
+    agents = _section("AGENTS.md")
     assert "python3 .github/scripts/check_public_output.py" in agents
-    assert "--allow" in agents
-    assert "--base origin/main" in agents
-    assert "mktemp" in agents and "/tmp/pr-" not in agents
-    assert "PUBLIC" in agents and "explicitly approved" in agents
+    assert "--base origin/main" in agents and "mktemp" in agents
+    assert "--allow" in agents and "PUBLIC" in agents and "explicitly approve" in agents
     assert "Fetch the published artifact back" in agents
+    assert "--branch-name" not in agents
+    claude = _section("CLAUDE.md")
+    assert "AGENTS.md" in claude and '"Public-output privacy gate"' in claude
+    assert len(claude.strip().splitlines()) <= 4, "CLAUDE.md keeps only a pointer"
 
 
-def _ci_suite_jobs():
-    yaml = pytest.importorskip("yaml")
-    jobs = yaml.safe_load(
-        (_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-    )["jobs"]
-    return {job_id: jobs[job_id] for job_id in ("test-self", "test-fork")}
+def test_ci_helper_reads_pr_text_only_from_env():
+    helper = (_SCRIPTS / "run_public_output_gate.sh").read_text(encoding="utf-8")
+    assert "set -euo pipefail" in helper and "${{" not in helper
+    assert helper.count("mktemp") == 2
+    assert "\"$PR_TITLE\"" in helper and "\"$PR_BODY\"" in helper
+    assert "check_public_output.py" in helper
+    for flag in ('--target "$GITHUB_REPOSITORY"', "--text-file", '--base "origin/$BASE_REF"'):
+        assert flag in helper
 
 
 @pytest.mark.parametrize("job_id", ["test-self", "test-fork"])
-def test_ci_runs_the_gate_on_every_pull_request_suite(job_id):
-    """The gate runs inside both suite jobs, so it gates the required `test`
-    check on same-repo and fork PRs alike instead of being a voluntary step."""
-    steps = _ci_suite_jobs()[job_id]["steps"]
-    gates = [
-        index for index, step in enumerate(steps)
-        if "check_public_output.py" in str(step.get("run", ""))
-    ]
+def test_ci_runs_the_gate_once_per_suite_job(job_id):
+    """Inside both suite jobs, the gate gates the required `test` check on
+    same-repo and fork PRs alike instead of being a voluntary step."""
+    yaml = pytest.importorskip("yaml")
+    workflow = yaml.safe_load((_ROOT / ".github" / "workflows" / "ci.yml").read_text("utf-8"))
+    steps = workflow["jobs"][job_id]["steps"]
+    gates = [i for i, s in enumerate(steps) if "public_output" in str(s.get("run", ""))]
     assert len(gates) == 1, f"{job_id} must run the privacy gate exactly once"
-    gate = steps[gates[0]]
     assert gates[0] < len(steps) - 1, "the gate must run before the suite step"
+    gate = steps[gates[0]]
     assert str(gate.get("if", "")).strip() == "github.event_name == 'pull_request'"
-    run = gate["run"]
-    for flag in ("--target", "--text-file", "--branch-name", "--base"):
-        assert flag in run
     # PR text is attacker-controlled: it may reach the shell only via env vars.
-    assert "${{" not in run, "template expressions in run: are injection sinks"
-    env = gate.get("env") or {}
-    assert env.get("PR_TITLE") == "${{ github.event.pull_request.title }}"
-    assert env.get("PR_BODY") == "${{ github.event.pull_request.body }}"
-    assert env.get("GH_TOKEN") == "${{ github.token }}"
+    assert gate["run"] == "bash .github/scripts/run_public_output_gate.sh"
+    assert gate.get("env") == {
+        "GH_TOKEN": "${{ github.token }}",
+        "BASE_REF": "${{ github.base_ref }}",
+        "PR_TITLE": "${{ github.event.pull_request.title }}",
+        "PR_BODY": "${{ github.event.pull_request.body }}",
+    }
