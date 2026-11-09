@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -8,7 +9,8 @@ from pathlib import Path
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from before_after import advance_verification
+from before_after import (GhVerificationClient, _baseline_from_findings,
+                          advance_verification, compare_push_cohorts)
 
 
 def _job(sha: str, attempt: int, end: int = 20):
@@ -51,9 +53,10 @@ class FakeClient:
         self.events.append("initial")
         return copy.deepcopy(self.initial) if self.initial and head == self.head else None
 
-    def rerun_cohort(self, repo, cohort):
-        self.events.append("rerun")
-        self.reruns += 1
+    def rerun_cohort(self, repo, cohort, *, trigger=True):
+        self.events.append("rerun-trigger" if trigger else "rerun-poll")
+        if trigger:
+            self.reruns += 1
         return _cohort(self.head, f"{self.head}-rerun-{self.reruns}",
                        attempt=self.reruns + 1)
 
@@ -97,7 +100,7 @@ def test_automatic_cohort_is_sample_one_and_cost_prints_before_rerun(tmp_path):
     assert result["status"] == "complete"
     assert result["sample_count"] == 2
     assert client.reruns == 1
-    assert client.events.index("rerun") > next(
+    assert client.events.index("rerun-trigger") > next(
         i for i, event in enumerate(client.events)
         if isinstance(event, tuple) and "runner-minutes" in event[1])
 
@@ -109,6 +112,50 @@ def test_repeat_invocation_reuses_verdict_without_duplicate_rerun(tmp_path):
     assert first["status"] == second["status"] == "complete"
     assert client.reruns == 1
     assert second["reused"] is True
+
+
+def test_saved_verdict_reuses_without_refetching_the_initial_cohort(tmp_path):
+    client = FakeClient()
+    _invoke(tmp_path, client)
+    client.initial = None
+    result = _invoke(tmp_path, client)
+    assert result["status"] == "complete"
+    assert result["reused"] is True
+    assert client.reruns == 1
+
+
+def test_changed_sampling_binding_never_reuses_an_ordinary_verdict(tmp_path):
+    client = FakeClient()
+    _invoke(tmp_path, client)
+    client.pushes = [_cohort(f"push-{n}", f"p{n}") for n in range(1, 4)]
+    result = _invoke(tmp_path, client, cache_sensitive=True)
+    assert result["reused"] is False
+    assert result["sample_count"] == 3
+    assert client.reruns == 1
+
+
+class InterruptedClient(FakeClient):
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+
+    def rerun_cohort(self, repo, cohort, *, trigger=True):
+        self.events.append("rerun-trigger" if trigger else "rerun-poll")
+        self.calls += 1
+        if self.calls == 1:
+            return None
+        assert trigger is False
+        return _cohort(self.head, "resumed-attempt", attempt=2)
+
+
+def test_interrupted_rerun_resumes_polling_without_a_second_trigger(tmp_path):
+    client = InterruptedClient()
+    first = _invoke(tmp_path, client)
+    second = _invoke(tmp_path, client)
+    assert first["status"] == "waiting-for-rerun"
+    assert second["status"] == "complete"
+    assert client.events.count("rerun-trigger") == 1
+    assert client.events.count("rerun-poll") == 1
 
 
 def test_moved_head_discards_old_in_flight_samples(tmp_path):
@@ -146,4 +193,148 @@ def test_cache_sensitive_change_waits_for_three_distinct_pushes_without_rerun(tm
     result = _invoke(tmp_path, client, cache_sensitive=True)
     assert result["status"] == "complete"
     assert result["sample_count"] == 3
+    assert result["verdict"]["after"]["all_complete"]["n"] == 3
     assert client.reruns == 0
+
+
+def test_cli_verification_preserves_the_original_baseline(tmp_path, monkeypatch):
+    run_path = SCRIPTS / "run.py"
+    spec = importlib.util.spec_from_file_location("ci_speedup_run_verify", run_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    baseline = tmp_path / "findings.json"
+    original = json.dumps({"verification_baseline": [
+        _cohort("base-1", "base-1"), _cohort("base-2", "base-2")]})
+    baseline.write_text(original)
+    observed = {}
+
+    def fake_advance(client, **kwargs):
+        observed.update(kwargs)
+        return {"status": "complete", "verdict": {}}
+
+    monkeypatch.setattr(module, "advance_verification", fake_advance)
+    monkeypatch.setattr(module, "GhVerificationClient", object)
+    assert module.main([
+        "--root", str(tmp_path), "--out", str(baseline),
+        "--repo", "o/r", "--verify-branch", "fix",
+    ]) == 0
+    assert baseline.read_text() == original
+    assert observed["baseline_artifact"] == str(baseline)
+
+
+class AdapterFixture(GhVerificationClient):
+    def __init__(self, responses):
+        super().__init__(poll_s=0, timeout_s=0.01, settle_s=0)
+        self.responses = responses
+        self.posts = []
+
+    def _api(self, endpoint, *, method="GET"):
+        if method != "GET":
+            self.posts.append(endpoint)
+            return {}
+        for key, value in self.responses.items():
+            if key in endpoint:
+                return copy.deepcopy(value)
+        return None
+
+
+def _api_run(run_id, workflow_id, event="pull_request", head="fix", attempt=1):
+    return {
+        "id": run_id, "workflow_id": workflow_id, "name": f"wf-{workflow_id}",
+        "event": event, "head_sha": head, "run_attempt": attempt,
+        "status": "completed", "conclusion": "success",
+        "created_at": "2026-11-08T00:00:00Z",
+    }
+
+
+def _api_job(job_id=1):
+    return {
+        "id": job_id, "name": "test", "created_at": "2026-11-08T00:00:00Z",
+        "started_at": "2026-11-08T00:00:02Z",
+        "completed_at": "2026-11-08T00:00:20Z", "conclusion": "success",
+        "labels": ["ubuntu-latest"], "steps": [{
+            "name": "tests", "started_at": "2026-11-08T00:00:02Z",
+            "completed_at": "2026-11-08T00:00:20Z"}],
+    }
+
+
+def test_real_adapter_keeps_all_events_and_uses_independent_check_run_set():
+    first = _api_run(10, 1, "pull_request")
+    chained = _api_run(20, 2, "workflow_run")
+    client = AdapterFixture({
+        "actions/runs?head_sha=fix": {"workflow_runs": [first, chained]},
+        "check-runs": {"check_runs": [
+            {"details_url": "https://github.com/o/r/actions/runs/10/job/1"},
+            {"details_url": "https://github.com/o/r/actions/runs/20/job/2"},
+        ]},
+        "runs/10/attempts/1/jobs": {"jobs": [_api_job(1)]},
+        "runs/20/attempts/1/jobs": {"jobs": [_api_job(2)]},
+        "event=pull_request": {"total_count": 40},
+        "event=workflow_run": {"total_count": 5},
+    })
+    cohort = client.completed_cohort("o/r", "fix")
+    assert cohort is not None
+    assert set(cohort["workflows"]) == {"1:pull_request", "2:workflow_run"}
+    assert cohort["lane_runs_30d"] == 45
+    assert all(job["workload_identity"] for job in cohort["jobs"])
+
+
+def test_collected_baseline_and_real_adapter_use_the_same_work_identity():
+    job = {
+        "name": "test", "workflow_file": ".github/workflows/ci.yml",
+        "created_at": "2026-11-08T00:00:00Z",
+        "started_at": "2026-11-08T00:00:02Z",
+        "completed_at": "2026-11-08T00:00:30Z",
+        "runner_label": "ubuntu-latest", "runner_class": "github-hosted",
+        "steps": [{"name": "tests", "started_at": "2026-11-08T00:00:02Z",
+                   "completed_at": "2026-11-08T00:00:30Z"}],
+    }
+    doc = {
+        "per_workflow_monthly_volume": {".github/workflows/ci.yml": 40},
+        "pr_critical_path": {"commit_wall_clock": {"facts": [
+            {"sha": "base-1", "event": "pull_request", "jobs": [job]},
+            {"sha": "base-2", "event": "pull_request", "jobs": [job]},
+        ]}},
+    }
+    before = _baseline_from_findings(doc)
+    after_job = copy.deepcopy(job)
+    after_job.update({
+        "workflow": ".github/workflows/ci.yml:pull_request",
+        "head_sha": "fix", "run_attempt": 1,
+        "workload_identity": [
+            ".github/workflows/ci.yml:pull_request/test/tests"],
+    })
+    after = [{
+        "head_sha": "fix", "cohort_id": f"after-{n}", "attempt": 1,
+        "position": n, "conclusion": "success",
+        "workflows": [".github/workflows/ci.yml:pull_request"],
+        "expected_workflows": [".github/workflows/ci.yml:pull_request"],
+        "jobs": [after_job], "logs": [], "lane": "pull_request",
+        "lane_runs_30d": 40,
+    } for n in (1, 2)]
+    result = compare_push_cohorts(
+        before, after, changed_files=[".github/workflows/ci.yml"])
+    assert result["available"] is True
+    assert result["workload_state"] == "same"
+
+
+def test_default_branch_sampling_maps_squash_merge_and_stops_at_a_gap():
+    commits = [{"sha": "newer"}, {"sha": "merge"}, {"sha": "older"}]
+    merge_run = _api_run(30, 3, "push", "merge")
+    newer_run = _api_run(40, 3, "push", "newer")
+    client = AdapterFixture({
+        "repos/o/r/commits?": commits,
+        "commits/fix/pulls": [{
+            "merged_at": "2026-11-08T01:00:00Z", "merge_commit_sha": "merge",
+            "base": {"ref": "main"},
+        }],
+        "head_sha=merge": {"workflow_runs": [merge_run]},
+        "head_sha=newer": {"workflow_runs": [newer_run]},
+        "runs/30/attempts/1/jobs": {"jobs": [_api_job(3)]},
+        "runs/40/attempts/1/jobs": {"jobs": []},
+        "event=push": {"total_count": 30},
+        "repos/o/r": {"default_branch": "main"},
+    })
+    cohorts = client.default_branch_cohorts("o/r", "fix", 3)
+    assert [cohort["head_sha"] for cohort in cohorts] == ["merge"]

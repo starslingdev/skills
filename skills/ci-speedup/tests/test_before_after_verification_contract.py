@@ -656,7 +656,8 @@ def test_locked_decisions_are_unchanged():
     assert "`CI_SPEEDUP_VERIFY_VARIANCE_PCT`" in d
     assert "never re-push" in d
     assert "not gated" in d
-    assert "Env-configurable, out of user-facing SKILL.md" in d
+    assert "**Env-configurable**" in d
+    assert "safe `0` opt-out" in d
     assert "Wall-clock only in v1" in d
 
 

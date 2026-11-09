@@ -63,12 +63,9 @@ pauses before committing / opening a PR. Phase 7 presupposes the user then
 
 Trigger condition: the fix is bound to an exact remote head SHA AND that head's
 initial complete CI cohort has completed (see "Sampling", and "Trigger and resume
-contract" for the precise eligibility, binding, and resume rules). Those rules
-describe the phase once it exists; they do not make it live. Phase 6 today ends
-at applying the fix, so until the skill gains a push-to-branch step, **nothing
-reaches eligibility and phase 7 never runs** — the eligibility rules are what the
-implementation must satisfy on the day that step lands, not a claim that the
-phase is reachable now.
+contract" for the precise eligibility, binding, and resume rules). The user
+reaches phase 7 by authorizing and pushing the fix, then resuming the original
+scratch findings artifact with `run.py --verify-branch`.
 
 ## Measurement design
 
@@ -291,7 +288,8 @@ sampling decision — where the two could interact, **the locked decision govern
   cannot run attempts 2 and 3 at once. So samples 2..N are collected serially, and
   N samples cost ≈ N × one run of wall-clock on this path. (Same attempt model
   `collect_runs.py` already handles for rerun/attempt waste.)
-- **`workflow_dispatch` where every required cohort member supports it** — the only path
+- **`workflow_dispatch` where every required cohort member supports it** — an optional
+  transport extension beyond the implemented v1 serial-rerun path, and the only path
   that yields *distinct run-ids* and can therefore fire N runs **truly in
   parallel** (≈ one run of wall-clock). But many workflows are `push`/`pull_request`
   only (the website's `ci.yml` is), so dispatch cannot be the primary path; use it
@@ -456,7 +454,7 @@ collapses it to ≈ one run); billing is N × one run's runner-minutes regardles
   Transparency, not a gate. (Edge refinement: if the report's own data shows the
   gating run is unusually expensive, escalate to a one-line confirm — otherwise
   auto.)
-- **Env-configurable, kept out of user-facing SKILL.md (Decision 5)**, matching
+- **Env-configurable** (Decision 5), matching
   the `CI_SPEEDUP_FETCH_CONCURRENCY` / `STARSLING_LOG_LEVEL` convention:
   - `CI_SPEEDUP_VERIFY_RUNS` — default `2`; **`0` disables phase 7 entirely** (the
     clean escape hatch that makes "auto" safe).
@@ -508,9 +506,10 @@ cohort. Cost estimates below use the whole cohort plus the separate noise contro
 4. **Automatic, with the runner-minute cost disclosed in the same line — not
    gated.** Auto serves the "never ask for the payoff" goal; the disclosed cost
    keeps it honest; `CI_SPEEDUP_VERIFY_RUNS=0` is the opt-out.
-5. **Env-configurable, out of user-facing SKILL.md** — `CI_SPEEDUP_VERIFY_RUNS`
-   (default 2, `0`=off) and `CI_SPEEDUP_VERIFY_VARIANCE_PCT` (default 20), per the
-   existing knob convention.
+5. **Env-configurable** — `CI_SPEEDUP_VERIFY_RUNS` (default 2, `0`=off) and
+   `CI_SPEEDUP_VERIFY_VARIANCE_PCT` (default 20), per the existing knob
+   convention. The phase documents the safe `0` opt-out; the variance tuning
+   knob remains a reference-level detail.
 6. **Wall-clock only in v1; runner-minute (billing) before/after is a documented
    fast-follow.** Merge-wait is the payoff the user feels and the skill headlines.
    A billing delta would compare the report's *modeled* before against a *measured*
@@ -524,14 +523,14 @@ Decision 6.
 ## Implementation map
 
 - SKILL.md: add phase 7 (post-fix verification) + its close-rendering rules.
-- A helper (or extend `collect_runs.py`) to: trigger the samples (serial reruns,
-  or parallel `workflow_dispatch` where available), poll to completion, enumerate
+- `before_after.py` triggers the samples with serial reruns, polls to completion, enumerates
   the run's **attempts** (new per-attempt fetch — the run-list sampler sees only
   one row), compute each complete push cohort's first-created → last-finished interval, run the two-part CI-only-scope
   guard (no product code + same work ran), classify cold/warm from log evidence,
   compare runner class, triggered set, task-cache hit share and work parity, and
   emit the disclosed before/after block (all six disclaimers, real wall-clock +
-  billing cost).
+  billing cost). The dispatch contract above remains the safe shape for a future
+  parallel transport; v1 does not claim to dispatch workflows.
 - Tests: median/range over all complete samples with cold and warm samples on separate lines, the
   variance-adaptive-N logic, log-backed cold classification, the CI-only-scope guard
   (product code → conflated; each workload state reached only on its own

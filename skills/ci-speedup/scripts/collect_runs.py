@@ -29735,6 +29735,14 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 if _duration < 0:
                     continue
                 _completed_here = True
+                _runner_label = _job_runner_label(_job)
+                _labels = [str(value) for value in _job.get("labels") or []]
+                _steps = [{
+                    "name": str(_step.get("name") or ""),
+                    "started_at": _step.get("started_at"),
+                    "completed_at": _step.get("completed_at"),
+                } for _step in _job.get("steps") or []
+                    if isinstance(_step, dict) and _step.get("name")]
                 _job_intervals.append({
                     "name": str(_job.get("name") or ""),
                     "workflow_file": _wf,
@@ -29745,6 +29753,14 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                                       or _run.get("created_at") or ""),
                     "started_at": str(_job.get("started_at") or ""),
                     "completed_at": str(_job.get("completed_at") or ""),
+                    "runner_label": _runner_label,
+                    "runner_class": ("self-hosted" if "self-hosted" in _labels
+                                     else "github-hosted"),
+                    "runner_image": "",
+                    "steps": _steps,
+                    "workload_identity": [
+                        f"{_wf}/{str(_job.get('name') or '')}/{step['name']}"
+                        for step in _steps],
                 })
                 _job_rows.append({
                     "name": str(_job.get("name") or ""),
