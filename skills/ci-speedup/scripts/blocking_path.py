@@ -10019,6 +10019,30 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
             f"Where: {locs}."]
     if ev:
         body.append(f"What ci-speedup saw: {ev}")
+    if wait and pat == "OPT43":
+        comparisons = [
+            member.get("queue_label_comparison")
+            for member in members
+            if isinstance(member.get("queue_label_comparison"), dict)
+        ]
+        named = next((item for item in comparisons
+                      if not item.get("unavailable")), None)
+        if named is not None:
+            body.append(
+                "Runner-pool comparison: the affected label "
+                f"`{named.get('slow_label')}` queued at p50 "
+                f"{_clock(_num(named.get('slow_queue_p50_s')) or 0)}, while "
+                f"`{named.get('lower_label')}` queued at p50 "
+                f"{_clock(_num(named.get('lower_queue_p50_s')) or 0)}. Investigate "
+                "the measured pool difference; OPT81 separately owns same-job "
+                "runner-speed comparisons."
+            )
+        else:
+            body.append("Runner-pool comparison: comparison unavailable.")
+        body.append(
+            "Queue wait alone does not show that fewer jobs or shards would help; "
+            "preserve the job graph and verification coverage while investigating."
+        )
     if opt9_measure and len(opt9_measure) != len(members):
         body.append(
             "Compiler build-state and generated-output occurrences in this group "
@@ -10305,6 +10329,53 @@ def _workflow_lane_line(ms: list[dict[str, Any]]) -> str | None:
     return line
 
 
+def _queue_runner_label_lines(finding: dict[str, Any]) -> list[str]:
+    """Render OPT43's descriptive per-pool queue/work distribution."""
+    rows = [row for row in (finding.get("queue_by_runner_label") or [])
+            if isinstance(row, dict) and row.get("runner_label")]
+    if not rows:
+        return []
+    out = [
+        "**Runner-label queue/work (one maximum per workflow run and runner label):**",
+        "",
+        "| Runner label | Runs | Queue p50 | Queue p95 | Work p50 |",
+        "| --- | ---: | ---: | ---: | ---: |",
+    ]
+    for row in sorted(rows, key=lambda item: str(item.get("runner_label"))):
+        out.append(
+            f"| `{_flatten_cell(str(row.get('runner_label') or ''))}` | "
+            f"{int(_num(row.get('n')) or 0)} | "
+            f"{_clock(_num(row.get('queue_p50_s')) or 0)} | "
+            f"{_clock(_num(row.get('queue_p95_s')) or 0)} | "
+            f"{_clock(_num(row.get('work_p50_s')) or 0)} |"
+        )
+    censored = sum(int(_num(row.get("censored_n")) or 0) for row in rows)
+    out += ["", "Each workflow run contributes at most one observation per label; "
+            "when several jobs use that label, the table uses that run's maximum."]
+    if censored:
+        out.append(
+            f"{censored} run-label observation{'s' if censored != 1 else ''} "
+            "include a job cancelled before it started; created-to-cancelled time is "
+            "a censored lower bound on queue wait."
+        )
+    comparison = finding.get("queue_label_comparison")
+    if isinstance(comparison, dict) and not comparison.get("unavailable"):
+        slow = _flatten_cell(str(comparison.get("slow_label") or ""))
+        lower = _flatten_cell(str(comparison.get("lower_label") or ""))
+        out += [
+            "",
+            f"**Runner-pool comparison:** `{slow}` queued at p50 "
+            f"{_clock(_num(comparison.get('slow_queue_p50_s')) or 0)}, while "
+            f"`{lower}` queued at p50 "
+            f"{_clock(_num(comparison.get('lower_queue_p50_s')) or 0)}. "
+            "This is descriptive pool evidence; OPT81 separately owns same-job "
+            "runner-speed comparisons.",
+        ]
+    else:
+        out += ["", "**Runner-pool comparison:** comparison unavailable."]
+    return out
+
+
 def _queue_wait_block(findings: list[dict[str, Any]], catalog_url: str,
                       shallow_note: str = "",
                       commit_clock: dict[str, Any] | None = None) -> list[str]:
@@ -10399,6 +10470,10 @@ def _queue_wait_block(findings: list[dict[str, Any]], catalog_url: str,
             lines.append(lane_line)
         if ev:
             lines.append(f"**Evidence:** {_flatten_cell(ev)}")
+        for member in ms:
+            label_lines = _queue_runner_label_lines(member)
+            if label_lines:
+                lines += ["", *label_lines]
         lines += [f"**Catalog (background + fix recipe):** {url}", "",
                   *_hygiene_prompt(pat, title, ms, url, wait=True), "", "</details>", ""]
     return lines

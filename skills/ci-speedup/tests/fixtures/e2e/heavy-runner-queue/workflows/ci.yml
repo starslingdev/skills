@@ -2,11 +2,19 @@ name: Queued CI
 on: pull_request
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, slow-linux]
     steps:
       - run: make build
+  lint:
+    runs-on: [self-hosted, fast-linux]
+    steps:
+      - run: make lint
+  probe:
+    runs-on: [self-hosted, cancelled-linux]
+    steps:
+      - run: make probe
   gate:
-    needs: build
-    runs-on: ubuntu-latest
+    needs: [build, lint]
+    runs-on: [self-hosted, slow-linux]
     steps:
       - run: make test

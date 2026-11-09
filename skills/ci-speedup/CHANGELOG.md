@@ -1,5 +1,6 @@
 # Changelog
 
+- Break excessive queue wait down by runner label with per-run queue and work distributions, including censored jobs cancelled before pickup. Reports name a materially faster observed pool without treating queue wait as evidence to reduce jobs or shards.
 - Detect cache configurations that cannot produce a useful warm run, including mismatched restore prefixes, undersized or unpersisted compiler caches, erased Go caches, volatile BuildKit scopes, and ephemeral Dockerfile cache mounts. These checks stay uncredited until logs measure the miss and transfer cost; cache economics now exclude no-change reruns and count unread restored paths as pure cost.
 - Read timestamped pytest verbose progress and Vitest per-test durations when identifying long same-file tests that run serially. Vitest recommendations now require distinct source-level namespaces and name `describe.concurrent` with its default concurrency cap.
 - Require a readable classic branch-protection result before advising that a check move off pull requests.
