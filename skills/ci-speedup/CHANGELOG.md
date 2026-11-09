@@ -20,6 +20,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-11-09** — Add resumable post-fix verification after an authorized push. It binds samples to the exact remote head, counts the completed automatic cohort first, discloses rerun cost before spending, reuses saved results, invalidates moved-head samples, and waits for three distinct pushes when cache changes make reruns unrepresentative.
 - **2026-11-09** — Add a conservative, read-only before/after engine for complete push cohorts. It binds fresh samples to one exact head and attempt, reports warm and cold timing separately, and withholds attribution when work, runners, triggered workflows, cache replay, or CI-only scope are not comparable.
 - **2026-11-09** — Detect repeated per-invocation process startup from timestamped, strictly serial pytest, Cargo test-binary, and structured verification boundaries. OPT85 reports the measured startup share and modeled repeated-startup saving, while retries, overlaps, progress output, and untimestamped logs fail closed.
 - **2026-11-08** — Expand the before/after measurement contract with separate queue and work deltas, work-parity evidence, runner and trigger comparability, cache-state guards, per-commit ratios, compute disclosures, exclusions, lane frequency, and a required negative control.

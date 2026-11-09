@@ -1,9 +1,8 @@
-# Before/After speedup verification — spec / plan (v0 draft, for review)
+# Before/After speedup verification — methodology (v1)
 
-**Status:** approved plan, not yet implemented. The six design decisions are
-**locked** (see "Decisions" below); nothing in this PR changes skill behavior.
-This becomes the methodology doc for a new, lightweight, **built-in** ci-speedup
-phase once the implementation lands in a follow-up PR.
+**Status:** implemented. The six design decisions are **locked** (see
+"Decisions" below); this is the methodology contract for ci-speedup's built-in
+post-fix verification phase.
 
 **Amended 2026-09-08** with the workload-state vocabulary, the confounded-workload
 reporting rule, the trigger/resume contract, the gate-migration rule, the
@@ -522,7 +521,7 @@ The compute rows required by the comparability contract are disclosures. They
 do not size a runner-minute saving, change the wall-clock headline, or alter
 Decision 6.
 
-## Implementation sketch (once approved — NOT in this PR)
+## Implementation map
 
 - SKILL.md: add phase 7 (post-fix verification) + its close-rendering rules.
 - A helper (or extend `collect_runs.py`) to: trigger the samples (serial reruns,

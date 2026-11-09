@@ -64,8 +64,15 @@ class FakeClient:
 
 def _invoke(tmp_path, client, **kwargs):
     events = client.events
+    baseline = tmp_path / "base.json"
+    if not baseline.exists():
+        baseline.write_text(json.dumps({
+            "verification_baseline": [
+                _cohort("base-1", "base-1"),
+                _cohort("base-2", "base-2"),
+            ]}))
     return advance_verification(
-        client, repo="o/r", branch="fix", baseline_artifact="/tmp/base.json",
+        client, repo="o/r", branch="fix", baseline_artifact=str(baseline),
         context_path=tmp_path / "verify.json",
         changed_files=[".github/workflows/ci.yml"],
         emit=lambda line: events.append(("emit", line)),

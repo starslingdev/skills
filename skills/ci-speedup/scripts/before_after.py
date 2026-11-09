@@ -1,10 +1,16 @@
 """Conservative push-cohort comparison for post-fix CI verification."""
 from __future__ import annotations
 
+import json
+import os
 import re
 import statistics
+import subprocess
+import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Iterable
+from urllib.parse import quote
 
 from wall_clock import observed_commit_wall_s
 
@@ -27,8 +33,383 @@ def advance_verification(
     environ: dict[str, str] | None = None,
     emit: Any = print,
 ) -> dict[str, Any]:
-    """Advance a persisted post-fix verification session."""
-    return {"status": "pending", "verdict": None}
+    """Advance a persisted post-fix verification session.
+
+    The client owns GitHub transport. Its methods are intentionally small so
+    acceptance tests can prove the write boundary without network access.
+    Repository writes are limited to context_path beside scratch artifacts.
+    """
+    env = os.environ if environ is None else environ
+    try:
+        target_runs = max(0, min(4, int(env.get("CI_SPEEDUP_VERIFY_RUNS", "2"))))
+    except ValueError:
+        target_runs = 2
+    if target_runs == 0:
+        return {"status": "disabled", "verdict": None}
+
+    context_file = Path(context_path)
+    head = client.remote_head(repo, branch)
+    if not head:
+        return {"status": "ineligible", "verdict": None}
+    initial = client.completed_cohort(repo, head)
+    if initial is None:
+        return {"status": "waiting-for-first-cohort", "head_sha": head,
+                "verdict": None}
+
+    saved: dict[str, Any] = {}
+    if context_file.exists():
+        try:
+            loaded = json.loads(context_file.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                saved = loaded
+        except (OSError, json.JSONDecodeError):
+            saved = {}
+    moved = bool(saved.get("head_sha") and saved.get("head_sha") != head)
+    same_binding = (
+        saved.get("repository") == repo
+        and saved.get("baseline_artifact") == baseline_artifact
+        and saved.get("head_sha") == head
+    )
+    if same_binding and saved.get("verdict") is not None:
+        return {"status": "complete", "head_sha": head,
+                "sample_count": len(saved.get("samples") or []),
+                "verdict": saved["verdict"], "reused": True,
+                "discarded_moved_head": False}
+
+    samples = list(saved.get("samples") or []) if same_binding else [initial]
+    workflow_ids = list(initial.get("expected_workflows") or
+                        initial.get("workflows") or [])
+    context: dict[str, Any] = {
+        "repository": repo,
+        "baseline_artifact": baseline_artifact,
+        "head_sha": head,
+        "workflow_identities": workflow_ids,
+        "samples": samples,
+        "run_attempt_ids": [
+            item for sample in samples
+            for item in sample.get("run_attempt_ids") or []
+        ],
+        "verdict": None,
+    }
+
+    def persist() -> None:
+        context_file.parent.mkdir(parents=True, exist_ok=True)
+        temporary = context_file.with_name(context_file.name + ".partial")
+        temporary.write_text(
+            json.dumps(context, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8")
+        temporary.replace(context_file)
+
+    if cache_sensitive:
+        pushes = client.default_branch_cohorts(repo, after_head=head, limit=3)
+        distinct: list[dict[str, Any]] = []
+        seen_heads: set[str] = set()
+        for cohort in pushes:
+            push_head = str(cohort.get("head_sha") or "")
+            if push_head and push_head not in seen_heads:
+                seen_heads.add(push_head)
+                distinct.append(cohort)
+        context["samples"] = distinct
+        context["run_attempt_ids"] = [
+            item for sample in distinct
+            for item in sample.get("run_attempt_ids") or []
+        ]
+        if len(distinct) < 3:
+            persist()
+            emit("Cache-sensitive verification needs 3 distinct consecutive "
+                 "default-branch pushes; reruns are not valid samples.")
+            return {"status": "waiting-for-default-branch-pushes",
+                    "head_sha": head, "sample_count": len(distinct),
+                    "needed": 3, "verdict": None,
+                    "discarded_moved_head": moved}
+        samples = distinct
+    else:
+        wanted = max(1, target_runs)
+        if len(samples) < wanted:
+            jobs = initial.get("jobs") or []
+            wall_s = observed_commit_wall_s(jobs) or 0.0
+            runner_s = sum(
+                max(0.0, _seconds(str(job["completed_at"]))
+                    - _seconds(str(job["started_at"])))
+                for job in jobs
+                if job.get("started_at") and job.get("completed_at"))
+            remaining = wanted - len(samples)
+            emit("Measuring the speedup — rerunning the complete CI cohort "
+                 f"{remaining}× (~{remaining * wall_s / 60:.1f} more minutes "
+                 f"of wall-clock, ~{remaining * runner_s / 60:.1f} "
+                 "runner-minutes).")
+        while len(samples) < wanted:
+            cohort = client.rerun_cohort(repo, initial)
+            if cohort is None:
+                context["samples"] = samples
+                persist()
+                return {"status": "waiting-for-rerun", "head_sha": head,
+                        "sample_count": len(samples), "verdict": None,
+                        "discarded_moved_head": moved}
+            if str(cohort.get("head_sha") or "") != head:
+                context["samples"] = samples
+                persist()
+                return {"status": "moved-head", "head_sha": head,
+                        "sample_count": len(samples), "verdict": None,
+                        "discarded_moved_head": True}
+            samples.append(cohort)
+            context["samples"] = samples
+            context["run_attempt_ids"] = [
+                item for sample in samples
+                for item in sample.get("run_attempt_ids") or []
+            ]
+            persist()
+
+    if cache_sensitive:
+        verdict: dict[str, Any] = {
+            "status": "measured",
+            "head_sha": head,
+            "sample_count": len(samples),
+            "sample_heads": [str(sample.get("head_sha") or "")
+                             for sample in samples],
+            "changed_files": list(changed_files),
+            "cache_sensitive": True,
+        }
+    else:
+        try:
+            baseline_doc = json.loads(
+                Path(baseline_artifact).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            baseline_doc = {}
+        before = (baseline_doc.get("verification_baseline")
+                  if isinstance(baseline_doc, dict) else None)
+        if (not isinstance(before, list) or not before) and isinstance(
+                baseline_doc, dict):
+            before = _baseline_from_findings(baseline_doc)
+        if not isinstance(before, list) or not before:
+            context["samples"] = samples
+            persist()
+            return {"status": "baseline-unavailable", "head_sha": head,
+                    "sample_count": len(samples), "verdict": None,
+                    "discarded_moved_head": moved}
+        verdict = compare_push_cohorts(
+            before, samples, changed_files=list(changed_files))
+        while (int((verdict.get("sampling") or {}).get("need") or 0)
+               > len(samples) and len(samples) < 4):
+            jobs = initial.get("jobs") or []
+            wall_s = observed_commit_wall_s(jobs) or 0.0
+            runner_s = sum(
+                max(0.0, _seconds(str(job["completed_at"]))
+                    - _seconds(str(job["started_at"])))
+                for job in jobs
+                if job.get("started_at") and job.get("completed_at"))
+            emit("Measured variance needs one more complete cohort "
+                 f"(~{wall_s / 60:.1f} more minutes of wall-clock, "
+                 f"~{runner_s / 60:.1f} runner-minutes).")
+            cohort = client.rerun_cohort(repo, initial)
+            if cohort is None:
+                context["samples"] = samples
+                persist()
+                return {"status": "waiting-for-rerun", "head_sha": head,
+                        "sample_count": len(samples), "verdict": None,
+                        "discarded_moved_head": moved}
+            samples.append(cohort)
+            context["samples"] = samples
+            context["run_attempt_ids"] = [
+                item for sample in samples
+                for item in sample.get("run_attempt_ids") or []
+            ]
+            persist()
+            verdict = compare_push_cohorts(
+                before, samples, changed_files=list(changed_files))
+    context["samples"] = samples
+    context["verdict"] = verdict
+    persist()
+    return {"status": "complete", "head_sha": head,
+            "sample_count": len(samples), "verdict": verdict,
+            "reused": False, "discarded_moved_head": moved}
+
+
+class GhVerificationClient:
+    """Small authenticated-gh adapter for the post-fix write boundary."""
+
+    def __init__(self, *, poll_s: float = 10.0, timeout_s: float = 3600.0):
+        self.poll_s = poll_s
+        self.timeout_s = timeout_s
+
+    @staticmethod
+    def _api(endpoint: str, *, method: str = "GET") -> Any:
+        cmd = ["gh", "api"]
+        if method != "GET":
+            cmd += ["--method", method]
+        cmd.append(endpoint)
+        result = subprocess.run(cmd, text=True, capture_output=True, timeout=90)
+        if result.returncode != 0:
+            return None
+        if not result.stdout.strip():
+            return {}
+        try:
+            return json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return None
+
+    def remote_head(self, repo: str, branch: str) -> str | None:
+        payload = self._api(f"repos/{repo}/branches/{quote(branch, safe='')}")
+        if not isinstance(payload, dict):
+            return None
+        commit = payload.get("commit")
+        return str(commit.get("sha") or "") if isinstance(commit, dict) else None
+
+    @staticmethod
+    def _run_rows(payload: Any, head: str) -> list[dict[str, Any]]:
+        rows = payload.get("workflow_runs") if isinstance(payload, dict) else None
+        return [row for row in rows or []
+                if isinstance(row, dict)
+                and str(row.get("head_sha") or "") == head]
+
+    def _jobs(self, repo: str, run_id: int, attempt: int) -> list[dict[str, Any]] | None:
+        endpoint = (f"repos/{repo}/actions/runs/{run_id}/attempts/{attempt}/jobs"
+                    "?per_page=100")
+        payload = self._api(endpoint)
+        rows = payload.get("jobs") if isinstance(payload, dict) else None
+        return [row for row in rows or [] if isinstance(row, dict)] if rows is not None else None
+
+    def _cohort(self, repo: str, head: str, runs: list[dict[str, Any]],
+                *, identity: str) -> dict[str, Any] | None:
+        if not runs or any(row.get("status") != "completed"
+                           or row.get("conclusion") != "success" for row in runs):
+            return None
+        workflows = [str(row.get("name") or row.get("workflow_id") or "")
+                     for row in runs]
+        if any(not value for value in workflows) or len(set(workflows)) != len(workflows):
+            return None
+        jobs: list[dict[str, Any]] = []
+        run_attempt_ids: list[dict[str, int]] = []
+        for run, workflow in zip(runs, workflows):
+            run_id = int(run.get("id") or 0)
+            attempt = int(run.get("run_attempt") or 1)
+            if not run_id:
+                return None
+            fetched = self._jobs(repo, run_id, attempt)
+            if not fetched:
+                return None
+            run_attempt_ids.append({"run_id": run_id, "attempt": attempt})
+            for job in fetched:
+                if (not job.get("created_at") or not job.get("started_at")
+                        or not job.get("completed_at")
+                        or job.get("conclusion") != "success"):
+                    return None
+                labels = job.get("labels") or []
+                steps = [dict(step) for step in job.get("steps") or []
+                         if isinstance(step, dict)]
+                jobs.append({
+                    "name": str(job.get("name") or ""),
+                    "workflow": workflow,
+                    "head_sha": head,
+                    "run_attempt": attempt,
+                    "created_at": job["created_at"],
+                    "started_at": job["started_at"],
+                    "completed_at": job["completed_at"],
+                    "runner_label": str(labels[0] if labels else
+                                        job.get("runner_name") or ""),
+                    "runner_class": ("self-hosted" if "self-hosted" in labels
+                                     else "github-hosted"),
+                    "runner_image": "",
+                    "steps": steps,
+                })
+        return {
+            "head_sha": head,
+            "cohort_id": identity,
+            "attempt": max(item["attempt"] for item in run_attempt_ids),
+            "position": max(item["attempt"] for item in run_attempt_ids),
+            "conclusion": "success",
+            "workflows": workflows,
+            "expected_workflows": workflows,
+            "jobs": jobs,
+            "logs": [],
+            "run_attempt_ids": run_attempt_ids,
+            "lane": str(runs[0].get("event") or ""),
+            "lane_runs_30d": None,
+        }
+
+    def completed_cohort(self, repo: str, head: str) -> dict[str, Any] | None:
+        payload = self._api(
+            f"repos/{repo}/actions/runs?head_sha={quote(head)}&per_page=100")
+        rows = [row for row in self._run_rows(payload, head)
+                if int(row.get("run_attempt") or 1) == 1]
+        if not rows:
+            return None
+        latest_created = max(str(row.get("created_at") or "") for row in rows)
+        latest_event = next(str(row.get("event") or "") for row in rows
+                            if str(row.get("created_at") or "") == latest_created)
+        event_rows = [row for row in rows
+                      if str(row.get("event") or "") == latest_event]
+        return self._cohort(repo, head, event_rows,
+                            identity=f"{head}:{latest_event}:initial")
+
+    def rerun_cohort(self, repo: str,
+                     cohort: dict[str, Any]) -> dict[str, Any] | None:
+        members = cohort.get("run_attempt_ids") or []
+        if not members:
+            return None
+        for member in members:
+            if self._api(
+                    f"repos/{repo}/actions/runs/{int(member['run_id'])}/rerun",
+                    method="POST") is None:
+                return None
+        deadline = time.monotonic() + self.timeout_s
+        runs: list[dict[str, Any]] = []
+        while time.monotonic() < deadline:
+            runs = []
+            settled = True
+            for member in members:
+                run = self._api(
+                    f"repos/{repo}/actions/runs/{int(member['run_id'])}")
+                if not isinstance(run, dict):
+                    return None
+                if int(run.get("run_attempt") or 1) <= int(member["attempt"]):
+                    settled = False
+                if run.get("status") != "completed":
+                    settled = False
+                runs.append(run)
+            if settled:
+                break
+            time.sleep(self.poll_s)
+        else:
+            return None
+        head = str(cohort.get("head_sha") or "")
+        attempt = max(int(row.get("run_attempt") or 1) for row in runs)
+        return self._cohort(repo, head, runs,
+                            identity=f"{head}:rerun:{attempt}")
+
+    def default_branch_cohorts(self, repo: str, after_head: str,
+                               limit: int) -> list[dict[str, Any]]:
+        info = self._api(f"repos/{repo}")
+        branch = str(info.get("default_branch") or "") if isinstance(info, dict) else ""
+        if not branch:
+            return []
+        payload = self._api(
+            f"repos/{repo}/actions/runs?event=push&branch={quote(branch)}&per_page=100")
+        rows = payload.get("workflow_runs") if isinstance(payload, dict) else []
+        by_head: dict[str, list[dict[str, Any]]] = {}
+        order: list[str] = []
+        for row in rows or []:
+            if not isinstance(row, dict) or row.get("event") != "push":
+                continue
+            head = str(row.get("head_sha") or "")
+            if head not in by_head:
+                by_head[head] = []
+                order.append(head)
+            by_head[head].append(row)
+        if after_head not in order:
+            return []
+        # GitHub returns newest first. Keep the named first push and pushes that
+        # followed it, then restore chronological order for position semantics.
+        candidate_heads = list(reversed(order[:order.index(after_head) + 1]))
+        cohorts: list[dict[str, Any]] = []
+        for head in candidate_heads:
+            cohort = self._cohort(repo, head, by_head[head],
+                                  identity=f"{head}:push")
+            if cohort is not None:
+                cohorts.append(cohort)
+            if len(cohorts) >= limit:
+                break
+        return cohorts
 
 
 def _seconds(value: str) -> float:
@@ -38,6 +419,48 @@ def _seconds(value: str) -> float:
 def _median(values: Iterable[float]) -> float | None:
     rows = list(values)
     return round(float(statistics.median(rows)), 3) if rows else None
+
+
+def _baseline_from_findings(doc: dict[str, Any]) -> list[dict[str, Any]]:
+    clock = ((doc.get("pr_critical_path") or {}).get("commit_wall_clock") or {})
+    cohorts: list[dict[str, Any]] = []
+    for fact in clock.get("facts") or []:
+        if not isinstance(fact, dict) or fact.get("partial") is True:
+            continue
+        sha = str(fact.get("sha") or "")
+        raw_jobs = [row for row in fact.get("jobs") or []
+                    if isinstance(row, dict)]
+        workflows = sorted({str(row.get("workflow_file") or "")
+                            for row in raw_jobs if row.get("workflow_file")})
+        if not sha or not raw_jobs or not workflows:
+            continue
+        jobs = [{
+            "name": str(row.get("name") or ""),
+            "workflow": str(row.get("workflow_file") or ""),
+            "head_sha": sha,
+            "run_attempt": 1,
+            "created_at": row.get("created_at"),
+            "started_at": row.get("started_at"),
+            "completed_at": row.get("completed_at"),
+            "runner_label": str(row.get("runner") or ""),
+            "runner_class": "",
+            "runner_image": "",
+            "steps": [],
+        } for row in raw_jobs]
+        cohorts.append({
+            "head_sha": sha,
+            "cohort_id": f"baseline:{sha}",
+            "attempt": 1,
+            "position": len(cohorts) + 1,
+            "conclusion": "success",
+            "workflows": workflows,
+            "expected_workflows": workflows,
+            "jobs": jobs,
+            "logs": [],
+            "lane": str(fact.get("event") or "push"),
+            "lane_runs_30d": None,
+        })
+    return cohorts
 
 
 def _summary(samples: list[dict[str, Any]], *, values: bool = False) -> dict[str, Any]:
