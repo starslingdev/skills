@@ -197,6 +197,31 @@ def test_cache_sensitive_change_waits_for_three_distinct_pushes_without_rerun(tm
     assert client.reruns == 0
 
 
+def test_cache_sampling_keeps_its_anchor_as_the_default_branch_advances(tmp_path):
+    class MovingDefaultClient(FakeClient):
+        def __init__(self):
+            super().__init__(head="main-1", pushes=[
+                _cohort("main-1", "p1"), _cohort("main-2", "p2")])
+            self.anchors = []
+
+        def is_default_branch(self, repo, branch):
+            return True
+
+        def default_branch_cohorts(self, repo, after_head, limit):
+            self.anchors.append(after_head)
+            return super().default_branch_cohorts(repo, after_head, limit)
+
+    client = MovingDefaultClient()
+    first = _invoke(tmp_path, client, cache_sensitive=True)
+    client.head = "main-2"
+    client.pushes.append(_cohort("main-3", "p3"))
+    second = _invoke(tmp_path, client, cache_sensitive=True)
+    assert first["status"] == "waiting-for-default-branch-pushes"
+    assert second["status"] == "complete"
+    assert second["head_sha"] == "main-1"
+    assert client.anchors == ["main-1", "main-1"]
+
+
 def test_cli_verification_preserves_the_original_baseline(tmp_path, monkeypatch):
     run_path = SCRIPTS / "run.py"
     spec = importlib.util.spec_from_file_location("ci_speedup_run_verify", run_path)
@@ -233,9 +258,9 @@ class AdapterFixture(GhVerificationClient):
         if method != "GET":
             self.posts.append(endpoint)
             return {}
-        for key, value in self.responses.items():
+        for key in sorted(self.responses, key=len, reverse=True):
             if key in endpoint:
-                return copy.deepcopy(value)
+                return copy.deepcopy(self.responses[key])
         return None
 
 
@@ -278,6 +303,34 @@ def test_real_adapter_keeps_all_events_and_uses_independent_check_run_set():
     assert set(cohort["workflows"]) == {"1:pull_request", "2:workflow_run"}
     assert cohort["lane_runs_30d"] == 45
     assert all(job["workload_identity"] for job in cohort["jobs"])
+
+
+def test_real_adapter_paginates_large_job_matrices():
+    first = [_api_job(job_id) for job_id in range(1, 101)]
+    last = [_api_job(101)]
+    client = AdapterFixture({
+        "runs/10/attempts/1/jobs?per_page=100&page=1": {
+            "total_count": 101, "jobs": first},
+        "runs/10/attempts/1/jobs?per_page=100&page=2": {
+            "total_count": 101, "jobs": last},
+    })
+    assert len(client._jobs("o/r", 10, 1) or []) == 101
+
+
+def test_real_adapter_retains_healthy_skipped_jobs_as_workload_evidence():
+    run = _api_run(10, 1)
+    skipped = {"id": 2, "name": "optional", "conclusion": "skipped",
+               "labels": ["ubuntu-latest"], "steps": []}
+    client = AdapterFixture({
+        "runs/10/attempts/1/jobs": {"jobs": [_api_job(1), skipped]},
+        "event=pull_request": {"total_count": 40},
+    })
+    cohort = client._cohort(
+        "o/r", "fix", [run], identity="fix:initial",
+        expected_workflows=["1:pull_request"])
+    assert cohort is not None
+    assert [job["name"] for job in cohort["jobs"]] == ["test"]
+    assert [job["name"] for job in cohort["skipped_jobs"]] == ["optional"]
 
 
 def test_collected_baseline_and_real_adapter_use_the_same_work_identity():

@@ -75,28 +75,38 @@ def advance_verification(
                 saved = loaded
         except (OSError, json.JSONDecodeError):
             pass
-    head = client.remote_head(repo, branch)
     saved_binding = saved.get("binding") or {}
-    if (not head and cache_sensitive
-            and saved_binding.get("repository") == repo
-            and saved_binding.get("branch") == branch
-            and saved_binding.get("baseline_sha256") ==
-                hashlib.sha256(baseline_bytes).hexdigest()):
+    static_binding = {
+        "repository": repo,
+        "branch": branch,
+        "baseline_artifact": str(baseline_path.resolve()),
+        "baseline_sha256": hashlib.sha256(baseline_bytes).hexdigest(),
+        "changed_files": sorted(set(changed_files)),
+        "cache_sensitive": bool(cache_sensitive),
+        "target_runs": target_runs,
+        "variance_pct": variance_pct,
+    }
+    static_matches = all(saved_binding.get(key) == value
+                         for key, value in static_binding.items())
+    is_default = getattr(client, "is_default_branch", None)
+    tracking_default = bool(
+        cache_sensitive and callable(is_default) and is_default(repo, branch))
+    resolved_head = client.remote_head(repo, branch)
+    head = resolved_head
+    if tracking_default and static_matches and saved_binding.get("head_sha"):
+        # The default branch is expected to advance while these three pushes
+        # accrue. Keep the first bound head as the fixed integration anchor.
+        head = str(saved_binding["head_sha"])
+    elif (not head and cache_sensitive and static_matches):
         # The topic branch may be deleted after merge while its persisted head
         # remains the anchor for the three default-branch pushes.
         head = str(saved_binding.get("head_sha") or "")
     if not head:
         return {"status": "ineligible", "verdict": None}
     binding = {
-        "repository": repo,
-        "branch": branch,
-        "baseline_artifact": str(baseline_path.resolve()),
-        "baseline_sha256": hashlib.sha256(baseline_bytes).hexdigest(),
+        **static_binding,
         "head_sha": head,
-        "changed_files": sorted(set(changed_files)),
-        "cache_sensitive": bool(cache_sensitive),
-        "target_runs": target_runs,
-        "variance_pct": variance_pct,
+        "tracks_moving_default_branch": tracking_default,
     }
     moved = bool(saved.get("head_sha") and saved.get("head_sha") != head)
     same_binding = saved.get("binding") == binding
@@ -138,7 +148,7 @@ def advance_verification(
 
     def moved_result() -> dict[str, Any] | None:
         current = client.remote_head(repo, branch)
-        if current is None and cache_sensitive:
+        if tracking_default or (current is None and cache_sensitive):
             current = head
         if current != head:
             context["samples"] = []
@@ -196,6 +206,9 @@ def advance_verification(
                  f"of wall-clock, ~{remaining * runner_s / 60:.1f} "
                  "runner-minutes).")
         while len(samples) < wanted:
+            drift = moved_result()
+            if drift is not None:
+                return drift
             trigger = context.get("pending_rerun") is None
             if trigger:
                 # Persist intent before the first POST.  A process interruption
@@ -238,6 +251,9 @@ def advance_verification(
     if not cache_sensitive:
         while (int((verdict.get("sampling") or {}).get("need") or 0)
                > len(samples) and len(samples) < 4):
+            drift = moved_result()
+            if drift is not None:
+                return drift
             jobs = initial.get("jobs") or []
             wall_s = observed_commit_wall_s(jobs) or 0.0
             runner_s = sum(
@@ -323,6 +339,30 @@ class GhVerificationClient:
         commit = payload.get("commit")
         return str(commit.get("sha") or "") if isinstance(commit, dict) else None
 
+    def is_default_branch(self, repo: str, branch: str) -> bool:
+        payload = self._api(f"repos/{repo}")
+        return (isinstance(payload, dict)
+                and str(payload.get("default_branch") or "") == branch)
+
+    def _paged_rows(self, endpoint: str, key: str) -> list[dict[str, Any]] | None:
+        rows: list[dict[str, Any]] = []
+        separator = "&" if "?" in endpoint else "?"
+        for page in range(1, 101):
+            payload = self._api(f"{endpoint}{separator}page={page}")
+            batch = payload.get(key) if isinstance(payload, dict) else None
+            if not isinstance(batch, list):
+                return None
+            rows.extend(row for row in batch if isinstance(row, dict))
+            total = payload.get("total_count")
+            if isinstance(total, int) and not isinstance(total, bool):
+                if len(rows) >= total:
+                    return rows
+            elif len(batch) < 100:
+                return rows
+            if len(batch) < 100:
+                return rows
+        return None
+
     @staticmethod
     def _run_rows(payload: Any, head: str) -> list[dict[str, Any]]:
         rows = payload.get("workflow_runs") if isinstance(payload, dict) else None
@@ -333,9 +373,7 @@ class GhVerificationClient:
     def _jobs(self, repo: str, run_id: int, attempt: int) -> list[dict[str, Any]] | None:
         endpoint = (f"repos/{repo}/actions/runs/{run_id}/attempts/{attempt}/jobs"
                     "?per_page=100")
-        payload = self._api(endpoint)
-        rows = payload.get("jobs") if isinstance(payload, dict) else None
-        return [row for row in rows or [] if isinstance(row, dict)] if rows is not None else None
+        return self._paged_rows(endpoint, "jobs")
 
     @staticmethod
     def _workflow_identity(row: dict[str, Any]) -> str:
@@ -368,6 +406,7 @@ class GhVerificationClient:
         if set(expected) != set(workflows):
             return None
         jobs: list[dict[str, Any]] = []
+        skipped_jobs: list[dict[str, Any]] = []
         run_attempt_ids: list[dict[str, int]] = []
         for run, workflow in zip(runs, workflows):
             run_id = int(run.get("id") or 0)
@@ -379,16 +418,27 @@ class GhVerificationClient:
                 return None
             run_attempt_ids.append({"run_id": run_id, "attempt": attempt})
             for job in fetched:
-                if (not job.get("created_at") or not job.get("started_at")
-                        or not job.get("completed_at")
-                        or job.get("conclusion") != "success"):
-                    return None
                 labels = job.get("labels") or []
                 steps = [dict(step) for step in job.get("steps") or []
                          if isinstance(step, dict)]
                 workload_identity = [
                     f"{workflow}/{str(job.get('name') or '')}/{str(step.get('name') or '')}"
                     for step in steps if step.get("name")]
+                if job.get("conclusion") == "skipped":
+                    skipped_jobs.append({
+                        "name": str(job.get("name") or ""),
+                        "workflow": workflow,
+                        "head_sha": head,
+                        "run_attempt": attempt,
+                        "skipped": True,
+                        "workload_identity": (workload_identity or [
+                            f"{workflow}/{str(job.get('name') or '')}/skipped"]),
+                    })
+                    continue
+                if (not job.get("created_at") or not job.get("started_at")
+                        or not job.get("completed_at")
+                        or job.get("conclusion") != "success"):
+                    return None
                 jobs.append({
                     "name": str(job.get("name") or ""),
                     "workflow": workflow,
@@ -421,6 +471,7 @@ class GhVerificationClient:
             "workflows": workflows,
             "expected_workflows": expected,
             "jobs": jobs,
+            "skipped_jobs": skipped_jobs,
             "logs": [],
             "run_attempt_ids": run_attempt_ids,
             "lane": lane,
@@ -428,9 +479,11 @@ class GhVerificationClient:
         }
 
     def completed_cohort(self, repo: str, head: str) -> dict[str, Any] | None:
-        payload = self._api(
-            f"repos/{repo}/actions/runs?head_sha={quote(head)}&per_page=100")
-        rows = [row for row in self._run_rows(payload, head)
+        all_rows = self._paged_rows(
+            f"repos/{repo}/actions/runs?head_sha={quote(head)}&per_page=100",
+            "workflow_runs")
+        rows = [row for row in all_rows or []
+                if str(row.get("head_sha") or "") == head
                 if int(row.get("run_attempt") or 1) == 1]
         if not rows:
             return None
@@ -449,11 +502,10 @@ class GhVerificationClient:
                    if row.get("created_at")]
         if not created or time.time() - max(created) < self.settle_s:
             return None
-        checks = self._api(
-            f"repos/{repo}/commits/{quote(head)}/check-runs?filter=latest&per_page=100")
-        check_rows = checks.get("check_runs") if isinstance(checks, dict) else None
-        if (not isinstance(check_rows, list) or not check_rows
-                or int(checks.get("total_count") or len(check_rows)) > len(check_rows)):
+        check_rows = self._paged_rows(
+            f"repos/{repo}/commits/{quote(head)}/check-runs?filter=latest&per_page=100",
+            "check_runs")
+        if not check_rows:
             return None
         expected_run_ids = {
             int(match.group(1))
@@ -540,9 +592,11 @@ class GhVerificationClient:
         candidate_heads = list(reversed(order[:order.index(anchor) + 1]))[:limit]
         cohorts: list[dict[str, Any]] = []
         for head in candidate_heads:
-            payload = self._api(
-                f"repos/{repo}/actions/runs?head_sha={quote(head)}&event=push&per_page=100")
-            rows = [row for row in self._run_rows(payload, head)
+            all_rows = self._paged_rows(
+                f"repos/{repo}/actions/runs?head_sha={quote(head)}&event=push&per_page=100",
+                "workflow_runs")
+            rows = [row for row in all_rows or []
+                    if str(row.get("head_sha") or "") == head
                     if str(row.get("event") or "") == "push"]
             expected = [self._workflow_identity(row) for row in rows]
             cohort = self._cohort(repo, head, rows,
@@ -696,18 +750,20 @@ def _prepare(cohorts: list[dict[str, Any]], bound_sha: str | None = None
 
 
 def _sample_work(sample: dict[str, Any]) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    rows = [*(sample.get("jobs") or []), *(sample.get("skipped_jobs") or [])]
     return tuple(sorted(
         (str(job.get("name") or ""),
          tuple(sorted(str(v) for v in (
              job.get("tests") or job.get("workload_identity") or []))))
-        for job in sample.get("jobs") or []))
+        for job in rows))
 
 
 def _tests(samples: list[dict[str, Any]]) -> tuple[set[str], bool]:
     found: set[str] = set()
     has_names = False
     for sample in samples:
-        for job in sample.get("jobs") or []:
+        for job in [*(sample.get("jobs") or []),
+                    *(sample.get("skipped_jobs") or [])]:
             identities = job.get("tests") or job.get("workload_identity") or []
             if identities:
                 has_names = True
@@ -716,7 +772,9 @@ def _tests(samples: list[dict[str, Any]]) -> tuple[set[str], bool]:
 
 
 def _has_shards(samples: list[dict[str, Any]]) -> bool:
-    return any(j.get("shard") for s in samples for j in s.get("jobs") or [])
+    return any(j.get("shard") for s in samples
+               for j in [*(s.get("jobs") or []),
+                         *(s.get("skipped_jobs") or [])])
 
 
 def _cached_count(samples: list[dict[str, Any]]) -> float | None:
