@@ -441,7 +441,6 @@ Name:                  default0
 Endpoint:              unix:///var/run/docker.sock
 Status:                inactive
 Platforms:
-docker buildx build --platform linux/amd64,linux/arm64 .
 #10 [linux/amd64 build 2/3] RUN go build ./...
 #10 DONE 20.0s
 #15 [linux/arm64 build 2/3] RUN go build ./...
@@ -458,6 +457,41 @@ docker buildx build --platform linux/amd64,linux/arm64 .
         "#15 [linux/arm64 build 2/3] RUN go build ./...",
         "#15 DONE 120.0s",
     ]
+
+
+def test_unreadable_builder_evidence_is_bounded():
+    nodes = "\n".join(
+        f"Name: node-{index}\nPlatforms:"
+        for index in range(12)
+    )
+    log = f"""Nodes:
+{nodes}
+#10 [linux/amd64 build 2/3] RUN go build ./...
+#10 DONE 20.0s
+#15 [linux/arm64 build 2/3] RUN go build ./...
+#15 DONE 120.0s
+"""
+
+    leaf = bp._parse_log(log)
+
+    assert leaf is not None and leaf["fix_key"] == "emulated-image-compile"
+    assert len(leaf["evidence"]) <= 8
+
+
+def test_builder_parser_stops_before_later_name_shaped_output():
+    log = _SINGLE_AMD64_BUILDER + """#10 [linux/amd64 build 2/3] RUN go build ./...
+#10 DONE 20.0s
+#15 [linux/arm64 build 2/3] RUN go build ./...
+#15 DONE 120.0s
+Name: release-artifact
+"""
+
+    leaf = bp._parse_log(log)
+
+    assert leaf is not None and leaf["fix_key"] == "emulated-image-compile"
+    assert leaf["magnitude"] == {
+        "label": "emulated compile/install seconds", "unit": "s", "value": 120.0}
+    assert "builder_topology_unconfirmed" not in leaf
 
 
 def test_buildkit_headers_without_a_buildx_invocation_do_not_assume_topology():

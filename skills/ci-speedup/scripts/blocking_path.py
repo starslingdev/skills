@@ -2323,6 +2323,9 @@ def _buildx_nodes(lines: list[str]) -> tuple[str, list[dict[str, str]]]:
             continue
         if not in_nodes:
             continue
+        if re.search(r"#\d+\s+\[[^\]]+\]\s+(?:FROM|RUN|COPY|ADD)\b", line,
+                     re.IGNORECASE):
+            break
         if re.search(r"\bName:\s+\S+", line):
             nodes.append({"name": line, "platforms": "", "native": ""})
             awaiting_platform = True
@@ -2442,10 +2445,12 @@ def _emulated_image_compile_leaf(lines: list[str]) -> dict[str, Any] | None:
                   re.IGNORECASE)
         for line in lines)
     nodes_header, builder_nodes = _buildx_nodes(lines)
+    incomplete_topology = bool(
+        nodes_header
+        and (not builder_nodes or any(not node["native"] for node in builder_nodes)))
     builder_unconfirmed = bool(
-        builder is None and raw_buildx
-        and (not nodes_header or not builder_nodes
-             or any(not node["native"] for node in builder_nodes)))
+        builder is None
+        and (incomplete_topology or (raw_buildx and not nodes_header)))
     if builder is None and not builder_unconfirmed:
         return None
     native_platform, builder_evidence = (
@@ -2494,14 +2499,15 @@ def _emulated_image_compile_leaf(lines: list[str]) -> dict[str, Any] | None:
             "fix_key": "emulated-image-compile",
             "unit_label": (
                 "foreign-platform compilation dominates the cold build, but "
-                "the builder topology was not printed — check the builder nodes"),
+                "the topology did not establish a native platform for every builder "
+                "node — check the builder nodes"),
             "magnitude": None,
             "deeper": [],
             "uncredited": True,
-            "evidence": [
+            "evidence": ([
                 item for _arch, _seconds, header, done, _kind in ordered_durations
                 for item in (header, done)
-            ][:6] + topology_evidence,
+            ][:6] + topology_evidence)[:8],
             "search": ["docker buildx inspect --bootstrap", "Nodes:", "Platforms:"],
             "builder_topology_unconfirmed": True,
         }
@@ -4666,13 +4672,15 @@ def _fix_meta_for_leaf(leaf: dict[str, Any] | None) -> dict[str, Any] | None:
         resolved.update({
             "cause": (
                 "Foreign-platform compilation dominates the measured cold build, "
-                "but the builder topology was not printed. The evidence does not "
-                "establish whether that work ran under emulation or on a native node."
+                "but the topology did not establish a native platform for every builder "
+                "node. The evidence does not establish whether that work ran under "
+                "emulation or on a native node."
             ),
             "look": (
-                "Run `docker buildx inspect --bootstrap` first and record every node "
-                "and platform. Then trace the foreign-platform compile stage in `{wf}` "
-                "and its repository-local Dockerfile."
+                "Run or rerun `docker buildx inspect --bootstrap`, start or repair any "
+                "inactive node, and record a usable native platform for every node. Then "
+                "trace the foreign-platform compile stage in `{wf}` and its "
+                "repository-local Dockerfile."
             ),
             "constraints": (
                 "Preserve every published platform, artifact, release flag, test, "
@@ -4681,11 +4689,12 @@ def _fix_meta_for_leaf(leaf: dict[str, Any] | None) -> dict[str, Any] | None:
                 "execution topology is confirmed."
             ),
             "deliver": (
-                "Start with `docker buildx inspect --bootstrap`. If the builder has no "
-                "native node for the foreign platform, compare a build-platform stage "
-                "or explicit cross-compilation against the same workload. If a native "
-                "node exists, investigate that node and the cold layer instead. Do not "
-                "claim emulation or a saving until the topology is confirmed."
+                "Run or rerun `docker buildx inspect --bootstrap` until every node reports "
+                "a usable native platform. If the builder has no native node for the "
+                "foreign platform, compare a build-platform stage or explicit "
+                "cross-compilation against the same workload. If a native node exists, "
+                "investigate that node and the cold layer instead. Do not claim emulation "
+                "or a saving until the topology is confirmed."
             ),
         })
     return resolved

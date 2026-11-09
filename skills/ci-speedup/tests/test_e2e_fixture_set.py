@@ -735,10 +735,7 @@ def test_no_inspect_foreign_compile_runs_through_collection(
 def test_inactive_builder_runs_through_collection_as_an_uncredited_check(
         monkeypatch, tmp_path):
     def inactive_builder(log: str) -> str:
-        return (
-            "docker buildx build --platform linux/amd64,linux/arm64 .\n"
-            + re.sub(r"(?m)^Platforms:.*$", "Platforms:", log)
-        )
+        return re.sub(r"(?m)^Platforms:.*$", "Platforms:", log)
 
     _doc, report, facts = _run_multiarch_log_variant(
         "multiarch-inactive-builder", monkeypatch, tmp_path, inactive_builder)
@@ -751,6 +748,8 @@ def test_inactive_builder_runs_through_collection_as_an_uncredited_check(
     assert "#15 [linux/arm64 build 2/3] RUN go build ./..." in report
     assert "Do not size or claim a saving" in report
     assert "docker buildx rebuilds 2 layers from scratch every run" not in report
+    assert "builder topology was not printed" not in report
+    assert "native platform for every builder node" in report
 
 
 def test_builder_detected_platform_and_dominance_guards_run_through_collection(
