@@ -504,3 +504,35 @@ def test_shared_agent_instructions_require_the_gate_and_readback():
         assert "explicit" in text
         assert "PUBLIC" in text
         assert "fetch" in text.lower()
+
+
+def _ci_suite_jobs():
+    yaml = pytest.importorskip("yaml")
+    jobs = yaml.safe_load(
+        (_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    )["jobs"]
+    return {job_id: jobs[job_id] for job_id in ("test-self", "test-fork")}
+
+
+@pytest.mark.parametrize("job_id", ["test-self", "test-fork"])
+def test_ci_runs_the_gate_on_every_pull_request_suite(job_id):
+    """The gate runs inside both suite jobs, so it gates the required `test`
+    check on same-repo and fork PRs alike instead of being a voluntary step."""
+    steps = _ci_suite_jobs()[job_id]["steps"]
+    gates = [
+        index for index, step in enumerate(steps)
+        if "check_public_output.py" in str(step.get("run", ""))
+    ]
+    assert len(gates) == 1, f"{job_id} must run the privacy gate exactly once"
+    gate = steps[gates[0]]
+    assert gates[0] < len(steps) - 1, "the gate must run before the suite step"
+    assert str(gate.get("if", "")).strip() == "github.event_name == 'pull_request'"
+    run = gate["run"]
+    for flag in ("--target", "--text-file", "--branch-name", "--base"):
+        assert flag in run
+    # PR text is attacker-controlled: it may reach the shell only via env vars.
+    assert "${{" not in run, "template expressions in run: are injection sinks"
+    env = gate.get("env") or {}
+    assert env.get("PR_TITLE") == "${{ github.event.pull_request.title }}"
+    assert env.get("PR_BODY") == "${{ github.event.pull_request.body }}"
+    assert env.get("GH_TOKEN") == "${{ github.token }}"

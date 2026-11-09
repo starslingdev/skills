@@ -72,6 +72,35 @@ jobs:
         with:
           node-version: "20"
 
+      # Public-output privacy gate (AGENTS.md / CLAUDE.md): this repo is public, so a pull
+      # request may not carry another repository's identifiers in its title, body, branch name,
+      # any outgoing commit's message, or added lines. It runs inside the suite job so it gates
+      # the required `test` check rather than being a voluntary local step. PR text reaches the
+      # shell only through env vars: interpolating the body into `run:` would be template
+      # injection. `gh repo view` (destination must verify PUBLIC) needs the read-only job token.
+      # Scope: pull_request events fire on push, open and reopen, not on a title/body edit; an
+      # edit is re-checked on the next push.
+      - name: Public-output privacy gate
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          title="$(mktemp)"
+          body="$(mktemp)"
+          printf '%s\n' "$PR_TITLE" > "$title"
+          printf '%s\n' "$PR_BODY" > "$body"
+          python3 .github/scripts/check_public_output.py \
+            --target "$GITHUB_REPOSITORY" \
+            --text-file "$title" \
+            --text-file "$body" \
+            --branch-name "$HEAD_REF" \
+            --base "origin/$BASE_REF"
+
       - name: Install test dependencies
         run: pip install -e ".[dev]"
 
@@ -109,6 +138,29 @@ jobs:
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: "20"
+
+      # Same privacy gate as test-self (see the comment there). On a fork PR the job token is
+      # read-only, which is all `gh repo view` of a public destination needs.
+      - name: Public-output privacy gate
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          title="$(mktemp)"
+          body="$(mktemp)"
+          printf '%s\n' "$PR_TITLE" > "$title"
+          printf '%s\n' "$PR_BODY" > "$body"
+          python3 .github/scripts/check_public_output.py \
+            --target "$GITHUB_REPOSITORY" \
+            --text-file "$title" \
+            --text-file "$body" \
+            --branch-name "$HEAD_REF" \
+            --base "origin/$BASE_REF"
 
       - name: Install test dependencies
         run: pip install -e ".[dev]"
