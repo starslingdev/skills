@@ -321,6 +321,7 @@
       "id": 14,
       "name": "post-fix-verification-resume",
       "serial": true,
+      "timeout": 300,
       "prompt": "I authorized and pushed the CI-only fix from this audit. The remote branch now has one completed CI cohort. Resume ci-speedup and verify the measured change; do not create another commit or push.",
       "expected_output": "ci-speedup binds verification to the branch's exact remote head, counts the completed automatic cohort as sample one, prints the added wall-clock and runner-minute cost before starting any required rerun, persists its scratch context, and reports the comparison only after the sample requirement is met. Repeating the invocation reuses that result without another rerun. It does not create a branch, commit, or push.",
       "note": "Lifecycle eval for the built-in post-fix phase. Offline unit coverage supplies the deterministic fake GitHub transport and exact call-order assertions.",
