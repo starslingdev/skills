@@ -834,13 +834,42 @@ def check_commit_wall_clock_projection(report: str, findings_path: Path | None) 
         basis, wall, slowest, next_longest, chain = min(
             complete, key=lambda row: abs(row[1] - expected_p50))
         projected, multiple = projection(wall, slowest, next_longest, 4.0, chain)
-        population_multiples = [
-            value
-            for _fact, item_wall, item_slowest, item_next, item_chain in complete
-            for _projected, value in [projection(
-                item_wall, item_slowest, item_next, 4.0, item_chain)]
-            if value is not None
-        ]
+        target = basis.get("slowest_job") or {}
+        target_workflow = str(target.get("workflow_file") or "")
+        target_name = str(target.get("name") or "")
+        population_multiples = []
+        for fact, item_wall, _item_slowest, _item_next, _item_chain in complete:
+            if item_wall <= 0:
+                continue
+            target_row = next((
+                row for row in fact.get("job_projections") or []
+                if isinstance(row, dict)
+                and str(row.get("workflow_file") or "") == target_workflow
+                and str(row.get("name") or "") == target_name
+            ), None)
+            if target_row is None:
+                fact_slowest = fact.get("slowest_job") or {}
+                if (str(fact_slowest.get("workflow_file") or "") == target_workflow
+                        and str(fact_slowest.get("name") or "") == target_name):
+                    target_row = {
+                        "duration_s": fact_slowest.get("duration_s"),
+                        "next_longest_s": (fact.get("next_longest_job") or {}).get(
+                            "duration_s", 0.0),
+                        "chain_span_s": fact.get("slowest_chain_span_s"),
+                    }
+            if target_row is None:
+                population_multiples.append(1.0)
+                continue
+            item_duration = _num(target_row.get("duration_s")) or 0.0
+            item_next = _num(target_row.get("next_longest_s")) or 0.0
+            item_chain = _num(target_row.get("chain_span_s")) or item_duration
+            if item_duration <= 0:
+                population_multiples.append(1.0)
+                continue
+            _item_projected, value = projection(
+                item_wall, item_duration, item_next, 4.0, item_chain)
+            if value is not None:
+                population_multiples.append(value)
         expected_median_multiple = (
             round(percentile(population_multiples, 50), 3)
             if population_multiples else None)
@@ -868,8 +897,11 @@ def check_commit_wall_clock_projection(report: str, findings_path: Path | None) 
                     f"**{expected_median_multiple:.2f}x**.")
             worst_sha = str(worst_fact.get("sha") or "")[:7]
             if worst_sha:
-                held = (f"; `{_wf_base(expected_worst_wf)}` holds its slowest job"
-                        if expected_worst_wf else "")
+                held = ""
+                if (expected_median_multiple is not None
+                        and expected_median_multiple < multiple / 2.0
+                        and expected_worst_wf):
+                    held = f"; `{_wf_base(expected_worst_wf)}` holds its slowest job"
                 projection_clause += (
                     f" The worst sampled commit is `{worst_sha}` at "
                     f"**{duration(worst_wall)}**{held}.")

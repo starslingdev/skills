@@ -14418,8 +14418,10 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
                         " Across commits, the median projection is "
                         f"**{_median_multiple:.2f}x**.")
                 if _worst_wall is not None and _worst_sha:
-                    _held = (f"; `{_wf_base(_worst_wf)}` holds its slowest job"
-                             if _worst_wf else "")
+                    _held = ""
+                    if (_median_multiple is not None
+                            and _median_multiple < _multiple / 2.0 and _worst_wf):
+                        _held = f"; `{_wf_base(_worst_wf)}` holds its slowest job"
                     _projection_clause += (
                         f" The worst sampled commit is `{_worst_sha}` at "
                         f"**{_commit_duration(_worst_wall)}**{_held}.")

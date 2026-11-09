@@ -30177,17 +30177,52 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             fact for fact in facts
             if fact.get("partial") is not True
             and isinstance(fact.get("wall_s"), (int, float))
+            and not isinstance(fact.get("wall_s"), bool)
             and float(fact["wall_s"]) > 0
-        ]
-        multiples = [
-            float(projection["multiple"])
-            for fact in complete
-            for projection in [fact.get("projection_4x")]
-            if isinstance(projection, dict)
-            and isinstance(projection.get("multiple"), (int, float))
         ]
         if not complete:
             return {"median_projection_multiple": None, "worst_commit": None}
+        p50 = _percentile([float(fact["wall_s"]) for fact in complete], 50)
+        typical = min(
+            complete, key=lambda fact: abs(float(fact["wall_s"]) - p50))
+        target = typical.get("slowest_job") or {}
+        target_workflow = str(target.get("workflow_file") or "")
+        target_name = str(target.get("name") or "")
+        multiples: list[float] = []
+        for fact in complete:
+            wall = float(fact["wall_s"])
+            target_row = next((
+                row for row in fact.get("job_projections") or []
+                if isinstance(row, dict)
+                and str(row.get("workflow_file") or "") == target_workflow
+                and str(row.get("name") or "") == target_name
+            ), None)
+            if target_row is None:
+                fact_slowest = fact.get("slowest_job") or {}
+                if (str(fact_slowest.get("workflow_file") or "") == target_workflow
+                        and str(fact_slowest.get("name") or "") == target_name):
+                    target_row = {
+                        "duration_s": fact_slowest.get("duration_s"),
+                        "next_longest_s": (fact.get("next_longest_job") or {}).get(
+                            "duration_s", 0.0),
+                        "chain_span_s": fact.get("slowest_chain_span_s"),
+                    }
+            if target_row is None:
+                multiples.append(1.0)
+                continue
+            duration = float(target_row.get("duration_s") or 0.0)
+            next_longest = float(target_row.get("next_longest_s") or 0.0)
+            chain = float(target_row.get("chain_span_s") or duration)
+            if duration <= 0:
+                multiples.append(1.0)
+                continue
+            projection = project_commit_wall(
+                wall, duration, next_longest, 4.0,
+                **({"chain_s": chain, "pole_s": duration,
+                    "runner_up_s": next_longest}
+                   if chain > duration else {}))
+            if isinstance(projection.multiple, (int, float)):
+                multiples.append(float(projection.multiple))
         worst = max(complete, key=lambda fact: float(fact["wall_s"]))
         return {
             "median_projection_multiple": (

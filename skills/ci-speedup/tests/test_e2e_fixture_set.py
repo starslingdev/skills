@@ -405,6 +405,7 @@ def test_named_fixtures_exercise_their_defining_interactions(
         row.get("minority_tail")
         for row in docs["minority-tail"]["pr_critical_path"]["checks"])
     assert "Across commits, the median projection is" in reports["minority-tail"]
+    assert "`ci.yml` holds its slowest job" not in reports["minority-tail"]
     duplicate = next(
         row for row in docs["duplicate-gate-job"]["findings"]
         if row.get("pattern") == "OPT12"
@@ -495,7 +496,8 @@ def _pr_commit_tail_fixture(root: Path) -> Path:
     }
     for commit in range(10):
         sha = f"commit-tail-{commit}"
-        for workflow_index, duration in ((0, 600), (1, 6000 if commit < 4 else 10)):
+        tail_duration = 6000 if commit < 4 else (600 if commit < 6 else 10)
+        for workflow_index, duration in ((0, 600), (1, tail_duration)):
             run_id = 60_000 + workflow_index * 100 + commit
             name = "gate" if workflow_index == 0 else "archive"
             recorded["workflows"][workflow_index]["runs"].append({
@@ -540,16 +542,16 @@ def test_pr_commit_projection_discloses_the_population_and_slow_tail(
     doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
 
     clock = doc["pr_critical_path"]["commit_wall_clock"]
-    assert clock["median_projection_multiple"] == 4.0
+    assert clock["median_projection_multiple"] == 1.0
     assert clock["worst_commit"]["workflow_file"].endswith("slow-tail.yml")
-    assert "Across commits, the median projection is **4.00x**" in report
+    assert "Across commits, the median projection is **1.00x**" in report
     assert "`slow-tail.yml` holds its slowest job" in report
     failures = [check for check in checks if not check.skipped and not check.ok]
     assert failures == [], [(check.name, check.detail) for check in failures]
 
     doctored = json.loads(json.dumps(doc))
     doctored["pr_critical_path"]["commit_wall_clock"][
-        "median_projection_multiple"] = 1.0
+        "median_projection_multiple"] = 2.0
     findings_path = tmp_path / "doctored-findings.json"
     findings_path.write_text(json.dumps(doctored), encoding="utf-8")
     check = vr.check_commit_wall_clock_projection(report, findings_path)
