@@ -28,6 +28,10 @@ unversioned and updates by reinstall from `main`.
 - **2026-11-08** — Detect compilation in emulated containers when shell variables or GitHub expressions appear elsewhere in the command. Platform and architecture values remain resolved, while unrelated variables stay opaque to command parsing.
 - **2026-11-08** — Show each critical matrix leg's measured fixed floor and remaining divided work beside its observed timing spread. When a log exposes compilation or collection inside the divided-work step, report that in-step floor separately without recommending a shard count.
 - **2026-11-08** — Route dominant foreign-platform image compilation with no Buildx node listing to a topology check without crediting savings or claiming emulation. Inspected single-node builders retain the measured recommendation, while explicit multi-node builders still fail closed.
+- **2026-11-08** — Add stable `subject` identities to static findings, stable
+  machine-readable `kind` values to scan coverage gaps, an
+  `INSTANCE_GRANULAR` detector set, and an out-of-tree symlink refusal so the
+  repository-local `ci-speedup-guard` can compare pull-request trees safely.
 - **2026-11-08** — Align cache-key guidance around rolling tool-result keys: a per-commit primary key with a stable restore prefix can restore useful content and save the updated result, while each new entry consumes cache budget and is unsuitable for large dependency or build stores.
 - **2026-11-08** — Keep checks whose required-job reachability cannot be confirmed visible but uncredited. Their structural findings and drill-downs now use conditional framing, and report verification rejects direct merge-wait credit or critical-path wording on those checks.
 - **2026-11-08** — Treat checkout submodules copied by a resolved local Dockerfile as image-build inputs. OPT76 now keeps those checkouts, fails closed on unresolved Dockerfiles, and recognizes both explicit source paths and whole-context copies.
@@ -1279,6 +1283,8 @@ unversioned and updates by reinstall from `main`.
 ### Fixed
 
 - **2026-11-09** — Keep post-fix verification from rerunning default-branch workflows, compare cache-sensitive results with baseline facts from the same push lane, and label repeated attempts of one commit as no-change reruns.
+
+- **2026-11-09** — Match the `repos/<owner>/<repo>/statuses/` path in `_STATUS_POST_RE` with disjoint branches. The catch-all character class no longer overlaps the `${{ ... }}` branch, so a long run of `${{` fragments with no `/statuses/` fails in linear time instead of backtracking (CodeQL `py/redos`). Both repeats are bounded at 200 units, so a file of repeated `repos/` prefixes scans in linear time too. Every realistic call still matches at the same span; only a `${{` left open at `/statuses/`, which GitHub rejects anyway, or a path over 200 units, no longer counts.
 - **2026-11-06** — Rank fallback and unresolved merge-wait candidates by the job that actually completes last on each sampled commit. A long pull-request job remains eligible even when its check run is absent from the per-PR check population; readable required-check scopes retain their existing ranking.
 - **2026-11-06** — Project a speedup to a job inside a serial `needs:` chain against the whole chain. Other serialized members, queue and idle gaps remain in the projected wait, while the longest independent path caps the result; each sampled commit stamps the slowest job's chain span, and the per-commit projection, the whole-commit finding cap and the report verifier all use it, so a chained slowest job no longer adds the independent floor to the rest of its chain.
 - **2026-11-06** — Quantize estimated wall-clock savings to tenths of a second before applying physical bounds, so harmless display rounding cannot violate the cascade's strict monotonicity checks.
