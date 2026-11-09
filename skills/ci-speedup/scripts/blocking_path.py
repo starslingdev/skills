@@ -3425,8 +3425,12 @@ def _parse_log(text: str,
                 (boundaries[i + 1] - boundaries[i]).total_seconds()
                 for i in range(len(completions))
             ]
-            if (min(durations) > 0 and sum(durations) >= 120
-                    and max(durations) <= min(durations) * 1.05):
+            # The command timestamp precedes collection and setup, so it is
+            # only a lower bound for test one. Later completion gaps are the
+            # comparable per-test timers.
+            comparable = durations[1:]
+            if (min(durations) > 0 and sum(comparable) >= 120
+                    and max(comparable) <= min(comparable) * 1.05):
                 isolated_test_leaf = {
                     "fix_key": "test-isolated-serial",
                     "unit_label": f"{len(completions)} isolated pytest tests in one file "
@@ -3444,11 +3448,11 @@ def _parse_log(text: str,
     # print application setup details merely to make this detector work.
     vitest_done = re.compile(
         r"^[\s✓✔··]*"
-        r"(?P<file>\S+\.(?:test|spec)\.[cm]?[jt]sx?)\s+>\s+.+?\s+"
+        r"(?P<file>\S+\.(?:test|spec)\.[cm]?[jt]sx?)\s+>\s+(?P<title>.+?)\s+"
         r"(?P<duration>\d+(?:\.\d+)?)\s*(?P<unit>ms|s)\s*$",
         re.IGNORECASE,
     )
-    vitest_rows: list[tuple[float, str, str, datetime]] = []
+    vitest_rows: list[tuple[float, str, str, datetime, str]] = []
     vitest_started = next(
         (when for when, message, _raw, _stamp in stamped_tests
          if re.match(r"^RUN\s+v?\d", message, re.IGNORECASE)),
@@ -3461,20 +3465,24 @@ def _parse_log(text: str,
         duration = float(match.group("duration"))
         if match.group("unit").casefold() == "ms":
             duration /= 1000.0
-        vitest_rows.append((duration, match.group("file"), raw, when))
+        test_name = match.group("title").rsplit(" > ", 1)[-1].strip()
+        vitest_rows.append((duration, match.group("file"), raw, when, test_name))
     count_matches = [
         int(match.group(1))
         for _when, message, _raw, _stamp in stamped_tests
         if (match := re.search(r"\b(\d+)\s+tests?\s+passed\b", message,
                                re.IGNORECASE))
     ]
-    by_file: dict[str, list[tuple[float, str, datetime]]] = {}
-    for duration, test_file, raw, when in vitest_rows:
-        by_file.setdefault(test_file, []).append((duration, raw, when))
+    by_file: dict[str, list[tuple[float, str, datetime, str]]] = {}
+    for duration, test_file, raw, when, test_name in vitest_rows:
+        by_file.setdefault(test_file, []).append((duration, raw, when, test_name))
     source_isolation = (iso or {}).get("isolated_test_files") or {}
     for test_file, rows in by_file.items():
-        markers = source_isolation.get(test_file.removeprefix("./")) or []
-        if len(set(str(marker).casefold() for marker in markers)) < len(rows):
+        markers = source_isolation.get(test_file.removeprefix("./")) or {}
+        matched_markers = [markers.get(row[3]) for row in rows]
+        if (any(marker is None for marker in matched_markers)
+                or len(set(str(marker).casefold() for marker in matched_markers))
+                != len(rows)):
             continue
         measured_span = ((max(row[2] for row in rows) - vitest_started).total_seconds()
                          if vitest_started is not None else 0.0)
@@ -3482,6 +3490,13 @@ def _parse_log(text: str,
         if not (summed_runtime * 0.95 <= measured_span <= summed_runtime * 1.2 + 1):
             continue
         if count_matches and max(count_matches) != len(rows):
+            continue
+        completion_order = sorted(rows, key=lambda row: row[2])
+        if any(
+            current[2] - timedelta(seconds=current[0])
+            < previous[2] - timedelta(seconds=1)
+            for previous, current in zip(completion_order, completion_order[1:])
+        ):
             continue
         ordered = sorted(rows, key=lambda row: row[0], reverse=True)
         cohort = ordered[:4]
@@ -3494,9 +3509,14 @@ def _parse_log(text: str,
                               "run strictly in sequence on a near-identical timer",
                 "magnitude": None,
                 "deeper": [],
-                "evidence": [row[1] for row in cohort[:3]],
+                "evidence": [
+                    f"source proof: {test_file} maps every logged test to a distinct "
+                    "schema/prefix setup call",
+                    *(row[1] for row in cohort[:2]),
+                ],
                 "search": [test_file, "describe.concurrent", "maxConcurrency"],
                 "test_count": max(count_matches) if count_matches else len(rows),
+                "isolation_basis": "test source",
             }
     if isolated_test_leaf is not None:
         return isolated_test_leaf
@@ -4013,13 +4033,14 @@ _FIX_META: dict[str, dict[str, Any]] = {
     },
     "test-isolated-serial": {
         "cause": "Four or more tests in the same file run strictly one after another "
-                 "for near-identical durations, and each interval logs its own unique "
-                 "schema, database or prefix. That positive isolation evidence makes "
+                 "for near-identical durations, and the log or scanned test source shows "
+                 "that each owns a unique schema, database or prefix. That positive "
+                 "isolation evidence makes "
                  "the repeated fixed wait a candidate for safe in-job concurrency.",
-        "look": "`{wf}` and the named test file — confirm every test owns the logged "
-                "isolation marker, then look for any remaining shared state: fixed ports, "
+        "look": "`{wf}` and the named test file — confirm every test owns the named "
+                "log or source isolation evidence, then look for any remaining shared state: fixed ports, "
                 "process globals, filesystem paths, queues, clocks or ordering assumptions.",
-        "constraints": "The logged marker proves only the named schema/database/prefix "
+        "constraints": "The positive marker proves only the named schema/database/prefix "
                        "is unique. Adversarially test the other shared state, preserve the "
                        "same test count and failure propagation, and keep any genuinely "
                        "exclusive tests in a serial lane.",
