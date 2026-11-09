@@ -374,7 +374,7 @@ def test_named_fixtures_exercise_their_defining_interactions(
             "cache-lints", "config-era-change", "duplicate-gate-job", "emulated-container",
             "external-required-gate", "heavy-runner-queue", "minority-tail",
             "multiarch-image", "path-partitioned-monorepo", "vendored-libs",
-            "vitest-isolated-serial", "cargo-double-compile"):
+            "vitest-isolated-serial", "cargo-double-compile", "per-test-startup"):
         docs[name], reports[name], _checks = run_fixture(
             FIXTURE_ROOT / name, monkeypatch, tmp_path)
 
@@ -420,6 +420,9 @@ def test_named_fixtures_exercise_their_defining_interactions(
         docs["cargo-double-compile"], [])["leaves"]
     assert "Compiling goport_core" in reports["cargo-double-compile"]
     assert "combine their `-p`/`--package`" in reports["cargo-double-compile"]
+    assert "per-invocation-startup" in fixture_facts(
+        docs["per-test-startup"], [])["leaves"]
+    assert "state-leak canary" in reports["per-test-startup"]
     assert any(
         row.get("cache_net_negative", {}).get("kind") == "opt79_buildkit_export"
         for row in image_doc["findings"])

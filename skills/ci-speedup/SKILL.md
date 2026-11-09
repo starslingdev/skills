@@ -427,7 +427,7 @@ prompt or review names `OPT<N>`, read that one file in full; read
 Never open `references/optimization-patterns.md`: it is the generated public copy.
 
 Adding or cutting a pattern (catalog entry + detector registration, coverage
-bookkeeping, the intentionally-cut OPT49/50/51 / router-less OPT74, OPT78, OPT85 and OPT87 cases) is a
+bookkeeping, the intentionally-cut OPT49/50/51 / router-less OPT74, OPT78 and OPT87 cases) is a
 contributor task — `maintainers/ci-speedup/MAINTAINERS.md` (source checkout
 only) § Adding a pattern to the catalog.
 

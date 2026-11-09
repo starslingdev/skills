@@ -14412,6 +14412,7 @@ _VR_LEAF_STEP_CATEGORY: dict[str, str | frozenset[str]] = {
     "vitest-import-bound": "test",
     "playwright-parallel": "test",
     "pytest-no-xdist": "test",
+    "per-invocation-startup": "test",
     "test-isolated-serial": "test",
     "test-loop-serial": "test",
     "vendored-lib-build": "build",

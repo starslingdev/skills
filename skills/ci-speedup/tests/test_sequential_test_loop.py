@@ -88,6 +88,7 @@ _EXPECTED_PARSE_LOG_LEAF_ORDER = (
     "android-emulator-shard",
     "gradle-test-parallelism",
     "dependency-cache",
+    "per-invocation-startup",
     "test-isolated-serial",
     "test-loop-serial",
     "vendored-lib-build",

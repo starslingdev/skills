@@ -1,0 +1,7 @@
+name: Per-test startup
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: python -m pytest tests/case_*.py -q
