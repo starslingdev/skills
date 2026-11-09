@@ -2526,6 +2526,29 @@ def _opt89_resolve_known_shell_env(command: str, env: dict[str, str]) -> str:
         lambda match: env.get(match.group(1), match.group(0)), command)
 
 
+def _opt89_command_env(command: str, env: dict[str, str]) -> dict[str, str]:
+    """Apply literal shell and Docker environment overrides in command order."""
+    effective = dict(env)
+    assignment_re = re.compile(
+        r"(?:^|[;&|]\s*|\bexport\s+)"
+        r"([A-Za-z_][A-Za-z0-9_]*)=([^\s;&|]+)\s*"
+        r"(?=;|&&|\|\||\n|$)",
+        re.MULTILINE,
+    )
+    docker_env_re = re.compile(
+        r"(?:--env(?:=|\s+)|-e(?:=|\s*)?)"
+        r"([A-Za-z_][A-Za-z0-9_]*)=([^\s;&|]+)"
+    )
+    for pattern in (assignment_re, docker_env_re):
+        for match in pattern.finditer(command):
+            value = match.group(2)
+            if "$" in value:
+                effective.pop(match.group(1), None)
+            else:
+                effective[match.group(1)] = value.strip("'\"")
+    return effective
+
+
 def _opt89_resolve_known_env(
         command: str, env: dict[str, str], matrix: dict[str, str]) -> str:
     """Resolve declared target variables while leaving unrelated values opaque."""
@@ -2534,7 +2557,8 @@ def _opt89_resolve_known_env(
         for key, value in env.items()
     }
     command = _opt89_resolve_known_env_expressions(command, env, matrix)
-    return _opt89_resolve_known_shell_env(command, resolved_env)
+    return _opt89_resolve_known_shell_env(
+        command, _opt89_command_env(command, resolved_env))
 
 
 def _opt89_action_env(value: object, env: dict[str, str],
@@ -2734,9 +2758,10 @@ def _detect_opt89(doc: dict, raw: str) -> list[Hit]:
                         or "").lower()
                     command = _opt89_resolve_known_env_expressions(
                         str(with_.get("run") or ""), step_env, matrix)
+                    action_env = _opt89_action_env(
+                        with_.get("env"), step_env, matrix)
                     command = _opt89_resolve_known_shell_env(
-                        command, _opt89_action_env(
-                            with_.get("env"), step_env, matrix))
+                        command, _opt89_command_env(command, action_env))
                     marker = "uraimo/run-on-arch-action@"
                     occurrence = action_occurrence
                     mechanism = "run-on-arch action"

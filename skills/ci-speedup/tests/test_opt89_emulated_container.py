@@ -415,6 +415,42 @@ jobs:
     assert len(hits) == 1
 
 
+def test_job_container_inline_assignment_overrides_declared_environment(
+        tmp_path: Path):
+    hits = _opt89(tmp_path, """name: inline target override
+on: pull_request
+jobs:
+  arm:
+    runs-on: ubuntu-latest
+    container: arm64v8/ubuntu:24.04
+    env:
+      MAKE_TARGET: check
+    steps:
+      - run: MAKE_TARGET=all; make $MAKE_TARGET
+""")
+
+    assert len(hits) == 1
+
+
+def test_docker_environment_option_overrides_declared_environment(
+        tmp_path: Path):
+    hits = _opt89(tmp_path, """name: docker target override
+on: pull_request
+jobs:
+  arm:
+    runs-on: ubuntu-latest
+    env:
+      MAKE_TARGET: check
+    steps:
+      - uses: docker/setup-qemu-action@v3
+      - run: >-
+          docker run --platform linux/arm64 -e MAKE_TARGET=all image
+          sh -c 'make $MAKE_TARGET'
+""")
+
+    assert len(hits) == 1
+
+
 def test_job_container_resolves_matrix_compile_command(tmp_path: Path):
     hits = _opt89(tmp_path, """name: matrix container command
 on: pull_request
