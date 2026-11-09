@@ -43,8 +43,9 @@ Explicit non-goals (v1):
 - Not a controlled A/B (we do **not** re-measure the baseline fresh — see
   "Asymmetry" below; we disclose it instead).
 - Not post-merge / production tracking over time.
-- Not a runner-minute (billing) before/after — v1 measures **wall-clock**
-  merge-wait only; a billing delta can follow later.
+- Not a runner-minute saving — v1 sizes **wall-clock** merge-wait only. It
+  discloses total job duration and billed compute beside that result, without
+  treating either as a sized saving.
 - Built-in and native to ci-speedup — no dependency on any external
   benchmarking tooling.
 
@@ -92,19 +93,15 @@ report it separately rather than treating it as a changed-code sample.
 - **Report median + range over the collected runs, never a single "clean"
   figure.** e.g. `6m10s median of 3 runs (5m50s–6m30s)`. A point estimate over
   noisy CI is the thing that misleads.
-- **Cold vs. warm cache — disclose, don't cherry-pick.** The first run on a fresh
-  branch often misses caches (nothing to restore yet), so it sits at the slow,
-  cold-start end; the reruns that follow hit the cache that first run populated
-  and sit at the warm, steady-state end. Detect this by **run position** — the
-  branch's first run is the cold sample, its reruns are warm — not by parsing
-  cache-hit log lines (the run-level API doesn't surface hit/miss). Keep **all**
-  collected runs in the reported median + range and **disclose the cache state**;
-  the cold run pulls the median toward the slow end (a conservative bias that
-  under- rather than over-states the win). Do **not** report a warm-only median:
-  at the default N = 2 that leaves a single warm sample, which "one run is not
-  evidence" forbids. A cold-vs-warm gap that trips the variance threshold is real
-  cache-sensitivity, not jitter — the adaptive run fires and the range is shown.
-  If only the cold run is available, say so and treat it as a ceiling.
+- **Cold vs. warm cache — disclose, don't cherry-pick.** Classify a sample from
+  its logs when they name a dependency, build, or task-cache miss or hit. State
+  why a cold sample was cold when the log identifies key miss, branch-scope
+  visibility, or eviction. Run position is descriptive context, never a
+  substitute for log evidence. Keep every complete sample in the aggregate
+  median and range, and also report cold and warm samples on separate lines;
+  an unclassified sample stays unknown. A cold-vs-warm gap that trips the
+  variance threshold is cache sensitivity, not jitter, so the adaptive run
+  still fires and the range is shown.
 - **Sampling costs wall-clock on the rerun path — it is not free.** `gh run rerun`
   produces *sequential* attempts of one run (see "Triggering"), so N samples cost
   ≈ N × one run of wall-clock — real time on already-slow CI. Only where the
@@ -116,8 +113,42 @@ report it separately rather than treating it as a changed-code sample.
 The **push-wide CI wall-clock**, from first job created to last job finished
 across all workflows triggered by each push:
 before-p50 vs after-median, plus the delta as a percentage and absolute time.
-Optionally, if the fix targeted a specific step, the step-level before/after too
-(the report already has the step timeline).
+If the fix targeted a specific step, the report must show that same step's
+before/after beside the push-cohort wall clock (the report already has the step
+timeline). This line is mandatory so unrelated checkout or setup noise cannot
+hide or imitate the changed step's result.
+
+## Comparability and disclosure contract
+
+This table is normative and closed-world: every row is evaluated for both arms.
+Anything that cannot establish its evidence takes the state shown here rather
+than being guessed from job counts or row position.
+
+| Rule | Evidence | State | Report |
+| --- | --- | --- | --- |
+| aggregate | Retain every complete sample, whether cold, warm, or unknown. | All complete samples contribute to the locked aggregate. | Show the median and range over all complete samples, then show cold and warm samples on separate lines. |
+| queue-work | Derive `queue_delta_s` and `work_delta_s` separately from job timestamps. | A runner-pool change is not attributable to the code change. | Show both deltas and name the changed runner pool. |
+| compute | Compare the sum of job durations in both arms. | Disclosure only. | Show both totals beside wall clock; this is not a sized saving. |
+| in-flight | An in-flight run is never a sample. | Excluded. | Name the in-flight run and its exclusion. |
+| tests | Compare test totals or names by field name, never position. | Missing tests make the workload `reduced`. | Say "coverage change, not a speedup" and state the missing work. |
+| lint-format-types | Compare files checked by lint, format, and type-check steps. | A lower checked set is `reduced`. | State the work parity evidence and the changed file count. |
+| build-output | Compare artifact file list and hashes; use sizes where builds are not reproducible, or a printed compile-unit count. | Without either arm's printed fingerprint, use `unknown`. | Show the differing files, hashes, sizes, or compile-unit counts. |
+| coverage | Compare reported coverage figures. | A coverage difference is `changed`. | State the coverage delta. |
+| cache-replay | Count `(cached)`, `FROM-CACHE`, and `cache hit, replaying` as not run. | An after-arm replay share more than 10 percentage points above before is `changed`. | State both replay shares and the work counted as not run. |
+| missing-totals | Check whether both arms print workload totals or names. | When neither arm prints them, use `unknown`, never `same`. | State that parity could not be established. |
+| red-before | Check each arm's conclusion before comparing totals. | When the before arm is red, use never `same`. | State that the before workload failed. |
+| runner-class | Compare runner label and image where the log names it. | A mismatch or runner pool change is not attributable. | Name both runner classes. |
+| changed-step | Match the step changed by the fix across both arms. | This line is mandatory. | Show the same step before and after beside push-wide wall clock. |
+| cold-evidence | Read dependency, build, and task-cache miss evidence from each log. | A logged cache miss makes that sample cold wherever it occurs. | State why it was cold when the log names key miss, branch scope, or eviction. |
+| task-cache | Record Turbo, Nx, and Gradle hit share per sample. | A difference of more than 20 percentage points is not attributable. | Show each arm's hit share on separate warm and cold lines. |
+| suspicious-warm | Find cache hits one arm lacked, including `FULL TURBO`, `CACHED`, and Go `(cached)`. | On persistent-disk runners this is `changed`. | Warn that the hits can come from unrelated jobs. |
+| triggered-set | Compare the same workflows and jobs in both arms. | A different triggered set is `changed`. | List the added or missing workflows and jobs. |
+| per-commit | Pair cohorts only when the collected data carries an explicit shared pair identity; never pair by position or reuse one arm's median as a synthetic pair. | Only explicit comparable pairs contribute; without them, this row is unavailable and requires no extra run. | Show the median of per-commit ratios and the worst explicit pair beside the ratio of medians, or state why pairwise ratios are unavailable. |
+| billed-compute | Each job is rounded up to the minute and grouped by runner OS and runner ownership. | Disclosure only. | Show GitHub-hosted billed compute by runner OS; show self-hosted and third-party rounded compute separately, never folded into billed minutes. |
+| runner-carry-over | Bind every measured multiple to its runner label and size. | The multiple is restricted to that class. | State the runner label and size with every multiple. |
+| exclusions | Identify infrastructure stalls, bot-triggered runs, and jobs red on both arms. | Exclude them only from a filtered diagnostic; the complete triggered group remains the primary headline. | List exclusions and show wall clock with and without jobs red on both arms, with the complete-group value first. |
+| lane | Bind each verdict to its workflow lane. | Required for every verdict. | Name the lane and its 30-day run count. |
+| negative-control | Remove one known unit of work and rerun parity classification. | Required; the parity check must fail. | Show the negative control and the guard that rejected parity. |
 
 ## Disclaimers — mandatory, auto-included
 
@@ -392,10 +423,13 @@ jargon, no machinery — the #234 UX direction):
 
 ```
 Speedup (measured): push-wide CI now finishes in ~6m10s, down from ~8m36s — about 28% faster.
-  • After: median of 3 fresh runs on your branch (5m50s–6m30s), including the cold first run.
+  • After: median of 3 complete fresh runs on your branch (5m50s–7m05s), including cold and warm samples.
+  • Cache: cold 7m05s (cache key miss); warm 5m50s–6m30s.
   • Before: median of 12 complete historical push cohorts.
-  • This branch changes only CI config and runs the same jobs, so the gain is attributable to the fix.
-  • Cache: the warm reruns are the steady state; a first push hits cold caches and can be slower.
+  • Queue delta: -8s. Work delta: -2m18s. Total job duration: 22m before, 20m after.
+  • Changed step: build, 3m12s before and 1m05s after.
+  • This branch changes only CI config and runs the same work on the same runner class, so the gain is attributable to the fix.
+  • Lane: pull requests, 240 runs in the last 30 days.
   • CI timing varies run-to-run, on whatever runner tier/concurrency you use; this is one branch's runs vs recent history, not a controlled test.
 ```
 
@@ -484,6 +518,10 @@ cohort. Cost estimates below use the whole cohort plus the separate noise contro
    after — the modeled-vs-measured mismatch this codebase is disciplined about
    avoiding — so it ships as its own clean increment, not bolted onto v1.
 
+The compute rows required by the comparability contract are disclosures. They
+do not size a runner-minute saving, change the wall-clock headline, or alter
+Decision 6.
+
 ## Implementation sketch (once approved — NOT in this PR)
 
 - SKILL.md: add phase 7 (post-fix verification) + its close-rendering rules.
@@ -491,11 +529,12 @@ cohort. Cost estimates below use the whole cohort plus the separate noise contro
   or parallel `workflow_dispatch` where available), poll to completion, enumerate
   the run's **attempts** (new per-attempt fetch — the run-list sampler sees only
   one row), compute each complete push cohort's first-created → last-finished interval, run the two-part CI-only-scope
-  guard (no product code + same work ran), tag each run cold/warm by position, and
+  guard (no product code + same work ran), classify cold/warm from log evidence,
+  compare runner class, triggered set, task-cache hit share and work parity, and
   emit the disclosed before/after block (all six disclaimers, real wall-clock +
   billing cost).
-- Tests: the median/range math over all runs, the variance-adaptive-N logic, the
-  cold(1)+warm(N−1) composition at the default N = 2, the CI-only-scope guard
+- Tests: median/range over all complete samples with cold and warm samples on separate lines, the
+  variance-adaptive-N logic, log-backed cold classification, the CI-only-scope guard
   (product code → conflated; each workload state reached only on its own
   evidence, with equal job counts and a pure re-shard NOT classified as
   `reduced`; `increased`/`changed`/`unknown` never headlining a clean

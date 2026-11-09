@@ -19,6 +19,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-11-08** — Expand the before/after measurement contract with separate queue and work deltas, work-parity evidence, runner and trigger comparability, cache-state guards, per-commit ratios, compute disclosures, exclusions, lane frequency, and a required negative control.
 - **2026-11-08** — Detect compilation in emulated containers when shell variables or GitHub expressions appear elsewhere in the command. Platform and architecture values remain resolved, while unrelated variables stay opaque to command parsing.
 - **2026-11-08** — Show each critical matrix leg's measured fixed floor and remaining divided work beside its observed timing spread. When a log exposes compilation or collection inside the divided-work step, report that in-step floor separately without recommending a shard count.
 - **2026-11-08** — Route dominant foreign-platform image compilation with no Buildx node listing to a topology check without crediting savings or claiming emulation. Inspected single-node builders retain the measured recommendation, while explicit multi-node builders still fail closed.
