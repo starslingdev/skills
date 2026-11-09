@@ -29,7 +29,45 @@ from __future__ import annotations
 
 import statistics
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Callable
+
+
+def observed_commit_wall_s(
+    jobs: list[dict[str, Any]],
+    *,
+    cohort_created_at: list[str] | None = None,
+) -> float | None:
+    """Return earliest supplied creation to last-job-completed wall time.
+
+    Callers pass one complete, exact-head push cohort and one attempt per
+    workflow. Cohort completeness and attempt identity remain the collector's
+    responsibility; this helper owns the shared timestamp formula. By default
+    job creation is the lower boundary. Existing collector callers may supply
+    workflow-run creation timestamps for their established commit-wall metric.
+    """
+    created: list[float] = []
+    completed: list[float] = []
+    for job in jobs:
+        if not job.get("created_at") or not job.get("completed_at"):
+            return None
+        try:
+            created.append(datetime.fromisoformat(
+                str(job["created_at"]).replace("Z", "+00:00")).timestamp())
+            completed.append(datetime.fromisoformat(
+                str(job["completed_at"]).replace("Z", "+00:00")).timestamp())
+        except (TypeError, ValueError):
+            return None
+    if cohort_created_at is not None:
+        try:
+            created = [datetime.fromisoformat(
+                str(value).replace("Z", "+00:00")).timestamp()
+                for value in cohort_created_at]
+        except (TypeError, ValueError):
+            return None
+    if not created or not completed or max(completed) < min(created):
+        return None
+    return round(max(completed) - min(created), 3)
 
 
 def _resolve_job_p50(job_key: str, job_p50: dict[str, float]) -> float:
