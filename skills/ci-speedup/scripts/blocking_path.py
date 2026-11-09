@@ -6087,8 +6087,11 @@ def _provenance_block(doc: dict[str, Any], repo: str, captured_at: str) -> list[
                    f"floor — {_shown}{_more}. They can't hold the merge pole, so their "
                    "jobs weren't fetched (saving calls); their off-path hygiene/queue "
                    "figures are run-list-only, not job-level.")
-    gate = (f"> - **Which checks gate (the critical-path ordering):** measured from **{spr}/{tgt} "
-            "sampled PRs**")
+    stop_reason = str(cp.get("sample_stop_reason") or (
+        "target_met" if complete else "candidates_exhausted")).replace("_", " ")
+    gate = (f"> - **Which checks gate (the critical-path ordering):** measured from "
+            f"**{spr}/{tgt} sampled PRs** — **{spr} of {tgt} PRs sampled: "
+            f"{stop_reason}**")
     if not complete:
         gate += (" — ⚠️ **short sample** (fewer recent PRs ran the full required suite), "
                  "so the gate ordering here is a floor, not the full picture")
@@ -7996,7 +7999,10 @@ def _metadata_table(doc: dict[str, Any], repo: str) -> list[str]:
                      f"{_count_noun(runs, 'run')} / {_count_noun(jobs, 'job')}{wf_part}"))
     rows.append(("Runs window", _run_window(str(cutoff) if cutoff else scanned)))
     if isinstance(spr, int) and isinstance(tgt, int):
-        rows.append(("PR gate sample", f"{spr} / {tgt} PRs"))
+        reason = str(cp.get("sample_stop_reason") or (
+            "target_met" if cp.get("sample_complete", True)
+            else "candidates_exhausted")).replace("_", " ")
+        rows.append(("PR gate sample", f"{spr} of {tgt} PRs sampled: {reason}"))
     if skill.startswith("installed:"):
         # Content-hash provenance for an installed skill copy (issue #2): not a
         # commit, so a plain identity string with NO commit permalink to fabricate.

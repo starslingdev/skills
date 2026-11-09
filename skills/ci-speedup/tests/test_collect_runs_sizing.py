@@ -1152,6 +1152,7 @@ def test_sampling_provenance_fields_locks_diag_to_doc_key_mapping():
         "sample_complete": False,
         "sample_fetch_failures": 3,
         "sample_fetched": 160,
+        "sample_stop_reason": "candidates_exhausted",
         "required_suite_scoped": True,
         "required_suite_unsatisfiable": False,
         "required_checks_unobservable": ["Devin Review"],
@@ -1165,6 +1166,7 @@ def test_sampling_provenance_fields_locks_diag_to_doc_key_mapping():
     mapped = _sampling_provenance_fields(real_diag)
     assert set(mapped) == {"sample_target", "sample_complete",
                            "sample_fetch_failures", "sample_fetched",
+                           "sample_stop_reason",
                            "required_suite_scoped", "required_suite_unsatisfiable",
                            "required_checks_unobservable"}
     assert mapped["sample_fetched"] == real_diag["fetched"]
