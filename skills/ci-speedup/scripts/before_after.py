@@ -61,12 +61,6 @@ def advance_verification(
     except (OSError, json.JSONDecodeError):
         baseline_bytes = b""
         baseline_doc = {}
-    before = (baseline_doc.get("verification_baseline")
-              if isinstance(baseline_doc, dict) else None)
-    if (not isinstance(before, list) or not before) and isinstance(
-            baseline_doc, dict):
-        before = _baseline_from_findings(baseline_doc)
-
     saved: dict[str, Any] = {}
     if context_file.exists():
         try:
@@ -89,8 +83,22 @@ def advance_verification(
     static_matches = all(saved_binding.get(key) == value
                          for key, value in static_binding.items())
     is_default = getattr(client, "is_default_branch", None)
-    tracking_default = bool(
-        cache_sensitive and callable(is_default) and is_default(repo, branch))
+    default_branch_state = is_default(repo, branch) if callable(is_default) else False
+    if default_branch_state is None:
+        emit("Could not determine the repository default branch; verification "
+             "will not request reruns.")
+        return {"status": "default-branch-unknown", "verdict": None}
+    on_default_branch = default_branch_state is True
+    tracking_default = on_default_branch
+    baseline_lane = ("push" if cache_sensitive or on_default_branch
+                     else "pull_request")
+    before = (baseline_doc.get("verification_baseline")
+              if isinstance(baseline_doc, dict) else None)
+    if isinstance(before, list) and before and baseline_lane:
+        before = _baseline_for_lane(before, baseline_lane)
+    if (not isinstance(before, list) or not before) and isinstance(
+            baseline_doc, dict):
+        before = _baseline_from_findings(baseline_doc, lane=baseline_lane)
     resolved_head = client.remote_head(repo, branch)
     head = resolved_head
     if tracking_default and static_matches and saved_binding.get("head_sha"):
@@ -167,8 +175,11 @@ def advance_verification(
                 "sample_count": len(samples), "verdict": None,
                 "discarded_moved_head": moved}
 
-    if cache_sensitive:
-        pushes = client.default_branch_cohorts(repo, after_head=head, limit=3)
+    distinct_push_sampling = bool(cache_sensitive or on_default_branch)
+    if distinct_push_sampling:
+        wanted_pushes = 3 if cache_sensitive else max(1, target_runs)
+        pushes = client.default_branch_cohorts(
+            repo, after_head=head, limit=wanted_pushes)
         distinct: list[dict[str, Any]] = []
         seen_heads: set[str] = set()
         for cohort in pushes:
@@ -181,13 +192,13 @@ def advance_verification(
             item for sample in distinct
             for item in sample.get("run_attempt_ids") or []
         ]
-        if len(distinct) < 3:
+        if len(distinct) < wanted_pushes:
             persist()
-            emit("Cache-sensitive verification needs 3 distinct consecutive "
+            emit(f"Verification needs {wanted_pushes} distinct consecutive "
                  "default-branch pushes; reruns are not valid samples.")
             return {"status": "waiting-for-default-branch-pushes",
                     "head_sha": head, "sample_count": len(distinct),
-                    "needed": 3, "verdict": None,
+                    "needed": wanted_pushes, "verdict": None,
                     "discarded_moved_head": moved}
         samples = distinct
     else:
@@ -247,8 +258,8 @@ def advance_verification(
     verdict = compare_push_cohorts(
         before, samples, changed_files=list(changed_files),
         variance_pct=variance_pct,
-        allow_distinct_after_heads=bool(cache_sensitive))
-    if not cache_sensitive:
+        allow_distinct_after_heads=distinct_push_sampling)
+    if not distinct_push_sampling:
         while (int((verdict.get("sampling") or {}).get("need") or 0)
                > len(samples) and len(samples) < 4):
             drift = moved_result()
@@ -339,10 +350,11 @@ class GhVerificationClient:
         commit = payload.get("commit")
         return str(commit.get("sha") or "") if isinstance(commit, dict) else None
 
-    def is_default_branch(self, repo: str, branch: str) -> bool:
+    def is_default_branch(self, repo: str, branch: str) -> bool | None:
         payload = self._api(f"repos/{repo}")
-        return (isinstance(payload, dict)
-                and str(payload.get("default_branch") or "") == branch)
+        if not isinstance(payload, dict):
+            return None
+        return str(payload.get("default_branch") or "") == branch
 
     def _paged_rows(self, endpoint: str, key: str) -> list[dict[str, Any]] | None:
         rows: list[dict[str, Any]] = []
@@ -618,8 +630,22 @@ def _median(values: Iterable[float]) -> float | None:
     return round(float(statistics.median(rows)), 3) if rows else None
 
 
-def _baseline_from_findings(doc: dict[str, Any]) -> list[dict[str, Any]]:
-    clock = ((doc.get("pr_critical_path") or {}).get("commit_wall_clock") or {})
+def _baseline_for_lane(cohorts: list[dict[str, Any]], lane: str
+                       ) -> list[dict[str, Any]]:
+    def normalized(value: Any) -> str:
+        text = str(value or "").strip().lower().replace(" ", "_")
+        return "pull_request" if text in {"pull_requests", "pr"} else text
+
+    return [cohort for cohort in cohorts
+            if normalized(cohort.get("lane")) == normalized(lane)]
+
+
+def _baseline_from_findings(
+    doc: dict[str, Any], *, lane: str | None = None,
+) -> list[dict[str, Any]]:
+    clock = ((doc.get("default_branch_push_lane") or {})
+             if lane == "push" else
+             ((doc.get("pr_critical_path") or {}).get("commit_wall_clock") or {}))
     cohorts: list[dict[str, Any]] = []
     for fact in clock.get("facts") or []:
         if not isinstance(fact, dict) or fact.get("partial") is True:
@@ -628,6 +654,8 @@ def _baseline_from_findings(doc: dict[str, Any]) -> list[dict[str, Any]]:
         raw_jobs = [row for row in fact.get("jobs") or []
                     if isinstance(row, dict)]
         event = str(fact.get("event") or "")
+        if lane and event != lane:
+            continue
         workflows = sorted({
             f"{str(row.get('workflow_file') or '')}:{event}"
             for row in raw_jobs if row.get("workflow_file")})
@@ -967,10 +995,19 @@ def compare_push_cohorts(
     enough_samples = len(before_samples) >= 2 and len(after_samples) >= 2
     sampling_pending = need > len(after_samples)
     noisy_at_cap = spread_pct > variance_pct and len(after_samples) >= 4
-    no_change = bool(
-        set(s.get("head_sha") for s in before_samples)
-        & set(s.get("head_sha") for s in after_samples)
+    after_success_heads = {
+        str(s.get("head_sha") or "") for s in after_samples
+        if s.get("head_sha")
+    }
+    repeated_attempts = bool(
+        len(after_success_heads) == 1
         and any(int(s.get("attempt") or 1) > 1 for s in after_samples))
+    before_success_heads = {
+        str(s.get("head_sha") or "") for s in before_samples
+        if s.get("head_sha")
+    }
+    no_change = bool(repeated_attempts
+                     and before_success_heads & after_success_heads)
     clean = (comparable and ci_only and state == "same" and enough_samples
              and not sampling_pending and not noisy_at_cap and not no_change
              and step is not None)
@@ -992,9 +1029,15 @@ def compare_push_cohorts(
     lane = str(after_samples[0].get("lane") or "unknown")
     lane_runs = after_samples[0].get("lane_runs_30d")
     cold_reasons = ", ".join(str(s["cache_reason"]) for s in cold) or "none observed"
+    sample_label = ("no-change reruns" if repeated_attempts
+                    else "fresh complete runs")
+    comparison_shape = (
+        f"{len(after_samples)} distinct default-branch push cohorts"
+        if allow_distinct_after_heads else "one exact-head branch cohort")
     report = "\n".join([
-        f"Sample size: {len(after_samples)} fresh complete runs.",
-        f"Asymmetry: {len(before_samples)} historical push cohorts versus one exact-head branch cohort.",
+        f"Sample size: {len(after_samples)} {sample_label}.",
+        f"Asymmetry: {len(before_samples)} historical push cohorts versus "
+        f"{comparison_shape}.",
         f"CI-only scope: {'passed' if ci_only else 'product files also changed'}; workload is {state} ({workload_evidence}).",
         f"Variance: {min(values):.1f}s-{max(values):.1f}s; {sampling['reason']}.",
         f"Cache state: {len(cold)} cold and {len(warm)} warm; warm reruns are optimistic.",
