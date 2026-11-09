@@ -293,6 +293,60 @@ jobs:
     assert hits == []
 
 
+@pytest.mark.parametrize("scope", ["job", "step"])
+def test_run_on_arch_resolves_env_test_target_before_classifying(
+        tmp_path: Path, scope: str):
+    job_env = "    env:\n      MAKE_TARGET: check\n" if scope == "job" else ""
+    step_env = "        env:\n          MAKE_TARGET: check\n" if scope == "step" else ""
+    hits = _opt89(tmp_path, f"""name: environment action target
+on: pull_request
+jobs:
+  arm:
+{job_env}    runs-on: ubuntu-latest
+    steps:
+      - uses: uraimo/run-on-arch-action@v2
+{step_env}        with:
+          arch: aarch64
+          run: make $MAKE_TARGET
+""")
+
+    assert hits == []
+
+
+def test_run_on_arch_resolves_env_compile_target(tmp_path: Path):
+    hits = _opt89(tmp_path, """name: environment action target
+on: pull_request
+jobs:
+  arm:
+    runs-on: ubuntu-latest
+    env:
+      MAKE_TARGET: all
+    steps:
+      - uses: uraimo/run-on-arch-action@v2
+        with:
+          arch: aarch64
+          run: make ${MAKE_TARGET}
+""")
+
+    assert len(hits) == 1
+
+
+def test_run_on_arch_unresolved_target_stays_silent(tmp_path: Path):
+    hits = _opt89(tmp_path, """name: unknown action target
+on: pull_request
+jobs:
+  arm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: uraimo/run-on-arch-action@v2
+        with:
+          arch: aarch64
+          run: make $MAKE_TARGET
+""")
+
+    assert hits == []
+
+
 def test_job_container_resolves_matrix_compile_command(tmp_path: Path):
     hits = _opt89(tmp_path, """name: matrix container command
 on: pull_request

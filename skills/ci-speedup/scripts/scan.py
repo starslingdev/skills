@@ -2474,6 +2474,9 @@ def _opt89_compile_signal(command: str) -> str | None:
                     elif not token.startswith("-") and "=" not in token:
                         targets.append(token.lower())
                 test_targets = {"test", "tests", "check", "checks", "ctest", "verify"}
+                if any(re.search(r"\$(?:\{|[A-Za-z_])|\$\{\{", target)
+                       for target in targets):
+                    continue
                 if targets and all(target in test_targets for target in targets):
                     continue
         if (re.search(r"\bcmake\b", low)
@@ -2497,6 +2500,21 @@ def _opt89_resolve_known_expressions(
         lambda match: matrix.get(match.group(1), match.group(0)),
         command,
     )
+
+
+def _opt89_resolve_known_env(
+        command: str, env: dict[str, str], matrix: dict[str, str]) -> str:
+    """Resolve declared target variables while leaving unrelated values opaque."""
+    command = _opt89_resolve_known_expressions(command, matrix)
+    command = re.sub(
+        r"\$\{\{\s*env\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}",
+        lambda match: env.get(match.group(1), match.group(0)), command)
+    command = re.sub(
+        r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}",
+        lambda match: env.get(match.group(1), match.group(0)), command)
+    return re.sub(
+        r"\$([A-Za-z_][A-Za-z0-9_]*)",
+        lambda match: env.get(match.group(1), match.group(0)), command)
 
 
 def _opt89_collapse_expressions(command: str) -> str:
@@ -2622,6 +2640,7 @@ def _opt89_foreign_container(job: dict, matrix: dict[str, str]) -> str | None:
 def _detect_opt89(doc: dict, raw: str) -> list[Hit]:
     """Find compile commands executed in an emulated foreign container."""
     hits: list[Hit] = []
+    workflow_env = (doc.get("env") if isinstance(doc.get("env"), dict) else {})
     for job_name, job in _jobs_from_doc(doc).items():
         if not isinstance(job, dict):
             continue
@@ -2633,6 +2652,10 @@ def _detect_opt89(doc: dict, raw: str) -> list[Hit]:
             container_arch = _opt89_foreign_container(job, matrix)
             action_occurrence = docker_occurrence = 0
             container_occurrences: dict[str, int] = {}
+            job_env = dict(workflow_env)
+            if isinstance(job.get("env"), dict):
+                job_env.update({str(key): str(value)
+                                for key, value in job["env"].items()})
             for step in _steps(job):
                 uses = _uses(step)
                 run = _run(step)
@@ -2662,12 +2685,16 @@ def _detect_opt89(doc: dict, raw: str) -> list[Hit]:
                 marker = ""
                 occurrence = 1
                 mechanism = ""
+                step_env = dict(job_env)
+                if isinstance(step.get("env"), dict):
+                    step_env.update({str(key): str(value)
+                                     for key, value in step["env"].items()})
                 if uses.startswith("uraimo/run-on-arch-action@") and isinstance(with_, dict):
                     arch = (_opt102_resolve(
                         with_.get("arch"), env={}, matrix=matrix, inputs={}, outputs={})
                         or "").lower()
-                    command = _opt89_resolve_known_expressions(
-                        str(with_.get("run") or ""), matrix)
+                    command = _opt89_resolve_known_env(
+                        str(with_.get("run") or ""), step_env, matrix)
                     marker = "uraimo/run-on-arch-action@"
                     occurrence = action_occurrence
                     mechanism = "run-on-arch action"
@@ -2680,13 +2707,13 @@ def _detect_opt89(doc: dict, raw: str) -> list[Hit]:
                           qemu_platforms, platform)):
                     arch = platform
                     command = _opt89_docker_payload(
-                        _opt89_resolve_known_expressions(run, matrix))
+                        _opt89_resolve_known_env(run, step_env, matrix))
                     marker = "docker run"
                     occurrence = docker_occurrence
                     mechanism = "QEMU-backed docker run"
                 elif container_arch and run:
                     arch = container_arch
-                    command = _opt89_resolve_known_expressions(run, matrix)
+                    command = _opt89_resolve_known_env(run, step_env, matrix)
                     marker = first_line
                     occurrence = container_occurrences[first_line]
                     mechanism = "foreign-architecture job container"
