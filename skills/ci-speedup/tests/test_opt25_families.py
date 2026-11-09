@@ -104,6 +104,50 @@ def _named_findings(pairs):
     return cr._detect_opt25_shard_imbalance("ci.yml", [jobs, jobs], 0, {})
 
 
+def test_skipped_matrix_legs_do_not_create_an_imbalance():
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    jobs = []
+    for index in range(10):
+        ran = index < 5
+        duration = 600 if ran else 12
+        jobs.append({
+            "name": f"Test (Shard {index + 1})",
+            "started_at": start.isoformat(),
+            "completed_at": (start + timedelta(seconds=duration)).isoformat(),
+            "conclusion": "success",
+            "steps": [
+                {"name": "Set up job", "conclusion": "success"},
+                {"name": "Run divided tests",
+                 "conclusion": "success" if ran else "skipped"},
+            ],
+        })
+
+    assert cr._detect_opt25_shard_imbalance(
+        "ci.yml", [jobs, jobs], 0, {"long_pole_p50": 600}) == []
+
+
+def test_real_imbalance_stamps_excluded_legs_without_work():
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    jobs = []
+    for index, duration in enumerate((600, 400, 100, 12)):
+        ran = index < 3
+        jobs.append({
+            "name": f"Test (Shard {index + 1})",
+            "started_at": start.isoformat(),
+            "completed_at": (start + timedelta(seconds=duration)).isoformat(),
+            "conclusion": "success",
+            "steps": [
+                {"name": "Set up job", "conclusion": "success"},
+                {"name": "Run divided tests",
+                 "conclusion": "success" if ran else "skipped"},
+            ],
+        })
+
+    findings = cr._detect_opt25_shard_imbalance(
+        "ci.yml", [jobs, jobs], 0, {"long_pole_p50": 600})
+    assert findings[0]["legs_excluded_no_work"] == 2
+
+
 @pytest.mark.parametrize("prefix", ["ubuntu", "ubuntu-", "macos-"])
 def test_platform_versions_remain_heterogeneous(prefix):
     findings = _named_findings([(f"Test ({prefix}{version})", duration)

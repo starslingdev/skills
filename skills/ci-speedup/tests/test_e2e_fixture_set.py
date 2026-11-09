@@ -382,7 +382,7 @@ def test_named_fixtures_exercise_their_defining_interactions(
     for name in (
             "cache-lints", "config-era-change", "duplicate-gate-job", "emulated-container",
             "external-required-gate", "heavy-runner-queue", "minority-tail",
-            "multiarch-image", "path-partitioned-monorepo", "vendored-libs",
+            "multiarch-image", "path-partitioned-monorepo", "pr-light-matrix", "vendored-libs",
             "vitest-isolated-serial", "cargo-double-compile", "per-test-startup"):
         docs[name], reports[name], _checks = run_fixture(
             FIXTURE_ROOT / name, monkeypatch, tmp_path)
@@ -403,6 +403,8 @@ def test_named_fixtures_exercise_their_defining_interactions(
     assert any(
         row.get("minority_tail")
         for row in docs["minority-tail"]["pr_critical_path"]["checks"])
+    assert "OPT25" not in {
+        row.get("pattern") for row in docs["pr-light-matrix"]["findings"]}
     duplicate = next(
         row for row in docs["duplicate-gate-job"]["findings"]
         if row.get("pattern") == "OPT12"

@@ -10017,7 +10017,34 @@ def _detect_opt25_shard_imbalance(
     suffix_base = _detect_common_suffix_matrices(jobs_per_run)
     by_base: dict[str, dict[str, list[tuple[float, str]]]] = {}
     base_sharded: dict[str, bool] = {}
+    excluded_by_base: dict[str, int] = {}
     for run_jobs in jobs_per_run:
+        active_step_counts: dict[str, dict[str, int]] = {}
+        for candidate in run_jobs:
+            candidate_name = str(candidate.get("name", ""))
+            candidate_base = _matrix_base_name(candidate_name)
+            if candidate_base == candidate_name:
+                candidate_base = suffix_base.get(candidate_name, "")
+            if not candidate_base:
+                continue
+            names = {
+                str(step.get("name") or "").strip()
+                for step in candidate.get("steps") or []
+                if isinstance(step, dict)
+                and str(step.get("conclusion") or "").lower() != "skipped"
+                and not _re.search(
+                    r"(?i)^(?:set up|complete|post |checkout|restore|save cache)",
+                    str(step.get("name") or "").strip())
+            }
+            for step_name in names:
+                active_step_counts.setdefault(candidate_base, {}).setdefault(
+                    step_name, 0)
+                active_step_counts[candidate_base][step_name] += 1
+        divided_step = {
+            base: max(counts, key=counts.get)
+            for base, counts in active_step_counts.items()
+            if counts and max(counts.values()) >= 2
+        }
         for j in run_jobs:
             name = str(j.get("name", ""))
             mbase = _matrix_base_name(name)
@@ -10030,6 +10057,21 @@ def _detect_opt25_shard_imbalance(
                 sharded = False  # prefix varies → distinct packages, not shards
             else:
                 continue  # neither convention matched → not a matrix job
+            steps = [step for step in j.get("steps") or []
+                     if isinstance(step, dict)
+                     and str(step.get("name") or "").strip().lower()
+                     not in {"set up job", "complete job"}]
+            if steps and all(str(step.get("conclusion") or "").lower() == "skipped"
+                             for step in steps):
+                excluded_by_base[base] = excluded_by_base.get(base, 0) + 1
+                continue
+            expected_step = divided_step.get(base)
+            if expected_step and steps and not any(
+                    str(step.get("name") or "").strip() == expected_step
+                    and str(step.get("conclusion") or "").lower() != "skipped"
+                    for step in steps):
+                excluded_by_base[base] = excluded_by_base.get(base, 0) + 1
+                continue
             d, url = _job_dur_url(j)
             if d is None or d <= 0:
                 continue
@@ -10189,6 +10231,7 @@ def _detect_opt25_shard_imbalance(
             out[-1]["measured_signal"] = summary
         if next_step is not None:
             out[-1]["next_step"] = next_step
+        out[-1]["legs_excluded_no_work"] = excluded_by_base.get(base, 0)
     return out
 
 
