@@ -170,6 +170,35 @@ def test_camel_case_shard_names_without_a_shard_step_stay_silent():
         "playwright (1, 4)", workflow, jobs, logs_by_job_id={}) is None
 
 
+def test_playwright_shard_argument_ignores_unrelated_matrix_references():
+    jobs = [[
+        _shard_job(170 + project_index * 10 + shard_index,
+                   f"playwright ({project}, {shard_index}, 4)")
+        for project_index, project in enumerate(("chromium", "firefox"))
+        for shard_index in range(1, 5)
+    ]]
+    workflow = {"jobs": {"playwright": {
+        "strategy": {"matrix": {
+            "project": ["chromium", "firefox"],
+            "shardIndex": [1, 2, 3, 4],
+            "shardTotal": [4],
+        }},
+        "steps": [{
+            "run": (
+                "echo project=${{ matrix.project }}\n"
+                "npx playwright test "
+                "--shard=${{ matrix.shardIndex }}/${{ matrix.shardTotal }}"
+            ),
+        }],
+    }}}
+
+    stamp = _shard_floor(
+        "playwright (chromium, 1, 4)", workflow, jobs, logs_by_job_id={})
+
+    assert stamp is not None
+    assert stamp["n_shards"] == 4
+
+
 def test_in_step_collection_floor_is_removed_from_divided_work():
     jobs = [[_shard_job(200 + i, f"tests / test (pkg, {i})", test_s=215)
              for i in range(4)]]
