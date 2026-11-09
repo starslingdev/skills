@@ -75,7 +75,7 @@ def test_collect_applies_budget_invalidation_and_transfer_guards(monkeypatch, tm
         (4 * 1024**3, 7.0, 1, 0, 0.75, 1, 1,
          "would exceed the repository's cache budget"),
         (int(10.4 * 1024**3), 0.5, 1, 0, 0.75, 1, 1,
-         "already fills the default budget"),
+         "at least 90% of the default 10 GB"),
         (200 * 1024**3, 1.0, 1, 0, 0.75, 1, 1,
          "limit unknown: not measured"),
         (0, 5.1, 2, 0, 0.75, 1, 1,
@@ -348,3 +348,137 @@ def test_dependency_cache_economics_use_unweighted_avoided_work():
     assert economics["saving_s"] == 100.0
     assert economics["expected_s"] == 4.25
     assert finding["cache_sizing_guard"]["status"] == "passed"
+
+
+def test_cache_economics_excludes_no_change_reruns() -> None:
+    def entry(sha: str, miss: float) -> dict:
+        return {"head_sha": sha, "fork": False, "cache_state": {
+            "miss_pct": miss, "cache_size_gb": 0.1,
+            "restore_s": 2.0, "save_s": 2.0,
+        }}
+
+    finding = {
+        "id": "f1", "pattern": "OPT96", "cache_key_globs": ["lockfile"],
+        "cache_copies": 1, "wall_clock_p50_s": 100.0,
+        "cache_dist": {"pr": {"values": [
+            entry("same-head", 100.0), entry("same-head", 0.0),
+            entry("edited-head", 0.0),
+        ]}, "sizing": {"saving_s": 100.0}},
+    }
+    sampled = [
+        {"head_sha": "same-head", "pull_requests": [{"number": 1}]},
+        {"head_sha": "same-head", "pull_requests": [{"number": 1}]},
+        {"head_sha": "edited-head", "pull_requests": [{"number": 2}]},
+    ]
+
+    cr._apply_cache_sizing_guard(
+        finding, usage_bytes=0, changed={1: [], 2: ["src/app.py"]},
+        sampled_runs=sampled, wf_docs={},
+    )
+
+    economics = finding["cache_sizing_guard"]["checks"]["economics"]
+    assert economics["sampled_real_edits"] == 1
+    assert economics["hit_rate"] == 1.0
+
+
+def test_cache_economics_keeps_original_run_when_same_head_is_sampled_out_of_order() -> None:
+    def entry(run_id: int, miss: float) -> dict:
+        return {
+            "run_url": f"https://github.com/o/r/actions/runs/{run_id}",
+            "head_sha": "edited-head", "fork": False,
+            "cache_state": {"miss_pct": miss, "cache_size_gb": 0.1,
+                            "restore_s": 2.0, "save_s": 2.0},
+        }
+
+    finding = {
+        "id": "f1", "pattern": "OPT96", "cache_key_globs": ["lockfile"],
+        "cache_copies": 1, "wall_clock_p50_s": 100.0,
+        # The representative warm rerun arrives before the original cold run.
+        "cache_dist": {"pr": {"values": [entry(102, 0.0), entry(101, 100.0)]},
+                       "sizing": {"saving_s": 100.0}},
+    }
+    sampled = [{"head_sha": "edited-head", "pull_requests": [{"number": 1}]}]
+
+    cr._apply_cache_sizing_guard(
+        finding, usage_bytes=0, changed={1: ["src/app.py"]},
+        sampled_runs=sampled, wf_docs={},
+    )
+
+    economics = finding["cache_sizing_guard"]["checks"]["economics"]
+    assert economics["hit_rate"] == 0.0
+
+
+def test_unused_cache_path_counts_transfers_as_pure_cost() -> None:
+    finding = {
+        "id": "f1", "pattern": "OPT61", "cache_key_globs": ["lockfile"],
+        "cache_copies": 1, "wall_clock_p50_s": 100.0,
+        "cache_path_consumed": False,
+        "cache_dist": {"pr": {"values": [{"fork": False, "cache_state": {
+            "miss_pct": 0.0, "cache_size_gb": 0.1,
+            "restore_s": 4.0, "save_s": 3.0,
+        }}]}, "sizing": {"saving_s": 100.0}},
+    }
+
+    cr._apply_cache_sizing_guard(
+        finding, usage_bytes=0, changed={}, sampled_runs=[], wf_docs={},
+    )
+
+    economics = finding["cache_sizing_guard"]["checks"]["economics"]
+    assert economics["status"] == "failed"
+    assert economics["expected_s"] == -4.0
+    assert "never reads" in economics["detail"]
+
+
+def test_verifier_rederives_unused_cache_path_as_pure_cost(tmp_path) -> None:
+    path = Path(__file__).with_name("verify_report.py")
+    spec = importlib.util.spec_from_file_location("cache_guard_unused_verify", path)
+    vr = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = vr
+    assert spec.loader is not None
+    spec.loader.exec_module(vr)
+    doc = {"findings": [{
+        "id": "f1", "pattern": "OPT61", "cache_path_consumed": False,
+        "wall_clock_p50_s": None, "runner_min_saving": None,
+        "cache_sizing_guard": {"status": "failed", "checks": {
+            "budget": {"status": "passed", "detail": "fits",
+                       "usage_bytes": 0, "proposed_bytes": 1024},
+            "invalidation": {"status": "passed", "detail": "stable",
+                             "invalidation_rate": 0.0, "sampled_prs": 1},
+            "economics": {"status": "failed", "detail": "the job never reads the restored cache path",
+                          "hit_rate": 1.0, "saving_s": 100.0,
+                          "restore_s": 4.0, "save_s": 3.0, "expected_s": -4.0},
+        }},
+    }]}
+    findings = tmp_path / "findings.json"
+    findings.write_text(json.dumps(doc), encoding="utf-8")
+    check = vr.check_cache_sizing_guards(
+        "the job never reads the restored cache path", findings)
+    assert check.ok, check.detail
+
+
+def test_renderer_does_not_label_zero_saving_static_lint_credited() -> None:
+    finding = {
+        "title": "Static cache lint", "static_cache_lint": True,
+        "wall_clock_p50_s": None, "runner_min_saving": None,
+        "cache_sizing_guard": {"status": "passed", "checks": {
+            "budget": {"status": "passed"}, "invalidation": {"status": "passed"},
+            "economics": {"status": "passed"},
+        }},
+    }
+    rendered = "\n".join(bp._cache_sizing_guard_block({"findings": [finding]}))
+    assert "uncredited" in rendered
+    assert " - credited:" not in rendered
+
+
+def test_ninety_percent_default_budget_names_the_admin_limit_uncertainty() -> None:
+    finding = {
+        "id": "f1", "pattern": "OPT61", "cache_key_globs": ["lockfile"],
+        "cache_copies": 1, "wall_clock_p50_s": 10.0,
+        "cache_dist": {"pr": {"values": []}},
+    }
+    cr._apply_cache_sizing_guard(
+        finding, usage_bytes=9 * 1024 ** 3, changed={}, sampled_runs=[], wf_docs={},
+    )
+    detail = finding["cache_sizing_guard"]["checks"]["budget"]["detail"]
+    assert "90% of the default 10 GB" in detail
+    assert "owner-raised limit" in detail

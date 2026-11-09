@@ -1,5 +1,7 @@
 # Changelog
 
+- Detect cache configurations that cannot produce a useful warm run, including mismatched restore prefixes, undersized or unpersisted compiler caches, erased Go caches, volatile BuildKit scopes, and ephemeral Dockerfile cache mounts. These checks stay uncredited until logs measure the miss and transfer cost; cache economics now exclude no-change reruns and count unread restored paths as pure cost.
+- Read timestamped pytest verbose progress and Vitest per-test durations when identifying long same-file tests that run serially. Vitest recommendations now require distinct source-level namespaces and name `describe.concurrent` with its default concurrency cap.
 - Require a readable classic branch-protection result before advising that a check move off pull requests.
 - Report the default-branch push count and mark infrequent post-merge lanes as rare.
 
@@ -17,6 +19,9 @@ unversioned and updates by reinstall from `main`.
 ### Added
 
 - **2026-11-08** — Detect compilation in emulated containers when shell variables or GitHub expressions appear elsewhere in the command. Platform and architecture values remain resolved, while unrelated variables stay opaque to command parsing.
+- **2026-11-08** — Show each critical matrix leg's measured fixed floor and remaining divided work beside its observed timing spread. When a log exposes compilation or collection inside the divided-work step, report that in-step floor separately without recommending a shard count.
+- **2026-11-08** — Route dominant foreign-platform image compilation with no Buildx node listing to a topology check without crediting savings or claiming emulation. Inspected single-node builders retain the measured recommendation, while explicit multi-node builders still fail closed.
+- **2026-11-08** — Align cache-key guidance around rolling tool-result keys: a per-commit primary key with a stable restore prefix can restore useful content and save the updated result, while each new entry consumes cache budget and is unsuitable for large dependency or build stores.
 - **2026-11-08** — Keep checks whose required-job reachability cannot be confirmed visible but uncredited. Their structural findings and drill-downs now use conditional framing, and report verification rejects direct merge-wait credit or critical-path wording on those checks.
 - **2026-11-08** — Treat checkout submodules copied by a resolved local Dockerfile as image-build inputs. OPT76 now keeps those checkouts, fails closed on unresolved Dockerfiles, and recognizes both explicit source paths and whole-context copies.
 - **2026-11-08** — Measure sequential vendored-library source builds from completed timestamped intervals, drill their per-library wall time, and route dominant builds to guarded per-library cache guidance. Restored trees without build stamps stay quiet, and the recipe requires complete artifacts across repeated warm builds.
