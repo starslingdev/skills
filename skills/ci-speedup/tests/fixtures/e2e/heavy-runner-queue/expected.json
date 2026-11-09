@@ -1,11 +1,11 @@
 {
   "commit_wall_clock": {
-    "p50_s": 1200.0,
-    "p90_s": 1200.0,
-    "queue_p50_s": 900.0,
-    "queue_p90_s": 900.0,
-    "work_p50_s": 300.0,
-    "work_p90_s": 300.0
+    "p50_s": 320.0,
+    "p90_s": 400.0,
+    "queue_p50_s": 5.0,
+    "queue_p90_s": 40.0,
+    "work_p50_s": 315.0,
+    "work_p90_s": 360.0
   },
   "config_eras": [],
   "credited_findings": [
@@ -16,13 +16,13 @@
     },
     {
       "pattern": "OPT45",
-      "runner_min": 3.0,
+      "runner_min": 14.4,
       "wall_clock_s": 0.0
     },
     {
       "pattern": "OPT43",
       "runner_min": null,
-      "wall_clock_s": 120.0
+      "wall_clock_s": 100.0
     },
     {
       "pattern": "OPT75",
