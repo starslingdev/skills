@@ -1283,6 +1283,7 @@ unversioned and updates by reinstall from `main`.
 ### Fixed
 
 - **2026-11-09** — Size unnecessary dependency edges from the measured longest-path change instead of a flat estimate. Reports now disclose an upper bound on downstream compute exposed on sampled failure paths, exclude runs where the dependency job cannot be resolved, and keep Go script launchers from being mistaken for check-only gates.
+- **2026-11-09** — Keep post-fix verification from rerunning default-branch workflows, compare cache-sensitive results with baseline facts from the same push lane, and label repeated attempts of one commit as no-change reruns.
 
 - **2026-11-09** — Match the `repos/<owner>/<repo>/statuses/` path in `_STATUS_POST_RE` with disjoint branches. The catch-all character class no longer overlaps the `${{ ... }}` branch, so a long run of `${{` fragments with no `/statuses/` fails in linear time instead of backtracking (CodeQL `py/redos`). Both repeats are bounded at 200 units, so a file of repeated `repos/` prefixes scans in linear time too. Every realistic call still matches at the same span; only a `${{` left open at `/statuses/`, which GitHub rejects anyway, or a path over 200 units, no longer counts.
 - **2026-11-06** — Rank fallback and unresolved merge-wait candidates by the job that actually completes last on each sampled commit. A long pull-request job remains eligible even when its check run is absent from the per-PR check population; readable required-check scopes retain their existing ranking.
