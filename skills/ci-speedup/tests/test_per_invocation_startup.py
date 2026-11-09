@@ -112,6 +112,9 @@ def test_opt85_accepts_collected_line_from_real_piped_pytest_output():
 
     assert leaf is not None
     assert leaf["fix_key"] == "per-invocation-startup"
+    assert leaf["magnitude"] is None
+    assert leaf["modeled_saving_s"] is None
+    assert "not separately measurable" in leaf["unit_label"]
 
 
 def test_opt85_rejects_quiet_pytest_output_without_a_pre_work_marker():

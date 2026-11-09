@@ -3513,6 +3513,7 @@ def _parse_log(text: str,
         startups: list[float] = []
         iterations: list[float] = []
         measurements: list[tuple[str, str, str]] = []
+        work_messages: list[str] = []
         complete = True
         for pos, (line_i, started, identity, boundary_raw) in enumerate(boundaries):
             next_line = (boundaries[pos + 1][0]
@@ -3520,14 +3521,15 @@ def _parse_log(text: str,
             next_started = (boundaries[pos + 1][1]
                             if pos + 1 < len(boundaries) else None)
             window = timestamped[line_i + 1:next_line]
-            work_row = next(((when, raw, match) for when, message, raw in window
+            work_row = next(((when, message, raw, match)
+                             for when, message, raw in window
                              if (match := work_re.match(message))), None)
             done_row = next(((when, raw, match) for when, message, raw in window
                              if (match := done_re.match(message))), None)
             if work_row is None or done_row is None:
                 complete = False
                 break
-            work, work_raw, work_match = work_row
+            work, work_message, work_raw, work_match = work_row
             done, done_raw, done_match = done_row
             if (bind_identity
                     and (work_match.group("id") != identity
@@ -3542,6 +3544,7 @@ def _parse_log(text: str,
             startups.append((work - started).total_seconds())
             iterations.append((done - started).total_seconds())
             measurements.append((boundary_raw, work_raw, done_raw))
+            work_messages.append(work_message)
         if not complete:
             continue
         startup_median = _median(startups)
@@ -3551,15 +3554,24 @@ def _parse_log(text: str,
                 or count * startup_median < 20):
             continue
         modeled = round((count - 1) * startup_median, 2)
+        collection_completion_only = all(
+            re.match(r"^collected\s+\d+\s+items?\b", message, re.IGNORECASE)
+            for message in work_messages
+        )
         startup_leaf = {
             "fix_key": "per-invocation-startup",
-            "unit_label": (
+            "unit_label": ((
+                f"{count} serial {profile_name} iterations each launch a fresh "
+                "process; collection completion is the first observable work marker, "
+                "so removable startup is not separately measurable"
+            ) if collection_completion_only else (
                 f"{count} serial {profile_name} iterations each launch a fresh "
                 f"process; median startup is {startup_median:g}s of a "
                 f"{iteration_median:g}s iteration"
-            ),
-            "magnitude": {"label": "modeled repeated process startup",
-                          "value": modeled, "unit": "s"},
+            )),
+            "magnitude": (None if collection_completion_only else
+                          {"label": "modeled repeated process startup",
+                           "value": modeled, "unit": "s"}),
             "deeper": [],
             "evidence": [
                 *measurements[0],
@@ -3571,7 +3583,7 @@ def _parse_log(text: str,
             "iteration_count": count,
             "startup_median_s": round(startup_median, 2),
             "iteration_median_s": round(iteration_median, 2),
-            "modeled_saving_s": modeled,
+            "modeled_saving_s": None if collection_completion_only else modeled,
         }
         break
     if startup_leaf is not None:
