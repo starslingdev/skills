@@ -98,7 +98,7 @@ def _vitest_verbose_log() -> str:
     at = datetime(2026, 11, 6, tzinfo=timezone.utc)
     durations = (68_100, 68_400, 67_900, 68_200, 21_000, 24_000, 28_000,
                  31_000, 35_000, 41_000, 46_000)
-    lines = [f"{_stamp(at)} RUN v3.2.4 /home/runner/work/example"]
+    lines = [f"{_stamp(at)} RUN v3.2.4 /repo"]
     for index, duration_ms in enumerate(durations, 1):
         at += timedelta(milliseconds=duration_ms)
         lines.append(
