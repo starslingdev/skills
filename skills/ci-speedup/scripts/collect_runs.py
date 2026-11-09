@@ -9661,8 +9661,8 @@ _STRUCTURAL_META: dict[str, dict[str, Any]] = {
             "test-failure exit; output-diff scoped vs full before adoption"),
         "rollout": (
             "run scoped + full in parallel for N runs (>=1-2 weeks of PRs) and "
-            "compare pass/fail + coverage before cutting over; keep the full job "
-            "on main/merge-queue after cutover"),
+            "compare pass/fail + coverage before adoption; keep the full job on "
+            "the default branch and merge queue after adoption"),
     },
     "OPT71": {
         "severity": "HIGH", "risk": "MEDIUM",
