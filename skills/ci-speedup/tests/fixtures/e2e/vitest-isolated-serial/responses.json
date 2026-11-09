@@ -1,0 +1,138 @@
+{
+  "repo": "fixture/vitest-isolated-serial",
+  "captured_at": "2026-01-31T00:00:00Z",
+  "default_branch": "main",
+  "required_checks": [
+    "test"
+  ],
+  "workflows": [
+    {
+      "id": 101,
+      "path": ".github/workflows/ci.yml",
+      "name": "Vitest isolated serial",
+      "runs_30d": 3,
+      "runs": [
+        {
+          "id": 1001,
+          "event": "pull_request",
+          "head_branch": "feature-a",
+          "head_sha": "sha-a",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-28T00:00:00Z",
+          "run_started_at": "2026-01-28T00:00:00Z",
+          "updated_at": "2026-01-28T00:12:00Z"
+        },
+        {
+          "id": 1002,
+          "event": "pull_request",
+          "head_branch": "feature-b",
+          "head_sha": "sha-b",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-27T00:00:00Z",
+          "run_started_at": "2026-01-27T00:00:00Z",
+          "updated_at": "2026-01-27T00:12:00Z"
+        },
+        {
+          "id": 1003,
+          "event": "pull_request",
+          "head_branch": "feature-c",
+          "head_sha": "sha-c",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-26T00:00:00Z",
+          "run_started_at": "2026-01-26T00:00:00Z",
+          "updated_at": "2026-01-26T00:12:00Z"
+        }
+      ]
+    }
+  ],
+  "jobs": {
+    "1001": [
+      {
+        "id": 1102,
+        "name": "test",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-28T00:00:00Z",
+        "completed_at": "2026-01-28T00:12:00Z",
+        "steps": [
+          {
+            "name": "vitest run --reporter=verbose",
+            "started_at": "2026-01-28T00:00:00Z",
+            "completed_at": "2026-01-28T00:12:00Z"
+          }
+        ],
+        "conclusion": "success"
+      }
+    ],
+    "1002": [
+      {
+        "id": 1202,
+        "name": "test",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-27T00:00:00Z",
+        "completed_at": "2026-01-27T00:12:00Z",
+        "steps": [
+          {
+            "name": "vitest run --reporter=verbose",
+            "started_at": "2026-01-27T00:00:00Z",
+            "completed_at": "2026-01-27T00:12:00Z"
+          }
+        ],
+        "conclusion": "success"
+      }
+    ],
+    "1003": [
+      {
+        "id": 1302,
+        "name": "test",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-26T00:00:00Z",
+        "completed_at": "2026-01-26T00:12:00Z",
+        "steps": [
+          {
+            "name": "vitest run --reporter=verbose",
+            "started_at": "2026-01-26T00:00:00Z",
+            "completed_at": "2026-01-26T00:12:00Z"
+          }
+        ],
+        "conclusion": "success"
+      }
+    ]
+  },
+  "checks": {
+    "sha-a": [
+      {
+        "name": "test",
+        "started_at": "2026-01-28T00:00:00Z",
+        "completed_at": "2026-01-28T00:12:00Z"
+      }
+    ],
+    "sha-b": [
+      {
+        "name": "test",
+        "started_at": "2026-01-27T00:00:00Z",
+        "completed_at": "2026-01-27T00:12:00Z"
+      }
+    ],
+    "sha-c": [
+      {
+        "name": "test",
+        "started_at": "2026-01-26T00:00:00Z",
+        "completed_at": "2026-01-26T00:12:00Z"
+      }
+    ]
+  },
+  "logs": {
+    "1102": "2026-01-28T00:00:00.0000000Z RUN v3.2.4 /home/runner/work/example\n2026-01-28T00:01:08.1000000Z \u2713 tests/accounts.test.ts > accounts > case 1 68100ms\n2026-01-28T00:02:16.5000000Z \u2713 tests/accounts.test.ts > accounts > case 2 68400ms\n2026-01-28T00:03:24.4000000Z \u2713 tests/accounts.test.ts > accounts > case 3 67900ms\n2026-01-28T00:04:32.6000000Z \u2713 tests/accounts.test.ts > accounts > case 4 68200ms\n2026-01-28T00:04:53.6000000Z \u2713 tests/accounts.test.ts > accounts > case 5 21000ms\n2026-01-28T00:05:17.6000000Z \u2713 tests/accounts.test.ts > accounts > case 6 24000ms\n2026-01-28T00:05:45.6000000Z \u2713 tests/accounts.test.ts > accounts > case 7 28000ms\n2026-01-28T00:06:16.6000000Z \u2713 tests/accounts.test.ts > accounts > case 8 31000ms\n2026-01-28T00:06:51.6000000Z \u2713 tests/accounts.test.ts > accounts > case 9 35000ms\n2026-01-28T00:07:32.6000000Z \u2713 tests/accounts.test.ts > accounts > case 10 41000ms\n2026-01-28T00:08:18.6000000Z \u2713 tests/accounts.test.ts > accounts > case 11 46000ms\n2026-01-28T00:08:18.6000000Z 11 tests passed",
+    "1202": "2026-01-27T00:00:00.0000000Z RUN v3.2.4 /home/runner/work/example\n2026-01-27T00:01:08.1000000Z \u2713 tests/accounts.test.ts > accounts > case 1 68100ms\n2026-01-27T00:02:16.5000000Z \u2713 tests/accounts.test.ts > accounts > case 2 68400ms\n2026-01-27T00:03:24.4000000Z \u2713 tests/accounts.test.ts > accounts > case 3 67900ms\n2026-01-27T00:04:32.6000000Z \u2713 tests/accounts.test.ts > accounts > case 4 68200ms\n2026-01-27T00:04:53.6000000Z \u2713 tests/accounts.test.ts > accounts > case 5 21000ms\n2026-01-27T00:05:17.6000000Z \u2713 tests/accounts.test.ts > accounts > case 6 24000ms\n2026-01-27T00:05:45.6000000Z \u2713 tests/accounts.test.ts > accounts > case 7 28000ms\n2026-01-27T00:06:16.6000000Z \u2713 tests/accounts.test.ts > accounts > case 8 31000ms\n2026-01-27T00:06:51.6000000Z \u2713 tests/accounts.test.ts > accounts > case 9 35000ms\n2026-01-27T00:07:32.6000000Z \u2713 tests/accounts.test.ts > accounts > case 10 41000ms\n2026-01-27T00:08:18.6000000Z \u2713 tests/accounts.test.ts > accounts > case 11 46000ms\n2026-01-27T00:08:18.6000000Z 11 tests passed",
+    "1302": "2026-01-26T00:00:00.0000000Z RUN v3.2.4 /home/runner/work/example\n2026-01-26T00:01:08.1000000Z \u2713 tests/accounts.test.ts > accounts > case 1 68100ms\n2026-01-26T00:02:16.5000000Z \u2713 tests/accounts.test.ts > accounts > case 2 68400ms\n2026-01-26T00:03:24.4000000Z \u2713 tests/accounts.test.ts > accounts > case 3 67900ms\n2026-01-26T00:04:32.6000000Z \u2713 tests/accounts.test.ts > accounts > case 4 68200ms\n2026-01-26T00:04:53.6000000Z \u2713 tests/accounts.test.ts > accounts > case 5 21000ms\n2026-01-26T00:05:17.6000000Z \u2713 tests/accounts.test.ts > accounts > case 6 24000ms\n2026-01-26T00:05:45.6000000Z \u2713 tests/accounts.test.ts > accounts > case 7 28000ms\n2026-01-26T00:06:16.6000000Z \u2713 tests/accounts.test.ts > accounts > case 8 31000ms\n2026-01-26T00:06:51.6000000Z \u2713 tests/accounts.test.ts > accounts > case 9 35000ms\n2026-01-26T00:07:32.6000000Z \u2713 tests/accounts.test.ts > accounts > case 10 41000ms\n2026-01-26T00:08:18.6000000Z \u2713 tests/accounts.test.ts > accounts > case 11 46000ms\n2026-01-26T00:08:18.6000000Z 11 tests passed"
+  }
+}

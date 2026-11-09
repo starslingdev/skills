@@ -5088,9 +5088,72 @@ def _iso_block(**overrides: Any) -> dict[str, Any]:
         "vm_pool": False,
         "error": None,
         "verdict": "unknown",
+        # Per-test source proof for the measured serial-test leaf. A file is
+        # listed only when every test block owns one distinct literal schema or
+        # prefix; absence is unknown, never evidence that tests are isolated.
+        "isolated_test_files": {},
     }
     block.update(overrides)
     return block
+
+
+_ISOLATED_TEST_FILE_RE = re.compile(
+    r"(?:^|[._-])(?:test|spec)s?\.[cm]?[jt]sx?$", re.IGNORECASE)
+_TEST_BLOCK_RE = re.compile(
+    r"(?:^|[^\w.])(?:test|it)\s*\(\s*(['\"]).*?\1\s*,",
+    re.DOTALL,
+)
+_TEST_ISOLATION_LITERAL_RE = re.compile(
+    r"\b(?:schema|prefix)(?:Name|_name)?\s*[:=]\s*(['\"])([A-Za-z0-9_.-]+)\1"
+    r"|\b(?:createSchema|schemaFor|prefixFor)\s*\(\s*(['\"])([A-Za-z0-9_.-]+)\3",
+    re.IGNORECASE,
+)
+
+
+def _isolated_test_source_facts(root: Path) -> dict[str, list[str]]:
+    """Return files whose test blocks each own a distinct literal namespace.
+
+    This recognizes a deliberately small source shape. Dynamic helpers, shared
+    setup and an incomplete read stay absent, so the log leaf cannot infer
+    isolation from a naming convention the scanner did not actually read.
+    """
+    facts: dict[str, list[str]] = {}
+    seen = 0
+    skipped = {".git", "node_modules", "vendor", "dist", "build", ".next"}
+    for directory, dirnames, filenames in os.walk(root):
+        dirnames[:] = [name for name in dirnames if name not in skipped]
+        for filename in filenames:
+            if not _ISOLATED_TEST_FILE_RE.search(filename):
+                continue
+            seen += 1
+            if seen > 2000:
+                return {}
+            path = Path(directory) / filename
+            try:
+                if path.stat().st_size > 1_000_000:
+                    continue
+                source = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                continue
+            starts = list(_TEST_BLOCK_RE.finditer(source))
+            if len(starts) < 4:
+                continue
+            markers: list[str] = []
+            complete = True
+            for index, match in enumerate(starts):
+                end = starts[index + 1].start() if index + 1 < len(starts) else len(source)
+                chunk = source[match.start():end]
+                values = {
+                    (hit.group(2) or hit.group(4)).casefold()
+                    for hit in _TEST_ISOLATION_LITERAL_RE.finditer(chunk)
+                }
+                if len(values) != 1:
+                    complete = False
+                    break
+                markers.append(next(iter(values)))
+            if complete and len(set(markers)) == len(markers):
+                facts[str(path.relative_to(root))] = markers
+    return facts
 
 
 def _isolation_verdict(block: dict[str, Any]) -> str:
@@ -5251,6 +5314,7 @@ def _read_test_runner_isolation_unguarded(root: Path) -> dict[str, Any]:
         opt_out_configs=sorted(set(opt_out_configs)),
         # A vm pool cannot disable isolation, so the lever cannot apply.
         vm_pool=vm_pool,
+        isolated_test_files=_isolated_test_source_facts(root),
     )
     block["verdict"] = _isolation_verdict(block)
     return block

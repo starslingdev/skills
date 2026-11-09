@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import blocking_path as bp
+import scan
 import verify_report as vr
 
 
@@ -76,6 +77,38 @@ def _repeated_node_log() -> str:
     return "\n".join(lines)
 
 
+def _pytest_verbose_log() -> str:
+    """GitHub runner timestamps around pytest's real ``-v`` progress lines."""
+    at = datetime(2026, 11, 6, tzinfo=timezone.utc)
+    lines = [f"{_stamp(at)} pytest -v tests/test_accounts.py"]
+    for index in range(1, 5):
+        at += timedelta(seconds=60)
+        lines.append(
+            f"{_stamp(at - timedelta(seconds=1))} schema_name=schema_test_{index}"
+        )
+        lines.append(
+            f"{_stamp(at)} tests/test_accounts.py::test_account_{index} "
+            f"PASSED [{index * 25}%]"
+        )
+    lines.append(f"{_stamp(at)} 4 passed in 240.00s")
+    return "\n".join(lines)
+
+
+def _vitest_verbose_log() -> str:
+    at = datetime(2026, 11, 6, tzinfo=timezone.utc)
+    durations = (68_100, 68_400, 67_900, 68_200, 21_000, 24_000, 28_000,
+                 31_000, 35_000, 41_000, 46_000)
+    lines = [f"{_stamp(at)} RUN v3.2.4 /home/runner/work/example"]
+    for index, duration_ms in enumerate(durations, 1):
+        at += timedelta(milliseconds=duration_ms)
+        lines.append(
+            f"{_stamp(at)} ✓ tests/accounts.test.ts > accounts > case {index} "
+            f"{duration_ms}ms"
+        )
+    lines.append(f"{_stamp(at)} 11 tests passed")
+    return "\n".join(lines)
+
+
 def _pole() -> dict:
     return {
         "workflow_file": ".github/workflows/ci.yml",
@@ -105,6 +138,89 @@ def test_isolated_same_file_tests_get_the_concurrency_leaf() -> None:
     leaf = bp._parse_log(_isolated_log())
     assert leaf is not None
     assert leaf["fix_key"] == "test-isolated-serial"
+
+
+def test_pytest_verbose_runner_timestamps_get_the_concurrency_leaf() -> None:
+    leaf = bp._parse_log(_pytest_verbose_log())
+    assert leaf is not None
+    assert leaf["fix_key"] == "test-isolated-serial"
+
+
+def test_pytest_verbose_requires_isolation_inside_each_test_interval() -> None:
+    log = _pytest_verbose_log().replace(
+        "2026-11-06T00:00:59.0000000Z schema_name=schema_test_1",
+        "2026-11-06T00:01:01.0000000Z schema_name=schema_test_1",
+    )
+    assert bp._parse_log(log) is None
+
+
+def test_vitest_verbose_durations_use_source_proven_isolation() -> None:
+    source_facts = {
+        "isolated_test_files": {
+            "tests/accounts.test.ts": [
+                f"schema_test_{index}" for index in range(1, 12)
+            ],
+        },
+    }
+    leaf = bp._parse_log(_vitest_verbose_log(), source_facts)
+    assert leaf is not None
+    assert leaf["fix_key"] == "test-isolated-serial"
+    assert leaf["test_count"] == 11
+
+
+def test_vitest_verbose_rejects_overlapping_duration_sum() -> None:
+    lines = _vitest_verbose_log().splitlines()
+    at = datetime(2026, 11, 6, tzinfo=timezone.utc)
+    for index in range(1, 12):
+        message = lines[index].split(" ", 1)[1]
+        lines[index] = f"{_stamp(at + timedelta(seconds=index))} {message}"
+    facts = {
+        "isolated_test_files": {
+            "tests/accounts.test.ts": [f"schema_test_{index}" for index in range(1, 12)],
+        },
+    }
+    assert bp._parse_log("\n".join(lines), facts) is None
+
+
+def test_timestamped_vitest_test_count_and_prompt_name_safe_concurrency() -> None:
+    source_facts = {
+        "isolated_test_files": {
+            "tests/accounts.test.ts": [
+                f"schema_test_{index}" for index in range(1, 12)
+            ],
+        },
+    }
+    leaf = bp._parse_log(_vitest_verbose_log(), source_facts)
+    assert leaf is not None
+    prompt = bp._build_agent_prompt(
+        leaf, _pole(), [], None, "example/repo", None, 1, 1,
+    ).lower()
+    assert "describe.concurrent" in prompt
+    assert "maxconcurrency" in prompt
+    assert "5" in prompt
+
+
+def test_vitest_source_reader_requires_a_unique_literal_per_test(tmp_path) -> None:
+    (tmp_path / "vitest.config.ts").write_text(
+        "import { defineConfig } from 'vitest/config'\n"
+        "export default defineConfig({ test: {} })\n",
+        encoding="utf-8",
+    )
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    source = "\n".join(
+        f"test('case {index}', async () => {{\n"
+        f"  const schemaName = 'schema_test_{index}'\n"
+        "})"
+        for index in range(1, 12)
+    )
+    (tests / "accounts.test.ts").write_text(source, encoding="utf-8")
+
+    facts = scan._read_test_runner_isolation(tmp_path)
+
+    assert facts["isolated_test_files"]["tests/accounts.test.ts"] == [
+        f"schema_test_{index}" for index in range(1, 12)
+    ]
 
 
 def test_isolated_test_leaf_rejects_varied_timers_and_missing_markers() -> None:
