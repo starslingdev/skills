@@ -38,11 +38,13 @@ def observed_commit_wall_s(
     *,
     cohort_created_at: list[str] | None = None,
 ) -> float | None:
-    """Return first-job-created to last-job-completed wall time.
+    """Return earliest supplied creation to last-job-completed wall time.
 
     Callers pass one complete, exact-head push cohort and one attempt per
     workflow. Cohort completeness and attempt identity remain the collector's
-    responsibility; this helper owns the shared timestamp formula.
+    responsibility; this helper owns the shared timestamp formula. By default
+    job creation is the lower boundary. Existing collector callers may supply
+    workflow-run creation timestamps for their established commit-wall metric.
     """
     created: list[float] = []
     completed: list[float] = []

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import sys
 from pathlib import Path
 
@@ -10,33 +11,46 @@ from before_after import compare_push_cohorts
 
 
 def _job(name: str, start: int, end: int, **extra):
-    return {"name": name, "created_at": f"2026-11-08T00:00:{start:02d}Z",
-            "started_at": f"2026-11-08T00:00:{start + 2:02d}Z",
-            "completed_at": f"2026-11-08T00:00:{end:02d}Z",
+    started = f"2026-11-08T00:00:{start + 2:02d}Z"
+    completed = f"2026-11-08T00:00:{end:02d}Z"
+    return {"name": name, "workflow": "ci",
+            "created_at": f"2026-11-08T00:00:{start:02d}Z",
+            "started_at": started, "completed_at": completed,
+            "steps": [{"name": name, "started_at": started,
+                       "completed_at": completed}],
             "runner_label": "ubuntu-latest", "runner_class": "github-hosted", **extra}
 
 
 def _cohort(sha: str, identity: str, wall: int, *, position: int = 1,
             log: str = "", conclusion: str = "success", attempt: int = 1,
             tests=("a", "b"), workflows=("ci",), jobs=None, pair=None):
+    if jobs is None:
+        job_rows = [_job("test" if workflow == "ci" else f"test-{workflow}",
+                         0, wall, tests=list(tests), workflow=workflow)
+                    for workflow in workflows]
+    else:
+        job_rows = copy.deepcopy(jobs)
+    for job in job_rows:
+        job["head_sha"] = sha
+        job["run_attempt"] = attempt
     return {"head_sha": sha, "cohort_id": identity, "attempt": attempt,
             "position": position, "conclusion": conclusion,
-            "workflows": list(workflows),
-            "jobs": jobs or [_job("test", 0, wall, tests=list(tests))],
+            "workflows": list(workflows), "expected_workflows": list(workflows),
+            "jobs": job_rows,
             "logs": [log], "pair_id": pair, "lane": "pull requests",
             "lane_runs_30d": 42}
 
 
 def test_complete_exact_head_attempts_produce_warm_median_and_range():
     before = [_cohort("base-a", "b1", 50), _cohort("base-b", "b2", 40, position=2)]
-    after = [_cohort("fix", "a1", 30, log="cache key miss"),
+    after = [_cohort("fix", "a1", 26, log="cache key miss"),
              _cohort("fix", "a2", 20, position=2, log="cache hit"),
              _cohort("fix", "a3", 24, position=3, log="cache hit")]
     result = compare_push_cohorts(before, after, changed_files=[".github/workflows/ci.yml"])
     assert result["available"] is True
     assert result["after"]["warm"] == {"n": 2, "median_s": 22.0, "range_s": [20.0, 24.0]}
-    assert result["after"]["cold"]["values_s"] == [30.0]
-    assert result["after"]["all_complete"]["values_s"] == [30.0, 20.0, 24.0]
+    assert result["after"]["cold"]["values_s"] == [26.0]
+    assert result["after"]["all_complete"]["values_s"] == [26.0, 20.0, 24.0]
     assert result["workload_state"] == "same"
     assert result["clean_attribution"] is True
 
@@ -115,7 +129,7 @@ def test_report_carries_queue_work_compute_step_and_six_disclosures():
     report = result["report"]
     assert result["queue_delta_s"] is not None
     assert result["work_delta_s"] is not None
-    assert result["total_job_duration"] == {"before_s": 38.0, "after_s": 36.0}
+    assert result["total_job_duration"] == {"before_s": 38.0, "after_s": 18.0}
     assert "Changed step" in report
     for label in ("Sample size", "Asymmetry", "CI-only scope", "Variance",
                   "Cache state", "Environment"):
@@ -181,8 +195,8 @@ def test_cache_evidence_is_compared_per_sample_not_as_arm_totals():
 
 def test_compute_disclosure_compares_median_cohorts_and_step_names():
     before_jobs = [_job("lint", 0, 10, tests=["lint"]),
-                   _job("test", 0, 40, tests=["a", "b"])]
-    after_jobs = [_job("test", 0, 20, tests=["a", "b"]),
+                   _job("test", 0, 40, tests=["a", "b"], changed_step=True)]
+    after_jobs = [_job("test", 0, 20, tests=["a", "b"], changed_step=True),
                   _job("lint", 0, 10, tests=["lint"])]
     result = compare_push_cohorts(
         [_cohort("base", "b", 40, jobs=before_jobs),
