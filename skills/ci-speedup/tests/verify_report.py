@@ -16257,6 +16257,80 @@ def check_unconfirmed_checks_have_no_direct_credit_or_gate_framing(
         else f"{len(rows)} unconfirmed check(s) stayed uncredited and conditionally framed")
 
 
+def check_queue_runner_label_evidence(report: str,
+                                      findings_path: Path | None) -> Check:
+    """Bind every OPT43 runner-label table and comparison to its structured stamp."""
+    name = "OPT43 runner-label evidence matches its structured stamp"
+    data, error = _load_findings_doc(findings_path)
+    if error:
+        return Check(name, True, error, skipped=True)
+    findings = [
+        finding for finding in _as_list(data.get("findings"))
+        if isinstance(finding, dict) and finding.get("pattern") == "OPT43"
+        and _as_list(finding.get("queue_by_runner_label"))
+        and not finding.get("advisory")
+        and (_num(finding.get("wall_clock_p50_s")) or 0.0) > 0.0
+    ]
+    if not findings:
+        return Check(name, True, "no OPT43 runner-label evidence", skipped=True)
+
+    def clock(value: object) -> str:
+        seconds = _num(value)
+        return _fmt_clock(seconds) if seconds is not None else "-"
+
+    failures: list[str] = []
+    for finding in findings:
+        fid = str(finding.get("id") or "?")
+        workflow = _flatten_cell(str(finding.get("workflow_file") or "unknown workflow"))
+        if f"**Runner-label queue/work for `{workflow}` " not in report:
+            failures.append(f"{fid} runner-label table does not name its workflow")
+        for raw in _as_list(finding.get("queue_by_runner_label")):
+            row = _as_dict(raw)
+            label = _flatten_cell(str(row.get("runner_label") or ""))
+            n = int(_num(row.get("n")) or 0)
+            work_n = int(_num(row.get("work_n")) or 0)
+            censored_n = int(_num(row.get("censored_n")) or 0)
+            if n == 0 and (row.get("queue_p50_s") is not None
+                           or row.get("queue_p95_s") is not None):
+                failures.append(f"{fid} `{label}` has exact percentiles with no exact samples")
+            if work_n == 0 and row.get("work_p50_s") is not None:
+                failures.append(f"{fid} `{label}` has a work median with no work samples")
+            expected = (
+                f"| `{label}` | {n} | {clock(row.get('queue_p50_s'))} | "
+                f"{clock(row.get('queue_p95_s'))} | {work_n} | "
+                f"{clock(row.get('work_p50_s'))} | {censored_n} |"
+            )
+            if expected not in report:
+                failures.append(f"{fid} `{label}` table row is absent or differs from its stamp")
+        censored = sum(
+            int(_num(_as_dict(row).get("censored_n")) or 0)
+            for row in _as_list(finding.get("queue_by_runner_label")))
+        if censored and "runnable-to-cancelled time is a censored lower bound" not in report:
+            failures.append(f"{fid} omits the censored queue disclosure")
+
+        comparison = _as_dict(finding.get("queue_label_comparison"))
+        jobs = [str(job) for job in _as_list(finding.get("affected_jobs")) if str(job)]
+        job = _flatten_cell(jobs[0] if jobs else str(finding.get("job") or "unknown job"))
+        if comparison.get("unavailable"):
+            expected_comparison = (
+                f"**Runner-label comparison for `{job}`:** comparison unavailable.")
+        else:
+            slow = _flatten_cell(str(comparison.get("slow_label") or ""))
+            lower = _flatten_cell(str(comparison.get("lower_label") or ""))
+            expected_comparison = (
+                f"**Runner-label comparison for `{job}`:** `{slow}` queued at p50 "
+                f"{clock(comparison.get('slow_queue_p50_s'))}, while `{lower}` "
+                f"queued at p50 {clock(comparison.get('lower_queue_p50_s'))}."
+            )
+        if expected_comparison not in report:
+            failures.append(f"{fid} runner-label comparison is absent or differs from its stamp")
+
+    return Check(
+        name, not failures,
+        "; ".join(failures[:8]) if failures
+        else f"{len(findings)} OPT43 runner-label finding(s) match their stamps")
+
+
 def run_checks(report, report_path, findings_path, skill_repo, clone=None):
     return [
         check_primary_section_present(report, findings_path),
@@ -16301,6 +16375,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_aggregate_total_ge_largest_member(report, findings_path, report_path),
         check_headline_wait_within_makespan(report, findings_path, report_path),
         check_commit_queue_work_credit(report, findings_path, report_path),
+        check_queue_runner_label_evidence(report, findings_path),
         check_headline_basis_excludes_fileless(report, findings_path, report_path),
         check_saving_within_measured_compute(report, findings_path),
         check_saving_carries_measured_basis(report, findings_path),

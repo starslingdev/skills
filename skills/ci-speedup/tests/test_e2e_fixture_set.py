@@ -471,6 +471,110 @@ def test_sharded_floor_runs_through_collection_and_full_verifier(
     assert sentence not in report.split("## 📋 Contents", 1)[0]
 
 
+def test_queue_by_runner_label_runs_through_collection_and_full_verifier(
+        monkeypatch, tmp_path):
+    doc, report, checks = run_fixture(
+        FIXTURE_ROOT / "heavy-runner-queue", monkeypatch, tmp_path)
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+
+    finding = next(
+        row for row in doc["findings"]
+        if row.get("pattern") == "OPT43" and row.get("affected_jobs") == ["build"])
+    labels = {
+        row["runner_label"]: row
+        for row in finding["queue_by_runner_label"]
+    }
+    slow = labels["self-hosted slow-linux"]
+    fast = labels["fast-linux self-hosted"]
+    cancelled = labels["cancelled-linux self-hosted"]
+    assert slow == {
+        "runner_label": "self-hosted slow-linux",
+        "n": 11,
+        "queue_p50_s": 20.0,
+        "queue_p95_s": 125.0,
+        "work_n": 11,
+        "work_p50_s": 180.0,
+    }
+    assert fast == {
+        "runner_label": "fast-linux self-hosted",
+        "n": 11,
+        "queue_p50_s": 5.0,
+        "queue_p95_s": 5.0,
+        "work_n": 11,
+        "work_p50_s": 60.0,
+    }
+    assert cancelled == {
+        "runner_label": "cancelled-linux self-hosted",
+        "n": 0,
+        "queue_p50_s": None,
+        "queue_p95_s": None,
+        "work_n": 0,
+        "work_p50_s": None,
+        "censored_n": 1,
+        "censored_queue_lower_bound_max_s": 30.0,
+    }
+    assert finding["queue_label_comparison"] == {
+        "slow_label": "self-hosted slow-linux",
+        "slow_queue_p50_s": 20.0,
+        "lower_label": "fast-linux self-hosted",
+        "lower_queue_p50_s": 5.0,
+    }
+    assert "self-hosted slow-linux" in report
+    assert "fast-linux self-hosted" in report
+    assert "20s" in report and "5s" in report and "2m 05s" in report
+    assert "one maximum per workflow run and runner label" in report
+    assert "runnable-to-cancelled time is a censored lower bound" in report
+    assert "**Runner-label comparison for `build`:** `self-hosted slow-linux` queued at p50 20s" in report
+    assert "reduce parallelism" not in report.lower()
+
+    table_mutant = report.replace(
+        "| `self-hosted slow-linux` | 11 | 20s | 2m 05s | 11 | 3m 00s | 0 |",
+        "| `self-hosted slow-linux` | 11 | 5s | 2m 05s | 11 | 3m 00s | 0 |",
+    )
+    mutant_checks = vr.run_checks(
+        table_mutant, tmp_path / "heavy-runner-queue" / "report.md",
+        tmp_path / "heavy-runner-queue" / "findings.json", skill_repo=None)
+    assert any(not check.skipped and not check.ok for check in mutant_checks)
+
+    comparison_mutant = report.replace(
+        "**Runner-label comparison for `build`:** `self-hosted slow-linux` queued at p50 20s",
+        "**Runner-label comparison for `build`:** `self-hosted slow-linux` queued at p50 5s",
+    )
+    mutant_checks = vr.run_checks(
+        comparison_mutant, tmp_path / "heavy-runner-queue" / "report.md",
+        tmp_path / "heavy-runner-queue" / "findings.json", skill_repo=None)
+    assert any(not check.skipped and not check.ok for check in mutant_checks)
+
+
+def test_queue_single_label_says_comparison_unavailable(
+        monkeypatch, tmp_path):
+    fixture = tmp_path / "one-queue-label"
+    shutil.copytree(FIXTURE_ROOT / "heavy-runner-queue", fixture)
+    responses_path = fixture / "responses.json"
+    responses = json.loads(responses_path.read_text(encoding="utf-8"))
+    for run_jobs in responses["jobs"].values():
+        for job in run_jobs:
+            job["labels"] = ["self-hosted", "only-pool"]
+    responses_path.write_text(json.dumps(responses), encoding="utf-8")
+    workflow_path = fixture / "workflows" / "ci.yml"
+    workflow_path.write_text(
+        re.sub(r"\[self-hosted, [^\]]+\]", "[self-hosted, only-pool]",
+               workflow_path.read_text(encoding="utf-8")),
+        encoding="utf-8")
+
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+    finding = next(row for row in doc["findings"]
+                   if row.get("pattern") == "OPT43")
+    assert finding["queue_label_comparison"] == {"unavailable": True}
+    assert "comparison unavailable" in report
+    assert "reduce parallelism" not in report.lower()
+
+
 def test_duplicate_gate_sizing_is_independently_verified(monkeypatch, tmp_path):
     doc, report, checks = run_fixture(
         FIXTURE_ROOT / "duplicate-gate-job", monkeypatch, tmp_path)

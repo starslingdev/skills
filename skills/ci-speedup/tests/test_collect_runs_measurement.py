@@ -399,6 +399,41 @@ def test_opt43_needs_at_least_three_samples():
     assert _detect_opt43_queue_time("ci.yml", runs, 0, is_pr_workflow=True) == []
 
 
+def _runner_job(name: str, queue_s: float, label: str) -> dict:
+    job = _job(name, 30, run_created_offset=queue_s)
+    job["labels"] = ["self-hosted", label]
+    job["runner_name"] = f"runner-{label}"
+    return job
+
+
+def test_opt43_runner_label_comparison_tracks_slow_minority():
+    runs = [[_runner_job("build", 5, "fast")]
+            for _ in range(6)]
+    runs += [[_runner_job("build", 200, "slow")]
+             for _ in range(5)]
+
+    [finding] = _detect_opt43_queue_time(
+        "ci.yml", runs, 0, is_pr_workflow=True)
+
+    assert finding["queue_label_comparison"] == {
+        "slow_label": "self-hosted slow",
+        "slow_queue_p50_s": 200.0,
+        "lower_label": "fast self-hosted",
+        "lower_queue_p50_s": 5.0,
+    }
+
+
+def test_opt43_runner_label_comparison_requires_three_samples_per_label():
+    runs = [[_runner_job("build", 100, "slow")]
+            for _ in range(3)]
+    runs.append([_runner_job("build", 5, "fast")])
+
+    [finding] = _detect_opt43_queue_time(
+        "ci.yml", runs, 0, is_pr_workflow=True)
+
+    assert finding["queue_label_comparison"] == {"unavailable": True}
+
+
 # --- _detect_shared_substep (OPT73) shared-step guard ------------------------
 def _shared_substep_findings(steps_a, steps_b,
                              jobA="Integration Test prisma",

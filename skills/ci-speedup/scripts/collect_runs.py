@@ -10148,11 +10148,15 @@ def _detect_opt25_shard_imbalance(
     return out
 
 
+_OPT43_CANCELLED_RUN_PROBE_MAX = 3
+
+
 def _detect_opt43_queue_time(
     wf_path: str, jobs_per_run: list[list[dict[str, Any]]], start_idx: int,
     is_pr_workflow: bool,
     all_status_runs: list[dict[str, Any]] | None = None,
     job_graph: dict[str, dict[str, Any]] | None = None,
+    cancelled_jobs_per_run: list[list[dict[str, Any]]] | None = None,
 ) -> list[dict[str, Any]]:
     """P90 queue per job across runs; flag >60s PR / >120s release. Catalog body OPT43.
 
@@ -10221,8 +10225,16 @@ def _detect_opt43_queue_time(
             return degen[0]
         return None
 
-    by_job: dict[str, list[tuple[float, str, int, Any, Any]]] = {}
-    for run_idx, run_jobs in enumerate(jobs_per_run):
+    by_job: dict[str, list[tuple[float, str, int, Any, Any, str]]] = {}
+    # One observation per workflow run and runner label. A run can fan out many
+    # jobs onto the same pool; counting every job would let a wide matrix
+    # dominate the distribution, so each run contributes its maximum queue and
+    # maximum observed work for that label.
+    by_label_run: dict[str, dict[int, list[tuple[float, float | None, bool]]]] = {}
+    sampled_runs = [(run_jobs, True) for run_jobs in jobs_per_run]
+    sampled_runs.extend(
+        (run_jobs, False) for run_jobs in (cancelled_jobs_per_run or []))
+    for run_idx, (run_jobs, finding_sample) in enumerate(sampled_runs):
         nodes = {id(j): _node_of(str(j.get("name", ""))) for j in run_jobs} if job_graph else {}
         # A reusable call's children (`<caller> / <child>`) all map to the CALLER's
         # node, whose `needs` say nothing about the children's own `needs` inside
@@ -10268,19 +10280,75 @@ def _detect_opt43_queue_time(
                     if not ends:
                         continue
                     runnable = max(ends).isoformat()
-            q = _duration_s(runnable, j.get("started_at"))
+            started_at = j.get("started_at")
+            conclusion = str(j.get("conclusion") or "").lower()
+            # GitHub's public jobs API can stamp `started_at` at cancellation
+            # time even though no runner ever picked the job up. `runner_name`
+            # stays null in that shape, so use runner identity rather than a
+            # nullable timestamp to recognize a pre-pickup cancellation.
+            censored = (conclusion == "cancelled" and not j.get("runner_name")
+                        and bool(j.get("completed_at")))
+            queue_end = j.get("completed_at") if censored else started_at
+            q = _duration_s(runnable, queue_end)
+            label = _job_runner_label(j)
+            work = (_duration_s(started_at, j.get("completed_at"))
+                    if started_at and not censored else None)
             if q is not None and q >= 0:
-                by_job.setdefault(name, []).append(
-                    (q, str(j.get("html_url") or ""), run_idx,
-                     _parse_dt(runnable), _parse_dt(j.get("started_at"))))
+                if finding_sample:
+                    by_job.setdefault(name, []).append(
+                        (q, str(j.get("html_url") or ""), run_idx,
+                         _parse_dt(runnable), _parse_dt(queue_end), label))
+                if label:
+                    by_label_run.setdefault(label, {}).setdefault(run_idx, []).append(
+                        (q, work, censored))
             elif q is not None and job_graph and q > -5:
                 # second-granularity stamps: a verdict picked up the same second its
                 # upstream completed can read a hair negative — that is ~0 queue.
-                by_job.setdefault(name, []).append(
-                    (0.0, str(j.get("html_url") or ""), run_idx,
-                     _parse_dt(j.get("started_at")), _parse_dt(j.get("started_at"))))
+                if finding_sample:
+                    by_job.setdefault(name, []).append(
+                        (0.0, str(j.get("html_url") or ""), run_idx,
+                         _parse_dt(queue_end), _parse_dt(queue_end), label))
+                if label:
+                    by_label_run.setdefault(label, {}).setdefault(run_idx, []).append(
+                        (0.0, work, censored))
 
-    def _sibling_overlap_ratio(samples: list[tuple[float, str, int, Any, Any]]) -> float | None:
+    queue_by_runner_label: list[dict[str, Any]] = []
+    for label, per_run in sorted(by_label_run.items()):
+        queue_values: list[float] = []
+        work_values: list[float] = []
+        censored_lower_bounds: list[float] = []
+        censored_n = 0
+        for observations in per_run.values():
+            exact_queue = [row[0] for row in observations if not row[2]]
+            if exact_queue:
+                queue_values.append(max(exact_queue))
+            known_work = [row[1] for row in observations if row[1] is not None]
+            if known_work:
+                work_values.append(max(known_work))
+            censored = [row[0] for row in observations if row[2]]
+            if censored:
+                censored_n += 1
+                censored_lower_bounds.append(max(censored))
+        row: dict[str, Any] = {
+            "runner_label": label,
+            "n": len(queue_values),
+            "queue_p50_s": (round(float(statistics.median(queue_values)), 1)
+                            if queue_values else None),
+            "queue_p95_s": (round(float(_percentile(queue_values, 95)), 1)
+                            if queue_values else None),
+            "work_n": len(work_values),
+            "work_p50_s": (round(float(statistics.median(work_values)), 1)
+                           if work_values else None),
+        }
+        if censored_n:
+            row["censored_n"] = censored_n
+            row["censored_queue_lower_bound_max_s"] = round(
+                max(censored_lower_bounds), 1)
+        queue_by_runner_label.append(row)
+
+    def _sibling_overlap_ratio(
+        samples: list[tuple[float, str, int, Any, Any, str]],
+    ) -> float | None:
         """Share of queued samples whose queue interval overlapped an in-flight
         sibling run of this workflow (windows from the ALL-STATUS slice; a
         sibling is any OTHER run, so the sampled run's own window is excluded
@@ -10289,7 +10357,7 @@ def _detect_opt43_queue_time(
         if not run_windows:
             return None
         checked = overlapped = 0
-        for _q, _url, run_idx, q_start, q_end in samples:
+        for _q, _url, run_idx, q_start, q_end, _label in samples:
             jobs = jobs_per_run[run_idx]
             # Self-exclusion is by RUN ID, never by timestamp equality: the
             # window starts at run_started_at while the queue interval starts
@@ -10369,6 +10437,39 @@ def _detect_opt43_queue_time(
             if cause is not None:
                 f["queue_cause"] = cause
                 f["queue_cause_note"] = cause_note
+            f["queue_by_runner_label"] = queue_by_runner_label
+            sample_labels = {sample[5] for sample in samples if sample[5]}
+            eligible = [
+                row for row in queue_by_runner_label
+                if row["runner_label"] in sample_labels
+                and int(row.get("n") or 0) >= 3
+                and row.get("queue_p50_s") is not None
+            ]
+            primary = (max(eligible, key=lambda row: row["queue_p50_s"])
+                       if eligible else None)
+            alternatives = [
+                row for row in queue_by_runner_label
+                if row is not primary
+                and int(row.get("n") or 0) >= 3
+                and row.get("queue_p50_s") is not None
+            ]
+            materially_lower = [
+                row for row in alternatives
+                if primary is not None
+                and float(primary["queue_p50_s"]) >= 15.0
+                and float(row["queue_p50_s"]) <= float(primary["queue_p50_s"]) * 0.5
+                and float(primary["queue_p50_s"]) - float(row["queue_p50_s"]) >= 10.0
+            ]
+            if primary is not None and materially_lower:
+                faster = min(materially_lower, key=lambda row: row["queue_p50_s"])
+                f["queue_label_comparison"] = {
+                    "slow_label": primary["runner_label"],
+                    "slow_queue_p50_s": primary["queue_p50_s"],
+                    "lower_label": faster["runner_label"],
+                    "lower_queue_p50_s": faster["queue_p50_s"],
+                }
+            else:
+                f["queue_label_comparison"] = {"unavailable": True}
             out.append(f)
     return out
 
@@ -30990,11 +31091,29 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                             "can't be separated from upstream job run time")
             new = []
         else:
+            _opt43_all_status = (_all_status_page(wf_path, wf_id)
+                                 if wf_id is not None else None)
+            _cancelled_runs = [
+                run for run in (_opt43_all_status or [])
+                if str(run.get("conclusion") or "").lower() == "cancelled"
+            ][:_OPT43_CANCELLED_RUN_PROBE_MAX]
+            _cancelled_jobs_per_run: list[list[dict[str, Any]]] = []
+            if _cancelled_runs:
+                _prefetch_json(client, [
+                    _run_jobs_endpoint(repo, run.get("id"))
+                    for run in _cancelled_runs
+                ])
+                _cancelled_kept, _cancelled_failures = _gather_run_jobs(
+                    client, repo, _cancelled_runs, memo=job_memo)
+                jobs_fetch_failures += _cancelled_failures
+                for _run, _jobs in _cancelled_kept:
+                    _stamp_run_context(_run, _jobs)
+                    _cancelled_jobs_per_run.append(_jobs)
             new = _detect_opt43_queue_time(
                 wf_path, jobs_per_run, next_id, is_pr,
-                all_status_runs=(_all_status_page(wf_path, wf_id)
-                                 if wf_id is not None else None),
-                job_graph=_opt43_graph)
+                all_status_runs=_opt43_all_status,
+                job_graph=_opt43_graph,
+                cancelled_jobs_per_run=_cancelled_jobs_per_run)
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
 
