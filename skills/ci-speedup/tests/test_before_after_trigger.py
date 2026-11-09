@@ -69,17 +69,74 @@ def _invoke(tmp_path, client, **kwargs):
     events = client.events
     baseline = tmp_path / "base.json"
     if not baseline.exists():
+        pull_rows = [_cohort(f"base-{n}", f"base-{n}") for n in (1, 2)]
+        push_rows = copy.deepcopy(pull_rows)
+        for row in push_rows:
+            row["lane"] = "push"
+            row["cohort_id"] += "-push"
         baseline.write_text(json.dumps({
-            "verification_baseline": [
-                _cohort("base-1", "base-1"),
-                _cohort("base-2", "base-2"),
-            ]}))
+            "verification_baseline": pull_rows + push_rows}))
+    branch = kwargs.pop("branch", "fix")
     return advance_verification(
-        client, repo="o/r", branch="fix", baseline_artifact=str(baseline),
+        client, repo="o/r", branch=branch, baseline_artifact=str(baseline),
         context_path=tmp_path / "verify.json",
         changed_files=[".github/workflows/ci.yml"],
         emit=lambda line: events.append(("emit", line)),
         environ={"CI_SPEEDUP_VERIFY_RUNS": "2"}, **kwargs)
+
+
+def test_default_branch_verification_never_requests_a_rerun(tmp_path):
+    class DefaultBranchClient(FakeClient):
+        def is_default_branch(self, repo, branch):
+            return branch == "main"
+
+    client = DefaultBranchClient(head="main")
+    baseline = tmp_path / "base.json"
+    rows = [_cohort(f"base-{n}", f"base-{n}") for n in (1, 2)]
+    for row in rows:
+        row["lane"] = "push"
+    baseline.write_text(json.dumps({"verification_baseline": rows}))
+    result = _invoke(tmp_path, client, branch="main")
+    assert result["status"] == "waiting-for-default-branch-pushes"
+    assert client.reruns == 0
+
+
+def test_cache_sensitive_baseline_uses_push_lane_facts(tmp_path):
+    pushes = [_cohort(f"push-{n}", f"p{n}") for n in range(1, 4)]
+    for cohort in pushes:
+        cohort["workflows"] = ["ci.yml:push"]
+        cohort["expected_workflows"] = ["ci.yml:push"]
+        cohort["jobs"][0]["workflow"] = "ci.yml:push"
+        cohort["jobs"][0]["workload_identity"] = ["ci.yml:push/test/test"]
+        cohort["lane"] = "push"
+    client = FakeClient(pushes=pushes)
+    baseline = tmp_path / "base.json"
+    baseline.write_text(json.dumps({
+        "per_workflow_monthly_volume": {"ci.yml": 40},
+        "pr_critical_path": {"commit_wall_clock": {"facts": [
+            {
+                "sha": f"base-{n}-{event}", "event": event, "jobs": [{
+                    **_job(f"base-{n}-{event}", 1),
+                    "workflow_file": "ci.yml",
+                }],
+            } for event in ("pull_request", "push") for n in (1, 2)
+        ]}},
+    }))
+    result = advance_verification(
+        client, repo="o/r", branch="fix", baseline_artifact=str(baseline),
+        context_path=tmp_path / "verify.json",
+        changed_files=[".github/workflows/ci.yml"], cache_sensitive=True,
+        environ={"CI_SPEEDUP_VERIFY_RUNS": "2"}, emit=lambda _line: None)
+    assert result["status"] == "complete"
+    assert result["verdict"]["reason"] != "triggered workflow set changed"
+
+
+def test_same_head_after_arm_is_labelled_no_change_reruns():
+    before = [_cohort(f"base-{n}", f"base-{n}") for n in (1, 2)]
+    after = [_cohort("fix", f"fix-{n}", attempt=n) for n in (1, 2)]
+    result = compare_push_cohorts(
+        before, after, changed_files=[".github/workflows/ci.yml"])
+    assert "no-change reruns" in result["report"]
 
 
 def test_no_rerun_before_remote_head_and_completed_first_cohort(tmp_path):
