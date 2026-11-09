@@ -5,11 +5,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: uraimo/run-on-arch-action@v2
-        env:
-          MAKE_TARGET: check
         with:
           arch: aarch64
           distro: ubuntu22.04
+          env: |
+            MAKE_TARGET: check
           run: make $MAKE_TARGET
       - uses: uraimo/run-on-arch-action@v2
         with:
