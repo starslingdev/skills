@@ -35,10 +35,14 @@ def _startup_log(
                     "collecting ...")
             done = ("======= 1 passed, 1 warning in 1.00s ======="
                     if pytest_output == "normal" else "1 passed in 1.00s")
+            command = (
+                f"+ python -m pytest tests/case_{i}.py"
+                if pytest_output == "piped" else
+                f"+ python3 -m pytest -q tests/case_{i}.py"
+                if pytest_option_first else
+                f"+ python -m pytest tests/case_{i}.py -q")
             messages = (
-                (f"+ python3 -m pytest -q tests/case_{i}.py"
-                 if pytest_option_first else
-                 f"+ python -m pytest tests/case_{i}.py -q"),
+                command,
                 work,
                 done,
             )

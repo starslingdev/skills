@@ -3665,7 +3665,8 @@ def _parse_log(text: str,
         r"^(?P<node>(?P<file>\S+\.py)::\S+?)(?:\s+.*)?$",
         re.IGNORECASE,
     )
-    pytest_outcome = re.compile(r"^(?:PASSED|OK)\b", re.IGNORECASE)
+    pytest_outcome = re.compile(
+        r"^PASSED(?:\s+\[\s*\d+%\])?\s*$", re.IGNORECASE)
     pytest_command = re.compile(r"(?:^|\s)(?:python\s+-m\s+)?pytest\b.*(?:^|\s)-v\b",
                                 re.IGNORECASE)
     completions = [
@@ -3676,26 +3677,46 @@ def _parse_log(text: str,
     # With ``pytest -v -s``, a test's own stdout follows the node id and pytest
     # writes the outcome on a later physical line. Pair that standalone outcome
     # with the preceding node, stopping at the next node so unrelated output
-    # cannot be borrowed as proof of completion.
-    if not completions:
+    # cannot be borrowed as proof of completion. A suite may contain both this
+    # split shape and ordinary one-line results, so merge the two sets by node.
+    # Failed summaries withhold the split path: untrusted test stdout can print
+    # ``PASSED`` and must not impersonate pytest's result after the test fails.
+    summary_failed = any(
+        re.search(r"\b\d+\s+(?:failed|errors?)\b", message, re.IGNORECASE)
+        for _when, message, _raw, _stamp in stamped_tests
+    )
+    passed_totals = [
+        int(match.group(1))
+        for _when, message, _raw, _stamp in stamped_tests
+        if (match := re.search(r"\b(\d+)\s+passed\b", message, re.IGNORECASE))
+    ]
+    if not summary_failed and passed_totals:
+        completed_nodes = {row[3] for row in completions}
+        split_completions: list[tuple[int, datetime, str, str, str]] = []
         node_rows = [
             (i, when, m.group("file"), m.group("node"), raw)
             for i, (when, message, raw, _stamp) in enumerate(stamped_tests)
             if (m := pytest_node.match(message))
         ]
         for pos, (line_i, _started, test_file, node, node_raw) in enumerate(node_rows):
+            if node in completed_nodes:
+                continue
             stop = node_rows[pos + 1][0] if pos + 1 < len(node_rows) else len(stamped_tests)
-            outcome = next(
-                ((i, when, raw) for i, (when, message, raw, _stamp)
-                 in enumerate(stamped_tests[line_i + 1:stop], start=line_i + 1)
-                 if pytest_outcome.match(message)),
-                None,
-            )
+            outcomes = [
+                (i, when, raw) for i, (when, message, raw, _stamp)
+                in enumerate(stamped_tests[line_i + 1:stop], start=line_i + 1)
+                if pytest_outcome.match(message)
+            ]
+            outcome = outcomes[-1] if outcomes else None
             if outcome is not None:
-                completions.append(
+                split_completions.append(
                     (outcome[0], outcome[1], test_file, node,
                      f"{node_raw} … {outcome[2]}")
                 )
+                completed_nodes.add(node)
+        if max(passed_totals) >= len(completions) + len(split_completions):
+            completions.extend(split_completions)
+    completions.sort(key=lambda row: row[0])
     if (len(completions) >= 4
             and len({row[2] for row in completions}) == 1
             and len({row[3] for row in completions}) == len(completions)):

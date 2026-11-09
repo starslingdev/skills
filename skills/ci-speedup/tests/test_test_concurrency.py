@@ -120,6 +120,33 @@ def _pytest_verbose_capture_log() -> str:
     )
 
 
+def _pytest_mixed_verbose_capture_log() -> str:
+    """A ``-v -s`` run where only alternating tests print to stdout."""
+    at = datetime(2026, 11, 9, tzinfo=timezone.utc)
+    rows = [(0, "python3 -m pytest -v -s tests/test_accounts.py"),
+            (0, "collecting ... collected 4 items")]
+    for index in range(1, 5):
+        if index % 2:
+            rows.extend((
+                ((index - 1) * 60,
+                 f"tests/test_accounts.py::test_account[{index - 1}] "
+                 f"schema_name=schema_test_{index}"),
+                (index * 60, "PASSED"),
+            ))
+        else:
+            rows.extend((
+                ((index - 1) * 60, f"schema_name=schema_test_{index}"),
+                (index * 60,
+                 f"tests/test_accounts.py::test_account[{index - 1}] PASSED "
+                 f"[{index * 25}%]"),
+            ))
+    rows.append((240, "4 passed in 240.00s"))
+    return "\n".join(
+        f"{_stamp(at + timedelta(seconds=offset))} {message}"
+        for offset, message in rows
+    )
+
+
 def _vitest_verbose_log() -> str:
     at = datetime(2026, 11, 6, tzinfo=timezone.utc)
     durations = (68_100, 68_400, 67_900, 68_200, 21_000, 24_000, 28_000,
@@ -187,6 +214,31 @@ def test_pytest_verbose_s_capture_gets_the_concurrency_leaf() -> None:
     leaf = bp._parse_log(_pytest_verbose_capture_log())
     assert leaf is not None
     assert leaf["fix_key"] == "test-isolated-serial"
+
+
+def test_pytest_verbose_s_mixed_printed_output_gets_the_concurrency_leaf() -> None:
+    leaf = bp._parse_log(_pytest_mixed_verbose_capture_log())
+    assert leaf is not None
+    assert leaf["fix_key"] == "test-isolated-serial"
+
+
+def test_pytest_verbose_s_does_not_trust_a_printed_pass_before_failure() -> None:
+    log = _pytest_verbose_capture_log().replace(
+        "2026-11-09T00:01:00.0000000Z PASSED",
+        "2026-11-09T00:00:59.0000000Z PASSED\n"
+        "2026-11-09T00:01:00.0000000Z FAILED [25%]",
+        1,
+    ).replace("4 passed in 240.00s", "1 failed, 3 passed in 240.00s")
+    assert bp._parse_log(log) is None
+
+
+def test_pytest_verbose_s_does_not_treat_printed_ok_as_an_outcome() -> None:
+    log = _pytest_verbose_capture_log().replace(
+        "2026-11-09T00:01:00.0000000Z PASSED",
+        "2026-11-09T00:01:00.0000000Z OK",
+        1,
+    )
+    assert bp._parse_log(log) is None
 
 
 def test_pytest_verbose_requires_isolation_inside_each_test_interval() -> None:
