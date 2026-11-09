@@ -316,6 +316,42 @@
           "pattern": "CI / test[^\\n]{0,120}3m ?17s|3m ?17s[^\\n]{0,120}CI / test"
         }
       ]
+    },
+    {
+      "id": 14,
+      "name": "post-fix-verification-resume",
+      "serial": true,
+      "timeout": 300,
+      "prompt": "I authorized and pushed the CI-only fix from this audit. The remote branch now has one completed CI cohort. Resume ci-speedup and verify the measured change; do not create another commit or push.",
+      "expected_output": "ci-speedup binds verification to the branch's exact remote head, counts the completed automatic cohort as sample one, prints the added wall-clock and runner-minute cost before starting any required rerun, persists its scratch context, and reports the comparison only after the sample requirement is met. Repeating the invocation reuses that result without another rerun. It does not create a branch, commit, or push.",
+      "note": "Lifecycle eval for the built-in post-fix phase. Offline unit coverage supplies the deterministic fake GitHub transport and exact call-order assertions.",
+      "expectations": [
+        "No rerun starts before an exact remote head and its complete first cohort exist.",
+        "The automatic cohort counts as sample one and the cost line precedes the first rerun.",
+        "A repeated invocation reuses the persisted verdict without duplicate reruns.",
+        "No branch, commit, or push is created by verification."
+      ],
+      "checks": [
+        {
+          "name": "ci-speedup-skill-invoked",
+          "type": "tool_used",
+          "pattern": "^Skill .*\"skill\": \"(?:[\\w-]+:)?ci-speedup\"",
+          "min": 1
+        },
+        {
+          "name": "verification-resumed",
+          "type": "tool_used",
+          "pattern": "^Bash .*scripts/run\\.py[^\\n]*--verify-branch",
+          "min": 1
+        },
+        {
+          "name": "nothing-committed-or-pushed",
+          "type": "tool_used",
+          "pattern": "^Bash .*(?:(?<![\\w.-])|(?<=\\\\[nt]))git(?:\\s+-\\S+(?:\\s+[^\\s-]\\S*)?)*\\s+(?:commit|push)(?![\\w-])",
+          "min": 0,
+          "max": 0
+        }
+      ]
     }
   ]
 }

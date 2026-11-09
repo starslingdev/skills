@@ -51,6 +51,7 @@ from pathlib import Path
 _DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_DIR))
 from summary import build_summary  # noqa: E402  (sibling module; needs _DIR on path)
+from before_after import advance_verification, GhVerificationClient  # noqa: E402
 
 
 def _git_short_sha(repo_dir: Path, short: bool = True) -> str | None:
@@ -192,6 +193,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--commit-sha", default=None,
                         help="Analyzed-tree sha for the report's `Audited commit` "
                              "row; auto-derived from --root's git HEAD when omitted.")
+    parser.add_argument(
+        "--verify-branch", default=None,
+        help="After an authorized push, resume post-fix verification for this "
+             "remote branch. The branch is resolved to an exact head SHA.")
+    parser.add_argument(
+        "--verify-context", type=Path, default=None,
+        help="Scratch context for resumable post-fix verification. Defaults beside --out.")
+    parser.add_argument(
+        "--verify-changed-file", action="append", default=[],
+        help="A file changed by the fix; repeat for every changed path.")
+    parser.add_argument(
+        "--verify-cache-sensitive", action="store_true",
+        help="Use three distinct default-branch pushes instead of warm reruns.")
     args = parser.parse_args(argv)
 
     # Create the output directory up front. Without this, a fresh `--out
@@ -199,6 +213,32 @@ def main(argv: list[str] | None = None) -> int:
     # write (the partial-file write below) instead of just working — a papercut that
     # forces the caller to mkdir and retry.
     args.out.parent.mkdir(parents=True, exist_ok=True)
+
+    # Verification resumes the artifact produced before the fix.  Do this
+    # before scan/collect so the historical baseline is never replaced with a
+    # fresh post-push collection.
+    if args.verify_branch:
+        if not args.repo:
+            print("ERROR: --verify-branch requires --repo.", file=sys.stderr)
+            return 2
+        if not args.out.is_file():
+            print("ERROR: --verify-branch requires the original findings file "
+                  f"at --out ({args.out}).", file=sys.stderr)
+            return 2
+        context_path = (args.verify_context
+                        or args.out.with_name(args.out.stem + ".verification.json"))
+        result = advance_verification(
+            GhVerificationClient(),
+            repo=args.repo,
+            branch=args.verify_branch,
+            baseline_artifact=str(args.out),
+            context_path=context_path,
+            changed_files=list(args.verify_changed_file),
+            cache_sensitive=bool(args.verify_cache_sensitive),
+        )
+        print("Post-fix verification: "
+              + json.dumps(result, sort_keys=True, ensure_ascii=False))
+        return 0
 
     # Provenance: forward explicit values, else derive from git so a run never
     # records a NULL skill/commit sha. scan.py only stamps these when non-empty.
@@ -338,6 +378,7 @@ def main(argv: list[str] | None = None) -> int:
                                 root=args.root))
         except Exception as e:  # a summary failure must never fail the run
             print(f"(summary unavailable: {e}; findings at {args.out})", file=sys.stderr)
+
     finally:
         if tmp.exists():  # any failure path: don't leave a stray partial file
             try:

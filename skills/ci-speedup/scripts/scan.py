@@ -8135,17 +8135,15 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
     # than being silently treated as covered. OPT74 (trust-boundary cache split)
     # is catalogued for human application but has no auto-detector: it needs
     # fork-PR cache trust-boundary signals we don't sample from run history.
-    # OPT78 (vitest per-file isolation) is not routed here either: it is emitted
-    # by a drill-time log leaf in blocking_path.py, gated on this scan's
-    # `test_runner_isolation` block.
+    # OPT78 (vitest per-file isolation) and OPT85 (per-invocation process startup)
+    # are not routed here either: they are emitted by drill-time log leaves in
+    # blocking_path.py (OPT78 is gated on this scan's `test_runner_isolation` block).
     # OPT83 (independent steps on a pole) is routed by collect_runs from each
     # drilled pole's step decomposition plus the workflow YAML. OPT84 (a slow
     # pole step runs a tool with a native drop-in) is routed the same way, from
     # the pole's step decomposition plus the workflow YAML and package scripts.
-    # OPT85 (tests run in many processes) and OPT87 (tests wait on a slow
-    # dependency they do not verify) are catalogued with no router yet, like OPT74.
     structural_detected = {"OPT70", "OPT71", "OPT72", "OPT73", "OPT75", "OPT83",
-                           "OPT84"}
+                           "OPT84", "OPT85"}
     structural_without_detector = sorted(
         c.pattern for c in catalog
         if c.finding_class == "structural" and c.pattern not in structural_detected)
@@ -8388,7 +8386,9 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
         "catalog_patterns_with_detector": len(static_entries) - len(unmatched_patterns),
         "catalog_patterns_without_detector": sorted(unmatched_patterns),
         # Structural catalog entries with no critical-path router (currently
-        # OPT74, OPT85, OPT87, and OPT78, which a drill-time log leaf routes instead). Reported so a catalogued-but-undetected structural pattern is
+        # OPT74, OPT87, and OPT78, which a drill-time log leaf routes instead).
+        # OPT85's drill-time leaf is registered as detected above. Reported so a
+        # catalogued-but-undetected structural pattern is
         # honest about its coverage instead of silently never appearing.
         "catalog_structural_patterns_without_detector": structural_without_detector,
     }

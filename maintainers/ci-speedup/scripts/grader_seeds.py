@@ -97,6 +97,7 @@ TRIAGE_ALLOWLIST = {
     "headline merge-wait is never above the measured makespan p50": AUTO_SEED,                        # check_headline_wait_within_makespan (issue #25/#24)
     "default-branch push lane is isolated": AUTO_SEED,                                                # check_default_branch_push_lane_isolated
     "code findings stay within commit work and never claim runner queue": AUTO_SEED,                  # check_commit_queue_work_credit
+    "OPT43 runner-label evidence matches its structured stamp": AUTO_SEED,                            # check_queue_runner_label_evidence
     "each finding's runner-minute saving is within its jobs' measured compute": AUTO_SEED,            # check_saving_within_measured_compute (issue #25)
     "every credited runner-minute saving carries a measured-basis stamp (sizing door)": AUTO_SEED,     # check_saving_carries_measured_basis (issues #43/#44/#45)
     "cluster-floor lever's ceiling floors at a NON-sibling check (not its own matrix leg)": AUTO_SEED,  # check_cluster_lever_ceiling_escapes_sibling (issue #44)
@@ -222,6 +223,7 @@ CHECK_CLASS = {
     "headline merge-wait is never above the measured makespan p50": "estimated-not-measured",  # issue #24: a crowned/modeled wait above the MEASURED wall — the estimate overstates the measurement
     "default-branch push lane is isolated": "mis-ranked-lever",  # post-merge timing leaking into the merge-gate headline or ranking
     "code findings stay within commit work and never claim runner queue": "estimated-not-measured",  # a modeled code saving above measured work, or a claim against runner queue
+    "OPT43 runner-label evidence matches its structured stamp": "fabricated-or-unsupported-finding",  # rendered queue distributions or comparisons that differ from their measured stamp
     "each finding's runner-minute saving is within its jobs' measured compute": "estimated-not-measured",  # issue #25: a modeled saving above the job's measured compute — an estimate exceeding its physical bound
     "every credited runner-minute saving carries a measured-basis stamp (sizing door)": "estimated-not-measured",  # issues #43/#44/#45: a saving that skipped the measured sizing door (no basis / unmeasured path) — an estimate with no measured grounding
     "cluster-floor lever's ceiling floors at a NON-sibling check (not its own matrix leg)": "mis-ranked-lever",  # issue #44: a cluster lever capped by its own sibling leg renders ~15x under its true ceiling and is buried — a ranking/placement error
