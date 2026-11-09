@@ -16,7 +16,7 @@
     },
     {
       "pattern": "OPT45",
-      "runner_min": 13.2,
+      "runner_min": 14.4,
       "wall_clock_s": 0.0
     },
     {
@@ -51,7 +51,7 @@
   "minority_tails": [],
   "provenance": "required_scoped",
   "representative_jobs": {
-    "next": "probe",
+    "next": null,
     "slowest": "gate"
   },
   "verifier": {

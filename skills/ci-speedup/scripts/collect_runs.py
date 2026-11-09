@@ -10148,11 +10148,15 @@ def _detect_opt25_shard_imbalance(
     return out
 
 
+_OPT43_CANCELLED_RUN_PROBE_MAX = 3
+
+
 def _detect_opt43_queue_time(
     wf_path: str, jobs_per_run: list[list[dict[str, Any]]], start_idx: int,
     is_pr_workflow: bool,
     all_status_runs: list[dict[str, Any]] | None = None,
     job_graph: dict[str, dict[str, Any]] | None = None,
+    cancelled_jobs_per_run: list[list[dict[str, Any]]] | None = None,
 ) -> list[dict[str, Any]]:
     """P90 queue per job across runs; flag >60s PR / >120s release. Catalog body OPT43.
 
@@ -10227,7 +10231,10 @@ def _detect_opt43_queue_time(
     # dominate the distribution, so each run contributes its maximum queue and
     # maximum observed work for that label.
     by_label_run: dict[str, dict[int, list[tuple[float, float | None, bool]]]] = {}
-    for run_idx, run_jobs in enumerate(jobs_per_run):
+    sampled_runs = [(run_jobs, True) for run_jobs in jobs_per_run]
+    sampled_runs.extend(
+        (run_jobs, False) for run_jobs in (cancelled_jobs_per_run or []))
+    for run_idx, (run_jobs, finding_sample) in enumerate(sampled_runs):
         nodes = {id(j): _node_of(str(j.get("name", ""))) for j in run_jobs} if job_graph else {}
         # A reusable call's children (`<caller> / <child>`) all map to the CALLER's
         # node, whose `needs` say nothing about the children's own `needs` inside
@@ -10287,18 +10294,20 @@ def _detect_opt43_queue_time(
             work = (_duration_s(started_at, j.get("completed_at"))
                     if started_at and not censored else None)
             if q is not None and q >= 0:
-                by_job.setdefault(name, []).append(
-                    (q, str(j.get("html_url") or ""), run_idx,
-                     _parse_dt(runnable), _parse_dt(queue_end), label))
+                if finding_sample:
+                    by_job.setdefault(name, []).append(
+                        (q, str(j.get("html_url") or ""), run_idx,
+                         _parse_dt(runnable), _parse_dt(queue_end), label))
                 if label:
                     by_label_run.setdefault(label, {}).setdefault(run_idx, []).append(
                         (q, work, censored))
             elif q is not None and job_graph and q > -5:
                 # second-granularity stamps: a verdict picked up the same second its
                 # upstream completed can read a hair negative — that is ~0 queue.
-                by_job.setdefault(name, []).append(
-                    (0.0, str(j.get("html_url") or ""), run_idx,
-                     _parse_dt(queue_end), _parse_dt(queue_end), label))
+                if finding_sample:
+                    by_job.setdefault(name, []).append(
+                        (0.0, str(j.get("html_url") or ""), run_idx,
+                         _parse_dt(queue_end), _parse_dt(queue_end), label))
                 if label:
                     by_label_run.setdefault(label, {}).setdefault(run_idx, []).append(
                         (0.0, work, censored))
@@ -31081,11 +31090,29 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                             "can't be separated from upstream job run time")
             new = []
         else:
+            _opt43_all_status = (_all_status_page(wf_path, wf_id)
+                                 if wf_id is not None else None)
+            _cancelled_runs = [
+                run for run in (_opt43_all_status or [])
+                if str(run.get("conclusion") or "").lower() == "cancelled"
+            ][:_OPT43_CANCELLED_RUN_PROBE_MAX]
+            _cancelled_jobs_per_run: list[list[dict[str, Any]]] = []
+            if _cancelled_runs:
+                _prefetch_json(client, [
+                    _run_jobs_endpoint(repo, run.get("id"))
+                    for run in _cancelled_runs
+                ])
+                _cancelled_kept, _cancelled_failures = _gather_run_jobs(
+                    client, repo, _cancelled_runs, memo=job_memo)
+                jobs_fetch_failures += _cancelled_failures
+                for _run, _jobs in _cancelled_kept:
+                    _stamp_run_context(_run, _jobs)
+                    _cancelled_jobs_per_run.append(_jobs)
             new = _detect_opt43_queue_time(
                 wf_path, jobs_per_run, next_id, is_pr,
-                all_status_runs=(_all_status_page(wf_path, wf_id)
-                                 if wf_id is not None else None),
-                job_graph=_opt43_graph)
+                all_status_runs=_opt43_all_status,
+                job_graph=_opt43_graph,
+                cancelled_jobs_per_run=_cancelled_jobs_per_run)
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
 

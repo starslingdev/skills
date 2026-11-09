@@ -141,20 +141,6 @@
             "started_at": "2026-01-28T00:02:20Z"
           }
         ]
-      },
-      {
-        "completed_at": "2026-01-28T00:00:30Z",
-        "conclusion": "cancelled",
-        "created_at": "2026-01-28T00:00:00Z",
-        "id": 1199,
-        "labels": [
-          "self-hosted",
-          "cancelled-linux"
-        ],
-        "name": "probe",
-        "runner_name": null,
-        "started_at": "2026-01-28T00:00:30Z",
-        "steps": []
       }
     ],
     "1002": [
@@ -776,6 +762,22 @@
           }
         ]
       }
+    ],
+    "1012": [
+      {
+        "completed_at": "2025-12-01T00:00:30Z",
+        "conclusion": "cancelled",
+        "created_at": "2025-12-01T00:00:00Z",
+        "id": 1211,
+        "labels": [
+          "self-hosted",
+          "cancelled-linux"
+        ],
+        "name": "probe",
+        "runner_name": null,
+        "started_at": "2025-12-01T00:00:30Z",
+        "steps": []
+      }
     ]
   },
   "repo": "fixture/heavy-runner-queue",
@@ -789,6 +791,17 @@
       "name": "CI",
       "path": ".github/workflows/ci.yml",
       "runs": [
+        {
+          "conclusion": "cancelled",
+          "created_at": "2025-12-01T00:00:00Z",
+          "event": "pull_request",
+          "head_branch": "feature-cancelled",
+          "head_sha": "sha-cancelled",
+          "id": 1012,
+          "run_started_at": "2025-12-01T00:00:00Z",
+          "status": "completed",
+          "updated_at": "2025-12-01T00:00:30Z"
+        },
         {
           "conclusion": "success",
           "created_at": "2026-01-28T00:00:00Z",

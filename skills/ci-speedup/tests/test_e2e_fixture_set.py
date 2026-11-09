@@ -518,7 +518,7 @@ def test_queue_by_runner_label_runs_through_collection_and_full_verifier(
     assert "20s" in report and "5s" in report and "2m 05s" in report
     assert "one maximum per workflow run and runner label" in report
     assert "runnable-to-cancelled time is a censored lower bound" in report
-    assert "**Runner-label comparison:** `self-hosted slow-linux` queued at p50 20s" in report
+    assert "**Runner-label comparison for `build`:** `self-hosted slow-linux` queued at p50 20s" in report
     assert "reduce parallelism" not in report.lower()
 
     table_mutant = report.replace(
@@ -531,8 +531,8 @@ def test_queue_by_runner_label_runs_through_collection_and_full_verifier(
     assert any(not check.skipped and not check.ok for check in mutant_checks)
 
     comparison_mutant = report.replace(
-        "**Runner-label comparison:** `self-hosted slow-linux` queued at p50 20s",
-        "**Runner-label comparison:** `self-hosted slow-linux` queued at p50 5s",
+        "**Runner-label comparison for `build`:** `self-hosted slow-linux` queued at p50 20s",
+        "**Runner-label comparison for `build`:** `self-hosted slow-linux` queued at p50 5s",
     )
     mutant_checks = vr.run_checks(
         comparison_mutant, tmp_path / "heavy-runner-queue" / "report.md",

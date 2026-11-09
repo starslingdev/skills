@@ -16276,6 +16276,9 @@ def check_queue_runner_label_evidence(report: str,
     failures: list[str] = []
     for finding in findings:
         fid = str(finding.get("id") or "?")
+        workflow = _flatten_cell(str(finding.get("workflow_file") or "unknown workflow"))
+        if f"**Runner-label queue/work for `{workflow}` " not in report:
+            failures.append(f"{fid} runner-label table does not name its workflow")
         for raw in _as_list(finding.get("queue_by_runner_label")):
             row = _as_dict(raw)
             label = _flatten_cell(str(row.get("runner_label") or ""))
@@ -16301,13 +16304,16 @@ def check_queue_runner_label_evidence(report: str,
             failures.append(f"{fid} omits the censored queue disclosure")
 
         comparison = _as_dict(finding.get("queue_label_comparison"))
+        jobs = [str(job) for job in _as_list(finding.get("affected_jobs")) if str(job)]
+        job = _flatten_cell(jobs[0] if jobs else str(finding.get("job") or "unknown job"))
         if comparison.get("unavailable"):
-            expected_comparison = "**Runner-label comparison:** comparison unavailable."
+            expected_comparison = (
+                f"**Runner-label comparison for `{job}`:** comparison unavailable.")
         else:
             slow = _flatten_cell(str(comparison.get("slow_label") or ""))
             lower = _flatten_cell(str(comparison.get("lower_label") or ""))
             expected_comparison = (
-                f"**Runner-label comparison:** `{slow}` queued at p50 "
+                f"**Runner-label comparison for `{job}`:** `{slow}` queued at p50 "
                 f"{clock(comparison.get('slow_queue_p50_s'))}, while `{lower}` "
                 f"queued at p50 {clock(comparison.get('lower_queue_p50_s'))}."
             )
