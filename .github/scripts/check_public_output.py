@@ -103,39 +103,127 @@ def scan_text(
     return findings
 
 
+# Added-diff lines under these paths are test fixtures and eval cases: they
+# routinely carry synthetic `owner/repo` slugs and upstream documentation
+# links that name no private context. They are skipped by the DIFF scan only;
+# PR text, branch names, and commit messages stay strict everywhere.
+_FIXTURE_PATH = re.compile(
+    r"^(?:tests/|skills/[^/]+/tests/|skills/[^/]+/evals/|maintainers/[^/]+/tests/)"
+)
+_HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(?P<start>\d+)(?:,\d+)? @@")
+
+
+def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+    """Run a tool; a missing binary is a fail-closed error, not a read error."""
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, check=False)
+    except FileNotFoundError:
+        raise RuntimeError(f"{cmd[0]} not installed") from None
+
+
 def _git_output(args: list[str]) -> str:
-    result = subprocess.run(
-        ["git", *args], capture_output=True, text=True, check=False
-    )
+    result = _run(["git", "-c", "core.quotePath=false", *args])
     if result.returncode:
-        raise RuntimeError(f"git {' '.join(args[:2])} failed")
+        # Only the subcommand: arguments can carry refs or paths.
+        raise RuntimeError(f"git {args[0]} failed")
     return result.stdout
 
 
-def _verify_public_target(target: str) -> None:
-    result = subprocess.run(
+def _verify_public_target(target: str, label: str = "destination repository") -> None:
+    result = _run(
         [
             "gh", "repo", "view", target, "--json", "visibility",
             "--jq", ".visibility",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
+        ]
     )
     if result.returncode:
-        raise RuntimeError("could not verify destination repository visibility")
+        raise RuntimeError(f"could not verify {label} visibility")
     if result.stdout.strip().upper() != "PUBLIC":
-        raise RuntimeError("destination repository is not verified PUBLIC")
+        raise RuntimeError(f"{label} is not verified PUBLIC")
 
 
-def _added_diff(base: str) -> str:
-    """Return only added content, excluding diff metadata and removed lines."""
-    diff = _git_output(["diff", "--unified=0", f"{base}...HEAD", "--"])
-    return "\n".join(
-        line[1:]
-        for line in diff.splitlines()
-        if line.startswith("+") and not line.startswith("+++")
-    )
+def _header_path(line: str) -> str | None:
+    """Return the new-file path from a `+++ ` header, or None for /dev/null."""
+    value = line[len("+++ "):].rstrip("\t")
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        value = value[1:-1]
+    if value == "/dev/null":
+        return None
+    return value[2:] if value.startswith("b/") else value
+
+
+def _added_lines(diff: str) -> list[tuple[str | None, int, str]]:
+    """Return (path, new-file line, text) for every added line in a patch.
+
+    A `+++ ` line is a file header only in header position (after `diff --git`
+    and before the first hunk). Inside a hunk it is added content that begins
+    with `++`, and is scanned like any other added line.
+    """
+    added: list[tuple[str | None, int, str]] = []
+    path: str | None = None
+    in_header = False
+    line_number = 0
+    for line in diff.splitlines():
+        if line.startswith("diff --git "):
+            in_header, path = True, None
+            continue
+        if in_header:
+            if line.startswith("+++ "):
+                path = _header_path(line)
+                continue
+            hunk = _HUNK.match(line)
+            if hunk:
+                in_header = False
+                line_number = int(hunk.group("start"))
+            continue
+        hunk = _HUNK.match(line)
+        if hunk:
+            line_number = int(hunk.group("start"))
+        elif line.startswith("+"):
+            added.append((path, line_number, line[1:]))
+            line_number += 1
+        elif line.startswith(" "):
+            line_number += 1
+    return added
+
+
+def _scan_diff(diff: str, *, label: str, target: str, allowed: frozenset[str]) -> list[Finding]:
+    findings: list[Finding] = []
+    for path, line_number, text in _added_lines(diff):
+        if path is not None and _FIXTURE_PATH.match(path):
+            continue
+        if scan_text(text, source="", target=target, allowed=allowed):
+            findings.append(Finding(f"{label}{path or '?'}", line_number))
+    return findings
+
+
+_DIFF_FLAGS = ["--unified=0", "--no-color", "--no-ext-diff", "--no-renames"]
+
+
+def _scan_history(base: str, *, target: str, allowed: frozenset[str]) -> list[Finding]:
+    """Scan every outgoing commit separately, then the net diff.
+
+    Pushing a branch publishes every commit on it, so a reference added in
+    one commit and removed in a later one is still published.
+    """
+    findings: list[Finding] = []
+    commits = _git_output(["rev-list", "--reverse", f"{base}..HEAD"]).split()
+    for sha in commits:
+        short = _git_output(["rev-parse", "--short", sha]).strip()
+        message = _git_output(["log", "-1", "--format=%B", sha])
+        findings.extend(
+            scan_text(message, source=f"commit {short} message", target=target, allowed=allowed)
+        )
+        parents = _git_output(["rev-list", "--parents", "-n", "1", sha]).split()[1:]
+        if len(parents) > 1:
+            continue  # merge: its content is covered by its parents and the net diff
+        patch = _git_output(["show", "--format=", *_DIFF_FLAGS, sha, "--"])
+        findings.extend(
+            _scan_diff(patch, label=f"commit {short} ", target=target, allowed=allowed)
+        )
+    net = _git_output(["diff", *_DIFF_FLAGS, f"{base}...HEAD", "--"])
+    findings.extend(_scan_diff(net, label="added diff:", target=target, allowed=allowed))
+    return findings
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -146,42 +234,22 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="exact outbound text to scan; repeat for title, body, or readback",
     )
     parser.add_argument(
-        "--base", help="base ref used to scan commit messages and added diff lines"
+        "--base",
+        help="base ref: scans each outgoing commit's message and added lines, "
+        "the net added diff, and the current branch name",
+    )
+    parser.add_argument(
+        "--branch-name",
+        help="branch name to scan (default with --base: the checked-out branch)",
+    )
+    parser.add_argument(
+        "--allow", action="append", default=[], metavar="OWNER/REPO",
+        help="explicitly approved cross-repository reference; must verify PUBLIC",
     )
     return parser.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = _parse_args(argv)
-    if not _TARGET.fullmatch(args.target):
-        print("privacy preflight error: --target must be owner/repo", file=sys.stderr)
-        return 2
-    if not args.text_file and not args.base:
-        print("privacy preflight error: provide --text-file or --base", file=sys.stderr)
-        return 2
-
-    findings: list[Finding] = []
-    try:
-        _verify_public_target(args.target)
-        for index, path in enumerate(args.text_file, start=1):
-            findings.extend(
-                scan_text(
-                    path.read_text(encoding="utf-8"),
-                    source=f"text file {index}",
-                    target=args.target,
-                )
-            )
-        if args.base:
-            messages = _git_output(["log", "--format=%B", f"{args.base}..HEAD"])
-            findings.extend(scan_text(messages, source="commit messages", target=args.target))
-            findings.extend(scan_text(_added_diff(args.base), source="added diff", target=args.target))
-    except (OSError, UnicodeError):
-        print("privacy preflight error: could not read an input file", file=sys.stderr)
-        return 2
-    except RuntimeError as exc:
-        print(f"privacy preflight error: {exc}", file=sys.stderr)
-        return 2
-
+def _report(findings: list[Finding]) -> int:
     if findings:
         print(
             "privacy preflight blocked: cross-repository GitHub reference(s) found",
@@ -191,9 +259,60 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {finding.source}:{finding.line}", file=sys.stderr)
         print("blocked identifiers are intentionally not echoed", file=sys.stderr)
         return 1
-
     print("privacy preflight passed")
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
+    if not _TARGET.fullmatch(args.target):
+        print("privacy preflight error: --target must be owner/repo", file=sys.stderr)
+        return 2
+    for index, repo in enumerate(args.allow, start=1):
+        if not _TARGET.fullmatch(repo):
+            print(
+                f"privacy preflight error: --allow {index} must be owner/repo",
+                file=sys.stderr,
+            )
+            return 2
+    if not args.text_file and not args.base and args.branch_name is None:
+        print(
+            "privacy preflight error: provide --text-file, --base, or --branch-name",
+            file=sys.stderr,
+        )
+        return 2
+
+    findings: list[Finding] = []
+    try:
+        _verify_public_target(args.target)
+        for index, repo in enumerate(args.allow, start=1):
+            _verify_public_target(repo, label=f"allowed repository {index}")
+        allowed = frozenset(_canonical(repo) for repo in args.allow)
+        for index, path in enumerate(args.text_file, start=1):
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                # The exception text carries the path; never print it.
+                raise RuntimeError(f"could not read text file {index}") from None
+            findings.extend(
+                scan_text(text, source=f"text file {index}", target=args.target, allowed=allowed)
+            )
+        branch = args.branch_name
+        if branch is None and args.base:
+            branch = _git_output(["rev-parse", "--abbrev-ref", "HEAD"]).strip()
+            if branch == "HEAD":  # detached: no branch name is pushed
+                branch = None
+        if branch:
+            findings.extend(
+                scan_text(branch, source="branch name", target=args.target, allowed=allowed)
+            )
+        if args.base:
+            findings.extend(_scan_history(args.base, target=args.target, allowed=allowed))
+    except RuntimeError as exc:
+        print(f"privacy preflight error: {exc}", file=sys.stderr)
+        return 2
+
+    return _report(findings)
 
 
 if __name__ == "__main__":

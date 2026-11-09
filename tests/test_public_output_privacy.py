@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
 from pathlib import Path
 
@@ -186,30 +187,314 @@ def test_unverified_visibility_fails_closed(capsys, monkeypatch, tmp_path):
     assert "not verified PUBLIC" in capsys.readouterr().err
 
 
-def test_base_scans_commit_messages_and_only_added_diff(monkeypatch, tmp_path):
+def _completed(stdout="", returncode=0):
+    return subprocess.CompletedProcess([], returncode, stdout=stdout, stderr="")
+
+
+def _neutral_payload(tmp_path):
     payload = tmp_path / "body.md"
     payload.write_text("neutral payload\n", encoding="utf-8")
+    return payload
+
+
+@pytest.mark.parametrize(
+    ("stdout", "returncode", "expected"),
+    [
+        ("PUBLIC\n", 0, 0),
+        ("PRIVATE\n", 0, 2),
+        ("INTERNAL\n", 0, 2),
+        ("", 0, 2),
+        ("PUBLIC\n", 1, 2),
+    ],
+)
+def test_visibility_check_parses_gh_output(
+    monkeypatch, tmp_path, stdout, returncode, expected
+):
+    calls = []
+
+    def fake_run(cmd, **_kwargs):
+        calls.append(cmd)
+        return _completed(stdout, returncode)
+
+    monkeypatch.setattr(checker.subprocess, "run", fake_run)
+    assert checker.main(
+        ["--target", _PUBLIC_TARGET, "--text-file", str(_neutral_payload(tmp_path))]
+    ) == expected
+    assert calls[0][:4] == ["gh", "repo", "view", _PUBLIC_TARGET]
+
+
+def test_missing_gh_reports_gh_not_installed(capsys, monkeypatch, tmp_path):
+    def missing(cmd, **_kwargs):
+        raise FileNotFoundError(2, "No such file or directory", cmd[0])
+
+    monkeypatch.setattr(checker.subprocess, "run", missing)
+    assert checker.main(
+        ["--target", _PUBLIC_TARGET, "--text-file", str(_neutral_payload(tmp_path))]
+    ) == 2
+    stderr = capsys.readouterr().err
+    assert "gh not installed" in stderr
+    assert "could not read an input file" not in stderr
+
+
+def test_missing_git_reports_git_not_installed(capsys, monkeypatch):
     monkeypatch.setattr(checker, "_verify_public_target", lambda _target: None)
 
-    def fake_git(args):
-        if args[0] == "log":
-            return "neutral commit message\n"
-        return "\n".join(
-            [
-                "--- a/file.md",
-                "+++ b/file.md",
-                "-" + "/".join(("old-owner", "old-project#1")),
-                "+" + "/".join(("example", "internal-project#91")),
-            ]
-        )
+    def missing(cmd, **_kwargs):
+        raise FileNotFoundError(2, "No such file or directory", cmd[0])
 
-    monkeypatch.setattr(checker, "_git_output", fake_git)
+    monkeypatch.setattr(checker.subprocess, "run", missing)
+    assert checker.main(["--target", _PUBLIC_TARGET, "--base", "origin/main"]) == 2
+    stderr = capsys.readouterr().err
+    assert "git not installed" in stderr
+    assert "could not read an input file" not in stderr
+
+
+def test_unreadable_input_file_is_not_echoed(capsys, monkeypatch, tmp_path):
+    monkeypatch.setattr(checker, "_verify_public_target", lambda _target: None)
+    sensitive_name = "internal-project-body.md"
+    assert checker.main(
+        ["--target", _PUBLIC_TARGET, "--text-file", str(tmp_path / sensitive_name)]
+    ) == 2
+    stderr = capsys.readouterr().err
+    assert "could not read text file 1" in stderr
+    assert sensitive_name not in stderr
+    assert str(tmp_path) not in stderr
+
+
+def test_allowed_public_repository_passes(monkeypatch, tmp_path):
+    payload = tmp_path / "body.md"
+    payload.write_text(f"Upstream: https://github.com/{_FOREIGN}\n", encoding="utf-8")
+    viewed = []
+
+    def fake_run(cmd, **_kwargs):
+        viewed.append(cmd[3])
+        return _completed("PUBLIC\n")
+
+    monkeypatch.setattr(checker.subprocess, "run", fake_run)
     assert checker.main(
         [
             "--target", _PUBLIC_TARGET, "--text-file", str(payload),
-            "--base", "origin/main",
+            "--allow", _FOREIGN,
         ]
-    ) == 1
+    ) == 0
+    assert viewed == [_PUBLIC_TARGET, _FOREIGN]
+
+
+def test_allowed_private_repository_fails_closed(capsys, monkeypatch, tmp_path):
+    payload = tmp_path / "body.md"
+    payload.write_text(f"Upstream: https://github.com/{_FOREIGN}\n", encoding="utf-8")
+
+    def fake_run(cmd, **_kwargs):
+        return _completed("PUBLIC\n" if cmd[3] == _PUBLIC_TARGET else "PRIVATE\n")
+
+    monkeypatch.setattr(checker.subprocess, "run", fake_run)
+    assert checker.main(
+        [
+            "--target", _PUBLIC_TARGET, "--text-file", str(payload),
+            "--allow", _FOREIGN,
+        ]
+    ) == 2
+    stderr = capsys.readouterr().err
+    assert "allowed repository 1 is not verified PUBLIC" in stderr
+    assert _FOREIGN not in stderr
+
+
+def test_allow_only_covers_the_named_repository(monkeypatch):
+    other = "/".join(("third-owner", "another-project"))
+    monkeypatch.setattr(checker, "_verify_public_target", lambda _target: None)
+    findings = checker.scan_text(
+        f"https://github.com/{_FOREIGN}\nhttps://github.com/{other}\n",
+        source="payload",
+        target=_PUBLIC_TARGET,
+        allowed=frozenset({_FOREIGN}),
+    )
+    assert [finding.line for finding in findings] == [2]
+
+
+def test_added_lines_parser_tracks_paths_hunks_and_double_plus_content():
+    diff = "\n".join(
+        [
+            "diff --git a/notes.md b/notes.md",
+            "index 1111111..2222222 100644",
+            "--- a/notes.md",
+            "+++ b/notes.md",
+            "@@ -3,0 +4,2 @@ heading",
+            "+++literal content",
+            "+--more content",
+            "@@ -9 +10,0 @@",
+            "-removed",
+            "diff --git a/other.md b/other.md",
+            "new file mode 100644",
+            "--- /dev/null",
+            "+++ b/other.md",
+            "@@ -0,0 +1 @@",
+            "+first",
+            "\\ No newline at end of file",
+        ]
+    )
+    assert checker._added_lines(diff) == [
+        ("notes.md", 4, "++literal content"),
+        ("notes.md", 5, "--more content"),
+        ("other.md", 1, "first"),
+    ]
+
+
+# --- real temporary git repositories ------------------------------------------------
+
+
+@pytest.fixture
+def repo(tmp_path, monkeypatch):
+    """An isolated git repository the checker runs inside.
+
+    Isolated from the caller's git environment (pre-commit hooks and worktrees
+    export GIT_DIR / GIT_WORK_TREE / GIT_INDEX_FILE) and from global config.
+    """
+    for var in (
+        "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_PREFIX",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(home / ".gitconfig"))
+    root = tmp_path / "repo"
+    root.mkdir()
+    monkeypatch.chdir(root)
+    _git("init", "-q", "-b", "main")
+    _commit("base", {"README.md": "neutral\n"})
+    monkeypatch.setattr(checker, "_verify_public_target", lambda _target: None)
+    return root
+
+
+def _git(*args):
+    return subprocess.run(
+        [
+            "git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+            "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", *args,
+        ],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+
+def _commit(message, files):
+    for name, content in files.items():
+        path = Path(name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if content is None:
+            path.unlink()
+        else:
+            path.write_text(content, encoding="utf-8")
+    _git("add", "-A")
+    _git("commit", "-q", "--allow-empty", "-m", message)
+    return _git("rev-parse", "--short", "HEAD")
+
+
+def _run_base(capsys, *extra):
+    code = checker.main(["--target", _PUBLIC_TARGET, "--base", "main", *extra])
+    return code, capsys.readouterr().err
+
+
+def test_added_line_starting_with_plus_plus_is_scanned(repo, capsys):
+    _git("checkout", "-q", "-b", "feature")
+    sha = _commit("add notes", {"notes.md": f"++https://github.com/{_FOREIGN}/pull/91\n"})
+    code, stderr = _run_base(capsys)
+    assert code == 1
+    assert f"commit {sha} notes.md:1" in stderr
+    assert "added diff:notes.md:1" in stderr
+    assert _FOREIGN not in stderr
+
+
+def test_reference_added_then_removed_in_a_later_commit_is_blocked(repo, capsys):
+    _git("checkout", "-q", "-b", "feature")
+    leaked = _commit("add notes", {"notes.md": f"see {_FOREIGN}#91\n"})
+    _commit("tidy notes", {"notes.md": "see the upstream report\n"})
+    code, stderr = _run_base(capsys)
+    assert code == 1
+    assert f"commit {leaked} notes.md:1" in stderr
+    assert "added diff:" not in stderr
+
+
+def test_commit_message_reference_is_blocked_per_commit(repo, capsys):
+    _git("checkout", "-q", "-b", "feature")
+    sha = _commit(f"fix parser\n\nPorted from https://github.com/{_FOREIGN}.", {"a.md": "x\n"})
+    code, stderr = _run_base(capsys)
+    assert code == 1
+    assert f"commit {sha} message:3" in stderr
+    assert _FOREIGN not in stderr
+
+
+def test_removed_only_reference_passes(repo, capsys):
+    _commit("seed", {"old.md": f"see https://github.com/{_FOREIGN}\n"})
+    _git("checkout", "-q", "-b", "feature")
+    _commit("drop old link", {"old.md": None})
+    code, stderr = _run_base(capsys)
+    assert (code, stderr) == (0, "")
+
+
+def test_unknown_base_fails_closed(repo, capsys):
+    code, stderr = checker.main(
+        ["--target", _PUBLIC_TARGET, "--base", "no-such-ref"]
+    ), capsys.readouterr().err
+    assert code == 2
+    assert "privacy preflight error: git" in stderr
+
+
+def test_git_output_nonzero_exit_fails_closed(monkeypatch, capsys):
+    monkeypatch.setattr(checker, "_verify_public_target", lambda _target: None)
+    monkeypatch.setattr(
+        checker.subprocess, "run", lambda cmd, **_kwargs: _completed("", 128)
+    )
+    assert checker.main(["--target", _PUBLIC_TARGET, "--base", "main"]) == 2
+    assert "privacy preflight error: git" in capsys.readouterr().err
+
+
+def test_fixture_paths_are_excluded_from_the_diff_scan_only(repo, capsys):
+    _git("checkout", "-q", "-b", "feature")
+    link = f"https://github.com/{_FOREIGN}\n"
+    _commit(
+        "add fixtures",
+        {
+            "tests/test_x.py": link,
+            "skills/demo/tests/test_y.py": link,
+            "skills/demo/evals/case.json": link,
+            "maintainers/demo/tests/test_z.py": link,
+        },
+    )
+    assert _run_base(capsys) == (0, "")
+    sha = _commit("add doc", {"docs/guide.md": link})
+    code, stderr = _run_base(capsys)
+    assert code == 1
+    assert f"commit {sha} docs/guide.md:1" in stderr
+    assert "tests/" not in stderr and "evals/" not in stderr
+
+
+def test_fixture_exclusion_does_not_cover_commit_messages(repo, capsys):
+    _git("checkout", "-q", "-b", "feature")
+    sha = _commit(f"add fixture for {_FOREIGN}#9", {"tests/test_x.py": "x = 1\n"})
+    code, stderr = _run_base(capsys)
+    assert code == 1
+    assert f"commit {sha} message:1" in stderr
+
+
+def test_branch_name_is_scanned_automatically_with_base(repo, capsys):
+    _git("checkout", "-q", "-b", "port/" + "/".join(("example", "internal-project")))
+    _commit("neutral", {"a.md": "x\n"})
+    code, stderr = _run_base(capsys)
+    assert code == 1
+    assert "branch name:1" in stderr
+
+
+def test_explicit_branch_name_overrides_detection(repo, capsys):
+    _git("checkout", "-q", "-b", "feature")
+    _commit("neutral", {"a.md": "x\n"})
+    assert _run_base(capsys, "--branch-name", "policy/privacy-gate") == (0, "")
+    code, stderr = _run_base(
+        capsys, "--branch-name", "port/" + "/".join(("example", "internal-project"))
+    )
+    assert code == 1
+    assert "branch name:1" in stderr
 
 
 def test_shared_agent_instructions_require_the_gate_and_readback():
