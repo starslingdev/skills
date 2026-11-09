@@ -20,7 +20,12 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
-BLOCKING_ALLOWLIST = frozenset()
+# Blocking is deliberately narrower than reporting. A pattern enters this set
+# only after its detector identifies stable, instance-granular occurrences, so
+# pre-existing debt and renamed jobs cannot make an unrelated PR red. OPT23 is
+# the first such policy: newly forcing a matrix to max-parallel: 1 serializes
+# work that GitHub Actions would otherwise run concurrently.
+BLOCKING_ALLOWLIST = frozenset({"OPT23"})
 SCAN_TIMEOUT_SECONDS = 60
 VALID_SEVERITIES = frozenset({"HIGH", "MEDIUM", "LOW"})
 FAIL_ON_NEW_GAP = frozenset({

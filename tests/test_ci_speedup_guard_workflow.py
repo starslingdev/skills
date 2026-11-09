@@ -93,6 +93,16 @@ def test_scan_timeout_contains_two_engine_timeouts(workflow):
     assert workflow["jobs"]["scan"]["timeout-minutes"] == 10
 
 
+def test_repository_policy_has_a_real_blocking_rule():
+    guard_path = REPO / ".github" / "scripts" / "ci_speedup_guard.py"
+    spec = importlib.util.spec_from_file_location("guard_policy_probe", guard_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    assert module.BLOCKING_ALLOWLIST == frozenset({"OPT23"})
+
+
 def test_codeowners_routes_the_workflow():
     text = (REPO / ".github" / "CODEOWNERS").read_text(encoding="utf-8")
     assert "/.github/" in text

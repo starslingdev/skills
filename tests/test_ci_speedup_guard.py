@@ -52,8 +52,9 @@ def trees(tmp_path: Path, base_text: str, merge_text: str):
     return base, merge
 
 
-def run(guard, base: Path, merge: Path, capsys, monkeypatch, allow=()):
-    monkeypatch.setattr(guard, "BLOCKING_ALLOWLIST", frozenset(allow))
+def run(guard, base: Path, merge: Path, capsys, monkeypatch, allow=None):
+    if allow is not None:
+        monkeypatch.setattr(guard, "BLOCKING_ALLOWLIST", frozenset(allow))
     code = guard.main(["--base", str(base), "--merge", str(merge),
                        "--default-branch", "main"])
     captured = capsys.readouterr()
@@ -87,9 +88,28 @@ def test_new_allowlisted_instance_is_policy_block_not_operational_failure(
     assert "count 1 -> 2" in output
 
 
-def test_new_non_allowlisted_finding_warns(guard, tmp_path, capsys, monkeypatch):
+def test_production_policy_blocks_a_new_serialized_matrix(
+        guard, tmp_path, capsys, monkeypatch):
     base, merge = trees(tmp_path, workflow(), workflow(opt23=True))
     code, output = run(guard, base, merge, capsys, monkeypatch)
+    assert guard.BLOCKING_ALLOWLIST == frozenset({"OPT23"})
+    assert code == 1
+    assert "ci-speedup-guard blocked: OPT23 -" in output
+    assert "count 0 -> 1" in output
+
+
+def test_production_policy_keeps_preexisting_serialized_matrix_green(
+        guard, tmp_path, capsys, monkeypatch):
+    base, merge = trees(tmp_path, workflow(opt23=True), workflow(opt23=True))
+    code, output = run(guard, base, merge, capsys, monkeypatch)
+    assert code == 0
+    assert "Pass" in output
+    assert "blocked:" not in output
+
+
+def test_new_non_allowlisted_finding_warns(guard, tmp_path, capsys, monkeypatch):
+    base, merge = trees(tmp_path, workflow(), workflow(opt23=True))
+    code, output = run(guard, base, merge, capsys, monkeypatch, allow=())
     assert code == 0
     assert "ci-speedup-guard warning: OPT23 -" in output
 
