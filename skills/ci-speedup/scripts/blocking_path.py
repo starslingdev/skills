@@ -24,6 +24,7 @@ raw log (`--log`), so level-2 and the drill stay on one coherent run. Without a
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import hashlib
 import json
 import re
@@ -3208,6 +3209,8 @@ def _parse_log(text: str,
         index = 0
         while index < len(tail):
             token = tail[index]
+            if token == "--":
+                break
             option, separator, inline = token.partition("=")
             if option in {"-p", "--package"}:
                 if separator:
@@ -3219,8 +3222,13 @@ def _parse_log(text: str,
                     return None
                 if value:
                     selected.add(value.split("@", 1)[0])
+            elif token.startswith("-p") and not token.startswith("--"):
+                selected.add(token[2:].split("@", 1)[0])
             index += 1
         return selected or None
+
+    def _cargo_package_selected(name: str, selectors: set[str]) -> bool:
+        return any(fnmatch.fnmatchcase(name, selector) for selector in selectors)
 
     def _cargo_group(group: tuple[str, list[str]]) -> dict[str, Any] | None:
         command, group_lines = group
@@ -3271,8 +3279,8 @@ def _parse_log(text: str,
             earlier_selected = earlier["selected_packages"] or set()
             later_crates = {
                 key for key in later["crates"]
-                if (key[0] not in later["selected_packages"]
-                    or key[0] in earlier_selected)
+                if (not _cargo_package_selected(key[0], later["selected_packages"])
+                    or _cargo_package_selected(key[0], earlier_selected))
             }
             repeated = sorted(set(earlier["crates"]) & later_crates)
             if (not repeated or not later_crates <= set(earlier["crates"])
