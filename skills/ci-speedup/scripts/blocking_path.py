@@ -3110,6 +3110,161 @@ def _parse_log(text: str,
                 "magnitude": None, "evidence": [l.strip() for l in uncached[:2]],
                 "search": ["eslint", "--cache", ".eslintcache"]}
 
+    # --- G2: the same local Cargo crate is compiled in two job steps ----------
+    # Cargo's group-delimited step logs let us distinguish a repeated compile
+    # from multiple crates within one invocation. Only paths with a recognizable
+    # GitHub Actions checkout shape count; registry/git and arbitrary machine-local
+    # dependencies are excluded. Both steps must finish the same profile and carry
+    # the same observable compilation context. The SECOND step's Finished time is
+    # an upper bound: it can include linking and other work beside the repeated crate.
+    cargo_groups = [
+        (command, lines[start + 1:end])
+        for command, start, end in _log_step_sections(lines)
+    ]
+
+    def _cargo_repo_path(path: str) -> bool:
+        normalized = path.replace("\\", "/")
+        if normalized.startswith(("./", "../", "/repo/", "/workspace/",
+                                  "/github/workspace/")):
+            return True
+        return bool(re.search(
+            r"/(?:work|_work|a)/([^/]+)/\1(?:/|$)", normalized, re.IGNORECASE))
+
+    def _cargo_command_context(command: str) -> tuple[str, ...] | None:
+        """Output-affecting Cargo context visible in one simple step command.
+
+        Package selection is deliberately excluded: two package-specific test
+        commands are the common shape whose shared local dependency should reuse.
+        Every other observable artifact axis fails closed when it differs.
+        """
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            return None
+        if any(token in {";", "&&", "||", "|"} for token in tokens):
+            return None
+        cargo_index = next((index for index, token in enumerate(tokens)
+                            if token == "cargo" or token.endswith("/cargo")), None)
+        if cargo_index is None:
+            return None
+        prefix = tokens[:cargo_index]
+        if any(token not in {"env", "command"} and "=" not in token
+               for token in prefix):
+            return None
+        environment = sorted(
+            token for token in prefix
+            if re.match(
+                r"^(?:CARGO_TARGET_DIR|CARGO_BUILD_TARGET|RUSTFLAGS|"
+                r"CARGO_ENCODED_RUSTFLAGS|RUSTC|RUSTC_WRAPPER|"
+                r"RUSTC_WORKSPACE_WRAPPER)=", token))
+        tail = tokens[cargo_index + 1:]
+        toolchain = tail.pop(0) if tail and tail[0].startswith("+") else ""
+        if not tail or tail[0] not in {"test", "build", "check", "clippy"}:
+            return None
+        subcommand = tail.pop(0)
+        valued = {
+            "--target", "--target-dir", "--features", "--profile", "--test",
+            "--bench", "--bin", "--example", "--config", "--manifest-path",
+        }
+        switches = {
+            "--all-features", "--no-default-features", "--lib", "--bins",
+            "--tests", "--benches", "--examples", "--all-targets",
+        }
+        context: list[str] = [f"toolchain={toolchain}", f"subcommand={subcommand}",
+                              *environment]
+        index = 0
+        while index < len(tail):
+            token = tail[index]
+            option, separator, inline = token.partition("=")
+            if option in valued:
+                if separator:
+                    value = inline
+                elif index + 1 < len(tail):
+                    index += 1
+                    value = tail[index]
+                else:
+                    return None
+                if option == "--features":
+                    value = ",".join(sorted(part for part in re.split(r"[,\s]+", value)
+                                             if part))
+                context.append(f"{option}={value}")
+            elif token in switches:
+                context.append(token)
+            index += 1
+        return tuple(sorted(context))
+
+    def _cargo_group(group: tuple[str, list[str]]) -> dict[str, Any] | None:
+        command, group_lines = group
+        context = _cargo_command_context(command)
+        if context is None:
+            return None
+        crates: dict[tuple[str, str, str], str] = {}
+        for group_line in group_lines:
+            match = re.search(
+                r"\bCompiling\s+(\S+)\s+v(\S+)\s+\(([^)]+)\)", group_line)
+            if match is None:
+                continue
+            path = match.group(3)
+            if (not _cargo_repo_path(path)
+                    or re.search(r"(?:\.cargo/registry|registry/src|/git/checkouts/)",
+                                 path, re.IGNORECASE)):
+                continue
+            key = (match.group(1), match.group(2), path)
+            crates[key] = group_line.strip()
+        finished = next((
+            match for group_line in group_lines
+            if (match := re.search(
+                r"Finished\s+(?:`(?P<quoted>[^`]+)`\s+profile|"
+                r"(?P<plain>dev|test|release|bench))\s+\[[^\]]+\]\s+"
+                r"target\(s\)\s+in\s+(?P<duration>"
+                r"(?:\d+(?:\.\d+)?\s*[hms]\s*)+)",
+                group_line, re.IGNORECASE))
+        ), None)
+        if not crates or finished is None:
+            return None
+        parts = re.findall(r"(\d+(?:\.\d+)?)\s*([hms])",
+                           finished.group("duration"), re.IGNORECASE)
+        seconds = sum(float(value) * {"h": 3600, "m": 60, "s": 1}[unit.casefold()]
+                      for value, unit in parts)
+        return {"command": command, "context": context, "crates": crates,
+                "profile": (finished.group("quoted") or finished.group("plain")).casefold(),
+                "seconds": seconds,
+                "finished": next(line.strip() for line in group_lines
+                                 if finished.group(0) in line)}
+
+    compiled = [row for group in cargo_groups if (row := _cargo_group(group)) is not None]
+    for later_index, later in enumerate(compiled[1:], 1):
+        for earlier in compiled[:later_index]:
+            repeated = sorted(set(earlier["crates"]) & set(later["crates"]))
+            if (not repeated or not set(later["crates"]) <= set(earlier["crates"])
+                    or earlier["profile"] != later["profile"]
+                    or earlier["context"] != later["context"]):
+                continue
+            names = [key[0] for key in repeated]
+            return {
+                "fix_key": "cargo-double-compile",
+                "unit_label": (f"{len(repeated)} local Cargo crate(s) compile again in a "
+                               f"second `{later['profile']}`-profile step"),
+                "magnitude": {"label": "second Cargo step wall (upper bound)",
+                              "value": round(later["seconds"], 2), "unit": "s"},
+                "deeper": [{
+                    "rows": [(earlier["command"], earlier["seconds"], None),
+                             (later["command"], later["seconds"], None)],
+                    "blocker_note": (f"the second step recompiles {', '.join(names[:3])} "
+                                     "with the same observable Cargo context; its full "
+                                     "wall is only an upper bound"),
+                    "pct_of": "sum",
+                }],
+                "evidence": [
+                    f"Run {earlier['command']}",
+                    earlier["crates"][repeated[0]],
+                    f"Run {later['command']}",
+                    later["crates"][repeated[0]],
+                    later["finished"],
+                ],
+                "search": ["Compiling", "Finished", "--package", "--features"],
+            }
+
     # --- H: long serial `cargo test` suite where a few test binaries dominate -----
     # The standard Rust libtest harness (`cargo test`, NOT cargo-nextest) runs each test
     # BINARY one after another and prints, per binary, a `Running <name> (target/…/deps/
@@ -4159,6 +4314,30 @@ _FIX_META: dict[str, dict[str, Any]] = {
                    "re-lint changed files and the updated cache "
                    "is saved. Verify a deliberately-introduced lint error still fails CI "
                    "(the cache must not hide it) and re-measure the lint step.",
+    },
+    "cargo-double-compile": {
+        "cause": "Two separate Cargo steps compile the same checked-out crate with the "
+                 "same profile and observable artifact context. The second step's "
+                 "measured `Finished` wall is an upper bound on the repeated compilation, "
+                 "not a claim that every operation in that step is removable.",
+        "look": "`{wf}` and every Cargo command in this job — compare each command's "
+                "`-p`/`--package`, `--features`, target and profile selection, then trace "
+                "why the second command does not reuse the first command's artifacts.",
+        "constraints": "Keep the exact test and build targets, feature combinations and "
+                       "failure propagation. Do not merge commands whose profiles or target "
+                       "triples differ, and do not remove a compile until the later test "
+                       "target demonstrably reuses the intended artifact.",
+        "docs": ["Cargo build cache — shared target directory and configuration: "
+                 "https://doc.rust-lang.org/cargo/reference/build-cache.html",
+                 "Cargo package selection: "
+                 "https://doc.rust-lang.org/cargo/reference/pkgid-spec.html"],
+        "deliver": "Preserve every intended package, feature and test target. Where the "
+                   "commands are meant to share artifacts, combine their `-p`/`--package` "
+                   "selections in one Cargo invocation or make their `--features`, target "
+                   "directory, toolchain and compiler flags consistent. If distinct feature "
+                   "or platform coverage is intentional, keep both builds. Confirm every "
+                   "original test target still builds and runs, keep the full test count and "
+                   "failures, and re-measure both steps.",
     },
     "cargo-test-shard": {
         "cause": "The job runs the whole test suite through the standard `cargo test` "
@@ -6475,9 +6654,9 @@ def _cache_health_block(cache_dist: dict[str, Any] | None) -> list[str]:
 # measured). Mirrors the `_apply_cache_dist` precedent (reframe a leaf off a re-derivable
 # measured fact); verify_report re-derives the SAME category agreement from findings.json.
 
-# fix_key -> the `collect_runs._step_category` bin the leaf's fix addresses. Kept coupled to
-# the engine taxonomy AND verify_report's mirror by test_verify_report_self.
-_LEAF_STEP_CATEGORY: dict[str, str] = {
+# fix_key -> the `collect_runs._step_category` bin(s) the leaf's fix addresses. Kept
+# coupled to the engine taxonomy AND verify_report's mirror by test_verify_report_self.
+_LEAF_STEP_CATEGORY: dict[str, str | frozenset[str]] = {
     "dependency-cache": "install",
     "cache-effective-path-mismatch": "install",
     "prisma-migrate-once": "test",
@@ -6490,6 +6669,7 @@ _LEAF_STEP_CATEGORY: dict[str, str] = {
     "test-loop-serial": "test",
     "vendored-lib-build": "build",
     "emulated-image-compile": "build",
+    "cargo-double-compile": frozenset({"build", "scan", "test"}),
     "cargo-test-shard": "test",
     "benchmark-serial-reruns": "test",
     "android-emulator-shard": "test",
@@ -6530,13 +6710,14 @@ def _offcategory_leaf(leaf: dict[str, Any] | None, pole: dict[str, Any]) -> bool
     if not leaf:
         return False
     fk = str(leaf.get("fix_key", ""))
-    cat = _LEAF_STEP_CATEGORY.get(fk)
-    if cat is None:
+    category = _LEAF_STEP_CATEGORY.get(fk)
+    if category is None:
         return False
+    categories = {category} if isinstance(category, str) else category
     dom_cat = pole.get("dominant_category")
     if not isinstance(dom_cat, str) or not dom_cat:
         return False
-    if cat != dom_cat:
+    if dom_cat not in categories:
         return True
     tok = _LEAF_DOMINANT_STEP_TOKEN.get(fk)
     if tok is not None:
@@ -6591,7 +6772,8 @@ def _offcategory_note_block(leaf: dict[str, Any], pole: dict[str, Any]) -> list[
     dom_step = _fence_safe(str(pole.get("dominant_step") or "the dominant step"))
     dom_cat = str(pole.get("dominant_category") or "")
     fk = str(leaf.get("fix_key", ""))
-    cat = _LEAF_STEP_CATEGORY.get(fk, "")
+    category = _LEAF_STEP_CATEGORY.get(fk, "")
+    cat = category if isinstance(category, str) else "/".join(sorted(category))
     out = [_OFFCATEGORY_MARKER, "",
            "**🔎 Secondary observation — not the measured cause.** A log detector matched "
            f"`{fk}` (a `{cat}` fix) in this job's log, but the pole's measured dominant work "

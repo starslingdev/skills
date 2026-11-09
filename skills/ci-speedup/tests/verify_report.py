@@ -14403,7 +14403,7 @@ def check_structural_step_category_not_payload_binned_as_build(findings_path: Pa
 # ceiling it claims (the pole's dominant_p50) is credited to a category that is not the
 # dominant measured work. The `_VR_LEAF_STEP_CATEGORY` mirror is pinned to the engine map by
 # test_verify_report_self (L7).
-_VR_LEAF_STEP_CATEGORY: dict[str, str] = {
+_VR_LEAF_STEP_CATEGORY: dict[str, str | frozenset[str]] = {
     "dependency-cache": "install",
     "cache-effective-path-mismatch": "install",
     "prisma-migrate-once": "test",
@@ -14416,6 +14416,7 @@ _VR_LEAF_STEP_CATEGORY: dict[str, str] = {
     "test-loop-serial": "test",
     "vendored-lib-build": "build",
     "emulated-image-compile": "build",
+    "cargo-double-compile": frozenset({"build", "scan", "test"}),
     "cargo-test-shard": "test",
     "benchmark-serial-reruns": "test",
     "android-emulator-shard": "test",
@@ -14476,17 +14477,20 @@ def check_detector_leaf_agrees_with_dominant_category(report: str,
         if not m:
             continue
         fk = m.group(1)
-        leaf_cat = _VR_LEAF_STEP_CATEGORY.get(fk)
-        if leaf_cat is None:
+        leaf_category = _VR_LEAF_STEP_CATEGORY.get(fk)
+        if leaf_category is None:
             unknown_cat.append(f"`{wf}` ▸ {check} (fix_key {fk})")
             continue
+        leaf_categories = ({leaf_category} if isinstance(leaf_category, str)
+                           else leaf_category)
         dom_cat = dom_by_pole.get((_wf_base(_strip_line_suffix(wf)), _cmp_name(check)))
         if dom_cat is None:
             unmapped.append(f"`{wf}` ▸ {check}")
             continue
         checked += 1
-        if leaf_cat != dom_cat:
-            bad.append(f"`{wf}` ▸ {check}: crowned `{fk}` is a `{leaf_cat}` fix but the pole's "
+        if dom_cat not in leaf_categories:
+            category_label = "/".join(sorted(leaf_categories))
+            bad.append(f"`{wf}` ▸ {check}: crowned `{fk}` is a `{category_label}` fix but the pole's "
                        f"measured dominant category is `{dom_cat}` — the ceiling is credited to "
                        "non-dominant work")
     # L8: surface every coverage skip in the detail rather than reading clean.
