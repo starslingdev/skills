@@ -1034,7 +1034,9 @@ def _pr_sample_fixture(tmp_path: Path, *, second_page: bool,
                        fail_first_page: bool = False,
                        fail_second_page: bool = False,
                        zero_first_matches: bool = False,
-                       matches_on_third: bool = False) -> Path:
+                       matches_on_third: bool = False,
+                       era_boundary: bool = False,
+                       wide_short_window: bool = False) -> Path:
     """A full collect/render/verify fixture with a sparse first candidate page."""
     fixture = tmp_path / ("pr-sample-paged" if second_page else "pr-sample-exhausted")
     workflows = fixture / "workflows"
@@ -1043,6 +1045,12 @@ def _pr_sample_fixture(tmp_path: Path, *, second_page: bool,
         "name: CI\non: [pull_request]\njobs:\n  gate:\n"
         "    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n",
         encoding="utf-8")
+    if wide_short_window:
+        for number in range(1, 9):
+            (workflows / f"other-{number}.yml").write_text(
+                f"name: Other {number}\non: [pull_request]\njobs:\n  other:\n"
+                "    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n",
+                encoding="utf-8")
 
     def run(i: int) -> dict:
         day = 28 - (i // 24)
@@ -1056,7 +1064,20 @@ def _pr_sample_fixture(tmp_path: Path, *, second_page: bool,
             "created_at": ts, "run_started_at": ts, "updated_at": end,
         }
 
-    first = [run(i) for i in range(100 if second_page else 9)]
+    first = [run(i) for i in range(
+        85 if wide_short_window else (100 if second_page else 9))]
+    other_pages: list[list[dict]] = []
+    if wide_short_window:
+        for number in range(1, 9):
+            page: list[dict] = []
+            for i in range(85):
+                row = run(i)
+                row["id"] += number * 1_000
+                row["head_branch"] = f"other-{number}-{i}"
+                row["head_sha"] = f"other-{number}-sha-{i}"
+                page.append(row)
+            other_pages.append(page)
+    other = [row for page in other_pages for row in page]
     second_count = (100 if third_page
                     else (20 if second_page and zero_first_matches
                           else (12 if second_page else 0)))
@@ -1066,7 +1087,8 @@ def _pr_sample_fixture(tmp_path: Path, *, second_page: bool,
                   else {f"sha-{i}" for i in range(9)})
     if matches_on_third:
         qualifying.update(f"sha-{200 + i}" for i in range(20))
-    elif second_page and not third_page and not fail_second_page:
+    elif (second_page and not third_page and not fail_second_page
+          and not era_boundary):
         qualifying.update(
             f"sha-{100 + i}" for i in range(20 if zero_first_matches else 12))
     checks = {
@@ -1074,7 +1096,7 @@ def _pr_sample_fixture(tmp_path: Path, *, second_page: bool,
             "name": "gate" if row["head_sha"] in qualifying else "optional",
             "started_at": row["created_at"], "completed_at": row["updated_at"],
         }]
-        for row in first + second + third
+        for row in first + second + third + other
     }
     jobs = {
         str(row["id"]): [{
@@ -1091,7 +1113,7 @@ def _pr_sample_fixture(tmp_path: Path, *, second_page: bool,
                 "completed_at": row["updated_at"],
             }],
         }]
-        for row in first + second + third
+        for row in first + second + third + other
     }
     run_pages = [first]
     if second_page:
@@ -1109,9 +1131,19 @@ def _pr_sample_fixture(tmp_path: Path, *, second_page: bool,
             "failed_all_status_pages": (
                 ([1] if fail_first_page else [])
                 + ([2] if fail_second_page else [])),
-        }],
+        }] + ([{
+            "id": 210 + number,
+            "path": f".github/workflows/other-{number}.yml",
+            "name": f"Other {number}",
+            "runs_30d": len(page), "run_pages": [page],
+        } for number, page in enumerate(other_pages, 1)]),
         "jobs": jobs, "checks": checks,
     }
+    if era_boundary:
+        recorded["commits_by_path"] = [{
+            "sha": "current-config",
+            "commit": {"committer": {"date": "2026-01-23T00:00:00Z"}},
+        }]
     (fixture / "responses.json").write_text(
         json.dumps(recorded), encoding="utf-8")
     (fixture / "expected.json").write_text("{}\n", encoding="utf-8")
@@ -1204,6 +1236,26 @@ def test_pr_sample_three_page_cap_is_pinned_through_full_pipeline(
     assert "9 of 20 PRs sampled: page cap" in report
 
 
+def test_pr_sample_selector_limit_is_not_called_exhaustion(
+        monkeypatch, tmp_path):
+    fixture = _pr_sample_fixture(
+        tmp_path, second_page=False, wide_short_window=True)
+    run_root = tmp_path / "run-selector-cap"
+    run_root.mkdir()
+    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
+
+    cp = doc["pr_critical_path"]
+    assert 0 < cp["sampled_pr_count"] < 20
+    assert cp["sample_candidate_selection_limited"] is True, {
+        key: cp.get(key) for key in (
+            "sample_fetched", "sampled_pr_count", "sample_stop_reason",
+            "sample_candidate_pages_exhausted")}
+    assert cp["sample_stop_reason"] == "page_cap"
+    assert cp["sample_candidate_pages_exhausted"] is True
+    assert [c for c in checks if not c.skipped and not c.ok] == []
+    assert "of 20 PRs sampled: page cap" in report
+
+
 def test_pr_sample_page_failure_is_named_through_full_pipeline(
         monkeypatch, tmp_path):
     fixture = _pr_sample_fixture(
@@ -1233,6 +1285,23 @@ def test_pr_sample_initial_page_failure_is_named_through_full_pipeline(
     assert cp["sample_candidate_page_fetch_failures"] == 1
     assert [c for c in checks if not c.skipped and not c.ok] == []
     assert "PRs sampled: fetch failures" in report
+
+
+def test_pr_sample_stops_at_era_boundary_discovered_on_later_page(
+        monkeypatch, tmp_path):
+    fixture = _pr_sample_fixture(
+        tmp_path, second_page=True, third_page=True, era_boundary=True)
+    run_root = tmp_path / "run-later-era-door"
+    run_root.mkdir()
+    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
+
+    cp = doc["pr_critical_path"]
+    assert cp["sampled_pr_count"] == 9
+    assert cp["sample_stop_reason"] == "era_door"
+    assert cp["sample_candidate_era_door"] is True
+    assert cp["sample_complete"] is False
+    assert [c for c in checks if not c.skipped and not c.ok] == []
+    assert "9 of 20 PRs sampled: era door" in report
 
 
 def test_pr_sample_verifier_rejects_doctored_stop_reason(monkeypatch, tmp_path):

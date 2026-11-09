@@ -2104,7 +2104,7 @@ def check_pr_sample_stop_reason(report: str, findings_path: Path | None = None) 
     required = (
         "sample_candidate_pages_fetched", "sample_candidate_page_cap",
         "sample_candidate_pages_exhausted", "sample_candidate_page_fetch_failures",
-        "sample_candidate_era_door",
+        "sample_candidate_era_door", "sample_candidate_selection_limited",
     )
     missing = [key for key in required if key not in cp]
     if missing:
@@ -2122,11 +2122,13 @@ def check_pr_sample_stop_reason(report: str, findings_path: Path | None = None) 
     cap = cp.get("sample_candidate_page_cap")
     exhausted = cp.get("sample_candidate_pages_exhausted")
     era_door = cp.get("sample_candidate_era_door")
+    selection_limited = cp.get("sample_candidate_selection_limited")
     if (not isinstance(failures, int) or failures < 0
             or not isinstance(page_failures, int) or page_failures < 0
             or not isinstance(pages, int) or pages < 1
             or not isinstance(cap, int) or cap < 1
-            or not isinstance(exhausted, bool) or not isinstance(era_door, bool)):
+            or not isinstance(exhausted, bool) or not isinstance(era_door, bool)
+            or not isinstance(selection_limited, bool)):
         return Check(name, False, "candidate-page stop facts are malformed")
     strict_complete = (
         sampled >= target and not cp.get("required_suite_unsatisfiable"))
@@ -2140,7 +2142,7 @@ def check_pr_sample_stop_reason(report: str, findings_path: Path | None = None) 
         expected = "fetch_failures"
     elif era_door:
         expected = "era_door"
-    elif not exhausted and pages >= cap:
+    elif selection_limited or (not exhausted and pages >= cap):
         expected = "page_cap"
     else:
         expected = "candidates_exhausted"

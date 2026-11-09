@@ -4810,7 +4810,7 @@ def _select_repr_shas(
             "target_met" if (len(repr_shas) >= target
                              and not required_suite_unsatisfiable)
             else "fetch_failures" if fetch_failures
-            else "page_cap" if fetched >= max_fetch
+            else "page_cap" if fetched < len(candidates)
             else "candidates_exhausted"),
         # True only when the FINAL sample is the required-suite one; a promoted
         # recency fallback is recency-scoped, so it reads False here.
@@ -4820,6 +4820,12 @@ def _select_repr_shas(
         # external) and were therefore excluded from the per-PR suite test — disclosed so
         # the report can name what was scoped out, never silently treated as satisfied.
         "required_checks_unobservable": required_checks_unobservable,
+        # True only when the selector's own bounded check-run walk left known
+        # candidates unevaluated. Reaching exactly the end of the candidate list
+        # is exhaustion, not a limit hit.
+        "selection_limited": (
+            fetched < len(candidates)
+            and (len(repr_shas) < target or required_suite_unsatisfiable)),
     }
     if required_checks_repo_published:
         # Required statuses the repo posts itself (issue #119): unobservable as check-runs
@@ -4890,6 +4896,8 @@ def _sampling_provenance_fields(sample_diag: dict[str, Any]) -> dict[str, Any]:
         "sample_candidate_page_fetch_failures": sample_diag.get(
             "candidate_page_fetch_failures", 0),
         "sample_candidate_era_door": sample_diag.get("candidate_era_door", False),
+        "sample_candidate_selection_limited": sample_diag.get(
+            "selection_limited", False),
         "sample_fetch_failures": sample_diag["fetch_failures"],
         "sample_fetched": sample_diag["fetched"],
         "required_suite_scoped": sample_diag["required_suite_scoped"],
@@ -28105,6 +28113,11 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # can re-derive that no drilled pole blends eras. Empty when no workflow straddled
     # (the byte-identical no-op case).
     config_era_facts: list[dict[str, Any]] = []
+    # Keep the last-change boundary even when the shallow sample is entirely on
+    # its current side. A later candidate page can cross that boundary and must
+    # stop there instead of introducing retired workflow timings.
+    config_era_boundary_by_wf: dict[str, str] = {}
+    config_era_boundary_checked: set[str] = set()
     # Per-workflow event buckets (`jobs_by_event`), retained so a cache pole's push
     # (default-branch) runs can be probed for their hit rate — `jobs_per_run_by_wf`
     # keeps only the developer-event bucket, dropping the push runs the cache-distribution
@@ -28403,8 +28416,11 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         runs_for_spine = runs
         _era_fact = None
         if len(runs) >= 2:
+            config_era_boundary_checked.add(wf_path)
             _era_boundary, _era_prev, _era_last_sha, _era_prev_sha = _workflow_change_boundary(
                 client, repo, wf_path, created_before)
+            if _era_boundary:
+                config_era_boundary_by_wf[wf_path] = _era_boundary
             # CONTENT-keyed era classification (issue #77). Fetch the workflow-file blobs and classify
             # each sampled run's head_sha by CONTENT only when the sample TIMESTAMP-straddles the
             # boundary — the cheap zero-fetch gate (`_timestamp_straddles`). A workflow that did not
@@ -29057,6 +29073,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     _candidate_page = 1
     _candidate_page_failed = False
     _candidate_page_failures = 0
+    _candidate_era_door = bool(config_era_facts)
     _candidate_runs_by_wf: dict[str, list[dict[str, Any]]] = defaultdict(list)
     _candidate_active = {
         wf_path
@@ -29073,14 +29090,34 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         _next_active: set[str] = set()
         for wf_path in sorted(_candidate_active):
             wf_id = (wf_by_path.get(wf_path) or {}).get("id")
+            if wf_path not in config_era_boundary_checked:
+                config_era_boundary_checked.add(wf_path)
+                _late_boundary, _late_prev, _late_sha, _late_prev_sha = (
+                    _workflow_change_boundary(
+                        client, repo, wf_path, created_before))
+                if _late_boundary:
+                    config_era_boundary_by_wf[wf_path] = _late_boundary
             page_rows = _all_status_run_page(
                 client, repo, wf_id, _candidate_page, created_before)
             if page_rows is None:
                 _candidate_page_failed = True
                 _candidate_page_failures += 1
                 continue
+            _boundary = config_era_boundary_by_wf.get(wf_path)
+            _crossed_boundary = False
+            if _boundary:
+                _current_rows = [
+                    row for row in page_rows
+                    if str(row.get("created_at") or "") >= _boundary]
+                if len(_current_rows) < len(page_rows):
+                    _candidate_era_door = True
+                    _crossed_boundary = True
+                page_rows = _current_rows
             _candidate_runs_by_wf[wf_path].extend(page_rows)
-            if len(page_rows) >= _COST_RUNLIST_MAX:
+            # A page that crossed the boundary closes this workflow's walk even
+            # when the current-era prefix itself happened to fill the page.
+            if (len(page_rows) >= _COST_RUNLIST_MAX
+                    and not _crossed_boundary):
                 _next_active.add(wf_path)
             for r in page_rows:
                 if (str(r.get("event") or "") not in _DEVELOPER_EVENTS
@@ -29113,9 +29150,10 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     elif (sample_diag.get("fetch_failures") or _candidate_page_failed
           or all_status_failed):
         sample_diag["stop_reason"] = "fetch_failures"
-    elif config_era_facts:
+    elif _candidate_era_door:
         sample_diag["stop_reason"] = "era_door"
-    elif _candidate_active and _candidate_page >= _PR_CANDIDATE_PAGE_CAP:
+    elif (sample_diag.get("selection_limited")
+          or (_candidate_active and _candidate_page >= _PR_CANDIDATE_PAGE_CAP)):
         sample_diag["stop_reason"] = "page_cap"
     else:
         sample_diag["stop_reason"] = "candidates_exhausted"
@@ -29129,7 +29167,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         "candidate_pages_exhausted": not _candidate_active,
         "candidate_page_fetch_failures": (
             _candidate_page_failures + len(all_status_failed)),
-        "candidate_era_door": bool(config_era_facts),
+        "candidate_era_door": _candidate_era_door,
     })
     # Config-era thin-flip (issue #74, direction (a): the timing spine flips WITH the rule). Now that
     # the PR gate sample (`per_sha_checks`) is in hand we can tell whether a `disclosed_pre` straddle's
