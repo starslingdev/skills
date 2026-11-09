@@ -383,7 +383,8 @@ def test_named_fixtures_exercise_their_defining_interactions(
             "cache-lints", "config-era-change", "duplicate-gate-job", "emulated-container",
             "external-required-gate", "heavy-runner-queue", "minority-tail",
             "multiarch-image", "path-partitioned-monorepo", "vendored-libs",
-            "vitest-isolated-serial", "cargo-double-compile", "per-test-startup"):
+            "vitest-isolated-serial", "cargo-double-compile", "per-test-startup",
+            "sharded-floor"):
         docs[name], reports[name], _checks = run_fixture(
             FIXTURE_ROOT / name, monkeypatch, tmp_path)
 
@@ -442,6 +443,11 @@ def test_named_fixtures_exercise_their_defining_interactions(
         spec.get("matrix")
         for jobs in docs["path-partitioned-monorepo"]["workflow_job_graph"].values()
         for spec in jobs.values())
+    restored_workflow = (FIXTURE_ROOT / "path-partitioned-monorepo" / "workflows"
+                         / "reusable-tests.yml").read_text()
+    assert "package: [api, web]" in restored_workflow
+    assert "runtime: [20, 22]" in restored_workflow
+    assert "shard:" not in restored_workflow
     assert any(
         row.get("name", "").startswith("tests / test (")
         for row in docs["path-partitioned-monorepo"]["pr_critical_path"]["checks"])
@@ -461,7 +467,7 @@ def test_named_fixtures_exercise_their_defining_interactions(
 def test_sharded_floor_runs_through_collection_and_full_verifier(
         monkeypatch, tmp_path):
     doc, report, checks = run_fixture(
-        FIXTURE_ROOT / "path-partitioned-monorepo", monkeypatch, tmp_path)
+        FIXTURE_ROOT / "sharded-floor", monkeypatch, tmp_path)
     failures = [check for check in checks if not check.skipped and not check.ok]
     assert failures == [], [(check.name, check.detail) for check in failures]
     pole = next(

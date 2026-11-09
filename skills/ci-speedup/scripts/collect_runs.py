@@ -23165,6 +23165,8 @@ _SHARD_FLOOR_BASIS = "p50_step_timing_before_first_divided_work"
 
 
 _SHARD_DIMENSION_RE = re.compile(r"(?:^|[_-])(?:shard|partition|chunk)(?:$|[_-])", re.I)
+_PLAYWRIGHT_SHARD_ARG_RE = re.compile(r"(?:^|\s)--shard\s*=", re.I)
+_MATRIX_REF_RE = re.compile(r"\bmatrix\.([A-Za-z_][A-Za-z0-9_-]*)\b")
 
 
 def _matrix_variant_values(job_name: str) -> tuple[str, ...] | None:
@@ -23201,9 +23203,17 @@ def _workflow_shard_scope(
         values = _matrix_variant_values(job_name)
         if values is None or len(values) != len(dimensions):
             return None
+        shard_arg_dimensions = {
+            match.group(1)
+            for step in (spec.get("steps") or []) if isinstance(step, dict)
+            for command in [step.get("run")]
+            if isinstance(command, str) and _PLAYWRIGHT_SHARD_ARG_RE.search(command)
+            for match in _MATRIX_REF_RE.finditer(command)
+        }
         shard_positions = tuple(
             index for index, name in enumerate(dimensions)
-            if _SHARD_DIMENSION_RE.search(name))
+            if (_SHARD_DIMENSION_RE.search(name)
+                or name in shard_arg_dimensions))
         return shard_positions or None
     return None
 
