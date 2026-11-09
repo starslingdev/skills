@@ -4406,6 +4406,44 @@ def _timing_spread_prompt_lines(pole: dict[str, Any]) -> list[str]:
     return [f"- {s}"] if s else []
 
 
+_SHARD_FLOOR_VERSION = 1
+
+
+def _shard_floor_sentence(pole: dict[str, Any]) -> str:
+    """The descriptive fixed-floor sentence stamped by collection."""
+    stamp = pole.get("shard_floor")
+    if not isinstance(stamp, dict) or stamp.get("version") != _SHARD_FLOOR_VERSION:
+        return ""
+    floor = _num(stamp.get("floor_s"))
+    divided = _num(stamp.get("divided_work_s"))
+    shards = stamp.get("n_shards")
+    parts = [str(item) for item in stamp.get("fixed_parts") or []
+             if str(item) in {"checkout", "setup", "install", "browser", "build"}]
+    if floor is None or divided is None or not isinstance(shards, int) or shards < 2:
+        return ""
+    fixed = f" ({', '.join(parts)})" if parts else ""
+    sentence = (
+        f"Each of the {shards} shards pays ~{_clock(floor)}{fixed} before its "
+        f"first unit of divided work; the remaining ~{_clock(divided)} is the "
+        "work that splits.")
+    in_step = _num(stamp.get("in_step_floor_s"))
+    if in_step is not None and in_step > 0:
+        sentence += (
+            f" The divided-work step also spends ~{_clock(in_step)} compiling or "
+            "collecting before its first result.")
+    return sentence + " Observed on the sampled runs, not a shard-count recommendation."
+
+
+def _shard_floor_report_lines(pole: dict[str, Any]) -> list[str]:
+    sentence = _shard_floor_sentence(pole)
+    return [f"_{sentence}_", ""] if sentence else []
+
+
+def _shard_floor_prompt_lines(pole: dict[str, Any]) -> list[str]:
+    sentence = _shard_floor_sentence(pole)
+    return [f"- {sentence}"] if sentence else []
+
+
 def _advisory_prompt_lines(pole: dict[str, Any]) -> list[str]:
     """The advisory-job bullet for the agent prompt's THE GATE section, or `[]`.
 
@@ -4518,6 +4556,7 @@ def _build_agent_prompt(leaf: dict[str, Any] | None, pole: dict[str, Any],
            f"- {gate}",
            *_advisory_prompt_lines(pole),
            *_timing_spread_prompt_lines(pole),
+           *_shard_floor_prompt_lines(pole),
            ""]
 
     fix_key = str((leaf or {}).get("fix_key", ""))
@@ -4678,6 +4717,7 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
             f"- {gate}",
             *_advisory_prompt_lines(pole),
             *_timing_spread_prompt_lines(pole),
+            *_shard_floor_prompt_lines(pole),
             "",
             "WHAT IS MISSING",
             f"- {reason}" if reason else (
@@ -4736,6 +4776,7 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
            f"- {gate}",
            *_advisory_prompt_lines(pole),
            *_timing_spread_prompt_lines(pole),
+           *_shard_floor_prompt_lines(pole),
            ""]
     if struct_pats:
         out += [_RELOCATION_RUNNER_MINUTE_LINE, ""]
@@ -4976,6 +5017,9 @@ def _llm_agent_prompt(body: str, pole: dict[str, Any] | None = None) -> str:
     _ts = _timing_spread_sentence(_as_dict(pole))
     if _ts and _ts not in body:
         body = _ts + "\n\n" + body
+    _sf = _shard_floor_sentence(_as_dict(pole))
+    if _sf and _sf not in body:
+        body = _sf + "\n\n" + body
     # The no-weakening rail is the renderer's too, for the same reason the disclaimer
     # is: the gap-fill body is LLM-authored, so the one rule the hand-off cannot afford
     # to have paraphrased away is appended here, not left to the author. The canonical
@@ -14588,6 +14632,7 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         # advisory line it is plain prose rather than a `Claim` - and it feeds nothing
         # downstream (never the Bottom line, never a saving).
         out += _timing_spread_report_lines(p)
+        out += _shard_floor_report_lines(p)
         if _agg:
             # AGGREGATION GATE (issue #1): the section ENDS at the honest pointer. No
             # per-step drill and no "capture timing, then optimize this step" agent prompt
