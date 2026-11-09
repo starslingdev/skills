@@ -30,9 +30,11 @@
     "OPT32",
     "OPT4",
     "OPT45",
+    "OPT6",
     "OPT61",
     "OPT62",
-    "OPT75"
+    "OPT75",
+    "OPT96"
   ],
   "gate_kind": null,
   "headline": {

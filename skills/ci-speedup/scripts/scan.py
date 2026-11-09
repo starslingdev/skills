@@ -3800,6 +3800,32 @@ def _cache_paths(steps: list[dict]) -> list[str]:
     return [path.strip().casefold() for path in paths if path.strip()]
 
 
+def _cache_saved_keys(doc: dict) -> list[str]:
+    """Normalized key families that a repository cache step can save."""
+    keys: list[str] = []
+    for job in _jobs_from_doc(doc).values():
+        if not isinstance(job, dict):
+            continue
+        for step in _cache_action_steps(job):
+            uses = _uses(step)
+            if re.search(r"(?:^|/)cache/restore@", uses, re.IGNORECASE):
+                continue
+            values = step.get("with") if isinstance(step.get("with"), dict) else {}
+            key = str(values.get("key") or "").strip()
+            if key:
+                keys.append(_normalized_actions_expression(key))
+    return keys
+
+
+def _job_env_blob(job: dict) -> str:
+    envs = [job.get("env"), *(step.get("env") for step in _steps(job))]
+    return "\n".join(
+        f"{key}={value}"
+        for env in envs if isinstance(env, dict)
+        for key, value in env.items()
+    )
+
+
 def _size_mib(value: str) -> float | None:
     match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([kmgt])(?:i?b)?\s*", value,
                          re.IGNORECASE)
@@ -3843,10 +3869,12 @@ def _buildkit_cache_blob(job: dict) -> str:
     return "\n".join(parts)
 
 
-def _buildkit_cache_round_trip(job: dict) -> bool:
-    blob = _buildkit_cache_blob(job)
-    return bool(re.search(r"(?:--)?cache-from\b", blob, re.I)
-                and re.search(r"(?:--)?cache-to\b", blob, re.I))
+def _buildkit_mount_persisted(job: dict) -> bool:
+    """Whether BuildKit cache-mount contents leave an ephemeral hosted builder."""
+    return any(
+        re.search(r"(?:^|/)buildkit-cache-dance@", _uses(step), re.IGNORECASE)
+        for step in _steps(job)
+    )
 
 
 def _uses_persistent_remote_builder(job: dict) -> bool:
@@ -3863,12 +3891,13 @@ def _uses_persistent_remote_builder(job: dict) -> bool:
 def _detect_opt61(doc: dict, raw: str) -> list[Hit]:
     """Find cache declarations whose own workflow shape prevents useful reuse."""
     hits: list[Hit] = []
+    saved_keys = _cache_saved_keys(doc)
     for job_name, job in _jobs_from_doc(doc).items():
         if not isinstance(job, dict):
             continue
         cache_steps = _cache_action_steps(job)
         cache_paths = _cache_paths(cache_steps)
-        blob = _job_run_blob(job)
+        blob = "\n".join((_job_run_blob(job), _job_env_blob(job)))
         reasons: list[tuple[str, str]] = []
 
         for step in cache_steps:
@@ -3876,11 +3905,10 @@ def _detect_opt61(doc: dict, raw: str) -> list[Hit]:
             key = str(values.get("key") or "").strip()
             restore = [line.strip() for line in
                        str(values.get("restore-keys") or "").splitlines() if line.strip()]
-            normalized_key = _normalized_actions_expression(key)
             rolling_key = re.search(r"github\.(?:sha|run_id|run_number)", key, re.I)
             if key and restore and rolling_key and not any(
-                    normalized_key.startswith(_normalized_actions_expression(prefix))
-                    for prefix in restore):
+                    saved_key.startswith(_normalized_actions_expression(prefix))
+                    for prefix in restore for saved_key in saved_keys):
                 reasons.append(("restore-keys", "none of its `restore-keys` can restore the "
                                 "rolling saved-key family on a later edit"))
             size = values.get("max-size") or values.get("max_size")
@@ -3960,10 +3988,13 @@ def _detect_opt4(doc: dict, raw: str) -> list[Hit]:
     """Find BuildKit cache exports whose scope or local rotation defeats reuse."""
     hits: list[Hit] = []
     volatile = re.compile(
-        r"type=gha[^\n]*(?:scope=\$\{\{\s*github\.(?:sha|run_id|run_number)\s*\}\})",
+        r"type=gha[^\n]*(?:scope=[^\s,]*\$\{\{\s*github\."
+        r"(?:sha|run_id|run_number)\s*\}\})",
         re.IGNORECASE)
-    local_from = re.compile(r"--cache-from\s+type=local,src=([^\s,]+)", re.IGNORECASE)
-    local_to = re.compile(r"--cache-to\s+type=local,dest=([^\s,]+)([^\n]*)", re.IGNORECASE)
+    local_from = re.compile(
+        r"(?:--)?cache-from\s+type=local,src=([^\s,]+)", re.IGNORECASE)
+    local_to = re.compile(
+        r"(?:--)?cache-to\s+type=local,dest=([^\s,]+)([^\n]*)", re.IGNORECASE)
     for job_name, job in _jobs_from_doc(doc).items():
         if not isinstance(job, dict):
             continue
@@ -3974,11 +4005,10 @@ def _detect_opt4(doc: dict, raw: str) -> list[Hit]:
                   else "a run-scoped GHA cache cannot be restored by a fresh workflow invocation")
         if match is None:
             source, destination = local_from.search(blob), local_to.search(blob)
-            if (source and destination and source.group(1) == destination.group(1)
-                    and "mode=max" not in destination.group(2).casefold()):
+            if source and destination and source.group(1) == destination.group(1):
                 match = destination
                 reason = ("the local cache exports over the directory it imports without "
-                          "a complete mode=max cache")
+                          "rotating to a fresh destination")
         if match is not None:
             hits.append(Hit(
                 line=_line_of_in_job(raw, job_name, match.group(0).strip()),
@@ -4002,7 +4032,7 @@ def _detect_opt4_ephemeral_mounts(
             if not isinstance(job, dict) or _is_self_hosted(job):
                 continue
             steps = _steps(job)
-            if _buildkit_cache_round_trip(job) or _uses_persistent_remote_builder(job):
+            if _buildkit_mount_persisted(job) or _uses_persistent_remote_builder(job):
                 continue
             dockerfile: Path | None = None
             matched = "RUN --mount=type=cache"

@@ -1,5 +1,6 @@
 # Changelog
 
+- Recognize repository-seeded cache families and BuildKit cache-mount persistence, while flagging volatile scopes, in-place local exports, export-only mount caches, and compiler caches declared through job environments.
 - Break excessive queue wait down by runner label with per-run queue and work distributions, including censored jobs cancelled before pickup. Reports name a materially faster observed label without treating queue wait as evidence to reduce jobs or shards.
 - Detect the same checked-out Cargo crates being compiled in separate steps under the same observable artifact settings, report the second step's wall as an upper bound, and guide safe command consolidation without dropping package, feature, platform, or test coverage.
 - Fill a short pull-request gate sample from a bounded walk through recent run pages, and disclose whether the walk met its target, exhausted visible candidates, reached its page cap, crossed a workflow-configuration boundary, or encountered unreadable history.

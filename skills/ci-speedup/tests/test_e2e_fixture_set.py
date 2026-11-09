@@ -395,6 +395,22 @@ def test_named_fixtures_exercise_their_defining_interactions(
                   if row.get("pattern") in {"OPT4", "OPT61", "OPT62"}]
     assert {row["pattern"] for row in cache_rows} == {"OPT4", "OPT61", "OPT62"}
     assert all(row.get("wall_clock_p50_s") in {None, 0.0} for row in cache_rows)
+    assert not any(
+        row.get("pattern") == "OPT61"
+        and "restore-family" in (row.get("affected_jobs") or [])
+        for row in cache_rows)
+    assert any(
+        row.get("pattern") == "OPT61"
+        and "env-ccache" in (row.get("affected_jobs") or [])
+        for row in cache_rows)
+    assert any(
+        row.get("pattern") == "OPT4"
+        and "export-only" in (row.get("affected_jobs") or [])
+        for row in cache_rows)
+    assert not any(
+        row.get("pattern") == "OPT4"
+        and "cache-dance" in (row.get("affected_jobs") or [])
+        for row in cache_rows)
     external = docs["external-required-gate"]["pr_critical_path"]
     assert external["gate_kind"] == "pr_floor_fallback"
     assert external["provenance"] == "pr_floor_fallback"
