@@ -732,6 +732,27 @@ def test_no_inspect_foreign_compile_runs_through_collection(
     assert "building a foreign architecture under emulation instead" not in report
 
 
+def test_inactive_builder_runs_through_collection_as_an_uncredited_check(
+        monkeypatch, tmp_path):
+    def inactive_builder(log: str) -> str:
+        return (
+            "docker buildx build --platform linux/amd64,linux/arm64 .\n"
+            + re.sub(r"(?m)^Platforms:.*$", "Platforms:", log)
+        )
+
+    _doc, report, facts = _run_multiarch_log_variant(
+        "multiarch-inactive-builder", monkeypatch, tmp_path, inactive_builder)
+    leaf = next(
+        row for row in facts["leaf_details"]
+        if row.get("fix_key") == "emulated-image-compile")
+
+    assert leaf["magnitude"] is None
+    assert leaf["builder_topology_unconfirmed"] is True
+    assert "#15 [linux/arm64 build 2/3] RUN go build ./..." in report
+    assert "Do not size or claim a saving" in report
+    assert "docker buildx rebuilds 2 layers from scratch every run" not in report
+
+
 def test_builder_detected_platform_and_dominance_guards_run_through_collection(
         monkeypatch, tmp_path):
     def configured_first(log: str) -> str:
