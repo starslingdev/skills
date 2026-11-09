@@ -3193,11 +3193,41 @@ def _parse_log(text: str,
             index += 1
         return tuple(sorted(context))
 
+    def _cargo_selected_packages(command: str) -> set[str] | None:
+        """Return explicit package selectors, or None when the command is unscoped."""
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            return None
+        cargo_index = next((index for index, token in enumerate(tokens)
+                            if token == "cargo" or token.endswith("/cargo")), None)
+        if cargo_index is None:
+            return None
+        selected: set[str] = set()
+        tail = tokens[cargo_index + 1:]
+        index = 0
+        while index < len(tail):
+            token = tail[index]
+            option, separator, inline = token.partition("=")
+            if option in {"-p", "--package"}:
+                if separator:
+                    value = inline
+                elif index + 1 < len(tail):
+                    index += 1
+                    value = tail[index]
+                else:
+                    return None
+                if value:
+                    selected.add(value.split("@", 1)[0])
+            index += 1
+        return selected or None
+
     def _cargo_group(group: tuple[str, list[str]]) -> dict[str, Any] | None:
         command, group_lines = group
         context = _cargo_command_context(command)
         if context is None:
             return None
+        selected_packages = _cargo_selected_packages(command)
         crates: dict[tuple[str, str, str], str] = {}
         for group_line in group_lines:
             match = re.search(
@@ -3227,6 +3257,7 @@ def _parse_log(text: str,
         seconds = sum(float(value) * {"h": 3600, "m": 60, "s": 1}[unit.casefold()]
                       for value, unit in parts)
         return {"command": command, "context": context, "crates": crates,
+                "selected_packages": selected_packages,
                 "profile": (finished.group("quoted") or finished.group("plain")).casefold(),
                 "seconds": seconds,
                 "finished": next(line.strip() for line in group_lines
@@ -3234,9 +3265,17 @@ def _parse_log(text: str,
 
     compiled = [row for group in cargo_groups if (row := _cargo_group(group)) is not None]
     for later_index, later in enumerate(compiled[1:], 1):
+        if later["selected_packages"] is None:
+            continue
         for earlier in compiled[:later_index]:
-            repeated = sorted(set(earlier["crates"]) & set(later["crates"]))
-            if (not repeated or not set(later["crates"]) <= set(earlier["crates"])
+            earlier_selected = earlier["selected_packages"] or set()
+            later_crates = {
+                key for key in later["crates"]
+                if (key[0] not in later["selected_packages"]
+                    or key[0] in earlier_selected)
+            }
+            repeated = sorted(set(earlier["crates"]) & later_crates)
+            if (not repeated or not later_crates <= set(earlier["crates"])
                     or earlier["profile"] != later["profile"]
                     or earlier["context"] != later["context"]):
                 continue
