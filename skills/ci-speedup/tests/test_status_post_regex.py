@@ -22,6 +22,12 @@ expression does not close, and `/statuses/` inside an expression is not a path
 the API call hits, so no real detection moves.
 `test_open_expression_is_the_only_difference` pins that behavior so a future
 edit cannot widen the gap unnoticed.
+
+Both repeats are also bounded (200 units each). Disjoint branches alone leave a
+whole-file search quadratic in the number of `repos/` prefixes, because every
+prefix starts a walk to the end of its line. The bound caps each walk, and a
+real owner/repo path with expressions is far shorter than the limit.
+`test_bounds_leave_real_paths_alone` pins the limit from both sides.
 """
 from __future__ import annotations
 
@@ -234,6 +240,16 @@ def test_open_expression_is_the_only_difference() -> None:
     assert not any(_differs_by_design(text) for text in _CORPUS)
 
 
+def test_bounds_leave_real_paths_alone() -> None:
+    long_expr = "${{ github.event.pull_request.head.repo.full_name || github.repository }}"
+    assert _NEW.search(f"repos/{long_expr}/statuses/{long_expr}")
+    assert _NEW.search("repos/" + "o" * 200 + "/statuses/")
+    assert _NEW.search("repos/${{ " + "x" * 198 + " }}/statuses/")
+    # Past the bound the pattern stops; nothing real is this long.
+    assert _NEW.search("repos/" + "o" * 201 + "/statuses/") is None
+    assert _NEW.search("repos/${{ " + "x" * 199 + " }}/statuses/") is None
+
+
 @pytest.mark.parametrize("fragment,count", [
     ("${{", 5000),
     ("${{ ", 5000),
@@ -246,6 +262,24 @@ def test_open_expression_is_the_only_difference() -> None:
 def test_adversarial_input_finishes_in_linear_time(fragment: str, count: int) -> None:
     # Never run _OLD here: on these inputs it takes minutes to hours.
     text = "repos/" + fragment * count
+    start = time.perf_counter()
+    found = _NEW.search(text)
+    elapsed = time.perf_counter() - start
+    assert found is None
+    assert elapsed < 0.5, f"{fragment!r} x {count}: {elapsed:.2f}s"
+
+
+@pytest.mark.parametrize("fragment,count", [
+    ("repos/", 10000),
+    ("repos/${{x", 10000),
+    ("repos/${{ x }}", 10000),
+    ("repos/$o", 10000),
+    ("repos/o/r/commits/x/statuses ", 2000),
+])
+def test_repeated_prefixes_finish_in_linear_time(fragment: str, count: int) -> None:
+    # Every `repos/` starts another attempt; the bounded repeats cap each one.
+    # The unbounded form took 0.4 s at 2000 prefixes and 1.45 s at 4000.
+    text = fragment * count
     start = time.perf_counter()
     found = _NEW.search(text)
     elapsed = time.perf_counter() - start

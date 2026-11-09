@@ -7240,8 +7240,11 @@ def _build_workflow_job_graph(
 # non-quote character. The three branches are disjoint, so every character has
 # exactly one way to match and a long run of `${{` fragments with no closing
 # `/statuses/` fails in linear time instead of backtracking through every split.
+# Both repeats are bounded: a real owner/repo path, expressions included, is far
+# shorter than 200 units, and the bound caps the work each `repos/` start can do,
+# so a file of repeated prefixes scans in time linear in its length.
 _STATUS_POST_RE = re.compile(
-    r"repos/(?:\$\{\{[^}]*\}\}|\$(?!\{\{)|[^\s'\"`$])*?/statuses/"
+    r"repos/(?:\$\{\{[^}]{0,200}\}\}|\$(?!\{\{)|[^\s'\"`$]){0,200}?/statuses/"
     r"|\bcreate_?(?:commit_?)?status\s*\("
     r"|\bcreateCommitStatus\b|\bCreateStatus\s*\("
     r"|\buses:\s*['\"]?(?:Sibz/github-status-action|ouzi-dev/commit-status-updater"
