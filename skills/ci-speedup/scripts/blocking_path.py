@@ -14404,6 +14404,25 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
                     " At the sampled p50 commit, a 4x speedup to its slowest job "
                     f"projects to **{_commit_duration(_projected)}** "
                     f"(**{_multiple:.2f}x**).")
+                _median_multiple = _num(
+                    _commit_wall.get("median_projection_multiple"))
+                _worst = _commit_wall.get("worst_commit") or {}
+                _worst_wall = (_num(_worst.get("wall_s"))
+                               if isinstance(_worst, dict) else None)
+                _worst_sha = (str(_worst.get("sha") or "")[:7]
+                              if isinstance(_worst, dict) else "")
+                _worst_wf = (str(_worst.get("workflow_file") or "")
+                             if isinstance(_worst, dict) else "")
+                if _median_multiple is not None:
+                    _projection_clause += (
+                        " Across commits, the median projection is "
+                        f"**{_median_multiple:.2f}x**.")
+                if _worst_wall is not None and _worst_sha:
+                    _held = (f"; `{_wf_base(_worst_wf)}` holds its slowest job"
+                             if _worst_wf else "")
+                    _projection_clause += (
+                        f" The worst sampled commit is `{_worst_sha}` at "
+                        f"**{_commit_duration(_worst_wall)}**{_held}.")
         _commit_wall_block.append(
             "> **Per-commit PR wait:** p50 "
             f"**{_commit_duration(_commit_p50)}**, p90 "

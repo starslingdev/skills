@@ -30172,6 +30172,34 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         _commit_facts.append(_commit_wall_fact(
             _sha, _event, _run_rows, _commit_jobs_by_run, _expected_workflows))
 
+    def _projection_population(facts: list[dict[str, Any]]) -> dict[str, Any]:
+        complete = [
+            fact for fact in facts
+            if fact.get("partial") is not True
+            and isinstance(fact.get("wall_s"), (int, float))
+            and float(fact["wall_s"]) > 0
+        ]
+        multiples = [
+            float(projection["multiple"])
+            for fact in complete
+            for projection in [fact.get("projection_4x")]
+            if isinstance(projection, dict)
+            and isinstance(projection.get("multiple"), (int, float))
+        ]
+        if not complete:
+            return {"median_projection_multiple": None, "worst_commit": None}
+        worst = max(complete, key=lambda fact: float(fact["wall_s"]))
+        return {
+            "median_projection_multiple": (
+                round(_percentile(multiples, 50), 3) if multiples else None),
+            "worst_commit": {
+                "sha": worst.get("sha"),
+                "wall_s": worst.get("wall_s"),
+                "workflow_file": (worst.get("slowest_job") or {}).get(
+                    "workflow_file"),
+            },
+        }
+
     _complete_walls = [float(f["wall_s"]) for f in _commit_facts
                        if isinstance(f.get("wall_s"), (int, float))]
     _commit_wall_clock = {
@@ -30180,6 +30208,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         "p90_s": (round(_percentile(_complete_walls, 90), 3)
                   if _complete_walls else None),
         "facts": _commit_facts,
+        **_projection_population(_commit_facts),
     }
     _joint_runner_bases = {
         tuple(sorted((observation.get("check_runners") or {}).items()))
@@ -30250,23 +30279,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             _typical_push = min(
                 _complete_push_facts,
                 key=lambda fact: abs(float(fact["wall_s"]) - _push_p50))
-            _worst_push = max(_complete_push_facts, key=lambda fact: float(fact["wall_s"]))
-            _projection_multiples = [
-                float(projection["multiple"])
-                for fact in _complete_push_facts
-                for projection in [fact.get("projection_4x")]
-                if isinstance(projection, dict)
-                and isinstance(projection.get("multiple"), (int, float))
-            ]
-            _push_lane["median_projection_multiple"] = (
-                round(_percentile(_projection_multiples, 50), 3)
-                if _projection_multiples else None)
-            _push_lane["worst_commit"] = {
-                "sha": _worst_push.get("sha"),
-                "wall_s": _worst_push.get("wall_s"),
-                "workflow_file": (_worst_push.get("slowest_job") or {}).get(
-                    "workflow_file"),
-            }
+            _push_lane.update(_projection_population(_complete_push_facts))
 
             # Drill the representative push-lane pole from the job lists already
             # fetched above. The only new request is its log; selection, steps,

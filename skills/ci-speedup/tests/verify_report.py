@@ -834,14 +834,51 @@ def check_commit_wall_clock_projection(report: str, findings_path: Path | None) 
         basis, wall, slowest, next_longest, chain = min(
             complete, key=lambda row: abs(row[1] - expected_p50))
         projected, multiple = projection(wall, slowest, next_longest, 4.0, chain)
+        population_multiples = [
+            value
+            for _fact, item_wall, item_slowest, item_next, item_chain in complete
+            for _projected, value in [projection(
+                item_wall, item_slowest, item_next, 4.0, item_chain)]
+            if value is not None
+        ]
+        expected_median_multiple = (
+            round(percentile(population_multiples, 50), 3)
+            if population_multiples else None)
+        if _num(stamp.get("median_projection_multiple")) != expected_median_multiple:
+            failures.append("median per-commit projection multiple does not re-derive")
+        worst_fact, worst_wall, *_rest = max(complete, key=lambda row: row[1])
+        worst_stamp = stamp.get("worst_commit") or {}
+        expected_worst_wf = str(
+            (worst_fact.get("slowest_job") or {}).get("workflow_file") or "")
+        if worst_wall > 0:
+            if (str(worst_stamp.get("sha") or "") != str(worst_fact.get("sha") or "")
+                    or _num(worst_stamp.get("wall_s")) != worst_wall
+                    or str(worst_stamp.get("workflow_file") or "") != expected_worst_wf):
+                failures.append("worst per-commit projection fact does not re-derive")
+        elif worst_stamp:
+            failures.append("zero-wall population publishes a worst commit")
+        projection_clause = ""
+        if multiple is not None:
+            projection_clause = (
+                " At the sampled p50 commit, a 4x speedup to its slowest job "
+                f"projects to **{duration(projected)}** (**{multiple:.2f}x**).")
+            if expected_median_multiple is not None:
+                projection_clause += (
+                    " Across commits, the median projection is "
+                    f"**{expected_median_multiple:.2f}x**.")
+            worst_sha = str(worst_fact.get("sha") or "")[:7]
+            if worst_sha:
+                held = (f"; `{_wf_base(expected_worst_wf)}` holds its slowest job"
+                        if expected_worst_wf else "")
+                projection_clause += (
+                    f" The worst sampled commit is `{worst_sha}` at "
+                    f"**{duration(worst_wall)}**{held}.")
         expected_line = (
             "> **Per-commit PR wait:** p50 "
             f"**{duration(expected_p50)}**, p90 **{duration(expected_p90)}**, from the "
             "earliest workflow run created to the last job completed across every "
             "workflow on that commit."
-            + (" At the sampled p50 commit, a 4x speedup to its slowest job "
-               f"projects to **{duration(projected)}** (**{multiple:.2f}x**)."
-               if multiple is not None else ""))
+            + projection_clause)
         if report.splitlines().count(expected_line) != 1:
             failures.append("report lacks the re-derived per-commit wait/projection line")
     elif _num(stamp.get("p50_s")) is not None or _num(stamp.get("p90_s")) is not None:
