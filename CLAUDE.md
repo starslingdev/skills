@@ -75,6 +75,38 @@ These rules apply to EVERY shipped skill — `ci-speedup`, `ci-score`,
   `.githooks/pre-commit` hook runs it locally (`git config core.hooksPath
   .githooks`).
 
+## Public-output privacy gate
+
+This repository is public. User-provided links and internal working context are
+inputs for the task, not permission to expose their repository identifiers.
+Treat repository names, URLs, issue/PR numbers, branch names, and other source
+identifiers as confidential unless publication of the exact reference is
+explicitly approved.
+
+Before every public GitHub write (commit, branch, PR, issue, review, comment,
+release, or changelog):
+
+1. Verify the destination repository is `PUBLIC`.
+2. Name only the destination repository by default. Describe private/internal
+   provenance generically, such as “internal design” or “internal review.”
+3. Scan the exact outbound title/body, commit messages, and added diff lines:
+
+   ```bash
+   python3 .github/scripts/check_public_output.py \
+     --target starslingdev/skills \
+     --text-file /tmp/pr-title.txt \
+     --text-file /tmp/pr-body.md \
+     --base origin/main
+   ```
+
+4. Fetch the published artifact back and scan its returned title/body.
+
+A cross-repository reference is allowed only when the user explicitly approves
+publishing that exact reference and its repository has just been verified as
+public. If either fact is absent or uncertain, fail closed: stop and remove or
+neutralize the reference. Never expose private context to explain provenance,
+credit, motivation, or review history.
+
 ## Opt-in DEBUG logging (off by default)
 
 The skill's scripts call `logger.debug(...)` at every interesting boundary — gh

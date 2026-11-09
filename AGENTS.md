@@ -71,6 +71,38 @@ git config core.hooksPath .githooks
   StarSling's own runners (we dogfood what we sell). Both live in `ci.yml` and
   run the identical suite.
 
+## Public-output privacy gate
+
+This is a public repository. Treat every repository name, URL, issue number,
+PR number, branch name, and other identifier learned from user-provided or
+internal context as confidential unless its publication is explicitly approved.
+A link supplied for research is not permission to republish it.
+
+Before creating or updating any public GitHub artifact (commit, branch, PR,
+issue, review, comment, release, or changelog):
+
+1. Verify the destination repository is `PUBLIC`.
+2. Default to naming only the destination repository. Cross-repository
+   provenance must be described generically (for example, “internal review”).
+3. Inspect the exact outbound title/body, commit messages, and added diff lines.
+   Run the fail-closed preflight when preparing a PR:
+
+   ```bash
+   python3 .github/scripts/check_public_output.py \
+     --target starslingdev/skills \
+     --text-file /tmp/pr-title.txt \
+     --text-file /tmp/pr-body.md \
+     --base origin/main
+   ```
+
+4. After publishing, fetch the artifact back and scan the returned content too.
+
+Any cross-repository reference requires the user's explicit approval to publish
+that exact reference and an immediate verification that the referenced
+repository is public. If either condition is missing or uncertain, stop and
+remove or neutralize the reference. Never use a public artifact as a breadcrumb
+to private context.
+
 ## Changelog discipline
 
 Every change that alters **skill behavior** adds a dated (UTC) bullet to
