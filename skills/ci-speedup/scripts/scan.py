@@ -7235,8 +7235,13 @@ def _build_workflow_job_graph(
 # create-status call, or a known status-publishing marketplace action. The HTTP
 # method is NOT checked, so a GET on `repos/.../statuses/<sha>` also counts: an
 # over-match only leaves the required gate unresolved, never claims gating.
+# The path segment between `repos/` and `/statuses/` is a `${{ ... }}` expression
+# (which may hold spaces), a `$` that does not open one, or any other non-space,
+# non-quote character. The three branches are disjoint, so every character has
+# exactly one way to match and a long run of `${{` fragments with no closing
+# `/statuses/` fails in linear time instead of backtracking through every split.
 _STATUS_POST_RE = re.compile(
-    r"repos/(?:\$\{\{[^}]*\}\}|[^\s'\"`])*?/statuses/"
+    r"repos/(?:\$\{\{[^}]*\}\}|\$(?!\{\{)|[^\s'\"`$])*?/statuses/"
     r"|\bcreate_?(?:commit_?)?status\s*\("
     r"|\bcreateCommitStatus\b|\bCreateStatus\s*\("
     r"|\buses:\s*['\"]?(?:Sibz/github-status-action|ouzi-dev/commit-status-updater"
