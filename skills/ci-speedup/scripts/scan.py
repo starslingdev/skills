@@ -2922,19 +2922,19 @@ _OPT9_TOOLS: tuple[tuple[str, "re.Pattern[str]", "re.Pattern[str]"], ...] = (
 )
 
 _OPT9_JEST_COMMAND_RE = re.compile(
-    r"(?:^|[\s/&;|])(?:npx |pnpm(?:\s+exec)? |yarn |bunx )?jest\b", re.I)
+    r"(?:^|[\n;&|])\s*@?(?:npx |pnpm(?:\s+exec)? |yarn |bunx )?jest\b", re.I)
 _OPT9_MAKE_TARGET_RE = re.compile(
     r"(?:^|[\n;&|])\s*make\s+(?!-)([A-Za-z0-9_.-]+)(?=\s|$)", re.M)
 _OPT9_JEST_CONFIG_RE = re.compile(
     r"^(?:jest\.config\.(?:js|cjs|mjs|ts|cts|mts)|jest\.config)$", re.I)
 
 
-def _opt9_make_recipe(root: Path, command: str) -> tuple[str, Path] | None:
+def _opt9_make_recipe(base: Path, command: str) -> tuple[str, Path] | None:
     """Resolve one literal ``make target`` to its local Makefile recipe."""
     match = _OPT9_MAKE_TARGET_RE.search(command)
     if match is None:
         return None
-    path = root / "Makefile"
+    path = base / "Makefile"
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -2954,11 +2954,65 @@ def _opt9_make_recipe(root: Path, command: str) -> tuple[str, Path] | None:
     return ("\n".join(recipe), path.parent) if recipe else None
 
 
-def _opt9_jest_notes(job: dict, command: str) -> list[str]:
+def _opt9_resolved_cache_path(root: Path, base: Path, value: str,
+                              *, actions_path: bool) -> Path | None:
+    """Resolve one literal Jest/cache-action path without guessing expressions."""
+    raw = value.strip()
+    if actions_path:
+        raw = _normalized_actions_expression(raw)
+        workspace = "${{github.workspace}}"
+        if raw == workspace:
+            raw = str(root)
+        elif raw.startswith(workspace + "/"):
+            raw = str(root / raw[len(workspace) + 1:])
+    else:
+        raw = raw.replace("<rootDir>", str(base))
+    if (not raw or "${{" in raw or raw.startswith("~")
+            or "$" in raw or any(char in raw for char in "*?[]")):
+        return None
+    path = Path(raw)
+    try:
+        return (path if path.is_absolute() else
+                (root if actions_path else base) / path).resolve()
+    except OSError:
+        return None
+
+
+def _opt9_cache_action_paths(job: dict, step: dict) -> list[str]:
+    """Literal cache paths restored before ``step``; later/disabled steps do not help it."""
+    prior: list[dict] = []
+    for candidate in _steps(job):
+        if candidate is step:
+            break
+        condition_value = candidate.get("if")
+        condition = str(condition_value or "").strip().casefold()
+        if (condition_value is False
+                or condition in {"false", "${{ false }}", "${{false}}"}):
+            continue
+        uses = _uses(candidate)
+        if (re.search(r"(?:^|/)cache/save@", uses, re.I) is None
+                and _CACHE_ACTION_RE.search(uses)):
+            prior.append(candidate)
+    paths: list[str] = []
+    for cache_step in prior:
+        values = (cache_step.get("with")
+                  if isinstance(cache_step.get("with"), dict) else {})
+        paths.extend(str(values.get("path") or "").splitlines())
+    return [path.strip() for path in paths if path.strip()]
+
+
+def _opt9_jest_notes(doc: dict, job: dict, step: dict) -> list[str]:
     root = Path(_OPT102_ROOT or ".").resolve()
-    recipe = _opt9_make_recipe(root, command)
+    working = _script_working_directory(job, step, doc)
+    base = (root / working).resolve()
+    try:
+        base.relative_to(root)
+    except (OSError, ValueError):
+        return []
+    command = _run(step)
+    recipe = _opt9_make_recipe(base, command)
     expanded = recipe[0] if recipe is not None else command
-    base = recipe[1] if recipe is not None else root
+    base = recipe[1] if recipe is not None else base
     if not _OPT9_JEST_COMMAND_RE.search(expanded):
         return []
     cd = re.search(r"(?:^|[;&|])\s*cd\s+([^\s;&|]+)\s*&&", expanded)
@@ -2971,17 +3025,34 @@ def _opt9_jest_notes(job: dict, command: str) -> list[str]:
             return []
     paths, truncated, _manifests = _vitest_config_files(
         root, lambda name: bool(_OPT9_JEST_CONFIG_RE.match(name)))
-    configs = [path for path in paths
-               if path.parent == base or base in path.parents]
-    if truncated or len(configs) != 1:
+    config: Path | None = None
+    cursor = base
+    while True:
+        here = [path for path in paths if path.parent == cursor]
+        if len(here) > 1:
+            return []
+        if here:
+            config = here[0]
+            break
+        if cursor == root:
+            break
+        parent = cursor.parent
+        try:
+            parent.relative_to(root)
+        except (OSError, ValueError):
+            break
+        if parent == cursor:
+            break
+        cursor = parent
+    if truncated or config is None:
         return []
-    config = configs[0]
     try:
         text = _read_config_text(config)
     except OSError:
         return []
     if text is None:
         return []
+    text = _tal_strip_js_comments(text)
     notes: list[str] = []
     max_workers = re.search(
         r"\bmaxWorkers\s*:\s*(['\"]?)(\d+(?:\.\d+)?)(%)?\1", text)
@@ -2993,7 +3064,7 @@ def _opt9_jest_notes(job: dict, command: str) -> list[str]:
             "OPT88 says to measure this CPU-bound worker cap on the actual runner "
             "before changing it, with no saving credited")
     provider = re.search(
-        r"\bcoverageProvider\s*:\s*(['\"])(v8|istanbul)\1", text, re.I)
+        r"\bcoverageProvider\s*:\s*(['\"])(v8|babel)\1", text, re.I)
     if provider is not None:
         notes.append(
             f"Jest coverage provider is `{provider.group(2).lower()}`; compare providers "
@@ -3002,14 +3073,30 @@ def _opt9_jest_notes(job: dict, command: str) -> list[str]:
     cache_dir = re.search(
         r"\bcacheDirectory\s*:\s*(['\"])([^'\"]+)\1", text)
     configured = cache_dir.group(2) if cache_dir is not None else "<Jest default cache>"
-    relative = configured.replace("<rootDir>", ".")
-    relative = relative[2:] if relative.startswith("./") else relative
-    expected = ((config.parent / relative).resolve().relative_to(root).as_posix().casefold()
-                if cache_dir is not None else "")
-    persisted = any(
-        path == expected or path.rstrip("/").endswith("/" + expected)
-        for path in _cache_paths(_cache_action_steps(job))) if expected else False
-    if not persisted:
+    disabled = bool(
+        re.search(r"(?:^|[\s;&|])--no-cache\b|--cache(?:=|\s+)false\b", expanded, re.I)
+        or re.search(r"\bcache\s*:\s*false\b", text, re.I)
+    )
+    root_dir = re.search(r"\brootDir\s*:\s*(['\"])([^'\"]+)\1", text)
+    config_root = (_opt9_resolved_cache_path(
+        root, config.parent, root_dir.group(2), actions_path=False)
+        if root_dir is not None else config.parent)
+    expected = (_opt9_resolved_cache_path(root, config_root or config.parent, configured,
+                                          actions_path=False)
+                if cache_dir is not None else None)
+    cached_paths = [
+        resolved
+        for path in _opt9_cache_action_paths(job, step)
+        if (resolved := _opt9_resolved_cache_path(
+            root, root, path, actions_path=True)) is not None
+    ]
+    persisted = bool(expected and any(
+        cached == expected or cached in expected.parents for cached in cached_paths))
+    if disabled:
+        notes.append(
+            "Jest result caching is disabled; remove `--no-cache`/`cache: false` "
+            "before persisting an explicit cacheDirectory")
+    elif not persisted:
         notes.append(
             f"Jest cache directory is not persisted across runners (`{configured}`); "
             "keep Jest's default cache enabled and persist a small explicit cacheDirectory "
@@ -3042,7 +3129,7 @@ def _detect_opt9(doc: dict, raw: str) -> list[Hit]:
                                       f"cache flag (`{line.strip()[:80]}`)"),
                             match_text=f"{job_name}#{tool}",
                         ))
-            jest_notes = _opt9_jest_notes(job, _run(s))
+            jest_notes = _opt9_jest_notes(doc, job, s)
             if jest_notes and "jest" not in flagged:
                 flagged.add("jest")
                 hits.append(Hit(
