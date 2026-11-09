@@ -250,6 +250,12 @@ def test_bounds_leave_real_paths_alone() -> None:
     assert _NEW.search("repos/${{ " + "x" * 199 + " }}/statuses/") is None
 
 
+# The old pattern needs minutes on these inputs; the new one takes milliseconds.
+# The limit is generous so a loaded CI runner (the suite runs with four workers)
+# cannot flake it, and still far below what a backtracking pattern needs.
+_TIME_LIMIT_S = 2.0
+
+
 @pytest.mark.parametrize("fragment,count", [
     ("${{", 5000),
     ("${{ ", 5000),
@@ -266,7 +272,7 @@ def test_adversarial_input_finishes_in_linear_time(fragment: str, count: int) ->
     found = _NEW.search(text)
     elapsed = time.perf_counter() - start
     assert found is None
-    assert elapsed < 0.5, f"{fragment!r} x {count}: {elapsed:.2f}s"
+    assert elapsed < _TIME_LIMIT_S, f"{fragment!r} x {count}: {elapsed:.2f}s"
 
 
 @pytest.mark.parametrize("fragment,count", [
@@ -284,4 +290,4 @@ def test_repeated_prefixes_finish_in_linear_time(fragment: str, count: int) -> N
     found = _NEW.search(text)
     elapsed = time.perf_counter() - start
     assert found is None
-    assert elapsed < 0.5, f"{fragment!r} x {count}: {elapsed:.2f}s"
+    assert elapsed < _TIME_LIMIT_S, f"{fragment!r} x {count}: {elapsed:.2f}s"
