@@ -95,6 +95,31 @@ def _pytest_verbose_log(*, startup_s: int = 0) -> str:
     return "\n".join(lines)
 
 
+def _pytest_verbose_capture_log() -> str:
+    """The message shape captured from ``pytest -v -s`` on 2026-11-09.
+
+    The runner timestamps are applied to the captured physical output lines;
+    pytest writes the node id, the test's print, and ``PASSED`` separately.
+    """
+    at = datetime(2026, 11, 9, tzinfo=timezone.utc)
+    rows = [
+        (0, "python3 -m pytest -v -s tests/test_accounts.py"),
+        (0, "collecting ... collected 4 items"),
+    ]
+    for index in range(1, 5):
+        rows.extend((
+            ((index - 1) * 60,
+             f"tests/test_accounts.py::test_account[{index - 1}] "
+             f"schema_name=schema_test_{index}"),
+            (index * 60, "PASSED"),
+        ))
+    rows.append((240, "4 passed in 240.00s"))
+    return "\n".join(
+        f"{_stamp(at + timedelta(seconds=offset))} {message}"
+        for offset, message in rows
+    )
+
+
 def _vitest_verbose_log() -> str:
     at = datetime(2026, 11, 6, tzinfo=timezone.utc)
     durations = (68_100, 68_400, 67_900, 68_200, 21_000, 24_000, 28_000,
@@ -154,6 +179,12 @@ def test_isolated_same_file_tests_get_the_concurrency_leaf() -> None:
 
 def test_pytest_verbose_runner_timestamps_get_the_concurrency_leaf() -> None:
     leaf = bp._parse_log(_pytest_verbose_log())
+    assert leaf is not None
+    assert leaf["fix_key"] == "test-isolated-serial"
+
+
+def test_pytest_verbose_s_capture_gets_the_concurrency_leaf() -> None:
+    leaf = bp._parse_log(_pytest_verbose_capture_log())
     assert leaf is not None
     assert leaf["fix_key"] == "test-isolated-serial"
 

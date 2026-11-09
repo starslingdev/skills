@@ -29,6 +29,8 @@ def _startup_log(
         if shape == "pytest":
             work = ("collecting ... collected 1 item"
                     if pytest_output == "normal" else
+                    "collected 1 item"
+                    if pytest_output == "piped" else
                     ". [100%]" if pytest_output == "quiet" else
                     "collecting ...")
             done = ("======= 1 passed, 1 warning in 1.00s ======="
@@ -93,6 +95,16 @@ def test_opt85_accepts_pytest_options_before_the_unique_target():
 
 def test_opt85_accepts_decorated_normal_pytest_output():
     leaf = bp._parse_log(_startup_log("pytest", pytest_output="normal"))
+
+    assert leaf is not None
+    assert leaf["fix_key"] == "per-invocation-startup"
+
+
+def test_opt85_accepts_collected_line_from_real_piped_pytest_output():
+    # Captured from ``python3 -m pytest test_real.py | cat`` on 2026-11-09:
+    # when stdout is not a terminal pytest prints this line without the
+    # transient ``collecting ...`` prefix.
+    leaf = bp._parse_log(_startup_log("pytest", pytest_output="piped"))
 
     assert leaf is not None
     assert leaf["fix_key"] == "per-invocation-startup"
