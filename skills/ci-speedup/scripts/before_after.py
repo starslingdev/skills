@@ -251,9 +251,10 @@ def compare_push_cohorts(
     state, workload_evidence = _workload_state(before_samples, after_samples)
     before_cached, after_cached = _cached_count(before_samples), _cached_count(after_samples)
     cache_regressed = (before_cached is not None and after_cached is not None
-                       and after_cached < before_cached)
+                       and after_cached != before_cached)
     cache_regressed = cache_regressed or (
-        all(s["cache_class"] == "warm" for s in before_samples)
+        all(s["cache_class"] == "warm"
+            and s["cache_reason"] == "log cache hit" for s in before_samples)
         and any(s["cache_class"] == "cold" for s in after_samples))
     if cache_regressed:
         state, workload_evidence = "changed", "cache replay fell on compared work"
@@ -297,17 +298,18 @@ def compare_push_cohorts(
     comparable = (runners_match and workflows_match and runner_evidence
                   and lane_evidence)
     enough_samples = len(before_samples) >= 2 and len(after_samples) >= 2
+    sampling_pending = need > len(after_samples)
     noisy_at_cap = spread_pct > 30.0 and len(after_samples) >= 4
-    clean = (comparable and ci_only and state == "same" and enough_samples
-             and not noisy_at_cap and step is not None)
-    before_med = _median(float(s["wall_s"]) for s in before_samples)
-    after_med = _median(float(s["wall_s"]) for s in headline)
-    saving = round(float(before_med) - float(after_med), 3) if clean else None
     no_change = bool(
         set(s.get("head_sha") for s in before_samples)
         & set(s.get("head_sha") for s in after_samples)
         and any(int(s.get("attempt") or 1) > 1 for s in after_samples))
-
+    clean = (comparable and ci_only and state == "same" and enough_samples
+             and not sampling_pending and not noisy_at_cap and not no_change
+             and step is not None)
+    before_med = _median(float(s["wall_s"]) for s in before_samples)
+    after_med = _median(float(s["wall_s"]) for s in headline)
+    saving = round(float(before_med) - float(after_med), 3) if clean else None
     step_line = ("Changed step: unavailable (no uniquely matched step timing)."
                  if step is None else
                  f"Changed step: {step[0]}, {step[1]:.1f}s before and "
