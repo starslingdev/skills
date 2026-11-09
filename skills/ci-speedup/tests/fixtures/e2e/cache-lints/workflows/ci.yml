@@ -47,14 +47,17 @@ jobs:
   cache-dance:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/cache@v4
+        with:
+          path: cache-mount
+          key: cache-mount-${{ hashFiles('Dockerfile') }}
       - uses: reproducible-containers/buildkit-cache-dance@v3
         with:
-          cache-map: '{"/root/.cache": "build-cache"}'
+          cache-dir: cache-mount
+          dockerfile: Dockerfile
       - uses: docker/build-push-action@v6
         with:
           context: .
-          cache-from: type=gha,scope=app
-          cache-to: type=gha,scope=app,mode=max
   gate:
     needs: build
     runs-on: ubuntu-latest
