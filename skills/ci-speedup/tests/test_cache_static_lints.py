@@ -197,6 +197,20 @@ def test_opt61_accepts_compiler_caches_with_persistent_or_remote_backends(tmp_pa
 """)
     assert "OPT61" not in _patterns(remote)
 
+    inherited_remote = _scan_workflow(tmp_path / "inherited-remote", """name: CI
+on: pull_request
+env:
+  CCACHE_REMOTE_STORAGE: redis://cache.internal
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+    steps:
+      - run: cmake --build build
+""")
+    assert "OPT61" not in _patterns(inherited_remote)
+
 
 def test_opt61_reads_ccache_directory_and_launcher_from_job_env(tmp_path) -> None:
     rows = _scan_workflow(tmp_path, """name: CI
@@ -368,6 +382,21 @@ def test_opt4_accepts_stable_gha_scope_and_mode_max_local_rotation(tmp_path) -> 
           --cache-to type=local,dest=/tmp/build-cache-new,mode=max
 """)
     assert "OPT4" not in _patterns(local)
+
+
+def test_opt4_does_not_pair_local_paths_from_separate_build_steps(tmp_path) -> None:
+    rows = _scan(tmp_path, """      - uses: docker/build-push-action@v6
+        with:
+          context: service-a
+          cache-to: type=local,dest=/tmp/build-cache
+      - uses: docker/build-push-action@v6
+        with:
+          context: service-b
+          cache-from: type=local,src=/tmp/build-cache
+          cache-to: type=local,dest=/tmp/build-cache-next
+""")
+
+    assert "OPT4" not in _patterns(rows)
 
 
 def test_opt4_flags_ephemeral_dockerfile_cache_mount_on_hosted_runner(tmp_path) -> None:

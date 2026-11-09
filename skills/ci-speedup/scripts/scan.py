@@ -3819,8 +3819,9 @@ def _cache_saved_keys(docs: Iterable[dict]) -> list[str]:
     return keys
 
 
-def _job_env_blob(job: dict) -> str:
-    envs = [job.get("env"), *(step.get("env") for step in _steps(job))]
+def _job_env_blob(job: dict, doc: dict | None = None) -> str:
+    envs = [doc.get("env") if isinstance(doc, dict) else None,
+            job.get("env"), *(step.get("env") for step in _steps(job))]
     return "\n".join(
         f"{key}={value}"
         for env in envs if isinstance(env, dict)
@@ -3847,8 +3848,9 @@ def _normalized_actions_expression(value: str) -> str:
     )
 
 
-def _compiler_cache_has_remote_backend(job: dict) -> bool:
-    envs = [job.get("env")] + [step.get("env") for step in _steps(job)]
+def _compiler_cache_has_remote_backend(job: dict, doc: dict | None = None) -> bool:
+    envs = [doc.get("env") if isinstance(doc, dict) else None,
+            job.get("env"), *(step.get("env") for step in _steps(job))]
     names = "\n".join(
         str(key) for env in envs if isinstance(env, dict) for key in env
     )
@@ -3856,19 +3858,25 @@ def _compiler_cache_has_remote_backend(job: dict) -> bool:
                 or _REMOTE_COMPILER_CACHE_RE.search(_job_run_blob(job)))
 
 
-def _buildkit_cache_blob(job: dict) -> str:
-    """BuildKit cache flags from shell commands and build-push-action inputs."""
-    parts = [_job_run_blob(job)]
+def _buildkit_cache_invocations(job: dict) -> list[str]:
+    """BuildKit cache flags grouped by the build invocation that consumes them."""
+    invocations: list[str] = []
     for step in _steps(job):
+        run = _run(step).strip()
+        if run:
+            invocations.append(run)
         if not re.search(r"(?:^|/)build-push-action@", _uses(step), re.I):
             continue
         values = step.get("with") if isinstance(step.get("with"), dict) else {}
+        parts: list[str] = []
         for key in ("cache-from", "cache-to"):
             value = values.get(key)
             if value is not None:
                 parts.extend(f"{key} {line.strip()}" for line in str(value).splitlines()
                              if line.strip())
-    return "\n".join(parts)
+        if parts:
+            invocations.append("\n".join(parts))
+    return invocations
 
 
 def _normalized_cache_path(value: object) -> str | None:
@@ -3981,7 +3989,7 @@ def _detect_opt61(
             continue
         cache_steps = _cache_action_steps(job)
         cache_paths = _cache_paths(cache_steps)
-        blob = "\n".join((_job_run_blob(job), _job_env_blob(job)))
+        blob = "\n".join((_job_run_blob(job), _job_env_blob(job, doc)))
         reasons: list[tuple[str, str]] = []
 
         for step in cache_steps:
@@ -4015,7 +4023,8 @@ def _detect_opt61(
         cache_path_text = "\n".join(cache_paths)
         declared_dirs = [
             (str(name).casefold(), str(value).strip())
-            for env in [job.get("env"), *(step.get("env") for step in _steps(job))]
+            for env in [doc.get("env"), job.get("env"),
+                        *(step.get("env") for step in _steps(job))]
             if isinstance(env, dict)
             for name, value in env.items()
             if str(name).casefold() in {
@@ -4058,7 +4067,7 @@ def _detect_opt61(
             token in cache_path_text for token in ("ccache", "sccache", "target")))
         if (uses_compiler_cache and not supplied_by_cache_action and not persisted_compiler
                 and not _is_self_hosted(job)
-                and not _compiler_cache_has_remote_backend(job)):
+                and not _compiler_cache_has_remote_backend(job, doc)):
             reasons.append((_COMPILER_CACHE_RE.search(blob).group(0),
                             "the compiler cache has no persistence step"))
         persisted_analysis = (persisted_dirs(declared_analysis_dirs)
@@ -4118,18 +4127,19 @@ def _detect_opt4(doc: dict, raw: str) -> list[Hit]:
     for job_name, job in _jobs_from_doc(doc).items():
         if not isinstance(job, dict):
             continue
-        blob = _buildkit_cache_blob(job)
-        match = volatile.search(blob)
-        reason = ("a commit-scoped GHA cache cannot be restored by a later commit"
-                  if match is not None and "github.sha" in match.group(0)
-                  else "a run-scoped GHA cache cannot be restored by a fresh workflow invocation")
-        if match is None:
-            source, destination = local_from.search(blob), local_to.search(blob)
-            if source and destination and source.group(1) == destination.group(1):
-                match = destination
-                reason = ("the local cache exports over the directory it imports without "
-                          "rotating to a fresh destination")
-        if match is not None:
+        for blob in _buildkit_cache_invocations(job):
+            match = volatile.search(blob)
+            reason = ("a commit-scoped GHA cache cannot be restored by a later commit"
+                      if match is not None and "github.sha" in match.group(0)
+                      else "a run-scoped GHA cache cannot be restored by a fresh workflow invocation")
+            if match is None:
+                source, destination = local_from.search(blob), local_to.search(blob)
+                if source and destination and source.group(1) == destination.group(1):
+                    match = destination
+                    reason = ("the local cache exports over the directory it imports without "
+                              "rotating to a fresh destination")
+            if match is None:
+                continue
             hits.append(Hit(
                 line=_line_of_in_job(raw, job_name, match.group(0).strip()),
                 affected_jobs=[job_name],
@@ -4139,6 +4149,7 @@ def _detect_opt4(doc: dict, raw: str) -> list[Hit]:
                 match_text=match.group(0).strip(),
                 facts={"static_cache_lint": True},
             ))
+            break
     return hits
 
 
