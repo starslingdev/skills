@@ -43,14 +43,14 @@ def _cohort(sha: str, identity: str, wall: int, *, position: int = 1,
 
 def test_complete_exact_head_attempts_produce_warm_median_and_range():
     before = [_cohort("base-a", "b1", 50), _cohort("base-b", "b2", 40, position=2)]
-    after = [_cohort("fix", "a1", 26, log="cache key miss"),
+    after = [_cohort("fix", "a1", 24, log="cache key miss"),
              _cohort("fix", "a2", 20, position=2, log="cache hit"),
-             _cohort("fix", "a3", 24, position=3, log="cache hit")]
+             _cohort("fix", "a3", 22, position=3, log="cache hit")]
     result = compare_push_cohorts(before, after, changed_files=[".github/workflows/ci.yml"])
     assert result["available"] is True
-    assert result["after"]["warm"] == {"n": 2, "median_s": 22.0, "range_s": [20.0, 24.0]}
-    assert result["after"]["cold"]["values_s"] == [26.0]
-    assert result["after"]["all_complete"]["values_s"] == [26.0, 20.0, 24.0]
+    assert result["after"]["warm"] == {"n": 2, "median_s": 21.0, "range_s": [20.0, 22.0]}
+    assert result["after"]["cold"]["values_s"] == [24.0]
+    assert result["after"]["all_complete"]["values_s"] == [24.0, 20.0, 22.0]
     assert result["workload_state"] == "same"
     assert result["clean_attribution"] is True
 
@@ -66,7 +66,7 @@ def test_incomplete_failed_and_mixed_head_cohorts_never_become_samples():
     assert set(result["excluded"]) == {"missing", "failed", "drift"}
 
 
-def test_adaptive_sampling_uses_thirty_percent_spread_and_caps_at_four():
+def test_adaptive_sampling_uses_documented_twenty_percent_spread_and_caps_at_four():
     result = compare_push_cohorts([_cohort("base", "b", 40)],
         [_cohort("fix", "a1", 20), _cohort("fix", "a2", 30, position=2)],
         changed_files=[".github/workflows/ci.yml"])
