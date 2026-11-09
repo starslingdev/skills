@@ -460,6 +460,10 @@ jobs:
         "module.exports = { maxWorkers: '50%' };\n")
     assert _finding(_scan(echoed), "OPT9") is None
 
+    outside_cd = _finding(_write_jest_make_project(
+        tmp_path / "outside-cd", recipe="cd ../outside && npx jest"), "OPT9")
+    assert outside_cd is None
+
 
 def test_opt14_repeated_setup_no_artifact(tmp_path: Path):
     pos = """name: CI

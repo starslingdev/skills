@@ -3021,6 +3021,8 @@ def _opt9_jest_notes(doc: dict, job: dict, step: dict) -> list[str]:
         try:
             if os.path.commonpath([str(root), str(candidate)]) == str(root):
                 base = candidate
+            else:
+                return []
         except ValueError:
             return []
     paths, truncated, _manifests = _vitest_config_files(
