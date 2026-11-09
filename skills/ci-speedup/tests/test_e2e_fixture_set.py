@@ -503,14 +503,24 @@ def test_duplicate_gate_positive_push_wall_stays_out_of_merge_credit(
     failures = [check for check in checks if not check.skipped and not check.ok]
     assert failures == [], [(check.name, check.detail) for check in failures]
 def _run_multiarch_log_variant(
-        name: str, monkeypatch, tmp_path, transform):
+        name: str, monkeypatch, tmp_path, transform, *, preserve_no_inspect=False):
     fixture = tmp_path / "fixture-variants" / name
     fixture.parent.mkdir(exist_ok=True)
     shutil.copytree(FIXTURE_ROOT / "multiarch-image", fixture)
     responses_path = fixture / "responses.json"
     recorded = json.loads(responses_path.read_text(encoding="utf-8"))
+    inspected_prefix = next(
+        log[:log.index("#10 [linux/amd64 build 2/3]")]
+        for log in recorded["logs"].values() if "Nodes:" in log)
+
+    def variant_input(log: str) -> str:
+        if preserve_no_inspect or "Nodes:" in log:
+            return log
+        return inspected_prefix + log[log.index("#10 [linux/amd64 build 2/3]"):]
+
     recorded["logs"] = {
-        job_id: transform(log) for job_id, log in recorded["logs"].items()
+        job_id: transform(variant_input(log))
+        for job_id, log in recorded["logs"].items()
     }
     responses_path.write_text(json.dumps(recorded), encoding="utf-8")
     doc, report, checks = run_fixture(fixture, monkeypatch, tmp_path)
@@ -565,6 +575,27 @@ def test_builder_topology_and_foreign_only_shapes_run_through_collection(
     _doc, _report, native = _run_multiarch_log_variant(
         "multiarch-native-arm", monkeypatch, tmp_path, native_arm)
     assert "emulated-image-compile" not in native["leaves"]
+
+
+def test_no_inspect_foreign_compile_runs_through_collection(
+        monkeypatch, tmp_path):
+    def remove_builder_inspect(log: str) -> str:
+        first_layer = log.index("#10 [linux/amd64 build 2/3]")
+        return ("docker buildx build --platform linux/amd64,linux/arm64 .\n"
+                + log[first_layer:])
+
+    _doc, report, facts = _run_multiarch_log_variant(
+        "multiarch-no-inspect", monkeypatch, tmp_path, remove_builder_inspect,
+        preserve_no_inspect=True)
+    leaf = next(
+        row for row in facts["leaf_details"]
+        if row.get("fix_key") == "emulated-image-compile")
+
+    assert leaf["magnitude"] is None
+    assert leaf["builder_topology_unconfirmed"] is True
+    assert "docker buildx inspect --bootstrap" in report
+    assert "does not establish whether that work ran under emulation" in report
+    assert "building a foreign architecture under emulation instead" not in report
 
 
 def test_builder_detected_platform_and_dominance_guards_run_through_collection(
@@ -663,6 +694,65 @@ def test_default_branch_image_is_drilled_and_kept_out_of_merge_claims(
         "**Bottom line.**", "**Bottom line.** OPT102 push-lane finding;", 1)
     assert not vr.check_default_branch_push_lane_isolated(
         bottom_mutant, tmp_path / "default-branch-image" / "findings.json").ok
+
+
+def test_unconfirmed_push_image_stays_uncredited_on_a_frequent_lane(
+        monkeypatch, tmp_path):
+    fixture = tmp_path / "frequent-no-inspect-image"
+    shutil.copytree(FIXTURE_ROOT / "default-branch-image", fixture)
+    responses_path = fixture / "responses.json"
+    responses = json.loads(responses_path.read_text(encoding="utf-8"))
+    for job_id, log in responses["logs"].items():
+        first_layer = log.index("#9 [linux/amd64")
+        responses["logs"][job_id] = (
+            "docker buildx build --platform linux/amd64,linux/arm64 .\n"
+            + log[first_layer:])
+    push_workflow = next(
+        row for row in responses["workflows"] if row["path"].endswith("ci.yml"))
+    template_run = push_workflow["runs"][0]
+    template_jobs = responses["jobs"][str(template_run["id"])]
+    for offset in range(5):
+        run_id = 1004 + offset
+        day = 25 - offset
+        run = dict(template_run)
+        run.update({
+            "id": run_id,
+            "head_sha": f"sha-extra-{offset}",
+            "created_at": f"2026-01-{day:02d}T00:00:00Z",
+            "run_started_at": f"2026-01-{day:02d}T00:00:00Z",
+            "updated_at": f"2026-01-{day:02d}T00:05:00Z",
+        })
+        push_workflow["runs"].append(run)
+        jobs = json.loads(json.dumps(template_jobs))
+        for job_index, job in enumerate(jobs, start=1):
+            job["id"] = run_id * 10 + job_index
+            for key in ("started_at", "completed_at"):
+                job[key] = job[key].replace("2026-01-28", f"2026-01-{day:02d}")
+            for step in job.get("steps") or []:
+                for key in ("started_at", "completed_at"):
+                    step[key] = step[key].replace(
+                        "2026-01-28", f"2026-01-{day:02d}")
+        responses["jobs"][str(run_id)] = jobs
+    push_workflow["runs_30d"] = len(push_workflow["runs"])
+    responses_path.write_text(json.dumps(responses), encoding="utf-8")
+
+    run_root = tmp_path / "frequent-run"
+    run_root.mkdir()
+    doc, _report, checks = run_fixture(fixture, monkeypatch, run_root)
+    finding = next(
+        row for row in doc["findings"]
+        if row.get("pattern") == "OPT102" and row.get("lane") == "push")
+    leaf = doc["default_branch_push_lane"]["drill"]["leaf"]
+
+    assert leaf["builder_topology_unconfirmed"] is True
+    assert leaf["uncredited"] is True
+    assert finding["push_lane_projection"]["cause_ceiling_s"] == 0.0
+    assert finding["push_lane_projection"]["credited_s"] == 0.0
+    assert "docker buildx inspect --bootstrap" in finding["agent_prompt"]
+    assert "Do not claim emulation or a saving" in finding["agent_prompt"]
+    assert "Build platform-independent output once" not in finding["agent_prompt"]
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
 
 
 def test_push_drill_isolates_every_match_without_erasing_a_pr_match(

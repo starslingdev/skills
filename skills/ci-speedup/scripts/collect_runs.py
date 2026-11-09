@@ -29992,11 +29992,14 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 _potential_s = max(
                     float(_typical_push.get("wall_s") or 0.0) - _projected_s, 0.0)
                 _leaf_magnitude = (_push_leaf or {}).get("magnitude") or {}
-                _cause_ceiling_s = (
-                    float(_leaf_magnitude["value"])
-                    if isinstance(_leaf_magnitude.get("value"), (int, float))
-                    and str(_leaf_magnitude.get("unit") or "") == "s"
-                    else _potential_s)
+                _leaf_uncredited = (_push_leaf or {}).get("uncredited") is True
+                if _leaf_uncredited:
+                    _cause_ceiling_s = 0.0
+                elif (isinstance(_leaf_magnitude.get("value"), (int, float))
+                      and str(_leaf_magnitude.get("unit") or "") == "s"):
+                    _cause_ceiling_s = float(_leaf_magnitude["value"])
+                else:
+                    _cause_ceiling_s = _potential_s
                 _rare_push = _push_lane.get("rare") is True
                 _projection_stamp = {
                     "job_speedup": float(_projection.get("job_speedup") or 0.0),
@@ -30004,13 +30007,13 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                     "multiple": round(float(_projection.get("multiple") or 0.0), 3),
                     "potential_s": round(_potential_s, 3),
                     "cause_ceiling_s": round(_cause_ceiling_s, 3),
-                    "credited_s": (0.0 if _rare_push else
+                    "credited_s": (0.0 if _rare_push or _leaf_uncredited else
                                    round(min(_potential_s, _cause_ceiling_s), 3)),
                     "next_longest_s": round(float(
                         (_typical_push.get("next_longest_job") or {}).get(
                             "duration_s") or 0.0), 3),
                 }
-                _recipe = bp._FIX_META.get(_leaf_fix_key, {}) if _leaf_fix_key else {}
+                _recipe = bp._fix_meta_for_leaf(_push_leaf) or {}
                 _measured_cause = str((_push_leaf or {}).get("unit_label") or "")
                 _evidence_lines = [
                     str(line) for line in ((_push_leaf or {}).get("evidence") or [])[:4]

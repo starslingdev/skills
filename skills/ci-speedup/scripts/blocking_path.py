@@ -2431,9 +2431,16 @@ def _emulated_image_compile_leaf(lines: list[str]) -> dict[str, Any] | None:
             cold_operations.discard(done.group(1))
             cold_durations.append(float(done.group(2)))
     builder = _buildx_single_node(lines)
-    if builder is None:
+    raw_buildx = any(
+        re.search(r"\bdocker\s+buildx\s+build\b|docker/build-push-action@", line,
+                  re.IGNORECASE)
+        for line in lines)
+    builder_unconfirmed = (builder is None and raw_buildx and not any(
+        re.search(r"\bNodes:\s*$", line) for line in lines))
+    if builder is None and not builder_unconfirmed:
         return None
-    native_platform, builder_evidence = builder
+    native_platform, builder_evidence = (
+        builder if builder is not None else ("linux/amd64", []))
     native_family = _platform_family(native_platform)
     native = sum(seconds for arch, seconds, _header, _done, _kind in durations
                  if _platform_family(f"linux/{arch}") == native_family)
@@ -2454,6 +2461,29 @@ def _emulated_image_compile_leaf(lines: list[str]) -> dict[str, Any] | None:
             or (native > 0 and any(
                 seconds / native < 2.0 for seconds in foreign_by_arch.values()))):
         return None
+    if builder_unconfirmed:
+        # A raw hosted build commonly runs on amd64, but without the builder's
+        # node list we cannot establish whether the foreign-platform work used
+        # emulation or a native remote node. Keep the measured dominance as a
+        # routing signal only: no scalar magnitude, no credited seconds and no
+        # emulation claim.
+        if native <= 0:
+            return None
+        return {
+            "fix_key": "emulated-image-compile",
+            "unit_label": (
+                "foreign-platform compilation dominates the cold build, but "
+                "the builder topology was not printed — check the builder nodes"),
+            "magnitude": None,
+            "deeper": [],
+            "uncredited": True,
+            "evidence": [
+                item for _arch, _seconds, header, done, _kind in durations
+                for item in (header, done)
+            ][:6],
+            "search": ["docker buildx inspect --bootstrap", "Nodes:", "Platforms:"],
+            "builder_topology_unconfirmed": True,
+        }
     share = round(100 * emulated / total)
     rows = []
     if native > 0:
@@ -4126,6 +4156,36 @@ _FIX_META: dict[str, dict[str, Any]] = {
 }
 
 
+def _fix_meta_for_leaf(leaf: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return claim-safe catalog guidance for one parsed log leaf."""
+    meta = _FIX_META.get(str((leaf or {}).get("fix_key", "")))
+    if not meta:
+        return None
+    resolved = dict(meta)
+    if (str((leaf or {}).get("fix_key") or "") == "emulated-image-compile"
+            and (leaf or {}).get("builder_topology_unconfirmed") is True):
+        resolved.update({
+            "cause": (
+                "Foreign-platform compilation dominates the measured cold build, "
+                "but the builder topology was not printed. The evidence does not "
+                "establish whether that work ran under emulation or on a native node."
+            ),
+            "look": (
+                "Run `docker buildx inspect --bootstrap` first and record every node "
+                "and platform. Then trace the foreign-platform compile stage in `{wf}` "
+                "and its repository-local Dockerfile."
+            ),
+            "deliver": (
+                "Start with `docker buildx inspect --bootstrap`. If the builder has no "
+                "native node for the foreign platform, compare a build-platform stage "
+                "or explicit cross-compilation against the same workload. If a native "
+                "node exists, investigate that node and the cold layer instead. Do not "
+                "claim emulation or a saving until the topology is confirmed."
+            ),
+        })
+    return resolved
+
+
 def _addressable_plain(pole: dict[str, Any], candidates: list[dict[str, Any]]) -> str:
     """The floor note's addressable-ceiling sentence as plain text (no blockquote /
     bold), for embedding in the agent prompt. "" when there's nothing to floor."""
@@ -4446,13 +4506,12 @@ def _build_agent_prompt(leaf: dict[str, Any] | None, pole: dict[str, Any],
     (OPT70–75, rendered AS the pole) or a DATA-DRIVEN catalog pattern (e.g. OPT24,
     rendered in the 'Also noticed' appendix) - pass those finding lists through so the
     generic prompt names the matched pattern instead of falsely claiming no catalog match."""
-    meta = _FIX_META.get(str((leaf or {}).get("fix_key", "")))
+    meta = _fix_meta_for_leaf(leaf)
     if not meta:
         return _build_generic_agent_prompt(
             pole, candidates, run_url, repo, sha, gate_count, npop, timeline,
             structural, data_driven, cs=cs, cross_run_rendered=cross_run_rendered,
             opt79=opt79, opt82=opt82)
-    meta = dict(meta)
     if (str((leaf or {}).get("fix_key") or "") == "buildx-no-cache"
             and (leaf or {}).get("whole_context_before_slowest") is True):
         meta.update({

@@ -15724,9 +15724,12 @@ def check_default_branch_push_lane_isolated(
                        - expected_projected) > 0.11:
                     failures.append("push finding projection drifted from the shared helper")
                 magnitude = _as_dict(_as_dict(drill.get("leaf")).get("magnitude"))
-                expected_cause = (
-                    _num(magnitude.get("value"))
-                    if magnitude.get("unit") == "s" else expected_potential)
+                if _as_dict(drill.get("leaf")).get("uncredited") is True:
+                    expected_cause = 0.0
+                elif magnitude.get("unit") == "s":
+                    expected_cause = _num(magnitude.get("value"))
+                else:
+                    expected_cause = expected_potential
                 expected_cause = (expected_cause if expected_cause is not None
                                   else expected_potential)
                 if abs((_num(stamped_projection.get("cause_ceiling_s")) or 0.0)
