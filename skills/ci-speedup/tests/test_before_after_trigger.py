@@ -101,6 +101,37 @@ def test_default_branch_verification_never_requests_a_rerun(tmp_path):
     assert client.reruns == 0
 
 
+def test_default_branch_verification_keeps_its_anchor_as_head_advances(tmp_path):
+    class MovingDefaultClient(FakeClient):
+        def __init__(self):
+            super().__init__(head="main-1", pushes=[_cohort("main-2", "p1")])
+            self.anchors = []
+
+        def is_default_branch(self, repo, branch):
+            return True
+
+        def default_branch_cohorts(self, repo, after_head, limit):
+            self.anchors.append(after_head)
+            return super().default_branch_cohorts(repo, after_head, limit)
+
+    client = MovingDefaultClient()
+    baseline = tmp_path / "base.json"
+    rows = [_cohort(f"base-{n}", f"base-{n}") for n in (1, 2)]
+    for row in rows:
+        row["lane"] = "push"
+    baseline.write_text(json.dumps({"verification_baseline": rows}))
+    first = _invoke(tmp_path, client, branch="main")
+    client.head = "main-2"
+    client.pushes.append(_cohort("main-3", "p2"))
+    second = _invoke(tmp_path, client, branch="main")
+
+    assert first["status"] == "waiting-for-default-branch-pushes"
+    assert second["status"] == "complete"
+    assert second["head_sha"] == "main-1"
+    assert client.anchors == ["main-1", "main-1"]
+    assert client.reruns == 0
+
+
 def test_cache_sensitive_baseline_uses_push_lane_facts(tmp_path):
     pushes = [_cohort(f"push-{n}", f"p{n}") for n in range(1, 4)]
     for cohort in pushes:
@@ -113,14 +144,14 @@ def test_cache_sensitive_baseline_uses_push_lane_facts(tmp_path):
     baseline = tmp_path / "base.json"
     baseline.write_text(json.dumps({
         "per_workflow_monthly_volume": {"ci.yml": 40},
-        "pr_critical_path": {"commit_wall_clock": {"facts": [
+        "default_branch_push_lane": {"facts": [
             {
                 "sha": f"base-{n}-{event}", "event": event, "jobs": [{
                     **_job(f"base-{n}-{event}", 1),
                     "workflow_file": "ci.yml",
                 }],
             } for event in ("pull_request", "push") for n in (1, 2)
-        ]}},
+        ]},
     }))
     result = advance_verification(
         client, repo="o/r", branch="fix", baseline_artifact=str(baseline),
@@ -129,6 +160,7 @@ def test_cache_sensitive_baseline_uses_push_lane_facts(tmp_path):
         environ={"CI_SPEEDUP_VERIFY_RUNS": "2"}, emit=lambda _line: None)
     assert result["status"] == "complete"
     assert result["verdict"]["reason"] != "triggered workflow set changed"
+    assert "distinct default-branch push cohorts" in result["verdict"]["report"]
 
 
 def test_same_head_after_arm_is_labelled_no_change_reruns():

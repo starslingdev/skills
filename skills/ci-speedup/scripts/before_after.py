@@ -85,7 +85,7 @@ def advance_verification(
     is_default = getattr(client, "is_default_branch", None)
     on_default_branch = bool(
         callable(is_default) and is_default(repo, branch))
-    tracking_default = bool(cache_sensitive and on_default_branch)
+    tracking_default = on_default_branch
     baseline_lane = ("push" if cache_sensitive or on_default_branch
                      else "pull_request")
     before = (baseline_doc.get("verification_baseline")
@@ -638,7 +638,9 @@ def _baseline_for_lane(cohorts: list[dict[str, Any]], lane: str
 def _baseline_from_findings(
     doc: dict[str, Any], *, lane: str | None = None,
 ) -> list[dict[str, Any]]:
-    clock = ((doc.get("pr_critical_path") or {}).get("commit_wall_clock") or {})
+    clock = ((doc.get("default_branch_push_lane") or {})
+             if lane == "push" else
+             ((doc.get("pr_critical_path") or {}).get("commit_wall_clock") or {}))
     cohorts: list[dict[str, Any]] = []
     for fact in clock.get("facts") or []:
         if not isinstance(fact, dict) or fact.get("partial") is True:
@@ -1018,9 +1020,13 @@ def compare_push_cohorts(
     cold_reasons = ", ".join(str(s["cache_reason"]) for s in cold) or "none observed"
     sample_label = ("no-change reruns" if no_change
                     else "fresh complete runs")
+    comparison_shape = (
+        f"{len(after_samples)} distinct default-branch push cohorts"
+        if allow_distinct_after_heads else "one exact-head branch cohort")
     report = "\n".join([
         f"Sample size: {len(after_samples)} {sample_label}.",
-        f"Asymmetry: {len(before_samples)} historical push cohorts versus one exact-head branch cohort.",
+        f"Asymmetry: {len(before_samples)} historical push cohorts versus "
+        f"{comparison_shape}.",
         f"CI-only scope: {'passed' if ci_only else 'product files also changed'}; workload is {state} ({workload_evidence}).",
         f"Variance: {min(values):.1f}s-{max(values):.1f}s; {sampling['reason']}.",
         f"Cache state: {len(cold)} cold and {len(warm)} warm; warm reruns are optimistic.",
