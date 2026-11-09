@@ -51,6 +51,71 @@ jobs:
     assert "aarch64" in hits[0]["evidence"]
 
 
+@pytest.mark.parametrize("workspace", ["$GITHUB_WORKSPACE", "${{ github.workspace }}"])
+def test_run_on_arch_compile_keeps_shell_variables_opaque(
+        tmp_path: Path, workspace: str):
+    hits = _opt89(tmp_path, """name: variable action
+on: pull_request
+jobs:
+  arm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: uraimo/run-on-arch-action@v2
+        with:
+          arch: aarch64
+          run: cd WORKSPACE && make -j2
+""".replace("WORKSPACE", workspace))
+
+    assert len(hits) == 1
+    assert "make" in hits[0]["evidence"]
+
+
+@pytest.mark.parametrize("workspace", ["$PWD", "${{ github.workspace }}"])
+def test_docker_compile_keeps_volume_variables_opaque(
+        tmp_path: Path, workspace: str):
+    hits = _opt89(tmp_path, """name: variable docker
+on: pull_request
+jobs:
+  arm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-qemu-action@v3
+      - run: docker run --platform linux/arm64 -v WORKSPACE:/src build-image make -j2
+""".replace("WORKSPACE", workspace))
+
+    assert len(hits) == 1
+    assert "make" in hits[0]["evidence"]
+
+
+def test_variable_using_docker_test_command_stays_silent(tmp_path: Path):
+    hits = _opt89(tmp_path, """name: variable docker tests
+on: pull_request
+jobs:
+  arm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-qemu-action@v3
+      - run: docker run --platform linux/arm64 -v $PWD:/src test-image pytest -q $TESTS
+""")
+
+    assert hits == []
+
+
+def test_raw_buildx_with_variable_image_remains_opt102(tmp_path: Path):
+    (tmp_path / "Dockerfile").write_text(
+        "FROM golang:1.24 AS build\nRUN go build ./...\n", encoding="utf-8")
+    findings = _scan(tmp_path, """name: variable buildx
+on: pull_request
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - run: docker buildx build --platform linux/arm64 -t $IMAGE .
+""")
+
+    assert "OPT102" in {row["pattern"] for row in findings}
+
+
 def test_run_on_arch_compile_is_silent_on_native_arm_runner(tmp_path: Path):
     hits = _opt89(tmp_path, """name: native build
 on: pull_request
@@ -208,6 +273,44 @@ jobs:
     assert "aarch64" in hits[0]["evidence"]
 
 
+def test_run_on_arch_resolves_matrix_test_target_before_classifying(
+        tmp_path: Path):
+    hits = _opt89(tmp_path, """name: matrix action target
+on: pull_request
+jobs:
+  arm:
+    strategy:
+      matrix:
+        target: [test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: uraimo/run-on-arch-action@v2
+        with:
+          arch: aarch64
+          run: make ${{ matrix.target }}
+""")
+
+    assert hits == []
+
+
+def test_job_container_resolves_matrix_compile_command(tmp_path: Path):
+    hits = _opt89(tmp_path, """name: matrix container command
+on: pull_request
+jobs:
+  arm:
+    strategy:
+      matrix:
+        command: [make -j2]
+    runs-on: ubuntu-latest
+    container: arm64v8/ubuntu:24.04
+    steps:
+      - run: ${{ matrix.command }}
+""")
+
+    assert len(hits) == 1
+    assert "make" in hits[0]["evidence"]
+
+
 def test_docker_run_resolves_matrix_platform(tmp_path: Path):
     hits = _opt89(tmp_path, """name: matrix docker
 on: pull_request
@@ -224,6 +327,40 @@ jobs:
 
     assert len(hits) == 1
     assert "linux/arm64" in hits[0]["evidence"]
+
+
+def test_docker_run_resolves_matrix_platform_beside_opaque_volume(
+        tmp_path: Path):
+    hits = _opt89(tmp_path, """name: matrix docker with variable volume
+on: pull_request
+jobs:
+  arm:
+    strategy:
+      matrix:
+        platform: [linux/arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-qemu-action@v3
+      - run: docker run --platform ${{ matrix.platform }} -v $PWD:/src build-image make -j2
+""")
+
+    assert len(hits) == 1
+    assert "linux/arm64" in hits[0]["evidence"]
+
+
+def test_docker_run_keeps_formatted_mount_expression_opaque(tmp_path: Path):
+    hits = _opt89(tmp_path, """name: formatted docker volume
+on: pull_request
+jobs:
+  arm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-qemu-action@v3
+      - run: docker run --platform linux/arm64 -v ${{ format('{0}', github.workspace) }}:/src build-image make -j2
+""")
+
+    assert len(hits) == 1
+    assert "make" in hits[0]["evidence"]
 
 
 def test_job_container_resolves_matrix_image(tmp_path: Path):

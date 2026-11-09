@@ -9,6 +9,7 @@ jobs:
           arch: aarch64
           distro: ubuntu22.04
           run: |
+            cd $GITHUB_WORKSPACE
             ./configure
             make -j2
   gate:
