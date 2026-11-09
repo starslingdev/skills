@@ -51,6 +51,21 @@ def test_cross_repository_references_are_blocked_without_echo(
     assert private_reference not in stderr
 
 
+def test_sensitive_input_filename_is_not_echoed(capsys, monkeypatch, tmp_path):
+    private_slug = "/".join(("example", "internal-project"))
+    sensitive_name = "internal-project-body.md"
+    payload = tmp_path / sensitive_name
+    payload.write_text(private_slug, encoding="utf-8")
+    monkeypatch.setattr(checker, "_verify_public_target", lambda _target: None)
+
+    assert checker.main(
+        ["--target", _PUBLIC_TARGET, "--text-file", str(payload)]
+    ) == 1
+    stderr = capsys.readouterr().err
+    assert "text file 1:1" in stderr
+    assert sensitive_name not in stderr
+
+
 def test_cross_repository_web_and_api_urls_are_blocked():
     private_slug = "/".join(("example", "internal-project"))
     text = "\n".join(

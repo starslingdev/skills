@@ -121,15 +121,22 @@ def main(argv: list[str] | None = None) -> int:
     findings: list[Finding] = []
     try:
         _verify_public_target(args.target)
-        for path in args.text_file:
+        for index, path in enumerate(args.text_file, start=1):
             findings.extend(
-                scan_text(path.read_text(encoding="utf-8"), source=str(path), target=args.target)
+                scan_text(
+                    path.read_text(encoding="utf-8"),
+                    source=f"text file {index}",
+                    target=args.target,
+                )
             )
         if args.base:
             messages = _git_output(["log", "--format=%B", f"{args.base}..HEAD"])
             findings.extend(scan_text(messages, source="commit messages", target=args.target))
             findings.extend(scan_text(_added_diff(args.base), source="added diff", target=args.target))
-    except (OSError, UnicodeError, RuntimeError) as exc:
+    except (OSError, UnicodeError):
+        print("privacy preflight error: could not read an input file", file=sys.stderr)
+        return 2
+    except RuntimeError as exc:
         print(f"privacy preflight error: {exc}", file=sys.stderr)
         return 2
 
