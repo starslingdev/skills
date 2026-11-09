@@ -192,6 +192,38 @@ def test_cache_evidence_is_compared_per_sample_not_as_arm_totals():
     assert result["workload_state"] == "changed"
     assert result["verified_saving"] is None
 
+    replayed = compare_push_cohorts(
+        [_cohort("base", "b", 40, log="0 packages (cached)"),
+         _cohort("base2", "b2", 40, position=2, log="0 packages (cached)")],
+        [_cohort("fix", "a", 20, log="144 packages (cached)"),
+         _cohort("fix", "a2", 20, position=2, log="144 packages (cached)")],
+        changed_files=[".github/workflows/ci.yml"])
+    assert replayed["cache"]["regressed"] is True
+    assert replayed["verified_saving"] is None
+
+
+def test_pending_adaptive_sample_and_no_change_rerun_withhold_saving():
+    baseline = [_cohort("base", "b", 40, log="cache hit"),
+                _cohort("base2", "b2", 40, position=2, log="cache hit")]
+    noisy = compare_push_cohorts(
+        baseline,
+        [_cohort("fix", "a", 20, log="cache hit"),
+         _cohort("fix", "a2", 30, position=2, log="cache hit")],
+        changed_files=[".github/workflows/ci.yml"])
+    assert noisy["sampling"]["need"] == 3
+    assert noisy["clean_attribution"] is False
+    assert noisy["verified_saving"] is None
+
+    control = compare_push_cohorts(
+        [_cohort("same", "b", 40, log="cache hit"),
+         _cohort("same", "b2", 40, position=2, log="cache hit")],
+        [_cohort("same", "a", 20, log="cache hit"),
+         _cohort("same", "a2", 20, position=2, attempt=2, log="cache hit")],
+        changed_files=[".github/workflows/ci.yml"])
+    assert control["no_change_rerun"] is True
+    assert control["clean_attribution"] is False
+    assert control["verified_saving"] is None
+
 
 def test_compute_disclosure_compares_median_cohorts_and_step_names():
     before_jobs = [_job("lint", 0, 10, tests=["lint"]),
