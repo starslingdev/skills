@@ -3323,6 +3323,7 @@ def _parse_log(text: str,
         when = _cache_path_stamp(stamp)
         if sep and when is not None:
             stamped_tests.append((when, message.strip(), raw.strip(), stamp))
+    isolated_test_leaf: dict[str, Any] | None = None
     starts = [(i, when, m.group("file"), m.group("node"), raw)
               for i, (when, message, raw, _stamp) in enumerate(stamped_tests)
               if (m := isolated_start.match(message))]
@@ -3365,7 +3366,7 @@ def _parse_log(text: str,
                     - starts[0][1]).total_seconds()
             if (summed >= 120 and max(durations) <= min(durations) * 1.05
                     and span <= summed * 1.05 + 1):
-                return {
+                isolated_test_leaf = {
                     "fix_key": "test-isolated-serial",
                     "unit_label": f"{len(starts)} isolated tests in one file run "
                                   "strictly in sequence on a near-identical timer",
@@ -3374,6 +3375,151 @@ def _parse_log(text: str,
                     "evidence": evidence[:4],
                     "search": ["schema", "concurrent", "shared state"],
                 }
+    # Real pytest ``-v`` output reports each node and outcome on one progress
+    # line. GitHub's runner timestamp makes consecutive completions measurable;
+    # the timestamped invocation is the first test's lower bound. Keep the same
+    # positive isolation requirement as the legacy split START/PASS form.
+    pytest_done = re.compile(
+        r"^(?P<node>(?P<file>\S+\.py)::\S+)\s+"
+        r"(?:PASSED|OK)\b(?:\s+\[\s*\d+%\])?",
+        re.IGNORECASE,
+    )
+    pytest_command = re.compile(r"(?:^|\s)(?:python\s+-m\s+)?pytest\b.*(?:^|\s)-v\b",
+                                re.IGNORECASE)
+    completions = [
+        (i, when, m.group("file"), m.group("node"), raw)
+        for i, (when, message, raw, _stamp) in enumerate(stamped_tests)
+        if (m := pytest_done.match(message))
+    ]
+    if (len(completions) >= 4
+            and len({row[2] for row in completions}) == 1
+            and len({row[3] for row in completions}) == len(completions)):
+        command = next(
+            ((i, when, raw) for i, (when, message, raw, _stamp)
+             in enumerate(stamped_tests[:completions[0][0]])
+             if pytest_command.search(message)),
+            None,
+        )
+        interval_markers: list[str] = []
+        if command is not None:
+            previous_line = command[0]
+            previous_when = command[1]
+            for line_i, completed_when, _file, _node, _raw in completions:
+                found = {
+                    (match.group("assigned") or match.group("created")).casefold()
+                    for marker_when, message, _marker_raw, _marker_stamp
+                    in stamped_tests[previous_line + 1:line_i]
+                    if previous_when <= marker_when <= completed_when
+                    if (match := isolation_marker.search(message))
+                }
+                if len(found) != 1:
+                    interval_markers = []
+                    break
+                interval_markers.append(next(iter(found)))
+                previous_line = line_i
+                previous_when = completed_when
+        if (command is not None and len(interval_markers) == len(completions)
+                and len(set(interval_markers)) == len(interval_markers)):
+            boundaries = [command[1], *(row[1] for row in completions)]
+            durations = [
+                (boundaries[i + 1] - boundaries[i]).total_seconds()
+                for i in range(len(completions))
+            ]
+            # The command timestamp precedes collection and setup, so it is
+            # only a lower bound for test one. Later completion gaps are the
+            # comparable per-test timers.
+            comparable = durations[1:]
+            if (min(durations) > 0 and sum(comparable) >= 120
+                    and max(comparable) <= min(comparable) * 1.05):
+                isolated_test_leaf = {
+                    "fix_key": "test-isolated-serial",
+                    "unit_label": f"{len(completions)} isolated pytest tests in one file "
+                                  "run strictly in sequence on a near-identical timer",
+                    "magnitude": None,
+                    "deeper": [],
+                    "evidence": [command[2], completions[0][4], completions[-1][4]],
+                    "search": ["pytest -v", "schema", "concurrent", "shared state"],
+                    "test_count": len(completions),
+                }
+
+    # Vitest verbose lines carry their own duration. Tests in one file are
+    # sequential unless explicitly declared concurrent. Static scan facts prove
+    # that every named test owns a distinct schema/prefix; the job log need not
+    # print application setup details merely to make this detector work.
+    vitest_done = re.compile(
+        r"^[\s✓✔··]*"
+        r"(?P<file>\S+\.(?:test|spec)\.[cm]?[jt]sx?)\s+>\s+(?P<title>.+?)\s+"
+        r"(?P<duration>\d+(?:\.\d+)?)\s*(?P<unit>ms|s)\s*$",
+        re.IGNORECASE,
+    )
+    vitest_rows: list[tuple[float, str, str, datetime, str]] = []
+    vitest_started = next(
+        (when for when, message, _raw, _stamp in stamped_tests
+         if re.match(r"^RUN\s+v?\d", message, re.IGNORECASE)),
+        None,
+    )
+    for when, message, raw, _stamp in stamped_tests:
+        match = vitest_done.match(message)
+        if match is None:
+            continue
+        duration = float(match.group("duration"))
+        if match.group("unit").casefold() == "ms":
+            duration /= 1000.0
+        test_name = match.group("title").rsplit(" > ", 1)[-1].strip()
+        vitest_rows.append((duration, match.group("file"), raw, when, test_name))
+    count_matches = [
+        int(match.group(1))
+        for _when, message, _raw, _stamp in stamped_tests
+        if (match := re.search(r"\b(\d+)\s+tests?\s+passed\b", message,
+                               re.IGNORECASE))
+    ]
+    by_file: dict[str, list[tuple[float, str, datetime, str]]] = {}
+    for duration, test_file, raw, when, test_name in vitest_rows:
+        by_file.setdefault(test_file, []).append((duration, raw, when, test_name))
+    source_isolation = (iso or {}).get("isolated_test_files") or {}
+    for test_file, rows in by_file.items():
+        markers = source_isolation.get(test_file.removeprefix("./")) or {}
+        matched_markers = [markers.get(row[3]) for row in rows]
+        if (any(marker is None for marker in matched_markers)
+                or len(set(str(marker).casefold() for marker in matched_markers))
+                != len(rows)):
+            continue
+        measured_span = ((max(row[2] for row in rows) - vitest_started).total_seconds()
+                         if vitest_started is not None else 0.0)
+        summed_runtime = sum(row[0] for row in rows)
+        if not (summed_runtime * 0.95 <= measured_span <= summed_runtime * 1.2 + 1):
+            continue
+        if count_matches and max(count_matches) != len(rows):
+            continue
+        completion_order = sorted(rows, key=lambda row: row[2])
+        if any(
+            current[2] - timedelta(seconds=current[0])
+            < previous[2] - timedelta(seconds=1)
+            for previous, current in zip(completion_order, completion_order[1:])
+        ):
+            continue
+        ordered = sorted(rows, key=lambda row: row[0], reverse=True)
+        cohort = ordered[:4]
+        durations = [row[0] for row in cohort]
+        if (len(cohort) == 4 and min(durations) > 0 and sum(durations) >= 120
+                and max(durations) <= min(durations) * 1.05):
+            isolated_test_leaf = {
+                "fix_key": "test-isolated-serial",
+                "unit_label": f"{len(cohort)} long isolated Vitest tests in one file "
+                              "run strictly in sequence on a near-identical timer",
+                "magnitude": None,
+                "deeper": [],
+                "evidence": [
+                    f"source proof: {test_file} maps every logged test to a distinct "
+                    "schema/prefix setup call",
+                    *(row[1] for row in cohort[:2]),
+                ],
+                "search": [test_file, "describe.concurrent", "maxConcurrency"],
+                "test_count": max(count_matches) if count_matches else len(rows),
+                "isolation_basis": "test source",
+            }
+    if isolated_test_leaf is not None:
+        return isolated_test_leaf
     # --- M: one shell runner invokes many test files one after another ----------
     # This stays ahead of the image-build leaf below. Each admitted invocation
     # needs a timestamped completion
@@ -3887,20 +4033,23 @@ _FIX_META: dict[str, dict[str, Any]] = {
     },
     "test-isolated-serial": {
         "cause": "Four or more tests in the same file run strictly one after another "
-                 "for near-identical durations, and each interval logs its own unique "
-                 "schema, database or prefix. That positive isolation evidence makes "
+                 "for near-identical durations, and the log or scanned test source shows "
+                 "that each owns a unique schema, database or prefix. That positive "
+                 "isolation evidence makes "
                  "the repeated fixed wait a candidate for safe in-job concurrency.",
-        "look": "`{wf}` and the named test file — confirm every test owns the logged "
-                "isolation marker, then look for any remaining shared state: fixed ports, "
+        "look": "`{wf}` and the named test file — confirm every test owns the named "
+                "log or source isolation evidence, then look for any remaining shared state: fixed ports, "
                 "process globals, filesystem paths, queues, clocks or ordering assumptions.",
-        "constraints": "The logged marker proves only the named schema/database/prefix "
+        "constraints": "The positive marker proves only the named schema/database/prefix "
                        "is unique. Adversarially test the other shared state, preserve the "
                        "same test count and failure propagation, and keep any genuinely "
                        "exclusive tests in a serial lane.",
         "docs": ["OPT88 in the ci-speedup catalog — measure in-job test concurrency "
                  "before choosing a worker count"],
-        "deliver": "Run the isolated tests concurrently inside this one job with a "
-                   "measured worker cap, check that shared state is not reused, preserve the "
+        "deliver": "Run the isolated tests concurrently inside this one job (for Vitest, "
+                   "prefer a reviewed `describe.concurrent` group and start from its default "
+                   "`maxConcurrency` of 5) with a measured worker cap, check that shared state "
+                   "is not reused, preserve the "
                    "full test set and failures, and re-measure wall clock and runner minutes.",
     },
     "test-loop-serial": {

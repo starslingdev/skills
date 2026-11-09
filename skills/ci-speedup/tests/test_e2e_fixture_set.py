@@ -221,7 +221,10 @@ def fixture_facts(doc: dict, checks: list) -> dict:
     for entry in bundle.get("logs") or []:
         if not entry.get("file"):
             continue
-        leaf = bp._parse_log((logs_dir / entry["file"]).read_text())
+        leaf = bp._parse_log(
+            (logs_dir / entry["file"]).read_text(),
+            doc.get("test_runner_isolation"),
+        )
         if leaf and leaf.get("fix_key"):
             leaves.append(str(leaf["fix_key"]))
     leaves.sort()
@@ -370,7 +373,8 @@ def test_named_fixtures_exercise_their_defining_interactions(
     for name in (
             "cache-lints", "config-era-change", "duplicate-gate-job", "emulated-container",
             "external-required-gate", "heavy-runner-queue", "minority-tail",
-            "multiarch-image", "path-partitioned-monorepo", "vendored-libs"):
+            "multiarch-image", "path-partitioned-monorepo", "vendored-libs",
+            "vitest-isolated-serial"):
         docs[name], reports[name], _checks = run_fixture(
             FIXTURE_ROOT / name, monkeypatch, tmp_path)
 
@@ -409,6 +413,9 @@ def test_named_fixtures_exercise_their_defining_interactions(
     assert "vendored-lib-build" in fixture_facts(
         docs["vendored-libs"], [])["leaves"]
     assert "vendored libraries built from source" in reports["vendored-libs"]
+    assert "test-isolated-serial" in fixture_facts(
+        docs["vitest-isolated-serial"], [])["leaves"]
+    assert "describe.concurrent" in reports["vitest-isolated-serial"]
     assert any(
         row.get("cache_net_negative", {}).get("kind") == "opt79_buildkit_export"
         for row in image_doc["findings"])

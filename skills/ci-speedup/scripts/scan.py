@@ -5286,9 +5286,105 @@ def _iso_block(**overrides: Any) -> dict[str, Any]:
         "vm_pool": False,
         "error": None,
         "verdict": "unknown",
+        # Per-test source proof for the measured serial-test leaf. A file is
+        # listed only when every test block owns one distinct literal schema or
+        # prefix; absence is unknown, never evidence that tests are isolated.
+        "isolated_test_files": {},
     }
     block.update(overrides)
     return block
+
+
+_ISOLATED_TEST_FILE_RE = re.compile(
+    r"(?:^|[._-])(?:test|spec)s?\.[cm]?[jt]sx?$", re.IGNORECASE)
+_TEST_BLOCK_RE = re.compile(
+    r"(?:^|[^\w.])(?:test|it)\s*\(\s*(?P<quote>['\"])"
+    r"(?P<name>.*?)(?P=quote)\s*,",
+    re.DOTALL,
+)
+_TEST_ISOLATION_LITERAL_RE = re.compile(
+    r"\b(?:createSchema|schemaFor|useSchema|createDatabase|createTestDatabase|"
+    r"databaseFor|prefixFor|usePrefix)\s*\(\s*(['\"])([A-Za-z0-9_.-]+)\1",
+    re.IGNORECASE,
+)
+
+
+def _js_position_is_quoted(text: str, position: int) -> bool:
+    """Whether ``position`` sits inside a JS string/template literal."""
+    quote = ""
+    index = 0
+    while index < position:
+        char = text[index]
+        if quote:
+            if char == "\\":
+                index += 2
+                continue
+            if char == quote:
+                quote = ""
+        elif char in "'\"`":
+            quote = char
+        index += 1
+    return bool(quote)
+
+
+def _isolated_test_source_facts(root: Path) -> dict[str, dict[str, str]]:
+    """Return files whose test blocks each own a distinct literal namespace.
+
+    This recognizes a deliberately small source shape. Dynamic helpers, shared
+    setup and an incomplete read stay absent, so the log leaf cannot infer
+    isolation from a naming convention the scanner did not actually read.
+    """
+    facts: dict[str, dict[str, str]] = {}
+    seen = 0
+    marker_count = 0
+    skipped = {".git", "node_modules", "vendor", "dist", "build", ".next"}
+    for directory, dirnames, filenames in os.walk(root):
+        dirnames[:] = [name for name in dirnames if name not in skipped]
+        for filename in filenames:
+            if not _ISOLATED_TEST_FILE_RE.search(filename):
+                continue
+            seen += 1
+            if seen > 500:
+                return {}
+            path = Path(directory) / filename
+            try:
+                resolved = path.resolve(strict=True)
+                resolved.relative_to(root)
+                if resolved.stat().st_size > 256_000:
+                    continue
+                source = _tal_strip_js_comments(resolved.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, ValueError):
+                continue
+            starts = [match for match in _TEST_BLOCK_RE.finditer(source)
+                      if not _js_position_is_quoted(source, match.start())]
+            if len(starts) < 4:
+                continue
+            markers: dict[str, str] = {}
+            complete = True
+            for index, match in enumerate(starts):
+                end = starts[index + 1].start() if index + 1 < len(starts) else len(source)
+                chunk = source[match.start():end]
+                close = re.search(r"(?m)^\s*}\)\s*;?\s*$", chunk)
+                if close is None:
+                    complete = False
+                    break
+                chunk = chunk[:close.end()]
+                values = {
+                    hit.group(2).casefold()
+                    for hit in _TEST_ISOLATION_LITERAL_RE.finditer(chunk)
+                    if not _js_position_is_quoted(chunk, hit.start())
+                }
+                test_name = match.group("name").strip()
+                if len(values) != 1 or not test_name or test_name in markers:
+                    complete = False
+                    break
+                markers[test_name] = next(iter(values))
+            if complete and len(set(markers.values())) == len(markers):
+                facts[str(path.relative_to(root))] = markers
+                marker_count += len(markers)
+                if len(facts) > 100 or marker_count > 1000:
+                    return {}
+    return facts
 
 
 def _isolation_verdict(block: dict[str, Any]) -> str:
@@ -5449,6 +5545,8 @@ def _read_test_runner_isolation_unguarded(root: Path) -> dict[str, Any]:
         opt_out_configs=sorted(set(opt_out_configs)),
         # A vm pool cannot disable isolation, so the lever cannot apply.
         vm_pool=vm_pool,
+        isolated_test_files=(_isolated_test_source_facts(root)
+                             if vitest_signal else {}),
     )
     block["verdict"] = _isolation_verdict(block)
     return block
