@@ -73,35 +73,59 @@ git config core.hooksPath .githooks
 
 ## Public-output privacy gate
 
-This is a public repository. Treat every repository name, URL, issue number,
-PR number, branch name, and other identifier learned from user-provided or
-internal context as confidential unless its publication is explicitly approved.
-A link supplied for research is not permission to republish it.
+This repository is public. User-provided links and internal working context are
+inputs for the task, not permission to expose their repository identifiers.
+Treat repository names, URLs, issue/PR numbers, branch names, and other source
+identifiers as confidential unless publication of the exact reference is
+explicitly approved. A link supplied for research is not permission to
+republish it.
 
-Before creating or updating any public GitHub artifact (commit, branch, PR,
-issue, review, comment, release, or changelog):
+Before every public GitHub write (commit, branch, PR, issue, review, comment,
+release, or changelog):
 
 1. Verify the destination repository is `PUBLIC`.
-2. Default to naming only the destination repository. Cross-repository
-   provenance must be described generically (for example, “internal review”).
-3. Inspect the exact outbound title/body, commit messages, and added diff lines.
-   Run the fail-closed preflight when preparing a PR:
+2. Name only the destination repository by default. Describe private/internal
+   provenance generically, such as “internal design” or “internal review.”
+3. Commit first, then scan the exact outbound title/body, the branch name,
+   every outgoing commit's message and added lines, and the net added diff.
+   The gate reads committed history only: uncommitted or unstaged edits are
+   not scanned. Write the PR text to fresh per-run files:
 
    ```bash
+   title="$(mktemp)"; body="$(mktemp)"
+   # write the exact PR title to "$title" and body to "$body", then:
    python3 .github/scripts/check_public_output.py \
      --target starslingdev/skills \
-     --text-file /tmp/pr-title.txt \
-     --text-file /tmp/pr-body.md \
+     --text-file "$title" \
+     --text-file "$body" \
      --base origin/main
    ```
 
-4. After publishing, fetch the artifact back and scan the returned content too.
+   With `--base`, the checked-out branch name is scanned automatically
+   (`--branch-name` overrides it). Exit 0 passes, 1 blocks (locations are
+   printed as `commit <sha> <path>:<line>`, `commit <sha> message:<line>`,
+   `added diff:<path>:<line>`, `branch name:1`, or `text file <n>:<line>`;
+   the blocked identifier is never echoed), and 2 is a fail-closed error.
+4. Fetch the published artifact back and scan its returned title/body.
 
-Any cross-repository reference requires the user's explicit approval to publish
-that exact reference and an immediate verification that the referenced
-repository is public. If either condition is missing or uncertain, stop and
-remove or neutralize the reference. Never use a public artifact as a breadcrumb
-to private context.
+CI runs the same gate on every pull request (inside both suite jobs, so it
+gates the required `test` check) over the PR title, body, branch name, and
+commits. A title or body edited after the last push is re-checked on the next
+push, so scan edits locally with step 3 before saving them.
+
+**Fixture paths.** Added lines under `tests/`, `skills/*/tests/`,
+`skills/*/evals/`, and `maintainers/*/tests/` are skipped by the diff scan
+only, because test fixtures and eval cases routinely carry synthetic
+`owner/repo` slugs. PR text, branch names, and commit messages stay strict for
+every path. Never put a real private reference in a fixture.
+
+A cross-repository reference is allowed only when the user explicitly approves
+publishing that exact reference and its repository has just been verified as
+public. Record that approval with `--allow owner/repo` (repeatable): the gate
+verifies each allowed repository is `PUBLIC` itself and fails closed if it is
+not. If either fact is absent or uncertain, fail closed: stop and remove or
+neutralize the reference. Never expose private context to explain provenance,
+credit, motivation, or review history.
 
 ## Changelog discipline
 

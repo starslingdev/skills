@@ -497,13 +497,24 @@ def test_explicit_branch_name_overrides_detection(repo, capsys):
     assert "branch name:1" in stderr
 
 
-def test_shared_agent_instructions_require_the_gate_and_readback():
-    for name in ("AGENTS.md", "CLAUDE.md"):
-        text = (_ROOT / name).read_text(encoding="utf-8")
-        assert "check_public_output.py" in text
-        assert "explicit" in text
-        assert "PUBLIC" in text
-        assert "fetch" in text.lower()
+def _policy_section(name):
+    text = (_ROOT / name).read_text(encoding="utf-8")
+    heading = "## Public-output privacy gate\n"
+    assert text.count(heading) == 1, f"{name} must have exactly one gate section"
+    section = text.split(heading, 1)[1]
+    next_heading = section.find("\n## ")
+    return heading + (section if next_heading == -1 else section[: next_heading + 1])
+
+
+def test_agent_instruction_sections_are_identical_and_name_the_gate():
+    agents, claude = _policy_section("AGENTS.md"), _policy_section("CLAUDE.md")
+    assert agents == claude, "AGENTS.md and CLAUDE.md gate sections must be identical"
+    assert "python3 .github/scripts/check_public_output.py" in agents
+    assert "--allow" in agents
+    assert "--base origin/main" in agents
+    assert "mktemp" in agents and "/tmp/pr-" not in agents
+    assert "PUBLIC" in agents and "explicitly approved" in agents
+    assert "Fetch the published artifact back" in agents
 
 
 def _ci_suite_jobs():
