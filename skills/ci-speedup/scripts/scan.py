@@ -10,7 +10,7 @@ run/job timings + logs.
 
 Output contract: a finding dict with these required keys:
     id, pattern, severity, title, workflow_file, line, affected_jobs,
-    workflow_activity, evidence, fix_strategy, fix_recipe_anchor
+    workflow_activity, evidence, subject, fix_strategy, fix_recipe_anchor
 
 `pattern` MUST be an OPT-id declared in the catalog. The scanner refuses to
 emit anything else.
@@ -27,6 +27,7 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import logging
 import os
@@ -41,6 +42,67 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger("scan")
+
+# Stable machine vocabulary for coverage gaps. Human-readable ``reason`` text
+# can contain exception messages and counts; consumers must compare ``kind``.
+SCAN_INCOMPLETE_KINDS = frozenset({
+    "workflow-unreadable", "workflow-unparseable", "workflow-not-mapping",
+    "parallel-group-unread", "symlink-out-of-tree", "no-workflows-dir",
+    "opt19-file-cap", "opt19-source-unreadable", "turbo-unreadable",
+})
+
+# Detectors proven by cardinality tests to emit one finding per physical
+# occurrence. ci-speedup-guard refuses to enforce a pattern absent from here.
+INSTANCE_GRANULAR = frozenset({"OPT23"})
+
+_SCAN_ROOT: Path | None = None
+
+
+def _confine_scan_reads(fn):
+    """Set the active repository root only for one top-level scan call."""
+    @functools.wraps(fn)
+    def wrapped(root: Path, catalog_path: Path,
+                default_branch: str | None = None) -> dict[str, Any]:
+        global _SCAN_ROOT
+        previous_root = _SCAN_ROOT
+        _SCAN_ROOT = root.resolve()
+        try:
+            return fn(root, catalog_path, default_branch)
+        finally:
+            _SCAN_ROOT = previous_root
+    return wrapped
+
+
+def _inside_scan_root(path: Path) -> bool:
+    """Return whether an existing path resolves inside the current scan root."""
+    if _SCAN_ROOT is None:
+        return True
+    try:
+        path.resolve(strict=True).relative_to(_SCAN_ROOT.resolve(strict=True))
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _out_of_tree_symlinks(root: Path) -> list[dict[str, str]]:
+    """Find symlinks that scanner readers must never follow."""
+    records: list[dict[str, str]] = []
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        dirnames[:] = [d for d in dirnames
+                       if d not in {".git", "node_modules", "dist", "build",
+                                    "out", "coverage", "vendor", "target",
+                                    "__pycache__"}]
+        for name in [*dirnames, *filenames]:
+            path = Path(dirpath, name)
+            if path.is_symlink() and not _inside_scan_root(path):
+                records.append({
+                    "path": path.relative_to(root).as_posix(),
+                    "kind": "symlink-out-of-tree",
+                    "reason": "symlink resolves outside the scanned tree",
+                })
+        # Never descend through a symlinked directory, including an in-tree one.
+        dirnames[:] = [d for d in dirnames if not Path(dirpath, d).is_symlink()]
+    return records
 
 try:
     import yaml
@@ -1005,6 +1067,8 @@ _LOCAL_ACTION_TEXT: dict[str, "str | None"] = {}
 
 
 def _read_repo_file(root: Path, name: str) -> str:
+    if not _inside_scan_root(root / name):
+        return ""
     try:
         return (root / name).read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -1834,6 +1898,8 @@ _OPT102_BUILDPLATFORM_RE = re.compile(
 def _opt102_workflow_rel(root: Path, raw: str) -> str | None:
     for path in sorted((root / ".github/workflows").glob("*.y*ml")):
         try:
+            if not _inside_scan_root(path):
+                continue
             if path.read_text(encoding="utf-8", errors="replace") == raw:
                 return str(path.relative_to(root))
         except OSError:
@@ -1847,6 +1913,8 @@ def _opt102_caller_inputs(root: Path, callee: str | None) -> dict[str, str]:
     values: dict[str, set[str]] = {}
     for path in sorted((root / ".github/workflows").glob("*.y*ml")):
         try:
+            if not _inside_scan_root(path):
+                continue
             caller = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         except (OSError, yaml.YAMLError):
             continue
@@ -4794,6 +4862,8 @@ def _package_manager_pnpm(root: Path) -> str | None:
     pj = root / "package.json"
     if not pj.is_file():
         return None
+    if not _inside_scan_root(pj):
+        return None
     try:
         data = json.loads(pj.read_text(encoding="utf-8", errors="replace"))
     except (OSError, json.JSONDecodeError):
@@ -5025,7 +5095,7 @@ def _ci_turbo_tasks(root: Path, parsed: list[tuple[str, dict, str]]) -> set[str]
     in this set, so its turbo.json config can't cost CI time → no finding."""
     scripts: dict[str, str] = {}
     pkg = root / "package.json"
-    if pkg.is_file():
+    if pkg.is_file() and _inside_scan_root(pkg):
         try:
             scripts = {str(k): str(v) for k, v in
                        (json.loads(pkg.read_text(encoding="utf-8")).get("scripts") or {}).items()}
@@ -5387,6 +5457,8 @@ def _read_config_text(path: Path) -> "str | None":
     garbage that matched no pattern and was then reported as a COMPLETE read
     with no opt-out — a repo that had opted out being told to opt out again.
     None routes the file to `unreadable`, which withholds the lever."""
+    if not _inside_scan_root(path):
+        raise PermissionError(f"refusing to read config outside scan root: {path}")
     data = path.read_bytes()                        # OSError → caller's handler
     for bom in (b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff", b"\xff\xfe", b"\xfe\xff"):
         if data.startswith(bom):
@@ -6847,14 +6919,17 @@ def _detect_turbo(root: Path, ci_turbo_tasks: set[str] | None = None):
     tj = root / "turbo.json"
     if not tj.is_file():
         return [], incomplete
+    if not _inside_scan_root(tj):
+        return [], incomplete
     try:
         raw = tj.read_text(encoding="utf-8", errors="replace")
     except OSError as e:
-        incomplete.append({"path": "turbo.json", "reason": f"read failed: {e}"})
+        incomplete.append({"path": "turbo.json", "kind": "turbo-unreadable",
+                           "reason": f"read failed: {e}"})
         return [], incomplete
     data = _load_jsonc(tj)
     if not isinstance(data, dict):
-        incomplete.append({"path": "turbo.json", "reason": (
+        incomplete.append({"path": "turbo.json", "kind": "turbo-unreadable", "reason": (
             "turbo.json present but unparseable / not a JSON object — Turbo "
             "cache patterns (OPT52/53/58/59/60) NOT evaluated")})
         return [], incomplete
@@ -7389,12 +7464,15 @@ def _detect_opt19(root: Path):
                 break
             scanned += 1
             try:
+                if not _inside_scan_root(Path(dirpath, fn)):
+                    continue
                 text = Path(dirpath, fn).read_text(encoding="utf-8", errors="replace")
             except OSError as e:
                 # A test source that matched the filter but can't be read is a
                 # coverage gap — its sleeps go uncounted, so surface it rather
                 # than silently undercounting the per-run sleep total.
-                incomplete.append({"path": rel, "reason": f"OPT19 source read failed: {e}"})
+                incomplete.append({"path": rel, "kind": "opt19-source-unreadable",
+                                   "reason": f"OPT19 source read failed: {e}"})
                 continue
             file_ms = 0.0
             file_lines: list[int] = []
@@ -7415,7 +7493,7 @@ def _detect_opt19(root: Path):
         if capped:
             break
     if capped:
-        incomplete.append({"path": "<source tree>", "reason": (
+        incomplete.append({"path": "<source tree>", "kind": "opt19-file-cap", "reason": (
             f"OPT19 source grep hit the {_OPT19_FILE_CAP}-file cap after "
             f"scanning {scanned} files; remaining test sources unscanned, so "
             f"the sleep total is a lower bound")})
@@ -7467,9 +7545,11 @@ def _collect_workflow_files(root: Path) -> tuple[list[Path], list[dict]]:
     """Return (workflow files, scan_incomplete records)."""
     wf_dir = root / ".github" / "workflows"
     if not wf_dir.is_dir():
-        return [], [{"path": str(wf_dir), "reason": "no .github/workflows directory"}]
+        return [], [{"path": str(wf_dir), "kind": "no-workflows-dir",
+                     "reason": "no .github/workflows directory"}]
     files = sorted(p for p in wf_dir.iterdir()
-                   if p.is_file() and p.suffix in (".yml", ".yaml"))
+                   if p.is_file() and p.suffix in (".yml", ".yaml")
+                   and _inside_scan_root(p))
     return files, []
 
 
@@ -7487,6 +7567,7 @@ def _emit(entry: CatalogEntry, hit: Hit, workflow_file: str,
         "affected_jobs": hit.affected_jobs,
         "workflow_activity": {},
         "evidence": hit.evidence,
+        "subject": hit.match_text,
         "fix_strategy": entry.fix_strategy,
         "fix_recipe_anchor": entry.anchor,
     }
@@ -8122,6 +8203,7 @@ def _cache_effective_paths(root: Path, parsed: list) -> dict:
     return result
 
 
+@_confine_scan_reads
 def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> dict[str, Any]:
     branch_source = "flag" if default_branch else None
     if default_branch is None:
@@ -8157,6 +8239,7 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
         if c.finding_class == "structural" and c.pattern not in structural_detected)
 
     files, scan_incomplete = _collect_workflow_files(root)
+    scan_incomplete.extend(_out_of_tree_symlinks(root))
     # Parse every workflow once. The per-file dispatch runs over `parsed`; the
     # cross-workflow / repo-context detectors need the whole set at once.
     parsed: list[tuple[str, dict, str]] = []
@@ -8167,15 +8250,18 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
         try:
             raw = path.read_text(encoding="utf-8", errors="replace")
         except OSError as e:
-            scan_incomplete.append({"path": rel, "reason": f"read failed: {e}"})
+            scan_incomplete.append({"path": rel, "kind": "workflow-unreadable",
+                                    "reason": f"read failed: {e}"})
             continue
         try:
             doc = yaml.safe_load(raw) or {}
         except yaml.YAMLError as e:
-            scan_incomplete.append({"path": rel, "reason": f"YAML parse: {e}"})
+            scan_incomplete.append({"path": rel, "kind": "workflow-unparseable",
+                                    "reason": f"YAML parse: {e}"})
             continue
         if not isinstance(doc, dict):
-            scan_incomplete.append({"path": rel, "reason": "top-level is not a mapping"})
+            scan_incomplete.append({"path": rel, "kind": "workflow-not-mapping",
+                                    "reason": "top-level is not a mapping"})
             continue
         parsed.append((rel, doc, raw))
     workflow_lanes = _declared_triggers(parsed)
@@ -8199,6 +8285,7 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
         kinds = "; ".join(MALFORMED_KINDS.get(k, k) for k in mj.get("reasons") or [])
         rec = {
             "path": mj["path"],
+            "kind": "parallel-group-unread",
             "reason": (f"job `{mj['job']}`: {mj['count']} `parallel:` group(s) not "
                        f"read ({kinds}), so the steps inside were not read")}
         scan_incomplete.append(rec)
@@ -8400,8 +8487,6 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
         # honest about its coverage instead of silently never appearing.
         "catalog_structural_patterns_without_detector": structural_without_detector,
     }
-
-
 # =============================================================================
 # CLI
 # =============================================================================
