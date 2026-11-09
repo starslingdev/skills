@@ -9,9 +9,14 @@ jobs:
   test:
     strategy:
       matrix:
-        package: [api, web]
-        runtime: [20, 22]
+        shard: [api-20, api-22, web-20, web-22]
     runs-on: ubuntu-latest
     steps:
-      - run: pnpm ls --filter '...[HEAD^1]'
-      - run: make test PACKAGE=${{ matrix.package }} RUNTIME=${{ matrix.runtime }}
+      - name: Setup
+        run: echo ready
+      - name: Build
+        run: make build
+      - name: Install browser
+        run: pnpm exec playwright install chromium
+      - name: Tests
+        run: cargo test

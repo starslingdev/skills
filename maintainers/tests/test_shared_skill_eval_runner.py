@@ -462,9 +462,9 @@ def test_a_crash_in_one_run_leaves_the_others_graded(parallel, tmp_path, monkeyp
     _fake_entry(monkeypatch, sleep=0.1, crash_ids=(10,))
     assert runner.main(["--skill", "ci-speedup"]) == 2
     res = {r["id"]: r for r in _results(tmp_path) if "skipped" not in r}
-    assert set(res) == {6, 10, 12, 13}
+    assert set(res) == {6, 10, 12, 13, 14}
     assert "RuntimeError" in res[10]["harness_error"]
-    assert all(res[i]["passed"] for i in (6, 12, 13))
+    assert all(res[i]["passed"] for i in (6, 12, 13, 14))
     assert "NOT RUN  ci-speedup #10" in capsys.readouterr().out
 
 
@@ -495,7 +495,7 @@ def test_a_measure_entry_is_skipped_by_default_and_listed_as_skipped(parallel, t
     assert {"id": 11, "skipped": "tier measure"} in _results(tmp_path)
 
 
-@pytest.mark.parametrize("argv,ids", [(["--all"], [6, 10, 11, 12, 13]),
+@pytest.mark.parametrize("argv,ids", [(["--all"], [6, 10, 11, 12, 13, 14]),
                                       (["--tier", "measure"], [11]),
                                       (["--all", "--id", "11"], [11])])
 def test_all_or_the_measure_tier_runs_the_measurement_entry(parallel, monkeypatch, argv, ids):

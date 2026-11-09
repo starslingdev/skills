@@ -2089,6 +2089,73 @@ def check_coverage_disclosed(report: str, findings_path: Path | None = None) -> 
                  + gh_note + skip_note)
 
 
+def check_pr_sample_stop_reason(report: str, findings_path: Path | None = None) -> Check:
+    """Re-derive the PR-sample stop reason and bind it to rendered provenance."""
+    name = "PR gate sample stop reason matches its bounded collection facts"
+    if not findings_path:
+        return Check(name, True, "no findings to compare", skipped=True)
+    try:
+        data = _as_dict(json.loads(Path(findings_path).read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError):
+        return Check(name, True, "findings unreadable", skipped=True)
+    cp = _as_dict(data.get("pr_critical_path"))
+    if "sample_stop_reason" not in cp:
+        return Check(name, True, "artifact predates the stop-reason contract", skipped=True)
+    required = (
+        "sample_candidate_pages_fetched", "sample_candidate_page_cap",
+        "sample_candidate_pages_exhausted", "sample_candidate_page_fetch_failures",
+        "sample_candidate_era_door", "sample_candidate_selection_limited",
+    )
+    missing = [key for key in required if key not in cp]
+    if missing:
+        return Check(name, False, "stop reason lacks re-derivation facts: " + ", ".join(missing))
+    sampled = cp.get("sampled_pr_count")
+    target = cp.get("sample_target")
+    complete = cp.get("sample_complete")
+    if (not isinstance(sampled, int) or isinstance(sampled, bool) or sampled < 0
+            or not isinstance(target, int) or isinstance(target, bool) or target <= 0
+            or not isinstance(complete, bool)):
+        return Check(name, False, "sample count, target, or completeness is malformed")
+    failures = cp.get("sample_fetch_failures")
+    page_failures = cp.get("sample_candidate_page_fetch_failures")
+    pages = cp.get("sample_candidate_pages_fetched")
+    cap = cp.get("sample_candidate_page_cap")
+    exhausted = cp.get("sample_candidate_pages_exhausted")
+    era_door = cp.get("sample_candidate_era_door")
+    selection_limited = cp.get("sample_candidate_selection_limited")
+    if (not isinstance(failures, int) or failures < 0
+            or not isinstance(page_failures, int) or page_failures < 0
+            or not isinstance(pages, int) or pages < 1
+            or not isinstance(cap, int) or cap < 1
+            or not isinstance(exhausted, bool) or not isinstance(era_door, bool)
+            or not isinstance(selection_limited, bool)):
+        return Check(name, False, "candidate-page stop facts are malformed")
+    strict_complete = (
+        sampled >= target and not cp.get("required_suite_unsatisfiable"))
+    if complete != strict_complete:
+        return Check(
+            name, False,
+            "sample_complete does not match the strict required-suite target")
+    if strict_complete:
+        expected = "target_met"
+    elif failures or page_failures:
+        expected = "fetch_failures"
+    elif era_door:
+        expected = "era_door"
+    elif selection_limited or (not exhausted and pages >= cap):
+        expected = "page_cap"
+    else:
+        expected = "candidates_exhausted"
+    actual = str(cp.get("sample_stop_reason") or "")
+    problems: list[str] = []
+    if actual != expected:
+        problems.append(f"sample_stop_reason={actual!r}, expected {expected!r}")
+    rendered = f"{sampled} of {target} PRs sampled: {expected.replace('_', ' ')}"
+    if rendered not in report:
+        problems.append("rendered report omits or changes the re-derived sample statement")
+    return Check(name, not problems, "; ".join(problems) if problems else rendered)
+
+
 # The two `data_sources` lists naming workflows that left the MEASURED sample: the
 # run-list fetch failed (no runs), or every per-run job fetch failed (runs, but no job
 # timing — so its checks would fall back to queue-inflated check-run spans). Both mean
@@ -14403,7 +14470,7 @@ def check_structural_step_category_not_payload_binned_as_build(findings_path: Pa
 # ceiling it claims (the pole's dominant_p50) is credited to a category that is not the
 # dominant measured work. The `_VR_LEAF_STEP_CATEGORY` mirror is pinned to the engine map by
 # test_verify_report_self (L7).
-_VR_LEAF_STEP_CATEGORY: dict[str, str] = {
+_VR_LEAF_STEP_CATEGORY: dict[str, str | frozenset[str]] = {
     "dependency-cache": "install",
     "cache-effective-path-mismatch": "install",
     "prisma-migrate-once": "test",
@@ -14412,10 +14479,12 @@ _VR_LEAF_STEP_CATEGORY: dict[str, str] = {
     "vitest-import-bound": "test",
     "playwright-parallel": "test",
     "pytest-no-xdist": "test",
+    "per-invocation-startup": "test",
     "test-isolated-serial": "test",
     "test-loop-serial": "test",
     "vendored-lib-build": "build",
     "emulated-image-compile": "build",
+    "cargo-double-compile": frozenset({"build", "scan", "test"}),
     "cargo-test-shard": "test",
     "benchmark-serial-reruns": "test",
     "android-emulator-shard": "test",
@@ -14476,17 +14545,20 @@ def check_detector_leaf_agrees_with_dominant_category(report: str,
         if not m:
             continue
         fk = m.group(1)
-        leaf_cat = _VR_LEAF_STEP_CATEGORY.get(fk)
-        if leaf_cat is None:
+        leaf_category = _VR_LEAF_STEP_CATEGORY.get(fk)
+        if leaf_category is None:
             unknown_cat.append(f"`{wf}` ▸ {check} (fix_key {fk})")
             continue
+        leaf_categories = ({leaf_category} if isinstance(leaf_category, str)
+                           else leaf_category)
         dom_cat = dom_by_pole.get((_wf_base(_strip_line_suffix(wf)), _cmp_name(check)))
         if dom_cat is None:
             unmapped.append(f"`{wf}` ▸ {check}")
             continue
         checked += 1
-        if leaf_cat != dom_cat:
-            bad.append(f"`{wf}` ▸ {check}: crowned `{fk}` is a `{leaf_cat}` fix but the pole's "
+        if dom_cat not in leaf_categories:
+            category_label = "/".join(sorted(leaf_categories))
+            bad.append(f"`{wf}` ▸ {check}: crowned `{fk}` is a `{category_label}` fix but the pole's "
                        f"measured dominant category is `{dom_cat}` — the ceiling is credited to "
                        "non-dominant work")
     # L8: surface every coverage skip in the detail rather than reading clean.
@@ -14754,7 +14826,9 @@ def check_cache_sizing_guards(report: str, findings_path: Path | None) -> Check:
                  ("hit_rate", "saving_s", "restore_s", "save_s")]
         if all(isinstance(value, (int, float)) for value in terms):
             hit, saving, restore, save = (float(value) for value in terms)
-            expected = hit * saving - restore - (1 - hit) * save
+            expected = (-restore - (1 - hit) * save
+                        if finding.get("cache_path_consumed") is False
+                        else hit * saving - restore - (1 - hit) * save)
             if (expected > 0) != (statuses["economics"] == "passed"):
                 bad.append(f"{finding.get('id')}: transfer-cost status disagrees with stored terms")
         elif statuses["economics"] in {"passed", "failed"}:
@@ -15724,9 +15798,12 @@ def check_default_branch_push_lane_isolated(
                        - expected_projected) > 0.11:
                     failures.append("push finding projection drifted from the shared helper")
                 magnitude = _as_dict(_as_dict(drill.get("leaf")).get("magnitude"))
-                expected_cause = (
-                    _num(magnitude.get("value"))
-                    if magnitude.get("unit") == "s" else expected_potential)
+                if _as_dict(drill.get("leaf")).get("uncredited") is True:
+                    expected_cause = 0.0
+                elif magnitude.get("unit") == "s":
+                    expected_cause = _num(magnitude.get("value"))
+                else:
+                    expected_cause = expected_potential
                 expected_cause = (expected_cause if expected_cause is not None
                                   else expected_potential)
                 if abs((_num(stamped_projection.get("cause_ceiling_s")) or 0.0)
@@ -16247,6 +16324,80 @@ def check_unconfirmed_checks_have_no_direct_credit_or_gate_framing(
         else f"{len(rows)} unconfirmed check(s) stayed uncredited and conditionally framed")
 
 
+def check_queue_runner_label_evidence(report: str,
+                                      findings_path: Path | None) -> Check:
+    """Bind every OPT43 runner-label table and comparison to its structured stamp."""
+    name = "OPT43 runner-label evidence matches its structured stamp"
+    data, error = _load_findings_doc(findings_path)
+    if error:
+        return Check(name, True, error, skipped=True)
+    findings = [
+        finding for finding in _as_list(data.get("findings"))
+        if isinstance(finding, dict) and finding.get("pattern") == "OPT43"
+        and _as_list(finding.get("queue_by_runner_label"))
+        and not finding.get("advisory")
+        and (_num(finding.get("wall_clock_p50_s")) or 0.0) > 0.0
+    ]
+    if not findings:
+        return Check(name, True, "no OPT43 runner-label evidence", skipped=True)
+
+    def clock(value: object) -> str:
+        seconds = _num(value)
+        return _fmt_clock(seconds) if seconds is not None else "-"
+
+    failures: list[str] = []
+    for finding in findings:
+        fid = str(finding.get("id") or "?")
+        workflow = _flatten_cell(str(finding.get("workflow_file") or "unknown workflow"))
+        if f"**Runner-label queue/work for `{workflow}` " not in report:
+            failures.append(f"{fid} runner-label table does not name its workflow")
+        for raw in _as_list(finding.get("queue_by_runner_label")):
+            row = _as_dict(raw)
+            label = _flatten_cell(str(row.get("runner_label") or ""))
+            n = int(_num(row.get("n")) or 0)
+            work_n = int(_num(row.get("work_n")) or 0)
+            censored_n = int(_num(row.get("censored_n")) or 0)
+            if n == 0 and (row.get("queue_p50_s") is not None
+                           or row.get("queue_p95_s") is not None):
+                failures.append(f"{fid} `{label}` has exact percentiles with no exact samples")
+            if work_n == 0 and row.get("work_p50_s") is not None:
+                failures.append(f"{fid} `{label}` has a work median with no work samples")
+            expected = (
+                f"| `{label}` | {n} | {clock(row.get('queue_p50_s'))} | "
+                f"{clock(row.get('queue_p95_s'))} | {work_n} | "
+                f"{clock(row.get('work_p50_s'))} | {censored_n} |"
+            )
+            if expected not in report:
+                failures.append(f"{fid} `{label}` table row is absent or differs from its stamp")
+        censored = sum(
+            int(_num(_as_dict(row).get("censored_n")) or 0)
+            for row in _as_list(finding.get("queue_by_runner_label")))
+        if censored and "runnable-to-cancelled time is a censored lower bound" not in report:
+            failures.append(f"{fid} omits the censored queue disclosure")
+
+        comparison = _as_dict(finding.get("queue_label_comparison"))
+        jobs = [str(job) for job in _as_list(finding.get("affected_jobs")) if str(job)]
+        job = _flatten_cell(jobs[0] if jobs else str(finding.get("job") or "unknown job"))
+        if comparison.get("unavailable"):
+            expected_comparison = (
+                f"**Runner-label comparison for `{job}`:** comparison unavailable.")
+        else:
+            slow = _flatten_cell(str(comparison.get("slow_label") or ""))
+            lower = _flatten_cell(str(comparison.get("lower_label") or ""))
+            expected_comparison = (
+                f"**Runner-label comparison for `{job}`:** `{slow}` queued at p50 "
+                f"{clock(comparison.get('slow_queue_p50_s'))}, while `{lower}` "
+                f"queued at p50 {clock(comparison.get('lower_queue_p50_s'))}."
+            )
+        if expected_comparison not in report:
+            failures.append(f"{fid} runner-label comparison is absent or differs from its stamp")
+
+    return Check(
+        name, not failures,
+        "; ".join(failures[:8]) if failures
+        else f"{len(findings)} OPT43 runner-label finding(s) match their stamps")
+
+
 def run_checks(report, report_path, findings_path, skill_repo, clone=None):
     return [
         check_primary_section_present(report, findings_path),
@@ -16261,6 +16412,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_skip_family_prompts_carry_pending_caveat(report),
         check_also_noticed_count_honest(report),
         check_coverage_disclosed(report, findings_path),
+        check_pr_sample_stop_reason(report, findings_path),
         check_run_list_gaps_named(report, findings_path),
         check_required_check_advice_proof(report, findings_path),
         check_prefetch_plan_consumed(report, findings_path),
@@ -16291,6 +16443,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_aggregate_total_ge_largest_member(report, findings_path, report_path),
         check_headline_wait_within_makespan(report, findings_path, report_path),
         check_commit_queue_work_credit(report, findings_path, report_path),
+        check_queue_runner_label_evidence(report, findings_path),
         check_headline_basis_excludes_fileless(report, findings_path, report_path),
         check_saving_within_measured_compute(report, findings_path),
         check_saving_carries_measured_basis(report, findings_path),

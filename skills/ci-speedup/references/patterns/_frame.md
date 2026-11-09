@@ -52,7 +52,7 @@ Checkout · 6. Conditional Execution · 7. Trigger and Scope · 8. Release Workf
 - **Category 11 — Stack-Specific**: turbo task outputs, unstable turbo env keys, type-aware ESLint on a slow lint job (`OPT82`).
 - **Category 12 — Build Caching (language-agnostic)**: uncached compiled-language builds, a dependency compiled from source when a prebuilt package exists (`OPT86`), a compile nobody profiled (`OPT91`), a machine-wide .NET SDK reconciling unrelated workloads (`OPT94`).
 - **Category 13 — Hidden Failures and Dead Config**: dead env vars, misconfigured caches.
-- **Category 14 — Structural / Critical-Path Levers** (`OPT70`–`OPT75`, `OPT78`, `OPT83`–`OPT85`, `OPT87`): routed from the measured long pole (see ARCHITECTURE §11), not a flat grep. `OPT85` (tests run in many processes instead of one) and `OPT87` (tests wait on a slow dependency they do not verify) have no router yet: like `OPT74`, they are catalogued for application from the drilled pole's log and are reported as without a detector. `OPT78` is routed by the drill-time leaf detector rather than the structural router; `OPT83` and `OPT84` are routed by structural passes over the drilled poles' step decomposition plus the workflow YAML, not by the log leaves (`OPT84` also follows the step's `package.json` scripts).
+- **Category 14 — Structural / Critical-Path Levers** (`OPT70`–`OPT75`, `OPT78`, `OPT83`–`OPT85`, `OPT87`): routed from the measured long pole (see ARCHITECTURE §11), not a flat grep. `OPT87` and `OPT74` remain manual. `OPT78` and `OPT85` are routed by drill-time log leaves; `OPT83` and `OPT84` are routed by structural passes over the drilled poles' step decomposition plus the workflow YAML, not by the log leaves (`OPT84` also follows the step's `package.json` scripts).
 
 (Catalog OPT-ids are the static scan; the `blocking_path.py` `_parse_log` **leaf
 detectors** — prisma / vitest / turbo / playwright — are a separate set run over
@@ -128,7 +128,7 @@ a finding.
 Most of them (OPT70–OPT75) are routed by the deterministic structural router in
 `collect_runs.py`. **OPT83** and **OPT84** are each routed by a structural pass over each drilled pole's
 per-step decomposition and its workflow YAML (not by the log leaves) and emit a
-finding with its own card; OPT84 also reads the repo's `package.json` scripts and tool versions. **OPT85** and **OPT87** have no router yet: like OPT74 they are listed as structural patterns without a detector, and are applied by reading the drilled pole's log and test code. **OPT78** is routed instead by a drill-time leaf detector over
+finding with its own card; OPT84 also reads the repo's `package.json` scripts and tool versions. **OPT87** and OPT74 remain listed as structural patterns without a detector. **OPT78** and **OPT85** are routed instead by drill-time leaf detectors over
 the long pole's captured log (ARCHITECTURE §12.3), corroborated against the repo's
 test-runner config. It emits no finding record, so the render boundary's `Risk`
 row and banner never see it: its HIGH risk is stamped on the pole's drill-down

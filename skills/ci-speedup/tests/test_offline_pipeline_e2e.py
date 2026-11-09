@@ -190,7 +190,9 @@ _JOB_ID = 9001
 # performs no PR discovery, and the fixture pages are short, so the exact delta is +3.
 # One repository-wide cache-usage read gates every cache saving against the
 # shared budget; it is issued once per audit, not once per finding.
-_GOLDEN_GH_QUERY_COUNT = 117
+# Three bounded cancelled-run job reads preserve pre-pickup queue lower bounds
+# that are absent from the success-only timing sample.
+_GOLDEN_GH_QUERY_COUNT = 120
 # PR-H1: `push` is UNSCOPED (no `branches:`) so the same-head_sha push+PR run
 # pair in the corpus satisfies OPT47's structural precondition (a push scoped
 # only to the default branch is excluded by design).

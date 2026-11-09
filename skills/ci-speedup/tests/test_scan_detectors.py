@@ -2786,11 +2786,9 @@ def test_structural_pattern_without_router_is_reported_not_hidden(tmp_path: Path
     data = _scan(tmp_path)
     without = set(data["catalog_structural_patterns_without_detector"])
     assert "OPT74" in without, "OPT74 has no router and must be reported as uncovered"
-    # OPT85 / OPT87 are catalogued with no router; their catalog entries promise
-    # the scan lists them here, so registering either as detected without a
-    # router would silently claim coverage the audit does not have.
-    for pat in ("OPT85", "OPT87"):
-        assert pat in without, f"{pat} has no router and must be reported as uncovered"
+    # OPT85 is routed by the drill-time startup leaf; OPT87 remains manual.
+    assert "OPT85" not in without
+    assert "OPT87" in without
     for pat in ("OPT70", "OPT71", "OPT72", "OPT73", "OPT75"):
         assert pat not in without, f"{pat} has a router and must not be listed"
 
