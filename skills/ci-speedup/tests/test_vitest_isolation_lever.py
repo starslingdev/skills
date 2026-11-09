@@ -75,6 +75,7 @@ _ISO_BASE = {
     "vm_pool": False,
     "error": None,
     "verdict": "isolation_on",
+    "isolated_test_files": {},
 }
 _ISO_ON = dict(_ISO_BASE)
 _ISO_OFF = dict(_ISO_BASE, isolation_opt_out=True, verdict="opted_out",

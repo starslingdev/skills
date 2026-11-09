@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import blocking_path as bp
+import scan
 import verify_report as vr
 
 
@@ -76,6 +77,50 @@ def _repeated_node_log() -> str:
     return "\n".join(lines)
 
 
+def _pytest_verbose_log(*, startup_s: int = 0) -> str:
+    """GitHub runner timestamps around pytest's real ``-v`` progress lines."""
+    at = datetime(2026, 11, 6, tzinfo=timezone.utc)
+    lines = [f"{_stamp(at)} pytest -v tests/test_accounts.py"]
+    at += timedelta(seconds=startup_s)
+    for index in range(1, 5):
+        at += timedelta(seconds=60)
+        lines.append(
+            f"{_stamp(at - timedelta(seconds=1))} schema_name=schema_test_{index}"
+        )
+        lines.append(
+            f"{_stamp(at)} tests/test_accounts.py::test_account_{index} "
+            f"PASSED [{index * 25}%]"
+        )
+    lines.append(f"{_stamp(at)} 4 passed in 240.00s")
+    return "\n".join(lines)
+
+
+def _vitest_verbose_log() -> str:
+    at = datetime(2026, 11, 6, tzinfo=timezone.utc)
+    durations = (68_100, 68_400, 67_900, 68_200, 21_000, 24_000, 28_000,
+                 31_000, 35_000, 41_000, 46_000)
+    lines = [f"{_stamp(at)} RUN v3.2.4 /repo"]
+    for index, duration_ms in enumerate(durations, 1):
+        at += timedelta(milliseconds=duration_ms)
+        lines.append(
+            f"{_stamp(at)} ✓ tests/accounts.test.ts > accounts > case {index} "
+            f"{duration_ms}ms"
+        )
+    lines.append(f"{_stamp(at)} 11 tests passed")
+    return "\n".join(lines)
+
+
+def _vitest_source_facts() -> dict:
+    return {
+        "isolated_test_files": {
+            "tests/accounts.test.ts": {
+                f"case {index}": f"schema_test_{index}"
+                for index in range(1, 12)
+            },
+        },
+    }
+
+
 def _pole() -> dict:
     return {
         "workflow_file": ".github/workflows/ci.yml",
@@ -105,6 +150,187 @@ def test_isolated_same_file_tests_get_the_concurrency_leaf() -> None:
     leaf = bp._parse_log(_isolated_log())
     assert leaf is not None
     assert leaf["fix_key"] == "test-isolated-serial"
+
+
+def test_pytest_verbose_runner_timestamps_get_the_concurrency_leaf() -> None:
+    leaf = bp._parse_log(_pytest_verbose_log())
+    assert leaf is not None
+    assert leaf["fix_key"] == "test-isolated-serial"
+
+
+def test_pytest_verbose_requires_isolation_inside_each_test_interval() -> None:
+    log = _pytest_verbose_log().replace(
+        "2026-11-06T00:00:59.0000000Z schema_name=schema_test_1",
+        "2026-11-06T00:01:01.0000000Z schema_name=schema_test_1",
+    )
+    assert bp._parse_log(log) is None
+
+
+def test_pytest_verbose_ignores_startup_before_the_first_test() -> None:
+    leaf = bp._parse_log(_pytest_verbose_log(startup_s=10))
+    assert leaf is not None
+    assert leaf["fix_key"] == "test-isolated-serial"
+
+
+def test_vitest_verbose_durations_use_source_proven_isolation() -> None:
+    leaf = bp._parse_log(_vitest_verbose_log(), _vitest_source_facts())
+    assert leaf is not None
+    assert leaf["fix_key"] == "test-isolated-serial"
+    assert leaf["test_count"] == 11
+
+
+def test_vitest_verbose_rejects_overlapping_duration_sum() -> None:
+    lines = _vitest_verbose_log().splitlines()
+    at = datetime(2026, 11, 6, tzinfo=timezone.utc)
+    for index in range(1, 12):
+        message = lines[index].split(" ", 1)[1]
+        lines[index] = f"{_stamp(at + timedelta(seconds=index))} {message}"
+    assert bp._parse_log("\n".join(lines), _vitest_source_facts()) is None
+
+
+def test_vitest_verbose_rejects_overlapping_intervals_with_equal_total_span() -> None:
+    at = datetime(2026, 11, 6, tzinfo=timezone.utc)
+    completions = (180, 200, 220, 240)
+    lines = [f"{_stamp(at)} RUN v3.2.4 /repo"]
+    for index, completed_s in enumerate(completions, 1):
+        lines.append(
+            f"{_stamp(at + timedelta(seconds=completed_s))} "
+            f"✓ tests/accounts.test.ts > accounts > case {index} 60000ms"
+        )
+    lines.append(f"{_stamp(at + timedelta(seconds=240))} 4 tests passed")
+    facts = {
+        "isolated_test_files": {
+            "tests/accounts.test.ts": {
+                f"case {index}": f"schema_test_{index}" for index in range(1, 5)
+            },
+        },
+    }
+
+    assert bp._parse_log("\n".join(lines), facts) is None
+
+
+def test_vitest_verbose_binds_each_logged_test_to_its_source_fact() -> None:
+    unrelated = {
+        "isolated_test_files": {
+            "tests/accounts.test.ts": {
+                f"other case {index}": f"schema_test_{index}"
+                for index in range(1, 12)
+            },
+        },
+    }
+    assert bp._parse_log(_vitest_verbose_log(), unrelated) is None
+
+
+def test_timestamped_vitest_test_count_and_prompt_name_safe_concurrency() -> None:
+    leaf = bp._parse_log(_vitest_verbose_log(), _vitest_source_facts())
+    assert leaf is not None
+    prompt = bp._build_agent_prompt(
+        leaf, _pole(), [], None, "example/repo", None, 1, 1,
+    ).lower()
+    assert "describe.concurrent" in prompt
+    assert "maxconcurrency" in prompt
+    assert "5" in prompt
+    assert "source isolation evidence" in prompt
+
+
+def test_vitest_source_reader_requires_a_unique_literal_per_test(tmp_path) -> None:
+    (tmp_path / "vitest.config.ts").write_text(
+        "import { defineConfig } from 'vitest/config'\n"
+        "export default defineConfig({ test: {} })\n",
+        encoding="utf-8",
+    )
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    source = "\n".join(
+        f"test('case {index}', async () => {{\n"
+        f"  await createSchema('schema_test_{index}')\n"
+        "})"
+        for index in range(1, 12)
+    )
+    (tests / "accounts.test.ts").write_text(source, encoding="utf-8")
+
+    facts = scan._read_test_runner_isolation(tmp_path)
+
+    assert facts["isolated_test_files"]["tests/accounts.test.ts"] == {
+        f"case {index}": f"schema_test_{index}" for index in range(1, 12)
+    }
+
+
+def test_vitest_source_reader_rejects_unused_namespace_variables(tmp_path) -> None:
+    (tmp_path / "vitest.config.ts").write_text(
+        "import { defineConfig } from 'vitest/config'\n"
+        "export default defineConfig({ test: {} })\n",
+        encoding="utf-8",
+    )
+    source = "\n".join(
+        f"test('case {index}', async () => {{\n"
+        f"  const schemaName = 'schema_test_{index}'\n"
+        "  await runAgainstSharedDatabase()\n"
+        "})"
+        for index in range(1, 5)
+    )
+    (tmp_path / "accounts.test.ts").write_text(source, encoding="utf-8")
+
+    facts = scan._read_test_runner_isolation(tmp_path)
+
+    assert facts["isolated_test_files"] == {}
+
+
+def test_vitest_source_reader_ignores_commented_namespace_calls(tmp_path) -> None:
+    (tmp_path / "vitest.config.ts").write_text(
+        "import { defineConfig } from 'vitest/config'\n"
+        "export default defineConfig({ test: {} })\n",
+        encoding="utf-8",
+    )
+    source = "\n".join(
+        f"test('case {index}', async () => {{\n"
+        f"  // await createSchema('schema_test_{index}')\n"
+        "  await runAgainstSharedDatabase()\n"
+        "})"
+        for index in range(1, 5)
+    )
+    (tmp_path / "accounts.test.ts").write_text(source, encoding="utf-8")
+
+    facts = scan._read_test_runner_isolation(tmp_path)
+
+    assert facts["isolated_test_files"] == {}
+
+
+def test_vitest_source_reader_rejects_test_symlinks_outside_root(tmp_path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "vitest.config.ts").write_text(
+        "import { defineConfig } from 'vitest/config'\n"
+        "export default defineConfig({ test: {} })\n",
+        encoding="utf-8",
+    )
+    external = tmp_path / "external.test.ts"
+    external.write_text(
+        "\n".join(
+            f"test('case {index}', async () => {{\n"
+            f"  await createSchema('schema_test_{index}')\n"
+            "})"
+            for index in range(1, 5)
+        ),
+        encoding="utf-8",
+    )
+    (root / "linked.test.ts").symlink_to(external)
+
+    facts = scan._read_test_runner_isolation(root)
+
+    assert facts["isolated_test_files"] == {}
+
+
+def test_non_vitest_repo_does_not_walk_test_sources(tmp_path, monkeypatch) -> None:
+    def unexpected(_root):
+        raise AssertionError("non-Vitest repositories must not scan test sources")
+
+    monkeypatch.setattr(scan, "_isolated_test_source_facts", unexpected)
+
+    facts = scan._read_test_runner_isolation(tmp_path)
+
+    assert facts["runner"] is None
+    assert facts["isolated_test_files"] == {}
 
 
 def test_isolated_test_leaf_rejects_varied_timers_and_missing_markers() -> None:

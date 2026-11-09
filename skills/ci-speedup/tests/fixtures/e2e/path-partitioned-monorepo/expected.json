@@ -10,39 +10,37 @@
   "config_eras": [],
   "credited_findings": [
     {
-      "pattern": "OPT21",
-      "runner_min": null,
-      "wall_clock_s": 30.0
-    },
-    {
       "pattern": "OPT45",
-      "runner_min": 1.8,
+      "runner_min": 0.3,
       "wall_clock_s": 0.0
     },
     {
-      "pattern": "OPT75",
-      "runner_min": null,
-      "wall_clock_s": 60.0
+      "pattern": "OPT73",
+      "runner_min": 41.0,
+      "wall_clock_s": 205.0
     }
   ],
   "detected_patterns": [
+    "OPT2",
     "OPT21",
     "OPT33",
     "OPT45",
-    "OPT75",
-    "OPT81"
+    "OPT73",
+    "OPT75"
   ],
   "gate_kind": null,
   "headline": {
-    "check": "gate",
-    "seconds": 180.0
+    "check": "tests / test (api-20)",
+    "seconds": 275.0
   },
   "lane": {
     "job_fetches": 0,
     "p50_s": null,
     "sampled_pushes": 0
   },
-  "leaves": [],
+  "leaves": [
+    "cargo-test-shard"
+  ],
   "minority_tails": [],
   "provenance": "required_scoped",
   "representative_jobs": {
@@ -52,9 +50,7 @@
   "verifier": {
     "fail": [],
     "skip": [
-      "Bottom-line crowned cluster lever is on the merge-gating spine (not off-spine)",
       "Bottom-line crowned cluster lever is presence-eligible (no minority-workflow crown)",
-      "Bottom-line headline leads with the stamped cluster-floor ceiling (no burial)",
       "OPT64 is ranked only on enough retried runs",
       "Tier-2 R-rows carry re-derived wall-clock-neutral certificates",
       "Tier-2 R-rows use measured sizing basis",
@@ -69,11 +65,14 @@
       "check enumeration is bound to the kept config era (no other-config check leaks in)",
       "cluster-floor lever's ceiling floors at a NON-sibling check (not its own matrix leg)",
       "code findings stay within commit work and never claim runner queue",
-      "crowned detector leaf agrees with the pole's dominant measured category (no off-category ceiling)",
-      "declared drilled-run timelines are readable",
-      "each rendered pole's drill belongs to its own job (no cross-job log leak)",
+      "cost spine names the minutes on runners GitHub does not host",
+      "cost-spine Contents count matches the rows the table shows",
+      "each finding's runner-minute saving is within its jobs' measured compute",
+      "every credited runner-minute saving carries a measured-basis stamp (sizing door)",
+      "every data-driven finding carries a measured signal (no unsupported claims)",
       "every drilled pole's binding floor is disclosed on the spine (no silent heavy-check drop)",
       "every rendered cache claim carries a cross-run cache distribution",
+      "headline critical-path check is an actual recurring gate",
       "headline leads with the observed wall when the chain sum diverges from the makespan",
       "headline reconciles a non-universal slowest check with the population floor",
       "minority slow tails on merge-blocking checks are re-derived",
@@ -82,6 +81,7 @@
       "no spine-dropped check is also framed on the merge-gating critical path",
       "pole addressable ceiling within the co-occurrence floor",
       "presence-causal headline only when the slowest check is minority-present",
+      "recoverable ceiling above the typical wait carries a worst-case reconciliation",
       "rendered chain total is never below the largest member it sums",
       "rendered per-workflow gate frequency matches the populations re-derivation",
       "scanned date matches the date in the filename",

@@ -185,6 +185,13 @@ grep -rn 'docker build\|docker compose build' .github/workflows/
 grep -rn 'docker/build-push-action' .github/workflows/
 ```
 
+Also flag a GHA cache scoped to `github.sha`, `run_id`, or `run_number`; a local
+cache exported over the directory it imports without a separate `mode=max`
+destination; and hosted-runner Dockerfiles that use `RUN --mount=type=cache`
+without persisting the BuildKit cache. A SHA scope cannot serve a later commit,
+and a run-ID scope cannot serve a fresh workflow invocation (reruns keep their
+original IDs). A remote persistent builder is not an ephemeral mount case.
+
 **Fix**: Use `docker/build-push-action` with `cache-from: type=gha` and
 `cache-to: type=gha,mode=min` by default, or use `docker compose build` with
 BuildKit cache mounts. Use `mode=max` only when intermediate stages are reused
@@ -256,7 +263,7 @@ grep -rn 'actions/cache' .github/workflows/ -A 5 | grep 'key:'
 # Flag ${{ github.run_id }} only without a compatible restore-keys prefix; always flag date, timestamp, random
 ```
 
-**Fix**: Match the key shape to what is cached. Dependency download stores use a deterministic lockfile + tool-version + OS key. Tool-result and build-output caches change as the job runs, so use a rolling primary key such as `<tool>-<os>-<lockfile-hash>-${{ github.sha }}` with a stable `restore-keys` prefix such as `<tool>-<os>-<lockfile-hash>-`. An exact primary-key hit is not saved again; the rolling suffix lets the updated cache be saved while the stable prefix restores the newest compatible result.
+**Fix**: Match the key shape to what is cached. Dependency download stores use a deterministic lockfile + tool-version + OS key. Tool-result and build-output caches change as the job runs, so use a rolling primary key such as `<tool>-<os>-<lockfile-hash>-${{ github.sha }}` with a stable `restore-keys` prefix such as `<tool>-<os>-<lockfile-hash>-`. An exact primary-key hit is not saved again; the rolling suffix lets the updated cache be saved while the stable prefix restores the newest compatible result. Each rolling entry consumes cache budget, so reserve the per-commit shape for small tool-result caches. Large dependency or build stores need a separately measured key and retention strategy; a stable exact key can also prevent updated mutable state from being saved.
 
 ---
 
@@ -324,12 +331,12 @@ A "broad" cache key (e.g. `hashFiles('**/*.ts', '**/*.tsx')`) does NOT automatic
 1. **Enumerate `restore-keys` before claiming the cache is defeated.** The finding MUST quote the existing `restore-keys` block and explicitly state whether prefix-fallback restoration is happening. Phrasing must distinguish "primary-key miss with restore-keys fallback hit" (cache content present, just not the latest entry) from "no cache restored at all" (no fallback configured, or all fallbacks miss). These have very different perf implications and must not be conflated.
 2. **Severity cap.** A "narrow the cache key" finding is capped at **MEDIUM** severity unless the finding includes benchmark data measuring the **step-time delta between cache-hit and cache-miss states on the actual runner type used by this repo** — not just a key-match-rate measurement. Key-match rate is necessary but not sufficient; the tool must demonstrably run faster on a hit.
 3. **Justify the ephemeral-runner case.** Before claiming wall-time savings on tool-level caches (ESLint, Prettier, Babel, Jest, `tsc`, etc.), the finding must justify why the specific tool's cache actually works on ephemeral runners for this repo — ideally by citing prior benchmark data on the same repo + same runner type. Default assumption is "tool cache is suspect on ephemeral runners until proven otherwise." Self-hosted persistent runners are a different regime; call out which one applies.
-4. **Default motivation: cache-namespace hygiene, not wall-time.** The cleanest legitimate motivation for narrowing a cache key is avoiding LRU eviction on the per-repo cache budget (10 GiB on GitHub-hosted; smaller on some self-hosted setups). Writing one cache entry per commit fills the budget faster than writing one per lockfile change, which can evict _other_ legitimate caches. Frame the finding as namespace hygiene first; only claim wall-time savings after the benchmark in (2) lands.
+4. **Default motivation: cache-namespace hygiene, not wall-time.** The cleanest legitimate motivation for narrowing a cache key is avoiding LRU eviction on the per-repo cache budget (10 GiB on GitHub-hosted; smaller on some self-hosted setups). For a small tool-result cache, one entry per commit plus a stable `restore-keys` prefix is the correct rolling shape because it can save the updated result. That shape fills the budget faster than one entry per lockfile change, so watch eviction and do not use it for large dependency or build stores. Frame the finding as namespace hygiene first; only claim wall-time savings after the benchmark in (2) lands.
 5. **Scope:** This guardrail applies ONLY to "narrow the existing cache key" findings. It does NOT apply to:
    - "No `actions/cache` step is configured at all" (no cache exists; not a narrowing question)
    - "Wrong path is being cached" (cache exists but covers the wrong directory)
-   - "Cache key is non-deterministic" (e.g. uses `${{ github.sha }}` so nothing ever hits)
-   - "Cache key has no `restore-keys` and the primary key changes per commit" (genuinely no fallback, content never restored — but the finding must still demonstrate step-time delta to claim wall-time savings)
+   - "Cache key is non-deterministic" (a random or time-based token that cannot share a compatible restore prefix)
+   - "Cache key has a per-run token such as `${{ github.sha }}` with no restore-keys" (a different token cannot restore the prior content, although a rerun with the identical token can exact-hit; the finding must still demonstrate step-time delta to claim wall-time savings)
    - OPT8's original detector case (Actions cache key broader than an _application-level_ per-item content cache it wraps, where the inner cache provably works) — that pattern is unaffected, but the benchmark requirement in (2) still applies before claiming savings.
 
 If the workflow has no `actions/cache` step at all, or caches the wrong path, that is a different finding type and proceeds normally.
@@ -367,7 +374,7 @@ title_template: "Tool-Specific Cache Flag Not Enabled"
 - For lint and format result caches, compare the affected step before and after enabling the cache; a warm hit can avoid a large share of repeated parsing.
 - For compiler build state such as `.tsbuildinfo` and generated-client output, a cache hit does not by itself prove a saving: restore, validation, and save overhead can cancel the avoided work. Treat these as uncredited suggestions until a same-workload before/after measurement shows a net reduction.
 
-**Fix**: Add the tool's cache flag AND wrap the cache directory in `actions/cache`. Because tool-result caches change on every run, use a rolling primary key such as `<tool>-<os>-<lockfile-hash>-${{ github.sha }}` with a stable `restore-keys` prefix such as `<tool>-<os>-<lockfile-hash>-`. An exact primary-key hit is not saved again; the rolling suffix lets the updated result be saved for the next run. For Prettier: `prettier --check --cache --cache-strategy content --cache-location ./node_modules/.cache/prettier`. For ESLint: `eslint --cache --cache-location ./node_modules/.cache/eslint`. Verify the tool's cache file is gitignored. For compiler state and generated output, benchmark the full restore/run/save path against an uncached run on the same workload and keep the cache only when it reduces total step time.
+**Fix**: Add the tool's cache flag AND wrap the cache directory in `actions/cache`. Because tool-result caches change on every run, use a rolling primary key such as `<tool>-<os>-<lockfile-hash>-${{ github.sha }}` with a stable `restore-keys` prefix such as `<tool>-<os>-<lockfile-hash>-`. An exact primary-key hit is not saved again; the rolling suffix lets the updated result be saved for the next run. Each rolling entry consumes cache budget, so use this per-commit shape for small tool-result caches. Large dependency or build stores need a separately measured key and retention strategy; a stable exact key can also prevent updated mutable state from being saved. For Prettier: `prettier --check --cache --cache-strategy content --cache-location ./node_modules/.cache/prettier`. For ESLint: `eslint --cache --cache-location ./node_modules/.cache/eslint`. Verify the tool's cache file is gitignored. For compiler state and generated output, benchmark the full restore/run/save path against an uncached run on the same workload and keep the cache only when it reduces total step time.
 
 ---
 
@@ -1410,6 +1417,15 @@ title_template: "Within-Job Duplicate Commands"
 
 **Detection heuristic**:
 
+Job logs can prove the Cargo variant even when the workflow commands differ:
+if two distinct step groups print the same in-repository
+`Compiling <crate> v<version> (<path>)` line, every local crate in the later
+step already appeared in the earlier step, and both commands share the same
+observable profile, target, feature, toolchain, compiler and target-directory
+settings, the second step repeats compilation. Different crates or artifact
+settings stay quiet. The later step's full `Finished` wall is an upper bound,
+because it can include linking or other work beside the repeated compilation.
+
 ```bash
 # For each job in each workflow, check if any command appears in multiple steps
 for f in /tmp/workflows/*.yml; do
@@ -1418,7 +1434,14 @@ for f in /tmp/workflows/*.yml; do
 done
 ```
 
-**Fix**: Remove the duplicate invocation. If the rebuild is a workaround for stale artifacts, fix the root cause (e.g., cache key, build system incremental support) instead.
+**Fix**: Remove the duplicate invocation. For Cargo, preserve every intended
+package, feature, platform and test target. Combine package selections in one
+invocation when they are meant to share artifacts, or align the feature, target
+directory, toolchain and compiler settings that should produce the same artifact;
+then confirm every original test target still builds and runs. If distinct feature
+or platform coverage is intentional, keep both builds. If the rebuild is a
+workaround for stale artifacts, fix the root cause (e.g., cache key, build system
+incremental support) instead.
 
 ---
 
@@ -4876,6 +4899,11 @@ title_template: "Missing Dependency Caching"
    - C++: `cmake`, `make`, `ninja` → check for `actions/cache` targeting build dir, or `ccache`/`sccache`
 2. Flag if the ecosystem's build/install commands are present but no corresponding cache action exists.
 3. Count total jobs affected — in sharded/matrix workflows, the waste multiplies.
+4. Also flag cache declarations whose workflow shape needs validation: a rolling
+   saved-key family whose restore prefix cannot serve a later edit; ccache capped
+   at 64 MiB or less, which may churn before reuse;
+   ccache, sccache, staticcheck, or golangci-lint caches placed in temporary
+   storage without a persistence step; or a cache directory deleted later.
 
 ```bash
 # Check for any caching across all workflows
@@ -4884,7 +4912,18 @@ grep -rn 'actions/cache\|rust-cache\|sccache\|setup-node.*cache\|setup-go.*cache
 grep -rn 'cargo \|pip install\|uv sync\|go build\|mvn \|gradle\|cmake\|make ' /tmp/workflows/
 ```
 
-**Fix**: Add the ecosystem-appropriate caching action. In multi-job workflows, use one key per compilation mode so incompatible artifacts cannot overwrite or restore each other. Give only one job permission to save each mode's cache, such as with a `save-if` condition; the other jobs restore it without racing to publish separate entries.
+**Fix**: Add the ecosystem-appropriate caching action. For compiler and mutable
+build-output caches such as ccache, sccache, Go's `GOCACHE`, `target/`,
+`.next/cache`, `.turbo`, `.nx/cache`, Gradle's build cache, and Bazel's disk
+cache, use a rolling primary key such as
+`<tool>-<os>-<mode>-<lockfile-hash>-${{ github.sha }}` and the stable
+`restore-keys: <tool>-<os>-<mode>-<lockfile-hash>-` prefix. A new primary entry
+is saved after each run, so budget the accumulated entries and their eviction
+pressure; do not use this shape when the cache is too large for the repository's
+cache budget. In multi-job workflows, use one key family per compilation mode so
+incompatible artifacts cannot overwrite or restore each other. Give only one job
+permission to save each mode's cache, such as with a `save-if` condition; the
+other jobs restore it without racing to publish separate entries.
 
 ---
 
@@ -4909,11 +4948,15 @@ title_template: "Build Artifacts Destroyed Before Every Run"
 1. Search workflow steps for clean commands:
 
 ```bash
-grep -rn 'rm -rf build\|rm -rf target\|rm -rf dist\|rm -rf node_modules\|cargo clean\|make clean\|gradle clean' /tmp/workflows/
+grep -rn 'rm -rf build\|rm -rf target\|rm -rf dist\|rm -rf node_modules\|cargo clean\|make clean\|gradle clean\|go clean .*\(-cache\|-modcache\)' /tmp/workflows/
 ```
 
 2. **CRITICAL**: Also read the build scripts invoked by workflow steps. A workflow step may call `./scripts/build.sh` which internally does `rm -rf build`. The detection heuristic must trace through to the actual script, not stop at the workflow YAML.
 3. Flag when the job runs on `self-hosted` runners (where workspace persists between runs). On GitHub-hosted runners, the workspace is always fresh, so `rm -rf` has no effect.
+4. Flag `go clean -cache`, `go clean -i -cache`, and `go clean -modcache`
+   on any runner because they erase reusable Go build/module state. Keep
+   `go clean -testcache` quiet: it clears test-result reuse rather than compiled
+   build artifacts.
 
 **Fix**: Make the clean step conditional on cache miss, or add an `--incremental` flag to the build script. For cmake: check for `CMakeCache.txt` existence before cleaning. For cargo: incremental compilation is the default — don't `cargo clean`.
 

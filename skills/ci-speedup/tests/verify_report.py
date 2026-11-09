@@ -14403,7 +14403,7 @@ def check_structural_step_category_not_payload_binned_as_build(findings_path: Pa
 # ceiling it claims (the pole's dominant_p50) is credited to a category that is not the
 # dominant measured work. The `_VR_LEAF_STEP_CATEGORY` mirror is pinned to the engine map by
 # test_verify_report_self (L7).
-_VR_LEAF_STEP_CATEGORY: dict[str, str] = {
+_VR_LEAF_STEP_CATEGORY: dict[str, str | frozenset[str]] = {
     "dependency-cache": "install",
     "cache-effective-path-mismatch": "install",
     "prisma-migrate-once": "test",
@@ -14416,6 +14416,7 @@ _VR_LEAF_STEP_CATEGORY: dict[str, str] = {
     "test-loop-serial": "test",
     "vendored-lib-build": "build",
     "emulated-image-compile": "build",
+    "cargo-double-compile": frozenset({"build", "scan", "test"}),
     "cargo-test-shard": "test",
     "benchmark-serial-reruns": "test",
     "android-emulator-shard": "test",
@@ -14476,17 +14477,20 @@ def check_detector_leaf_agrees_with_dominant_category(report: str,
         if not m:
             continue
         fk = m.group(1)
-        leaf_cat = _VR_LEAF_STEP_CATEGORY.get(fk)
-        if leaf_cat is None:
+        leaf_category = _VR_LEAF_STEP_CATEGORY.get(fk)
+        if leaf_category is None:
             unknown_cat.append(f"`{wf}` ▸ {check} (fix_key {fk})")
             continue
+        leaf_categories = ({leaf_category} if isinstance(leaf_category, str)
+                           else leaf_category)
         dom_cat = dom_by_pole.get((_wf_base(_strip_line_suffix(wf)), _cmp_name(check)))
         if dom_cat is None:
             unmapped.append(f"`{wf}` ▸ {check}")
             continue
         checked += 1
-        if leaf_cat != dom_cat:
-            bad.append(f"`{wf}` ▸ {check}: crowned `{fk}` is a `{leaf_cat}` fix but the pole's "
+        if dom_cat not in leaf_categories:
+            category_label = "/".join(sorted(leaf_categories))
+            bad.append(f"`{wf}` ▸ {check}: crowned `{fk}` is a `{category_label}` fix but the pole's "
                        f"measured dominant category is `{dom_cat}` — the ceiling is credited to "
                        "non-dominant work")
     # L8: surface every coverage skip in the detail rather than reading clean.
@@ -14754,7 +14758,9 @@ def check_cache_sizing_guards(report: str, findings_path: Path | None) -> Check:
                  ("hit_rate", "saving_s", "restore_s", "save_s")]
         if all(isinstance(value, (int, float)) for value in terms):
             hit, saving, restore, save = (float(value) for value in terms)
-            expected = hit * saving - restore - (1 - hit) * save
+            expected = (-restore - (1 - hit) * save
+                        if finding.get("cache_path_consumed") is False
+                        else hit * saving - restore - (1 - hit) * save)
             if (expected > 0) != (statuses["economics"] == "passed"):
                 bad.append(f"{finding.get('id')}: transfer-cost status disagrees with stored terms")
         elif statuses["economics"] in {"passed", "failed"}:
@@ -15724,9 +15730,12 @@ def check_default_branch_push_lane_isolated(
                        - expected_projected) > 0.11:
                     failures.append("push finding projection drifted from the shared helper")
                 magnitude = _as_dict(_as_dict(drill.get("leaf")).get("magnitude"))
-                expected_cause = (
-                    _num(magnitude.get("value"))
-                    if magnitude.get("unit") == "s" else expected_potential)
+                if _as_dict(drill.get("leaf")).get("uncredited") is True:
+                    expected_cause = 0.0
+                elif magnitude.get("unit") == "s":
+                    expected_cause = _num(magnitude.get("value"))
+                else:
+                    expected_cause = expected_potential
                 expected_cause = (expected_cause if expected_cause is not None
                                   else expected_potential)
                 if abs((_num(stamped_projection.get("cause_ceiling_s")) or 0.0)

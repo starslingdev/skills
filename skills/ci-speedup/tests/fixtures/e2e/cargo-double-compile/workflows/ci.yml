@@ -1,0 +1,8 @@
+name: Cargo duplicate compile
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: cargo test -p goport_core
+      - run: cargo test -p ts_goport

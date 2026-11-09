@@ -82,6 +82,7 @@ _EXPECTED_PARSE_LOG_LEAF_ORDER = (
     "buildx-no-cache",
     "pytest-no-xdist",
     "eslint-no-cache",
+    "cargo-double-compile",
     "cargo-test-shard",
     "benchmark-serial-reruns",
     "android-emulator-shard",
@@ -144,7 +145,9 @@ def _helper_fix_keys(name: str) -> list[str]:
             if eligible:
                 latest = max(line for line, _key in eligible)
                 keys.extend(key for line, key in eligible if line == latest)
-    return keys
+    # Alternate return shapes from one helper retain one precedence slot when
+    # they route to the same leaf identity.
+    return list(dict.fromkeys(keys))
 
 
 def _parse_log_leaf_order(source: str) -> tuple[str, ...]:
