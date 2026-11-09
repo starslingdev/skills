@@ -64,6 +64,7 @@ def test_opt85_measures_repeated_process_startup_for_declared_shapes(shape):
 @pytest.mark.parametrize("text", [
     "\n".join(f"2026-01-01T00:00:{i:02d}Z progress {i * 10}%" for i in range(10)),
     _startup_log("pytest", parallel=True),
+    _startup_log("pytest").replace("case_9.py", "case_8.py"),
     _startup_log("pytest", timestamps=False),
 ])
 def test_opt85_stays_silent_without_serial_timestamped_process_boundaries(text):
