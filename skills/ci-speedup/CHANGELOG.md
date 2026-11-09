@@ -16,6 +16,10 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-11-08** — Add stable `subject` identities to static findings, stable
+  machine-readable `kind` values to scan coverage gaps, an
+  `INSTANCE_GRANULAR` detector set, and an out-of-tree symlink refusal so the
+  repository-local `ci-speedup-guard` can compare pull-request trees safely.
 - **2026-11-08** — Align cache-key guidance around rolling tool-result keys: a per-commit primary key with a stable restore prefix can restore useful content and save the updated result, while each new entry consumes cache budget and is unsuitable for large dependency or build stores.
 - **2026-11-08** — Keep checks whose required-job reachability cannot be confirmed visible but uncredited. Their structural findings and drill-downs now use conditional framing, and report verification rejects direct merge-wait credit or critical-path wording on those checks.
 - **2026-11-08** — Treat checkout submodules copied by a resolved local Dockerfile as image-build inputs. OPT76 now keeps those checkouts, fails closed on unresolved Dockerfiles, and recognizes both explicit source paths and whole-context copies.
