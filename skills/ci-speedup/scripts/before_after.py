@@ -15,6 +15,22 @@ _CACHED_COUNT = re.compile(
     r"(?:go\s+)?cached(?:\s+lines?)?)")
 
 
+def advance_verification(
+    client: Any,
+    *,
+    repo: str,
+    branch: str,
+    baseline_artifact: str,
+    context_path: Any,
+    changed_files: list[str],
+    cache_sensitive: bool = False,
+    environ: dict[str, str] | None = None,
+    emit: Any = print,
+) -> dict[str, Any]:
+    """Advance a persisted post-fix verification session."""
+    return {"status": "pending", "verdict": None}
+
+
 def _seconds(value: str) -> float:
     return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
 
