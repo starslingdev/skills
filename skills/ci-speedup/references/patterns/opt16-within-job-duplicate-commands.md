@@ -15,6 +15,12 @@ category: 2
 
 **Detection heuristic**:
 
+Job logs can prove the Cargo variant even when the workflow commands differ:
+if two distinct step groups print the same in-repository
+`Compiling <crate> v<version> (<path>)` line and finish the same profile, the
+second step repeats compilation. Different crates, target triples, or dev and
+release profiles are distinct work and stay quiet.
+
 ```bash
 # For each job in each workflow, check if any command appears in multiple steps
 for f in /tmp/workflows/*.yml; do
@@ -23,4 +29,8 @@ for f in /tmp/workflows/*.yml; do
 done
 ```
 
-**Fix**: Remove the duplicate invocation. If the rebuild is a workaround for stale artifacts, fix the root cause (e.g., cache key, build system incremental support) instead.
+**Fix**: Remove the duplicate invocation. For Cargo, align `-p`/`--package` and
+`--features` selection across every command in the job so the later test target
+reuses the first compile, then confirm that target still builds and runs. If the
+rebuild is a workaround for stale artifacts, fix the root cause (e.g., cache key,
+build system incremental support) instead.

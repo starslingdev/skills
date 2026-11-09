@@ -3110,6 +3110,98 @@ def _parse_log(text: str,
                 "magnitude": None, "evidence": [l.strip() for l in uncached[:2]],
                 "search": ["eslint", "--cache", ".eslintcache"]}
 
+    # --- G2: the same local Cargo crate is compiled in two job steps ----------
+    # Cargo's group-delimited step logs let us distinguish a repeated compile
+    # from multiple crates within one invocation. Only path dependencies from
+    # the checked-out repository count; registry/git dependencies are excluded.
+    # Both steps must finish the same profile, so a deliberate dev then release
+    # build remains quiet. The avoidable wall is the SECOND step's Finished time.
+    cargo_groups: list[tuple[str, list[str]]] = []
+    cargo_command: str | None = None
+    cargo_group_lines: list[str] = []
+    for line in lines:
+        if match := re.match(r"^##\[group\]Run\s+(.+)$", line.strip()):
+            if cargo_command is not None:
+                cargo_groups.append((cargo_command, cargo_group_lines))
+            cargo_command = match.group(1).strip()
+            cargo_group_lines = []
+        elif line.strip() == "##[endgroup]" and cargo_command is not None:
+            cargo_groups.append((cargo_command, cargo_group_lines))
+            cargo_command = None
+            cargo_group_lines = []
+        elif cargo_command is not None:
+            cargo_group_lines.append(line)
+    if cargo_command is not None:
+        cargo_groups.append((cargo_command, cargo_group_lines))
+
+    def _cargo_group(group: tuple[str, list[str]]) -> dict[str, Any] | None:
+        command, group_lines = group
+        if not re.search(r"(?:^|\s)cargo\s+(?:test|build|check|clippy)\b", command):
+            return None
+        crates: dict[tuple[str, str, str], str] = {}
+        for group_line in group_lines:
+            match = re.search(
+                r"\bCompiling\s+(\S+)\s+v(\S+)\s+\(([^)]+)\)", group_line)
+            if match is None:
+                continue
+            path = match.group(3)
+            if (not (path.startswith(("/", "./", "../")))
+                    or re.search(r"(?:\.cargo/registry|registry/src|/git/checkouts/)",
+                                 path, re.IGNORECASE)):
+                continue
+            key = (match.group(1), match.group(2), path)
+            crates[key] = group_line.strip()
+        finished = next((
+            match for group_line in group_lines
+            if (match := re.search(
+                r"Finished\s+(?:`(?P<quoted>[^`]+)`\s+profile|"
+                r"(?P<plain>dev|test|release|bench))\s+\[[^\]]+\]\s+"
+                r"target\(s\)\s+in\s+(?P<duration>"
+                r"(?:\d+(?:\.\d+)?\s*[hms]\s*)+)",
+                group_line, re.IGNORECASE))
+        ), None)
+        if not crates or finished is None:
+            return None
+        parts = re.findall(r"(\d+(?:\.\d+)?)\s*([hms])",
+                           finished.group("duration"), re.IGNORECASE)
+        seconds = sum(float(value) * {"h": 3600, "m": 60, "s": 1}[unit.casefold()]
+                      for value, unit in parts)
+        return {"command": command, "crates": crates,
+                "profile": (finished.group("quoted") or finished.group("plain")).casefold(),
+                "seconds": seconds,
+                "finished": next(line.strip() for line in group_lines
+                                 if finished.group(0) in line)}
+
+    compiled = [row for group in cargo_groups if (row := _cargo_group(group)) is not None]
+    for later_index, later in enumerate(compiled[1:], 1):
+        for earlier in compiled[:later_index]:
+            repeated = sorted(set(earlier["crates"]) & set(later["crates"]))
+            if not repeated or earlier["profile"] != later["profile"]:
+                continue
+            names = [key[0] for key in repeated]
+            return {
+                "fix_key": "cargo-double-compile",
+                "unit_label": (f"{len(repeated)} local Cargo crate(s) compile again in a "
+                               f"second `{later['profile']}`-profile step"),
+                "magnitude": {"label": "redundant second Cargo compile wall",
+                              "value": round(later["seconds"], 2), "unit": "s"},
+                "deeper": [{
+                    "rows": [(earlier["command"], earlier["seconds"], None),
+                             (later["command"], later["seconds"], None)],
+                    "blocker_note": (f"the second step recompiles {', '.join(names[:3])} "
+                                     "with the same Cargo profile"),
+                    "pct_of": "sum",
+                }],
+                "evidence": [
+                    f"Run {earlier['command']}",
+                    earlier["crates"][repeated[0]],
+                    f"Run {later['command']}",
+                    later["crates"][repeated[0]],
+                    later["finished"],
+                ],
+                "search": ["Compiling", "Finished", "--package", "--features"],
+            }
+
     # --- H: long serial `cargo test` suite where a few test binaries dominate -----
     # The standard Rust libtest harness (`cargo test`, NOT cargo-nextest) runs each test
     # BINARY one after another and prints, per binary, a `Running <name> (target/…/deps/
@@ -4159,6 +4251,26 @@ _FIX_META: dict[str, dict[str, Any]] = {
                    "re-lint changed files and the updated cache "
                    "is saved. Verify a deliberately-introduced lint error still fails CI "
                    "(the cache must not hide it) and re-measure the lint step.",
+    },
+    "cargo-double-compile": {
+        "cause": "Two separate Cargo steps compile the same checked-out crate with the "
+                 "same profile. The second step's measured `Finished` wall is repeated "
+                 "compilation rather than a distinct release/debug artifact.",
+        "look": "`{wf}` and every Cargo command in this job — compare each command's "
+                "`-p`/`--package`, `--features`, target and profile selection, then trace "
+                "why the second command does not reuse the first command's artifacts.",
+        "constraints": "Keep the exact test and build targets, feature combinations and "
+                       "failure propagation. Do not merge commands whose profiles or target "
+                       "triples differ, and do not remove a compile until the later test "
+                       "target demonstrably reuses the intended artifact.",
+        "docs": ["Cargo build cache — shared target directory and configuration: "
+                 "https://doc.rust-lang.org/cargo/reference/build-cache.html",
+                 "Cargo package selection: "
+                 "https://doc.rust-lang.org/cargo/reference/pkgid-spec.html"],
+        "deliver": "Use one consistent `-p`/`--package` and `--features` selection "
+                   "across every Cargo command in the job so the later command reuses the "
+                   "first compile. Confirm the same test target still builds and runs, keep "
+                   "the full test count and failures, and re-measure both steps.",
     },
     "cargo-test-shard": {
         "cause": "The job runs the whole test suite through the standard `cargo test` "
@@ -6490,6 +6602,7 @@ _LEAF_STEP_CATEGORY: dict[str, str] = {
     "test-loop-serial": "test",
     "vendored-lib-build": "build",
     "emulated-image-compile": "build",
+    "cargo-double-compile": "test",
     "cargo-test-shard": "test",
     "benchmark-serial-reruns": "test",
     "android-emulator-shard": "test",

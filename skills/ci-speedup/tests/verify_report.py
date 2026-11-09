@@ -14416,6 +14416,7 @@ _VR_LEAF_STEP_CATEGORY: dict[str, str] = {
     "test-loop-serial": "test",
     "vendored-lib-build": "build",
     "emulated-image-compile": "build",
+    "cargo-double-compile": "test",
     "cargo-test-shard": "test",
     "benchmark-serial-reruns": "test",
     "android-emulator-shard": "test",

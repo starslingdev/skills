@@ -82,6 +82,7 @@ _EXPECTED_PARSE_LOG_LEAF_ORDER = (
     "buildx-no-cache",
     "pytest-no-xdist",
     "eslint-no-cache",
+    "cargo-double-compile",
     "cargo-test-shard",
     "benchmark-serial-reruns",
     "android-emulator-shard",

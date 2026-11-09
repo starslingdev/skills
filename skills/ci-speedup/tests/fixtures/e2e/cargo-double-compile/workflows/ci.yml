@@ -1,0 +1,8 @@
+name: Cargo duplicate compile
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: ./ci/build-core.sh
+      - run: ./ci/build-ts.sh
