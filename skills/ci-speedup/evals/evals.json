@@ -329,6 +329,27 @@
         "The automatic cohort counts as sample one and the cost line precedes the first rerun.",
         "A repeated invocation reuses the persisted verdict without duplicate reruns.",
         "No branch, commit, or push is created by verification."
+      ],
+      "checks": [
+        {
+          "name": "ci-speedup-skill-invoked",
+          "type": "tool_used",
+          "pattern": "^Skill .*\"skill\": \"(?:[\\w-]+:)?ci-speedup\"",
+          "min": 1
+        },
+        {
+          "name": "verification-resumed",
+          "type": "tool_used",
+          "pattern": "^Bash .*scripts/run\\.py[^\\n]*--verify-branch",
+          "min": 1
+        },
+        {
+          "name": "nothing-committed-or-pushed",
+          "type": "tool_used",
+          "pattern": "^Bash .*(?:(?<![\\w.-])|(?<=\\\\[nt]))git(?:\\s+-\\S+(?:\\s+[^\\s-]\\S*)?)*\\s+(?:commit|push)(?![\\w-])",
+          "min": 0,
+          "max": 0
+        }
       ]
     }
   ]

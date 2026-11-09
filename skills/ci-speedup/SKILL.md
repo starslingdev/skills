@@ -370,7 +370,7 @@ Only the delivery mechanism varies; the contract is **agent-independent.**
    Reruns start CI on the user's branch but never change repository contents, create branches, commit, or push.
    Full rules: [before/after verification](references/before-after-verification-spec.md).
 
-`scripts/run.py` orchestrates deterministic phases 2–3; the agent then calls
+`scripts/run.py` orchestrates the deterministic phases 2–3; the agent then calls
 `blocking_path.py` to render phase 4 and grounds any catalog gap from the log in
 4a. Every catalog or gap-fill result ends in a hand-off prompt, never a prescribed
 diff. `run.py` also records the analyzed repo and skill commit provenance from git

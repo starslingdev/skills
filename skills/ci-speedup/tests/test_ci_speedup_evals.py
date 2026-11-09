@@ -37,12 +37,13 @@ def _agent_readable() -> list[Path]:
     return out
 
 
-def test_five_entries_are_runnable_and_ids_are_unique():
+def test_six_entries_are_runnable_and_ids_are_unique():
     ids = [e["id"] for e in _EVALS["evals"]]
     assert len(ids) == len(set(ids))
     assert {e["name"] for e in _RUNNABLE} == {
         "full-run-synthetic", "security-ask-routes-to-ci-secure", "quality-review-opt81",
-        "gap-fill-coverage-lookup", "no-catalog-read-needed"}
+        "gap-fill-coverage-lookup", "no-catalog-read-needed",
+        "post-fix-verification-resume"}
 
 
 @pytest.mark.parametrize("entry", _RUNNABLE, ids=lambda e: e["name"])
