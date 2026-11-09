@@ -1,0 +1,12 @@
+name: Jest checks
+on: pull_request
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make test_frontend_ci
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo gate

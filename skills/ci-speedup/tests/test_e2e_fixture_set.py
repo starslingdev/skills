@@ -383,7 +383,8 @@ def test_named_fixtures_exercise_their_defining_interactions(
             "cache-lints", "config-era-change", "duplicate-gate-job", "emulated-container",
             "external-required-gate", "heavy-runner-queue", "minority-tail",
             "multiarch-image", "path-partitioned-monorepo", "vendored-libs",
-            "vitest-isolated-serial", "cargo-double-compile", "per-test-startup"):
+            "vitest-isolated-serial", "cargo-double-compile", "per-test-startup",
+            "jest-make-hop"):
         docs[name], reports[name], _checks = run_fixture(
             FIXTURE_ROOT / name, monkeypatch, tmp_path)
 
@@ -432,6 +433,11 @@ def test_named_fixtures_exercise_their_defining_interactions(
         docs["cargo-double-compile"], [])["leaves"]
     assert "Compiling goport_core" in reports["cargo-double-compile"]
     assert "combine their `-p`/`--package`" in reports["cargo-double-compile"]
+    jest = next(row for row in docs["jest-make-hop"]["findings"]
+                if row.get("pattern") == "OPT9")
+    assert "maxWorkers" in jest["evidence"] and "OPT88" in jest["evidence"]
+    assert "cache directory is not persisted" in reports["jest-make-hop"]
+    assert "no provider-switch saving is credited" in reports["jest-make-hop"]
     assert "per-invocation-startup" in fixture_facts(
         docs["per-test-startup"], [])["leaves"]
     assert "state-leak canary" in reports["per-test-startup"]

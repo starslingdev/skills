@@ -258,6 +258,65 @@ jobs:
     assert "OPT9" not in _scan_one(tmp_path, neg)
 
 
+def _write_jest_make_project(tmp_path: Path, *, max_workers: str = '"50%"',
+                             provider: str = '"v8"', persist: bool = False) -> dict:
+    cache_step = """
+      - uses: actions/cache@v4
+        with:
+          path: frontend/.cache/jest
+          key: jest-${{ github.sha }}
+          restore-keys: jest-
+""" if persist else ""
+    workflow = f"""name: CI
+on: pull_request
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+{cache_step}      - run: make test_frontend_ci
+"""
+    _write_workflow(tmp_path, "ci.yml", workflow)
+    (tmp_path / "Makefile").write_text(
+        "test_frontend_ci:\n\tcd frontend && npx jest --coverage\n")
+    frontend = tmp_path / "frontend"
+    frontend.mkdir(exist_ok=True)
+    (frontend / "package.json").write_text('{"scripts":{"test":"jest"}}')
+    (frontend / "jest.config.js").write_text(
+        "module.exports = {\n"
+        f"  maxWorkers: {max_workers},\n"
+        f"  coverageProvider: {provider},\n"
+        "  cacheDirectory: '<rootDir>/.cache/jest',\n"
+        "};\n")
+    return _scan(tmp_path)
+
+
+def test_opt9_follows_one_make_recipe_and_reads_jest_config(tmp_path: Path):
+    finding = _finding(_write_jest_make_project(tmp_path), "OPT9")
+    assert finding is not None
+    evidence = finding["evidence"]
+    assert "cache directory is not persisted" in evidence
+    assert "maxWorkers" in evidence and "OPT88" in evidence
+    assert "coverage provider" in evidence
+    assert "no provider-switch saving is credited" in evidence
+
+
+def test_opt9_jest_notes_have_independent_negative_controls(tmp_path: Path):
+    persisted = _finding(_write_jest_make_project(tmp_path, persist=True), "OPT9")
+    assert persisted is not None
+    assert "cache directory is not persisted" not in persisted["evidence"]
+
+    full_workers = _finding(
+        _write_jest_make_project(tmp_path, max_workers='"100%"'), "OPT9")
+    assert full_workers is not None
+    assert "OPT88" not in full_workers["evidence"]
+
+    no_provider = _finding(
+        _write_jest_make_project(tmp_path, provider='undefined'), "OPT9")
+    assert no_provider is not None
+    assert "coverage provider" not in no_provider["evidence"]
+
+
 def test_opt14_repeated_setup_no_artifact(tmp_path: Path):
     pos = """name: CI
 on: push
