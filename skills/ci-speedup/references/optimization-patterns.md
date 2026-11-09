@@ -185,6 +185,13 @@ grep -rn 'docker build\|docker compose build' .github/workflows/
 grep -rn 'docker/build-push-action' .github/workflows/
 ```
 
+Also flag a GHA cache scoped to `github.sha`, `run_id`, or `run_number`; a local
+cache exported over the directory it imports without a separate `mode=max`
+destination; and hosted-runner Dockerfiles that use `RUN --mount=type=cache`
+without persisting the BuildKit cache. A SHA scope cannot serve a later commit,
+and a run-ID scope cannot serve a fresh workflow invocation (reruns keep their
+original IDs). A remote persistent builder is not an ephemeral mount case.
+
 **Fix**: Use `docker/build-push-action` with `cache-from: type=gha` and
 `cache-to: type=gha,mode=min` by default, or use `docker compose build` with
 BuildKit cache mounts. Use `mode=max` only when intermediate stages are reused
@@ -4892,6 +4899,11 @@ title_template: "Missing Dependency Caching"
    - C++: `cmake`, `make`, `ninja` → check for `actions/cache` targeting build dir, or `ccache`/`sccache`
 2. Flag if the ecosystem's build/install commands are present but no corresponding cache action exists.
 3. Count total jobs affected — in sharded/matrix workflows, the waste multiplies.
+4. Also flag cache declarations whose workflow shape needs validation: a rolling
+   saved-key family whose restore prefix cannot serve a later edit; ccache capped
+   at 64 MiB or less, which may churn before reuse;
+   ccache, sccache, staticcheck, or golangci-lint caches placed in temporary
+   storage without a persistence step; or a cache directory deleted later.
 
 ```bash
 # Check for any caching across all workflows
@@ -4900,7 +4912,18 @@ grep -rn 'actions/cache\|rust-cache\|sccache\|setup-node.*cache\|setup-go.*cache
 grep -rn 'cargo \|pip install\|uv sync\|go build\|mvn \|gradle\|cmake\|make ' /tmp/workflows/
 ```
 
-**Fix**: Add the ecosystem-appropriate caching action. In multi-job workflows, use one key per compilation mode so incompatible artifacts cannot overwrite or restore each other. Give only one job permission to save each mode's cache, such as with a `save-if` condition; the other jobs restore it without racing to publish separate entries.
+**Fix**: Add the ecosystem-appropriate caching action. For compiler and mutable
+build-output caches such as ccache, sccache, Go's `GOCACHE`, `target/`,
+`.next/cache`, `.turbo`, `.nx/cache`, Gradle's build cache, and Bazel's disk
+cache, use a rolling primary key such as
+`<tool>-<os>-<mode>-<lockfile-hash>-${{ github.sha }}` and the stable
+`restore-keys: <tool>-<os>-<mode>-<lockfile-hash>-` prefix. A new primary entry
+is saved after each run, so budget the accumulated entries and their eviction
+pressure; do not use this shape when the cache is too large for the repository's
+cache budget. In multi-job workflows, use one key family per compilation mode so
+incompatible artifacts cannot overwrite or restore each other. Give only one job
+permission to save each mode's cache, such as with a `save-if` condition; the
+other jobs restore it without racing to publish separate entries.
 
 ---
 
@@ -4925,11 +4948,15 @@ title_template: "Build Artifacts Destroyed Before Every Run"
 1. Search workflow steps for clean commands:
 
 ```bash
-grep -rn 'rm -rf build\|rm -rf target\|rm -rf dist\|rm -rf node_modules\|cargo clean\|make clean\|gradle clean' /tmp/workflows/
+grep -rn 'rm -rf build\|rm -rf target\|rm -rf dist\|rm -rf node_modules\|cargo clean\|make clean\|gradle clean\|go clean .*\(-cache\|-modcache\)' /tmp/workflows/
 ```
 
 2. **CRITICAL**: Also read the build scripts invoked by workflow steps. A workflow step may call `./scripts/build.sh` which internally does `rm -rf build`. The detection heuristic must trace through to the actual script, not stop at the workflow YAML.
 3. Flag when the job runs on `self-hosted` runners (where workspace persists between runs). On GitHub-hosted runners, the workspace is always fresh, so `rm -rf` has no effect.
+4. Flag `go clean -cache`, `go clean -i -cache`, and `go clean -modcache`
+   on any runner because they erase reusable Go build/module state. Keep
+   `go clean -testcache` quiet: it clears test-result reuse rather than compiled
+   build artifacts.
 
 **Fix**: Make the clean step conditional on cache miss, or add an `--incremental` flag to the build script. For cmake: check for `CMakeCache.txt` existence before cleaning. For cargo: incremental compilation is the default — don't `cargo clean`.
 

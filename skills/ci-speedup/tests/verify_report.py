@@ -14758,7 +14758,9 @@ def check_cache_sizing_guards(report: str, findings_path: Path | None) -> Check:
                  ("hit_rate", "saving_s", "restore_s", "save_s")]
         if all(isinstance(value, (int, float)) for value in terms):
             hit, saving, restore, save = (float(value) for value in terms)
-            expected = hit * saving - restore - (1 - hit) * save
+            expected = (-restore - (1 - hit) * save
+                        if finding.get("cache_path_consumed") is False
+                        else hit * saving - restore - (1 - hit) * save)
             if (expected > 0) != (statuses["economics"] == "passed"):
                 bad.append(f"{finding.get('id')}: transfer-cost status disagrees with stored terms")
         elif statuses["economics"] in {"passed", "failed"}:

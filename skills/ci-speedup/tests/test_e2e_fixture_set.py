@@ -371,7 +371,7 @@ def test_named_fixtures_exercise_their_defining_interactions(
     docs = {}
     reports = {}
     for name in (
-            "config-era-change", "duplicate-gate-job", "emulated-container",
+            "cache-lints", "config-era-change", "duplicate-gate-job", "emulated-container",
             "external-required-gate", "heavy-runner-queue", "minority-tail",
             "multiarch-image", "path-partitioned-monorepo", "vendored-libs",
             "vitest-isolated-serial", "cargo-double-compile"):
@@ -379,6 +379,10 @@ def test_named_fixtures_exercise_their_defining_interactions(
             FIXTURE_ROOT / name, monkeypatch, tmp_path)
 
     assert docs["config-era-change"]["pr_critical_path"]["config_eras"]
+    cache_rows = [row for row in docs["cache-lints"]["findings"]
+                  if row.get("pattern") in {"OPT4", "OPT61", "OPT62"}]
+    assert {row["pattern"] for row in cache_rows} == {"OPT4", "OPT61", "OPT62"}
+    assert all(row.get("wall_clock_p50_s") in {None, 0.0} for row in cache_rows)
     external = docs["external-required-gate"]["pr_critical_path"]
     assert external["gate_kind"] == "pr_floor_fallback"
     assert external["provenance"] == "pr_floor_fallback"
