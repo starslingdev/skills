@@ -5107,6 +5107,8 @@ def _read_config_text(path: Path) -> "str | None":
     garbage that matched no pattern and was then reported as a COMPLETE read
     with no opt-out — a repo that had opted out being told to opt out again.
     None routes the file to `unreadable`, which withholds the lever."""
+    if not _inside_scan_root(path):
+        raise PermissionError(f"refusing to read config outside scan root: {path}")
     data = path.read_bytes()                        # OSError → caller's handler
     for bom in (b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff", b"\xff\xfe", b"\xfe\xff"):
         if data.startswith(bom):

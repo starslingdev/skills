@@ -1,6 +1,7 @@
 """Scanner output guarantees consumed by ci-speedup-guard."""
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
 
 import scan
@@ -25,13 +26,17 @@ def test_every_finding_on_the_repository_has_a_stable_nonempty_subject():
     ci = REPO / ".github" / "workflows" / "ci.yml"
     original = ci.read_text(encoding="utf-8")
     doc = scan.yaml.safe_load(original)
+    original_hits = {p: [h.match_text for h in fn(doc, original)]
+                     for p, fn in scan._DETECTORS.items()}
     doc["jobs"]["guard-subject-control"] = {
         "runs-on": "ubuntu-latest", "steps": [{"run": "echo control"}]}
     changed = scan.yaml.safe_dump(doc, sort_keys=False)
     # Exercise the detector layer directly without mutating the checkout.
-    before_hits = {p: [h.match_text for h in fn(doc, changed)]
-                   for p, fn in scan._DETECTORS.items()}
-    assert all(all(subject for subject in subjects) for subjects in before_hits.values())
+    changed_hits = {p: [h.match_text for h in fn(doc, changed)]
+                    for p, fn in scan._DETECTORS.items()}
+    assert all(all(subject for subject in subjects) for subjects in changed_hits.values())
+    for pattern, subjects in original_hits.items():
+        assert not (Counter(subjects) - Counter(changed_hits[pattern]))
 
 
 def test_opt23_is_instance_granular_in_new_jobs_and_same_workflow(tmp_path):
@@ -105,3 +110,17 @@ def test_out_of_tree_workflow_symlink_is_recorded_and_not_scanned(tmp_path):
     result = scan.scan(root, CATALOG)
     assert any(row["kind"] == "symlink-out-of-tree" for row in result["scan_incomplete"])
     assert not any(f["pattern"] == "OPT23" for f in result["findings"])
+
+
+def test_out_of_tree_config_symlink_is_recorded_and_not_read(tmp_path):
+    root = _repo(tmp_path / "repo", "on: pull_request\njobs: {}\n")
+    outside = tmp_path / "outside-vitest.config.ts"
+    outside.write_text("export default { test: { isolate: false } }\n", encoding="utf-8")
+    (root / "vitest.config.ts").symlink_to(outside)
+
+    result = scan.scan(root, CATALOG)
+
+    assert any(row["path"] == "vitest.config.ts" and row["kind"] == "symlink-out-of-tree"
+               for row in result["scan_incomplete"])
+    assert result["test_runner_isolation"]["isolation_opt_out"] is False
+    assert result["test_runner_isolation"]["opt_out_evidence"] == []

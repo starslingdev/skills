@@ -280,7 +280,7 @@ def multiset_delta(base: list[dict[str, Any]], merge: list[dict[str, Any]],
                    mapping: dict[str, str], non_perfile: set[str]):
     b_buckets: dict[tuple, list[dict[str, Any]]] = defaultdict(list)
     m_buckets: dict[tuple, list[dict[str, Any]]] = defaultdict(list)
-    for f in base: b_buckets[finding_key(f, mapping, non_perfile)].append(f)
+    for f in base: b_buckets[finding_key(f, {}, non_perfile)].append(f)
     for f in merge: m_buckets[finding_key(f, mapping, non_perfile)].append(f)
     new, resolved, existing = [], [], []
     for key in sorted(set(b_buckets) | set(m_buckets)):
@@ -330,7 +330,7 @@ def pair_moves(new: list[dict[str, Any]], resolved: list[dict[str, Any]],
             for rf in available_resolved:
                 if not confirmed(rf) or rf["pattern"] != nf["pattern"]:
                     continue
-                rs = scope(rf, mapping, non_perfile)
+                rs = scope(rf, {}, non_perfile)
                 preference = 0 if rf["subject"] == nf["subject"] else (1 if rs == ns else 2)
                 left = job_body(base_root, rf) or json.dumps(
                     rf.get("affected_jobs", []), sort_keys=True)
@@ -432,7 +432,7 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError:
             pass
 
-        base_gaps = Counter(gap_key(r, mapping, base) for r in base_doc["scan_incomplete"])
+        base_gaps = Counter(gap_key(r, {}, base) for r in base_doc["scan_incomplete"])
         merge_gaps = Counter(gap_key(r, mapping, merge) for r in merge_doc["scan_incomplete"])
         new_gaps = list((merge_gaps - base_gaps).elements())
         fatal_gaps = [g for g in new_gaps if g[1] in FAIL_ON_NEW_GAP]
@@ -440,7 +440,7 @@ def main(argv: list[str] | None = None) -> int:
             kinds = ", ".join(f"{kind} at {path}" for path, kind in fatal_gaps)
             raise OperationalFailure(f"new scan coverage gap: {kinds}")
 
-        base_held = held_back(base_doc, mapping)
+        base_held = held_back(base_doc, {})
         merge_held = held_back(merge_doc, mapping)
         new_held = sorted(merge_held - base_held)
 
@@ -487,7 +487,7 @@ def main(argv: list[str] | None = None) -> int:
                 warnings += 1
 
         # An aggregate workflow finding can keep its key while covering more jobs.
-        b_by_key = {finding_key(f, mapping, non_perfile): f for f in base_doc["findings"]}
+        b_by_key = {finding_key(f, {}, non_perfile): f for f in base_doc["findings"]}
         for f in merge_doc["findings"]:
             key = finding_key(f, mapping, non_perfile)
             old = b_by_key.get(key)
