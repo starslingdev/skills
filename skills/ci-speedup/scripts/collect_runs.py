@@ -4636,6 +4636,7 @@ def _select_repr_shas(
     req_names: frozenset[str],
     target: int,
     repo_published: frozenset[str] = frozenset(),
+    max_fetch_override: int | None = None,
 ) -> tuple[list[str], list[dict[str, float]], dict[str, list[float]], dict[str, Any]]:
     """Pick up to `target` PR head-SHAs for the measured critical path.
 
@@ -4697,7 +4698,8 @@ def _select_repr_shas(
     candidates = sorted(sha_ts, key=lambda s: sha_ts[s], reverse=True)
     # Runaway backstop only — the walk normally stops at `target` kept or window
     # exhausted; this just bounds gh calls on a pathologically large window.
-    max_fetch = max(target * 8, 120)
+    max_fetch = (max(target * 8, 120) if max_fetch_override is None
+                 else max(0, int(max_fetch_override)))
     check_durs: dict[str, list[float]] = {}
     per_sha_checks: list[dict[str, float]] = []
     repr_shas: list[str] = []
@@ -4802,9 +4804,11 @@ def _select_repr_shas(
         "kept": len(repr_shas),
         "fetched": fetched,
         "fetch_failures": fetch_failures,
-        "complete": len(repr_shas) >= target,
+        "complete": (
+            len(repr_shas) >= target and not required_suite_unsatisfiable),
         "stop_reason": (
-            "target_met" if len(repr_shas) >= target
+            "target_met" if (len(repr_shas) >= target
+                             and not required_suite_unsatisfiable)
             else "fetch_failures" if fetch_failures
             else "page_cap" if fetched >= max_fetch
             else "candidates_exhausted"),
@@ -4878,6 +4882,14 @@ def _sampling_provenance_fields(sample_diag: dict[str, Any]) -> dict[str, Any]:
         "sample_stop_reason": sample_diag.get(
             "stop_reason",
             "target_met" if sample_diag["complete"] else "candidates_exhausted"),
+        "sample_candidate_pages_fetched": sample_diag.get("candidate_pages_fetched", 1),
+        "sample_candidate_page_cap": sample_diag.get(
+            "candidate_page_cap", _PR_CANDIDATE_PAGE_CAP),
+        "sample_candidate_pages_exhausted": sample_diag.get(
+            "candidate_pages_exhausted", True),
+        "sample_candidate_page_fetch_failures": sample_diag.get(
+            "candidate_page_fetch_failures", 0),
+        "sample_candidate_era_door": sample_diag.get("candidate_era_door", False),
         "sample_fetch_failures": sample_diag["fetch_failures"],
         "sample_fetched": sample_diag["fetched"],
         "required_suite_scoped": sample_diag["required_suite_scoped"],
@@ -29044,13 +29056,16 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # pulling older pages across it would mix retired and current workflow layouts.
     _candidate_page = 1
     _candidate_page_failed = False
+    _candidate_page_failures = 0
+    _candidate_runs_by_wf: dict[str, list[dict[str, Any]]] = defaultdict(list)
     _candidate_active = {
         wf_path
         for wf_path, page_rows in all_status_runs_by_wf.items()
         if len(page_rows) >= _COST_RUNLIST_MAX
         and (wf_by_path.get(wf_path) or {}).get("id") is not None
     }
-    while (len(repr_shas) < _REPR_PR_TARGET
+    while ((len(repr_shas) < _REPR_PR_TARGET
+            or sample_diag.get("required_suite_unsatisfiable"))
            and not config_era_facts
            and _candidate_active
            and _candidate_page < _PR_CANDIDATE_PAGE_CAP):
@@ -29062,7 +29077,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 client, repo, wf_id, _candidate_page, created_before)
             if page_rows is None:
                 _candidate_page_failed = True
+                _candidate_page_failures += 1
                 continue
+            _candidate_runs_by_wf[wf_path].extend(page_rows)
             if len(page_rows) >= _COST_RUNLIST_MAX:
                 _next_active.add(wf_path)
             for r in page_rows:
@@ -29084,11 +29101,17 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         repr_shas, per_sha_checks, check_durs, sample_diag = _select_repr_shas(
             _rep_ts, _checks_for, req_names, _REPR_PR_TARGET,
             repo_published=_repo_published_required(
-                req_names, findings_doc.get("workflow_status_publishers")))
+                req_names, findings_doc.get("workflow_status_publishers")),
+            # Every candidate already paid for by the bounded run-page walk is
+            # eligible. The ordinary selector keeps its 160-fetch runaway cap;
+            # this path's three-page cap is the bound instead.
+            max_fetch_override=len(_rep_ts))
 
-    if len(repr_shas) >= _REPR_PR_TARGET:
+    if (len(repr_shas) >= _REPR_PR_TARGET
+            and not sample_diag.get("required_suite_unsatisfiable")):
         sample_diag["stop_reason"] = "target_met"
-    elif sample_diag.get("fetch_failures") or _candidate_page_failed:
+    elif (sample_diag.get("fetch_failures") or _candidate_page_failed
+          or all_status_failed):
         sample_diag["stop_reason"] = "fetch_failures"
     elif config_era_facts:
         sample_diag["stop_reason"] = "era_door"
@@ -29096,6 +29119,18 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         sample_diag["stop_reason"] = "page_cap"
     else:
         sample_diag["stop_reason"] = "candidates_exhausted"
+    # Completeness means the strict sampling contract was met. A recency-only
+    # fallback can contain 20 rows while still being incomplete for the required
+    # suite, so row count alone cannot certify it.
+    sample_diag["complete"] = sample_diag["stop_reason"] == "target_met"
+    sample_diag.update({
+        "candidate_pages_fetched": _candidate_page,
+        "candidate_page_cap": _PR_CANDIDATE_PAGE_CAP,
+        "candidate_pages_exhausted": not _candidate_active,
+        "candidate_page_fetch_failures": (
+            _candidate_page_failures + len(all_status_failed)),
+        "candidate_era_door": bool(config_era_facts),
+    })
     # Config-era thin-flip (issue #74, direction (a): the timing spine flips WITH the rule). Now that
     # the PR gate sample (`per_sha_checks`) is in hand we can tell whether a `disclosed_pre` straddle's
     # kept PRE era actually produced a gate-bearing check IN THE SAMPLE. When it did not (the gate PRs
@@ -29425,8 +29460,16 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         _era_scope_pr_spine_sample(
             repr_shas, per_sha_checks, sha_check_intervals, _rep_ts,
             set(pr_check_p50), config_era_facts, _era_check_wf_of))
+    # The public sample count is the post-era-door population, so completeness
+    # and its reason must be post-door too. Keeping the pre-door `complete=True`
+    # would render a short 12/20 population as complete.
+    sample_diag["kept"] = len(_era_repr_shas)
+    sample_diag["complete"] = (
+        len(_era_repr_shas) >= _REPR_PR_TARGET
+        and not sample_diag.get("required_suite_unsatisfiable"))
     if _era_dropped_pr_count and len(_era_repr_shas) < _REPR_PR_TARGET:
         sample_diag["stop_reason"] = "era_door"
+        sample_diag["candidate_era_door"] = True
     _era_check_runs_complete = [
         check_runs_complete_by_sha.get(sha, False) for sha in _era_repr_shas]
     # One caps source for the ranking, the populations, AND the chain facts —
@@ -29680,6 +29723,33 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             if _rid:
                 _commit_jobs_by_run[(_wf, _rid)] = _job_run
 
+    # Deeper candidate pages are fetched after the normal workflow timing pass.
+    # Fetch jobs only for the selected PR members from those pages, so the added
+    # gate rows also participate in the complete per-commit wall spine without
+    # turning pagination into a jobs crawl over every rejected candidate.
+    _commit_sha_set = set(_commit_shas)
+    _candidate_run_wf: dict[str, str] = {}
+    _candidate_commit_runs: list[dict[str, Any]] = []
+    for _wf, _runs in _candidate_runs_by_wf.items():
+        for _run in _runs:
+            _rid = str(_run.get("id") or "")
+            _sha = str(_run.get("head_sha") or "")
+            if (not _rid or _sha not in _commit_sha_set
+                    or (_wf, _rid) in _commit_jobs_by_run):
+                continue
+            _candidate_run_wf[_rid] = _wf
+            _candidate_commit_runs.append(_run)
+    if _candidate_commit_runs:
+        _candidate_kept, _candidate_job_failures = _gather_run_jobs(
+            client, repo, _candidate_commit_runs, keep_empty=True, memo=job_memo)
+        for _run, _jobs in _candidate_kept:
+            _rid = str(_run.get("id") or "")
+            _commit_jobs_by_run[(_candidate_run_wf.get(_rid, ""), _rid)] = list(_jobs)
+        if _candidate_job_failures:
+            logger.warning(
+                "PR sample fill: %d selected deeper-page run job fetch(es) failed; "
+                "their commit-wall facts remain partial", _candidate_job_failures)
+
     def _commit_wall_fact(_sha: str, _event: str,
                           _run_rows: list[tuple[str, dict[str, Any]]],
                           _jobs_by_run: dict[tuple[str, str], list[dict[str, Any]]],
@@ -29916,12 +29986,14 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     for _sha in _commit_shas:
         _event = str((sha_meta.get(_sha) or {}).get("event") or "")
         _run_rows: list[tuple[str, dict[str, Any]]] = []
-        for _wf in sorted(set(sampled_runs_by_wf) | set(all_status_runs_by_wf)):
+        for _wf in sorted(set(sampled_runs_by_wf) | set(all_status_runs_by_wf)
+                          | set(_candidate_runs_by_wf)):
             if _wf in _commit_dropped_workflows.get(_sha, set()):
                 continue
             _runs_by_id: dict[str, dict[str, Any]] = {}
             for _run in [*(all_status_runs_by_wf.get(_wf) or []),
-                         *(sampled_runs_by_wf.get(_wf) or [])]:
+                         *(sampled_runs_by_wf.get(_wf) or []),
+                         *(_candidate_runs_by_wf.get(_wf) or [])]:
                 _runs_by_id[str(_run.get("id") or id(_run))] = _run
             _runs = [
                 _run for _run in _runs_by_id.values()

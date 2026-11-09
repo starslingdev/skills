@@ -6093,7 +6093,13 @@ def _provenance_block(doc: dict[str, Any], repo: str, captured_at: str) -> list[
             f"**{spr}/{tgt} sampled PRs** — **{spr} of {tgt} PRs sampled: "
             f"{stop_reason}**")
     if not complete:
-        gate += (" — ⚠️ **short sample** (fewer recent PRs ran the full required suite), "
+        short_reasons = {
+            "fetch failures": "some candidate or check-run history was unreadable",
+            "page cap": "the bounded candidate-page walk stopped before reaching the target",
+            "era door": "older PRs from a different workflow configuration were excluded",
+            "candidates exhausted": "the visible candidate history contained too few qualifying PRs",
+        }
+        gate += (f" — ⚠️ **short sample** ({short_reasons.get(stop_reason, 'the sample target was not reached')}), "
                  "so the gate ordering here is a floor, not the full picture")
     elif (evaluated and spr and evaluated >= spr * 3
           and not cp.get("required_suite_unsatisfiable")):

@@ -2089,6 +2089,71 @@ def check_coverage_disclosed(report: str, findings_path: Path | None = None) -> 
                  + gh_note + skip_note)
 
 
+def check_pr_sample_stop_reason(report: str, findings_path: Path | None = None) -> Check:
+    """Re-derive the PR-sample stop reason and bind it to rendered provenance."""
+    name = "PR gate sample stop reason matches its bounded collection facts"
+    if not findings_path:
+        return Check(name, True, "no findings to compare", skipped=True)
+    try:
+        data = _as_dict(json.loads(Path(findings_path).read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError):
+        return Check(name, True, "findings unreadable", skipped=True)
+    cp = _as_dict(data.get("pr_critical_path"))
+    if "sample_stop_reason" not in cp:
+        return Check(name, True, "artifact predates the stop-reason contract", skipped=True)
+    required = (
+        "sample_candidate_pages_fetched", "sample_candidate_page_cap",
+        "sample_candidate_pages_exhausted", "sample_candidate_page_fetch_failures",
+        "sample_candidate_era_door",
+    )
+    missing = [key for key in required if key not in cp]
+    if missing:
+        return Check(name, False, "stop reason lacks re-derivation facts: " + ", ".join(missing))
+    sampled = cp.get("sampled_pr_count")
+    target = cp.get("sample_target")
+    complete = cp.get("sample_complete")
+    if (not isinstance(sampled, int) or isinstance(sampled, bool) or sampled < 0
+            or not isinstance(target, int) or isinstance(target, bool) or target <= 0
+            or not isinstance(complete, bool)):
+        return Check(name, False, "sample count, target, or completeness is malformed")
+    failures = cp.get("sample_fetch_failures")
+    page_failures = cp.get("sample_candidate_page_fetch_failures")
+    pages = cp.get("sample_candidate_pages_fetched")
+    cap = cp.get("sample_candidate_page_cap")
+    exhausted = cp.get("sample_candidate_pages_exhausted")
+    era_door = cp.get("sample_candidate_era_door")
+    if (not isinstance(failures, int) or failures < 0
+            or not isinstance(page_failures, int) or page_failures < 0
+            or not isinstance(pages, int) or pages < 1
+            or not isinstance(cap, int) or cap < 1
+            or not isinstance(exhausted, bool) or not isinstance(era_door, bool)):
+        return Check(name, False, "candidate-page stop facts are malformed")
+    strict_complete = (
+        sampled >= target and not cp.get("required_suite_unsatisfiable"))
+    if complete != strict_complete:
+        return Check(
+            name, False,
+            "sample_complete does not match the strict required-suite target")
+    if strict_complete:
+        expected = "target_met"
+    elif failures or page_failures:
+        expected = "fetch_failures"
+    elif era_door:
+        expected = "era_door"
+    elif not exhausted and pages >= cap:
+        expected = "page_cap"
+    else:
+        expected = "candidates_exhausted"
+    actual = str(cp.get("sample_stop_reason") or "")
+    problems: list[str] = []
+    if actual != expected:
+        problems.append(f"sample_stop_reason={actual!r}, expected {expected!r}")
+    rendered = f"{sampled} of {target} PRs sampled: {expected.replace('_', ' ')}"
+    if rendered not in report:
+        problems.append("rendered report omits or changes the re-derived sample statement")
+    return Check(name, not problems, "; ".join(problems) if problems else rendered)
+
+
 # The two `data_sources` lists naming workflows that left the MEASURED sample: the
 # run-list fetch failed (no runs), or every per-run job fetch failed (runs, but no job
 # timing — so its checks would fall back to queue-inflated check-run spans). Both mean
@@ -16266,6 +16331,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_skip_family_prompts_carry_pending_caveat(report),
         check_also_noticed_count_honest(report),
         check_coverage_disclosed(report, findings_path),
+        check_pr_sample_stop_reason(report, findings_path),
         check_run_list_gaps_named(report, findings_path),
         check_required_check_advice_proof(report, findings_path),
         check_prefetch_plan_consumed(report, findings_path),
