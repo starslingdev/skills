@@ -3461,21 +3461,38 @@ def _parse_log(text: str,
     startup_profiles = (
         (
             "pytest",
-            re.compile(r"^\+\s+(?:python\s+-m\s+)?pytest\s+(?P<id>\S+)", re.I),
-            re.compile(r"^(?:collecting\b|collected\s+\d+\s+items?\b)", re.I),
-            re.compile(r"^\d+\s+passed\s+in\s+\d", re.I),
+            re.compile(
+                r"^\+\s+(?:(?:python(?:3(?:\.\d+)?)?)\s+-m\s+)?"
+                r"pytest\s+(?P<id>.+?)\s*$",
+                re.I,
+            ),
+            re.compile(r"^collecting\b", re.I),
+            re.compile(
+                r"^(?:=+\s*)?\d+\s+(?:passed|failed|errors?|skipped)\b"
+                r".*\bin\s+\d",
+                re.I,
+            ),
+            False,
         ),
         (
             "cargo test binary",
-            re.compile(r"^Running unittests\s+(?P<id>\S+)\s+\([^)]*\)$", re.I),
+            re.compile(
+                r"^Running\s+(?P<id>(?:unittests\s+\S+|tests/\S+))\s+"
+                r"\([^)]*\)$",
+                re.I,
+            ),
             re.compile(r"^running\s+\d+\s+tests?\b", re.I),
             re.compile(r"^test result:\s+(?:ok|FAILED)\.", re.I),
+            False,
         ),
         (
             "verification script",
-            re.compile(r"^Starting verification:\s*(?P<id>\S.+?)\s*$", re.I),
-            re.compile(r"^Checking verification:\s*\S", re.I),
-            re.compile(r"^Verification (?:passed|failed):\s*\S", re.I),
+            re.compile(
+                r"^Process started:\s*verification\s+(?P<id>\S.+?)\s*$", re.I),
+            re.compile(r"^Checking verification:\s*(?P<id>\S.+?)\s*$", re.I),
+            re.compile(
+                r"^Verification (?:passed|failed):\s*(?P<id>\S.+?)\s*$", re.I),
+            True,
         ),
     )
     timestamped: list[tuple[datetime, str, str]] = []
@@ -3485,7 +3502,7 @@ def _parse_log(text: str,
         if sep and when is not None:
             timestamped.append((when, message.strip(), raw.strip()))
     startup_leaf: dict[str, Any] | None = None
-    for profile_name, boundary_re, work_re, done_re in startup_profiles:
+    for profile_name, boundary_re, work_re, done_re, bind_identity in startup_profiles:
         boundaries = [
             (line_i, when, match.group("id"), raw)
             for line_i, (when, message, raw) in enumerate(timestamped)
@@ -3495,20 +3512,36 @@ def _parse_log(text: str,
             continue
         startups: list[float] = []
         iterations: list[float] = []
+        measurements: list[tuple[str, str, str]] = []
         complete = True
-        for pos, (line_i, started, _identity, _raw) in enumerate(boundaries):
+        for pos, (line_i, started, identity, boundary_raw) in enumerate(boundaries):
             next_line = (boundaries[pos + 1][0]
                          if pos + 1 < len(boundaries) else len(timestamped))
+            next_started = (boundaries[pos + 1][1]
+                            if pos + 1 < len(boundaries) else None)
             window = timestamped[line_i + 1:next_line]
-            work = next((when for when, message, _line in window
-                         if work_re.match(message)), None)
-            done = next((when for when, message, _line in window
-                         if done_re.match(message)), None)
-            if work is None or done is None or not (started < work <= done):
+            work_row = next(((when, raw, match) for when, message, raw in window
+                             if (match := work_re.match(message))), None)
+            done_row = next(((when, raw, match) for when, message, raw in window
+                             if (match := done_re.match(message))), None)
+            if work_row is None or done_row is None:
+                complete = False
+                break
+            work, work_raw, work_match = work_row
+            done, done_raw, done_match = done_row
+            if (bind_identity
+                    and (work_match.group("id") != identity
+                         or done_match.group("id") != identity)):
+                complete = False
+                break
+            if (not (started < work <= done)
+                    or (next_started is not None
+                        and (next_started < started or done > next_started))):
                 complete = False
                 break
             startups.append((work - started).total_seconds())
             iterations.append((done - started).total_seconds())
+            measurements.append((boundary_raw, work_raw, done_raw))
         if not complete:
             continue
         startup_median = _median(startups)
@@ -3528,7 +3561,12 @@ def _parse_log(text: str,
             "magnitude": {"label": "modeled repeated process startup",
                           "value": modeled, "unit": "s"},
             "deeper": [],
-            "evidence": [boundaries[0][3], boundaries[-1][3]],
+            "evidence": [
+                *measurements[0],
+                (f"{count} measured intervals: median boundary-to-work "
+                 f"{startup_median:g}s; median boundary-to-completion "
+                 f"{iteration_median:g}s"),
+            ],
             "search": ["process boundary", "startup", "run concurrently"],
             "iteration_count": count,
             "startup_median_s": round(startup_median, 2),
@@ -4284,13 +4322,19 @@ _FIX_META: dict[str, dict[str, Any]] = {
                        "canary that fails if one iteration contaminates the next. The "
                        "modeled saving removes only repeated startup after the first. "
                        "Running iterations concurrently is an alternative use of those "
-                       "same seconds, so never add both savings.",
+                       "same seconds, so never add both savings. Convert one suite at a "
+                       "time, compare the old and new paths over real pull-request "
+                       "traffic, and permanently retain real subprocess coverage for "
+                       "argument parsing, exit codes, stream wiring, signals and "
+                       "process-boundary isolation.",
         "docs": ["OPT85 in the ci-speedup catalog — reuse a process or measure safe "
                  "iteration concurrency"],
         "deliver": "Reuse one process for the serial iterations when the tool supports "
                    "it, or run proven-independent iterations concurrently with a measured "
                    "worker cap. Keep the full case count, the broken-position checks and "
-                   "the state-leak canary, then re-measure startup and total iteration wall.",
+                   "the state-leak canary. Roll out one suite at a time, compare old and "
+                   "new paths on real pull requests, keep boundary-dependent subprocess "
+                   "tests permanently, then re-measure startup and total iteration wall.",
     },
     "test-isolated-serial": {
         "cause": "Four or more tests in the same file run strictly one after another "
