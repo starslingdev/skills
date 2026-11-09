@@ -108,8 +108,9 @@ def _documentation_sections() -> dict[str, str]:
 def _prescribes_cache_key(text: str) -> bool:
     flat = " ".join(text.split())
     return bool(re.search(
-        r"\b(?:add|configure|persist|save|use)\b.{0,100}\bcache\b.{0,160}"
-        r"(?:keyed\s+(?:on|to)|key\s+on|stable\s+key|deterministic\s+cache\s+key)",
+        r"(?:\bcache\b.{0,160}(?:keyed\s+(?:on|to)|key\s+on|stable\s+key|"
+        r"deterministic\s+cache\s+key)|(?:keyed\s+(?:on|to)|key\s+on|stable\s+key|"
+        r"deterministic\s+cache\s+key).{0,160}\bcache\b)",
         flat, re.IGNORECASE,
     ))
 
@@ -170,6 +171,12 @@ def test_contract_scans_skill_evals_and_reference_docs() -> None:
 def test_ccache_mutant_in_documentation_is_rejected() -> None:
     mutant = "Persist the ccache directory with actions/cache keyed on the lockfile hash."
     label = "docs:SKILL.md#mutant"
+    assert _guidance_errors({label: mutant}) == {label}
+
+
+def test_noun_first_ccache_mutant_in_documentation_is_rejected() -> None:
+    mutant = "Cache ccache, keyed on the lockfile hash."
+    label = "docs:SKILL.md#noun-first-mutant"
     assert _guidance_errors({label: mutant}) == {label}
 
 

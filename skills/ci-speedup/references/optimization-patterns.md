@@ -188,8 +188,9 @@ grep -rn 'docker/build-push-action' .github/workflows/
 Also flag a GHA cache scoped to `github.sha`, `run_id`, or `run_number`; a local
 cache exported over the directory it imports without a separate `mode=max`
 destination; and hosted-runner Dockerfiles that use `RUN --mount=type=cache`
-without persisting the BuildKit cache. These shapes either make every run a new
-scope or discard the reusable cache with the runner.
+without persisting the BuildKit cache. A SHA scope cannot serve a later commit,
+and a run-ID scope cannot serve a fresh workflow invocation (reruns keep their
+original IDs). A remote persistent builder is not an ephemeral mount case.
 
 **Fix**: Use `docker/build-push-action` with `cache-from: type=gha` and
 `cache-to: type=gha,mode=min` by default, or use `docker compose build` with
@@ -4882,8 +4883,9 @@ title_template: "Missing Dependency Caching"
    - C++: `cmake`, `make`, `ninja` → check for `actions/cache` targeting build dir, or `ccache`/`sccache`
 2. Flag if the ecosystem's build/install commands are present but no corresponding cache action exists.
 3. Count total jobs affected — in sharded/matrix workflows, the waste multiplies.
-4. Also flag cache declarations that cannot produce a useful warm run: a restore
-   prefix that cannot match the saved key; ccache capped at 64 MiB or less;
+4. Also flag cache declarations whose workflow shape needs validation: a rolling
+   saved-key family whose restore prefix cannot serve a later edit; ccache capped
+   at 64 MiB or less, which may churn before reuse;
    ccache, sccache, staticcheck, or golangci-lint caches placed in temporary
    storage without a persistence step; or a cache directory deleted later.
 

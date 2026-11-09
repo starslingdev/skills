@@ -49,6 +49,17 @@ def test_opt61_accepts_a_matching_rolling_restore_prefix(tmp_path) -> None:
     assert "OPT61" not in _patterns(rows)
 
 
+def test_opt61_accepts_equivalent_expression_spacing_in_restore_prefix(tmp_path) -> None:
+    rows = _scan(tmp_path, """      - uses: actions/cache@v4
+        with:
+          path: .cache/tool
+          key: tool-${{runner.os}}-${{ github.sha }}
+          restore-keys: tool-${{ runner.os }}-
+      - run: tool build
+""")
+    assert "OPT61" not in _patterns(rows)
+
+
 def test_opt61_flags_tiny_ccache_limits_but_accepts_500m(tmp_path) -> None:
     small = _scan(tmp_path, """      - uses: hendrikmuhs/ccache-action@v1
         with:
@@ -101,6 +112,20 @@ def test_opt61_accepts_a_persisted_temporary_analysis_cache(tmp_path) -> None:
     assert "OPT61" not in _patterns(rows)
 
 
+def test_opt61_accepts_compiler_caches_with_persistent_or_remote_backends(tmp_path) -> None:
+    self_hosted = _scan(
+        tmp_path / "self-hosted", "      - run: sccache --start-server && cargo build\n",
+        runs_on="[self-hosted, linux]",
+    )
+    assert "OPT61" not in _patterns(self_hosted)
+
+    remote = _scan(tmp_path / "remote", """      - run: sccache --start-server && cargo build
+        env:
+          SCCACHE_BUCKET: compiler-cache
+""")
+    assert "OPT61" not in _patterns(remote)
+
+
 def test_opt61_marks_a_restored_then_unread_deleted_path_as_pure_cost(tmp_path) -> None:
     rows = _scan(tmp_path, """      - uses: actions/cache@v4
         with:
@@ -114,6 +139,19 @@ def test_opt61_marks_a_restored_then_unread_deleted_path_as_pure_cost(tmp_path) 
                 if row.get("pattern") == "OPT61"
                 and row.get("cache_path_consumed") is False)
     assert "deletes" in lint["evidence"]
+
+
+def test_opt61_does_not_call_a_pre_restore_cleanup_a_later_deletion(tmp_path) -> None:
+    rows = _scan(tmp_path, """      - run: rm -rf /tmp/staticcheck
+      - uses: actions/cache@v4
+        with:
+          path: /tmp/staticcheck
+          key: staticcheck-${{ runner.os }}-${{ github.sha }}
+          restore-keys: staticcheck-${{ runner.os }}-
+      - run: staticcheck ./...
+""")
+    assert not any(row.get("cache_path_consumed") is False for row in rows)
+    assert not any("later step deletes" in row.get("evidence", "") for row in rows)
 
 
 def test_opt62_flags_go_build_cache_clean_but_not_testcache(tmp_path) -> None:
@@ -138,6 +176,16 @@ def test_opt4_flags_run_scoped_gha_and_lossy_local_exports(tmp_path) -> None:
           --cache-to type=local,dest=/tmp/build-cache
 """)
     assert "OPT4" in _patterns(local)
+
+
+def test_opt4_flags_run_scoped_gha_on_build_push_action(tmp_path) -> None:
+    rows = _scan(tmp_path, """      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          cache-from: type=gha,scope=${{ github.sha }}
+          cache-to: type=gha,scope=${{ github.sha }},mode=max
+""")
+    assert "OPT4" in _patterns(rows)
 
 
 def test_opt4_accepts_stable_gha_scope_and_mode_max_local_rotation(tmp_path) -> None:
@@ -177,3 +225,50 @@ def test_opt4_accepts_persisted_buildkit_cache_for_cache_mount(tmp_path) -> None
           --cache-to type=gha,scope=app,mode=max
 """)
     assert "OPT4" not in _patterns(rows)
+
+
+def test_opt4_accepts_action_form_import_and_export_for_cache_mount(tmp_path) -> None:
+    (tmp_path / "Dockerfile").parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "Dockerfile").write_text(
+        "FROM alpine\nRUN --mount=type=cache,target=/root/.cache make all\n",
+        encoding="utf-8",
+    )
+    rows = _scan(tmp_path, """      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          cache-from: type=gha,scope=app
+          cache-to: type=gha,scope=app,mode=max
+""")
+    assert "OPT4" not in _patterns(rows)
+
+
+def test_opt4_accepts_cache_mount_on_persistent_remote_builder(tmp_path) -> None:
+    (tmp_path / "Dockerfile").parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "Dockerfile").write_text(
+        "FROM alpine\nRUN --mount=type=cache,target=/root/.cache make all\n",
+        encoding="utf-8",
+    )
+    rows = _scan(tmp_path, """      - uses: docker/setup-buildx-action@v3
+        with:
+          driver: remote
+          endpoint: tcp://builder.internal:1234
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+""")
+    assert "OPT4" not in _patterns(rows)
+
+
+def test_opt4_unrelated_actions_cache_does_not_hide_ephemeral_docker_mount(tmp_path) -> None:
+    (tmp_path / "Dockerfile").parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "Dockerfile").write_text(
+        "FROM alpine\nRUN --mount=type=cache,target=/root/.cache make all\n",
+        encoding="utf-8",
+    )
+    rows = _scan(tmp_path, """      - uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ hashFiles('package-lock.json') }}
+      - run: docker build .
+""")
+    assert "OPT4" in _patterns(rows)

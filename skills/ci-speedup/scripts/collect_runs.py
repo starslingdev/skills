@@ -6064,8 +6064,7 @@ def _cache_guard_values(
 ) -> list[dict[str, Any]]:
     cd = finding.get("cache_dist") if isinstance(finding.get("cache_dist"), dict) else {}
     pr = cd.get("pr") if isinstance(cd.get("pr"), dict) else {}
-    out: list[dict[str, Any]] = []
-    seen_shas: set[str] = set()
+    candidates: list[dict[str, Any]] = []
     for value in pr.get("values") or []:
         if (not isinstance(value, dict) or value.get("fork")
                 or not isinstance(value.get("cache_state"), dict)):
@@ -6075,11 +6074,29 @@ def _cache_guard_values(
         # artifacts carry no head stamp and remain readable rather than being
         # reinterpreted as proof that no sample qualifies.
         if sha and eligible_shas is not None:
-            if sha not in eligible_shas or sha in seen_shas:
+            if sha not in eligible_shas:
                 continue
-            seen_shas.add(sha)
-        out.append(value["cache_state"])
-    return out
+        candidates.append(value)
+
+    # Probe order is representative, fastest, slowest; it is not chronology.
+    # Select the earliest workflow run for an edited head so a warm rerun cannot
+    # displace the original cold run merely because it was the representative.
+    def run_id(value: dict[str, Any]) -> int:
+        match = re.search(r"/actions/runs/(\d+)(?:/|$)", str(value.get("run_url") or ""))
+        return int(match.group(1)) if match else sys.maxsize
+
+    earliest: dict[str, tuple[int, int, dict[str, Any]]] = {}
+    unstamped: list[dict[str, Any]] = []
+    for order, value in enumerate(candidates):
+        sha = str(value.get("head_sha") or "")
+        if not sha:
+            unstamped.append(value)
+            continue
+        candidate = (run_id(value), order, value)
+        if sha not in earliest or candidate[:2] < earliest[sha][:2]:
+            earliest[sha] = candidate
+    selected = unstamped + [item[2] for item in sorted(earliest.values(), key=lambda x: x[1])]
+    return [value["cache_state"] for value in selected]
 
 
 def _cache_step_transfer_times(job: dict[str, Any]) -> tuple[float | None, float | None]:

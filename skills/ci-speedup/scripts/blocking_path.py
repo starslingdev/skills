@@ -9013,13 +9013,17 @@ def _cache_sizing_guard_block(doc: dict[str, Any] | None) -> list[str]:
                    if isinstance(v, dict) and v.get("status") != "passed" and v.get("detail")]
         if guard.get("status") == "passed":
             details = ["all three cache sizing checks passed"]
+        credited = ((isinstance(finding.get("wall_clock_p50_s"), (int, float))
+                     and finding.get("wall_clock_p50_s") > 0)
+                    or (isinstance(finding.get("runner_min_saving"), (int, float))
+                        and finding.get("runner_min_saving") > 0))
         rows.append((str(finding.get("title") or finding.get("pattern") or "Cache opportunity"),
-                     str(guard.get("status") or "not_measured"), details))
+                     str(guard.get("status") or "not_measured"), details, credited))
     if not rows:
         return []
     out = ["---", "", "## Cache sizing checks", ""]
-    for title, status, details in rows:
-        label = "credited" if status == "passed" else "check this - uncredited"
+    for title, status, details, credited in rows:
+        label = "credited" if status == "passed" and credited else "check this - uncredited"
         out += [f"- **{_clean_label(title)}** - {label}: "
                 + "; ".join(_clean_label(detail) for detail in details)]
     out.append("")

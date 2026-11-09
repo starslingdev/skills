@@ -25,8 +25,9 @@ grep -rn 'docker/build-push-action' .github/workflows/
 Also flag a GHA cache scoped to `github.sha`, `run_id`, or `run_number`; a local
 cache exported over the directory it imports without a separate `mode=max`
 destination; and hosted-runner Dockerfiles that use `RUN --mount=type=cache`
-without persisting the BuildKit cache. These shapes either make every run a new
-scope or discard the reusable cache with the runner.
+without persisting the BuildKit cache. A SHA scope cannot serve a later commit,
+and a run-ID scope cannot serve a fresh workflow invocation (reruns keep their
+original IDs). A remote persistent builder is not an ephemeral mount case.
 
 **Fix**: Use `docker/build-push-action` with `cache-from: type=gha` and
 `cache-to: type=gha,mode=min` by default, or use `docker compose build` with

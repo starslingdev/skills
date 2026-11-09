@@ -3721,6 +3721,9 @@ _COMPILER_CACHE_RE = re.compile(r"\b(?:ccache|sccache)\b", re.I)
 _ANALYSIS_CACHE_RE = re.compile(r"\b(?:STATICCHECK_CACHE|GOLANGCI_LINT_CACHE)\b", re.I)
 _TEMP_CACHE_RE = re.compile(
     r"(?:RUNNER_TEMP|/tmp/)[^\s'\"]*(?:ccache|sccache|staticcheck|golangci)", re.I)
+_REMOTE_COMPILER_CACHE_RE = re.compile(
+    r"\b(?:SCCACHE_(?:BUCKET|ENDPOINT|REDIS|MEMCACHED|GCS_BUCKET|AZURE_CONNECTION_STRING|"
+    r"WEBDAV_ENDPOINT)|CCACHE_REMOTE_STORAGE)\b", re.I)
 
 
 def _cache_action_steps(job: dict) -> list[dict]:
@@ -3745,6 +3748,57 @@ def _size_mib(value: str) -> float | None:
     return float(match.group(1)) * scale[match.group(2).casefold()]
 
 
+def _normalized_actions_expression(value: str) -> str:
+    """Ignore whitespace that GitHub ignores inside `${{ ... }}` expressions."""
+    return re.sub(
+        r"\$\{\{(.*?)\}\}",
+        lambda match: "${{" + re.sub(r"\s+", "", match.group(1)) + "}}",
+        value,
+        flags=re.DOTALL,
+    )
+
+
+def _compiler_cache_has_remote_backend(job: dict) -> bool:
+    envs = [job.get("env")] + [step.get("env") for step in _steps(job)]
+    names = "\n".join(
+        str(key) for env in envs if isinstance(env, dict) for key in env
+    )
+    return bool(_REMOTE_COMPILER_CACHE_RE.search(names)
+                or _REMOTE_COMPILER_CACHE_RE.search(_job_run_blob(job)))
+
+
+def _buildkit_cache_blob(job: dict) -> str:
+    """BuildKit cache flags from shell commands and build-push-action inputs."""
+    parts = [_job_run_blob(job)]
+    for step in _steps(job):
+        if not re.search(r"(?:^|/)build-push-action@", _uses(step), re.I):
+            continue
+        values = step.get("with") if isinstance(step.get("with"), dict) else {}
+        for key in ("cache-from", "cache-to"):
+            value = values.get(key)
+            if value is not None:
+                parts.extend(f"{key} {line.strip()}" for line in str(value).splitlines()
+                             if line.strip())
+    return "\n".join(parts)
+
+
+def _buildkit_cache_round_trip(job: dict) -> bool:
+    blob = _buildkit_cache_blob(job)
+    return bool(re.search(r"(?:--)?cache-from\b", blob, re.I)
+                and re.search(r"(?:--)?cache-to\b", blob, re.I))
+
+
+def _uses_persistent_remote_builder(job: dict) -> bool:
+    for step in _steps(job):
+        if not re.search(r"(?:^|/)setup-buildx-action@", _uses(step), re.I):
+            continue
+        values = step.get("with") if isinstance(step.get("with"), dict) else {}
+        if (str(values.get("driver") or "").strip().casefold() == "remote"
+                and str(values.get("endpoint") or "").strip()):
+            return True
+    return False
+
+
 def _detect_opt61(doc: dict, raw: str) -> list[Hit]:
     """Find cache declarations whose own workflow shape prevents useful reuse."""
     hits: list[Hit] = []
@@ -3761,12 +3815,18 @@ def _detect_opt61(doc: dict, raw: str) -> list[Hit]:
             key = str(values.get("key") or "").strip()
             restore = [line.strip() for line in
                        str(values.get("restore-keys") or "").splitlines() if line.strip()]
-            if key and restore and not any(key.startswith(prefix) for prefix in restore):
-                reasons.append(("restore-keys", "none of its `restore-keys` prefixes its saved key"))
+            normalized_key = _normalized_actions_expression(key)
+            rolling_key = re.search(r"github\.(?:sha|run_id|run_number)", key, re.I)
+            if key and restore and rolling_key and not any(
+                    normalized_key.startswith(_normalized_actions_expression(prefix))
+                    for prefix in restore):
+                reasons.append(("restore-keys", "none of its `restore-keys` can restore the "
+                                "rolling saved-key family on a later edit"))
             size = values.get("max-size") or values.get("max_size")
             mib = _size_mib(str(size)) if size is not None else None
             if mib is not None and mib <= 64:
-                reasons.append((str(size), f"its compiler-cache size limit is only {size}"))
+                reasons.append((str(size), f"its compiler-cache size limit is only {size} and "
+                                "may churn before the next reuse"))
 
         for match in re.finditer(
                 r"\bCCACHE_MAXSIZE\s*=\s*([^\s;&]+)|\bccache\s+-M\s+([^\s;&]+)",
@@ -3775,7 +3835,8 @@ def _detect_opt61(doc: dict, raw: str) -> list[Hit]:
             mib = _size_mib(value)
             if mib is not None and mib <= 64:
                 reasons.append((match.group(0),
-                                f"its compiler-cache size limit is only {value}"))
+                                f"its compiler-cache size limit is only {value} and may churn "
+                                "before the next reuse"))
 
         temp = _TEMP_CACHE_RE.search(blob)
         cache_path_text = "\n".join(cache_paths)
@@ -3789,30 +3850,44 @@ def _detect_opt61(doc: dict, raw: str) -> list[Hit]:
             for step in cache_steps)
         persisted_compiler = any(token in cache_path_text
                                  for token in ("ccache", "sccache", "target"))
-        if uses_compiler_cache and not supplied_by_cache_action and not persisted_compiler:
+        if (uses_compiler_cache and not supplied_by_cache_action and not persisted_compiler
+                and not _is_self_hosted(job)
+                and not _compiler_cache_has_remote_backend(job)):
             reasons.append((_COMPILER_CACHE_RE.search(blob).group(0),
                             "the compiler cache has no persistence step"))
         if _ANALYSIS_CACHE_RE.search(blob) and not any(
                 token in cache_path_text for token in ("staticcheck", "golangci")):
             reasons.append((_ANALYSIS_CACHE_RE.search(blob).group(0),
                             "the analysis cache has no persistence step"))
-        deleted = re.search(
-            r"(?:rm\s+-rf?|Remove-Item)[^\n]*(?:ccache|sccache|staticcheck|golangci)",
-            blob, re.IGNORECASE)
-        if deleted:
-            reasons.append((deleted.group(0), "a later step deletes the cache directory"))
+        steps = _steps(job)
+        cache_indices = [i for i, step in enumerate(steps) if step in cache_steps]
+        deleted: re.Match[str] | None = None
+        deletion_unread = False
+        for index, step in enumerate(steps):
+            candidate = re.search(
+                r"(?:rm\s+-rf?|Remove-Item)[^\n]*(?:ccache|sccache|staticcheck|golangci)",
+                _run(step), re.IGNORECASE)
+            prior = [i for i in cache_indices if i < index]
+            if candidate is None or not prior:
+                continue
+            deleted = candidate
+            reasons.append((candidate.group(0), "a later step deletes the cache directory"))
+            restore_index = max(prior)
+            # With no command between restore and deletion, the restored path is
+            # provably unread. A wrapper command may consume it, so fail closed.
+            deletion_unread = not any(_run(s).strip()
+                                      for s in steps[restore_index + 1:index])
+            break
 
         for matched, reason in dict.fromkeys(reasons):
             facts: dict[str, Any] = {"static_cache_lint": True}
-            if (deleted is not None and matched == deleted.group(0)
-                    and not re.search(r"\b(?:ccache|sccache|staticcheck|golangci-lint)\b",
-                                      blob[:deleted.start()], re.IGNORECASE)):
+            if deleted is not None and matched == deleted.group(0) and deletion_unread:
                 facts["cache_path_consumed"] = False
             hits.append(Hit(
                 line=_line_of_in_job(raw, job_name, matched),
                 affected_jobs=[job_name],
-                evidence=(f"job `{job_name}` declares a cache that cannot provide a useful "
-                          f"warm run: {reason}; confirm with its own restore/build log before "
+                evidence=(f"job `{job_name}` declares a cache whose workflow shape may prevent "
+                          f"useful warm reuse: {reason}; confirm with its own restore/build log before "
                           "crediting a saving"),
                 match_text=matched,
                 facts=facts,
@@ -3831,9 +3906,11 @@ def _detect_opt4(doc: dict, raw: str) -> list[Hit]:
     for job_name, job in _jobs_from_doc(doc).items():
         if not isinstance(job, dict):
             continue
-        blob = _job_run_blob(job)
+        blob = _buildkit_cache_blob(job)
         match = volatile.search(blob)
-        reason = "a per-run GHA scope prevents later runs from restoring the exported layers"
+        reason = ("a commit-scoped GHA cache cannot be restored by a later commit"
+                  if match is not None and "github.sha" in match.group(0)
+                  else "a run-scoped GHA cache cannot be restored by a fresh workflow invocation")
         if match is None:
             source, destination = local_from.search(blob), local_to.search(blob)
             if (source and destination and source.group(1) == destination.group(1)
@@ -3846,7 +3923,7 @@ def _detect_opt4(doc: dict, raw: str) -> list[Hit]:
                 line=_line_of_in_job(raw, job_name, match.group(0).strip()),
                 affected_jobs=[job_name],
                 evidence=(f"job `{job_name}` configures a BuildKit cache that cannot warm "
-                          f"the next run: {reason}; confirm the miss in its own build log "
+                          f"its intended later scope: {reason}; confirm the miss in its own build log "
                           "before crediting a saving"),
                 match_text=match.group(0).strip(),
                 facts={"static_cache_lint": True},
@@ -3864,9 +3941,7 @@ def _detect_opt4_ephemeral_mounts(
             if not isinstance(job, dict) or _is_self_hosted(job):
                 continue
             steps = _steps(job)
-            job_text = "\n".join(_uses(step) + "\n" + _run(step) for step in steps)
-            if re.search(r"cache-to|actions/cache|buildx-cache|buildkit.*cache",
-                         job_text, re.IGNORECASE):
+            if _buildkit_cache_round_trip(job) or _uses_persistent_remote_builder(job):
                 continue
             dockerfile: Path | None = None
             matched = "RUN --mount=type=cache"

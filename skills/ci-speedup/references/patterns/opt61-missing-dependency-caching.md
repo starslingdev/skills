@@ -26,8 +26,9 @@ category: 12
    - C++: `cmake`, `make`, `ninja` → check for `actions/cache` targeting build dir, or `ccache`/`sccache`
 2. Flag if the ecosystem's build/install commands are present but no corresponding cache action exists.
 3. Count total jobs affected — in sharded/matrix workflows, the waste multiplies.
-4. Also flag cache declarations that cannot produce a useful warm run: a restore
-   prefix that cannot match the saved key; ccache capped at 64 MiB or less;
+4. Also flag cache declarations whose workflow shape needs validation: a rolling
+   saved-key family whose restore prefix cannot serve a later edit; ccache capped
+   at 64 MiB or less, which may churn before reuse;
    ccache, sccache, staticcheck, or golangci-lint caches placed in temporary
    storage without a persistence step; or a cache directory deleted later.
 
