@@ -76,7 +76,12 @@ class FixtureClient:
                 row for row in self.recorded["workflows"]
                 if row["id"] == int(match.group(1)))
             query = parse_qs(match.group(2), keep_blank_values=True)
-            runs = list(workflow.get("runs", []))
+            pages = workflow.get("run_pages")
+            page = int((query.get("page") or ["1"])[0])
+            if isinstance(pages, list):
+                runs = list(pages[page - 1]) if 0 < page <= len(pages) else []
+            else:
+                runs = list(workflow.get("runs", []))
             for key, field in (("event", "event"), ("branch", "head_branch")):
                 if query.get(key):
                     runs = [
@@ -1015,6 +1020,84 @@ def test_fixture_runs_through_collect_render_and_full_verifier(
         (check.name, check.detail) for check in failures]
 
     assert_fixture_facts(fixture, fixture_facts(doc, checks))
+
+
+def _pr_sample_fixture(tmp_path: Path, *, second_page: bool) -> Path:
+    """A full collect/render/verify fixture with a sparse first candidate page."""
+    fixture = tmp_path / ("pr-sample-paged" if second_page else "pr-sample-exhausted")
+    workflows = fixture / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "ci.yml").write_text(
+        "name: CI\non: [pull_request]\njobs:\n  gate:\n"
+        "    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n",
+        encoding="utf-8")
+
+    def run(i: int) -> dict:
+        day = 28 - (i // 24)
+        hour = i % 24
+        ts = f"2026-01-{day:02d}T{hour:02d}:00:00Z"
+        end = f"2026-01-{day:02d}T{hour:02d}:05:00Z"
+        return {
+            "id": 10_000 + i, "event": "pull_request",
+            "head_branch": f"feature-{i}", "head_sha": f"sha-{i}",
+            "status": "completed", "conclusion": "success",
+            "created_at": ts, "run_started_at": ts, "updated_at": end,
+        }
+
+    first = [run(i) for i in range(100 if second_page else 9)]
+    second = [run(100 + i) for i in range(12)] if second_page else []
+    qualifying = {f"sha-{i}" for i in range(9)}
+    qualifying.update(f"sha-{100 + i}" for i in range(12))
+    checks = {
+        row["head_sha"]: [{
+            "name": "gate" if row["head_sha"] in qualifying else "optional",
+            "started_at": row["created_at"], "completed_at": row["updated_at"],
+        }]
+        for row in first + second
+    }
+    recorded = {
+        "repo": f"fixture/{fixture.name}",
+        "captured_at": "2026-01-31T00:00:00Z",
+        "default_branch": "main", "required_checks": ["gate"],
+        "workflows": [{
+            "id": 210, "path": ".github/workflows/ci.yml", "name": "CI",
+            "runs_30d": len(first) + len(second),
+            "run_pages": [first] + ([second] if second_page else []),
+        }],
+        "jobs": {}, "checks": checks,
+    }
+    (fixture / "responses.json").write_text(
+        json.dumps(recorded), encoding="utf-8")
+    (fixture / "expected.json").write_text("{}\n", encoding="utf-8")
+    return fixture
+
+
+def test_pr_sample_pages_until_target_through_collect_and_full_verifier(
+        monkeypatch, tmp_path):
+    fixture = _pr_sample_fixture(tmp_path, second_page=True)
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
+
+    cp = doc["pr_critical_path"]
+    assert cp["sampled_pr_count"] == 20
+    assert cp["sample_stop_reason"] == "target_met"
+    assert [c for c in checks if not c.skipped and not c.ok] == []
+    assert "20 of 20 PRs sampled: target met" in report
+
+
+def test_short_pr_sample_names_exhausted_candidates_through_full_pipeline(
+        monkeypatch, tmp_path):
+    fixture = _pr_sample_fixture(tmp_path, second_page=False)
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
+
+    cp = doc["pr_critical_path"]
+    assert cp["sampled_pr_count"] == 9
+    assert cp["sample_stop_reason"] == "candidates_exhausted"
+    assert [c for c in checks if not c.skipped and not c.ok] == []
+    assert "9 of 20 PRs sampled: candidates exhausted" in report
 
 
 def test_fixture_set_catches_required_crown_regression(monkeypatch, tmp_path):
