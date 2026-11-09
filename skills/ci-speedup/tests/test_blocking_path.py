@@ -5943,6 +5943,25 @@ def test_queue_wait_block_ranks_by_savable_groups_and_truncates():
     assert bp._queue_wait_block(adv, "http://cat") == []
 
 
+def test_queue_wait_block_renders_one_label_table_per_workflow():
+    rows = [{"runner_label": "self-hosted linux", "n": 3,
+             "queue_p50_s": 90.0, "queue_p95_s": 100.0,
+             "work_n": 3, "work_p50_s": 30.0}]
+    findings = [
+        {"pattern": "OPT43", "title": "Excessive Queue Time", "id": f"f{i}",
+         "workflow_file": ".github/workflows/ci.yml", "affected_jobs": [job],
+         "wall_clock_p50_s": 90.0, "queue_by_runner_label": rows,
+         "queue_label_comparison": {"unavailable": True}}
+        for i, job in enumerate(("build", "test"), 1)
+    ]
+
+    body = "\n".join(bp._queue_wait_block(findings, "http://cat"))
+
+    assert body.count("Runner-label queue/work for `.github/workflows/ci.yml`") == 1
+    assert body.count("Runner-label comparison for `build`") == 1
+    assert body.count("Runner-label comparison for `test`") == 1
+
+
 def test_is_wait_finding_excludes_zero_savable_wait():
     # The dogfood overstatement: 107 OPT43 findings emitted but only the few with a positive
     # floor-capped savable wait belong in the section/TOC count. A zero-savable queue finding

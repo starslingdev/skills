@@ -3454,7 +3454,129 @@ def _parse_log(text: str,
     if (dependency_state and dependency_state["miss_pct"] > 0
             and vendored_build_leaf is None):
         return dependency_hit_leaf
-    # --- L: isolated tests in one file wait on the same fixed timer ------------
+    # --- L: a fresh process pays most of every serial test/check iteration -------
+    # Admit only declared, structured tool boundaries with timestamped work and
+    # completion markers. A periodic progress line is not a process boundary. Each
+    # completion must precede the next boundary, proving these iterations are serial.
+    startup_profiles = (
+        (
+            "pytest",
+            re.compile(
+                r"^\+\s+(?:(?:python(?:3(?:\.\d+)?)?)\s+-m\s+)?"
+                r"pytest\s+(?P<id>.+?)\s*$",
+                re.I,
+            ),
+            re.compile(r"^collecting\b", re.I),
+            re.compile(
+                r"^(?:=+\s*)?\d+\s+(?:passed|failed|errors?|skipped)\b"
+                r".*\bin\s+\d",
+                re.I,
+            ),
+            False,
+        ),
+        (
+            "cargo test binary",
+            re.compile(
+                r"^Running\s+(?P<id>(?:unittests\s+\S+|tests/\S+))\s+"
+                r"\([^)]*\)$",
+                re.I,
+            ),
+            re.compile(r"^running\s+\d+\s+tests?\b", re.I),
+            re.compile(r"^test result:\s+(?:ok|FAILED)\.", re.I),
+            False,
+        ),
+        (
+            "verification script",
+            re.compile(
+                r"^Process started:\s*verification\s+(?P<id>\S.+?)\s*$", re.I),
+            re.compile(r"^Checking verification:\s*(?P<id>\S.+?)\s*$", re.I),
+            re.compile(
+                r"^Verification (?:passed|failed):\s*(?P<id>\S.+?)\s*$", re.I),
+            True,
+        ),
+    )
+    timestamped: list[tuple[datetime, str, str]] = []
+    for raw in text.splitlines():
+        stamp, sep, message = raw.partition(" ")
+        when = _cache_path_stamp(stamp)
+        if sep and when is not None:
+            timestamped.append((when, message.strip(), raw.strip()))
+    startup_leaf: dict[str, Any] | None = None
+    for profile_name, boundary_re, work_re, done_re, bind_identity in startup_profiles:
+        boundaries = [
+            (line_i, when, match.group("id"), raw)
+            for line_i, (when, message, raw) in enumerate(timestamped)
+            if (match := boundary_re.match(message))
+        ]
+        if len(boundaries) < 10 or len({row[2] for row in boundaries}) != len(boundaries):
+            continue
+        startups: list[float] = []
+        iterations: list[float] = []
+        measurements: list[tuple[str, str, str]] = []
+        complete = True
+        for pos, (line_i, started, identity, boundary_raw) in enumerate(boundaries):
+            next_line = (boundaries[pos + 1][0]
+                         if pos + 1 < len(boundaries) else len(timestamped))
+            next_started = (boundaries[pos + 1][1]
+                            if pos + 1 < len(boundaries) else None)
+            window = timestamped[line_i + 1:next_line]
+            work_row = next(((when, raw, match) for when, message, raw in window
+                             if (match := work_re.match(message))), None)
+            done_row = next(((when, raw, match) for when, message, raw in window
+                             if (match := done_re.match(message))), None)
+            if work_row is None or done_row is None:
+                complete = False
+                break
+            work, work_raw, work_match = work_row
+            done, done_raw, done_match = done_row
+            if (bind_identity
+                    and (work_match.group("id") != identity
+                         or done_match.group("id") != identity)):
+                complete = False
+                break
+            if (not (started < work <= done)
+                    or (next_started is not None
+                        and (next_started < started or done > next_started))):
+                complete = False
+                break
+            startups.append((work - started).total_seconds())
+            iterations.append((done - started).total_seconds())
+            measurements.append((boundary_raw, work_raw, done_raw))
+        if not complete:
+            continue
+        startup_median = _median(startups)
+        iteration_median = _median(iterations)
+        count = len(iterations)
+        if (startup_median < iteration_median * 0.5
+                or count * startup_median < 20):
+            continue
+        modeled = round((count - 1) * startup_median, 2)
+        startup_leaf = {
+            "fix_key": "per-invocation-startup",
+            "unit_label": (
+                f"{count} serial {profile_name} iterations each launch a fresh "
+                f"process; median startup is {startup_median:g}s of a "
+                f"{iteration_median:g}s iteration"
+            ),
+            "magnitude": {"label": "modeled repeated process startup",
+                          "value": modeled, "unit": "s"},
+            "deeper": [],
+            "evidence": [
+                *measurements[0],
+                (f"{count} measured intervals: median boundary-to-work "
+                 f"{startup_median:g}s; median boundary-to-completion "
+                 f"{iteration_median:g}s"),
+            ],
+            "search": ["process boundary", "startup", "run concurrently"],
+            "iteration_count": count,
+            "startup_median_s": round(startup_median, 2),
+            "iteration_median_s": round(iteration_median, 2),
+            "modeled_saving_s": modeled,
+        }
+        break
+    if startup_leaf is not None:
+        return startup_leaf
+    # --- M: isolated tests in one file wait on the same fixed timer ------------
     # This is narrower than the shell-loop detector below. Four tests in ONE file
     # must each carry an explicit, distinct schema/database/prefix marker inside
     # its own timestamped interval. Similar runtimes then identify a fixed wait
@@ -3675,7 +3797,7 @@ def _parse_log(text: str,
             }
     if isolated_test_leaf is not None:
         return isolated_test_leaf
-    # --- M: one shell runner invokes many test files one after another ----------
+    # --- N: one shell runner invokes many test files one after another ----------
     # This stays ahead of the image-build leaf below. Each admitted invocation
     # needs a timestamped completion
     # before the next invocation starts. That proves serial execution rather than
@@ -4185,6 +4307,34 @@ _FIX_META: dict[str, dict[str, Any]] = {
                    "once per-worker isolation is proven, or shard the suite across matrix "
                    "jobs by directory. Keep the full test count and (if present) a "
                    "complete merged coverage report; re-measure the step.",
+    },
+    "per-invocation-startup": {
+        "cause": "At least ten timestamped iterations each launch a fresh process. "
+                 "A declared tool boundary, first-work line and completion line show "
+                 "strictly serial execution, and measured startup is at least half of "
+                 "the median iteration.",
+        "look": "`{wf}` and the command that emits the named process boundaries — "
+                "identify which setup is repeated in every process and whether one "
+                "long-lived process can perform the same complete set of checks.",
+        "constraints": "Preserve every case and failure. Prove isolation adversarially: "
+                       "put a deliberately broken iteration at several positions and "
+                       "confirm each position still fails the job, then add a state-leak "
+                       "canary that fails if one iteration contaminates the next. The "
+                       "modeled saving removes only repeated startup after the first. "
+                       "Running iterations concurrently is an alternative use of those "
+                       "same seconds, so never add both savings. Convert one suite at a "
+                       "time, compare the old and new paths over real pull-request "
+                       "traffic, and permanently retain real subprocess coverage for "
+                       "argument parsing, exit codes, stream wiring, signals and "
+                       "process-boundary isolation.",
+        "docs": ["OPT85 in the ci-speedup catalog — reuse a process or measure safe "
+                 "iteration concurrency"],
+        "deliver": "Reuse one process for the serial iterations when the tool supports "
+                   "it, or run proven-independent iterations concurrently with a measured "
+                   "worker cap. Keep the full case count, the broken-position checks and "
+                   "the state-leak canary. Roll out one suite at a time, compare old and "
+                   "new paths on real pull requests, keep boundary-dependent subprocess "
+                   "tests permanently, then re-measure startup and total iteration wall.",
     },
     "test-isolated-serial": {
         "cause": "Four or more tests in the same file run strictly one after another "
@@ -6665,6 +6815,7 @@ _LEAF_STEP_CATEGORY: dict[str, str | frozenset[str]] = {
     "vitest-import-bound": "test",
     "playwright-parallel": "test",
     "pytest-no-xdist": "test",
+    "per-invocation-startup": "test",
     "test-isolated-serial": "test",
     "test-loop-serial": "test",
     "vendored-lib-build": "build",
@@ -10201,6 +10352,30 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
             f"Where: {locs}."]
     if ev:
         body.append(f"What ci-speedup saw: {ev}")
+    if wait and pat == "OPT43":
+        comparisons = [
+            member.get("queue_label_comparison")
+            for member in members
+            if isinstance(member.get("queue_label_comparison"), dict)
+        ]
+        named = next((item for item in comparisons
+                      if not item.get("unavailable")), None)
+        if named is not None:
+            body.append(
+                "Runner-label comparison: the affected label "
+                f"`{named.get('slow_label')}` queued at p50 "
+                f"{_clock(_num(named.get('slow_queue_p50_s')) or 0)}, while "
+                f"`{named.get('lower_label')}` queued at p50 "
+                f"{_clock(_num(named.get('lower_queue_p50_s')) or 0)}. Investigate "
+                "the measured label difference; OPT81 separately owns same-job "
+                "runner-speed comparisons."
+            )
+        else:
+            body.append("Runner-label comparison: comparison unavailable.")
+        body.append(
+            "Queue wait alone does not show that fewer jobs or shards would help; "
+            "preserve the job graph and verification coverage while investigating."
+        )
     if opt9_measure and len(opt9_measure) != len(members):
         body.append(
             "Compiler build-state and generated-output occurrences in this group "
@@ -10487,6 +10662,65 @@ def _workflow_lane_line(ms: list[dict[str, Any]]) -> str | None:
     return line
 
 
+def _queue_runner_label_lines(finding: dict[str, Any]) -> list[str]:
+    """Render OPT43's descriptive per-label queue/work distribution."""
+    rows = [row for row in (finding.get("queue_by_runner_label") or [])
+            if isinstance(row, dict) and row.get("runner_label")]
+    if not rows:
+        return []
+    workflow = _flatten_cell(str(finding.get("workflow_file") or "unknown workflow"))
+    out = [
+        f"**Runner-label queue/work for `{workflow}` "
+        "(one maximum per workflow run and runner label):**",
+        "",
+        "| Runner label | Queue runs | Queue p50 | Queue p95 | Work runs | Work p50 | Censored |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    def clock(value: object) -> str:
+        number = _num(value)
+        return _clock(number) if number is not None else "-"
+
+    for row in sorted(rows, key=lambda item: str(item.get("runner_label"))):
+        out.append(
+            f"| `{_flatten_cell(str(row.get('runner_label') or ''))}` | "
+            f"{int(_num(row.get('n')) or 0)} | "
+            f"{clock(row.get('queue_p50_s'))} | "
+            f"{clock(row.get('queue_p95_s'))} | "
+            f"{int(_num(row.get('work_n')) or 0)} | "
+            f"{clock(row.get('work_p50_s'))} | "
+            f"{int(_num(row.get('censored_n')) or 0)} |"
+        )
+    censored = sum(int(_num(row.get("censored_n")) or 0) for row in rows)
+    out += ["", "Each workflow run contributes at most one observation per label; "
+            "when several jobs use that label, the table uses that run's maximum."]
+    if censored:
+        out.append(
+            f"{censored} run-label observation{'s' if censored != 1 else ''} "
+            "include a job cancelled before runner pickup; runnable-to-cancelled "
+            "time is a censored lower bound on queue wait and is excluded from "
+            "the exact percentiles."
+        )
+    return out
+
+
+def _queue_runner_label_comparison_lines(finding: dict[str, Any]) -> list[str]:
+    comparison = finding.get("queue_label_comparison")
+    jobs = [str(job) for job in (finding.get("affected_jobs") or []) if str(job)]
+    job = _flatten_cell(jobs[0] if jobs else str(finding.get("job") or "unknown job"))
+    if isinstance(comparison, dict) and not comparison.get("unavailable"):
+        slow = _flatten_cell(str(comparison.get("slow_label") or ""))
+        lower = _flatten_cell(str(comparison.get("lower_label") or ""))
+        return [
+            f"**Runner-label comparison for `{job}`:** `{slow}` queued at p50 "
+            f"{_clock(_num(comparison.get('slow_queue_p50_s')) or 0)}, while "
+            f"`{lower}` queued at p50 "
+            f"{_clock(_num(comparison.get('lower_queue_p50_s')) or 0)}. "
+            "This is descriptive runner-label evidence; OPT81 separately owns same-job "
+            "runner-speed comparisons.",
+        ]
+    return [f"**Runner-label comparison for `{job}`:** comparison unavailable."]
+
+
 def _queue_wait_block(findings: list[dict[str, Any]], catalog_url: str,
                       shallow_note: str = "",
                       commit_clock: dict[str, Any] | None = None) -> list[str]:
@@ -10581,6 +10815,16 @@ def _queue_wait_block(findings: list[dict[str, Any]], catalog_url: str,
             lines.append(lane_line)
         if ev:
             lines.append(f"**Evidence:** {_flatten_cell(ev)}")
+        by_workflow: dict[str, list[dict[str, Any]]] = {}
+        for member in ms:
+            if member.get("queue_by_runner_label"):
+                by_workflow.setdefault(str(member.get("workflow_file") or ""), []).append(member)
+        for workflow_members in by_workflow.values():
+            label_lines = _queue_runner_label_lines(workflow_members[0])
+            if label_lines:
+                lines += ["", *label_lines]
+            for member in workflow_members:
+                lines += ["", *_queue_runner_label_comparison_lines(member)]
         lines += [f"**Catalog (background + fix recipe):** {url}", "",
                   *_hygiene_prompt(pat, title, ms, url, wait=True), "", "</details>", ""]
     return lines
