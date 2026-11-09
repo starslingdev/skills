@@ -15,18 +15,37 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-_REPO = r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"
+_NAME = r"[A-Za-z0-9_.-]+"
+_REPO = rf"{_NAME}/{_NAME}"
+# Repository names are matched greedily and then canonicalized, rather than
+# bounded by a lookahead: a lookahead list of "allowed next characters" misses
+# whatever ordinary prose puts after a link (space, `)`, `,`, backtick, `>`,
+# `]`, quotes). Covers https://, scheme-less, www., and SSH `git@github.com:`.
+# The negative lookbehind keeps subdomains such as docs.github.com and
+# gist.github.com out: they do not name repositories.
 _GITHUB_URL = re.compile(
-    rf"(?i)https?://(?:www\.)?github\.com/(?P<repo>{_REPO})(?=[/#?]|$)"
+    rf"(?i)(?<![A-Za-z0-9_.-])(?:https?://)?(?:www\.)?github\.com[/:]"
+    rf"(?P<repo>{_REPO})"
 )
 _GITHUB_API_URL = re.compile(
-    rf"(?i)https?://api\.github\.com/repos/(?P<repo>{_REPO})(?=[/#?]|$)"
+    rf"(?i)(?<![A-Za-z0-9_.-])(?:https?://)?api\.github\.com/repos/(?P<repo>{_REPO})"
 )
 _NUMBERED_REFERENCE = re.compile(
     rf"(?<![A-Za-z0-9_.-])(?P<repo>{_REPO})[#!](?:pull/|issues/)?\d+\b",
     re.IGNORECASE,
 )
 _TARGET = re.compile(rf"^{_REPO}$")
+# First path segments on github.com that are site pages, not repository
+# owners: a two-segment URL under them (github.com/settings/tokens) names no
+# repository. Kept to the reserved names that appear in docs and PR text.
+_NON_REPO_OWNERS = frozenset(
+    {
+        "apps", "features", "login", "marketplace", "orgs", "organizations",
+        "settings", "sponsors", "topics",
+    }
+)
+# Prose punctuation that can trail a link without being part of the name.
+_TRAILING_PUNCTUATION = ".,;:!?)"
 
 
 @dataclass(frozen=True)
@@ -36,24 +55,47 @@ class Finding:
 
 
 def _canonical(value: str) -> str:
-    return value.rstrip("/").casefold()
+    """Normalize a matched owner/repo so equal repositories compare equal.
+
+    Strips a trailing slash, prose punctuation, and a `.git` clone suffix,
+    so `owner/repo.`, `owner/repo.git`, and `owner/repo` are one repository.
+    """
+    key = value.casefold()
+    while True:
+        stripped = key.rstrip("/").rstrip(_TRAILING_PUNCTUATION)
+        if stripped.endswith(".git"):
+            stripped = stripped[: -len(".git")]
+        if stripped == key:
+            return key
+        key = stripped
 
 
-def scan_text(text: str, *, source: str, target: str) -> list[Finding]:
-    """Return locations of non-target GitHub repository references."""
+def _is_repository(pattern: re.Pattern[str], repo: str) -> bool:
+    owner = repo.split("/", 1)[0].casefold()
+    return not (pattern is _GITHUB_URL and owner in _NON_REPO_OWNERS)
+
+
+def scan_text(
+    text: str, *, source: str, target: str, allowed: frozenset[str] = frozenset()
+) -> list[Finding]:
+    """Return locations of GitHub repository references outside the allowed set.
+
+    The allowed set is the target plus any explicitly approved `allowed`
+    repositories (already canonical).
+    """
     findings: list[Finding] = []
-    target_key = _canonical(target)
+    allowed_keys = {_canonical(target), *allowed}
     owner = target.split("/", 1)[0]
     same_owner_reference = re.compile(
-        rf"(?i)(?<![A-Za-z0-9_.-])(?P<repo>{re.escape(owner)}/[A-Za-z0-9_.-]+)"
-        rf"(?=[/#?\s`'\"),.;:!]|$)"
+        rf"(?i)(?<![A-Za-z0-9_.-])(?P<repo>{re.escape(owner)}/{_NAME})"
     )
     patterns = (
         _GITHUB_URL, _GITHUB_API_URL, _NUMBERED_REFERENCE, same_owner_reference
     )
     for line_number, line in enumerate(text.splitlines(), start=1):
         if any(
-            _canonical(match.group("repo")) != target_key
+            _is_repository(pattern, match.group("repo"))
+            and _canonical(match.group("repo")) not in allowed_keys
             for pattern in patterns
             for match in pattern.finditer(line)
         ):

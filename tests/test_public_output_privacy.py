@@ -4,6 +4,7 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
 
 _ROOT = Path(__file__).resolve().parents[1]
 _SCRIPT = _ROOT / ".github" / "scripts" / "check_public_output.py"
@@ -78,6 +79,74 @@ def test_cross_repository_web_and_api_urls_are_blocked():
         text, source="payload", target=_PUBLIC_TARGET
     )
     assert [finding.line for finding in findings] == [1, 2]
+
+
+# A DIFFERENT owner than the target: the same-owner bare-slug rule cannot mask
+# a URL pattern that fails to match.
+_FOREIGN = "/".join(("other-owner", "private-project"))
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        f"See https://github.com/{_FOREIGN} for context",
+        f"(https://github.com/{_FOREIGN})",
+        f"[context](https://github.com/{_FOREIGN})",
+        f"`https://github.com/{_FOREIGN}`",
+        f"<https://github.com/{_FOREIGN}>",
+        f"[https://github.com/{_FOREIGN}]",
+        f'"https://github.com/{_FOREIGN}",',
+        f"'https://github.com/{_FOREIGN}'",
+        f"https://github.com/{_FOREIGN}, then more",
+        f"https://github.com/{_FOREIGN}.",
+        f"https://github.com/{_FOREIGN}/pull/91",
+        f"github.com/{_FOREIGN}",
+        f"www.github.com/{_FOREIGN}",
+        f"https://www.github.com/{_FOREIGN} here",
+        f"git@github.com:{_FOREIGN}.git",
+        f"git@github.com:{_FOREIGN}",
+        f"https://api.github.com/repos/{_FOREIGN} now",
+        f"https://api.github.com/repos/{_FOREIGN})",
+        f"{_FOREIGN}#91",
+    ],
+)
+def test_foreign_repository_links_are_blocked_in_ordinary_prose(line):
+    findings = checker.scan_text(line, source="payload", target=_PUBLIC_TARGET)
+    assert [finding.line for finding in findings] == [1], line
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        f"Clone https://github.com/{_PUBLIC_TARGET}.git to start.",
+        f"git@github.com:{_PUBLIC_TARGET}.git",
+        f"See {_PUBLIC_TARGET}.",
+        f"See {_PUBLIC_TARGET}, then run it.",
+        f"(https://github.com/{_PUBLIC_TARGET}).",
+        f"github.com/{_PUBLIC_TARGET}",
+        f"Is it {_PUBLIC_TARGET}?",
+    ],
+)
+def test_destination_repository_forms_are_allowed(line):
+    assert checker.scan_text(line, source="payload", target=_PUBLIC_TARGET) == [], line
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "https://github.com/settings/tokens",
+        "https://github.com/orgs/other-owner/people",
+        "https://github.com/features/actions",
+        "https://github.com/marketplace/actions/some-action",
+        "https://github.com/sponsors/someone",
+        "https://github.com/apps/some-bot",
+        "https://github.com/topics/python",
+        "https://github.com/login/oauth",
+        "https://docs.github.com/en/actions/using-workflows",
+    ],
+)
+def test_non_repository_github_pages_are_allowed(line):
+    assert checker.scan_text(line, source="payload", target=_PUBLIC_TARGET) == [], line
 
 
 def test_bare_repository_slug_in_target_organization_is_blocked():
