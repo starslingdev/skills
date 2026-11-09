@@ -75,6 +75,12 @@ These rules apply to EVERY shipped skill — `ci-speedup`, `ci-score`,
   `.githooks/pre-commit` hook runs it locally (`git config core.hooksPath
   .githooks`).
 
+## Public-output privacy gate
+
+This repo is public, so every public GitHub write must pass the privacy gate
+(`.github/scripts/check_public_output.py`). The full rules live in AGENTS.md,
+section "Public-output privacy gate".
+
 ## Opt-in DEBUG logging (off by default)
 
 The skill's scripts call `logger.debug(...)` at every interesting boundary — gh
