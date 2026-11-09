@@ -6059,12 +6059,27 @@ def _cache_usage_bytes(client: GhClient, repo: str,
     return int(value) if isinstance(value, (int, float)) and value >= 0 else None
 
 
-def _cache_guard_values(finding: dict[str, Any]) -> list[dict[str, Any]]:
+def _cache_guard_values(
+    finding: dict[str, Any], eligible_shas: set[str] | None = None,
+) -> list[dict[str, Any]]:
     cd = finding.get("cache_dist") if isinstance(finding.get("cache_dist"), dict) else {}
     pr = cd.get("pr") if isinstance(cd.get("pr"), dict) else {}
-    return [v.get("cache_state") for v in (pr.get("values") or [])
-            if isinstance(v, dict) and not v.get("fork")
-            and isinstance(v.get("cache_state"), dict)]
+    out: list[dict[str, Any]] = []
+    seen_shas: set[str] = set()
+    for value in pr.get("values") or []:
+        if (not isinstance(value, dict) or value.get("fork")
+                or not isinstance(value.get("cache_state"), dict)):
+            continue
+        sha = str(value.get("head_sha") or "")
+        # New artifacts bind cache economics to one run per edited head. Old
+        # artifacts carry no head stamp and remain readable rather than being
+        # reinterpreted as proof that no sample qualifies.
+        if sha and eligible_shas is not None:
+            if sha not in eligible_shas or sha in seen_shas:
+                continue
+            seen_shas.add(sha)
+        out.append(value["cache_state"])
+    return out
 
 
 def _cache_step_transfer_times(job: dict[str, Any]) -> tuple[float | None, float | None]:
@@ -6208,7 +6223,13 @@ def _apply_cache_sizing_guard(
     wf_docs: dict[str, dict[str, Any]],
 ) -> None:
     """Admit a cache saving only after budget, invalidation and net-cost checks."""
-    values = _cache_guard_values(finding)
+    real_edit_shas = {
+        str(run.get("head_sha") or "")
+        for run in sampled_runs
+        for number in [_run_pr_number(run)]
+        if isinstance(number, int) and bool(changed.get(number)) and run.get("head_sha")
+    }
+    values = _cache_guard_values(finding, real_edit_shas)
     sizes = [float(v["cache_size_gb"]) for v in values
              if isinstance(v.get("cache_size_gb"), (int, float)) and v["cache_size_gb"] >= 0]
     copies = _cache_copy_count(finding, sampled_runs, wf_docs)
@@ -6220,7 +6241,9 @@ def _apply_cache_sizing_guard(
             usage_bytes=usage_bytes)
     elif usage_bytes >= _CACHE_DEFAULT_BUDGET_BYTES * _CACHE_BUDGET_FULL_FRACTION:
         budget = _cache_guard_check(
-            "failed", "repository cache usage already fills the default budget",
+            "failed", "repository cache usage is at least 90% of the default 10 GB; "
+            "new caches fail this guard even when an owner-raised limit may exist, "
+            "because that admin-only limit is unreadable",
             usage_bytes=usage_bytes)
     elif not sizes:
         budget = _cache_guard_check("not_measured", "proposed cache size not measured")
@@ -6284,14 +6307,18 @@ def _apply_cache_sizing_guard(
     else:
         hit_rate = max(0.0, min(1.0, 1.0 - statistics.mean(misses) / 100.0))
         restore_s, save_s = statistics.median(restores), statistics.median(saves)
-        expected = hit_rate * float(saving) - restore_s - (1.0 - hit_rate) * save_s
+        unused_path = finding.get("cache_path_consumed") is False
+        expected = (-restore_s - (1.0 - hit_rate) * save_s if unused_path
+                    else hit_rate * float(saving) - restore_s
+                    - (1.0 - hit_rate) * save_s)
         economics = _cache_guard_check(
             "passed" if expected > 0 else "failed",
-            ("expected cache saving is positive" if expected > 0
+            ("the job never reads the restored cache path, so restore and save are pure cost"
+             if unused_path else "expected cache saving is positive" if expected > 0
              else "restore and save cost exceeds the expected saving"),
             hit_rate=round(hit_rate, 4), saving_s=round(float(saving), 2),
             restore_s=round(restore_s, 2), save_s=round(save_s, 2),
-            expected_s=round(expected, 2))
+            expected_s=round(expected, 2), sampled_real_edits=len(real_edit_shas))
 
     checks = {"budget": budget, "invalidation": invalidation, "economics": economics}
     status = ("passed" if all(v["status"] == "passed" for v in checks.values())
@@ -6478,6 +6505,15 @@ def _demote_runner_min(f: dict[str, Any], note: str) -> None:
 def _size_finding(f: dict[str, Any], crit: dict[str, Any],
                   monthly_volume: int | None) -> None:
     """Set wall_clock_p50_s and runner_min_saving on the finding in-place."""
+    if f.get("static_cache_lint"):
+        f["wall_clock_p50_s"] = None
+        f["runner_min_saving"] = None
+        f["tier"] = 2
+        f["realization"] = "none"
+        f["size_note"] = ("workflow configuration proves the cache shape needs review; "
+                          "credit no saving until this job's logs measure a miss and "
+                          "the restore/build cost")
+        return
     if f.get("sizing_basis") == "measured" and (
             "wall_clock_p50_s" in f or "runner_min_saving" in f):
         # Detector-issued measured rows already carry their axes. Some catalog
@@ -24123,6 +24159,15 @@ def _attach_cache_log_evidence(client: "GhClient", repo: str,
             # job may not run the cacheable work. Require POSITIVE evidence: an
             # install/build line in the logs, plus a measurable job cost. Without
             # both, the finding is unprovable → drop it (admission gate).
+            if f.get("static_cache_lint"):
+                f["size_note"] = ("workflow configuration proves this cache cannot "
+                                  "provide a useful warm run; logs did not confirm a "
+                                  "measured miss, so no saving is credited")
+                f["wall_clock_p50_s"] = None
+                f["runner_min_saving"] = None
+                f["tier"] = 2
+                f["realization"] = "none"
+                continue
             if not (saw_install and max_dur > 5.0):
                 f["_drop"] = (
                     "cache finding unprovable from sampled logs — no cache line "
@@ -27068,7 +27113,8 @@ def _magnitude_sample(
             # excluded from the rendered cross-run magnitude line (`_mag_line` filters None) but its
             # `cache_state.miss_pct` still feeds the distribution verdict.
             entry = {"run_url": str(j.get("html_url", "")).split("/job/")[0],
-                     "value": val, "drilled": jid == repr_job.get("id")}
+                     "value": val, "drilled": jid == repr_job.get("id"),
+                     "head_sha": str(j.get("_run_head_sha") or "")}
             if state_fn is not None:
                 # Fork = the run's head repo differs from the audited repo. A fork PR gets no
                 # repo secrets (secrets-gated remote caches are unreachable) and restores only

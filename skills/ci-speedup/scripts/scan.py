@@ -3714,11 +3714,203 @@ def _detect_opt39(doc: dict, raw: str) -> list[Hit]:
     return hits
 
 
+# ---- OPT4 / OPT61 — cache configurations that cannot warm --------------------
+
+_CACHE_ACTION_RE = re.compile(r"(?:^|/)cache(?:/|@)|ccache-action|rust-cache", re.I)
+_COMPILER_CACHE_RE = re.compile(r"\b(?:ccache|sccache)\b", re.I)
+_ANALYSIS_CACHE_RE = re.compile(r"\b(?:STATICCHECK_CACHE|GOLANGCI_LINT_CACHE)\b", re.I)
+_TEMP_CACHE_RE = re.compile(
+    r"(?:RUNNER_TEMP|/tmp/)[^\s'\"]*(?:ccache|sccache|staticcheck|golangci)", re.I)
+
+
+def _cache_action_steps(job: dict) -> list[dict]:
+    return [step for step in _steps(job)
+            if isinstance(step, dict) and _CACHE_ACTION_RE.search(_uses(step))]
+
+
+def _cache_paths(steps: list[dict]) -> list[str]:
+    paths: list[str] = []
+    for step in steps:
+        values = step.get("with") if isinstance(step.get("with"), dict) else {}
+        paths.extend(str(values.get("path") or "").splitlines())
+    return [path.strip().casefold() for path in paths if path.strip()]
+
+
+def _size_mib(value: str) -> float | None:
+    match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([kmgt])(?:i?b)?\s*", value,
+                         re.IGNORECASE)
+    if match is None:
+        return None
+    scale = {"k": 1 / 1024, "m": 1, "g": 1024, "t": 1024 ** 2}
+    return float(match.group(1)) * scale[match.group(2).casefold()]
+
+
+def _detect_opt61(doc: dict, raw: str) -> list[Hit]:
+    """Find cache declarations whose own workflow shape prevents useful reuse."""
+    hits: list[Hit] = []
+    for job_name, job in _jobs_from_doc(doc).items():
+        if not isinstance(job, dict):
+            continue
+        cache_steps = _cache_action_steps(job)
+        cache_paths = _cache_paths(cache_steps)
+        blob = _job_run_blob(job)
+        reasons: list[tuple[str, str]] = []
+
+        for step in cache_steps:
+            values = step.get("with") if isinstance(step.get("with"), dict) else {}
+            key = str(values.get("key") or "").strip()
+            restore = [line.strip() for line in
+                       str(values.get("restore-keys") or "").splitlines() if line.strip()]
+            if key and restore and not any(key.startswith(prefix) for prefix in restore):
+                reasons.append(("restore-keys", "none of its `restore-keys` prefixes its saved key"))
+            size = values.get("max-size") or values.get("max_size")
+            mib = _size_mib(str(size)) if size is not None else None
+            if mib is not None and mib <= 64:
+                reasons.append((str(size), f"its compiler-cache size limit is only {size}"))
+
+        for match in re.finditer(
+                r"\bCCACHE_MAXSIZE\s*=\s*([^\s;&]+)|\bccache\s+-M\s+([^\s;&]+)",
+                blob, re.IGNORECASE):
+            value = match.group(1) or match.group(2)
+            mib = _size_mib(value)
+            if mib is not None and mib <= 64:
+                reasons.append((match.group(0),
+                                f"its compiler-cache size limit is only {value}"))
+
+        temp = _TEMP_CACHE_RE.search(blob)
+        cache_path_text = "\n".join(cache_paths)
+        if temp and not any(token in cache_path_text for token in
+                            ("ccache", "sccache", "staticcheck", "golangci")):
+            reasons.append((temp.group(0),
+                            "a compiler or analysis cache lives in temporary storage and is not saved"))
+        uses_compiler_cache = bool(_COMPILER_CACHE_RE.search(blob))
+        supplied_by_cache_action = any(
+            re.search(r"ccache-action|rust-cache", _uses(step), re.IGNORECASE)
+            for step in cache_steps)
+        persisted_compiler = any(token in cache_path_text
+                                 for token in ("ccache", "sccache", "target"))
+        if uses_compiler_cache and not supplied_by_cache_action and not persisted_compiler:
+            reasons.append((_COMPILER_CACHE_RE.search(blob).group(0),
+                            "the compiler cache has no persistence step"))
+        if _ANALYSIS_CACHE_RE.search(blob) and not any(
+                token in cache_path_text for token in ("staticcheck", "golangci")):
+            reasons.append((_ANALYSIS_CACHE_RE.search(blob).group(0),
+                            "the analysis cache has no persistence step"))
+        deleted = re.search(
+            r"(?:rm\s+-rf?|Remove-Item)[^\n]*(?:ccache|sccache|staticcheck|golangci)",
+            blob, re.IGNORECASE)
+        if deleted:
+            reasons.append((deleted.group(0), "a later step deletes the cache directory"))
+
+        for matched, reason in dict.fromkeys(reasons):
+            facts: dict[str, Any] = {"static_cache_lint": True}
+            if (deleted is not None and matched == deleted.group(0)
+                    and not re.search(r"\b(?:ccache|sccache|staticcheck|golangci-lint)\b",
+                                      blob[:deleted.start()], re.IGNORECASE)):
+                facts["cache_path_consumed"] = False
+            hits.append(Hit(
+                line=_line_of_in_job(raw, job_name, matched),
+                affected_jobs=[job_name],
+                evidence=(f"job `{job_name}` declares a cache that cannot provide a useful "
+                          f"warm run: {reason}; confirm with its own restore/build log before "
+                          "crediting a saving"),
+                match_text=matched,
+                facts=facts,
+            ))
+    return hits
+
+
+def _detect_opt4(doc: dict, raw: str) -> list[Hit]:
+    """Find BuildKit cache exports whose scope or local rotation defeats reuse."""
+    hits: list[Hit] = []
+    volatile = re.compile(
+        r"type=gha[^\n]*(?:scope=\$\{\{\s*github\.(?:sha|run_id|run_number)\s*\}\})",
+        re.IGNORECASE)
+    local_from = re.compile(r"--cache-from\s+type=local,src=([^\s,]+)", re.IGNORECASE)
+    local_to = re.compile(r"--cache-to\s+type=local,dest=([^\s,]+)([^\n]*)", re.IGNORECASE)
+    for job_name, job in _jobs_from_doc(doc).items():
+        if not isinstance(job, dict):
+            continue
+        blob = _job_run_blob(job)
+        match = volatile.search(blob)
+        reason = "a per-run GHA scope prevents later runs from restoring the exported layers"
+        if match is None:
+            source, destination = local_from.search(blob), local_to.search(blob)
+            if (source and destination and source.group(1) == destination.group(1)
+                    and "mode=max" not in destination.group(2).casefold()):
+                match = destination
+                reason = ("the local cache exports over the directory it imports without "
+                          "a complete mode=max cache")
+        if match is not None:
+            hits.append(Hit(
+                line=_line_of_in_job(raw, job_name, match.group(0).strip()),
+                affected_jobs=[job_name],
+                evidence=(f"job `{job_name}` configures a BuildKit cache that cannot warm "
+                          f"the next run: {reason}; confirm the miss in its own build log "
+                          "before crediting a saving"),
+                match_text=match.group(0).strip(),
+                facts={"static_cache_lint": True},
+            ))
+    return hits
+
+
+def _detect_opt4_ephemeral_mounts(
+    parsed: list[tuple[str, dict, str]], root: Path,
+) -> list[tuple[str, str, Hit]]:
+    """Find hosted builds whose Dockerfile cache mount dies with the runner."""
+    out: list[tuple[str, str, Hit]] = []
+    for rel, doc, raw in parsed:
+        for job_name, job in _jobs_from_doc(doc).items():
+            if not isinstance(job, dict) or _is_self_hosted(job):
+                continue
+            steps = _steps(job)
+            job_text = "\n".join(_uses(step) + "\n" + _run(step) for step in steps)
+            if re.search(r"cache-to|actions/cache|buildx-cache|buildkit.*cache",
+                         job_text, re.IGNORECASE):
+                continue
+            dockerfile: Path | None = None
+            matched = "RUN --mount=type=cache"
+            for step in steps:
+                config_and_kind = _opt102_step_build_config(step, job, doc)
+                if config_and_kind is None:
+                    continue
+                config, _kind = config_and_kind
+                resolved = _opt102_resolved_dockerfile(
+                    root, config, env={}, matrix={}, inputs={}, outputs={})
+                if resolved is not None:
+                    dockerfile = resolved[0]
+                    break
+            if dockerfile is None:
+                continue
+            try:
+                docker_text = dockerfile.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if not re.search(r"(?im)^\s*RUN\s+--mount=type=cache\b", docker_text):
+                continue
+            out.append(("OPT4", rel, Hit(
+                line=_line_of_in_job(raw, job_name, "docker"),
+                affected_jobs=[job_name],
+                evidence=(f"job `{job_name}` uses a Dockerfile cache mount on a hosted "
+                          "runner without a persistence step, so the mount disappears "
+                          "after every run; confirm the miss in its own build log before "
+                          "crediting a saving"),
+                match_text=matched,
+                snippet=f"{dockerfile.relative_to(root)}: {matched}",
+                facts={"static_cache_lint": True},
+            )))
+    return out
+
+
 # ---- OPT62 — Build Artifacts Destroyed Before Every Run ----------------------
 
 _CLEAN_RE = re.compile(
     r"rm\s+-rf?\s+\S*(?:build|target|dist|node_modules)|cargo\s+clean|"
     r"make\s+clean|gradle\s+clean|nx\s+reset", re.I)
+_GO_BUILD_CACHE_CLEAN_RE = re.compile(
+    r"\bgo\s+clean\b(?=[^\n;&]*(?:^|\s)-(?:i\s+)?(?:cache|modcache)\b)[^\n;&]*",
+    re.IGNORECASE,
+)
 
 
 def _detect_opt62(doc: dict, raw: str) -> list[Hit]:
@@ -3727,17 +3919,21 @@ def _detect_opt62(doc: dict, raw: str) -> list[Hit]:
     workspace is always fresh, so the clean is a no-op there."""
     hits: list[Hit] = []
     for job_name, job in _jobs_from_doc(doc).items():
-        if not isinstance(job, dict) or not _is_self_hosted(job):
+        if not isinstance(job, dict):
             continue
-        m = _CLEAN_RE.search(_job_run_blob(job))
+        blob = _job_run_blob(job)
+        go_clean = _GO_BUILD_CACHE_CLEAN_RE.search(blob)
+        m = go_clean or (_CLEAN_RE.search(blob) if _is_self_hosted(job) else None)
         if m:
             hits.append(Hit(
                 line=_line_of_in_job(raw, job_name, m.group(0).strip()),
                 affected_jobs=[job_name],
-                evidence=(f"job `{job_name}` on a self-hosted (persistent) runner "
-                          f"destroys build artifacts (`{m.group(0).strip()}`) "
-                          f"before each run, defeating incremental builds"),
+                evidence=(f"job `{job_name}` "
+                          + ("clears Go's reusable build/module cache"
+                             if go_clean else "on a self-hosted (persistent) runner destroys build artifacts")
+                          + f" (`{m.group(0).strip()}`) before each run, defeating reuse"),
                 match_text=job_name,
+                facts=({"static_cache_lint": True} if go_clean else {}),
             ))
     return hits
 
@@ -4301,6 +4497,7 @@ def _hold_back_unreadable(pattern: str, hits: list[Hit], rel: str,
 
 _DETECTORS: dict[str, Any] = {
     "OPT1": _detect_opt1,
+    "OPT4": _detect_opt4,
     "OPT6": _detect_opt6,
     "OPT12": _detect_opt12,
     "OPT2": _detect_opt2,
@@ -4328,6 +4525,7 @@ _DETECTORS: dict[str, Any] = {
     "OPT36": _detect_opt36,
     "OPT39": _detect_opt39,
     "OPT45": _detect_opt45,
+    "OPT61": _detect_opt61,
     "OPT62": _detect_opt62,
     "OPT63": _detect_opt63,
     "OPT89": _detect_opt89,
@@ -4424,7 +4622,7 @@ def _declarative_hits(entry: "CatalogEntry", doc: dict, raw: str):
 # cancellation saves a handful of runner-minutes, not a wall-clock lever — so it
 # should not carry HIGH visual weight.
 _SEVERITY_OVERRIDE: dict[str, str] = {"OPT37": "LOW", "OPT45": "LOW"}
-_NEEDS_LOG_CONFIRMATION: set[str] = {"OPT37", "OPT96"}
+_NEEDS_LOG_CONFIRMATION: set[str] = {"OPT4", "OPT37", "OPT61", "OPT96"}
 
 # Patterns whose remedy is NOT a CI-config change ci-speedup produces — it's a
 # change in a domain the tool doesn't own (here: editing test SOURCE to remove
@@ -6886,6 +7084,7 @@ def _cross_workflow_hits(parsed: list[tuple[str, dict, str]], root: Path,
     out += _detect_opt7(parsed, root)
     out += _detect_opt37(parsed, root)
     out += _detect_opt40(parsed, root)
+    out += _detect_opt4_ephemeral_mounts(parsed, root)
     out += _detect_opt12_duplicate_test_work(parsed)
     turbo_hits, incomplete = _detect_turbo(root, _ci_turbo_tasks(root, parsed))
     out += turbo_hits

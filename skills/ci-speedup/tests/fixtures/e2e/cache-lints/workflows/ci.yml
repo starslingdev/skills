@@ -1,0 +1,19 @@
+name: Cache lints
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: hendrikmuhs/ccache-action@v1
+        with:
+          max-size: 50M
+      - run: go clean -i -cache
+      - run: >-
+          docker buildx build .
+          --cache-from type=gha,scope=${{ github.sha }}
+          --cache-to type=gha,scope=${{ github.sha }}
+  gate:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - run: make test

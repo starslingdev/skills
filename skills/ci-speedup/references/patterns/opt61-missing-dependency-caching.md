@@ -26,6 +26,10 @@ category: 12
    - C++: `cmake`, `make`, `ninja` → check for `actions/cache` targeting build dir, or `ccache`/`sccache`
 2. Flag if the ecosystem's build/install commands are present but no corresponding cache action exists.
 3. Count total jobs affected — in sharded/matrix workflows, the waste multiplies.
+4. Also flag cache declarations that cannot produce a useful warm run: a restore
+   prefix that cannot match the saved key; ccache capped at 64 MiB or less;
+   ccache, sccache, staticcheck, or golangci-lint caches placed in temporary
+   storage without a persistence step; or a cache directory deleted later.
 
 ```bash
 # Check for any caching across all workflows
@@ -34,6 +38,17 @@ grep -rn 'actions/cache\|rust-cache\|sccache\|setup-node.*cache\|setup-go.*cache
 grep -rn 'cargo \|pip install\|uv sync\|go build\|mvn \|gradle\|cmake\|make ' /tmp/workflows/
 ```
 
-**Fix**: Add the ecosystem-appropriate caching action. In multi-job workflows, use one key per compilation mode so incompatible artifacts cannot overwrite or restore each other. Give only one job permission to save each mode's cache, such as with a `save-if` condition; the other jobs restore it without racing to publish separate entries.
+**Fix**: Add the ecosystem-appropriate caching action. For compiler and mutable
+build-output caches such as ccache, sccache, Go's `GOCACHE`, `target/`,
+`.next/cache`, `.turbo`, `.nx/cache`, Gradle's build cache, and Bazel's disk
+cache, use a rolling primary key such as
+`<tool>-<os>-<mode>-<lockfile-hash>-${{ github.sha }}` and the stable
+`restore-keys: <tool>-<os>-<mode>-<lockfile-hash>-` prefix. A new primary entry
+is saved after each run, so budget the accumulated entries and their eviction
+pressure; do not use this shape when the cache is too large for the repository's
+cache budget. In multi-job workflows, use one key family per compilation mode so
+incompatible artifacts cannot overwrite or restore each other. Give only one job
+permission to save each mode's cache, such as with a `save-if` condition; the
+other jobs restore it without racing to publish separate entries.
 
 ---
