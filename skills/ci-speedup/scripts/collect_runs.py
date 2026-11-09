@@ -10018,33 +10018,14 @@ def _detect_opt25_shard_imbalance(
     by_base: dict[str, dict[str, list[tuple[float, str]]]] = {}
     base_sharded: dict[str, bool] = {}
     excluded_by_base: dict[str, int] = {}
+
+    def _is_preparation_step(name: str) -> bool:
+        return bool(_re.search(
+            r"(?i)^(?:set up|setup(?:\s|$)|complete|post |checkout|restore|"
+            r"save cache|install (?:dependencies|deps|packages)(?:\s|$))",
+            name.strip()))
+
     for run_jobs in jobs_per_run:
-        active_step_counts: dict[str, dict[str, int]] = {}
-        for candidate in run_jobs:
-            candidate_name = str(candidate.get("name", ""))
-            candidate_base = _matrix_base_name(candidate_name)
-            if candidate_base == candidate_name:
-                candidate_base = suffix_base.get(candidate_name, "")
-            if not candidate_base:
-                continue
-            names = {
-                str(step.get("name") or "").strip()
-                for step in candidate.get("steps") or []
-                if isinstance(step, dict)
-                and str(step.get("conclusion") or "").lower() != "skipped"
-                and not _re.search(
-                    r"(?i)^(?:set up|complete|post |checkout|restore|save cache)",
-                    str(step.get("name") or "").strip())
-            }
-            for step_name in names:
-                active_step_counts.setdefault(candidate_base, {}).setdefault(
-                    step_name, 0)
-                active_step_counts[candidate_base][step_name] += 1
-        divided_step = {
-            base: max(counts, key=counts.get)
-            for base, counts in active_step_counts.items()
-            if counts and max(counts.values()) >= 2
-        }
         for j in run_jobs:
             name = str(j.get("name", ""))
             mbase = _matrix_base_name(name)
@@ -10057,19 +10038,15 @@ def _detect_opt25_shard_imbalance(
                 sharded = False  # prefix varies → distinct packages, not shards
             else:
                 continue  # neither convention matched → not a matrix job
-            steps = [step for step in j.get("steps") or []
-                     if isinstance(step, dict)
-                     and str(step.get("name") or "").strip().lower()
-                     not in {"set up job", "complete job"}]
-            if steps and all(str(step.get("conclusion") or "").lower() == "skipped"
-                             for step in steps):
-                excluded_by_base[base] = excluded_by_base.get(base, 0) + 1
-                continue
-            expected_step = divided_step.get(base)
-            if expected_step and steps and not any(
-                    str(step.get("name") or "").strip() == expected_step
-                    and str(step.get("conclusion") or "").lower() != "skipped"
-                    for step in steps):
+            steps = [step for step in j.get("steps") or [] if isinstance(step, dict)]
+            work_steps = [
+                step for step in steps
+                if not _is_preparation_step(str(step.get("name") or ""))]
+            active_work_steps = [
+                step for step in work_steps
+                if str(step.get("conclusion") or "").lower() != "skipped"]
+            if (str(j.get("conclusion") or "").lower() == "skipped"
+                    or (work_steps and not active_work_steps)):
                 excluded_by_base[base] = excluded_by_base.get(base, 0) + 1
                 continue
             d, url = _job_dur_url(j)
