@@ -10,8 +10,54 @@ jobs:
       - run: go clean -i -cache
       - run: >-
           docker buildx build .
-          --cache-from type=gha,scope=${{ github.sha }}
-          --cache-to type=gha,scope=${{ github.sha }}
+          --cache-from type=gha,scope=image-${{ github.sha }}
+          --cache-to type=gha,scope=image-${{ github.sha }}
+  seed:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-main-${{ github.sha }}
+      - run: ccache make
+  restore-family:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-pr-${{ github.sha }}
+          restore-keys: ccache-main-
+      - run: ccache make
+  env-ccache:
+    runs-on: ubuntu-latest
+    env:
+      CCACHE_DIR: ${{ runner.temp }}/ccache
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+    steps:
+      - run: cmake --build build
+  export-only:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          cache-from: type=gha,scope=app
+          cache-to: type=gha,scope=app,mode=max
+  cache-dance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: cache-mount
+          key: cache-mount-${{ hashFiles('Dockerfile') }}
+      - uses: reproducible-containers/buildkit-cache-dance@v3
+        with:
+          cache-dir: cache-mount
+          dockerfile: Dockerfile
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
   gate:
     needs: build
     runs-on: ubuntu-latest

@@ -7,6 +7,7 @@ import json
 import re
 import shutil
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs
 
@@ -145,7 +146,8 @@ class FixtureClient:
         return ""
 
 
-def run_fixture(path: Path, monkeypatch, tmp_path: Path) -> tuple[dict, str, list]:
+def run_fixture(path: Path, monkeypatch, tmp_path: Path, *,
+                max_runs: int = 20) -> tuple[dict, str, list]:
     recorded = json.loads((path / "responses.json").read_text(encoding="utf-8"))
     repo_root = tmp_path / f"{path.name}-repo"
     repo_root.mkdir()
@@ -169,7 +171,7 @@ def run_fixture(path: Path, monkeypatch, tmp_path: Path) -> tuple[dict, str, lis
         repo_root, CATALOG, default_branch=recorded.get("default_branch", "main"))
     scanned["skill_commit_sha"] = "installed:unversioned"
     doc = cr.collect(
-        scanned, recorded["repo"], max_runs=20,
+        scanned, recorded["repo"], max_runs=max_runs,
         shallow_runs=recorded.get("shallow_runs", 20),
         with_logs=True, data_dir=tmp_path / f"{path.name}-data",
         created_before=recorded["captured_at"], root=repo_root)
@@ -341,7 +343,98 @@ def test_compact_facts_pin_collected_provenance_and_representative_job(
     facts = fixture_facts(doc, checks)
 
     assert facts["provenance"] == "required_scoped"
-    assert facts["representative_jobs"]["slowest"] == "gate"
+    assert facts["representative_jobs"]["slowest"] == "test"
+
+
+def test_serial_chain_sizes_removed_edge_and_failure_path_compute(
+        monkeypatch, tmp_path):
+    fixture = FIXTURE_ROOT / "serial-chain"
+    doc, report, checks = run_fixture(fixture, monkeypatch, tmp_path)
+    finding = next(row for row in doc["findings"]
+                   if row.get("pattern") == "OPT21"
+                   and row.get("affected_jobs") == ["test"])
+    stamp = finding["opt21_edge_sizing"]
+    assert stamp["chain_before_s"] == 1320.0
+    assert stamp["chain_after_s"] == 1200.0
+    assert finding["wall_clock_p50_s"] == 120.0
+    assert stamp["dependency_failure_share"] == 0.25
+    assert stamp["extra_runner_min_per_run"] == 5.0
+    assert "can add up to 5.00 extra runner-minutes" in finding["evidence"]
+    assert "can add up to" in report
+    assert not [check for check in checks if not check.skipped and not check.ok]
+
+
+def test_opt21_edge_sizing_certificate_rejects_a_tampered_path_delta(
+        monkeypatch, tmp_path):
+    fixture = FIXTURE_ROOT / "serial-chain"
+    doc, report, _checks = run_fixture(fixture, monkeypatch, tmp_path)
+    finding = next(row for row in doc["findings"]
+                   if row.get("opt21_edge_sizing"))
+    finding["opt21_edge_sizing"]["chain_before_s"] += 100.0
+    out = tmp_path / fixture.name
+    findings_path = out / "findings.json"
+    report_path = out / "report.md"
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+
+    checks = vr.run_checks(report, report_path, findings_path, skill_repo=None)
+    assert any(
+        check.name == "OPT21 edge sizing re-derives from the workflow graph"
+        and not check.ok
+        for check in checks
+    )
+
+
+def test_opt21_edge_delta_is_not_capped_to_the_short_dependent_job(
+        monkeypatch, tmp_path):
+    fixture = tmp_path / "edge-cap-fixture"
+    shutil.copytree(FIXTURE_ROOT / "serial-chain", fixture)
+    responses_path = fixture / "responses.json"
+    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
+    for run in recorded["workflows"][0]["runs"]:
+        if run.get("conclusion") == "success":
+            day = str(run["created_at"])[:10]
+            run["updated_at"] = f"{day}T00:20:10Z"
+    for jobs in recorded["jobs"].values():
+        if len(jobs) != 3:
+            continue
+        day = str(jobs[0]["started_at"])[:10]
+        spans = ((0, 600), (600, 610), (610, 1210))
+        for job, (start_s, end_s) in zip(jobs, spans):
+            job["started_at"] = f"{day}T00:{start_s // 60:02d}:{start_s % 60:02d}Z"
+            job["completed_at"] = f"{day}T00:{end_s // 60:02d}:{end_s % 60:02d}Z"
+            job["steps"][0]["started_at"] = job["started_at"]
+            job["steps"][0]["completed_at"] = job["completed_at"]
+    for checks in recorded["checks"].values():
+        day = str(checks[0]["started_at"])[:10]
+        spans = ((0, 600), (600, 610), (610, 1210))
+        for check, (start_s, end_s) in zip(checks, spans):
+            check["started_at"] = f"{day}T00:{start_s // 60:02d}:{start_s % 60:02d}Z"
+            check["completed_at"] = f"{day}T00:{end_s // 60:02d}:{end_s % 60:02d}Z"
+    responses_path.write_text(json.dumps(recorded, indent=2) + "\n", encoding="utf-8")
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    doc, _report, checks = run_fixture(fixture, monkeypatch, run_root)
+    finding = next(row for row in doc["findings"]
+                   if row.get("pattern") == "OPT21"
+                   and row.get("affected_jobs") == ["test"])
+    assert finding["opt21_edge_sizing"]["chain_before_s"] == 1210.0
+    assert finding["opt21_edge_sizing"]["chain_after_s"] == 610.0
+    assert finding["wall_clock_p50_s"] == 600.0
+    assert not [check for check in checks if not check.skipped and not check.ok]
+
+
+def test_opt21_failure_share_uses_one_bounded_recent_run_cohort(
+        monkeypatch, tmp_path):
+    doc, _report, checks = run_fixture(
+        FIXTURE_ROOT / "serial-chain", monkeypatch, tmp_path, max_runs=2)
+    finding = next(row for row in doc["findings"]
+                   if row.get("pattern") == "OPT21"
+                   and row.get("affected_jobs") == ["test"])
+    stamp = finding["opt21_edge_sizing"]
+    assert stamp["dependency_sampled_runs"] == 2
+    assert stamp["dependency_failed_runs"] == 0
+    assert stamp["dependency_failure_share"] == 0.0
+    assert not [check for check in checks if not check.skipped and not check.ok]
 
 
 def test_fixture_client_applies_run_query_filters():
@@ -382,9 +475,9 @@ def test_named_fixtures_exercise_their_defining_interactions(
     for name in (
             "cache-lints", "config-era-change", "duplicate-gate-job", "emulated-container",
             "external-required-gate", "heavy-runner-queue", "minority-tail",
-            "multiarch-image", "path-partitioned-monorepo", "vendored-libs",
+            "multiarch-image", "path-partitioned-monorepo", "pr-light-matrix", "vendored-libs",
             "vitest-isolated-serial", "cargo-double-compile", "per-test-startup",
-            "sharded-floor"):
+            "jest-make-hop", "sharded-floor"):
         docs[name], reports[name], _checks = run_fixture(
             FIXTURE_ROOT / name, monkeypatch, tmp_path)
 
@@ -396,6 +489,22 @@ def test_named_fixtures_exercise_their_defining_interactions(
                   if row.get("pattern") in {"OPT4", "OPT61", "OPT62"}]
     assert {row["pattern"] for row in cache_rows} == {"OPT4", "OPT61", "OPT62"}
     assert all(row.get("wall_clock_p50_s") in {None, 0.0} for row in cache_rows)
+    assert not any(
+        row.get("pattern") == "OPT61"
+        and "restore-family" in (row.get("affected_jobs") or [])
+        for row in cache_rows)
+    assert any(
+        row.get("pattern") == "OPT61"
+        and "env-ccache" in (row.get("affected_jobs") or [])
+        for row in cache_rows)
+    assert any(
+        row.get("pattern") == "OPT4"
+        and "export-only" in (row.get("affected_jobs") or [])
+        for row in cache_rows)
+    assert not any(
+        row.get("pattern") == "OPT4"
+        and "cache-dance" in (row.get("affected_jobs") or [])
+        for row in cache_rows)
     external = docs["external-required-gate"]["pr_critical_path"]
     assert external["gate_kind"] == "pr_floor_fallback"
     assert external["provenance"] == "pr_floor_fallback"
@@ -404,6 +513,10 @@ def test_named_fixtures_exercise_their_defining_interactions(
     assert any(
         row.get("minority_tail")
         for row in docs["minority-tail"]["pr_critical_path"]["checks"])
+    assert "Across commits, the median projection is" in reports["minority-tail"]
+    assert "`ci.yml` holds its slowest job" not in reports["minority-tail"]
+    assert "OPT25" not in {
+        row.get("pattern") for row in docs["pr-light-matrix"]["findings"]}
     duplicate = next(
         row for row in docs["duplicate-gate-job"]["findings"]
         if row.get("pattern") == "OPT12"
@@ -419,6 +532,14 @@ def test_named_fixtures_exercise_their_defining_interactions(
     assert "OPT89" in {
         row.get("pattern") for row in docs["emulated-container"]["findings"]}
     image_doc = docs["multiarch-image"]
+    image_opt72 = [
+        row for row in image_doc["findings"]
+        if row.get("pattern") == "OPT72" and "image" in (row.get("affected_jobs") or [])
+    ]
+    assert not any(float(row.get("wall_clock_p50_s") or 0.0) > 0 for row in image_opt72)
+    assert "prefer warming the cache" not in reports["multiarch-image"].lower()
+    assert "cache path: measure warm-vs-cold" not in reports["multiarch-image"].lower()
+    assert "warm-cache claim" not in reports["multiarch-image"].lower()
     assert any(
         pole.get("job") == "image"
         for pole in image_doc["pr_critical_path"]["poles"])
@@ -433,6 +554,11 @@ def test_named_fixtures_exercise_their_defining_interactions(
         docs["cargo-double-compile"], [])["leaves"]
     assert "Compiling goport_core" in reports["cargo-double-compile"]
     assert "combine their `-p`/`--package`" in reports["cargo-double-compile"]
+    jest = next(row for row in docs["jest-make-hop"]["findings"]
+                if row.get("pattern") == "OPT9")
+    assert "maxWorkers" in jest["evidence"] and "OPT88" in jest["evidence"]
+    assert "cache directory is not persisted" in reports["jest-make-hop"]
+    assert "no provider-switch saving is credited" in reports["jest-make-hop"]
     assert "per-invocation-startup" in fixture_facts(
         docs["per-test-startup"], [])["leaves"]
     assert "state-leak canary" in reports["per-test-startup"]
@@ -462,6 +588,104 @@ def test_named_fixtures_exercise_their_defining_interactions(
     assert any(
         run.get("event") == "push" and run.get("conclusion") == "failure"
         for workflow in red["workflows"] for run in workflow["runs"])
+
+
+def _pr_commit_tail_fixture(root: Path) -> Path:
+    """Ten PR commits; four also carry an untouched 100-minute workflow."""
+    fixture = root / "pr-commit-tail"
+    workflows = fixture / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "ci.yml").write_text(
+        "name: CI\non: [pull_request]\njobs:\n  gate:\n"
+        "    runs-on: ubuntu-latest\n    steps:\n      - run: echo test\n",
+        encoding="utf-8")
+    (workflows / "slow-tail.yml").write_text(
+        "name: Slow tail\non: [pull_request]\njobs:\n  archive:\n"
+        "    runs-on: ubuntu-latest\n    steps:\n      - run: echo archive\n",
+        encoding="utf-8")
+
+    def at(commit: int, seconds: int) -> str:
+        return datetime.fromtimestamp(
+            1_767_225_600 + commit * 10_000 + seconds,
+            tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+    recorded = {
+        "captured_at": "2026-01-31T00:00:00Z",
+        "default_branch": "main",
+        "repo": "fixture/pr-commit-tail",
+        "required_checks": ["gate"],
+        "workflows": [
+            {"id": 601, "name": "CI", "path": ".github/workflows/ci.yml",
+             "runs": []},
+            {"id": 602, "name": "Slow tail",
+             "path": ".github/workflows/slow-tail.yml", "runs": []},
+        ],
+        "jobs": {},
+        "checks": {},
+    }
+    for commit in range(10):
+        sha = f"commit-tail-{commit}"
+        tail_duration = 6000 if commit < 4 else (600 if commit < 6 else 10)
+        for workflow_index, duration in ((0, 600), (1, tail_duration)):
+            run_id = 60_000 + workflow_index * 100 + commit
+            name = "gate" if workflow_index == 0 else "archive"
+            recorded["workflows"][workflow_index]["runs"].append({
+                "id": run_id,
+                "event": "pull_request",
+                "head_branch": f"feature-{commit}",
+                "head_sha": sha,
+                "pull_requests": [{"number": commit + 1}],
+                "status": "completed",
+                "conclusion": "success",
+                "created_at": at(commit, 0),
+                "run_started_at": at(commit, 0),
+                "updated_at": at(commit, duration),
+            })
+            recorded["jobs"][str(run_id)] = [{
+                "id": run_id * 10,
+                "name": name,
+                "labels": ["ubuntu-latest"],
+                "started_at": at(commit, 0),
+                "completed_at": at(commit, duration),
+                "steps": [{
+                    "name": "work",
+                    "started_at": at(commit, 0),
+                    "completed_at": at(commit, duration),
+                }],
+            }]
+        recorded["checks"][sha] = [{
+            "name": "gate",
+            "started_at": at(commit, 0),
+            "completed_at": at(commit, 600),
+        }]
+    (fixture / "responses.json").write_text(
+        json.dumps(recorded), encoding="utf-8")
+    return fixture
+
+
+def test_pr_commit_projection_discloses_the_population_and_slow_tail(
+        monkeypatch, tmp_path):
+    fixture = _pr_commit_tail_fixture(tmp_path)
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
+
+    clock = doc["pr_critical_path"]["commit_wall_clock"]
+    assert clock["median_projection_multiple"] == 1.0
+    assert clock["worst_commit"]["workflow_file"].endswith("slow-tail.yml")
+    assert "Across commits, the median projection is **1.00x**" in report
+    assert "`slow-tail.yml` holds its slowest job" in report
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+
+    doctored = json.loads(json.dumps(doc))
+    doctored["pr_critical_path"]["commit_wall_clock"][
+        "median_projection_multiple"] = 2.0
+    findings_path = tmp_path / "doctored-findings.json"
+    findings_path.write_text(json.dumps(doctored), encoding="utf-8")
+    check = vr.check_commit_wall_clock_projection(report, findings_path)
+    assert not check.ok
+    assert "median per-commit projection multiple does not re-derive" in check.detail
 
 
 def test_sharded_floor_runs_through_collection_and_full_verifier(
@@ -724,7 +948,7 @@ def test_no_inspect_foreign_compile_runs_through_collection(
         return ("docker buildx build --platform linux/amd64,linux/arm64 .\n"
                 + log[first_layer:])
 
-    _doc, report, facts = _run_multiarch_log_variant(
+    doc, report, facts = _run_multiarch_log_variant(
         "multiarch-no-inspect", monkeypatch, tmp_path, remove_builder_inspect,
         preserve_no_inspect=True)
     leaf = next(
@@ -733,9 +957,34 @@ def test_no_inspect_foreign_compile_runs_through_collection(
 
     assert leaf["magnitude"] is None
     assert leaf["builder_topology_unconfirmed"] is True
+    opt72 = [row for row in doc["findings"] if row.get("pattern") == "OPT72"]
+    assert not any(float(row.get("wall_clock_p50_s") or 0.0) > 0 for row in opt72)
+    assert "prefer warming the cache" not in report.lower()
+    assert "cache path: measure warm-vs-cold" not in report.lower()
+    assert "warm-cache claim" not in report.lower()
     assert "docker buildx inspect --bootstrap" in report
     assert "does not establish whether that work ran under emulation" in report
     assert "building a foreign architecture under emulation instead" not in report
+
+
+def test_inactive_builder_runs_through_collection_as_an_uncredited_check(
+        monkeypatch, tmp_path):
+    def inactive_builder(log: str) -> str:
+        return re.sub(r"(?m)^Platforms:.*$", "Platforms:", log)
+
+    _doc, report, facts = _run_multiarch_log_variant(
+        "multiarch-inactive-builder", monkeypatch, tmp_path, inactive_builder)
+    leaf = next(
+        row for row in facts["leaf_details"]
+        if row.get("fix_key") == "emulated-image-compile")
+
+    assert leaf["magnitude"] is None
+    assert leaf["builder_topology_unconfirmed"] is True
+    assert "#15 [linux/arm64 build 2/3] RUN go build ./..." in report
+    assert "Do not size or claim a saving" in report
+    assert "docker buildx rebuilds 2 layers from scratch every run" not in report
+    assert "builder topology was not printed" not in report
+    assert "native platform for every builder node" in report
 
 
 def test_builder_detected_platform_and_dominance_guards_run_through_collection(

@@ -72,6 +72,19 @@ jobs:
         with:
           node-version: "20"
 
+      # Public-output privacy gate (AGENTS.md): blocks other repositories' identifiers in the
+      # PR title/body and every outgoing commit. Inside the suite job so it gates `test`. PR text
+      # reaches the shell only via env (never `run:`); the read-only token verifies PUBLIC.
+      # A title/body edit is re-checked on the next push.
+      - name: Public-output privacy gate
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_REF: ${{ github.base_ref }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: bash .github/scripts/run_public_output_gate.sh
+
       - name: Install test dependencies
         run: pip install -e ".[dev]"
 
@@ -109,6 +122,15 @@ jobs:
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: "20"
+
+      - name: Public-output privacy gate
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_REF: ${{ github.base_ref }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: bash .github/scripts/run_public_output_gate.sh
 
       - name: Install test dependencies
         run: pip install -e ".[dev]"

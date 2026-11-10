@@ -834,14 +834,83 @@ def check_commit_wall_clock_projection(report: str, findings_path: Path | None) 
         basis, wall, slowest, next_longest, chain = min(
             complete, key=lambda row: abs(row[1] - expected_p50))
         projected, multiple = projection(wall, slowest, next_longest, 4.0, chain)
+        target = basis.get("slowest_job") or {}
+        target_workflow = str(target.get("workflow_file") or "")
+        target_name = str(target.get("name") or "")
+        population_multiples = []
+        for fact, item_wall, _item_slowest, _item_next, _item_chain in complete:
+            if item_wall <= 0:
+                continue
+            target_row = next((
+                row for row in fact.get("job_projections") or []
+                if isinstance(row, dict)
+                and str(row.get("workflow_file") or "") == target_workflow
+                and str(row.get("name") or "") == target_name
+            ), None)
+            if target_row is None:
+                fact_slowest = fact.get("slowest_job") or {}
+                if (str(fact_slowest.get("workflow_file") or "") == target_workflow
+                        and str(fact_slowest.get("name") or "") == target_name):
+                    target_row = {
+                        "duration_s": fact_slowest.get("duration_s"),
+                        "next_longest_s": (fact.get("next_longest_job") or {}).get(
+                            "duration_s", 0.0),
+                        "chain_span_s": fact.get("slowest_chain_span_s"),
+                    }
+            if target_row is None:
+                population_multiples.append(1.0)
+                continue
+            item_duration = _num(target_row.get("duration_s")) or 0.0
+            item_next = _num(target_row.get("next_longest_s")) or 0.0
+            item_chain = _num(target_row.get("chain_span_s")) or item_duration
+            if item_duration <= 0:
+                population_multiples.append(1.0)
+                continue
+            _item_projected, value = projection(
+                item_wall, item_duration, item_next, 4.0, item_chain)
+            if value is not None:
+                population_multiples.append(value)
+        expected_median_multiple = (
+            round(percentile(population_multiples, 50), 3)
+            if population_multiples else None)
+        if _num(stamp.get("median_projection_multiple")) != expected_median_multiple:
+            failures.append("median per-commit projection multiple does not re-derive")
+        worst_fact, worst_wall, *_rest = max(complete, key=lambda row: row[1])
+        worst_stamp = stamp.get("worst_commit") or {}
+        expected_worst_wf = str(
+            (worst_fact.get("slowest_job") or {}).get("workflow_file") or "")
+        if worst_wall > 0:
+            if (str(worst_stamp.get("sha") or "") != str(worst_fact.get("sha") or "")
+                    or _num(worst_stamp.get("wall_s")) != worst_wall
+                    or str(worst_stamp.get("workflow_file") or "") != expected_worst_wf):
+                failures.append("worst per-commit projection fact does not re-derive")
+        elif worst_stamp:
+            failures.append("zero-wall population publishes a worst commit")
+        projection_clause = ""
+        if multiple is not None:
+            projection_clause = (
+                " At the sampled p50 commit, a 4x speedup to its slowest job "
+                f"projects to **{duration(projected)}** (**{multiple:.2f}x**).")
+            if expected_median_multiple is not None:
+                projection_clause += (
+                    " Across commits, the median projection is "
+                    f"**{expected_median_multiple:.2f}x**.")
+            worst_sha = str(worst_fact.get("sha") or "")[:7]
+            if worst_sha:
+                held = ""
+                if (expected_median_multiple is not None
+                        and expected_median_multiple < multiple / 2.0
+                        and expected_worst_wf):
+                    held = f"; `{_wf_base(expected_worst_wf)}` holds its slowest job"
+                projection_clause += (
+                    f" The worst sampled commit is `{worst_sha}` at "
+                    f"**{duration(worst_wall)}**{held}.")
         expected_line = (
             "> **Per-commit PR wait:** p50 "
             f"**{duration(expected_p50)}**, p90 **{duration(expected_p90)}**, from the "
             "earliest workflow run created to the last job completed across every "
             "workflow on that commit."
-            + (" At the sampled p50 commit, a 4x speedup to its slowest job "
-               f"projects to **{duration(projected)}** (**{multiple:.2f}x**)."
-               if multiple is not None else ""))
+            + projection_clause)
         if report.splitlines().count(expected_line) != 1:
             failures.append("report lacks the re-derived per-commit wait/projection line")
     elif _num(stamp.get("p50_s")) is not None or _num(stamp.get("p90_s")) is not None:
@@ -869,6 +938,20 @@ def check_commit_wall_clock_projection(report: str, findings_path: Path | None) 
 
         caps: list[float] = []
         for fact, wall, slowest, next_longest, chain in complete:
+            edge_stamp = finding.get("opt21_edge_sizing")
+            if isinstance(edge_stamp, dict) and workflow:
+                edge_before = _num(edge_stamp.get("chain_before_s"))
+                workflow_present = any(
+                    isinstance(row, dict)
+                    and str(row.get("workflow_file") or "") == workflow
+                    for row in (fact.get("job_projections") or []))
+                if edge_before is None or edge_before <= 0 or not workflow_present:
+                    caps.append(0.0)
+                    continue
+                projected = projection(
+                    wall, edge_before, next_longest, float("inf"), edge_before)[0]
+                caps.append(max(0.0, wall - projected))
+                continue
             candidates = [
                 row for row in (fact.get("job_projections") or [])
                 if isinstance(row, dict)
@@ -4880,6 +4963,138 @@ def check_headline_presence_causal_only_when_minority(report: str,
     return Check(name, True,
                  f"headline presence-causal claim OK: `{label}` present {pres}/{npop} "
                  f"(<= {_VR_RARE_PRESENCE_FRAC:g}·npop) — a typical PR genuinely skips it")
+
+
+def check_opt21_edge_sizing_rederived(report: str, findings_path: Path | None) -> Check:
+    """Re-derive OPT21's removed-edge certificate from the workflow DAG.
+
+    The failure observations themselves are collector inputs, but their count,
+    rate, downstream upper bound, and rendered wording must agree internally;
+    the path delta and downstream duration are independently re-walked from the
+    stamped graph and per-workflow p50 timings.
+    """
+    name = "OPT21 edge sizing re-derives from the workflow graph"
+    if not findings_path:
+        return Check(name, True, "no findings — no OPT21 edge certificate")
+    try:
+        data = json.loads(findings_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return Check(name, False, "findings.json unreadable")
+    data = _as_dict(data)
+    findings = [f for f in _as_list(data.get("findings"))
+                if isinstance(f, dict) and f.get("opt21_edge_sizing")]
+    if not findings:
+        return Check(name, True, "no OPT21 edge certificate")
+    graphs = _as_dict(data.get("workflow_job_graph"))
+    timings = _as_dict(data.get("per_workflow_timing"))
+    failures: list[str] = []
+
+    def needs_of(spec: dict) -> list[str]:
+        raw = spec.get("needs") or []
+        return [str(raw)] if isinstance(raw, str) else [str(v) for v in _as_list(raw)]
+
+    def longest_path(graph: dict, durations: dict[str, float],
+                     removed: tuple[str, str] | None = None) -> float | None:
+        memo: dict[str, float] = {}
+        visiting: set[str] = set()
+
+        def visit(node: str) -> float | None:
+            if node in memo:
+                return memo[node]
+            if node in visiting or node not in durations:
+                return None
+            visiting.add(node)
+            parents = [parent for parent in needs_of(_as_dict(graph.get(node)))
+                       if parent in durations
+                       if removed != (parent, node)]
+            spans = [visit(parent) for parent in parents]
+            visiting.remove(node)
+            if any(span is None for span in spans):
+                return None
+            memo[node] = durations[node] + max(
+                (float(span) for span in spans if span is not None), default=0.0)
+            return memo[node]
+
+        spans = [visit(str(node)) for node in durations]
+        if not spans or any(span is None for span in spans):
+            return None
+        return max(float(span) for span in spans if span is not None)
+
+    for finding in findings:
+        fid = str(finding.get("id") or "OPT21")
+        wf = str(finding.get("workflow_file") or "")
+        graph = _as_dict(graphs.get(wf))
+        p50 = _as_dict(_as_dict(timings.get(wf)).get("job_p50"))
+        affected = [str(v) for v in _as_list(finding.get("affected_jobs"))]
+        dependency = [str(v) for v in _as_list(finding.get("opt21_needs"))]
+        stamp = _as_dict(finding.get("opt21_edge_sizing"))
+        if len(affected) != 1 or len(dependency) != 1 or not graph or not p50:
+            failures.append(f"{fid} has no single resolvable edge and timing graph")
+            continue
+        durations: dict[str, float] = {}
+        compute_durations: dict[str, float] = {}
+        for node, raw_spec in graph.items():
+            display = str(_as_dict(raw_spec).get("name") or node)
+            candidates = [
+                float(value) for check, value in p50.items()
+                if isinstance(value, (int, float))
+                and (_cmp_name(str(check)) == _cmp_name(display)
+                     or _cmp_name(str(check)).startswith(_cmp_name(display) + " ("))
+            ]
+            if candidates:
+                durations[str(node)] = max(candidates)
+                matrix_legs = [
+                    float(value) for check, value in p50.items()
+                    if isinstance(value, (int, float))
+                    and str(check).startswith(display + " (")
+                ]
+                compute_durations[str(node)] = (
+                    sum(matrix_legs) if matrix_legs else max(candidates))
+        before = longest_path(graph, durations)
+        after = longest_path(graph, durations, (dependency[0], affected[0]))
+        downstream = {affected[0]}
+        changed = True
+        while changed:
+            prior = len(downstream)
+            downstream.update(
+                str(node) for node, raw_spec in graph.items()
+                if any(parent in downstream for parent in needs_of(_as_dict(raw_spec))))
+            changed = len(downstream) != prior
+        downstream_s = sum(compute_durations.get(node, 0.0) for node in downstream)
+        try:
+            failed = int(stamp.get("dependency_failed_runs"))
+            sampled = int(stamp.get("dependency_sampled_runs"))
+            unmatched = int(stamp.get("dependency_unmatched_runs"))
+            share = float(stamp.get("dependency_failure_share"))
+            stamped_before = float(stamp.get("chain_before_s"))
+            stamped_after = float(stamp.get("chain_after_s"))
+            stamped_downstream = float(stamp.get("downstream_p50_s"))
+            extra = float(stamp.get("extra_runner_min_per_run"))
+            wall = float(finding.get("wall_clock_p50_s"))
+            uncapped_wall = float(finding.get("wall_clock_uncapped_p50_s", wall))
+        except (TypeError, ValueError):
+            failures.append(f"{fid} carries a non-numeric OPT21 certificate")
+            continue
+        expected_share = round(failed / sampled, 4) if sampled > 0 else -1.0
+        expected_extra = round(expected_share * downstream_s / 60.0, 2)
+        if (before is None or after is None
+                or abs(stamped_before - round(before, 1)) > 0.01
+                or abs(stamped_after - round(after, 1)) > 0.01
+                or abs(uncapped_wall - round(before - after, 1)) > 0.01
+                or wall < 0 or wall > uncapped_wall + 0.01):
+            failures.append(f"{fid} path delta does not re-derive from the workflow graph")
+        if (sampled <= 0 or failed < 0 or failed > sampled or unmatched < 0
+                or abs(share - expected_share) > 0.0001):
+            failures.append(f"{fid} dependency failure share does not re-derive from its counts")
+        if (abs(stamped_downstream - round(downstream_s, 1)) > 0.01
+                or abs(extra - expected_extra) > 0.01):
+            failures.append(f"{fid} downstream runner-minute upper bound does not re-derive")
+        phrase = f"can add up to {extra:.2f} extra runner-minutes per run"
+        if phrase not in str(finding.get("evidence") or ""):
+            failures.append(f"{fid} does not state its runner-minute figure as an upper bound")
+    return Check(name, not failures,
+                 "; ".join(failures[:8]) if failures
+                 else f"{len(findings)} OPT21 edge certificate(s) re-derived")
 
 
 def check_headline_chain_matches_stamp(report: str, findings_path: Path | None,
@@ -16439,6 +16654,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_headline_slowest_matches_stamp(report, findings_path, report_path),
         check_headline_floor_presence_reconciled(report, findings_path),
         check_headline_presence_causal_only_when_minority(report, findings_path),
+        check_opt21_edge_sizing_rederived(report, findings_path),
         check_headline_chain_matches_stamp(report, findings_path, report_path),
         check_aggregate_total_ge_largest_member(report, findings_path, report_path),
         check_headline_wait_within_makespan(report, findings_path, report_path),

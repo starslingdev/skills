@@ -2238,13 +2238,149 @@ def _chain_facts_for_pr(
 def _cite_chain_in_opt21_evidence(findings: "list[dict[str, Any]]",
                                   chain_summary: "dict[str, Any] | None",
                                   jg: "dict[str, Any] | None",
-                                  crit_by_wf: "dict[str, Any]") -> None:
+                                  crit_by_wf: "dict[str, Any]",
+                                  outcome_jobs_by_wf: "dict[str, list[list[dict[str, Any]]]] | None" = None,
+                                  ) -> None:
     """ENG-1 PR-N3: append the measured-gate-chain note to every OPT21
     (unnecessary `needs:`) finding on the chain's own workflow - the edge
     OPT21 questions IS the serialization the headline measures. Evidence
-    annotation only (sizing unchanged); idempotent (the note is never
+    sizes a resolvable single edge from sampled job history; the chain note is
+    idempotent (it is never
     appended twice); a <2-member modal chain or an unresolvable chain
     workflow is a no-op."""
+    outcome_jobs_by_wf = outcome_jobs_by_wf or {}
+
+    def _path_s(graph: dict[str, Any], durations: dict[str, float],
+                removed: tuple[str, str] | None = None) -> float | None:
+        memo: dict[str, float] = {}
+        visiting: set[str] = set()
+
+        def visit(node: str) -> float | None:
+            if node in memo:
+                return memo[node]
+            if node in visiting or node not in durations:
+                return None
+            visiting.add(node)
+            spec = graph.get(node) if isinstance(graph.get(node), dict) else {}
+            parents = [str(parent) for parent in (spec.get("needs") or [])
+                       if str(parent) in durations
+                       if removed != (str(parent), node)]
+            parent_spans = [visit(parent) for parent in parents]
+            visiting.remove(node)
+            if any(span is None for span in parent_spans):
+                return None
+            memo[node] = durations[node] + max(
+                (float(span) for span in parent_spans if span is not None), default=0.0)
+            return memo[node]
+
+        spans = [visit(str(node)) for node in durations]
+        if not spans or any(span is None for span in spans):
+            return None
+        return max(float(span) for span in spans if span is not None)
+
+    for f in findings:
+        if f.get("pattern") != "OPT21":
+            continue
+        wf = str(f.get("workflow_file") or "")
+        graph = ((jg or {}).get(wf) or {})
+        affected = [str(job) for job in (f.get("affected_jobs") or [])]
+        needs = [str(job) for job in (f.get("opt21_needs") or [])]
+        crit = crit_by_wf.get(wf) or {}
+        if (len(affected) == 1 and len(needs) == 1 and affected[0] in graph
+                and needs[0] in graph):
+            durations: dict[str, float] = {}
+            compute_durations: dict[str, float] = {}
+            job_p50 = crit.get("job_p50") or {}
+            for node, spec in graph.items():
+                display = str((spec or {}).get("name") or node)
+                duration = _resolve_job_p50(display, job_p50)
+                if duration > 0:
+                    durations[str(node)] = float(duration)
+                    matrix_legs = [
+                        float(value) for name, value in job_p50.items()
+                        if str(name).startswith(display + " (")
+                        and isinstance(value, (int, float))
+                    ]
+                    compute_durations[str(node)] = (
+                        sum(matrix_legs) if matrix_legs else float(duration))
+            before = _path_s(graph, durations)
+            after = _path_s(graph, durations, (needs[0], affected[0]))
+            samples = outcome_jobs_by_wf.get(wf) or []
+            dep_outcomes: list[str] = []
+            for run_jobs in samples:
+                dependency_names = {
+                    needs[0], _matrix_base_name(str(
+                        (graph.get(needs[0]) or {}).get("name") or needs[0])),
+                }
+                dependency_legs = [
+                    job for job in run_jobs
+                    if _matrix_base_name(str(job.get("name") or "")) in dependency_names
+                ]
+                # An empty successful jobs response, or a response whose names
+                # do not resolve to this dependency, is unavailable evidence —
+                # never turn it into a synthetic failure. A matrix dependency
+                # succeeds only when every matching leg succeeds (neutral is
+                # also a completed non-failure outcome).
+                conclusions = [str(job.get("conclusion") or "")
+                               for job in dependency_legs]
+                if dependency_legs and all(conclusions):
+                    dep_outcomes.append(
+                        "success" if all(outcome in {"success", "neutral"}
+                                         for outcome in conclusions) else "failure"
+                    )
+            if (before is not None and after is not None and before > after
+                    and dep_outcomes):
+                failed = sum(outcome not in {"success", "neutral"}
+                             for outcome in dep_outcomes)
+                share = failed / len(dep_outcomes)
+                downstream = {affected[0]}
+                changed = True
+                while changed:
+                    prior = len(downstream)
+                    downstream.update(
+                        str(node) for node, spec in graph.items()
+                        if any(str(parent) in downstream
+                               for parent in ((spec or {}).get("needs") or [])))
+                    changed = len(downstream) != prior
+                downstream_s = sum(compute_durations.get(node, 0.0)
+                                   for node in downstream)
+                projection = project_commit_wall(
+                    before, before, after, float("inf"), chain_s=before,
+                    pole_s=before - after, runner_up_s=after)
+                extra_minutes = round(share * downstream_s / 60.0, 2)
+                stamp = {
+                    "dependency": needs[0], "dependent": affected[0],
+                    "chain_before_s": round(before, 1),
+                    "chain_after_s": round(projection.projected_s, 1),
+                    "dependency_failed_runs": failed,
+                    "dependency_sampled_runs": len(dep_outcomes),
+                    "dependency_unmatched_runs": len(samples) - len(dep_outcomes),
+                    "dependency_failure_share": round(share, 4),
+                    "downstream_p50_s": round(downstream_s, 1),
+                    "extra_runner_min_per_run": extra_minutes,
+                }
+                unmatched_note = (
+                    f" {len(samples) - len(dep_outcomes)} sampled run(s) without a "
+                    "resolvable dependency job were excluded."
+                    if len(samples) != len(dep_outcomes) else ""
+                )
+                f.update({
+                    "opt21_edge_sizing": stamp,
+                    "sizing_basis": "measured",
+                    "wall_clock_p50_s": round(before - projection.projected_s, 1),
+                    "runner_min_saving": None,
+                    "tier": 1,
+                    "realization": "direct",
+                    "size_note": "measured change in the workflow's longest dependency path",
+                })
+                f["evidence"] = (str(f.get("evidence") or "")
+                    + f" Measured longest path: {before:.0f}s -> "
+                      f"{projection.projected_s:.0f}s. The dependency did not succeed "
+                      f"on {failed}/{len(dep_outcomes)} sampled runs ({share:.0%}); "
+                      f"starting downstream work on those paths can add up to "
+                      f"{extra_minutes:.2f} extra runner-minutes per run."
+                      f"{unmatched_note}")
+
     modal = [str(m) for m in ((chain_summary or {}).get("modal_chain") or [])]
     if len(modal) < 2:
         return
@@ -5687,7 +5823,7 @@ _SIZING: dict[str, dict[str, Any]] = {
     "OPT19": {"model": "measured"},  # test source sleep dominance
     "OPT20": {"model": "runner-min-only", "hit_rate": 0.0},  # unpinned docker tags — reliability
     # Parallelization (non fast-path).
-    "OPT21": {"model": "direct", "default_s": 30.0},  # unnecessary needs:
+    "OPT21": {"model": "measured"},  # unnecessary needs: edge path delta
     "OPT22": {"model": "direct", "default_s": 60.0},  # sequential workflow_run
     # Actions/Checkout (non fast-path).
     "OPT26": {"model": "runner-min-only", "hit_rate": 0.0},  # outdated action major
@@ -5854,9 +5990,9 @@ def _opt9_is_build_state(f: dict[str, Any]) -> bool:
 # credited `runner_min_saving` is set to None (so the bill headline / Also-noticed
 # appendix skip it) and the modeled amount is preserved in `runner_min_unrealizable_s` so the
 # report can show it, annotated, instead of summing it into the bill total.
-#   OPT21 — removing a `needs:` edge changes WHEN a job starts (queue wait), not
-#           how long it runs; compute is unchanged, so the bill saving is 0.
-_WALL_CLOCK_ONLY_NO_RUNNER_MIN = {"OPT21"}
+# OPT21 is excluded: its measured stamp reports the extra failure-path compute
+# caused by removing an edge rather than claiming a runner-minute saving.
+_WALL_CLOCK_ONLY_NO_RUNNER_MIN: set[str] = set()
 #   OPT32 — a missing `paths:` filter's bill saving is the compute on irrelevant
 #           runs the filter would skip; it's a GROSS UPPER BOUND that's only
 #           realizable where the workflow's jobs don't ALREADY self-skip (via
@@ -10017,6 +10153,14 @@ def _detect_opt25_shard_imbalance(
     suffix_base = _detect_common_suffix_matrices(jobs_per_run)
     by_base: dict[str, dict[str, list[tuple[float, str]]]] = {}
     base_sharded: dict[str, bool] = {}
+    excluded_by_base: dict[str, int] = {}
+
+    def _is_preparation_step(name: str) -> bool:
+        return bool(_re.search(
+            r"(?i)^(?:set up|setup(?:\s|$)|complete|post |checkout|restore|"
+            r"save cache|install (?:dependencies|deps|packages)(?:\s|$))",
+            name.strip()))
+
     for run_jobs in jobs_per_run:
         for j in run_jobs:
             name = str(j.get("name", ""))
@@ -10030,6 +10174,17 @@ def _detect_opt25_shard_imbalance(
                 sharded = False  # prefix varies → distinct packages, not shards
             else:
                 continue  # neither convention matched → not a matrix job
+            steps = [step for step in j.get("steps") or [] if isinstance(step, dict)]
+            work_steps = [
+                step for step in steps
+                if not _is_preparation_step(str(step.get("name") or ""))]
+            active_work_steps = [
+                step for step in work_steps
+                if str(step.get("conclusion") or "").lower() != "skipped"]
+            if (str(j.get("conclusion") or "").lower() == "skipped"
+                    or (work_steps and not active_work_steps)):
+                excluded_by_base[base] = excluded_by_base.get(base, 0) + 1
+                continue
             d, url = _job_dur_url(j)
             if d is None or d <= 0:
                 continue
@@ -10189,6 +10344,7 @@ def _detect_opt25_shard_imbalance(
             out[-1]["measured_signal"] = summary
         if next_step is not None:
             out[-1]["next_step"] = next_step
+        out[-1]["legs_excluded_no_work"] = excluded_by_base.get(base, 0)
     return out
 
 
@@ -22077,6 +22233,7 @@ def _detect_structural_candidates(
     overlap_withheld: "list[dict[str, Any]] | None" = None,
     status_publishers: "dict[str, dict[str, Any]] | None" = None,
     pr_check_populations_complete: list[bool] | None = None,
+    log_leaf_owners: "frozenset[tuple[str, str, str]]" = frozenset(),
 ) -> list[dict[str, Any]]:
     """Route the top measured critical-path checks into STRUCTURAL candidates
     instead of the old inherent-cost dead-end. For each top check: map it to its
@@ -22410,6 +22567,32 @@ def _detect_structural_candidates(
                         "could not confirm this check blocks merging. Optimize it only "
                         "if repository policy confirms that it gates the merge.")
                 f["size_note"] = note
+            if (pat == "OPT72" and (
+                    wf_path, job_name, "emulated-image-compile") in log_leaf_owners):
+                # The log-grounded emulated compile is the specific root cause for this
+                # pole. Retain an uncredited OPT72 row so downstream lever selection does
+                # not invent a different generic route, but remove both its saving and
+                # its cache-warming advice: neither follows from foreign-platform work.
+                f["wall_clock_p50_s"] = 0.0
+                f.pop("wall_clock_uncapped_p50_s", None)
+                f.pop("wall_clock_derivation", None)
+                f["realization"] = "none"
+                f["tier"] = 2
+                f["guardrail"] = (
+                    "Preserve every published platform, artifact, release flag, test, "
+                    "provenance record, and manifest; confirm the builder topology before "
+                    "changing how the foreign-platform work executes.")
+                f["rollout"] = (
+                    "Do not run a separate OPT72 rollout for this pole; follow the "
+                    "emulated-image compile drill and re-measure the same check after "
+                    "that change.")
+                f["failure_mode"] = (
+                    "Treating this uncredited row as an independent lever would "
+                    "double-count the same pole; preserve every published platform and "
+                    "artifact while validating the specific compile change.")
+                f["size_note"] = (
+                    "The emulated-image compile leaf owns this pole; OPT72 receives no "
+                    "separate saving.")
             out.append(f)
         if mapping is not None:
             seen_jobs.add((wf_path, job_name))
@@ -28065,6 +28248,7 @@ def _persist_pole_logs(
                 mag_fn = None
         manifest.append({
             "job": job, "check": p.get("check"), "job_id": jid, "file": fn,
+            "leaf_fix_key": leaf0.get("fix_key"),
             "steps_file": steps_fn, "mag_file": mag_fn,
             "html_url": repr_job.get("html_url", ""), "workflow_file": wf,
             "duration_s": round(repr_dur, 1), "selected": "nearest-p50",
@@ -30187,6 +30371,69 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         _commit_facts.append(_commit_wall_fact(
             _sha, _event, _run_rows, _commit_jobs_by_run, _expected_workflows))
 
+    def _projection_population(facts: list[dict[str, Any]]) -> dict[str, Any]:
+        complete = [
+            fact for fact in facts
+            if fact.get("partial") is not True
+            and isinstance(fact.get("wall_s"), (int, float))
+            and not isinstance(fact.get("wall_s"), bool)
+            and float(fact["wall_s"]) > 0
+        ]
+        if not complete:
+            return {"median_projection_multiple": None, "worst_commit": None}
+        p50 = _percentile([float(fact["wall_s"]) for fact in complete], 50)
+        typical = min(
+            complete, key=lambda fact: abs(float(fact["wall_s"]) - p50))
+        target = typical.get("slowest_job") or {}
+        target_workflow = str(target.get("workflow_file") or "")
+        target_name = str(target.get("name") or "")
+        multiples: list[float] = []
+        for fact in complete:
+            wall = float(fact["wall_s"])
+            target_row = next((
+                row for row in fact.get("job_projections") or []
+                if isinstance(row, dict)
+                and str(row.get("workflow_file") or "") == target_workflow
+                and str(row.get("name") or "") == target_name
+            ), None)
+            if target_row is None:
+                fact_slowest = fact.get("slowest_job") or {}
+                if (str(fact_slowest.get("workflow_file") or "") == target_workflow
+                        and str(fact_slowest.get("name") or "") == target_name):
+                    target_row = {
+                        "duration_s": fact_slowest.get("duration_s"),
+                        "next_longest_s": (fact.get("next_longest_job") or {}).get(
+                            "duration_s", 0.0),
+                        "chain_span_s": fact.get("slowest_chain_span_s"),
+                    }
+            if target_row is None:
+                multiples.append(1.0)
+                continue
+            duration = float(target_row.get("duration_s") or 0.0)
+            next_longest = float(target_row.get("next_longest_s") or 0.0)
+            chain = float(target_row.get("chain_span_s") or duration)
+            if duration <= 0:
+                multiples.append(1.0)
+                continue
+            projection = project_commit_wall(
+                wall, duration, next_longest, 4.0,
+                **({"chain_s": chain, "pole_s": duration,
+                    "runner_up_s": next_longest}
+                   if chain > duration else {}))
+            if isinstance(projection.multiple, (int, float)):
+                multiples.append(float(projection.multiple))
+        worst = max(complete, key=lambda fact: float(fact["wall_s"]))
+        return {
+            "median_projection_multiple": (
+                round(_percentile(multiples, 50), 3) if multiples else None),
+            "worst_commit": {
+                "sha": worst.get("sha"),
+                "wall_s": worst.get("wall_s"),
+                "workflow_file": (worst.get("slowest_job") or {}).get(
+                    "workflow_file"),
+            },
+        }
+
     _complete_walls = [float(f["wall_s"]) for f in _commit_facts
                        if isinstance(f.get("wall_s"), (int, float))]
     _commit_wall_clock = {
@@ -30195,6 +30442,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         "p90_s": (round(_percentile(_complete_walls, 90), 3)
                   if _complete_walls else None),
         "facts": _commit_facts,
+        **_projection_population(_commit_facts),
     }
     _joint_runner_bases = {
         tuple(sorted((observation.get("check_runners") or {}).items()))
@@ -30265,23 +30513,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             _typical_push = min(
                 _complete_push_facts,
                 key=lambda fact: abs(float(fact["wall_s"]) - _push_p50))
-            _worst_push = max(_complete_push_facts, key=lambda fact: float(fact["wall_s"]))
-            _projection_multiples = [
-                float(projection["multiple"])
-                for fact in _complete_push_facts
-                for projection in [fact.get("projection_4x")]
-                if isinstance(projection, dict)
-                and isinstance(projection.get("multiple"), (int, float))
-            ]
-            _push_lane["median_projection_multiple"] = (
-                round(_percentile(_projection_multiples, 50), 3)
-                if _projection_multiples else None)
-            _push_lane["worst_commit"] = {
-                "sha": _worst_push.get("sha"),
-                "wall_s": _worst_push.get("wall_s"),
-                "workflow_file": (_worst_push.get("slowest_job") or {}).get(
-                    "workflow_file"),
-            }
+            _push_lane.update(_projection_population(_complete_push_facts))
 
             # Drill the representative push-lane pole from the job lists already
             # fetched above. The only new request is its log; selection, steps,
@@ -30495,13 +30727,57 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         _era_repr_shas, _era_per_sha_checks, _chain_spine, _span_caps, _jg,
         crit_by_wf, _era_sha_intervals)
     _chain_summary_val = _chain_summary(_chain_facts)
-    # ENG-1 PR-N3: an OPT21 (unnecessary `needs:`) finding whose workflow hosts
-    # the measured gate chain now cites that fact — the edge it questions IS
-    # the serialization the headline measures (evidence annotation only; OPT21
-    # keeps its modeled sizing, follow-up trigger in the plan). Named helper so
-    # the path is directly red/green-testable (the e2e corpus keeps OPT21
-    # deliberately quiet, so it can never exercise this).
-    _cite_chain_in_opt21_evidence(findings, _chain_summary_val, _jg, crit_by_wf)
+    _opt21_workflows = {
+        str(f.get("workflow_file") or "") for f in findings
+        if f.get("pattern") == "OPT21" and f.get("workflow_file")
+    }
+    def _opt21_kept_era(wf: str, run: dict[str, Any]) -> bool:
+        era = next((row for row in config_era_facts
+                    if str(row.get("workflow_file") or "") == wf), None)
+        if not isinstance(era, dict):
+            return True
+        kept = str(era.get("kept_era") or "")
+        by_sha = era.get("content_era_by_sha")
+        sha = str(run.get("head_sha") or "")
+        if isinstance(by_sha, dict) and sha in by_sha:
+            return str(by_sha.get(sha) or "") == kept
+        boundary = str(era.get("boundary") or "")
+        created = str(run.get("created_at") or "")
+        if boundary and created:
+            return ("post" if created >= boundary else "pre") == kept
+        return False
+
+    # One newest-first, event- and configuration-scoped cohort supplies both
+    # successes and failures. Sampling each outcome independently would inflate
+    # a 10% failure rate to 33% when the success stratum hits `max_runs` first.
+    _opt21_outcome_runs = {
+        wf: [
+            run for run in (all_status_runs_by_wf.get(wf)
+                            or sampled_runs_by_wf.get(wf) or [])
+            if str(run.get("event") or "") in _DEVELOPER_EVENTS
+            and str(run.get("conclusion") or "")
+            in {"success", "failure", "timed_out"}
+            and _opt21_kept_era(wf, run)
+        ][:max_runs]
+        for wf in _opt21_workflows
+    }
+    _prefetch_json(client, [
+        _run_jobs_endpoint(repo, run.get("id"))
+        for runs in _opt21_outcome_runs.values() for run in runs])
+    _opt21_outcome_jobs: dict[str, list[list[dict[str, Any]]]] = {}
+    for _wf in sorted(_opt21_workflows):
+        _outcome_kept, _outcome_fetches = _gather_run_jobs(
+            client, repo, _opt21_outcome_runs.get(_wf) or [], memo=job_memo,
+            keep_empty=True)
+        jobs_fetch_failures += _outcome_fetches
+        _add_cost_spine_fetch_failures(_wf, _outcome_fetches)
+        _opt21_outcome_jobs[_wf] = [jobs for _run, jobs in _outcome_kept]
+    # Size each resolvable OPT21 edge from the measured workflow graph and
+    # disclose its sampled dependency-failure rate plus the upper bound on
+    # downstream compute exposed by removing the edge. The serial-chain E2E
+    # fixture drives this path through collect, render, and the full verifier.
+    _cite_chain_in_opt21_evidence(
+        findings, _chain_summary_val, _jg, crit_by_wf, _opt21_outcome_jobs)
     # ENG-1 PR-N3: the chain fields the sizing cascade consumes (empty/zero on
     # chainless repos — the cascade then behaves exactly as before).
     _cs_modal = [str(m) for m in ((_chain_summary_val or {}).get("modal_chain") or [])]
@@ -30533,6 +30809,35 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         if not _workflow or not _affected:
             return _commit_ctx_facts
         _affected_bases = {_matrix_base_name(name) for name in _affected}
+
+        # Removing a dependency edge shortens a WHOLE path; it does not shorten
+        # the dependent job. Project the measured path delta against each
+        # commit's competing floor instead of capping it at the dependent's own
+        # duration (A(600) -> B(10) can legitimately expose 600s of parallelism).
+        _edge_stamp = _finding.get("opt21_edge_sizing")
+        if isinstance(_edge_stamp, dict):
+            _edge_before = _finite_float(_edge_stamp.get("chain_before_s"))
+            if _edge_before is None or _edge_before <= 0:
+                return _commit_ctx_facts
+            _edge_rows: list[tuple[float, ...]] = []
+            for _fact in _commit_facts:
+                _wall = _finite_float(_fact.get("wall_s"))
+                if _wall is None or _wall <= 0:
+                    continue
+                _workflow_present = any(
+                    isinstance(row, dict)
+                    and str(row.get("workflow_file") or "") == _workflow
+                    for row in (_fact.get("job_projections") or []))
+                if not _workflow_present:
+                    _edge_rows.append((float(_wall), 0.0, 0.0, 0.0))
+                    continue
+                _competitor = _finite_float(
+                    (_fact.get("next_longest_job") or {}).get("duration_s")) or 0.0
+                _edge_rows.append((
+                    float(_wall), float(_edge_before), float(_competitor),
+                    float(_edge_before),
+                ))
+            return tuple(_edge_rows)
 
         def _matches_affected(_row: dict[str, Any]) -> bool:
             return bool(
@@ -31850,7 +32155,11 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         chain_win_s=_chain_ctx_win,
         wf_docs=_wf_docs, overlap_withheld=_overlap_withheld,
         status_publishers=findings_doc.get("workflow_status_publishers"),
-        pr_check_populations_complete=pr_check_population_complete)
+        pr_check_populations_complete=pr_check_population_complete,
+        log_leaf_owners=frozenset(
+            (str(entry.get("workflow_file") or ""), str(entry.get("job") or ""),
+             str(entry.get("leaf_fix_key") or ""))
+            for entry in pole_logs if entry.get("leaf_fix_key")))
     # Stamped only when a lever was held back, so a repo without `parallel:`
     # groups or background steps keeps a byte-identical findings document.
     if _overlap_withheld:

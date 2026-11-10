@@ -24,6 +24,7 @@ raw log (`--log`), so level-2 and the drill stay on one coherent run. Without a
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import hashlib
 import json
 import re
@@ -2310,17 +2311,8 @@ def _cache_path_leaf(cache_path_sample: dict[str, Any] | None) -> dict[str, Any]
             "config_fact": " ".join(context)}
 
 
-def _buildx_single_node(
-    lines: list[str],
-) -> tuple[str, list[str]] | None:
-    """Return the native platform and auditable evidence for one Buildx node.
-
-    `docker buildx inspect --bootstrap` prints the builder header, then a
-    `Nodes:` section with one `Name:` and `Platforms:` pair per node. Platforms
-    configured by the user are printed first with a `*`; the detected native
-    platform is the first unstarred entry, before emulated detected platforms.
-    Missing, all-configured, or multi-node evidence fails closed.
-    """
+def _buildx_nodes(lines: list[str]) -> tuple[str, list[dict[str, str]]]:
+    """Parse the Buildx node block, retaining nodes with unusable platforms."""
     in_nodes = False
     nodes: list[dict[str, str]] = []
     nodes_header = ""
@@ -2332,11 +2324,14 @@ def _buildx_single_node(
             continue
         if not in_nodes:
             continue
+        if re.search(r"#\d+\s+\[[^\]]+\]\s+(?:FROM|RUN|COPY|ADD)\b", line,
+                     re.IGNORECASE):
+            break
         if re.search(r"\bName:\s+\S+", line):
             nodes.append({"name": line, "platforms": "", "native": ""})
             awaiting_platform = True
             continue
-        platform = re.search(r"\bPlatforms:\s+(.+)$", line)
+        platform = re.search(r"\bPlatforms:\s*(.*)$", line)
         if awaiting_platform and platform and nodes:
             detected = [
                 item.strip().lower()
@@ -2347,6 +2342,21 @@ def _buildx_single_node(
             nodes[-1]["platforms"] = line
             nodes[-1]["native"] = detected[0] if detected else ""
             awaiting_platform = False
+    return nodes_header, nodes
+
+
+def _buildx_single_node(
+    lines: list[str],
+) -> tuple[str, list[str]] | None:
+    """Return the native platform and auditable evidence for one Buildx node.
+
+    `docker buildx inspect --bootstrap` prints the builder header, then a
+    `Nodes:` section with one `Name:` and `Platforms:` pair per node. Platforms
+    configured by the user are printed first with a `*`; the detected native
+    platform is the first unstarred entry, before emulated detected platforms.
+    Missing, all-configured, or multi-node evidence fails closed.
+    """
+    nodes_header, nodes = _buildx_nodes(lines)
     if len(nodes) != 1 or not nodes[0]["native"]:
         return None
     node = nodes[0]
@@ -2435,8 +2445,13 @@ def _emulated_image_compile_leaf(lines: list[str]) -> dict[str, Any] | None:
         re.search(r"\bdocker\s+buildx\s+build\b|docker/build-push-action@", line,
                   re.IGNORECASE)
         for line in lines)
-    builder_unconfirmed = (builder is None and raw_buildx and not any(
-        re.search(r"\bNodes:\s*$", line) for line in lines))
+    nodes_header, builder_nodes = _buildx_nodes(lines)
+    incomplete_topology = bool(
+        nodes_header
+        and (not builder_nodes or any(not node["native"] for node in builder_nodes)))
+    builder_unconfirmed = bool(
+        builder is None
+        and (incomplete_topology or (raw_buildx and not nodes_header)))
     if builder is None and not builder_unconfirmed:
         return None
     native_platform, builder_evidence = (
@@ -2469,18 +2484,31 @@ def _emulated_image_compile_leaf(lines: list[str]) -> dict[str, Any] | None:
         # emulation claim.
         if native <= 0:
             return None
+        ordered_durations = sorted(
+            durations,
+            key=lambda row: (
+                _platform_family(f"linux/{row[0]}") != native_family,
+                row[1],
+            ),
+            reverse=True,
+        )
+        topology_evidence = [nodes_header] if nodes_header else []
+        topology_evidence.extend(
+            value for node in builder_nodes
+            for value in (node["name"], node["platforms"]) if value)
         return {
             "fix_key": "emulated-image-compile",
             "unit_label": (
                 "foreign-platform compilation dominates the cold build, but "
-                "the builder topology was not printed — check the builder nodes"),
+                "the topology did not establish a native platform for every builder "
+                "node — check the builder nodes"),
             "magnitude": None,
             "deeper": [],
             "uncredited": True,
-            "evidence": [
-                item for _arch, _seconds, header, done, _kind in durations
+            "evidence": ([
+                item for _arch, _seconds, header, done, _kind in ordered_durations
                 for item in (header, done)
-            ][:6],
+            ][:6] + topology_evidence)[:8],
             "search": ["docker buildx inspect --bootstrap", "Nodes:", "Platforms:"],
             "builder_topology_unconfirmed": True,
         }
@@ -3193,11 +3221,54 @@ def _parse_log(text: str,
             index += 1
         return tuple(sorted(context))
 
+    def _cargo_selected_packages(command: str) -> set[str] | None:
+        """Return explicit package selectors, or None when the command is unscoped."""
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            return None
+        cargo_index = next((index for index, token in enumerate(tokens)
+                            if token == "cargo" or token.endswith("/cargo")), None)
+        if cargo_index is None:
+            return None
+        selected: set[str] = set()
+        tail = tokens[cargo_index + 1:]
+        index = 0
+        while index < len(tail):
+            token = tail[index]
+            if token == "--":
+                break
+            option, separator, inline = token.partition("=")
+            if option in {"-p", "--package"}:
+                if separator:
+                    value = inline
+                elif index + 1 < len(tail):
+                    index += 1
+                    value = tail[index]
+                else:
+                    return None
+                if value:
+                    selected.add(value.split("@", 1)[0])
+            elif token.startswith("-p") and not token.startswith("--"):
+                selected.add(token[2:].split("@", 1)[0])
+            index += 1
+        return selected or None
+
+    def _cargo_package_selected(name: str, selectors: set[str]) -> bool:
+        return any(fnmatch.fnmatchcase(name, selector) for selector in selectors)
+
+    def _cargo_builds_test_harness(context: tuple[str, ...]) -> bool:
+        return ("subcommand=test" in context
+                or any(axis in {"--tests", "--benches", "--all-targets"}
+                       or axis.startswith(("--test=", "--bench="))
+                       for axis in context))
+
     def _cargo_group(group: tuple[str, list[str]]) -> dict[str, Any] | None:
         command, group_lines = group
         context = _cargo_command_context(command)
         if context is None:
             return None
+        selected_packages = _cargo_selected_packages(command)
         crates: dict[tuple[str, str, str], str] = {}
         for group_line in group_lines:
             match = re.search(
@@ -3227,6 +3298,7 @@ def _parse_log(text: str,
         seconds = sum(float(value) * {"h": 3600, "m": 60, "s": 1}[unit.casefold()]
                       for value, unit in parts)
         return {"command": command, "context": context, "crates": crates,
+                "selected_packages": selected_packages,
                 "profile": (finished.group("quoted") or finished.group("plain")).casefold(),
                 "seconds": seconds,
                 "finished": next(line.strip() for line in group_lines
@@ -3234,9 +3306,19 @@ def _parse_log(text: str,
 
     compiled = [row for group in cargo_groups if (row := _cargo_group(group)) is not None]
     for later_index, later in enumerate(compiled[1:], 1):
+        if later["selected_packages"] is None:
+            continue
         for earlier in compiled[:later_index]:
-            repeated = sorted(set(earlier["crates"]) & set(later["crates"]))
-            if (not repeated or not set(later["crates"]) <= set(earlier["crates"])
+            earlier_selected = earlier["selected_packages"] or set()
+            later_crates = set(later["crates"])
+            if _cargo_builds_test_harness(later["context"]):
+                later_crates = {
+                    key for key in later_crates
+                    if (not _cargo_package_selected(key[0], later["selected_packages"])
+                        or _cargo_package_selected(key[0], earlier_selected))
+                }
+            repeated = sorted(set(earlier["crates"]) & later_crates)
+            if (not repeated or not later_crates <= set(earlier["crates"])
                     or earlier["profile"] != later["profile"]
                     or earlier["context"] != later["context"]):
                 continue
@@ -3466,7 +3548,7 @@ def _parse_log(text: str,
                 r"pytest\s+(?P<id>.+?)\s*$",
                 re.I,
             ),
-            re.compile(r"^collecting\b", re.I),
+            re.compile(r"^(?:collecting\b|collected\s+\d+\s+items?\b)", re.I),
             re.compile(
                 r"^(?:=+\s*)?\d+\s+(?:passed|failed|errors?|skipped)\b"
                 r".*\bin\s+\d",
@@ -3513,6 +3595,7 @@ def _parse_log(text: str,
         startups: list[float] = []
         iterations: list[float] = []
         measurements: list[tuple[str, str, str]] = []
+        work_messages: list[str] = []
         complete = True
         for pos, (line_i, started, identity, boundary_raw) in enumerate(boundaries):
             next_line = (boundaries[pos + 1][0]
@@ -3520,14 +3603,15 @@ def _parse_log(text: str,
             next_started = (boundaries[pos + 1][1]
                             if pos + 1 < len(boundaries) else None)
             window = timestamped[line_i + 1:next_line]
-            work_row = next(((when, raw, match) for when, message, raw in window
+            work_row = next(((when, message, raw, match)
+                             for when, message, raw in window
                              if (match := work_re.match(message))), None)
             done_row = next(((when, raw, match) for when, message, raw in window
                              if (match := done_re.match(message))), None)
             if work_row is None or done_row is None:
                 complete = False
                 break
-            work, work_raw, work_match = work_row
+            work, work_message, work_raw, work_match = work_row
             done, done_raw, done_match = done_row
             if (bind_identity
                     and (work_match.group("id") != identity
@@ -3542,6 +3626,7 @@ def _parse_log(text: str,
             startups.append((work - started).total_seconds())
             iterations.append((done - started).total_seconds())
             measurements.append((boundary_raw, work_raw, done_raw))
+            work_messages.append(work_message)
         if not complete:
             continue
         startup_median = _median(startups)
@@ -3551,15 +3636,24 @@ def _parse_log(text: str,
                 or count * startup_median < 20):
             continue
         modeled = round((count - 1) * startup_median, 2)
+        collection_completion_only = all(
+            re.match(r"^collected\s+\d+\s+items?\b", message, re.IGNORECASE)
+            for message in work_messages
+        )
         startup_leaf = {
             "fix_key": "per-invocation-startup",
-            "unit_label": (
+            "unit_label": ((
+                f"{count} serial {profile_name} iterations each launch a fresh "
+                "process; collection completion is the first observable work marker, "
+                "so removable startup is not separately measurable"
+            ) if collection_completion_only else (
                 f"{count} serial {profile_name} iterations each launch a fresh "
                 f"process; median startup is {startup_median:g}s of a "
                 f"{iteration_median:g}s iteration"
-            ),
-            "magnitude": {"label": "modeled repeated process startup",
-                          "value": modeled, "unit": "s"},
+            )),
+            "magnitude": (None if collection_completion_only else
+                          {"label": "modeled repeated process startup",
+                           "value": modeled, "unit": "s"}),
             "deeper": [],
             "evidence": [
                 *measurements[0],
@@ -3571,7 +3665,7 @@ def _parse_log(text: str,
             "iteration_count": count,
             "startup_median_s": round(startup_median, 2),
             "iteration_median_s": round(iteration_median, 2),
-            "modeled_saving_s": modeled,
+            "modeled_saving_s": None if collection_completion_only else modeled,
         }
         break
     if startup_leaf is not None:
@@ -3661,6 +3755,12 @@ def _parse_log(text: str,
         r"(?:PASSED|OK)\b(?:\s+\[\s*\d+%\])?",
         re.IGNORECASE,
     )
+    pytest_node = re.compile(
+        r"^(?P<node>(?P<file>\S+\.py)::\S+?)(?:\s+.*)?$",
+        re.IGNORECASE,
+    )
+    pytest_outcome = re.compile(
+        r"^PASSED(?:\s+\[\s*\d+%\])?\s*$", re.IGNORECASE)
     pytest_command = re.compile(r"(?:^|\s)(?:python\s+-m\s+)?pytest\b.*(?:^|\s)-v\b",
                                 re.IGNORECASE)
     completions = [
@@ -3668,6 +3768,49 @@ def _parse_log(text: str,
         for i, (when, message, raw, _stamp) in enumerate(stamped_tests)
         if (m := pytest_done.match(message))
     ]
+    # With ``pytest -v -s``, a test's own stdout follows the node id and pytest
+    # writes the outcome on a later physical line. Pair that standalone outcome
+    # with the preceding node, stopping at the next node so unrelated output
+    # cannot be borrowed as proof of completion. A suite may contain both this
+    # split shape and ordinary one-line results, so merge the two sets by node.
+    # Failed summaries withhold the split path: untrusted test stdout can print
+    # ``PASSED`` and must not impersonate pytest's result after the test fails.
+    summary_failed = any(
+        re.search(r"\b\d+\s+(?:failed|errors?)\b", message, re.IGNORECASE)
+        for _when, message, _raw, _stamp in stamped_tests
+    )
+    passed_totals = [
+        int(match.group(1))
+        for _when, message, _raw, _stamp in stamped_tests
+        if (match := re.search(r"\b(\d+)\s+passed\b", message, re.IGNORECASE))
+    ]
+    if not summary_failed and passed_totals:
+        completed_nodes = {row[3] for row in completions}
+        split_completions: list[tuple[int, datetime, str, str, str]] = []
+        node_rows = [
+            (i, when, m.group("file"), m.group("node"), raw)
+            for i, (when, message, raw, _stamp) in enumerate(stamped_tests)
+            if (m := pytest_node.match(message))
+        ]
+        for pos, (line_i, _started, test_file, node, node_raw) in enumerate(node_rows):
+            if node in completed_nodes:
+                continue
+            stop = node_rows[pos + 1][0] if pos + 1 < len(node_rows) else len(stamped_tests)
+            outcomes = [
+                (i, when, raw) for i, (when, message, raw, _stamp)
+                in enumerate(stamped_tests[line_i + 1:stop], start=line_i + 1)
+                if pytest_outcome.match(message)
+            ]
+            outcome = outcomes[-1] if outcomes else None
+            if outcome is not None:
+                split_completions.append(
+                    (outcome[0], outcome[1], test_file, node,
+                     f"{node_raw} … {outcome[2]}")
+                )
+                completed_nodes.add(node)
+        if max(passed_totals) >= len(completions) + len(split_completions):
+            completions.extend(split_completions)
+    completions.sort(key=lambda row: row[0])
     if (len(completions) >= 4
             and len({row[2] for row in completions}) == 1
             and len({row[3] for row in completions}) == len(completions)):
@@ -4645,20 +4788,29 @@ def _fix_meta_for_leaf(leaf: dict[str, Any] | None) -> dict[str, Any] | None:
         resolved.update({
             "cause": (
                 "Foreign-platform compilation dominates the measured cold build, "
-                "but the builder topology was not printed. The evidence does not "
-                "establish whether that work ran under emulation or on a native node."
+                "but the topology did not establish a native platform for every builder "
+                "node. The evidence does not establish whether that work ran under "
+                "emulation or on a native node."
             ),
             "look": (
-                "Run `docker buildx inspect --bootstrap` first and record every node "
-                "and platform. Then trace the foreign-platform compile stage in `{wf}` "
-                "and its repository-local Dockerfile."
+                "Run or rerun `docker buildx inspect --bootstrap`, start or repair any "
+                "inactive node, and record a usable native platform for every node. Then "
+                "trace the foreign-platform compile stage in `{wf}` and its "
+                "repository-local Dockerfile."
+            ),
+            "constraints": (
+                "Preserve every published platform, artifact, release flag, test, "
+                "provenance record, and manifest. Do not size or claim a saving until "
+                "every builder node has a usable native platform and the foreign work's "
+                "execution topology is confirmed."
             ),
             "deliver": (
-                "Start with `docker buildx inspect --bootstrap`. If the builder has no "
-                "native node for the foreign platform, compare a build-platform stage "
-                "or explicit cross-compilation against the same workload. If a native "
-                "node exists, investigate that node and the cold layer instead. Do not "
-                "claim emulation or a saving until the topology is confirmed."
+                "Run or rerun `docker buildx inspect --bootstrap` until every node reports "
+                "a usable native platform. If the builder has no native node for the "
+                "foreign platform, compare a build-platform stage or explicit "
+                "cross-compilation against the same workload. If a native node exists, "
+                "investigate that node and the cold layer instead. Do not claim emulation "
+                "or a saving until the topology is confirmed."
             ),
         })
     return resolved
@@ -14404,6 +14556,27 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
                     " At the sampled p50 commit, a 4x speedup to its slowest job "
                     f"projects to **{_commit_duration(_projected)}** "
                     f"(**{_multiple:.2f}x**).")
+                _median_multiple = _num(
+                    _commit_wall.get("median_projection_multiple"))
+                _worst = _commit_wall.get("worst_commit") or {}
+                _worst_wall = (_num(_worst.get("wall_s"))
+                               if isinstance(_worst, dict) else None)
+                _worst_sha = (str(_worst.get("sha") or "")[:7]
+                              if isinstance(_worst, dict) else "")
+                _worst_wf = (str(_worst.get("workflow_file") or "")
+                             if isinstance(_worst, dict) else "")
+                if _median_multiple is not None:
+                    _projection_clause += (
+                        " Across commits, the median projection is "
+                        f"**{_median_multiple:.2f}x**.")
+                if _worst_wall is not None and _worst_sha:
+                    _held = ""
+                    if (_median_multiple is not None
+                            and _median_multiple < _multiple / 2.0 and _worst_wf):
+                        _held = f"; `{_wf_base(_worst_wf)}` holds its slowest job"
+                    _projection_clause += (
+                        f" The worst sampled commit is `{_worst_sha}` at "
+                        f"**{_commit_duration(_worst_wall)}**{_held}.")
         _commit_wall_block.append(
             "> **Per-commit PR wait:** p50 "
             f"**{_commit_duration(_commit_p50)}**, p90 "
