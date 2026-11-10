@@ -184,6 +184,8 @@ def test_a_working_leg_with_a_different_step_name_is_not_discarded():
             (100, "windows", "success"),
             (90, "windows", "success"),
             (12, "empty", "skipped"))):
+        linux_ran = platform == "linux"
+        windows_ran = platform == "windows"
         jobs.append({
             "name": f"Test (Shard {index + 1})",
             "started_at": start.isoformat(),
@@ -192,9 +194,15 @@ def test_a_working_leg_with_a_different_step_name_is_not_discarded():
             "steps": [
                 {"name": "Install dependencies", "conclusion": "success"},
                 {"name": "Run Linux tests",
-                 "conclusion": "success" if platform == "linux" else "skipped"},
+                 "conclusion": "success" if linux_ran else "skipped",
+                 "started_at": start.isoformat() if linux_ran else None,
+                 "completed_at": ((start + timedelta(seconds=800)).isoformat()
+                                  if linux_ran else None)},
                 {"name": "Run Windows tests",
-                 "conclusion": "success" if platform == "windows" else "skipped"},
+                 "conclusion": "success" if windows_ran else "skipped",
+                 "started_at": start.isoformat() if windows_ran else None,
+                 "completed_at": ((start + timedelta(seconds=duration - 10)).isoformat()
+                                  if windows_ran else None)},
             ],
         })
 

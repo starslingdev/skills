@@ -10215,7 +10215,11 @@ def _detect_opt25_shard_imbalance(
             dominant_name = dominant_step_by_base.get(base)
             dominant_steps = [step for step in work_steps
                               if str(step.get("name") or "") == dominant_name]
-            skipped_dominant = bool(dominant_name) and (
+            # A differently named active step is positive evidence that this
+            # leg did real work (for example platform-specific test steps).
+            # Only use the dominant sibling step to confirm an otherwise
+            # workless leg; never discard that alternate work.
+            skipped_dominant = bool(dominant_name) and not active_work_steps and (
                 not dominant_steps or all(
                     str(step.get("conclusion") or "").lower() == "skipped"
                     for step in dominant_steps))
