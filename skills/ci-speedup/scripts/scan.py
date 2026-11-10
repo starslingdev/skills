@@ -4158,6 +4158,36 @@ def _cache_paths(steps: list[dict]) -> list[str]:
     return [path.strip().casefold() for path in paths if path.strip()]
 
 
+_CACHE_ENV_PATH_RE = re.compile(
+    r"\$\{\{\s*env\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}", re.IGNORECASE)
+
+
+def _resolved_cache_env_path(
+    value: str, doc: dict, job: dict, step: dict,
+) -> str | None:
+    """Resolve cache-path env expressions with Actions' scope precedence.
+
+    ``None`` means an expression named an unavailable variable. Callers keep
+    that case unknown rather than turning it into an absence finding.
+    """
+    env: dict[str, str] = {}
+    for scope in (doc.get("env"), job.get("env"), step.get("env")):
+        if isinstance(scope, dict):
+            env.update({str(name): str(item) for name, item in scope.items()})
+    missing = False
+
+    def replace(match: re.Match[str]) -> str:
+        nonlocal missing
+        name = match.group(1)
+        if name not in env:
+            missing = True
+            return match.group(0)
+        return env[name]
+
+    resolved = _CACHE_ENV_PATH_RE.sub(replace, value)
+    return None if missing else resolved
+
+
 def _cache_saved_keys(docs: Iterable[dict]) -> list[str]:
     """Normalized key families that repository cache steps can save."""
     keys: list[str] = []
@@ -4345,7 +4375,19 @@ def _detect_opt61(
         if not isinstance(job, dict):
             continue
         cache_steps = _cache_action_steps(job)
-        cache_paths = _cache_paths(cache_steps)
+        cache_paths: list[str] = []
+        unknown_env_cache_path = False
+        for cache_step in cache_steps:
+            values = (cache_step.get("with")
+                      if isinstance(cache_step.get("with"), dict) else {})
+            for raw_path in str(values.get("path") or "").splitlines():
+                if not raw_path.strip():
+                    continue
+                resolved = _resolved_cache_env_path(raw_path.strip(), doc, job, cache_step)
+                if resolved is None:
+                    unknown_env_cache_path = True
+                else:
+                    cache_paths.append(resolved.casefold())
         blob = "\n".join((_job_run_blob(job), _job_env_blob(job, doc)))
         reasons: list[tuple[str, str]] = []
 
@@ -4404,10 +4446,10 @@ def _detect_opt61(
         ]
 
         def persisted_dirs(directories: list[str]) -> bool:
-            return bool(directories) and all(
+            return bool(directories) and (unknown_env_cache_path or all(
                 any(_cache_path_covers(path, directory) for path in cache_paths)
                 for directory in directories
-            )
+            ))
 
         persisted_declared = persisted_dirs([value for _name, value in declared_dirs])
         if temp and not (persisted_declared or any(
@@ -4421,7 +4463,8 @@ def _detect_opt61(
             for step in cache_steps)
         persisted_compiler = (persisted_dirs(declared_compiler_dirs)
                                 if declared_compiler_dirs else any(
-            token in cache_path_text for token in ("ccache", "sccache", "target")))
+            token in cache_path_text for token in ("ccache", "sccache", "target"))
+            or unknown_env_cache_path)
         if (uses_compiler_cache and not supplied_by_cache_action and not persisted_compiler
                 and not _is_self_hosted(job)
                 and not _compiler_cache_has_remote_backend(job, doc)):
@@ -4430,7 +4473,8 @@ def _detect_opt61(
         persisted_analysis = (persisted_dirs(declared_analysis_dirs)
                                if declared_analysis_dirs else any(
                                    token in cache_path_text
-                                   for token in ("staticcheck", "golangci")))
+                                   for token in ("staticcheck", "golangci"))
+                               or unknown_env_cache_path)
         if _ANALYSIS_CACHE_RE.search(blob) and not persisted_analysis:
             reasons.append((_ANALYSIS_CACHE_RE.search(blob).group(0),
                             "the analysis cache has no persistence step"))

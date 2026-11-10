@@ -289,6 +289,46 @@ jobs:
     assert "OPT61" not in _patterns(expression_match)
 
 
+def test_opt61_resolves_job_env_in_a_saved_cache_path(tmp_path) -> None:
+    rows = _scan_workflow(tmp_path, """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CCACHE_DIR: /tmp/ccache
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-v1
+      - run: cmake --build build
+""")
+
+    assert "OPT61" not in _patterns(rows)
+
+
+def test_opt61_keeps_an_unknown_cache_path_expression_silent(tmp_path) -> None:
+    rows = _scan_workflow(tmp_path, """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CCACHE_DIR: /tmp/ccache
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.CACHE_PATH_NOT_DECLARED }}
+          key: ccache-v1
+      - run: cmake --build build
+""")
+
+    assert "OPT61" not in _patterns(rows)
+
+
 def test_opt61_marks_a_restored_then_unread_deleted_path_as_pure_cost(tmp_path) -> None:
     rows = _scan(tmp_path, """      - uses: actions/cache@v4
         with:
