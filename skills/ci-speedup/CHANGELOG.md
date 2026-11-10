@@ -1286,6 +1286,7 @@ unversioned and updates by reinstall from `main`.
 ### Fixed
 
 - **2026-11-09** — Follow one Make target into Jest configuration and surface uncredited worker-cap, persisted-cache, and coverage-provider checks. Jest's default-enabled cache is no longer misreported as missing merely because `--cache` is absent.
+- **2026-11-09** — Size unnecessary dependency edges from the measured longest-path change instead of a flat estimate. Reports now disclose an upper bound on downstream compute exposed on sampled failure paths, exclude runs where the dependency job cannot be resolved, and keep Go script launchers from being mistaken for check-only gates.
 - **2026-11-10** — Stop crediting the generic redundant-work lever when a measured foreign-platform compile already explains the long pole. The specific compile drill remains, while the redundant-work row becomes uncredited and no longer recommends cache warming.
 - **2026-11-09** — Read pytest's real non-terminal `collected N items` line when measuring repeated invocation startup, and pair `-v -s` node IDs with later standalone outcomes when proving isolated tests run serially.
 - **2026-11-09** — Distinguish a selected Cargo package's newly compiled test harness from a repeated dependency compile. Package-scoped steps now report only shared local crates that compile again, and unscoped follow-up commands fail closed.

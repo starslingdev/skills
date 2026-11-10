@@ -10,11 +10,6 @@
   "config_eras": [],
   "credited_findings": [
     {
-      "pattern": "OPT21",
-      "runner_min": null,
-      "wall_clock_s": 30.0
-    },
-    {
       "pattern": "OPT45",
       "runner_min": 3.0,
       "wall_clock_s": 0.0
@@ -62,6 +57,7 @@
       "Bottom-line headline leads with the stamped cluster-floor ceiling (no burial)",
       "OPT43 runner-label evidence matches its structured stamp",
       "OPT64 is ranked only on enough retried runs",
+      "TOC 'Also noticed' pointer's on/off-path label matches the appendix",
       "Tier-2 R-rows carry re-derived wall-clock-neutral certificates",
       "Tier-2 R-rows use measured sizing basis",
       "Tier-2 savings rows are backed by runner-minute cost spine",

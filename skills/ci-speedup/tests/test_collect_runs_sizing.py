@@ -582,10 +582,9 @@ def test_runner_min_demoted_for_unrealizable_patterns():
     # whose modeled bill saving isn't realizable are demoted out of the credited
     # field (→ None, so the bill headline / Also-noticed appendix skip them) with the
     # modeled amount preserved for annotated display.
-    #   OPT21 — needs-removal is queue-wait, not compute (M3)
     #   OPT3/OPT9 — warm-local-cache unproven on ephemeral runners (M4/M5)
     #   OPT32 — missing paths filter is a gross upper bound (B3)
-    for pat in ("OPT21", "OPT3", "OPT9", "OPT32"):
+    for pat in ("OPT3", "OPT9", "OPT32"):
         f = {"pattern": pat, "affected_jobs": ["changed-tests"]}
         if pat == "OPT32":
             f["path_filter_measurement"] = {
