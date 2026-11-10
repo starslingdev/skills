@@ -517,7 +517,8 @@ def test_named_fixtures_exercise_their_defining_interactions(
         for row in cache_rows)
     static_cache_rows = [row for row in cache_rows if row.get("static_cache_lint")]
     assert static_cache_rows
-    assert all(not row.get("cache_log_confirmation") for row in static_cache_rows)
+    assert all(not (row.get("cache_log_confirmation") or {}).get("misses")
+               for row in static_cache_rows)
     assert all(
         not float(row.get("wall_clock_p50_s") or 0)
         and not float(row.get("runner_min_saving") or 0)
@@ -654,17 +655,36 @@ def test_static_cache_lint_with_measured_miss_can_be_credited(
             "Cache restored in 2s\nCache saved in 2s")
     hit = (f"{hit}\nCache size: 50 MB\n"
            "Cache restored in 2s\nCache saved in 2s")
-    recorded["logs"] = {"1101": miss, "1201": hit, "1301": hit}
+    recorded["logs"] = {"1101": miss, "1201": miss, "1301": hit}
     responses.write_text(json.dumps(recorded, indent=2) + "\n", encoding="utf-8")
+    family_steps = {
+        "ccache": """
+    env:
+      CCACHE_MAXSIZE: 50M
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ hashFiles('compiler.lock') }}
+      - run: cmake --build build
+""",
+        "buildkit": """
+    steps:
+      - run: >-
+          docker buildx build --cache-to type=gha,scope=image-${{ github.sha }} .
+""",
+        "go": """
+    steps:
+      - run: go clean -i -cache
+""",
+    }
     workflow = fixture / "workflows" / "ci.yml"
-    workflow.write_text(workflow.read_text(encoding="utf-8").replace(
-        "      - uses: hendrikmuhs/ccache-action@v1\n",
-        "      - uses: actions/cache@v4\n"
-        "        with:\n"
-        "          path: ~/.cache/ccache\n"
-        "          key: ccache-${{ hashFiles('go.sum') }}\n"
-        "          restore-keys: unrelated-family-\n"
-        "      - uses: hendrikmuhs/ccache-action@v1\n"), encoding="utf-8")
+    workflow.write_text(f"""name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest{family_steps[family]}""", encoding="utf-8")
     (fixture / "expected.json").write_text("{}\n", encoding="utf-8")
 
     doc, _report, checks = run_fixture(fixture, monkeypatch, tmp_path)
@@ -673,7 +693,8 @@ def test_static_cache_lint_with_measured_miss_can_be_credited(
     confirmed = [row for row in doc["findings"]
                  if row.get("static_cache_lint")
                  and row.get("pattern") == pattern
-                 and row.get("cache_family") == family
+                 and family in " ".join(str(row.get(key) or "")
+                                        for key in ("evidence", "subject")).lower()
                  and "build" in (row.get("affected_jobs") or [])
                  and row.get("cache_log_confirmation", {}).get("misses")]
     if credited:
@@ -701,6 +722,79 @@ def test_static_cache_lint_with_measured_miss_can_be_credited(
     assert any(
         run.get("event") == "push" and run.get("conclusion") == "failure"
         for workflow in red["workflows"] for run in workflow["runs"])
+
+
+@pytest.mark.parametrize("statuses", [
+    ("hit", "hit", "hit", "hit"),
+    ("miss", "hit", "hit", "hit"),
+])
+def test_collect_withholds_cache_credit_without_a_majority_of_misses(
+        monkeypatch, tmp_path, statuses):
+    fixture = tmp_path / "inputs" / "cache-hit-distribution"
+    fixture.parent.mkdir()
+    shutil.copytree(FIXTURE_ROOT / "cache-lints", fixture)
+    responses = fixture / "responses.json"
+    recorded = json.loads(responses.read_text(encoding="utf-8"))
+    recorded["repo"] = "fixture/cache-hit-distribution"
+    recorded["required_checks"] = ["build"]
+    recorded["cache_usage_bytes"] = 0
+
+    extra_run = json.loads(json.dumps(recorded["workflows"][0]["runs"][-1]))
+    extra_run["id"] = 1004
+    extra_run["head_sha"] = "sha-d"
+    extra_run["html_url"] = str(extra_run.get("html_url") or "").replace(
+        "/1003", "/1004")
+    recorded["workflows"][0]["runs"].append(extra_run)
+    extra_jobs = json.loads(json.dumps(recorded["jobs"]["1003"]))
+    for job in extra_jobs:
+        old_id = str(job.get("id") or "")
+        if old_id:
+            job["id"] = int(old_id) + 100
+            job["html_url"] = str(job.get("html_url") or "").replace(
+                f"/job/{old_id}", f"/job/{job['id']}")
+    recorded["jobs"]["1004"] = extra_jobs
+    recorded["changed_files"] = {
+        str(number): [f"src/{letter}.cc"]
+        for number, letter in enumerate("abcd", 1)
+    }
+    log_by_status = {
+        "miss": ("Cache not found for input keys: pnpm-linux-old\n"
+                 "pnpm install\nCache size: 50 MB\n"
+                 "Cache restored in 2s\nCache saved in 2s"),
+        "hit": ("Cache restored from key: pnpm-linux-stable\n"
+                "pnpm install\nCache size: 50 MB\n"
+                "Cache restored in 2s\nCache saved in 2s"),
+    }
+    recorded["logs"] = {
+        job_id: log_by_status[status]
+        for job_id, status in zip(("1101", "1201", "1301", "1401"), statuses)
+    }
+    for number, workflow_run in enumerate(recorded["workflows"][0]["runs"], 1):
+        workflow_run["pull_requests"] = [{"number": number}]
+        recorded["checks"][workflow_run["head_sha"]] = [{
+            "name": "build",
+            "started_at": workflow_run["run_started_at"],
+            "completed_at": workflow_run["updated_at"],
+        }]
+    responses.write_text(json.dumps(recorded, indent=2) + "\n", encoding="utf-8")
+    (fixture / "workflows" / "ci.yml").write_text("""name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: pnpm/action-setup@v4
+      - run: pnpm install
+""", encoding="utf-8")
+    (fixture / "expected.json").write_text("{}\n", encoding="utf-8")
+
+    doc, _report, checks = run_fixture(fixture, monkeypatch, tmp_path)
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+    finding = next(row for row in doc["findings"]
+                   if row.get("pattern") == "OPT5")
+    assert finding.get("wall_clock_p50_s") == 0
+    assert not float(finding.get("runner_min_saving") or 0)
 
 
 def _pr_commit_tail_fixture(root: Path) -> Path:

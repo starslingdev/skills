@@ -6715,8 +6715,13 @@ def _demote_runner_min(f: dict[str, Any], note: str) -> None:
 def _size_finding(f: dict[str, Any], crit: dict[str, Any],
                   monthly_volume: int | None) -> None:
     """Set wall_clock_p50_s and runner_min_saving on the finding in-place."""
-    if (f.get("static_cache_lint")
-            and not isinstance(f.get("cache_log_confirmation"), dict)):
+    cache_confirmation = f.get("cache_log_confirmation")
+    confirmed_miss_majority = (
+        isinstance(cache_confirmation, dict)
+        and int(cache_confirmation.get("misses") or 0)
+        > int(cache_confirmation.get("hits") or 0)
+    )
+    if f.get("static_cache_lint") and not confirmed_miss_majority:
         f["wall_clock_p50_s"] = None
         f["runner_min_saving"] = None
         f["tier"] = 2
@@ -24539,19 +24544,20 @@ def _attach_cache_log_evidence(client: "GhClient", repo: str,
         if not rows:
             continue
         sampled = len(rows)
-        if f.get("static_cache_lint") and miss_n:
-            f["cache_log_confirmation"] = {
-                "misses": miss_n,
-                "hits": hit_n,
-                "unreadable": unknown_n,
-                "sampled_runs": sampled,
-            }
+        f["cache_log_confirmation"] = {
+            "misses": miss_n,
+            "hits": hit_n,
+            "unreadable": unknown_n,
+            "sampled_runs": sampled,
+        }
         noun = f"{keywords[0]} cache" if keywords else "cache"   # "pnpm cache"
         the_cache = f"the {noun}"                                  # "the pnpm cache"
         if miss_n and hit_n:
+            credit = ("misses outnumber hits, so the miss-mode saving is eligible "
+                      "for the sizing guards" if miss_n > hit_n else
+                      "hits are at least as common as misses, so no saving is credited")
             summary = (f"Across {sampled} sampled run(s), {the_cache} MISSED on "
-                       f"{miss_n} and hit on {hit_n} — bimodal, so the saving is "
-                       f"the miss-mode cost × miss rate, not the full step:")
+                       f"{miss_n} and hit on {hit_n} — bimodal; {credit}:")
             note = ("Each link opens that run's job log with the verbatim cache "
                     "line. Compare the MISS vs hit run durations to size the win.")
         elif miss_n:
@@ -32084,6 +32090,18 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         crit = crit_by_wf.get(wf_path, {})
         vol = vol_by_wf.get(wf_path)
         _size_finding(f, crit, vol)
+        confirmation = f.get("cache_log_confirmation")
+        if isinstance(confirmation, dict):
+            misses = int(confirmation.get("misses") or 0)
+            hits = int(confirmation.get("hits") or 0)
+            if hits and misses <= hits:
+                f["wall_clock_p50_s"] = 0.0
+                f["runner_min_saving"] = 0.0
+                f["tier"] = 2
+                f["realization"] = "none"
+                f["size_note"] = (
+                    "sampled cache hits are at least as common as misses — no "
+                    "wall-clock or runner-minute saving is credited")
         if f in _cache_candidates:
             _apply_cache_sizing_guard(
                 f, usage_bytes=_cache_usage, changed=_changed_files,
