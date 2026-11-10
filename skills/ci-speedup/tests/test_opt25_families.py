@@ -147,7 +147,33 @@ def test_real_imbalance_stamps_excluded_legs_without_work():
 
     findings = cr._detect_opt25_shard_imbalance(
         "ci.yml", [jobs, jobs], 0, {"long_pole_p50": 600})
-    assert findings[0]["legs_excluded_no_work"] == 2
+    assert findings[0]["legs_excluded_no_work"] == 1
+
+
+@pytest.mark.parametrize("housekeeping", [
+    ["Run actions/checkout@v4"],
+    ["Post Run actions/checkout@v4", "Run actions/upload-artifact@v4"],
+])
+def test_pr_light_legs_with_github_step_names_do_not_create_an_imbalance(
+        housekeeping):
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    jobs = []
+    for index, duration in enumerate((600, 400, 12, 12)):
+        ran = index < 2
+        steps = [{"name": name, "conclusion": "success"}
+                 for name in housekeeping]
+        steps.append({"name": "Run divided tests",
+                      "conclusion": "success" if ran else "skipped"})
+        jobs.append({
+            "name": f"Test (Shard {index + 1})",
+            "started_at": start.isoformat(),
+            "completed_at": (start + timedelta(seconds=duration)).isoformat(),
+            "conclusion": "success",
+            "steps": steps,
+        })
+
+    assert cr._detect_opt25_shard_imbalance(
+        "ci.yml", [jobs, jobs], 0, {"long_pole_p50": 600}) == []
 
 
 def test_a_working_leg_with_a_different_step_name_is_not_discarded():
@@ -175,7 +201,7 @@ def test_a_working_leg_with_a_different_step_name_is_not_discarded():
     findings = cr._detect_opt25_shard_imbalance(
         "ci.yml", [jobs, jobs], 0, {"long_pole_p50": 900})
 
-    assert findings[0]["legs_excluded_no_work"] == 2
+    assert findings[0]["legs_excluded_no_work"] == 1
     assert "Test (Shard 1)" in findings[0]["measured_evidence"]["summary"]
 
 

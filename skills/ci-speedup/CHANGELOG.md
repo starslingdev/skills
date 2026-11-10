@@ -1286,6 +1286,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-11-10** — Recognize GitHub's generated checkout, post-action, and always-run upload step names when excluding pull-request-light matrix legs from imbalance measurements, and count excluded legs once across repeated runs.
 - **2026-11-09** — Recognize Playwright's documented camel-case `shardIndex`/`shardTotal` matrix when those dimensions feed `--shard=`, and keep the path-partitioned monorepo fixture focused on package and runtime routing.
 
 - **2026-11-09** — Follow one Make target into Jest configuration and surface uncredited worker-cap, persisted-cache, and coverage-provider checks. Jest's default-enabled cache is no longer misreported as missing merely because `--cache` is absent.
