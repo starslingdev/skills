@@ -146,7 +146,8 @@ class FixtureClient:
         return ""
 
 
-def run_fixture(path: Path, monkeypatch, tmp_path: Path) -> tuple[dict, str, list]:
+def run_fixture(path: Path, monkeypatch, tmp_path: Path, *,
+                max_runs: int = 20) -> tuple[dict, str, list]:
     recorded = json.loads((path / "responses.json").read_text(encoding="utf-8"))
     repo_root = tmp_path / f"{path.name}-repo"
     repo_root.mkdir()
@@ -170,7 +171,7 @@ def run_fixture(path: Path, monkeypatch, tmp_path: Path) -> tuple[dict, str, lis
         repo_root, CATALOG, default_branch=recorded.get("default_branch", "main"))
     scanned["skill_commit_sha"] = "installed:unversioned"
     doc = cr.collect(
-        scanned, recorded["repo"], max_runs=20,
+        scanned, recorded["repo"], max_runs=max_runs,
         shallow_runs=recorded.get("shallow_runs", 20),
         with_logs=True, data_dir=tmp_path / f"{path.name}-data",
         created_before=recorded["captured_at"], root=repo_root)
@@ -342,7 +343,98 @@ def test_compact_facts_pin_collected_provenance_and_representative_job(
     facts = fixture_facts(doc, checks)
 
     assert facts["provenance"] == "required_scoped"
-    assert facts["representative_jobs"]["slowest"] == "gate"
+    assert facts["representative_jobs"]["slowest"] == "test"
+
+
+def test_serial_chain_sizes_removed_edge_and_failure_path_compute(
+        monkeypatch, tmp_path):
+    fixture = FIXTURE_ROOT / "serial-chain"
+    doc, report, checks = run_fixture(fixture, monkeypatch, tmp_path)
+    finding = next(row for row in doc["findings"]
+                   if row.get("pattern") == "OPT21"
+                   and row.get("affected_jobs") == ["test"])
+    stamp = finding["opt21_edge_sizing"]
+    assert stamp["chain_before_s"] == 1320.0
+    assert stamp["chain_after_s"] == 1200.0
+    assert finding["wall_clock_p50_s"] == 120.0
+    assert stamp["dependency_failure_share"] == 0.25
+    assert stamp["extra_runner_min_per_run"] == 5.0
+    assert "can add up to 5.00 extra runner-minutes" in finding["evidence"]
+    assert "can add up to" in report
+    assert not [check for check in checks if not check.skipped and not check.ok]
+
+
+def test_opt21_edge_sizing_certificate_rejects_a_tampered_path_delta(
+        monkeypatch, tmp_path):
+    fixture = FIXTURE_ROOT / "serial-chain"
+    doc, report, _checks = run_fixture(fixture, monkeypatch, tmp_path)
+    finding = next(row for row in doc["findings"]
+                   if row.get("opt21_edge_sizing"))
+    finding["opt21_edge_sizing"]["chain_before_s"] += 100.0
+    out = tmp_path / fixture.name
+    findings_path = out / "findings.json"
+    report_path = out / "report.md"
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+
+    checks = vr.run_checks(report, report_path, findings_path, skill_repo=None)
+    assert any(
+        check.name == "OPT21 edge sizing re-derives from the workflow graph"
+        and not check.ok
+        for check in checks
+    )
+
+
+def test_opt21_edge_delta_is_not_capped_to_the_short_dependent_job(
+        monkeypatch, tmp_path):
+    fixture = tmp_path / "edge-cap-fixture"
+    shutil.copytree(FIXTURE_ROOT / "serial-chain", fixture)
+    responses_path = fixture / "responses.json"
+    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
+    for run in recorded["workflows"][0]["runs"]:
+        if run.get("conclusion") == "success":
+            day = str(run["created_at"])[:10]
+            run["updated_at"] = f"{day}T00:20:10Z"
+    for jobs in recorded["jobs"].values():
+        if len(jobs) != 3:
+            continue
+        day = str(jobs[0]["started_at"])[:10]
+        spans = ((0, 600), (600, 610), (610, 1210))
+        for job, (start_s, end_s) in zip(jobs, spans):
+            job["started_at"] = f"{day}T00:{start_s // 60:02d}:{start_s % 60:02d}Z"
+            job["completed_at"] = f"{day}T00:{end_s // 60:02d}:{end_s % 60:02d}Z"
+            job["steps"][0]["started_at"] = job["started_at"]
+            job["steps"][0]["completed_at"] = job["completed_at"]
+    for checks in recorded["checks"].values():
+        day = str(checks[0]["started_at"])[:10]
+        spans = ((0, 600), (600, 610), (610, 1210))
+        for check, (start_s, end_s) in zip(checks, spans):
+            check["started_at"] = f"{day}T00:{start_s // 60:02d}:{start_s % 60:02d}Z"
+            check["completed_at"] = f"{day}T00:{end_s // 60:02d}:{end_s % 60:02d}Z"
+    responses_path.write_text(json.dumps(recorded, indent=2) + "\n", encoding="utf-8")
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    doc, _report, checks = run_fixture(fixture, monkeypatch, run_root)
+    finding = next(row for row in doc["findings"]
+                   if row.get("pattern") == "OPT21"
+                   and row.get("affected_jobs") == ["test"])
+    assert finding["opt21_edge_sizing"]["chain_before_s"] == 1210.0
+    assert finding["opt21_edge_sizing"]["chain_after_s"] == 610.0
+    assert finding["wall_clock_p50_s"] == 600.0
+    assert not [check for check in checks if not check.skipped and not check.ok]
+
+
+def test_opt21_failure_share_uses_one_bounded_recent_run_cohort(
+        monkeypatch, tmp_path):
+    doc, _report, checks = run_fixture(
+        FIXTURE_ROOT / "serial-chain", monkeypatch, tmp_path, max_runs=2)
+    finding = next(row for row in doc["findings"]
+                   if row.get("pattern") == "OPT21"
+                   and row.get("affected_jobs") == ["test"])
+    stamp = finding["opt21_edge_sizing"]
+    assert stamp["dependency_sampled_runs"] == 2
+    assert stamp["dependency_failed_runs"] == 0
+    assert stamp["dependency_failure_share"] == 0.0
+    assert not [check for check in checks if not check.skipped and not check.ok]
 
 
 def test_fixture_client_applies_run_query_filters():

@@ -12,7 +12,7 @@
     {
       "pattern": "OPT21",
       "runner_min": null,
-      "wall_clock_s": 30.0
+      "wall_clock_s": 120.0
     },
     {
       "pattern": "OPT45",
