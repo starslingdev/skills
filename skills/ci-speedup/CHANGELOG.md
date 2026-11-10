@@ -1,5 +1,6 @@
 # Changelog
 
+- Match the shell prefixes before a build command (`KEY=value`, `env`, `sudo`, `time`) with disjoint regex branches in OPT89, OPT102 and the emulated-image drill, from one shared source in `shell_prefix.py`. The bare-value class no longer overlaps the quoted branches, both repeats are bounded, and a value with an unpaired quote no longer counts as a prefix. CodeQL flagged the three copies as `py/redos`, the same shape #257 fixed in `_STATUS_POST_RE`.
 - Break excessive queue wait down by runner label with per-run queue and work distributions, including censored jobs cancelled before pickup. Reports name a materially faster observed label without treating queue wait as evidence to reduce jobs or shards.
 - Detect the same checked-out Cargo crates being compiled in separate steps under the same observable artifact settings, report the second step's wall as an upper bound, and guide safe command consolidation without dropping package, feature, platform, or test coverage.
 - Fill a short pull-request gate sample from a bounded walk through recent run pages, and disclose whether the walk met its target, exhausted visible candidates, reached its page cap, crossed a workflow-configuration boundary, or encountered unreadable history.
