@@ -9,7 +9,7 @@ from pathlib import Path
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from before_after import (GhVerificationClient, _baseline_from_findings,
+from before_after import (GhVerificationClient, _baseline_from_findings, _cache_class,
                           advance_verification, compare_push_cohorts)
 
 
@@ -355,6 +355,7 @@ class AdapterFixture(GhVerificationClient):
         super().__init__(poll_s=0, timeout_s=0.01, settle_s=0)
         self.responses = responses
         self.posts = []
+        self.text_gets = []
 
     def _api(self, endpoint, *, method="GET"):
         if method != "GET":
@@ -363,6 +364,13 @@ class AdapterFixture(GhVerificationClient):
         for key in sorted(self.responses, key=len, reverse=True):
             if key in endpoint:
                 return copy.deepcopy(self.responses[key])
+        return None
+
+    def _text(self, endpoint):
+        self.text_gets.append(endpoint)
+        for key in sorted(self.responses, key=len, reverse=True):
+            if key in endpoint and isinstance(self.responses[key], str):
+                return self.responses[key]
         return None
 
 
@@ -556,6 +564,53 @@ def test_real_adapter_retains_healthy_skipped_jobs_as_workload_evidence():
     assert [job["name"] for job in cohort["skipped_jobs"]] == ["optional"]
 
 
+def test_real_adapter_reads_the_sampled_jobs_log():
+    run = _api_run(10, 1)
+    client = AdapterFixture({
+        "runs/10/attempts/1/jobs": {"jobs": [_api_job(7)]},
+        "event=pull_request": {"total_count": 40},
+        "actions/jobs/7/logs": "Cache not found for input keys: node-v1",
+    })
+
+    cohort = client._cohort(
+        "o/r", "fix", [run], identity="fix:initial",
+        expected_workflows=["1:pull_request"])
+
+    assert cohort is not None
+    assert cohort["logs"] == ["Cache not found for input keys: node-v1"]
+    assert client.text_gets == ["repos/o/r/actions/jobs/7/logs"]
+
+
+def test_real_adapter_caps_and_counts_job_log_calls():
+    run = _api_run(10, 1)
+    client = AdapterFixture({
+        "runs/10/attempts/1/jobs": {
+            "jobs": [_api_job(job_id) for job_id in range(1, 23)]},
+        "event=pull_request": {"total_count": 40},
+        "actions/jobs/": "log",
+    })
+
+    cohort = client._cohort(
+        "o/r", "fix", [run], identity="fix:initial",
+        expected_workflows=["1:pull_request"])
+
+    assert cohort is not None
+    assert len(client.text_gets) == 20
+    assert cohort["log_api_calls"] == 20
+    assert cohort["log_jobs_omitted"] == 2
+
+
+def test_actions_cache_hit_and_miss_lines_drive_cache_classification():
+    assert _cache_class({
+        "position": 2,
+        "logs": ["Cache not found for input keys: node-v1"],
+    })[0] == "cold"
+    assert _cache_class({
+        "position": 1,
+        "logs": ["Cache restored from key: node-v1"],
+    })[0] == "warm"
+
+
 def test_collected_baseline_and_real_adapter_use_the_same_work_identity():
     job = {
         "name": "test", "workflow_file": ".github/workflows/ci.yml",
@@ -569,11 +624,13 @@ def test_collected_baseline_and_real_adapter_use_the_same_work_identity():
     doc = {
         "per_workflow_monthly_volume": {".github/workflows/ci.yml": 40},
         "pr_critical_path": {"commit_wall_clock": {"facts": [
-            {"sha": "base-1", "event": "pull_request", "jobs": [job]},
+            {"sha": "base-1", "event": "pull_request", "jobs": [job],
+             "logs": ["Cache restored from key: node-v1"]},
             {"sha": "base-2", "event": "pull_request", "jobs": [job]},
         ]}},
     }
     before = _baseline_from_findings(doc)
+    assert before[0]["logs"] == ["Cache restored from key: node-v1"]
     after_job = copy.deepcopy(job)
     after_job.update({
         "workflow": ".github/workflows/ci.yml:pull_request",

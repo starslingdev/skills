@@ -15,11 +15,36 @@ from urllib.parse import quote
 
 from wall_clock import observed_commit_wall_s
 
-_COLD = re.compile(r"(?i)cache (?:key )?miss|not found in cache|cache.*evict|branch.scope")
-_WARM = re.compile(r"(?i)cache hit|from-cache|cache hit, replaying|\(cached\)|\bcached\b")
+_COLD = re.compile(
+    r"(?i)cache (?:key )?miss|cache not found for input keys|not found in cache|"
+    r"cache.*evict|branch.scope")
+_WARM = re.compile(
+    r"(?i)cache restored from key|cache hit|from-cache|cache hit, replaying|"
+    r"\(cached\)|\bcached\b")
 _CACHED_COUNT = re.compile(
     r"(?i)\b(\d+)\s+(?:(?:packages?|tests?|steps?|lines?).{0,20}\(cached\)|"
     r"(?:go\s+)?cached(?:\s+lines?)?)")
+
+# Job logs are the largest verification responses.  Bound both the number of
+# API reads per cohort and the amount of each response retained in the
+# persisted verification context.
+_VERIFY_LOG_JOB_CAP = 20
+_VERIFY_LOG_CHAR_CAP = 1_000_000
+
+
+def _bounded_logs(*values: Any) -> list[str]:
+    logs: list[str] = []
+    for value in values:
+        rows = [value] if isinstance(value, str) else (
+            value if isinstance(value, list) else [])
+        for row in rows:
+            if isinstance(row, str) and row:
+                logs.append(row[:_VERIFY_LOG_CHAR_CAP])
+                if len(logs) == _VERIFY_LOG_JOB_CAP:
+                    return logs
+    return logs
+_VERIFY_LOG_JOB_CAP = 20
+_VERIFY_LOG_CHAR_CAP = 1_000_000
 
 
 def advance_verification(
@@ -363,6 +388,14 @@ class GhVerificationClient:
         except json.JSONDecodeError:
             return None
 
+    @staticmethod
+    def _text(endpoint: str) -> str | None:
+        result = subprocess.run(
+            ["gh", "api", endpoint], text=True, capture_output=True, timeout=90)
+        if result.returncode != 0:
+            return None
+        return result.stdout
+
     def remote_head(self, repo: str, branch: str) -> str | None:
         payload = self._api(f"repos/{repo}/branches/{quote(branch, safe='')}")
         if not isinstance(payload, dict):
@@ -439,6 +472,9 @@ class GhVerificationClient:
             return None
         jobs: list[dict[str, Any]] = []
         skipped_jobs: list[dict[str, Any]] = []
+        logs: list[str] = []
+        log_api_calls = 0
+        log_jobs_omitted = 0
         run_attempt_ids: list[dict[str, int]] = []
         for run, workflow in zip(runs, workflows):
             run_id = int(run.get("id") or 0)
@@ -471,6 +507,14 @@ class GhVerificationClient:
                         or not job.get("completed_at")
                         or job.get("conclusion") != "success"):
                     return None
+                job_id = int(job.get("id") or 0)
+                if job_id and log_api_calls < _VERIFY_LOG_JOB_CAP:
+                    log_api_calls += 1
+                    text = self._text(f"repos/{repo}/actions/jobs/{job_id}/logs")
+                    if text:
+                        logs.append(text[:_VERIFY_LOG_CHAR_CAP])
+                elif job_id:
+                    log_jobs_omitted += 1
                 jobs.append({
                     "name": str(job.get("name") or ""),
                     "workflow": workflow,
@@ -504,7 +548,9 @@ class GhVerificationClient:
             "expected_workflows": expected,
             "jobs": jobs,
             "skipped_jobs": skipped_jobs,
-            "logs": [],
+            "logs": logs,
+            "log_api_calls": log_api_calls,
+            "log_jobs_omitted": log_jobs_omitted,
             "run_attempt_ids": run_attempt_ids,
             "lane": lane,
             "lane_runs_30d": lane_runs,
@@ -740,7 +786,11 @@ def _baseline_from_findings(
             "workflows": workflows,
             "expected_workflows": workflows,
             "jobs": jobs,
-            "logs": [],
+            "logs": _bounded_logs(
+                fact.get("logs"),
+                *(row.get("logs") for row in raw_jobs),
+                *(row.get("log") for row in raw_jobs),
+            ),
             "lane": str(fact.get("event") or "push"),
             "lane_runs_30d": lane_runs,
         })
