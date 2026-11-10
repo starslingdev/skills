@@ -477,7 +477,8 @@ def test_named_fixtures_exercise_their_defining_interactions(
             "external-required-gate", "heavy-runner-queue", "minority-tail",
             "multiarch-image", "path-partitioned-monorepo", "pr-light-matrix", "vendored-libs",
             "vitest-isolated-serial", "cargo-double-compile", "per-test-startup",
-            "jest-make-hop", "sharded-floor", "replayed-test-cache"):
+             "jest-make-hop", "sharded-floor", "replayed-test-cache",
+             "path-filter-unmeasured"):
         docs[name], reports[name], _checks = run_fixture(
             FIXTURE_ROOT / name, monkeypatch, tmp_path)
 
@@ -517,6 +518,11 @@ def test_named_fixtures_exercise_their_defining_interactions(
     assert "`ci.yml` holds its slowest job" not in reports["minority-tail"]
     assert "OPT25" not in {
         row.get("pattern") for row in docs["pr-light-matrix"]["findings"]}
+    unmeasured = next(
+        row for row in docs["path-filter-unmeasured"]["findings"]
+        if row.get("pattern") == "OPT32")
+    assert unmeasured["path_filter_measurement"]["status"] == "unmeasured"
+    assert "hit rate not measured" in reports["path-filter-unmeasured"]
     duplicate = next(
         row for row in docs["duplicate-gate-job"]["findings"]
         if row.get("pattern") == "OPT12"
@@ -554,10 +560,11 @@ def test_named_fixtures_exercise_their_defining_interactions(
         docs["cargo-double-compile"], [])["leaves"]
     assert "Compiling goport_core" in reports["cargo-double-compile"]
     assert "combine their `-p`/`--package`" in reports["cargo-double-compile"]
+    assert "OPT9" not in {
+        row.get("pattern") for row in docs["jest-make-hop"]["findings"]}
     jest = next(row for row in docs["jest-make-hop"]["findings"]
-                if row.get("pattern") == "OPT9")
+                if row.get("pattern") == "OPT88")
     assert "maxWorkers" in jest["evidence"] and "OPT88" in jest["evidence"]
-    assert "cache directory is not persisted" in reports["jest-make-hop"]
     assert "no provider-switch saving is credited" in reports["jest-make-hop"]
     assert "per-invocation-startup" in fixture_facts(
         docs["per-test-startup"], [])["leaves"]

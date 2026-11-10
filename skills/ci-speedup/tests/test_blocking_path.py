@@ -4234,6 +4234,28 @@ def test_render_no_poles_is_graceful():
     assert "No measured critical path" in bp.render({"pr_critical_path": {}})
 
 
+def test_jest_provider_note_keeps_a_static_only_report_visible():
+    doc = {
+        "repo": "demo/repo",
+        "findings": [],
+        "pr_critical_path": {},
+        "data_sources": {},
+        "jest_coverage_notes": [{
+            "workflow_file": ".github/workflows/ci.yml",
+            "job": "test",
+            "note": ("Jest coverage provider is `v8`; compare providers on the same "
+                     "commit; no provider-switch saving is credited without matched "
+                     "measurements"),
+        }],
+    }
+
+    report = bp.render(doc)
+
+    assert "No measured critical path" not in report
+    assert "Jest coverage configuration" in report
+    assert "no provider-switch saving is credited" in report
+
+
 def _load_verify_report():
     # `verify_report` is not a unique module name (ci-secure ships one too), so load
     # THIS skill's by path under a unique name to avoid a cross-skill import clash.
