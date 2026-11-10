@@ -2311,17 +2311,8 @@ def _cache_path_leaf(cache_path_sample: dict[str, Any] | None) -> dict[str, Any]
             "config_fact": " ".join(context)}
 
 
-def _buildx_single_node(
-    lines: list[str],
-) -> tuple[str, list[str]] | None:
-    """Return the native platform and auditable evidence for one Buildx node.
-
-    `docker buildx inspect --bootstrap` prints the builder header, then a
-    `Nodes:` section with one `Name:` and `Platforms:` pair per node. Platforms
-    configured by the user are printed first with a `*`; the detected native
-    platform is the first unstarred entry, before emulated detected platforms.
-    Missing, all-configured, or multi-node evidence fails closed.
-    """
+def _buildx_nodes(lines: list[str]) -> tuple[str, list[dict[str, str]]]:
+    """Parse the Buildx node block, retaining nodes with unusable platforms."""
     in_nodes = False
     nodes: list[dict[str, str]] = []
     nodes_header = ""
@@ -2333,11 +2324,14 @@ def _buildx_single_node(
             continue
         if not in_nodes:
             continue
+        if re.search(r"#\d+\s+\[[^\]]+\]\s+(?:FROM|RUN|COPY|ADD)\b", line,
+                     re.IGNORECASE):
+            break
         if re.search(r"\bName:\s+\S+", line):
             nodes.append({"name": line, "platforms": "", "native": ""})
             awaiting_platform = True
             continue
-        platform = re.search(r"\bPlatforms:\s+(.+)$", line)
+        platform = re.search(r"\bPlatforms:\s*(.*)$", line)
         if awaiting_platform and platform and nodes:
             detected = [
                 item.strip().lower()
@@ -2348,6 +2342,21 @@ def _buildx_single_node(
             nodes[-1]["platforms"] = line
             nodes[-1]["native"] = detected[0] if detected else ""
             awaiting_platform = False
+    return nodes_header, nodes
+
+
+def _buildx_single_node(
+    lines: list[str],
+) -> tuple[str, list[str]] | None:
+    """Return the native platform and auditable evidence for one Buildx node.
+
+    `docker buildx inspect --bootstrap` prints the builder header, then a
+    `Nodes:` section with one `Name:` and `Platforms:` pair per node. Platforms
+    configured by the user are printed first with a `*`; the detected native
+    platform is the first unstarred entry, before emulated detected platforms.
+    Missing, all-configured, or multi-node evidence fails closed.
+    """
+    nodes_header, nodes = _buildx_nodes(lines)
     if len(nodes) != 1 or not nodes[0]["native"]:
         return None
     node = nodes[0]
@@ -2436,8 +2445,13 @@ def _emulated_image_compile_leaf(lines: list[str]) -> dict[str, Any] | None:
         re.search(r"\bdocker\s+buildx\s+build\b|docker/build-push-action@", line,
                   re.IGNORECASE)
         for line in lines)
-    builder_unconfirmed = (builder is None and raw_buildx and not any(
-        re.search(r"\bNodes:\s*$", line) for line in lines))
+    nodes_header, builder_nodes = _buildx_nodes(lines)
+    incomplete_topology = bool(
+        nodes_header
+        and (not builder_nodes or any(not node["native"] for node in builder_nodes)))
+    builder_unconfirmed = bool(
+        builder is None
+        and (incomplete_topology or (raw_buildx and not nodes_header)))
     if builder is None and not builder_unconfirmed:
         return None
     native_platform, builder_evidence = (
@@ -2470,18 +2484,31 @@ def _emulated_image_compile_leaf(lines: list[str]) -> dict[str, Any] | None:
         # emulation claim.
         if native <= 0:
             return None
+        ordered_durations = sorted(
+            durations,
+            key=lambda row: (
+                _platform_family(f"linux/{row[0]}") != native_family,
+                row[1],
+            ),
+            reverse=True,
+        )
+        topology_evidence = [nodes_header] if nodes_header else []
+        topology_evidence.extend(
+            value for node in builder_nodes
+            for value in (node["name"], node["platforms"]) if value)
         return {
             "fix_key": "emulated-image-compile",
             "unit_label": (
                 "foreign-platform compilation dominates the cold build, but "
-                "the builder topology was not printed — check the builder nodes"),
+                "the topology did not establish a native platform for every builder "
+                "node — check the builder nodes"),
             "magnitude": None,
             "deeper": [],
             "uncredited": True,
-            "evidence": [
-                item for _arch, _seconds, header, done, _kind in durations
+            "evidence": ([
+                item for _arch, _seconds, header, done, _kind in ordered_durations
                 for item in (header, done)
-            ][:6],
+            ][:6] + topology_evidence)[:8],
             "search": ["docker buildx inspect --bootstrap", "Nodes:", "Platforms:"],
             "builder_topology_unconfirmed": True,
         }
@@ -4700,20 +4727,29 @@ def _fix_meta_for_leaf(leaf: dict[str, Any] | None) -> dict[str, Any] | None:
         resolved.update({
             "cause": (
                 "Foreign-platform compilation dominates the measured cold build, "
-                "but the builder topology was not printed. The evidence does not "
-                "establish whether that work ran under emulation or on a native node."
+                "but the topology did not establish a native platform for every builder "
+                "node. The evidence does not establish whether that work ran under "
+                "emulation or on a native node."
             ),
             "look": (
-                "Run `docker buildx inspect --bootstrap` first and record every node "
-                "and platform. Then trace the foreign-platform compile stage in `{wf}` "
-                "and its repository-local Dockerfile."
+                "Run or rerun `docker buildx inspect --bootstrap`, start or repair any "
+                "inactive node, and record a usable native platform for every node. Then "
+                "trace the foreign-platform compile stage in `{wf}` and its "
+                "repository-local Dockerfile."
+            ),
+            "constraints": (
+                "Preserve every published platform, artifact, release flag, test, "
+                "provenance record, and manifest. Do not size or claim a saving until "
+                "every builder node has a usable native platform and the foreign work's "
+                "execution topology is confirmed."
             ),
             "deliver": (
-                "Start with `docker buildx inspect --bootstrap`. If the builder has no "
-                "native node for the foreign platform, compare a build-platform stage "
-                "or explicit cross-compilation against the same workload. If a native "
-                "node exists, investigate that node and the cold layer instead. Do not "
-                "claim emulation or a saving until the topology is confirmed."
+                "Run or rerun `docker buildx inspect --bootstrap` until every node reports "
+                "a usable native platform. If the builder has no native node for the "
+                "foreign platform, compare a build-platform stage or explicit "
+                "cross-compilation against the same workload. If a native node exists, "
+                "investigate that node and the cold layer instead. Do not claim emulation "
+                "or a saving until the topology is confirmed."
             ),
         })
     return resolved

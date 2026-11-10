@@ -71,6 +71,53 @@ git config core.hooksPath .githooks
   StarSling's own runners (we dogfood what we sell). Both live in `ci.yml` and
   run the identical suite.
 
+## Public-output privacy gate
+
+This repository is public. Links and internal context supplied for a task are
+inputs, not permission to publish them: treat repository names, URLs, issue/PR
+numbers, and other source identifiers as confidential unless publishing the
+exact reference is explicitly approved.
+
+Before every public GitHub write (commit, branch, PR, issue, review, comment,
+release, or changelog):
+
+1. Verify the destination repository is `PUBLIC`.
+2. Name only the destination repository. Describe private provenance
+   generically ("internal design", "internal review"). Keep private
+   identifiers out of branch names too; the gate does not scan them.
+3. Commit first, then scan the exact outbound title/body, every outgoing
+   commit's message and added lines, and the net added diff. Only committed
+   history is scanned. Write the PR text to fresh per-run files:
+
+   ```bash
+   title="$(mktemp)"; body="$(mktemp)"
+   # write the exact PR title to "$title" and body to "$body", then:
+   python3 .github/scripts/check_public_output.py --target starslingdev/skills \
+     --text-file "$title" --text-file "$body" --base origin/main
+   ```
+
+   Exit 0 passes. Exit 1 blocks and prints only locations
+   (`commit <sha> <path>:<line>`, `commit <sha> message:<line>`,
+   `added diff:<path>:<line>`, `text file <n>:<line>`), never the identifier.
+   Exit 2 is a fail-closed error.
+4. Fetch the published artifact back and scan its returned title/body.
+
+CI runs the same gate on every pull request inside both suite jobs, so it gates
+the required `test` check. A title/body edit is re-checked only on the next
+push, so scan edits locally first.
+
+**Fixture paths.** The diff scan alone skips added lines under `tests/`,
+`skills/*/tests/`, `skills/*/evals/`, and `maintainers/*/tests/`, where
+synthetic `owner/repo` slugs are routine. Commit messages and PR text stay
+strict. Never put a real private reference in a fixture.
+
+**Exceptions.** A cross-repository reference is allowed only when the user
+explicitly approves publishing that exact reference. Pass `--allow owner/repo`
+(repeatable); the gate fails closed unless that repository verifies `PUBLIC`.
+If approval or visibility is uncertain, remove or neutralize the reference.
+Never expose private context to explain provenance, credit, motivation, or
+review history.
+
 ## Changelog discipline
 
 Every change that alters **skill behavior** adds a dated (UTC) bullet to
