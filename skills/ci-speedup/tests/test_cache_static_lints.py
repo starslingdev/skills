@@ -25,6 +25,13 @@ def _patterns(rows: list[dict]) -> set[str]:
     return {str(row["pattern"]) for row in rows}
 
 
+def _scan_workflow(tmp_path: Path, workflow: str) -> list[dict]:
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "ci.yml").write_text(workflow, encoding="utf-8")
+    return scan.scan(tmp_path, _CATALOG)["findings"]
+
+
 def test_opt61_flags_restore_prefix_that_cannot_match_saved_key(tmp_path) -> None:
     rows = _scan(tmp_path, """      - uses: actions/cache@v4
         with:
@@ -58,6 +65,71 @@ def test_opt61_accepts_equivalent_expression_spacing_in_restore_prefix(tmp_path)
       - run: tool build
 """)
     assert "OPT61" not in _patterns(rows)
+
+
+def test_opt61_accepts_restore_family_seeded_by_another_job(tmp_path) -> None:
+    rows = _scan_workflow(tmp_path, """name: CI
+on: [push, pull_request]
+jobs:
+  seed:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-main-${{ github.sha }}
+      - run: ccache make
+  pr:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-pr-${{ github.sha }}
+          restore-keys: ccache-main-
+      - run: ccache make
+""")
+
+    assert "OPT61" not in _patterns(rows)
+
+
+def test_opt61_accepts_restore_family_seeded_by_another_workflow(tmp_path) -> None:
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "seed.yml").write_text("""name: Seed
+on:
+  push:
+    branches: [main]
+jobs:
+  seed:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-main-${{ github.sha }}
+      - run: ccache make
+""", encoding="utf-8")
+    (workflows / "pr.yml").write_text("""name: PR
+on: pull_request
+jobs:
+  pr:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-pr-${{ github.sha }}
+          restore-keys: ccache-main-
+      - run: ccache make
+""", encoding="utf-8")
+
+    rows = scan.scan(tmp_path, _CATALOG)["findings"]
+
+    assert not any(
+        row.get("pattern") == "OPT61"
+        and row.get("workflow_file", "").endswith("pr.yml")
+        for row in rows)
 
 
 def test_opt61_flags_tiny_ccache_limits_but_accepts_500m(tmp_path) -> None:
@@ -125,6 +197,97 @@ def test_opt61_accepts_compiler_caches_with_persistent_or_remote_backends(tmp_pa
 """)
     assert "OPT61" not in _patterns(remote)
 
+    inherited_remote = _scan_workflow(tmp_path / "inherited-remote", """name: CI
+on: pull_request
+env:
+  CCACHE_REMOTE_STORAGE: redis://cache.internal
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+    steps:
+      - run: cmake --build build
+""")
+    assert "OPT61" not in _patterns(inherited_remote)
+
+
+def test_opt61_reads_ccache_directory_and_launcher_from_job_env(tmp_path) -> None:
+    rows = _scan_workflow(tmp_path, """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CCACHE_DIR: ${{ runner.temp }}/ccache
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+    steps:
+      - run: cmake --build build
+""")
+
+    assert "OPT61" in _patterns(rows)
+
+
+def test_opt61_matches_the_declared_ccache_directory_to_the_saved_path(tmp_path) -> None:
+    mismatch = _scan_workflow(tmp_path / "mismatch", """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CCACHE_DIR: /tmp/ccache
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ github.sha }}
+      - run: cmake --build build
+""")
+    assert "OPT61" in _patterns(mismatch)
+
+    matching = _scan_workflow(tmp_path / "matching", """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CCACHE_DIR: /tmp/ccache
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: /tmp/ccache
+          key: ccache-${{ github.sha }}
+      - run: cmake --build build
+""")
+    assert "OPT61" not in _patterns(matching)
+
+    inline_mismatch = _scan(tmp_path / "inline-mismatch", """      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ github.sha }}
+      - run: CCACHE_DIR=/var/cache/compiler ccache make
+""")
+    assert "OPT61" in _patterns(inline_mismatch)
+
+    expression_match = _scan_workflow(tmp_path / "expression-match", """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CCACHE_DIR: ${{ runner.temp }}/ccache
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: ${{runner.temp}}/ccache
+          key: ccache-${{ github.sha }}
+      - run: cmake --build build
+""")
+    assert "OPT61" not in _patterns(expression_match)
+
 
 def test_opt61_marks_a_restored_then_unread_deleted_path_as_pure_cost(tmp_path) -> None:
     rows = _scan(tmp_path, """      - uses: actions/cache@v4
@@ -188,6 +351,24 @@ def test_opt4_flags_run_scoped_gha_on_build_push_action(tmp_path) -> None:
     assert "OPT4" in _patterns(rows)
 
 
+def test_opt4_flags_prefixed_commit_scope_and_action_local_overwrite(tmp_path) -> None:
+    scoped = _scan(tmp_path / "scoped", """      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          cache-from: type=gha,scope=image-${{ github.sha }}
+          cache-to: type=gha,scope=image-${{ github.sha }},mode=max
+""")
+    assert "OPT4" in _patterns(scoped)
+
+    local = _scan(tmp_path / "local", """      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          cache-from: type=local,src=/tmp/build-cache
+          cache-to: type=local,dest=/tmp/build-cache
+""")
+    assert "OPT4" in _patterns(local)
+
+
 def test_opt4_accepts_stable_gha_scope_and_mode_max_local_rotation(tmp_path) -> None:
     gha = _scan(tmp_path / "gha", """      - run: >-
           docker buildx build .
@@ -203,6 +384,21 @@ def test_opt4_accepts_stable_gha_scope_and_mode_max_local_rotation(tmp_path) -> 
     assert "OPT4" not in _patterns(local)
 
 
+def test_opt4_does_not_pair_local_paths_from_separate_build_steps(tmp_path) -> None:
+    rows = _scan(tmp_path, """      - uses: docker/build-push-action@v6
+        with:
+          context: service-a
+          cache-to: type=local,dest=/tmp/build-cache
+      - uses: docker/build-push-action@v6
+        with:
+          context: service-b
+          cache-from: type=local,src=/tmp/build-cache
+          cache-to: type=local,dest=/tmp/build-cache-next
+""")
+
+    assert "OPT4" not in _patterns(rows)
+
+
 def test_opt4_flags_ephemeral_dockerfile_cache_mount_on_hosted_runner(tmp_path) -> None:
     (tmp_path / "Dockerfile").parent.mkdir(parents=True, exist_ok=True)
     (tmp_path / "Dockerfile").write_text(
@@ -213,7 +409,7 @@ def test_opt4_flags_ephemeral_dockerfile_cache_mount_on_hosted_runner(tmp_path) 
     assert "OPT4" in _patterns(rows)
 
 
-def test_opt4_accepts_persisted_buildkit_cache_for_cache_mount(tmp_path) -> None:
+def test_opt4_export_only_does_not_persist_a_buildkit_cache_mount(tmp_path) -> None:
     (tmp_path / "Dockerfile").parent.mkdir(parents=True, exist_ok=True)
     (tmp_path / "Dockerfile").write_text(
         "FROM alpine\nRUN --mount=type=cache,target=/root/.cache make all\n",
@@ -224,10 +420,10 @@ def test_opt4_accepts_persisted_buildkit_cache_for_cache_mount(tmp_path) -> None
           --cache-from type=gha,scope=app
           --cache-to type=gha,scope=app,mode=max
 """)
-    assert "OPT4" not in _patterns(rows)
+    assert "OPT4" in _patterns(rows)
 
 
-def test_opt4_accepts_action_form_import_and_export_for_cache_mount(tmp_path) -> None:
+def test_opt4_action_export_only_does_not_persist_a_cache_mount(tmp_path) -> None:
     (tmp_path / "Dockerfile").parent.mkdir(parents=True, exist_ok=True)
     (tmp_path / "Dockerfile").write_text(
         "FROM alpine\nRUN --mount=type=cache,target=/root/.cache make all\n",
@@ -239,7 +435,113 @@ def test_opt4_accepts_action_form_import_and_export_for_cache_mount(tmp_path) ->
           cache-from: type=gha,scope=app
           cache-to: type=gha,scope=app,mode=max
 """)
+    assert "OPT4" in _patterns(rows)
+
+
+def test_opt4_accepts_buildkit_cache_dance_for_cache_mount(tmp_path) -> None:
+    (tmp_path / "Dockerfile").parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "Dockerfile").write_text(
+        "FROM alpine\nRUN --mount=type=cache,target=/root/.cache make all\n",
+        encoding="utf-8",
+    )
+    rows = _scan(tmp_path, """      - uses: actions/cache@v4
+        with:
+          path: cache-mount
+          key: cache-mount-${{ hashFiles('Dockerfile') }}
+      - uses: reproducible-containers/buildkit-cache-dance@v3
+        with:
+          cache-dir: cache-mount
+          dockerfile: Dockerfile
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+""")
+
     assert "OPT4" not in _patterns(rows)
+
+
+def test_opt4_accepts_cache_dance_explicit_map_and_target_source(tmp_path) -> None:
+    for name in ("explicit", "target-source"):
+        root = tmp_path / name
+        root.mkdir(parents=True)
+        (root / "Dockerfile").write_text(
+            "FROM alpine\nRUN --mount=type=cache,target=/root/.cache make all\n",
+            encoding="utf-8",
+        )
+    explicit = _scan(tmp_path / "explicit", """      - uses: actions/cache@v4
+        with:
+          path: build-cache
+          key: cache-mount-${{ hashFiles('Dockerfile') }}
+      - uses: reproducible-containers/buildkit-cache-dance@v3
+        with:
+          cache-map: '{"build-cache": {"target": "/root/.cache", "id": "compiler"}}'
+      - run: docker build .
+""")
+    assert "OPT4" not in _patterns(explicit)
+
+    target_source = _scan(tmp_path / "target-source", """      - uses: actions/cache@v4
+        with:
+          path: /root/.cache
+          key: cache-mount-${{ hashFiles('Dockerfile') }}
+      - uses: reproducible-containers/buildkit-cache-dance@v3
+        with:
+          dockerfile: Dockerfile
+      - run: docker build .
+""")
+    assert "OPT4" not in _patterns(target_source)
+
+
+def test_opt4_cache_dance_requires_a_persisted_matching_source(tmp_path) -> None:
+    for name in ("unrelated", "unpersisted"):
+        root = tmp_path / name
+        root.mkdir(parents=True)
+        (root / "Dockerfile").write_text(
+            "FROM alpine\nRUN --mount=type=cache,target=/root/.cache make all\n",
+            encoding="utf-8",
+        )
+    unrelated = _scan(tmp_path / "unrelated", """      - uses: actions/cache@v4
+        with:
+          path: apt-cache
+          key: apt-cache-${{ hashFiles('Dockerfile') }}
+      - uses: reproducible-containers/buildkit-cache-dance@v3
+        with:
+          cache-map: '{"apt-cache": "/var/cache/apt"}'
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+""")
+    assert "OPT4" in _patterns(unrelated)
+
+    unpersisted = _scan(tmp_path / "unpersisted", """      - uses: reproducible-containers/buildkit-cache-dance@v3
+        with:
+          cache-map: '{"build-cache": "/root/.cache"}'
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+""")
+    assert "OPT4" in _patterns(unpersisted)
+
+
+def test_opt4_cache_dance_skip_extraction_does_not_seed_mount(tmp_path) -> None:
+    (tmp_path / "Dockerfile").parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "Dockerfile").write_text(
+        "FROM alpine\nRUN --mount=type=cache,target=/root/.cache make all\n",
+        encoding="utf-8",
+    )
+    rows = _scan(tmp_path, """      - uses: actions/cache@v4
+        with:
+          path: build-cache
+          key: build-cache-${{ hashFiles('Dockerfile') }}
+      - uses: reproducible-containers/buildkit-cache-dance@v3
+        with:
+          cache-map: '{"build-cache": "/root/.cache"}'
+          skip-extraction: true
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+""")
+
+    assert "OPT4" in _patterns(rows)
 
 
 def test_opt4_accepts_cache_mount_on_persistent_remote_builder(tmp_path) -> None:
