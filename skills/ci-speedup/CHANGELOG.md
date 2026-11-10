@@ -1283,6 +1283,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-11-09** — Resolve workflow, job, step and explicitly propagated action environment values before classifying Make and Ninja targets inside emulated containers. Declared test targets and unresolved variable targets stay silent, while declared build targets remain detectable.
 - **2026-11-09** — Exclude matrix legs that skipped all work, or never ran their siblings' divided-work step, from shard-imbalance comparisons. Findings stamp how many no-work leg samples were excluded, and fewer than two working legs stay silent.
 - **2026-11-09** — Keep post-fix verification from rerunning default-branch workflows, compare cache-sensitive results with baseline facts from the same push lane, and label repeated attempts of one commit as no-change reruns.
 
