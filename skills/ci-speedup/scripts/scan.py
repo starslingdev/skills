@@ -127,6 +127,7 @@ from workflow_steps import (  # noqa: E402
     parallel_steps_stats,
     parallel_steps_used,
 )
+from shell_prefix import SHELL_PREFIX_SRC  # noqa: E402  (one source for three detectors)
 
 
 # =============================================================================
@@ -1881,8 +1882,8 @@ _OPT102_ROOT: Path | None = None
 _OPT102_COMPILE_RE = re.compile(
     r"(?:^|&&|\|\||[;|]|\bthen\b|\bdo\b)\s*"
     r"(?:--mount=[^\s;&|]+\s+)*"
-    r"(?:(?:(?:[A-Za-z_][A-Za-z0-9_]*=(?:[^\s;&|]+|'[^']*'|\"[^\"]*\"))|"
-    r"(?:env|sudo|time))\s+)*(?:go\s+(?:build|install)|xx-go\b|cargo\s+(?:build|install)|"
+    + SHELL_PREFIX_SRC +  # `KEY=value` / env / sudo / time prefixes, see shell_prefix.py
+    r"(?:go\s+(?:build|install)|xx-go\b|cargo\s+(?:build|install)|"
     r"cargo\s+chef\s+cook|xx-cargo\b|(?:npm|pnpm|yarn)\s+(?:run\s+)?build|"
     r"cmake\s+(?:--build|-G)|ninja(?:\s|$)|meson\s+compile|node-gyp\b|"
     r"pip\s+wheel\b|(?:\./)?mvnw?\b[^\n;&|]*\b(?:compile|package|install)\b|"
@@ -2494,8 +2495,8 @@ def _detect_opt102(doc: dict, raw: str) -> list[Hit]:
 
 _OPT89_COMPILE_RE = re.compile(
     r"(?:^|&&|\|\||[;|]|\bthen\b|\bdo\b)\s*"
-    r"(?:(?:(?:[A-Za-z_][A-Za-z0-9_]*=(?:[^\s;&|]+|'[^']*'|\"[^\"]*\"))|"
-    r"(?:env|sudo|time))\s+)*(?:"
+    + SHELL_PREFIX_SRC +  # `KEY=value` / env / sudo / time prefixes, see shell_prefix.py
+    r"(?:"
     r"(?:\./)?configure\b|make(?:\s|$)|cmake(?:\s|$)|ninja(?:\s|$)|"
     r"cargo\s+(?:build|install)\b|go\s+(?:build|install)\b|"
     r"(?:\./)?mvnw?\b[^\n;&|]*\b(?:compile|package|install)\b|"

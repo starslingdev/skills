@@ -1,5 +1,6 @@
 # Changelog
 
+- Match the shell prefixes before a build command (`KEY=value`, `env`, `sudo`, `time`) with disjoint regex branches in OPT89, OPT102 and the emulated-image drill, from one shared source in `shell_prefix.py`. The bare-value class no longer overlaps the quoted branches, both repeats are bounded, and a value with an unpaired quote no longer counts as a prefix. CodeQL flagged the three copies as `py/redos`, the same shape #257 fixed in `_STATUS_POST_RE`.
 - Recognize repository-seeded cache families and BuildKit cache-mount persistence, while flagging volatile scopes, in-place local exports, export-only mount caches, and compiler caches declared through job environments.
 - Show the median per-commit projection and the workflow holding the worst sampled commit beside PR-lane commit projections.
 - Treat Buildx inspect blocks with unusable node platforms as unconfirmed topology, keeping foreign-build guidance uncredited until every node is readable.
