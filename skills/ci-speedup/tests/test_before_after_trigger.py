@@ -437,6 +437,80 @@ def test_same_sha_on_topic_and_default_branch_reruns_only_the_topic_run():
     assert client.posts == ["repos/o/r/actions/runs/10/rerun"]
 
 
+def test_rerun_preflights_every_member_before_posting_any_rerun():
+    first = _api_run(10, 1)
+    first["head_branch"] = "fix"
+    mismatched = _api_run(20, 2)
+    mismatched["head_branch"] = "other"
+    client = AdapterFixture({
+        "actions/runs/10": first,
+        "actions/runs/20": mismatched,
+        "repos/o/r": {"default_branch": "main"},
+    })
+    cohort = {
+        "head_sha": "fix",
+        "head_branch": "fix",
+        "run_attempt_ids": [
+            {"run_id": 10, "attempt": 1},
+            {"run_id": 20, "attempt": 1},
+        ],
+    }
+
+    assert client.rerun_cohort("o/r", cohort) == {
+        "_rerun_status": "preflight-refused"}
+    assert client.posts == []
+
+
+def test_topic_cohort_waits_for_a_topic_branch_check_run():
+    topic = _api_run(10, 1, "pull_request", "shared")
+    topic["head_branch"] = "fix"
+    default = _api_run(30, 3, "push", "shared")
+    client = AdapterFixture({
+        "actions/runs?head_sha=shared": {"workflow_runs": [topic, default]},
+        "check-runs": {"check_runs": [
+            {"details_url": "https://github.com/o/r/actions/runs/30/job/3"},
+        ]},
+        "runs/10/attempts/1/jobs": {"jobs": [_api_job(1)]},
+        "event=pull_request": {"total_count": 40},
+    })
+
+    assert client.completed_cohort("o/r", "shared", "fix") is None
+
+
+def test_topic_cohort_rejects_a_workflow_already_on_a_later_attempt():
+    first = _api_run(10, 1, "pull_request", "shared")
+    first["head_branch"] = "fix"
+    rerun = _api_run(20, 2, "workflow_run", "shared", attempt=2)
+    rerun["head_branch"] = "fix"
+    client = AdapterFixture({
+        "actions/runs?head_sha=shared": {"workflow_runs": [first, rerun]},
+        "check-runs": {"check_runs": [
+            {"details_url": "https://github.com/o/r/actions/runs/10/job/1"},
+            {"details_url": "https://github.com/o/r/actions/runs/20/job/2"},
+        ]},
+        "runs/10/attempts/1/jobs": {"jobs": [_api_job(1)]},
+        "event=pull_request": {"total_count": 40},
+    })
+
+    assert client.completed_cohort("o/r", "shared", "fix") is None
+
+
+def test_preflight_refusal_clears_pending_intent_for_a_later_retry(tmp_path):
+    class RefusedClient(FakeClient):
+        def rerun_cohort(self, repo, cohort, *, trigger=True):
+            self.events.append("rerun-trigger" if trigger else "rerun-poll")
+            return {"_rerun_status": "preflight-refused"}
+
+    client = RefusedClient()
+    first = _invoke(tmp_path, client)
+    second = _invoke(tmp_path, client)
+    saved = json.loads((tmp_path / "verify.json").read_text())
+
+    assert first["status"] == second["status"] == "rerun-preflight-refused"
+    assert client.events.count("rerun-trigger") == 2
+    assert saved["pending_rerun"] is None
+
+
 def test_missing_push_baseline_names_the_lane_and_status(tmp_path):
     client = FakeClient(pushes=[])
     baseline = tmp_path / "base.json"
