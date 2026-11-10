@@ -794,6 +794,10 @@ _OPT21_LINT_GATE = """  lint:
     ("go run build/ci.go lint", False),
     ("go run build/ci.go check-generated", False),
     ("go run ./cmd/server", True),
+    ("go run cmd/server.go lint", True),
+    ("go run cmd/server/main.go lint", True),
+    ("go run build/ci.go checkout", True),
+    ("go run build/ci.go checkpoint", True),
     ("go run build/ci.go lint && make test", True),
     ("go run build/ci.go lint || true", True),
     ("golangci-lint run", False),
@@ -820,6 +824,8 @@ jobs:
     "go run build/ci.go lint || make test",
     "go run build/ci.go lint & make test",
     "go run build/ci.go lint $(go test ./...)",
+    "go run build/ci.go lint <(make test)",
+    "go run build/ci.go lint >(go test ./...)",
 ])
 def test_opt21_check_named_go_lint_with_hidden_work_is_not_a_gate(
         tmp_path: Path, command: str) -> None:
@@ -865,6 +871,8 @@ jobs:
     "go run build/ci.go lint || make test",
     "go run build/ci.go lint & make test",
     "go run build/ci.go lint $(go test ./...)",
+    "go run build/ci.go lint <(make test)",
+    "go run build/ci.go lint >(go test ./...)",
     "set +e\ngo run build/ci.go lint\necho done=yes >> \"$GITHUB_OUTPUT\"",
 ])
 def test_opt21_step_kind_rejects_go_lint_that_can_hide_work_or_failure(

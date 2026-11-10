@@ -3753,9 +3753,9 @@ _OPT21_CHECK_LINE_RE = re.compile(
 # check command in the same sense as a direct linter invocation; a runnable
 # application under ./cmd remains ordinary work.
 _OPT21_GO_RUN_CHECK_RE = re.compile(
-    r"^(?!.*(?:\|\||&&|[|;&`]|\$\())"
-    r"go\s+run\s+(?!\./cmd(?:/|\s|$))\S+\.go\s+"
-    r"(?:lint|check[\w:.-]*)(?:\s+\S+)*\s*$", re.I)
+    r"^(?!.*(?:\|\||&&|[|;&`]|[$<>]\())"
+    r"go\s+run\s+(?!(?:\./)?cmd/)\S+\.go\s+"
+    r"(?:lint|check(?:[-:._][\w:.-]*)?)(?:\s+\S+)*\s*$", re.I)
 # A step NAMED as a check ("Verify ...", "Check ...", "Lint ...") also counts
 # as a check when its body is a bespoke inline check (openai-python's
 # provenance check): every line is a recognised check or setup line, an inline
