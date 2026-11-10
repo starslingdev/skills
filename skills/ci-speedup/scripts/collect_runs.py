@@ -27472,7 +27472,11 @@ def _magnitude_sample(
         log = (repr_log if jid == repr_job.get("id")
                else _fetch_job_log(client, repo, j))
         replay = replay_share(log)
-        if isinstance(replay, dict) and replay.get("replayed") is True:
+        # Cache poles use the same fetched log to ground their miss distribution.
+        # Cached test output beside a real restore/miss line must not hide that
+        # independent cache evidence.
+        if (state_fn is None and isinstance(replay, dict)
+                and replay.get("replayed") is True):
             parsed[jid] = None
             replayed_ids.add(jid)
             return None
@@ -27505,7 +27509,8 @@ def _magnitude_sample(
                     lambda j: (j.get("id"), _fetch_job_log(client, repo, j)),
                     chunk):
                 replay = replay_share(log)
-                if isinstance(replay, dict) and replay.get("replayed") is True:
+                if (state_fn is None and isinstance(replay, dict)
+                        and replay.get("replayed") is True):
                     parsed[jid] = None
                     replayed_ids.add(jid)
                     continue
@@ -28243,8 +28248,13 @@ def _persist_pole_logs(
             logger.warning("no log captured for pole job %r (id=%s) - fetch returned "
                            "empty; this pole will render without a drill-down", job, jid)
             continue
+        # A replay-heavy test log can still contain an independent catalog leaf
+        # (most commonly dependency-cache state). Preserve that drill; replay
+        # exclusion applies only when the log has no other recognized work.
+        leaf0 = bp._parse_log(log, iso) or {}
         replay = bp._test_result_replay_share(log)
-        if isinstance(replay, dict) and replay.get("replayed") is True:
+        if (not leaf0 and isinstance(replay, dict)
+                and replay.get("replayed") is True):
             p["replayed_test_results"] = {
                 "cached_lines": replay["cached_lines"],
                 "test_result_lines": replay["test_result_lines"],
@@ -28292,7 +28302,6 @@ def _persist_pole_logs(
                         if str(j.get("name", "")) == job]
             p["cache_path_sample"] = _cache_path_sample(client, repo, all_jobs, facts,
                                                         known={repr_job.get("id"): log})
-        leaf0 = bp._parse_log(log, iso) or {}
         _cache_fk = leaf0.get("fix_key") if leaf0.get("fix_key") in _CACHE_LEAF_KEYS else None
         # A restore line sits in nearly every job log. Sample dependency-cache
         # outcomes (sibling logs + the push probe) only for a job a static OPT96

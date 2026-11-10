@@ -438,6 +438,26 @@ def test_persist_pole_logs_marks_and_excludes_replayed_test_results(tmp_path: Pa
     }
 
 
+def test_persist_pole_logs_keeps_a_cache_drill_beside_replayed_tests(tmp_path: Path):
+    log = "\n".join(
+        ["Cache not found for input keys: go-linux"]
+        + [f"ok example/pkg{i} (cached)" for i in range(4)]
+    )
+
+    class FakeClient:
+        def text(self, endpoint: str, allow_missing: bool = False) -> str:
+            return log
+
+    poles = [{"check": "test", "workflow_file": ".github/workflows/ci.yml",
+              "job": "test", "p50_s": 300.0}]
+    jobs = {".github/workflows/ci.yml": [[_job_inst("test", 333, 300)]]}
+
+    manifest = cr._persist_pole_logs(FakeClient(), "o/r", poles, jobs, tmp_path)
+
+    assert manifest[0]["leaf_fix_key"] == "dependency-cache"
+    assert "replayed_test_results" not in poles[0]
+
+
 def test_persist_pole_logs_picks_real_run_when_noops_are_the_majority(tmp_path: Path):
     # The hard case: a gated job (e.g. `changed-tests`) self-skips on MOST sampled
     # PRs, so no-op instances are the MAJORITY. Here the median is ITSELF a no-op, so
@@ -835,6 +855,38 @@ def test_magnitude_sample_reports_when_every_log_was_replayed():
     assert sample is not None
     assert sample["values"] == []
     assert sample["replayed_result_logs_excluded"] == 2
+
+
+def test_magnitude_sample_keeps_cache_state_beside_replayed_tests():
+    log = "\n".join(
+        ["Cache not found for input keys: go-linux"]
+        + [f"ok example/pkg{i} (cached)" for i in range(4)]
+    )
+
+    class FakeBp:
+        _test_result_replay_share = staticmethod(bp._test_result_replay_share)
+
+        @staticmethod
+        def _parse_log(text: str, iso=None) -> dict:
+            return {"fix_key": "dependency-cache", "magnitude": {
+                "label": "cache misses", "unit": "%", "value": 100.0}}
+
+    class FakeClient:
+        def text(self, endpoint: str, allow_missing: bool = False) -> str:
+            return log
+
+    first = _job_inst("test", 1, 300)
+    second = _job_inst("test", 2, 310)
+    sample = cr._magnitude_sample(
+        FakeBp(), FakeClient(), "o/r", [(300.0, first), (310.0, second)],
+        first, log, state_fn=lambda _log: {
+            "miss_pct": 100.0, "cold": True, "remote_off": False},
+    )
+
+    assert sample is not None
+    assert len(sample["values"]) == 2
+    assert all(v["cache_state"]["cold"] is True for v in sample["values"])
+    assert sample["replayed_result_logs_excluded"] == 0
 
 
 def test_persist_pole_logs_escalates_sample_on_a_wide_spread(tmp_path: Path):
