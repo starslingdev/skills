@@ -2685,14 +2685,16 @@ def _opt89_command_env(
     return effective
 
 
-def _opt89_docker_env(command: str, host_env: dict[str, str]) -> dict[str, str]:
-    """Environment explicitly propagated through Docker's ``--env`` options."""
+def _opt89_docker_env(
+    command: str, host_env: dict[str, str],
+) -> tuple[dict[str, str], bool]:
+    """Environment propagated through Docker options and whether one is a file."""
     propagated: dict[str, str] = {}
     try:
         tokens = shlex.split(_LINE_CONTINUATION_RE.sub(" ", command))
         index = tokens.index("run", tokens.index("docker") + 1) + 1
     except (ValueError, IndexError):
-        return propagated
+        return propagated, False
     value_options = {
         "--add-host", "--cap-add", "--cpus", "--device", "--env-file",
         "--entrypoint", "--hostname", "-h", "--memory", "-m", "--mount",
@@ -2700,8 +2702,17 @@ def _opt89_docker_env(command: str, host_env: dict[str, str]) -> dict[str, str]:
         "-v", "--workdir", "-w",
     }
     specs: list[str] = []
+    env_file = False
     while index < len(tokens):
         token = tokens[index]
+        if token == "--env-file":
+            env_file = True
+            index += 2
+            continue
+        if token.startswith("--env-file="):
+            env_file = True
+            index += 1
+            continue
         if token in {"--env", "-e"}:
             if index + 1 >= len(tokens):
                 break
@@ -2736,7 +2747,7 @@ def _opt89_docker_env(command: str, host_env: dict[str, str]) -> dict[str, str]:
         resolved = _opt89_resolve_known_shell_env(value, host_env)
         if "$" not in resolved:
             propagated[name] = resolved.strip("'\"")
-    return propagated
+    return propagated, env_file
 
 
 def _opt89_resolve_docker_payload_env(
@@ -2998,15 +3009,23 @@ def _detect_opt89(doc: dict, raw: str) -> list[Hit]:
                     host_env = _opt89_command_env(
                         _opt89_mask_host_single_quotes(expanded),
                         resolved_step_env)
+                    docker_start = re.search(r"\bdocker\s+run\b", expanded, re.I)
+                    if docker_start is not None:
+                        # Preserve quoted shell assignments that execute before
+                        # Docker.  The masking above is only needed to keep
+                        # assignments inside the container payload out.
+                        host_env.update(_opt89_command_env(
+                            expanded[:docker_start.start()], resolved_step_env,
+                            docker_options=False))
                     expanded = _opt89_resolve_host_shell_env(expanded, host_env)
                     payload = _opt89_docker_payload(expanded)
+                    docker_env, env_file = _opt89_docker_env(expanded, host_env)
                     container_env = _opt89_command_env(
-                        payload, _opt89_docker_env(expanded, host_env),
+                        payload, docker_env,
                         docker_options=False)
                     command = _opt89_resolve_docker_payload_env(
                         payload, host_env, container_env,
-                        env_file=bool(re.search(
-                            r"(?:^|\s)--env-file(?:=|\s+)", expanded)))
+                        env_file=env_file)
                     marker = "docker run"
                     occurrence = docker_occurrence
                     mechanism = "QEMU-backed docker run"

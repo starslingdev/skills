@@ -408,6 +408,24 @@ jobs:
     assert hits == []
 
 
+def test_payload_env_file_argument_is_not_a_docker_env_file(tmp_path: Path):
+    hits = _opt89(tmp_path, """name: payload option boundary
+on: pull_request
+jobs:
+  arm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-qemu-action@v3
+      - run: >-
+          docker run --platform linux/arm64 image
+          sh -c 'tool --env-file ci.env; make $MAKE_TARGET'
+        env:
+          MAKE_TARGET: all
+""")
+
+    assert len(hits) == 1
+
+
 @pytest.mark.parametrize("payload", [
     'sh -c "make $MAKE_TARGET"',
     "make $MAKE_TARGET",
@@ -558,6 +576,23 @@ jobs:
 """)
 
     assert hits == []
+
+
+def test_docker_pass_through_keeps_quoted_host_assignments(tmp_path: Path):
+    hits = _opt89(tmp_path, """name: quoted host assignment
+on: pull_request
+jobs:
+  arm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-qemu-action@v3
+      - run: >-
+          MAKE_TARGET='all';
+          docker run --platform linux/arm64 -e MAKE_TARGET image
+          sh -c 'make $MAKE_TARGET'
+""")
+
+    assert len(hits) == 1
 
 
 @pytest.mark.parametrize("target, expected", [("all", 1), ("check", 0)])
