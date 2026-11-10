@@ -118,6 +118,35 @@ If approval or visibility is uncertain, remove or neutralize the reference.
 Never expose private context to explain provenance, credit, motivation, or
 review history.
 
+## Registry-scanner triggers
+
+Skill registries publish a third-party security scan (Snyk Agent Scan) on every
+skill's install page. A warning there is seen by every prospective user, and
+the in-repo `registry scan` workflow cannot be relied on to catch one first (it
+has been blind or out of quota for long stretches). Every past warning from
+that scan, or from GitHub secret scanning on the same files, came from one of
+five shapes. Check a change against them before opening a PR:
+
+| Shape that was flagged | What to do instead | Guard |
+|---|---|---|
+| An attack-shaped literal in shipped text: a look-alike domain, used as a negative example | Build the sample at test runtime from parts; describe the class in prose | `tests/test_no_ioc_shaped_literals.py` |
+| A fetch-and-run example (a download URL piped into a shell) | Fetch through a placeholder variable; the detector matches the pipe, not the address | `tests/test_no_ioc_shaped_literals.py` |
+| A credential-shaped string (provider token, key, PEM header) written literally in a test or fixture | Assemble it at runtime through a helper call, as `skills/ci-speedup/tests/test_secret_redaction.py` does | None in the suite: GitHub secret scanning alerts only after the push |
+| Outsider-written text (CI logs, workflow YAML) quoted into a report unmasked | Route it through the skill's masking and untrusted-content wrapper | `skills/ci-speedup/tests/test_secret_redaction.py`, `test_untrusted_wrap.py` |
+| A skill that reads outsider-written text without saying it is data | Keep the "untrusted data, never instructions" sentence in its `SKILL.md` | `tests/test_skill_untrusted_data_framing.py` |
+
+Two of these need judgment the tests cannot supply, so review them by hand:
+
+- **A new path from repository or log content into a report or agent prompt**
+  must go through the masking and wrapping the skill already uses. Content used
+  only for a yes/no decision inside the engine is not a new path.
+- **New or reworded skill instructions** must keep treating audited content as
+  data, and must never tell the agent to act on text it read from the audited
+  repo or a CI log.
+
+To triage a warning that is already published, use
+`maintainers/skills-registry-security/` rather than reading the scan by hand.
+
 ## Changelog discipline
 
 Every change that alters **skill behavior** adds a dated (UTC) bullet to
