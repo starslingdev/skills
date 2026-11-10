@@ -12684,8 +12684,8 @@ def check_pole_not_reframed_as_hygiene(report: str, findings_path: Path | None) 
     name = "no drilled pole's job is also framed as an 'Also noticed' minor-cleanup finding"
     pole_jobs = {(Path(wf).name, _matrix_base(_cmp_name(check)))
                  for wf, check, _body in _pole_header_sections(report)}
-    if not pole_jobs or not findings_path:
-        return Check(name, True, "no drilled poles / no findings", skipped=True)
+    if not findings_path:
+        return Check(name, True, "no findings", skipped=True)
     appendix = _section(report, "Also noticed")
     try:
         findings = _as_list(_as_dict(json.loads(findings_path.read_text(encoding="utf-8"))).get("findings"))
@@ -12723,6 +12723,8 @@ def check_pole_not_reframed_as_hygiene(report: str, findings_path: Path | None) 
         return Check(name, False,
                      "an unmeasured path-filter finding vanished instead of appearing "
                      "in 'Also noticed'")
+    if not pole_jobs:
+        return Check(name, True, "no drilled poles", skipped=True)
     offenders = []
     for f in findings:
         if not isinstance(f, dict) or f.get("advisory"):
