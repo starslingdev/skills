@@ -1882,6 +1882,48 @@ _CACHE_SAVE_SECONDS_RE = re.compile(
 # save-path leaf is uncredited and says nothing about the job's dominant work.
 _OBSERVATION_ONLY_LEAVES = frozenset({"dependency-cache", "cache-effective-path-mismatch"})
 
+_GO_TEST_RESULT_RE = re.compile(
+    r"^(?:ok|FAIL)\s+\S+(?:\s+(?:\(cached\)|[0-9]+(?:\.[0-9]+)?s))?"
+    r"(?:\s+coverage:\s+(?:[0-9]+(?:\.[0-9]+)?%\s+of\s+statements|"
+    r"\[no statements\]))?$", re.I)
+_BAZEL_TEST_RESULT_RE = re.compile(
+    r"^\S.*\b(?:PASSED|FAILED)\b(?:\s+in\s+[0-9]+(?:\.[0-9]+)?s)?$", re.I)
+_GRADLE_TEST_RESULT_RE = re.compile(
+    r"^> Task \S*test(?:\s+(?:FROM-CACHE|UP-TO-DATE|SKIPPED|FAILED))?$", re.I)
+_TURBO_TEST_RESULT_RE = re.compile(
+    r"^(?:[^:\s]+:)*[^:\s]*test[^:\s]*:\s+cache\s+"
+    r"(?:hit, replaying logs|miss, executing)\b", re.I)
+
+
+def _test_result_replay_share(text: str | None) -> dict[str, Any] | None:
+    """Count narrowly recognized cached test-result lines in one job log."""
+    if not text:
+        return None
+    cached = total = 0
+    for line in _clean_log(text):
+        if _GO_TEST_RESULT_RE.search(line):
+            total += 1
+            cached += "(cached)" in line.casefold()
+        elif _BAZEL_TEST_RESULT_RE.search(line):
+            total += 1
+            cached += bool(re.search(
+                r"\(cached\)\s+(?:PASSED|FAILED)\b", line, re.I))
+        elif _GRADLE_TEST_RESULT_RE.search(line):
+            total += 1
+            cached += "FROM-CACHE" in line.upper()
+        elif _TURBO_TEST_RESULT_RE.search(line):
+            total += 1
+            cached += "cache hit, replaying logs" in line.casefold()
+    if not total:
+        return None
+    share = cached / total
+    return {
+        "cached_lines": cached,
+        "test_result_lines": total,
+        "share": share,
+        "replayed": share > 0.5,
+    }
+
 
 def _catalog_leaf(leaf: dict[str, Any] | None) -> dict[str, Any] | None:
     """`leaf`, unless it is an observation-only leaf (then None)."""
@@ -7145,10 +7187,17 @@ def _mag_line(mag: dict[str, Any] | None, leaf: dict[str, Any] | None) -> list[s
     finding) or fewer than 2 runs to compare."""
     if not mag or not isinstance(mag, dict):
         return []
+    excluded = mag.get("replayed_result_logs_excluded")
+    excluded_n = excluded if isinstance(excluded, int) and excluded > 0 else 0
+    exclusion = (
+        f"**Replayed-result exclusion:** {excluded_n} fetched sibling "
+        f"log{'s were' if excluded_n != 1 else ' was'} left out of this cross-run "
+        "magnitude baseline because most recognized test results were replayed from cache."
+    ) if excluded_n else ""
     entries = [x for x in (mag.get("values") or []) if _num(x.get("value")) is not None]
     vals = [_num(x.get("value")) for x in entries]
     if len(vals) < 2:
-        return []
+        return [exclusion, ""] if exclusion else []
     unit = str(mag.get("unit", ""))
     fmt = (lambda x: f"{x:.0f}%") if unit == "%" else (lambda x: _clock(x))
     # The median can land on a half (even sample -> mean of the two middles, e.g.
@@ -7190,6 +7239,8 @@ def _mag_line(mag: dict[str, Any] | None, leaf: dict[str, Any] | None) -> list[s
             if x.get("fork"):
                 tag += " — fork PR (no repo secrets; can't reach upstream branch caches)"
             out.append(f"- [run {rid}]({url}) — {fmt(_num(x.get('value')))}{tag}")
+        if exclusion:
+            out += ["", exclusion]
         out.append("")
         return out
     if n >= 5:
@@ -7234,6 +7285,8 @@ def _mag_line(mag: dict[str, Any] | None, leaf: dict[str, Any] | None) -> list[s
         if x.get("fork"):
             tag += " — fork PR (no repo secrets; can't reach upstream branch caches)"
         out.append(f"- [run {rid}]({url}) — {fmt(_num(x.get('value')))}{tag}")
+    if exclusion:
+        out += ["", exclusion]
     out.append("")
     return out
 
@@ -8361,6 +8414,14 @@ def _data_sources_footer(doc: dict[str, Any], repo: str,
     if _par:
         rows.append(("Parallel steps", _par,
                      parallel_steps_used_for(doc.get("parallel_steps"))))
+    _jest_coverage = doc.get("jest_coverage_notes")
+    if isinstance(_jest_coverage, list):
+        _notes = sorted({str(row.get("note")) for row in _jest_coverage
+                         if isinstance(row, dict) and row.get("note")})
+        if _notes:
+            rows.append(("Jest coverage configuration", _flatten_cell("; ".join(_notes)),
+                         "Provider comparison guidance; no saving credited without "
+                         "matched measurements"))
     # Candidates a pattern measured and then HELD BACK because it could not
     # decide them — a candidate cache (OPT79), a group of small jobs sharing one
     # setup (OPT77), a checkout with a slow tail (OPT80). Without these rows the
@@ -11787,6 +11848,8 @@ def _also_noticed_block(findings: list[dict[str, Any]],
         if str(f.get("pattern") or "") == "OPT32":
             measurement = f.get("path_filter_measurement")
             if isinstance(measurement, dict):
+                if measurement.get("status") == "unmeasured":
+                    return False
                 sampled = measurement.get("sampled_prs")
                 skipped = measurement.get("would_skip_prs")
                 rate = measurement.get("hit_rate")
@@ -11841,13 +11904,20 @@ def _also_noticed_block(findings: list[dict[str, Any]],
     # `_group_by_pattern_ranked`, so they survive this slice (they'd only be cut if there
     # were >_ALSO_NOTICED_CAP of them — not a case that arises today; see that docstring).
     shown, rest = ranked[:_ALSO_NOTICED_CAP], ranked[_ALSO_NOTICED_CAP:]
-    # OPT82 is exempt from the cap. It carries no bill saving BY DESIGN, so it ranks
-    # last and would be the first row the cap cuts — but its card is the only place
-    # its named rules, its benchmark and its ledger requirement reach the reader
-    # (the same reason `_on_pole_job` exempts it). The "+N more" tail is for rows
-    # whose substance is a smaller number; OPT82 has no number to be smaller.
-    shown += [g for g in rest if g[0] == "OPT82"]
-    rest = [g for g in rest if g[0] != "OPT82"]
+    # OPT82 and unmeasured OPT32 are exempt from the cap. OPT82 carries no bill saving
+    # BY DESIGN, while an unmeasured OPT32 has no number because GitHub did not return
+    # enough evidence to calculate one. In both cases the card is the only place the
+    # reader sees the substance that a numeric ranking cannot represent.
+    def _uncapped_group(group: tuple[str, list[dict[str, Any]]]) -> bool:
+        pat, members = group
+        return pat == "OPT82" or (
+            pat == "OPT32" and any(
+                isinstance(m.get("path_filter_measurement"), dict)
+                and m["path_filter_measurement"].get("status") == "unmeasured"
+                for m in members))
+
+    shown += [g for g in rest if _uncapped_group(g)]
+    rest = [g for g in rest if not _uncapped_group(g)]
     # A credited wall-clock lever (OPT24) can land in this appendix; it sorts first and
     # carries a per-row correction below. Qualify the blanket "off-path / ~0 wall-clock"
     # blurb when one is present, so the section header doesn't contradict that row.
@@ -12010,6 +12080,14 @@ def _also_noticed_block(findings: list[dict[str, Any]],
                          "**wall-clock-negative** (build-once-then-fan-out adds a serial "
                          "gate), so it lengthens the merge wait. Treat it as a bill "
                          "saving, not a speed win.")
+        if pat == "OPT32":
+            unmeasured = next((m.get("path_filter_measurement") for m in ms
+                               if isinstance(m.get("path_filter_measurement"), dict)
+                               and m["path_filter_measurement"].get("status") == "unmeasured"),
+                              None)
+            if isinstance(unmeasured, dict):
+                reason = str(unmeasured.get("reason") or "unknown reason")
+                lines.append(f"**Measurement:** hit rate not measured ({reason}).")
         if ev:
             lines.append(f"**Evidence:** {_flatten_cell(ev)}")
         lines += [f"**Catalog (background + fix recipe):** {url}", "",
@@ -13165,11 +13243,12 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     # row. A quiet repo with the stamp and nothing else collapsed to the
     # one-line note, dropping the footer and failing its own verifier.
     parallel_n = parallel_steps_used(doc.get("parallel_steps"))
+    jest_coverage_n = bool(doc.get("jest_coverage_notes"))
     if (not tier2_lines and not also_lines and not queue_lines
             and not incomplete and not broken and not uncredited_lines
             and not cache_guard_lines
             and not withheld_n and not opt79_off_pole and not opt81_n
-            and not parallel_n):
+            and not parallel_n and not jest_coverage_n):
         return ""  # nothing static to say — caller keeps the one-line note
 
     sampled = cp.get("sampled_pr_count")
@@ -15372,6 +15451,18 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         out.append("")
         out.append(f"_{role}_" if not role.startswith("**") else role)
         out.append("")
+        replay = p.get("replayed_test_results")
+        if isinstance(replay, dict):
+            cached = replay.get("cached_lines")
+            total = replay.get("test_result_lines")
+            if isinstance(cached, int) and isinstance(total, int) and total > 0:
+                out += [
+                    f"**Replayed test results:** {cached} of {total} recognized test-result "
+                    "lines came from a result cache. This fetched run is excluded from the "
+                    "log-derived pole drill and cross-run magnitude baseline; timing samples "
+                    "whose logs were not fetched remain in the jobs-API population.",
+                    "",
+                ]
         # Advisory-job disclosure. Sits directly under the role line, because it qualifies
         # what this pole's ranking MEANS before any drill, prompt or saving is read. Plain
         # prose, not a `Claim`: it asserts no framing-vocabulary phrase and no derived

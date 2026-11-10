@@ -5,7 +5,7 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - run: go run build/ci.go lint
+      - run: go run ./cmd/server
   test:
     needs: lint
     runs-on: ubuntu-latest
@@ -16,3 +16,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: make test-32
+  script-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: go run build/ci.go lint
+  checked-test:
+    needs: script-lint
+    runs-on: ubuntu-latest
+    steps:
+      - run: make test
