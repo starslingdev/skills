@@ -6213,7 +6213,7 @@ def _measure_opt32_path_filters(
 
 
 _CACHE_SIZING_PATTERNS = frozenset(
-    {"OPT4", "OPT6", "OPT9", "OPT61", "OPT96", "OPT101"})
+    {"OPT4", "OPT6", "OPT9", "OPT61", "OPT62", "OPT96", "OPT101"})
 _CACHE_DEFAULT_BUDGET_BYTES = 10 * 1024 ** 3
 _CACHE_BUDGET_FULL_FRACTION = 0.90
 _CACHE_LIMIT_UNKNOWN_ABOVE = 1.10
@@ -24378,7 +24378,7 @@ def _cache_keywords_for_finding(finding: dict[str, Any]) -> tuple[str, ...]:
     """Scope a static compiler-cache lint to the cache family it predicts."""
     pattern = str(finding.get("pattern") or "")
     keywords = _CACHE_KEYWORDS.get(pattern, ())
-    if not finding.get("static_cache_lint") or pattern != "OPT61":
+    if not finding.get("static_cache_lint"):
         return keywords
     explicit = str(finding.get("cache_family") or "").strip().lower()
     if explicit:
@@ -24386,7 +24386,7 @@ def _cache_keywords_for_finding(finding: dict[str, Any]) -> tuple[str, ...]:
     evidence = " ".join(str(finding.get(key) or "")
                         for key in ("evidence", "subject", "evidence_snippet")).lower()
     compiler_families = tuple(
-        family for family in ("ccache", "sccache", "staticcheck", "golangci")
+        family for family in ("sccache", "ccache", "staticcheck", "golangci", "buildkit", "go")
         if family in evidence)
     return compiler_families or keywords
 
@@ -24404,8 +24404,8 @@ def _cache_status_from_log(log: str, keywords: tuple[str, ...] = ()) -> tuple[st
         first_hit = ""
         for raw_line in log.splitlines():
             if re.search(
-                    r"(?:error|failed|not found).*(?:importing )?cache|"
-                    r"(?:importing )?cache.*(?:error|failed|not found)|\bcache miss\b",
+                    r"(?:error|failed|not found).*(?:importing cache|cache manifest)|"
+                    r"(?:importing cache|cache manifest).*(?:error|failed|not found)",
                     raw_line, re.I):
                 return "miss", _clean_log_line(raw_line)
             if not first_hit and re.search(
@@ -24415,7 +24415,17 @@ def _cache_status_from_log(log: str, keywords: tuple[str, ...] = ()) -> tuple[st
         return ("hit", first_hit) if first_hit else ("unknown", "")
 
     def _relevant(line: str) -> bool:
-        return not keywords or any(k.lower() in line.lower() for k in keywords)
+        if not keywords:
+            return True
+        for keyword in keywords:
+            if keyword == "go":
+                if re.search(r"\b(?:go(?:\s+build)?\s+cache|GOCACHE)\b", line, re.I):
+                    return True
+                continue
+            if re.search(rf"(?<![A-Za-z0-9]){re.escape(keyword)}(?![A-Za-z0-9])",
+                         line, re.I):
+                return True
+        return False
     first_hit = ""
     for raw_line in log.splitlines():
         if not _relevant(raw_line):
@@ -32035,6 +32045,12 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         client, repo, findings, sampled_runs_by_wf, _wf_docs,
         changed_files=_changed_files)
 
+    # Confirm static cache misses before the shared sizing pass so newly
+    # creditable findings cross the same guards and wall-clock cascade as every
+    # other finding.
+    if with_logs:
+        _attach_cache_log_evidence(client, repo, findings, jobs_per_run_by_wf)
+
     # A cache log distribution belongs to the same workflow/job finding even
     # when the finding is not OPT96. Reuse the already-fetched pole logs; this
     # adds no job-log reads.
@@ -32393,23 +32409,6 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     tiers = ["gh-timing"]
     logs_fetched: int | None = None
     if with_logs:
-        _attach_cache_log_evidence(client, repo, findings, jobs_per_run_by_wf)
-        # Static cache lints start uncredited because workflow shape alone cannot
-        # prove cost. A sampled miss supplies the missing runtime evidence, so run
-        # the same sizing and three-part cache guard used by other cache findings.
-        # A guard that remains failed or unmeasured still removes the credit.
-        for _finding in findings:
-            if not (_finding.get("static_cache_lint")
-                    and isinstance(_finding.get("cache_log_confirmation"), dict)):
-                continue
-            _wf_path = str(_finding.get("workflow_file") or "")
-            _size_finding(
-                _finding, crit_by_wf.get(_wf_path, {}), vol_by_wf.get(_wf_path))
-            if _finding in _cache_candidates:
-                _apply_cache_sizing_guard(
-                    _finding, usage_bytes=_cache_usage, changed=_changed_files,
-                    sampled_runs=sampled_runs_by_wf.get(_wf_path, []),
-                    wf_docs=_wf_docs)
         tiers.append("job-logs")
         # Capture the long-pole jobs' raw logs into a local data bundle so the
         # report / fix-agent can read the step's internal timing without

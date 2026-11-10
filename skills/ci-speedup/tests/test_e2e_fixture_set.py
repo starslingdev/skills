@@ -601,12 +601,22 @@ def test_named_fixtures_exercise_their_defining_interactions(
         for fact in path_facts if fact.get("partial") is not True)
 
 
-@pytest.mark.parametrize(("cache_key", "credited"), [
-    ("ccache-linux", True),
-    ("pnpm-linux", False),
+@pytest.mark.parametrize(("family", "pattern", "miss", "hit", "credited"), [
+    ("ccache", "OPT61", "Cache not found for input keys: ccache-linux-old",
+     "Cache restored from key: ccache-linux-stable", True),
+    ("ccache", "OPT61", "Cache not found for input keys: pnpm-linux-old",
+     "Cache restored from key: pnpm-linux-stable", False),
+    ("buildkit", "OPT4", "ERROR importing cache manifest from gha: not found",
+     "#5 CACHED", True),
+    ("buildkit", "OPT4", "Cache not found for input keys: pnpm-linux-old",
+     "Cache restored from key: pnpm-linux-stable", False),
+    ("go", "OPT62", "Go build cache miss",
+     "Go cache restored from key: go-build-stable", True),
+    ("go", "OPT62", "Cache not found for input keys: cargo-linux-old",
+     "Cache restored from key: cargo-linux-stable", False),
 ])
 def test_static_cache_lint_with_measured_miss_can_be_credited(
-        monkeypatch, tmp_path, cache_key, credited):
+        monkeypatch, tmp_path, family, pattern, miss, hit, credited):
     fixture = tmp_path / "inputs" / "cache-lint-confirmed"
     fixture.parent.mkdir()
     shutil.copytree(FIXTURE_ROOT / "cache-lints", fixture)
@@ -640,10 +650,10 @@ def test_static_cache_lint_with_measured_miss_can_be_credited(
             {"name": "Post Restore compiler cache",
              "started_at": f"{day}T00:01:58Z", "completed_at": f"{day}T00:02:00Z"},
         ]
-    miss = (f"Cache not found for input keys: {cache_key}-old\n"
-            "Cache size: 50 MB\nCache restored in 2s\nCache saved in 2s")
-    hit = (f"Cache restored from key: {cache_key}-stable\n"
-           "Cache size: 50 MB\nCache restored in 2s\nCache saved in 2s")
+    miss = (f"{miss}\nCache size: 50 MB\n"
+            "Cache restored in 2s\nCache saved in 2s")
+    hit = (f"{hit}\nCache size: 50 MB\n"
+           "Cache restored in 2s\nCache saved in 2s")
     recorded["logs"] = {"1101": miss, "1201": hit, "1301": hit}
     responses.write_text(json.dumps(recorded, indent=2) + "\n", encoding="utf-8")
     workflow = fixture / "workflows" / "ci.yml"
@@ -662,15 +672,27 @@ def test_static_cache_lint_with_measured_miss_can_be_credited(
     assert failures == [], [(check.name, check.detail) for check in failures]
     confirmed = [row for row in doc["findings"]
                  if row.get("static_cache_lint")
-                 and row.get("pattern") == "OPT61"
-                 and "size limit" in str(row.get("evidence") or "")
+                 and row.get("pattern") == pattern
+                 and row.get("cache_family") == family
+                 and "build" in (row.get("affected_jobs") or [])
                  and row.get("cache_log_confirmation", {}).get("misses")]
     if credited:
         assert confirmed
-        assert any(
-            float(row.get("wall_clock_p50_s") or 0) > 0
-            or float(row.get("runner_min_saving") or 0) > 0
-            for row in confirmed), json.dumps(confirmed, indent=2)
+        assert all(isinstance(row.get("cache_sizing_guard"), dict)
+                   for row in confirmed), json.dumps(confirmed, indent=2)
+        if family == "ccache":
+            assert all(row["cache_sizing_guard"]["status"] == "passed"
+                       for row in confirmed), json.dumps(confirmed, indent=2)
+            assert any(
+                float(row.get("wall_clock_p50_s") or 0) > 0
+                or float(row.get("runner_min_saving") or 0) > 0
+                for row in confirmed), json.dumps(confirmed, indent=2)
+        else:
+            assert all(
+                row["cache_sizing_guard"]["status"] != "passed"
+                and not float(row.get("wall_clock_p50_s") or 0)
+                and not float(row.get("runner_min_saving") or 0)
+                for row in confirmed), json.dumps(confirmed, indent=2)
     else:
         assert not confirmed
 

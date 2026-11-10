@@ -304,6 +304,25 @@ def test_opt61_marks_a_restored_then_unread_deleted_path_as_pure_cost(tmp_path) 
     assert "deletes" in lint["evidence"]
 
 
+def test_opt61_stamps_each_finding_with_its_own_cache_family(tmp_path) -> None:
+    rows = _scan(tmp_path, """      - run: cmake --build build
+        env:
+          CCACHE_DIR: ${{ runner.temp }}/ccache
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+      - run: staticcheck ./...
+        env:
+          STATICCHECK_CACHE: ${{ runner.temp }}/staticcheck
+""")
+    families = {
+        str(row.get("subject") or "").lower(): row.get("cache_family")
+        for row in rows if row.get("pattern") == "OPT61"
+    }
+    assert any("ccache" in subject and family == "ccache"
+               for subject, family in families.items())
+    assert any("staticcheck" in subject and family == "staticcheck"
+               for subject, family in families.items())
+
+
 def test_opt61_does_not_call_a_pre_restore_cleanup_a_later_deletion(tmp_path) -> None:
     rows = _scan(tmp_path, """      - run: rm -rf /tmp/staticcheck
       - uses: actions/cache@v4

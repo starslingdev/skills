@@ -4145,6 +4145,20 @@ _REMOTE_COMPILER_CACHE_RE = re.compile(
     r"WEBDAV_ENDPOINT)|CCACHE_REMOTE_STORAGE)\b", re.I)
 
 
+def _static_cache_family(text: str) -> str | None:
+    """Return the cache family named by one detector reason, not its job."""
+    folded = text.casefold()
+    for family, pattern in (
+        ("sccache", r"\bsccache\b"),
+        ("ccache", r"\bccache\b"),
+        ("staticcheck", r"\bstaticcheck(?:_cache)?\b"),
+        ("golangci", r"\bgolangci(?:_lint_cache|-lint)?\b"),
+    ):
+        if re.search(pattern, folded):
+            return family
+    return None
+
+
 def _cache_action_steps(job: dict) -> list[dict]:
     return [step for step in _steps(job)
             if isinstance(step, dict) and _CACHE_ACTION_RE.search(_uses(step))]
@@ -4347,7 +4361,7 @@ def _detect_opt61(
         cache_steps = _cache_action_steps(job)
         cache_paths = _cache_paths(cache_steps)
         blob = "\n".join((_job_run_blob(job), _job_env_blob(job, doc)))
-        reasons: list[tuple[str, str]] = []
+        reasons: list[tuple[str, str, str | None]] = []
 
         for step in cache_steps:
             values = step.get("with") if isinstance(step.get("with"), dict) else {}
@@ -4358,13 +4372,17 @@ def _detect_opt61(
             if key and restore and rolling_key and not any(
                     saved_key.startswith(_normalized_actions_expression(prefix))
                     for prefix in restore for saved_key in saved_keys):
+                family = _static_cache_family("\n".join(
+                    [key, *cache_paths, _uses(step)]))
                 reasons.append(("restore-keys", "none of its `restore-keys` can restore the "
-                                "rolling saved-key family on a later edit"))
+                                "rolling saved-key family on a later edit", family))
             size = values.get("max-size") or values.get("max_size")
             mib = _size_mib(str(size)) if size is not None else None
             if mib is not None and mib <= 64:
+                family = _static_cache_family("\n".join(
+                    [key, *cache_paths, _uses(step)]))
                 reasons.append((str(size), f"its compiler-cache size limit is only {size} and "
-                                "may churn before the next reuse"))
+                                "may churn before the next reuse", family))
 
         for match in re.finditer(
                 r"\bCCACHE_MAXSIZE\s*=\s*([^\s;&]+)|\bccache\s+-M\s+([^\s;&]+)",
@@ -4374,7 +4392,7 @@ def _detect_opt61(
             if mib is not None and mib <= 64:
                 reasons.append((match.group(0),
                                 f"its compiler-cache size limit is only {value} and may churn "
-                                "before the next reuse"))
+                                "before the next reuse", "ccache"))
 
         temp = _TEMP_CACHE_RE.search(blob)
         cache_path_text = "\n".join(cache_paths)
@@ -4414,7 +4432,8 @@ def _detect_opt61(
                 _cache_path_covers(path, temp.group(0).split("=", 1)[-1])
                 for path in cache_paths)):
             reasons.append((temp.group(0),
-                            "a compiler or analysis cache lives in temporary storage and is not saved"))
+                            "a compiler or analysis cache lives in temporary storage and is not saved",
+                            _static_cache_family(temp.group(0))))
         uses_compiler_cache = bool(_COMPILER_CACHE_RE.search(blob))
         supplied_by_cache_action = any(
             re.search(r"ccache-action|rust-cache", _uses(step), re.IGNORECASE)
@@ -4425,15 +4444,17 @@ def _detect_opt61(
         if (uses_compiler_cache and not supplied_by_cache_action and not persisted_compiler
                 and not _is_self_hosted(job)
                 and not _compiler_cache_has_remote_backend(job, doc)):
-            reasons.append((_COMPILER_CACHE_RE.search(blob).group(0),
-                            "the compiler cache has no persistence step"))
+            compiler = _COMPILER_CACHE_RE.search(blob).group(0)
+            reasons.append((compiler, "the compiler cache has no persistence step",
+                            _static_cache_family(compiler)))
         persisted_analysis = (persisted_dirs(declared_analysis_dirs)
                                if declared_analysis_dirs else any(
                                    token in cache_path_text
                                    for token in ("staticcheck", "golangci")))
         if _ANALYSIS_CACHE_RE.search(blob) and not persisted_analysis:
-            reasons.append((_ANALYSIS_CACHE_RE.search(blob).group(0),
-                            "the analysis cache has no persistence step"))
+            analysis = _ANALYSIS_CACHE_RE.search(blob).group(0)
+            reasons.append((analysis, "the analysis cache has no persistence step",
+                            _static_cache_family(analysis)))
         steps = _steps(job)
         cache_indices = [i for i, step in enumerate(steps) if step in cache_steps]
         deleted: re.Match[str] | None = None
@@ -4446,7 +4467,8 @@ def _detect_opt61(
             if candidate is None or not prior:
                 continue
             deleted = candidate
-            reasons.append((candidate.group(0), "a later step deletes the cache directory"))
+            reasons.append((candidate.group(0), "a later step deletes the cache directory",
+                            _static_cache_family(candidate.group(0))))
             restore_index = max(prior)
             # With no command between restore and deletion, the restored path is
             # provably unread. A wrapper command may consume it, so fail closed.
@@ -4454,14 +4476,8 @@ def _detect_opt61(
                                       for s in steps[restore_index + 1:index])
             break
 
-        for matched, reason in dict.fromkeys(reasons):
+        for matched, reason, family in dict.fromkeys(reasons):
             facts: dict[str, Any] = {"static_cache_lint": True}
-            family_text = "\n".join(
-                [blob, cache_path_text, *(str(_uses(step)) for step in cache_steps)]
-            ).casefold()
-            family = next((name for name in (
-                "ccache", "sccache", "staticcheck", "golangci")
-                if name in family_text), None)
             if family:
                 facts["cache_family"] = family
             if deleted is not None and matched == deleted.group(0) and deletion_unread:
