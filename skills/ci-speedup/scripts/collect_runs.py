@@ -22426,6 +22426,14 @@ def _detect_structural_candidates(
                     "Preserve every published platform, artifact, release flag, test, "
                     "provenance record, and manifest; confirm the builder topology before "
                     "changing how the foreign-platform work executes.")
+                f["rollout"] = (
+                    "Do not run a separate OPT72 rollout for this pole; follow the "
+                    "emulated-image compile drill and re-measure the same check after "
+                    "that change.")
+                f["failure_mode"] = (
+                    "Treating this uncredited row as an independent lever would "
+                    "double-count the same pole; preserve every published platform and "
+                    "artifact while validating the specific compile change.")
                 f["size_note"] = (
                     "The emulated-image compile leaf owns this pole; OPT72 receives no "
                     "separate saving.")

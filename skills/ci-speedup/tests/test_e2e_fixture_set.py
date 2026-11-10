@@ -424,6 +424,8 @@ def test_named_fixtures_exercise_their_defining_interactions(
     ]
     assert not any(float(row.get("wall_clock_p50_s") or 0.0) > 0 for row in image_opt72)
     assert "prefer warming the cache" not in reports["multiarch-image"].lower()
+    assert "cache path: measure warm-vs-cold" not in reports["multiarch-image"].lower()
+    assert "warm-cache claim" not in reports["multiarch-image"].lower()
     assert any(
         pole.get("job") == "image"
         for pole in image_doc["pr_critical_path"]["poles"])
@@ -736,6 +738,8 @@ def test_no_inspect_foreign_compile_runs_through_collection(
     opt72 = [row for row in doc["findings"] if row.get("pattern") == "OPT72"]
     assert not any(float(row.get("wall_clock_p50_s") or 0.0) > 0 for row in opt72)
     assert "prefer warming the cache" not in report.lower()
+    assert "cache path: measure warm-vs-cold" not in report.lower()
+    assert "warm-cache claim" not in report.lower()
     assert "docker buildx inspect --bootstrap" in report
     assert "does not establish whether that work ran under emulation" in report
     assert "building a foreign architecture under emulation instead" not in report
