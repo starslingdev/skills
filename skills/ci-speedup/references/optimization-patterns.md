@@ -2227,7 +2227,7 @@ fix_strategy: measure-test-concurrency
 title_template: "Test concurrency is set by guess, not measurement"
 -->
 
-**Narrowly auto-detected for Jest.** When a workflow invokes Jest and its nearest configuration pins `maxWorkers` below 100%, the static pass emits this uncredited measurement note. Other tools and unpinned Jest worker counts still require the measured review below.
+**Narrowly auto-detected for Jest.** When a workflow invokes Jest and its nearest configuration pins `maxWorkers` to an absolute number or a percentage below 100%, the static pass emits this uncredited measurement note. Other tools and unpinned Jest worker counts still require the measured review below.
 
 **TL;DR**: The slowest test job runs with a worker count nobody measured: one worker on a runner with several cores, a fixed cap carried over from an older runner, or "as many as there are cores" where memory or a shared service is the real limit. Time two or three settings on the real runner class and keep the fastest. More workers is not always faster.
 
@@ -3480,7 +3480,7 @@ fix_strategy: fast-subset-on-prs-full-after-merge
 title_template: "Every pull request pays for coverage that could run after merge"
 -->
 
-**Not auto-detected yet.** Like OPT86 and OPT88, no pass emits OPT90, so the audit never reports it on its own and never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading the pull-request workflows and their run history against the heuristic below.
+**Not auto-detected yet.** Like OPT86, no pass emits OPT90, so the audit never reports it on its own and never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading the pull-request workflows and their run history against the heuristic below.
 
 **TL;DR**: Every pull request waits for the full matrix (every OS, every runtime version, every heavyweight configuration) even though a small subset catches almost every failure. Run the subset that catches what matters before merge, and move the rest to a run after merge or on a schedule, where it still gates releases and pages someone when it fails.
 
@@ -5077,7 +5077,7 @@ fix_strategy: profile-the-compile
 title_template: "The compile is the long pole and nobody profiled it"
 -->
 
-**Not auto-detected yet.** Like OPT86 and OPT88, no pass emits OPT91, so the audit never reports it on its own and never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading the slow build step and the compiler's own timing reports against the heuristic below.
+**Not auto-detected yet.** Like OPT86, no pass emits OPT91, so the audit never reports it on its own and never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading the slow build step and the compiler's own timing reports against the heuristic below.
 
 **TL;DR**: The slowest job's time goes to compiling, the cache is already doing its job, and nobody has asked the compiler where the time goes. Profile the compile with the compiler's own timing reports, then fix the hotspot it names: a build-profile setting that costs far more build time than it returns at runtime, or one piece of code that is expensive to compile.
 

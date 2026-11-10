@@ -12,7 +12,7 @@ category: 4
 
 # OPT88 — Test Concurrency Is a Guess, Not a Measurement
 
-**Narrowly auto-detected for Jest.** When a workflow invokes Jest and its nearest configuration pins `maxWorkers` below 100%, the static pass emits this uncredited measurement note. Other tools and unpinned Jest worker counts still require the measured review below.
+**Narrowly auto-detected for Jest.** When a workflow invokes Jest and its nearest configuration pins `maxWorkers` to an absolute number or a percentage below 100%, the static pass emits this uncredited measurement note. Other tools and unpinned Jest worker counts still require the measured review below.
 
 **TL;DR**: The slowest test job runs with a worker count nobody measured: one worker on a runner with several cores, a fixed cap carried over from an older runner, or "as many as there are cores" where memory or a shared service is the real limit. Time two or three settings on the real runner class and keep the fastest. More workers is not always faster.
 

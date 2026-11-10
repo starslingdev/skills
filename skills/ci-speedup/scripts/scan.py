@@ -3165,7 +3165,12 @@ def _opt9_cache_action_paths(job: dict, step: dict) -> list[str]:
     return [path.strip() for path in paths if path.strip()]
 
 
-def _opt9_jest_notes(doc: dict, job: dict, step: dict) -> dict[str, list[str]]:
+_OPT9_JEST_NOTES_CACHE: dict[
+    tuple[int, int, int], dict[str, list[str]]
+] = {}
+
+
+def _read_opt9_jest_notes(doc: dict, job: dict, step: dict) -> dict[str, list[str]]:
     root = Path(_OPT102_ROOT or ".").resolve()
     working = _script_working_directory(job, step, doc)
     base = (root / working).resolve()
@@ -3276,6 +3281,14 @@ def _opt9_jest_notes(doc: dict, job: dict, step: dict) -> dict[str, list[str]]:
     }
 
 
+def _opt9_jest_notes(doc: dict, job: dict, step: dict) -> dict[str, list[str]]:
+    """Read one Jest config at most once for all note-routing consumers."""
+    key = (id(doc), id(job), id(step))
+    if key not in _OPT9_JEST_NOTES_CACHE:
+        _OPT9_JEST_NOTES_CACHE[key] = _read_opt9_jest_notes(doc, job, step)
+    return _OPT9_JEST_NOTES_CACHE[key]
+
+
 def _detect_opt9(doc: dict, raw: str) -> list[Hit]:
     """A lint/format/type-check tool invoked in a `run:` block without its own
     cache flag (catalog OPT9 heuristic). Covers prettier / eslint / jest / tsc;
@@ -3327,18 +3340,38 @@ def _detect_opt88(doc: dict, raw: str) -> list[Hit]:
             concurrency = notes.get("concurrency", [])
             if not concurrency:
                 continue
-            coverage = notes.get("coverage", [])
             command = _run(step)
             hits.append(Hit(
                 line=_line_of_in_job(raw, job_name, command.splitlines()[0].strip()),
                 affected_jobs=[job_name],
-                evidence=f"job `{job_name}`: " + "; ".join(concurrency + coverage),
+                evidence=f"job `{job_name}`: " + "; ".join(concurrency),
                 match_text=f"{job_name}#jest-max-workers",
-                facts={"jest_concurrency_notes": concurrency,
-                       "jest_coverage_notes": coverage},
+                facts={"jest_concurrency_notes": concurrency},
             ))
             break
     return hits
+
+
+def _jest_coverage_notes(
+    parsed: list[tuple[str, dict, str]],
+) -> list[dict[str, str]]:
+    """Uncredited Jest provider guidance, independent of cache/concurrency findings."""
+    out: list[dict[str, str]] = []
+    for rel, doc, _raw in parsed:
+        for job_name, job in _jobs_from_doc(doc).items():
+            if not isinstance(job, dict):
+                continue
+            for step in _steps(job):
+                coverage = _opt9_jest_notes(doc, job, step).get("coverage", [])
+                if not coverage:
+                    continue
+                out.append({
+                    "workflow_file": rel,
+                    "job": job_name,
+                    "note": coverage[0],
+                })
+                break
+    return out
 
 
 # ---- Job exclusivity (shared by the cross-job duplicate detectors) -----------
@@ -8783,6 +8816,7 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
     # `git checkout origin/main` hidden inside `uses: ./.github/actions/foo`.
     global _GIT_HISTORY_LOCAL_ACTIONS, _GIT_HISTORY_LOCAL_SCRIPTS, _OPT102_ROOT
     _OPT102_ROOT = root
+    _OPT9_JEST_NOTES_CACHE.clear()
     _GIT_HISTORY_LOCAL_ACTIONS = _index_local_git_actions(root, parsed)
     _GIT_HISTORY_LOCAL_SCRIPTS = _index_local_git_scripts(root, parsed)
 
@@ -8918,6 +8952,9 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
     if held_back:
         parallel_stats["held_back"] = held_back
     extra: dict[str, Any] = dict(extra_opt96)
+    jest_coverage = _jest_coverage_notes(parsed)
+    if jest_coverage:
+        extra["jest_coverage_notes"] = jest_coverage
     if parallel_steps_used(parallel_stats):
         # Stamped only when the syntax is used, so every other findings
         # document is byte-identical to before. Rendered as the "Parallel steps"

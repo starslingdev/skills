@@ -311,8 +311,10 @@ def test_opt9_follows_one_make_recipe_and_reads_jest_config(tmp_path: Path):
     assert concurrency is not None
     evidence = concurrency["evidence"]
     assert "maxWorkers" in evidence and "OPT88" in evidence
-    assert "coverage provider" in evidence
-    assert "no provider-switch saving is credited" in evidence
+    coverage = result["jest_coverage_notes"]
+    assert len(coverage) == 1
+    assert "coverage provider" in coverage[0]["note"]
+    assert "no provider-switch saving is credited" in coverage[0]["note"]
 
 
 def test_opt9_jest_notes_have_independent_negative_controls(tmp_path: Path):
@@ -321,23 +323,55 @@ def test_opt9_jest_notes_have_independent_negative_controls(tmp_path: Path):
     persisted = _finding(persisted_scan, "OPT88")
     assert persisted is not None
     assert "maxWorkers" in persisted["evidence"]
-    assert "coverage provider" in persisted["evidence"]
-    assert "no provider-switch saving is credited" in persisted["evidence"]
+    assert "coverage provider" in persisted_scan["jest_coverage_notes"][0]["note"]
+    assert "no provider-switch saving is credited" in (
+        persisted_scan["jest_coverage_notes"][0]["note"])
+
+    provider_only = _write_jest_make_project(
+        tmp_path / "provider-only", persist=True, max_workers="undefined")
+    assert _finding(provider_only, "OPT9") is None
+    assert _finding(provider_only, "OPT88") is None
+    assert "coverage provider" in provider_only["jest_coverage_notes"][0]["note"]
 
     trailing_slash_scan = _write_jest_make_project(
         tmp_path, persist=True, cache_path="frontend/.cache/jest/")
     assert _finding(trailing_slash_scan, "OPT9") is None
     assert _finding(trailing_slash_scan, "OPT88") is not None
 
-    full_workers = _finding(
-        _write_jest_make_project(tmp_path, max_workers='"100%"'), "OPT9")
-    assert full_workers is not None
-    assert "OPT88" not in full_workers["evidence"]
+    full_workers_scan = _write_jest_make_project(
+        tmp_path, max_workers='"100%"')
+    assert _finding(full_workers_scan, "OPT9") is not None
+    assert _finding(full_workers_scan, "OPT88") is None
 
-    no_provider = _finding(
-        _write_jest_make_project(tmp_path, provider='undefined'), "OPT9")
+    no_provider_scan = _write_jest_make_project(
+        tmp_path, provider='undefined')
+    no_provider = _finding(no_provider_scan, "OPT88")
     assert no_provider is not None
     assert "coverage provider" not in no_provider["evidence"]
+    assert "jest_coverage_notes" not in no_provider_scan
+
+
+def test_jest_config_discovery_is_shared_across_note_routes(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    _write_jest_make_project(tmp_path, persist=True)
+    sys.path.insert(0, str(_SKILL_DIR / "scripts"))
+    import scan  # noqa: E402
+
+    calls = 0
+    original = scan._vitest_config_files
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        predicate = args[1] if len(args) > 1 else kwargs.get("is_config")
+        if (callable(predicate) and predicate("jest.config.js")
+                and not predicate("vitest.config.js")):
+            calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(scan, "_vitest_config_files", counted)
+    scan.scan(tmp_path, _SKILL_DIR / "references" / "patterns")
+
+    assert calls == 1
 
 
 def test_opt9_jest_cache_paths_are_ordered_and_compared_by_containment(tmp_path: Path):
@@ -376,9 +410,8 @@ def test_opt9_jest_disabled_comments_provider_and_root_dir(tmp_path: Path):
         assert finding is not None
         assert "result caching is disabled" in finding["evidence"]
 
-    babel = _finding(_write_jest_make_project(
-        tmp_path / "babel", provider='"babel"'), "OPT88")
-    assert babel is not None and "coverage provider is `babel`" in babel["evidence"]
+    babel = _write_jest_make_project(tmp_path / "babel", provider='"babel"')
+    assert "coverage provider is `babel`" in babel["jest_coverage_notes"][0]["note"]
 
     comments = _finding(_write_jest_make_project(
         tmp_path / "comments", persist=True, max_workers="undefined",
