@@ -148,6 +148,50 @@ def test_opt32_changed_files_fetch_rejects_the_api_ceiling_as_incomplete():
     assert client.changed_file_calls == cr._OPT32_CHANGED_FILES_MAX_PAGES
 
 
+def test_opt32_unmeasured_ceiling_stays_visible_through_collect_and_verifier(
+        monkeypatch, tmp_path):
+    paths = {n: [f"src/file{n}.py"] for n in range(1, 61)}
+    paths[1] = [f"docs/file-{i}.md" for i in range(3000)]
+
+    doc = _collect(monkeypatch, _PathFilterClient(paths))
+    finding = _opt32(doc)
+
+    assert finding.get("path_filter_measurement", {}).get("status") == "unmeasured"
+    assert finding["path_filter_measurement"]["sampled_prs"] == 60
+    report = _verify_full(doc, tmp_path)
+    assert "hit rate not measured (changed-file list unavailable or incomplete)" in report
+    assert "Add path filters" in report.split('<a id="also-noticed">', 1)[1]
+
+
+def test_opt32_unmeasured_disclosure_is_never_cut_by_the_appendix_cap():
+    billed = [
+        {"id": f"h{i}", "pattern": f"OPT{i + 1}", "title": f"Hygiene {i}",
+         "severity": "LOW", "workflow_file": ".github/workflows/ci.yml",
+         "line": 10 + i, "affected_jobs": [f"job{i}"], "evidence": "measured",
+         "runner_min_saving": 100.0 - i, "wall_clock_p50_s": 0.0}
+        for i in range(bp._ALSO_NOTICED_CAP + 1)
+    ]
+    unmeasured = {
+        "id": "path-filter", "pattern": "OPT32", "title": "Add path filters",
+        "severity": "LOW", "workflow_file": ".github/workflows/path.yml",
+        "line": 7, "affected_jobs": ["test"], "evidence": "pull requests run it",
+        "runner_min_saving": None, "wall_clock_p50_s": 0.0,
+        "path_filter_measurement": {
+            "status": "unmeasured",
+            "reason": "changed-file list unavailable or incomplete",
+            "sampled_prs": 60,
+        },
+    }
+
+    lines, _count, _has_wall_clock = bp._also_noticed_block(
+        billed + [unmeasured], "https://example.test/catalog")
+    report = "\n".join(lines)
+
+    assert "OPT32 - Add path filters" in report
+    assert "hit rate not measured (changed-file list unavailable or incomplete)" in report
+    assert "more hygiene pattern(s)" in report
+
+
 def test_opt32_unsupported_negative_glob_fails_closed():
     patterns = ["docs/**", "!docs/[ab]/**"]
 

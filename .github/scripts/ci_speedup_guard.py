@@ -290,6 +290,40 @@ def multiset_delta(base: list[dict[str, Any]], merge: list[dict[str, Any]],
     return new, resolved, existing
 
 
+def pair_aggregate_scopes(
+        base: list[dict[str, Any]], merge: list[dict[str, Any]],
+) -> list[tuple[dict[str, Any], dict[str, Any] | None]]:
+    """Pair repeated aggregate findings by exact jobs, then greatest overlap."""
+    remaining_base = list(base)
+    remaining_merge = list(merge)
+    pairs: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
+
+    for current in list(remaining_merge):
+        jobs = set(current.get("affected_jobs", []))
+        exact = next((old for old in remaining_base
+                      if set(old.get("affected_jobs", [])) == jobs), None)
+        if exact is not None:
+            pairs.append((current, exact))
+            remaining_merge.remove(current)
+            remaining_base.remove(exact)
+
+    while remaining_base and remaining_merge:
+        candidates = []
+        for current in remaining_merge:
+            current_jobs = set(current.get("affected_jobs", []))
+            for old in remaining_base:
+                old_jobs = set(old.get("affected_jobs", []))
+                candidates.append((
+                    -len(current_jobs & old_jobs),
+                    sorted(current_jobs), sorted(old_jobs), current, old))
+        *_, current, old = min(candidates, key=lambda row: row[:3])
+        pairs.append((current, old))
+        remaining_merge.remove(current)
+        remaining_base.remove(old)
+    pairs.extend((current, None) for current in remaining_merge)
+    return pairs
+
+
 def job_body(root: Path, finding: dict[str, Any]) -> str:
     """Best-effort normalized YAML body for a job-id subject, stdlib only."""
     subject, rel = finding.get("subject"), finding.get("workflow_file")
@@ -487,12 +521,23 @@ def main(argv: list[str] | None = None) -> int:
                 warnings += 1
 
         # An aggregate workflow finding can keep its key while covering more jobs.
-        b_by_key = {finding_key(f, {}, non_perfile): f for f in base_doc["findings"]}
+        base_aggregates: dict[tuple, list[dict[str, Any]]] = defaultdict(list)
+        merge_aggregates: dict[tuple, list[dict[str, Any]]] = defaultdict(list)
+        for f in base_doc["findings"]:
+            if f["subject"] == "(workflow)":
+                base_aggregates[finding_key(f, {}, non_perfile)].append(f)
         for f in merge_doc["findings"]:
-            key = finding_key(f, mapping, non_perfile)
-            old = b_by_key.get(key)
-            if old and f["subject"] == "(workflow)":
-                grew = sorted(set(f.get("affected_jobs", [])) - set(old.get("affected_jobs", [])))
+            if f["subject"] == "(workflow)":
+                merge_aggregates[finding_key(f, mapping, non_perfile)].append(f)
+        for key, current_findings in merge_aggregates.items():
+            old_findings = base_aggregates.get(key, [])
+            all_old_jobs = {job for old in old_findings
+                            for job in old.get("affected_jobs", [])}
+            for f, old in pair_aggregate_scopes(old_findings, current_findings):
+                old_jobs = (set(old.get("affected_jobs", []))
+                            if old is not None else all_old_jobs)
+                grew = sorted(set(f.get("affected_jobs", []))
+                              - old_jobs)
                 if grew:
                     annotation("warning", f"{f['pattern']} scope grew to jobs: {', '.join(grew)}", f)
                     warnings += 1
