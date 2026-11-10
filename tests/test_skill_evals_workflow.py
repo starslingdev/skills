@@ -1,8 +1,9 @@
 """The skill-evals gate cannot go green over a session that did not happen.
 
-This workflow exists to run ci-secure's and ci-speedup's behavioural evals against a live agent.
-Its entire value is that a green `skill evals` check means five real sessions ran
-and behaved. Every way that decays is invisible in the check list: a fork PR that
+This workflow runs ci-secure's behavioural evals on internal pull requests and keeps
+ci-speedup's longer agent suite available through manual dispatch. A green PR
+`skill evals` check means the PR-gated sessions ran and behaved; a green dispatch
+means both suites ran. Every way that decays is invisible in the check list: a fork PR that
 reports green having reached no API key, a verdict job that exits 0 on a skip, a
 harness that could not start and is read as a behaviour change, a floating CLI
 version that turns an upstream release into a "skill regression".
@@ -81,34 +82,38 @@ def test_only_the_verdict_job_carries_the_check_name_skill_evals():
         f"exactly one job may report the check name 'skill evals'; got {named}")
 
 
-@pytest.mark.parametrize("result,speedup,expected", [
-    ("success", "success", 0),
-    ("failure", "success", 1),
-    ("cancelled", "success", 1),
-    ("skipped", "success", 1),
-    ("", "success", 1),
-    ("neutral", "success", 1),
-    ("success", "failure", 1),
-    ("success", "skipped", 1),
-    ("success", "", 1),
+@pytest.mark.parametrize("event,result,speedup,expected", [
+    ("pull_request", "success", "skipped", 0),
+    ("pull_request", "failure", "skipped", 1),
+    ("pull_request", "cancelled", "skipped", 1),
+    ("pull_request", "skipped", "skipped", 1),
+    ("pull_request", "", "skipped", 1),
+    ("pull_request", "neutral", "skipped", 1),
+    ("pull_request", "success", "failure", 1),
+    ("workflow_dispatch", "success", "success", 0),
+    ("workflow_dispatch", "success", "failure", 1),
+    ("workflow_dispatch", "success", "skipped", 1),
+    ("workflow_dispatch", "success", "", 1),
 ])
-def test_the_verdict_script_passes_only_on_a_real_success(result, speedup, expected):
-    """Executed, not read. `skipped` reads as green to branch protection, so the
-    verdict must turn every non-success of EITHER suite into a non-zero exit."""
+def test_the_verdict_script_passes_only_the_suites_selected_for_the_event(
+        event, result, speedup, expected):
+    """Executed, not read. Pull requests deliberately skip the long ci-speedup
+    suite; a manual dispatch must still fail unless both suites really passed."""
     script = _job("verdict")["steps"][0]["run"]
     proc = subprocess.run(
         ["bash", "-c", script],
-        env={"RESULT": result, "SPEEDUP_RESULT": speedup, "PATH": "/usr/bin:/bin"},
+        env={"EVENT_NAME": event, "RESULT": result,
+             "SPEEDUP_RESULT": speedup, "PATH": "/usr/bin:/bin"},
         capture_output=True, text=True)
     assert proc.returncode == expected, (
         f"RESULT={result!r} exited {proc.returncode}, expected {expected}: "
         f"{proc.stdout}{proc.stderr}")
 
 
-def test_the_verdict_waits_on_both_suites_and_they_share_the_fork_gate():
+def test_the_verdict_waits_on_both_suites_and_ci_speedup_is_dispatch_only():
     """A suite the verdict does not `needs:` can be skipped or red unseen."""
     assert set(_job("verdict")["needs"]) == {"evals", "ci-speedup-evals"}
-    assert _squash(_job("ci-speedup-evals")["if"]) == _squash(_job("evals")["if"])
+    assert _squash(_job("ci-speedup-evals")["if"]) == "github.event_name == 'workflow_dispatch'"
 
 
 @pytest.mark.parametrize("job_id,skill", [("evals", "ci-secure"),
