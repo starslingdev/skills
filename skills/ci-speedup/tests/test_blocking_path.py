@@ -1696,6 +1696,19 @@ def test_test_result_replay_share_leaves_uncached_results_unchanged():
     assert replay["replayed"] is False
 
 
+def test_test_result_replay_share_reads_cached_go_coverage_results():
+    log = "ok example/pkg (cached) coverage: 81.2% of statements"
+
+    replay = bp._test_result_replay_share(log)
+
+    assert replay == {
+        "cached_lines": 1,
+        "test_result_lines": 1,
+        "share": 1.0,
+        "replayed": True,
+    }
+
+
 def test_test_result_replay_share_reads_each_supported_test_format_only():
     log = "\n".join([
         "ok example/go (cached)",

@@ -1883,7 +1883,9 @@ _CACHE_SAVE_SECONDS_RE = re.compile(
 _OBSERVATION_ONLY_LEAVES = frozenset({"dependency-cache", "cache-effective-path-mismatch"})
 
 _GO_TEST_RESULT_RE = re.compile(
-    r"^(?:ok|FAIL)\s+\S+(?:\s+(?:\(cached\)|[0-9]+(?:\.[0-9]+)?s))?$", re.I)
+    r"^(?:ok|FAIL)\s+\S+(?:\s+(?:\(cached\)|[0-9]+(?:\.[0-9]+)?s))?"
+    r"(?:\s+coverage:\s+(?:[0-9]+(?:\.[0-9]+)?%\s+of\s+statements|"
+    r"\[no statements\]))?$", re.I)
 _BAZEL_TEST_RESULT_RE = re.compile(
     r"^\S.*\b(?:PASSED|FAILED)\b(?:\s+in\s+[0-9]+(?:\.[0-9]+)?s)?$", re.I)
 _GRADLE_TEST_RESULT_RE = re.compile(

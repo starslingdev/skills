@@ -807,6 +807,36 @@ def test_magnitude_sample_excludes_replayed_sibling_log():
     assert sample["replayed_result_logs_excluded"] == 1
 
 
+def test_magnitude_sample_reports_when_every_log_was_replayed():
+    replayed = "\n".join(
+        [f"ok example/pkg{i} (cached)" for i in range(144)]
+        + ["ok example/live 2.1s"]
+    )
+
+    class FakeBp:
+        _test_result_replay_share = staticmethod(bp._test_result_replay_share)
+
+        @staticmethod
+        def _parse_log(log: str, iso=None) -> dict:
+            return {"fix_key": "same", "magnitude": {
+                "label": "work", "unit": "s", "value": 10.0}}
+
+    class FakeClient:
+        def text(self, endpoint: str, allow_missing: bool = False) -> str:
+            return replayed
+
+    first = _job_inst("test", 1, 300)
+    second = _job_inst("test", 2, 310)
+    sample = cr._magnitude_sample(
+        FakeBp(), FakeClient(), "o/r", [(300.0, first), (310.0, second)],
+        first, replayed,
+    )
+
+    assert sample is not None
+    assert sample["values"] == []
+    assert sample["replayed_result_logs_excluded"] == 2
+
+
 def test_persist_pole_logs_escalates_sample_on_a_wide_spread(tmp_path: Path):
     # Adaptive: a TIGHT 3-run probe stops cheap, but a WIDE bracket widens the sample
     # (to tell a smooth spread from two clusters). Here one run has a warm cache (low

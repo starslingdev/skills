@@ -27530,7 +27530,7 @@ def _magnitude_sample(
             idx = sorted({round(i * (len(qual) - 1) / (k_max - 1))
                           for i in range(k_max)})
             add([qual[i][1] for i in idx], k_max)
-    if not values:
+    if not values and not replayed_ids:
         return None
     return {"label": mag["label"], "unit": mag.get("unit", "%"),
             "this_run": mag["value"], "escalated": escalated, "values": values,
