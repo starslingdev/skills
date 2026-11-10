@@ -2600,6 +2600,39 @@ def _opt89_resolve_known_shell_env(command: str, env: dict[str, str]) -> str:
         lambda match: env.get(match.group(1), match.group(0)), command)
 
 
+def _opt89_resolve_host_shell_env(command: str, env: dict[str, str]) -> str:
+    """Resolve host variables except inside POSIX single-quoted spans."""
+    pieces: list[str] = []
+    index = 0
+    quote = ""
+    variable_re = re.compile(
+        r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
+    while index < len(command):
+        char = command[index]
+        if char == "\\" and quote != "'" and index + 1 < len(command):
+            pieces.append(command[index:index + 2])
+            index += 2
+            continue
+        if char in {"'", '"'}:
+            if not quote:
+                quote = char
+            elif quote == char:
+                quote = ""
+            pieces.append(char)
+            index += 1
+            continue
+        if char == "$" and quote != "'":
+            match = variable_re.match(command, index)
+            if match is not None:
+                name = match.group(1) or match.group(2)
+                pieces.append(env.get(name, match.group(0)))
+                index = match.end()
+                continue
+        pieces.append(char)
+        index += 1
+    return "".join(pieces)
+
+
 def _opt89_command_env(command: str, env: dict[str, str]) -> dict[str, str]:
     """Apply literal shell and Docker environment overrides in command order."""
     effective = dict(env)
@@ -2626,10 +2659,46 @@ def _opt89_command_env(command: str, env: dict[str, str]) -> dict[str, str]:
 def _opt89_docker_env(command: str, host_env: dict[str, str]) -> dict[str, str]:
     """Environment explicitly propagated through Docker's ``--env`` options."""
     propagated: dict[str, str] = {}
-    option_re = re.compile(
-        r"(?:--env(?:=|\s+)|-e(?:=|\s*)?)"
-        r"([A-Za-z_][A-Za-z0-9_]*)(?:=([^\s;&|]+))?")
-    for match in option_re.finditer(command):
+    try:
+        tokens = shlex.split(_LINE_CONTINUATION_RE.sub(" ", command))
+        index = tokens.index("run", tokens.index("docker") + 1) + 1
+    except (ValueError, IndexError):
+        return propagated
+    value_options = {
+        "--add-host", "--cap-add", "--cpus", "--device", "--env-file",
+        "--entrypoint", "--hostname", "-h", "--memory", "-m", "--mount",
+        "--name", "--network", "--platform", "--user", "-u", "--volume",
+        "-v", "--workdir", "-w",
+    }
+    specs: list[str] = []
+    while index < len(tokens):
+        token = tokens[index]
+        if token in {"--env", "-e"}:
+            if index + 1 >= len(tokens):
+                break
+            specs.append(tokens[index + 1])
+            index += 2
+            continue
+        if token.startswith("--env="):
+            specs.append(token.removeprefix("--env="))
+            index += 1
+            continue
+        if token.startswith("-e") and len(token) > 2:
+            specs.append(token[2:].removeprefix("="))
+            index += 1
+            continue
+        if token in value_options:
+            index += 2
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        break
+    for spec in specs:
+        match = re.fullmatch(
+            r"([A-Za-z_][A-Za-z0-9_]*)(?:=(.*))?", spec)
+        if match is None:
+            continue
         name, value = match.group(1), match.group(2)
         if value is None:
             if name in host_env:
@@ -2886,9 +2955,11 @@ def _detect_opt89(doc: dict, raw: str) -> list[Hit]:
                     arch = platform
                     expanded = _opt89_resolve_known_env_expressions(
                         run, step_env, matrix)
+                    host_env = _opt89_command_env(expanded, step_env)
+                    expanded = _opt89_resolve_host_shell_env(expanded, host_env)
                     command = _opt89_resolve_docker_payload_env(
-                        _opt89_docker_payload(expanded), step_env,
-                        _opt89_docker_env(expanded, step_env))
+                        _opt89_docker_payload(expanded), host_env,
+                        _opt89_docker_env(expanded, host_env))
                     marker = "docker run"
                     occurrence = docker_occurrence
                     mechanism = "QEMU-backed docker run"

@@ -390,6 +390,27 @@ jobs:
     assert len(hits) == 1
 
 
+@pytest.mark.parametrize("payload", [
+    'sh -c "make $MAKE_TARGET"',
+    "make $MAKE_TARGET",
+])
+def test_docker_host_expanded_payload_inherits_step_environment(
+        tmp_path: Path, payload: str):
+    hits = _opt89(tmp_path, f"""name: host environment boundary
+on: pull_request
+jobs:
+  arm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-qemu-action@v3
+      - run: docker run --platform linux/arm64 image {payload}
+        env:
+          MAKE_TARGET: check
+""")
+
+    assert hits == []
+
+
 def test_run_on_arch_resolves_only_its_propagated_environment(tmp_path: Path):
     hits = _opt89(tmp_path, """name: action environment target
 on: pull_request
@@ -481,6 +502,42 @@ jobs:
 """)
 
     assert len(hits) == 1
+
+
+def test_docker_payload_options_do_not_propagate_container_environment(
+        tmp_path: Path):
+    hits = _opt89(tmp_path, """name: payload option boundary
+on: pull_request
+jobs:
+  arm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-qemu-action@v3
+      - run: >-
+          docker run --platform linux/arm64 image sh -c
+          'python tool.py --env MAKE_TARGET=check; make $MAKE_TARGET'
+""")
+
+    assert len(hits) == 1
+
+
+def test_docker_pass_through_uses_the_effective_host_environment(tmp_path: Path):
+    hits = _opt89(tmp_path, """name: docker pass through
+on: pull_request
+jobs:
+  arm:
+    runs-on: ubuntu-latest
+    env:
+      MAKE_TARGET: all
+    steps:
+      - uses: docker/setup-qemu-action@v3
+      - run: >-
+          export MAKE_TARGET=check;
+          docker run --platform linux/arm64 -e MAKE_TARGET image
+          sh -c 'make $MAKE_TARGET'
+""")
+
+    assert hits == []
 
 
 def test_job_container_resolves_matrix_compile_command(tmp_path: Path):
