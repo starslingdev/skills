@@ -33,6 +33,7 @@ from pathlib import Path
 
 from collect_runs import (
     _attach_cache_log_evidence,
+    _cache_keywords_for_finding,
     _cache_status_from_log,
     _detect_opt24_long_test_no_sharding,
     _detect_opt25_shard_imbalance,
@@ -491,6 +492,21 @@ def test_cache_status_scopes_static_compiler_and_buildkit_misses():
     assert line == "#12 ERROR importing cache manifest from gha: not found"
 
 
+@pytest.mark.parametrize(("evidence", "expected", "unrelated_log"), [
+    ("GOLANGCI_LINT_CACHE is not persisted", ("golangci",),
+     "GOCACHE miss: cache not found"),
+    ("SCCACHE_DIR is not persisted", ("sccache",),
+     "ccache miss: cache not found"),
+])
+def test_static_cache_family_keywords_do_not_include_substring_families(
+        evidence, expected, unrelated_log):
+    keywords = _cache_keywords_for_finding({
+        "pattern": "OPT61", "static_cache_lint": True, "evidence": evidence,
+    })
+    assert keywords == expected
+    assert _cache_status_from_log(unrelated_log, keywords) == ("unknown", "")
+
+
 def test_attach_cache_log_evidence_quotes_the_real_miss(tmp_path: Path):
     findings = [{
         "id": "f1", "pattern": "OPT5", "affected_jobs": ["build"],
@@ -534,6 +550,36 @@ def test_attach_cache_log_evidence_flags_all_hits_as_unconfirmed(tmp_path: Path)
     assert "HIT" in findings[0]["measured_evidence"]["summary"].upper()
     assert "unconfirmed" in findings[0]["size_note"]
     # The evidence refutes a wall-clock saving, so it must be zeroed (not kept).
+    assert findings[0]["wall_clock_p50_s"] == 0.0
+
+
+def test_attach_cache_log_evidence_does_not_call_partial_hits_all_runs():
+    findings = [{
+        "id": "f1", "pattern": "OPT61", "static_cache_lint": True,
+        "cache_family": "ccache", "affected_jobs": ["build"],
+        "workflow_file": ".github/workflows/ci.yml", "measured_signal": "",
+    }]
+    jobs_per_run = {
+        ".github/workflows/ci.yml": [[{
+            "name": "build", "id": job_id, "conclusion": "success",
+            "html_url": f"https://github.com/o/r/actions/runs/{job_id}/job/{job_id}",
+            "started_at": "2026-05-29T10:00:00Z",
+            "completed_at": "2026-05-29T10:00:06Z",
+        }] for job_id in (111, 222, 333)],
+    }
+    client = _FakeClient({
+        111: "Cache restored from key: ccache-linux",
+        222: "unrelated build output",
+        333: "",
+    })
+
+    _attach_cache_log_evidence(client, "o/r", findings, jobs_per_run)
+
+    summary = findings[0]["measured_evidence"]["summary"]
+    assert "hit on 1 of 3 sampled run(s)" in summary.lower()
+    assert "2 showed no matching cache line" in summary.lower()
+    assert "hit on all" not in summary.lower()
+    assert "every sampled run" not in findings[0]["size_note"].lower()
     assert findings[0]["wall_clock_p50_s"] == 0.0
 
 

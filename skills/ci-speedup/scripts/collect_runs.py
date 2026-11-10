@@ -24451,7 +24451,7 @@ def _cache_keywords_for_finding(finding: dict[str, Any]) -> tuple[str, ...]:
                         for key in ("evidence", "subject", "evidence_snippet")).lower()
     compiler_families = tuple(
         family for family in ("sccache", "ccache", "staticcheck", "golangci", "buildkit", "go")
-        if family in evidence)
+        if re.search(rf"(?<![a-z0-9]){re.escape(family)}(?![a-z0-9])", evidence))
     return compiler_families or keywords
 
 
@@ -24627,13 +24627,24 @@ def _attach_cache_log_evidence(client: "GhClient", repo: str,
             note = ("Each link opens that run's job log; the quoted line is the "
                     "verbatim cache-miss line from it.")
         elif hit_n:
-            summary = (f"⚠️ {the_cache.capitalize()} HIT on all {hit_n} sampled "
-                       f"run(s) — no miss observed in logs. Config-hygiene only "
-                       f"unless a miss is shown; do NOT claim wall-clock savings:")
+            if hit_n == sampled:
+                summary = (f"⚠️ {the_cache.capitalize()} HIT on all {hit_n} sampled "
+                           f"run(s) — no miss observed in logs. Config-hygiene only "
+                           f"unless a miss is shown; do NOT claim wall-clock savings:")
+                f["size_note"] = (
+                    "logs show the cache HITTING on every sampled run — treat as "
+                    "config hygiene, savings unconfirmed")
+            else:
+                summary = (f"⚠️ {the_cache.capitalize()} HIT on {hit_n} of {sampled} "
+                           f"sampled run(s) ({unknown_n} showed no matching cache "
+                           "line) — no miss observed in logs. Config-hygiene only "
+                           "unless a miss is shown; do NOT claim wall-clock savings:")
+                f["size_note"] = (
+                    f"logs show the cache hitting on {hit_n} of {sampled} sampled "
+                    f"runs; {unknown_n} had no matching cache line — treat as config "
+                    "hygiene, savings unconfirmed")
             note = ("Logs show the cache restoring. Re-review: the configured "
                     "issue may not actually cost time on this runner.")
-            f["size_note"] = ("logs show the cache HITTING on every sampled run — "
-                              "treat as config hygiene, savings unconfirmed")
             # The evidence here REFUTES a wall-clock saving (the cache already
             # restores), so don't keep a sized wall-clock number that the
             # evidence contradicts — zero it. (Config hygiene = no measured
