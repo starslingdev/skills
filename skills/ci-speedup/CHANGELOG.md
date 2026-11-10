@@ -1,5 +1,6 @@
 # Changelog
 
+- Credit static cache findings only after sampled job logs confirm the predicted miss and the existing budget, invalidation, and transfer-cost guards all pass.
 - Resolve workflow, job, and cache-step environment variables in OPT61 cache paths, while keeping undeclared expressions unknown instead of reporting missing persistence.
 - Route Jest's configured worker cap to uncredited concurrency guidance and its provider choice to an independent uncredited coverage-configuration note, while reserving OPT9 for a disabled or unpersisted result cache.
 - Match the shell prefixes before a build command (`KEY=value`, `env`, `sudo`, `time`) with disjoint regex branches in OPT89, OPT102 and the emulated-image drill, from one shared source in `shell_prefix.py`. The bare-value class no longer overlaps the quoted branches, both repeats are bounded, and a value with an unpaired quote no longer counts as a prefix. CodeQL flagged the three copies as `py/redos`, the same shape #257 fixed in `_STATUS_POST_RE`.
