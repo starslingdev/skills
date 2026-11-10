@@ -219,6 +219,7 @@ def test_removing_matrix_exclusions_warns_on_effective_shard_growth(
 @pytest.mark.parametrize("merge_text", [
     repeated_setup_matrix(shard_legs=8),
     repeated_setup_matrix(shard_legs=16, axis="os"),
+    repeated_setup_matrix(shard_legs=16, axis="version"),
     repeated_setup_matrix(shard_legs=16, artifact_handoff=True),
 ])
 def test_matrix_growth_exception_stays_silent_for_non_growth_or_non_shards(
@@ -229,6 +230,7 @@ def test_matrix_growth_exception_stays_silent_for_non_growth_or_non_shards(
 
     assert code == 0
     assert "legs; each leg repeats" not in output
+    assert "OPT14 job shards" not in output
 
 
 def test_same_identity_aggregate_finding_reports_regrouped_job(
