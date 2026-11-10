@@ -108,9 +108,9 @@ Needs `claude` and an authenticated `gh` (the skill's phase 1 checks it).
 The skill is mounted as a copy without `evals/`, `CHANGELOG.md`,
 `tests/test_*.py`, `tests/conftest.py` or `tests/fixtures/` (the answer key); `tests/verify_report.py`
 stays because the skill runs it. The `ci-speedup skill evals` job in
-`.github/workflows/skill-evals.yml` is dispatch-only because these live agent
-sessions are nondeterministic and slow. Pull requests use the deterministic
-offline regression suite instead. Manual dispatch takes
+`.github/workflows/skill-evals.yml` runs on a schedule or by dispatch because
+these live agent sessions are nondeterministic and slow. Pull requests use the
+deterministic offline regression suite instead. Manual dispatch takes
 `tier: gate | measure | all`.
 
 Exit codes: **0** every run passed; **1** at least one session ran and failed

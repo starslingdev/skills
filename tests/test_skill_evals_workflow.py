@@ -94,6 +94,8 @@ def test_only_the_verdict_job_carries_the_check_name_skill_evals():
     ("workflow_dispatch", "success", "failure", 1),
     ("workflow_dispatch", "success", "skipped", 1),
     ("workflow_dispatch", "success", "", 1),
+    ("schedule", "success", "success", 0),
+    ("schedule", "success", "skipped", 1),
 ])
 def test_the_verdict_script_passes_only_the_suites_selected_for_the_event(
         event, result, speedup, expected):
@@ -110,10 +112,20 @@ def test_the_verdict_script_passes_only_the_suites_selected_for_the_event(
         f"{proc.stdout}{proc.stderr}")
 
 
-def test_the_verdict_waits_on_both_suites_and_ci_speedup_is_dispatch_only():
+def test_the_verdict_waits_on_both_suites_and_ci_speedup_stays_off_prs():
     """A suite the verdict does not `needs:` can be skipped or red unseen."""
     assert set(_job("verdict")["needs"]) == {"evals", "ci-speedup-evals"}
-    assert _squash(_job("ci-speedup-evals")["if"]) == "github.event_name == 'workflow_dispatch'"
+    condition = _squash(_job("ci-speedup-evals")["if"])
+    assert "github.event_name == 'workflow_dispatch'" in condition
+    assert "github.event_name == 'schedule'" in condition
+    assert "pull_request" not in condition
+
+
+def test_the_live_agent_suites_have_a_scheduled_run():
+    triggers = _doc().get("on") or _doc()[True]
+    assert triggers.get("schedule"), "live agent coverage must not depend on a human dispatch"
+    assert "github.event_name == 'schedule'" in _squash(_job("evals")["if"])
+    assert "github.event_name == 'schedule'" in _squash(_job("ci-speedup-evals")["if"])
 
 
 @pytest.mark.parametrize("job_id,skill", [("evals", "ci-secure"),
