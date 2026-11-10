@@ -1291,6 +1291,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-11-10** — Warn when a shard-like matrix grows while each leg repeats checkout and dependency setup, naming the job and effective before/after shard counts while honoring matrix include/exclude rules and ignoring diagnostic dimensions.
 - **2026-11-10** — Keep path-filter findings visible when sampled pull-request file lists are incomplete, label their hit rate as unmeasured with the reason, and withhold numeric credit.
 - **2026-11-10** — Recognize GitHub's generated checkout, post-action, and always-run upload step names when excluding pull-request-light matrix legs from imbalance measurements, and count excluded legs once across repeated runs.
 - **2026-11-10** — Bind post-fix verification cohorts to the requested branch as well as the commit, refuse default-branch reruns, and name the unavailable baseline lane when its facts are missing.
