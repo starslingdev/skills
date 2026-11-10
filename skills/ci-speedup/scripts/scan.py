@@ -4376,7 +4376,7 @@ def _detect_opt61(
             continue
         cache_steps = _cache_action_steps(job)
         cache_paths: list[str] = []
-        unknown_env_cache_path = False
+        unknown_env_cache_names: set[str] = set()
         for cache_step in cache_steps:
             values = (cache_step.get("with")
                       if isinstance(cache_step.get("with"), dict) else {})
@@ -4385,7 +4385,9 @@ def _detect_opt61(
                     continue
                 resolved = _resolved_cache_env_path(raw_path.strip(), doc, job, cache_step)
                 if resolved is None:
-                    unknown_env_cache_path = True
+                    unknown_env_cache_names.update(
+                        name.casefold()
+                        for name in _CACHE_ENV_PATH_RE.findall(raw_path))
                 else:
                     cache_paths.append(resolved.casefold())
         blob = "\n".join((_job_run_blob(job), _job_env_blob(job, doc)))
@@ -4420,22 +4422,41 @@ def _detect_opt61(
 
         temp = _TEMP_CACHE_RE.search(blob)
         cache_path_text = "\n".join(cache_paths)
-        declared_dirs = [
-            (str(name).casefold(), str(value).strip())
-            for env in [doc.get("env"), job.get("env"),
-                        *(step.get("env") for step in _steps(job))]
-            if isinstance(env, dict)
-            for name, value in env.items()
-            if str(name).casefold() in {
-                "ccache_dir", "sccache_dir", "staticcheck_cache", "golangci_lint_cache",
-            } and str(value).strip()
-        ]
-        declared_dirs.extend(
-            (match.group(1).casefold(), match.group(2))
-            for match in re.finditer(
-                r"\b(CCACHE_DIR|SCCACHE_DIR|STATICCHECK_CACHE|GOLANGCI_LINT_CACHE)"
-                r"\s*=\s*([^\s;&]+)", _job_run_blob(job), re.IGNORECASE)
-        )
+        cache_dir_names = {
+            "ccache_dir", "sccache_dir", "staticcheck_cache", "golangci_lint_cache",
+        }
+        base_env: dict[str, str] = {}
+        for scope in (doc.get("env"), job.get("env")):
+            if isinstance(scope, dict):
+                base_env.update({str(name).casefold(): str(value).strip()
+                                 for name, value in scope.items()})
+        # A run-step declaration shadows workflow/job env for that command.
+        # Cache-action step env affects only the action input and must not be
+        # mistaken for the compiler process's directory.
+        run_overrides: dict[str, list[str]] = {}
+        assignment_re = re.compile(
+            r"\b(CCACHE_DIR|SCCACHE_DIR|STATICCHECK_CACHE|GOLANGCI_LINT_CACHE)"
+            r"\s*=\s*([^\s;&]+)", re.IGNORECASE)
+        for step in _steps(job):
+            run = _run(step)
+            if not run.strip():
+                continue
+            step_env = step.get("env")
+            if isinstance(step_env, dict):
+                for name, value in step_env.items():
+                    folded = str(name).casefold()
+                    if folded in cache_dir_names and str(value).strip():
+                        run_overrides.setdefault(folded, []).append(str(value).strip())
+            for match in assignment_re.finditer(run):
+                run_overrides.setdefault(match.group(1).casefold(), []).append(
+                    match.group(2))
+        declared_dirs: list[tuple[str, str]] = []
+        for name in cache_dir_names:
+            values = run_overrides.get(name)
+            if values:
+                declared_dirs.extend((name, value) for value in dict.fromkeys(values))
+            elif base_env.get(name):
+                declared_dirs.append((name, base_env[name]))
         declared_compiler_dirs = [
             value for name, value in declared_dirs
             if name in {"ccache_dir", "sccache_dir"}
@@ -4445,13 +4466,14 @@ def _detect_opt61(
             if name in {"staticcheck_cache", "golangci_lint_cache"}
         ]
 
-        def persisted_dirs(directories: list[str]) -> bool:
-            return bool(directories) and (unknown_env_cache_path or all(
-                any(_cache_path_covers(path, directory) for path in cache_paths)
-                for directory in directories
-            ))
+        def persisted_dirs(directories: list[tuple[str, str]]) -> bool:
+            return bool(directories) and all(
+                name in unknown_env_cache_names
+                or any(_cache_path_covers(path, directory) for path in cache_paths)
+                for name, directory in directories
+            )
 
-        persisted_declared = persisted_dirs([value for _name, value in declared_dirs])
+        persisted_declared = persisted_dirs(declared_dirs)
         if temp and not (persisted_declared or any(
                 _cache_path_covers(path, temp.group(0).split("=", 1)[-1])
                 for path in cache_paths)):
@@ -4461,20 +4483,29 @@ def _detect_opt61(
         supplied_by_cache_action = any(
             re.search(r"ccache-action|rust-cache", _uses(step), re.IGNORECASE)
             for step in cache_steps)
-        persisted_compiler = (persisted_dirs(declared_compiler_dirs)
+        compiler_dir_entries = [
+            (name, value) for name, value in declared_dirs
+            if name in {"ccache_dir", "sccache_dir"}
+        ]
+        persisted_compiler = (persisted_dirs(compiler_dir_entries)
                                 if declared_compiler_dirs else any(
             token in cache_path_text for token in ("ccache", "sccache", "target"))
-            or unknown_env_cache_path)
+            or bool(unknown_env_cache_names & {"ccache_dir", "sccache_dir"}))
         if (uses_compiler_cache and not supplied_by_cache_action and not persisted_compiler
                 and not _is_self_hosted(job)
                 and not _compiler_cache_has_remote_backend(job, doc)):
             reasons.append((_COMPILER_CACHE_RE.search(blob).group(0),
                             "the compiler cache has no persistence step"))
-        persisted_analysis = (persisted_dirs(declared_analysis_dirs)
+        analysis_dir_entries = [
+            (name, value) for name, value in declared_dirs
+            if name in {"staticcheck_cache", "golangci_lint_cache"}
+        ]
+        persisted_analysis = (persisted_dirs(analysis_dir_entries)
                                if declared_analysis_dirs else any(
                                    token in cache_path_text
                                    for token in ("staticcheck", "golangci"))
-                               or unknown_env_cache_path)
+                               or bool(unknown_env_cache_names & {
+                                   "staticcheck_cache", "golangci_lint_cache"}))
         if _ANALYSIS_CACHE_RE.search(blob) and not persisted_analysis:
             reasons.append((_ANALYSIS_CACHE_RE.search(blob).group(0),
                             "the analysis cache has no persistence step"))
