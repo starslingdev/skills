@@ -139,6 +139,32 @@ def test_same_identity_aggregate_finding_reports_only_the_added_job(
     assert all("guard-verify" not in line and "test" not in line for line in growth)
 
 
+def test_same_identity_aggregate_finding_reports_regrouped_job(
+        guard, tmp_path, capsys, monkeypatch):
+    base = two_duplicate_setup_groups()
+    merge = base.replace(
+        "  lint:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - uses: actions/checkout@v4\n"
+        "      - uses: actions/setup-python@v5\n"
+        "      - run: pip install ruff\n"
+        "      - run: ruff check .\n",
+        "  lint:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - uses: actions/checkout@v4\n"
+        "      - uses: actions/setup-node@v4\n"
+        "      - run: npm install\n"
+        "      - run: npm test\n",
+    )
+    base_root, merge_root = trees(tmp_path, base, merge)
+
+    code, output = run(guard, base_root, merge_root, capsys, monkeypatch)
+
+    assert code == 0
+    growth = [line for line in output.splitlines()
+              if "OPT12 scope grew" in line]
+    assert growth
+    assert all("lint" in line for line in growth)
+
+
 def test_new_allowlisted_instance_is_policy_block_not_operational_failure(
         guard, tmp_path, capsys, monkeypatch):
     second = """

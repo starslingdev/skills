@@ -528,10 +528,9 @@ def main(argv: list[str] | None = None) -> int:
                 merge_aggregates[finding_key(f, mapping, non_perfile)].append(f)
         for key, current_findings in merge_aggregates.items():
             old_findings = base_aggregates.get(key, [])
-            old_jobs = {job for old in old_findings
-                        for job in old.get("affected_jobs", [])}
-            for f, _old in pair_aggregate_scopes(old_findings, current_findings):
-                grew = sorted(set(f.get("affected_jobs", [])) - old_jobs)
+            for f, old in pair_aggregate_scopes(old_findings, current_findings):
+                grew = sorted(set(f.get("affected_jobs", []))
+                              - set(old.get("affected_jobs", [])))
                 if grew:
                     annotation("warning", f"{f['pattern']} scope grew to jobs: {', '.join(grew)}", f)
                     warnings += 1
