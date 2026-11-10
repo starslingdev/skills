@@ -1696,6 +1696,38 @@ def test_test_result_replay_share_leaves_uncached_results_unchanged():
     assert replay["replayed"] is False
 
 
+def test_test_result_replay_share_reads_each_supported_test_format_only():
+    log = "\n".join([
+        "ok example/go (cached)",
+        "//example:bazel_test (cached) PASSED in 0.1s",
+        "> Task :app:integrationTest FROM-CACHE",
+        "web:unit-test: cache hit, replaying logs",
+        "//example:bazel_live PASSED in 1.2s",
+        "> Task :app:otherTest",
+        "web:test: cache miss, executing abc123",
+    ])
+
+    replay = bp._test_result_replay_share(log)
+
+    assert replay == {
+        "cached_lines": 4,
+        "test_result_lines": 7,
+        "share": 4 / 7,
+        "replayed": True,
+    }
+
+
+def test_test_result_replay_share_ignores_non_test_build_cache_hits():
+    log = "\n".join([
+        "> Task :app:compileJava FROM-CACHE",
+        "> Task :app:processResources FROM-CACHE",
+        "web:build: cache hit, replaying logs",
+        "web:lint: cache hit, replaying logs",
+    ])
+
+    assert bp._test_result_replay_share(log) is None
+
+
 # A real Lint pole shape (generalized from a captured gap): a `bun run lint` step that
 # shells to a bare `$ eslint` with no `--cache`, followed by a whole-graph `knip` pass in
 # the same job. eslint prints no duration, so the finding is the missing-flag, not a wall.
@@ -6504,6 +6536,37 @@ def test_mag_line_healthy_step_wall_still_reads_stable():
     out = "\n".join(bp._mag_line(mag, None))
     assert "stable across runs" in out
     assert "NOT cross-run validated" not in out
+
+
+def test_mag_line_discloses_replayed_sibling_when_too_few_values_survive():
+    mag = {
+        "label": "test work", "unit": "s", "this_run": 10.0,
+        "values": [{"run_url": "https://example/runs/1", "value": 10.0,
+                    "drilled": True}],
+        "replayed_result_logs_excluded": 1,
+    }
+
+    out = "\n".join(bp._mag_line(mag, None))
+
+    assert "1 fetched sibling log was left out" in out
+    assert "replayed from cache" in out
+    assert "Cross-run check" not in out
+
+
+def test_mag_line_discloses_replayed_sibling_beside_surviving_baseline():
+    mag = {
+        "label": "test work", "unit": "s", "this_run": 10.0,
+        "values": [
+            {"run_url": "https://example/runs/1", "value": 10.0, "drilled": True},
+            {"run_url": "https://example/runs/2", "value": 11.0},
+        ],
+        "replayed_result_logs_excluded": 2,
+    }
+
+    out = "\n".join(bp._mag_line(mag, None))
+
+    assert "Cross-run check" in out
+    assert "2 fetched sibling logs were left out" in out
 
 
 # The one sentence every fork disclosure must land on. A fork PR is NOT colder because it

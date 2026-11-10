@@ -1887,9 +1887,9 @@ _GO_TEST_RESULT_RE = re.compile(
 _BAZEL_TEST_RESULT_RE = re.compile(
     r"^\S.*\b(?:PASSED|FAILED)\b(?:\s+in\s+[0-9]+(?:\.[0-9]+)?s)?$", re.I)
 _GRADLE_TEST_RESULT_RE = re.compile(
-    r"^> Task \S+(?:\s+(?:FROM-CACHE|UP-TO-DATE|SKIPPED|FAILED))?$", re.I)
+    r"^> Task \S*test(?:\s+(?:FROM-CACHE|UP-TO-DATE|SKIPPED|FAILED))?$", re.I)
 _TURBO_TEST_RESULT_RE = re.compile(
-    r"^[^:\s]+(?::[^:\s]+)*:\s+cache\s+"
+    r"^(?:[^:\s]+:)*[^:\s]*test[^:\s]*:\s+cache\s+"
     r"(?:hit, replaying logs|miss, executing)\b", re.I)
 
 
@@ -7185,10 +7185,17 @@ def _mag_line(mag: dict[str, Any] | None, leaf: dict[str, Any] | None) -> list[s
     finding) or fewer than 2 runs to compare."""
     if not mag or not isinstance(mag, dict):
         return []
+    excluded = mag.get("replayed_result_logs_excluded")
+    excluded_n = excluded if isinstance(excluded, int) and excluded > 0 else 0
+    exclusion = (
+        f"**Replayed-result exclusion:** {excluded_n} fetched sibling "
+        f"log{'s were' if excluded_n != 1 else ' was'} left out of this cross-run "
+        "magnitude baseline because most recognized test results were replayed from cache."
+    ) if excluded_n else ""
     entries = [x for x in (mag.get("values") or []) if _num(x.get("value")) is not None]
     vals = [_num(x.get("value")) for x in entries]
     if len(vals) < 2:
-        return []
+        return [exclusion, ""] if exclusion else []
     unit = str(mag.get("unit", ""))
     fmt = (lambda x: f"{x:.0f}%") if unit == "%" else (lambda x: _clock(x))
     # The median can land on a half (even sample -> mean of the two middles, e.g.
@@ -7230,6 +7237,8 @@ def _mag_line(mag: dict[str, Any] | None, leaf: dict[str, Any] | None) -> list[s
             if x.get("fork"):
                 tag += " — fork PR (no repo secrets; can't reach upstream branch caches)"
             out.append(f"- [run {rid}]({url}) — {fmt(_num(x.get('value')))}{tag}")
+        if exclusion:
+            out += ["", exclusion]
         out.append("")
         return out
     if n >= 5:
@@ -7274,6 +7283,8 @@ def _mag_line(mag: dict[str, Any] | None, leaf: dict[str, Any] | None) -> list[s
         if x.get("fork"):
             tag += " — fork PR (no repo secrets; can't reach upstream branch caches)"
         out.append(f"- [run {rid}]({url}) — {fmt(_num(x.get('value')))}{tag}")
+    if exclusion:
+        out += ["", exclusion]
     out.append("")
     return out
 
